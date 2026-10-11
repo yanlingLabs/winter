@@ -81,6 +81,8 @@ extension CUCore {
     func noteWatchedEvent(type: CGEventType, sourcePid: Int64, userData: Int64, flags: CGEventFlags, keycode: Int64,
                           location: CGPoint, targetPid: Int64) {
         guard !guardianRunning, CUHardwareInput.classify(type: type, sourcePid: sourcePid, userData: userData) == .action else { return }
+        // (Its time too: the secure-input rule takes recent input of theirs as what corroborates work.)
+        noteHardwareInput(now: clock.nowSeconds())
         switch type {
         case .leftMouseDown:
             // A click into an ordinary window of a bound app (not a ⌘-click): work in it once it is in front.

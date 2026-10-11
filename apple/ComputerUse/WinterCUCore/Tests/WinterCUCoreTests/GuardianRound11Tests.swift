@@ -207,6 +207,11 @@ final class GuardianRound11Tests: XCTestCase {
         core.secureInputOwnerOverride = 1
         XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "another app holds it")
         core.secureInputOwnerOverride = 500
+        // Review of round 12, MEDIUM #3: held by the app in front, but the user is only looking (Terminal's Secure
+        // Keyboard Entry): nothing corroborates work — not refused.
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "only looking")
+        // Input of theirs a moment ago: working.
+        core.noteHardwareInput(now: core.clock.nowSeconds(), move: false)
         XCTAssertThrowsError(try core.refuseWhileUserWorks(t))
         sys.front = 1
         XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "not in front")

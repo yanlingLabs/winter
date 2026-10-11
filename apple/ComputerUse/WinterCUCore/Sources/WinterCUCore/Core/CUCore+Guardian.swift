@@ -413,7 +413,18 @@ extension CUCore {
     func refuseWhileUserWorks(_ t: CUTarget) throws {
         // Under Secure Event Input the tap sees no key: when the bound app in front holds it itself (a password or a
         // secure field of its own has the keyboard), the user is taken to be working in it (review of round 10, LOW #10).
-        let secureOwner = secureInputOn && sys.frontmostPid() == t.pid && secureInputOwnerPid() == t.pid
+        // Corroborated (review of round 12, MEDIUM #3: Terminal's Secure Keyboard Entry holds it whenever Terminal is in
+        // front, and a user switching there only to look must block nothing): a secure field of the app has the focus, or
+        // input of theirs came in the last 2.5 s. The owner may be a true part of the app (a WebContent's password field).
+        let secureOwner: Bool = {
+            guard secureInputOn, sys.frontmostPid() == t.pid, let owner = secureInputOwnerPid(),
+                  owner == t.pid || sys.isContentProcess(owner, of: t.pid) else { return false }
+            let now = clock.nowSeconds()
+            let recent = guardianLock.withLock { now - lastHardwareActionAt <= 2.5 }
+            let secureField = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
+                .flatMap { ax.string($0, kAXSubroleAttribute) } == kAXSecureTextFieldSubrole
+            return recent || secureField
+        }()
         guard secureOwner || userIsWorking(in: t.pid) else { return }
         CULog.act.notice("act in \(t.appName, privacy: .public): refused — the user is working in it")
         throw CUError.refused(.userWorking, "the user is working in \(t.appName) right now — wait and retry, or ask them")
