@@ -1,3 +1,4 @@
+import { COWORK_METHODS } from "./cowork";
 import { z } from "zod";
 // `SessionActivity` is defined in ./events (not here, where its first consumer `SessionListResult`
 // lives): the `session_activity` EVENT variant needs the same enum, and events.ts cannot import
@@ -3198,6 +3199,7 @@ export const PanelReadDiffResult = z.object({
 });
 
 export const METHODS = {
+  ...COWORK_METHODS,
   hello: "protocol.hello",
   sessionCreate: "session.create",
   sessionList: "session.list",

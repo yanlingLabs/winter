@@ -1,3 +1,5 @@
+import { CoworkRepository } from "./cowork/repository";
+import { CoworkWorkspaceService, disabledCoworkHost, type CoworkHostPorts } from "./cowork/service";
 import { join } from "node:path";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -354,6 +356,8 @@ export function pluginToolNameParts(fullName: string): { pluginId: string; name:
 }
 
 export async function startDaemon(opts: {
+  /** Explicit host-only fixture/native authority ports; never read from settings or RPC. */
+  coworkHost?: CoworkHostPorts;
   home?: string;
   secrets?: SecretStore;
   server?: Partial<Pick<IpcServerOptions, "helloTimeoutMs" | "maxConnections" | "preAuthMaxLine">>;
@@ -2902,6 +2906,7 @@ export async function startDaemon(opts: {
   const server: IpcServer = startIpcServer({
     socketPath: dirs.socketPath,
     serverVersion: CORE_VERSION,
+    cowork: runtime ? new CoworkWorkspaceService(new CoworkRepository(runtime.db), opts.coworkHost ?? disabledCoworkHost) : undefined,
     tokens: authority,
     store,
     hub,

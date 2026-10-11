@@ -676,7 +676,7 @@ final class GatewayGateTests: XCTestCase {
 
     // MARK: - G7: the Swift remote allowlist is EXACTLY the twenty-five names (cross-language tripwire)
 
-    func testG7_RemoteAllowlistIsExactlyTheTwentyFiveNames() {
+    func testG7_RemoteAllowlistIsExactlyTheThirtyNineNames() {
         let expected: Set<String> = [
             "protocol.hello", "session.list", "session.attach", "session.send",
             "session.dispatch", "approval.respond", "ask_user.respond",
@@ -697,8 +697,24 @@ final class GatewayGateTests: XCTestCase {
             "credential.list", "credential.set", "credential.remove",
             // grew 24→25: ComputerV2 Phase 1b — the phone watches the live mirror of the session it is attached to.
             "session.mirror",
+            // Cowork workspace routes remain subject to daemon per-record authority.
+            "workspace.list",
+            "workspace.get",
+            "workspace.create",
+            "workspace.update",
+            "project.list",
+            "project.get",
+            "project.create",
+            "project.update",
+            "workspace.source.list",
+            "workspace.source.get",
+            "workspace.source.addRepository",
+            "workspace.source.remove",
+            "workspace.source.revoke",
+            "workspace.operation.get",
+
         ]
-        XCTAssertEqual(Gateway.remoteAllowedMethods.count, 25)
+        XCTAssertEqual(Gateway.remoteAllowedMethods.count, 39)
         XCTAssertEqual(Gateway.remoteAllowedMethods, expected,
                        "Swift remote allowlist drifted from the twenty-five — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")
     }

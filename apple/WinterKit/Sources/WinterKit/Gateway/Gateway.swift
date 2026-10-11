@@ -102,6 +102,22 @@ public actor Gateway {
         // Special-cased below (`handleMirror`) like `session.attach`: relayed to the daemon for the gate, then
         // served from Winter.app's own mirror on `WireKind.mirror` — never through the daemon.
         "session.mirror",
+        // Cowork workspace routes remain subject to daemon per-record authority.
+        "workspace.list",
+        "workspace.get",
+        "workspace.create",
+        "workspace.update",
+        "project.list",
+        "project.get",
+        "project.create",
+        "project.update",
+        "workspace.source.list",
+        "workspace.source.get",
+        "workspace.source.addRepository",
+        "workspace.source.remove",
+        "workspace.source.revoke",
+        "workspace.operation.get",
+
     ]
 
     /// Session-map cap (SP2b Task 4) — see `evictIfNeeded()`.

@@ -29,13 +29,13 @@ export interface ConversationBinding {
   sessionId: string; workspaceId: string; projectId: string | null; sourceId: string; relativeCwd: string;
   policy: ApprovalPolicy; restrictions: CapabilityCeiling; revision: number; state: "active" | "archived" | "deleted"; createdAt: string;
 }
-export interface MutationContext { principalId: string; requestId: string; expectedRevision?: number }
+export interface MutationContext { /** Host-derived RPC name for principal/method idempotency scope. */ method?: string; /** Pure host response validation inside the mutation transaction; never RPC data. */ validateReceipt?: (receipt: MutationReceipt<unknown>) => void; principalId: string; requestId: string; expectedRevision?: number }
 export interface MutationReceipt<T> { operationId: string; workspaceId: string; revision: number; value: T }
 export type OperationStatus = "pending" | "applied" | "blocked" | "failed" | "superseded";
 /** Superseded receipts never become applied later, including multi-source creation receipts. */
 export const isTerminalOperationStatus = (status: OperationStatus): boolean => ["applied", "failed", "superseded"].includes(status);
 export interface GuestEpoch { workspaceId: string; incarnationId: string; leaseEpoch: number; configRevision: number; grantRevision: number }
-export type CoworkErrorCode = "not_found" | "revision_conflict" | "request_conflict" | "last_source_required" | "source_unavailable" | "authority_denied" | "invalid_request" | "recovery_required" | "stale_acknowledgment";
+export type CoworkErrorCode = "not_found" | "revision_conflict" | "request_conflict" | "last_source_required" | "source_unavailable" | "authority_denied" | "invalid_request" | "recovery_required" | "stale_acknowledgment" | "unsupported_topology" | "response_too_large";
 export class CoworkError extends Error {
   constructor(readonly code: CoworkErrorCode, readonly currentRevision?: number) { super(code); this.name = "CoworkError"; }
 }

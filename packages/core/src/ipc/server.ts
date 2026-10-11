@@ -1,3 +1,6 @@
+import { COWORK_RPC, COWORK_REMOTE_METHODS, type CoworkMethod } from "@yanlinglabs/winter-protocol";
+import { CoworkWorkspaceService } from "../cowork/service";
+import { CoworkError } from "../cowork/types";
 import { chmodSync, realpathSync, statSync } from "node:fs";
 import { ComputerUseControlError, type ComputerUseControl } from "../computer-use/wiring";
 import { BrowserLinkRpcError, type BrowserLink } from "../computer-use/browser/cef-link/rpc";
@@ -222,6 +225,7 @@ export interface InternalSessionCreateInput {
 export type InternalSessionCreator = (input: InternalSessionCreateInput) => Promise<{ sessionId: string; trusted: boolean }>;
 
 export interface IpcServerOptions {
+  cowork?: CoworkWorkspaceService;
   socketPath: string;
   serverVersion: string;
   tokens: TokenAuthority;
@@ -726,6 +730,7 @@ const PLUGIN_ALLOWED_METHODS = new Set<string>([
 // edit to one side that isn't matched on the other fails the parity test rather than silently
 // letting the two allowlists diverge.
 export const REMOTE_ALLOWED_METHODS = new Set<string>([
+  ...COWORK_REMOTE_METHODS,
   METHODS.hello, METHODS.sessionList, METHODS.sessionAttach, METHODS.sessionSend,
   METHODS.sessionDispatch, METHODS.approvalRespond, METHODS.askUserRespond,
   METHODS.sessionInterrupt, METHODS.engineActivity,
@@ -2072,6 +2077,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       throw new RpcFailure(ERR.UNAUTHORIZED, `remote role may not call ${method}`);
     }
 
+    if (Object.hasOwn(COWORK_RPC, method)) {
+      if (!opts.cowork) throw new RpcFailure(ERR.INVALID_PARAMS, "Cowork unavailable", { code: "unsupported_topology" });
+      try { return opts.cowork.call({ role: socket.data.authedRole, connectionId: socket.data.connId }, method as CoworkMethod, params ?? {}); }
+      catch (error) {
+        if (error instanceof CoworkError) throw new RpcFailure(error.code === "authority_denied" ? ERR.UNAUTHORIZED : ERR.INVALID_PARAMS, "Cowork request refused", { code: error.code, ...(error.currentRevision === undefined ? {} : { currentRevision: error.currentRevision }) });
+        if (error instanceof z.ZodError) throw new RpcFailure(ERR.INVALID_PARAMS, "Invalid Cowork request", { code: "invalid_request" });
+        throw new RpcFailure(ERR.INTERNAL, "Cowork operation unavailable", { code: "recovery_required" });
+      }
+    }
     switch (method) {
       case METHODS.sessionCreate: {
         const p = parseParams(SessionCreateParams, params);
