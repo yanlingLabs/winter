@@ -89,6 +89,32 @@ final class GuardianModelTests: XCTestCase {
         (1022, "I2: the engine's place T@200, the user's T@100 — the same app on two desktops"),
     ]
 
+    /// The standing second check (round 14): T an ORDINARY app (its acts reach T, the default browser and the mail app
+    /// only; X is Terminal, a third party's) — the same invariants over seeds 1–12. Seed 2 is known to fail there (a ⌃-arrow
+    /// overridden by a restore's landing a few ms later stays unused and later explains T's own activation).
+    static let ordinaryTargetKnownFailing: Set<Int> = [2]
+
+    func testTheInvariantsHoldWithAnOrdinaryTarget() async {
+        for seed in 1...12 {
+            var plan = SimPlan.generate(seed: UInt64(seed), count: Self.steps)
+            plan.targetBundle = "sim.editor"
+            let r = await SimRun.execute(plan)
+            if Self.ordinaryTargetKnownFailing.contains(seed) {
+                if let v = r.violation {
+                    XCTExpectFailure("KNOWN, round 14: seed \(seed) with an ordinary target", strict: true) { XCTFail("seed \(seed): \(v)") }
+                } else {
+                    XCTFail("seed \(seed) passes with an ordinary target now — take it off ordinaryTargetKnownFailing")
+                }
+                continue
+            }
+            if let v = r.violation {
+                let at = r.trace.firstIndex { $0.hasPrefix("VIOLATION") } ?? r.trace.count
+                XCTFail("seed \(seed) (an ordinary target): \(v)\n\(r.trace[max(0, at - 60)..<min(r.trace.count, at + 2)].joined(separator: "\n"))")
+                return
+            }
+        }
+    }
+
     /// Seeds fixed in an earlier round, pinned so they stay fixed (review of round 13: 1067 — a click into the app already
     /// in front, the quiet instant).
     func testFixedSeedsStayFixed() async {

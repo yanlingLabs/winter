@@ -127,4 +127,36 @@ final class Round14Tests: XCTestCase {
         XCTAssertNotNil(input.explanation(from: 9, after: -.infinity, raiseAfter: -.infinity, now: 10.1, front: 500), "its own app")
         XCTAssertNil(input.explanation(from: 9, after: -.infinity, raiseAfter: -.infinity, now: 10.1, front: 600), "never another app")
     }
+
+    // MARK: item 1, finished
+
+    /// Opens and launches reach the app they open (round 14): a pending launch of A, or its opener cause, never makes
+    /// an untouched B "clearly the agent's".
+    func testALaunchReachesOnlyTheAppItLaunches() {
+        var g = started()
+        let token = g.beginLaunch(now: 10)
+        g.setLaunchBundle(token, "com.example.a")
+        g.noteOpenerCause(now: 10, scope: .apps(["com.example.a"]))
+        XCTAssertTrue(g.clearlyAt(10.5, hardwareAt: nil, bundle: "com.example.a"))
+        XCTAssertFalse(g.clearlyAt(10.5, hardwareAt: nil, bundle: "com.example.b"), "another app")
+        g.endLaunch(token, pid: 77, now: 11)
+        XCTAssertFalse(g.clearlyAt(11.2, hardwareAt: nil, bundle: "com.example.b"))
+    }
+
+    /// The opt-in survey's seed 11: the user clicks into the app held in front (a consented foreground) while an app
+    /// left in front sits between — their choice: the hold's end gives nothing back over it.
+    func testTheUsersClickIntoTheHeldAppKeepsItAtTheHoldsEnd() {
+        var g = started()
+        g.noteCause(600, raise: true, now: 10)
+        g.exempt(600, until: 40, now: 10)
+        XCTAssertEqual(g.judge(CUMoveQuery(app: 600, space: 100), now: 10.1), .consented)
+        // An untouched app comes forward around the agent's action: left in front, not their place.
+        g.noteOpenerCause(now: 12)
+        _ = g.judge(CUMoveQuery(app: 700, space: 100, appBundle: "com.example.other"), now: 12.2)
+        // Their click into the held app's window brings it back.
+        g.userClicked(app: 600, space: 100, now: 14)
+        _ = g.judge(CUMoveQuery(app: 600, space: 100), now: 14.05)
+        g.endExempt(600, now: 15)
+        XCTAssertEqual(g.view.app, 600, "nothing given back over their click")
+    }
 }

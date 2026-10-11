@@ -118,7 +118,9 @@ extension CUCore {
     /// The agent is about to launch an app (a bind's): an app whose process starts meanwhile is the agent's.
     func beginGuardianLaunch() -> Int {
         let now = clock.nowSeconds()
-        return guardianLock.withLock { guardianCore.noteOpenerCause(now: now); return guardianCore.beginLaunch(now: now) }
+        // (No opener cause of any reach here: the launch pending counts for the app it is for once its bundle is known,
+        // and the bundle's own opener cause is noted then — round 14: opens and launches reach the app they open.)
+        return guardianLock.withLock { guardianCore.beginLaunch(now: now) }
     }
 
     /// The bundle the pending launch is for, when the bind knows it (the default resolver does): only that app's
@@ -126,14 +128,22 @@ extension CUCore {
     /// binds at once could swap their bundles), else the latest.
     func noteGuardianLaunchBundle(_ bundle: String?) {
         let token = CUCore.bindLaunchToken
+        let now = clock.nowSeconds()
         guardianLock.withLock {
             if let token { guardianCore.setLaunchBundle(token, bundle) } else { guardianCore.setLatestLaunchBundle(bundle) }
+            guardianCore.noteOpenerCause(now: now, scope: bundle.map { .apps([$0]) } ?? .any)
         }
     }
 
     func endGuardianLaunch(_ token: Int, pid: pid_t?) {
         let now = clock.nowSeconds()
-        guardianLock.withLock { guardianCore.noteOpenerCause(now: now); guardianCore.endLaunch(token, pid: pid, now: now) }
+        // What it opened: its bundle as named, else the process's own; unknown — any app.
+        let named = guardianLock.withLock { guardianCore.launchBundle(token) }
+        let bundle = named ?? pid.flatMap { sys.bundleId(pid: $0) }
+        guardianLock.withLock {
+            guardianCore.noteOpenerCause(now: now, scope: bundle.map { .apps([$0]) } ?? .any)
+            guardianCore.endLaunch(token, pid: pid, now: now)
+        }
     }
 
     /// A restore of ours re-activates `pid` now (I2: its late landing, after the user moved elsewhere, is the restore's).

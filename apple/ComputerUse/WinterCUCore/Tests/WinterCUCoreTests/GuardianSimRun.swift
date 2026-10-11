@@ -1002,7 +1002,7 @@ final class SimRun {
             let wid = UInt32(8000 + pid)
             let bundle = "sim.launched.\(pid)"
             w.agentBegins(pid, raise: true)
-            w.lock.withLock { w.noteOpener(nil) }  // a launch can open apps (the engine notes its start and end)
+            w.lock.withLock { w.noteOpener([bundle]) }  // a launch opens the app it launches (round 14: never any app)
             w.lock.withLock {
                 w.running.insert(pid)
                 w.bundles[pid] = bundle
@@ -1032,7 +1032,7 @@ final class SimRun {
             do {
                 _ = try await core.targetBind(TargetBindParams(sessionId: "s", app: bundle, mirror: false))
             } catch { w.log("the bind: \((error as? CUError)?.message ?? "\(error)")") }
-            w.agentEnds(pid); w.lock.withLock { w.noteOpener(nil) }
+            w.agentEnds(pid); w.lock.withLock { w.noteOpener([bundle]) }
         case .agentBusy(let n, let gap):
             for k in 0..<n {
                 if w.violation != nil { break }

@@ -397,6 +397,9 @@ public struct CUFocusGuardianCore: Sendable {
         launches[k]?.bundle = bundle
     }
 
+    /// The bundle a pending launch is for, when known.
+    public func launchBundle(_ token: Int) -> String? { launches[token]?.bundle }
+
     public mutating func endLaunch(_ token: Int, pid: pid_t?, now: TimeInterval) {
         launches[token] = nil
         if let pid { noteAfterglow(pid, raise: true, now: now); agentLaunched.insert(pid) }
@@ -548,7 +551,9 @@ public struct CUFocusGuardianCore: Sendable {
         if hardwareTimes.contains(where: { $0 <= t && t - $0 <= Self.quietBeforeUndo }) { return false }
         if let h = hardwareAt, h <= t, t - h <= Self.quietBeforeUndo { return false }
         if openerTimes.contains(where: { $0.at <= t && t - $0.at <= Self.causalWindow && $0.scope.covers(bundle) }) { return true }
-        return launches.values.contains { $0.since <= t }
+        // A launch pending: what it launches (once its bundle is known — round 14: an open or a launch reaches the app it
+        // opens, never any app).
+        return launches.values.contains { $0.since <= t && ($0.bundle == nil || $0.bundle == bundle) }
     }
 
     public mutating func noteHardwareAction(now: TimeInterval) {
@@ -664,6 +669,13 @@ public struct CUFocusGuardianCore: Sendable {
             }
             // Back at their place: a claim of a click elsewhere is gone (they moved on from it).
             if previous != current, let c = claim, c.app != app { claim = nil }
+            // Back at their place BY THEIR CLICK into it while it is held in front (a consented foreground): they chose it
+            // — a hold's end gives nothing back over it (round 14, the opt-in survey's seed 11: an app left in front came
+            // between, their click into the held app read as "already there", and the hold's end gave back the place
+            // from before it).
+            if previous != current, let c = claim, c.app == app, now <= c.until, exemptions[app]?.previous != nil {
+                forgetExemptPrevious()
+            }
             // Back at their place DURING a desktop visit (no restore runs then, and the visit takes them elsewhere): their
             // own move — the visit's end leaves them there (the model-based test: their ⌘-Tab back during the visit, and
             // its end took them to the dialog that was in front when it began).
