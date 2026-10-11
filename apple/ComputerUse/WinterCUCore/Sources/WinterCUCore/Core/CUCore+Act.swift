@@ -1941,8 +1941,11 @@ extension CUCore {
             }
         }
         // AXPress may not focus a web textarea: a window-targeted click at its centre, on this desktop or (with
-        // the private path) on another Space, after the synthetic activation so it isn't taken as activation.
-        guard let c = ElementInfo(e, ax).center else { return false }
+        // the private path) on another Space, after the synthetic activation so it isn't taken as activation. An
+        // element scrolled out of view is scrolled to first (round 13's dogfood item 13: Return into an off-screen
+        // button was refused focus_not_placed); one that stays outside the window gets no click — it would land on
+        // something else.
+        guard let c = clickablePoint(e, ElementInfo(e, ax), t) else { return false }
         let onScreen = sys.window(id: t.windowID)?.onScreen == true
         let elsewhere = !onScreen && t.privatePath && skyLight.canSetWindowLocation
         guard onScreen || elsewhere else { return false }
