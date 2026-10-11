@@ -783,7 +783,7 @@ final class FocusMenusFoldPasteTests: XCTestCase {
                           isChromium: false, mirror: false, windowID: 77, windowTitle: "Downloads")
         core.registerForTesting(t3, windowElement: window)
         core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: [], now: core.clock.nowSeconds())  // ⌘ released earlier
-        core.guardianLock.withLock { core.switchInput = CUSwitchInput() }
+        core.guardianLock.withLock { core.guardianCore.input = CUSwitchInput() }
         XCTAssertEqual(core.keyForClick(t3, privatePath: true, clickWindow: 77), .activatedItself)
     }
 
@@ -979,7 +979,7 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         // Back in their own app later: the next blip runs as ever.
         sys.front = 1
         core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: [], now: core.clock.nowSeconds() - 5)
-        core.guardianLock.withLock { core.switchInput = CUSwitchInput() }
+        core.guardianLock.withLock { core.guardianCore.input = CUSwitchInput() }
         enforcer.onDeactivate = nil
         FocusSPI.reset()
         try await act(.type(CUTypeAction(text: "b")))

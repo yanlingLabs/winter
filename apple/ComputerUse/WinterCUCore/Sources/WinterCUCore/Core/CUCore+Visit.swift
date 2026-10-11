@@ -151,19 +151,9 @@ extension CUCore {
     /// When the visit in progress began, or nil when there is none.
     func visitStart() -> TimeInterval? { visitLock.withLock { openVisit?.base.startedAt } }
 
-    /// During a visit, the guardian's "user input" is only a HARDWARE ACTION — a click, a key, a scroll, a gesture
-    /// from no process (`eventSourceUnixProcessID` 0) and not the helper's stamp; a pointer move alone never counts
-    /// — that came after the visit began AND after the agent's own latest cause (the click on the panel's "Switch
-    /// now" a moment before, or the helper's own rung-4 events, must never make the visit's switch the user's).
-    /// Never the HID idle state, which counts synthetic events too. Nil: no visit.
-    func visitInput(now: TimeInterval) -> Bool? {
-        guard let start = visitStart() else { return nil }
-        let (action, cause) = guardianLock.withLock { (lastHardwareActionAt, guardianLastCause) }
-        return action >= 0 && action > max(start, cause)
-    }
-
-    /// The guardian saw the user move by themselves during the visit (a hardware-attributed activation or Space
-    /// change): the visit closes now, leaving them where they went.
+    /// The one rule found the user moved by themselves during the visit (an app the agent did not touch came forward, or
+    /// their switch-capable input after the visit's own causes — never typing, nor the click on "Switch now" before it):
+    /// the visit closes now, leaving them where they went.
     func noteVisitUserMove() {
         // Only once the visit has arrived (its own switch there is not the user's doing).
         guard let v = visitLock.withLock({ openVisit.flatMap { $0.arrived != nil && !$0.closing ? $0 : nil } }) else { return }
@@ -250,13 +240,14 @@ extension CUCore {
             return v
         }
         made.visit = v
+        // The switch there and the way back are the agent's own: both apps touched while it lasts, so only the user's input
+        // after it can make a change theirs.
         guardianLock.withLock {
-            guardianCore.beginVisit(app: t.pid, now: base.startedAt, maxSeconds: max(Self.visitModeSeconds(maxMs: maxMs), visitCapMs / 1000))
+            guardianCore.beginVisit(app: t.pid, user: before.front, now: base.startedAt,
+                                    maxSeconds: max(Self.visitModeSeconds(maxMs: maxMs), visitCapMs / 1000))
         }
-        // The switch is the agent's own cause: only input after it can be the user's.
-        noteGuardianCause(t.pid)
         CULog.act.notice("visit \(v.id, privacy: .public) (\(why.rawValue, privacy: .public)): taking the user to \(t.appName, privacy: .public)'s desktop for window \(t.windowID, privacy: .public) (\(element == nil ? "the app alone: no element" : "its element raised", privacy: .public))")
-        noteSyntheticActivation()
+        noteGuardianCause(t.pid, raise: true)
         _ = sys.bringForward(pid: t.pid, windowID: t.windowID, window: element, makeMain: true)
         // The window on screen AND the desktop changed (when it can be read), bounded. Halfway, once more: by then
         // the app is in front (here, if it stayed), and an active app's window raised takes macOS to its desktop.
@@ -270,20 +261,19 @@ extension CUCore {
         var arrived = arrivedNow()
         var again = false
         while !arrived, clock.nowMs() < deadline {
-            usleep(20_000)
+            clock.pause(ms: 20)
             arrived = arrivedNow()
             if !arrived, !again, clock.nowMs() - start >= visitArriveMs / 2 {
                 again = true
                 CULog.act.notice("visit \(v.id, privacy: .public): not on \(t.appName, privacy: .public)'s desktop yet — bringing the window forward once more")
-                noteGuardianCause(t.pid)  // a switch this causes late is still the agent's own
-                noteSyntheticActivation()
+                noteGuardianCause(t.pid, raise: true)  // a switch this causes late is still the agent's own
                 _ = sys.bringForward(pid: t.pid, windowID: t.windowID, window: element, makeMain: true)
             }
         }
         guard arrived else {
             CULog.act.error("visit \(v.id, privacy: .public): \(t.appName, privacy: .public)'s window never came on screen — nothing was done there")
             // Its queued raise and activation (a busy app answers AX late) may still switch the desktop: a cause now.
-            noteGuardianCause(t.pid)
+            noteGuardianCause(t.pid, raise: true)
             let failure = CUError.unsupported("macOS did not show \(t.appName)'s desktop — nothing was done there")
             // Closed here — unless a close (a cancel, the script's end) claimed it meanwhile: that one, queued behind
             // this on the pid queue, brings the user back and reports it.
@@ -328,11 +318,11 @@ extension CUCore {
     func waitForFreshFrame(_ t: CUTarget) -> String {
         let start = clock.nowMs()
         guard let first = visitFrameDigest(t) else {
-            if visitNoProbeWaitMs > 0 { usleep(UInt32(visitNoProbeWaitMs * 1000)) }
+            if visitNoProbeWaitMs > 0 { clock.pause(ms: visitNoProbeWaitMs) }
             return "no sample"
         }
         while clock.nowMs() - start < visitFreshMaxMs {
-            usleep(UInt32(max(1, visitFrameIntervalMs) * 1000))
+            clock.pause(ms: max(1, visitFrameIntervalMs))
             guard let d = visitFrameDigest(t) else { continue }
             if d != first { return "repainted" }
             if clock.nowMs() - start >= visitFreshStableMs { return "unchanged" }
@@ -531,9 +521,10 @@ extension CUCore {
         let sawUserMove = guardianLock.withLock { guardianCore.visitSawUserInput }
         if let arrived, sawUserMove, now != s.before, now != arrived {
             // Theirs, never fought.
+            let at = clock.nowSeconds()
             guardianLock.withLock {
-                guardianCore.endVisit()
-                guardianCore.adoptUserView(CUGuardedView(app: now.front, space: now.space))
+                guardianCore.endVisit(now: at)
+                guardianCore.adoptUserView(CUGuardedView(app: now.front, space: now.space), now: at)
             }
             let ms = Int(clock.nowMs() - s.startedMs)
             CULog.act.notice("visit \(v.id, privacy: .public) to \(s.appName, privacy: .public)'s desktop (\(reason.rawValue, privacy: .public)): the user moved elsewhere during it — left there (\(ms, privacy: .public) ms, \(actions, privacy: .public) actions)")
@@ -548,36 +539,35 @@ extension CUCore {
                 back = returnOnce(s, user: user) == s.before && userWindowBack(s) && displaysBack(s)
             }
             // Another display still on the visited Space (separate Spaces per display): once, a window of the user's
-            // that is on that display's Space is raised (macOS follows to it), and their app put in front again.
-            if !back, !displaysBack(s), returnDisplays(s, user: user) { back = userView() == s.before && userWindowBack(s) && displaysBack(s) }
+            // that is on that display's Space is raised (macOS follows to it) — which makes that display's desktop the
+            // active one and its window key — then the ordinary return again, which puts their own window and app back
+            // in front on their desktop, and only then is it checked (review of round 7: the check came right after the
+            // raise, while the side display's window was key).
+            if !back, !displaysBack(s), returnDisplays(s) {
+                back = returnOnce(s, user: user) == s.before && userWindowBack(s) && displaysBack(s)
+            }
         }
         // A visit that never arrived: the target's raise and activation are AX calls a busy app answers late (each
         // bounded only by the messaging timeout), so its switch can still land after the deadline — even after the
-        // user was put back. Watched for `visitLateSwitchMs`, and undone (at most twice) if it lands.
-        // Only THAT switch is undone — whose move a change is, is the one decision (`classifyMove`, the visit's own watch
-        // judged with the visit mode set aside): the target in front, or its window's desktop shown, is what the agent
-        // could have caused; input of the user's that switches apps or desktops since the watch began makes it theirs
-        // (never their typing in their own app, which goes on while the target's raise lands). Theirs: left alone, and
-        // their new place adopted (the guardian is still in visit mode, so nothing else would).
+        // user was put back. Watched for `visitLateSwitchMs`, and undone (at most twice) if it lands. The visit mode
+        // ends first — its apps stay touched for the causal window (longer than the watch) — so the watch and the
+        // guardian judge the same way, by the one rule: the target (or the user's app, which the visit moved) coming
+        // forward with no switch-capable input of theirs since is undone; an app the agent did not touch, or their own
+        // switch (never their typing), is theirs and left alone.
         if reason == .neverArrived, let user = s.before.front {
             let watchFrom = clock.nowSeconds()
+            guardianLock.withLock { _ = guardianCore.endVisit(now: watchFrom) }
             let until = clock.nowMs() + visitLateSwitchMs
             var undone = 0
             var userMoved = false
             while clock.nowMs() < until, undone < 2 {
-                usleep(40_000)
+                clock.pause(ms: 40)
                 let now = userView()
                 guard now != s.before else { continue }
-                let couldBeTheTarget = Self.lateSwitchCouldBeTheTarget(now, before: s.before, targetPid: s.pid,
-                                                                       targetWindowOnScreen: sys.window(id: s.windowID)?.onScreen == true)
-                let owner = classifyMove(app: now.front, space: now.space, since: watchFrom, agentCaused: couldBeTheTarget, ignoreVisit: true)
+                let owner = judgeMove(now, since: watchFrom, from: s.before, path: "a desktop visit's late-switch watch")
                 if owner.isUsers {
                     userMoved = true
                     CULog.act.notice("visit \(v.id, privacy: .public): after the return the view changed — \(owner.words, privacy: .public) (front \(now.front.map(String.init) ?? "?", privacy: .public)) — left there")
-                    guardianLock.withLock {
-                        guardianCore.endVisit()
-                        guardianCore.userMoved(app: now.front, space: now.space, now: clock.nowSeconds())
-                    }
                     break
                 }
                 undone += 1
@@ -592,7 +582,8 @@ extension CUCore {
         }
         // The guardian's view was never changed by the visit: if the user is not back, it still knows where they
         // belong, and the next activation or Space change puts them there.
-        guardianLock.withLock { _ = guardianCore.endVisit() }
+        let endedAt = clock.nowSeconds()
+        guardianLock.withLock { _ = guardianCore.endVisit(now: endedAt) }
         let ms = Int(clock.nowMs() - s.startedMs)
         if back {
             CULog.act.notice("visit \(v.id, privacy: .public) (\(s.why.rawValue, privacy: .public)) to \(s.appName, privacy: .public)'s desktop closed (\(reason.rawValue, privacy: .public)): \(ms, privacy: .public) ms, \(actions, privacy: .public) actions, the user is back")
@@ -623,7 +614,7 @@ extension CUCore {
     /// it runs under `SLSDisableUpdate`, so the switch back is not drawn as a flash; across desktops macOS draws
     /// the switch itself. Returns the view it ends on.
     private func returnOnce(_ s: VisitBase, user: pid_t) -> CUUserView {
-        noteSyntheticActivation()
+        noteGuardianCause(user, raise: true)  // the way back is the agent's own: a late activation of it after the user moved is undone
         let sameDesktop = s.before.space == nil || sys.activeSpace() == s.before.space
         let cid = sameDesktop ? skyLight.disableUpdate() : nil
         defer { if let cid { skyLight.reenableUpdate(cid) } }
@@ -672,12 +663,6 @@ extension CUCore {
         return (nil, nil)
     }
 
-    /// A change of the user's view after a never-arrived visit's return that the agent could have caused: the TARGET came
-    /// to the front, or its window's desktop is now shown. Anything else is no doing of the agent's. Pure.
-    static func lateSwitchCouldBeTheTarget(_ now: CUUserView, before: CUUserView, targetPid: pid_t, targetWindowOnScreen: Bool) -> Bool {
-        now.front == targetPid || (targetWindowOnScreen && now.space != before.space)
-    }
-
     /// Every display on the Space it showed when the visit began (one display: always, the active Space is checked
     /// elsewhere); true when that can't be read.
     func displaysBack(_ s: VisitBase) -> Bool {
@@ -686,9 +671,9 @@ extension CUCore {
     }
 
     /// A display still on the visited Space: a window of the user's that was on that display's Space when the visit
-    /// began is raised (macOS follows to it), then their app put in front again. False when no such window is known —
-    /// switching that display back then needs the user (said in the report).
-    func returnDisplays(_ s: VisitBase, user: pid_t) -> Bool {
+    /// began is raised (macOS follows to it). The caller then returns the user to their own window as usual. False when
+    /// no such window is known — switching that display back then needs the user (said in the report).
+    func returnDisplays(_ s: VisitBase) -> Bool {
         guard let before = s.beforeDisplays, let now = sys.displaySpaces() else { return false }
         var raised = false
         for (display, space) in before where now[display] != nil && now[display] != space {
@@ -697,12 +682,11 @@ extension CUCore {
                 CULog.act.notice("visit return: display \(display, privacy: .public) stayed on the visited desktop, and no window of the user's is known on its own — left for the user")
                 continue
             }
+            if let user = s.before.front { noteGuardianCause(user, raise: true) }
             try? ax.perform(w.0, kAXRaiseAction)
             raised = true
         }
-        guard raised else { return false }
-        _ = restoreUserView(s.before, user: user, window: nil, raiseFocused: false)
-        return true
+        return raised
     }
 
     /// Back is the user's desktop and front app (checked by the caller) — and, when their app IS the target app, its

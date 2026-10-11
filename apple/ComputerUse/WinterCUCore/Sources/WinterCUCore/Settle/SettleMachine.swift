@@ -5,11 +5,15 @@ import Foundation
 public protocol CUClock: Sendable {
     func nowMs() -> Double
     func sleep(ms: Double) async throws
+    /// A short blocking pause on the calling thread (the engine's polls and settles). A simulated clock advances
+    /// instead of sleeping, so the whole engine can run in simulated time (the guardian's model-based test).
+    func pause(ms: Double)
 }
 
 public extension CUClock {
     /// Monotonic seconds (for the focus guardian's windows).
     func nowSeconds() -> Double { nowMs() / 1000 }
+    func pause(ms: Double) { if ms > 0 { usleep(useconds_t(ms * 1000)) } }
 }
 
 public struct CUSystemClock: CUClock {

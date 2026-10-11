@@ -39,14 +39,14 @@ extension CUCore {
             }
             guardianLock.withLock { guardianCore.exempt(t.pid, until: clock.nowSeconds() + Self.holdForegroundMaxSeconds) }
             if sys.frontmostPid() != t.pid {
-                noteSyntheticActivation()
+                noteGuardianCause(t.pid, raise: true)
                 _ = sys.activate(pid: t.pid)
                 if let w = try? windowElement(t) { try? ax.perform(w, kAXRaiseAction) }
             }
             var front = false
             for _ in 0..<50 {
                 if sys.frontmostPid() == t.pid { front = true; break }
-                usleep(20_000)
+                clock.pause(ms: 20)
             }
             CULog.act.notice("foreground in \(t.appName, privacy: .public): \(front ? "held in front" : "could not be brought forward", privacy: .public)\(first ? "" : " (already held)", privacy: .public)")
             // Never held past the longest script, even if its end is never heard.
@@ -81,6 +81,7 @@ extension CUCore {
     private func giveBack(_ h: HeldForeground) {
         guardianLock.withLock { guardianCore.endExempt(h.pid) }
         if sys.frontmostPid() == h.pid, let prev = h.previous, sys.appRunning(prev) {
+            noteGuardianCause(prev, raise: true)  // the agent's own activation
             _ = sys.activate(pid: prev)
             CULog.act.notice("foreground in \(h.appName, privacy: .public): the front given back")
         }

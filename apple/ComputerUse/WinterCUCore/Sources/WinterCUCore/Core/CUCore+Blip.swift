@@ -70,18 +70,22 @@ extension CUCore {
             CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used (private path off, or the app is in front)")
             return nil
         }
-        // The user's keys typed in the TARGET while it is their front app (they switched into it) are theirs — passed
-        // through, never posted to the app they left (review of round 6).
+        // Each key of the user's that reaches the target goes to their place by the one rule (I3): through to the target
+        // only once their own move took them there, else to where they are — never the app they left, never a target that
+        // took the front by itself (`keyPlace`).
         let tpid = t.pid
-        let reroute = CUKeyReroute(target: t.pid, victim: user, installer: keyTapInstaller, post: keyReroutePost,
-                                   passThrough: { [sys] in sys.frontmostPid() == tpid })
+        let space0 = sys.activeSpace()
         let start = clock.nowMs()  // the deadline counts from the tap's install
         let startedAt = clock.nowSeconds()
+        let reroute = CUKeyReroute(target: t.pid, victim: user, installer: keyTapInstaller, post: keyReroutePost,
+                                   destination: { [weak self] in
+                                       self?.keyPlace(target: tpid, user: user, space: space0, since: startedAt) ?? user
+                                   })
         guard reroute.begin() else {
             CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used — no keyboard reroute tap")
             return nil
         }
-        let space = sys.activeSpace()
+        let space = space0
         let undo: () -> Void
         var refusal: CUError?
         switch keyWithoutRaise(t) {
@@ -128,23 +132,25 @@ extension CUCore {
                 CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): ended (\(reason, privacy: .public)) after \(Int(self.clock.nowMs() - start), privacy: .public) ms — the user moved: nothing handed back; \(rerouted, privacy: .public) key event(s) rerouted before")
                 return
             }
-            // The front is not where it began: whose move it was decides first, before any hand-back (a hand-back would
-            // take the key focus from wherever they went).
-            if let f = sys.frontmostPid(), f != user, isUsersMove(userView(), since: startedAt) {
+            // The front or the desktop is not where it began: whose move it was decides first, before any hand-back (a
+            // hand-back would take the key focus from wherever they went).
+            let nowView = userView()
+            if nowView.front != user || (space != nil && nowView.space != nil && nowView.space != space),
+               isUsersMove(nowView, since: startedAt, from: CUUserView(space: space, front: user), path: "the focus blip's end") {
                 let rerouted = removeTap(reason)
-                CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): ended (\(reason, privacy: .public)) — the user moved to \(f, privacy: .public): nothing handed back; \(rerouted, privacy: .public) key event(s) rerouted before")
+                CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): ended (\(reason, privacy: .public)) — the user moved to \(nowView.front ?? 0, privacy: .public): nothing handed back; \(rerouted, privacy: .public) key event(s) rerouted before")
                 return
             }
-            // Where the user belongs now: the guardian's view (it follows their moves), else where the blip began — never
-            // merely the pid captured then (review of round 6: the restore ignored where they had gone).
-            let place = guardianLock.withLock { guardianCore.active ? guardianCore.view : nil } ?? CUGuardedView(app: user, space: space)
+            // Where the user belongs now: their place as the guardian knows it (it follows their moves), else where the
+            // blip began — never merely the pid captured then (review of round 6: the restore ignored where they had gone).
+            let place = guardianPlace() ?? CUGuardedView(app: user, space: space)
             let home = place.app ?? user
             if home == user { undo() }  // the user's key window handed back (the record names their window)
             // The user's app must hold the key focus and the front again within `blipFrontWaitMs` (and before the
             // bound); the tap stays until then, so a key typed meanwhile still goes to them.
             let until = min(clock.nowMs() + Self.blipFrontWaitMs, start + boundMs)
             let back = { [self] in keyFocusPidForTarget(t) != t.pid && sys.frontmostPid() == home }
-            while clock.nowMs() < until, !back() { usleep(10_000) }
+            while clock.nowMs() < until, !back() { clock.pause(ms: 10) }
             // Not back yet: hand it back once more (the first focus record can be lost while the app is busy),
             // and only then is it a theft for the guardian.
             var handedBackTwice = false
@@ -152,7 +158,7 @@ extension CUCore {
                 undo()
                 handedBackTwice = true
                 let again = min(clock.nowMs() + 60, start + boundMs)
-                while clock.nowMs() < again, !back() { usleep(10_000) }
+                while clock.nowMs() < again, !back() { clock.pause(ms: 10) }
             }
             noteGuardianActed(t.pid)  // the blip's end is a cause: an activation right after it may be its doing
             let rerouted = removeTap(reason)
@@ -162,7 +168,7 @@ extension CUCore {
             let keys = keyFocusPidForTarget(t) != t.pid
             if handedBackTwice { CULog.act.notice("focus blip in \(app, privacy: .public): the key focus was handed back a second time — back: \(front && keys ? "yes" : "no", privacy: .public)") }
             if !front || !keys {
-                guardianRestore(place, thief: t.pid, repeatOffender: false,
+                guardianRestore(thief: t.pid, fallback: place, force: front,
                                 cause: front ? "the focus blip left the key focus with the target" : "the focus blip did not hand the front back")
             }
             CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): ended (\(reason, privacy: .public)) after \(Int(self.clock.nowMs() - start), privacy: .public) ms; \(rerouted, privacy: .public) key event(s) rerouted to the user's app; the user's app back (front and keys): \(front && keys ? "yes" : "no — the guardian restored it", privacy: .public)")
@@ -203,7 +209,7 @@ extension CUCore {
                     return .pressed(try press(item))
                 }
                 if clock.nowMs() >= until || blip.isEnded { break }
-                usleep(20_000)
+                clock.pause(ms: 20)
             }
             CULog.act.notice("menu in \(t.appName, privacy: .public): “\(title, privacy: .public)” still disabled in the focus blip (try \(attempt, privacy: .public), \(reads, privacy: .public) reads)")
         }
@@ -255,8 +261,9 @@ final class CUKeyBlips {
     private var blip: CUFocusBlip?
     private var settled = false  // not needed, or not possible: never asked again in this act
     private(set) var bursts = 0
-    /// When the last burst's blip began.
+    /// When the last burst's blip began, and where the user was then.
     private var lastBurstAt: TimeInterval?
+    private var lastBurstView: CUUserView?
 
     init(_ core: CUCore, _ p: TargetActParams, _ t: CUTarget, why: String) {
         self.core = core
@@ -272,32 +279,37 @@ final class CUKeyBlips {
     /// activated itself), or macOS switching desktops by itself: the blip ends the ordinary way — the user put back — and
     /// the act stops. Either way nothing more is sent.
     func before() throws {
+        // A blip its bound already ended counts as none: the check between bursts applies (review of round 7: an ended
+        // blip skipped both checks).
+        if let b = blip, b.isEnded { blip = nil }
         if let b = blip {
             let front = core.sys.frontmostPid()
             let space = core.sys.activeSpace()
             let spaceMoved = b.space != nil && space != nil && space != b.space
-            let frontMoved = !b.isEnded && front != nil && front != b.user
+            let frontMoved = front != nil && front != b.user
             if spaceMoved || frontMoved {
                 blip = nil
-                if core.isUsersMove(CUUserView(space: space, front: front), since: b.startedAt) {
+                if core.isUsersMove(CUUserView(space: space, front: front), since: b.startedAt,
+                                    from: CUUserView(space: b.space, front: b.user), path: "the agent's next key in the focus blip") {
                     b.end("the user moved", usersMove: true)
                     CULog.act.notice("keys in \(self.t.appName, privacy: .public): the user moved during the focus blip (front \(front ?? 0, privacy: .public)) — stopped, nothing handed back")
                     if frontMoved, let front { throw core.usersMoveRefusal(t, front: front, typed: true) }
                     throw CUError.uncertain("the user switched desktops while keys were going to \(t.appName), so the typing was stopped — they were left where they went; check state() to see what landed")
                 }
-                if spaceMoved {
+                if spaceMoved, !frontMoved {
                     b.end("the desktop began to switch")
                     CULog.act.fault("keys in \(self.t.appName, privacy: .public): macOS began switching desktops during the focus blip — stopped")
                     throw CUError.uncertain("macOS began switching desktops while keys were going to \(t.appName), so the typing was stopped (the user's desktop is being put back) — check state() to see what landed")
                 }
-                b.end("\(t.appName) came to the front by itself")
-                CULog.act.fault("keys in \(self.t.appName, privacy: .public): it came to the front by itself during the focus blip — stopped")
-                throw CUError.uncertain("\(t.appName) came to the front by itself while keys were going to it, so the typing was stopped (the user was put back) — check state() to see what landed")
+                b.end("\(front.map { core.appName($0) } ?? "an app") came to the front by itself")
+                CULog.act.fault("keys in \(self.t.appName, privacy: .public): \(front ?? 0, privacy: .public) came to the front by itself during the focus blip — stopped")
+                throw CUError.uncertain("\(front == t.pid ? t.appName : "another app") came to the front by itself while keys were going to \(t.appName), so the typing was stopped (the user was put back) — check state() to see what landed")
             }
         } else if bursts > 0, let front = core.sys.frontmostPid(), front == t.pid {
             // Between two bursts the target came to the front: its window would take the keys with no blip — into the
             // app the user may be using now. Judged the same way, and nothing more is sent either way.
-            if core.isUsersMove(core.userView(), since: lastBurstAt ?? core.clock.nowSeconds()) {
+            if core.isUsersMove(core.userView(), since: lastBurstAt ?? core.clock.nowSeconds(),
+                                from: lastBurstView, path: "the agent's next key between two focus blips") {
                 throw core.usersMoveRefusal(t, front: front, typed: true)
             }
             throw CUError.uncertain("\(t.appName) came to the front by itself while keys were going to it, so the typing was stopped (the user is being put back) — check state() to see what landed")
@@ -317,9 +329,10 @@ final class CUKeyBlips {
         }
         blip = b
         lastBurstAt = b.startedAt
+        lastBurstView = CUUserView(space: b.space, front: b.user)
         bursts += 1
         // The app takes the key focus as it handles the focus record: keys sent before that are lost.
-        if core.blipKeySettleMs > 0 { usleep(useconds_t(core.blipKeySettleMs * 1000)) }
+        if core.blipKeySettleMs > 0 { core.clock.pause(ms: core.blipKeySettleMs) }
         // Where the keys go, as the app answers for its key window — the bound one now.
         if bursts == 1 { core.noteBlipFocus(t, start: true) }
     }
@@ -331,6 +344,6 @@ final class CUKeyBlips {
 
     /// The keys just posted are still in the app's queue: held key a moment longer, so they reach this window.
     private func drain() {
-        if core.blipDrainMs > 0 { usleep(useconds_t(core.blipDrainMs * 1000)) }
+        if core.blipDrainMs > 0 { core.clock.pause(ms: core.blipDrainMs) }
     }
 }

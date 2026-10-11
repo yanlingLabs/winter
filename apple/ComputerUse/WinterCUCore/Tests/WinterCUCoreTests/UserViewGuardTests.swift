@@ -102,12 +102,13 @@ final class UserViewGuardTests: XCTestCase {
             + "stayed on the other desktop (switching back needs the user)")
     }
 
-    func testAnotherAppComingForwardIsSaidButNotUndone() async throws {
+    /// I1: an app the agent never touched coming forward during an act is the user's — never undone, nothing to say.
+    func testAnotherAppComingForwardIsLeftAlone() async throws {
         safari()
         ax.onPerform = { [unowned self] _ in sys.front = 42 }  // the user clicked another app meanwhile
         let r = try await act(.click(CUClickAction(ref: ref(button))))
         XCTAssertTrue(sys.activated.isEmpty, "not the target's doing: the user's choice stands")
-        XCTAssertEqual(r.detail, "the frontmost app changed during the action")
+        XCTAssertNil(r.detail)
     }
 
     func testAQuietActSaysNothing() async throws {
@@ -145,11 +146,14 @@ final class UserViewGuardTests: XCTestCase {
     func testABindThatBringsTheAppForwardIsPutBack() {
         safari()
         let before = core.userView()
+        let since = core.clock.nowSeconds()
+        core.beginGuardianSpan(pid)  // the bind's window wait: the app touched throughout
         sys.front = pid  // launched, it activated itself
-        let note = core.viewNoteAfterBind(before, app: "Safari", pid: pid, route: "bind")
+        core.endGuardianSpan(pid)
+        let note = core.viewNoteAfterBind(before, app: "Safari", pid: pid, route: "bind", since: since)
         XCTAssertEqual(note, "Safari activated itself — the user's app was put back")
         XCTAssertEqual(sys.activated, [1])
-        XCTAssertNil(core.viewNoteAfterBind(core.userView(), app: "Safari", pid: pid, route: "bind"), "a quiet bind says nothing")
+        XCTAssertNil(core.viewNoteAfterBind(core.userView(), app: "Safari", pid: pid, route: "bind", since: since), "a quiet bind says nothing")
     }
 
     // MARK: background steps, checked every time
