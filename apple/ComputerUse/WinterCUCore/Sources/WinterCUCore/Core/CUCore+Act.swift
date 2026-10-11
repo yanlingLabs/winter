@@ -403,39 +403,46 @@ extension CUCore {
         let synth = self.synth(p)
         let windowFor = self.windowFor(t)
         // A web page takes no hover from a pointer that is not the real one while its app is in the background:
-        // measured — WebKit on 2026-10-10 (posted moves reached the window, and a plain AppKit view's tracking areas in
-        // the same state, but no mouseenter reached the page, in the background or with the app in front and the window
-        // key), Chromium on 2026-10-11 (run111: a background Chrome page got moves on the private path but neither a
+        // measured — WebKit on 2026-10-10 (posted moves reached the window, but no mouseenter reached the page, in the
+        // background or with the app in front and the window key), Chromium on 2026-10-11 (run111: a background Chrome page got moves on the private path but neither a
         // mouseenter nor a :hover, on either route). Watched here, so the answer says when nothing appeared instead of
         // leaving the model to look.
         let webPage = t.accessible
             && (a.ref.flatMap { try? element($0, in: t) } ?? elementAt(pt, in: t)).map(isWebContent) == true
+        // Nor does an AppKit view's tracking area (round 11 — live and run126: a `.activeAlways` area under posted moves,
+        // in the background and after the synthetic activation, never got its mouseEntered: tracking follows the REAL
+        // cursor). Watched the same way, over the window's own tree.
+        let nativeView = t.accessible && !webPage
         // The app held in front (requestForeground) or the rung-4 card agreed to: the REAL pointer hovers it — the only
         // hover a web page takes (what the bind's note and the answer below advise).
-        if webPage, d.rung != .foreground, p.allowForeground {
-            d = CUInputLadder.Decision(rung: .foreground, detail: "\(t.appName)'s web page takes hover only from the real pointer")
+        if webPage || nativeView, d.rung != .foreground, p.allowForeground {
+            d = CUInputLadder.Decision(rung: .foreground, detail: "\(t.appName)'s \(webPage ? "web page" : "window") takes hover only from the real pointer")
         }
-        let watched = webPage ? webElementCount(t) : nil
+        let count = { [self] in webPage ? webElementCount(t) : windowElementCount(t) }
+        let watched = webPage || nativeView ? count() : nil
         // With the real pointer, what appeared is counted WHILE it rests there (it goes back to where the user had it
         // right after, and a hover menu may close with it).
         var during: Int?
         let out = try runEvents(p, t, d, focus: false, token) { route, check in
             let used = try synth.hover(pid: t.pid, windowFor: windowFor, at: pt, route: route, dwellMs: ms, check: check)
-            if route == .hid, watched != nil { during = webElementCount(t) }
+            if route == .hid, watched != nil { during = count() }
             return used
         }
         if let before = watched {
-            let after = webElementCount(t)
+            let after = count()
+            let place = webPage ? "the page" : "the window"
             if d.rung == .foreground {
                 if let during, during > before {
                     let gone = after.map { $0 <= before } ?? false
-                    return out.noting("the real pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms and \(during - before) new element(s) appeared in the page\(gone ? " — gone again once the pointer went back to where the user had it: if what it opens also opens on a click, click it" : "; state() shows them")")
+                    return out.noting("the real pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms and \(during - before) new element(s) appeared in \(place)\(gone ? " — gone again once the pointer went back to where the user had it: if what it opens also opens on a click, click it" : "; state() shows them")")
                 }
-                return out.noting("the real pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms; nothing new appeared in the page")
+                return out.noting("the real pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms; nothing new appeared in \(place)")
             }
             if let after, after == before {
-                CULog.act.notice("hover in \(t.appName, privacy: .public): nothing new appeared in the page (\(before, privacy: .public) elements)")
-                return out.noting("the pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms, and nothing new appeared in the page — \(t.appName)'s web page takes no hover from a pointer that isn't the real one: if the menu or item also opens on a click, click it; else app.requestForeground(reason) for a real hover")
+                CULog.act.notice("hover in \(t.appName, privacy: .public): nothing new appeared in \(place, privacy: .public) (\(before, privacy: .public) elements)")
+                let why = webPage ? "\(t.appName)'s web page takes no hover from a pointer that isn't the real one"
+                    : "\(t.appName)'s views take no hover from a pointer that isn't the real one while it is in the background (hover tracking follows the real cursor)"
+                return out.noting("the pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms, and nothing new appeared in \(place) — \(why): if the menu or item also opens on a click, click it; else app.requestForeground(reason) for a real hover")
             }
         }
         return out.noting(rested)
@@ -444,6 +451,20 @@ extension CUCore {
     /// How many elements accessibility shows in the bound window's web page — the cheap "did anything appear"
     /// fingerprint around a hover. Nil when it has none, or when the walk was cut short (`hoverFingerprintMaxNodes`,
     /// or 200 ms): a capped count is the same before and after whatever appeared, so it proves nothing either way.
+    /// The same fingerprint over the bound window's whole tree (a native window's hover).
+    func windowElementCount(_ t: CUTarget, maxMs: Double = 200) -> Int? {
+        guard let win = try? windowElement(t) else { return nil }
+        let deadline = clock.nowMs() + maxMs
+        var queue = [win]
+        var next = 0
+        while next < queue.count {
+            guard next < hoverFingerprintMaxNodes, clock.nowMs() < deadline else { return nil }
+            queue.append(contentsOf: ax.elements(queue[next], kAXChildrenAttribute))
+            next += 1
+        }
+        return next
+    }
+
     func webElementCount(_ t: CUTarget, maxMs: Double = 200) -> Int? {
         guard let win = try? windowElement(t), let area = firstWebArea(win) else { return nil }
         let deadline = clock.nowMs() + maxMs
