@@ -8,15 +8,26 @@
 // two local origins (so the payment iframe is an out-of-process iframe). The browser is `$WINTER_TEST_CHROME`, or a
 // Chrome for Testing build already on this Mac (Playwright's cache) — nothing is installed, the profile is a fresh temp
 // directory, `--use-mock-keychain` keeps it off the login Keychain, and nothing is downloaded.
+//
+//   WINTER_BROWSER_E2E=1 WINTER_HEADLESS_APP=<Winter Headless Dev.app> bun run e2e:browser -- --headless [--no-verify]
+//
+// Phase 4: the same suite through the PRODUCTION headless pool on Winter Headless (`bun run dev:headless` builds one):
+// every tab is `{ browser: "headless" }`, the pool spawns the helper over its pipes and checks it against its stated
+// requirement (`--no-verify` skips that, for an unsigned build). No Chrome is launched; the scenarios that need a USER's
+// browser (its downloads, WebMCP there) are skipped. Temp directories only.
 import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { CDP_ALLOWED_METHODS } from "../../packages/core/src/computer-use/browser/cdp-allowlist";
 import { BrowserEngine } from "../../packages/core/src/computer-use/browser/engine";
+import { headlessRequirementFor } from "../../packages/core/src/computer-use/browser/headless/engines";
+import { HEADLESS_NAME, HeadlessPool } from "../../packages/core/src/computer-use/browser/headless/pool";
 import { BrowserBackendRegistry } from "../../packages/core/src/computer-use/browser/registry";
 import type { TabRunScope } from "../../packages/core/src/computer-use/browser/tab-scope";
+import { TransportError } from "../../packages/core/src/computer-use/browser/transport";
 import { DiffBases } from "../../packages/core/src/computer-use/diff-base";
 import { AutomationFailure } from "../../packages/core/src/computer-use/errors";
+import { processSatisfiesRequirement } from "../../packages/core/src/computer-use/helper-verify";
 import { TargetLocks } from "../../packages/core/src/computer-use/locks";
 import type { SessionFacts } from "../../packages/core/src/computer-use/policy";
 import { ResultBuilder } from "../../packages/core/src/computer-use/result";
@@ -55,7 +66,19 @@ function findChrome(): string | undefined {
   return undefined;
 }
 
-const chrome = findChrome();
+/** `--headless`: the suite on Winter Headless through the production pool (no Chrome at all). */
+const HEADLESS = process.argv.includes("--headless");
+const headlessApp = process.env.WINTER_HEADLESS_APP;
+if (HEADLESS && (headlessApp === undefined || !existsSync(headlessApp))) {
+  console.error("e2e:browser --headless: set WINTER_HEADLESS_APP to a built Winter Headless (bun run dev:headless → dist/dev/Winter Headless Dev.app)");
+  process.exit(1);
+}
+/** What every default `browsers.open` adds: the headless browser, in that mode. */
+const DEFAULT_BROWSER: Record<string, unknown> = HEADLESS ? { browser: "headless" } : {};
+/** The page's viewport in CSS px: the test Chromium's window (`--window-size=1200,800`), or Winter Headless's fixed
+ *  view (1280×800, `WinterCEFHeadlessView{Width,Height}`). */
+const VIEW = HEADLESS ? { width: 1280, height: 800 } : { width: 1200, height: 800 };
+const chrome = HEADLESS ? "" : findChrome();
 if (chrome === undefined) {
   console.error("no Chromium to drive: set WINTER_TEST_CHROME to a Chrome for Testing binary");
   process.exit(1);
@@ -92,19 +115,47 @@ const BASE: string = `http://localhost:${main.port}`;
 let listedDomains: string[] = [];
 
 // ── the engine over the pipe ─────────────────────────────────────────────────────────────────────
-const transport = new PipeTransport("winter", "winter");
-// WebMCP (Phase 4): Winter's own browsers always run with it on; here both test browsers do.
-await transport.launch(chrome, ["--enable-features=WebMCP"]);
 const registry = new BrowserBackendRegistry();
-registry.register(transport, { family: "winter", name: "Chromium (test)", instanceKey: "winter" });
-// Phase 3: a second Chromium playing a USER's browser (Winter for Chrome's backend: Fetch interception for downloads).
-// A download Winter does not catch lands in a temp folder, never the user's Downloads folder.
+const transport = new PipeTransport("winter", "winter");
 const userBrowser = new PipeTransport("chrome", "chrome");
-userBrowser.features = new Set(["cdp3"]);
-await userBrowser.launch(chrome, ["--enable-features=WebMCP"]);
 const browserDownloads = mkdtempSync(join(tmpdir(), "winter-browser-e2e-downloads-"));
-await userBrowser.setDownloadDir(browserDownloads);
-registry.register(userBrowser, { family: "chrome", name: "Chrome for Testing", bundleId: "com.google.chrome.for.testing", instanceKey: "chrome-e2e" });
+const headlessHome = mkdtempSync(join(tmpdir(), "winter-browser-e2e-headless-"));
+const headlessPool = HEADLESS ? new HeadlessPool({
+  home: headlessHome,
+  enabled: () => true,
+  resolve: () => ({ engine: "winter", app: headlessApp!, executable: join(headlessApp!, "Contents", "MacOS", headlessApp!.split("/").filter((x) => x.length > 0).at(-1)!.replace(/\.app$/, "")), requirement: headlessRequirementFor("dist", true) }),
+  ...(process.argv.includes("--no-verify") ? {} : { verify: processSatisfiesRequirement }),
+  log: (line) => { if (/started|exited/.test(line)) console.log(`  (${line})`); },
+}) : undefined;
+/** What the engine sent the headless pool, and what the helper refused (`not_allowed`) — but an ENDED winter world, which
+ *  the helper answers in the browser's own words and the engine retries in a fresh one, as it would the browser's. */
+const headlessSent: string[] = [];
+const headlessRefused: string[] = [];
+if (headlessPool !== undefined) {
+  const send = headlessPool.send.bind(headlessPool);
+  headlessPool.send = (async (tabKey: string, method: string, params?: Record<string, unknown>, opts?: { cdpSessionId?: string; timeoutMs?: number }) => {
+    headlessSent.push(method);
+    try {
+      return await send(tabKey, method, params, opts);
+    } catch (err) {
+      if (err instanceof TransportError && err.code === "not_allowed" && !err.message.startsWith("Cannot find context with specified id")) headlessRefused.push(`${method}: ${err.message}`);
+      throw err;
+    }
+  }) as typeof headlessPool.send;
+}
+if (headlessPool !== undefined) {
+  registry.register(headlessPool, { family: "headless", name: HEADLESS_NAME, instanceKey: "headless" });
+} else {
+  // WebMCP (Phase 4): Winter's own browsers always run with it on; here both test browsers do.
+  await transport.launch(chrome, ["--enable-features=WebMCP"]);
+  registry.register(transport, { family: "winter", name: "Chromium (test)", instanceKey: "winter" });
+  // Phase 3: a second Chromium playing a USER's browser (Winter for Chrome's backend: Fetch interception for downloads).
+  // A download Winter does not catch lands in a temp folder, never the user's Downloads folder.
+  userBrowser.features = new Set(["cdp3"]);
+  await userBrowser.launch(chrome, ["--enable-features=WebMCP"]);
+  await userBrowser.setDownloadDir(browserDownloads);
+  registry.register(userBrowser, { family: "chrome", name: "Chrome for Testing", bundleId: "com.google.chrome.for.testing", instanceKey: "chrome-e2e" });
+}
 const cwd = mkdtempSync(join(tmpdir(), "winter-browser-e2e-cwd-"));
 const sessionTmp = join(mkdtempSync(join(tmpdir(), "winter-browser-e2e-tmp-")), "winter-session-e2e");
 writeFileSync(join(cwd, "receipt.txt"), "a receipt");
@@ -118,6 +169,7 @@ const engine = new BrowserEngine({
   home: mkdtempSync(join(tmpdir(), "winter-browser-e2e-home-")),
   uploadRoots: () => ({ denyRead: [] }),
   downloadRoots: () => ({ tmpDir: sessionTmp, denyWrite: [], denyRead: [] }),
+  ...(headlessPool === undefined ? {} : { headlessSessionEnded: (sid: string) => headlessPool.disposeSession(sid), headlessReason: () => headlessPool.reason }),
 });
 const locks = new TargetLocks();
 const diffBases = new DiffBases();
@@ -176,9 +228,9 @@ let state = "";
 const P = (primitive: string, args: Record<string, unknown> = {}, sc = run1.s) => engine.primitive(sc, tab.targetId, primitive, args);
 
 await check("browsers.open prints the full flattened state: frames, the OOPIF, open shadow DOM, redaction", async () => {
-  tab = await engine.global(run1.s, "browsers.open", { url: `${BASE}/index.html` }) as TabHandle;
+  tab = await engine.global(run1.s, "browsers.open", { url: `${BASE}/index.html`, ...DEFAULT_BROWSER }) as TabHandle;
   state = run1.text();
-  expect(state.includes("opened a new tab in Winter's browser"), "the daemon line", state);
+  expect(state.includes(HEADLESS ? "opened a new tab in Winter's headless browser" : "opened a new tab in Winter's browser"), "the daemon line", state);
   expect(/Tab "Fixture Shop" — http:\/\/localhost:\d+\/index.html/.test(state), "the header", state);
   expect(/\[\d+\] heading "Your cart" \(level 1\)/.test(state), "the heading", state);
   expect(/\[\d+\] link "Next page" → localhost:\d+/.test(state), "a link with its host", state);
@@ -321,7 +373,7 @@ await check("a screenshot's point maps back to the page (click by pixels)", asyn
   const s = await P("state", { full: true, emit: false }) as string;
   void s;
   // Click at the image's top-left nav link area: the first link sits near (20+, 20+) CSS px.
-  await P("click", { target: [Math.round(40 * img.width / 1200), Math.round(28 * img.height / 800)] });
+  await P("click", { target: [Math.round(40 * img.width / VIEW.width), Math.round(28 * img.height / VIEW.height)] });
   const loaded = await P("waitFor", { cond: { url: "page2.html" }, timeoutMs: 5_000 }) as { waitedMs: number };
   expect(loaded.waitedMs >= 0, "the pixel click followed the link");
 });
@@ -367,7 +419,7 @@ await check("native pickers never open: a select, date, time, color (and its lab
   expect(e4.message.includes("opens a file chooser") && e4.message.includes("use upload(ref, paths) instead"), "the file input's refusal names upload()", e4.message);
   // The colour's label sits at a known place (CSS 600–800 × 20–60): pressing it would open the colour picker too.
   const img = await P("screenshot", { emit: false }) as { width: number; height: number };
-  const e5 = await failsWith(P("click", { target: [Math.round(700 * img.width / 1200), Math.round(40 * img.height / 800)] }), "Refused");
+  const e5 = await failsWith(P("click", { target: [Math.round(700 * img.width / VIEW.width), Math.round(40 * img.height / VIEW.height)] }), "Refused");
   expect(e5.message.startsWith("that control opens a color picker"), "a pixel press on the label", e5.message);
   // setValue is the way: by visible text, by value, several lines for a multiple select; a date in its shape.
   await P("setValue", { ref: country, value: "Japan" });
@@ -432,7 +484,7 @@ let rtab!: TabHandle;
 const R = (primitive: string, args: Record<string, unknown> = {}) => engine.primitive(run3.s, rtab.targetId, primitive, args);
 
 await check("console(): the page's console calls and its uncaught exception, as text", async () => {
-  rtab = await engine.global(run3.s, "browsers.open", { url: `${BASE}/readers.html` }) as TabHandle;
+  rtab = await engine.global(run3.s, "browsers.open", { url: `${BASE}/readers.html`, ...DEFAULT_BROWSER }) as TabHandle;
   await R("waitFor", { cond: { load: "load" }, timeoutMs: 5_000 });
   await new Promise((r) => setTimeout(r, 300));
   const entries = await R("console", { emit: false }) as Array<{ level: string; text: string }>;
@@ -470,8 +522,8 @@ await check("inspect(ref | point), html(), text({ within }), assets()", async ()
   const info = await R("inspect", { target: link, emit: false }) as { tag: string; attributes: Record<string, string>; box: number[]; visible: boolean };
   expect(info.tag === "a" && info.attributes["data-testid"] === "buy" && info.visible && info.box[2]! > 0, "the link's facts", JSON.stringify(info));
   const shot = await R("screenshot", { emit: false }) as { width: number; height: number };
-  // The image's pixels per CSS px (the viewport is 1200 CSS px wide here; its height is the window's).
-  const scale = shot.width / 1200;
+  // The image's pixels per CSS px.
+  const scale = shot.width / VIEW.width;
   const at = await R("inspect", { target: [Math.round((info.box[0]! + info.box[2]! / 2) * scale), Math.round((info.box[1]! + info.box[3]! / 2) * scale)], emit: false }) as { tag: string };
   expect(at.tag === "a", "a point inspects the element there", JSON.stringify({ at, box: info.box, shot }));
   const html = await R("html", { emit: false }) as string;
@@ -514,10 +566,12 @@ await check("screenshot({ fullPage }) and viewport(): the whole page, and an emu
   const whole = await R("screenshot", { fullPage: true, emit: false }) as { width: number; height: number };
   const view = await R("screenshot", { emit: false }) as { width: number; height: number };
   expect(whole.height / whole.width > view.height / view.width * 2, "the full page is much taller than the viewport", JSON.stringify({ whole, view }));
+  const before = /width (\d+)/.exec(await R("text", { emit: false }) as string)?.[1];
+  expect(before === String(VIEW.width), "the page's own width before any override", String(before));
   await R("viewport", { size: { width: 390, height: 844, mobile: true } });
-  await R("waitFor", { cond: { text: "width 390" }, timeoutMs: 3_000 });
+  await R("waitFor", { cond: { text: "width 390" }, timeoutMs: 3_000 }).catch((err: unknown) => { throw new Error(`the emulated width never reached the page: ${(err as Error).message}`); });
   await R("viewport", { size: null });
-  await R("waitFor", { cond: { text: "width 1200" }, timeoutMs: 3_000 });
+  await R("waitFor", { cond: { text: `width ${VIEW.width}` }, timeoutMs: 3_000 }).catch((err: unknown) => { throw new Error(`the page's own width never came back: ${(err as Error).message}`); });
 });
 run3.end();
 
@@ -527,7 +581,7 @@ let wtab!: TabHandle;
 const W = (primitive: string, args: Record<string, unknown> = {}) => engine.primitive(run4.s, wtab.targetId, primitive, args);
 
 await check("WebMCP: the state names the page's own tools (not the iframe's); tools() describes them", async () => {
-  wtab = await engine.global(run4.s, "browsers.open", { url: `${BASE}/webmcp.html` }) as TabHandle;
+  wtab = await engine.global(run4.s, "browsers.open", { url: `${BASE}/webmcp.html`, ...DEFAULT_BROWSER }) as TabHandle;
   const s = await W("state", { full: true, emit: false }) as string;
   // (Chrome lists them by name.)
   expect(s.includes("site tools (WebMCP): add_to_cart, failing_tool, search_products, slow_tool — tab.tools() describes them") && !s.includes("frame_tool"), "the state's line", s.slice(0, 600));
@@ -571,7 +625,7 @@ await check("WebMCP: plan refuses a call (an act) but still lists", async () => 
   }
 });
 
-await check("WebMCP in a user's browser (its per-app policy): listed and called the same way", async () => {
+if (!HEADLESS) await check("WebMCP in a user's browser (its per-app policy): listed and called the same way", async () => {
   const utab = await engine.global(run4.s, "browsers.open", { url: `${BASE}/webmcp.html`, browser: "chrome" }) as TabHandle;
   const U = (primitive: string, args: Record<string, unknown> = {}) => engine.primitive(run4.s, utab.targetId, primitive, args);
   const s = await U("state", { full: true, emit: false }) as string;
@@ -582,6 +636,8 @@ await check("WebMCP in a user's browser (its per-app policy): listed and called 
 run4.end();
 
 // ── Phase 3: download() in a user's browser (Fetch interception) ─────────────────────────────────────
+// The downloads: a USER's browser's (Winter for Chrome's Fetch route). Winter's headless browser never downloads.
+if (!HEADLESS) {
 const run2 = scope("r2");
 let dtab!: TabHandle;
 const D = (primitive: string, args: Record<string, unknown> = {}) => engine.primitive(run2.s, dtab.targetId, primitive, args);
@@ -652,7 +708,13 @@ await check("an unarmed click that downloads: Page.downloadWillBegin still fires
 });
 run2.end();
 
-await check("the engine never sent a method outside the allowlist, and the transport refused nothing", async () => {
+}
+
+if (HEADLESS) await check("the engine never sent a method outside the allowlist, and Winter Headless refused nothing", async () => {
+  expect(headlessSent.length > 0 && headlessSent.every((m) => CDP_ALLOWED_METHODS.includes(m)), "all methods allowlisted");
+  expect(headlessRefused.length === 0, "nothing refused", headlessRefused.join("\n"));
+});
+if (!HEADLESS) await check("the engine never sent a method outside the allowlist, and the transport refused nothing", async () => {
   expect(transport.sent.every((m) => CDP_ALLOWED_METHODS.includes(m)), "all methods allowlisted");
   expect(transport.refused.length === 0, "nothing refused", transport.refused.join("\n"));
   expect(userBrowser.sent.every((m) => CDP_ALLOWED_METHODS.includes(m)), "all methods allowlisted (the user's browser)");
@@ -661,8 +723,12 @@ await check("the engine never sent a method outside the allowlist, and the trans
 
 run1.end();
 engine.stop();
-await transport.close();
-await userBrowser.close();
+if (headlessPool !== undefined) {
+  headlessPool.stop();
+} else {
+  await transport.close();
+  await userBrowser.close();
+}
 oop.stop(true);
 main.stop(true);
 console.log(`\n${passed} passed, ${failures.length} failed`);
