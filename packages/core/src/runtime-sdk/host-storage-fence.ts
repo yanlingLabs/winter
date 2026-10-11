@@ -1,12 +1,13 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { canonicalizeForWrite, resolveLeafSymlinks } from "../agent/paths";
+import { lstatSync } from "node:fs";
 
 /** Injected by the host coordinator, never inferred from manifests or a scan of user homes. */
 export interface HostStorageFenceOptions {
   participatingHomes?: readonly string[];
   coordinationDir?: string;
-  /** Once backing storage is usable, an escape without a persistent kernel fence must refuse. */
+  /** Protected retained storage exists. This remains true while a guest is stopped or archived. */
   coworkStorageActive?: boolean;
 }
 const registered = new Map<string, HostStorageFenceOptions>();
@@ -44,19 +45,83 @@ export function hostStorageFenceOptions(home: string, options?: HostStorageFence
   };
 }
 export const COWORK_CONTROL_ENTRIES = ["manifest.json", "env.ext4", "data.ext4", "control"] as const;
+export const COWORK_RUNTIME_AUTHORITY_FILES = ["runtime-state.db", "runtime-state.db-wal", "runtime-state.db-shm"] as const;
+/** Only explicit coordinator registrations can introduce Cowork read/ancestor protection. A disabled
+ * feature or an unused home must not change ordinary Code scans of HOME, Library or /. Provisioning
+ * creates an empty owned root, registers it and refreshes runtime floors BEFORE materializing data. */
+export function protectedHostStorageFences(home: string, options?: HostStorageFenceOptions): { homes: string[]; coordinationDirs: string[] } {
+  const registrations: Array<readonly [string, HostStorageFenceOptions]> = [...registered];
+  if (options) registrations.push([resolve(home), options]);
+  const homes=new Set<string>(), coordinationDirs=new Set<string>();
+  for (const [owner, registration] of registrations) {
+    if (registration.coworkStorageActive !== true) continue;
+    let retained=false;
+    for (const candidate of [owner, ...(registration.participatingHomes ?? [])]) {
+      const h=resolve(candidate);
+      try {
+        if (lstatSync(join(h,"cowork")).isDirectory()) { homes.add(h); retained=true; }
+      } catch { /* no materialized Cowork root; no read or ancestor floor */ }
+    }
+    if (retained) coordinationDirs.add(hostStorageFenceOptions(owner, registration).coordinationDir);
+  }
+  return { homes:[...homes], coordinationDirs:[...coordinationDirs] };
+}
 export function hostStorageWriteRoots(home: string, options?: HostStorageFenceOptions): string[] {
-  const config = hostStorageFenceOptions(home, options);
-  return [...config.participatingHomes.flatMap((h) => [join(h, "cowork"), join(h, "runtimes")]), config.coordinationDir];
+  const active = protectedHostStorageFences(home, options);
+  return [...active.homes.flatMap((h) => [join(h, "cowork"), join(h, "runtimes")]), ...active.coordinationDirs];
 }
 /** Literal prefixes and glob tails are kept separate until a consumer spells its own grammar. */
 export function hostStorageReadPatterns(home: string, options?: HostStorageFenceOptions): Array<{ root: string; tail: string }> {
-  const config = hostStorageFenceOptions(home, options);
+  const active = protectedHostStorageFences(home, options);
   return [
-    { root: config.coordinationDir, tail: "**" },
-    ...config.participatingHomes.flatMap((h) => [
+    ...active.coordinationDirs.map(root => ({root, tail:"**"})),
+    ...active.homes.flatMap((h) => [
       { root: join(h, "runtimes"), tail: "**" },
       { root: join(h, "cowork", "control"), tail: "**" },
       ...COWORK_CONTROL_ENTRIES.map((entry) => ({ root: join(h, "cowork", "workspaces"), tail: `*/${entry}${entry === "control" ? "/**" : ""}` })),
     ]),
   ];
+}
+
+/** Host-owned spawn input, never an editable settings value. The SDK consumes this outside normal
+ * permission policy and wraps the whole Code runtime, including its file tools and shell escapes.
+ * Applying a changed descriptor requires draining/restarting every affected runtime generation.
+ * This descriptor alone does not activate kernel enforcement or enable Cowork. */
+export interface HostStorageFloorDescriptor {
+  denyReadPaths: string[];
+  denyWritePaths: string[];
+  denyReadRegexes: string[];
+  denyWriteRegexes: string[];
+  denyLinkPaths: string[];
+  protectAncestorsOf: string[];
+}
+export function hostStorageFloorDescriptor(home: string, options?: HostStorageFenceOptions): HostStorageFloorDescriptor {
+  const spellings=(path:string):string[] => {
+    const out=[resolve(path)];
+    try { out.push(canonicalizeForWrite(resolveLeafSymlinks(resolve(path)))); } catch { /* registered literal still binds */ }
+    return [...new Set(out)];
+  };
+  const escapeRegex=(value:string) => value.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  const active=protectedHostStorageFences(home,options);
+  // The outer floor wraps the trusted runtime as well as its tools. A legacy executable may itself
+  // live in runtimes/bin; fence the authority DB, not that executable or other runtime-owned data.
+  const runtimeFiles=active.homes.flatMap(h => COWORK_RUNTIME_AUTHORITY_FILES.map(name => join(h,"runtimes",name)));
+  const runtimeRoots=new Set(active.homes.map(h => join(h,"runtimes")));
+  const write=[...new Set([...active.homes.map(h => join(h,"cowork")),...active.coordinationDirs,...runtimeFiles].flatMap(spellings))];
+  const paths:string[]=[],regexes:string[]=[];
+  for (const {root,tail} of hostStorageReadPatterns(home,options)) {
+    if (runtimeRoots.has(root)) {
+      paths.push(...COWORK_RUNTIME_AUTHORITY_FILES.flatMap(name => spellings(join(root,name))));
+      continue;
+    }
+    for (const base of spellings(root)) {
+      if (tail==="**") paths.push(base);
+      else {
+        const entry=tail.slice(2).replace(/\/\*\*$/,"");
+        regexes.push(`^${escapeRegex(base)}/[^/]+/${escapeRegex(entry)}(/|$)`);
+      }
+    }
+  }
+  return {denyReadPaths:[...new Set(paths)],denyWritePaths:write,denyReadRegexes:[...new Set(regexes)],denyWriteRegexes:[],
+    denyLinkPaths:[...write],protectAncestorsOf:[...write]};
 }

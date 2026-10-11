@@ -65,8 +65,8 @@ import { DIFF_PATCH_MAX_BYTES, mintDiffId, writeDiff } from "../diffs/store";
 import type { HookResult } from "../plugins/hook-runner";
 import { attachFileDiff } from "./diff-attach";
 import { REVIEWER_ESCALATION_REASON, noteReviewerCleared } from "./bridge-common";
-import { ESCAPE_FENCED_FILENAMES, PROJECT_FENCED_SEGMENTS, homeFenceFor, homeFencedDirs, homeFencedFiles, isHomeWriteOnly, hostStorageFenceOptions } from "./home-fence";
-import { controlPlaneDenialMessage, controlPlaneTargetForCall, hostStorageReadTarget } from "./control-plane";
+import { ESCAPE_FENCED_FILENAMES, PROJECT_FENCED_SEGMENTS, homeFenceFor, homeFencedDirs, homeFencedFiles, isHomeWriteOnly } from "./home-fence";
+import { controlPlaneDenialMessage, controlPlaneTargetForCall, homeFenceTarget, hostStorageReadTarget } from "./control-plane";
 import { protectedPathsFor, protectedReadDenial, protectedWriteDecision, storeWriteDenial } from "./protected-paths";
 import { baseName, COMMAND_PREFIXES, inPlaceFiles, nestedCommandStrings, quotedOperatorsAsText, shellSegments, shellWords } from "./shell-words";
 export { shellSegments } from "./shell-words";
@@ -892,7 +892,7 @@ const GIT_READ_SUBCOMMANDS: ReadonlySet<string> = new Set(["status", "log", "dif
 const DESTINATION_VERBS: ReadonlySet<string> = new Set(["cp", "mv", "ln", "install", "rsync"]);
 
 /** One normalised segment's write targets (words), per `bashProtectedWriteHit`'s rules. */
-function segmentWriteTargets(seg: string): string[] {
+function segmentWriteTargets(seg: string, includeMovedSources = false): string[] {
   const targets: string[] = [];
   // Output redirects: the word after the operator; an fd dup (`>&1`, `>&-`) names no file.
   const redirect = /(?:\d*|&)>{1,2}\|?(&?)\s*([^\s<>&|;()]*)/g;
@@ -940,6 +940,7 @@ function segmentWriteTargets(seg: string): string[] {
       for (const w of rest) {
         if (w.startsWith("-")) { if (operands.length > 0) optionAfterOperand = true; } else operands.push(w);
       }
+      if (verb === "mv" && includeMovedSources) return [...targets, ...operands];
       const last = operands.length === 0 ? [] : [operands[operands.length - 1]!];
       for (let j = 0; j < rest.length; j += 1) {
         const w = rest[j]!;
@@ -963,7 +964,7 @@ function segmentWriteTargets(seg: string): string[] {
         if (w !== "-exec" && w !== "-execdir" && w !== "-ok" && w !== "-okdir") continue;
         const sub: string[] = [];
         for (j += 1; j < rest.length && rest[j] !== "+" && rest[j] !== "\\;" && rest[j] !== ";"; j += 1) sub.push(rest[j]!);
-        targets.push(...segmentWriteTargets(sub.join(" ")));
+        targets.push(...segmentWriteTargets(sub.join(" "), includeMovedSources));
       }
       return targets;
     }
@@ -1000,9 +1001,6 @@ function bashProtectedWriteHook(home?: string): HookCallback {
  * and execute — only in a write-shaped position (after a redirect or a write verb).
  */
 export function escapeFloorHit(command: string, home: string | undefined, cwd?: string): string | undefined {
-  // A detached escape has no kernel-level control-storage fence. String matching cannot constrain a
-  // script/computed path or a fresh hard link; once Cowork storage is live this route must refuse.
-  if (home && hostStorageFenceOptions(home).coworkStorageActive) return "Cowork host storage: this execution route cannot preserve its control-storage fence";
   // R.3 re-review B-1: the command as written, and once per reading of the child's path variables with each
   // replaced by the absolute value the daemon knows — so `$WINTER_STORE_HOME/../agents`, `cd $OUTDIR &&
   // cd ../..` and every other depth collapse into the literal-path checks below (the normaliser folds
@@ -1077,13 +1075,15 @@ function escapeFloorHitIn(command: string, home: string | undefined, cwd?: strin
   if (home === undefined || home.length === 0) return undefined;
   const bareHome = home.replace(/\/+$/, "");
   const storageFence = homeFenceFor(bareHome);
-  // A plain nonrecursive directory listing names siblings, not their control-file contents. Keep
-  // ancestor scans refused for recursive commands, chains and every write/replacement shape.
-  const plainListing = writeStart === Infinity && /^ls(?:\s|$)/.test(c) && !/[;&|]/.test(c) && !/\s-[^\s]*r/.test(c);
   for (const word of c.split(/[\s;&|()<>"']+/)) {
     if (!word.includes("/")) continue;
-    const hit = hostStorageReadTarget(word, cwd ?? "/", storageFence, !plainListing);
+    const hit = hostStorageReadTarget(word, cwd ?? "/", storageFence, false);
     if (hit) return "Cowork control storage or host coordination";
+  }
+  // Actual destructive targets include ancestors; a cd/du/find operand is not itself a write.
+  const storageOnly = { ...storageFence, dirs: [...(storageFence.coworkRoots ?? []), ...(storageFence.coordinationDir ? [storageFence.coordinationDir] : [])], files: [], segments: [] };
+  for (const segment of shellSegments(c)) for (const target of segmentWriteTargets(segment,true)) {
+    if (homeFenceTarget(target,cwd ?? "/",storageOnly)) return "Cowork control storage or host coordination";
   }
   for (const { needle, writeOnly } of floorNeedles(bareHome)) {
     let at = c.indexOf(needle);

@@ -35,7 +35,8 @@ export class CoworkAuthority {
     } else if (selected.kind === "githubRepository") {
       if (principal.kind === "paired-user" && !principal.repositoryAuthorities.has(selected.detail.authorityRef)) throw new CoworkError("authority_denied");
       const grant = this.grants.repository(selected.detail.authorityRef, selected.detail.repositoryId);
-      if (!grant || grant.revoked || !grant.readable || (selected.access === "read-write" && !grant.writable)) throw new CoworkError("authority_denied");
+      // Local checkout edits do not require remote push authority. Publication is checked separately.
+      if (!grant || grant.revoked || !grant.readable) throw new CoworkError("authority_denied");
     } else throw new CoworkError("authority_denied");
   }
   requireSource(workspaceId: string, sourceId: string, write = false): WorkspaceSource {
@@ -49,6 +50,14 @@ export class CoworkAuthority {
     const binding = this.records.binding(sessionId);
     if (binding.state !== "active" || this.records.get(binding.workspaceId).state !== "retained") throw new CoworkError("authority_denied");
     return intersectCeilings(binding.restrictions, this.records.policy(binding.workspaceId).ceiling);
+  }
+  requireAutomaticPublication(workspaceId: string, sourceId: string): WorkspaceSource {
+    if (this.records.policy(workspaceId).publication !== "github-only-feature-branches" || !this.records.githubOnly(workspaceId)) throw new CoworkError("authority_denied");
+    const selected = this.requireSource(workspaceId, sourceId, true);
+    if (selected.kind !== "githubRepository") throw new CoworkError("authority_denied");
+    const remote = this.grants.repository(selected.detail.authorityRef, selected.detail.repositoryId);
+    if (!remote || remote.revoked || !remote.writable) throw new CoworkError("authority_denied");
+    return selected; // Ref/protection/task restrictions remain the Git broker's mandatory check.
   }
   requirePeer(principal: CoworkPrincipal, targetSessionId: string): void {
     if (principal.kind !== "runtime") throw new CoworkError("authority_denied");

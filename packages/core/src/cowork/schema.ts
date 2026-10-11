@@ -55,7 +55,7 @@ export function migrateCoworkSchema(db: Database): void {
     CREATE TABLE IF NOT EXISTS cowork_operations (
       operation_id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, method TEXT NOT NULL, scope TEXT NOT NULL,
       request_id TEXT NOT NULL, request_digest TEXT NOT NULL, workspace_id TEXT REFERENCES cowork_workspaces(workspace_id),
-      status TEXT NOT NULL CHECK(status IN ('pending','applied','blocked','failed')),
+      status TEXT NOT NULL CHECK(status IN ('pending','applied','blocked','failed','superseded')),
       result_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
       UNIQUE(principal_id,method,scope,request_id)
     );

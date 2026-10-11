@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { CONTROL_PLANE_FILENAMES, type HomeFence } from "./control-plane";
 import { selfGrantDenyWrite } from "./mode-options";
-import { COWORK_CONTROL_ENTRIES, hostStorageFenceOptions, type HostStorageFenceOptions } from "./host-storage-fence";
+import { COWORK_CONTROL_ENTRIES, protectedHostStorageFences, type HostStorageFenceOptions } from "./host-storage-fence";
 export * from "./host-storage-fence";
 
 /**
@@ -74,8 +74,8 @@ export const PROJECT_FENCED_SEGMENTS: readonly string[] = [".winter/agents/"];
 export const ESCAPE_FENCED_FILENAMES: readonly string[] = [...CONTROL_PLANE_FILENAMES, "trust.json", ".winter.json"];
 
 export function homeFenceFor(home: string, options?: HostStorageFenceOptions): HomeFence {
-  const config = hostStorageFenceOptions(home, options);
+  const active = protectedHostStorageFences(home, options);
   return { dirs: homeFencedDirs(home, options), files: homeFencedFiles(home), segments: PROJECT_FENCED_SEGMENTS,
-    coworkRoots: config.participatingHomes.map((h) => join(h, "cowork")), coordinationDir: config.coordinationDir,
-    readDirs: config.participatingHomes.map((h) => join(h, "runtimes")), controlEntries: COWORK_CONTROL_ENTRIES };
+    coworkRoots: active.homes.map((h) => join(h, "cowork")), coordinationDir: active.coordinationDirs[0],
+    readDirs: [...active.homes.map((h) => join(h, "runtimes")), ...active.coordinationDirs], controlEntries: COWORK_CONTROL_ENTRIES };
 }

@@ -3096,6 +3096,7 @@ if (import.meta.main) {
   provider | provider-smoke [--prompt <text>]
   init                                            generate/update WINTER.md by surveying the project
   migrate [--from <legacyHome>] [--status|--resume|--rollback] [--yes]        Migration B: copy a legacy home into this one
+  migrate --cowork-schema --rollback [--home <dir>] [--yes]  roll back unused Cowork tables to v7; keep the SDK layout
   migrate-project [dir] [--yes]                   convert one project's legacy instructions file / project dir to WINTER.md/.winter
   -p "<prompt>" [--auto|--plan] [--trust|--no-trust]   headless agent turn (asks for tool approval unless --auto/--plan)`);
   }

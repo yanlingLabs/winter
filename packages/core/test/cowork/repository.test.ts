@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { downgradeRuntimeStateToV6, openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
+import { downgradeRuntimeStateToV6, downgradeCoworkRuntimeStateToV7, openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
 import { CoworkRepository, relativeCoworkPath } from "../../src/cowork/repository";
 import { CoworkAuthority } from "../../src/cowork/authority";
 import { CoworkError, type CoworkErrorCode, type CapabilityCeiling, type SourceSelection } from "../../src/cowork/types";
@@ -126,7 +127,7 @@ test("relative cwd rejects absolute paths and traversal rather than normalizing 
 
 test("legacy rollback refuses any populated Cowork authority without deleting records", () => {
   const { store, home, db } = open(), made = create(store);
-  expect(() => downgradeRuntimeStateToV6(home)).toThrow("newer-schema");
+  expect(() => downgradeRuntimeStateToV6(home)).toThrow("Cowork authority");
   expect(store.get(made.workspaceId)).toEqual(made.value.workspace);
   expect(db.schemaVersion()).toBe(8);
   expect(db.integrity().ok).toBe(true);
@@ -160,11 +161,64 @@ test("source readiness commits a durable notification and duplicate acknowledgme
   const { store, db } = open(), made = create(store); const initial = ready(store, made.workspaceId);
   store.bindConversation(context("bind", 1), made.workspaceId, { sessionId: "session-a", sourceId: made.value.sources[0]!.sourceId });
   const added = store.addSource(context("add", 2), made.workspaceId, repo);
-  const current = store.get(made.workspaceId), epoch = { ...initial, configRevision: current.configRevision, grantRevision: current.grantRevision };
+  const epoch = store.refreshEpoch(made.workspaceId, initial.incarnationId, initial.leaseEpoch);
   const before = store.pendingChanges("session-a").length;
   store.acknowledgeSource(epoch, added.value.sourceId, 1, "ready");
   expect(store.pendingChanges("session-a")).toHaveLength(before + 1);
   store.acknowledgeSource(epoch, added.value.sourceId, 1, "ready");
   expect(store.pendingChanges("session-a")).toHaveLength(before + 1);
   expect(db.db.query("SELECT status FROM cowork_operations WHERE operation_id=?").get(added.operationId)).toEqual({ status: "applied" });
+});
+
+test("live controller refresh is explicit, while superseded callbacks and owners stay fenced", () => {
+  const { store } = open(), made = create(store), old = store.beginIncarnation(made.workspaceId, "owner-one", 1);
+  store.updatePolicy(context("policy", 1), made.workspaceId, { publication: "manual" });
+  code(() => store.acknowledgeSource(old, made.value.sources[0]!.sourceId, 1, "ready"), "stale_acknowledgment");
+  code(() => store.refreshEpoch(made.workspaceId, "wrong-owner", old.leaseEpoch), "stale_acknowledgment");
+  code(() => store.refreshEpoch(made.workspaceId, old.incarnationId, old.leaseEpoch + 1), "stale_acknowledgment");
+  const current = store.refreshEpoch(made.workspaceId, old.incarnationId, old.leaseEpoch);
+  store.acknowledgeSource(current, made.value.sources[0]!.sourceId, 1, "ready");
+});
+
+test("revocation narrows archived workspaces and supersedes pending source operations", () => {
+  const { store, db } = open(), made = create(store);
+  db.db.run("UPDATE cowork_workspaces SET state='archived' WHERE workspace_id=?", [made.workspaceId]);
+  store.removeSource(context("revoke", 1), made.workspaceId, made.value.sources[0]!.sourceId, true);
+  expect(store.source(made.workspaceId, made.value.sources[0]!.sourceId).state).toBe("unavailable");
+  expect(db.db.query("SELECT status FROM cowork_operations WHERE operation_id=?").get(made.operationId)).toEqual({ status: "superseded" });
+});
+
+test("a revoked source cannot justify removing the last usable or preparing replacement", () => {
+  const { store } = open(), made = create(store, [folder, repo]);
+  store.removeSource(context("revoke", 1), made.workspaceId, made.value.sources[0]!.sourceId, true);
+  code(() => store.removeSource(context("remove", 2), made.workspaceId, made.value.sources[1]!.sourceId), "last_source_required");
+});
+
+test("GitHub-only membership alone never authorizes publication to a disconnected repository", () => {
+  const { store } = open(), made = create(store, [repo]); ready(store, made.workspaceId);
+  const authority = new CoworkAuthority(store, { folder: () => undefined, repository: () => ({ readable: true, writable: true, revoked: true }) });
+  expect(store.githubOnly(made.workspaceId)).toBe(true);
+  code(() => authority.requireAutomaticPublication(made.workspaceId, made.value.sources[0]!.sourceId), "authority_denied");
+});
+
+test("read-only GitHub credentials permit local checkout work but cannot authorize publication", () => {
+  const { store } = open(), made = create(store, [repo]); ready(store, made.workspaceId);
+  const authority = new CoworkAuthority(store, { folder: () => undefined, repository: () => ({ readable: true, writable: false, revoked: false }) });
+  expect(authority.requireSource(made.workspaceId, made.value.sources[0]!.sourceId, true).access).toBe("read-write");
+  code(() => authority.requireAutomaticPublication(made.workspaceId, made.value.sources[0]!.sourceId), "authority_denied");
+});
+
+test("empty v8 rollback to v7 preserves run-home metadata and refuses populated Cowork state", () => {
+  const { store, home, db } = open();
+  db.db.run("INSERT INTO run_root_quarantine(root,recorded_at,detail_json) VALUES('/fixture/run','now','{}')");
+  expect(downgradeCoworkRuntimeStateToV7(home)).toEqual({ from: 8, to: 7 });
+  const raw = new Database(join(home, "runtimes/runtime-state.db"), { readonly: true });
+  try {
+    expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 7 });
+    expect(raw.query("SELECT root FROM run_root_quarantine").get()).toEqual({ root: "/fixture/run" });
+    expect(raw.query("SELECT name FROM sqlite_master WHERE name='cowork_sources'").get()).toBeNull();
+  } finally { raw.close(); }
+  const reopened = open(home); create(reopened.store);
+  expect(() => downgradeCoworkRuntimeStateToV7(home)).toThrow("Cowork authority");
+  expect(reopened.store.list()).toHaveLength(1);
 });

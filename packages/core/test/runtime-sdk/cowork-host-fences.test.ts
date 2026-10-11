@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { homeFenceFor, registerHostStorageFences } from "../../src/runtime-sdk/home-fence";
+import { homeFenceFor, registerHostStorageFences, hostStorageReadPatterns, hostStorageFloorDescriptor } from "../../src/runtime-sdk/home-fence";
 import { controlPlaneTargetForCall } from "../../src/runtime-sdk/control-plane";
 import { childSandboxConfigFor, controlPlaneDenyRules } from "../../src/runtime-sdk/mode-options";
 import { escapeFloorHit } from "../../src/runtime-sdk/hooks";
@@ -20,7 +20,7 @@ describe("Cowork host storage fences", () => {
     writeFileSync(join(workspace, "manifest.json"), "{}");
     writeFileSync(join(workspace, "data.ext4"), "fixture disk");
     writeFileSync(join(workspace, "shared/outputs/manifest.json"), "ordinary shared artifact");
-    unregister = registerHostStorageFences(home, { participatingHomes: [other], coordinationDir: coordination });
+    unregister = registerHostStorageFences(home, { participatingHomes: [other], coordinationDir: coordination, coworkStorageActive:true });
   });
   afterEach(() => { unregister(); rmSync(root, { recursive: true, force: true }); });
   const target = (tool: string, path: string) => controlPlaneTargetForCall(tool, { file_path: path }, home, homeFenceFor(home));
@@ -37,9 +37,10 @@ describe("Cowork host storage fences", () => {
     }
     expect(controlPlaneTargetForCall("MultiEdit", { edits: [{ file_path: join(root, "ordinary.txt") }, { file_path: join(workspace, "data.ext4") }] }, home, homeFenceFor(home))).not.toBeNull();
   });
-  test("Read/Glob/Grep control reads and ancestor scans are denied; shared content stays readable", () => {
+  test("Read/Glob/Grep control reads are denied; ancestor queries and shared content stay readable", () => {
     for (const tool of ["Read", "Glob", "Grep", "read", "glob", "grep"]) {
-      for (const path of [join(workspace, "manifest.json"), join(workspace, "data.ext4"), workspace, other, coordination]) expect(target(tool, path)).not.toBeNull();
+      for (const path of [join(workspace, "manifest.json"), join(workspace, "data.ext4"), workspace, coordination]) expect(target(tool, path)).not.toBeNull();
+      expect(target(tool, other)).toBeNull();
       expect(target(tool, join(workspace, "shared/outputs/manifest.json"))).toBeNull();
       expect(target(tool, join(root, "project/manifest.json"))).toBeNull();
     }
@@ -63,6 +64,31 @@ describe("Cowork host storage fences", () => {
     expect(rules).toContain(`Read(/${other}/cowork/workspaces/*/manifest.json)`);
     expect(rules).toContain(`Write(/${other}/cowork/**)`);
   });
+  test("the trusted spawn floor descriptor protects controls and link/ancestor operations while allowing shared reads", () => {
+    const floor=hostStorageFloorDescriptor(home);
+    expect(floor.denyWritePaths).toContain(join(other,"cowork"));
+    expect(floor.denyReadPaths).toContain(coordination);
+    expect(floor.denyLinkPaths).toEqual(floor.denyWritePaths);
+    expect(floor.protectAncestorsOf).toEqual(floor.denyWritePaths);
+    const runtime=join(other,"runtimes"),binary=join(runtime,"bin/winter");
+    expect(floor.denyReadPaths).not.toContain(runtime);
+    expect(floor.denyWritePaths).not.toContain(runtime);
+    for (const name of ["runtime-state.db","runtime-state.db-wal","runtime-state.db-shm"]) {
+      expect(floor.denyReadPaths).toContain(join(runtime,name));
+      expect(floor.denyWritePaths).toContain(join(runtime,name));
+    }
+    expect(floor.denyReadPaths.some(path => binary===path || binary.startsWith(`${path}/`))).toBe(false);
+    expect(floor.denyReadRegexes.some(pattern => new RegExp(pattern).test(binary))).toBe(false);
+    for (const file of ["manifest.json","env.ext4","data.ext4","control/grants.json"]) {
+      expect(floor.denyReadRegexes.some(pattern => new RegExp(pattern).test(join(workspace,file)))).toBe(true);
+    }
+    for (const file of [join(workspace,"shared/outputs/manifest.json"),join(root,"project/manifest.json")]) {
+      expect(floor.denyReadRegexes.some(pattern => new RegExp(pattern).test(file))).toBe(false);
+    }
+    expect(escapeFloorHit(`du -sh ${root}`,home)).toBeUndefined();
+    expect(escapeFloorHit(`find ${root} -name fixture`,home)).toBeUndefined();
+    expect(escapeFloorHit(`cd / && cat ${root}/ordinary.txt`,home)).toBeUndefined();
+  });
   test("nested escape precedence preserves reads of shared artifacts without guessing manifest filenames", () => {
     expect(escapeFloorHit(`cat ${workspace}/manifest.json`, home)).toBeDefined();
     expect(escapeFloorHit(`cat ${workspace}/shared/outputs/manifest.json`, home)).toBeUndefined();
@@ -70,16 +96,16 @@ describe("Cowork host storage fences", () => {
     expect(escapeFloorHit(`chmod 777 ${workspace}/shared/outputs`, home)).toBeDefined();
     expect(escapeFloorHit(`mv ${other} ${root}/replacement`, home)).toBeDefined();
   });
-  test("an active backing store refuses escapes including scripts and computed paths", () => {
+  test("an active backing store preserves ordinary escape policy; kernel floor protects computed paths", () => {
     const restore = registerHostStorageFences(home, { participatingHomes: [other], coordinationDir: coordination, coworkStorageActive: true });
     try {
-      for (const command of ["python3 -c 'import os; os.rename(*(os.environ[x] for x in [\"A\",\"B\"]))'", "./fixture-script", "cat harmless.txt"]) expect(escapeFloorHit(command, home)).toBeDefined();
+      for (const command of ["python3 -c 'print(1)'", "./fixture-script", "cat harmless.txt"]) expect(escapeFloorHit(command, home)).toBeUndefined();
     } finally { restore(); }
   });
   test("an explicit inactive home cannot disable another participating home's escape floor", () => {
     const stopOther = registerHostStorageFences(other, { coordinationDir: coordination, coworkStorageActive: true });
     const restore = registerHostStorageFences(home, { coordinationDir: coordination, coworkStorageActive: false });
-    try { expect(escapeFloorHit("./computed-path-script", home)).toBeDefined(); }
+    try { expect(target("Read",join(workspace,"data.ext4"))).not.toBeNull(); }
     finally { restore(); stopOther(); }
   });
   test("migrate-project refuses backing trees and revalidates a preview whose directory becomes a link", () => {
@@ -97,4 +123,28 @@ describe("Cowork host storage fences", () => {
     expect(() => runProjectMigration(plan)).toThrow("migrate-project cannot");
     expect(Bun.file(join(workspace, "data.ext4")).size).toBe("fixture disk".length);
   });
+});
+
+test("disabled, unregistered and unmaterialized Cowork preserve ordinary Code scans and escapes at HOME", () => {
+  const root=realpathSync(mkdtempSync(join(tmpdir(),"winter-cowork-disabled-")));
+  const userHome=join(root,"user-home"), home=join(userHome,".winter"), coordination=join(root,"coordination");
+  mkdirSync(home,{recursive:true}); mkdirSync(coordination);
+  writeFileSync(join(home,"trust.json"),"{}"); linkSync(join(home,"trust.json"),join(root,"trust-alias.json"));
+  try {
+    for (const config of [{registered:false,active:false,exists:false},{registered:true,active:false,exists:true},{registered:true,active:true,exists:false}]) {
+      if (config.exists) mkdirSync(join(home,"cowork")); else rmSync(join(home,"cowork"),{recursive:true,force:true});
+      const dispose=config.registered ? registerHostStorageFences(home,{coordinationDir:coordination,coworkStorageActive:config.active}) : () => {};
+      try {
+        expect(hostStorageReadPatterns(home)).toEqual([]);
+        expect(hostStorageFloorDescriptor(home)).toEqual({denyReadPaths:[],denyWritePaths:[],denyReadRegexes:[],denyWriteRegexes:[],denyLinkPaths:[],protectAncestorsOf:[]});
+        expect(controlPlaneTargetForCall("Read",{file_path:join(root,"trust-alias.json")},userHome,homeFenceFor(home))).toBeNull();
+        expect(controlPlaneTargetForCall("Write",{file_path:join(root,"trust-alias.json")},userHome,homeFenceFor(home))).not.toBeNull();
+        for (const tool of ["Glob","Grep"]) {
+          expect(controlPlaneTargetForCall(tool,{pattern:"fixture"},userHome,homeFenceFor(home))).toBeNull();
+          expect(controlPlaneTargetForCall(tool,{path:userHome,pattern:"fixture"},userHome,homeFenceFor(home))).toBeNull();
+        }
+        for (const command of [`du -sh ${userHome}`,`find ${userHome} -name fixture`,`cd ${userHome} && ls`,`rsync -a ${userHome}/ ${root}/copy/`]) expect(escapeFloorHit(command,home,userHome)).toBeUndefined();
+      } finally { dispose(); }
+    }
+  } finally { rmSync(root,{recursive:true,force:true}); }
 });

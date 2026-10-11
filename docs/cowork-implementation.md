@@ -14,14 +14,17 @@ separately. Cowork remains unavailable until its required gates pass.
   persistence have scoped evidence. SDK restoration inside a VM is still required.
 - Both 6.12.28 and the matched Apple-package 6.18.35 kernel completed the bounded
   memory workload and balloon protocol without observed host footprint return.
-  Both negotiated neither free-page hinting nor reporting. The resource gate is open.
+  Both negotiated neither free-page hinting nor reporting. Acknowledged, aligned
+  page donations likewise produced no observed return. The user explicitly
+  requires RAM return during active work; idle shutdown is insufficient. The
+  resource gate is open, and backend/topology alternatives require validation.
 
 ## Work in progress
 
 | Area | Current work | Required before completion |
 | --- | --- | --- |
 | Canonical host state | Schema 8, workspace/source/policy/binding repository, durable receipts/outbox and pure authority checks | Controller acknowledgments, authority service wiring, lifecycle/recovery, typed public protocol |
-| Host storage protection | Participating-home fences and migration exclusions | Register coordination homes before creating usable storage; refresh existing host sandbox profiles; native enforcement checks |
+| Host storage protection | Explicit retained-home fences, migration exclusions, narrow runtime floor descriptor | Consume the SDK trusted-parent process broker, enroll/drain existing Code generations before usable storage, preserve ordinary Code sandbox behavior |
 | Native VM integration | Production Swift/Node-API boundary and lifecycle | Real signed daemon integration, cancellation/ownership, admitted disks/shares, concurrent latency and memory return |
 | Guest execution | Remote runtime transport and explicit confined execution posture | Immutable Linux runtime, real confined file/process/extension routes, guest run-home and instructions, cold parent/child restoration |
 | Network and credentials | Interfaces and backend dependencies identified | Native userspace egress with no NAT bypass; host provider/auxiliary/MCP transport; GitHub connection and validated-ref gateway |
@@ -29,6 +32,10 @@ separately. Cowork remains unavailable until its required gates pass.
 | Product integration | Pending dependent runtime/authority slices | Mac/CLI/iOS flows, host schedules, producer/consumer protocol mirrors, kit/SDK version integration and end-to-end checks |
 
 Internal repositories and fake backends do not enable a session creation door.
+Source/policy changes require the trusted controller to refresh its epoch before
+issuing a new effect; old callbacks remain fenced. Empty schema 8 stores have an
+explicit v7 rollback that preserves SDK layout (`winter migrate --cowork-schema
+--rollback`); populated Cowork authority refuses rollback without data loss.
 Tests use injected temporary homes, grants, credentials and coordination. Real-VM
 experiments remain opt-in, disposable and sequential; none touches the live
 Winter installation or deliberately creates host memory pressure.

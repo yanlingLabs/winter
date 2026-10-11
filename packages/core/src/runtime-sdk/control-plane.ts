@@ -135,7 +135,9 @@ export function controlPlaneTargetForCall(
     const paths = writeTargetPathsIn(input);
     if (paths.length === 0 && ["glob", "grep", "ls"].includes(toolName.toLowerCase())) paths.push(cwd || "/");
     for (const p of paths) {
-      const hit = hostStorageReadTarget(p, cwd, fence);
+      // SDK Glob/Grep prune every discovered file through their Read-deny probe; blocking an
+      // ancestor scan here would also hide its ordinary project/shared content.
+      const hit = hostStorageReadTarget(p, cwd, fence, false);
       if (hit) return hit;
     }
     return null;
@@ -179,11 +181,11 @@ function within(candidate: string, root: string): boolean { return candidate ===
 
 /** Hard links have no different realpath. Compare file identity against known control files, without
  * reading their content or walking guest disks/shared artifacts. This runs only for a multiply-linked target. */
-function controlFileAlias(path: string, fence: HomeFence): boolean {
+function controlFileAlias(path: string, fence: HomeFence, readOnly = false): boolean {
   let target: ReturnType<typeof statSync>;
   try { target = statSync(path); } catch { return false; }
   if (!target.isFile() || target.nlink < 2) return false;
-  const controls = [...fence.files, ...(fence.readDirs ?? []).flatMap((root) => ["", "-wal", "-shm"].map((suffix) => `${root}/runtime-state.db${suffix}`))];
+  const controls = [...(readOnly ? [] : fence.files), ...(fence.readDirs ?? []).flatMap((root) => ["", "-wal", "-shm"].map((suffix) => `${root}/runtime-state.db${suffix}`))];
   for (const root of fence.coworkRoots ?? []) {
     try {
       for (const entry of readdirSync(`${root}/workspaces`, { withFileTypes: true })) {
@@ -213,7 +215,7 @@ export function hostStorageReadTarget(path: string, cwd: string, fence: HomeFenc
     }
     if (fence.coordinationDir && pathSpellings(fence.coordinationDir, "/").some((r) => within(candidate, r) || (includeAncestors && within(r, candidate)))) return { path, canonical: candidate, home: true };
   }
-  if (controlFileAlias(resolve(cwd || "/", path), fence)) return { path, canonical: candidates[0]!, home: true };
+  if (controlFileAlias(resolve(cwd || "/", path), fence, true)) return { path, canonical: candidates[0]!, home: true };
   return null;
 }
 

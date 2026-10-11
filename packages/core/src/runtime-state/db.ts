@@ -10,6 +10,10 @@ export class RuntimeStateUnavailableError extends Error {
     super(`runtime-state.db ${reason}: ${path}`, { cause }); this.name = "RuntimeStateUnavailableError";
   }
 }
+export class CoworkDowngradeRefused extends Error {
+  readonly code = "cowork-data-present";
+  constructor() { super("Cowork authority or retained state is present; downgrade would discard it"); this.name = "CoworkDowngradeRefused"; }
+}
 export interface IntegrityReport { ok: boolean; checks: string[]; schemaVersion: number; tables: string[] }
 
 /** SQLite's three BEGIN flavours. `deferred` (the default) takes no lock until the first statement
@@ -234,6 +238,30 @@ function foreignKeyViolations(db: Database): number {
   return db.query("PRAGMA foreign_key_check").all().length;
 }
 
+function dropEmptyCoworkSchema(db: Database): void {
+  for (const table of COWORK_TABLES) if (db.query(`SELECT 1 FROM ${table} LIMIT 1`).get()) throw new CoworkDowngradeRefused();
+  for (const table of COWORK_TABLES) db.run(`DROP TABLE ${table}`);
+}
+
+/** Explicit compatibility rollback only; caller must hold the stopped-daemon migration boundary.
+ * Keeps all WS-21/v7 state and filesystem layout intact. Populated Cowork authority never drops. */
+export function downgradeCoworkRuntimeStateToV7(home: string): { from: 8; to: 7 } | "not-needed" {
+  const path = join(home, "runtimes", "runtime-state.db");
+  if (!existsSync(path)) return "not-needed";
+  const db = new Database(path);
+  try {
+    db.run("PRAGMA busy_timeout=5000"); db.run("PRAGMA foreign_keys=ON");
+    return db.transaction(() => {
+      const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
+      if (version <= 7) return "not-needed" as const;
+      if (version !== 8) throw new RuntimeStateUnavailableError(path, "newer-schema");
+      dropEmptyCoworkSchema(db);
+      db.run("PRAGMA user_version=7");
+      return { from: 8 as const, to: 7 as const };
+    }).immediate();
+  } finally { db.close(); }
+}
+
 /**
  * Review I3 (controller ruling): step a v7 store back to v6 so an OLDER build (0.116.0 refuses a v7 store
  * as `newer-schema` and runs with its runtime spine offline) can open it — what `winter migrate --sdk-home
@@ -264,10 +292,7 @@ export function downgradeRuntimeStateToV6(home: string): { from: 7 | 8; to: 6 } 
         // Existing homes may roll back an unused additive v8 schema. Never discard
         // a home identity, source grant, binding, receipt or retained workspace.
         if (version === 8) {
-          for (const table of COWORK_TABLES) {
-            if (db.query(`SELECT 1 FROM ${table} LIMIT 1`).get()) throw new RuntimeStateUnavailableError(path, "newer-schema");
-          }
-          for (const table of COWORK_TABLES) db.run(`DROP TABLE ${table}`);
+          dropEmptyCoworkSchema(db);
         }
         const before = foreignKeyViolations(db);
         db.run("UPDATE runtime_sessions SET active_local_write_root = NULL, active_local_write_root_kind = NULL WHERE active_local_write_root_kind = 'run-folder'");

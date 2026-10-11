@@ -8,6 +8,8 @@ import {
   MigrationRefused,
   convertLegacyPluginsForMigration,
   downgradeRuntimeStateToV6,
+  downgradeCoworkRuntimeStateToV7,
+  CoworkDowngradeRefused,
   isOldLayout,
   isPristineHome,
   linkedRouterSupportsRunHome,
@@ -161,7 +163,7 @@ async function runMigrateSdkHome(deps: MigrateCommandDeps, yes: boolean): Promis
     printMigrationCSummary(await runMigrationC(home, migrationDeps), deps.log);
     return 0;
   } catch (err) {
-    if (err instanceof MigrationCRefused) {
+    if (err instanceof MigrationCRefused || err instanceof CoworkDowngradeRefused) {
       deps.error(`winter migrate --sdk-home: ${err.message}`);
       return 1;
     }
@@ -172,6 +174,22 @@ async function runMigrateSdkHome(deps: MigrateCommandDeps, yes: boolean): Promis
 /** Returns a process exit code (0 success, 1 refusal) — `main.ts`'s wrapper calls `process.exit`. */
 export async function runMigrateCommand(deps: MigrateCommandDeps): Promise<number> {
   const yes = deps.argv.includes("--yes");
+  if (deps.argv.includes("--cowork-schema")) {
+    if (!deps.argv.includes("--rollback") || deps.argv.includes("--sdk-home") || deps.argv.includes("--resume") || deps.argv.includes("--status")) {
+      deps.error("usage: winter migrate --cowork-schema --rollback [--home <dir>] [--yes]"); return 1;
+    }
+    const index = deps.argv.indexOf("--home"), home = index < 0 ? deps.home : deps.argv[index + 1];
+    if (!home || home.startsWith("--")) { deps.error("winter migrate --cowork-schema: --home requires a path"); return 1; }
+    if (deps.isDaemonLockHeld(home)) { deps.error("winter migrate --cowork-schema: the daemon is running; stop it first"); return 1; }
+    if (!yes && !(await deps.confirm(`Roll back unused Cowork schema in ${home} to v7, keeping the SDK layout? [y/N] `))) { deps.log("aborted"); return 1; }
+    try {
+      const result = downgradeCoworkRuntimeStateToV7(home);
+      deps.log(result === "not-needed" ? "Cowork schema rollback: nothing to change" : "Cowork schema rolled back to v7; SDK layout and runtime state retained"); return 0;
+    } catch (error) {
+      if (error instanceof CoworkDowngradeRefused) { deps.error(`winter migrate --cowork-schema: ${error.code}: ${error.message}`); return 1; }
+      throw error;
+    }
+  }
   if (deps.argv.includes("--sdk-home")) return runMigrateSdkHome(deps, yes);
 
   if (deps.argv.includes("--status")) {

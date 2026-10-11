@@ -89,12 +89,17 @@ export class CoworkRepository {
       if (scope !== "new") {
         const current = this.get(scope);
         if (!Number.isSafeInteger(context.expectedRevision) || context.expectedRevision !== current.configRevision) throw new CoworkError("revision_conflict", current.configRevision);
-        if (current.state !== "retained") throw new CoworkError("authority_denied");
+        const narrowing = method === "workspace.source.revoke";
+        if (current.state !== "retained" && !(narrowing && current.state !== "deleted")) throw new CoworkError("authority_denied");
       }
       const result = body(), current = this.get(result.workspaceId), operationId = this.mint("operation"), at = this.now();
       const receipt: MutationReceipt<T> = { operationId, workspaceId: current.workspaceId, revision: current.configRevision, value: result.value };
       this.run("INSERT INTO cowork_operations VALUES(?,?,?,?,?,?,?,?,?,?,?)", operationId, context.principalId, method, scope, context.requestId, requestDigest, current.workspaceId, "pending", canonical(receipt), at, at);
-      for (const sourceId of result.changedSources ?? []) this.run("UPDATE cowork_sources SET operation_id=? WHERE workspace_id=? AND source_id=?", operationId, current.workspaceId, sourceId);
+      for (const sourceId of result.changedSources ?? []) {
+        const previousOperation = this.one("SELECT operation_id FROM cowork_sources WHERE workspace_id=? AND source_id=?", current.workspaceId, sourceId)?.operation_id;
+        if (previousOperation) this.run("UPDATE cowork_operations SET status='superseded',updated_at=? WHERE operation_id=? AND status='pending'", at, previousOperation);
+        this.run("UPDATE cowork_sources SET operation_id=? WHERE workspace_id=? AND source_id=?", operationId, current.workspaceId, sourceId);
+      }
       this.publish(current.workspaceId, operationId, result.kind, result.payload ?? {});
       return receipt;
     }, { mode: "immediate" });
@@ -127,7 +132,11 @@ export class CoworkRepository {
     return this.mutate(context, revoke ? "workspace.source.revoke" : "workspace.source.remove", id(workspaceId), { sourceId: id(sourceId) }, () => {
       const current = this.source(workspaceId, sourceId);
       if (current.state === "detached" || (!revoke && current.desired === "removed")) throw new CoworkError("invalid_request");
-      if (!revoke && this.sources(workspaceId).filter(value => value.desired === "present" && value.sourceId !== sourceId).length < 1) throw new CoworkError("last_source_required");
+      if (!revoke) {
+        const others = this.sources(workspaceId).filter(value => value.desired === "present" && value.sourceId !== sourceId);
+        const targetUsableOrPreparing = current.state === "ready" || current.state === "preparing";
+        if (others.length < 1 || (targetUsableOrPreparing && !others.some(value => value.state === "ready" || value.state === "preparing"))) throw new CoworkError("last_source_required");
+      }
       const desired = revoke ? current.desired : "removed";
       this.run("UPDATE cowork_sources SET desired=?,state=?,revision=revision+1,ack_revision=NULL,ack_incarnation_id=NULL,reason=?,restart_required=1,trust='revoked',updated_at=? WHERE source_id=?", desired, desired === "removed" ? "removing" : "unavailable", revoke ? "access_revoked" : null, this.now(), sourceId);
       this.advance(workspaceId, true);
@@ -168,6 +177,13 @@ export class CoworkRepository {
       return { workspaceId, incarnationId, leaseEpoch: current.leaseEpoch + 1, configRevision: current.configRevision, grantRevision: current.grantRevision };
     }, { mode: "immediate" });
   }
+  /** Host controller refreshes authority before issuing a NEW effect; never rewrite an old
+   * callback's captured epoch. Guest messages cannot call this internal ownership port. */
+  refreshEpoch(workspaceId: string, incarnationId: string, leaseEpoch: number): GuestEpoch {
+    const current = this.get(workspaceId);
+    if (!["starting", "running"].includes(current.power) || current.incarnationId !== incarnationId || current.leaseEpoch !== leaseEpoch || current.state !== "retained") throw new CoworkError("stale_acknowledgment");
+    return { workspaceId, incarnationId, leaseEpoch, configRevision: current.configRevision, grantRevision: current.grantRevision };
+  }
   acknowledgeSource(epoch: GuestEpoch, sourceId: string, revision: number, state: "ready" | "detached"): void {
     this.rs.transaction(() => {
       const current = this.get(epoch.workspaceId), selected = this.source(epoch.workspaceId, sourceId);
@@ -178,9 +194,10 @@ export class CoworkRepository {
       if (!operationId) throw new CoworkError("recovery_required");
       this.run("UPDATE cowork_sources SET state=?,ack_revision=revision,ack_incarnation_id=?,restart_required=0,reason=NULL,updated_at=? WHERE source_id=?", state, epoch.incarnationId, this.now(), sourceId);
       this.publish(epoch.workspaceId, operationId, "workspace_sources_changed", { sourceId, sourceRevision: revision, state, incarnationId: epoch.incarnationId });
-      if (!this.one("SELECT 1 FROM cowork_sources WHERE operation_id=? AND state NOT IN ('ready','detached') LIMIT 1", operationId)) this.run("UPDATE cowork_operations SET status='applied',updated_at=? WHERE operation_id=?", this.now(), operationId);
+      if (!this.one("SELECT 1 FROM cowork_sources WHERE operation_id=? AND state NOT IN ('ready','detached') LIMIT 1", operationId)) this.run("UPDATE cowork_operations SET status='applied',updated_at=? WHERE operation_id=? AND status='pending'", this.now(), operationId);
     }, { mode: "immediate" });
   }
+  /** Membership predicate only; publication still requires current ready source/write authority. */
   githubOnly(workspaceId: string): boolean {
     const current = this.sources(workspaceId).filter(value => value.state !== "detached");
     return current.some(value => value.kind === "githubRepository" && value.desired === "present") && !current.some(value => value.kind === "folder");
