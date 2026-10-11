@@ -474,7 +474,7 @@ export class ComputerV2Service {
 
     // The taint outlives the call (the fence is per session) — unless the runtime is gone below.
     if (builder.readScreen) state.tainted = true;
-    let error: ScriptError | undefined;
+    let error: (ScriptError & { place?: string }) | undefined;
     let outcomeWord: string;
     if (outcome.kind === "exited") {
       state.worker = undefined;
@@ -487,6 +487,9 @@ export class ComputerV2Service {
       // The worker is UNTRUSTED (the model's code shares its process): its error name is normalised to a known
       // kind or `Error` before it reaches the result or the audit line, and its message and line are bounded.
       error = outcome.error === undefined ? undefined : normaliseScriptError(outcome.error, ctx.daemonSentences);
+      // A daemon sentence thrown inside a saved script: the sentence alone is the daemon's (outside the fence); the
+      // place the worker appended ("(in saved script x, line n)" — a name is the model's own text) is the script's.
+      if (error?.place !== undefined) builder.text(error.place);
       if (outcome.note === "declarations-not-kept") builder.notice("This script's top-level declarations could not be kept for later calls.");
       outcomeWord = ctx.timedOut ? "timeout" : ctx.cancelled !== undefined ? "cancelled" : error === undefined ? "ok" : `error:${error.name}`;
     }
@@ -500,7 +503,9 @@ export class ComputerV2Service {
         scripts: { ...(ctx.scriptsSaved === undefined ? {} : { saved: [...ctx.scriptsSaved] }), ...(ctx.scriptsRan === undefined ? {} : { ran: [...ctx.scriptsRan] }) },
       }),
     });
-    return builder.build(error === undefined ? {} : { error });
+    if (error === undefined) return builder.build({});
+    const { place: _place, ...shown } = error;
+    return builder.build({ error: shown });
   }
 
   /** `script.active` for this run, on the helper connection that is live now (a relaunched helper is told again). */
@@ -1890,16 +1895,19 @@ function helperDetail(detail: unknown, cap = 300): string | undefined {
 /** What the worker appends to an error thrown inside a saved script (`worker/runtime.ts`'s `savedPlace`). */
 const SAVED_SCRIPT_PLACE = / \(in saved script [a-z][A-Za-z0-9_]{0,47}(?:, line \d+)?\)$/;
 
-export function normaliseScriptError(e: { name?: unknown; message?: unknown; line?: unknown }, daemonSentences: ReadonlySet<string>): ScriptError {
+export function normaliseScriptError(e: { name?: unknown; message?: unknown; line?: unknown }, daemonSentences: ReadonlySet<string>): ScriptError & { place?: string } {
   const name = typeof e.name === "string" && KNOWN_ERROR_NAMES.has(e.name) ? e.name : "Error";
   const raw = typeof e.message === "string" ? e.message : String(e.message ?? "");
-  const message = raw.slice(0, ERROR_MESSAGE_CAP);
   const line = typeof e.line === "number" && Number.isInteger(e.line) && e.line > 0 && e.line < 1_000_000 ? e.line : undefined;
-  // A daemon sentence thrown inside a saved script carries the worker's "(in saved script x, line n)" after it: still
-  // the daemon's words.
+  const kind = (AUTOMATION_ERROR_KINDS as readonly string[]).includes(name);
+  // A daemon sentence thrown inside a saved script carries the worker's "(in saved script x, line n)" after it. Only
+  // the sentence is the daemon's: it alone is trusted, and the place goes back to the caller to show as the script's
+  // own text (inside the fence) — never the whole message outside it.
   const own = raw.replace(SAVED_SCRIPT_PLACE, "");
-  const trusted = (AUTOMATION_ERROR_KINDS as readonly string[]).includes(name) && (daemonSentences.has(raw) || daemonSentences.has(own));
-  return { name, message, ...(line === undefined ? {} : { line }), trusted };
+  if (kind && own !== raw && !daemonSentences.has(raw) && daemonSentences.has(own)) {
+    return { name, message: own.slice(0, ERROR_MESSAGE_CAP), ...(line === undefined ? {} : { line }), trusted: true, place: raw.slice(own.length).trim() };
+  }
+  return { name, message: raw.slice(0, ERROR_MESSAGE_CAP), ...(line === undefined ? {} : { line }), trusted: kind && daemonSentences.has(raw) };
 }
 
 /** Sleep `ms` unless `signal` aborts first; `false` when it did. */
