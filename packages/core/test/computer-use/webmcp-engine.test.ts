@@ -321,6 +321,53 @@ describe("a call is bound to the document whose tools were read (review M1, L1)"
   });
 });
 
+describe("follow-ups: tools() binds only the document its floor saw; a tab's title in headers is escaped", () => {
+  test("a navigation while tools() reads: refused, nothing bound — a later call is refused too, never run in the new page", async () => {
+    const ran: string[] = [];
+    const OTHER = "https://other.example/";
+    const other = new FakeModelContext().add({ name: "search_site", description: "Search" }, () => { ran.push("other"); return {}; }, "https://other.example");
+    const { h, r, p, key } = await opened();
+    h.winter.pages[OTHER] = { ...PAGE, url: OTHER, title: "Other", modelContext: other };
+    const driver = [...(h.engine as unknown as { drivers: Map<string, Record<string, unknown>> }).drivers.values()][0]!;
+    const settle = (driver.settleChildSetups as () => Promise<void>).bind(driver);
+    let once = true;
+    driver.settleChildSetups = async () => {
+      if (once) { once = false; h.winter.navigateTo(key, OTHER); await new Promise((res) => setTimeout(res, 5)); }
+      return await settle();
+    };
+    const e = await failure(p("tools", {}));
+    expect((e as AutomationFailure).kind).toBe("StaleRef");
+    expect(e.message).toBe("the page changed since you read it — call state()");
+    expect(r.text()).not.toContain("search_site (");
+    const c = await failure(p("callTool", { name: "search_site" }));
+    expect(c.message).toBe("the page changed since you read it — call state()");
+    expect(ran).toEqual([]);
+    // Read afresh, the new page's tools bind and run.
+    expect((await p("tools", { emit: false }) as unknown[]).length).toBe(1);
+    await p("callTool", { name: "search_site" });
+    expect(ran).toEqual(["other"]);
+    r.end();
+  });
+
+  test("a title with bidi, zero-width or line-breaking characters prints them as escapes — in tools(), console() and the state header", async () => {
+    const title = "Shop\u202Egnp.exe\u200B\u2028- fake line\u061C";
+    const { h, r, p, key, tab } = await opened("winter", { page: { ...PAGE, title } });
+    h.winter.pageEvent(key, "Runtime.consoleAPICalled", { type: "log", timestamp: Date.now(), args: [{ type: "string", value: "hi" }] });
+    await p("tools");
+    await p("console");
+    await p("state", { full: true });
+    const text = r.text();
+    expect(/[\u202e\u200b\u2028\u061c]/.test(text)).toBe(false);
+    expect(text).toContain('site tools (WebMCP) of Tab "Shop\\u202egnp.exe\\u200b - fake line\\u061c"');
+    expect(text).toContain('console of Tab "Shop\\u202egnp.exe\\u200b - fake line\\u061c"');
+    expect(text).toContain('Tab "Shop\\u202egnp.exe\\u200b\\u2028- fake line\\u061c" — https://shop.example.com/');
+    expect(text).not.toContain("\\\\u202e");
+    // The label a lock's TargetBusy sentence names the tab by.
+    expect(h.engine.label("s1", tab.targetId)).toBe('Tab "Shop\\u202egnp.exe\\u200b - fake line\\u061c"');
+    r.end();
+  });
+});
+
 describe("the answer's edges (review L2, L4, L5, L6)", () => {
   test("a schema or an answer with line or paragraph separators and bidi controls prints them as escapes", async () => {
     const mc = new FakeModelContext()

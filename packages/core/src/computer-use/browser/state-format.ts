@@ -15,6 +15,8 @@
 // `FULL_STATE_LINE_CAP` (its own read budget), and says where it was cut when it had to fold anyway (as the helper's
 // does). A diff compares facets per ref and falls back to the full tree when more than half the elements changed.
 
+import { escapeInvisible } from "./page-runtime/webmcp";
+
 export const STATE_LINE_CAP = 300;
 /** A `full: true` state's hard cap: the page runtime's default read budget (`snapshot`'s `maxNodes`)… */
 export const FULL_STATE_LINE_CAP = 4_000;
@@ -92,7 +94,8 @@ export function headerLine(h: TabHeader): string {
   if (h.settle !== undefined) parts.push(h.settle.settled ? `settled ${h.settle.ms} ms` : `not settled after ${h.settle.ms} ms`);
   if (h.newPage === true) parts.push("new page");
   if (h.unread !== undefined && h.unread > 0) parts.push(`read cut short: at least ${h.unread.toLocaleString("en-US")} elements not read (the "more" markers show where)`);
-  const head = `Tab ${quote(cut(h.title || "(untitled)", 120))} — ${cut(h.url, URL_CAP)}`;
+  // The page's title, quoted, with whatever could break or reorder the line (bidi, zero-width, separators) as escapes.
+  const head = `Tab ${escapeInvisible(quote(cut(h.title || "(untitled)", 120)))} — ${cut(h.url, URL_CAP)}`;
   return parts.length === 0 ? head : `${head} · ${parts.join(" · ")}`;
 }
 

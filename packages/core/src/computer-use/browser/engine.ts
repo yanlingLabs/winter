@@ -223,7 +223,7 @@ export class BrowserEngine {
     const b = this.sessions.get(sessionId)?.bindings.get(targetId);
     if (b === undefined) return undefined;
     const title = this.drivers.get(tabKeyOf(b.backend, b.tabKey))?.shownTitle.replace(/\s+/g, " ").trim();
-    return title !== undefined && title.length > 0 ? `Tab "${title.slice(0, 60)}"` : `Tab ${b.backend}:${b.tabKey}`;
+    return title !== undefined && title.length > 0 ? `Tab "${escapeInvisible(title.slice(0, 60))}"` : `Tab ${b.backend}:${b.tabKey}`;
   }
 
   async global(scope: TabRunScope, primitive: string, args: Record<string, unknown>): Promise<unknown> {
@@ -2022,9 +2022,11 @@ export class BrowserEngine {
     return out;
   }
 
+  /** A tab as a printed header names it: its title (the page's own words — whitespace collapsed, and whatever could
+   *  break or reorder the line written as escapes) or its id. */
   private labelOf(driver: TabDriver): string {
     const t = driver.shownTitle.replace(/\s+/g, " ").trim();
-    return t.length > 0 ? `Tab "${t.slice(0, 60)}"` : `Tab ${driver.backend}:${driver.tabKey}`;
+    return t.length > 0 ? `Tab "${escapeInvisible(t.slice(0, 60))}"` : `Tab ${driver.backend}:${driver.tabKey}`;
   }
 
   private async navigate(scope: TabRunScope, b: Binding, driver: TabDriver, go: () => Promise<boolean>): Promise<undefined> {
