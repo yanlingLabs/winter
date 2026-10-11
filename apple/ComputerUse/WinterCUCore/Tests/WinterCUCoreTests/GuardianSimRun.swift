@@ -668,7 +668,18 @@ final class SimRun {
         core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, flags: flags, now: clock.nowSeconds())
         let i = sw.map { w.addSwitch($0) }
         let here = w.lock.withLock { SPlace(app: hit?.pid ?? w.front, space: w.space) }
-        _ = w.within(.userClick(dest ?? here)) { core.onPhysicalClick(at: p, userData: 0, flags: flags, now: clock.nowSeconds()) }
+        if drag {
+            // A drag brings nothing forward (review of round 9, #8): its button comes up elsewhere, and nothing the engine
+            // does in it passes for the user's click (no `userClick` label — that masked the activation on the mouse-down).
+            _ = core.onPhysicalClick(at: p, userData: 0, flags: flags, now: clock.nowSeconds())
+            core.onPhysicalMouseUp(at: CGPoint(x: p.x + 40, y: p.y + 30), userData: 0, now: clock.nowSeconds())
+        } else {
+            _ = w.within(.userClick(dest ?? here)) {
+                let r = core.onPhysicalClick(at: p, userData: 0, flags: flags, now: clock.nowSeconds())
+                core.onPhysicalMouseUp(at: p, userData: 0, now: clock.nowSeconds())
+                return r
+            }
+        }
         if hit?.id == 701 {
             w.lock.withLock { w.wins[701]?.shown = false }
             if let subject, let i {

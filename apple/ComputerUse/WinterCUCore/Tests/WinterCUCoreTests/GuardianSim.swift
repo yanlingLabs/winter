@@ -618,8 +618,12 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         guard !secure else { return }
         // A key the tap sees (typing — no ⌘/⌃ chord) while an agent target is in front: the contract counts it as work in
         // it (round 10's I6), wherever the key lands (Spotlight's panel too: the engine can't tell).
-        if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl) { userInteracted(lock.withLock { front }) }
-        core?.noteTapEvent(type: type, sourcePid: 0, userData: 0, flags: f, keycode: keycode, now: now / 1000)
+        let receiver = lock.withLock { front }
+        if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl) { userInteracted(receiver) }
+        // The process the key goes to, as the real tap reads it (`kCGEventTargetUnixProcessID`; review of round 12, LOW —
+        // the engine's receiver check was never exercised): the front app. The sim has no panel process of its own, so a
+        // Spotlight key is given to the front app too — the stricter case (the engine counts it as work there).
+        core?.noteTapEvent(type: type, sourcePid: 0, userData: 0, flags: f, keycode: keycode, targetPid: Int64(receiver), now: now / 1000)
     }
 
     func gesture(_ raw: UInt32) {

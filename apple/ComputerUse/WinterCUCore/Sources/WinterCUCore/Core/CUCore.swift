@@ -653,10 +653,17 @@ public final class CUCore: @unchecked Sendable {
     var focusTheftGuard = CUFocusGuard()
     /// The live CPS tap's run-loop thread and port (best-effort; nil when it could not be created).
     var cpsTapThread: Thread?
+    /// A click into a bound target's background window, waiting for its button to come up (guarded by `guardianLock`).
+    var pendingClickBring: (pid: pid_t, wid: UInt32, at: CGPoint, time: Double)?
     /// The work watcher (`CUCore+WorkWatcher.swift`): its tap's thread and port, while a target is bound.
     let workWatcherLock = NSLock()
-    var workWatcherThread: Thread?
+    /// How to stop the running watcher (nil: off), and its tap's port (for re-enabling). Under `workWatcherLock`.
+    var workWatcherStop: (() -> Void)?
     var workWatcherPort: CFMachPort?
+    /// When a scroll last had the window under the pointer read for I6 (guarded by `guardianLock`).
+    var lastScrollWorkCheck: TimeInterval = -.infinity
+    /// A test's stand-in for the live tap: called to start, it answers how to stop (nil: could not start).
+    var workWatcherStarter: (() -> (() -> Void)?)?
     var cpsTapPort: CFMachPort?
     /// A test seam for the CPS notification handler (the live tap feeds the real one).
     var cpsReleaseOverride: ((Int32) -> Bool)?
@@ -928,6 +935,10 @@ public final class CUCore: @unchecked Sendable {
             let sid = t.nextSnapshotId()
             let page = pageNumber(t, pageSignature(t))
             if within == nil { t.pageNumberAtState = page }
+            // A read `within` one element shows its values whole, up to 8,000 characters (a window's read cuts them at
+            // 200 and says so — round 13's dogfood item 14: a long field could not be read back).
+            var formatter = formatter
+            if within != nil { formatter.valueCap = CUStateFormatter.wholeValueCap }
             let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note,
                                        caret: obs.caret, focusText: obs.focusText, page: page,
                                        stateNumber: Int(sid.components(separatedBy: ".s").last ?? ""), unread: obs.unread)

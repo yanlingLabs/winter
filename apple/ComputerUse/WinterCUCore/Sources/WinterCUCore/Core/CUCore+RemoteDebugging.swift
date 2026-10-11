@@ -20,8 +20,11 @@ extension CUCore {
     /// window with no accessibility. Pure.
     static func isInspectPageTitle(_ s: String?) -> Bool {
         guard let s = s?.lowercased() else { return false }
-        return s.range(of: #"\binspect with .{1,40} developer tools\b"#, options: .regularExpression) != nil
-            || s.range(of: #"^[a-z][a-z0-9+.-]*://inspect\b"#, options: .regularExpression) != nil
+        // Anchored (review of round 12, LOW: "How to Inspect with Chrome Developer Tools" matched, and so did an
+        // `https://inspect.example.com` title).
+        if s.range(of: #"^inspect with [^\n]{1,40} developer tools$"#, options: .regularExpression) != nil { return true }
+        guard let m = s.range(of: #"^[a-z][a-z0-9+.-]*://inspect(?:[/#?]|$)"#, options: .regularExpression) else { return false }
+        return !s[m].hasPrefix("http://") && !s[m].hasPrefix("https://")
     }
 
     /// The dialog's English wording (its title or its text). Pure. (A localized dialog: its structural signature is to
@@ -32,9 +35,11 @@ extension CUCore {
     }
 
     func floorCheckRemoteDebugging(_ p: TargetActParams, _ t: CUTarget) throws {
-        // Every Chromium-based app (review of round 11, MEDIUM #8: Edge Canary, Brave Beta/Nightly, Opera GX, the Vivaldi
-        // snapshot, Comet — a bundle list misses them).
-        guard t.isChromium || t.bundleId.map(CUChromium.bundleIds.contains) == true else { return }
+        // Every Chromium-based BROWSER (review of round 11, MEDIUM #8: Edge Canary, Brave Beta/Nightly, Opera GX, the
+        // Vivaldi snapshot, Comet — a bundle list misses them) — never an Electron or CEF app, which has no remote-debugging
+        // page to protect and would pay the scan on every act, its own `<scheme>://inspect` route refused (review of
+        // round 12, MEDIUM #5).
+        guard t.bundleId.map(CUChromium.bundleIds.contains) == true || (t.isChromium && isWebBrowser(t)) else { return }
         let refusal = CUError.refused(.remoteDebugging, Self.remoteDebuggingSentence)
         // A capture-only bind (no accessibility) still sends point clicks: judged by the window server's titles.
         guard t.accessible else {
@@ -85,12 +90,28 @@ extension CUCore {
     func remoteDebuggingDialogShown(_ t: CUTarget) -> Bool {
         // Scanned again only when the app's windows changed (a dialog or a sheet is a window of its own): an act on a
         // browser with many windows pays one window-server read, not a walk of every window.
-        // (Every layer: a dialog may sit above the normal level — review of round 11, MEDIUM #8.)
-        let windows = appWindowsOnScreen(t)
+        // (The normal level and the dialog levels — a dialog may sit above the normal one, review of round 11, MEDIUM #8 —
+        // never menus or tooltips, which come and go on every hover: review of round 12, MEDIUM #5.)
+        let windows = Set(sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 && $0.layer < 100 }.map(\.id))
+            .union(sys.windows(pid: t.pid).filter { $0.layer == 0 }.map(\.id))
         if let last = t.remoteDebuggingScan, last.windows == windows { return last.shown }
         let shown = scanForRemoteDebuggingDialog(t)
         t.remoteDebuggingScan = (windows, shown)
         return shown
+    }
+
+    /// The window holds NO web area: a bounded walk that ran to its end without one (a cut-short walk proves nothing).
+    func webAreaAbsent(_ w: AXUIElement, maxNodes: Int = 200, maxMs: Double = 30) -> Bool {
+        let deadline = clock.nowMs() + maxMs
+        var queue = [w]
+        var next = 0
+        while next < queue.count {
+            guard next < maxNodes, clock.nowMs() < deadline else { return false }  // cut short: unknown
+            if ax.string(queue[next], kAXRoleAttribute) == "AXWebArea" { return false }
+            queue.append(contentsOf: ax.elements(queue[next], kAXChildrenAttribute))
+            next += 1
+        }
+        return true
     }
 
     private func scanForRemoteDebuggingDialog(_ t: CUTarget) -> Bool {
@@ -100,7 +121,9 @@ extension CUCore {
             if role == kAXSheetRole || (sub != nil && sub != kAXStandardWindowSubrole) { candidates.append(w) }
             // A standard window with no web page in it may be the dialog too (never a browser window: its page title may
             // say anything) — review of round 11, MEDIUM #8.
-            else if firstWebArea(w, maxNodes: 200, maxMs: 30) == nil { candidates.append(w) }
+            // (Only when the walk COMPLETED and found none — a slow or deep page's window that timed out is no candidate,
+            // or a tab titled "how to allow remote debugging" would refuse every act: review of round 12, MEDIUM #5.)
+            else if webAreaAbsent(w) { candidates.append(w) }
             candidates.append(contentsOf: ax.elements(w, kAXChildrenAttribute).filter { ax.string($0, kAXRoleAttribute) == kAXSheetRole })
         }
         for d in candidates {

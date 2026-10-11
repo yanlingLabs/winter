@@ -18,62 +18,71 @@ extension CUCore {
     }()
 
     /// Starts the watcher when a target is bound and none runs; stops it when none is bound. Cheap; called at every bind
-    /// and release.
+    /// and release. The decision and the start or stop happen under ONE lock (review of round 12, MEDIUM #1: a release's
+    /// stop could run after a concurrent bind's start found the thread still there, leaving it off with a target bound; two
+    /// binds could both start a tap, one leaking).
     func updateWorkWatcher() {
-        let bound = !boundTargets().isEmpty
-        if bound { startWorkWatcher() } else { stopWorkWatcher() }
+        guard guardianLiveTapEnabled || workWatcherStarter != nil else { return }
+        workWatcherLock.withLock {
+            let bound = !boundTargets().isEmpty
+            if bound, workWatcherStop == nil {
+                workWatcherStop = (workWatcherStarter ?? { [self] in startWorkWatcherTap() })()
+                if workWatcherStop != nil { CULog.guardian.notice("the work watcher is on (a target is bound)") }
+            } else if !bound, let stop = workWatcherStop {
+                workWatcherStop = nil
+                stop()
+                CULog.guardian.notice("the work watcher is off (nothing is bound)")
+            }
+        }
     }
 
-    func startWorkWatcher() {
-        guard guardianLiveTapEnabled else { return }
-        let box: UnsafeMutableRawPointer? = workWatcherLock.withLock {
-            guard workWatcherThread == nil else { return nil }
-            return Unmanaged.passRetained(CUCPSTapContext(core: self)).toOpaque()
-        }
-        guard let box else { return }
+    /// The live tap and its run-loop thread; the way to stop them. Under `workWatcherLock`.
+    private func startWorkWatcherTap() -> (() -> Void)? {
+        let box = Unmanaged.passRetained(CUCPSTapContext(core: self)).toOpaque()
         guard let port = CGEvent.tapCreate(tap: .cgAnnotatedSessionEventTap, place: .tailAppendEventTap, options: .listenOnly,
                                            eventsOfInterest: Self.workWatcherMask, callback: workWatcherCallback, userInfo: box) else {
             Unmanaged<CUCPSTapContext>.fromOpaque(box).release()
             CULog.guardian.notice("the work watcher could not start (no event tap)")
-            return
+            return nil
         }
+        workWatcherPort = port
         let thread = Thread {
             let source = CFMachPortCreateRunLoopSource(nil, port, 0)
             CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
             CGEvent.tapEnable(tap: port, enable: true)
-            // A long wait: the tap's events wake the run loop; nothing else needs it (a cancel is seen within 5 s).
-            while !Thread.current.isCancelled, CFRunLoopRunInMode(.defaultMode, 5, false) != .stopped {}
+            // A long wait: the tap's events wake the run loop; nothing else needs it (a cancel is seen within 5 s). A run
+            // loop with no source left (the port invalidated) returns at once: the thread ends then, never spins.
+            while !Thread.current.isCancelled {
+                let r = CFRunLoopRunInMode(.defaultMode, 5, false)
+                if r == .stopped || r == .finished { break }
+            }
             CGEvent.tapEnable(tap: port, enable: false)
             CFMachPortInvalidate(port)
             Unmanaged<CUCPSTapContext>.fromOpaque(box).release()
         }
         thread.name = "Winter work watcher"
-        workWatcherLock.withLock {
-            workWatcherThread = thread
-            workWatcherPort = port
-        }
         thread.start()
-        CULog.guardian.notice("the work watcher is on (a target is bound)")
-    }
-
-    func stopWorkWatcher() {
-        let (thread, port) = workWatcherLock.withLock { () -> (Thread?, CFMachPort?) in
-            defer { workWatcherThread = nil; workWatcherPort = nil }
-            return (workWatcherThread, workWatcherPort)
+        return { [weak self] in
+            CGEvent.tapEnable(tap: port, enable: false)
+            thread.cancel()
+            self?.workWatcherPort = nil
         }
-        guard let thread else { return }
-        if let port { CGEvent.tapEnable(tap: port, enable: false) }
-        thread.cancel()
-        CULog.guardian.notice("the work watcher is off (nothing is bound)")
     }
 
-    var workWatcherRunning: Bool { workWatcherLock.withLock { workWatcherThread != nil } }
+    /// The tap was disabled by the system (a slow callback, or the user's secure input): on again.
+    func reenableWorkWatcherTap() {
+        workWatcherLock.withLock { if let port = workWatcherPort { CGEvent.tapEnable(tap: port, enable: true) } }
+    }
+
+    var workWatcherRunning: Bool { workWatcherLock.withLock { workWatcherStop != nil } }
 
     /// One event the watcher saw. While the guardian runs its own tap handles it; else the user's own action on a bound
     /// app in front is their work in it.
     func noteWatchedEvent(type: CGEventType, sourcePid: Int64, userData: Int64, flags: CGEventFlags, keycode: Int64,
                           location: CGPoint, targetPid: Int64) {
         guard !guardianRunning, CUHardwareInput.classify(type: type, sourcePid: sourcePid, userData: userData) == .action else { return }
+        // (Its time too: the secure-input rule takes recent input of theirs as what corroborates work.)
+        noteHardwareInput(now: clock.nowSeconds())
         switch type {
         case .leftMouseDown:
             // A click into an ordinary window of a bound app (not a ⌘-click): work in it once it is in front.
@@ -89,8 +98,12 @@ extension CUCore {
 
 /// The work watcher's tap callback (a C function: it cannot capture). Listen-only: the event goes on unchanged.
 private let workWatcherCallback: CGEventTapCallBack = { _, type, event, refcon in
-    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput { return Unmanaged.passUnretained(event) }
     guard let refcon, let core = Unmanaged<CUCPSTapContext>.fromOpaque(refcon).takeUnretainedValue().core else {
+        return Unmanaged.passUnretained(event)
+    }
+    // Disabled by the system (review of round 12, LOW): on again — a listen-only tap left off would see nothing more.
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        core.reenableWorkWatcherTap()
         return Unmanaged.passUnretained(event)
     }
     core.noteWatchedEvent(type: type, sourcePid: event.getIntegerValueField(.eventSourceUnixProcessID),
