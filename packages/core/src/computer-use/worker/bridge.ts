@@ -68,7 +68,7 @@ export interface SavedScriptSource { name: string; source: string }
 export const SAVED_SCRIPT_NAME = /^[a-z][A-Za-z0-9_]{0,47}$/;
 /** Names `scripts.save` refuses: its own, and what `await`, printing or JSON would look up on an object. */
 export const SAVED_SCRIPT_RESERVED: ReadonlySet<string> = new Set(["save", "then", "constructor", "toString", "valueOf", "toJSON", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable", "toLocaleString"]);
-/** The limits (spine D12): one script's source, the scripts one session keeps, and their sources in all (UTF-8). */
+/** The limits (Phase 4 ruling): one script's source, the scripts one session keeps, and their sources in all (UTF-8). */
 export const SAVED_SCRIPT_MAX_BYTES = 32 * 1024;
 export const SAVED_SCRIPTS_MAX_COUNT = 32;
 export const SAVED_SCRIPTS_MAX_TOTAL_BYTES = 256 * 1024;

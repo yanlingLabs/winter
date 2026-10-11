@@ -2,7 +2,7 @@
 // session; any later call runs it as `scripts.<name>(…)`. The worker compiles and installs it (`worker/runtime.ts`);
 // this store is what lets it outlive the worker: a reset, the 30-minute idle end, a crash or a summarized context.
 //
-// - IN MEMORY ONLY (D11): nothing model-written goes to disk, and a daemon restart loses them all.
+// - IN MEMORY ONLY (the Phase 4 ruling): nothing model-written goes to disk, and a daemon restart loses them all.
 // - Kept OUTSIDE the service's per-session runtime state, which the idle end deletes; cleared only when the session is
 //   deleted (and with the daemon).
 // - The model can never list or read one back: nothing here is ever printed, logged, written to metrics or the audit
@@ -64,6 +64,6 @@ export class SavedScripts {
   /** The session was deleted. */
   clearSession(sessionId: string): void { this.bySession.delete(sessionId); }
 
-  /** The daemon stops (D11: nothing survives it). */
+  /** The daemon stops (memory only: nothing survives it). */
   clearAll(): void { this.bySession.clear(); }
 }

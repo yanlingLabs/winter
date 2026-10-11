@@ -285,7 +285,7 @@ export class ComputerV2Service {
   /** Phase 4: the sessions' saved scripts — outside `SessionState`, which the idle end deletes. */
   readonly savedScripts: SavedScripts;
   /**
-   * Sessions that have had a worker (spine §5.7): kept OUTSIDE `SessionState` — the idle end deletes that, so without
+   * Sessions that have had a worker: kept OUTSIDE `SessionState` — the idle end deletes that, so without
    * this the next call started silently and the model found out from an `undefined` or a `TargetLost` that its
    * variables and handles were gone. Removed only when the session is deleted (and with the daemon).
    */
@@ -347,7 +347,7 @@ export class ComputerV2Service {
       builder.notice(`The automation runtime was reset: earlier variables and bindings are gone (apps stay open).${kept}`);
     } else if (state.worker === undefined || !state.worker.alive) {
       if (state.hadWorker) builder.notice(`The automation runtime restarted; earlier variables and bindings are gone.${kept}`);
-      // The idle end deleted this session's state with its `hadWorker`; `ranWorker` remembers it had one (§5.7).
+      // The idle end deleted this session's state with its `hadWorker`; `ranWorker` remembers it had one.
       else if (this.ranWorker.has(sessionId)) builder.notice(`The automation runtime restarted after ${idleWords(this.deps.idleMs ?? WORKER_IDLE_MS)} without use; earlier variables and bindings are gone.${kept}`);
       this.forgetBindings(sessionId, state);
     }
@@ -1774,7 +1774,7 @@ export class ComputerV2Service {
   stop(): void {
     this.stopped = true;
     for (const sessionId of [...this.sessions.keys()]) this.endSession(sessionId, "stop");
-    // D11: saved scripts are memory only — nothing survives the daemon.
+    // Saved scripts are memory only — nothing survives the daemon.
     this.savedScripts.clearAll();
     this.ranWorker.clear();
     this.deps.browsers?.stop();

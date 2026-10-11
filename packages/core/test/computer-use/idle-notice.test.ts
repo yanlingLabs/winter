@@ -1,4 +1,4 @@
-// ComputerV2 Phase 4 (spine §5.7) — the restart notice after the idle end. The 30-minute idle end deletes the session's
+// ComputerV2 Phase 4 — the restart notice after the idle end. The 30-minute idle end deletes the session's
 // runtime state (its `hadWorker` with it), so the next call used to start silently: the model found out from an
 // `undefined` or a `TargetLost` that its variables and handles were gone. Now it is told.
 import { afterEach, describe, expect, test } from "bun:test";
