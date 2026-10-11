@@ -1,0 +1,154 @@
+// Winter Headless's live drills (`headless.ts`), without a screen: the command line, whose a change of the front app or
+// Space is, the window and application-type readers, the leftover-process finder, and the fixtures.
+import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
+import type { MonitorSample } from "./lib";
+import {
+  attributeFrontChanges, cookieUser, HEADLESS_LIVE_DRILLS, heavySvg, helperNames, LAN_PROBE, mediaPage, mib, parseApplicationType, parseHeadlessOptions,
+  parseWindowsLines, PERMISSIONS_PROBE, processesInside, siteHome, siteLogin, wavTone,
+} from "./headless";
+
+const APP = "/tmp/x/Winter Headless Dev.app";
+
+describe("the command line", () => {
+  test("defaults, the app from the environment, and every flag", () => {
+    const o = parseHeadlessOptions([], { WINTER_HEADLESS_APP: APP });
+    if ("error" in o) throw new Error(o.error);
+    expect(o).toMatchObject({ app: APP, verify: true, userTyping: false, load: false, promptProbes: false, keepTemp: false });
+    expect([...o.drills].sort()).toEqual([2, 3, 4]);
+    expect(o.report.endsWith(join("out", "cu-live", "headless.json"))).toBe(true);
+    const all = parseHeadlessOptions(["--app", APP, "--no-verify", "--user-typing", "--load", "--prompt-probes", "--keep-temp", "--only", "2,4", "--report", "/tmp/r.json"], {});
+    if ("error" in all) throw new Error(all.error);
+    expect(all).toMatchObject({ verify: false, userTyping: true, load: true, promptProbes: true, keepTemp: true, report: "/tmp/r.json" });
+    expect([...all.drills].sort()).toEqual([2, 4]);
+  });
+
+  test("what it refuses", () => {
+    expect(parseHeadlessOptions([], {})).toEqual({ error: expect.stringContaining("--app") });
+    expect(parseHeadlessOptions(["--app", "/tmp/not-an-app"], {})).toEqual({ error: expect.stringContaining(".app bundle") });
+    expect(parseHeadlessOptions(["--app", APP, "--only", "1"], {})).toEqual({ error: expect.stringContaining("--only") });
+    expect(parseHeadlessOptions(["--app", APP, "--only"], {})).toEqual({ error: expect.stringContaining("--only") });
+    expect(parseHeadlessOptions(["--app", APP, "--yes"], {})).toEqual({ error: "unknown argument --yes" });
+    expect(parseHeadlessOptions(["--app"], {})).toEqual({ error: "--app needs a path" });
+  });
+
+  test("the helper's executable and its window-server owner name are the bundle's name", () => {
+    expect(helperNames(APP)).toEqual({ executable: join(APP, "Contents", "MacOS", "Winter Headless Dev"), owner: "Winter Headless Dev" });
+    expect(helperNames("/Applications/Winter.app/Contents/Helpers/Winter Headless.app/").owner).toBe("Winter Headless");
+  });
+});
+
+describe("whose a change of the front app or Space is", () => {
+  const sample = (t: number, frontPid: number, space: number | null, hw?: { n: number; last: number | null }): MonitorSample => ({
+    t, front: `app${frontPid}`, frontPid, space, hidIdleMs: null, ...(hw === undefined ? {} : { hw: hw.n, hwLast: hw.last, hwStart: 0, hwKeys: true }),
+  });
+
+  test("nothing changed: nothing reported", () => {
+    expect(attributeFrontChanges([sample(0, 1, 5), sample(20, 1, 5), sample(40, 1, null)], 0, 100, new Set([9]))).toEqual([]);
+  });
+
+  test("the helper in front is the helper's, whatever the user did", () => {
+    const s = [sample(0, 1, 5, { n: 0, last: null }), sample(20, 1, 5, { n: 1, last: 15 }), sample(40, 9, 5, { n: 1, last: 15 })];
+    expect(attributeFrontChanges(s, 0, 100, new Set([9]))).toEqual([{ t: 40, what: "frontmost became app9 (pid 9)", by: "helper" }]);
+  });
+
+  test("a change right after the user's hardware input is theirs; one with none is unexplained", () => {
+    const s = [
+      sample(0, 1, 5, { n: 0, last: null }),
+      sample(1_000, 1, 5, { n: 2, last: 990 }),
+      sample(1_020, 2, 5, { n: 2, last: 990 }),
+      sample(9_000, 2, 5, { n: 2, last: 990 }),
+      sample(9_020, 3, 5, { n: 2, last: 990 }),
+    ];
+    expect(attributeFrontChanges(s, 0, 10_000, new Set([9])).map((c) => [c.t, c.by])).toEqual([[1_020, "user"], [9_020, "unexplained"]]);
+  });
+
+  test("a Space change is judged too; an unreadable Space is not", () => {
+    const s = [sample(0, 1, 5), sample(20, 1, null), sample(40, 1, 5), sample(60, 1, 6)];
+    expect(attributeFrontChanges(s, 0, 100, new Set())).toEqual([{ t: 60, what: "active Space became 6", by: "unexplained" }]);
+  });
+
+  test("only the window [from, to] is judged, its first sample the baseline", () => {
+    const s = [sample(0, 1, 5), sample(20, 2, 5), sample(40, 2, 5), sample(60, 3, 5), sample(80, 4, 5)];
+    expect(attributeFrontChanges(s, 30, 70, new Set()).map((c) => c.t)).toEqual([60]);
+  });
+});
+
+describe("the readers", () => {
+  test("cu-live-tool windows lines", () => {
+    const out = '{"id":12,"layer":0,"onScreen":false,"bounds":[0,0,500,500]}\n{"id":13,"layer":25,"onScreen":true,"bounds":[1,2,3,4]}\nnot json\n\n';
+    expect(parseWindowsLines(out)).toEqual([
+      { id: 12, layer: 0, onScreen: false, bounds: [0, 0, 500, 500] },
+      { id: 13, layer: 25, onScreen: true, bounds: [1, 2, 3, 4] },
+    ]);
+  });
+
+  test("lsappinfo's ApplicationType", () => {
+    expect(parseApplicationType('"ApplicationType"="BackgroundOnly"\n')).toBe("BackgroundOnly");
+    expect(parseApplicationType('"ApplicationType"="Foreground"')).toBe("Foreground");
+    expect(parseApplicationType("")).toBeUndefined();
+  });
+
+  test("the processes inside the helper app — never this run's own command line naming it", () => {
+    const ps = [
+      `  101 ${APP}/Contents/MacOS/Winter Headless Dev --winter-cache-root=/tmp/c`,
+      `  102 ${APP}/Contents/Frameworks/Winter Helper (Renderer).app/Contents/MacOS/Winter Helper (Renderer) --type=renderer`,
+      `  103 /usr/local/bin/bun scripts/cu-live/headless.ts --app ${APP}`,
+      `  104 /tmp/x/Winter Headless Dev.app.bak/Contents/MacOS/other`,
+      "  105 /Applications/Winter.app/Contents/Frameworks/Winter Helper.app/Contents/MacOS/Winter Helper",
+    ].join("\n");
+    expect(processesInside(ps, APP).map((p) => p.pid)).toEqual([101, 102]);
+    expect(processesInside(ps, `${APP}/`).map((p) => p.pid)).toEqual([101, 102]);
+  });
+
+  test("mib", () => {
+    expect(mib(undefined)).toBe("?");
+    expect(mib(3 * 1024 * 1024 * 1024)).toBe("3072 MiB");
+  });
+});
+
+describe("the fixtures", () => {
+  const scriptsOf = (html: string): string[] => [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!);
+  const compiles = (code: string): void => { expect(() => new Function(code)).not.toThrow(); };
+
+  test("a WAV tone with a valid header", () => {
+    const w = wavTone(0.5, 440, 8_000);
+    const text = (a: number, n: number): string => String.fromCharCode(...w.slice(a, a + n));
+    expect([text(0, 4), text(8, 4), text(12, 4), text(36, 4)]).toEqual(["RIFF", "WAVE", "fmt ", "data"]);
+    expect(w.length).toBe(44 + 4_000);
+    expect(new DataView(w.buffer).getUint32(40, true)).toBe(4_000);
+  });
+
+  test("the media page: its title, sound, canvases, animations and images; its script compiles", () => {
+    const html = mediaPage(7);
+    expect(html).toContain("<title>Media 7</title>");
+    expect(html).toContain('<audio autoplay loop src="/tone.wav">');
+    expect(html.match(/<img /g)?.length).toBe(6);
+    expect(html.match(/class=s /g)?.length).toBe(200);
+    for (const s of scriptsOf(html)) compiles(s);
+    expect(heavySvg(3)).toBe(heavySvg(3));
+    expect(heavySvg(3, 10).match(/<circle /g)?.length).toBe(10);
+  });
+
+  test("the sign-in site: who the cookie names, and the pages", () => {
+    expect(cookieUser("a=1; sid=alice; b=2")).toBe("alice");
+    expect(cookieUser("sid=alice")).toBe("alice");
+    expect(cookieUser("sid=Alice")).toBeUndefined();
+    expect(cookieUser("xsid=bob")).toBeUndefined();
+    expect(cookieUser(null)).toBeUndefined();
+    expect(siteHome("bob")).toContain("signed in as bob");
+    expect(siteHome(undefined)).toContain("signed out");
+    expect(siteLogin("bob")).toContain('localStorage.setItem("who", "bob")');
+    for (const html of [siteHome("bob"), siteLogin("bob"), PERMISSIONS_PROBE, LAN_PROBE]) for (const s of scriptsOf(html)) compiles(s);
+  });
+
+  test("the probes ask for each permission and fetch a LAN address and an mDNS name", () => {
+    for (const asked of ["video: true", "audio: true", "getCurrentPosition", "requestPermission"]) expect(PERMISSIONS_PROBE).toContain(asked);
+    expect(LAN_PROBE).toContain("http://192.168.1.1/");
+    expect(LAN_PROBE).toMatch(/\.local\//);
+  });
+
+  test("drill 1 is listed for the user", () => {
+    expect(HEADLESS_LIVE_DRILLS[0]).toMatch(/^Drill 1/);
+  });
+});
