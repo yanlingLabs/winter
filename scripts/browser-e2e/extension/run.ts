@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WINTER_TEAM_ID } from "../../../packages/core/src/auth/app-token-acl";
 import { FileSecretStore } from "../../../packages/core/src/auth/secret-store";
+import { cdpEventParams } from "../../../packages/core/src/computer-use/browser/cdp-reduce";
 import { allowedOrigins, EXTENSION_IDS, NATIVE_HOST_NAME } from "../../../packages/core/src/computer-use/browser/extension/extension-ids";
 import { hostManifest, writeManifestInto } from "../../../packages/core/src/computer-use/browser/extension/manifest";
 import type { BackendId, BackendRegistry, BrowserBackendInfo, BrowserFamily, CdpEvent, CdpTransport } from "../../../packages/core/src/computer-use/browser/transport";
@@ -324,9 +325,13 @@ async function main(): Promise<void> {
     const titleAfter = await evalIn<string>("document.title");
     check(titleAfter.result.value === "Winter e2e page", "…none of which ran", titleAfter.result.value);
 
-    // Network events arrive reduced.
+    // Network events arrive reduced (Phase 3: the request's URL and method, its timing and frame — never headers, cookies
+    // or post data), exactly as `cdp-reduce.ts` leaves them.
     const net = events.filter((e) => e.method === "Network.requestWillBeSent");
-    check(net.length > 0 && net.every((e) => Object.keys(e.params).every((k) => ["requestId", "timestamp", "type"].includes(k))), "Network events arrive reduced to requestId, timestamp, type", net[0]?.params);
+    const json = JSON.stringify(net.map((e) => e.params));
+    check(net.length > 0 && net.every((e) => JSON.stringify(cdpEventParams(e.method, e.params)) === JSON.stringify(e.params))
+      && !/"headers"|"postData"|"cookie"|"initiator"/i.test(json),
+    "Network events arrive reduced: URL, method, timing and frame — no headers, cookies, post data or initiator", net[0]?.params);
 
     // Input in the background tab, through Input.* (never the OS pointer).
     const box = await evalIn<{ x: number; y: number }>("(() => { const r = document.getElementById('count').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()");

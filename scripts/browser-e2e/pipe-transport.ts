@@ -40,7 +40,15 @@ export class PipeTransport implements CdpTransport {
   private nextTab = 1;
   private profile = "";
 
+  /** As Winter for Chrome says in its hello (Phase 3: `cdp3`); undefined for the built-in browser's stand-in. */
+  features?: Set<string>;
+
   constructor(readonly backend: string, family: BrowserFamily) { this.family = family; }
+
+  /** TEST ONLY, browser level: where a download the engine did NOT catch lands (never the user's Downloads folder). */
+  async setDownloadDir(dir: string): Promise<void> {
+    await this.raw("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: dir });
+  }
 
   async launch(chrome: string, extraArgs: string[] = []): Promise<void> {
     this.profile = mkdtempSync(join(tmpdir(), "winter-browser-e2e-profile-"));

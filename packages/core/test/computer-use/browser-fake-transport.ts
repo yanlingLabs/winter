@@ -2,10 +2,12 @@
 // what every real transport enforces (`cdp-allowlist.ts`: the methods, the events, and the world rules — code runs
 // only in an isolated world named "winter" whose context it SAW created), and plays the page runtime's ops
 // (`page-runtime/protocol.ts`) from the scripted page, so the engine is exercised exactly as it would drive Chromium.
-import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_NETWORK_BUFFER_MAX, CDP_RESPONSE_BODY_MAX_CHARS } from "../../src/computer-use/browser/cdp-allowlist";
+import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_IO_READ_MAX, CDP_NETWORK_BUFFER_MAX, CDP_RESPONSE_BODY_MAX_CHARS } from "../../src/computer-use/browser/cdp-allowlist";
 import { cdpEventParams } from "../../src/computer-use/browser/cdp-reduce";
 import type { RtClassify, RtHit, RtNode, RtPoint } from "../../src/computer-use/browser/page-runtime/protocol";
-import { TransportError, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportTab } from "../../src/computer-use/browser/transport";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { TransportError, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportDownload, type TransportTab } from "../../src/computer-use/browser/transport";
 
 export interface FakeFrame {
   frameId: string;
@@ -44,7 +46,14 @@ export interface FakePage {
   assets?: Array<{ kind: string; url: string }>;
   /** Phase 3: element attributes for `inspect`. */
   attributes?: Record<number, Record<string, string>>;
+  /** Phase 3: a click anywhere asks the server for this URL as a download (a button that makes the page download). */
+  clickDownload?: string;
+  /** Phase 3: a click anywhere makes the page save a file it made itself (a `blob:` download) with this name. */
+  clickBlob?: { name: string; body: string };
 }
+
+/** Phase 3: what the fake "server" answers for a URL (a download, or a page). */
+export interface FakeFile { body: string; headers?: Record<string, string>; status?: number }
 
 interface Ctx { frameId: string; session?: string; winter: boolean; doc: number }
 
@@ -92,6 +101,10 @@ export class FakeTab {
   beforeUnload = false;
   pendingNav?: string;
   holders = new Set<string>();
+  /** Phase 3: CDP sessions with Fetch interception on, the requests paused, the body streams handed out. */
+  readonly fetchOn = new Set<string>();
+  readonly paused = new Map<string, { session: string; url: string; body: Buffer; taken: boolean; settle(how: "continue" | "fail"): void }>();
+  readonly streams = new Map<string, { session: string; data: Buffer; off: number }>();
   constructor(readonly tabKey: string, public page: FakePage, readonly sessionId?: string, readonly agent = false) {
     this.history.push(page.url);
     this.historyIndex = 0;
@@ -131,6 +144,70 @@ export class FakeCdpTransport implements CdpTransport {
   updateGroup?: CdpTransport["updateGroup"];
   listWindows?: CdpTransport["listWindows"];
   readonly groupUpdates: Array<{ sessionId: string; title?: string; color?: string; collapsed?: boolean }> = [];
+  /** Phase 3 downloads: what the server answers by URL; the native handler's arms; where a user's browser saves. */
+  files: Record<string, FakeFile> = {};
+  readonly downloadArms = new Map<string, { dir: string; subdir: string; until: number; maxBytes: number }>();
+  readonly released: string[] = [];
+  /** A user's browser's own downloads folder (the extension's downloads route). */
+  browserDownloadsDir?: string;
+  /** The extension's optional downloads permission (false: an arm is refused not_allowed). */
+  downloadsPermission = true;
+  private readonly downloadListeners = new Set<(tabKey: string, d: TransportDownload) => void>();
+  private nextReq = 1;
+  private nextDl = 1;
+  armDownloads?: CdpTransport["armDownloads"];
+  startDownload?: CdpTransport["startDownload"];
+  onDownload?: CdpTransport["onDownload"];
+  releaseDownload?: CdpTransport["releaseDownload"];
+
+  /** Give this fake the native download members (the built-in browser's link 2; Winter for Chrome's downloads). */
+  withNativeDownloads(): this {
+    this.armDownloads = async (tabKey, o) => {
+      this.tab(tabKey);
+      if (o === null) { this.downloadArms.delete(tabKey); return; }
+      if (this.family !== "winter" && !this.downloadsPermission) throw new TransportError("not_allowed", "Winter for Chrome may not save downloads (the user has not allowed it)", { permission: "downloads" });
+      this.downloadArms.set(tabKey, { ...o });
+    };
+    if (this.family === "winter") this.startDownload = async (tabKey, url) => { this.nativeDownload(tabKey, url, this.files[url]); };
+    this.onDownload = (l) => { this.downloadListeners.add(l); return () => { this.downloadListeners.delete(l); }; };
+    this.releaseDownload = async (id) => { this.released.push(id); };
+    this.features?.add("downloads");
+    return this;
+  }
+
+  private tellDownload(tabKey: string, d: TransportDownload): void { for (const l of [...this.downloadListeners]) l(tabKey, d); }
+
+  /** The browser's own download handler: saves into the arm's folder (or refuses, unarmed — the built-in browser). */
+  private nativeDownload(tabKey: string, url: string, file: FakeFile | undefined, name?: string): void {
+    const arm = this.downloadArms.get(tabKey);
+    const id = `dl${this.nextDl++}`;
+    const fileName = name ?? url.split("/").at(-1) ?? "download";
+    if (arm === undefined) {
+      if (this.family === "winter") setTimeout(() => this.tellDownload(tabKey, { id, state: "refused", name: fileName, bytes: 0 }), 0);
+      return;
+    }
+    setTimeout(() => {
+      if (file === undefined || (file.status ?? 200) >= 400) { this.tellDownload(tabKey, { id, state: "failed", name: fileName, bytes: 0, error: "SERVER_BAD_CONTENT" }); return; }
+      const body = Buffer.from(file.body);
+      this.tellDownload(tabKey, { id, state: "started", name: fileName, bytes: 0, totalBytes: body.length });
+      const dir = this.family === "winter" ? arm.dir : join(this.browserDownloadsDir ?? arm.dir, arm.subdir);
+      mkdirSync(dir, { recursive: true });
+      const path = join(dir, fileName);
+      writeFileSync(path, body);
+      this.tellDownload(tabKey, { id, state: "done", name: fileName, bytes: body.length, path, mime: file.headers?.["content-type"] ?? "application/octet-stream" });
+    }, 0);
+  }
+
+  /** Pause a response under Fetch interception, as Chromium does; resolves when the engine continues or fails it. */
+  private pauseResponse(t: FakeTab, url: string, file: FakeFile, resourceType: "Document" | "Other"): Promise<"continue" | "fail"> {
+    const requestId = `interception-${this.nextReq++}`;
+    return new Promise((resolve) => {
+      t.paused.set(requestId, { session: "", url, body: Buffer.from(file.body), taken: false, settle: (how) => { t.paused.delete(requestId); resolve(how); } });
+      const headers = Object.entries(file.headers ?? { "content-type": "text/html" }).map(([name, value]) => ({ name, value }));
+      headers.push({ name: "Set-Cookie", value: "secret=1" });
+      queueMicrotask(() => this.emit(t, "Fetch.requestPaused", { requestId, frameId: "top", resourceType, request: { url, method: "GET", headers: { Cookie: "x" } }, responseStatusCode: file.status ?? 200, responseHeaders: headers }));
+    });
+  }
   windows: Array<{ id: number; focused: boolean; tabs: number }> = [{ id: 1, focused: true, tabs: 2 }];
 
   constructor(readonly backend: string, readonly family: BrowserFamily) {
@@ -469,7 +546,59 @@ export class FakeCdpTransport implements CdpTransport {
         }
         return r({ result: { type: "object", value: this.op(t, frameId, op, arg) } });
       }
-      case "Input.dispatchMouseEvent": return r({});
+      case "Input.dispatchMouseEvent": {
+        if (params.type === "mouseReleased" && session === undefined) {
+          const page = t.page;
+          if (page.clickBlob !== undefined) {
+            // A file the page makes itself: CDP never sees it (no Fetch pause); the browser's handler does.
+            this.emit(t, "Page.downloadWillBegin", { frameId: "top", guid: "g1", url: "blob:https://x/1", suggestedFilename: page.clickBlob.name });
+            this.nativeDownload(tabKey, "blob:https://x/1", { body: page.clickBlob.body }, page.clickBlob.name);
+          } else if (page.clickDownload !== undefined) {
+            const url = page.clickDownload;
+            const file = this.files[url];
+            if (t.fetchOn.has("") && file !== undefined) void this.pauseResponse(t, url, file, "Document");
+            else if (this.family === "winter") this.nativeDownload(tabKey, url, file);
+            else this.emit(t, "Page.downloadWillBegin", { frameId: "top", guid: "g2", url, suggestedFilename: url.split("/").at(-1) ?? "download" });
+          }
+        }
+        return r({});
+      }
+      case "Fetch.enable": {
+        if (params.handleAuthRequests === true) throw new TransportError("not_allowed", "Fetch.enable: no auth handling");
+        const patterns = Array.isArray(params.patterns) ? params.patterns as Array<Record<string, unknown>> : [];
+        if (patterns.length === 0 || patterns.some((p) => p.requestStage !== "Response")) throw new TransportError("not_allowed", "Fetch.enable: the Response stage only");
+        t.fetchOn.add(session ?? "");
+        return r({});
+      }
+      case "Fetch.disable": {
+        t.fetchOn.delete(session ?? "");
+        for (const [, p] of [...t.paused]) if (p.session === (session ?? "")) p.settle("continue");
+        return r({});
+      }
+      case "Fetch.continueRequest": case "Fetch.failRequest": {
+        const extra = Object.keys(params).filter((k) => k !== "requestId" && !(method === "Fetch.failRequest" && k === "errorReason"));
+        if (extra.length > 0 || (method === "Fetch.failRequest" && params.errorReason !== "Aborted")) throw new TransportError("not_allowed", `${method}: requestId only`);
+        const p = t.paused.get(String(params.requestId));
+        if (p === undefined) throw new TransportError("cdp_error", "Invalid InterceptionId.", { cdpCode: -32602, cdpMessage: "Invalid InterceptionId." });
+        p.settle(method === "Fetch.failRequest" ? "fail" : "continue");
+        return r({});
+      }
+      case "Fetch.takeResponseBodyAsStream": {
+        const p = t.paused.get(String(params.requestId));
+        if (p === undefined || p.session !== (session ?? "") || p.taken) throw new TransportError("not_allowed", "Fetch.takeResponseBodyAsStream: not a request paused at the Response stage here");
+        p.taken = true;
+        const stream = `stream-${this.nextReq++}`;
+        t.streams.set(stream, { session: session ?? "", data: p.body, off: 0 });
+        return r({ stream });
+      }
+      case "IO.read": {
+        const st = t.streams.get(String(params.handle));
+        if (st === undefined || st.session !== (session ?? "") || params.offset !== undefined || Number(params.size) > CDP_IO_READ_MAX) throw new TransportError("not_allowed", "IO.read: only our own stream, no offset, at most 1 MiB");
+        const chunk = st.data.subarray(st.off, st.off + Math.min(Number(params.size ?? CDP_IO_READ_MAX), 64 * 1024));
+        st.off += chunk.length;
+        return r({ data: chunk.toString("base64"), base64Encoded: true, eof: st.off >= st.data.length });
+      }
+      case "IO.close": t.streams.delete(String(params.handle)); return r({});
       case "Input.dispatchKeyEvent": {
         if (params.type === "keyDown" && typeof params.text === "string" && t.focused !== undefined) t.values.set(t.focused, (t.values.get(t.focused) ?? "") + params.text);
         return r({});
@@ -483,6 +612,11 @@ export class FakeCdpTransport implements CdpTransport {
         if (String(params.url) !== "about:blank" && !/^https?:/i.test(String(params.url))) throw new TransportError("not_allowed", "Page.navigate: only http(s) and about:blank");
         if (this.failNextNavigate !== undefined) { const e = this.failNextNavigate; delete this.failNextNavigate; return r({ frameId: "top", errorText: e }); }
         const url = String(params.url);
+        if (t.fetchOn.has("") && url !== "about:blank") {
+          // Every Document response pauses at the Response stage; the engine continues a page and takes a download.
+          const how = await this.pauseResponse(t, url, this.files[url] ?? { body: "<html></html>", headers: { "content-type": "text/html" } }, "Document");
+          if (how === "fail") return r({ frameId: "top", loaderId: `L${t.doc}`, errorText: "net::ERR_ABORTED" });
+        }
         t.history = t.history.slice(0, t.historyIndex + 1);
         t.history.push(url);
         t.historyIndex = t.history.length - 1;

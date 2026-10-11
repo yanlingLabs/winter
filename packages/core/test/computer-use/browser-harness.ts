@@ -27,6 +27,9 @@ export interface HarnessOpts {
   savedRules?: string[];
   vision?: boolean;
   installed?: string[];
+  /** Give these fakes the native download members before the engine starts (link protocol 2 / the extension's
+   *  downloads feature). */
+  nativeDownloads?: Array<"winter" | "chrome">;
 }
 
 export function harness(o: HarnessOpts = {}) {
@@ -37,6 +40,8 @@ export function harness(o: HarnessOpts = {}) {
   const registry = new BrowserBackendRegistry();
   const winter = new FakeCdpTransport("winter", "winter");
   const chrome = new FakeCdpTransport("chrome", "chrome");
+  if (o.nativeDownloads?.includes("winter") === true) winter.withNativeDownloads();
+  if (o.nativeDownloads?.includes("chrome") === true) chrome.withNativeDownloads();
   const winterReg = registry.register(winter, { family: "winter", name: "Winter (built-in)", instanceKey: "winter" });
   const chromeReg = registry.register(chrome, { family: "chrome", name: "Google Chrome", bundleId: "com.google.Chrome", instanceKey: "chrome-instance-1" });
   const panel = new Map<string, Array<{ tabId: string; url?: string; title?: string }>>();
@@ -80,6 +85,7 @@ export function harness(o: HarnessOpts = {}) {
     site: { dangerousDomainsAdded: () => o.dangerousAdded ?? [], savedAllowRules: () => o.savedRules ?? [] },
     home,
     uploadRoots: () => ({ tmpDir: tmp, denyRead: [join(cwd, "secret")] }),
+    downloadRoots: (sid) => ({ tmpDir: join(tmp, `winter-session-${sid}`), denyWrite: [join(cwd, "locked")], denyRead: [join(cwd, "secret")] }),
     installed: (b) => (o.installed ?? []).includes(b),
     persistentlyAllowed: (sid, b) => policy.persistentlyAllowed(sid, b),
     stopScript: (sessionId, reason) => stops.push({ sessionId, reason }),
@@ -99,6 +105,7 @@ export function harness(o: HarnessOpts = {}) {
     const metric: PrimitiveMetric = { ts: 0, sessionId, callId: "cv2_test", primitive: "x", ms: 0, helperMs: 0 };
     const sites = new Set<string>();
     const browsers = new Set<string>();
+    let downloads = 0;
     const scope: TabRunScope = {
       sessionId, runId, callId: "cv2_test", vision: o.vision ?? true, signal: abort.signal,
       live: () => { if (abort.signal.aborted) throw new Error("ended"); },
@@ -116,7 +123,7 @@ export function harness(o: HarnessOpts = {}) {
       granted: (b) => policy.persistentlyAllowed(sessionId, b) || grants.once.has(b),
       builder, lastTargetShot, acted, diffBases, metric,
       keepImage: (img) => { const id = `img${images.size + 1}`; images.set(id, { data: img.imageBase64 }); return { image: id, width: img.width, height: img.height }; },
-      noteSite: (h) => sites.add(h), noteBrowser: (b) => browsers.add(b), trusted: () => {},
+      noteSite: (h) => sites.add(h), noteBrowser: (b) => browsers.add(b), noteDownload: () => { downloads++; }, trusted: () => {},
     };
     const end = (): void => {
       abort.abort();
@@ -125,7 +132,7 @@ export function harness(o: HarnessOpts = {}) {
       engine.runEnded(sessionId, runId);
     };
     const text = (): string => builder.build().content.map((c) => (c.type === "text" ? c.text : "[image]")).join("");
-    return { scope, builder, end, text, metric, sites, browsers, grants, abort };
+    return { scope, builder, end, text, metric, sites, browsers, grants, abort, downloads: () => downloads };
   };
   return { engine, registry, winter, chrome, winterReg, chromeReg, panel, closedWinter, cards, approvals, run, locks, diffBases, home, cwd, tmp, facts, stops, policy };
 }

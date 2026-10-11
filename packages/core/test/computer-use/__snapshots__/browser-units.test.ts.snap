@@ -21,6 +21,7 @@ exports[`the tool description snapshots, with and without vision 1`] = `
 - Tabs you open are yours. Tabs you open in the user's own browser close when your turn ends unless you call keep() (give it to the user) or handoff() (keep it for your next turn). Tabs you bind with \`browsers.tab()\` are the user's: never close them; they are released at the end of the turn.
 - A tab's refs belong to its page: after a navigation to a new page every earlier ref is stale. A page dialog (alert, confirm, prompt) shows at the top of \`state()\` — click its OK or Cancel before anything else.
 - Tabs have developer readers: \`console()\`, \`network()\` and \`networkBody(id)\`, \`inspect()\`, \`html()\`, \`assets()\` — what Winter saw while it worked in the tab since you bound it, secrets redacted; \`viewport()\` emulates a screen size.
+- \`download(ref | { url })\` saves the file a link or button gives into this session's temp folder — \`{ to: "<path in the working directory>" }\` puts it there — and returns its path. Clicking a download link yourself saves nothing. In the user's own browser a file the page makes itself needs the user to allow downloads in Winter for Chrome (\`NotAllowed\` says so).
 - \`browsers.group()\` names or folds your tabs' group in the user's browser; \`keep({ group })\` hands tabs to the user in a group of their own.
 
 \`\`\`ts
@@ -87,6 +88,7 @@ interface Tab extends Target {
   upload(ref: Ref, paths: string | string[]): Promise<void>;  // files from this session's working directory into a file input
   viewport(size: { width: number; height: number; mobile?: boolean; scale?: number } | null): Promise<void>;   // emulate a screen size on a tab you opened; null: back to normal
   mute(on?: boolean): Promise<void>;     // a tab you opened
+  download(t: Ref | { url: string }, o?: { to?: string; timeoutMs?: number }): Promise<{ path: string; name: string; bytes: number; mime: string }>;
   keep(o?: { group?: string }): Promise<void>;   // hand this tab to the user: it leaves Winter's group (into their own group named \`group\`, if given) and Winter never closes it
   handoff(): Promise<void>;   // keep this tab (yours, still in Winter's group) for your next turn only — call it again each turn you still need it
   close(): Promise<void>;                // only a tab you opened and still own (not one you kept)
@@ -139,6 +141,7 @@ exports[`the tool description snapshots, with and without vision 2`] = `
 - Tabs you open are yours. Tabs you open in the user's own browser close when your turn ends unless you call keep() (give it to the user) or handoff() (keep it for your next turn). Tabs you bind with \`browsers.tab()\` are the user's: never close them; they are released at the end of the turn.
 - A tab's refs belong to its page: after a navigation to a new page every earlier ref is stale. A page dialog (alert, confirm, prompt) shows at the top of \`state()\` — click its OK or Cancel before anything else.
 - Tabs have developer readers: \`console()\`, \`network()\` and \`networkBody(id)\`, \`inspect()\`, \`html()\`, \`assets()\` — what Winter saw while it worked in the tab since you bound it, secrets redacted; \`viewport()\` emulates a screen size.
+- \`download(ref | { url })\` saves the file a link or button gives into this session's temp folder — \`{ to: "<path in the working directory>" }\` puts it there — and returns its path. Clicking a download link yourself saves nothing. In the user's own browser a file the page makes itself needs the user to allow downloads in Winter for Chrome (\`NotAllowed\` says so).
 - \`browsers.group()\` names or folds your tabs' group in the user's browser; \`keep({ group })\` hands tabs to the user in a group of their own.
 
 \`\`\`ts
@@ -199,6 +202,7 @@ interface Tab extends Target {
   upload(ref: Ref, paths: string | string[]): Promise<void>;  // files from this session's working directory into a file input
   viewport(size: { width: number; height: number; mobile?: boolean; scale?: number } | null): Promise<void>;   // emulate a screen size on a tab you opened; null: back to normal
   mute(on?: boolean): Promise<void>;     // a tab you opened
+  download(t: Ref | { url: string }, o?: { to?: string; timeoutMs?: number }): Promise<{ path: string; name: string; bytes: number; mime: string }>;
   keep(o?: { group?: string }): Promise<void>;   // hand this tab to the user: it leaves Winter's group (into their own group named \`group\`, if given) and Winter never closes it
   handoff(): Promise<void>;   // keep this tab (yours, still in Winter's group) for your next turn only — call it again each turn you still need it
   close(): Promise<void>;                // only a tab you opened and still own (not one you kept)

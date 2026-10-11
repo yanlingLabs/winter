@@ -7,7 +7,7 @@
 // settings watcher swaps the holder (the `connector-source.ts` `noteWritten` pattern) — the very next call sees it.
 import { PanelOpenTabParams, type NewSessionEvent, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { ApprovalBroker } from "../agent/approvals";
-import { sessionTmpDir } from "../agent/session-tmp";
+import { sessionTmpDir, sessionTmpDirPath } from "../agent/session-tmp";
 import { mintPanelTab } from "../panel/open-tab";
 import { foldPanelTabs } from "../panel/store";
 import { sandboxConfigFor } from "../runtime-sdk/mode-options";
@@ -254,6 +254,10 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     },
     home: deps.home,
     uploadRoots: (sessionId, cwd) => ({ tmpDir: sessionTmpDir(sessionId), denyRead: sandboxConfigFor(deps.home, cwd).filesystem?.denyRead ?? [] }),
+    downloadRoots: (sessionId, cwd) => {
+      const sandbox = sandboxConfigFor(deps.home, cwd).filesystem;
+      return { tmpDir: sessionTmpDirPath(sessionId), denyWrite: sandbox?.denyWrite ?? [], denyRead: sandbox?.denyRead ?? [] };
+    },
     screenshotMaxDim: () => computerUseScreenshotMaxDimFrom(settings()),
     installed: deps.inject?.browserInstalled ?? ((bundleId) => systemAppResolver.fromBundleId(bundleId) !== undefined),
     persistentlyAllowed: (sessionId, bundleId) => policy.persistentlyAllowed(sessionId, bundleId),

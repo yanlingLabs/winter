@@ -246,6 +246,8 @@ interface RunCtx {
   /** Phase 2, for the audit line: the sites (hosts only) and browser backends this run touched. */
   sites?: Set<string>;
   browsers?: Set<string>;
+  /** download() files saved this run (a count, for the audit line). */
+  downloads?: number;
   /** Phase 2: browser-tab primitives still running (the run's tab locks wait for them at its end). */
   tabWork?: Set<Promise<unknown>>;
 }
@@ -454,6 +456,7 @@ export class ComputerV2Service {
       kind: "automation", sessionId, apps: [...ctx.apps], primitives: Object.fromEntries(ctx.primitives),
       durationMs: this.now() - started, outcome: outcomeWord, ...(ctx.visitsClaimed > 0 ? { desktopVisits: ctx.visitsClaimed } : {}),
       ...(ctx.sites === undefined ? {} : { sites: [...ctx.sites] }), ...(ctx.browsers === undefined ? {} : { browsers: [...ctx.browsers] }),
+      ...(ctx.downloads === undefined ? {} : { downloads: ctx.downloads }),
     });
     return builder.build(error === undefined ? {} : { error });
   }
@@ -1445,6 +1448,7 @@ export class ComputerV2Service {
       metric,
       noteSite: (host) => { (ctx.sites ??= new Set()).add(host); },
       noteBrowser: (id) => { (ctx.browsers ??= new Set()).add(id); },
+      noteDownload: () => { ctx.downloads = (ctx.downloads ?? 0) + 1; },
       trusted: (sentence) => { ctx.daemonSentences.add(sentence); },
     };
   }

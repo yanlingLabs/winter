@@ -8,7 +8,7 @@
 // two local origins (so the payment iframe is an out-of-process iframe). The browser is `$WINTER_TEST_CHROME`, or a
 // Chrome for Testing build already on this Mac (Playwright's cache) — nothing is installed, the profile is a fresh temp
 // directory, `--use-mock-keychain` keeps it off the login Keychain, and nothing is downloaded.
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { CDP_ALLOWED_METHODS } from "../../packages/core/src/computer-use/browser/cdp-allowlist";
@@ -67,6 +67,9 @@ const serve = (port: number, rewrite: (s: string) => string) => Bun.serve({
   port, hostname: "127.0.0.1",
   fetch(req) {
     const path = new URL(req.url).pathname.replace(/^\/$/, "/index.html");
+    // Phase 3's downloads: an attachment, and a PDF a browser would show (no disposition).
+    if (path === "/files/prices.csv") return new Response("item,price\ntea,3\n", { headers: { "content-type": "text/csv", "content-disposition": 'attachment; filename="prices.csv"' } });
+    if (path === "/files/doc.pdf") return new Response("%PDF-1.4\n%fake\n", { headers: { "content-type": "application/pdf" } });
     const file = join(FIXTURE, path.replace(/\.\./g, ""));
     if (!existsSync(file)) return new Response("not found", { status: 404 });
     return new Response(rewrite(readFileSync(file, "utf8")), { headers: { "content-type": "text/html; charset=utf-8" } });
@@ -83,7 +86,16 @@ const transport = new PipeTransport("winter", "winter");
 await transport.launch(chrome);
 const registry = new BrowserBackendRegistry();
 registry.register(transport, { family: "winter", name: "Chromium (test)", instanceKey: "winter" });
+// Phase 3: a second Chromium playing a USER's browser (Winter for Chrome's backend: Fetch interception for downloads).
+// A download Winter does not catch lands in a temp folder, never the user's Downloads folder.
+const userBrowser = new PipeTransport("chrome", "chrome");
+userBrowser.features = new Set(["cdp3"]);
+await userBrowser.launch(chrome);
+const browserDownloads = mkdtempSync(join(tmpdir(), "winter-browser-e2e-downloads-"));
+await userBrowser.setDownloadDir(browserDownloads);
+registry.register(userBrowser, { family: "chrome", name: "Chrome for Testing", bundleId: "com.google.chrome.for.testing", instanceKey: "chrome-e2e" });
 const cwd = mkdtempSync(join(tmpdir(), "winter-browser-e2e-cwd-"));
+const sessionTmp = join(mkdtempSync(join(tmpdir(), "winter-browser-e2e-tmp-")), "winter-session-e2e");
 writeFileSync(join(cwd, "receipt.txt"), "a receipt");
 let tabSeq = 0;
 const engine = new BrowserEngine({
@@ -94,6 +106,7 @@ const engine = new BrowserEngine({
   site: { dangerousDomainsAdded: () => [], savedAllowRules: () => [] },
   home: mkdtempSync(join(tmpdir(), "winter-browser-e2e-home-")),
   uploadRoots: () => ({ denyRead: [] }),
+  downloadRoots: () => ({ tmpDir: sessionTmp, denyWrite: [], denyRead: [] }),
 });
 const locks = new TargetLocks();
 const diffBases = new DiffBases();
@@ -402,14 +415,74 @@ await check("with nothing editable focused, a key carrying a command keeps its d
   await P("waitFor", { cond: { text: "key Backspace" }, timeoutMs: 3_000 });
 });
 
+// ── Phase 3: download() in a user's browser (Fetch interception) ─────────────────────────────────────
+const run2 = scope("r2");
+let dtab!: TabHandle;
+const D = (primitive: string, args: Record<string, unknown> = {}) => engine.primitive(run2.s, dtab.targetId, primitive, args);
+const browserFolder = (): string[] => readdirSync(browserDownloads).filter((f) => !f.endsWith(".crdownload"));
+
+await check("download(link) in a user's browser: a temporary tab under Fetch interception, the file in the session folder, nothing in the browser's folder", async () => {
+  dtab = await engine.global(run2.s, "browsers.open", { url: `${BASE}/downloads.html`, browser: "chrome" }) as TabHandle;
+  const s = await D("state", { full: true, emit: false }) as string;
+  const tabsBefore = (await userBrowser.listTabs()).length;
+  const got = await D("download", { target: refOf(s, /link "Price list"/) }) as { path: string; name: string; bytes: number; mime: string };
+  expect(got.name === "prices.csv" && got.mime === "text/csv" && got.bytes === 17, "the file's facts", JSON.stringify(got));
+  expect(readFileSync(got.path, "utf8") === "item,price\ntea,3\n", "the file's bytes", readFileSync(got.path, "utf8"));
+  expect(got.path.startsWith(sessionTmp) || got.path.includes("winter-session-e2e"), "in the session's temp folder", got.path);
+  expect((await userBrowser.listTabs()).length === tabsBefore, "the temporary tab closed");
+  await new Promise((r) => setTimeout(r, 500));
+  expect(browserFolder().length === 0, "the browser saved nothing", browserFolder().join(", "));
+});
+
+await check("download(button) in the bound tab: armed, clicked, caught — the page stays", async () => {
+  const s = await D("state", { full: true, emit: false }) as string;
+  const got = await D("download", { target: refOf(s, /button "Export"/), to: "exports/" }) as { path: string; name: string };
+  expect(got.path === join(realpathSync(cwd), "exports", "prices.csv"), "into the working directory", got.path);
+  expect((await D("url", {}) as string).endsWith("/downloads.html"), "the page stayed");
+  await new Promise((r) => setTimeout(r, 500));
+  expect(browserFolder().length === 0, "the browser saved nothing", browserFolder().join(", "));
+});
+
+await check("download(link to a PDF): the browser would show it — Winter saves it", async () => {
+  const s = await D("state", { full: true, emit: false }) as string;
+  const got = await D("download", { target: refOf(s, /link "Read the PDF"/) }) as { name: string; mime: string };
+  expect(got.name === "doc.pdf" && got.mime === "application/pdf", "the PDF's facts", JSON.stringify(got));
+});
+
+await check("download(data: link): decoded by Winter, named by its download attribute", async () => {
+  const s = await D("state", { full: true, emit: false }) as string;
+  const got = await D("download", { target: refOf(s, /link "Inline note"/) }) as { path: string; name: string };
+  expect(got.name === "note.txt" && readFileSync(got.path, "utf8") === "hello data", "the decoded file", JSON.stringify(got));
+});
+
+await check("a page-made (blob:) file without the downloads permission: CDP never sees it, Page.downloadWillBegin does — the sentence says to allow downloads", async () => {
+  dtab = await engine.global(run2.s, "browsers.open", { url: `${BASE}/downloads.html`, browser: "chrome" }) as TabHandle;
+  const s = await D("state", { full: true, emit: false }) as string;
+  const e = await failsWith(D("download", { target: refOf(s, /button "Make file"/), timeoutMs: 3_000 }), "WaitTimeout");
+  expect(e.message.includes("that file is made by the page itself") && e.message.includes('saved "made.txt"'), "the sentence", e.message);
+  expect(browserFolder().includes("made.txt"), "the browser saved its own copy (in the test's folder)", browserFolder().join(", "));
+});
+
+await check("an unarmed click that downloads: Page.downloadWillBegin still fires, and the next state says the browser saved it", async () => {
+  const s = await D("state", { full: true, emit: false }) as string;
+  await D("click", { target: refOf(s, /button "Export"/) });
+  await new Promise((r) => setTimeout(r, 1_000));
+  const after = await D("state", { full: true, emit: false }) as string;
+  expect(after.includes('the page started a download of "prices.csv"') && after.includes("saved it in its own Downloads folder"), "the note", after);
+});
+run2.end();
+
 await check("the engine never sent a method outside the allowlist, and the transport refused nothing", async () => {
   expect(transport.sent.every((m) => CDP_ALLOWED_METHODS.includes(m)), "all methods allowlisted");
   expect(transport.refused.length === 0, "nothing refused", transport.refused.join("\n"));
+  expect(userBrowser.sent.every((m) => CDP_ALLOWED_METHODS.includes(m)), "all methods allowlisted (the user's browser)");
+  expect(userBrowser.refused.length === 0, "nothing refused (the user's browser)", userBrowser.refused.join("\n"));
 });
 
 run1.end();
 engine.stop();
 await transport.close();
+await userBrowser.close();
 oop.stop(true);
 main.stop(true);
 console.log(`\n${passed} passed, ${failures.length} failed`);

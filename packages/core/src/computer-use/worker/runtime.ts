@@ -231,6 +231,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     keep(o?: unknown) { return call("keep", tid(this), opts(o)).then(nothing); }
     viewport(size: unknown) { return call("viewport", tid(this), { size: size === undefined ? null : size }).then(nothing); }
     mute(on?: unknown) { return call("mute", tid(this), on === undefined ? {} : { on }).then(nothing); }
+    download(t: unknown, o?: unknown) { return call("download", tid(this), { target: t, ...opts(o) }); }
     handoff() { return call("handoff", tid(this), {}).then(nothing); }
     close() { return call("close", tid(this), {}).then(nothing); }
     toString(): string { return `[Tab ${(this as unknown as { id: string }).id}]`; }

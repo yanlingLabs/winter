@@ -14,6 +14,8 @@
 // `browsers.tab` is a bind; reads are observes; acts are acts. One grant covers the browser as an app and its tabs.
 // The dangerous-domain floor and the secure-field floor apply to both backends.
 import { randomBytes } from "node:crypto";
+import { constants, copyFileSync, lstatSync, realpathSync, rmdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { nextScreenshotQuality, screenshotBudgetFor, SCREENSHOT_BYTE_CAP, SCREENSHOT_QUALITY } from "../budget";
 import { AutomationFailure } from "../errors";
 import type { AppRef } from "../policy";
@@ -29,6 +31,10 @@ import type { BackendId, BrowserFamily, CdpTransport, TransportTab } from "./tra
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
 import { BODY_DEFAULT_CHARS, BODY_MAX_CHARS, isTextMime, redactBody } from "./body-redact";
 import { bytesLabel, CONSOLE_LEVELS, consoleLine, requestLine } from "./devtools";
+import { clearStagedDownloads, DOWNLOAD_MAX_BYTES, DOWNLOADS_PER_RUN, newStagingDir, placeDownload, planDownload, type DownloadPlan, type DownloadRoots } from "./download-paths";
+import {
+  decodeDataUrl, DOWNLOAD_START_DEFAULT_MS, DOWNLOAD_TOTAL_MAX_MS, FetchCapture, NativeCapture, nativeArmFailure, waitForCapture, type CapturedFile,
+} from "./downloads";
 
 /** `state()`/`screenshot()` settle for at most this long after an act in the same call (Phase 1's cap). */
 const SETTLE_CAP_MS = 1_500;
@@ -60,6 +66,9 @@ export interface BrowserEngineDeps {
   /** Uploads: the Winter home, and the session's temp directory and read-deny list. */
   home: string;
   uploadRoots?(sessionId: string, cwd: string | null | undefined): { tmpDir?: string; denyRead: readonly string[] };
+  /** Downloads: the session's temp directory AS SPELLED (`sessionTmpDirPath`), and the sandbox's deny-write and
+   *  deny-read lists for the session. */
+  downloadRoots?(sessionId: string, cwd: string | null | undefined): { tmpDir: string; denyWrite: readonly string[]; denyRead: readonly string[] };
   /** `computerUse.screenshotMaxDim` (read live). */
   screenshotMaxDim?(): number | undefined;
   /** Is an app with this bundle id installed (a LaunchServices lookup, never a launch)? */
@@ -157,13 +166,17 @@ export class BrowserEngine {
   private readonly hooked = new Map<CdpTransport, { backend: BackendId; off: Array<() => void> }>();
   private readonly approvals = new SiteApprovals();
   private readonly declined = new Map<string, Set<string>>();
+  /** download() calls per run (session + run id), for the per-run cap. */
+  private readonly downloadsByRun = new Map<string, number>();
   private installedCache?: { at: number; ids: Set<string> };
   private unwatch?: () => void;
   private stopped = false;
 
   constructor(private readonly deps: BrowserEngineDeps) {
-    // Files an earlier daemon run staged for uploads go (the daemon is starting: no session can be using them).
+    // Files an earlier daemon run staged for uploads or downloads go (the daemon is starting: no session can be using
+    // them).
     clearStagedUploads(deps.home);
+    clearStagedDownloads(deps.home);
     this.unwatch = deps.registry.onChange(() => this.hookTransports());
     this.hookTransports();
   }
@@ -246,6 +259,7 @@ export class BrowserEngine {
   /** A run ended: its "once" site approvals go, and a user browser bound on an "Allow once" answer is released. */
   runEnded(sessionId: string, runId: string): void {
     this.approvals.runEnded(sessionId, runId);
+    this.downloadsByRun.delete(`${sessionId}\u0000${runId}`);
     this.declined.delete(`${sessionId}\u0000${runId}`);
     const s = this.sessions.get(sessionId);
     if (s === undefined) return;
@@ -317,6 +331,7 @@ export class BrowserEngine {
   /** The session's computer-use runtime ended: idled out, the session deleted, or the daemon stopping. */
   sessionEnded(sessionId: string, reason: "deleted" | "idle" | "stop"): void {
     clearStagedUploads(this.deps.home, sessionId);
+    clearStagedDownloads(this.deps.home, sessionId);
     const s = this.sessions.get(sessionId);
     if (s !== undefined) {
       for (const b of s.bindings.values()) if (b.lost === undefined) void this.drivers.get(tabKeyOf(b.backend, b.tabKey))?.release(sessionId);
@@ -399,6 +414,10 @@ export class BrowserEngine {
         transport.onEvent((e) => this.drivers.get(tabKeyOf(id, e.tabKey))?.onEvent(e)),
         transport.onTabGone((tabKey, reason) => this.tabGone(id, tabKey, reason)),
         transport.onStop((tabKey) => this.stopPressed(id, tabKey)),
+        // A download the built-in browser refused while nothing was armed: the next state says so.
+        ...(transport.onDownload === undefined ? [] : [transport.onDownload((tabKey, d) => {
+          if (d.state === "refused") this.drivers.get(tabKeyOf(id, tabKey))?.noteUncaughtDownload(d.name);
+        })]),
       ];
       this.hooked.set(transport, { backend: id, off });
       if (this.familyOf(id) !== "winter" && transport.connected) void this.reconcileOrphans(id, transport);
@@ -1174,6 +1193,7 @@ export class BrowserEngine {
       case "console": this.requireCdp3(driver, "console()"); return this.consoleCall(scope, driver, args);
       case "network": this.requireCdp3(driver, "network()"); return this.networkCall(scope, driver, args);
       case "networkBody": this.requireCdp3(driver, "networkBody()"); return await this.networkBodyCall(scope, driver, args);
+      case "download": return await this.downloadCall(scope, b, driver, args);
       case "upload": {
         if (!isRef(args.ref)) throw bad("upload() takes a file input's ref and a path or an array of paths");
         const cwd = (() => { try { return this.deps.sessionInfo(sid).cwd; } catch { return undefined; } })();
@@ -1394,6 +1414,256 @@ export class BrowserEngine {
     return read.entries;
   }
 
+  // ── download() ─────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * `download(ref | { url }, { to?, timeoutMs? })`: the file a link or button gives, saved into the session's temp
+   * folder (or `to`) — never through the user's Downloads folder for an ordinary file. The routes:
+   *  - a `data:` link: decoded here, no browser;
+   *  - an http(s) link or media (or `{ url }`): the built-in browser downloads it in that tab (its cookies), a user's
+   *    browser loads it in a temporary background tab of the session's group under Fetch interception;
+   *  - a `blob:` link (a file the page makes itself) or a button: the tab is armed and the ref clicked — the built-in
+   *    browser's own handler catches anything; a user's browser catches http(s) over Fetch, and a page-made file only
+   *    through Winter for Chrome's optional downloads permission.
+   */
+  private async downloadCall(scope: TabRunScope, b: Binding, driver: TabDriver, args: Record<string, unknown>): Promise<{ path: string; name: string; bytes: number; mime: string }> {
+    const sid = scope.sessionId;
+    const cwd = this.cwdOf(sid);
+    const r = this.deps.downloadRoots?.(sid, cwd);
+    if (r === undefined) throw new Error("downloads are not available in this Winter");
+    const roots: DownloadRoots = { cwd, tmpDir: r.tmpDir, home: this.deps.home, denyWrite: r.denyWrite };
+    // A destination that can't be used fails before anything is fetched.
+    planDownload(args.to, "download", roots);
+    const runKey = `${sid}\u0000${scope.runId}`;
+    const count = this.downloadsByRun.get(runKey) ?? 0;
+    if (count >= DOWNLOADS_PER_RUN) throw new AutomationFailure("NotAllowed", `at most ${DOWNLOADS_PER_RUN} downloads per script — run another script for more`);
+    const timeout = args.timeoutMs === undefined ? DOWNLOAD_START_DEFAULT_MS : args.timeoutMs;
+    if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) throw bad("download()'s timeoutMs is a positive number of ms");
+    const startMs = scope.clampWait(Math.min(timeout, DOWNLOAD_TOTAL_MAX_MS));
+    const totalMs = scope.clampWait(DOWNLOAD_TOTAL_MAX_MS);
+    const winter = this.familyOf(b.backend) === "winter";
+
+    const t = args.target;
+    let ref: number | undefined;
+    let url: string | undefined;
+    let linkName: string | undefined;
+    if (isRef(t)) {
+      ref = t;
+      const link = await driver.linkOf(t);
+      scope.live();
+      if (link.kind !== "other") url = link.url;
+      if (link.kind === "link" && link.download !== undefined && link.download !== "") linkName = link.download;
+    } else if (t !== null && typeof t === "object" && !Array.isArray(t) && typeof (t as { url?: unknown }).url === "string") {
+      url = (t as { url: string }).url.trim();
+    } else {
+      throw bad("download() takes an element ref or { url }");
+    }
+    this.downloadsByRun.set(runKey, count + 1);
+
+    const staging = newStagingDir(this.deps.home, sid);
+    let captured: CapturedFile;
+    let fromBrowserFolder: { path: string; subdir: string; id?: string; transport: CdpTransport } | undefined;
+    if (url !== undefined && /^data:/i.test(url)) {
+      const { bytes, mime } = decodeDataUrl(url, DOWNLOAD_MAX_BYTES);
+      const stagedPath = join(staging, "file");
+      writeFileSync(stagedPath, bytes, { mode: 0o600, flag: "wx" });
+      captured = { stagedPath, bytes: bytes.length, mime, name: linkName ?? `download${extFor(mime)}` };
+    } else if (url !== undefined && /^blob:/i.test(url)) {
+      if (ref === undefined) throw new AutomationFailure("NotAllowed", "a blob: address only works inside its page — pass the link's ref instead");
+      const out = await this.captureByClick(scope, b, driver, ref, { staging, startMs, totalMs, fetch: false });
+      captured = out.file;
+      fromBrowserFolder = out.browserFolder;
+    } else if (url !== undefined) {
+      const checked = checkTabUrl(url, "download()");
+      if (checked === "about:blank") throw bad("download() needs the address of a file");
+      await ensureSiteAllowed(scope, this.approvals, this.deps.site ?? {}, checked, this.browserName(b.backend), cwd);
+      scope.live();
+      noteSiteOf(scope, checked);
+      captured = winter
+        ? await this.captureNativeUrl(scope, b, driver, checked, { staging, startMs, totalMs })
+        : await this.captureUrlRoute(scope, b, checked, { staging, startMs, totalMs });
+    } else {
+      const out = await this.captureByClick(scope, b, driver, ref!, { staging, startMs, totalMs, fetch: !winter });
+      captured = out.file;
+      fromBrowserFolder = out.browserFolder;
+    }
+    scope.live();
+
+    // Into place: the name the server (or the browser) suggested, under the rules of `download-paths.ts`.
+    const plan: DownloadPlan = planDownload(args.to, captured.name, roots);
+    let source = captured.stagedPath;
+    let afterPlaced: (() => void) | undefined;
+    if (fromBrowserFolder !== undefined) ({ source, afterPlaced } = this.takeFromBrowserFolder(fromBrowserFolder, captured, staging, r.denyRead));
+    else if (winter && captured.reportedPath !== undefined) this.requireInStaging(captured.reportedPath, staging);
+    const placed = placeDownload(source, plan, { expectedBytes: captured.bytes, tmpDir: r.tmpDir });
+    afterPlaced?.();
+    if (fromBrowserFolder?.id !== undefined) void fromBrowserFolder.transport.releaseDownload?.(fromBrowserFolder.id).catch(() => undefined);
+    scope.metric.download = { bytes: placed.bytes };
+    scope.noteDownload?.();
+    scope.builder.markScreenRead();
+    scope.builder.text(`downloaded "${redactText(placed.name)}" (${bytesLabel(placed.bytes)}, ${captured.mime}) → ${placed.path}`, { screen: true });
+    return { path: placed.path, name: placed.name, bytes: placed.bytes, mime: captured.mime };
+  }
+
+  /** Arm the tab, click the ref, take whichever capture catches first. */
+  private async captureByClick(
+    scope: TabRunScope, b: Binding, driver: TabDriver, ref: number,
+    o: { staging: string; startMs: number; totalMs: number; fetch: boolean },
+  ): Promise<{ file: CapturedFile; browserFolder?: { path: string; subdir: string; id?: string; transport: CdpTransport } }> {
+    const winter = this.familyOf(b.backend) === "winter";
+    const name = this.browserName(b.backend);
+    const transport = driver.transport;
+    if (o.fetch) this.requireCdp3(driver, "download()");
+    const fetch = o.fetch ? new FetchCapture(driver, { anyResponse: false, stagingDir: o.staging, maxBytes: DOWNLOAD_MAX_BYTES }) : undefined;
+    const subdir = winter ? "" : `Winter/${randomBytes(6).toString("hex")}`;
+    let native: NativeCapture | undefined;
+    if (transport.armDownloads !== undefined && transport.onDownload !== undefined) {
+      native = new NativeCapture(transport, b.tabKey, { dir: winter ? o.staging : "", subdir, until: this.now() + o.totalMs, maxBytes: DOWNLOAD_MAX_BYTES, now: () => this.now() });
+    } else if (winter) {
+      throw new Error("Winter's built-in browser can't save downloads until Winter is updated");
+    }
+    let nativeRefusal: Error | undefined;
+    try {
+      if (fetch !== undefined) await fetch.arm();
+      if (native !== undefined) {
+        try { await native.arm(); } catch (err) {
+          nativeRefusal = winter ? transportFailure(err, name) : nativeArmFailure(err, name);
+          native = undefined;
+          if (fetch === undefined) throw nativeRefusal;
+        }
+      } else if (fetch === undefined) {
+        throw new AutomationFailure("NotAllowed", `this file is made by the page itself — to save it from ${name}, ask the user to allow downloads in Winter for Chrome's menu (its toolbar button)`);
+      }
+      const at = await this.pointOf(scope, b, driver, ref, "download()", true);
+      scope.live();
+      await driver.click(at, {});
+      scope.acted.add(b.targetId);
+      const captures = [fetch, native].filter((c): c is FetchCapture | NativeCapture => c !== undefined);
+      const any = firstOf(captures);
+      const file = await waitForCapture(any, {
+        startMs: o.startMs, totalMs: o.totalMs, signal: scope.signal, now: () => this.now(),
+        ...(native === undefined ? {} : { progressAt: () => native!.lastProgress }),
+        nothing: () => {
+          const pageMade = fetch?.sighting.pageDownload;
+          if (pageMade !== undefined) {
+            const saved = `${name} saved "${redactText(pageMade)}" in its own Downloads folder`;
+            if (nativeRefusal !== undefined) return `${nativeRefusal.message} (${saved})`;
+            if (!winter && transport.armDownloads === undefined) {
+              return `that file is made by the page itself — to save it from ${name}, ask the user to update Winter for Chrome and allow downloads in its menu (its toolbar button) (${saved})`;
+            }
+            return `the page started a download of "${redactText(pageMade)}" that Winter could not catch`;
+          }
+          if ((fetch?.sighting.pages ?? 0) > 0) return "the click opened a page instead of a download — read the page (state()) and download from its link";
+          return `nothing started a download within ${Math.round(o.startMs / 1000)} s of the click`;
+        },
+      });
+      if (file.nativeId !== undefined && !winter) return { file, browserFolder: { path: file.reportedPath ?? file.stagedPath, subdir, id: file.nativeId, transport } };
+      return { file };
+    } finally {
+      await fetch?.disarm();
+      await native?.disarm();
+    }
+  }
+
+  /** The built-in browser: arm the tab and have it download `url` itself (its cookies), with no navigation. */
+  private async captureNativeUrl(scope: TabRunScope, b: Binding, driver: TabDriver, url: string, o: { staging: string; startMs: number; totalMs: number }): Promise<CapturedFile> {
+    const transport = driver.transport;
+    if (transport.armDownloads === undefined || transport.startDownload === undefined || transport.onDownload === undefined) {
+      throw new Error("Winter's built-in browser can't save downloads until Winter is updated");
+    }
+    const native = new NativeCapture(transport, b.tabKey, { dir: o.staging, subdir: "", until: this.now() + o.totalMs, maxBytes: DOWNLOAD_MAX_BYTES, now: () => this.now() });
+    try {
+      try { await native.arm(); } catch (err) { throw transportFailure(err, this.browserName(b.backend)); }
+      try { await transport.startDownload(b.tabKey, url); } catch (err) { throw transportFailure(err, this.browserName(b.backend)); }
+      return await waitForCapture(native, {
+        startMs: o.startMs, totalMs: o.totalMs, signal: scope.signal, now: () => this.now(), progressAt: () => native.lastProgress,
+        nothing: () => `the download of ${redactUrl(url).slice(0, 200)} did not start within ${Math.round(o.startMs / 1000)} s`,
+      });
+    } finally {
+      await native.disarm();
+    }
+  }
+
+  /**
+   * A user's browser: the file at `url` loaded in a TEMPORARY background tab of the session's group, under Fetch
+   * interception (any final 2xx is the file), then the tab closed. The bound tab itself is never navigated (a "leave
+   * this page?" there could cost it its page).
+   */
+  private async captureUrlRoute(scope: TabRunScope, b: Binding, url: string, o: { staging: string; startMs: number; totalMs: number }): Promise<CapturedFile> {
+    const sid = scope.sessionId;
+    const name = this.browserName(b.backend);
+    const transport = this.deps.registry.get(b.backend);
+    if (transport === undefined || !transport.connected) throw this.unavailable(b.backend);
+    if (!transportHasCdp3(transport)) throw new AutomationFailure("BrowserUnavailable", `the Winter for Chrome in ${name} is too old for download() — ask the user to update it`);
+    let title: string | undefined;
+    try { title = this.deps.sessionInfo(sid).title; } catch { title = undefined; }
+    let tab: TransportTab;
+    try { tab = await transport.createTab({ sessionId: sid, url: "about:blank", ...(title === undefined ? {} : { sessionTitle: title }) }); } catch (err) { throw transportFailure(err, name); }
+    const s = this.session(sid);
+    const key = tabKeyOf(b.backend, tab.tabKey);
+    const agent: AgentTab = { backend: b.backend, tabKey: tab.tabKey, kept: false, handoff: false };
+    s.agentTabs.set(key, agent);
+    const temp = this.driverFor(b.backend, tab.tabKey);
+    let fetch: FetchCapture | undefined;
+    try {
+      await temp.ensureAttached(sid);
+      scope.live();
+      fetch = new FetchCapture(temp, { anyResponse: true, stagingDir: o.staging, maxBytes: DOWNLOAD_MAX_BYTES });
+      await fetch.arm();
+      const f = fetch;
+      void temp.send<{ errorText?: unknown }>("Page.navigate", { url }).then((res) => {
+        if (typeof res.errorText === "string" && res.errorText.length > 0) f.fail(new Error(`${name} could not load ${redactUrl(url).slice(0, 200)} (${res.errorText})`));
+      }, (err: unknown) => f.fail(err instanceof Error ? err : new Error(String(err))));
+      return await waitForCapture(fetch, {
+        startMs: o.startMs, totalMs: o.totalMs, signal: scope.signal, now: () => this.now(),
+        nothing: () => `${redactUrl(url).slice(0, 200)} did not answer within ${Math.round(o.startMs / 1000)} s`,
+      });
+    } finally {
+      await fetch?.disarm();
+      if (s.agentTabs.get(key) === agent) this.closeAgentTab(sid, s, key, agent, "closed");
+    }
+  }
+
+  /** The built-in browser saved into the staging directory: the file it reported must be there. */
+  private requireInStaging(path: string, staging: string): void {
+    let realPath: string | undefined;
+    try { realPath = realpathSync(path); } catch { realPath = undefined; }
+    const root = realpathSync(staging);
+    if (realPath === undefined || !realPath.startsWith(`${root}/`)) throw new Error("the browser saved the download somewhere Winter did not expect — nothing was saved");
+  }
+
+  /**
+   * The extension's downloads route: the browser saved the file in its own downloads folder, under `Winter/<random>/`
+   * (or wherever the user chose in its save dialog). It is accepted only as a regular file of the reported size, not
+   * a link, outside Winter's home and the sandbox's read-deny list. Under our subfolder it is MOVED (and the subfolder
+   * removed); elsewhere — the user's choice — it is copied and theirs left alone.
+   */
+  private takeFromBrowserFolder(f: { path: string; subdir: string }, captured: CapturedFile, staging: string, denyRead: readonly string[]): { source: string; afterPlaced?: () => void } {
+    const path = f.path;
+    let st;
+    try { st = lstatSync(path); } catch { throw new Error("the browser's downloaded file is gone"); }
+    if (st.isSymbolicLink() || !st.isFile()) throw new Error("the browser's downloaded file is not a regular file — nothing was saved");
+    if (st.size !== captured.bytes) throw new Error(`the browser's downloaded file is not the size it reported (${st.size} of ${captured.bytes} bytes)`);
+    const home = [this.deps.home, (() => { try { return realpathSync(this.deps.home); } catch { return this.deps.home; } })()];
+    const realPath = realpathSync(path);
+    const under = (p: string, root: string): boolean => p === root || p.startsWith(root.endsWith("/") ? root : `${root}/`);
+    if (home.some((h) => under(realPath, h)) || denyRead.some((d) => under(realPath, d))) throw new Error("the browser saved the download somewhere Winter may not read — nothing was saved");
+    const ours = dirname(realPath).endsWith(`/${f.subdir}`);
+    if (ours) {
+      // A move: placeDownload removes it once copied; the subfolder (and `Winter/` when empty) goes after.
+      return {
+        source: realPath,
+        afterPlaced: () => {
+          try { rmdirSync(dirname(realPath)); } catch { /* not empty, or gone */ }
+          try { rmdirSync(dirname(dirname(realPath))); } catch { /* the user's other Winter downloads, or gone */ }
+        },
+      };
+    }
+    const copy = join(staging, "file");
+    copyFileSync(realPath, copy, constants.COPYFILE_EXCL);
+    return { source: copy };
+  }
+
   private async networkBodyCall(scope: TabRunScope, driver: TabDriver, args: Record<string, unknown>): Promise<string> {
     if (typeof args.id !== "string" || args.id.length === 0) throw bad("networkBody() takes a request's id from network() (\"r12\")");
     const req = driver.devtools.request(args.id);
@@ -1484,6 +1754,36 @@ export class BrowserEngine {
 }
 
 /** The audit's site: a URL's host only (never its path or query). */
+/** A file extension for a decoded `data:` file's type (the common ones; else none). */
+function extFor(mime: string): string {
+  const map: Record<string, string> = {
+    "text/plain": ".txt", "text/csv": ".csv", "text/html": ".html", "application/json": ".json", "application/pdf": ".pdf",
+    "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp", "image/svg+xml": ".svg", "application/zip": ".zip",
+  };
+  return map[mime] ?? "";
+}
+
+/** The first capture to catch a file wins; the wait fails only when every capture failed (with the first's error). */
+function firstOf(captures: Array<FetchCapture | NativeCapture>): { file: Promise<CapturedFile>; readonly started: boolean; fail(e: Error): void } {
+  const file = new Promise<CapturedFile>((resolve, reject) => {
+    let failed = 0;
+    let first: unknown;
+    for (const c of captures) {
+      c.file.then(resolve, (err: unknown) => {
+        failed++;
+        first ??= err;
+        if (failed === captures.length) reject(first);
+      });
+    }
+  });
+  file.catch(() => undefined);
+  return {
+    file,
+    get started() { return captures.some((c) => c.started); },
+    fail: (e) => { for (const c of captures) c.fail(e); },
+  };
+}
+
 function noteSiteOf(scope: TabRunScope, url: string): void {
   try {
     const host = new URL(url).hostname;

@@ -28,7 +28,7 @@ import { TransportError, type CdpEvent, type CdpTransport } from "./transport";
 /** Phase 3's events: the developer readers (console(), network()) and a download the page started by itself — subscribed
  *  only where the transport's allowlist has them (a Winter for Chrome built before Phase 3 refuses a subscription naming
  *  any). */
-const PHASE3_EVENTS = ["Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded", "Network.responseReceived", "Page.downloadWillBegin"];
+const PHASE3_EVENTS = ["Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded", "Network.responseReceived", "Page.downloadWillBegin", "Fetch.requestPaused"];
 export const PHASE3_TAB_EVENTS: ReadonlySet<string> = new Set(PHASE3_EVENTS);
 
 /** The events the engine follows on every tab (a subset of `CDP_ALLOWED_EVENTS`). */
@@ -194,6 +194,8 @@ export class TabDriver {
   private viewportWish: { width: number; height: number; mobile: boolean; scale?: number } | undefined;
   /** Phase 3: event listeners the engine adds for one wait (a download's `Fetch.requestPaused`). */
   readonly listeners = new Set<(e: CdpEvent) => void>();
+  /** Phase 3: a `download()` capture is armed on this tab (a download the page starts now is the capture's to say). */
+  capturing = 0;
 
   constructor(
     readonly backend: string,
@@ -399,6 +401,7 @@ export class TabDriver {
         this.devtools.onEvent(e.method, p, session, (id) => this.isWinterContext(id, session));
         break;
       case "Page.downloadWillBegin": {
+        if (this.capturing > 0) break; // the armed capture says what became of it
         const name = typeof p.suggestedFilename === "string" && p.suggestedFilename.length > 0 ? p.suggestedFilename : "a file";
         if (this.uncaughtDownloads.length < 5) this.uncaughtDownloads.push(name.slice(0, 120));
         break;
@@ -583,6 +586,16 @@ export class TabDriver {
   async responseBody(session: string | undefined, requestId: string): Promise<{ body: string; base64Encoded: boolean; truncated: boolean }> {
     const r = await this.send<{ body?: unknown; base64Encoded?: unknown; truncated?: unknown }>("Network.getResponseBody", { requestId }, session);
     return { body: typeof r.body === "string" ? r.body : "", base64Encoded: r.base64Encoded === true, truncated: r.truncated === true };
+  }
+
+  /** The CDP sessions of the frames attached in their own process (out-of-process iframes). */
+  childSessions(): string[] {
+    return [...this.runtimeOn].filter((s) => s !== "");
+  }
+
+  /** A download the backend refused while nothing was armed (the built-in browser): said in the next state. */
+  noteUncaughtDownload(name: string): void {
+    if (this.capturing === 0 && this.uncaughtDownloads.length < 5) this.uncaughtDownloads.push((name.length > 0 ? name : "a file").slice(0, 120));
   }
 
   /** The uncaught downloads said so far, once. */

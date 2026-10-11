@@ -56,6 +56,8 @@ export interface TabRunScope {
   /** For the audit line: a site (host only) and a backend this run touched. */
   noteSite(host: string): void;
   noteBrowser(id: string): void;
+  /** For the audit line: a download() saved a file (a count — never its name, URL or path). */
+  noteDownload?(): void;
   /** A failure sentence that is the daemon's own words (shown outside the DATA-ONLY fence when it escapes). */
   trusted(sentence: string): void;
 }
