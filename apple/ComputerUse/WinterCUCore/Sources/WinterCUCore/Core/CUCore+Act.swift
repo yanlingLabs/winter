@@ -601,6 +601,9 @@ extension CUCore {
         }
         guard let px = try cuPoint(a.point) else { throw CUError.invalidParams("click needs a ref or a point") }
         let pt = try screenPoint(for: t, shotId: a.shotId, pixel: px)
+        // (Only a plain left click is judged: a right, other or modified click's effect — a menu, a selection — may be
+        // anywhere.)
+        guard button == .left, flags.isEmpty else { return try pointerClick(p, t, at: pt, button: button, count: count, flags: flags, token) }
         return try pointClickVerified(t, at: pt) {
             try pointerClick(p, t, at: pt, button: button, count: count, flags: flags, token)
         }
@@ -613,18 +616,24 @@ extension CUCore {
         guard offScreenSubject(t) == nil, let window = sys.window(id: t.windowID)?.frame else { return try click() }
         let crop = CGRect(x: pt.x - 120, y: pt.y - 80, width: 240, height: 160).intersection(window)
         guard !crop.isNull, !crop.isEmpty, let before = pressShot(crop, t) else { return try click() }
-        let windowsBefore = Set(sys.windows(pid: t.pid).map(\.id))
+        let windowsBefore = appWindowsOnScreen(t)
         let o = try click()
         guard o.rung != .foreground else { return o }
         let deadline = clock.nowMs() + webPressWatchMs
         repeat {
-            if Set(sys.windows(pid: t.pid).map(\.id)) != windowsBefore { return o }
+            if appWindowsOnScreen(t) != windowsBefore { return o }
             if let after = pressShot(crop, t), CUImageTools.differs(before, after) { return o }
             if clock.nowMs() >= deadline { break }
             clock.pause(ms: 150)
         } while true
         CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect at the point")
         return o.noting("the click at that point had no visible effect (nothing changed there, and no window opened) — check with state() or a screenshot before clicking again")
+    }
+
+    /// The app's windows on screen, EVERY layer (review of round 11, MEDIUM #7: a menu or popover opens at a higher one,
+    /// and the normal-level list said "no window opened" when one had).
+    func appWindowsOnScreen(_ t: CUTarget) -> Set<UInt32> {
+        Set(sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 }.map(\.id)).union(sys.windows(pid: t.pid).filter { $0.layer == 0 }.map(\.id))
     }
 
     /// `announced`: the cursor already showed this press (an AX attempt that fell back to events). `element`:
@@ -2935,7 +2944,7 @@ extension CUCore {
         let parent = ax.element(e, kAXParentAttribute)
         let grand = parent.flatMap { ax.element($0, kAXParentAttribute) }
         let near = [parent, grand].compactMap { $0 }.flatMap { ax.elements($0, kAXChildrenAttribute) }.map { AXIdentity(element: $0) }
-        return WebPressEvidence(windows: Set(sys.windows(pid: t.pid).filter { $0.layer == 0 }.map(\.id)),
+        return WebPressEvidence(windows: appWindowsOnScreen(t),
                                 focused: ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute).map { AXIdentity(element: $0) },
                                 alive: ax.isAlive(e), value: ax.string(e, kAXValueAttribute),
                                 selected: ax.bool(e, kAXSelectedAttribute), expanded: ax.bool(e, kAXExpandedAttribute),
