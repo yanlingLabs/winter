@@ -1,0 +1,118 @@
+# Cowork host records and protocol inventory
+
+Status: proposed specification, 2026-10-11. This is the gate-3/4 planning contract accompanying the [main specification](cowork-spec.md) and [execution contracts](cowork-execution-contracts.md). Names and fields below are intended protocol additions, not implemented RPCs or events. Exact generated types and migrations must follow the repository protocol checklist during implementation.
+
+## Canonical records
+
+Workspace, Project, Source, Delegation, trust/policy and durable transition/outbox records live in new versioned tables in `<WINTER_HOME>/runtimes/runtime-state.db`. Extend the existing runtime/session/lease/mailbox store; do not create an independently authoritative JSON manifest or session-index copy. The schema version must reject incompatible older writers. The admission ledger is the explicit cross-home exception described below. [Existing durable records](../packages/core/src/runtime-state/db.ts#L35)
+
+| Record | Required fields and invariants |
+| --- | --- |
+| `HomeIdentity` | Host-only immutable `homeId` in versioned runtime-state DB metadata, canonical location and schema version; distinct from daemon instance/PID. Relocation preserves it. Copying a home cannot create a second valid owner; a separately authorized clone/import needs a new home identity and explicit provenance/identity reconciliation, otherwise it is refused. |
+| `Workspace` | `workspaceId`, ownership kind (`standalone` or `project`), owner session/project ID, title, retained/archive/delete state, `configRevision`, `grantRevision`, `instructionRevision`, canonical `policyId`, image/environment/runtime digests, owned storage references, verified backing status and last durable checkpoint. Durable identity is separate from guest incarnation, disk lease epoch and current VM power. |
+| `Project` | `projectId`, exactly one `workspaceId`, title/archive state, a reference to its workspace's canonical policy record (default approval policy, capability ceiling, publication policy and revisions), never a second mutable copy. Defaults initialize new conversations; a later default-policy edit does not silently change existing conversations. Ceiling/source restrictions still revalidate existing work. |
+| `WorkspacePolicy` | `policyId`, `workspaceId`, default approval policy, capability ceiling, publication policy and independent revisions. Shared by the owning Project view or standalone workspace; authoritative values exist once. The ordinary initial default is auto for both ownership kinds. |
+| `ProjectMembership` | `sessionId`, `projectId`, `workspaceId`, joined time and active/archive/delete state. A conversation's workspace binding is immutable. Creating a Project conversation adds membership; archiving/deleting updates membership without deleting workspace data. Moving an existing conversation to another workspace requires a separately designed migration and is unsupported here. |
+| `ConversationBinding` | `sessionId`, workspace/project IDs, current source/location plus relative cwd, conversation policy/restrictions, revisions and runtime identity. These survive session-index rebuilding and are checked against durable creation events. Missing authority blocks restoration; it is never inferred from a title, cwd or imported transcript. |
+| `Source` | `sourceId`, workspace ID, kind (`folder` or `githubRepository`), safe label, stable guest `locationId`, desired membership, preparing/ready/unavailable/removing/detached state, reason, source/config revisions, guest-acknowledged revision/incarnation and restart requirement. Membership, usable readiness and retained data are distinct. |
+| Folder source detail | Opaque local grant/bookmark reference, validated root identity and access mode. Mac absolute path/bookmark data stays local; neither is supplied by a paired client. |
+| Repository source detail | Canonical repository ID, account/authority reference, initial ref, retained guest checkout identity and read/write scope. Tokens never enter this record or remote projections. Disconnection retains checkout data, but revokes broker authority. |
+| `SourceTrust` | Source identity and executable-configuration admission revision/digest, approving user, status and revocation. Plain guidance provenance records source/path/import/digest/refresh state separately. Files cannot promote their own executable trust. |
+| `DelegationGrant` | Grant ID, authenticated issuer, sender session/runtime identity, target workspace/session scope, operation set (`spawn`, `send`, `list`, `readOutput`, `stop`), capability/source/policy bounds, issued/expiry/revoked times and revision. Resume rechecks current authority. |
+| `AdmissionRecord` | Admission ID, coordination domain, stable owning home/daemon identity, PID plus observed process-start/boot identity and instance nonce, workspace/incarnation/epoch, internal resource ceilings/commitment, pressure observation, reserved/booting/running/draining/uncertain/released state and heartbeat/recovery timestamps. Admission is distinct from disk ownership and activity. |
+
+The production `AdmissionRecord` store is `~/Library/Application Support/Winter/Coordination/cowork-admission.sqlite`, independent of profile/home. Reject Winter home roots that contain or overlap the coordination directory, protect directory/sidecars from host tools, and exclude it from home migration/exports. Reconcile PID reuse and OS boot changes; heartbeat expiry alone cannot free a live/unknown owner. Tests inject an isolated ledger and identity probes before initialization and never read, lock or fall back to the production path. Released admission is not proof that a guest's writable disk is reusable.
+
+`manifest.json` stores only owned relative backing locations, format versions, digests and checkpoint/export descriptors. Authority remains in the DB. Imports are recovery inputs requiring validation and current user authorization, never a route to reconstruct permissions from JSON. Distinguish relocation/ownership transfer from making a second clone: copied IDs must not permit two owners to attach the same workspace. Offline backups/migration include a consistent canonical DB snapshot; user-facing exports omit the raw authority DB, bookmarks and unrelated records. Credentials remain in the Keychain, not these tables.
+
+## Mutation and recovery rules
+
+Mutating methods carry a stable `requestId` and applicable expected revision. Scope idempotency to the authenticated principal, method and workspace, and bind the normalized request digest; reusing an ID with different sources, targets, authority or export arguments returns conflict rather than a prior unrelated success. Check canonical identity, role and current grants before preparing effects. Stale revisions return a typed conflict with current safe revision; retrying the same request returns its recorded operation, not a duplicate clone, push, revoke or export. Persist desired state and an operation/outbox entry transactionally, then perform guest/network work and acknowledge effective state separately. A DB commit does not imply a live mount, completed revocation or successful clone.
+
+A standalone workspace atomically reserves/mints its sole owning conversation ID during creation; `session.create` may bind only that reservation, and additional conversation bindings are rejected. Project conversations instead bind to the Project workspace through membership. Creating a workspace selects at least one initial source in the same admission operation; it may be preparing but cannot run dependent tasks until ready. Source removal checks the minimum-source/replacement invariant in one transaction. Security revocation can make the last retained source unavailable. Immediately close new admission and revoke affected host broker authority on narrowing. Pending/effective transition state records draining old tool handles, installing narrower execution views and confirming share removal; it never permits old broker authority to remain usable while cleanup waits. Current source/GitHub-only publication predicates include preparing/unavailable/removing sources as specified in the main document.
+
+Use canonical records plus a durable outbox for revision-bound workspace-change fanout to affected conversations. Each notification has a stable `workspaceChangeId`/operation ID and per-session delivery record. Preserve event idempotency across a crash between database commit and JSONL append. Session/index rebuilding may recreate display indexes, never authority or broader default permissions. Existing global `$system` broadcasts use an in-memory sequence and are not a durable workspace journal. [Global broadcast](../packages/core/src/ipc/server.ts#L1544), [index rebuilding](../packages/core/src/sessions/store.ts#L73)
+
+Use typed operation outcomes such as `revision_conflict`, `source_unavailable`, `last_source_required`, `restart_required`, `approval_required`, `resource_blocked`, `authority_denied`, `unsupported_topology` and `recovery_required`, with safe IDs/reasons. Do not return raw host paths or credential-bearing errors. Pending work has an operation/receipt ID that can be queried after reconnect.
+
+## RPC inventory and caller access
+
+`Paired` below means an authenticated authorized user client, not an agent/plugin runtime. Add only the stated methods to remote lists, with per-record authorization and bounded safe projections. Local-only mutations require a user/control principal; a local socket location alone does not give an agent authority to issue them. Agent tools continue through the authenticated runtime/delegation boundary. Folder grant creation/reauthorization and any arbitrary Mac-path selection remain Mac-only.
+
+| New methods | Request/result outline | Paired-client decision |
+| --- | --- | --- |
+| `workspace.list`, `workspace.get` | Paged safe records, source counts/states, VM/operation state, revisions | Allow; omit backing paths/bookmarks and other homes |
+| `workspace.create` | Ownership, title, initial source selections; returns preparing workspace/operation | Allow repository-only creation within admitted account/repository authority; folder creation local-only |
+| `workspace.update` | Title/display properties with expected revision; never arbitrary policy/storage patch | Allow |
+| `workspace.archive`, `workspace.restore` | ID/revision; return pending/effective lifecycle | Allow; restore never restores revoked grants or deleted backing |
+| `workspace.delete` | Explicit destructive workspace operation after retention/ownership checks | Local-only initially; selected Mac folders untouched |
+| `project.list`, `project.get`, `project.members.list` | Safe Project/workspace/member records | Allow |
+| `project.create`, `project.update`, `project.archive`, `project.restore` | Create repository-only workspace or edit title/lifecycle; revisions required | Allow within workspace rules; no implicit folder grants |
+| `project.delete` | Explicit Project/retained-workspace deletion choices | Local-only initially; no cascade from deleting one conversation |
+| `project.setDefaultPolicy`, `workspace.setDefaultPolicy`, `workspace.setCapabilityCeiling`, `workspace.setPublicationPolicy` | Typed policy field, expected revision and current-user authority | Local-only initially; Project ceiling/publication are the owning workspace's canonical policy, not duplicated copies |
+| `workspace.source.list`, `workspace.source.get` | Safe source identities, membership/readiness/revision/restart status | Allow |
+| `workspace.source.addFolder`, `workspace.source.reauthorizeFolder` | Mac picker/validated grant handle, access mode, expected revision | Local-only; reject caller-supplied remote Mac paths |
+| `workspace.source.addRepository` | Canonical repository/account selection, initial ref, expected revision | Allow within already admitted GitHub account/broker authority |
+| `workspace.source.remove`, `workspace.source.revoke` | Source ID/revision; detach versus security revocation; durable operation receipt | Allow authority narrowing; minimum-source rule applies only to ordinary remove |
+| `workspace.source.setAccess`, `workspace.source.setTrust` | Typed source access/executable trust changes and configuration digest | Local-only initially; agent cannot self-approve |
+| `workspace.instructions.get`, `workspace.instructions.provenance` | Shared guidance bytes/revision and admitted source/import provenance | Allow bounded reads; provenance uses source/location IDs and relative guest paths, with Mac import roots/bookmarks redacted |
+| `workspace.instructions.update` | Content/digest plus expected instruction revision, explicit user operation | Local-only initially; agent edits use content-bound approval service |
+| `session.retarget` | Session, source/location ID, relative path and expected source revision | Allow inside an already authorized ready workspace; guest validates cwd, no grant creation |
+| `workspace.delegation.list`, `workspace.delegation.revoke` | Safe scope summaries or narrowing by ID/revision | Allow |
+| `workspace.delegation.create` | Sender/target scope, operations, expiry and explicit user authorization | Local-only initially |
+| `workspace.file.list`, `workspace.file.stat`, `workspace.file.read`, `workspace.file.readRange` | Location ID/relative path, size/range bounds, explicit wake permission when needed | Allow within admitted workspace; no raw Mac paths, no hidden reads of SDK/control stores |
+| `workspace.export.create`, `workspace.export.status`, `workspace.export.read` | Generation-bound export job and bounded artifact/chunk handles | Allow user-facing export without raw authority DB/bookmarks or selected external-folder contents; host destination path/export-import authority stays local |
+| `workspace.watch` | Authorized workspace IDs and known revisions; bounded snapshot/change hints | Allow; snapshot/refetch closes reconnect gaps, no reliance on `$system` replay |
+
+New GitHub sign-in/token setup and local host-capability grants are separate Mac user surfaces; repository selection does not imply account-wide publication authority. An export reader receives only its admitted artifact, not arbitrary backing-file access. Local import/migration and full-authority backup are not remotely exposed by these methods.
+
+| Existing methods/surfaces to extend | Cowork contract and paired decision |
+| --- | --- |
+| `session.create` | Add Cowork mode and an authorized workspace/location binding; Project membership created transactionally. A fresh standalone workspace is first admitted through workspace creation. Paired clients cannot set raw cwd or approval policy; use Project/server default within ceiling. |
+| `session.list`, `session.attach`, `session.history`, `session.send`, `session.interrupt`, `session.setModel`, `session.setEffort`, `session.setActivity` | Deliberately admit authorized Cowork targets in existing user control paths and remote mode filtering; add safe workspace/project references. Keep current Code/Chat behavior. |
+| Conversation archive/delete | Update membership/tombstones and retain the workspace as specified; no automatic disk deletion or authority reconstruction from a session index. Preserve the existing method's role policy until its explicit schema change is reviewed. |
+| `approval.list`, `approval.respond`, `ask_user.respond` | Reuse authorized user card flow with Cowork IDs/revisions; paired user responses allowed where currently supported; no agent impersonation. |
+| `session.setPolicy` | Local-only initially; pending narrowing transition required before reporting effective plan/restrictions. |
+| `session.setDirs`, `session.setCwd` | Existing absolute-path forms remain Code-only; Cowork uses sources and `session.retarget`. Never reinterpret these as folder grants. |
+| `thread.list`, `thread.send`, `agent.stop` and SendMessage/ListAgents/ListSessions/TaskStop/SpawnSession aliases | Apply the execution companion's runtime caller/target matrix. Child-control RPCs remain local-only initially; agents get only their authorized scope regardless of RPC transport. |
+| `session.stageImage` | Add a separate validated Cowork guest-upload path and guest file identity; initially local-only like the existing Code image door. Never return a Mac temp path as guest input. |
+| `sync.heads/pull/push/config/memory` | Existing chat replication is not Cowork authority/state import. Reject injected Cowork control/authority events; share safe views through the explicit workspace methods. |
+
+Current constraints to preserve/extend deliberately: [session creation schema](../packages/protocol/src/methods.ts#L149), [remote raw-parameter restrictions](../packages/core/src/ipc/server.ts#L2053), [existing absolute directory method](../packages/protocol/src/methods.ts#L1406).
+
+## Event inventory and visibility
+
+Extend `SessionEvent` deliberately using the existing `{seq, sessionId, ts}` envelope and snake-case variants. Host-generated workspace notifications are projections of canonical DB/outbox state; guest frames and `sync.push` cannot author them. Add workspace/source revision and stable change/operation IDs for recovery and deduplication. Generated remote metadata omits bookmarks, Mac backing paths, tokens and unrestricted config text; explicitly authorized file/artifact reads remain user content, not a promise to scrub arbitrary strings from those files. Instruction provenance uses source/location IDs plus relative guest paths; imports must not reveal original Mac roots. Guidance/content requires its explicit bounded read method.
+
+| Proposed event | Persistence and content | History / paired visibility |
+| --- | --- | --- |
+| Extended `session_created` | Durable Cowork mode, workspace/project/location identity and initial policy revision | Preserve safe live/replay stream-control visibility; keep excluded from HISTORY_EVENT_TYPES as today; missing canonical binding blocks resume |
+| `workspace_sources_changed` | Durable source IDs, membership/readiness/reasons, revision and `restartRequired`; no host roots | Include safe control history and live paired stream for affected conversations |
+| `workspace_policy_changed` | Durable requested/effective policy/ceiling/publication revision and pending transition | Include safe history/live; no approval secrets |
+| `workspace_instructions_changed` | Durable provenance/revision/digest/refresh state, not full guidance text | Include safe history/live; content via bounded read |
+| `session_location_changed` | Durable source/location/relative cwd and revision | Include safe history/live |
+| `cowork_recovery_required` | Durable reason, workspace/incarnation and operation IDs; no arbitrary raw error | Include safe history/live |
+| `cowork_delivery_updated` | Durable stable receipt, accepted/queued/blocked/delivered/failed status and safe reason | Include safe history/live; delivered is not model completion |
+| `workspace_export_completed` | Durable job/generation/artifact identity, completion/failure and safe status | Include safe history/live; no host destination or raw DB |
+| `workspace_state_changed` | Transient VM power/preparing/pending-restart state with canonical revision; state itself stored in DB | Live paired UI; not conversation history or model prompt by default |
+| `workspace_source_progress`, `workspace_resource_wait`, `workspace_export_progress` | Transient bounded progress/pressure hints; durable source/operation state remains queryable | Live paired UI; not durable transcript |
+| Existing `session_activity` | Preserve Active/Background/Idle/Archived independently of VM power | Preserve current transient visibility |
+
+Durable control history does not automatically become model instruction content. The context assembler receives only applicable source/policy/location updates through the controlled refresh contract. For a workspace with no attached conversation, persist changes in the workspace DB/outbox; workspace watchers refetch safe snapshots/revisions. Do not create a fake conversation merely to broadcast state.
+
+Update `HISTORY_EVENT_TYPES`, transient classifications, remote caps, projector coverage maps and Swift/phone folding deliberately; merely putting an event in the transient set currently makes it eligible for remote streaming. Host-generated control events need explicit coverage classification even though they are not SDK projection events. [History allowlist](../packages/core/src/sessions/history.ts#L38), [remote stream](../packages/core/src/sessions/remote-stream.ts#L76), [projector coverage](../packages/core/src/projector/event-coverage.ts#L157)
+
+## Producer/consumer and release checklist
+
+Implementation must update protocol schemas/method constants/event definitions, daemon handlers/role validation, Swift RPC and event mirrors, fixtures and round-trip tests, Gateway/client wrappers, Mac UI, CLI and iOS consumers. Run protocol code generation after event changes. Add Cowork to the separate remote-eligible session-mode set only after its per-record and parameter gates exist. Test denied methods/fields as well as allowed flows; older clients must see unsupported capabilities instead of silently dropping source/grant fields.
+
+Keep the four remote-method mirrors synchronized:
+
+1. [Daemon allowlist](../packages/core/src/ipc/server.ts#L722).
+2. [TypeScript/Swift parity test](../packages/core/test/ipc/remote-allowlist-parity.test.ts#L49).
+3. [Swift Gateway allowlist](../apple/WinterKit/Sources/WinterKit/Gateway/Gateway.swift#L78).
+4. [Swift allowlist assertion](../apple/WinterKit/Tests/WinterKitTests/GatewayGateTests.swift#L677).
+
+Also update [remote-eligible modes](../packages/core/src/ipc/server.ts#L804), history/transient projections and event caps. A method being allowlisted does not authorize arbitrary workspace IDs, broad policy changes or Mac paths. Plugin/agent method lists remain separately restricted and gain no administrative workspace methods by accident.
+
+The iOS app consumes the exported Winter protocol/session/chat kit from a separate repository. After implementation and authorized release work, publish a new immutable `v-<name>-kitN` tag, update the iOS dependency revision and regenerate its project, then run its consumer checks. Editing Winter Swift files alone does not update the phone. No tag, release or pin change is authorized/performed by this documentation work. [Kit products](../Package.swift#L24), [repository release contract](../CLAUDE.md#monorepo-layout)

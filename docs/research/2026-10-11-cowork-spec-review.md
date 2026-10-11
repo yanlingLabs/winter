@@ -2,7 +2,7 @@
 
 An independent read-only review of specification commit `c7fd1f87` found a coherent product direction but five unresolved execution/integration contracts. Source was checked against Winter `c7fd1f87`, agent SDK checkout `27f1c43e` and runtime SDK checkout `c542420`; the SDK checkout is not a claim about Winter's released pin. The revisions below update the [main specification](../cowork-spec.md) and add its normative [execution companion](../cowork-execution-contracts.md).
 
-Status: all findings have a documented disposition, with internal source/platform review completed and independent re-review pending. This is not implementation, an external approval, or proof that any feasibility gate passed. No VM was launched, dependency installed, live app/daemon changed, SDK released or pin bumped during this review response.
+Status: independent re-review of `da073e0d` accepted every original B1–B5, H1–H5 and R1–R8 disposition and found no contradiction with accepted product choices. It judged the specification ready to plan gates 1–2, while requesting C1/C2 before planning gates 3–4. Those additions and the further refinements below are documented and awaiting re-review. This is not implementation approval or proof that any feasibility gate passed. No VM was launched, dependency installed, live app/daemon changed, SDK released or pin bumped during these review responses.
 
 | Finding | Specification disposition | Remaining validation |
 | --- | --- | --- |
@@ -34,6 +34,24 @@ Status: all findings have a documented disposition, with internal source/platfor
 - Reusing Code instruction filenames/order does not make additional-root discovery, mandatory subagent guidance or context refresh already work. The plain-guidance/executable-trust split is a stated Cowork change.
 - The policy matrix does not claim a remote connector's read-only annotation proves no side effects. Local plan-mode filesystem writes are separately prevented by the execution view.
 - Moving shared guidance/memory/outputs to canonical host-backed files preserves their guest paths and direct-access/no-mirroring behavior. Repositories and real SDK stores remain on the guest data volume.
+
+## Re-review of da073e0d: later planning contracts and refinements
+
+The [host protocol inventory](../cowork-host-protocol.md) and expanded [execution contracts](../cowork-execution-contracts.md) address this second review. The prior review's readiness judgment applies to its reviewed commit, not automatically to later edits.
+
+| Finding | Documented disposition | Remaining validation |
+| --- | --- | --- |
+| C1: new host tree is outside current fences | Canonical authority moves to protected runtime-state DB tables; manifest is nonauthoritative. Extend common host read/write/escape fences over Cowork and coordination paths, including other homes/aliases/ancestors. Preserve non-bypassable control-storage denial on raw host execution. Define coordinated B/home migration, explicit C exclusions and no guest re-keying. | Host Code/Dispatch raw tools and computed-path escapes, bounded permitted shared reads, source/destination ownership, consistent DB/volume/shared snapshots, migration resume/rollback and unsupported downgrade |
+| C2: host/wire inventory missing | New normative record/RPC/event tables with WorkspacePolicy and HomeIdentity, source/membership revisions, standalone owner reservation, content-bound request idempotency, canonical outbox, per-method paired decisions, four allowlist mirrors and iOS kit integration | Producer/consumer schemas, denied fields/roles, safe projections, event classification, index rebuild/crash fanout, remote source operations and consumer release checks |
+| R-a: trusted filesystem methods bypass compartment | Ordinary file tools execute through a helper inside the caller's effective tool identity/view; no broad runtime handles are passed; protected-instruction writes remain explicit broker operations | Concurrent symlink/rename/ancestor races, narrowed child/plan views, existing handles, notebook/image/search/diff paths |
+| R-b: native packet stack shares daemon load/failure | Native dedicated queues/threads, bounded queues/backpressure; explicitly same crash domain as controller/provider transport; aggregate CPU/memory/event-loop/tail-latency gates | Concurrent guests, model streams, traffic/lifecycle churn and UI/approval responsiveness; saturation never disables enforcement |
+| R-c: automatic guidance remains injection risk | Record influence within already granted sources/egress, without falsely claiming separately approved risk; expose admitted guidance provenance/revision/refresh | Source changes/resume provenance and safe paired path projection; no claim metadata prevents injection |
+| R-d: global ledger location/test isolation | Fixed per-user Coordination path outside supported homes, overlap refusal, host fences, persisted home identity plus observed PID/start/boot identity; test backend never touches real ledger | PID reuse, stale/unknown owner, relocation vs duplicate copied identity, early dependency injection and isolated multi-daemon tests |
+| R-e: host shares can fill Mac volume | Automatic backing-filesystem pressure guard with tunable 5 GiB reserve, write admission block and visible emergency halt/read-only/stop; no automatic data deletion. Explicit reactive/not-hard-quota and incomplete-write limits | Multi-guest/host-write overshoot, metadata exhaustion, failed checkpoint/marker/remount, adequate measured reserve margin or quota-capable backing before exposure |
+| R-f: Git gateway cannot constrain unrelated credentials | Limit feature-ref enforcement claim to Winter-held credentials; independent credentials plus outbound access remain outside that guarantee, without authorizing policy evasion | Gateway rejection vs alternative-route distinction and honest capability descriptions |
+| R-g: Quit stops owned work/schedules | Warn on active/unknown occupancy or enabled Cowork schedules, identify affected work and offer cancel/quit; 30 seconds bounds graceful drain only, not termination proof | Idle scheduled-only work, independent profiles, user restart/update, incomplete flush and retained disk ownership |
+
+Follow-up internal checks clarified that `session_created` stays outside history as today while preserving live/replay stream control; broker authority is revoked immediately before pending filesystem cleanup completes; canonical Project/standalone policy exists once in WorkspacePolicy; guidance provenance uses safe source-relative paths remotely; and migration cannot blindly skip user artifacts named `index.db` or SQLite sidecar names. These are specification corrections, not passing runtime tests.
 
 ## Review evidence and boundaries
 
