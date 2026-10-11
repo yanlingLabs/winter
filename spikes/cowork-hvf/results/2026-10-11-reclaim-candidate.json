@@ -1,0 +1,15 @@
+{
+  "status": "candidate prepared; no patched VM run; independent review pending",
+  "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+  "patch": "spikes/cowork-hvf/patches/0002-proposed-active-reclaim.patch",
+  "patchSha256": "353e6676f2b9bddde82748b43e210fe6c4d43adec6bf7246c98af894433b598e",
+  "appliesTo": "pristine pinned upstream, separately from instrumentation patch",
+  "cargoCheckPassed": true,
+  "simulationTestCount": 23,
+  "simulationTestsPassed": true,
+  "testCommand": "spikes/cowork-hvf/out/rust/bin/rustc --edition=2021 --test spikes/cowork-hvf/reclaim_tests.rs -o spikes/cowork-hvf/out/reclaim-tests && spikes/cowork-hvf/out/reclaim-tests",
+  "cargoCheckCommand": "PATH=\"$PWD/spikes/cowork-hvf/out/rust/bin:$PATH\" CARGO_HOME=\"$PWD/spikes/cowork-hvf/out/cargo-home\" cargo check --manifest-path spikes/cowork-hvf/out/libkrun-reclaim/Cargo.toml -p libkrun --locked --no-default-features --jobs 4",
+  "activeReturnVerified": false,
+  "productionReady": false,
+  "nativeLoopAndActualHvfRaceValidated": false
+}

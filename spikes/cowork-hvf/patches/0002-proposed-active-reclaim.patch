@@ -1,0 +1,980 @@
+diff --git a/src/devices/src/virtio/balloon/device.rs b/src/devices/src/virtio/balloon/device.rs
+index 85b2812..31aa9e1 100644
+--- a/src/devices/src/virtio/balloon/device.rs
++++ b/src/devices/src/virtio/balloon/device.rs
+@@ -46,6 +46,9 @@ pub struct VirtioBalloonConfig {
+ unsafe impl ByteValued for VirtioBalloonConfig {}
+ 
+ pub struct Balloon {
++    pub fixture_reclaim: bool,
++    pub fixture_pending: bool,
++    pub fixture_generation: u64,
+     pub(crate) queues: Option<Vec<DeviceQueue>>,
+     pub(crate) avail_features: u64,
+     pub(crate) acked_features: u64,
+@@ -57,6 +60,9 @@ pub struct Balloon {
+ impl Balloon {
+     pub fn new() -> super::Result<Balloon> {
+         Ok(Balloon {
++            fixture_reclaim: false,
++            fixture_pending: false,
++            fixture_generation: 0,
+             queues: None,
+             avail_features: AVAIL_FEATURES,
+             acked_features: 0,
+@@ -72,6 +78,7 @@ impl Balloon {
+     }
+ 
+     pub fn process_frq(&mut self) -> bool {
++        if self.fixture_reclaim { self.fixture_pending = true; return false; }
+         debug!("balloon: process_frq()");
+         let mem = match self.device_state {
+             DeviceState::Activated(ref mem, _) => mem,
+@@ -183,6 +190,8 @@ impl VirtioDevice for Balloon {
+             return Err(ActivateError::BadActivate);
+         }
+ 
++        self.fixture_generation = self.fixture_generation.checked_add(1).expect("generation overflow");
++        self.fixture_pending = false;
+         self.queues = Some(queues);
+         self.device_state = DeviceState::Activated(mem, interrupt);
+ 
+@@ -193,3 +202,40 @@ impl VirtioDevice for Balloon {
+         self.device_state.is_activated()
+     }
+ }
++
++impl Balloon {
++    pub fn fixture_exclusions(&self) -> Result<Vec<(u64,u64)>, &'static str> {
++        let mut out=Vec::new();
++        if let DeviceState::Activated(mem,_) = &self.device_state {
++            for (index,q) in self.queues.as_ref().ok_or("balloon queues")?.iter().enumerate() {
++                out.extend(q.queue.fixture_exclusions(mem,index!=FRQ_INDEX)?);
++            }
++        } else { return Err("balloon inactive"); }
++        Ok(out)
++    }
++    pub fn fixture_pop(&mut self) -> Result<Vec<(u16,Vec<(u64,u64)>)>, &'static str> {
++        let mem=match &self.device_state { DeviceState::Activated(mem,_)=>mem, _=>return Err("balloon inactive") };
++        let queues=self.queues.as_mut().ok_or("balloon queues")?;
++        let queue=&mut queues[FRQ_INDEX].queue;
++        let mut batches=Vec::new();
++        while queue.len(mem)>0 {
++            if batches.len()>=256 { return Err("report batch bound"); }
++            let head=queue.pop(mem).ok_or("report head")?; let index=head.index;
++            let descriptors=super::super::queue::fixture_chain(head)?;
++            let mut ranges=Vec::new();
++            for desc in descriptors {
++                if !desc.is_write_only() { return Err("report writable flag"); }
++                ranges.push((desc.addr.0,u64::from(desc.len)));
++            }
++            batches.push((index,ranges));
++        }
++        self.fixture_pending=false;
++        Ok(batches)
++    }
++    pub fn fixture_ack(&mut self, indices: &[u16]) -> Result<(), &'static str> {
++        let mem=match &self.device_state { DeviceState::Activated(mem,_)=>mem, _=>return Err("balloon inactive") };
++        let queues=self.queues.as_mut().ok_or("balloon queues")?;
++        for &index in indices { queues[FRQ_INDEX].queue.add_used(mem,index,0).map_err(|_| "report ack")?; }
++        self.device_state.signal_used_queue(); Ok(())
++    }
++}
+diff --git a/src/devices/src/virtio/queue.rs b/src/devices/src/virtio/queue.rs
+index 2fb7428..5101422 100644
+--- a/src/devices/src/virtio/queue.rs
++++ b/src/devices/src/virtio/queue.rs
+@@ -1141,3 +1141,38 @@ pub(crate) mod tests {
+         assert_eq!(x.len, 0x1000);
+     }
+ }
++
++impl Queue {
++    pub fn fixture_exclusions(&self, mem: &GuestMemoryMmap, buffers: bool) -> Result<Vec<(u64,u64)>, &'static str> {
++        use vm_memory::GuestMemoryRegion;
++        if !self.ready { return Ok(Vec::new()); }
++        let size=u64::from(self.actual_size());
++        let mut ranges=vec![(self.desc_table.raw_value(),16*size), (self.avail_ring.raw_value(),6+2*size), (self.used_ring.raw_value(),6+8*size)];
++        for &(start,len) in &ranges {
++            let region=mem.find_region(GuestAddress(start)).ok_or("queue region")?;
++            let end=start.checked_add(len).ok_or("queue overflow")?;
++            if len==0 || end>region.start_addr().raw_value().checked_add(region.len()).ok_or("region overflow")? { return Err("queue full span"); }
++        }
++        if !self.is_valid(mem) { return Err("queue configuration"); }
++        let pending=self.len(mem); if pending>self.actual_size() { return Err("queue pending count"); }
++        if buffers {
++            for offset in 0..pending {
++                let ring=4+2*((self.next_avail.0.wrapping_add(offset))%self.actual_size());
++                let index=mem.read_obj::<u16>(self.avail_ring.checked_add(u64::from(ring)).ok_or("ring offset")?).map_err(|_| "ring read")?;
++                let head=DescriptorChain::checked_new(mem,self.desc_table,self.actual_size(),u16::from_le(index)).ok_or("pending descriptor")?;
++                for descriptor in fixture_chain(head)? { ranges.push((descriptor.addr.raw_value(),u64::from(descriptor.len))); }
++            }
++        }
++        Ok(ranges)
++    }
++}
++/// Validate the complete chain, including malformed NEXT/cycles/indirect flags; no silent truncation.
++pub fn fixture_chain(head: DescriptorChain<'_>) -> Result<Vec<DescriptorChain<'_>>, &'static str> {
++    let mut out=Vec::new(); let mut seen=std::collections::HashSet::new(); let mut next=Some(head);
++    while let Some(desc)=next {
++        if out.len()>=256 || !seen.insert(desc.index) || desc.flags & 4 != 0 || desc.len==0 { return Err("descriptor chain"); }
++        next=if desc.flags & 1 != 0 { Some(desc.next_descriptor().ok_or("descriptor NEXT")?) } else { None };
++        out.push(desc);
++    }
++    Ok(out)
++}
+diff --git a/src/devices/src/virtio/rng/device.rs b/src/devices/src/virtio/rng/device.rs
+index c008c61..2c468b5 100644
+--- a/src/devices/src/virtio/rng/device.rs
++++ b/src/devices/src/virtio/rng/device.rs
+@@ -156,3 +156,13 @@ impl VirtioDevice for Rng {
+         true
+     }
+ }
++
++impl Rng {
++    pub fn fixture_exclusions(&self) -> Result<Vec<(u64,u64)>, &'static str> {
++        let mut out=Vec::new();
++        if let DeviceState::Activated(mem,_) = &self.device_state {
++            for q in self.queues.as_ref().ok_or("rng queues")? { out.extend(q.queue.fixture_exclusions(mem,true)?); }
++        }
++        Ok(out)
++    }
++}
+diff --git a/src/hvf/src/lib.rs b/src/hvf/src/lib.rs
+index b2d6d0d..1ee0bb3 100644
+--- a/src/hvf/src/lib.rs
++++ b/src/hvf/src/lib.rs
+@@ -809,3 +809,14 @@ impl HvfVcpu<'_> {
+         }
+     }
+ }
++
++impl HvfVm {
++    /// TEST-ONLY: caller must own the full mapping and hold an exact-epoch all-vCPU/device barrier.
++    pub unsafe fn fixture_unmap(&self, gpa: u64, len: usize) -> i32 {
++        hv_vm_unmap(gpa, len)
++    }
++    /// TEST-ONLY: same backing address and the initial map_memory RWX flags are required.
++    pub unsafe fn fixture_map(&self, hva: *mut core::ffi::c_void, gpa: u64, len: usize) -> i32 {
++        hv_vm_map(hva, gpa, len, (HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC).into())
++    }
++}
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index a797fd1..734c628 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -2884,6 +2884,9 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+     #[cfg(feature = "aws-nitro")]
+     return krun_start_enter_nitro(ctx_id);
+ 
++    if ctx_fixture_enabled(ctx_id) && cfg!(any(feature = "init-blob", feature = "net", feature = "blk", feature = "gpu", feature = "snd", feature = "input", feature = "efi", feature = "tee")) {
++        return -libc::EINVAL;
++    }
+     let mut event_manager = match EventManager::new() {
+         Ok(em) => em,
+         Err(e) => {
+@@ -2921,6 +2924,17 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+         }
+     }
+ 
++    if ctx_cfg.vmr.cowork_fixture_reclaim && (!matches!(ctx_cfg.vsock_config, VsockConfig::Disabled)
++        || !ctx_cfg.vmr.disable_implicit_console || !ctx_cfg.vmr.virtio_consoles.is_empty()
++        || ctx_cfg.vmr.serial_consoles.len() != 1 || !ctx_cfg.vmr.fs.is_empty()
++        || ctx_cfg.vmr.external_kernel.is_none() || ctx_cfg.vmr.kernel_bundle.is_some()
++        || ctx_cfg.vmr.firmware_config.is_some() || ctx_cfg.vmr.nested_enabled
++        || ctx_cfg.vmr.gpu_virgl_flags.is_some() || ctx_cfg.vmr.gpu_shm_size.is_some()
++        || ctx_cfg.vmr.gpu_render_server_fd.is_some()
++        || ctx_cfg.vmr.vm_config().vcpu_count != Some(2)
++        || ctx_cfg.vmr.vm_config().mem_size_mib.is_none_or(|m| m > 1024)) {
++        return -libc::EINVAL;
++    }
+     /*
+      * Before krun_start_enter() is called in an encrypted context, the TEE
+      * config must have been set via krun_set_tee_config_file(). If the TEE
+@@ -3072,6 +3086,8 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+     vmm::worker::start_worker_thread(_vmm.clone(), _receiver.clone()).unwrap();
+ 
+     loop {
++        #[cfg(target_os = "macos")]
++        _vmm.lock().unwrap().cowork_fixture_tick();
+         match event_manager.run() {
+             Ok(_) => {}
+             Err(e) => {
+@@ -3158,3 +3174,14 @@ mod test_shutdown_eventfd {
+         assert_eq!(krun_free_ctx(ctx), KRUN_SUCCESS);
+     }
+ }
++
++#[no_mangle]
++pub extern "C" fn krun_enable_cowork_fixture_reclaim(ctx_id: u32) -> i32 {
++    match CTX_MAP.lock().unwrap().get_mut(&ctx_id) {
++        Some(cfg) => { cfg.vmr.cowork_fixture_reclaim = true; 0 },
++        None => -libc::ENOENT,
++    }
++}
++fn ctx_fixture_enabled(ctx_id: u32) -> bool {
++    CTX_MAP.lock().unwrap().get(&ctx_id).is_some_and(|cfg| cfg.vmr.cowork_fixture_reclaim)
++}
+diff --git a/src/vmm/src/builder.rs b/src/vmm/src/builder.rs
+index 72831f1..4f62fe8 100644
+--- a/src/vmm/src/builder.rs
++++ b/src/vmm/src/builder.rs
+@@ -97,7 +97,7 @@ use vm_memory::Bytes;
+ use vm_memory::GuestMemory;
+ #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+ use vm_memory::GuestRegionMmap;
+-use vm_memory::{GuestAddress, GuestMemoryMmap};
++use vm_memory::{GuestAddress, GuestMemoryMmap, GuestMemoryRegion};
+ 
+ #[cfg(all(target_arch = "aarch64", feature = "efi"))]
+ #[allow(dead_code)]
+@@ -959,6 +959,16 @@ pub fn build_microvm(
+     let exit_code = Arc::new(AtomicI32::new(i32::MAX));
+ 
+     let mut vmm = Vmm {
++        #[cfg(target_os = "macos")]
++        cowork_owned: payload_config.cowork_owned,
++        #[cfg(target_os = "macos")]
++        cowork_enabled: vm_resources.cowork_fixture_reclaim,
++        #[cfg(target_os = "macos")]
++        cowork_epoch: 0,
++        #[cfg(target_os = "macos")]
++        cowork_balloon: None,
++        #[cfg(target_os = "macos")]
++        cowork_rng: None,
+         guest_memory,
+         arch_memory_info,
+         kernel_cmdline,
+@@ -1428,6 +1438,8 @@ fn load_payload(
+ }
+ 
+ pub struct PayloadConfig {
++    #[cfg(target_os = "macos")]
++    cowork_owned: Vec<crate::cowork_ranges::OwnedRegion>,
+     entry_addr: GuestAddress,
+     initrd_config: Option<InitrdConfig>,
+     kernel_cmdline: Option<String>,
+@@ -1517,6 +1529,14 @@ pub fn create_guest_memory(
+     let guest_mem = GuestMemoryMmap::from_ranges(&arch_mem_regions)
+         .map_err(|e| StartMicrovmError::GuestMemoryMmap(format!("{e:?}")))?;
+ 
++    #[cfg(target_os = "macos")]
++    let cowork_owned = if vm_resources.cowork_fixture_reclaim {
++        assert!(matches!(payload, Payload::ExternalKernel(_)) && vm_resources.fs.is_empty()
++            && vm_resources.gpu_shm_size.is_none());
++        guest_mem.iter().map(|r| crate::cowork_ranges::OwnedRegion {
++            gpa: r.start_addr().raw_value(), hva: r.as_ptr() as u64, len: r.len(), private_anonymous: true,
++        }).collect()
++    } else { Vec::new() };
+     let (guest_mem, entry_addr, initrd_config, cmdline) =
+         load_payload(vm_resources, guest_mem, &arch_mem_info, payload)?;
+ 
+@@ -1531,6 +1551,8 @@ pub fn create_guest_memory(
+     }
+ 
+     let payload_config = PayloadConfig {
++        #[cfg(target_os = "macos")]
++        cowork_owned,
+         entry_addr,
+         initrd_config,
+         kernel_cmdline: cmdline.clone(),
+@@ -2221,6 +2243,8 @@ fn attach_balloon_device(
+         .add_subscriber(balloon.clone())
+         .map_err(RegisterEvent)?;
+ 
++    #[cfg(target_os = "macos")]
++    { balloon.lock().unwrap().fixture_reclaim = vmm.cowork_enabled; vmm.cowork_balloon = Some(balloon.clone()); }
+     let id = String::from(balloon.lock().unwrap().id());
+ 
+     // The device mutex mustn't be locked here otherwise it will deadlock.
+@@ -2261,6 +2285,8 @@ fn attach_rng_device(
+         .add_subscriber(rng.clone())
+         .map_err(RegisterEvent)?;
+ 
++    #[cfg(target_os = "macos")]
++    { vmm.cowork_rng = Some(rng.clone()); }
+     let id = String::from(rng.lock().unwrap().id());
+ 
+     // The device mutex mustn't be locked here otherwise it will deadlock.
+diff --git a/src/vmm/src/cowork_barrier.rs b/src/vmm/src/cowork_barrier.rs
+new file mode 100644
+index 0000000..f231887
+--- /dev/null
++++ b/src/vmm/src/cowork_barrier.rs
+@@ -0,0 +1,93 @@
++//! Exact-epoch coordinator state. No OS/HVF calls; runtime must supply the actual immutable roster.
++use std::collections::BTreeSet;
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Phase { Awaiting, Parked, Replacing, Mapped, Acknowledged, Resuming, Finished, Stopped, Failed }
++#[derive(Debug)]
++pub struct Barrier {
++    pub epoch: u64,
++    phase: Phase,
++    roster: BTreeSet<u64>,
++    paused: BTreeSet<u64>,
++    resumed: BTreeSet<u64>,
++}
++impl Barrier {
++    pub fn new(epoch:u64, roster:&[u64])->Result<Self,&'static str> {
++        let set:BTreeSet<_>=roster.iter().copied().collect();
++        if epoch==0 || set.is_empty() || set.len()!=roster.len() || set.contains(&u64::MAX) { return Err("invalid epoch/roster"); }
++        Ok(Self{epoch,phase:Phase::Awaiting,roster:set,paused:BTreeSet::new(),resumed:BTreeSet::new()})
++    }
++    pub fn phase(&self)->Phase { self.phase }
++    pub fn pause_ack(&mut self, cpu:u64, epoch:u64)->Result<(),&'static str> {
++        if self.phase!=Phase::Awaiting || epoch!=self.epoch || !self.roster.contains(&cpu) || !self.paused.insert(cpu) { self.fail(); return Err("invalid pause ACK"); }
++        if self.paused==self.roster { self.phase=Phase::Parked; }
++        Ok(())
++    }
++    pub fn begin_replacement(&mut self)->Result<(),&'static str> {
++        if self.phase!=Phase::Parked { return Err("CPUs not parked"); }
++        self.phase=Phase::Replacing; Ok(())
++    }
++    pub fn mappings_complete(&mut self)->Result<(),&'static str> {
++        if self.phase!=Phase::Replacing { return Err("invalid mapping state"); }
++        self.phase=Phase::Mapped; Ok(())
++    }
++    pub fn acknowledge_used(&mut self)->Result<(),&'static str> {
++        if self.phase!=Phase::Mapped { return Err("mappings incomplete"); }
++        self.phase=Phase::Acknowledged; Ok(())
++    }
++    pub fn begin_resume(&mut self)->Result<(),&'static str> {
++        if self.phase!=Phase::Acknowledged { return Err("used ring not acknowledged"); }
++        self.phase=Phase::Resuming; Ok(())
++    }
++    pub fn resume_ack(&mut self,cpu:u64,epoch:u64)->Result<(),&'static str> {
++        if self.phase!=Phase::Resuming || epoch!=self.epoch || !self.roster.contains(&cpu) || !self.resumed.insert(cpu) { self.fail(); return Err("invalid resume ACK"); }
++        if self.resumed==self.roster { self.phase=Phase::Finished; }
++        Ok(())
++    }
++    pub fn stop(&mut self) { self.phase=Phase::Stopped; }
++    pub fn fail(&mut self) { if self.phase!=Phase::Stopped { self.phase=Phase::Failed; } }
++}
++
++#[cfg(test)] mod tests {
++    use super::*;
++    #[test] fn exact_roster_and_epoch_before_any_mapping() {
++        let mut b=Barrier::new(7,&[10,20,30]).unwrap();
++        assert!(b.begin_replacement().is_err());
++        b.pause_ack(10,7).unwrap();
++        b.pause_ack(20,7).unwrap(); assert!(b.begin_replacement().is_err());
++        b.pause_ack(30,7).unwrap(); b.begin_replacement().unwrap();
++        assert!(b.acknowledge_used().is_err()); assert!(b.begin_resume().is_err());
++        b.mappings_complete().unwrap(); b.acknowledge_used().unwrap(); b.begin_resume().unwrap();
++        for id in [10,20,30] { b.resume_ack(id,7).unwrap(); }
++        assert_eq!(b.phase(),Phase::Finished);
++    }
++    #[test] fn stale_unknown_duplicate_acks_permanently_forbid_mutation() {
++        for (id,epoch) in [(10,6),(40,7),(10,7)] {
++            let mut b=Barrier::new(7,&[10,20,30]).unwrap(); b.pause_ack(10,7).unwrap();
++            assert!(b.pause_ack(id,epoch).is_err()); assert_eq!(b.phase(),Phase::Failed);
++            assert!(b.begin_replacement().is_err()); assert!(b.acknowledge_used().is_err()); assert!(b.begin_resume().is_err());
++        }
++    }
++    #[test] fn stop_wins_over_every_pause_or_mapping_phase() {
++        for position in 0..6 {
++            let mut b=Barrier::new(1,&[0]).unwrap();
++            if position>=1 { b.pause_ack(0,1).unwrap(); }
++            if position>=2 { b.begin_replacement().unwrap(); }
++            if position>=3 { b.mappings_complete().unwrap(); }
++            if position>=4 { b.acknowledge_used().unwrap(); }
++            if position>=5 { b.begin_resume().unwrap(); }
++            b.stop();
++            assert!(b.pause_ack(0,1).is_err()); assert!(b.begin_replacement().is_err());
++            assert!(b.mappings_complete().is_err()); assert!(b.acknowledge_used().is_err());
++            assert!(b.begin_resume().is_err()); assert!(b.resume_ack(0,1).is_err());
++        }
++    }
++    #[test] fn partial_failure_never_acknowledges_or_resumes() {
++        let mut b=Barrier::new(1,&[0,1]).unwrap();
++        b.pause_ack(0,1).unwrap(); b.pause_ack(1,1).unwrap(); b.begin_replacement().unwrap(); b.fail();
++        assert!(b.mappings_complete().is_err()); assert!(b.acknowledge_used().is_err()); assert!(b.begin_resume().is_err());
++    }
++    #[test] fn unknown_or_duplicate_roster_refused() {
++        for ids in [&[][..],&[0,0][..],&[u64::MAX][..]] { assert!(Barrier::new(1,ids).is_err()); }
++        assert!(Barrier::new(0,&[0]).is_err());
++    }
++}
+diff --git a/src/vmm/src/cowork_fixture.rs b/src/vmm/src/cowork_fixture.rs
+new file mode 100644
+index 0000000..45f08ec
+--- /dev/null
++++ b/src/vmm/src/cowork_fixture.rs
+@@ -0,0 +1,114 @@
++//! TEST-ONLY, PL011/RNG/balloon topology. Called on the main event thread, outside device callbacks.
++use super::{Vmm, vstate::{VcpuEvent, VcpuResponse}, cowork_barrier::Barrier, cowork_ranges::{self, Extent}};
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::time::{Duration, Instant};
++static STOPPED: AtomicBool = AtomicBool::new(false);
++pub(crate) fn mark_stop() { STOPPED.store(true, Ordering::Release); }
++fn fatal(message:&str)->! {
++    eprintln!("{{\"kind\":\"reclaim_failure\",\"message\":\"{}\",\"exitCode\":77}}",message);
++    unsafe { libc::_exit(77) }
++}
++fn alive(barrier:&mut Barrier) {
++    if STOPPED.load(Ordering::Acquire) { barrier.stop(); fatal("stop wins"); }
++}
++fn checked<T>(value:Result<T,impl std::fmt::Debug>, operation:&str)->T {
++    value.unwrap_or_else(|_| fatal(operation))
++}
++impl Vmm {
++    pub fn cowork_fixture_tick(&mut self) {
++        if !self.cowork_enabled { return; }
++        let balloon_arc=self.cowork_balloon.as_ref().unwrap_or_else(|| fatal("balloon missing")).clone();
++        let generation={
++            let balloon=balloon_arc.lock().unwrap();
++            if !balloon.fixture_pending { return; }
++            balloon.fixture_generation
++        }; // NO device mutex held while requesting/waiting for park ACKs.
++        self.cowork_epoch=self.cowork_epoch.checked_add(1).unwrap_or_else(|| fatal("epoch overflow"));
++        let epoch=self.cowork_epoch;
++        let ids:Vec<_>=self.vcpus_handles.iter().map(|h|h.fixture_id()).collect();
++        let mut barrier=checked(Barrier::new(epoch,&ids),"roster");
++        alive(&mut barrier);
++        let pause_started=Instant::now();
++        for handle in &self.vcpus_handles { checked(handle.send_event(VcpuEvent::FixturePause(epoch)),"send pause"); }
++        for handle in &self.vcpus_handles { checked(handle.fixture_kick(),"kick pause"); }
++        let deadline=pause_started+Duration::from_millis(1000);
++        for (handle,&id) in self.vcpus_handles.iter().zip(&ids) {
++            let response=checked(handle.response_receiver().recv_timeout(deadline.saturating_duration_since(Instant::now())),"pause timeout");
++            match response {
++                VcpuResponse::FixturePaused(received) => checked(barrier.pause_ack(id,received),"pause epoch ACK"),
++                _ => fatal("unexpected pause response"),
++            }
++        }
++        if self.vcpus_handles.iter().any(|h| h.response_receiver().try_recv().is_ok()) { fatal("duplicate pause ACK"); }
++        alive(&mut barrier);
++        eprintln!("{{\"kind\":\"reclaim_parked\",\"epoch\":{},\"roster\":{:?},\"pauseMicros\":{}}}",epoch,ids,pause_started.elapsed().as_micros());
++        let rng_arc=self.cowork_rng.as_ref().unwrap_or_else(|| fatal("rng missing")).clone();
++        let rng=rng_arc.lock().unwrap(); let mut balloon=balloon_arc.lock().unwrap();
++        if balloon.fixture_generation!=generation { fatal("queue generation changed"); }
++        // Only the event thread processes RNG/balloon RAM; no event dispatch occurs in this function.
++        // PL011 has no GuestMemory/DMA worker. All vCPU MMIO accesses finished before exact ACK.
++        let exclusions=checked(balloon.fixture_exclusions(),"balloon queue snapshot");
++        let mut excluded:Vec<_>=exclusions.into_iter().map(|(start,len)|Extent{start,len}).collect();
++        excluded.extend(checked(rng.fixture_exclusions(),"rng queue snapshot").into_iter().map(|(start,len)|Extent{start,len}));
++        let batches=checked(balloon.fixture_pop(),"report chain snapshot");
++        let indices:Vec<_>=batches.iter().map(|(index,_)|*index).collect();
++        let reports:Vec<_>=batches.iter().flat_map(|(_,ranges)|ranges.iter().map(|&(start,len)|Extent{start,len})).collect();
++        if reports.is_empty() { fatal("empty staged report"); }
++        let page=unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
++        if page!=16384 { fatal("host page mismatch"); }
++        for x in &excluded {
++            let end=x.start.checked_add(x.len).unwrap_or_else(|| fatal("excluded overflow"));
++            if x.len==0 || !self.cowork_owned.iter().any(|r| x.start>=r.gpa && end<=r.gpa+r.len) { fatal("excluded full span"); }
++        }
++        let spans=checked(cowork_ranges::plan(&self.cowork_owned,&excluded,&reports,page as u64),"complete span validation");
++        for extent in &excluded { eprintln!("{{\"kind\":\"reclaim_exclusion\",\"epoch\":{},\"gpa\":{},\"len\":{}}}",epoch,extent.start,extent.len); }
++        // Full validation completes for every span before the first mapping is changed.
++        let mut operations=HvfOps{vm:self.vm.hvf_vm(),epoch};
++        checked(super::cowork_ops::apply(&mut barrier,&spans,&mut operations),"coordinated replacement failed");
++        let replaced:u64=spans.iter().map(|span|span.len).sum();
++        alive(&mut barrier);
++        checked(barrier.acknowledge_used(),"used ACK phase");
++        checked(balloon.fixture_ack(&indices),"used ACK write");
++        eprintln!("{{\"kind\":\"reclaim_used_ack\",\"epoch\":{},\"indices\":{:?},\"replacedBytes\":{}}}",epoch,indices,replaced);
++        drop(balloon); drop(rng);
++        alive(&mut barrier); checked(barrier.begin_resume(),"resume phase");
++        for handle in &self.vcpus_handles { checked(handle.send_event(VcpuEvent::FixtureResume(epoch)),"send resume"); }
++        let resume_deadline=Instant::now()+Duration::from_millis(1000);
++        for (handle,&id) in self.vcpus_handles.iter().zip(&ids) {
++            let response=checked(handle.response_receiver().recv_timeout(resume_deadline.saturating_duration_since(Instant::now())),"resume timeout");
++            match response {
++                VcpuResponse::FixtureResumed(received) => checked(barrier.resume_ack(id,received),"resume epoch ACK"),
++                _ => fatal("unexpected resume response"),
++            }
++        }
++        eprintln!("{{\"kind\":\"reclaim_resumed\",\"epoch\":{},\"roster\":{:?},\"parkMicros\":{},\"spanCount\":{}}}",epoch,ids,pause_started.elapsed().as_micros(),spans.len());
++        debug_assert_eq!(barrier.phase(),super::cowork_barrier::Phase::Finished);
++    }
++}
++
++struct HvfOps<'a> { vm:&'a hvf::HvfVm, epoch:u64 }
++impl super::cowork_ops::ReplaceOps for HvfOps<'_> {
++    fn stopped(&self)->bool { STOPPED.load(Ordering::Acquire) }
++    fn unmap(&mut self,span:super::cowork_ranges::ReclaimSpan)->Result<(),()> {
++        let len=usize::try_from(span.len).map_err(|_|())?;
++        let result=unsafe { self.vm.fixture_unmap(span.gpa,len) };
++        eprintln!("{{\"kind\":\"reclaim_unmap\",\"epoch\":{},\"gpa\":{},\"hva\":{},\"len\":{},\"return\":{}}}",self.epoch,span.gpa,span.hva,span.len,result);
++        if result==0 { Ok(()) } else { Err(()) }
++    }
++    fn replace(&mut self,span:super::cowork_ranges::ReclaimSpan)->Result<(),()> {
++        let len=usize::try_from(span.len).map_err(|_|())?;
++        let hva=usize::try_from(span.hva).map_err(|_|())? as *mut libc::c_void;
++        // Atomic replacement of our OWNED mapping. No standalone munmap hole/allocator race.
++        let result=unsafe { libc::mmap(hva,len,libc::PROT_READ|libc::PROT_WRITE,libc::MAP_ANON|libc::MAP_PRIVATE|libc::MAP_FIXED,-1,0) };
++        let mmap_errno=std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
++        eprintln!("{{\"kind\":\"reclaim_replace\",\"epoch\":{},\"gpa\":{},\"sameHVA\":{},\"errnoIfFailed\":{}}}",self.epoch,span.gpa,result==hva,if result==hva {0}else{mmap_errno});
++        if result==hva { Ok(()) } else { Err(()) }
++    }
++    fn map(&mut self,span:super::cowork_ranges::ReclaimSpan)->Result<(),()> {
++        let len=usize::try_from(span.len).map_err(|_|())?;
++        let hva=usize::try_from(span.hva).map_err(|_|())? as *mut libc::c_void;
++        let result=unsafe { self.vm.fixture_map(hva,span.gpa,len) };
++        eprintln!("{{\"kind\":\"reclaim_map\",\"epoch\":{},\"gpa\":{},\"sameHVA\":true,\"flags\":\"RWX\",\"return\":{}}}",self.epoch,span.gpa,result);
++        if result==0 { Ok(()) } else { Err(()) }
++    }
++}
+diff --git a/src/vmm/src/cowork_ops.rs b/src/vmm/src/cowork_ops.rs
+new file mode 100644
+index 0000000..89256d2
+--- /dev/null
++++ b/src/vmm/src/cowork_ops.rs
+@@ -0,0 +1,87 @@
++//! Shared replacement sequence; real HVF operations and bounded fakes use this exact function.
++use crate::cowork_barrier::Barrier;
++use crate::cowork_ranges::ReclaimSpan;
++pub trait ReplaceOps {
++    fn stopped(&self)->bool;
++    fn unmap(&mut self, span:ReclaimSpan)->Result<(),()>;
++    fn replace(&mut self, span:ReclaimSpan)->Result<(),()>;
++    fn map(&mut self, span:ReclaimSpan)->Result<(),()>;
++}
++#[derive(Clone,Copy,Debug,PartialEq,Eq)]
++pub enum Failure { NotParked, Empty, Stopped, Unmap, Replace, Map, State }
++fn stop(barrier:&mut Barrier, ops:&impl ReplaceOps)->Result<(),Failure> {
++    if ops.stopped() { barrier.stop(); Err(Failure::Stopped) } else { Ok(()) }
++}
++pub fn apply(barrier:&mut Barrier, spans:&[ReclaimSpan], ops:&mut impl ReplaceOps)->Result<(),Failure> {
++    stop(barrier,ops)?;
++    if spans.is_empty() { barrier.fail(); return Err(Failure::Empty); }
++    barrier.begin_replacement().map_err(|_|Failure::NotParked)?;
++    for &span in spans {
++        stop(barrier,ops)?;
++        if ops.unmap(span).is_err() { barrier.fail(); return Err(Failure::Unmap); }
++        stop(barrier,ops)?;
++        if ops.replace(span).is_err() { barrier.fail(); return Err(Failure::Replace); }
++        stop(barrier,ops)?;
++        if ops.map(span).is_err() { barrier.fail(); return Err(Failure::Map); }
++    }
++    stop(barrier,ops)?;
++    barrier.mappings_complete().map_err(|_|Failure::State)
++}
++#[cfg(test)] mod tests {
++    use super::*;
++    use crate::cowork_barrier::Phase;
++    #[derive(Default)] struct Fake { calls:Vec<(&'static str,ReclaimSpan)>, fail_at:Option<usize>, stop_at:Option<usize> }
++    impl Fake { fn call(&mut self,op:&'static str,span:ReclaimSpan)->Result<(),()> {
++        self.calls.push((op,span)); if self.fail_at==Some(self.calls.len()) { Err(()) } else { Ok(()) }
++    } }
++    impl ReplaceOps for Fake {
++        fn stopped(&self)->bool { self.stop_at.is_some_and(|n| self.calls.len()>=n) }
++        fn unmap(&mut self,s:ReclaimSpan)->Result<(),()> { self.call("unmap",s) }
++        fn replace(&mut self,s:ReclaimSpan)->Result<(),()> { self.call("replace",s) }
++        fn map(&mut self,s:ReclaimSpan)->Result<(),()> { self.call("map",s) }
++    }
++    fn spans()->[ReclaimSpan;2] { [ReclaimSpan{gpa:0x80000000,hva:0x100000000,len:16384},ReclaimSpan{gpa:0x80008000,hva:0x100008000,len:32768}] }
++    fn parked()->Barrier { let mut b=Barrier::new(9,&[10,20]).unwrap(); b.pause_ack(10,9).unwrap(); b.pause_ack(20,9).unwrap(); b }
++    #[test] fn every_partial_hvf_or_mmap_failure_forbids_ack_resume() {
++        for failure in 1..=6 {
++            let mut b=parked();let mut ops=Fake{fail_at:Some(failure),..Fake::default()};
++            assert!(apply(&mut b,&spans(),&mut ops).is_err()); assert_eq!(ops.calls.len(),failure);
++            assert_eq!(b.phase(),Phase::Failed); assert!(b.acknowledge_used().is_err()); assert!(b.begin_resume().is_err());
++        }
++    }
++    #[test] fn stop_at_each_transition_prevents_more_operations_or_ack() {
++        for position in 0..=6 {
++            let mut b=parked();let mut ops=Fake{stop_at:Some(position),..Fake::default()};
++            assert_eq!(apply(&mut b,&spans(),&mut ops),Err(Failure::Stopped)); assert_eq!(ops.calls.len(),position);
++            assert_eq!(b.phase(),Phase::Stopped); assert!(b.acknowledge_used().is_err()); assert!(b.begin_resume().is_err());
++        }
++    }
++    #[test] fn missing_stale_duplicate_cpu_means_zero_map_calls() {
++        for ack in [None,Some((10,8)),Some((10,9))] {
++            let mut b=Barrier::new(9,&[10,20]).unwrap(); b.pause_ack(10,9).unwrap();
++            if let Some((id,e))=ack { assert!(b.pause_ack(id,e).is_err()); }
++            let mut ops=Fake::default(); assert!(apply(&mut b,&spans(),&mut ops).is_err()); assert!(ops.calls.is_empty());
++        }
++    }
++    #[test] fn full_sequence_preserves_every_hva_and_delays_used_ack() {
++        let mut b=parked();let mut ops=Fake::default();apply(&mut b,&spans(),&mut ops).unwrap();
++        assert_eq!(ops.calls,vec![("unmap",spans()[0]),("replace",spans()[0]),("map",spans()[0]),("unmap",spans()[1]),("replace",spans()[1]),("map",spans()[1])]);
++        assert_eq!(b.phase(),Phase::Mapped);assert!(b.begin_resume().is_err());
++        b.acknowledge_used().unwrap();b.begin_resume().unwrap();
++    }
++    #[test] fn empty_plan_is_not_a_replacement() {
++        let mut b=parked();let mut ops=Fake::default();assert_eq!(apply(&mut b,&[],&mut ops),Err(Failure::Empty));assert!(ops.calls.is_empty());
++    }
++    #[test] fn malformed_report_or_ring_intersection_rejected_before_any_map_call() {
++        use crate::cowork_ranges::{self,OwnedRegion,Extent};
++        let region=OwnedRegion{gpa:0x80000000,hva:0x100000000,len:8*16384,private_anonymous:true};
++        let bad=[Extent{start:region.gpa,len:4096},Extent{start:region.gpa+7*16384,len:2*16384},Extent{start:u64::MAX-16383,len:32768},Extent{start:region.gpa,len:0}];
++        for report in bad {
++            let mut b=parked();let mut ops=Fake::default();
++            if let Ok(spans)=cowork_ranges::plan(&[region],&[],&[report],16384) { let _=apply(&mut b,&spans,&mut ops); }
++            assert!(ops.calls.is_empty());
++        }
++        let report=Extent{start:region.gpa,len:16384};let ring=Extent{start:region.gpa+16383,len:1};
++        assert!(cowork_ranges::plan(&[region],&[ring],&[report],16384).is_err());
++    }
++}
+diff --git a/src/vmm/src/cowork_ranges.rs b/src/vmm/src/cowork_ranges.rs
+new file mode 100644
+index 0000000..d64879a
+--- /dev/null
++++ b/src/vmm/src/cowork_ranges.rs
+@@ -0,0 +1,112 @@
++//! Pure planning only: never unmaps or modifies memory. Runtime owns the registry and exclusions.
++//! Compile tests with the slice-local rustc --test; no VM or library linkage is needed.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct Extent { pub start: u64, pub len: u64 }
++#[derive(Clone, Copy, Debug)]
++pub struct OwnedRegion { pub gpa: u64, pub hva: u64, pub len: u64, pub private_anonymous: bool }
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct ReclaimSpan { pub gpa: u64, pub hva: u64, pub len: u64 }
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Reject { HostPageSize, Empty, TooMany, Overflow, Registry, Unowned, Alignment, Overlap, Excluded, Limit }
++
++fn end(start: u64, len: u64) -> Result<u64, Reject> {
++    if len == 0 { return Err(Reject::Empty); }
++    start.checked_add(len).ok_or(Reject::Overflow)
++}
++fn overlaps(a: Extent, b: Extent) -> Result<bool, Reject> {
++    Ok(a.start < end(b.start,b.len)? && b.start < end(a.start,a.len)?)
++}
++
++/// Every input descriptor must be a complete host page, inside ONE sealed private RAM region.
++/// Reject whole batches atomically. Never round, truncate, merge a gap, or translate only the start.
++pub fn plan(regions: &[OwnedRegion], excluded: &[Extent], reports: &[Extent], host_page: u64)
++    -> Result<Vec<ReclaimSpan>, Reject>
++{
++    if host_page != 16384 { return Err(Reject::HostPageSize); }
++    if reports.is_empty() { return Err(Reject::Empty); }
++    if reports.len()>256 || regions.len()>256 || excluded.len()>4096 { return Err(Reject::TooMany); }
++    for (i,r) in regions.iter().enumerate() {
++        end(r.gpa,r.len)?; end(r.hva,r.len)?;
++        if !r.private_anonymous || r.gpa%host_page!=0 || r.hva%host_page!=0 || r.len%host_page!=0 {
++            return Err(Reject::Registry);
++        }
++        for previous in &regions[..i] {
++            if overlaps(Extent{start:r.gpa,len:r.len},Extent{start:previous.gpa,len:previous.len})?
++                || overlaps(Extent{start:r.hva,len:r.len},Extent{start:previous.hva,len:previous.len})? {
++                return Err(Reject::Registry);
++            }
++        }
++    }
++    for x in excluded { end(x.start,x.len)?; }
++    let mut spans=Vec::with_capacity(reports.len()); let mut total=0u64;
++    for (i,report) in reports.iter().enumerate() {
++        let report_end=end(report.start,report.len)?;
++        if report.start%host_page!=0 || report.len%host_page!=0 { return Err(Reject::Alignment); }
++        total=total.checked_add(report.len).ok_or(Reject::Overflow)?;
++        if total>384*1024*1024 { return Err(Reject::Limit); }
++        let region=regions.iter().find(|r| report.start>=r.gpa && report_end<=r.gpa+r.len).ok_or(Reject::Unowned)?;
++        let hva=region.hva.checked_add(report.start-region.gpa).ok_or(Reject::Overflow)?;
++        if hva%host_page!=0 || end(hva,report.len)?>region.hva+region.len { return Err(Reject::Alignment); }
++        for previous in &reports[..i] { if overlaps(*report,*previous)? { return Err(Reject::Overlap); } }
++        for x in excluded { if overlaps(*report,*x)? { return Err(Reject::Excluded); } }
++        spans.push(ReclaimSpan{gpa:report.start,hva,len:report.len});
++    }
++    Ok(spans)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    const PAGE:u64=16384;
++    fn region()->OwnedRegion { OwnedRegion{gpa:0x80000000,hva:0x100000000,len:8*PAGE,private_anonymous:true} }
++    fn report(start:u64,len:u64)->Extent { Extent{start,len} }
++    #[test] fn full_span_translation() {
++        let r=region(); let p=plan(&[r],&[],&[report(r.gpa+PAGE,2*PAGE)],PAGE).unwrap();
++        assert_eq!(p,[ReclaimSpan{gpa:r.gpa+PAGE,hva:r.hva+PAGE,len:2*PAGE}]);
++    }
++    #[test] fn valid_start_invalid_full_span() {
++        let r=region();assert_eq!(plan(&[r],&[],&[report(r.gpa+7*PAGE,2*PAGE)],PAGE),Err(Reject::Unowned));
++    }
++    #[test] fn adjacent_regions_are_not_one_owned_span() {
++        let a=region(); let b=OwnedRegion{gpa:a.gpa+a.len,hva:a.hva+a.len,..a};
++        assert_eq!(plan(&[a,b],&[],&[report(a.gpa+7*PAGE,2*PAGE)],PAGE),Err(Reject::Unowned));
++    }
++    #[test] fn partial_host_pages_are_never_rounded() {
++        let r=region();
++        for x in [report(r.gpa,4096),report(r.gpa+4096,PAGE),report(r.gpa,PAGE+4096)] {
++            assert_eq!(plan(&[r],&[],&[x],PAGE),Err(Reject::Alignment));
++        }
++    }
++    #[test] fn overflow_and_empty_inputs() {
++        let r=region();
++        assert_eq!(plan(&[r],&[],&[report(u64::MAX-PAGE+1,2*PAGE)],PAGE),Err(Reject::Overflow));
++        assert_eq!(plan(&[r],&[],&[report(r.gpa,0)],PAGE),Err(Reject::Empty));
++        assert_eq!(plan(&[r],&[],&[],PAGE),Err(Reject::Empty));
++    }
++    #[test] fn duplicate_or_overlapping_reports_rejected() {
++        let r=region();
++        for start in [r.gpa,r.gpa+PAGE] {
++            assert_eq!(plan(&[r],&[],&[report(r.gpa,2*PAGE),report(start,PAGE)],PAGE),Err(Reject::Overlap));
++        }
++    }
++    #[test] fn dma_or_ring_exclusion_even_one_byte() {
++        let r=region();
++        assert_eq!(plan(&[r],&[report(r.gpa+PAGE-1,1)],&[report(r.gpa,PAGE)],PAGE),Err(Reject::Excluded));
++        assert!(plan(&[r],&[report(r.gpa+PAGE,1)],&[report(r.gpa,PAGE)],PAGE).is_ok());
++    }
++    #[test] fn registry_rejects_aliases_shared_memory_and_unaligned_hva() {
++        let r=region();
++        for invalid in [OwnedRegion{private_anonymous:false,..r},OwnedRegion{hva:r.hva+4096,..r}] {
++            assert_eq!(plan(&[invalid],&[],&[report(r.gpa,PAGE)],PAGE),Err(Reject::Registry));
++        }
++        let alias=OwnedRegion{gpa:r.gpa+r.len,..r};
++        assert_eq!(plan(&[r,alias],&[],&[report(r.gpa,PAGE)],PAGE),Err(Reject::Registry));
++    }
++    #[test] fn bounded_fixture_limit_and_descriptor_count() {
++        let r=OwnedRegion{len:512*1024*1024,..region()};
++        assert_eq!(plan(&[r],&[],&[report(r.gpa,385*1024*1024)],PAGE),Err(Reject::Limit));
++        assert_eq!(plan(&[r],&[],&vec![report(r.gpa,PAGE);257],PAGE),Err(Reject::TooMany));
++        assert_eq!(plan(&[r],&[],&[report(r.gpa,PAGE)],4096),Err(Reject::HostPageSize));
++    }
++}
+diff --git a/src/vmm/src/lib.rs b/src/vmm/src/lib.rs
+index 0f0f8c2..42edbf0 100644
+--- a/src/vmm/src/lib.rs
++++ b/src/vmm/src/lib.rs
+@@ -192,7 +192,25 @@ pub trait VmmEventsObserver {
+ pub type Result<T> = std::result::Result<T, Error>;
+ 
+ /// Contains the state and associated methods required for the Firecracker VMM.
++#[cfg(target_os = "macos")]
++mod cowork_fixture;
++#[cfg(target_os = "macos")]
++mod cowork_ranges;
++#[cfg(target_os = "macos")]
++mod cowork_barrier;
++#[cfg(target_os = "macos")]
++mod cowork_ops;
+ pub struct Vmm {
++    #[cfg(target_os = "macos")]
++    cowork_owned: Vec<cowork_ranges::OwnedRegion>,
++    #[cfg(target_os = "macos")]
++    cowork_enabled: bool,
++    #[cfg(target_os = "macos")]
++    cowork_epoch: u64,
++    #[cfg(target_os = "macos")]
++    cowork_balloon: Option<Arc<Mutex<devices::virtio::Balloon>>>,
++    #[cfg(target_os = "macos")]
++    cowork_rng: Option<Arc<Mutex<devices::virtio::Rng>>>,
+     // Guest VM core resources.
+     guest_memory: GuestMemoryMmap,
+     arch_memory_info: ArchMemoryInfo,
+diff --git a/src/vmm/src/macos/vstate.rs b/src/vmm/src/macos/vstate.rs
+index ccafa1c..a1c3b71 100644
+--- a/src/vmm/src/macos/vstate.rs
++++ b/src/vmm/src/macos/vstate.rs
+@@ -10,15 +10,15 @@ use std::collections::HashMap;
+ use std::fmt::{Display, Formatter};
+ use std::io;
+ use std::result;
+-use std::sync::Arc;
++use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+ use std::thread;
+-use std::time::Duration;
++use std::time::{Duration, Instant};
+ 
+ use super::super::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK};
+ use crate::vmm_config::machine_config::CpuFeaturesTemplate;
+ 
+ use arch::ArchMemoryInfo;
+-use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
++use crossbeam_channel::{unbounded, Receiver, Sender};
+ use devices::legacy::VcpuList;
+ use hvf::{HvfVcpu, HvfVm, VcpuExit, Vcpus};
+ use utils::eventfd::EventFd;
+@@ -201,6 +201,7 @@ pub struct Vcpu {
+ 
+     vcpu_list: Arc<VcpuList>,
+     nested_enabled: bool,
++    fixture_hvf_id: Arc<AtomicU64>,
+ }
+ 
+ impl Vcpu {
+@@ -296,6 +297,7 @@ impl Vcpu {
+             response_sender,
+             vcpu_list,
+             nested_enabled,
++            fixture_hvf_id: Arc::new(AtomicU64::new(u64::MAX)),
+         })
+     }
+ 
+@@ -335,6 +337,7 @@ impl Vcpu {
+         let event_sender = self.event_sender.take().unwrap();
+         let response_receiver = self.response_receiver.take().unwrap();
+         let (init_tls_sender, init_tls_receiver) = unbounded();
++        let fixture_hvf_id = self.fixture_hvf_id.clone();
+ 
+         let vcpu_thread = thread::Builder::new()
+             .name(format!("fc_vcpu {}", self.cpu_index()))
+@@ -354,6 +357,7 @@ impl Vcpu {
+             event_sender,
+             response_receiver,
+             vcpu_thread,
++            fixture_hvf_id,
+         ))
+     }
+ 
+@@ -443,6 +447,7 @@ impl Vcpu {
+             HvfVcpu::new(self.mpidr, self.nested_enabled).expect("Can't create HVF vCPU");
+         let hvf_vcpuid = hvf_vcpu.id();
+ 
++        self.fixture_hvf_id.store(hvf_vcpuid, Ordering::Release);
+         init_tls_sender
+             .send(true)
+             .expect("Cannot notify vcpu TLS initialization.");
+@@ -450,8 +455,13 @@ impl Vcpu {
+         let (wfe_sender, wfe_receiver) = unbounded();
+         self.vcpu_list.register(hvf_vcpuid, wfe_sender);
+ 
+-        let entry_addr = if let Some(boot_receiver) = &self.boot_receiver {
+-            boot_receiver.recv().unwrap()
++        let entry_addr = if let Some(boot_receiver) = self.boot_receiver.clone() {
++            loop {
++                crossbeam_channel::select! {
++                    recv(boot_receiver) -> entry => break entry.expect("boot channel closed"),
++                    recv(self.event_receiver) -> event => self.fixture_control(event.expect("control closed")),
++                }
++            }
+         } else {
+             self.boot_entry_addr
+         };
+@@ -461,6 +471,7 @@ impl Vcpu {
+             .unwrap_or_else(|_| panic!("Can't set HVF vCPU {hvf_vcpuid} initial state"));
+ 
+         loop {
++            while let Ok(event) = self.event_receiver.try_recv() { self.fixture_control(event); }
+             match self.run_emulation(&mut hvf_vcpu) {
+                 // Emulation ran successfully, continue.
+                 Ok(VcpuEmulation::Handled) => (),
+@@ -494,24 +505,47 @@ impl Vcpu {
+         receiver: &Receiver<u32>,
+         timeout: Option<Duration>,
+     ) {
+-        if self.vcpu_list.should_wait(hvf_vcpuid) {
+-            if let Some(timeout) = timeout {
+-                match receiver.recv_timeout(timeout) {
+-                    Ok(_) => {}
+-                    Err(e) => match e {
+-                        RecvTimeoutError::Timeout => {}
+-                        RecvTimeoutError::Disconnected => panic!("WFE channel closed unexpectedly"),
+-                    },
++        let deadline = timeout.map(|d| Instant::now() + d);
++        loop {
++            if !self.vcpu_list.should_wait(hvf_vcpuid) { return; }
++            if let Some(deadline) = deadline {
++                let remaining = deadline.saturating_duration_since(Instant::now());
++                if remaining.is_zero() { return; }
++                crossbeam_channel::select! {
++                    recv(receiver) -> irq => { irq.expect("WFE channel closed"); return; },
++                    recv(self.event_receiver) -> event => self.fixture_control(event.expect("control closed")),
++                    default(remaining) => return,
+                 }
+             } else {
+-                receiver.recv().unwrap();
++                crossbeam_channel::select! {
++                    recv(receiver) -> irq => { irq.expect("WFE channel closed"); return; },
++                    recv(self.event_receiver) -> event => self.fixture_control(event.expect("control closed")),
++                }
+             }
+         }
+     }
+ 
++    fn fixture_control(&mut self, event: VcpuEvent) {
++        if let VcpuEvent::FixturePause(epoch) = event {
++            // Called only outside hv_vcpu_run/MMIO emulation: no device mutex or guest slice survives.
++            self.response_sender.send(VcpuResponse::FixturePaused(epoch)).expect("pause ACK closed");
++            loop {
++                match self.event_receiver.recv().expect("parked control closed") {
++                    VcpuEvent::FixtureResume(resume) if resume == epoch => {
++                        self.response_sender.send(VcpuResponse::FixtureResumed(epoch)).expect("resume ACK closed");
++                        return;
++                    },
++                    _ => panic!("mismatched fixture park epoch"),
++                }
++            }
++        } else if matches!(event, VcpuEvent::FixtureResume(_)) {
++            panic!("fixture resume without park");
++        }
++    }
+     fn wait_for_resume(&mut self) {}
+ 
+     fn exit(&mut self, exit_code: u8) {
++        crate::cowork_fixture::mark_stop();
+         self.response_sender
+             .send(VcpuResponse::Exited(exit_code))
+             .expect("failed to send Exited status");
+@@ -535,6 +569,8 @@ impl Drop for Vcpu {
+ pub enum VcpuEvent {
+     /// Pause the Vcpu.
+     Pause,
++    FixturePause(u64),
++    FixtureResume(u64),
+     /// Event that should resume the Vcpu.
+     Resume,
+     // Serialize and Deserialize to follow after we get the support from kvm-ioctls.
+@@ -545,6 +581,8 @@ pub enum VcpuEvent {
+ pub enum VcpuResponse {
+     /// Vcpu is paused.
+     Paused,
++    FixturePaused(u64),
++    FixtureResumed(u64),
+     /// Vcpu is resumed.
+     Resumed,
+     /// Vcpu is stopped.
+@@ -553,6 +591,7 @@ pub enum VcpuResponse {
+ 
+ /// Wrapper over Vcpu that hides the underlying interactions with the Vcpu thread.
+ pub struct VcpuHandle {
++    fixture_hvf_id: Arc<AtomicU64>,
+     event_sender: Sender<VcpuEvent>,
+     response_receiver: Receiver<VcpuResponse>,
+ }
+@@ -562,10 +601,12 @@ impl VcpuHandle {
+         event_sender: Sender<VcpuEvent>,
+         response_receiver: Receiver<VcpuResponse>,
+         _vcpu_thread: thread::JoinHandle<()>,
++        fixture_hvf_id: Arc<AtomicU64>,
+     ) -> Self {
+         Self {
+             event_sender,
+             response_receiver,
++            fixture_hvf_id,
+         }
+     }
+ 
+@@ -586,6 +627,12 @@ impl VcpuHandle {
+         Ok(())
+     }
+ 
++    pub fn fixture_id(&self) -> u64 { self.fixture_hvf_id.load(Ordering::Acquire) }
++    pub fn fixture_kick(&self) -> Result<()> {
++        let id = self.fixture_hvf_id.load(Ordering::Acquire);
++        if id == u64::MAX { return Err(Error::VcpuRun); }
++        hvf::vcpu_request_exit(id).map_err(|_| Error::VcpuRun)
++    }
+     pub fn response_receiver(&self) -> &Receiver<VcpuResponse> {
+         &self.response_receiver
+     }
+@@ -604,9 +651,9 @@ enum VcpuEmulation {
+ mod tests {
+     #[cfg(target_arch = "x86_64")]
+     use crossbeam_channel::RecvTimeoutError;
+-    use std::sync::Arc;
++    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+     #[cfg(target_arch = "x86_64")]
+-    use std::time::Duration;
++    use std::time::{Duration, Instant};
+ 
+     use super::*;
+     use arch::aarch64::layout::DRAM_MEM_START_EFI;
+diff --git a/src/vmm/src/resources.rs b/src/vmm/src/resources.rs
+index aa32404..ca025a5 100644
+--- a/src/vmm/src/resources.rs
++++ b/src/vmm/src/resources.rs
+@@ -128,6 +128,8 @@ pub enum VsockConfig {
+ /// held in the Vmm.
+ #[derive(Default)]
+ pub struct VmResources {
++    /// TEST-ONLY reduced-device active-reclaim opt-in.
++    pub cowork_fixture_reclaim: bool,
+     /// The vCpu and memory configuration for this microVM.
+     vm_config: VmConfig,
+     /// The firmware to be loaded into the microVM.
