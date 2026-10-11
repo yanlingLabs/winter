@@ -10,7 +10,7 @@ import { sandboxAvailable } from "../workflows/sandbox";
 import { AUTOMATION_WORKER_ENV, buildAutomationSeatbeltProfile, devSourceRootFor } from "./sandbox";
 import { WORKER_NOT_SANDBOXED_EXIT_CODE } from "../workflows/sandbox-guard";
 import { AUTOMATION_WORKER_ARG } from "./worker/entry";
-import { BRIDGE_MAX_LINE, type HostToWorker, type WorkerToHost } from "./worker/bridge";
+import { BRIDGE_MAX_LINE, type HostToWorker, type SavedScriptSource, type WorkerToHost } from "./worker/bridge";
 
 export interface AutomationWorkerCommand { file: string; args: string[] }
 
@@ -31,7 +31,7 @@ export interface RunHandlers {
 }
 
 export type WorkerRunOutcome =
-  | { kind: "done"; error?: { name: string; message: string; line?: number }; note?: string }
+  | { kind: "done"; error?: { name: string; message: string; line?: number }; note?: string; installFailed?: string[] }
   /** The process went away before the run settled (killed, crashed, or refused to run — `refused`). */
   | { kind: "exited"; code: number | null; refused: boolean };
 
@@ -141,19 +141,22 @@ export class AutomationWorker {
       case "show": if (typeof msg.image === "string") run.handlers.onShow(msg.image); return;
       case "done": {
         this.current = undefined;
-        run.settle({ kind: "done", ...(msg.error === undefined ? {} : { error: msg.error }), ...(msg.note === undefined ? {} : { note: msg.note }) });
+        run.settle({
+          kind: "done", ...(msg.error === undefined ? {} : { error: msg.error }), ...(msg.note === undefined ? {} : { note: msg.note }),
+          ...(Array.isArray(msg.installFailed) ? { installFailed: msg.installFailed.filter((n): n is string => typeof n === "string") } : {}),
+        });
         return;
       }
     }
   }
 
   /** Run one script. Resolves when it settles or the process goes away; never rejects. */
-  run(runId: string, code: string, handlers: RunHandlers): Promise<WorkerRunOutcome> {
+  run(runId: string, code: string, handlers: RunHandlers, install?: SavedScriptSource[]): Promise<WorkerRunOutcome> {
     if (!this.alive) return Promise.resolve({ kind: "exited", code: this.exitCode ?? null, refused: false });
     if (this.current !== undefined) return Promise.resolve({ kind: "done", error: { name: "Error", message: "another script is still running in this session's runtime" } });
     return new Promise<WorkerRunOutcome>((settle) => {
       this.current = { id: runId, handlers, settle };
-      this.send({ op: "run", runId, code });
+      this.send({ op: "run", runId, code, ...(install === undefined || install.length === 0 ? {} : { install }) });
     });
   }
 

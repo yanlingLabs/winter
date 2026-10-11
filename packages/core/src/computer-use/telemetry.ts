@@ -48,6 +48,8 @@ export interface PrimitiveMetric {
   bytes?: number;
   /** An `extra` / `dict` primitive: the extra's or dictionary command's NAME (never its arguments). */
   extra?: string;
+  /** `scripts.save` / `scripts.run` (Phase 4): the saved script's NAME — never its source or its arguments. */
+  script?: string;
   /** An act (helper 1.9.8): the apps that came forward after the agent's action with no input of the user's since — sent
    *  back, or left in front (a system dialog) — since the act before (names only, at most 8). */
   viewMovedBy?: string[];

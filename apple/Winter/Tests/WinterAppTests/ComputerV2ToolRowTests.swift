@@ -57,6 +57,14 @@ final class ComputerV2ToolRowTests: XCTestCase {
         XCTAssertEqual(computerV2AppNames(in: "await Promise.all(urls.map((u) => browsers.read(u)))"), [])
     }
 
+    func testASavedScriptsCallIsShownAsScriptAndItsName() {
+        XCTAssertEqual(computerV2Verbs(in: "const r = await scripts.exportCsv(sheet, '/tmp/a.csv'); await notes.state()"), ["script exportCsv", "state"])
+        XCTAssertEqual(computerV2Label(title: nil, code: "await scripts.exportCsv(s, p)"), "Using the computer · script exportCsv")
+        // Saving is not a saved script's call; what the saved function does is still read as verbs.
+        XCTAssertEqual(computerV2Verbs(in: "await scripts.save('fill', async (app, v) => { await app.click(3); await app.type(v) })"), ["click", "type"])
+        XCTAssertEqual(computerV2Verbs(in: "await scripts.fill(a, 'x'); await scripts.fill(a, 'y')"), ["script fill"])
+    }
+
     func testAppNameFormsAreShownAsNames() {
         XCTAssertEqual(computerV2AppNames(in: #"await apps.open("com.apple.Notes")"#), ["Notes"])
         XCTAssertEqual(computerV2AppNames(in: #"await apps.open('/Applications/Final Cut Pro.app')"#), ["Final Cut Pro"])
