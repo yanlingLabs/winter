@@ -119,10 +119,12 @@ extension CUCore {
     /// queue. Returns the view it ends on.
     /// `window`: the user's window to raise — recorded BEFORE something took them away (a desktop visit), since by
     /// now the app's focused window can be another one (the target's, when the user's app is the target app).
+    /// `raiseFocused`: with no recorded window, raise the app's focused window (the guardian's restore); false raises
+    /// nothing then (a visit's return, whose own choice of window found none of the user's).
     @discardableResult
-    func restoreUserView(_ before: CUUserView, user: pid_t, window recorded: AXUIElement? = nil) -> CUUserView {
+    func restoreUserView(_ before: CUUserView, user: pid_t, window recorded: AXUIElement? = nil, raiseFocused: Bool = true) -> CUUserView {
         if before.space != nil, userView().space != before.space,
-           let window = recorded ?? ax.element(ax.application(user), kAXFocusedWindowAttribute) {
+           let window = recorded ?? (raiseFocused ? ax.element(ax.application(user), kAXFocusedWindowAttribute) : nil) {
             try? ax.perform(window, kAXRaiseAction)
         }
         _ = sys.activate(pid: user)

@@ -512,6 +512,9 @@ public final class CUCore: @unchecked Sendable {
     var visitArriveMs: Double = 1500
     /// After a visit that never arrived, how long a late switch (the target answering its AX calls late) is watched for.
     var visitLateSwitchMs: Double = 1200
+    /// A late switch counts as the user's when input of theirs that can switch apps or desktops (`lastSwitchInputAt`)
+    /// came at most this long before it was seen (a ⌘-Tab's switch lands a few hundred ms after the keys).
+    static let lateSwitchInputWindow: TimeInterval = 1.0
     /// How long a window read as closed while the server still lists it is watched before it counts as gone
     /// (`windowGone`): a full-screen transition reads like that for a moment.
     var windowGoneSettleMs: Double = 1500
@@ -553,6 +556,12 @@ public final class CUCore: @unchecked Sendable {
     /// The same, for a hardware ACTION only (a click, a key, a scroll, a gesture — never a pointer move): what a
     /// desktop visit counts as the user acting during it.
     var lastHardwareActionAt: TimeInterval = -1
+    /// The last hardware input that can SWITCH apps or desktops (`CUCore.canSwitch`): a ⌘ or ⌃ chord (⌘-Tab, ⌃-arrows),
+    /// a trackpad gesture (a swipe between desktops, Mission Control), a click on a bound target's window or on the
+    /// Dock — what a never-arrived visit's late-switch watch counts as the user moving (typing in their own app is not).
+    var lastSwitchInputAt: TimeInterval = -1
+    /// Whether that input can be seen at all (the session tap or the gesture monitor runs); a test sets it.
+    var switchInputObservableOverride: Bool?
     /// Schedules the end of the guard's tail; tests run it by hand.
     var guardianTailSchedule: (TimeInterval, @escaping () -> Void) -> DispatchWorkItem? = { seconds, work in
         let item = DispatchWorkItem(block: work)

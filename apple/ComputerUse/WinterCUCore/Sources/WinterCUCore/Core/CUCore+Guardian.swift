@@ -107,9 +107,30 @@ extension CUCore {
 
     /// One event the listen-only session tap saw (not a type-21 process notification): the user's input only when
     /// `CUHardwareInput` says so — the window server's own events around an activation or a desktop change are not.
-    func noteTapEvent(type: CGEventType, sourcePid: Int64, userData: Int64, now: TimeInterval) {
+    func noteTapEvent(type: CGEventType, sourcePid: Int64, userData: Int64, flags: CGEventFlags = [], now: TimeInterval) {
         let kind = CUHardwareInput.classify(type: type, sourcePid: sourcePid, userData: userData)
         if kind != .none { noteHardwareInput(now: now, move: kind == .move) }
+        if kind == .action, Self.canSwitch(type: type, flags: flags) { noteSwitchInput(now: now) }
+    }
+
+    /// Hardware input that can switch the front app or the desktop by itself: a key or modifier change with ⌘ or ⌃ held
+    /// (⌘-Tab, ⌘-`, ⌃-arrows — the modifier's own press is seen even where the switcher takes the chord), and a
+    /// trackpad gesture (a swipe between desktops, Mission Control's). A click counts only on a target's window or the
+    /// Dock (`onPhysicalClick`). Typing, scrolling and pointer moves never do. Pure.
+    static func canSwitch(type: CGEventType, flags: CGEventFlags) -> Bool {
+        switch type.rawValue {
+        case CGEventType.keyDown.rawValue, CGEventType.flagsChanged.rawValue:
+            return flags.contains(.maskCommand) || flags.contains(.maskControl)
+        case 18, 29, 30, 31, 32: return true  // rotate, gesture, magnify, swipe, smart magnify
+        default: return false
+        }
+    }
+
+    func noteSwitchInput(now: TimeInterval) { guardianLock.withLock { lastSwitchInputAt = now } }
+
+    /// Whether switch-capable input can be seen at all: the session tap or the gesture monitor runs.
+    var switchInputObservable: Bool {
+        switchInputObservableOverride ?? guardianLock.withLock { cpsTapPort != nil || guardianGestureMonitor != nil }
     }
 
     /// The listen-only tap (or the gesture monitor) saw a hardware-origin event (source pid 0, not ours). `move`:
@@ -176,7 +197,13 @@ extension CUCore {
                                              userData: $0.getIntegerValueField(.eventSourceUserData), markers: true)
                 } ?? (event.type == .mouseMoved ? .move : .action)
                 guard kind != .none else { return }
-                self.noteHardwareInput(now: self.clock.nowSeconds(), move: kind == .move)
+                let now = self.clock.nowSeconds()
+                self.noteHardwareInput(now: now, move: kind == .move)
+                let gestures: Set<NSEvent.EventType> = [.gesture, .swipe, .magnify, .rotate, .beginGesture, .endGesture, .smartMagnify]
+                if kind == .action, gestures.contains(event.type)
+                    || Self.canSwitch(type: event.cgEvent?.type ?? .null, flags: event.cgEvent?.flags ?? []) {
+                    self.noteSwitchInput(now: now)
+                }
             }
             let stale = self.guardianLock.withLock { () -> Bool in
                 if self.guardianRefs == 0 { return true }
@@ -347,8 +374,11 @@ extension CUCore {
         guard !CUEventStamp.isOurs(userData) else { return nil }
         guard guardianLock.withLock({ guardianCore.active }) else { return nil }
         let own = getpid()
-        guard let hit = sys.windowStack().first(where: { $0.pid != own && $0.alpha > 0 && $0.frame.contains(point) }),
-              boundTargetPids().contains(hit.pid) else { return nil }
+        guard let hit = sys.windowStack().first(where: { $0.pid != own && $0.alpha > 0 && $0.frame.contains(point) }) else { return nil }
+        // A click on the Dock (an app's icon) can switch apps: the user's move for a visit's late-switch watch.
+        if hit.ownerName == "Dock" { noteSwitchInput(now: now) }
+        guard boundTargetPids().contains(hit.pid) else { return nil }
+        noteSwitchInput(now: now)
         let space = sys.activeSpace()
         guardianLock.withLock { guardianCore.userClicked(app: hit.pid, space: space, now: now) }
         let name = appName(hit.pid)
@@ -418,7 +448,7 @@ private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
     // told apart.
     if type.rawValue != CUFocusTaps.processNotificationType {
         core.noteTapEvent(type: type, sourcePid: event.getIntegerValueField(.eventSourceUnixProcessID),
-                          userData: event.getIntegerValueField(.eventSourceUserData), now: core.clock.nowSeconds())
+                          userData: event.getIntegerValueField(.eventSourceUserData), flags: event.flags, now: core.clock.nowSeconds())
     }
     if type == .leftMouseDown {
         core.onPhysicalClick(at: event.location, userData: event.getIntegerValueField(.eventSourceUserData),
