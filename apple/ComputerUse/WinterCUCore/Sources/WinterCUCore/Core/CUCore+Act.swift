@@ -524,8 +524,12 @@ extension CUCore {
         let event = announced ? nil : CursorEvent(kind: "press", point: pt, count: count, button: button.rawValue)
         // Pid events in the background: the window made its app's key window first, so the click is not taken
         // as the one that makes it key.
-        if d.rung == .processEvents, keyForClick(t, privatePath: p.privatePath, clickWindow: windowFor(pt)) == .appInFront {
-            throw clickRefusal(t)
+        if d.rung == .processEvents {
+            switch keyForClick(t, privatePath: p.privatePath, clickWindow: windowFor(pt)) {
+            case .appInFront: throw clickRefusal(t)
+            case .activatedItself: throw clickActivatedItselfRefusal(t)
+            case .notApplied, .prepared: break
+            }
         }
         return try runEvents(p, t, d, focus: true, token, cursor: event) { route, check in
             try synth.click(pid: t.pid, windowFor: windowFor, at: pt, button: button, count: count, flags: flags,
@@ -1480,6 +1484,7 @@ extension CUCore {
         case .notApplied: postSyntheticActivation(t, privatePath: t.privatePath)
         case .prepared: break
         case .appInFront: throw clickRefusal(t)  // the user may be using it now: no click, and nothing typed after it
+        case .activatedItself: throw clickActivatedItselfRefusal(t)
         }
         try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()
@@ -1633,6 +1638,7 @@ extension CUCore {
         case .notApplied: postSyntheticActivation(t, privatePath: t.privatePath)
         case .prepared: break
         case .appInFront: throw clickRefusal(t)  // the user may be using it now: no click, and nothing typed after it
+        case .activatedItself: throw clickActivatedItselfRefusal(t)
         }
         try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()

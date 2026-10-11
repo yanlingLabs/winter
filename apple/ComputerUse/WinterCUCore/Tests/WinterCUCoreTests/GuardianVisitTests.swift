@@ -17,11 +17,11 @@ final class GuardianVisitTests: XCTestCase {
         g.beginVisit(app: 9, now: 0)
         XCTAssertTrue(g.visiting(now: 1))
         // The target coming forward, on its own desktop: neither theft nor the user's.
-        XCTAssertEqual(g.handle(CUActivation(app: 9, space: 200, hadRecentUserInput: false), now: 1), .ignore)
+        XCTAssertEqual(g.handle(CUActivation(app: 9, space: 200, switchInput: false), now: 1), .ignore)
         // The Space change the agent caused: not restored (today it would be, at once).
-        XCTAssertNil(g.handleSpaceChange(to: 200, front: 9, hadRecentUserInput: false, caused: true, now: 1))
+        XCTAssertNil(g.handleSpaceChange(to: 200, front: 9, switchInput: false, caused: true, now: 1))
         // The user's app coming back on the way home: nothing either.
-        XCTAssertEqual(g.handle(CUActivation(app: 1, space: 100, hadRecentUserInput: false), now: 2), .ignore)
+        XCTAssertEqual(g.handle(CUActivation(app: 1, space: 100, switchInput: false), now: 2), .ignore)
         XCTAssertEqual(g.view, CUGuardedView(app: 1, space: 100), "the user's place is still the pre-visit one")
         XCTAssertFalse(g.visitSawUserInput)
         XCTAssertFalse(g.endVisit())
@@ -31,8 +31,8 @@ final class GuardianVisitTests: XCTestCase {
     func testUserInputDuringAVisitIsNotedNotAdopted() {
         var g = started()
         g.beginVisit(app: 9, now: 0)
-        XCTAssertEqual(g.handle(CUActivation(app: 42, space: 300, hadRecentUserInput: true), now: 1), .ignore)
-        XCTAssertNil(g.handleSpaceChange(to: 300, front: 42, hadRecentUserInput: true, now: 1))
+        XCTAssertEqual(g.handle(CUActivation(app: 42, space: 300, switchInput: true), now: 1), .ignore)
+        XCTAssertNil(g.handleSpaceChange(to: 300, front: 42, switchInput: true, now: 1))
         g.userClicked(app: 9, space: 200, now: 1)
         XCTAssertEqual(g.view, CUGuardedView(app: 1, space: 100), "decided at the visit's end, by where the user is then")
         XCTAssertTrue(g.endVisit(), "the end reports the input")
@@ -44,12 +44,12 @@ final class GuardianVisitTests: XCTestCase {
     func testAfterAFailedReturnTheGuardianStillRestoresTheUser() {
         var g = started()
         g.beginVisit(app: 9, now: 0)
-        _ = g.handleSpaceChange(to: 200, front: 9, hadRecentUserInput: false, caused: true, now: 1)
+        _ = g.handleSpaceChange(to: 200, front: 9, switchInput: false, caused: true, now: 1)
         g.endVisit()
         // The user is still on the target's desktop: the next change the agent caused is put right.
-        XCTAssertEqual(g.handleSpaceChange(to: 250, front: 9, hadRecentUserInput: false, caused: true, now: 2),
+        XCTAssertEqual(g.handleSpaceChange(to: 250, front: 9, switchInput: false, caused: true, now: 2),
                        CUGuardedView(app: 1, space: 100))
-        XCTAssertEqual(g.handle(CUActivation(app: 9, space: 200, hadRecentUserInput: false), now: 3),
+        XCTAssertEqual(g.handle(CUActivation(app: 9, space: 200, switchInput: false), now: 3),
                        .theft(restore: CUGuardedView(app: 1, space: 100), thief: 9, repeatOffender: false))
     }
 
@@ -58,7 +58,7 @@ final class GuardianVisitTests: XCTestCase {
         g.beginVisit(app: 9, now: 0)
         let late = CUFocusGuardianCore.visitMaxSeconds + 1
         XCTAssertFalse(g.visiting(now: late))
-        XCTAssertEqual(g.handle(CUActivation(app: 9, space: 200, hadRecentUserInput: false), now: late),
+        XCTAssertEqual(g.handle(CUActivation(app: 9, space: 200, switchInput: false), now: late),
                        .theft(restore: CUGuardedView(app: 1, space: 100), thief: 9, repeatOffender: false),
                        "an unended visit is no exemption past its deadline")
     }

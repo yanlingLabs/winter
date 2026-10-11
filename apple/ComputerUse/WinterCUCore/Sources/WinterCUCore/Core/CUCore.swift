@@ -601,6 +601,7 @@ public final class CUCore: @unchecked Sendable {
     var restoreRetryMs: Double = 120
     /// Seconds since the last physical user input, injectable for tests.
     var secondsSinceUserInputOverride: (() -> TimeInterval)?
+    var secondsSinceUserClickOverride: (() -> TimeInterval)?
     /// The window server's key-focus pid, injectable for tests (the swallowed-click retry).
     var keyFocusPidOverride: (() -> pid_t?)?
 

@@ -33,6 +33,7 @@ public struct CUSkyLight: @unchecked Sendable {
     typealias GetKeyFocus = @convention(c) (UnsafeMutableRawPointer) -> Int32
     typealias ReleaseKeyFocus = @convention(c) (Int32) -> Int32
     typealias ProcessPID = @convention(c) (UnsafeRawPointer, UnsafeMutablePointer<pid_t>) -> Int32
+    typealias CopyManagedDisplaySpaces = @convention(c) (UInt32) -> Unmanaged<CFArray>?
 
     var postToPidFn: PostToPid?
     var setIntFieldFn: SetIntField?
@@ -56,6 +57,7 @@ public struct CUSkyLight: @unchecked Sendable {
     var getKeyFocusFn: GetKeyFocus?
     var releaseKeyFocusFn: ReleaseKeyFocus?
     var processPIDFn: ProcessPID?
+    var copyManagedDisplaySpacesFn: CopyManagedDisplaySpaces?
 
     /// `SLEventPostToPid` resolved: rung 3 is possible.
     public var isAvailable: Bool { postToPidFn != nil }
@@ -103,6 +105,8 @@ public struct CUSkyLight: @unchecked Sendable {
         s.getKeyFocusFn = fn("CPSGetKeyFocusProcess", GetKeyFocus.self)
         s.releaseKeyFocusFn = fn("CPSReleaseKeyFocusWithID", ReleaseKeyFocus.self)
         s.processPIDFn = fn("GetProcessPID", ProcessPID.self)
+        s.copyManagedDisplaySpacesFn = fn("SLSCopyManagedDisplaySpaces", CopyManagedDisplaySpaces.self)
+            ?? fn("CGSCopyManagedDisplaySpaces", CopyManagedDisplaySpaces.self)
         return s
     }
 
@@ -303,6 +307,27 @@ public struct CUSkyLight: @unchecked Sendable {
               let arr = copySpacesFn(cid, 0x7, [NSNumber(value: id)] as CFArray)?.takeRetainedValue() as? [NSNumber]
         else { return [] }
         return arr.map(\.uint64Value).filter { $0 != 0 }
+    }
+
+    /// The Spaces a window is on; nil when it can't be read.
+    public func spacesOf(windowID id: UInt32) -> Set<UInt64>? {
+        guard let mainConnectionFn, copySpacesFn != nil else { return nil }
+        return Set(spaces(ofWindow: id, connection: mainConnectionFn()))
+    }
+
+    /// Each display's CURRENT Space, by display identifier (`SLSCopyManagedDisplaySpaces`: "Display Identifier" →
+    /// "Current Space"'s id); nil when it can't be read. One display, one entry; "Displays have separate Spaces" off,
+    /// one entry for all.
+    public func currentSpacesByDisplay() -> [String: UInt64]? {
+        guard let mainConnectionFn, let copyManagedDisplaySpacesFn,
+              let arr = copyManagedDisplaySpacesFn(mainConnectionFn())?.takeRetainedValue() as? [[String: Any]] else { return nil }
+        var out: [String: UInt64] = [:]
+        for d in arr {
+            guard let display = d["Display Identifier"] as? String, let current = d["Current Space"] as? [String: Any] else { continue }
+            let id = (current["id64"] as? NSNumber) ?? (current["ManagedSpaceID"] as? NSNumber)
+            if let id { out[display] = id.uint64Value }
+        }
+        return out.isEmpty ? nil : out
     }
 
     /// Whether a window is on any Space at all (an ordered-out — closed but still allocated — window is on

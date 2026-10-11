@@ -267,6 +267,11 @@ final class FakeSystem: CUSystemBackend {
         if let r = onSpaceReading { return r(id) }
         return noSpaceWindows.contains(id) ? false : onSpace
     }
+    /// The Spaces each window is on (unset: unknown), and each display's current Space (unset: unknown).
+    var spacesOfWindow: [UInt32: Set<UInt64>] = [:]
+    func windowSpaces(_ id: UInt32) -> Set<UInt64>? { spacesOfWindow[id] }
+    var displays: [String: UInt64]?
+    func displaySpaces() -> [String: UInt64]? { displays }
     /// Content processes (Safari's WebContent), each with the app it serves.
     var contentProcesses: [pid_t: pid_t] = [:]
     func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { contentProcesses[pid] == appPid }

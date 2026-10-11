@@ -13,9 +13,10 @@ import Foundation
 ///   `guardianCausalWindow` after something the agent did that could cause it — an act on that app, a focus blip
 ///   ending, a document opened or an app launched (live: the user swiping to Safari's desktop to watch the agent
 ///   was pulled back, Safari being a bound app). Anything else is the user's, whatever the app.
-/// And any hardware input in the last second (trackpad gestures, Mission Control, ⌘Tab, the Dock) makes an
-/// activation or Space switch the user's even inside that window; and once the user has moved somewhere, that is
-/// where a later restore returns them. Gated by the private-path setting; off, the per-action user-view guard
+/// And input of the user's that can SWITCH apps or desktops (`CUSwitchInput`: ⌘-Tab, ⌃-arrows, gestures, the Dock, a
+/// click on a target's window — never typing in their own app) makes an activation or Space switch theirs even inside
+/// that window; once the user has moved somewhere, that is where a later restore returns them. Whose move a change is,
+/// is ONE rule (`CUFocusGuardianCore.whoseMove`, via `classifyMove`) that every other path asks too. Gated by the private-path setting; off, the per-action user-view guard
 /// stays the only backstop. The keyboard reroute runs only inside the focus blip (CUCore+Blip).
 extension CUCore {
     /// How long the guardian treats an activation as following one of our own synthetic events.
@@ -97,20 +98,52 @@ extension CUCore {
         guardianLock.withLock { guardianLastCause >= 0 && now - guardianLastCause <= Self.guardianCausalWindow }
     }
 
-    /// Recent user input: physical mouse/keys (HID state, the original 0.4 s window), or ANY hardware-origin event
-    /// the listen-only tap saw in the last `guardianHardwareWindow` (trackpad gestures, scrolls, moves included).
-    func userInputRecent(now: TimeInterval) -> Bool {
-        if secondsSinceUserInput < CUFocusGuardianCore.userInputWindow { return true }
-        let last = guardianLock.withLock { lastHardwareInputAt }
-        return last >= 0 && now - last <= Self.guardianHardwareWindow
+
+    // MARK: whose move — the one decision (`CUFocusGuardianCore.whoseMove`)
+
+    /// The facts for a change of the user's view to `app` on `space`, seen now, and the guardian core's verdict on
+    /// them. `since`: when it could have begun (a blip's focus record, a click's preparation, an act's start, a visit's
+    /// watch) — switch-capable input counts from then, and at most `guardianHardwareWindow` back. `agentCaused`: the
+    /// caller knows (it just posted something that could cause it); else a cause for the app within
+    /// `guardianCausalWindow`, or a synthetic event within `guardianSyntheticWindow`.
+    func classifyMove(app: pid_t?, space: UInt64?, since: TimeInterval? = nil, agentCaused: Bool? = nil,
+                      ignoreVisit: Bool = false) -> CUMoveOwner {
+        let now = clock.nowSeconds()
+        let from = max(since ?? (now - Self.guardianHardwareWindow), now - Self.guardianHardwareWindow)
+        let observable = switchInputObservable
+        let caused = agentCaused ?? (app.map { guardianSuspect($0, now: now) } ?? guardianSpaceChangeCaused(now: now))
+            || now - guardianLock.withLock({ lastSyntheticActivationAt }) < Self.guardianSyntheticWindow
+        let click = !observable && secondsSinceUserClick < CUFocusGuardianCore.userInputWindow
+        return guardianLock.withLock {
+            let switched = switchInput.seen(from: from, seenAt: now, window: Self.guardianHardwareWindow)
+            return guardianCore.whoseMove(CUMoveFacts(app: app, space: space, switchInput: switched, agentCaused: caused,
+                                                      inputObservable: observable, clickRecent: click, ignoreVisit: ignoreVisit),
+                                          now: now)
+        }
+    }
+
+    /// A path judged a change the user's: the guardian follows them there and claims the activation it brings, so it
+    /// never restores over their move.
+    func userMovedTo(app: pid_t?, space: UInt64?) {
+        let now = clock.nowSeconds()
+        guardianLock.withLock { guardianCore.userMoved(app: app, space: space, now: now) }
+        CULog.guardian.notice("the user moved to \(app.map { self.appName($0) } ?? "another app", privacy: .public) — theirs, left there")
+    }
+
+    /// Whose move the user's view as it is now is (since `since`), the guardian told when it is theirs.
+    func isUsersMove(_ v: CUUserView, since: TimeInterval?, agentCaused: Bool? = true, ignoreVisit: Bool = false) -> Bool {
+        let owner = classifyMove(app: v.front, space: v.space, since: since, agentCaused: agentCaused, ignoreVisit: ignoreVisit)
+        if owner.isUsers { userMovedTo(app: v.front, space: v.space) }
+        return owner.isUsers
     }
 
     /// One event the listen-only session tap saw (not a type-21 process notification): the user's input only when
     /// `CUHardwareInput` says so — the window server's own events around an activation or a desktop change are not.
-    func noteTapEvent(type: CGEventType, sourcePid: Int64, userData: Int64, flags: CGEventFlags = [], now: TimeInterval) {
+    func noteTapEvent(type: CGEventType, sourcePid: Int64, userData: Int64, flags: CGEventFlags = [], keycode: Int64 = -1,
+                      now: TimeInterval) {
         let kind = CUHardwareInput.classify(type: type, sourcePid: sourcePid, userData: userData)
         if kind != .none { noteHardwareInput(now: now, move: kind == .move) }
-        if kind == .action { guardianLock.withLock { switchInput.event(type: type, flags: flags, now: now) } }
+        if kind == .action { guardianLock.withLock { switchInput.event(type: type, flags: flags, keycode: keycode, now: now) } }
     }
 
     /// A click on a bound target's window or on the Dock, or a trackpad gesture: input that can switch.
@@ -246,6 +279,14 @@ extension CUCore {
         return types.map { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0) }.min() ?? .greatestFiniteMagnitude
     }
 
+    /// The least time since a physical mouse-down (HID state; the helper's own posted clicks never count — measured
+    /// on 2026-10-11). Read only when no session tap runs. Replaceable by tests.
+    var secondsSinceUserClick: TimeInterval {
+        if let o = secondsSinceUserClickOverride { return o() }
+        let types: [CGEventType] = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        return types.map { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0) }.min() ?? .greatestFiniteMagnitude
+    }
+
     /// Runs a restore inline in tests (synchronous), else off the main queue so the observer never blocks.
     private func dispatchRestore(_ restore: CUGuardedView, thief: pid_t, repeatOffender: Bool, cause: String) {
         if guardianRestoreSync {
@@ -260,13 +301,17 @@ extension CUCore {
     func onActivation(pid: pid_t) {
         appActivated(pid: pid)  // really activated: it has its key window back (or the user picks one)
         let now = clock.nowSeconds()
-        // During a desktop visit only input AFTER it began is the user's (never the click that allowed it).
+        // During a desktop visit only input AFTER it began is the user's (never the click that allowed it) — noted.
         let visit = visitInput(now: now)
-        let userInput = visit ?? userInputRecent(now: now)
         if visit == true { noteVisitUserMove() }
-        let synthetic = now - lastSyntheticActivationAt < Self.guardianSyntheticWindow
-        let activation = CUActivation(app: pid, space: sys.activeSpace(), hadRecentUserInput: userInput, fromSyntheticEvent: synthetic,
-                                      suspect: guardianSuspect(pid, now: now))
+        let synthetic = now - guardianLock.withLock({ lastSyntheticActivationAt }) < Self.guardianSyntheticWindow
+        let observable = switchInputObservable
+        let switched = visit ?? guardianLock.withLock {
+            switchInput.seen(from: now - Self.guardianHardwareWindow, seenAt: now, window: Self.guardianHardwareWindow)
+        }
+        let activation = CUActivation(app: pid, space: sys.activeSpace(), switchInput: switched, fromSyntheticEvent: synthetic,
+                                      suspect: guardianSuspect(pid, now: now), inputObservable: observable,
+                                      clickRecent: !observable && secondsSinceUserClick < CUFocusGuardianCore.userInputWindow)
         guardianLock.lock()
         let verdict = guardianCore.handle(activation, now: now)
         let reason = guardianCore.lastReason
@@ -276,7 +321,7 @@ extension CUCore {
             if activation.suspect {
                 let hid = secondsSinceUserInput
                 let tap = guardianLock.withLock { lastHardwareInputAt }
-                CULog.guardian.notice("\(self.appName(pid), privacy: .public) came to the front soon after the agent acted on it — left alone: \(reason, privacy: .public) (HID input \(hid < 1e6 ? String(format: "%.2f s", hid) : "never", privacy: .public) ago, tap input \(tap >= 0 ? String(format: "%.2f s", now - tap) : "never", privacy: .public) ago, synthetic \(synthetic, privacy: .public))")
+                CULog.guardian.notice("\(self.appName(pid), privacy: .public) came to the front soon after the agent acted on it — left alone: \(reason, privacy: .public) (HID input \(hid < 1e6 ? String(format: "%.2f s", hid) : "never", privacy: .public) ago, tap input \(tap >= 0 ? String(format: "%.2f s", now - tap) : "never", privacy: .public) ago, switch input \(switched, privacy: .public), synthetic \(synthetic, privacy: .public))")
             }
             return
         }
@@ -286,13 +331,15 @@ extension CUCore {
     func onSpaceChange() {
         let now = clock.nowSeconds()
         let visit = visitInput(now: now)
-        let userInput = visit ?? userInputRecent(now: now)
         if visit == true { noteVisitUserMove() }
         let caused = guardianSpaceChangeCaused(now: now)
         let front = sys.frontmostPid()
+        let observable = switchInputObservable
+        let click = !observable && secondsSinceUserClick < CUFocusGuardianCore.userInputWindow
         guardianLock.lock()
-        let restore = guardianCore.handleSpaceChange(to: sys.activeSpace(), front: front, hadRecentUserInput: userInput,
-                                                     caused: caused, now: now)
+        let switched = visit ?? switchInput.seen(from: now - Self.guardianHardwareWindow, seenAt: now, window: Self.guardianHardwareWindow)
+        let restore = guardianCore.handleSpaceChange(to: sys.activeSpace(), front: front, switchInput: switched, caused: caused,
+                                                     inputObservable: observable, clickRecent: click, now: now)
         guardianLock.unlock()
         guard let restore else { return }
         dispatchRestore(restore, thief: restore.app ?? 0, repeatOffender: false, cause: "the desktop changed")
@@ -433,7 +480,8 @@ private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
     // told apart.
     if type.rawValue != CUFocusTaps.processNotificationType {
         core.noteTapEvent(type: type, sourcePid: event.getIntegerValueField(.eventSourceUnixProcessID),
-                          userData: event.getIntegerValueField(.eventSourceUserData), flags: event.flags, now: core.clock.nowSeconds())
+                          userData: event.getIntegerValueField(.eventSourceUserData), flags: event.flags,
+                          keycode: type == .keyDown ? event.getIntegerValueField(.keyboardEventKeycode) : -1, now: core.clock.nowSeconds())
     }
     if type == .leftMouseDown {
         core.onPhysicalClick(at: event.location, userData: event.getIntegerValueField(.eventSourceUserData),
@@ -476,21 +524,28 @@ enum CUHardwareInput: Equatable {
 }
 
 /// Hardware input that can switch the front app or the desktop by itself — review of round 4: a chord the tap SEES
-/// (⌘S, ⌘Z, ⌃C) went to an app and switched nothing, while the switcher's own (⌘-Tab, ⌃-arrows) is swallowed: only the
-/// modifier's press and release show. So a ⌘ or ⌃ HOLD counts — its release, and the hold while it lasts — unless a
-/// chord was seen during it; a trackpad gesture counts, and a click on a target's window or the Dock (`note`). Typing,
-/// scrolling and pointer moves never do. Pure.
+/// (⌘S, ⌘Z, ⌃C) went to an app and switched nothing, while the switcher's own (⌘-Tab, ⌃-arrows) is often swallowed —
+/// only the modifier's press and release show. So a ⌘ or ⌃ HOLD counts — its release, and the hold while it lasts —
+/// unless a chord was seen during it: a key, a mouse button or a scroll with the modifier held (⌘-click, ⌃-click for a
+/// context menu, ⌘-drag, ⌃-scroll — review of round 6); a hold counts only from when it began. A switching chord the
+/// tap DOES see counts whatever came before it in the hold (⌘S, then ⌘-Tab): ⌘-Tab, ⌘-`, ⌃-←/→/↑/↓. A trackpad gesture
+/// counts, and a click on a target's window or the Dock (`note`). Typing, scrolling and pointer moves never do. Under
+/// Secure Event Input (a password field focused) the tap sees no keys: a hold reads as chord-less, so it counts — the
+/// side that never fights the user. Pure.
 struct CUSwitchInput {
-    /// When switch-capable input last ended (a hold's release, a gesture, a click).
+    /// When switch-capable input last ended (a hold's release, a switching chord, a gesture, a click).
     private(set) var lastAt: TimeInterval = -1
     /// A ⌘/⌃ hold in progress: since when, and whether a chord was seen in it.
     private var hold: (since: TimeInterval, chord: Bool)?
     /// A hold whose release was never seen is not trusted past this.
     static let holdMax: TimeInterval = 10
+    /// Keys that switch apps, windows or desktops with ⌘ (Tab, `) or ⌃ (the arrows: Spaces, Mission Control).
+    static let commandSwitchKeys: Set<Int64> = [48, 50]
+    static let controlSwitchKeys: Set<Int64> = [123, 124, 125, 126]
 
     static func modifier(_ flags: CGEventFlags) -> Bool { flags.contains(.maskCommand) || flags.contains(.maskControl) }
 
-    mutating func event(type: CGEventType, flags: CGEventFlags, now: TimeInterval) {
+    mutating func event(type: CGEventType, flags: CGEventFlags, keycode: Int64 = -1, now: TimeInterval) {
         switch type.rawValue {
         case CGEventType.flagsChanged.rawValue:
             if Self.modifier(flags) {
@@ -500,7 +555,14 @@ struct CUSwitchInput {
                 hold = nil
             }
         case CGEventType.keyDown.rawValue:
-            if Self.modifier(flags), hold != nil { hold?.chord = true }  // a chord an app got: no switch
+            if (flags.contains(.maskCommand) && Self.commandSwitchKeys.contains(keycode))
+                || (flags.contains(.maskControl) && Self.controlSwitchKeys.contains(keycode)) {
+                lastAt = now  // a switching chord the tap saw
+            } else if Self.modifier(flags), hold != nil {
+                hold?.chord = true  // a chord an app got: no switch
+            }
+        case 1, 3, 25, 22, 6, 7, 27:  // mouse down (left, right, other), scroll, drags — with ⌘/⌃ held, a chord
+            if Self.modifier(flags), hold != nil { hold?.chord = true }
         case 18, 29, 30, 31, 32:  // rotate, gesture, magnify, swipe, smart magnify
             lastAt = now
         default:
@@ -510,10 +572,11 @@ struct CUSwitchInput {
 
     mutating func note(_ now: TimeInterval) { lastAt = now }
 
-    /// Whether such input came after `from` and at most `window` before `seenAt` — or a chord-less hold is going on.
+    /// Whether such input came after `from` and at most `window` before `seenAt` — or a chord-less hold that began
+    /// after `from` is going on.
     func seen(from: TimeInterval, seenAt: TimeInterval, window: TimeInterval) -> Bool {
         if lastAt >= 0, lastAt >= max(from, seenAt - window) { return true }
-        if let h = hold, !h.chord, seenAt - h.since < Self.holdMax { return true }
+        if let h = hold, !h.chord, h.since >= from, seenAt - h.since < Self.holdMax { return true }
         return false
     }
 }
