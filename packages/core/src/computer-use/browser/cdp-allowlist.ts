@@ -76,7 +76,7 @@ export const CDP_EVENT_STRING_MAX = 4096;
 export const CDP_EVENT_ARRAY_MAX = 32;
 /** `Fetch.requestPaused`'s `responseHeaders` keep only these, by name in any case (a download's type, name and size). */
 export const CDP_FETCH_RESPONSE_HEADERS: readonly string[] = ["content-type", "content-disposition", "content-length"];
-/** `Network.enable`: request bodies are never kept (`maxPostDataSize` absent or 0); response buffers at most these. */
+/** `Network.enable`: every cap stated — request bodies never kept (`maxPostDataSize: 0`), response buffers at most these. */
 export const CDP_NETWORK_BUFFER_MAX: Readonly<{ resource: number; total: number }> = { resource: 1_048_576, total: 8_388_608 };
 /** `Network.getResponseBody`'s `body` is cut here before it leaves the browser's process (`truncated: true` added). */
 export const CDP_RESPONSE_BODY_MAX_CHARS = 1_048_576;
@@ -98,8 +98,8 @@ export const CDP_IO_READ_MAX = 1_048_576;
  * its name alone, which another extension's world could share.
  *
  * Phase 3's rules, refused the same way:
- *  - `Network.enable` with a `maxPostDataSize` other than 0, or a `maxResourceBufferSize` / `maxTotalBufferSize` above
- *    CDP_NETWORK_BUFFER_MAX;
+ *  - `Network.enable` without `maxPostDataSize: 0`, or without a `maxResourceBufferSize` / `maxTotalBufferSize` that is
+ *    an integer from 0 to CDP_NETWORK_BUFFER_MAX's (a cap left out means the browser's own, far larger, defaults);
  *  - `Network.getResponseBody`: not refused, but its answer's `body` is cut at CDP_RESPONSE_BODY_MAX_CHARS (base64 or
  *    not) with `truncated: true`;
  *  - `Fetch.enable` with `handleAuthRequests: true`, or a pattern whose `requestStage` is not "Response";
