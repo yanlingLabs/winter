@@ -65,6 +65,49 @@ The final independent review accepted all documented findings at `21e3e5f4` and 
 
 ## Review evidence and boundaries
 
+### Subsequent storage decision
+
+During implementation review the user selected **"Encrypt at rest"** when asked
+how to protect private VM data from commands approved outside Code's sandbox.
+The reviewer relayed the exact choice and its helper-only Keychain custody,
+ciphertext-at-rest and detectable-not-preventable corruption/deletion limits.
+Fence-only protection and blocking Code escapes while Cowork data exists were
+the rejected alternatives. The new [storage contract](../cowork-storage-security.md)
+records this as a subsequent product decision, not a property of the earlier
+plaintext probes or a passed gate. The reviewer subsequently narrowed their
+control-record extension to integrity protection for broker/worker-consumed
+manifest, workspace/volume identity and key version, not control-record
+encryption or a helper-backed database. Selected Mac folders and shared
+instructions/memory/outputs remain plaintext. Host transcript/diff copies need
+their own explicit treatment. The separate later worker decision below changes
+process topology; active RAM return remains mandatory and unproven with Linux.
+
+This supersedes the earlier C1 wording insofar as it implied that path/IPC
+denials could prevent every same-user delegation escape. Fences stay defense
+in depth. Helper authentication, encrypted block I/O, integrity/recovery and
+sealed broker-consumed identity records are new mandatory implementation gates.
+Authenticated Winter API requests can still ask a guest to return plaintext;
+this is an explicit residual alongside host transcript/diff copies. A native
+launcher handing the genuine Core instance an inherited capability descriptor
+is the candidate for broker launch admission, not a code-signature-only check.
+
+### Subsequent worker decision
+
+The designated reviewer relayed the user's explicit **yes** to one sandboxed
+VMM worker per workspace on 2026-10-11. This supersedes the earlier embedded
+controller and shared daemon/network crash-domain baseline, including R-b's
+historical disposition above. Project conversations continue sharing one VM.
+The daemon orchestrates; guest-facing parsers stay outside its credential
+process. Workers require hardened signatures/library validation, no debugger
+entitlement, a verified sandbox, scoped storage/shares and brokered networking.
+
+The next candidate is pinned libkrun/HVF. Its stock macOS `MADV_FREE` handler
+is not proof of active memory return; the existing bare-metal discard experiment
+is not Linux/device/concurrent-vCPU proof. A separate minimal key/launch broker
+and workspace-derived worker keys are the current architecture proposal, not
+an already implemented or independently accepted mechanism. Keep the prior
+plaintext/VZ receipts as evidence of their tested scope only.
+
 The companion links exact current source consumers and pinned SDK/router evidence, plus primary Apple/Linux/GitHub documentation. A second architecture review checked Linux control-state protection and cross-mode/policy behavior; separate source and platform reviews checked reader placement, extension/trust integration, lifecycle, networking and storage claims. Their refinements are reflected in plan-mode read-only mounts, pending narrowing transitions, explicit Workflow behavior, supervisor-owned mount setup, host-backed-file validation and export-generation consistency.
 
 Documentation validation covers local links/anchors and whitespace. Runtime, security, performance, signed packaging, cross-process recovery and hardware feasibility tests are still required during a separately authorized implementation phase. Independent re-review may identify additional specification gaps; the recorded dispositions are not a substitute for that review.
