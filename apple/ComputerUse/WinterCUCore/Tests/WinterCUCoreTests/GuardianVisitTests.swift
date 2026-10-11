@@ -48,7 +48,12 @@ final class GuardianVisitTests: XCTestCase {
         g.userClicked(app: 9, space: 200, now: 1.3)
         XCTAssertEqual(judge(&g, 9, 200, now: 1.4), .visit)
         XCTAssertEqual(g.view, CUGuardedView(app: 1, space: 100))
-        // They ⌘-Tab to Mail (never touched): theirs — the visit closes, leaving them there.
+        // Mail coming forward with no input of theirs: during a visit the agent acts in front (a link its click opened
+        // in another app) — the visit's, not a move of theirs.
+        XCTAssertEqual(judge(&g, 43, 300, now: 1.8), .visit)
+        // They ⌘-Tab to Mail: theirs — the visit closes, leaving them there.
+        g.inputEvent(type: .flagsChanged, flags: .maskCommand, now: 1.85)
+        g.inputEvent(type: .flagsChanged, flags: [], now: 1.9)
         XCTAssertTrue(judge(&g, 42, 300, now: 2).isUsers)
         XCTAssertTrue(g.visitSawUserInput)
         XCTAssertEqual(g.view, CUGuardedView(app: 42, space: 300))

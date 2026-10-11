@@ -1035,7 +1035,7 @@ final class DesktopVisitTests: XCTestCase {
         poster.onPost = { [unowned self] e in
             guard e.type == .leftMouseUp else { return }
             // The user swipes to a third desktop and is in another app there (the target's window is not shown there).
-            core.noteTapEvent(type: CGEventType(rawValue: 31)!, sourcePid: 0, userData: 0, now: core.clock.nowSeconds() + 0.01)
+            core.noteTapEvent(type: CGEventType(rawValue: 31)!, sourcePid: 0, userData: 0, now: core.clock.nowSeconds())
             sys.windows[77]?.onScreen = false
             sys.space = 3
             sys.front = 555

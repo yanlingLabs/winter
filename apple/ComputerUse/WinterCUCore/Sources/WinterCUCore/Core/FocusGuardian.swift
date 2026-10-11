@@ -67,8 +67,8 @@ public struct CUMoveQuery: Equatable, Sendable {
     /// The front app and the active Space now.
     public var app: pid_t?
     public var space: UInt64?
-    /// When the change could have begun (the caller's own operation's start): switch input counts from then. Nil — an
-    /// observer that only knows the change happened — `switchWindow` back.
+    /// When the caller's own operation began: switch input counts from then, or from `switchWindow` back if that is
+    /// earlier. Nil — an observer that only knows the change happened — `switchWindow` back.
     public var since: TimeInterval?
     /// Where the caller's own operation began: the user's place when the guard is not running.
     public var from: CUGuardedView?
@@ -135,6 +135,7 @@ public struct CUFocusGuardianCore: Sendable {
     private var visitApp: pid_t?
     private var visitUser: pid_t?
     private var visitUntil: TimeInterval = 0
+    private var visitStartedAt: TimeInterval = 0
     public private(set) var visitSawUserInput = false
     /// The agent's causes: the last time it did something to each app that could bring it forward, operations still
     /// running on an app (an AppleScript, a bind's window wait, a visit), and launches pending.
@@ -142,6 +143,19 @@ public struct CUFocusGuardianCore: Sendable {
     /// The same for causes that can bring a window or a desktop forward (an activation, a raise, a main-window write, a
     /// visit, a restore): the only kind that can make a desktop change through an app that stays in the background.
     private var raises: [pid_t: TimeInterval] = [:]
+    /// Until when an app stays touched after an operation on it ENDED (an act, a blip, a span, a launch, a visit): its
+    /// delayed reactions are still the agent's — but an end is no new action, so it never makes the user's input during
+    /// the operation "before the agent's last cause" (the model-based test: an AppleScript's end outranked the user's
+    /// Dock click into the app a moment before, and their move was undone).
+    private var touchedUntil: [pid_t: TimeInterval] = [:]
+    private var raiseTouchedUntil: [pid_t: TimeInterval] = [:]
+    /// What the agent did to an app while it was ALREADY in front (an act on the user's own front app): it can't have
+    /// brought it forward, so it counts only once the app has left the front (a later return of it may be its doing) —
+    /// never for the change that put it there (the model-based test: an act begun 70 ms after the user's ⌘-Tab into the
+    /// target, before the guardian heard of it, made their move the agent's).
+    private var frontGlow: [pid_t: (at: TimeInterval, raise: Bool)] = [:]
+    /// Operations begun on an app while it was in front: they count as spans once it leaves the front.
+    private var frontSpans: [pid_t: Int] = [:]
     private var spans: [pid_t: Int] = [:]
     private var launches: [Int: (since: TimeInterval, bundle: String?)] = [:]
     private var launchSeq = 0
@@ -151,7 +165,12 @@ public struct CUFocusGuardianCore: Sendable {
     private var evidence = 0
     /// The last state judged, its verdict, and the facts it was judged on (the user's input so far, the agent's last
     /// cause on that app): new facts of either kind and it is judged again.
-    private var judged: (app: pid_t?, space: UInt64?, owner: CUMoveOwner, evidence: Int, cause: TimeInterval)?
+    private var judged: (app: pid_t?, space: UInt64?, owner: CUMoveOwner, evidence: Int, cause: TimeInterval, seenAt: TimeInterval,
+                         before: CUGuardedView)?
+    /// The last state any path looked at: what a change is a change FROM (which app or desktop it moved) — the user's
+    /// place can be stale (a move of theirs the rule could not attribute), and a desktop switch must never explain an
+    /// app coming forward on the desktop that was already shown (the model-based test).
+    private var lastSeen: CUGuardedView?
     /// Why the last judgement went as it did, whether it was a fresh one, and whether its theft was a repeat.
     public private(set) var lastReason = ""
     public private(set) var lastFresh = false
@@ -177,6 +196,7 @@ public struct CUFocusGuardianCore: Sendable {
         exemptApp = nil
         claim = nil
         judged = nil
+        lastSeen = nil
         if visitApp != nil { endVisit() }
     }
 
@@ -189,17 +209,38 @@ public struct CUFocusGuardianCore: Sendable {
         if raise { raises[pid] = max(raises[pid] ?? -.infinity, now) }
     }
 
-    /// An operation on `pid` runs (an AppleScript, a bind's window wait, a visit): it counts as touched throughout.
-    public mutating func beginSpan(_ pid: pid_t, now: TimeInterval) {
+    /// The agent did something to `pid` while it was the front app: touched once it leaves the front (see `frontGlow`).
+    public mutating func noteFrontAfterglow(_ pid: pid_t, raise: Bool = false, now: TimeInterval) {
+        frontGlow[pid] = (now, raise || (frontGlow[pid]?.raise ?? false))
+    }
+
+    /// An operation on `pid` ended (an act, a blip): it stays touched for `causalWindow` — without being a new cause.
+    public mutating func noteAfterglow(_ pid: pid_t, raise: Bool = false, now: TimeInterval) {
+        touchedUntil[pid] = max(touchedUntil[pid] ?? -.infinity, now + Self.causalWindow)
+        if raise { raiseTouchedUntil[pid] = max(raiseTouchedUntil[pid] ?? -.infinity, now + Self.causalWindow) }
+    }
+
+    /// An operation on `pid` runs (an AppleScript, a bind's window wait, a visit): it counts as touched throughout —
+    /// begun while the app is in front (`whileFront`), only once it has left the front (see `frontGlow`).
+    public mutating func beginSpan(_ pid: pid_t, whileFront: Bool = false, now: TimeInterval) {
+        if whileFront {
+            frontSpans[pid, default: 0] += 1
+            return
+        }
         spans[pid, default: 0] += 1
         noteCause(pid, raise: true, now: now)
     }
 
-    /// The operation ended: touched for `causalWindow` more.
+    /// The operation ended: touched for `causalWindow` more (an afterglow, not a new cause).
     public mutating func endSpan(_ pid: pid_t, now: TimeInterval) {
+        if let n = frontSpans[pid] {
+            frontSpans[pid] = n > 1 ? n - 1 : nil
+            noteFrontAfterglow(pid, raise: true, now: now)
+            return
+        }
         guard let n = spans[pid] else { return }
         spans[pid] = n > 1 ? n - 1 : nil
-        noteCause(pid, raise: true, now: now)
+        noteAfterglow(pid, raise: true, now: now)
     }
 
     /// The agent may launch an app: once its bundle is known (`setLaunchBundle`), an app of that bundle whose process
@@ -222,7 +263,7 @@ public struct CUFocusGuardianCore: Sendable {
 
     public mutating func endLaunch(_ token: Int, pid: pid_t?, now: TimeInterval) {
         launches[token] = nil
-        if let pid { noteCause(pid, raise: true, now: now) }
+        if let pid { noteAfterglow(pid, raise: true, now: now) }
     }
 
     public var launchPending: Bool { launches.values.contains { $0.bundle != nil } }
@@ -234,6 +275,7 @@ public struct CUFocusGuardianCore: Sendable {
         // A visit's apps — the way there and the way back are the agent's — while it lasts.
         if visiting(now: now), app == visitApp || app == visitUser { return true }
         if let c = causes[app], now - c <= Self.causalWindow { return true }
+        if let u = touchedUntil[app], now <= u { return true }
         // An app the agent is launching: its process started after the launch began, and it is that bundle (a launch
         // counts once its bundle is known — the bind's resolver says so as it launches).
         if let s = startedAt {
@@ -252,6 +294,7 @@ public struct CUFocusGuardianCore: Sendable {
         if (spans[app] ?? 0) > 0 { return true }
         if visiting(now: now), app == visitApp || app == visitUser { return true }
         if let r = raises[app], now - r <= Self.causalWindow { return true }
+        if let u = raiseTouchedUntil[app], now <= u { return true }
         return false
     }
 
@@ -259,6 +302,7 @@ public struct CUFocusGuardianCore: Sendable {
     public func raiseTouchedApps(now: TimeInterval) -> [pid_t] {
         var apps = Set(spans.keys)
         for (a, r) in raises where now - r <= Self.causalWindow { apps.insert(a) }
+        for (a, u) in raiseTouchedUntil where now <= u { apps.insert(a) }
         if visiting(now: now) { if let a = visitApp { apps.insert(a) }; if let u = visitUser { apps.insert(u) } }
         return Array(apps).sorted()
     }
@@ -274,15 +318,16 @@ public struct CUFocusGuardianCore: Sendable {
 
     /// Input that can switch by itself: a click on the Dock or on a window of an app that is not in front (or on
     /// another display), a trackpad swipe the gesture monitor saw.
-    public mutating func noteSwitch(now: TimeInterval) {
-        input.note(now)
+    mutating func noteSwitch(now: TimeInterval, _ kind: CUSwitchInput.Kind = .app, target: pid_t? = nil) {
+        input.note(now, kind, target: target)
         evidence += 1
     }
 
     /// The user physically clicked a window of `app` (a bound target's): theirs — the activation it causes is claimed,
     /// and their place is that app and the Space it is on, at once.
     public mutating func userClicked(app: pid_t, space: UInt64?, now: TimeInterval) {
-        input.note(now)
+        // A claim, not a switch instant: it explains that app coming forward and nothing else (an instant left unused
+        // when their place was set here at once would explain another app's activation a moment later).
         evidence += 1
         claim = (app, now + Self.clickClaimWindow)
         guard active else { return }
@@ -314,6 +359,18 @@ public struct CUFocusGuardianCore: Sendable {
         let place = active ? view : (q.from ?? view)
         lastFresh = false
         lastRepeatOffender = false
+        // An app that has left the front: what the agent did to it while it was there counts from now on.
+        for (pid, n) in frontSpans where pid != q.app {
+            frontSpans[pid] = nil
+            spans[pid, default: 0] += n
+        }
+        for (pid, g) in frontGlow where pid != q.app {
+            frontGlow[pid] = nil
+            touchedUntil[pid] = max(touchedUntil[pid] ?? -.infinity, g.at + Self.causalWindow)
+            if g.raise { raiseTouchedUntil[pid] = max(raiseTouchedUntil[pid] ?? -.infinity, g.at + Self.causalWindow) }
+        }
+        let previous = lastSeen ?? place
+        lastSeen = CUGuardedView(app: q.app, space: q.space)
         if let app = q.app, app == place.app, q.space == nil || place.space == nil || q.space == place.space {
             judged = nil
             lastReason = CUMoveOwner.theirPlace.words
@@ -323,10 +380,19 @@ public struct CUFocusGuardianCore: Sendable {
             lastReason = j.owner.words + " (judged before)"
             return j.owner
         }
-        let owner = decide(q, place: place, now: now)
-        // Each switch input explains the first change after it, never a later one.
-        input.consume(through: now)
-        judged = (q.app, q.space, owner, evidence, lastCause(q.app))
+        // A state already seen, judged again on new facts: input that came after it was first seen can't have caused it
+        // (the model-based test: the user's Dock click a moment after a theft was seen made the theft "theirs").
+        // (Only while nothing new of the agent's happened to that app: a new cause means the state may have been left and
+        // reached again, unseen.)
+        let again = judged.flatMap { $0.app == q.app && $0.space == q.space && $0.cause == lastCause(q.app) ? $0 : nil }
+        let seenAt = again?.seenAt ?? now
+        let before = again?.before ?? (previous == lastSeen ? place : previous)
+        let (owner, used) = decide(q, place: place, before: before, upTo: seenAt, now: now)
+        // Each switch input explains one change only: the one it was the evidence for. A change decided otherwise (an app
+        // the agent never touched) uses none — the model-based test: an untouched app activating itself during the
+        // user's ⌘-Tab took its release, and their ⌘-Tab into the target, landing right after, was undone (I2).
+        if owner.isUsers, let used { input.use(used) }
+        judged = (q.app, q.space, owner, evidence, lastCause(q.app), seenAt, before)
         lastFresh = true
         lastReason = owner.words
         switch owner {
@@ -351,43 +417,72 @@ public struct CUFocusGuardianCore: Sendable {
         return owner
     }
 
-    private func decide(_ q: CUMoveQuery, place: CUGuardedView, now: TimeInterval) -> CUMoveOwner {
+    private func decide(_ q: CUMoveQuery, place: CUGuardedView, before: CUGuardedView, upTo: TimeInterval,
+                        now: TimeInterval) -> (CUMoveOwner, TimeInterval?) {
         let visit = visiting(now: now)
-        if let why = usersEvidence(q, place: place, now: now) {
+        if let (why, used) = usersEvidence(q, place: place, before: before, upTo: upTo, now: now) {
             // On the visited desktop, their input in the visited app is no move away: the visit's end decides.
-            if visit, let a = q.app, a == visitApp { return .visit }
-            return .user(why)
+            if visit, let a = q.app, a == visitApp { return (.visit, nil) }
+            return (.user(why), used)
         }
-        if visit { return .visit }
-        if let a = q.app, a == exemptApp, now < exemptUntil { return .consented }
-        return .agent(q.inputObservable
+        if visit { return (.visit, nil) }
+        if let a = q.app, a == exemptApp, now < exemptUntil { return (.consented, nil) }
+        return (.agent(q.inputObservable
             ? "the agent touched it, and no input of the user's that switches apps or desktops came after"
-            : "the agent touched it, and no input source tells more")
+            : "the agent touched it, and no input source tells more"), nil)
     }
 
-    /// Why the change is the user's (rules 1–5), or nil.
-    private func usersEvidence(_ q: CUMoveQuery, place: CUGuardedView, now: TimeInterval) -> String? {
+    /// Whether the change brought forward an app the agent touched (I1), as `judge` would read it now (for the model-
+    /// based test's ground truth).
+    public func touches(_ q: CUMoveQuery, now: TimeInterval) -> Bool {
+        let before = lastSeen ?? view
+        if isTouched(q.app, startedAt: q.appStartedAt, bundle: q.appBundle, now: now) { return true }
+        return q.app == before.app && q.shown.contains { $0 != q.app && isRaiseTouched($0, now: now) }
+    }
+
+    /// What a change moved, against the state before it: the front app, the desktop (unknown counts as moved).
+    static func moved(_ q: CUMoveQuery, from place: CUGuardedView) -> (app: Bool, desktop: Bool) {
+        (q.app != place.app, q.space == nil || place.space == nil || q.space != place.space)
+    }
+
+    /// Why the change is the user's (rules 1–5) and the switch instant it took, or nil.
+    private func usersEvidence(_ q: CUMoveQuery, place: CUGuardedView, before: CUGuardedView, upTo: TimeInterval,
+                               now: TimeInterval) -> (String, TimeInterval?)? {
         let app = q.app
-        // What the change brought forward that the agent touched: the front app (any cause can make an app activate
-        // itself), and the apps whose window a desktop change showed (only a cause that raises can do that).
+        // What the change brought forward that the agent touched: the app that came to the front (any cause can make an
+        // app activate itself) — and, only when no other app came forward (their own app stayed in front while the
+        // desktop changed), the apps whose window the new desktop shows (only a cause that raises can do that). An app
+        // that came forward and that the agent never touched makes the change theirs, whatever else the desktop shows.
         let front = isTouched(app, startedAt: q.appStartedAt, bundle: q.appBundle, now: now)
-        let shown = q.shown.filter { $0 != app && isRaiseTouched($0, now: now) }
-        if !front && shown.isEmpty {
-            return "the agent did not touch it — an app it never touched coming forward is always the user's"
+        let shown = app == before.app ? q.shown.filter { $0 != app && isRaiseTouched($0, now: now) } : []
+        // During a desktop visit the agent acts in front, on the user's screen: what it brings up there (a link its click
+        // opened in another app) is the visit's — only the user's own input or click, after the visit began, is a move.
+        let visit = visiting(now: now)
+        if !front && shown.isEmpty, !visit {
+            return ("the agent did not touch it — an app it never touched coming forward is always the user's", nil)
         }
         let cause = max(front ? lastCause(app) : -.infinity, shown.map { raises[$0] ?? -.infinity }.max() ?? -.infinity)
         if let a = app, let c = claim, c.app == a, now <= c.until {
-            return "they clicked into its window"
+            return ("they clicked into its window", nil)
         }
         if let a = app, a == place.app, viewAt >= now - Self.followOnWindow, cause <= viewAt {
-            return "the desktop change that came with their own move into it"
+            return ("the desktop change that came with their own move into it", nil)
         }
-        let from = q.since ?? (now - Self.switchWindow)
-        if input.explains(from: from, after: cause, now: now) {
-            return "their input that switches apps or desktops (⌘-Tab, ⌃-arrows, a swipe, the Dock, a click on another app's window), after the agent's last action on it"
+        // While guarding, the observers judge every change as it comes, so a path's late look counts only the input of
+        // the last `switchWindow` (a change of theirs during a long operation is already their place): input left unused
+        // by changes decided otherwise must not explain one seconds later (the model-based test: clicks of theirs on two
+        // other apps during an AppleScript made the target's own activation at its end "theirs"). Not guarding, nothing
+        // judged the change when it came: from the caller's own start, however long ago (a long AppleScript's after-
+        // check, review of round 7) — and never less than `switchWindow` back (input just before an operation began can
+        // land its change during it: a Dock click 90 ms before a bind).
+        var from = active ? now - Self.switchWindow : min(q.since ?? now, now - Self.switchWindow)
+        if visit { from = max(from, visitStartedAt) }
+        let (appMoved, desktopMoved) = Self.moved(q, from: before)
+        if let used = input.explanation(from: from, after: cause, now: upTo, app: appMoved, desktop: desktopMoved, front: app) {
+            return ("their input that switches apps or desktops (⌘-Tab, ⌃-arrows, a swipe, the Dock, a click on another app's window), after the agent's last action on it", used)
         }
-        if !q.inputObservable, let c = q.clickAt, now - c <= Self.userInputWindow, c > cause {
-            return "a click of theirs just before it (no input source tells more)"
+        if !q.inputObservable, let c = q.clickAt, now - c <= Self.userInputWindow, c > cause, c <= upTo, !visit || c >= visitStartedAt {
+            return ("a click of theirs just before it (no input source tells more)", nil)
         }
         return nil
     }
@@ -416,15 +511,15 @@ public struct CUFocusGuardianCore: Sendable {
 
     /// The user agreed to be taken to `app`'s desktop from `user`'s: until `endVisit` (or the deadline — `maxSeconds`,
     /// the primitive's own, else `visitMaxSeconds`), its own switches are neither undone nor adopted. Both apps count as
-    /// touched while it lasts (the way there and the way back are the agent's), and for the causal window after.
+    /// touched while it lasts (the way there and the way back are the agent's), the target for the causal window after.
     public mutating func beginVisit(app: pid_t, user: pid_t? = nil, now: TimeInterval, maxSeconds: TimeInterval = visitMaxSeconds) {
         if visitApp != nil { endVisit(now: now) }
         visitApp = app
         visitUser = user
         visitUntil = now + maxSeconds
+        visitStartedAt = now
         visitSawUserInput = false
         noteCause(app, raise: true, now: now)
-        if let user { noteCause(user, raise: true, now: now) }
     }
 
     /// The open visit runs on: its visit mode lasts until `until` (the safety cap, re-armed as work starts and ends).
@@ -438,16 +533,33 @@ public struct CUFocusGuardianCore: Sendable {
     @discardableResult
     public mutating func endVisit(now: TimeInterval? = nil) -> Bool {
         let saw = visitSawUserInput
-        // Its apps stay touched for the causal window after it (a late switch of its making is still the agent's).
-        if let now {
-            if let a = visitApp { noteCause(a, raise: true, now: now) }
-            if let u = visitUser { noteCause(u, raise: true, now: now) }
-        }
+        // Its target stays touched for the causal window after it (a late switch of its making is still the agent's) —
+        // never the user's own app, which is their place to come back to.
+        if let now, let a = visitApp { noteAfterglow(a, raise: true, now: now) }
         visitApp = nil
         visitUser = nil
         visitUntil = 0
         visitSawUserInput = false
         return saw
+    }
+
+    /// An app the agent never touched was activated and is no longer in front (heard of late, after whatever came next):
+    /// it was the user's place (I1) before that — adopted as their place, without judging the state now in front again
+    /// (that keeps its own verdict). Nothing during a visit (the visit's end decides). Returns whether it was adopted.
+    /// Never over a newer state already judged (`live`, what is in front now, seen before): that verdict is newer history.
+    /// `space`: the desktop it was on, as far as its windows tell — the one shown now when it has a window there (then the
+    /// change now in front moved only the app — the model-based test: the user's swipe that brought that app forward
+    /// "explained" the target's own activation on the same desktop), else its one other desktop, else unknown (then the
+    /// change now in front may have moved the desktop too: the user's ⌃-arrow right after the app came forward).
+    @discardableResult
+    public mutating func adoptPast(_ app: pid_t, space: UInt64?, live: CUGuardedView, now: TimeInterval) -> Bool {
+        guard active, !visiting(now: now), !isTouched(app, now: now), app != view.app, lastSeen != live else { return false }
+        view = CUGuardedView(app: app, space: space ?? view.space)
+        lastSeen = CUGuardedView(app: app, space: space)
+        viewAt = now
+        thefts[app] = nil
+        claim = nil
+        return true
     }
 
     /// The user is somewhere of their own now (they moved during a visit): that is where later restores return them.
@@ -471,8 +583,11 @@ public struct CUFocusGuardianCore: Sendable {
 /// And a ⌃ hold with no chord seen WHILE it lasts (the desktop switcher acts during it). Under Secure Event Input the
 /// tap sees no keys, so a hold can't be told from a shortcut: no hold counts then. Pure.
 struct CUSwitchInput {
-    /// Instants not yet used, oldest first.
-    private(set) var instants: [TimeInterval] = []
+    /// What a switch can change: the front app (⌘-Tab, the Dock, a click on another app's window), or the desktop
+    /// (⌃-arrows, a swipe). An app switch to an app on another desktop takes the desktop along (one change).
+    enum Kind: Equatable { case app, desktop }
+    /// Instants not yet used, oldest first; `target`: the app it was for, when known (a click on its window).
+    private(set) var instants: [(at: TimeInterval, kind: Kind, target: pid_t?)] = []
     /// The last instant seen (for the log), used or not.
     private(set) var lastAt: TimeInterval = -1
     /// A ⌘/⌃ hold in progress: since when, whether a chord was seen in it, whether ⌃ is in it, and whether it began
@@ -506,19 +621,24 @@ struct CUSwitchInput {
             guard let h = hold else { return false }
             hold = nil
             guard !h.chord, !h.secure, !secure else { return false }  // a chord an app got, or keys the tap could not see
-            add(now)
+            add(now, h.control ? .desktop : .app)
             return true
         case CGEventType.keyDown.rawValue:
-            if (flags.contains(.maskCommand) && Self.commandSwitchKeys.contains(keycode))
-                || (flags.contains(.maskControl) && Self.controlSwitchKeys.contains(keycode)) {
-                add(now)  // a switching chord the tap saw
+            if flags.contains(.maskControl), Self.controlSwitchKeys.contains(keycode) {
+                add(now, .desktop)  // ⌃-arrow, seen: the desktop switches now — the hold's release is no second switch
+                hold?.chord = true
+                return true
+            }
+            if flags.contains(.maskCommand), Self.commandSwitchKeys.contains(keycode) {
+                add(now, .app)  // ⌘-Tab or ⌘-`, seen: a switch (at the release, for ⌘-Tab — the release then adds nothing more)
+                hold?.chord = true
                 return true
             }
             if Self.modifier(flags), hold != nil { hold?.chord = true }  // a chord an app got: no switch
         case 1, 3, 25, 22, 6, 7, 27:  // mouse down (left, right, other), scroll, drags — with ⌘/⌃ held, a chord
             if Self.modifier(flags), hold != nil { hold?.chord = true }
         case let t where Self.switchGestures.contains(t):
-            add(now)
+            add(now, .desktop)
             return true
         default:
             break
@@ -526,24 +646,53 @@ struct CUSwitchInput {
         return false
     }
 
-    mutating func note(_ now: TimeInterval) { add(now) }
+    mutating func note(_ now: TimeInterval, _ kind: Kind = .app, target: pid_t? = nil) { add(now, kind, target: target) }
 
-    private mutating func add(_ now: TimeInterval) {
+    private mutating func add(_ now: TimeInterval, _ kind: Kind, target: pid_t? = nil) {
         lastAt = now
-        instants.removeAll { now - $0 > Self.keep }
-        instants.append(now)
+        instants.removeAll { now - $0.at > Self.keep }
+        instants.append((now, kind, target))
     }
+
+    /// Whether an instant of `kind` can explain a change that moved the front app (`app`) and/or the desktop.
+    static func fits(_ kind: Kind, app: Bool, desktop: Bool) -> Bool { kind == .app ? app : desktop }
 
     /// Whether switch input explains a change seen at `now`: an instant not yet used, at or after `from`, after the
     /// agent's last cause on the app — or a ⌃ hold with no chord that began after that cause and still lasts.
-    func explains(from: TimeInterval, after cause: TimeInterval, now: TimeInterval) -> Bool {
-        if instants.contains(where: { $0 >= from && $0 > cause && $0 <= now }) { return true }
-        if let h = hold, h.control, !h.chord, !h.secure, h.since > cause, now - h.since < Self.holdMax { return true }
-        return false
+    func explains(from: TimeInterval, after cause: TimeInterval, now: TimeInterval, app: Bool = true, desktop: Bool = true,
+                  front: pid_t? = nil) -> Bool {
+        explanation(from: from, after: cause, now: now, app: app, desktop: desktop, front: front) != nil
     }
 
-    /// The change seen at `now` used every instant up to it.
-    mutating func consume(through now: TimeInterval) { instants.removeAll { $0 <= now } }
+    /// What explains a change that moved the front app (`app`) and/or the desktop: the oldest instant of a kind that fits
+    /// — or, for a ⌃ hold going on (which explains every desktop it passes), −∞, nothing to use up.
+    /// An instant for a known app explains only that app coming forward (`front`).
+    func explanation(from: TimeInterval, after cause: TimeInterval, now: TimeInterval, app: Bool = true,
+                     desktop: Bool = true, front: pid_t? = nil) -> TimeInterval? {
+        if let i = instants.first(where: {
+            $0.at >= from && $0.at > cause && $0.at <= now && Self.fits($0.kind, app: app, desktop: desktop)
+                && ($0.target == nil || $0.target == front)
+        }) {
+            return i.at
+        }
+        if desktop, let h = hold, h.control, !h.chord, !h.secure, h.since > cause, h.since <= now, now - h.since < Self.holdMax { return -.infinity }
+        return nil
+    }
+
+    /// The instant a change was explained by is used up.
+    mutating func use(_ instant: TimeInterval) {
+        if let i = instants.firstIndex(where: { $0.at == instant }) { instants.remove(at: i) }
+    }
+
+    /// A change of theirs decided otherwise took the oldest instant since `from` of a kind that fits it.
+    mutating func useOldest(from: TimeInterval, now: TimeInterval, app: Bool = true, desktop: Bool = true) {
+        if let i = instants.firstIndex(where: { $0.at >= from && $0.at <= now && Self.fits($0.kind, app: app, desktop: desktop) }) {
+            instants.remove(at: i)
+        }
+    }
+
+    /// Every instant up to `now` used (tests).
+    mutating func consume(through now: TimeInterval) { instants.removeAll { $0.at <= now } }
 
     /// For tests and the log: whether input that could switch came between `from` and `seenAt`, used or not.
     func seen(from: TimeInterval, seenAt: TimeInterval, window: TimeInterval) -> Bool {

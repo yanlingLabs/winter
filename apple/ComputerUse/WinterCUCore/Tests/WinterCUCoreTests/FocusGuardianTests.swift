@@ -65,13 +65,12 @@ final class FocusGuardianTests: XCTestCase {
         // Used up: the change it explained took it. Back in their app, the target's next self-activation is undone.
         XCTAssertTrue(judge(&g, 1, now: 1.6).isUsers, "their app: untouched")
         XCTAssertFalse(judge(&g, 500, now: 1.7).isUsers, "the ⌘-Tab explained one change only")
-        // An untouched app's change uses the input up too: ⌘-Tab to Mail, then the target activating itself is undone.
+        // An app switch never explains a desktop change on its own, nor a desktop switch an app change on the same desktop.
         var h = started()
         h.noteCause(500, now: 0.9)
-        commandTab(&h, at: 1.0)
-        XCTAssertTrue(judge(&h, 77, now: 1.05).isUsers)
-        XCTAssertFalse(judge(&h, 500, now: 1.1).isUsers, "the ⌘-Tab was Mail's")
-        XCTAssertEqual(h.view.app, 77)
+        h.inputEvent(type: CGEventType(rawValue: 31)!, flags: [], now: 1.0)  // a swipe
+        XCTAssertFalse(judge(&h, 500, 100, now: 1.1).isUsers, "the target in front on the same desktop: no swipe explains that")
+        XCTAssertTrue(judge(&h, 500, 200, now: 1.2).isUsers, "on another desktop: the swipe's")
     }
 
     /// The same state judged by two paths gets the same verdict (I5), and input of theirs that arrives later re-judges it.
@@ -636,6 +635,7 @@ final class FocusGuardianTests: XCTestCase {
                           pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
         core.restoreDeadlineMs = 400
         core.restoreRetryMs = 40
+        core.guardianLock.withLock { core.guardianCore.noteCause(800, now: core.clock.nowSeconds()) }  // the thief: an app the agent touched
         var left = refusals
         sys.onActivate = { pid in
             guard pid == 500, left != 0 else { return }

@@ -81,7 +81,6 @@ extension CUCore {
     private func giveBack(_ h: HeldForeground) {
         guardianLock.withLock { guardianCore.endExempt(h.pid) }
         if sys.frontmostPid() == h.pid, let prev = h.previous, sys.appRunning(prev) {
-            noteGuardianCause(prev, raise: true)  // the agent's own activation
             _ = sys.activate(pid: prev)
             CULog.act.notice("foreground in \(h.appName, privacy: .public): the front given back")
         }

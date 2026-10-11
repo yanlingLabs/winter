@@ -276,6 +276,9 @@ final class FakeSystem: CUSystemBackend {
     var contentProcesses: [pid_t: pid_t] = [:]
     func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { contentProcesses[pid] == appPid }
     func cursorLocation() -> CGPoint? { cursor }
+    /// How long ago each process started (a launch's).
+    var ages: [pid_t: TimeInterval] = [:]
+    func processAge(pid: pid_t) -> TimeInterval? { ages[pid] }
     func warpCursor(to p: CGPoint) { warpedTo.append(p) }
 
     static func window(_ id: UInt32, pid: pid_t, _ frame: CGRect, owner: String = "App", layer: Int = 0) -> CUWindowServerWindow {

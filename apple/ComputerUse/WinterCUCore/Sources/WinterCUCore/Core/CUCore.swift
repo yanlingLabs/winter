@@ -226,7 +226,7 @@ public final class CUCore: @unchecked Sendable {
             // None new (the app showed the doc in an existing window, or none has appeared): the frontmost.
             return CUBindWait.realWindows(sys.windows(pid: app.processIdentifier)).map(\.id).first
         }()
-        noteGuardianCause(app.processIdentifier, raise: true)  // its window is up: it may activate now (a cause again)
+        noteGuardianAfterglow(app.processIdentifier, raise: true)  // its window is up: it may still activate now
         let bound = CUBoundApp(name: app.localizedName ?? b.bundleIdentifier ?? appURL.lastPathComponent,
                                bundleId: app.bundleIdentifier ?? "", pid: app.processIdentifier)
         return OpenDocumentsResult(app: bound, windowID: windowID)
@@ -362,7 +362,7 @@ public final class CUCore: @unchecked Sendable {
         target.knownWindows = Set(CUBindWait.realWindows(serverNow).map(\.id)).union([chosen.id])
         emit { $0.targetBound(sessionId: p.sessionId, pid: pid, windowID: chosen.id, appName: appName, mirror: p.mirror) }
         noteGuardianPrivatePath(privatePath)
-        noteGuardianActed(pid)
+        noteGuardianAfterglow(pid, raise: true)
         // Said up front: what working a window on another desktop costs, and the way out.
         let offDesktop = sys.window(id: chosen.id)?.onScreen == false && !outcome.captureOnly
         let costs = offDesktop ? Self.offDesktopCosts(appName) : nil

@@ -614,7 +614,6 @@ extension CUCore {
     /// it runs under `SLSDisableUpdate`, so the switch back is not drawn as a flash; across desktops macOS draws
     /// the switch itself. Returns the view it ends on.
     private func returnOnce(_ s: VisitBase, user: pid_t) -> CUUserView {
-        noteGuardianCause(user, raise: true)  // the way back is the agent's own: a late activation of it after the user moved is undone
         let sameDesktop = s.before.space == nil || sys.activeSpace() == s.before.space
         let cid = sameDesktop ? skyLight.disableUpdate() : nil
         defer { if let cid { skyLight.reenableUpdate(cid) } }
@@ -682,7 +681,6 @@ extension CUCore {
                 CULog.act.notice("visit return: display \(display, privacy: .public) stayed on the visited desktop, and no window of the user's is known on its own — left for the user")
                 continue
             }
-            if let user = s.before.front { noteGuardianCause(user, raise: true) }
             try? ax.perform(w.0, kAXRaiseAction)
             raised = true
         }

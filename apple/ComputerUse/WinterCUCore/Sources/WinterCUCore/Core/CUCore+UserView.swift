@@ -49,6 +49,7 @@ extension CUCore {
         if holdsForeground(t) || isVisiting(t) { t.consentedForeground = true }
         let before = userView()
         let startedAt = clock.nowSeconds()
+        t.actStart = (before.front, before.space, startedAt)
         let route = { (o: ActOutcome?) in "\(Self.actionName(p.action)) (\(o.map { Self.routeName($0.rung) } ?? "failed"))" }
         let outcome: ActOutcome
         do {
@@ -118,7 +119,6 @@ extension CUCore {
         guard let first = before.front, first != pid, targetFront || (spaceMoved && !late) else { return what }
         let place = guardianPlace().map { CUUserView(space: $0.space, front: $0.app) } ?? before
         guard let user = place.front, user != pid else { return what }
-        noteGuardianCause(user, raise: true)  // the restore is the agent's own
         let back = restoreUserView(place, user: user)
         if back == place { return what + " — the user's \(spaceMoved ? "desktop and app were" : "app was") put back" }
         if spaceMoved, back.space != place.space {
@@ -152,9 +152,16 @@ extension CUCore {
         var attempts = 1
         var now = userView()
         let deadline = lastActivate + restoreDeadlineMs
+        let startedAt = clock.nowSeconds()
+        let placeAtStart = guardianPlace()
         while now != before, clock.nowMs() < deadline {
             clock.pause(ms: 30)
             now = userView()
+            // I2 — while it waits, the restore is never retried over the user: another app in front now is judged by the
+            // one rule (their move ends the restore), and their place having moved on meanwhile ends it too (the model-
+            // based test: a retry 22 ms after a Dock click of theirs pulled them back out of the app they chose).
+            if guardianPlace() != placeAtStart { break }
+            if let f = now.front, f != user, isUsersMove(now, since: startedAt, from: before, path: "a restore, before trying again") { break }
             if now.front != user, clock.nowMs() - lastActivate >= restoreRetryMs, clock.nowMs() < deadline {
                 _ = sys.activate(pid: user)
                 try? ax.set(ax.application(user), kAXFrontmostAttribute, kCFBooleanTrue)

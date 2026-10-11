@@ -75,7 +75,7 @@ extension CUCore {
                 throw error
             }
         }
-        noteGuardianActed(t.pid)  // an activation in the next seconds may be this act's doing
+        noteGuardianAfterglow(t.pid)  // an activation in the next seconds may be this act's doing
         CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): \(Self.routeName(outcome.rung), privacy: .public)\(outcome.detail.map { " — " + $0 } ?? "", privacy: .public)")
         let notes = takeGuardianNotes()
         let detail = (notes + [outcome.detail].compactMap { $0 }).isEmpty ? nil
