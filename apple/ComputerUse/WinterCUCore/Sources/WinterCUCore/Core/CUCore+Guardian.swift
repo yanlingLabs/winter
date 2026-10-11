@@ -549,7 +549,9 @@ extension CUCore {
         guard guardianRefs == 0 else { return true }
         guardianRefs = 1
         guardianCore.begin(view: CUGuardedView(app: sys.frontmostPid(), space: sys.activeSpace()))
-        installGuardianObservers()
+        // (Never in a test's core: the machine's REAL activations — another app, a probe running meanwhile — reached the
+        // model-based test's simulated world as an unknown pid and failed a seed, round 14.)
+        if guardianLiveTapEnabled { installGuardianObservers() }
         startCPSTap()
         startGestureMonitor()
         CULog.guardian.notice("guarding the user's view while a script runs")

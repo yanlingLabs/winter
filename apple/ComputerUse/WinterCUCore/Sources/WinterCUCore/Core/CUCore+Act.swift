@@ -912,6 +912,11 @@ extension CUCore {
         return nil
     }
 
+    /// Controls a press acts on: giving one the keyboard focus by a press already acts on it.
+    static let pressActsRoles: Set<String> = [
+        "AXCheckBox", "AXRadioButton", "AXSwitch", "AXToggle", "AXButton", "AXLink", "AXMenuButton", "AXPopUpButton",
+    ]
+
     /// Roles that take a click: the hit test climbs from the deepest element at the point to the first of these
     /// (or anything listing press / open / show menu).
     static let clickableRoles: Set<String> = [
@@ -2138,6 +2143,21 @@ extension CUCore {
             let el = try element(into, in: t)
             let info = ElementInfo(el, ax)
             if Self.producesText(chord), info.secure { throw secureRefusal() }
+            // A control that a PRESS acts on (a check box, a radio, a button, a link…) without the focus: placing the
+            // focus presses it, and the key would press it again — a check box toggled twice, a button pressed twice
+            // (round 14, the Material probe: key("space", { into }) on a check box "ok" and nothing changed). Space or
+            // Return is that press: done once, as a press. Any other key: refused, with the way.
+            if Self.pressActsRoles.contains(info.role ?? ""), focusRelation(el, t) != .onIt {
+                let isPress = chord.modifiers.isEmpty && rep == 1
+                    && [.named(.space), .named(.returnKey), .named(.keypadEnter)].contains(chord.key)
+                guard isPress else {
+                    throw CUError.unsupported("putting the keyboard focus on [\(into)] would press it (\(Self.elementLabel(into, info))) — click(\(into)) presses it; send other keys once it has the focus")
+                }
+                announceTarget(t, info, pressing: true)
+                do { try ax.perform(el, kAXPressAction) } catch let error where Self.deliveryUncertain(error) { throw busyAfterSend(t) }
+                CULog.act.notice("key in \(t.appName, privacy: .public): \(a.combo, privacy: .public) into a control a press acts on — pressed once, not focused by a press and sent the key")
+                return ActOutcome(rung: .accessibility, detail: "\(Self.elementLabel(into, info)) was pressed once — what \(a.combo) does to it — rather than given the focus by a press and sent the key (that would press it twice)")
+            }
             announceTarget(t, info, pressing: false)
             try placeFocus(el, t, ref: into)
             t.noteTargeted(el, at: clock.nowMs())
@@ -2275,7 +2295,9 @@ extension CUCore {
             let editing = editingShortcut && boundWindowIsKeyInApp(t) != true
             // A shortcut aimed INTO a sheet, a panel or a dialog goes there as keys, never to the app's menu bar (dogfood,
             // round 13: ⌘⇧G into Chrome's open panel ran Chrome's own "Find Previous" instead of the panel's Go to Folder).
-            let intoPanel = g.explicit.map { inSheetOrPanel($0, t) } ?? false
+            // (The focus already in one counts too — round 14's probe: ⌘⇧G with no `into`, the open panel's list focused,
+            // still ran Chrome's own "Find Previous".)
+            let intoPanel = (g.explicit ?? (t.accessible ? reportedFocus(t) : nil)).map { inSheetOrPanel($0, t) } ?? false
             if intoPanel { CULog.act.notice("key in \(t.appName, privacy: .public): aimed into a sheet or panel — keys, never its menu bar") }
             // Every ⌘-chord, before the split: with the app in front and another of its windows key, the keys or the menu
             // command would act in the user's window (review of round 13, LOW: a ⌘⇧H aimed into a sheet went to the

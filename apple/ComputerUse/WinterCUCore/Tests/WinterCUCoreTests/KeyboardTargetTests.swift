@@ -261,6 +261,27 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertEqual(downs.first?.location.y ?? 0, 312, accuracy: 1, "at the field's centre where it is now")
     }
 
+    /// Round 14 (the Material probe): Space or Return INTO a control a press acts on (a check box, a button) is ONE
+    /// press — never a press to place the focus and then the key (a check box toggled twice, a button pressed twice);
+    /// another key into it is refused with the way.
+    func testSpaceIntoACheckBoxIsOnePressNeverTwo() async throws {
+        safari(fieldOwner: pid)
+        let cb = fakeElement(93_090)
+        ax.add(cb, role: kAXCheckBoxRole, title: "Accept terms", frame: CGRect(x: 20, y: 120, width: 20, height: 20),
+               extra: [kAXParentAttribute: ax.element(field, kAXParentAttribute)!, kAXValueAttribute: 0])
+        ax.setActions(cb, [kAXPressAction])
+        let r = try await act(.key(CUKeyAction(combo: "space", into: ref(cb))))
+        XCTAssertEqual(ax.performed.filter { $0.hasSuffix(":AXPress") }.count, 1, "one press: \(ax.performed)")
+        XCTAssertTrue(poster.keyDowns.isEmpty, "no key sent after it")
+        XCTAssertTrue(r.detail?.contains("pressed once") ?? false, r.detail ?? "")
+        do {
+            _ = try await act(.key(CUKeyAction(combo: "tab", into: ref(cb))))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertTrue(e.message.contains("would press it"), e.message)
+        }
+    }
+
     /// Review of round 13, MEDIUM #5: a paste the field took but shows otherwise (a formatting input, a rich target, a
     /// block editor) is done and said — never Uncertain; Markdown is looked for rendered too.
     func testAPasteTheFieldReformattedIsDoneAndSaid() async throws {
