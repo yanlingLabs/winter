@@ -572,12 +572,10 @@ export class HostCodeExecutionService {
           };
           const cwd = canonicalDirectory(hook.cwd),
             claimed = canonicalDirectory(request.cwd);
-          if (
-            cwd !== claimed ||
-            !binding!.allowedCwds
-              .map(canonicalDirectory)
-              .some((root) => cwd === root || cwd.startsWith(`${root}/`))
-          )
+          // A previously approved Code escape may have changed the runtime cwd. The
+          // matching host hook supplies current cwd; it is evaluated by host authority below.
+          // Starting directories remain the sandbox write roots, never inferred from this cwd.
+          if (cwd !== claimed)
             throw new HostCodeUnavailable("cwd-outside-current-host-binding");
           if (binding!.policyRevision() !== hook.policy)
             throw new HostCodeUnavailable("permission-context-changed");
@@ -619,10 +617,7 @@ export class HostCodeExecutionService {
             );
           if (
             canonicalDirectory(hook.cwd) !== cwd ||
-            canonicalDirectory(request.cwd) !== claimed ||
-            !binding!.allowedCwds
-              .map(canonicalDirectory)
-              .some((root) => cwd === root || cwd.startsWith(`${root}/`))
+            canonicalDirectory(request.cwd) !== claimed
           )
             throw new HostCodeUnavailable("cwd-changed-during-admission");
           const latest = hostStorageFloorDescriptor(binding!.home);

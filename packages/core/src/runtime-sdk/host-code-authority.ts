@@ -281,6 +281,7 @@ export class CanonicalHostCodeAuthority implements HostCodeAuthority {
       invocation.ancestors ?? [],
       invocation.preHookDecision,
     );
+    const revision = this.policyRevision();
     const result = await this.evaluator.evaluate(
       {
         scope: invocation.scope,
@@ -290,6 +291,9 @@ export class CanonicalHostCodeAuthority implements HostCodeAuthority {
       signal,
     );
     return (
+      !signal.aborted &&
+      this.policyRevision() === revision &&
+      String(result.policyRevision) === revision &&
       result.status === "allow" &&
       (!result.record?.transformedInput ||
         canonical(result.record.transformedInput) ===

@@ -102,7 +102,7 @@ import type { SkillStore } from "../agent/skills";
 import { startWinterSession, unconsumedUserMessages, withRunHome, withRuntimeVersion, withSessionMcpServers, type CompactOptions, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 import type { UserMessageImageRef } from "@yanlinglabs/winter-protocol";
 import { RunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeFor, type RunHomeInput } from "@yanlinglabs/winter-runtime-sdk";
-import { projectScopeTrusted, type RunHomeSessionFacts } from "./run-home-input";
+import { projectScopeTrusted, projectScopeRootFor, type RunHomeSessionFacts } from "./run-home-input";
 import { readWinterTasks } from "./tasks-reader";
 import { keychainService } from "../profile";
 import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
@@ -111,6 +111,9 @@ import { SESSION_REPLACED } from "./session-replaced";
 import { withHostCodeBinding, type HostCodeAuthority } from "./host-code-broker";
 import { CanonicalHostCodeAuthority, installedHostCodePolicyAdapter, type CanonicalHostCodePolicy } from "./host-code-authority";
 import { buildCoreBrand } from "./brand";
+import { projectWalk } from "./project-walk";
+import { authorityFileRevision } from "../authority-revision";
+import { sdkSettingsPath, sdkGlobalConfigPath } from "../agent/paths";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
@@ -324,6 +327,8 @@ export interface WinterLegDeps {
   profile?: string;
   /** THE LIVE settings holder. */
   settings: () => Settings | null | undefined;
+  /** Monotonic host-owned trust/settings mutation epoch; never a runtime-supplied revision. */
+  hostAuthorityRevision?: () => unknown;
   runtime: WinterRuntimeSdk | undefined;
   /** 8a's repositories; undefined when the spine is offline (the Winter leg then refuses). */
   records: RuntimeSessionRecords | undefined;
@@ -1379,6 +1384,12 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
                 authorityRevision: {
                   approvalPolicy: current.approvalPolicy,
                   trusted,
+                  sessionEpoch: deps.store.hostAuthorityRevision(sessionId),
+                  hostEpoch: deps.hostAuthorityRevision?.(),
+                  fileEpochs: [
+                    join(home, "settings.json"), sdkSettingsPath(home), sdkGlobalConfigPath(home),
+                    ...projectWalk(cwd, trusted ? projectScopeRootFor(cwd) : null, options.env?.HOME ?? home).flatMap(dir => [join(dir, ".winter", "settings.json"), join(dir, ".winter", "settings.local.json"), join(dir, ".winter", "permissions.local.json")]),
+                  ].map(authorityFileRevision),
                 },
               };
             },

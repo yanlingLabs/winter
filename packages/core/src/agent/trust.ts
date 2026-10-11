@@ -6,6 +6,8 @@ interface TrustFile { version: 1; trustedDirs: string[] }
 /** Per-directory trust, persisted to a JSON file. Trust inherits to subdirectories. */
 export class TrustStore {
   private trusted: string[];
+  private epoch = 0;
+  authorityRevision(): number { return this.epoch; }
   constructor(private readonly path: string) {
     this.trusted = TrustStore.read(path);
   }
@@ -31,6 +33,7 @@ export class TrustStore {
     const c = this.canon(dir);
     if (!this.trusted.includes(c)) {
       this.trusted.push(c);
+      this.epoch++;
       writeFileSync(this.path, JSON.stringify({ version: 1, trustedDirs: this.trusted }, null, 2) + "\n");
     }
   }
@@ -44,6 +47,7 @@ export class TrustStore {
     const idx = this.trusted.indexOf(c);
     if (idx === -1) return false;
     this.trusted.splice(idx, 1);
+    this.epoch++;
     writeFileSync(this.path, JSON.stringify({ version: 1, trustedDirs: this.trusted }, null, 2) + "\n");
     return true;
   }

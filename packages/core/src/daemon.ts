@@ -95,6 +95,7 @@ import { openRoutineStore } from "./routines/store";
 import { RoutineAuditLog } from "./routines/audit";
 import { makeApply } from "./settings-apply";
 import { SettingsWatcher, watchViaParentDir } from "./settings-watcher";
+import { advanceAuthorityRevision, authorityRevision } from "./authority-revision";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { restampStep } from "./runtime-state/recovery";
 import { createWinterRuntimeSdk, describeLoadError, type WinterRuntimeSdk } from "./runtime-sdk/create";
@@ -1965,6 +1966,7 @@ export async function startDaemon(opts: {
     ...(runHomeDeps === undefined ? {} : { runHome: runHomeDeps }),
     // WS-21 (spec §4.3): a card offers "in this project" only for a trusted project.
     isTrusted: (dir) => trustStore.isTrusted(dir),
+    hostAuthorityRevision: () => [trustStore.authorityRevision(), authorityRevision(winterHome)],
     profile: process.env.WINTER_PROFILE,
     settings: () => settings, // LIVE holder
     runtime: runtimeSdk,
@@ -2594,7 +2596,7 @@ export async function startDaemon(opts: {
     // engine to hot-apply against (same "agent disabled" boundary the rest of this gate follows).
     const apply = makeApply({
       // THE atomic swap — a single synchronous assignment, first thing every apply does (T4).
-      setLiveSettings: (s) => { settings = liveSettingsView(s); },
+      setLiveSettings: (s) => { settings = liveSettingsView(s); advanceAuthorityRevision(winterHome); },
       registry,
       buildComputerService: (s) => new ComputerUseService({ broker: peripheral, heartbeatMs: s?.peripheral?.heartbeatMs }),
       registerComputer: (svc, s) => {
@@ -2652,6 +2654,7 @@ export async function startDaemon(opts: {
     });
     settingsWatcher = new SettingsWatcher({
       path: dirs.settingsPath,
+      onChangeObserved: () => advanceAuthorityRevision(winterHome),
       load: loadSettings,
       apply,
       log: (msg) => console.error(`settings-watcher: ${msg}`),
@@ -2672,6 +2675,7 @@ export async function startDaemon(opts: {
   };
   const sdkSettingsWatcher = new SettingsWatcher<Record<string, unknown>>({
     path: sdkSettingsPath(winterHome),
+    onChangeObserved: () => advanceAuthorityRevision(winterHome),
     load: loadSdkFileStrict,
     // The memory importer's hot trigger moved with `memory.enabled`: it re-runs on exactly an
     // `autoMemoryEnabled` false→true flip (claude's default is ON, so only an explicit `false` is off).
@@ -2695,6 +2699,7 @@ export async function startDaemon(opts: {
   });
   const sdkGlobalConfigWatcher = new SettingsWatcher<Record<string, unknown>>({
     path: sdkGlobalConfigPath(winterHome),
+    onChangeObserved: () => advanceAuthorityRevision(winterHome),
     load: loadSdkFileStrict,
     apply: () => {},
     watch: watchViaParentDir,

@@ -182,3 +182,15 @@ test("completed host pre-hook decision is replayed without invoking reviewer aga
   f.authority.dispose();
   expect(f.counts().clear).toBe(2);
 });
+
+test("an evaluator allow for an old revision cannot authorize a changed policy", async () => {
+  let mode: "default" | "plan" = "default";
+  const authority = new CanonicalHostCodeAuthority({
+    getPolicy: () => ({ config: { permissionMode: mode }, sessionRoot: "/fixture", home: "/fixture", trustedWorkspace: true, brand: WINTER_BRAND }),
+    adapter: { settingsSeed: () => ({}), create: ({ getCurrentSnapshot }) => ({
+      clearReceipts() {}, recordPromptResult() {},
+      async evaluate(request) { const captured = getCurrentSnapshot(request); mode = "plan"; return { status: "allow", policyRevision: captured.policyRevision }; },
+    }) },
+  });
+  expect(await authority.authorize(fixture().invocation, "/fixture", new AbortController().signal)).toBe(false);
+});

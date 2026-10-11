@@ -205,6 +205,13 @@ function isSessionDirs(x: unknown): x is SessionDirs {
 
 export class SessionStore {
   private db: Database;
+  private readonly hostAuthorityEpochs = new Map<string, number>();
+  hostAuthorityRevision(sessionId: string): number {
+    return this.hostAuthorityEpochs.get(sessionId) ?? 0;
+  }
+  private advanceHostAuthority(sessionId: string): void {
+    this.hostAuthorityEpochs.set(sessionId, this.hostAuthorityRevision(sessionId) + 1);
+  }
   /** working-directories T1: session ids already warned about a malformed `dirs` column, this
    *  store instance's lifetime — see `dirs()`'s doc comment for why this is what makes "log once"
    *  true without a second `dirs`-column write path. */
@@ -712,7 +719,8 @@ export class SessionStore {
   }
 
   setCwd(sessionId: string, cwd: string): void {
-    this.db.run("UPDATE sessions SET cwd = ? WHERE session_id = ?", [cwd, sessionId]);
+    const result = this.db.run("UPDATE sessions SET cwd = ? WHERE session_id = ?", [cwd, sessionId]);
+    if (result.changes) this.advanceHostAuthority(sessionId);
   }
 
   /** working-directories T1 (design doc §1/§4): the session's ordered `SessionDir[]` set, with the
@@ -776,6 +784,7 @@ export class SessionStore {
   setDirsRaw(sessionId: string, dirs: SessionDirs): void {
     const res = this.db.run("UPDATE sessions SET dirs = ? WHERE session_id = ?", [JSON.stringify(dirs), sessionId]);
     if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
+    this.advanceHostAuthority(sessionId);
   }
 
   /** Deterministic on an unknown session: throws so the IPC server can map it to NOT_FOUND
@@ -783,6 +792,7 @@ export class SessionStore {
   setApprovalPolicy(sessionId: string, policy: SessionApprovalPolicy): void {
     const res = this.db.run("UPDATE sessions SET approval_policy = ? WHERE session_id = ?", [policy, sessionId]);
     if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
+    this.advanceHostAuthority(sessionId);
   }
 
   /** Chat Slice D task 1: per-session model override — `model: null` CLEARS it (falls back to the

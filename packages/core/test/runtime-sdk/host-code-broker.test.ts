@@ -920,3 +920,30 @@ test("Agent lineage awaits the exact completed host permission receipt", async (
   g.dispose();
   f.exited.resolve(0);
 });
+
+test("matching current cwd outside initial roots reaches host approval without adding a write root", async () => {
+  let admittedCwd: string | undefined;
+  const f = fixture(), outside = join(root, "approved-other-directory");
+  mkdirSync(outside);
+  f.binding.authorize = async (_call, cwd) => { admittedCwd = cwd; return true; };
+  const g = f.enroll();
+  f.spawnGeneration(g);
+  f.call(g, "main", "Bash", { command: "cat note", dangerouslyDisableSandbox: true });
+  // The prior approved command may legitimately cd into this separate fixture directory.
+  g.noteHook({ tool_name: "Bash", tool_use_id: "call", session_id: "backend", cwd: outside });
+  const result = await f.resolve(g, { cwd: outside, sandboxIntent: "override-requested" });
+  expect(admittedCwd).toBe(outside);
+  expect(result.commandOptions.cwd).toBe(outside);
+  expect(result.commandOptions.dangerouslyDisableSandbox).toBe(true);
+  expect(result.commandOptions.writableRoots).toEqual([source, temp]);
+  expect(result.commandOptions.writableRoots).not.toContain(outside);
+  expect(result.floor).toEqual(hostStorageFloorDescriptor(home));
+  g.dispose(); f.exited.resolve(0);
+});
+test("matching cwd outside initial roots does not bypass a current host denial", async () => {
+  const f = fixture({ authorize: async () => false }), g = f.enroll();
+  f.spawnGeneration(g); f.call(g);
+  g.noteHook({ tool_name: "Bash", tool_use_id: "call", session_id: "backend", cwd: temp });
+  await expect(f.resolve(g, { cwd: temp })).rejects.toThrow("current-permission-denied");
+  g.dispose(); f.exited.resolve(0);
+});

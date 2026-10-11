@@ -22,6 +22,7 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
+import { advanceAuthorityRevision } from "./authority-revision";
 import { sdkGlobalConfigPath, sdkSettingsPath } from "./agent/paths";
 
 /** claude `Settings`, as far as the daemon reads or writes it. Every other key is preserved verbatim. */
@@ -99,6 +100,7 @@ export function writeJsonAtomic(path: string, value: unknown): void {
     closeSync(fd);
     fd = undefined;
     renameSync(tmp, path);
+    advanceAuthorityRevision(path);
   } catch (err) {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* already closed */ } }
     try { unlinkSync(tmp); } catch { /* never created, or already renamed */ }
