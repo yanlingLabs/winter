@@ -390,6 +390,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case "activate":
             fixture.activate(reason: "user-command")
             done(nil)
+        case "userFocus":
+            // The user clicking into a Form field (round 10's hands-off row): its window key, the field first responder.
+            guard let form else { return done("no Form window") }
+            let id = command.args["id"] as? String ?? "name"
+            let field: NSView? = id == "email" ? form.email : id == "notes" ? form.notes : form.name
+            form.window.makeKeyAndOrderFront(nil)
+            done(form.window.makeFirstResponder(field) ? nil : "the \(id) field did not take the focus")
         case "quit":
             quit(done)
         default:

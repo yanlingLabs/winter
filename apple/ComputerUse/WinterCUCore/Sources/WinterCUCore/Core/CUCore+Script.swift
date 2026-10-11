@@ -63,6 +63,9 @@ extension CUCore {
             throw CUError.invalidParams("applescript() takes a script of 1 to \(Self.appleScriptMaxSource) bytes")
         }
         try token.check()
+        try refuseWhileUserWorks(t)  // an AppleScript acts in the app (round 10: hands off while the user works in it)
+        noteGuardianOpener()
+        defer { noteGuardianOpener() }
         do {
             try CUAppleScriptPolicy.checkSource(p.source, bound: boundApp(t))
         } catch let e as CUError {

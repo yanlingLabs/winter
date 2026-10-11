@@ -1112,6 +1112,7 @@ final class FocusMenusFoldPasteTests: XCTestCase {
             keys += 1
             if keys == 2 {  // a plain click into Mail: no ⌘, no gesture
                 core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: core.clock.nowSeconds())
+                core.noteSwitchInput(now: core.clock.nowSeconds(), .app, target: mail)  // what the click handler records
                 sys.front = mail; sys.onActivate?(mail)
             }
         }
