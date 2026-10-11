@@ -44,7 +44,7 @@ function projectPolicyReceipt(receipt: MutationReceipt<WorkspacePolicy>) {
   return { ...receipt, value: { detailState: "summary" as const, detailReason: "response_limit" as const, policySummary: projectPolicySummary(receipt.value), detailMethod: "workspace.policy.get" as const } };
 }
 /** One per-record gate, also used by list filtering. Unknown ownership never becomes a grant. */
-export function assertRemoteMayUseWorkspace(records: CoworkRepository, authority: CoworkAuthority, principal: CoworkPrincipal, workspaceId: string, operation: "read" | "narrow" | "admin" = "read") {
+export function assertRemoteMayUseWorkspace(records: CoworkRepository, authority: CoworkAuthority, principal: CoworkPrincipal, workspaceId: string, operation: "read" | "member" | "admin" = "read") {
   const value = records.get(workspaceId);
   if (!["standalone", "project"].includes(value.ownership)) throw new CoworkError("authority_denied");
   authority.requireWorkspace(principal, workspaceId, operation);
@@ -144,9 +144,16 @@ export class CoworkWorkspaceService {
   call<M extends CoworkMethod>(connection: CoworkConnection, method: M, raw: unknown): CoworkResult<M> {
     const principal = this.host.principal(connection);
     if (!principal || principal.kind === "runtime" || !["harness", "admin", "remote"].includes(connection.role) || (connection.role === "remote" ? principal.kind !== "paired-user" : principal.kind !== "local-user")) throw new CoworkError("authority_denied");
-    const result = this.execute(principal, method, raw);
-    this.checkedResponse(method, result);
-    return result as CoworkResult<M>;
+    try {
+      const result = this.execute(principal, method, raw);
+      this.checkedResponse(method, result);
+      return result as CoworkResult<M>;
+    } catch (error) {
+      // Paired callers must not distinguish unknown identifiers from records
+      // outside their current scope, including project/source/operation lookups.
+      if (principal.kind === "paired-user" && error instanceof CoworkError && error.code === "not_found") throw new CoworkError("authority_denied");
+      throw error;
+    }
   }
   private checkedResponse(method: CoworkMethod, result: unknown): void {
     COWORK_RPC[method].result.parse(result);
@@ -177,7 +184,7 @@ export class CoworkWorkspaceService {
       case "workspace.update": case "project.update": {
         const p = COWORK_RPC[method].params.parse(raw);
         const workspaceId = "workspaceId" in p ? p.workspaceId : this.records.project(p.projectId).workspaceId;
-        assertRemoteMayUseWorkspace(this.records, this.authority, principal, workspaceId, "narrow");
+        assertRemoteMayUseWorkspace(this.records, this.authority, principal, workspaceId, "member");
         const receipt = this.records.updateTitle(this.context(principal, method, p), workspaceId, p.title);
         return { ...receipt, value: projectWorkspace(receipt.value) };
       }
@@ -209,7 +216,7 @@ export class CoworkWorkspaceService {
       case "workspace.source.addFolder": case "workspace.source.addRepository": {
         const p = COWORK_RPC[method].params.parse(raw);
         // Paired additions require both current workspace membership and admitted repository authority.
-        assertRemoteMayUseWorkspace(this.records, this.authority, principal, p.workspaceId, method === "workspace.source.addFolder" ? "admin" : "narrow");
+        assertRemoteMayUseWorkspace(this.records, this.authority, principal, p.workspaceId, method === "workspace.source.addFolder" ? "admin" : "member");
         this.host.requireProvisioning(principal);
         const selected = this.select(principal, p.selectionId, method === "workspace.source.addFolder" ? "folder" : "githubRepository");
         const receipt = this.records.addSource(this.context(principal, method, p), p.workspaceId, selected);
@@ -217,7 +224,7 @@ export class CoworkWorkspaceService {
       }
       case "workspace.source.remove": case "workspace.source.revoke": {
         const p = COWORK_RPC[method].params.parse(raw);
-        assertRemoteMayUseWorkspace(this.records, this.authority, principal, p.workspaceId, "narrow");
+        assertRemoteMayUseWorkspace(this.records, this.authority, principal, p.workspaceId, "member");
         const receipt = this.records.removeSource(this.context(principal, method, p, true), p.workspaceId, p.sourceId, method === "workspace.source.revoke");
         return { ...receipt, value: projectSource(receipt.value) };
       }
