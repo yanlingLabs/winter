@@ -168,6 +168,18 @@ describe("waitForUser(): policy and checks", () => {
     plan.r.end();
   });
 
+  test("a page dialog open on the tab: refused TargetBusy before any card (showing the tab would dismiss it)", async () => {
+    const { h, r, key, p } = await opened("winter", { answer: () => "handoff_show" });
+    h.winter.openDialog(key, "confirm", "Leave without saving?");
+    const e = await failure(p({ reason: "sign in" }));
+    expect((e as AutomationFailure).kind).toBe("TargetBusy");
+    expect(e.message).toBe("a page dialog is open (confirm) — read it with dialog() and answer it with answerDialog() first: handing the tab to the user would dismiss it");
+    expect(h.cards).toHaveLength(0);
+    expect(h.winter.presented).toEqual([]);
+    expect(h.winter.tabs.get(key)!.attached).toBe(true);
+    r.end();
+  });
+
   test("a reason is required and capped; a bad timeout is a TypeError; an extension without present says to update it", async () => {
     const { h, r, p } = await opened("chrome");
     await expect(p({})).rejects.toThrow(/waitForUser\(\) takes a reason/);

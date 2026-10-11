@@ -10,8 +10,8 @@
 //   auto / bypass / dont-ask, Dispatch     hard block (`NotAllowed`)
 //   a Dispatch child                       its own policy's row (a card is relayed to Dispatch, bounded)
 //
-// After a committed navigation onto a listed host that is not approved, only back(), close(), url() and title() work
-// on that tab until it navigates away.
+// After a committed navigation onto a listed host that is not approved, only BLOCKED_TAB_PRIMITIVES work on that tab
+// until it navigates away (leaving it, reading where it is, answering a page dialog, handing it to the user).
 import { checkDangerousDomain, type DangerousDomainMatch } from "../../agent/tools/page-core";
 import { parseRule, ruleMatches } from "../../agent/permission-rules";
 import { AutomationFailure } from "../errors";
@@ -110,6 +110,13 @@ export async function ensureSiteAllowed(scope: TabRunScope, approvals: SiteAppro
   approvals.approve(scope.sessionId, scope.runId, host, res.optionId === "session" ? "session" : "once");
 }
 
-/** The primitives that still work on a tab sitting on an unapproved listed host (Phase 3: handing the tab to the user —
- *  the user acts there, not Winter). */
-export const BLOCKED_TAB_PRIMITIVES: ReadonlySet<string> = new Set(["back", "close", "url", "title", "waitForUser"]);
+/** The primitives that still work on a tab sitting on an unapproved listed host: leaving it, reading where it is,
+ *  answering the page dialog that may be holding it (Phase 3), and handing it to the user (the user acts there, not
+ *  Winter). */
+export const BLOCKED_TAB_PRIMITIVES: ReadonlySet<string> = new Set(["back", "close", "url", "title", "dialog", "answerDialog", "waitForUser"]);
+
+/** The sentence naming them, for the model: "back(), close(), …, and waitForUser()". */
+export function blockedTabMembers(): string {
+  const all = [...BLOCKED_TAB_PRIMITIVES].map((p) => `${p}()`);
+  return `${all.slice(0, -1).join(", ")} and ${all.at(-1)!}`;
+}

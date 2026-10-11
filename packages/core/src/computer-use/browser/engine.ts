@@ -23,7 +23,7 @@ import type { TabHandle } from "../worker/bridge";
 import { browserForBundleId, familyInfo, familyOfBackendId } from "./families";
 import { shouldCloseAgentTab } from "./lifecycle";
 import type { BrowserBackendRegistry } from "./registry";
-import { BLOCKED_TAB_PRIMITIVES, ensureSiteAllowed, listedHost, SiteApprovals, type SiteFloorDeps } from "./site-policy";
+import { BLOCKED_TAB_PRIMITIVES, blockedTabMembers, ensureSiteAllowed, listedHost, SiteApprovals, type SiteFloorDeps } from "./site-policy";
 import type { TabRunScope } from "./tab-scope";
 import { redactText, redactUrl } from "./page-runtime/redact";
 import { cssSelectorRefusal } from "./page-runtime/rules";
@@ -918,7 +918,7 @@ export class BrowserEngine {
     if (match === null) return;
     const runKey = `${scope.sessionId}\u0000${scope.runId}`;
     const blocked = (): AutomationFailure => new AutomationFailure("NotAllowed",
-      `this tab is on ${match.host}, which is on the dangerous-domains list and was not approved — only back(), close(), url() and title() work on it until it navigates away`);
+      `this tab is on ${match.host}, which is on the dangerous-domains list and was not approved — only ${blockedTabMembers()} work on it until it navigates away`);
     if (this.declined.get(runKey)?.has(match.host) === true) throw blocked();
     try {
       await ensureSiteAllowed(scope, this.approvals, this.deps.site ?? {}, url, this.browserName(b.backend), cwd);
@@ -1541,6 +1541,11 @@ export class BrowserEngine {
     try { const h = new URL(driver.url).hostname; if (h.length > 0) host = h; } catch { /* not a URL with a host */ }
     if (scope.sessionPolicy() === "dont-ask") {
       throw new AutomationFailure("NotAllowed", `this session never asks — tell the user in your reply what they need to do on ${host}`);
+    }
+    // Showing the tab to the user dismisses a page dialog that holds it (the built-in browser clears it with the hold):
+    // the dialog is answered first, by the model, knowing what it says.
+    if (driver.dialog !== undefined) {
+      throw new AutomationFailure("TargetBusy", `a page dialog is open (${driver.dialog.type}) — read it with dialog() and answer it with answerDialog() first: handing the tab to the user would dismiss it`);
     }
     if (scope.userCard === undefined) throw new Error("this Winter can't hand a tab to the user");
     const winter = this.familyOf(b.backend) === "winter";

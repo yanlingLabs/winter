@@ -644,15 +644,19 @@ describe("the dangerous-domain floor", () => {
     });
   }
 
-  test("a committed navigation onto a listed host: only back/close/url/title work until it navigates away", async () => {
+  test("a committed navigation onto a listed host: only back/close/url/title/dialog/answerDialog/waitForUser work until it navigates away", async () => {
     const h = harness({ policy: "auto", dangerousAdded: ["evil.example"] });
     const r = h.run();
     const t = await h.engine.global(r.scope, "browsers.open", { url: "https://ok.example/" }) as TabHandle;
     h.winter.navigateTo("w1", LISTED);
     const e = await failure(h.engine.primitive(r.scope, t.targetId, "state", {}));
     expect((e as AutomationFailure).kind).toBe("NotAllowed");
-    expect(e.message).toContain("only back(), close(), url() and title() work");
+    expect(e.message).toContain("only back(), close(), url(), title(), dialog(), answerDialog() and waitForUser() work on it until it navigates away");
     expect(await h.engine.primitive(r.scope, t.targetId, "url", {})).toBe(LISTED);
+    // A dialog the listed page raised can be read and answered there (it may be what holds the tab).
+    h.winter.openDialog("w1", "alert", "You won a prize");
+    expect(await h.engine.primitive(r.scope, t.targetId, "dialog", {})).toEqual({ type: "alert", message: "You won a prize" });
+    await h.engine.primitive(r.scope, t.targetId, "answerDialog", { accept: true });
     await h.engine.primitive(r.scope, t.targetId, "back", {});
     await h.engine.primitive(r.scope, t.targetId, "state", {});
   });
