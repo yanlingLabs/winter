@@ -11,7 +11,9 @@ The length-prefixed home ID/path/dev/inode, workspace, volume, creation, purpose
 format and wrapping-version identity is authenticated associated data, never KDF
 input. Re-provisioning an existing volume refuses. Explicit native fixture
 relocation re-seals the same DEK, and KEK rotation re-wraps every current DEK;
-neither changes disk keys. Tests verify this across changed home identities and
+neither changes disk keys. Relocation preserves the logical home ID; transfer to
+a different Winter home requires separate authority and is not exposed here.
+Tests verify this across changed home locations and
 two wrapping-key rotations. The current-record map is volatile; the fixture is
 not a durable rollback/recovery protocol. The ordinary canonical runtime-state
 DB is unchanged and outside this package.

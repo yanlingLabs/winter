@@ -41,7 +41,7 @@ final class BrokerTests: XCTestCase {
     func testExplicitHomeRelocationPreservesDiskKeyAndInvalidatesOldRecord() throws {
         let vault = SyntheticVault(), original = try vault.provisionForFixture(identity())
         let before = try fingerprint(original, vault)
-        let moved = try identity(["homeId": "00000000-0000-0000-0000-000000000006", "homePath": "/restored/home", "homeDevice": 99, "homeInode": 101, "keyVersion": 2])
+        let moved = try identity(["homePath": "/restored/home", "homeDevice": 99, "homeInode": 101, "keyVersion": 2])
         let rebound = try vault.rebindForFixture(original, to: moved)
         XCTAssertEqual(try fingerprint(rebound, vault), before)
         XCTAssertNotEqual(rebound.wrappedKey, original.wrappedKey)
@@ -53,7 +53,8 @@ final class BrokerTests: XCTestCase {
     func testRebindingCannotChangeVolumeWorkspacePurposeOrSkipVersion() throws {
         let vault = SyntheticVault(), original = try vault.provisionForFixture(identity())
         let before = try fingerprint(original, vault)
-        for change: [String: Any] in [["workspaceId": "00000000-0000-0000-0000-000000000006", "keyVersion": 2],
+        for change: [String: Any] in [["homeId": "00000000-0000-0000-0000-000000000006", "keyVersion": 2],
+            ["workspaceId": "00000000-0000-0000-0000-000000000006", "keyVersion": 2],
             ["volumeId": "00000000-0000-0000-0000-000000000006", "keyVersion": 2],
             ["creationId": "00000000-0000-0000-0000-000000000006", "keyVersion": 2],
             ["purpose": "environment", "keyVersion": 2], ["keyVersion": 1], ["keyVersion": 3]] {

@@ -90,6 +90,7 @@ public final class SyntheticVault {
         try identity.validate()
         let old = record.identity
         guard old.keyVersion < UInt64.max, identity.keyVersion == old.keyVersion + 1,
+              identity.homeId == old.homeId,
               identity.workspaceId == old.workspaceId, identity.volumeId == old.volumeId,
               identity.creationId == old.creationId, identity.purpose == old.purpose,
               identity.formatVersion == old.formatVersion else { throw BrokerFailure.invalidTransition }
