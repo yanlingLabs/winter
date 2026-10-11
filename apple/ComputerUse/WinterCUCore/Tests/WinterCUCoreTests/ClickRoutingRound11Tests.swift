@@ -179,6 +179,22 @@ final class ClickRoutingRound11Tests: XCTestCase {
         XCTAssertEqual(windowFor(CGPoint(x: 220, y: 20)), 80, "the bound window's own sheet, right above it, still is")
     }
 
+    /// Review of round 12, LOW: a popup the AGENT's act opened in a bound window another window of the app covers takes
+    /// the agent's next click there — it appeared during the act; the user's own popups still never do.
+    func testAPopupTheAgentOpenedInACoveredBoundWindowTakesTheClick() {
+        world(menu: true, order: [79, 78, 77])
+        XCTAssertEqual(core.windowFor(target)(CGPoint(x: 300, y: 300)), 77, "not the agent's: the bound window takes it")
+        core.noteAgentPopups(target, before: [78, 77])
+        XCTAssertEqual(target.agentPopups, [79])
+        XCTAssertEqual(core.windowFor(target)(CGPoint(x: 300, y: 300)), 79, "the agent's popup takes it")
+        sys.stack = sys.stack.filter { $0.id != 79 }
+        core.noteAgentPopups(target, before: [78, 77])
+        XCTAssertTrue(target.agentPopups.isEmpty, "gone from the screen, forgotten")
+        world(menu: true, order: [79, 78, 77])
+        core.noteAgentPopups(target, before: [79, 78, 77])
+        XCTAssertTrue(target.agentPopups.isEmpty, "there before the act: not the agent's")
+    }
+
     /// An empty accessibility answer (a timeout) falls back to the capture-only rule — never "every window takes it".
     func testAnEmptyAccessibilityAnswerFallsBackToTheCaptureOnlyRule() {
         world(axWindows: false)

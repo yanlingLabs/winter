@@ -115,6 +115,10 @@ final class CUTarget: @unchecked Sendable {
     /// The act asked again does not press it again: from another desktop it waits for the visit, and in the visit it is
     /// clicked where it is, once (review of round 11, MEDIUM #5). Pid-queue only.
     var unconfirmedPress: (element: AXIdentity, atMs: Double, before: CUCore.WebPressEvidence?)?
+    /// Windows of the app that appeared during the agent's own acts on this target — a menu, a popover, a page's popup it
+    /// opened — kept while they are on screen: they belong to the bound window even where another document window of the
+    /// app lies between them and it in the z-order (review of round 12, LOW). Pid-queue only.
+    var agentPopups: Set<UInt32> = []
 
     /// The focus read after the last act, and when: the next act's "before". Pid-queue only.
     var focusAfterLastAct: (atMs: Double, focus: CUCore.WindowFocus)?

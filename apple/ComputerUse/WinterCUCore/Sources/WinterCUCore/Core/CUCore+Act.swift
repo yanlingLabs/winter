@@ -164,6 +164,8 @@ extension CUCore {
             do {
                 let focusBefore = t.accessible ? focusBeforeAct(t) : nil
                 let pageBefore = pageBeforeAct(t)
+                let windowsBefore = Set(sys.windowStack().lazy.filter { $0.pid == t.pid }.map(\.id))
+                defer { noteAgentPopups(t, before: windowsBefore) }
                 var o: ActOutcome
                 do {
                     o = try guardingUserView(p, t) { try perform(p, on: t, token: token) }
@@ -939,13 +941,23 @@ extension CUCore {
         // By z-order (review of round 11, MEDIUM #4): another document window never takes the click, and anything else
         // drawn over the point — a menu, a popover, a sheet, a page's popup, a floating panel — takes it only when the
         // first document window below it is the bound one: it belongs to the bound window, not to the user's.
+        // A window the agent's own act opened (`agentPopups`) is the bound window's wherever it sits in the z-order — a
+        // popup opened in a bound window that another of the app's windows covers (review of round 12, LOW).
         var takers: [CUWindowServerWindow] = []
         for (i, w) in mine.enumerated() {
             if w.id == bound { takers.append(w); continue }
             if documents.contains(w.id) { continue }
-            if mine[(i + 1)...].first(where: { documents.contains($0.id) })?.id == bound { takers.append(w) }
+            if t.agentPopups.contains(w.id) || mine[(i + 1)...].first(where: { documents.contains($0.id) })?.id == bound { takers.append(w) }
         }
         return { point in takers.first { $0.frame.contains(point) }?.id ?? bound }
+    }
+
+    /// After an act: the app's windows that appeared while it ran join `agentPopups` (the ones gone leave it). A window
+    /// that is a document window is never taken for a popup (`windowFor` checks documents first).
+    func noteAgentPopups(_ t: CUTarget, before: Set<UInt32>) {
+        let now = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 }
+        let ids = Set(now.map(\.id))
+        t.agentPopups = t.agentPopups.intersection(ids).union(ids.subtracting(before).subtracting([t.windowID]))
     }
 
     /// The app's OTHER document windows: a point of the bound window that one of them covers still goes to the bound
