@@ -356,6 +356,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     observe(event) {
       diffBases.observe(event);
       adapters.observe(event);
+      svc.hoverNotes.observe(event);
       // 5a: the USER's next message lifts the session's desktop-switch refusals (and its dispatch children's).
       const lift = desktopRefusalLiftFor(event);
       if (lift !== undefined) policy.liftDesktopRefusals(lift);

@@ -34,6 +34,7 @@ import type { AutomationTelemetry, PrimitiveMetric } from "./telemetry";
 import { AutomationWorker, AutomationWorkerUnavailable, type AutomationWorkerOptions, type CallMessage } from "./worker-host";
 import { APP_PRIMITIVES, BROWSER_PRIMITIVES, EXTRA_PRIMITIVES, GLOBAL_PRIMITIVES, TAB_PRIMITIVES, type AppHandle, type ImageHandle } from "./worker/bridge";
 import type { AdapterRunScope, AppAdapters } from "./adapters";
+import { AdapterDelivery } from "./adapters/delivery";
 import type { BrowserEngine } from "./browser/engine";
 import type { TabRunScope } from "./browser/tab-scope";
 
@@ -268,6 +269,9 @@ export class ComputerV2Service {
   private readonly sessions = new Map<string, SessionState>();
   readonly locks: TargetLocks;
   readonly diffBases: DiffBases;
+  /** Which apps' "web pages don't react to hover" line this session's model has seen (once per session per app; again
+   *  after a compaction, a reset, a worker restart — the adapter delivery's rule). */
+  readonly hoverNotes = new AdapterDelivery();
   private stopped = false;
 
   constructor(private readonly deps: ComputerV2ServiceDeps) {
@@ -580,6 +584,7 @@ export class ComputerV2Service {
         ctx.state.lastTargetShot.delete(targetId);
         const detail = helperDetail(res?.detail);
         if (detail !== undefined) ctx.builder.daemonLine(detail);
+        if (res?.webContent === true) this.hoverNote(ctx, t);
         return undefined;
       }
       case "waitFor": return await this.waitFor(ctx, t, args, metric);
@@ -785,6 +790,7 @@ export class ComputerV2Service {
     // outside the fence — the helper's fixed wording, not screen text.
     const detail = helperDetail(res.detail);
     if (detail !== undefined) ctx.builder.daemonLine(detail);
+    if (res.webContent === true) this.hoverNote(ctx, info);
     if (base !== undefined && snap.isDiff === true) {
       ctx.builder.daemonLine(`${app.name} was already bound to this window — the same handle; what changed since its last state follows (keep the handle in a top-level const: it lasts between calls)`);
     }
@@ -792,6 +798,15 @@ export class ComputerV2Service {
     ctx.builder.text(snap.text, { screen: true });
     this.diffBases.set(ctx.sessionId, info.targetId, snap.snapshotId);
     return { targetId: info.targetId, name: app.name, bundleId: app.bundleId, ...adapted?.handle };
+  }
+
+  /** A known limitation, said once per session per app (helper 1.9.8): web pages (WebKit and Chromium alike) take no
+   *  hover from a pointer that is not the real one while the app is in the background — never in the tool description,
+   *  which stays fixed per incarnation. */
+  private hoverNote(ctx: RunCtx, t: { bundleId: string; name: string }): void {
+    if (this.hoverNotes.has(ctx.sessionId, t.bundleId)) return;
+    ctx.builder.daemonLine(`${t.name}'s web pages don't react to hover from Winter's pointer while it is in the background — click instead, or app.requestForeground(reason) for a real hover`);
+    this.hoverNotes.mark(ctx.sessionId, t.bundleId);
   }
 
   private async state(ctx: RunCtx, t: TargetInfo, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<string> {
@@ -1133,6 +1148,16 @@ export class ComputerV2Service {
     ctx.acted.add(t.targetId);
     metric.rung = res.rung;
     if (res.inVisit === true) metric.inVisit = true;
+    // What the Focus Guardian did or saw since the last act (helper 1.9.8) — the user put back after an app took their
+    // front, an app the agent's action brought forward sent back, a system dialog left for the user: daemon lines, never
+    // inside the act's own (fenced) line — and the apps that came forward, counted.
+    for (const note of Array.isArray(res.guardian) ? res.guardian : []) {
+      const line = helperDetail(note, 400);
+      if (line !== undefined) ctx.builder.daemonLine(line);
+    }
+    if (Array.isArray(res.viewMovedBy) && res.viewMovedBy.length > 0) {
+      metric.viewMovedBy = res.viewMovedBy.slice(0, 8).map((n) => String(n).slice(0, 80));
+    }
     // What the act did, in the helper's words: for keyboard input, FIRST where it went (so the model never has
     // to guess), then the helper's detail (an unconfirmed paste, an editor that hides its text, a view put back).
     // Element names come from the screen: inside the fence.
@@ -1534,6 +1559,7 @@ export class ComputerV2Service {
     state.tainted = false;
     this.diffBases.clearSession(sessionId);
     this.deps.adapters?.clearSession(sessionId);
+    this.hoverNotes.clearSession(sessionId);
   }
 
   private resetSession(sessionId: string, state: SessionState): void {
@@ -1572,6 +1598,7 @@ export class ComputerV2Service {
     state.worker?.kill();
     this.diffBases.clearSession(sessionId);
     this.deps.adapters?.clearSession(sessionId);
+    this.hoverNotes.clearSession(sessionId);
     this.deps.helper.tell("session.ended", { sessionId });
     this.sessions.delete(sessionId);
   }

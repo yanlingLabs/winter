@@ -42,6 +42,9 @@ export interface PrimitiveMetric {
   engineMs?: number;
   /** An `extra` / `dict` primitive: the extra's or dictionary command's NAME (never its arguments). */
   extra?: string;
+  /** An act (helper 1.9.8): the apps that came forward after the agent's action with no input of the user's since — sent
+   *  back, or left in front (a system dialog) — since the act before (names only, at most 8). */
+  viewMovedBy?: string[];
 }
 
 export const AUTOMATION_METRICS_MAX_BYTES = 8 * 1024 * 1024;
