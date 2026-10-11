@@ -2034,13 +2034,19 @@ extension CUCore {
         switch result {
         case .leftAlone:
             o.detail = [o.detail, "the clipboard changed meanwhile, so it was not restored"].compactMap { $0 }.joined(separator: "; ")
+        // A field that shows its text and does NOT show the paste: never a success (round 13's dogfood item 12 — a
+        // Material page's field took no ⌘V from the background and the act read as done). `Uncertain`: the paste was
+        // sent and may still land late — never retried, the model checks state() first.
         case .restored(let evidence) where !evidence:
-            o.detail = [o.detail, "unconfirmed — the field does not show the pasted text (within 1.5 s); check state() before pasting again"].compactMap { $0 }.joined(separator: "; ")
+            CULog.act.notice("paste in \(t.appName, privacy: .public): the field does not show the pasted text (1.5 s) — uncertain")
+            throw CUError.uncertain([o.detail, "the paste was sent, but the field does not show the pasted text (within 1.5 s) — check state() before pasting again"]
+                .compactMap { $0 }.joined(separator: "; "))
         case .restored:
             o.detail = [o.detail, "the field shows the pasted text"].compactMap { $0 }.joined(separator: "; ")
         case .unconfirmed:
-            o.detail = [o.detail, "unconfirmed — the field does not show the pasted text yet; check state() before pasting again; the clipboard is restored once \(t.appName) has had time to read it"]
-                .compactMap { $0 }.joined(separator: "; ")
+            CULog.act.notice("paste in \(t.appName, privacy: .public): the web field does not show the pasted text yet — uncertain")
+            throw CUError.uncertain([o.detail, "the paste was sent, but the field does not show the pasted text yet — check state() before pasting again; the clipboard is restored once \(t.appName) has had time to read it"]
+                .compactMap { $0 }.joined(separator: "; "))
         case .deferred:
             o.detail = [o.detail, "unconfirmed — can't be read back: \(t.appName) doesn't show this editor's text to accessibility; check something the app shows (a word count) or a screenshot before pasting again; the clipboard is restored once \(t.appName) has had time to read it"]
                 .compactMap { $0 }.joined(separator: "; ")

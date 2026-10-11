@@ -379,9 +379,15 @@ final class KeyboardTargetTests: XCTestCase {
         sys.contentProcesses[content] = pid
         ax.put(field, [kAXValueAttribute: "existing"])
         let start = Date()
-        let r = try await act(.paste(CUPasteAction(text: "hello")))
+        // Round 13's dogfood item 12: never a success — Uncertain (sent, not confirmed; never retried).
+        do {
+            _ = try await act(.paste(CUPasteAction(text: "hello")))
+            XCTFail("a field that shows its text and not the paste is no success")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["uncertain"], .bool(true), e.message)
+            XCTAssertTrue(e.message.contains("does not show the pasted text"), e.message)
+        }
         XCTAssertLessThan(Date().timeIntervalSince(start), 1.0, "no 1.5 s wait for a web editor")
-        XCTAssertTrue(r.detail?.contains("unconfirmed") ?? false, r.detail ?? "")
     }
 
     func testAnInsertThatCantBeReadBackInWebContentIsNeverTypedAgain() async throws {
@@ -604,6 +610,10 @@ final class KeyboardTargetTests: XCTestCase {
 
     func testSeveralLinesIntoAFieldThatReadsBackGoAsAPasteAndSaySo() async throws {
         safari(fieldOwner: pid)
+        // The paste lands (⌘V): the field shows it — an unshown paste is Uncertain since round 13.
+        poster.onPost = { [unowned self] e in
+            if e.type == .keyDown, e.flags.contains(.maskCommand) { ax.put(field, [kAXValueAttribute: "one\ntwo"]) }
+        }
         let r = try await act(.type(CUTypeAction(text: "one\ntwo", into: ref(field))))
         XCTAssertTrue(r.detail?.hasPrefix("as a paste (several lines go as a paste into a field that reads them back)") ?? false, r.detail ?? "")
     }
