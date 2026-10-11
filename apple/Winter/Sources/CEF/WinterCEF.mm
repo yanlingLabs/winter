@@ -4495,3 +4495,465 @@ void WinterCEFShutdown(void) {
 BOOL WinterCEFDidShutdown(void) {
   return g_did_shutdown ? YES : NO;
 }
+
+// ---------------------------------------------------------------------------------------------------
+// ComputerV2 Phase 4 — Winter Headless: the windowless mode and per-session request contexts.
+//
+// ADDITIONS ONLY. Nothing above calls into this section, and nothing here changes a browser Winter.app
+// creates: only `WinterCEFInitializeHeadless` (which Winter.app never calls) turns windowless rendering on,
+// and only `WinterCEFCreateWindowlessBrowser` makes a browser with the client below. See `WinterCEF.h`.
+// ---------------------------------------------------------------------------------------------------
+
+#include "include/cef_cookie.h"
+#include "include/cef_render_handler.h"
+#include "include/cef_request_context_handler.h"
+
+namespace {
+
+/// Low on purpose: nobody sees these frames, and a page's own animation work is bound to this rate.
+/// `Page.captureScreenshot` asks for a fresh frame of its own. (Tuned by the live gate's memory/CPU drill.)
+const int kHeadlessFrameRate = 10;
+
+bool g_headless = false;
+
+/// The view a headless browser reports. Paint goes nowhere: the engine reads pixels only through
+/// `Page.captureScreenshot`, which the compositor answers on its own.
+class WinterHeadlessRenderHandler : public CefRenderHandler {
+ public:
+  WinterHeadlessRenderHandler() = default;
+
+  void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect &rect) override {
+    rect = CefRect(0, 0, WinterCEFHeadlessViewWidth, WinterCEFHeadlessViewHeight);
+  }
+
+  bool GetScreenInfo(CefRefPtr<CefBrowser> browser, CefScreenInfo &screen_info) override {
+    const CefRect screen(0, 0, WinterCEFHeadlessViewWidth, WinterCEFHeadlessViewHeight);
+    screen_info.Set(1.0f, 24, 8, false, screen, screen);
+    return true;
+  }
+
+  void OnPaint(CefRefPtr<CefBrowser> browser,
+               PaintElementType type,
+               const RectList &dirtyRects,
+               const void *buffer,
+               int width,
+               int height) override {}
+
+  /// A drag the page starts has nowhere to go: no window, no pasteboard of the user's. Cancelled.
+  bool StartDragging(CefRefPtr<CefBrowser> browser,
+                     CefRefPtr<CefDragData> drag_data,
+                     DragOperationsMask allowed_ops,
+                     int x,
+                     int y) override {
+    return false;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(WinterHeadlessRenderHandler);
+  DISALLOW_COPY_AND_ASSIGN(WinterHeadlessRenderHandler);
+};
+
+/// The RESULT of a DevTools method sent to a flattened child session (an out-of-process iframe), settled here.
+///
+/// CEF's own parser takes a method result only in the shape `{"id":…,"result":…}`; Chromium writes a child session's
+/// as `{"id":…,"result":…,"sessionId":"…"}`, which CEF logs as "Failed to parse message" and drops — so the call it
+/// answers would wait for its timeout. This second observer, registered on HEADLESS browsers only, reads that one
+/// shape itself and settles the pending call; everything else it leaves to CEF and the browser's own observer
+/// (`WinterCDPObserver`), unchanged.
+class WinterHeadlessChildResultObserver : public CefDevToolsMessageObserver {
+ public:
+  bool OnDevToolsMessage(CefRefPtr<CefBrowser> browser, const void *message, size_t message_size) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (!browser || message == nullptr || message_size < 8 || memcmp(message, "{\"id\":", 6) != 0) {
+      return false;
+    }
+    NSData *data = [NSData dataWithBytes:message length:message_size];
+    id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![parsed isKindOfClass:[NSDictionary class]]) {
+      return false;
+    }
+    NSDictionary *dict = parsed;
+    NSNumber *messageId = dict[@"id"];
+    if (![dict[@"sessionId"] isKindOfClass:[NSString class]] || ![messageId isKindOfClass:[NSNumber class]]) {
+      return false;  // the tab's own result: CEF parses it
+    }
+    id error = dict[@"error"];
+    id result = dict[@"result"];
+    const BOOL ok = error == nil;
+    id body = ok ? (result ?: @{}) : error;
+    if (![body isKindOfClass:[NSDictionary class]]) {
+      body = ok ? @{} : @{@"code" : @(-32603), @"message" : @"the DevTools method failed"};
+    }
+    NSData *encoded = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+    NSString *payload = encoded != nil ? [[NSString alloc] initWithData:encoded encoding:NSUTF8StringEncoding] : nil;
+    SettlePendingCDP(browser->GetIdentifier(), messageId.intValue, ok, payload ?: @"{}");
+    return true;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(WinterHeadlessChildResultObserver);
+};
+
+/// Heap-allocated and never destroyed: a registration a close left behind must not be released by a static destructor
+/// running after `CefShutdown`.
+std::map<int, CefRefPtr<CefRegistration>> &HeadlessChildResultRegistrations() {
+  static auto *registrations = new std::map<int, CefRefPtr<CefRegistration>>();
+  return *registrations;
+}
+
+/// `WinterClient` with exactly three differences, all forced by having no window:
+///  * a render handler (a windowless browser cannot exist without one);
+///  * a second DevTools observer for child-session results (`WinterHeadlessChildResultObserver`);
+///  * `DoClose` answers `false`. Winter.app's `true` means "the host completes the close by releasing the
+///    host view" — and a windowless browser has none, so CEF's own reading of `false` for it ("If no OS
+///    window exists … returning false will cause the browser object to be destroyed immediately") is the only
+///    close that ever completes. With `true`, `CloseBrowser(true)` would be cancelled and the browser leak.
+/// Everything else — the native-UI handlers, the DevTools observer, pop-ups refused while no pop-up observer
+/// is set, the crash observer — is the base class's, unchanged.
+class WinterHeadlessClient : public WinterClient {
+ public:
+  WinterHeadlessClient(WinterCEFBrowserCreation *creation,
+                       WinterCEFTabBridge *bridge,
+                       CefRefPtr<CefRenderHandler> render)
+      : WinterClient(creation, bridge), render_(render) {}
+
+  CefRefPtr<CefRenderHandler> GetRenderHandler() override { return render_; }
+
+  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
+    WinterClient::OnAfterCreated(browser);
+    if (browser && browser->GetHost()) {
+      HeadlessChildResultRegistrations()[browser->GetIdentifier()] =
+          browser->GetHost()->AddDevToolsMessageObserver(new WinterHeadlessChildResultObserver());
+    }
+  }
+
+  void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
+    if (browser) {
+      HeadlessChildResultRegistrations().erase(browser->GetIdentifier());
+    }
+    WinterClient::OnBeforeClose(browser);
+  }
+
+  bool DoClose(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    Log("headless browser close completes in CEF (DoClose->false, id=%d)", browser->GetIdentifier());
+    return false;
+  }
+
+ private:
+  CefRefPtr<CefRenderHandler> render_;
+};
+
+CefRefPtr<WinterHeadlessRenderHandler> g_headless_render;
+
+}  // namespace
+
+/// A creation waiting for its session's context to come up. Weak: a tab closed meanwhile is simply dropped.
+@interface WinterCEFHeadlessPendingBrowser : NSObject
+@property(nonatomic, weak) NSView *key;
+@property(nonatomic, copy) NSString *url;
+@end
+
+@implementation WinterCEFHeadlessPendingBrowser
+@end
+
+namespace {
+
+struct HeadlessContext {
+  CefRefPtr<CefRequestContext> context;
+  bool initialized = false;
+  std::string printing = "pending";
+  NSMutableArray<WinterCEFHeadlessPendingBrowser *> *pending = nil;
+};
+
+/// One request context per Winter session, keyed by the session id. Main (CEF UI) thread only. Heap-allocated and
+/// never destroyed, like the registrations above: nothing here may be released by a static destructor after
+/// `CefShutdown`.
+std::map<std::string, HeadlessContext> &HeadlessContexts() {
+  static auto *contexts = new std::map<std::string, HeadlessContext>();
+  return *contexts;
+}
+
+void CreateWindowlessBrowserNow(NSView *key, const std::string &url, CefRefPtr<CefRequestContext> context) {
+  CefWindowInfo window_info;
+  // `SetAsWindowless` also sets the Alloy runtime style (`cef_mac.h`). No parent: there is no view to attach
+  // dialogs or menus to, and none is wanted.
+  window_info.SetAsWindowless(kNullWindowHandle);
+
+  WinterCEFBrowserCreation *creation = [[WinterCEFBrowserCreation alloc] init];
+  creation.parent = key;  // held for the length of the creation, as `CreateBrowserNow` does
+  WinterCEFTabBridge *bridge = BridgeFor(key);
+  bridge.creation = creation;
+
+  CefBrowserSettings browser_settings;
+  browser_settings.windowless_frame_rate = kHeadlessFrameRate;
+  // Opaque white, explicitly: for a WINDOWLESS browser a transparent (0) background turns on transparent
+  // painting, and a screenshot of a page with no background of its own would come back transparent.
+  browser_settings.background_color = 0xFFFFFFFF;
+
+  if (!g_headless_render) {
+    g_headless_render = new WinterHeadlessRenderHandler();
+  }
+  CefRefPtr<WinterHeadlessClient> client = new WinterHeadlessClient(creation, bridge, g_headless_render);
+  if (!CefBrowserHost::CreateBrowser(window_info, client, CefString(url), browser_settings, nullptr, context)) {
+    creation.parent = nil;
+    Log("headless CreateBrowser refused the request");
+  }
+}
+
+void HeadlessContextInitialized(const std::string &sessionId, CefRefPtr<CefRequestContext> context) {
+  auto it = HeadlessContexts().find(sessionId);
+  if (it == HeadlessContexts().end() || !it->second.context || !it->second.context->IsSame(context)) {
+    return;  // disposed (or replaced) before it came up
+  }
+  HeadlessContext &record = it->second;
+  // Before any of the session's browsers exists — they are created just below — so no page in this context
+  // ever runs with printing on. The same preference, and the same decision, as the built-in browser's.
+  const CefString name(kPrintingEnabledPreference);
+  record.printing = DisablePrinting(
+      [&] { return context->HasPreference(name); },
+      [&] { return context->CanSetPreference(name); },
+      [&](std::string &error) {
+        CefRefPtr<CefValue> value = CefValue::Create();
+        value->SetBool(false);
+        CefString reason;
+        const bool ok = context->SetPreference(name, value, reason);
+        error = reason.ToString();
+        return ok;
+      });
+  record.initialized = true;
+  Log("headless context initialized (printing: %s)", record.printing.c_str());
+  NSArray<WinterCEFHeadlessPendingBrowser *> *pending = [record.pending copy];
+  record.pending = nil;
+  for (WinterCEFHeadlessPendingBrowser *request in pending) {
+    NSView *key = request.key;
+    if (key == nil) {
+      continue;
+    }
+    CreateWindowlessBrowserNow(key, std::string([request.url UTF8String] ?: ""), record.context);
+  }
+}
+
+class WinterHeadlessContextHandler : public CefRequestContextHandler {
+ public:
+  explicit WinterHeadlessContextHandler(std::string sessionId) : session_(std::move(sessionId)) {}
+
+  void OnRequestContextInitialized(CefRefPtr<CefRequestContext> request_context) override {
+    CEF_REQUIRE_UI_THREAD();
+    HeadlessContextInitialized(session_, request_context);
+  }
+
+ private:
+  std::string session_;
+  IMPLEMENT_REFCOUNTING(WinterHeadlessContextHandler);
+  DISALLOW_COPY_AND_ASSIGN(WinterHeadlessContextHandler);
+};
+
+}  // namespace
+
+BOOL WinterCEFInitializeHeadless(int argc,
+                                 char **argv,
+                                 const char *frameworkDir,
+                                 const char *mainBundlePath,
+                                 const char *subprocessPath,
+                                 const char *rootCachePath) {
+  if (g_initialized) {
+    return g_headless ? YES : NO;
+  }
+  if (g_did_shutdown) {
+    g_last_error = "CEF was already shut down in this process and cannot be restarted";
+    return NO;
+  }
+  if (frameworkDir == nullptr || mainBundlePath == nullptr || subprocessPath == nullptr ||
+      rootCachePath == nullptr) {
+    g_last_error = "the headless helper's layout is incomplete";
+    return NO;
+  }
+  if (!g_library_loaded) {
+    // BY PATH: the helper is not where `LoadInMain` looks (`<exe>/../Frameworks/…` inside its own bundle) —
+    // in Winter.app it borrows Winter's own framework from the enclosing bundle.
+    const std::string library = std::string(frameworkDir) + "/Chromium Embedded Framework";
+    if (!cef_load_library(library.c_str())) {
+      g_last_error = "could not load the Chromium Embedded Framework at the headless layout's path";
+      Log("FAILED: %s", g_last_error.c_str());
+      return NO;
+    }
+    g_library_loaded = true;
+    Log("framework loaded (headless, by path)");
+  }
+
+  ExternalPump::Create();
+  CefMainArgs main_args(argc, argv);
+
+  CefSettings settings;
+  settings.external_message_pump = true;  // the helper's own `[NSApp run]`
+  settings.multi_threaded_message_loop = false;
+  settings.no_sandbox = false;  // the renderers keep CEF's sandbox (the "Winter Helper" bundles' own)
+  settings.windowless_rendering_enabled = true;
+  CefString(&settings.framework_dir_path).FromString(frameworkDir);
+  CefString(&settings.main_bundle_path).FromString(mainBundlePath);
+  CefString(&settings.browser_subprocess_path).FromString(subprocessPath);
+  CefString(&settings.root_cache_path).FromString(rootCachePath);
+  // No `cache_path`: the global context is in memory, like every session's. Nothing a page stores is written.
+  const std::string logPath = std::string(rootCachePath) + "/chromium-debug.log";
+  CefString(&settings.log_file).FromString(logPath);
+#if DEBUG
+  settings.log_severity = LOGSEVERITY_WARNING;
+#else
+  settings.log_severity = LOGSEVERITY_DISABLE;
+#endif
+
+  // The SAME app class as Winter.app's browser process: CEF requires the same custom-scheme list in every
+  // process, and the "Winter Helper" subprocesses this host borrows register Winter's editor scheme.
+  g_app = new WinterApp();
+  if (!CefInitialize(main_args, settings, g_app.get(), nullptr)) {
+    g_last_error = "CefInitialize failed (exit code " + std::to_string(CefGetExitCode()) + ")";
+    Log("FAILED: %s", g_last_error.c_str());
+    g_app = nullptr;
+    return NO;
+  }
+  g_initialized = true;
+  g_headless = true;
+  Log("CefInitialize ok (headless, windowless rendering)");
+  return YES;
+}
+
+BOOL WinterCEFHeadlessReady(void) {
+  return (g_headless && g_initialized && g_context_initialized && !g_shutting_down) ? YES : NO;
+}
+
+void WinterCEFCreateWindowlessBrowser(NSView *key, const char *url, const char *sessionId) {
+  if (!g_headless || !g_initialized || g_shutting_down || key == nil || sessionId == nullptr ||
+      sessionId[0] == '\0') {
+    return;
+  }
+  const std::string session(sessionId);
+  const std::string target(url != nullptr ? url : "");
+  auto it = HeadlessContexts().find(session);
+  if (it == HeadlessContexts().end()) {
+    HeadlessContext record;
+    CefRequestContextSettings context_settings;  // no cache_path: "incognito", in memory
+    record.context = CefRequestContext::CreateContext(context_settings, new WinterHeadlessContextHandler(session));
+    if (!record.context) {
+      Log("headless CreateContext refused the request");
+      return;
+    }
+    it = HeadlessContexts().emplace(session, std::move(record)).first;
+    Log("headless context created (contexts=%zu)", HeadlessContexts().size());
+  }
+  HeadlessContext &record = it->second;
+  if (record.initialized) {
+    CreateWindowlessBrowserNow(key, target, record.context);
+    return;
+  }
+  if (record.pending == nil) {
+    record.pending = [[NSMutableArray alloc] init];
+  }
+  WinterCEFHeadlessPendingBrowser *request = [[WinterCEFHeadlessPendingBrowser alloc] init];
+  request.key = key;
+  request.url = [NSString stringWithUTF8String:target.c_str()] ?: @"";
+  [record.pending addObject:request];
+}
+
+void WinterCEFHeadlessSendCDP(NSView *key,
+                              const char *method,
+                              const char *paramsJSON,
+                              const char *cdpSessionId,
+                              WinterCEFCDPStatusCompletion completion) {
+  if (completion == nil) {
+    return;
+  }
+  WinterCEFCDPStatusCompletion answer = [completion copy];
+  if (method == nullptr || *method == '\0') {
+    answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"no DevTools method was named"));
+    return;
+  }
+  if (!g_headless || !g_initialized || g_shutting_down) {
+    answer(WinterCEFCDPStatusNotLive, CDPReasonJSON(@"the browser engine is not running"));
+    return;
+  }
+  auto browser = BrowserForParent(key);
+  if (!browser || !browser->GetHost()) {
+    answer(WinterCEFCDPStatusNotLive, CDPReasonJSON(@"this tab has no live browser"));
+    return;
+  }
+  id params = @{};
+  if (paramsJSON != nullptr && *paramsJSON != '\0') {
+    NSData *data = [NSData dataWithBytes:paramsJSON length:strlen(paramsJSON)];
+    params = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![params isKindOfClass:[NSDictionary class]]) {
+      answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the DevTools params were not a JSON object"));
+      return;
+    }
+  }
+  const int browserId = browser->GetIdentifier();
+  const int messageId = SuggestedCDPMessageId(browserId);
+  NSMutableDictionary *message = [@{
+    @"id" : @(messageId),
+    @"method" : [NSString stringWithUTF8String:method] ?: @"",
+    @"params" : params,
+  } mutableCopy];
+  if (cdpSessionId != nullptr && *cdpSessionId != '\0') {
+    message[@"sessionId"] = [NSString stringWithUTF8String:cdpSessionId] ?: @"";
+  }
+  NSData *encoded = [NSJSONSerialization dataWithJSONObject:message options:0 error:nil];
+  if (encoded == nil) {
+    answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the DevTools message could not be encoded"));
+    return;
+  }
+  NoteCDPMessageId(browserId, messageId);
+  // Registered FIRST: the answer may arrive before `SendDevToolsMessage` returns.
+  RememberPendingCDP(browserId, messageId, ^(BOOL ok, NSString *payload) {
+    if (ok) {
+      answer(WinterCEFCDPStatusOK, payload ?: @"{}");
+    } else {
+      answer(PayloadIsProtocolError(payload) ? WinterCEFCDPStatusProtocolError : WinterCEFCDPStatusGone,
+             payload ?: CDPReasonJSON(@"the DevTools method failed without a reason"));
+    }
+  });
+  if (!browser->GetHost()->SendDevToolsMessage(encoded.bytes, encoded.length)) {
+    NSMutableDictionary<NSNumber *, WinterCEFCDPCompletion> *byMessage = g_pending_cdp[@(browserId)];
+    if (byMessage[@(messageId)] != nil) {
+      [byMessage removeObjectForKey:@(messageId)];
+      answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the browser refused to submit the DevTools message"));
+    }
+  }
+}
+
+void WinterCEFHeadlessDisposeContext(const char *sessionId) {
+  if (sessionId == nullptr) {
+    return;
+  }
+  auto it = HeadlessContexts().find(std::string(sessionId));
+  if (it == HeadlessContexts().end()) {
+    return;
+  }
+  if (it->second.context && it->second.initialized) {
+    // Belt: the context is in memory and goes with its last reference, but its cookies go NOW, whatever
+    // still holds a reference to it.
+    if (CefRefPtr<CefCookieManager> cookies = it->second.context->GetCookieManager(nullptr)) {
+      cookies->DeleteCookies(CefString(), CefString(), nullptr);
+    }
+  }
+  HeadlessContexts().erase(it);
+  Log("headless context disposed (contexts=%zu)", HeadlessContexts().size());
+}
+
+void WinterCEFHeadlessDisposeAllContexts(void) {
+  HeadlessContexts().clear();
+}
+
+int WinterCEFHeadlessContextCount(void) {
+  return static_cast<int>(HeadlessContexts().size());
+}
+
+NSString *WinterCEFHeadlessPrintingOutcome(const char *sessionId) {
+  if (sessionId == nullptr) {
+    return @"";
+  }
+  auto it = HeadlessContexts().find(std::string(sessionId));
+  if (it == HeadlessContexts().end()) {
+    return @"";
+  }
+  return [NSString stringWithUTF8String:it->second.printing.c_str()] ?: @"";
+}

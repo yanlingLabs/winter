@@ -48,6 +48,9 @@ targets:
         # design (see that file's own header comment for why it lives outside OfficeHelper/).
         excludes:
           - OfficeHelper
+          # ComputerV2 Phase 4: Winter Headless's own sources (its `main.swift` and app class) belong to the
+          # WinterHeadless target below only.
+          - HeadlessHelper
       - path: Support/AppIcon.icns
       # DD-T4: dev icon bundles alongside dist; the config-selected CFBundleIconFile
       # ($(WINTER_APP_ICON)) picks AppIcon (dist) / AppIconDev (dev) at build time.
@@ -96,6 +99,10 @@ targets:
       # Computer Use" postCompileScript below copies into Contents/Helpers and re-signs; xcodegen's own
       # embedding is not involved.
       - target: WinterComputerUse
+        embed: false
+      # ComputerV2 Phase 4: build order only — the Release-only "Embed Winter Headless" phase below copies the
+      # windowless browser helper into Contents/Helpers and signs it.
+      - target: WinterHeadless
         embed: false
       # panel-cef Task 6a: the app now LINKS CEF's C++/C-API translation layer, which Task 4 built
       # for the helper targets alone. `Sources/CEF/WinterCEF.mm` calls CefInitialize /
@@ -684,6 +691,11 @@ targets:
         script: |
           set -euo pipefail
           "${SRCROOT}/../../scripts/embed-computer-helper.sh"
+      - name: Embed Winter Headless
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          "${SRCROOT}/../../scripts/embed-headless-helper.sh"
     info:
       path: Support/Info.plist
       properties:
@@ -1108,6 +1120,165 @@ targets:
           DEPLOYMENT_POSTPROCESSING: YES
           STRIP_INSTALLED_PRODUCT: YES
           STRIP_STYLE: debugging
+  # ComputerV2 Phase 4 — **Winter Headless**: Winter's private, invisible browser for the agent's background reading
+  # (`browsers.open(url, { browser: "headless" })`). A background-only app (LSBackgroundOnly: no Dock tile, no menu bar,
+  # no window) running only WINDOWLESS CEF browsers, one in-memory request context per Winter session. The daemon spawns
+  # its executable directly (never through LaunchServices) with a pipe on fds 3/4 and drives it with the browser-link op
+  # set (Sources/HeadlessHelper/HeadlessWire.swift); it exits when the pipe closes.
+  #
+  # No second Chromium: it compiles WinterCEF.mm (its windowless additions) and, nested in a Release Winter.app at
+  # Contents/Helpers/Winter Headless.app, loads Winter.app's own CEF framework by path and runs Winter.app's "Winter Helper"
+  # bundles as its subprocesses. WinterKit is not linked (it would drag Iroh in): the pure files of the browser link — the
+  # wire vocabulary, the command parser, the CDP allowlist and the per-tab gate — are compiled in directly, so the helper
+  # enforces the very same Swift copy of the allowlist and world rules Winter.app does.
+  #
+  # Identity: com.winter.headless (Release), com.winter.headless.dev (only `bun run dev:headless` gives it, on its own
+  # command line), com.winter.headless.xcode-debug for a plain Xcode Debug build. Hardened runtime, NO entitlements, a
+  # stated designated requirement at every signing site (scripts/embed-headless-helper.sh, dev:headless). With
+  # WINTER_HEADLESS_SELF_CONTAINED=YES (dev:headless passes it) the build copies the CEF framework and the five helper
+  # bundles into its OWN Contents/Frameworks, so the dev helper runs outside Winter.app.
+  WinterHeadless:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/HeadlessHelper
+      - path: Sources/CEF/WinterCEF.h
+      - path: Sources/CEF/WinterCEF.mm
+      - path: Sources/CEF/WinterCEFAssetResolve.h
+      - path: Sources/CEF/WinterCEFAssetResolve.mm
+      - path: Sources/CEF/WinterEditorBridge.h
+      - path: Sources/CEF/WinterEditorScheme.h
+      - path: ../WinterKit/Sources/WinterKit/JSONValue.swift
+      - path: ../WinterKit/Sources/WinterKit/LineDecoder.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/BrowserLinkProtocol.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/BrowserLinkCommand.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/CDPAllowlist.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/CDPTabGate.swift
+    dependencies:
+      - target: CefDllWrapper
+      # Build order only: a self-contained build copies them into its own Contents/Frameworks.
+      - target: CEFHelperBase
+        embed: false
+      - target: CEFHelperAlerts
+        embed: false
+      - target: CEFHelperGPU
+        embed: false
+      - target: CEFHelperPlugin
+        embed: false
+      - target: CEFHelperRenderer
+        embed: false
+    postCompileScripts:
+      - name: Embed CEF for a self-contained build
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          if [ "${WINTER_HEADLESS_SELF_CONTAINED:-NO}" != "YES" ]; then
+            echo "Winter Headless: not self-contained (it borrows the enclosing Winter.app's Chromium)"
+            exit 0
+          fi
+          CEF_SRC="${SRCROOT}/vendor/cef/Release/Chromium Embedded Framework.framework"
+          DEST_FRAMEWORKS="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks"
+          DEST="${DEST_FRAMEWORKS}/Chromium Embedded Framework.framework"
+          STAMP="${TARGET_TEMP_DIR}/cef-framework.stamp"
+          WANT="$(cat "${SRCROOT}/vendor/cef/.vendored-version")|${EXPANDED_CODE_SIGN_IDENTITY}|${CONFIGURATION}|recipe-2-versioned"
+          mkdir -p "${DEST_FRAMEWORKS}" "${TARGET_TEMP_DIR}"
+          if [ -d "${DEST}" ] && [ -f "${STAMP}" ] && [ "$(cat "${STAMP}")" = "${WANT}" ]; then
+            echo "CEF framework already embedded and signed for this identity — skipping"
+          else
+            rm -f "${STAMP}"
+            rm -rf "${DEST}"
+            # An APFS clone where the volume allows it: a 300 MB copy that costs no space.
+            cp -c -R "${CEF_SRC}" "${DEST}" 2>/dev/null || ditto "${CEF_SRC}" "${DEST}"
+            if [ ! -d "${DEST}/Versions" ]; then
+              mkdir -p "${DEST}/Versions/A"
+              mv "${DEST}/Chromium Embedded Framework" "${DEST}/Libraries" "${DEST}/Resources" "${DEST}/Versions/A/"
+              ln -s "A" "${DEST}/Versions/Current"
+              ln -s "Versions/Current/Chromium Embedded Framework" "${DEST}/Chromium Embedded Framework"
+              ln -s "Versions/Current/Libraries" "${DEST}/Libraries"
+              ln -s "Versions/Current/Resources" "${DEST}/Resources"
+            fi
+            for LIB in "${DEST}/Versions/A/Libraries/"*.dylib; do
+              codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime "${LIB}"
+            done
+            codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime "${DEST}/Versions/A"
+            printf '%s' "${WANT}" > "${STAMP}"
+          fi
+          for NAME in "Winter Helper" "Winter Helper (Alerts)" "Winter Helper (GPU)" "Winter Helper (Plugin)" "Winter Helper (Renderer)"; do
+            SRC="${BUILT_PRODUCTS_DIR}/${NAME}.app"
+            if [ ! -d "${SRC}" ]; then
+              echo "error: expected built CEF helper bundle not found at ${SRC}" >&2
+              exit 1
+            fi
+            rm -rf "${DEST_FRAMEWORKS}/${NAME}.app"
+            ditto "${SRC}" "${DEST_FRAMEWORKS}/${NAME}.app"
+          done
+    info:
+      path: Support/WinterHeadless-Info.plist
+      properties:
+        CFBundleName: "$(WINTER_HEADLESS_APP_NAME)"
+        CFBundleDisplayName: "$(WINTER_HEADLESS_APP_NAME)"
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+        CFBundleShortVersionString: "0.124.0"
+        CFBundleVersion: "0.124.0"
+        # No Dock tile, no menu bar, never activated: this process has no UI at all.
+        LSBackgroundOnly: true
+        LSMinimumSystemVersion: "26.0"
+        # Never forces the discrete GPU on for a process nobody sees.
+        NSSupportsAutomaticGraphicsSwitching: true
+    settings:
+      base:
+        PRODUCT_NAME: "$(WINTER_HEADLESS_APP_NAME)"
+        PRODUCT_BUNDLE_IDENTIFIER: com.winter.headless
+        WINTER_HEADLESS_APP_NAME: Winter Headless
+        WINTER_HEADLESS_SELF_CONTAINED: "NO"
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_DEBUG_DYLIB: NO
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/HeadlessHelper/HeadlessBridge.h
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/vendor/cef
+          - $(SRCROOT)/Sources/CEF
+        CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.winter.headless.xcode-debug
+          WINTER_HEADLESS_APP_NAME: Winter Headless Dev
+        Release:
+          # The helper's privacy set: the release identity scan reads every byte of it too.
+          OTHER_SWIFT_FLAGS: -file-prefix-map $(HOME)=/builder
+          OTHER_CPLUSPLUSFLAGS: -ffile-prefix-map=$(HOME)=/builder
+          OTHER_CFLAGS: -ffile-prefix-map=$(HOME)=/builder
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
+  # Winter Headless's logic with no CEF and no host app (a logic-test bundle: nothing launches, nothing takes focus) —
+  # the op executor against a fake driver, the pipe's wire and outbox, the layout and argument rules.
+  WinterHeadlessTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/WinterHeadlessTests
+      - path: Sources/HeadlessHelper/HeadlessHost.swift
+      - path: Sources/HeadlessHelper/HeadlessCEFDriver.swift
+      - path: Sources/HeadlessHelper/HeadlessWire.swift
+      - path: Sources/HeadlessHelper/HeadlessLayout.swift
+      - path: ../WinterKit/Sources/WinterKit/JSONValue.swift
+      - path: ../WinterKit/Sources/WinterKit/LineDecoder.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/BrowserLinkProtocol.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/BrowserLinkCommand.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/CDPAllowlist.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/CDPTabGate.swift
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
   # panel-cef Task 4 — CEF's own generated C++/C-API translation layer ("libcef_dll_wrapper" in
   # CEF's own CMakeLists.txt, vendored verbatim alongside include/ and Release/ by fetch-cef.ts).
   # CefExecuteProcess / CefScopedLibraryLoader / CefScopedSandboxContext — what the five helper
@@ -1379,6 +1550,7 @@ schemes:
         WinterHelper: all
         WinterOfficeHelper: all
         WinterComputerUse: all
+        WinterHeadless: all
         # F7 (T2 review, "if trivial"): [test], not `all` — the fixture is test-only infrastructure
         # (Tests/OfficeHelperFixtureSources/, never embedded, never touched by any postCompileScript),
         # so it belongs in the same scheme-action scope as WinterAppTests itself immediately below,
@@ -1401,3 +1573,11 @@ schemes:
     build:
       targets:
         WinterComputerUse: all
+  # Winter Headless alone — what `bun run dev:headless` builds — and its logic tests.
+  WinterHeadless:
+    build:
+      targets:
+        WinterHeadless: all
+        WinterHeadlessTests: [test]
+    test:
+      targets: [WinterHeadlessTests]
