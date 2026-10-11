@@ -164,7 +164,7 @@ async function load(corePath: string, verify: SignatureVerifier, loadAddon: (fd:
     let addon: Addon;
     try { addon = loadAddon(handle.fd); }
     catch { throw new HostOutputUnavailable("addon-load"); }
-    if (addon.protocolVersion !== 1 || addon.implementationId !== pinned.implementationId || addon.sourceSha256 !== pinned.sourceSha256 || typeof addon.createOutputTransport !== "function") {
+    if (!addon || typeof addon !== "object" || addon.protocolVersion !== 1 || addon.implementationId !== pinned.implementationId || addon.sourceSha256 !== pinned.sourceSha256 || typeof addon.createOutputTransport !== "function") {
       throw new HostOutputUnavailable("addon-identity");
     }
     return async () => addon.createOutputTransport();

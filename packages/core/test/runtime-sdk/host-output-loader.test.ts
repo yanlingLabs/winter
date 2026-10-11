@@ -88,10 +88,10 @@ test("first output calls share responsive async verification and cache success",
   await create();expect(verifications).toBe(1);expect(mappings).toBe(1);expect(allocations).toBe(13);
 });
 test("deterministic digest and ABI refusal stay cached despite later path repair",async()=>{
-  for(const kind of ["digest","abi"]){
+  for(const kind of ["digest","abi","empty-export"]){
     const f=fixture();let maps=0,checks=0;const logs:string[]=[];
     if(kind==="digest")writeFileSync(f.addon,"unsealed bytes");
-    const create=createFixtureLazyHostOutputFactory({corePath:f.core,verifySignature:()=>{checks++;return true},loadAddon:()=>{maps++;return{...f.native,protocolVersion:2}},log:line=>logs.push(line)});
+    const create=createFixtureLazyHostOutputFactory({corePath:f.core,verifySignature:()=>{checks++;return true},loadAddon:()=>{maps++;return kind==="empty-export"?null as never:{...f.native,protocolVersion:2}},log:line=>logs.push(line)});
     await expect(create()).rejects.toThrow(kind==="digest"?"artifact-digest":"addon-identity");
     writeFileSync(f.addon,"fixture-addon");
     await expect(create()).rejects.toThrow(kind==="digest"?"artifact-digest":"addon-identity");
