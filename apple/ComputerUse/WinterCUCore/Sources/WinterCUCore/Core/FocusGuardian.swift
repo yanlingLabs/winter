@@ -249,6 +249,8 @@ public struct CUFocusGuardianCore: Sendable {
     /// Apps launched since the guard began that the agent did not launch, until their first activation: that one is the
     /// user's (their own slow launch — never undone as an indirect effect).
     private var othersLaunches: [pid_t: TimeInterval] = [:]
+    /// Apps judged in front at least once while guarding (a launch's FIRST activation is told apart by it).
+    private var everFront: Set<pid_t> = []
     /// How long a launch's first activation is waited for.
     static let launchFirstWindow: TimeInterval = 60
     /// The user's input that can switch apps or desktops (fed by the session tap, the gesture monitor and the clicks).
@@ -376,8 +378,10 @@ public struct CUFocusGuardianCore: Sendable {
 
     public mutating func endLaunch(_ token: Int, pid: pid_t?, now: TimeInterval) {
         launches[token] = nil
-        if let pid { noteAfterglow(pid, raise: true, now: now) }
+        if let pid { noteAfterglow(pid, raise: true, now: now); agentLaunched.insert(pid) }
     }
+    /// The processes the agent's own launches (binds, opens) produced: never "the user's own launch".
+    private var agentLaunched: Set<pid_t> = []
 
     public var launchPending: Bool { launches.values.contains { $0.bundle != nil } }
 
@@ -660,6 +664,7 @@ public struct CUFocusGuardianCore: Sendable {
             break
         }
         if let a = q.app, owner.isUsers || owner.undoes { othersLaunches[a] = nil }  // its first activation, judged
+        if let a = q.app { everFront.insert(a) }
         return owner
     }
 
@@ -685,6 +690,12 @@ public struct CUFocusGuardianCore: Sendable {
         // The first activation of an app the user launched (not the agent): theirs — during a visit too (they moved).
         if !front, let a = app, let l = othersLaunches[a], now - l <= Self.launchFirstWindow {
             return (.user("the first activation of an app the user launched"), nil)
+        }
+        // The same when the launch notice was never heard: an app started within the window, never seen in front, not the
+        // agent's launch (review of round 9, MEDIUM #5).
+        if !front, let a = app, !everFront.contains(a), !agentLaunched.contains(a), let s = q.appStartedAt,
+           now - s <= Self.launchFirstWindow, now >= s {
+            return (.user("the first activation of an app started a moment ago, not by the agent"), nil)
         }
         // I1 — an app the agent never touched (during a visit, what it brings up is the visit's: below).
         if !front && shown.isEmpty, !visit {

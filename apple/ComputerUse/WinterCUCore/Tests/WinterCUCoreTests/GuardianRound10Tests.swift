@@ -92,4 +92,18 @@ final class GuardianRound10Tests: XCTestCase {
         g.endExempt(600, now: 13)
         XCTAssertEqual(g.view.app, 1, "the hold's end gives the place from before it back")
     }
+    /// Review of round 9, MEDIUM #5: an app started a moment ago, not by the agent, never seen in front — its first
+    /// activation is the user's own launch even when the launch notice was never heard; the agent's own launch's is not.
+    func testAFirstActivationOfAnAppStartedJustNowNotByTheAgentIsTheUsers() {
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 100))
+        g.noteCause(500, now: 20)
+        g.noteOpenerCause(now: 20)
+        XCTAssertTrue(g.judge(CUMoveQuery(app: 880, space: 100, appStartedAt: 15), now: 20.3).isUsers, "their own slow launch")
+        let token = g.beginLaunch(now: 30)
+        g.endLaunch(token, pid: 881, now: 30.5)
+        g.noteCause(500, now: 34)
+        g.noteOpenerCause(now: 34)
+        XCTAssertFalse(g.judge(CUMoveQuery(app: 881, space: 100, appStartedAt: 30.2), now: 34.2).isUsers, "the agent's own launch")
+    }
 }

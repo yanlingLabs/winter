@@ -164,7 +164,9 @@ extension CUCore {
         let observable = switchInputObservable
         let clickAt: TimeInterval? = observable ? nil : now - secondsSinceUserClick
         let launching = guardianLock.withLock { guardianCore.launchPending }
-        let started = launching ? v.front.flatMap { pid in sys.processAge(pid: pid).map { now - $0 } } : nil
+        // (Always read: an app started a moment ago, not by the agent, comes forward on its first activation as the
+        // user's own launch even when NSWorkspace's launch notice was never heard — review of round 9, MEDIUM #5.)
+        let started = v.front.flatMap { pid in sys.processAge(pid: pid).map { now - $0 } }
         let bundle = launching ? v.front.flatMap { sys.bundleId(pid: $0) } : nil
         // A desktop change: the apps the agent touched (with a cause that raises) whose window it showed.
         let placeSpace = guardianPlace()?.space ?? from?.space
