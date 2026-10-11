@@ -131,4 +131,28 @@ final class ClickRoutingRound11Tests: XCTestCase {
         XCTAssertNil(AXTreeReader.checkedState("non-trader"))
         XCTAssertNil(AXTreeReader.checkedState(""))
     }
+
+    /// Review of round 11, MEDIUM #3: the bound app is in FRONT with another of its windows key (the user works there) —
+    /// no pointer event goes to the bound window (it would raise it over the user's window and take their keys); with the
+    /// bound window the key one, the click goes.
+    func testAFrontAppsCoveredBoundWindowTakesNoClick() async throws {
+        world()
+        sys.front = pid
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [other, bound], kAXFocusedWindowAttribute: other])
+        let ref = target.refs.ref(for: AXIdentity(element: field))
+        do {
+            _ = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+                                                         action: .click(CUClickAction(ref: ref)), access: .full,
+                                                         allowForeground: false, privatePath: true))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("app_in_front"), e.message)
+        }
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown || $0.type == .leftMouseUp }.isEmpty, "no click sent")
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [other, bound], kAXFocusedWindowAttribute: bound])
+        _ = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c2",
+                                                     action: .click(CUClickAction(ref: ref)), access: .full,
+                                                     allowForeground: false, privatePath: true))
+        XCTAssertEqual(poster.entries.filter { $0.type == .leftMouseDown }.count, 1, "the key bound window takes it")
+    }
 }

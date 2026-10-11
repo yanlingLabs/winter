@@ -625,6 +625,7 @@ extension CUCore {
                                       announced: announced, element: element, axTried: axTried, subject: subject)
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
+        if d.rung != .foreground, let refusal = coveredWindowRefusal(t, allowForeground: p.allowForeground) { throw refusal }
         let synth = self.synth(p)
         let windowFor = self.windowFor(t)
         let event = announced ? nil : CursorEvent(kind: "press", point: pt, count: count, button: button.rawValue)
@@ -1656,6 +1657,7 @@ extension CUCore {
         let elsewhere = !onScreen && t.privatePath && skyLight.canSetWindowLocation
         guard onScreen || elsewhere else { return false }
         let route: CURoute = elsewhere && t.isChromium && skyLight.isAvailable ? .skyLight : .publicPid
+        if onScreen, let refusal = coveredWindowRefusal(t, allowForeground: holdsForeground(t)) { throw refusal }
         var s = synth
         s.windowSPI = t.privatePath
         let windowFor = self.windowFor(t)
@@ -1668,6 +1670,21 @@ extension CUCore {
         try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()
         return true
+    }
+
+    /// The bound app is in FRONT with another of its windows key (review of round 11, MEDIUM #3): a window-targeted click
+    /// on the bound window — covered or not — would be taken by the front app as the user's own, raise it over the window
+    /// they work in and take its keys, so no pointer event is sent (an accessibility press, a value or a menu command
+    /// still goes). Not while the app is held in front for the script (its window is the one meant to be used), nor when
+    /// the bound window is the key one (the user is looking at it — a click there moves nothing). With no accessibility
+    /// (a capture-only bind), the app's topmost window on screen stands for its key window.
+    func coveredWindowRefusal(_ t: CUTarget, allowForeground: Bool) -> CUError? {
+        guard !allowForeground, sys.frontmostPid() == t.pid else { return nil }
+        let topmost = { [self] in sys.windowStack().first { $0.pid == t.pid && $0.layer == 0 && $0.alpha > 0 }.map { $0.id == t.windowID } }
+        let isKey: Bool? = (t.accessible ? boundWindowIsKeyInApp(t) : nil) ?? topmost()
+        guard isKey != true else { return nil }
+        CULog.act.notice("click in \(t.appName, privacy: .public): the app is in front with another of its windows key — no pointer event")
+        return CUError.refused(.appInFront, "\(t.appName) is in front with another of its windows active — a click on the bound window would bring it over the user's window and take their keys, so nothing was sent; an accessibility press (action()), setValue or a menu command still works, or wait until the user leaves \(t.appName)")
     }
 
     /// Whether the bound window is its app's key (focused) window, as the app tells accessibility; nil when it
@@ -1810,6 +1827,7 @@ extension CUCore {
         var s = synth
         s.windowSPI = t.privatePath
         let windowFor = self.windowFor(t)
+        if onScreen, let refusal = coveredWindowRefusal(t, allowForeground: holdsForeground(t)) { throw refusal }
         // Key IN ITS APP (the app's focused window): in the background the system-wide key focus is the user's
         // app, always, so it can't tell whether the click only made the window key.
         let wasKey = boundWindowIsKeyInApp(t)
@@ -2692,6 +2710,7 @@ extension CUCore {
             }
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
+        if d.rung != .foreground, let refusal = coveredWindowRefusal(t, allowForeground: p.allowForeground) { throw refusal }
         if let fromInfo { announceTarget(t, fromInfo, pressing: false) }
         let synth = self.synth(p)
         let windowFor = self.windowFor(t)
