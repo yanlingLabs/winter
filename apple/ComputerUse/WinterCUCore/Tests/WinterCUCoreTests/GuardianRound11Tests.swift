@@ -118,4 +118,35 @@ final class GuardianRound11Tests: XCTestCase {
         core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: 0, targetPid: 500, now: now)
         XCTAssertThrowsError(try core.refuseWhileUserWorks(t))
     }
+
+    /// Review of round 11, HIGH #2: a process that is NOT part of the front app — Spotlight's or a launcher's panel, an
+    /// accessory or agent process of its own — never counts as the app receiving the key; a true part of it does (its
+    /// renderer, its WebContent). Decided like the live check, from the process facts.
+    func testAKeyIntoAnAccessoryProcessIsNoWorkButOneIntoAPartOfTheAppIs() throws {
+        let sys = FakeSystem()
+        sys.running = [1, 500]; sys.front = 500; sys.space = 100
+        sys.windows[77] = FakeSystem.window(77, pid: 500, CGRect(x: 500, y: 0, width: 400, height: 300))
+        sys.stack = [sys.windows[77]!]
+        sys.appBundles[500] = "/Applications/Google Chrome.app"
+        sys.processFacts[811] = (responsible: 811, parent: nil, executable: "/System/Library/CoreServices/Spotlight.app/Contents/MacOS/Spotlight")
+        sys.processFacts[900] = (responsible: 996, parent: 500, executable: "/Applications/Google Chrome.app/Contents/Frameworks/Helpers/Renderer")
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        let t = CUTarget(id: "t1", sessionId: "s", pid: 500, bundleId: "com.google.Chrome", appName: "Google Chrome",
+                         isChromium: true, mirror: false, windowID: 77, windowTitle: "")
+        core.registerForTesting(t, windowElement: nil)
+        core.switchInputObservableOverride = true
+        XCTAssertTrue(core.startGuardian(privatePath: true))
+        defer { core.stopGuardian() }
+        let now = core.clock.nowSeconds()
+        core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: 0, targetPid: 811, now: now)  // Spotlight's panel
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t))
+        core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: 0, targetPid: 900, now: now)  // its renderer
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(t))
+        // The pure rule: a bundle path is a prefix only at a path boundary.
+        XCTAssertFalse(CUProcessFacts.isPart(5, of: 4, responsible: 5, parent: nil, executable: "/Applications/Google Chrome.app2/x",
+                                             appBundle: "/Applications/Google Chrome.app"))
+        XCTAssertTrue(CUProcessFacts.isPart(5, of: 4, responsible: 5, parent: nil, executable: "/Applications/Google Chrome.app/Contents/x",
+                                            appBundle: "/Applications/Google Chrome.app"))
+    }
 }

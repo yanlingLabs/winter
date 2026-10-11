@@ -272,9 +272,17 @@ final class FakeSystem: CUSystemBackend {
     func windowSpaces(_ id: UInt32) -> Set<UInt64>? { spacesOfWindow[id] }
     var displays: [String: UInt64]?
     func displaySpaces() -> [String: UInt64]? { displays }
-    /// Content processes (Safari's WebContent), each with the app it serves.
+    /// Content processes (Safari's WebContent), each with the app it serves (the app is responsible for it).
     var contentProcesses: [pid_t: pid_t] = [:]
-    func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { contentProcesses[pid] == appPid }
+    /// Other processes' facts, as the live check reads them (a launcher's panel: responsible for itself, launchd's child).
+    var processFacts: [pid_t: (responsible: pid_t?, parent: pid_t?, executable: String?)] = [:]
+    var appBundles: [pid_t: String] = [:]
+    /// Decided like the live check (`CUProcessFacts.isPart`), from the facts above.
+    func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool {
+        let f = processFacts[pid]
+        return CUProcessFacts.isPart(pid, of: appPid, responsible: f?.responsible ?? contentProcesses[pid],
+                                     parent: f?.parent, executable: f?.executable, appBundle: appBundles[appPid])
+    }
     func cursorLocation() -> CGPoint? { cursor }
     /// How long ago each process started (a launch's).
     var ages: [pid_t: TimeInterval] = [:]
