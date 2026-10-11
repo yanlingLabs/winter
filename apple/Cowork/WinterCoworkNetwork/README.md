@@ -1,0 +1,125 @@
+# Cowork host network endpoint
+
+Implemented native component, not an integrated or passed VM gate. All packet,
+userspace TCP/UDP stack, and host socket work stays on a dedicated pthread inside
+the caller process. No helper process, VZ NAT attachment, bridge, host port
+forward, guest exec service, or global firewall change is exposed.
+
+## Interface and ownership
+
+`CoworkNetworkEndpoint(scope:policy:syntheticNoOutbound:)` requires host-supplied
+workspace/incarnation/lease identity. `NetworkEndpointPolicy.revision` is the
+current **grant revision**, independent of conversation/config changes. The caller
+must authenticate that scope and policy against protected host authority before
+construction and before each policy update. This module does not authenticate
+JSON or read the authority DB. Never construct it from a guest request.
+
+- `attachment()` duplicates its connected AF_UNIX datagram socket into an owned
+  `VZFileHandleNetworkDeviceAttachment`, MTU 1500. The endpoint must outlive the VM.
+- The C API `wc_network_guest_fd` borrows the same L2 endpoint, allowing another
+  host-owned VM backend to attach it. A duplicate is still only a transport.
+- `replacePolicy(_:expectedRevision:)` drains on the native thread, destroys the
+  old stack and all its flows, rebuilds with the new policy, then acknowledges.
+  Stale/concurrent revisions are refused. It advances grant revision only.
+- `statistics()` returns bounded counters, not destination traffic contents.
+- `shutdown()` joins only the owned worker and closes only owned descriptors.
+  Close the VM device before destroying its endpoint; shutdown is not proof the
+  VM stopped. The host controller retains its independent uncertain-stop fence.
+
+Static guest settings: MAC `02:77:69:00:00:01`, IPv4 `10.0.2.15/24`, gateway
+`10.0.2.2`, DNS `10.0.2.3`; IPv6 `fd00:77::15/64`, gateway `fd00:77::2`, DNS
+`fd00:77::3`. The Linux guest must receive these settings from trusted boot setup.
+
+## Enforcement
+
+A bounded ingress parser admits ARP/DHCP/NDP infrastructure and unfragmented
+TCP/UDP; unsupported/raw IP, IPv4 options, fragments and IPv6 extension headers
+fail closed. The final patched libslirp hooks run after destination translation,
+immediately before TCP connect or UDP sendto. Actual translated loopback,
+private, link-local, multicast, reserved and connected host/LAN destinations are
+denied by default. Mapped IPv6 addresses are normalized. Exact IP/port/transport
+host grants can allow private unicast; grants expire against monotonic time.
+Gateway aliases resolve only to loopback and require that exact loopback grant.
+The upstream broad IPv6 virtual-prefix-to-loopback alias is narrowed to the
+specific gateway. No network name or DNS answer is authority: each resulting
+IP destination is checked again, including after DNS rebinding.
+
+`SystemDNSConfiguration.current()` reads the host OS DNS configuration. Nothing
+silently chooses a third-party resolver. The optional resolver exception allows
+only configured resolver IP:53 TCP/UDP reached via the virtual DNS service while
+public internet access is enabled. It gives no generic private-network grant.
+The UDP query parser rejects non-query/opcode traffic, but this is a fixed DNS
+service exception, not a full DNS application firewall. Host integration must
+watch system DNS changes and replace the resolver policy before resuming work;
+automatic resolver-change observation is not implemented yet. A failed host
+interface snapshot conservatively disables public destinations.
+
+UDP responses must match the exact flow peer and current policy. TCP read/send
+checks the connected peer and current policy. Expired/revoked peers or changed
+host/LAN interface snapshots destroy the old stack. No unsolicited listener or
+forwarding API is reachable through the wrapper. Internet ping/raw sockets are
+explicitly disabled in the vendored paths as defense in depth.
+
+Limits: 256 sockets, 64 grants, 128 supplied/observed prefixes, MTU1500, one native
+worker, 128KiB send / 512KiB receive kernel queues per endpoint, nonblocking
+writes with visible drop counters, ingress burst64 and 1024 packets/s, at most64
+frames processed per poll turn. Idle flow revalidation waits at most100ms plus
+scheduled thread time; final outbound checks are synchronous. These bounds are
+implemented; CPU/latency under hostile sustained load is not yet benchmarked.
+The 1024pps development limit is deliberately conservative and needs product
+performance validation. It is not a user's RAM/CPU allocation control.
+
+## Dependency and distribution state
+
+Vendored libslirp v4.9.5, commit
+`390848f47391f412451b2d259d8527fabb51e5e3`, with original per-file notices,
+LICENSE and COPYRIGHT. See `vendor/libslirp/WINTER-PATCHES.md`. Public callbacks
+in upstream libslirp do **not** provide destination filtering; the local hooks
+are mandatory. Missing hooks deny. Review and maintain the patch on upgrades.
+
+Build currently uses existing local GLib2.90.0 via pkg-config, and transitively
+libintl1.0 and PCRE2 10.49; no global installation was performed. These are
+runtime dependencies, not optional developer-only dependencies. Current output
+still links Homebrew absolute paths, so it is **not a distributable production
+artifact**. Production availability must remain blocked until the exact native
+closure is packaged with relative load paths, verified provenance and notices,
+corresponding GLib/libintl source/build material and LGPL replacement/relinking
+rights. GLib and libintl use LGPL2.1-or-later; PCRE2 uses BSD3 plus its retained
+individual notices. Statically absorbing LGPL libraries is not this design.
+
+Primary references: [libslirp source/tag](https://gitlab.freedesktop.org/slirp/libslirp/-/tree/v4.9.5),
+[GLib license](https://docs.gtk.org/glib/),
+[LGPL2.1 terms](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html),
+[Apple file-handle attachment](https://developer.apple.com/documentation/virtualization/vzfilehandlenetworkdeviceattachment).
+
+## Verification
+
+```
+swift build --package-path apple/Cowork/WinterCoworkNetwork --jobs 4
+swift test --package-path apple/Cowork/WinterCoworkNetwork --jobs 4
+```
+
+13 Swift Testing tests passed on 2026-10-11: public/private/mapped IPv6 and LAN
+policy, tuple/expiry grants, configured DNS exception, gateway final tuple,
+malformed/raw/fragment denial, policy ACK/stale revision, real libslirp TCP
+connect and UDP send to scoped ephemeral loopback listeners, unsolicited UDP
+peer rejection, flow closure on revocation, direct private IPv6 denial, and a
+full supplied-prefix inventory failing closed instead of skipping observed host
+interfaces. The latter regression came from independent security review and
+exercises final translated-tuple policy without performing a public send.
+Tests use disposable local socket fixtures; no VM, real public connection,
+provider credential, global service or host pressure is involved. This does not
+prove DNS end-to-end, TCP payload transfer, guest DHCP/IPv6 negotiation, VZ
+integration, persistent policy crash recovery, or production security readiness.
+
+## Next integration requirements
+
+Host authority must bind immutable workspace/incarnation/lease scope separately
+from mutable grant revision. The existing VM groundwork's immutable grant-equality
+check must not become a consumer requirement: use per-operation current authority
+validation, reject stale grants individually, and host-authorize source/share
+transitions. Native transport ACKs do not substitute for DB fences. The root
+service must own endpoint lifecycle and resolver change policy, package all
+runtime dependencies, and pass independent review plus an isolated VM network
+suite before exposing this backend. Active-work RAM return remains a separate
+open requirement; this endpoint makes no memory-return claim.
