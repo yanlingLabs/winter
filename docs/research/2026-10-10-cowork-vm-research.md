@@ -184,20 +184,30 @@ Guest paths and host capabilities require separate authority. Filesystem/shell w
 
 | Decision | Suggested starting point | Status |
 | --- | --- | --- |
-| Execution location | Winter loop and subagents in a local Linux ARM64 guest | User direction; Linux choice proposed |
+| Execution location | Winter loop and subagents in a local Linux ARM64 guest | Accepted specification direction; guest runtime validation pending |
 | VM ownership | Prefer native VM controller inside the existing daemon; avoid a Winter helper per conversation | User requirement; Apple backing-process constraint unresolved |
-| VM technology | Evaluate Containerization before building all VZ device/image plumbing directly | Proposed; no runtime validation yet |
+| VM technology | Containerization/VZ library, native control inside the daemon, Linux VM per workspace | Specification direction accepted 2026-10-11; feasibility gates and runtime validation remain |
 | Workspace | Per-conversation for standalone Cowork; reusable workspace for Projects, with concurrent conversations | Accepted; normal shared-filesystem/Git behavior, agent-selected worktrees |
 | Project messaging | Same-Project conversations can coordinate through SendMessage, including resumable recipients | Accepted feature; durable host routing/receipt contract proposed |
 | Access | Direct writes to explicitly granted folders, or selected repos cloned into guest storage | Accepted; no ambient home/SSH sharing remains proposed enforcement |
+| Changing sources | Add folders/repositories during conversations; allow removal while one source remains; never block security revocation | Accepted 2026-10-11; effective live share changes and recovery still need validation |
+| Workspace instructions | Shared `/workspace/.winter/WINTER.md`, plus normal applicable source WINTER.md discovery | Accepted requirement; explicit workspace injection and fresh context on resume are planned work |
 | Memory and temp | Shared Project MEMDIR; private logical transcripts; persistent conversation scratch and disposable OS tmp proposed | Project memory sharing accepted; scratch/retention details open |
 | Resource release | Quiescent cold stop, retained files and durable parent/child continuation | Accepted direction; SDK prerequisite merged, release and Winter integration pending |
 | Resource sharing | Automatic CPU/RAM management with no manual per-VM carving; no assumed Linux GPU compute passthrough | User direction; real host-memory reclaim requires validation |
 | Scheduling | Durable host authority, VM start on demand, occurrence deduplication while Project conversations may overlap | Proposed |
 | Host tools | Explicit narrow capabilities, no automatic guest-to-host shell fallback | Proposed |
-| Git publication | Session branches; separate commit/push/PR/merge authority | Proposed |
+| Git publication | Automatically commit completed work and push feature branches for GitHub-only workspaces; enforce current repository/ref authority on host | User selected 2026-10-11; main/default/protected branches, merges and force-pushes remain separately authorized |
 
-The next decision is whether the proposed backend meets automatic-resource requirements, then finalizing the remaining lifecycle/schedule contracts. Direct host-folder writes, workspace ownership, concurrent Project conversations, shared memory, peer messaging and ordinary edit/worktree behavior are settled. The working specification retains the distinction between accepted requirements, proposed defaults and implementation gates.
+The user accepted the working specification's design direction on 2026-10-11, without authorizing implementation. Backend resource return, signed native integration, guest persistence and live source handling remain validation gates. Direct host-folder writes, workspace ownership, concurrent Project conversations, shared memory, peer messaging, ordinary edit/worktree behavior and the source/publication choices above are settled. The working specification retains the distinction between accepted requirements, proposed mechanisms and implementation gates.
+
+### Source and instruction follow-up, 2026-10-11
+
+Apple documents modifying an existing Virtio filesystem device's share while a VM runs. This supports investigating live folder additions without adding another VM device, but the pinned Containerization hotplug/release methods can be no-ops without a provider. Test actual guest visibility and open-handle revocation; retain a coordinated restart fallback. Repository removal disconnects remote authority and active-source membership while preserving the local checkout; it cannot claim to erase or hide files already present in the guest. [Apple shared directories](https://developer.apple.com/documentation/virtualization/shared-directories), [runtime share](https://developer.apple.com/documentation/virtualization/vzvirtiofilesystemdevice/share), [pinned hooks](https://github.com/apple/containerization/blob/bc994b88df46207fad7775b0eabc51947e315881/Sources/Containerization/VZVirtualMachineInstance.swift#L337)
+
+The normal Winter Code path generates a run-home WINTER.md from the SDK-home instruction file and trusted root-to-cwd `WINTER.md`, `.winter/WINTER.md` and `WINTER.local.md`. It does not automatically include a shared workspace file above the repository boundary or additional attached source roots. The SDK can omit all instruction context for specialized subagents, while forks persist an inherited request layout. Therefore the shared workspace layer, per-source discovery and current-instruction refresh are explicit planned changes, not existing behavior. [Run-home construction](https://github.com/yanlingLabs/winter-runtime-sdk/blob/c5424202619cc8df2c8d18b832bfc52ad6fa35f7/src/run-home/instructions.ts#L251), [SDK instruction omission](https://github.com/yanlingLabs/winter-agent-sdk/blob/27f1c43e8383582ce73e544237bcfa6fb3721db3/packages/runtime/src/context/assembler.ts#L330), [fork context reuse](https://github.com/yanlingLabs/winter-agent-sdk/blob/27f1c43e8383582ce73e544237bcfa6fb3721db3/packages/runtime/src/subagents/child-engine.ts#L1523)
+
+The updated [working specification](../cowork-spec.md) also records that outputs are optional user-facing deliverables, mounted source edits are not mirrored there, persistent disks/build caches are reused, and Xcode work requires an explicit Mac-side build capability against a host-readable checkout. Apple's sub-second lightweight guest-start claim remains distinct from measured Winter readiness.
 
 ## Research limits and later validation
 
