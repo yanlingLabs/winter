@@ -273,7 +273,10 @@ extension CUCore {
         // The agent's own launch (a bind's, its bundle named before it launched) is no user's launch.
         let started = sys.processAge(pid: pid).map { now - $0 }
         let bundle = sys.bundleId(pid: pid)
-        guardianLock.withLock { guardianCore.appLaunched(pid, startedAt: started, bundle: bundle, now: now) }
+        let observable = switchInputObservable, secure = secureInputOn
+        guardianLock.withLock {
+            guardianCore.appLaunched(pid, startedAt: started, bundle: bundle, now: now, inputObservable: observable, secureInput: secure)
+        }
     }
 
     /// The user's place, while guarding.
@@ -313,11 +316,11 @@ extension CUCore {
     /// One event the listen-only session tap saw (not a type-21 process notification): the user's input only when
     /// `CUHardwareInput` says so — the window server's own events around an activation or a desktop change are not.
     func noteTapEvent(type: CGEventType, sourcePid: Int64, userData: Int64, flags: CGEventFlags = [], keycode: Int64 = -1,
-                      location: CGPoint? = nil, now: TimeInterval) {
+                      location: CGPoint? = nil, targetPid: Int64 = 0, now: TimeInterval) {
         let kind = CUHardwareInput.classify(type: type, sourcePid: sourcePid, userData: userData)
         if kind != .none { noteHardwareInput(now: now, move: kind == .move) }
         guard kind == .action else { return }
-        noteUserInteraction(type: type, flags: flags, keycode: keycode, location: location)
+        noteUserInteraction(type: type, flags: flags, keycode: keycode, location: location, targetPid: targetPid)
         let secure = (type == .flagsChanged || type == .keyDown) && secureInputOn
         guardianLock.withLock { guardianCore.inputEvent(type: type, flags: flags, keycode: keycode, secure: secure, now: now) }
     }
@@ -326,15 +329,27 @@ extension CUCore {
     /// ⌃-arrows), a right or other click or a scroll in its window while it is in front (a left click is the click
     /// handler's) — makes the agent hands-off it until it leaves the front. Only bound targets matter, so nothing is read
     /// for any other front app.
-    func noteUserInteraction(type: CGEventType, flags: CGEventFlags, keycode: Int64, location: CGPoint?) {
+    /// `targetPid`: the process the window server delivers the event to (the annotated session tap's
+    /// `eventTargetUnixProcessID`; 0 when it says none): a key typed into Spotlight's, a launcher's, the emoji picker's or
+    /// a menu-bar item's panel goes to THAT process while the bound app stays in front — never work in the bound app
+    /// (review of round 10, MEDIUM #3: the key was put on the front app).
+    func noteUserInteraction(type: CGEventType, flags: CGEventFlags, keycode: Int64, location: CGPoint?, targetPid: Int64 = 0) {
         guard guardianRunning, let front = sys.frontmostPid(), boundTargetPids().contains(front) else { return }
         switch type {
         case .keyDown:
             // Typing (no ⌘ or ⌃): a ⌘/⌃ chord may be the system's (⌘-Space, ⌘-Tab, ⌃-arrows), not work in the app —
-            // found by the model-based test (the user's ⌘-Space for Spotlight refused the agent's next act).
+            // found by the model-based test (the user's ⌘-Space for Spotlight refused the agent's next act). Nor ⌥-Space (a
+            // launcher's hotkey: Alfred, Raycast), nor Escape (their Esc stops the agent, or closes a panel of the system's).
             guard !flags.contains(.maskCommand), !flags.contains(.maskControl) else { return }
+            guard !(flags.contains(.maskAlternate) && keycode == 49), keycode != 53 else { return }
+            if targetPid > 0 {
+                let receiver = pid_t(truncatingIfNeeded: targetPid)
+                guard receiver == front || sys.isContentProcess(receiver, of: front) else { return }
+            }
+            if guardianLock.withLock({ guardianCore.userWorkingApp == front }) { return }  // marked already: nothing more read
             userInteracted(front)
         case .rightMouseDown, .otherMouseDown, .scrollWheel:
+            if guardianLock.withLock({ guardianCore.userWorkingApp == front }) { return }  // marked already: no window lookup
             guard let point = location, windowUnder(point)?.pid == front else { return }
             userInteracted(front)
         default:
@@ -866,7 +881,9 @@ private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
         core.noteTapEvent(type: type, sourcePid: event.getIntegerValueField(.eventSourceUnixProcessID),
                           userData: event.getIntegerValueField(.eventSourceUserData), flags: event.flags,
                           keycode: type == .keyDown ? event.getIntegerValueField(.keyboardEventKeycode) : -1,
-                          location: pointer ? event.location : nil, now: core.clock.nowSeconds())
+                          location: pointer ? event.location : nil,
+                          targetPid: type == .keyDown ? event.getIntegerValueField(.eventTargetUnixProcessID) : 0,
+                          now: core.clock.nowSeconds())
     }
     if type == .leftMouseDown {
         core.onPhysicalClick(at: event.location, userData: event.getIntegerValueField(.eventSourceUserData), flags: event.flags,

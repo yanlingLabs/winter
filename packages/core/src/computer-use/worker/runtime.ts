@@ -248,6 +248,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       const extra: Record<string, unknown> = {};
       if (typeof t.app === "string") extra.with = t.app;
       if (t.window !== undefined) extra.window = t.window;
+      if (t.emit === false) extra.emit = false;
       return call("apps.open", undefined, { app, ...extra }).then(toApp);
     },
   });

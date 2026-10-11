@@ -451,26 +451,23 @@ report({ ok: true });`,
       check("the hover's answer says nothing appeared, and the way out", /nothing new appeared in the page/.test(ctx.output) && /requestForeground\(reason\) for a real hover/.test(ctx.output), ctx.output.slice(0, 400))],
   },
   {
-    // A NATIVE view's hover works from the background: the Form window's "Native Hover Area" shows "Native Hidden Item"
-    // when the pointer enters it (an AppKit tracking area), and the item is then clicked. Its window holds no web page,
-    // so its bind says nothing about hover.
-    name: "hover on a native view in the background: the hidden item appears and is clicked", group: "click",
+    // A NATIVE view takes no hover from the background either (round 11 — live and run126: an AppKit tracking area
+    // follows the REAL cursor; posted moves, before and after the synthetic activation, never reached its mouseEntered).
+    // The Form window's "Native Hover Area" would show "Native Hidden Item": the hover's answer says nothing appeared and
+    // the way out, and nothing is clicked in its place.
+    name: "hover on a native view in the background: nothing appears, and the answer says so", group: "click",
     session: "fresh",
     before: [{ role: "main", cmd: "reset" }],
     code: `
 const form = await win("Fixture Form");
 const area = await pick(form, "Native Hover Area");
 await form.hover(area.ref, { ms: 600 });
-// The item is listed once it is shown (a hidden button is not): looked for up to 2 s.
-let item;
-for (const t0 = Date.now(); ; await sleep(200)) {
-  try { item = await pick(form, "Native Hidden Item", "button"); break; } catch (e) { if (Date.now() - t0 > 2000) throw e; }
-}
-await form.click(item.ref);
 report({ ok: true });`,
     verify: (ctx) => [ok(ctx),
-      check("the pointer entering the area revealed the item", has(ctx.events, ctx.since, "form.hover", () => true)),
-      check("the revealed item was clicked exactly once", eventsSince(ctx.events, ctx.since, "form.hoveritem").length === 1,
+      check("no mouseEntered reached the area (tracking follows the real cursor)", eventsSince(ctx.events, ctx.since, "form.hover").length === 0,
+        JSON.stringify(eventsSince(ctx.events, ctx.since, "form.hover"))),
+      check("the hover's answer says nothing appeared, and the way out", /nothing new appeared in the window/.test(ctx.output) && /requestForeground\(reason\) for a real hover/.test(ctx.output), ctx.output.slice(0, 400)),
+      check("nothing was clicked in its place", eventsSince(ctx.events, ctx.since, "form.hoveritem").length === 0,
         JSON.stringify(eventsSince(ctx.events, ctx.since, "form.hoveritem"))),
       check("the Form window's bind says nothing about hover (no web page in it)", !/don't react to hover/.test(ctx.output), ctx.output.slice(0, 300))],
   },

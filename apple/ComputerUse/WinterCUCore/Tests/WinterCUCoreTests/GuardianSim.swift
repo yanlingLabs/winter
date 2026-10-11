@@ -311,6 +311,10 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     var bannerSubject: pid_t?
     /// Apps the user launched (Spotlight, the Finder), and when: their first activation is theirs.
     var userLaunches: [pid_t: Double] = [:]
+    /// Apps the AGENT's action started (a link it pressed opening an app that was not running — round 11, HIGH #1): the
+    /// process start, and whether it was clearly the agent's then (the world's own record: no input of the user's in the
+    /// 2.5 s before it, an opener act within 1.5 s before it, no Secure Event Input).
+    var agentColdLaunches: [pid_t: (start: Double, clearly: Touch)] = [:]
     var backgroundOpens = 0
     /// An untouched app's coming forward the engine must SAY (sent back, or a system dialog left in front): owed from
     /// the change, due once its notification found it still in front.
@@ -677,7 +681,38 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
 
     /// An app the agent never touched coming forward now: the contract's rule on the world's facts (I1 and its indirect
     /// effects, round 9).
+    /// "Clearly the agent's" now, from the world's own record (round 10's rule).
+    func clearlyNow() -> Touch {
+        let quiet = now - lastObservableHardwareAt, opener = now - lastOpenerAt
+        return secure ? .no : (quiet > 2_600 && opener <= 1_400) ? .yes : (quiet < 2_400 || opener > 1_600) ? .no : .edge
+    }
+
     func untouchedCause(_ pid: pid_t, indirect: Bool, why: String, newPlace n: SPlace) -> SimCause {
+        let generic = untouchedCauseNow(pid, indirect: indirect, why: why, newPlace: n)
+        // The first activation of an app the agent's action started (round 11, HIGH #1): the user's launch only when the
+        // start was not clearly the agent's; when it was, and no input of the user's came since, sent back like any
+        // indirect effect (during a visit, the visit's — the ordinary rule).
+        guard let c = agentColdLaunches[pid], now - c.start < 60_000, !(cands.allSatisfy { $0.place == n } && !cands.isEmpty) else {
+            return generic
+        }
+        let adopt = SimCause.untouched(pid, .adopt, indirect: indirect, why)
+        let clearlyCase: SimCause = {
+            if visiting || secure { return generic }
+            let since = lastObservableHardwareAt - c.start
+            if since > 30 { return generic }
+            let back = SimCause.untouched(pid, .undone, indirect: true, why + " (the agent's action started it)")
+            let sentBack: SimCause = competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop) != nil
+                ? .either([back, adopt], "a switch input of the user's it may have been") : back
+            return since < -30 ? sentBack : .either([sentBack, generic], "input of the user's right at the process start")
+        }()
+        switch c.clearly {
+        case .no: return adopt
+        case .yes: return clearlyCase
+        case .edge: return .either([adopt, clearlyCase], "at the edge of 'clearly the agent's' at the process start")
+        }
+    }
+
+    func untouchedCauseNow(_ pid: pid_t, indirect: Bool, why: String, newPlace n: SPlace) -> SimCause {
         let adopt = SimCause.untouched(pid, .adopt, indirect: indirect, why)
         // Back to their place (their own app coming forward again): nothing to undo, nothing to say.
         if !cands.isEmpty, cands.allSatisfy({ $0.place == n }) { return .user(n, "back to their place") }
@@ -700,10 +735,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         // last 2.5 s, an action of the agent's that can open apps within 1.5 s, no Secure Event Input; otherwise, with the
         // agent active, left in front (never adopted — only their switch input does that), said.
         let left = SimCause.untouched(pid, .leftAlone, indirect: indirect, why + " (not clearly the agent's)")
-        let quiet = now - lastObservableHardwareAt, opener = now - lastOpenerAt
-        let clearly: Touch = secure ? .no
-            : (quiet > 2_600 && opener <= 1_400) ? .yes
-            : (quiet < 2_400 || opener > 1_600) ? .no : .edge
+        let clearly = clearlyNow()
         switch agentRecent(at: now) {
         case .no:
             base = clearly == .yes ? notTheirs : adopt
@@ -860,6 +892,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             }
             if case .user = cause { lastUserChangeAt = now } else if case .engine = cause {} else { lastOtherChangeAt = now }
             userLaunches[n.app] = nil  // its first activation, done
+            agentColdLaunches[n.app] = nil
             frontCause = cause
             if n.app == SimPid.target { targetForwardDuringOp = true }
             switch cause {

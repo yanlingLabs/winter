@@ -25,7 +25,10 @@ final class GuardianRound10Tests: XCTestCase {
         var h = CUFocusGuardianCore()
         h.begin(view: CUGuardedView(app: 1, space: 100))
         h.userInteracted(500, front: 1, now: 5)
-        XCTAssertFalse(h.userIsWorking(in: 500, front: 500, now: 6), "switched there 1 s after a drag: only looking")
+        XCTAssertFalse(h.userIsWorking(in: 500, front: 500, now: 6.6), "switched there 1.6 s after a drag: only looking")
+        // (Within the claim's window — 1.5 s, round 11 — a slow app's activation after their click still counts.)
+        h.userInteracted(500, front: 1, now: 10)
+        XCTAssertTrue(h.userIsWorking(in: 500, front: 500, now: 11.2))
     }
 
     /// The engine's wiring: a key the tap sees while the bound target is in front refuses the next act on it at once

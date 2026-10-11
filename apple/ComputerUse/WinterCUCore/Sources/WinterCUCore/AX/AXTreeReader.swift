@@ -23,6 +23,17 @@ struct AXTreeReader {
         kAXPlaceholderValueAttribute, "AXDOMIdentifier",
     ]
 
+    /// A check box's or radio button's `AXValue` as checked (true), unchecked (false), or unknown (nil): only 1/0 (and
+    /// true/false) say so — a mixed box (2) or a value that is not a state (a web radio's own `value`, a label) claims
+    /// nothing (queue item 1, round 11: two web radios both read "(checked)"). Pure.
+    static func checkedState(_ v: String) -> Bool? {
+        switch v.trimmingCharacters(in: .whitespaces).lowercased() {
+        case "1", "true": return true
+        case "0", "false": return false
+        default: return nil
+        }
+    }
+
     /// Roles whose `AXValue` the state shows (or turns into checked/unchecked).
     static let valueRoles: Set<String> = [
         "AXTextField", "AXTextArea", "AXStaticText", "AXComboBox", "AXSlider", "AXCheckBox", "AXRadioButton",
@@ -73,7 +84,7 @@ struct AXTreeReader {
                 value = AX.attribute(e, kAXValueAttribute).flatMap(AX.stringValue)
             }
             if Self.checkRoles.contains(role) || subrole.map(Self.checkRoles.contains) == true {
-                if let v = value { states.insert(v == "0" ? .unchecked : .checked) }
+                if let v = value, let checked = Self.checkedState(v) { states.insert(checked ? .checked : .unchecked) }
                 value = nil
             } else if role == "AXDisclosureTriangle" {
                 if let v = value { states.insert(v == "0" ? .collapsed : .expanded) }

@@ -200,6 +200,7 @@ final class SimRun {
     let opener = fakeElement(97_031)
     var launchSeq: pid_t = 800
     var userLaunchSeq: pid_t = 0
+    var coldSeq: pid_t = 0
     var openVisit: CUOpenVisit?
 
     var trace: [String] { world.trace }
@@ -735,13 +736,52 @@ final class SimRun {
         }
     }
 
+    /// The agent's action starts an app that was not running (a link opening the default browser): its process starts
+    /// `startAfter` ms later (NSWorkspace's notice 30 ms after, unless missed), and it comes forward `forwardAfter` ms after
+    /// its start — the world records whether the start was clearly the agent's (round 11, HIGH #1).
+    func coldLaunch(startAfter: Double, forwardAfter: Double, noticed: Bool) {
+        let w = world
+        w.schedule(after: startAfter, "an app the agent's action opened starts") { [unowned self] in
+            let pid = w.lock.withLock { () -> pid_t in
+                self.coldSeq += 1
+                let pid = 970 + self.coldSeq
+                let wid = UInt32(9_700 + Int(pid))
+                w.running.insert(pid)
+                w.bundles[pid] = "sim.cold.\(pid)"
+                w.startedAt[pid] = w.now
+                w.wins[wid] = SimWin(id: wid, pid: pid, frame: CGRect(x: 320, y: 620, width: 300, height: 200), space: w.space1)
+                w.mainWin[pid] = wid
+                w.zOrder.append(pid)
+                w.agentColdLaunches[pid] = (w.now, w.clearlyNow())
+                return pid
+            }
+            w.log("\(SimPid.name(pid)) starts (the agent's action opened it; clearly the agent's: \(w.lock.withLock { w.agentColdLaunches[pid].map { "\($0.clearly)" } ?? "?" }))")
+            if noticed { w.schedule(after: 30, "NSWorkspace: \(SimPid.name(pid)) launched") { [unowned self] in self.core.onAppLaunched(pid: pid) } }
+            w.schedule(after: forwardAfter, "\(SimPid.name(pid)) comes forward (the agent's action opened it)") {
+                w.lock.withLock {
+                    guard w.running.contains(pid), pid != w.front else { return }
+                    let n = w.landingPlace(pid)
+                    guard n.app != w.front || n.space != w.space else { return }
+                    w.change(to: n, cause: w.untouchedCause(pid, indirect: true, why: "what the agent's click opened, freshly launched", newPlace: n),
+                             why: "\(SimPid.name(pid)) comes forward — the agent's click launched it")
+                    w.indirectSince[pid] = w.now
+                }
+            }
+        }
+    }
+
     /// An app the agent never touched comes forward because of what the agent did (a link it clicked, a file its
     /// AppleScript opened, a dialog its action raised).
     func indirect(_ pid: pid_t, after ms: Double, why: String) {
         let w = world
         w.schedule(after: ms, "\(SimPid.name(pid)) comes forward (\(why))") {
             w.lock.withLock {
-                if pid == SimPid.coreServices { w.wins[761]?.shown = true; w.wins[761]?.space = w.space1 }
+                // CoreServicesUIAgent starts on demand: a dialog not on screen is a fresh process (review of round 10,
+                // MEDIUM #2 — never "the user's own launch").
+                if pid == SimPid.coreServices {
+                    if w.wins[761]?.shown != true { w.startedAt[pid] = w.now }
+                    w.wins[761]?.shown = true; w.wins[761]?.space = w.space1
+                }
                 let n = w.landingPlace(pid)
                 guard n.app != w.front || n.space != w.space else { return }
                 var cause = w.untouchedCause(pid, indirect: true, why: why, newPlace: n)
@@ -874,11 +914,12 @@ final class SimRun {
                 w.actEpisode = w.episode
                 w.actStartFront = w.front
             }
-            w.agentBegins(tpid)
-            defer { w.agentEnds(tpid) }
             // I6 (round 10): an act on the app the user is working in is refused at once; any other act is not refused for it.
+            // A refused act is no operation on the app and no opener act (round 11 — the review of round 10, LOW #9).
             let working = w.userWorks(in: tpid)
-            let opener = CUCore.actCanOpenApps(action)
+            if !working { w.agentBegins(tpid) }
+            defer { if !working { w.agentEnds(tpid) } }
+            let opener = CUCore.actCanOpenApps(action) && !working
             if opener { w.lock.withLock { w.lastOpenerAt = w.now } }
             defer { if opener { w.lock.withLock { w.lastOpenerAt = w.now } } }
             do {
@@ -901,7 +942,16 @@ final class SimRun {
             await act(.type(CUTypeAction(text: String(repeating: "x", count: n))), "c\(step.seed)")
         case .agentClick(let what, let ms):
             // (An act refused because the user works in T opens nothing.)
-            if what == .opener, !w.userWorks(in: tpid) { indirect(SimPid.safari, after: ms ?? r.double(150, 900), why: "the button the agent clicked in T opened it") }
+            if what == .opener, !w.userWorks(in: tpid) {
+                // (Its own generator, so the seeds' other draws stay as they were.) Sometimes the app it opens was not
+                // running: the agent's action cold-launches it (round 11, HIGH #1).
+                var c = SimRNG(step.seed ^ 0xC01D_1A57)
+                if c.chance(0.3) {
+                    coldLaunch(startAfter: c.double(30, 600), forwardAfter: c.double(200, 3_500), noticed: c.chance(0.8))
+                } else {
+                    indirect(SimPid.safari, after: ms ?? r.double(150, 900), why: "the button the agent clicked in T opened it")
+                }
+            }
             let el = what == .link ? link : what == .opener ? opener : field
             let ref = target.refs.ref(for: AXIdentity(element: el))
             await act(.click(CUClickAction(ref: ref)), "c\(step.seed)")
@@ -911,9 +961,13 @@ final class SimRun {
                 let app = (dialog ?? !r.chance(0.7)) ? SimPid.coreServices : SimPid.preview
                 indirect(app, after: ms ?? r.double(200, min(1_000, seconds * 1000)), why: "what the agent's AppleScript opened")
             }
-            w.agentBegins(tpid, raise: true)
-            w.lock.withLock { w.lastOpenerAt = w.now }
-            defer { w.agentEnds(tpid); w.lock.withLock { w.lastOpenerAt = w.now } }
+            // (Refused at once while the user works in T: no operation on the app, no opener act — as the engine.)
+            let working = w.userWorks(in: tpid)
+            if !working {
+                w.agentBegins(tpid, raise: true)
+                w.lock.withLock { w.lastOpenerAt = w.now }
+            }
+            defer { if !working { w.agentEnds(tpid); w.lock.withLock { w.lastOpenerAt = w.now } } }
             do {
                 _ = try await core.targetAppleScript(TargetAppleScriptParams(targetId: "tsim", source: "tell application \"Finder\" to get name"))
             } catch { w.log("the script: \((error as? CUError)?.message ?? "\(error)")") }
