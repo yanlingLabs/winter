@@ -12,6 +12,9 @@ manifest caching, and disabled netrc/Keychain credential search. Git reads no
 user/global configuration and cannot prompt for credentials. Clang module and
 Bun transpiler caches stay in this invocation's output. Bun smoke uses explicit
 empty configuration and disables environment-file autoloading.
+The config argument uses `--config=PATH`; separate arguments can exit without
+running the script on Bun 1.3.14. Every runtime smoke also requires its typed
+JSON completion receipt, so a silent successful exit cannot pass verification.
 
 ## Reproduce
 

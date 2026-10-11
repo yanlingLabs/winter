@@ -27,6 +27,18 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def require_json_receipt(log, expected):
+    for line in log.read_text().splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and all(key in value and type(value[key]) is type(wanted)
+                and value[key] == wanted for key, wanted in expected.items()):
+            return
+    raise ValueError(f"successful exit without required execution receipt: {log.name}")
+
+
 def clean_environment():
     env = dict(os.environ)
     for key in list(env):
@@ -158,7 +170,7 @@ class Build:
                                           f"Version: {version}\nCflags: {flags}\nLibs: {libs}\n")
         shutil.copytree(pc, self.bundle / "build-config/apple-sdk-pkgconfig")
 
-    def run(self, label, command, cwd=None, env=None, timeout=900):
+    def run(self, label, command, cwd=None, env=None, timeout=900, receipt=None):
         command = [str(v) for v in command]
         self.commands.append({"label": label, "argv": command, "cwd": str(cwd or ROOT)})
         print(f"{label}: {shlex.join(command)}", flush=True)
@@ -168,6 +180,8 @@ class Build:
             command_env["PWD"] = str(cwd or ROOT)
             subprocess.run(command, cwd=cwd or ROOT, env=command_env,
                            stdout=stream, stderr=subprocess.STDOUT, check=True, timeout=timeout)
+        if receipt is not None:
+            require_json_receipt(log, receipt)
 
     def source(self, name, cache):
         pin = PINS[name]
@@ -367,16 +381,19 @@ class Build:
             f"-L{relocated}", "-lWinterCoworkNetwork", "-o", executable])
         env = clean_environment()
         # Library loads must work with no injected Homebrew or build-prefix search paths.
-        self.run("relocated-network-smoke", [executable], env=env, timeout=30)
+        self.run("relocated-network-smoke", [executable], env=env, timeout=30,
+            receipt={"relocatedNetwork": True, "syntheticNoOutbound": True, "realVM": False})
         if not skip_native:
             env["WINTER_COWORK_NATIVE_TEST_BUILD"] = str(relocated)
             env["BUN_RUNTIME_TRANSPILER_CACHE_PATH"] = str(self.directory / "bun-transpiler-cache")
             config = self.directory / "empty-bunfig.toml"
             config.write_text("")
-            self.run("relocated-native-smoke", ["bun", "run", "--no-env-file", "--config", config,
-                self.native / "node-api/smoke.ts"], env=env, timeout=30)
-            self.run("relocated-client-smoke", ["bun", "run", "--no-env-file", "--config", config,
-                self.native / "node-api/client-smoke.ts"], env=env, timeout=30)
+            self.run("relocated-native-smoke", ["bun", "run", "--no-env-file", f"--config={config}",
+                self.native / "node-api/smoke.ts"], env=env, timeout=30,
+                receipt={"backend": "fake", "nodeAPI": True, "boundedInputOutput": True, "realVM": False})
+            self.run("relocated-client-smoke", ["bun", "run", "--no-env-file", f"--config={config}",
+                self.native / "node-api/client-smoke.ts"], env=env, timeout=30,
+                receipt={"nativeTypedClient": True, "productionFeatureBlocked": True, "realVM": False})
 
 
 def main():

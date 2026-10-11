@@ -96,15 +96,41 @@ relocated dependencies also needed temporary install IDs in their fresh build
 copies so Swift test executables could load them before final relocation.
 The original verified cache is unchanged. No `DYLD_*` workaround is used.
 
+## Combined native package and independently verified execution
+
+`out/build-3x8r74l_/bundle` was built from native checkpoint `59a67a96` with
+the `verified-eof` profile. Its fixed preparer verified the upstream archive,
+patch and complete patched tree. The package's 37 native and 33 network tests
+passed, and the closure checker accepted the native/network libraries, addon,
+and three dependency dylibs. The native dylib SHA256 is
+`280aadf709e050c4144555b27b459266f38fffbe9e6a25e9c38a74ec93fd7558`;
+the addon SHA256 is
+`0dea894abe213a8e8a4f3886adf5fc71741a69b2b22384f9df9daa720c6169b0`.
+
+The original recipe's two Bun smoke logs were empty despite exit zero: Bun
+1.3.14 interpreted separate `--config PATH` arguments without executing the
+following script. Those original smoke exits are invalid evidence. The recipe
+now uses `--config=PATH` and requires typed JSON completion receipts, with a
+regression test rejecting empty or wrong-typed receipts. Nine recipe tests pass.
+
+Root reran both scripts against the unchanged relocated frozen libraries with
+the corrected argument; `verified-smoke.ts.log` and
+`verified-client-smoke.ts.log` under that build directory contain the actual
+completion receipts. The addon proved concurrent fake execution, independent
+cancellation and bounded input/output; the typed client proved ordered input
+and the production-blocked factory. Both explicitly report `realVM: false`.
+These supplemental logs are outside the original bundle manifest, whose source
+recipe and empty smoke logs remain unchanged for audit. The next full recipe
+run must retain the corrected receipts in its manifest material.
+
 ## Pending
 
-Controller/Node-API products and their relocated fake smokes are deferred while
-native lifecycle review fixes modify those sources. The recipe's
+The next native checkpoint adds the protected output transport needed by the
+host Code broker; its integration and packaging are still pending. The recipe's
 `--dependency-bundle` option permits packaging a
 fresh reviewed source snapshot without repeating the dependency source build.
-The recipe now wires the verified-EOF Containerization profile to its fixed
-prepare/verify helper and source retention; the combined native artifact still
-needs to exercise that route. Production team signing, hardened
+The combined package exercises the verified-EOF fixed prepare/verify helper and
+source-retention route. Production team signing, hardened
 compiled-Bun loading, replacement/relinking
 policy, CI provenance, notarization, app integration and all VM/authority
 feasibility gates remain open. This evidence does not authorize enabling Cowork.

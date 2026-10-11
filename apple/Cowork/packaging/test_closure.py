@@ -3,7 +3,7 @@ import unittest
 import json
 from pathlib import Path
 from closure import dependencies, is_system, resolve_reference, runpaths, validate
-from build import Build, PINS, clean_environment
+from build import Build, PINS, clean_environment, require_json_receipt
 from unittest.mock import patch
 
 
@@ -54,6 +54,16 @@ class ClosureTests(unittest.TestCase):
         build = Build.__new__(Build)
         with self.assertRaisesRegex(ValueError, "unknown native source profile"):
             build.prepare_native("/tmp/unreviewed-dependency")
+
+    def test_smoke_needs_typed_completion_receipt_even_after_successful_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "smoke.log"
+            for content in ("", "ordinary output\n", '{"realVM":0}\n', '{"realVM":true}\n'):
+                log.write_text(content)
+                with self.assertRaisesRegex(ValueError, "without required execution receipt"):
+                    require_json_receipt(log, {"realVM": False})
+            log.write_text('ordinary output\n{"realVM":false,"nodeAPI":true}\n')
+            require_json_receipt(log, {"realVM": False, "nodeAPI": True})
 
     def test_verification_checks_runpaths_in_every_architecture(self):
         with tempfile.TemporaryDirectory() as tmp:
