@@ -53,7 +53,13 @@ export interface FakePage {
 }
 
 /** Phase 3: what the fake "server" answers for a URL (a download, or a page). */
-export interface FakeFile { body: string; headers?: Record<string, string>; status?: number }
+export interface FakeFile {
+  body: string; headers?: Record<string, string>; status?: number;
+  /** The request is redirected (302) by its own address, then by each of `redirectThrough`, and answered at `redirectTo`. */
+  redirectTo?: string; redirectThrough?: string[];
+  /** The frame whose request it is (a click's download; "top" by default). */
+  frame?: string;
+}
 
 interface Ctx { frameId: string; session?: string; winter: boolean; doc: number }
 
@@ -204,18 +210,31 @@ export class FakeCdpTransport implements CdpTransport {
       const path = join(dir, fileName);
       writeFileSync(path, body);
       if (this.backdateDownloads) { const old = new Date(Date.now() - 3_600_000); utimesSync(path, old, old); }
-      this.tellDownload(tabKey, { id, state: "done", name: fileName, bytes: body.length, path, mime: file.headers?.["content-type"] ?? "application/octet-stream" });
+      this.tellDownload(tabKey, { id, state: "done", name: fileName, bytes: body.length, path, mime: file.headers?.["content-type"] ?? "application/octet-stream", ...(/^https?:/.test(url) ? { url: file.redirectTo ?? url } : {}) });
     }, 0);
   }
 
   /** Pause a response under Fetch interception, as Chromium does; resolves when the engine continues or fails it. */
   private pauseResponse(t: FakeTab, url: string, file: FakeFile, resourceType: "Document" | "Other"): Promise<"continue" | "fail"> {
     const requestId = `interception-${this.nextReq++}`;
+    const frameId = file.frame ?? "top";
+    // Redirects pause too (a 3xx at the Response stage), under the same request id, before the final answer.
+    const hops = file.redirectTo === undefined ? [] : [url, ...(file.redirectThrough ?? [])];
     return new Promise((resolve) => {
-      t.paused.set(requestId, { session: "", url, body: Buffer.from(file.body), taken: false, settle: (how) => { t.paused.delete(requestId); resolve(how); } });
-      const headers = Object.entries(file.headers ?? { "content-type": "text/html" }).map(([name, value]) => ({ name, value }));
-      headers.push({ name: "Set-Cookie", value: "secret=1" });
-      queueMicrotask(() => this.emit(t, "Fetch.requestPaused", { requestId, frameId: "top", resourceType, request: { url, method: "GET", headers: { Cookie: "x" } }, responseStatusCode: file.status ?? 200, responseHeaders: headers }));
+      const step = (): void => {
+        const hop = hops.shift();
+        if (hop !== undefined) {
+          t.paused.set(requestId, { session: "", url: hop, body: Buffer.alloc(0), taken: false, settle: (how) => { t.paused.delete(requestId); if (how === "fail") resolve("fail"); else step(); } });
+          queueMicrotask(() => this.emit(t, "Fetch.requestPaused", { requestId, frameId, resourceType, request: { url: hop, method: "GET" }, responseStatusCode: 302, responseHeaders: [] }));
+          return;
+        }
+        const at = file.redirectTo ?? url;
+        t.paused.set(requestId, { session: "", url: at, body: Buffer.from(file.body), taken: false, settle: (how) => { t.paused.delete(requestId); resolve(how); } });
+        const headers = Object.entries(file.headers ?? { "content-type": "text/html" }).map(([name, value]) => ({ name, value }));
+        headers.push({ name: "Set-Cookie", value: "secret=1" });
+        queueMicrotask(() => this.emit(t, "Fetch.requestPaused", { requestId, frameId, resourceType, request: { url: at, method: "GET", headers: { Cookie: "x" } }, responseStatusCode: file.status ?? 200, responseHeaders: headers }));
+      };
+      step();
     });
   }
   windows: Array<{ id: number; focused: boolean; tabs: number }> = [{ id: 1, focused: true, tabs: 2 }];

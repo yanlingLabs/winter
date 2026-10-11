@@ -335,9 +335,11 @@ export class Library {
     if (state === "interrupted") {
       this.tell(a, { id: String(item.id), state: "failed", name: safeSegment(item.filename), bytes: item.bytesReceived, error: (delta.error?.current ?? item.error ?? "interrupted").slice(0, 200) });
     } else {
+      // Where the file came from after its redirects: Winter holds it to its dangerous-domain floor before taking it.
+      const from = webUrl(item.finalUrl) ? item.finalUrl : webUrl(item.url) ? item.url : undefined;
       this.tell(a, {
         id: String(item.id), state: "done", name: baseName(item.filename), bytes: item.fileSize > 0 ? item.fileSize : item.bytesReceived, path: item.filename,
-        ...(typeof item.mime === "string" ? { mime: item.mime } : {}),
+        ...(typeof item.mime === "string" ? { mime: item.mime } : {}), ...(from === undefined ? {} : { url: from }),
       });
     }
     this.disarm(a.tabId);

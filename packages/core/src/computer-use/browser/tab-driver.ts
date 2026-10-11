@@ -405,6 +405,9 @@ export class TabDriver {
     await this.release("");
   }
 
+  /** The tab's top-level frame (a download capture tells its document from a frame's). */
+  get mainFrameId(): string | undefined { return this.topFrameId; }
+
   /** Is the tab attached (held) now? */
   get isAttached(): boolean { return this.attached; }
 

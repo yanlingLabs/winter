@@ -30,6 +30,9 @@ export interface CapturedFile {
   nativeId?: string;
   /** The native route: the file the backend reported (outside the staging dir for the extension's route). */
   reportedPath?: string;
+  /** The native route: the address the browser says the file came from, after its redirects — the engine holds it to
+   *  the dangerous-domain floor before the file is placed (the Fetch route checks every address before reading). */
+  url?: string;
 }
 
 /** What a capture saw while it waited, for the sentence when nothing came. */
@@ -73,8 +76,12 @@ const mimeOf = (contentType: string | undefined): string => (contentType ?? "").
 const HTML_MIME = new Set(["text/html", "application/xhtml+xml"]);
 
 /**
- * The Fetch capture on one tab driver. `anyResponse`: the URL route (a temporary tab Winter navigates itself) — the
- * first final 2xx response of any kind is the file.
+ * The Fetch capture on one tab driver. A response is the file when it is an ATTACHMENT (from any frame), or the tab's
+ * own TOP-LEVEL document that says a non-HTML type — a frame's document is the page's own and is left alone, and a
+ * document that names no type is left to the browser. `anyResponse`: the URL route (a temporary tab Winter navigates
+ * itself) — its top-level document is the file whatever its type. `checkUrl`: the dangerous-domain floor, held to every
+ * address the file came through (each redirect, and its own) before a byte is read; the request waits paused meanwhile
+ * (a card may be up), and the wait's clock with it.
  */
 export class FetchCapture {
   private readonly armed = new Set<string>();
@@ -89,10 +96,14 @@ export class FetchCapture {
   started = false;
   /** When the last bytes arrived (each `IO.read`): a slow file is alive while they keep coming. */
   lastProgress = 0;
+  /** The addresses a paused request answered with a redirect, by request id (Fetch keeps the id across redirects). */
+  private readonly hops = new Map<string, string[]>();
+  /** The floor is being asked about the file's addresses (a card may be up): the wait's clock stops. */
+  private checking = false;
 
   constructor(
     private readonly driver: TabDriver,
-    private readonly o: { anyResponse: boolean; stagingDir: string; maxBytes: number; now?: () => number },
+    private readonly o: { anyResponse: boolean; stagingDir: string; maxBytes: number; now?: () => number; checkUrl?: (url: string) => Promise<void> },
   ) {
     this.result = new Promise<CapturedFile>((resolve, reject) => { this.resolveFn = resolve; this.rejectFn = reject; });
     this.result.catch(() => undefined);
@@ -139,26 +150,49 @@ export class FetchCapture {
     if (requestId === undefined) return;
     const go = async (): Promise<void> => { try { await this.driver.send("Fetch.continueRequest", { requestId }, session); } catch { /* the request went away */ } };
     const status = typeof p.responseStatusCode === "number" ? p.responseStatusCode : undefined;
-    if (this.done || this.capturing || status === undefined || p.responseErrorReason !== undefined) { await go(); return; }
-    if (status >= 300 && status < 400) { await go(); return; }
+    const url = String((p.request as { url?: unknown } | undefined)?.url ?? "");
+    if (this.done || this.capturing || status === undefined || p.responseErrorReason !== undefined) { this.hops.delete(requestId); await go(); return; }
+    if (status >= 300 && status < 400) {
+      // A redirect: the request comes back paused at its next address, under the same id.
+      const h = this.hops.get(requestId) ?? [];
+      if (h.length < 20) h.push(url);
+      this.hops.set(requestId, h);
+      await go();
+      return;
+    }
+    const hops = this.hops.get(requestId) ?? [];
+    this.hops.delete(requestId);
     const headers = p.responseHeaders;
     const disposition = header(headers, "content-disposition");
-    const mime = mimeOf(header(headers, "content-type"));
+    const contentType = header(headers, "content-type");
+    const mime = mimeOf(contentType);
     const ok = status >= 200 && status < 300;
-    const isDownload = ok && (
-      this.o.anyResponse
-      || (disposition !== undefined && /^\s*attachment/i.test(disposition))
-      || (p.resourceType === "Document" && !HTML_MIME.has(mime))
-    );
+    const attachment = disposition !== undefined && /^\s*attachment/i.test(disposition);
+    const topDocument = p.resourceType === "Document" && session === undefined
+      && typeof p.frameId === "string" && p.frameId.length > 0 && p.frameId === this.driver.mainFrameId;
+    const isDownload = ok && (attachment || (topDocument && (this.o.anyResponse || (contentType !== undefined && !HTML_MIME.has(mime)))));
     if (!isDownload) {
-      if (p.resourceType === "Document") this.sighting.pages++;
+      if (topDocument) this.sighting.pages++;
       await go();
       return;
     }
     this.capturing = true;
+    const abort = async (): Promise<void> => { try { await this.driver.send("Fetch.failRequest", { requestId, errorReason: "Aborted" }, session); } catch { /* already gone */ } };
+    if (this.o.checkUrl !== undefined) {
+      this.checking = true;
+      try {
+        for (const u of new Set([...hops, url])) await this.o.checkUrl(u);
+      } catch (err) {
+        this.fail(err instanceof Error ? err : new Error(String(err)));
+        await abort();
+        return;
+      } finally {
+        this.checking = false;
+      }
+      if (this.done) { await abort(); return; } // cancelled while the floor asked
+    }
     this.started = true;
     this.lastProgress = (this.o.now ?? Date.now)();
-    const url = String((p.request as { url?: unknown } | undefined)?.url ?? "");
     const name = dispositionName(disposition) ?? urlName(url) ?? "download";
     const length = Number(header(headers, "content-length"));
     try {
@@ -169,7 +203,7 @@ export class FetchCapture {
       this.fail(err instanceof Error ? err : new Error(String(err)));
     } finally {
       // The browser saves nothing and shows nothing; the page stays where it was.
-      try { await this.driver.send("Fetch.failRequest", { requestId, errorReason: "Aborted" }, session); } catch { /* already gone */ }
+      await abort();
     }
   }
 
@@ -206,6 +240,7 @@ export class FetchCapture {
 
   get file(): Promise<CapturedFile> { return this.result; }
   progressAt(): number { return this.lastProgress; }
+  held(): boolean { return this.checking; }
 
   /** Take the arm off everywhere it was put (always — in a `finally`). */
   async disarm(): Promise<void> {
@@ -231,6 +266,8 @@ export class NativeCapture {
   /** Bytes still arriving keep a slow download alive. */
   lastProgress = 0;
   private ids = new Set<string>();
+  /** The address the browser last named for the download (its final one once it is done). */
+  private url?: string;
 
   constructor(
     private readonly transport: CdpTransport,
@@ -261,6 +298,7 @@ export class NativeCapture {
     this.ids.add(d.id);
     this.started = true;
     this.lastProgress = this.o.now();
+    if (typeof d.url === "string" && d.url.length > 0) this.url = d.url;
     switch (d.state) {
       case "started": case "progress":
         if (d.bytes > this.o.maxBytes || (d.totalBytes !== undefined && d.totalBytes > this.o.maxBytes)) this.fail(tooLarge(this.o.maxBytes));
@@ -272,7 +310,7 @@ export class NativeCapture {
         if (d.path === undefined) { this.fail(new Error("the browser finished the download but said nowhere where it saved it")); return; }
         if (d.bytes > this.o.maxBytes) { this.fail(tooLarge(this.o.maxBytes)); return; }
         this.done = true;
-        this.resolveFn?.({ stagedPath: d.path, reportedPath: d.path, name: d.name, bytes: d.bytes, mime: mimeOf(d.mime), nativeId: d.id });
+        this.resolveFn?.({ stagedPath: d.path, reportedPath: d.path, name: d.name, bytes: d.bytes, mime: mimeOf(d.mime), nativeId: d.id, ...(this.url === undefined ? {} : { url: this.url }) });
         return;
       default:
         return;
@@ -282,6 +320,7 @@ export class NativeCapture {
   fail(e: Error): void { if (!this.done) { this.done = true; this.rejectFn?.(e); } }
   get file(): Promise<CapturedFile> { return this.result; }
   progressAt(): number { return this.lastProgress; }
+  held(): boolean { return false; }
   get id(): string | undefined { return [...this.ids][0]; }
 
   async disarm(): Promise<void> {
@@ -316,10 +355,11 @@ export function decodeDataUrl(url: string, maxBytes: number): { bytes: Buffer; m
 
 /** A capture's wait: until the file is in, the start deadline passes with nothing started, the total cap, or a cancel. */
 export async function waitForCapture(
-  capture: { file: Promise<CapturedFile>; started: boolean; fail(e: Error): void; progressAt?(): number },
+  capture: { file: Promise<CapturedFile>; started: boolean; fail(e: Error): void; progressAt?(): number; held?(): boolean },
   o: { startMs: number; totalMs: number; signal: AbortSignal; now: () => number; nothing: () => string },
 ): Promise<CapturedFile> {
-  const t0 = o.now();
+  let t0 = o.now();
+  let last = t0;
   let timer: ReturnType<typeof setInterval> | undefined;
   const onAbort = (): void => capture.fail(new AutomationFailure("Cancelled", "the run was cancelled"));
   o.signal.addEventListener("abort", onAbort);
@@ -327,6 +367,10 @@ export async function waitForCapture(
   try {
     timer = setInterval(() => {
       const now = o.now();
+      // The floor is asking about the file's address (a card may be up): the clock stops while it does.
+      if (capture.held?.() === true) t0 += now - last;
+      last = now;
+      if (capture.held?.() === true) return;
       if (!capture.started && now - t0 >= o.startMs) capture.fail(new AutomationFailure("WaitTimeout", o.nothing()));
       else if (now - t0 >= o.totalMs) capture.fail(new AutomationFailure("WaitTimeout", `the download did not finish within ${Math.round(o.totalMs / 1000)} s`));
       // Stalled: started, but no bytes for as long as a start may take (the progress of the capture that started).

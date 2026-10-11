@@ -99,6 +99,15 @@ describe("downloads (a file the page makes itself)", () => {
     expect(chrome.erased).toEqual([id]);
   });
 
+  test("a finished download names the address it came from after its redirects (Winter holds it to its dangerous-domain floor)", async () => {
+    chrome.grant("downloads");
+    const tabId = await armedTab();
+    await c.handle("downloads.arm", { tabKey: String(tabId), subdir: "Winter/abc123", until: Date.now() + 60_000, maxBytes: 1000 });
+    const id = await chrome.pageDownload({ url: "https://shop.example.com/export?id=1", finalUrl: "https://files.example.net/r/prices.csv", name: "prices.csv", bytes: 5, downloadsDir: "/Users/u/Downloads", fromTab: tabId });
+    const done = notes.filter((n) => n.method === "download").map((n) => (n.params as { download: Record<string, unknown> }).download).find((d) => d.state === "done");
+    expect(done).toMatchObject({ id: String(id), url: "https://files.example.net/r/prices.csv" });
+  });
+
   test("never another site's download, one made before the arm, or one past the size cap; unarmed downloads are left alone", async () => {
     chrome.grant("downloads");
     const free = await chrome.pageDownload({ url: "https://elsewhere.example/a.zip", name: "a.zip", bytes: 1, downloadsDir: "/d" });

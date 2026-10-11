@@ -448,12 +448,12 @@ export class FakeChrome implements ChromeApi {
    * says `Page.downloadWillBegin` for it — `willBegin` "before" (the default) or "after" the browser's item. Returns its id.
    */
   async pageDownload(o: {
-    url: string; referrer?: string; name: string; bytes: number; downloadsDir: string; mime?: string; startTime?: number; complete?: boolean;
+    url: string; finalUrl?: string; referrer?: string; name: string; bytes: number; downloadsDir: string; mime?: string; startTime?: number; complete?: boolean;
     fromTab?: number; willBegin?: "before" | "after"; holdMs?: () => Promise<void>;
   }): Promise<number> {
     const id = this.nextDownload++;
     const item: ChromeDownloadItem = {
-      id, url: o.url, ...(o.referrer === undefined ? {} : { referrer: o.referrer }), filename: `${o.downloadsDir}/${o.name}`,
+      id, url: o.url, ...(o.finalUrl === undefined ? {} : { finalUrl: o.finalUrl }), ...(o.referrer === undefined ? {} : { referrer: o.referrer }), filename: `${o.downloadsDir}/${o.name}`,
       ...(o.mime === undefined ? {} : { mime: o.mime }), startTime: new Date(o.startTime ?? Date.now()).toISOString(), state: "in_progress",
       totalBytes: o.bytes, fileSize: 0, bytesReceived: 0,
     };

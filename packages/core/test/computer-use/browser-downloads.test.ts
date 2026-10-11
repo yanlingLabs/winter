@@ -204,3 +204,64 @@ describe("data: links, destinations, limits, policy", () => {
     r.end();
   });
 });
+
+describe("what a Fetch capture takes, and the floor on every address (review LOW 9)", () => {
+  const FRAMED = "https://shop.example.com/frame.pdf";
+  const exportPage: FakePage = { ...PAGE, url: "https://shop.example.com/export", clickDownload: FRAMED };
+
+  test("a frame's own document is the page's — continued, never read; an untyped top document is left to the browser; a frame's ATTACHMENT is taken", async () => {
+    const { h, r, p, tab } = await opened("chrome", exportPage);
+    const key = tab.id.split(":")[1]!;
+    const sent = (m: string) => h.chrome.sent.filter((x) => x.tabKey === key && x.method === m).length;
+    h.chrome.files[FRAMED] = { body: "%PDF-1.4", headers: { "content-type": "application/pdf" }, frame: "child-frame" };
+    expect((await failure(p("download", { target: 2, timeoutMs: 100 })) as AutomationFailure).kind).toBe("WaitTimeout");
+    expect(sent("Fetch.continueRequest")).toBe(1);
+    expect(sent("Fetch.takeResponseBodyAsStream")).toBe(0);
+    h.chrome.files[FRAMED] = { body: "\u0000\u0001binary", headers: {} };
+    expect((await failure(p("download", { target: 2, timeoutMs: 100 })) as AutomationFailure).kind).toBe("WaitTimeout");
+    expect(sent("Fetch.continueRequest")).toBe(2);
+    expect(sent("Fetch.takeResponseBodyAsStream")).toBe(0);
+    h.chrome.files[FRAMED] = { body: "a,b\n", headers: { "content-type": "text/csv", "content-disposition": 'attachment; filename="framed.csv"' }, frame: "child-frame" };
+    expect(await p("download", { target: 2 })).toMatchObject({ name: "framed.csv", bytes: 4 });
+    r.end();
+  });
+
+  test("a redirect through a listed host is refused before a byte is read (bypass blocks); the temporary tab closes", async () => {
+    const { h, r, p } = await opened("chrome", PAGE, { dangerousAdded: ["evil.example"] });
+    h.chrome.files[CSV] = { ...FILES[CSV]!, redirectThrough: ["https://evil.example/hop"], redirectTo: "https://files.example.net/prices.csv" };
+    const before = new Set(h.chrome.tabs.keys());
+    const e = await failure(p("download", { target: 3 }));
+    expect((e as AutomationFailure).kind).toBe("NotAllowed");
+    expect(e.message).toContain("evil.example is on the dangerous-domains list");
+    expect(h.chrome.sent.some((x) => x.method === "IO.read" || x.method === "Fetch.takeResponseBodyAsStream")).toBe(false);
+    const temp = [...h.chrome.tabs.values()].find((t) => !before.has(t.tabKey))!;
+    expect(h.chrome.sent.filter((x) => x.tabKey === temp.tabKey && x.method === "Fetch.failRequest").map((x) => x.params.errorReason)).toEqual(["Aborted"]);
+    expect(temp.closed).toBe(true);
+    r.end();
+  });
+
+  test("ask: the final address's host gets its site card (the wait's clock stopped meanwhile); allowed, the file is saved", async () => {
+    const { h, r, p } = await opened("chrome", PAGE, { policy: "ask", dangerousAdded: ["evil.example"], answer: (s) => (s.includes("evil.example") ? "once" : "session") });
+    h.chrome.files[CSV] = { ...FILES[CSV]!, redirectTo: "https://evil.example/prices.csv" };
+    expect(await p("download", { target: 3 })).toMatchObject({ name: "prices.csv", bytes: 17 });
+    expect(h.cards.map((c) => c.summary)).toContain("Allow Winter to use evil.example in Google Chrome? It is on the dangerous-domains list.");
+    expect([...r.sites]).toContain("evil.example");
+    r.end();
+  });
+
+  test("the built-in browser's own download, redirected to a listed host: refused before it is placed, the staged copy gone", async () => {
+    const { h, r, p, tmpRoot } = await opened("winter", PAGE, { nativeDownloads: ["winter"], dangerousAdded: ["evil.example"] });
+    h.winter.files[CSV] = { ...FILES[CSV]!, redirectTo: "https://evil.example/prices.csv" };
+    const e = await failure(p("download", { target: 3 }));
+    expect((e as AutomationFailure).kind).toBe("NotAllowed");
+    expect(e.message).toContain("evil.example is on the dangerous-domains list");
+    let placed: string[] = [];
+    try { placed = readdirSync(join(tmpRoot, "downloads")); } catch { placed = []; }
+    expect(placed).toEqual([]);
+    const staged = join(h.home, "cache", "downloads", "s1");
+    let left: string[] = [];
+    try { left = readdirSync(staged); } catch { left = []; }
+    expect(left).toEqual([]);
+    r.end();
+  });
+});

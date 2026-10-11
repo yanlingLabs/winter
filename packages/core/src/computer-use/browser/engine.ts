@@ -14,7 +14,7 @@
 // `browsers.tab` is a bind; reads are observes; acts are acts. One grant covers the browser as an app and its tabs.
 // The dangerous-domain floor and the secure-field floor apply to both backends.
 import { randomBytes } from "node:crypto";
-import { constants, copyFileSync, lstatSync, realpathSync, rmdirSync, writeFileSync } from "node:fs";
+import { constants, copyFileSync, lstatSync, realpathSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { nextScreenshotQuality, screenshotBudgetFor, SCREENSHOT_BYTE_CAP, SCREENSHOT_QUALITY } from "../budget";
 import { AutomationFailure } from "../errors";
@@ -1637,6 +1637,13 @@ export class BrowserEngine {
     this.downloadsByRun.set(runKey, count + 1);
 
     const staging = newStagingDir(this.deps.home, sid);
+    // The dangerous-domain floor, on every address a file comes through (its redirects and its own), not just the first.
+    const floor = async (u: string): Promise<void> => {
+      if (!/^https?:/i.test(u)) return;
+      await ensureSiteAllowed(scope, this.approvals, this.deps.site ?? {}, u, this.browserName(b.backend), cwd);
+      scope.live();
+      noteSiteOf(scope, u);
+    };
     let captured: CapturedFile;
     let fromBrowserFolder: { path: string; subdir: string; id?: string; transport: CdpTransport; armedAt: number } | undefined;
     if (url !== undefined && /^data:/i.test(url)) {
@@ -1646,7 +1653,7 @@ export class BrowserEngine {
       captured = { stagedPath, bytes: bytes.length, mime, name: linkName ?? `download${extFor(mime)}` };
     } else if (url !== undefined && /^blob:/i.test(url)) {
       if (ref === undefined) throw new AutomationFailure("NotAllowed", "a blob: address only works inside its page — pass the link's ref instead");
-      const out = await this.captureByClick(scope, b, driver, ref, { staging, startMs, totalMs, fetch: false });
+      const out = await this.captureByClick(scope, b, driver, ref, { staging, startMs, totalMs, fetch: false, floor });
       captured = out.file;
       fromBrowserFolder = out.browserFolder;
     } else if (url !== undefined) {
@@ -1657,13 +1664,20 @@ export class BrowserEngine {
       noteSiteOf(scope, checked);
       captured = winter
         ? await this.captureNativeUrl(scope, b, driver, checked, { staging, startMs, totalMs })
-        : await this.captureUrlRoute(scope, b, checked, { staging, startMs, totalMs });
+        : await this.captureUrlRoute(scope, b, checked, { staging, startMs, totalMs, floor });
     } else {
-      const out = await this.captureByClick(scope, b, driver, ref!, { staging, startMs, totalMs, fetch: !winter });
+      const out = await this.captureByClick(scope, b, driver, ref!, { staging, startMs, totalMs, fetch: !winter, floor });
       captured = out.file;
       fromBrowserFolder = out.browserFolder;
     }
     scope.live();
+    // A browser's own download names its final address only once it is done: held to the floor before it is placed.
+    if (captured.url !== undefined) {
+      try { await floor(captured.url); } catch (err) {
+        this.discardCaptured(staging, fromBrowserFolder);
+        throw err;
+      }
+    }
 
     // Into place: the name the server (or the browser) suggested, under the rules of `download-paths.ts`.
     const plan: DownloadPlan = planDownload(args.to, captured.name, roots);
@@ -1684,13 +1698,13 @@ export class BrowserEngine {
   /** Arm the tab, click the ref, take whichever capture catches first. */
   private async captureByClick(
     scope: TabRunScope, b: Binding, driver: TabDriver, ref: number,
-    o: { staging: string; startMs: number; totalMs: number; fetch: boolean },
+    o: { staging: string; startMs: number; totalMs: number; fetch: boolean; floor: (url: string) => Promise<void> },
   ): Promise<{ file: CapturedFile; browserFolder?: { path: string; subdir: string; id?: string; transport: CdpTransport; armedAt: number } }> {
     const winter = this.familyOf(b.backend) === "winter";
     const name = this.browserName(b.backend);
     const transport = driver.transport;
     if (o.fetch) this.requireCdp3(driver, "download()");
-    const fetch = o.fetch ? new FetchCapture(driver, { anyResponse: false, stagingDir: o.staging, maxBytes: DOWNLOAD_MAX_BYTES, now: () => this.now() }) : undefined;
+    const fetch = o.fetch ? new FetchCapture(driver, { anyResponse: false, stagingDir: o.staging, maxBytes: DOWNLOAD_MAX_BYTES, now: () => this.now(), checkUrl: o.floor }) : undefined;
     const subdir = winter ? "" : `Winter/${randomBytes(6).toString("hex")}`;
     let native: NativeCapture | undefined;
     if (transport.armDownloads !== undefined && transport.onDownload !== undefined) {
@@ -1765,7 +1779,7 @@ export class BrowserEngine {
    * interception (any final 2xx is the file), then the tab closed. The bound tab itself is never navigated (a "leave
    * this page?" there could cost it its page).
    */
-  private async captureUrlRoute(scope: TabRunScope, b: Binding, url: string, o: { staging: string; startMs: number; totalMs: number }): Promise<CapturedFile> {
+  private async captureUrlRoute(scope: TabRunScope, b: Binding, url: string, o: { staging: string; startMs: number; totalMs: number; floor: (url: string) => Promise<void> }): Promise<CapturedFile> {
     const sid = scope.sessionId;
     const name = this.browserName(b.backend);
     const transport = this.deps.registry.get(b.backend);
@@ -1784,7 +1798,7 @@ export class BrowserEngine {
     try {
       await temp.ensureAttached(sid);
       scope.live();
-      fetch = new FetchCapture(temp, { anyResponse: true, stagingDir: o.staging, maxBytes: DOWNLOAD_MAX_BYTES, now: () => this.now() });
+      fetch = new FetchCapture(temp, { anyResponse: true, stagingDir: o.staging, maxBytes: DOWNLOAD_MAX_BYTES, now: () => this.now(), checkUrl: o.floor });
       await fetch.arm();
       const f = fetch;
       void temp.send<{ errorText?: unknown }>("Page.navigate", { url }).then((res) => {
@@ -1798,6 +1812,21 @@ export class BrowserEngine {
       await fetch?.disarm();
       if (s.agentTabs.get(key) === agent) this.closeAgentTab(sid, s, key, agent, "closed");
     }
+  }
+
+  /** A captured file that will not be placed (the floor refused its address): the staged copy goes, and a file the
+   *  browser saved into Winter's own subfolder of its downloads folder goes with its item in the browser's list. */
+  private discardCaptured(staging: string, fromBrowserFolder: { path: string; subdir: string; id?: string; transport: CdpTransport } | undefined): void {
+    try { rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
+    if (fromBrowserFolder === undefined) return;
+    try {
+      const st = lstatSync(fromBrowserFolder.path);
+      if (st.isFile() && dirname(fromBrowserFolder.path).endsWith(`/${fromBrowserFolder.subdir}`)) {
+        unlinkSync(fromBrowserFolder.path);
+        try { rmdirSync(dirname(fromBrowserFolder.path)); } catch { /* not empty, or gone */ }
+      }
+    } catch { /* gone already */ }
+    if (fromBrowserFolder.id !== undefined) void fromBrowserFolder.transport.releaseDownload?.(fromBrowserFolder.id).catch(() => undefined);
   }
 
   /** The built-in browser saved into the staging directory: the file it reported must be there. */
@@ -1943,7 +1972,7 @@ function extFor(mime: string): string {
 
 /** The first capture to catch a file wins; the wait fails only when every capture failed (with the first's error). Its
  *  progress is that of the capture(s) that STARTED — one still waiting never makes a running one look stalled. */
-function firstOf(captures: Array<FetchCapture | NativeCapture>): { file: Promise<CapturedFile>; readonly started: boolean; fail(e: Error): void; progressAt(): number } {
+function firstOf(captures: Array<FetchCapture | NativeCapture>): { file: Promise<CapturedFile>; readonly started: boolean; fail(e: Error): void; progressAt(): number; held(): boolean } {
   const file = new Promise<CapturedFile>((resolve, reject) => {
     let failed = 0;
     let first: unknown;
@@ -1951,6 +1980,8 @@ function firstOf(captures: Array<FetchCapture | NativeCapture>): { file: Promise
       c.file.then(resolve, (err: unknown) => {
         failed++;
         first ??= err;
+        // A refusal (the floor, the size cap) is the answer at once: the other capture has nothing more to add.
+        if (err instanceof AutomationFailure && err.kind === "NotAllowed") { for (const o of captures) if (o !== c) o.fail(err); reject(err); return; }
         if (failed === captures.length) reject(first);
       });
     }
@@ -1961,6 +1992,7 @@ function firstOf(captures: Array<FetchCapture | NativeCapture>): { file: Promise
     get started() { return captures.some((c) => c.started); },
     fail: (e) => { for (const c of captures) c.fail(e); },
     progressAt: () => Math.max(0, ...captures.filter((c) => c.started).map((c) => c.progressAt())),
+    held: () => captures.some((c) => c.held()),
   };
 }
 
