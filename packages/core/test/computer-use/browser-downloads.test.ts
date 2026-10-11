@@ -140,6 +140,15 @@ describe("a user's browser (Fetch interception)", () => {
     expect(readdirSync(folder)).toEqual([]);
     expect(on.fake.released).toEqual(["dl1"]);
     on.r.end();
+
+    // A reported file older than the arm is not this download's: refused, and left where it was.
+    const stale = await opened("chrome", page, { nativeDownloads: ["chrome"] });
+    const staleFolder = join(stale.h.tmp, "Downloads");
+    mkdirSync(staleFolder);
+    stale.fake.browserDownloadsDir = staleFolder;
+    stale.fake.backdateDownloads = true;
+    await expect(stale.p("download", { target: 5 })).rejects.toThrow(/older than the download/);
+    stale.r.end();
   });
 });
 

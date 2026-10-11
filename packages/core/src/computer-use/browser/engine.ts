@@ -1637,7 +1637,7 @@ export class BrowserEngine {
 
     const staging = newStagingDir(this.deps.home, sid);
     let captured: CapturedFile;
-    let fromBrowserFolder: { path: string; subdir: string; id?: string; transport: CdpTransport } | undefined;
+    let fromBrowserFolder: { path: string; subdir: string; id?: string; transport: CdpTransport; armedAt: number } | undefined;
     if (url !== undefined && /^data:/i.test(url)) {
       const { bytes, mime } = decodeDataUrl(url, DOWNLOAD_MAX_BYTES);
       const stagedPath = join(staging, "file");
@@ -1684,7 +1684,7 @@ export class BrowserEngine {
   private async captureByClick(
     scope: TabRunScope, b: Binding, driver: TabDriver, ref: number,
     o: { staging: string; startMs: number; totalMs: number; fetch: boolean },
-  ): Promise<{ file: CapturedFile; browserFolder?: { path: string; subdir: string; id?: string; transport: CdpTransport } }> {
+  ): Promise<{ file: CapturedFile; browserFolder?: { path: string; subdir: string; id?: string; transport: CdpTransport; armedAt: number } }> {
     const winter = this.familyOf(b.backend) === "winter";
     const name = this.browserName(b.backend);
     const transport = driver.transport;
@@ -1698,6 +1698,7 @@ export class BrowserEngine {
       throw new Error("Winter's built-in browser can't save downloads until Winter is updated");
     }
     let nativeRefusal: Error | undefined;
+    const armedAt = this.now();
     try {
       if (fetch !== undefined) await fetch.arm();
       if (native !== undefined) {
@@ -1732,7 +1733,7 @@ export class BrowserEngine {
           return `nothing started a download within ${Math.round(o.startMs / 1000)} s of the click`;
         },
       });
-      if (file.nativeId !== undefined && !winter) return { file, browserFolder: { path: file.reportedPath ?? file.stagedPath, subdir, id: file.nativeId, transport } };
+      if (file.nativeId !== undefined && !winter) return { file, browserFolder: { path: file.reportedPath ?? file.stagedPath, subdir, id: file.nativeId, transport, armedAt } };
       return { file };
     } finally {
       await fetch?.disarm();
@@ -1813,12 +1814,14 @@ export class BrowserEngine {
    * a link, outside Winter's home and the sandbox's read-deny list. Under our subfolder it is MOVED (and the subfolder
    * removed); elsewhere — the user's choice — it is copied and theirs left alone.
    */
-  private takeFromBrowserFolder(f: { path: string; subdir: string }, captured: CapturedFile, staging: string, denyRead: readonly string[]): { source: string; afterPlaced?: () => void } {
+  private takeFromBrowserFolder(f: { path: string; subdir: string; armedAt: number }, captured: CapturedFile, staging: string, denyRead: readonly string[]): { source: string; afterPlaced?: () => void } {
     const path = f.path;
     let st;
     try { st = lstatSync(path); } catch { throw new Error("the browser's downloaded file is gone"); }
     if (st.isSymbolicLink() || !st.isFile()) throw new Error("the browser's downloaded file is not a regular file — nothing was saved");
     if (st.size !== captured.bytes) throw new Error(`the browser's downloaded file is not the size it reported (${st.size} of ${captured.bytes} bytes)`);
+    // Written by this download: modified after the arm (a little slack for the file system's clock).
+    if (st.mtimeMs + 2_000 < f.armedAt) throw new Error("the browser reported a file older than the download — nothing was saved");
     const home = [this.deps.home, (() => { try { return realpathSync(this.deps.home); } catch { return this.deps.home; } })()];
     const realPath = realpathSync(path);
     const under = (p: string, root: string): boolean => p === root || p.startsWith(root.endsWith("/") ? root : `${root}/`);

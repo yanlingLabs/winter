@@ -5,7 +5,7 @@
 import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_IO_READ_MAX, CDP_NETWORK_BUFFER_MAX, CDP_RESPONSE_BODY_MAX_CHARS } from "../../src/computer-use/browser/cdp-allowlist";
 import { cdpEventParams } from "../../src/computer-use/browser/cdp-reduce";
 import type { RtClassify, RtHit, RtNode, RtPoint } from "../../src/computer-use/browser/page-runtime/protocol";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { TransportError, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportDownload, type TransportTab } from "../../src/computer-use/browser/transport";
 
@@ -159,6 +159,8 @@ export class FakeCdpTransport implements CdpTransport {
   browserDownloadsDir?: string;
   /** The extension's optional downloads permission (false: an arm is refused not_allowed). */
   downloadsPermission = true;
+  /** A misbehaving browser: it reports a file that was there before the download (an hour old). */
+  backdateDownloads = false;
   private readonly downloadListeners = new Set<(tabKey: string, d: TransportDownload) => void>();
   private nextReq = 1;
   private nextDl = 1;
@@ -201,6 +203,7 @@ export class FakeCdpTransport implements CdpTransport {
       mkdirSync(dir, { recursive: true });
       const path = join(dir, fileName);
       writeFileSync(path, body);
+      if (this.backdateDownloads) { const old = new Date(Date.now() - 3_600_000); utimesSync(path, old, old); }
       this.tellDownload(tabKey, { id, state: "done", name: fileName, bytes: body.length, path, mime: file.headers?.["content-type"] ?? "application/octet-stream" });
     }, 0);
   }
