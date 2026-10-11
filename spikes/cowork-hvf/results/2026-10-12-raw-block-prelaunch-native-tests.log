@@ -1,0 +1,140 @@
+   Compiling krun-devices v0.1.0-1.19.6 (${REPOSITORY_ROOT}/spikes/cowork-hvf/out/libkrun-block-reclaim/src/devices)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.14s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-block-reclaim/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+running 6 tests
+test virtio::queue::cowork_frq_tests::cowork_frq_pending_count_and_whole_ring_spans_before_pop ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_nonready_nonzero_metadata_never_pops_or_acks ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_zero_length_payload_is_structurally_valid_for_noop ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_ring_intersection_is_returnable_valid_chain_for_noop ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_two_kicks_one_batch_second_has_no_invented_head ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_malformed_chain_never_acknowledged ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 84 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-block-reclaim/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+running 16 tests
+{"kind":"block_ring_pin","clockMicros":0,"row":0,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":7,"row":1,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pintest virtio::block::cowork::tests::cowork_block_wrong_lease_device_cannot_parse_guest_ram ... ok
+","clockMicros":9,"row":2,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+test virtio::block::cowork::tests::cowork_block_ring_pin_survives_empty_queue_and_completion ... {"kind":"block_ring_pin","clockMicros":10,"row":3,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+ok
+{"kind":"test virtio::queue::cowork_pop_tests::cowork_block_checked_pop_allows_forward_progress_and_valid_u16_wrap ... ok
+block_ring_pin","clockMicros":11,"row":4,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}]test virtio::queue::cowork_pop_tests::cowork_block_checked_pop_rejects_regression_overrun_invalid_wrap_and_head_replacement ... ok
+ }
+{"kind":"block_ring_pin","clockMicros":12,"row":5,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":14,"row":6,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+test virtio::block::cowork::tests::cowork_block_frozen_completion_is_pinned_until_gate_reopens ... {"kind":"block_ring_pin","clockMicros":16,"row":7,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+ok
+{"kind":"block_ring_pin","clockMicros":19,"row":8,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+test virtio::block::cowork::tests::cowork_block_unsupported_command_completes_unsupp_without_disk_io ... ok
+{"kind":"block_ring_pin","clockMicros":24,"row":9,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":719,"row":18,"request":3,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":752,"row":19,"request":3 }
+{"kind":"block_ring_pin","clockMicros":56,"row":12,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":57,"row":13,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+test virtio::block::cowork::tests::cowork_block_stale_completion_has_no_copy_or_used_ack ... ok
+{"kind":"block_ring_pin","clockMicros":318,"row":14,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":360,"row":15,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":631,"row":16,test virtio::block::cowork::tests::cowork_block_actual_queue_copies_then_io_has_no_guest_lease ... ok
+"request":1,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+test virtio::block::cowork::tests::cowork_block_terminal_access_fault_wakes_quiet_event_manager ... ok
+{"kind":"block_owned_io_begin","clockMicros":977,"row":22,"request":1 }
+test virtio::block::cowork::tests::cowork_block_nonready_and_cyclic_queue_fail_before_disk_or_ack ... ok
+{"kind":"block_ring_pin","clockMicros":28,"row":10,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":35,"row":11,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":767,"row":20,"request":4,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":1104,"row":25,"request":4test virtio::block::cowork::tests::cowork_block_actual_capture_guest_appends_second_request_both_complete ... ok
+ }
+{"kind":"block_owned_io_end","clockMicros":1148,"row":26,"request":4,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":1181,"row":27,"request":4,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_ring_pin","clockMicros":1099,"row":24,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_owned_io_end","clockMicros":791,"row":21,"request":3,"success":true,"dataBytes":512test virtio::block::cowork::tests::cowork_block_out_of_range_first_head_and_next_are_terminal_not_empty ... ok
+ }
+{"kind":"block_owned_completion_hold","clockMicros":1312,"row":28,"request":3,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_owned_io_end","clockMicros":1029,"row":23,"request":1,"success":true,"dataBytes":512 }
+{"kind":"block_completion_deferred","clockMicros":1376,"row":test virtio::block::cowork::tests::cowork_block_actual_epoll_stop_during_io_drains_reusable_fd ... ok
+29,"request":1 }
+{"kind":"block_request_capture","clockMicros":656,"row":17,"request":2,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":1461,"row":30,"request":2 }
+{"kind":"block_owned_io_end","clockMicros":1492,"row":31,"request":2,"success":true,"dataBytes":512 }
+test virtio::block::cowork::tests::cowork_block_actual_worker_stop_after_io_never_completes_guest ... ok
+{"kind":"block_used_ack","clockMicros":28202,"row":32,"request":4,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":28333,"row":33,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":28420,"row":34,"request":5,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":28444,"row":35,"request":5 }
+{"kind":"block_owned_io_end","clockMicros":28466,"row":36,"request":5,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":28484,"row":37,"request":5,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_used_ack","clockMicros":36083,"row":38,"request":1,"head":0,"success":true }
+test virtio::block::cowork::tests::cowork_block_actual_worker_stalled_io_freezes_and_defers_completion ... ok
+{"kind":"block_used_ack","clockMicros":54786,"row":39,"request":5,"head":0,"success":true }
+test virtio::block::cowork::tests::cowork_block_actual_epoll_reset_reactivate_reuses_drained_stopfd_and_completes_io ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 74 filtered out; finished in 0.06s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-block-reclaim/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+running 10 tests
+test reclaim_access::tests::explicit_abort_keeps_gate_closed ... ok
+test reclaim_access::tests::freeze_denies_new_access_and_snapshots_pinned_io_with_zero_readers ... ok
+test reclaim_access::tests::resume_requires_explicit_complete_mapping_transaction ... ok
+test reclaim_access::tests::pins_budget_and_overflow_are_checked_before_recording ... ok
+test reclaim_access::tests::no_implicit_resume_after_partial_mutation_or_abandoned_freeze ... ok
+test reclaim_access::tests::stopped_or_stale_generation_never_reenters_ram ... ok
+test reclaim_access::tests::frozen_mapping_and_stop_are_serialized_no_operations_after_stop ... ok
+test reclaim_access::tests::waiting_completion_wakes_on_resume_and_stop ... ok
+test reclaim_access::tests::timeout_stops_gate_and_preserves_outstanding_lease ... ok
+test reclaim_access::tests::drain_waits_for_short_copy_without_blocking_lease_drop ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 80 filtered out; finished in 0.02s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-block-reclaim/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+running 8 tests
+test block_bounce::tests::stop_blocks_completion_without_guest_access ... ok
+test block_bounce::tests::duplicate_completion_cannot_touch_unpinned_guest_ram ... ok
+test block_bounce::tests::disk_error_has_no_partial_read_data_and_returns_error_status ... ok
+test block_bounce::tests::completion_during_freeze_stays_pinned_and_is_deferred ... ok
+test block_bounce::tests::get_id_uses_owned_metadata_then_completes_once ... ok
+test block_bounce::tests::malformed_size_and_sector_overflow_do_not_start_io ... ok
+test block_bounce::tests::actual_owned_pipeline_performs_io_with_zero_memory_leases_and_pins_excluded ... ok
+test block_bounce::tests::stale_queue_or_device_generation_cannot_write_completion ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 82 filtered out; finished in 0.00s
+
+   Compiling krun-devices v0.1.0-1.19.6 (${REPOSITORY_ROOT}/spikes/cowork-hvf/out/libkrun-block-reclaim/src/devices)
+   Compiling krun-vmm v0.1.0-1.19.6 (${REPOSITORY_ROOT}/spikes/cowork-hvf/out/libkrun-block-reclaim/src/vmm)
+   Compiling libkrun v1.19.6 (${REPOSITORY_ROOT}/spikes/cowork-hvf/out/libkrun-block-reclaim/src/libkrun)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.64s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-block-reclaim/target/debug/deps/krun-fe8b317545a4d4ac)
+
+running 4 tests
+test cowork_admission_tests::cowork_admission_rejected_disks_never_invoke_actual_construction_callback ... ok
+test cowork_admission_tests::cowork_admission_normalized_gpu_resources_rejected ... ok
+test cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_before_any_vm ... ok
+test cowork_admission_tests::cowork_admission_actual_mapping_ack_gate_stopped_freeze_prevents_all_operations ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 7 tests
+test cowork_control::tests::actual_step_stop_bypasses_queued_pause_ack ... ok
+test cowork_control::tests::actual_handler_rejects_wrong_resume_epoch ... ok
+test cowork_control::tests::actual_wfe_preserves_irq_received_while_parked ... ok
+test cowork_control::tests::actual_boot_wait_parks_then_preserves_boot_arrival ... ok
+test cowork_control::tests::actual_step_unlocks_mmio_before_pause_ack ... ok
+test cowork_control::tests::actual_wfe_deadline_captured_before_post_emulation_park_does_not_restart ... ok
+test cowork_control::tests::actual_wfe_deadline_is_not_restarted_after_pause ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+    Checking krun-devices v0.1.0-1.19.6 (${REPOSITORY_ROOT}/spikes/cowork-hvf/out/libkrun-block-reclaim/src/devices)
+    Checking krun-vmm v0.1.0-1.19.6 (${REPOSITORY_ROOT}/spikes/cowork-hvf/out/libkrun-block-reclaim/src/vmm)
+    Checking libkrun v1.19.6 (${REPOSITORY_ROOT}/spikes/cowork-hvf/out/libkrun-block-reclaim/src/libkrun)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.61s
+{"source": "${REPOSITORY_ROOT}/spikes/cowork-hvf/out/libkrun-block-reclaim", "patchSha256": "00e169fb7e5c527d348269cc8211afc99daa800622bce6140a4b2b42c204951d", "vmStarted": false}

@@ -195,6 +195,23 @@ pub fn service_next(
     disk: &mut impl Disk,
     stopped: impl Fn() -> bool,
 ) -> Result<Step, Fault> {
+    service_next_fixture(
+        access,
+        device,
+        port,
+        disk,
+        stopped,
+        std::time::Duration::ZERO,
+    )
+}
+pub fn service_next_fixture(
+    access: &Access,
+    device: Device,
+    port: &mut impl Port,
+    disk: &mut impl Disk,
+    stopped: impl Fn() -> bool,
+    hold: std::time::Duration,
+) -> Result<Step, Fault> {
     use std::time::{Duration, Instant};
     let wait = || -> Result<bool, Fault> {
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -231,14 +248,66 @@ pub fn service_next(
     if stopped() || access.stopped() {
         return Ok(Step::Stopped);
     }
+    let request = work.request.clone();
+    let pin = work.pin.as_ref().unwrap().identity();
+    let id = crate::block_trace::next_request()?;
+    crate::block_trace::emit("block_request_capture",format!("\"request\":{},\"pin\":{},\"head\":{},\"generation\":{},\"command\":\"{:?}\",\"sector\":{},\"length\":{},\"leaseReleased\":true,\"ranges\":{}",id,pin,request.head,request.queue_generation,request.command,request.sector,request.length,crate::block_trace::ranges(&request.protected)))?;
+    crate::block_trace::emit("block_owned_io_begin", format!("\"request\":{}", id))?;
     let mut completion = perform(work, disk);
+    crate::block_trace::emit(
+        "block_owned_io_end",
+        format!(
+            "\"request\":{},\"success\":{},\"dataBytes\":{}",
+            id,
+            completion.outcome.success,
+            completion.outcome.data.len()
+        ),
+    )?;
+    if !hold.is_zero() {
+        crate::block_trace::emit(
+            "block_owned_completion_hold",
+            format!(
+                "\"request\":{},\"millis\":{},\"osSyscallBlocked\":false",
+                id,
+                hold.as_millis()
+            ),
+        )?;
+        let deadline = Instant::now() + hold;
+        while Instant::now() < deadline {
+            if stopped() || access.stopped() {
+                return Ok(Step::Stopped);
+            }
+            std::thread::sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(5)),
+            );
+        }
+    }
+    let mut deferred = false;
     loop {
         if stopped() || access.stopped() {
             return Ok(Step::Stopped);
         }
         match complete(access, &mut completion, port) {
-            Ok(()) => return Ok(Step::Completed),
+            Ok(()) => {
+                crate::block_trace::emit(
+                    "block_used_ack",
+                    format!(
+                        "\"request\":{},\"head\":{},\"success\":{}",
+                        id, request.head, completion.outcome.success
+                    ),
+                )?;
+                return Ok(Step::Completed);
+            }
             Err(Fault::Frozen) => {
+                if !deferred {
+                    crate::block_trace::emit(
+                        "block_completion_deferred",
+                        format!("\"request\":{}", id),
+                    )?;
+                    deferred = true;
+                }
                 if !wait()? {
                     return Ok(Step::Stopped);
                 }

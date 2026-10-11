@@ -1,0 +1,123 @@
+/* Minimal static PID 1: concurrent Linux work, bounded allocation/free/reuse. */
+#define _GNU_SOURCE
+#include <dirent.h>
+#include <time.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/mount.h>
+#include <sys/reboot.h>
+#include <sys/stat.h>
+#include <sys/utsname.h>
+#include <unistd.h>
+#ifdef COWORK_FIXTURE_SERIAL_LOG
+#include <stdarg.h>
+#include <sys/sysmacros.h>
+static int telemetry_fd=-1;
+static int fixture_printf(const char *format,...) {
+    char line[4096];memcpy(line,"<0>",3);va_list args;va_start(args,format);
+    int n=vsnprintf(line+3,sizeof(line)-3,format,args);va_end(args);
+    if(n<0 || (size_t)n>=sizeof(line)-3 || telemetry_fd<0) return -1;
+    ssize_t written=write(telemetry_fd,line,(size_t)n+3);return written==n+3?n:-1;
+}
+#define printf fixture_printf
+#endif
+#define MIB (1024UL * 1024UL)
+static atomic_uint heartbeat = 0;
+static void *work(void *unused) {
+    (void)unused;
+    for (;;) { unsigned n = atomic_fetch_add(&heartbeat, 1) + 1;
+        printf("{\"kind\":\"guest_heartbeat\",\"tick\":%u}\n", n); sleep(1); }
+}
+static void fail(const char *what) {
+    printf("{\"kind\":\"guest_failure\",\"operation\":\"%s\"}\n", what); fflush(stdout);
+    reboot(RB_POWER_OFF); for (;;) pause();
+}
+static void text(const char *path, char *buf, size_t size) {
+    int fd = open(path, O_RDONLY); if (fd < 0) { snprintf(buf,size,"unavailable"); return; }
+    ssize_t n = read(fd,buf,size-1); close(fd); if (n < 0) n=0; buf[n]=0;
+    buf[strcspn(buf,"\n")]=0;
+}
+static void vmstat(unsigned cycle, const char *phase) {
+    FILE *file=fopen("/proc/vmstat","r"); if(!file) fail("vmstat");
+    char key[100]; unsigned long long value;
+    while(fscanf(file,"%99s %llu",key,&value)==2) {
+        if(!strcmp(key,"nr_free_pages") || !strcmp(key,"nr_active_anon") || !strcmp(key,"nr_inactive_anon")
+           || !strcmp(key,"pgfree") || !strcmp(key,"pgalloc_normal") || !strcmp(key,"pgscan_kswapd")
+           || !strcmp(key,"pgsteal_kswapd"))
+            printf("{\"kind\":\"guest_vmstat\",\"cycle\":%u,\"phase\":\"%s\",\"metric\":\"%s\",\"value\":%llu}\n",cycle,phase,key,value);
+    }
+    fclose(file);
+}
+static atomic_uint io_stop=0,io_cycle=0;
+static atomic_ullong io_reads=0,io_writes=0,io_flushes=0;
+static int io_disk=-1;
+#define IO_BYTES (256UL*1024)
+static uint64_t pattern(unsigned id,unsigned loop,size_t word){return 0x6a39000000000000ULL ^ ((uint64_t)id<<48) ^ ((uint64_t)loop<<24) ^ word;}
+static void *disk_work(void *argument){
+    unsigned id=(unsigned)(uintptr_t)argument;uint64_t *buffer=NULL;if(posix_memalign((void**)&buffer,16384,IO_BYTES))fail("bounded aligned IO buffer");
+    unsigned completed=0;for(unsigned loop=0;loop<1400 && !atomic_load(&io_stop);loop++){
+        off_t offset=(off_t)(id*4*MIB+(loop%16)*IO_BYTES);for(size_t word=0;word<IO_BYTES/8;word++)buffer[word]=pattern(id,loop,word);
+        if(pwrite(io_disk,buffer,IO_BYTES,offset)!=(ssize_t)IO_BYTES)fail("direct block write");atomic_fetch_add(&io_writes,1);
+        memset(buffer,0,IO_BYTES);if(pread(io_disk,buffer,IO_BYTES,offset)!=(ssize_t)IO_BYTES)fail("direct block read");atomic_fetch_add(&io_reads,1);
+        for(size_t word=0;word<IO_BYTES/8;word++)if(buffer[word]!=pattern(id,loop,word))fail("every-byte disk integrity");
+        if(loop%16==0){if(fsync(io_disk))fail("block full sync");atomic_fetch_add(&io_flushes,1);}
+        if(loop%16==0)printf("{\"kind\":\"guest_block_progress\",\"thread\":%u,\"cycle\":%u,\"iteration\":%u,\"reads\":%llu,\"writes\":%llu,\"flushes\":%llu,\"direct\":true,\"integrity\":true}\n",id,atomic_load(&io_cycle),loop,atomic_load(&io_reads),atomic_load(&io_writes),atomic_load(&io_flushes));
+        completed=loop+1;usleep(40000);
+    }
+    printf("{\"kind\":\"guest_block_thread_complete\",\"thread\":%u,\"iterations\":%u}\n",id,completed);free(buffer);return NULL;
+}
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    mkdir("/proc",0755); mkdir("/sys",0755);
+    if (mount("proc","/proc","proc",0,NULL) || mount("sysfs","/sys","sysfs",0,NULL)) fail("mount");
+#ifdef COWORK_FIXTURE_SERIAL_LOG
+    /* Upstream PL011 earlycon works, but its FDT does not bind the regular console here.
+     * Public guest kmsg writes use that same serial path, without virtio-console RAM threads. */
+    if(mknod("/dev/kmsg",S_IFCHR|0600,makedev(1,11)) && access("/dev/kmsg",F_OK)) fail("kmsg node");
+    telemetry_fd=open("/dev/kmsg",O_WRONLY);if(telemetry_fd<0) fail("kmsg open");
+    printf("{\"kind\":\"guest_telemetry\",\"sink\":\"guest-kmsg-via-PL011-earlycon\",\"regularConsoleOpened\":false}\n");
+#endif
+    struct utsname u; if (uname(&u)) fail("uname"); char boot[80]; text("/proc/sys/kernel/random/boot_id",boot,sizeof boot);
+    printf("{\"kind\":\"linux_boot\",\"release\":\"%s\",\"machine\":\"%s\",\"bootId\":\"%s\"}\n",u.release,u.machine,boot);
+    DIR *dir = opendir("/sys/bus/virtio/devices"); if (!dir) fail("virtio inventory"); struct dirent *ent;
+    while ((ent = readdir(dir))) { if (ent->d_name[0]=='.') continue; char path[512], device[64], features[200];
+        snprintf(path,sizeof path,"/sys/bus/virtio/devices/%s/device",ent->d_name); text(path,device,sizeof device);
+        snprintf(path,sizeof path,"/sys/bus/virtio/devices/%s/features",ent->d_name); text(path,features,sizeof features);
+        printf("{\"kind\":\"virtio_device\",\"name\":\"%s\",\"device\":\"%s\",\"features\":\"%s\"}\n",ent->d_name,device,features);
+    } closedir(dir);
+    char device[80];text("/sys/block/vda/dev",device,sizeof device);unsigned major=0,minor=0; if(sscanf(device,"%u:%u",&major,&minor)!=2)fail("guest block sysfs identity");
+    if(mknod("/dev/vda",S_IFBLK|0600,makedev(major,minor)) && access("/dev/vda",F_OK))fail("guest block node");io_disk=open("/dev/vda",O_RDWR|O_DIRECT);if(io_disk<0)fail("guest direct disk open");
+    pthread_t io_threads[2];for(unsigned id=0;id<2;id++)if(pthread_create(&io_threads[id],NULL,disk_work,(void*)(uintptr_t)id))fail("IO thread");
+    pthread_t thread; if(pthread_create(&thread,NULL,work,NULL)) fail("heartbeat");
+    uint64_t *live = mmap(NULL,32*MIB,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    if(live==MAP_FAILED) fail("live allocation"); for(size_t i=0;i<32*MIB/8;i++) live[i]=0x5a5a900012345678ULL;
+    for(unsigned cycle=1;cycle<=3;cycle++) {
+        atomic_store(&io_cycle,cycle);
+        uint64_t *p=mmap(NULL,256*MIB,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+        if(p==MAP_FAILED) fail("bounded allocation"); const uint64_t value=0x12345678abcdef00ULL+cycle;
+        for(size_t i=0;i<256*MIB/8;i++) if(p[i]!=0) fail("anonymous reuse zero fill");
+        for(size_t i=0;i<256*MIB/8;i++) p[i]=value;
+        for(size_t i=0;i<256*MIB/8;i++) if(p[i]!=value) fail("allocated integrity");
+        printf("{\"kind\":\"guest_reuse\",\"cycle\":%u,\"anonymousZeroFill\":true,\"writtenIntegrity\":true,\"bytes\":268435456}\n",cycle);
+        printf("{\"kind\":\"guest_touched\",\"cycle\":%u,\"bytes\":268435456,\"liveBytes\":33554432}\n",cycle);
+        vmstat(cycle,"touched");
+        sleep(3); if(munmap(p,256*MIB)) fail("free");
+        printf("{\"kind\":\"guest_freed\",\"cycle\":%u,\"bytes\":268435456}\n",cycle);
+        vmstat(cycle,"freed");
+        unsigned before=atomic_load(&heartbeat); sleep(10);
+        for(size_t i=0;i<32*MIB/8;i++) if(live[i]!=0x5a5a900012345678ULL) fail("retained integrity");
+        if(atomic_load(&heartbeat)<=before) fail("concurrent progress");
+        printf("{\"kind\":\"guest_integrity\",\"cycle\":%u,\"retained\":true,\"progress\":true}\n",cycle);
+        vmstat(cycle,"after-report-delay");
+    }
+    atomic_store(&io_stop,1);for(unsigned id=0;id<2;id++)if(pthread_join(io_threads[id],NULL))fail("IO join");if(fsync(io_disk))fail("final sync");close(io_disk);
+    printf("{\"kind\":\"guest_block_complete\",\"reads\":%llu,\"writes\":%llu,\"flushes\":%llu,\"threadsJoined\":true,\"integrity\":true}\n",atomic_load(&io_reads),atomic_load(&io_writes),atomic_load(&io_flushes));
+    printf("{\"kind\":\"guest_complete\",\"cycles\":3,\"activeReturnVerified\":false}\n");
+    reboot(RB_POWER_OFF); for (;;) pause();
+}

@@ -8,7 +8,8 @@ def prepare():
     patch=ROOT/pin['patchFile']
     verify(patch,pin['patchSha256'])
     verify(ROOT/'patches/0002-proposed-active-reclaim.patch',pin['preservedA6PatchSha256'])
-    verify(ROOT/pin['previousCandidate']['patchFile'],pin['previousCandidate']['patchSha256'])
+    bases=pin.get('basePatches',[pin['previousCandidate']])
+    for base in bases:verify(ROOT/base['patchFile'],base['patchSha256'])
     source=OUT/'libkrun-block-reclaim'
     if not source.exists():
         base=OUT/'libkrun'
@@ -18,10 +19,11 @@ def prepare():
     if revision!=pin['baseRevision']:raise RuntimeError('Wrong source base')
     verify(source/'Cargo.lock',PINS['libkrun']['lockSha256'])
     if not subprocess.check_output(['git','-C',str(source),'status','--porcelain'],text=True).strip():
-        base_patch=ROOT/pin['previousCandidate']['patchFile']
-        checked(['git','-C',source,'apply','--check',base_patch]);checked(['git','-C',source,'apply',base_patch])
+        for base in bases:
+            base_patch=ROOT/base['patchFile']
+            checked(['git','-C',source,'apply','--check',base_patch]);checked(['git','-C',source,'apply',base_patch])
         checked(['git','-C',source,'apply','--check',patch]);checked(['git','-C',source,'apply',patch])
-    additions=['src/devices/src/reclaim_access.rs','src/devices/src/block_bounce.rs','src/devices/src/virtio/block/cowork.rs',*[f'src/vmm/src/cowork_{name}.rs' for name in ['fixture','ranges','barrier','ops','control','coordinator']]]
+    additions=['src/devices/src/block_trace.rs','src/devices/src/reclaim_access.rs','src/devices/src/block_bounce.rs','src/devices/src/virtio/block/cowork.rs',*[f'src/vmm/src/cowork_{name}.rs' for name in ['fixture','ranges','barrier','ops','control','coordinator']]]
     checked(['git','-C',source,'add','-N',*additions])
     if subprocess.check_output(['git','-C',str(source),'ls-files','--others','--exclude-standard'],text=True).strip():raise RuntimeError('Unexpected source files')
     full=subprocess.check_output(['git','-C',str(source),'diff','--binary','--no-ext-diff'])
@@ -30,7 +32,8 @@ def prepare():
     with tempfile.TemporaryDirectory(prefix='block-delta-',dir=OUT) as directory:
         env=os.environ.copy();env['GIT_INDEX_FILE']=str(Path(directory)/'index')
         checked(['git','-C',source,'read-tree','HEAD'],env=env)
-        checked(['git','-C',source,'apply','--cached',ROOT/pin['previousCandidate']['patchFile']],env=env)
+        for base in bases:checked(['git','-C',source,'apply','--cached',ROOT/base['patchFile']],env=env)
+        checked(['git','-C',source,'add','-N','src/devices/src/block_trace.rs'],env=env)
         if subprocess.check_output(['git','-C',str(source),'diff','--binary','--no-ext-diff'],env=env)!=patch.read_bytes():raise RuntimeError('Actual delta differs from frozen reviewed-baseline patch')
     for local,native in pin['moduleCorrespondence'].items():
         if (ROOT/local).read_bytes()!=(source/native).read_bytes():raise RuntimeError('Actual/shared module differs: '+local)

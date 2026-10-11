@@ -58,6 +58,13 @@ pub struct Pin {
     inner: Arc<Inner>,
     id: u64,
 }
+#[derive(Clone)]
+pub struct PinSnapshot {
+    pub id: u64,
+    pub device: u64,
+    pub generation: u64,
+    pub ranges: Vec<Range>,
+}
 pub struct Frozen {
     inner: Arc<Inner>,
     epoch: u64,
@@ -65,6 +72,7 @@ pub struct Frozen {
     mapping_complete: bool,
     finished: bool,
     ranges: Vec<Range>,
+    pins: Vec<PinSnapshot>,
 }
 fn valid(state: &State, device: Device) -> Result<(), Fault> {
     if state.stopped {
@@ -200,6 +208,16 @@ impl Access {
             .values()
             .flat_map(|(_, ranges)| ranges.iter().copied())
             .collect();
+        let pins = state
+            .pins
+            .iter()
+            .map(|(id, (device, ranges))| PinSnapshot {
+                id: *id,
+                device: device.id,
+                generation: device.generation,
+                ranges: ranges.clone(),
+            })
+            .collect();
         Ok(Frozen {
             inner: self.inner.clone(),
             epoch,
@@ -207,6 +225,7 @@ impl Access {
             mapping_complete: false,
             finished: false,
             ranges,
+            pins,
         })
     }
     /// Notification contains no guest RAM; runs only after the state lock is released.
@@ -294,6 +313,11 @@ impl Drop for Lease {
         self.inner.wake.notify_all();
     }
 }
+impl Pin {
+    pub fn identity(&self) -> u64 {
+        self.id
+    }
+}
 impl Drop for Pin {
     fn drop(&mut self) {
         let mut s = self.inner.state.lock().unwrap();
@@ -305,6 +329,9 @@ impl Drop for Pin {
     }
 }
 impl Frozen {
+    pub fn pin_snapshots(&self) -> &[PinSnapshot] {
+        &self.pins
+    }
     pub fn exclusions(&self) -> &[Range] {
         &self.ranges
     }
