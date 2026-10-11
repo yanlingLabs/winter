@@ -82,4 +82,30 @@ final class Round13Tests: XCTestCase {
         let (s2, p2) = counts.withLock { (starts, stops) }
         XCTAssertEqual(s2, p2, "every start stopped")
     }
+
+    /// MEDIUM #2: the agent's own activation of another app (a blip into B, heard late or not) never ends the user's work
+    /// in A — the next act on A is still refused; another app the user brings forward does end it.
+    func testTheAgentsOwnActivationNeverEndsTheUsersWork() throws {
+        let sys = FakeSystem()
+        sys.running = [1, 500, 600]; sys.front = 500; sys.space = 100
+        sys.windows[77] = FakeSystem.window(77, pid: 500, CGRect(x: 500, y: 0, width: 400, height: 300))
+        sys.stack = [sys.windows[77]!]
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        let a = CUTarget(id: "ta", sessionId: "s", pid: 500, bundleId: "com.example.a", appName: "A",
+                         isChromium: false, mirror: false, windowID: 77, windowTitle: "")
+        core.registerForTesting(a, windowElement: nil)
+        core.switchInputObservableOverride = true
+        XCTAssertTrue(core.startGuardian(privatePath: true))
+        defer { core.stopGuardian() }
+        core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: 0, targetPid: 500, now: core.clock.nowSeconds())
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(a))
+        // The agent's blip into B: B touched; its activation (heard while B is in front, and again late with A back).
+        core.noteGuardianCause(600, raise: false)
+        sys.front = 600
+        core.appActivated(pid: 600)
+        sys.front = 500
+        core.appActivated(pid: 600)
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(a), "the agent's own activation ended nothing")
+    }
 }

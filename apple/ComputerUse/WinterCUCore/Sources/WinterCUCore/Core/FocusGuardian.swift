@@ -1040,8 +1040,11 @@ public struct CUFocusGuardianCore: Sendable {
         return w == app
     }
 
-    /// An app activated (heard by the always-on observer, guarding or not): the user's work in any OTHER app is over.
-    public mutating func otherAppActivated(_ pid: pid_t) {
+    /// An app activated (heard by the always-on observer, guarding or not): the user's work in any OTHER app is over —
+    /// only when that app is IN FRONT NOW and the agent has no live cause on it (a blip, a visit, a hold, rung 4, an open:
+    /// its own activation, heard late or not, never ends the user's work — review of round 12, MEDIUM #2).
+    public mutating func otherAppActivated(_ pid: pid_t, front: pid_t?, now: TimeInterval) {
+        guard front == pid, !isTouched(pid, now: now), exemptions[pid] == nil, !(visiting(now: now) && pid == visitApp) else { return }
         if let w = userWorkingApp, w != pid { userWorkingApp = nil }
         if let p = pendingWork, p.app != pid { pendingWork = nil }
     }
