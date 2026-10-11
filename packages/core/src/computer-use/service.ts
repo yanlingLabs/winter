@@ -834,6 +834,8 @@ export class ComputerV2Service {
     if (typeof q === "string" && q.length > 0) query = q;
     else if (q !== null && typeof q === "object" && !Array.isArray(q)) {
       const o = q as Record<string, unknown>;
+      const tabOnly = ["label", "placeholder", "testId", "css"].filter((k) => o[k] !== undefined);
+      if (tabOnly.length > 0) throw bad(`find()'s ${tabOnly.join(", ")} ${tabOnly.length === 1 ? "is" : "are"} for browser tabs — an app takes { role, name, text }`);
       query = Object.fromEntries(["role", "name", "text"].filter((k) => typeof o[k] === "string").map((k) => [k, o[k] as string]));
       if (Object.keys(query).length === 0) throw bad("find() takes text, or { role, name, text }");
     } else throw bad("find() takes text, or { role, name, text }");

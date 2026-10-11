@@ -41,7 +41,7 @@ export const EXTRA_PRIMITIVES = ["extra", "dict", "help"] as const;
 export const TAB_PRIMITIVES = ["state", "find", "screenshot", "click", "setValue", "type", "paste", "key", "scroll", "drag",
   "select", "hover", "waitFor", "waitForIdle", "goto", "back", "forward", "reload", "url", "title", "text", "upload", "keep", "handoff", "close",
   // Phase 3
-  "console", "network", "networkBody"] as const;
+  "console", "network", "networkBody", "inspect", "html", "assets", "dialog", "answerDialog"] as const;
 export const BROWSER_PRIMITIVES = ["browsers.list", "browsers.open", "browsers.tabs", "browsers.tab"] as const;
 export type AppPrimitive = (typeof APP_PRIMITIVES)[number];
 export type GlobalPrimitive = (typeof GLOBAL_PRIMITIVES)[number];

@@ -223,6 +223,11 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     console(o?: unknown) { return call("console", tid(this), opts(o)); }
     network(o?: unknown) { return call("network", tid(this), opts(o)); }
     networkBody(id: unknown, o?: unknown) { return call("networkBody", tid(this), { id, ...opts(o) }); }
+    inspect(t: unknown, o?: unknown) { return call("inspect", tid(this), { target: t, ...opts(o) }); }
+    html(o?: unknown) { return call("html", tid(this), opts(o)); }
+    assets(o?: unknown) { return call("assets", tid(this), opts(o)); }
+    dialog() { return call("dialog", tid(this), {}); }
+    answerDialog(accept: unknown, text?: unknown) { return call("answerDialog", tid(this), { accept, ...(text === undefined ? {} : { text }) }).then(nothing); }
     keep() { return call("keep", tid(this), {}).then(nothing); }
     handoff() { return call("handoff", tid(this), {}).then(nothing); }
     close() { return call("close", tid(this), {}).then(nothing); }

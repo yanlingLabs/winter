@@ -68,7 +68,16 @@ export type RtClassify =
 /** What a pixel point hits in a frame: a native picker control, or an iframe to look into (its element's id). */
 export interface RtHit { picker?: string; id?: RtId; frame?: RtId }
 
-export interface RtFindQuery { text?: string; role?: string; name?: string }
+/** `label`, `placeholder`, `testId`, `css` (Phase 3) search the DOM itself; `exact`: whole, case-sensitive matches. */
+export interface RtFindQuery { text?: string; role?: string; name?: string; label?: string; placeholder?: string; testId?: string; css?: string; exact?: boolean }
+
+/** Phase 3: one element, read for `inspect()`. `box` is CSS px in this frame's viewport. */
+export interface RtInspect {
+  id: RtId; tag: string; role: string; name?: string; text?: string; value?: string;
+  attributes: Record<string, string>; box: [number, number, number, number]; visible: boolean; enabled: boolean; states?: string[];
+}
+/** Phase 3: what a link or a media element points at (`download(ref)`). */
+export type RtLink = { kind: "link"; url: string; download?: string } | { kind: "media"; url: string } | { kind: "other" };
 export interface RtFound { id: RtId; role: string; name?: string; value?: string; states?: string[] }
 
 /** `waitFor`'s conditions the runtime can check by itself (refs are the engine's: it passes their ids). */
@@ -80,7 +89,7 @@ export interface RtOps {
   hello: { arg: null; result: { id: string; url: string; title: string; readyState: string } };
   snapshot: { arg: { within?: RtId; maxNodes?: number }; result: RtSnapshot };
   find: { arg: RtFindQuery; result: RtFound[] };
-  text: { arg: { markdown?: boolean }; result: string };
+  text: { arg: { markdown?: boolean; within?: RtId }; result: string };
   /** The id of the element `this` (an element-bound call). */
   owner: { arg: null; result: RtId };
   /** An iframe element's content-box origin in this frame's viewport (scrolled into view first with `scroll`). */
@@ -109,6 +118,17 @@ export interface RtOps {
   /** Which of these ids still name a connected element. */
   alive: { arg: { ids: RtId[] }; result: RtId[] };
   hitAt: { arg: { x: number; y: number; guardMenu?: boolean }; result: RtHit };
+  // ── Phase 3 ──
+  /** One element by id, or the element at a point (an iframe there answers `{ frame }` — look inside it). */
+  inspect: { arg: { id?: RtId; x?: number; y?: number }; result: RtInspect | { frame: RtId } | null };
+  /** The document (or `id`'s subtree) as markup: scripts, field values, secrets and Winter's overlay left out. */
+  html: { arg: { id?: RtId; maxChars: number }; result: { html: string; cut: boolean } };
+  /** The page's images, media, stylesheets and scripts (http(s); a data: one summarized). */
+  assets: { arg: { kinds: string[]; max: number }; result: Array<{ kind: string; url: string }> };
+  /** The link or media URL an element stands for. */
+  linkOf: { arg: { id: RtId }; result: RtLink };
+  /** Is it a check box, radio or switch, and is it checked? */
+  checkState: { arg: { id: RtId }; result: { checkable: boolean; checked?: boolean } };
 }
 export type RtOp = keyof RtOps;
 

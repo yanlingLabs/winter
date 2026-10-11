@@ -38,6 +38,12 @@ export interface FakePage {
   pickers?: Record<number, string>;
   /** Text leaves (top frame): id → the field the text labels, or null — `setValue`/`fileInput` answer `reason: "text"`. */
   textLeaves?: Record<number, number | null>;
+  /** Phase 3: what a link or media element points at (`linkOf`); the page's markup (`html`) and assets. */
+  links?: Record<number, { kind: "link"; url: string; download?: string } | { kind: "media"; url: string }>;
+  html?: string;
+  assets?: Array<{ kind: string; url: string }>;
+  /** Phase 3: element attributes for `inspect`. */
+  attributes?: Record<number, Record<string, string>>;
 }
 
 interface Ctx { frameId: string; session?: string; winter: boolean; doc: number }
@@ -61,6 +67,7 @@ export class FakeTab {
   navigateByDiscard = false;
   /** Phase 3: response bodies the browser keeps (by request id), and the buffers `Network.enable` asked for. */
   readonly bodies = new Map<string, { body: string; base64Encoded: boolean }>();
+  emulated?: { width: number; height: number; mobile: boolean; scale: number };
   networkBuffers = { resource: 0, total: 0 };
   /** The fallbacks of §5.3 for a browser that behaves otherwise: "new-session" — the discard ended the debugging
    *  session (an `Inspector.detached`, the command run in a session the engine does not follow, answered `cdp_error`
@@ -483,7 +490,14 @@ export class FakeCdpTransport implements CdpTransport {
         }
         return r({});
       case "Page.getLayoutMetrics":
-        return r({ cssVisualViewport: { pageX: 0, pageY: 300, clientWidth: 1200, clientHeight: 800, offsetX: 0, offsetY: 0, scale: 1, zoom: 1 } });
+        return r({ cssVisualViewport: { pageX: 0, pageY: 300, clientWidth: t.emulated?.width ?? 1200, clientHeight: t.emulated?.height ?? 800, offsetX: 0, offsetY: 0, scale: 1, zoom: 1 }, cssContentSize: { x: 0, y: 0, width: 1200, height: 4000 } });
+      case "Emulation.setDeviceMetricsOverride": {
+        const extra = Object.keys(params).filter((k) => !["width", "height", "deviceScaleFactor", "mobile"].includes(k));
+        if (extra.length > 0) throw new TransportError("not_allowed", "Emulation: a screen size only");
+        t.emulated = { width: Number(params.width), height: Number(params.height), mobile: params.mobile === true, scale: Number(params.deviceScaleFactor ?? 0) };
+        return r({});
+      }
+      case "Emulation.clearDeviceMetricsOverride": delete t.emulated; return r({});
       case "Page.captureScreenshot": {
         const clip = params.clip as { width: number; height: number; scale: number };
         return r({ data: fakeJpeg(Math.round(clip.width * clip.scale * 2), Math.round(clip.height * clip.scale * 2)) });
@@ -521,7 +535,10 @@ export class FakeCdpTransport implements CdpTransport {
         const q = String(arg?.text ?? arg?.name ?? "").toLowerCase();
         return all().filter((n) => (n.name ?? "").toLowerCase().includes(q)).map((n) => ({ id: n.id, role: n.role, ...(n.name === undefined ? {} : { name: n.name }) }));
       }
-      case "text": return t.page.text ?? all().map((n) => n.name ?? "").join("\n");
+      case "text": {
+        if (arg?.within !== undefined) { const n = node(arg.within); if (n === undefined) throw new TransportError("cdp_error", "exception", { cdpMessage: `stale:${arg.within}` }); return n.name ?? ""; }
+        return t.page.text ?? all().map((n) => n.name ?? "").join("\n");
+      }
       case "frameOffset": return { x: 100, y: 200 };
       case "point": {
         const n = node(arg?.id);
@@ -589,6 +606,42 @@ export class FakeCdpTransport implements CdpTransport {
         return { met, seen: `title "${t.page.title}" · ${text.slice(0, 100)}` };
       }
       case "alive": return (arg?.ids ?? []).filter((id: number) => node(id) !== undefined);
+      // ── Phase 3 ──
+      case "inspect": {
+        let n: RtNode | undefined;
+        if (arg?.id !== undefined) {
+          n = node(arg.id);
+          if (n === undefined) throw new TransportError("cdp_error", "exception", { cdpMessage: `stale:${arg.id}` });
+        } else {
+          n = all().find((x) => Math.abs(10 * x.id - Number(arg?.x)) < 1 && Math.abs(5 * x.id - Number(arg?.y)) < 1);
+          if (n === undefined) return null;
+          if (n.frame === true) return { frame: n.id };
+        }
+        const states = n.states;
+        return {
+          id: n.id, tag: n.role === "link" ? "a" : n.role === "button" ? "button" : "div", role: n.role, ...(n.name === undefined ? {} : { name: n.name }),
+          ...(n.value === undefined ? {} : { value: f.secure.includes(n.id) ? "<redacted>" : n.value }),
+          attributes: (frameId === "top" ? t.page.attributes?.[n.id] : undefined) ?? {}, box: [10 * n.id - 5, 5 * n.id - 2, 10, 4],
+          visible: t.page.hidden?.includes(n.id) !== true, enabled: !(states ?? []).includes("disabled"), ...(states === undefined ? {} : { states }),
+        };
+      }
+      case "html": {
+        const full = arg?.id === undefined ? (t.page.html ?? `<html><body>${all().map((n) => n.name ?? "").join("")}</body></html>`) : `<div id="${String(arg.id)}">${node(arg.id)?.name ?? ""}</div>`;
+        const max = Number(arg?.maxChars ?? 100_000);
+        return { html: full.slice(0, max), cut: full.length > max };
+      }
+      case "assets": return (frameId === "top" ? t.page.assets ?? [] : []).filter((a) => (arg?.kinds as string[] | undefined)?.includes(a.kind) !== false);
+      case "linkOf": {
+        if (node(arg?.id) === undefined) throw new TransportError("cdp_error", "exception", { cdpMessage: `stale:${arg?.id}` });
+        return (frameId === "top" ? t.page.links?.[Number(arg?.id)] : undefined) ?? { kind: "other" };
+      }
+      case "checkState": {
+        const n = node(arg?.id);
+        if (n === undefined) throw new TransportError("cdp_error", "exception", { cdpMessage: `stale:${arg?.id}` });
+        const st = n.states ?? [];
+        if (!st.includes("checked") && !st.includes("unchecked")) return { checkable: false };
+        return { checkable: true, checked: t.values.get(key(n.id)) === undefined ? st.includes("checked") : t.values.get(key(n.id)) === "checked" };
+      }
       default: throw new Error(`fake runtime: unknown op ${op}`);
     }
   }

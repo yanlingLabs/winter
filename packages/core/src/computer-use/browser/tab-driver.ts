@@ -19,7 +19,7 @@ import { PAGE_RUNTIME_SOURCE } from "./page-runtime/bundle.generated";
 import { redactText, redactUrl } from "./page-runtime/redact";
 import { pickerAdvice } from "./page-runtime/rules";
 import {
-  PAGE_RUNTIME_CALL, type RtCheck, type RtClassify, type RtCondition, type RtFindQuery, type RtFound, type RtHit, type RtNode, type RtPoint, type RtSnapshot,
+  PAGE_RUNTIME_CALL, type RtCheck, type RtClassify, type RtCondition, type RtFindQuery, type RtFound, type RtHit, type RtInspect, type RtLink, type RtNode, type RtPoint, type RtSnapshot,
 } from "./page-runtime/protocol";
 import { fitsBudget, imageSize, outputSize, scaleFor, toCss, type CssRect, type ShotFrame } from "./scale";
 import { diffState, fullState, makeSnapshot, printedState, type TabDialogLine, type TabHeader, type TabNode, type TabSnapshot } from "./state-format";
@@ -160,6 +160,7 @@ export class TabDriver {
   private lastCommitLoader?: string;
   private lastCommitType?: string;
   private dclLoader?: string;
+  private loadSeen?: string;
   private readonly pokes = new Set<() => void>();
   private readonly shots = new Map<string, ShotFrame>();
   private shotCounter = 0;
@@ -427,6 +428,9 @@ export class TabDriver {
       }
       case "Page.domContentEventFired":
         if (session === undefined) this.dclLoader = this.lastCommitLoader;
+        break;
+      case "Page.loadEventFired":
+        if (session === undefined) this.loadSeen = this.lastCommitLoader;
         break;
       case "Page.lifecycleEvent":
         if (p.name === "DOMContentLoaded" && p.frameId === this.topFrameId && session === undefined) this.dclLoader = typeof p.loaderId === "string" ? p.loaderId : this.lastCommitLoader;
@@ -1087,7 +1091,152 @@ export class TabDriver {
   pointForShot(shotId: string | undefined, x: number, y: number): { x: number; y: number } {
     const shot = shotId === undefined ? undefined : this.shots.get(shotId);
     if (shot === undefined) throw new AutomationFailure("NotAllowed", "a point is pixels in this tab's latest screenshot — take tab.screenshot() first, or use an element ref");
+    if (shot.fullPage === true) throw new AutomationFailure("NotAllowed", "a full-page screenshot is for looking — take an ordinary screenshot() to act at a point, or use an element ref");
     return toCss(shot, x, y);
+  }
+
+  // ── Phase 3: element readers ───────────────────────────────────────────────────────────────────
+
+  /** Where `rec`'s viewport sits in the top frame's (CSS px), WITHOUT scrolling anything (a read never moves the page);
+   *  undefined when it can't be told. */
+  private async frameOriginQuiet(rec: FrameRec): Promise<{ x: number; y: number } | undefined> {
+    if (rec.parentId === undefined) return { x: 0, y: 0 };
+    const parent = this.frames.get(rec.parentId);
+    if (parent === undefined) return undefined;
+    try {
+      await this.ensureRuntime(parent);
+      await this.ensureOwners(parent);
+      if (rec.owner === undefined) return undefined;
+      const off = await this.callIn<{ x: number; y: number } | null>(parent, "frameOffset", { id: rec.owner.id, scroll: false }, { expectRt: rec.owner.parentRt });
+      if (off === null) return undefined;
+      const up = await this.frameOriginQuiet(parent);
+      return up === undefined ? undefined : { x: off.x + up.x, y: off.y + up.y };
+    } catch { return undefined; }
+  }
+
+  private async withTopBox(rec: FrameRec, info: RtInspect): Promise<{ ref: number; info: RtInspect; frame?: string }> {
+    const ref = this.refFor(rec.rtId!, info.id);
+    if (rec.parentId === undefined) return { ref, info };
+    const o = await this.frameOriginQuiet(rec);
+    const frame = hostLabel(rec.url);
+    if (o === undefined) return { ref, info, frame };
+    return { ref, info: { ...info, box: [info.box[0] + Math.round(o.x), info.box[1] + Math.round(o.y), info.box[2], info.box[3]] }, frame };
+  }
+
+  /** One element by ref. */
+  async inspect(ref: number): Promise<{ ref: number; info: RtInspect; frame?: string }> {
+    this.requireNoDialog("inspect()");
+    const { rec, id, rtId } = this.resolve(ref);
+    const info = await this.callIn<RtInspect | null>(rec, "inspect", { id }, { expectRt: rtId });
+    if (info === null || "frame" in info) throw stale(ref);
+    return await this.withTopBox(rec, info as RtInspect);
+  }
+
+  /** The element at a viewport point (CSS px), looking into frames. */
+  async inspectAt(x: number, y: number): Promise<{ ref: number; info: RtInspect; frame?: string } | undefined> {
+    this.requireNoDialog("inspect()");
+    let rec = this.top();
+    let px = x, py = y;
+    for (let depth = 0; depth <= MAX_FRAME_DEPTH; depth++) {
+      const hit = await this.callFresh<RtInspect | { frame: number } | null>(rec, "inspect", { x: px, y: py });
+      if (hit === null) return undefined;
+      if (!("frame" in hit)) return await this.withTopBox(rec, hit);
+      await this.ensureOwners(rec);
+      const child = this.childFrameFor(rec, hit.frame);
+      if (child === undefined) return undefined;
+      const off = await this.callIn<{ x: number; y: number } | null>(rec, "frameOffset", { id: hit.frame });
+      if (off === null) return undefined;
+      px -= off.x; py -= off.y;
+      rec = child;
+    }
+    return undefined;
+  }
+
+  /** The markup of the page, of one element, or (an iframe's ref) of that frame's document. */
+  async html(ref: number | undefined, maxChars: number): Promise<{ html: string; cut: boolean }> {
+    this.requireNoDialog("html()");
+    await this.settleChildSetups();
+    if (ref === undefined) return await this.callFresh<{ html: string; cut: boolean }>(this.top(), "html", { maxChars });
+    const { rec, id, rtId } = this.resolve(ref);
+    const child = this.childFrameFor(rec, id);
+    if (child !== undefined) return await this.callFresh<{ html: string; cut: boolean }>(child, "html", { maxChars });
+    return await this.callIn<{ html: string; cut: boolean }>(rec, "html", { id, maxChars }, { expectRt: rtId });
+  }
+
+  /** One element's readable text. */
+  async textWithin(ref: number, markdown: boolean): Promise<string> {
+    this.requireNoDialog("text()");
+    const { rec, id, rtId } = this.resolve(ref);
+    const child = this.childFrameFor(rec, id);
+    if (child !== undefined) return await this.callFresh<string>(child, "text", { markdown });
+    return await this.callIn<string>(rec, "text", { markdown, within: id }, { expectRt: rtId });
+  }
+
+  /** The page's assets in every frame (de-duplicated), with what the network log saw of the same kinds. */
+  async assets(kinds: readonly string[], max: number): Promise<Array<{ kind: string; url: string }>> {
+    this.requireNoDialog("assets()");
+    await this.settleChildSetups();
+    const out: Array<{ kind: string; url: string }> = [];
+    const seen = new Set<string>();
+    const add = (a: { kind: string; url: string }): void => {
+      if (out.length >= max || seen.has(a.url)) return;
+      seen.add(a.url);
+      out.push({ kind: a.kind, url: a.url.startsWith("data:") ? a.url : redactUrl(a.url) });
+    };
+    const top = this.top();
+    for (const a of await this.callFresh<Array<{ kind: string; url: string }>>(top, "assets", { kinds, max })) add(a);
+    let frames = 0;
+    for (const c of this.frames.values()) {
+      if (c === top || frames >= MAX_FRAMES || out.length >= max) continue;
+      frames++;
+      try { for (const a of await this.callFresh<Array<{ kind: string; url: string }>>(c, "assets", { kinds, max })) add(a); } catch { /* an unreadable frame */ }
+    }
+    const fromNet: Record<string, string> = { image: "image", media: "media", font: "font", stylesheet: "stylesheet", script: "script" };
+    const want = new Set(kinds.filter((k) => fromNet[k] !== undefined));
+    for (const r of this.devtools.urlsOfTypes(want)) add({ kind: r.type, url: r.url });
+    return out;
+  }
+
+  async linkOf(ref: number): Promise<RtLink> {
+    const { rec, id, rtId } = this.resolve(ref);
+    return await this.callIn<RtLink>(rec, "linkOf", { id }, { expectRt: rtId });
+  }
+
+  async checkState(ref: number): Promise<{ checkable: boolean; checked?: boolean }> {
+    const { rec, id, rtId } = this.resolve(ref);
+    return await this.callIn<{ checkable: boolean; checked?: boolean }>(rec, "checkState", { id }, { expectRt: rtId });
+  }
+
+  /** An element's box in the top frame's viewport (CSS px), brought into view first (for a screenshot of it). */
+  async rectForRef(ref: number): Promise<CssRect> {
+    await this.pointForRef(ref);
+    const { rec, id, rtId } = this.resolve(ref);
+    const info = await this.callIn<RtInspect | null>(rec, "inspect", { id }, { expectRt: rtId });
+    if (info === null || "frame" in info) throw stale(ref);
+    const o = rec.parentId === undefined ? { x: 0, y: 0 } : await this.frameOrigin(rec, { x: 0, y: 0 });
+    return { x: info.box[0] + o.x, y: info.box[1] + o.y, width: Math.max(1, info.box[2]), height: Math.max(1, info.box[3]) };
+  }
+
+  /** `waitFor({ load })`: the top document reached DOMContentLoaded / load, within `timeoutMs` (else `WaitTimeout`). */
+  async waitForLoad(state: "domcontentloaded" | "load", timeoutMs: number, signal?: AbortSignal): Promise<{ waitedMs: number }> {
+    const t0 = this.now();
+    for (;;) {
+      if (this.loaded(state)) return { waitedMs: this.now() - t0 };
+      // A page that finished before Winter attached sent no event: its document's own ready state says.
+      try {
+        const q = await this.quietInfo();
+        if (q.readyState === "complete" || (state === "domcontentloaded" && q.readyState === "interactive")) return { waitedMs: this.now() - t0 };
+      } catch (err) { if (!isContextGone(err) && !(err instanceof AutomationFailure)) throw err; }
+      const left = timeoutMs - (this.now() - t0);
+      if (signal?.aborted === true) throw new AutomationFailure("Cancelled", "the script was cancelled");
+      if (left <= 0) throw new AutomationFailure("WaitTimeout", `the page did not reach ${state === "load" ? "its load event" : "DOMContentLoaded"} within ${timeoutMs} ms`);
+      await this.waitUntil(() => this.loaded(state), Math.min(100, left), signal);
+    }
+  }
+
+  /** Has the top document reached DOMContentLoaded / load? */
+  loaded(state: "domcontentloaded" | "load"): boolean {
+    return state === "load" ? this.loadSeen === this.lastCommitLoader && this.lastCommitLoader !== undefined : this.dclLoader !== undefined && this.dclLoader === this.lastCommitLoader;
   }
 
   async mouse(type: string, x: number, y: number, extra: Record<string, unknown> = {}): Promise<void> {
@@ -1382,10 +1531,11 @@ export class TabDriver {
   }
 
   /** One JPEG at the budget; its frame is kept so a Point maps back to CSS px. */
-  async screenshot(budget: ScreenshotBudget, region: CssRect | undefined, quality: number): Promise<{ shotId: string; imageBase64: string; width: number; height: number; css: CssRect }> {
+  async screenshot(budget: ScreenshotBudget, region: CssRect | undefined, quality: number, o: { fullPage?: boolean } = {}): Promise<{ shotId: string; imageBase64: string; width: number; height: number; css: CssRect }> {
     this.requireNoDialog("screenshot()");
-    const m = await this.send<{ cssVisualViewport: { pageX: number; pageY: number; clientWidth: number; clientHeight: number } }>("Page.getLayoutMetrics");
+    const m = await this.send<{ cssVisualViewport: { pageX: number; pageY: number; clientWidth: number; clientHeight: number }; cssContentSize?: { width: number; height: number } }>("Page.getLayoutMetrics");
     const vv = m.cssVisualViewport;
+    if (o.fullPage === true) return await this.fullPageShot(budget, quality, vv, m.cssContentSize);
     const css: CssRect = region === undefined
       ? { x: 0, y: 0, width: vv.clientWidth, height: vv.clientHeight }
       : { x: Math.max(0, region.x), y: Math.max(0, region.y), width: Math.max(1, Math.min(region.width, vv.clientWidth - Math.max(0, region.x))), height: Math.max(1, Math.min(region.height, vv.clientHeight - Math.max(0, region.y))) };
@@ -1408,7 +1558,33 @@ export class TabDriver {
     if (this.shots.size > 16) this.shots.delete(this.shots.keys().next().value!);
     return { shotId, imageBase64: shot!.data, width: size!.width, height: size!.height, css };
   }
+
+  /** The whole document (its height capped at FULL_PAGE_MAX_CSS), scaled to the budget. For looking only: a Point in it
+   *  is refused (`pointForShot`). */
+  private async fullPageShot(budget: ScreenshotBudget, quality: number, vv: { clientWidth: number; clientHeight: number }, content: { width: number; height: number } | undefined): Promise<{ shotId: string; imageBase64: string; width: number; height: number; css: CssRect }> {
+    const css: CssRect = { x: 0, y: 0, width: Math.max(1, Math.round(content?.width ?? vv.clientWidth)), height: Math.max(1, Math.min(FULL_PAGE_MAX_CSS, Math.round(content?.height ?? vv.clientHeight))) };
+    let scale = scaleFor(css, this.dpr, budget);
+    let shot: { data: string } | undefined;
+    let size: { width: number; height: number } | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      shot = await this.send<{ data: string }>("Page.captureScreenshot", {
+        format: "jpeg", quality: Math.round(quality * 100), fromSurface: true, captureBeyondViewport: true,
+        clip: { x: 0, y: 0, width: css.width, height: css.height, scale },
+      }, undefined, 20_000);
+      const assumed = outputSize(css, scale, this.dpr);
+      size = imageSize(shot.data) ?? { width: assumed.w, height: assumed.h };
+      if (fitsBudget(size.width, size.height, budget)) break;
+      scale *= Math.min(budget.maxLongEdge / Math.max(size.width, size.height), 0.97);
+    }
+    const shotId = `tshot${++this.shotCounter}`;
+    this.shots.set(shotId, { width: size!.width, height: size!.height, css, fullPage: true });
+    if (this.shots.size > 16) this.shots.delete(this.shots.keys().next().value!);
+    return { shotId, imageBase64: shot!.data, width: size!.width, height: size!.height, css };
+  }
 }
+
+/** A full-page screenshot's document height at most this (CSS px). */
+export const FULL_PAGE_MAX_CSS = 10_000;
 
 interface FrameTreeNode { frame: { id: string; parentId?: string; url: string; urlFragment?: string }; childFrames?: FrameTreeNode[] }
 

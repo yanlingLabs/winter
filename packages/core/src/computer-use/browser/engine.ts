@@ -32,6 +32,9 @@ import { bytesLabel, CONSOLE_LEVELS, consoleLine, requestLine } from "./devtools
 
 /** `state()`/`screenshot()` settle for at most this long after an act in the same call (Phase 1's cap). */
 const SETTLE_CAP_MS = 1_500;
+const HTML_DEFAULT_CHARS = 100_000;
+const HTML_MAX_CHARS = 500_000;
+const ASSET_KINDS = ["image", "media", "font", "stylesheet", "script"] as const;
 const WAIT_FOR_DEFAULT_MS = 10_000;
 const NO_VISION = "this model can't see images — use state()";
 const FOCUS_NOT_EDITABLE = "the focus is not a text field, so nothing was typed — click the field or pass { into }";
@@ -39,7 +42,7 @@ const FOCUS_NOT_EDITABLE = "the focus is not a text field, so nothing was typed 
 /** What a tab primitive is, for the per-app policy (everything not here acts). */
 const OBSERVE_PRIMITIVES: ReadonlySet<string> = new Set(["state", "find", "screenshot", "waitFor", "waitForIdle", "url", "title", "text",
   // Phase 3's readers
-  "console", "network", "networkBody"]);
+  "console", "network", "networkBody", "inspect", "html", "assets", "dialog"]);
 
 export interface BrowserEngineDeps {
   registry: BrowserBackendRegistry;
@@ -903,7 +906,7 @@ export class BrowserEngine {
   private async run(scope: TabRunScope, b: Binding, driver: TabDriver, primitive: string, args: Record<string, unknown>): Promise<unknown> {
     const sid = scope.sessionId;
     // An open page dialog: answering it is the only act; reading the dialog itself still works.
-    if (driver.dialog !== undefined && !OBSERVE_PRIMITIVES.has(primitive) && primitive !== "close" && primitive !== "keep") {
+    if (driver.dialog !== undefined && !OBSERVE_PRIMITIVES.has(primitive) && primitive !== "close" && primitive !== "keep" && primitive !== "answerDialog") {
       const ref = primitive === "click" || primitive === "setValue" ? (primitive === "click" ? args.target : args.ref) : undefined;
       if (!(isRef(ref) && driver.isDialogRef(ref))) throw new AutomationFailure("TargetBusy", driver.dialogBusySentence());
     }
@@ -928,9 +931,11 @@ export class BrowserEngine {
         if (typeof q === "string" && q.length > 0) query = { text: q };
         else if (q !== null && typeof q === "object" && !Array.isArray(q)) {
           const o = q as Record<string, unknown>;
-          query = Object.fromEntries(["role", "name", "text"].filter((k) => typeof o[k] === "string").map((k) => [k, o[k] as string]));
-          if (Object.keys(query).length === 0) throw bad("find() takes text, or { role, name, text }");
-        } else throw bad("find() takes text, or { role, name, text }");
+          query = Object.fromEntries(["role", "name", "text", "label", "placeholder", "testId", "css"].filter((k) => typeof o[k] === "string" && (o[k] as string).length > 0).map((k) => [k, o[k] as string]));
+          if (Object.keys(query).length === 0) throw bad("find() takes text, or { role, name, text, label, placeholder, testId, css }");
+          if (typeof o.css === "string" && o.css.length > 500) throw bad("find()'s css selector is at most 500 characters");
+          if (o.exact === true) (query as Record<string, unknown>).exact = true;
+        } else throw bad("find() takes text, or { role, name, text, label, placeholder, testId, css }");
         const found = await driver.find(query);
         scope.builder.markScreenRead();
         if (args.emit !== false) {
@@ -955,7 +960,19 @@ export class BrowserEngine {
         return undefined;
       }
       case "setValue": {
-        if (!isRef(args.ref) || typeof args.value !== "string") throw bad("setValue() takes an element ref and a string");
+        if (isRef(args.ref) && typeof args.value === "boolean") {
+          // A check box, radio or switch: pressed as a person would, only when its state differs.
+          const st = await driver.checkState(args.ref);
+          if (!st.checkable) throw bad(`setValue(ref, true | false) is for a check box, radio or switch — [${args.ref}] is not one`);
+          if (st.checked !== args.value) {
+            const at = await this.pointOf(scope, b, driver, args.ref, "setValue()", true);
+            scope.live();
+            await driver.click(at, {});
+          }
+          scope.acted.add(b.targetId);
+          return undefined;
+        }
+        if (!isRef(args.ref) || typeof args.value !== "string") throw bad("setValue() takes an element ref and a string (true or false for a check box)");
         if (driver.dialog !== undefined && args.ref === driver.dialog.promptRef) {
           driver.dialog.promptText = args.value;
           return undefined;
@@ -1045,7 +1062,15 @@ export class BrowserEngine {
         else if (typeof o.gone === "string") cond.goneText = o.gone;
         if (typeof o.title === "string") cond.title = o.title;
         if (typeof o.url === "string") cond.url = o.url;
-        if (Object.keys(cond).length === 0) throw bad("waitFor() needs one of text, ref, gone, title or url");
+        if (o.load !== undefined) {
+          if (o.load !== "domcontentloaded" && o.load !== "load") throw bad("waitFor()'s load is \"domcontentloaded\" or \"load\"");
+          if (Object.keys(cond).length === 0) {
+            const timeout = scope.clampWait(typeof args.timeoutMs === "number" ? args.timeoutMs : WAIT_FOR_DEFAULT_MS);
+            return await driver.waitForLoad(o.load, timeout, scope.signal);
+          }
+          throw bad("waitFor({ load }) waits for the page's load alone — wait for the rest in a second waitFor()");
+        }
+        if (Object.keys(cond).length === 0) throw bad("waitFor() needs one of text, ref, gone, title, url or load");
         const timeout = scope.clampWait(typeof args.timeoutMs === "number" ? args.timeoutMs : WAIT_FOR_DEFAULT_MS);
         try {
           return await driver.waitFor(cond, timeout, scope.signal);
@@ -1084,10 +1109,46 @@ export class BrowserEngine {
         return driver.shownTitle;
       }
       case "text": {
-        const text = await driver.text(args.markdown === true);
+        if (args.within !== undefined && !isRef(args.within)) throw bad("text()'s within takes an element ref");
+        const text = isRef(args.within) ? await driver.textWithin(args.within, args.markdown === true) : await driver.text(args.markdown === true);
         scope.builder.markScreenRead();
         if (args.emit !== false) scope.builder.text(text.length === 0 ? "(the page has no readable text)" : text, { screen: true });
         return text;
+      }
+      case "inspect": return await this.inspectCall(scope, b, driver, args);
+      case "html": {
+        if (args.within !== undefined && !isRef(args.within)) throw bad("html()'s within takes an element ref");
+        const maxChars = typeof args.maxChars === "number" && Number.isFinite(args.maxChars) && args.maxChars > 0 ? Math.min(HTML_MAX_CHARS, Math.floor(args.maxChars)) : HTML_DEFAULT_CHARS;
+        const r = await driver.html(isRef(args.within) ? args.within : undefined, maxChars);
+        scope.builder.markScreenRead();
+        const out = r.cut ? `${r.html}\n<!-- cut at ${maxChars} characters — html({ within: ref }) reads one part, { maxChars } up to ${HTML_MAX_CHARS} -->` : r.html;
+        if (args.emit !== false) scope.builder.text(out, { screen: true });
+        return out;
+      }
+      case "assets": {
+        const kinds = args.kinds === undefined ? [...ASSET_KINDS] : stringList(args.kinds, "assets()'s kinds");
+        const unknown = kinds.filter((k) => !(ASSET_KINDS as readonly string[]).includes(k));
+        if (unknown.length > 0) throw bad(`assets()'s kinds are ${ASSET_KINDS.join(", ")} (not ${unknown.join(", ")})`);
+        const max = typeof args.limit === "number" && args.limit > 0 ? Math.min(1_000, Math.floor(args.limit)) : 200;
+        const list = await driver.assets(kinds, max);
+        scope.builder.markScreenRead();
+        if (args.emit !== false) scope.builder.text(list.length === 0 ? "(no assets of those kinds)" : list.map((a) => `${a.kind} ${a.url}`).join("\n"), { screen: true });
+        return list;
+      }
+      case "dialog": {
+        const d = driver.dialog;
+        if (d === undefined) return null;
+        scope.builder.markScreenRead();
+        return { type: d.type, message: redactText(d.message), ...(d.type === "prompt" ? { defaultValue: redactText(d.promptText ?? "") } : {}) };
+      }
+      case "answerDialog": {
+        const d = driver.dialog;
+        if (d === undefined) throw new Error("no page dialog is open — dialog() says when one is");
+        if (typeof args.accept !== "boolean") throw bad("answerDialog() takes true (OK) or false (Cancel), and a prompt's text");
+        if (typeof args.text === "string" && d.type === "prompt") d.promptText = args.text;
+        await driver.answerDialog(args.accept ? d.okRef : d.cancelRef ?? d.okRef);
+        scope.acted.add(b.targetId);
+        return undefined;
       }
       case "console": return this.consoleCall(scope, driver, args);
       case "network": return this.networkCall(scope, driver, args);
@@ -1144,6 +1205,35 @@ export class BrowserEngine {
   }
 
   // ── Phase 3: the developer readers ─────────────────────────────────────────────────────────────
+
+  private async inspectCall(scope: TabRunScope, b: Binding, driver: TabDriver, args: Record<string, unknown>): Promise<unknown> {
+    let got: Awaited<ReturnType<TabDriver["inspect"]>> | undefined;
+    if (isRef(args.target)) got = await driver.inspect(args.target);
+    else if (isPoint(args.target)) {
+      this.requireVision(scope);
+      const at = driver.pointForShot(scope.lastTargetShot.get(b.targetId), args.target[0], args.target[1]);
+      got = await driver.inspectAt(at.x, at.y);
+      if (got === undefined) throw new Error("nothing is at that point");
+    } else throw bad(`inspect() takes an element ref${scope.vision ? " or a [x, y] point" : ""}`);
+    const i = got.info;
+    const out = {
+      ref: got.ref, tag: i.tag, role: i.role, ...(i.name === undefined ? {} : { name: i.name }), ...(i.text === undefined ? {} : { text: i.text }),
+      ...(i.value === undefined ? {} : { value: i.value }), attributes: i.attributes, box: i.box, visible: i.visible, enabled: i.enabled,
+      ...(i.states === undefined ? {} : { states: i.states }), ...(got.frame === undefined ? {} : { frame: got.frame }),
+    };
+    scope.builder.markScreenRead();
+    if (args.emit !== false) {
+      const attrs = Object.entries(i.attributes).map(([k, v]) => `${k}="${v}"`).join(" ");
+      scope.builder.text([
+        `[${got.ref}] <${i.tag}> ${i.role}${i.name === undefined ? "" : ` "${i.name}"`}${i.states === undefined ? "" : ` (${i.states.join(", ")})`}`,
+        `box ${i.box.join(", ")} · ${i.visible ? "visible" : "not visible"} · ${i.enabled ? "enabled" : "disabled"}${got.frame === undefined ? "" : ` · in a frame of ${got.frame}`}`,
+        ...(attrs.length === 0 ? [] : [`attributes: ${attrs}`]),
+        ...(i.value === undefined ? [] : [`value: ${i.value}`]),
+        ...(i.text === undefined ? [] : [`text: ${i.text}`]),
+      ].join("\n"), { screen: true });
+    }
+    return out;
+  }
 
   private consoleCall(scope: TabRunScope, driver: TabDriver, args: Record<string, unknown>): unknown {
     const levels = args.levels === undefined ? undefined : stringList(args.levels, "console()'s levels");
@@ -1228,8 +1318,15 @@ export class BrowserEngine {
   private async screenshot(scope: TabRunScope, b: Binding, driver: TabDriver, args: Record<string, unknown>): Promise<unknown> {
     this.requireVision(scope);
     const r = args.region;
-    const region = Array.isArray(r) && r.length === 4 && r.every((n) => typeof n === "number" && Number.isFinite(n))
+    let region = Array.isArray(r) && r.length === 4 && r.every((n) => typeof n === "number" && Number.isFinite(n))
       ? { x: r[0] as number, y: r[1] as number, width: r[2] as number, height: r[3] as number } : undefined;
+    const fullPage = args.fullPage === true;
+    if (args.within !== undefined) {
+      if (!isRef(args.within)) throw bad("screenshot()'s within takes an element ref");
+      if (fullPage) throw bad("screenshot() takes within or fullPage, not both");
+      region = await driver.rectForRef(args.within);
+      scope.live();
+    }
     const settle = this.settleFor(scope, b, args);
     if (settle !== undefined) {
       const w = await driver.waitForIdle(150, settle.maxMs, scope.signal);
@@ -1241,7 +1338,7 @@ export class BrowserEngine {
     let quality: number = SCREENSHOT_QUALITY;
     let shot: Awaited<ReturnType<TabDriver["screenshot"]>>;
     for (;;) {
-      shot = await driver.screenshot(screenshotBudgetFor(scope.model, maxDim, quality), region, quality);
+      shot = await driver.screenshot(screenshotBudgetFor(scope.model, maxDim, quality), fullPage ? undefined : region, quality, { fullPage });
       const bytes = Math.floor((shot.imageBase64.length * 3) / 4);
       const next = nextScreenshotQuality(quality);
       if (bytes <= SCREENSHOT_BYTE_CAP || next === undefined) { scope.metric.imageBytes = bytes; break; }
@@ -1251,7 +1348,9 @@ export class BrowserEngine {
     scope.lastTargetShot.set(b.targetId, shot.shotId);
     const handle = scope.keepImage({ imageBase64: shot.imageBase64, mime: "image/jpeg", width: shot.width, height: shot.height });
     if (args.emit !== false) {
-      scope.builder.daemonLine(`clicks take this image's pixel coordinates: ${shot.width}×${shot.height} (viewport ${Math.round(shot.css.width)}×${Math.round(shot.css.height)} CSS px)`);
+      scope.builder.daemonLine(fullPage
+        ? `the whole page, ${shot.width}×${shot.height} (${Math.round(shot.css.width)}×${Math.round(shot.css.height)} CSS px) — for looking; clicks take an ordinary screenshot's coordinates`
+        : `clicks take this image's pixel coordinates: ${shot.width}×${shot.height} (viewport ${Math.round(shot.css.width)}×${Math.round(shot.css.height)} CSS px)`);
       scope.builder.image(shot.imageBase64, "image/jpeg");
     } else {
       scope.builder.markScreenRead();
