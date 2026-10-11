@@ -1,0 +1,356 @@
+{
+  "kernelBuilt": true,
+  "initramfsBuilt": false,
+  "productionReady": false,
+  "resumedVerifiedBuild": true,
+  "sourceSha256": "f78602932219125e211c5f5bfd84edcfd4ec5ce88fc944f8248413f665bef236",
+  "toolchainArchiveSha256": "945d22282d4bc623fd828fad50e14698fe7be070855f68f3d351a26305615ba7",
+  "toolchainFileManifestSha256": "a4213c847ac4d96a8282988d4963922337d5b39777b93ae5efe30f2731d0355c",
+  "kernelLicenseManifestSha256": "86393f8e19a101d4b9ac072802c923e005d1a380cca9af5e69ff647936aedbec",
+  "builderReceiptSha256": "3354c9083949ea532aee587fe2483cc7dd7a72a8ef53ecf973a0c385cd7e436e",
+  "commands": [
+    [
+      "/usr/bin/make",
+      "-C",
+      "/build/src/linux-6.18.35",
+      "O=/build/output",
+      "ARCH=arm64",
+      "LLVM=/build/llvm/llvm-20.1.8-aarch64/bin/",
+      "LLVM_IAS=1",
+      "-j2",
+      "PAHOLE_FLAGS=--btf_gen_floats -j1 --skip_encoding_btf_inconsistent_proto --btf_gen_optimized",
+      "olddefconfig"
+    ],
+    [
+      "/usr/bin/make",
+      "-C",
+      "/build/src/linux-6.18.35",
+      "O=/build/output",
+      "ARCH=arm64",
+      "LLVM=/build/llvm/llvm-20.1.8-aarch64/bin/",
+      "LLVM_IAS=1",
+      "-j2",
+      "PAHOLE_FLAGS=--btf_gen_floats -j1 --skip_encoding_btf_inconsistent_proto --btf_gen_optimized",
+      "Image",
+      "vmlinux"
+    ]
+  ],
+  "environment": {
+    "PATH": "/build/llvm/llvm-20.1.8-aarch64/bin:/usr/bin",
+    "HOME": "/build/builder-home",
+    "TMPDIR": "/build/builder-tmp",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "SOURCE_DATE_EPOCH": "1781001093",
+    "KBUILD_BUILD_USER": "cowork-fixture",
+    "KBUILD_BUILD_HOST": "isolated",
+    "KBUILD_BUILD_TIMESTAMP": "Tue Jun 9 10:31:33 UTC 2026",
+    "KCONFIG_NOTIMESTAMP": "1",
+    "KBUILD_BUILD_VERSION": "1"
+  },
+  "requiredSymbols": {
+    "CONFIG_MD": "y",
+    "CONFIG_MODULES": "n",
+    "CONFIG_BLK_DEV_DM": "y",
+    "CONFIG_DM_CRYPT": "y",
+    "CONFIG_DM_INTEGRITY": "y",
+    "CONFIG_BLK_DEV_INTEGRITY": "y",
+    "CONFIG_CRYPTO": "y",
+    "CONFIG_CRYPTO_SKCIPHER": "y",
+    "CONFIG_CRYPTO_AES": "y",
+    "CONFIG_CRYPTO_XTS": "y",
+    "CONFIG_CRYPTO_GCM": "y",
+    "CONFIG_CRYPTO_GHASH": "y",
+    "CONFIG_CRYPTO_AUTHENC": "y",
+    "CONFIG_CRYPTO_HMAC": "y",
+    "CONFIG_CRYPTO_SHA256": "y",
+    "CONFIG_CRYPTO_ESSIV": "y",
+    "CONFIG_CRYPTO_USER_API": "y",
+    "CONFIG_CRYPTO_USER_API_HASH": "y",
+    "CONFIG_CRYPTO_USER_API_SKCIPHER": "y",
+    "CONFIG_CRYPTO_USER_API_AEAD": "y",
+    "CONFIG_KEYS": "y",
+    "CONFIG_DEVTMPFS": "y",
+    "CONFIG_TMPFS": "y",
+    "CONFIG_BLK_DEV_INITRD": "y",
+    "CONFIG_EXT4_FS": "y",
+    "CONFIG_VIRTIO_BLK": "y",
+    "CONFIG_VIRTIO_MMIO": "y",
+    "CONFIG_VIRTIO_BALLOON": "y",
+    "CONFIG_PAGE_REPORTING": "y",
+    "CONFIG_PAGE_POISONING": "n",
+    "CONFIG_INIT_ON_FREE_DEFAULT_ON": "n",
+    "CONFIG_INIT_ON_ALLOC_DEFAULT_ON": "n",
+    "CONFIG_DEBUG_INFO_BTF": "n"
+  },
+  "artifacts": {
+    ".config": "f0be0fabe2ee0366a0b8dd26364aaf5b8cc9b827a4d7c0ab12b75bf6806b8afe",
+    "vmlinux": "13e0553cb94838b2bf75e82d0de6b544a4830d46612a27855f5574eeecb4be39",
+    "arch/arm64/boot/Image": "6ab571a8482455d5b9ffe75aaa428613113c705144a3d479cfdcfa9e9457c862"
+  },
+  "artifactBytes": {
+    ".config": 98830,
+    "vmlinux": 302054888,
+    "arch/arm64/boot/Image": 21412352
+  },
+  "moduleInventory": [],
+  "patches": [],
+  "remaining": "Independently review builder dependency receipt, regular serial binding and trusted immutable userspace/key bootstrap; boot and remeasure crypto profile. No crypto/unlock claim follows from compilation.",
+  "builder": {
+    "imageDigest": "sha256:8143f5c8e71574a89a9dc0cfbfa43cc4c491f02f6a08b3f0f8910329de137de8",
+    "imageDigestKind": "Docker immutable local image ID; base registry manifest separately pinned",
+    "baseImageManifest": "sha256:08571ca13e00ca07a2a84eab83a959b4242e22cceb16486a11bef1428c9e93a7",
+    "snapshot": "20261011T000000Z",
+    "tools": {
+      "make": {
+        "path": "/usr/bin/make",
+        "sha256": "abbecc214fcadef6530d1cc137bde7ceb74cae3f6b992c7d10a8669a7314c7e0"
+      },
+      "bison": {
+        "path": "/usr/bin/bison",
+        "sha256": "746581750f75fe81394562ab14f2d0942addface479685b9a11840ab8d002959"
+      },
+      "flex": {
+        "path": "/usr/bin/flex",
+        "sha256": "b0b03937b2b0ed6c8992dbee72c1978c4b545c14c8444b5256fb87d67a30f676"
+      },
+      "bc": {
+        "path": "/usr/bin/bc",
+        "sha256": "3da7a7527037a868fda18c1a4cfd3534cd009d652cc3f67c31c960febd1df84f"
+      },
+      "perl": {
+        "path": "/usr/bin/perl",
+        "sha256": "32b632e848ac6d106042c9628ea5ba3c558791e8bbad3c0b89bd5483e9abcb77"
+      },
+      "openssl": {
+        "path": "/usr/bin/openssl",
+        "sha256": "a2044013d30169104887d7823bf7a0a1d443eafc34d7501876e22da532f24f0e"
+      },
+      "sh": {
+        "path": "/usr/bin/dash",
+        "sha256": "c883d9c27228339580994a1d0ea960645368c7d1b960a712bd0c655860c2d0d7"
+      },
+      "awk": {
+        "path": "/usr/bin/gawk",
+        "sha256": "74a585a10c39d4ddc1b3a21df5dc5137c14bf4c4d2c1a76c25d724dfbb836496"
+      },
+      "sed": {
+        "path": "/usr/bin/sed",
+        "sha256": "39ca7d42a112f32abd4f2a016c8a0d1777a5fd75608f8e1a5d80ac161337a0fe"
+      },
+      "find": {
+        "path": "/usr/bin/find",
+        "sha256": "1ee9e96c55e9d3551cebb991882087c5b21d18c4b4ead73203ca84ab54940ce1"
+      },
+      "pahole": {
+        "path": "/usr/bin/pahole",
+        "sha256": "6ad2e798fe3b6147d82f1dff13957c5998d02910b92b8fc3b3a4d9bd3653b026"
+      },
+      "python3": {
+        "path": "/usr/bin/python3.12",
+        "sha256": "c86f21d0da9290ece2d7d49a3f7ed52aed59cb029abdf0ea25c79634f6cbe960"
+      },
+      "gpgv": {
+        "path": "/usr/bin/gpgv",
+        "sha256": "e4d7e8ce2f59e4e3098981cfea5d6178411d5bbd3670b88914078b53a400c146"
+      },
+      "xz": {
+        "path": "/usr/bin/xz",
+        "sha256": "296a7eaf0ac8cc4f37bd29f8fded9c768ed60fc646f64333e83e4f3a9148451d"
+      },
+      "ldd": {
+        "path": "/usr/bin/ldd",
+        "sha256": "8b1b9cb2220e2b8942431c102e249984cb61b5c62e8ac8e099968e610d3a27f8"
+      },
+      "ld": {
+        "path": "/usr/bin/aarch64-linux-gnu-ld.bfd",
+        "sha256": "1e4d3369b76845fa8e099b83513bf28f6f722e046f9b2cde1378c9e27f96d19c"
+      }
+    },
+    "packagesSha256": "43e1f2438776ee1509463e92e3657f5bea125bb3bb4ff59a457332bff9863712",
+    "packageArchivesSha256": "33cca73cc68b52db412b069af5e4bce0a65cb2ff66a1f44d873c6bfbe9e6315b",
+    "sysrootSha256": "a9d4ac517498b4bb81404e98ed8ea6d37ff73ad02f5f7cfa7d53f163fae258c7",
+    "packageCount": 157,
+    "downloadedPackageCount": 66,
+    "missingCopyright": [],
+    "limits": {
+      "jobs": 2,
+      "cpus": 2,
+      "memoryBytes": 4294967296,
+      "swapBytes": 0,
+      "diskStopBytes": 8589934592,
+      "hostFreeFloorBytes": 8589934592
+    },
+    "isolation": "Docker Linux arm64; compile non-root, read-only rootfs, no network, all capabilities dropped, no-new-privileges. Fixture input read-only and private scratch/output only. No Docker socket or home mount. Dependency inventory does not itself establish trusted/accepted production tooling."
+  },
+  "verification": {
+    "exportedArtifactHashesMatch": true,
+    "arm64ImageMagicHex": "41524d64",
+    "elfArchitecture": "AArch64",
+    "configDeltaCount": 95,
+    "linkedSymbols": [
+      "ffff8000806f2948 T aes_decrypt",
+      "ffff8000806f2500 T aes_encrypt",
+      "ffff8000806f2178 T aes_expandkey",
+      "ffff8000813e0a18 d crypt_target",
+      "ffff8000806759b0 t crypto_authenc_create",
+      "ffff800080675ef8 t crypto_authenc_decrypt",
+      "ffff8000806761f0 t crypto_authenc_decrypt_tail",
+      "ffff800080675dc0 t crypto_authenc_encrypt",
+      "ffff800080675fd8 t crypto_authenc_encrypt_done",
+      "ffff800080676340 t crypto_authenc_esn_create",
+      "ffff800080676858 t crypto_authenc_esn_decrypt",
+      "ffff800080676d98 t crypto_authenc_esn_decrypt_tail",
+      "ffff800080676758 t crypto_authenc_esn_encrypt",
+      "ffff800080676a60 t crypto_authenc_esn_encrypt_done",
+      "ffff800080676608 t crypto_authenc_esn_exit_tfm",
+      "ffff800080676a18 t crypto_authenc_esn_free",
+      "ffff800080676ab8 t crypto_authenc_esn_genicv",
+      "ffff800080676550 t crypto_authenc_esn_init_tfm",
+      "ffff800081179a78 t crypto_authenc_esn_module_exit",
+      "ffff800081143520 t crypto_authenc_esn_module_init",
+      "ffff800080676730 t crypto_authenc_esn_setauthsize",
+      "ffff800080676650 t crypto_authenc_esn_setkey",
+      "ffff8000813b4b18 d crypto_authenc_esn_tmpl",
+      "ffff800080675c50 t crypto_authenc_exit_tfm",
+      "ffff800080675928 T crypto_authenc_extractkeys",
+      "ffff800080675f90 t crypto_authenc_free",
+      "ffff800080675ba8 t crypto_authenc_init_tfm",
+      "ffff800081179a58 t crypto_authenc_module_exit",
+      "ffff8000811434f0 t crypto_authenc_module_init",
+      "ffff800080675c98 t crypto_authenc_setkey",
+      "ffff8000813b4a48 d crypto_authenc_tmpl",
+      "ffff800080670870 t crypto_gcm_base_create",
+      "ffff8000806708f8 t crypto_gcm_create",
+      "ffff800080670d60 t crypto_gcm_create_common",
+      "ffff8000806712f0 t crypto_gcm_decrypt",
+      "ffff800080671230 t crypto_gcm_encrypt",
+      "ffff800080671050 t crypto_gcm_exit_tfm",
+      "ffff8000806713e8 t crypto_gcm_free",
+      "ffff800080671430 t crypto_gcm_init_common",
+      "ffff800080670fa0 t crypto_gcm_init_tfm",
+      "ffff8000811799c0 t crypto_gcm_module_exit",
+      "ffff8000811433d8 t crypto_gcm_module_init",
+      "ffff8000806711f8 t crypto_gcm_setauthsize",
+      "ffff800080671098 t crypto_gcm_setkey",
+      "ffff8000813b4020 d crypto_gcm_tmpls",
+      "ffff80008066d708 t crypto_sha256_digest",
+      "ffff80008066d740 t crypto_sha256_export",
+      "ffff80008066d860 t crypto_sha256_export_core",
+      "ffff80008066d6d8 t crypto_sha256_final",
+      "ffff80008066d7f8 t crypto_sha256_import",
+      "ffff80008066d898 t crypto_sha256_import_core",
+      "ffff80008066d678 t crypto_sha256_init",
+      "ffff8000811798e0 t crypto_sha256_mod_exit",
+      "ffff800081143288 t crypto_sha256_mod_init",
+      "ffff80008066d6a8 t crypto_sha256_update",
+      "ffff80008115b5b8 t dm_crypt_init",
+      "ffff80008115b5e8 t dm_integrity_init",
+      "ffff80008066ceb0 t hmac_init_tfm",
+      "ffff8000813e0b50 d integrity_target",
+      "ffff8000811450d8 t sha256_mod_init",
+      "ffff80008066f978 t xts_init_tfm"
+    ],
+    "finalContainer": {
+      "Status": "exited",
+      "Running": false,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 0,
+      "ExitCode": 0,
+      "Error": "",
+      "StartedAt": "2026-10-11T23:15:36.216223126Z",
+      "FinishedAt": "2026-10-11T23:22:32.627132055Z"
+    },
+    "resources": {
+      "commands": [
+        [
+          "/usr/bin/make",
+          "-C",
+          "/build/src/linux-6.18.35",
+          "O=/build/output",
+          "ARCH=arm64",
+          "LLVM=/build/llvm/llvm-20.1.8-aarch64/bin/",
+          "LLVM_IAS=1",
+          "-j2",
+          "PAHOLE_FLAGS=--btf_gen_floats -j1 --skip_encoding_btf_inconsistent_proto --btf_gen_optimized",
+          "olddefconfig"
+        ],
+        [
+          "/usr/bin/make",
+          "-C",
+          "/build/src/linux-6.18.35",
+          "O=/build/output",
+          "ARCH=arm64",
+          "LLVM=/build/llvm/llvm-20.1.8-aarch64/bin/",
+          "LLVM_IAS=1",
+          "-j2",
+          "PAHOLE_FLAGS=--btf_gen_floats -j1 --skip_encoding_btf_inconsistent_proto --btf_gen_optimized",
+          "Image",
+          "vmlinux"
+        ]
+      ],
+      "toolExitCodes": [
+        0,
+        0
+      ],
+      "cgroup": {
+        "memory.current": "3411681280",
+        "memory.peak": "4041830400",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0"
+      },
+      "note": "Captured after make and before container exit; builder counters, not Cowork VM telemetry."
+    },
+    "focusedTests": {
+      "passed": 9,
+      "failed": 0
+    }
+  },
+  "supportingEvidence": {
+    "build-receipt.json": "7c7cddea7a83adb9e87729dd9f45e3dc01d1716936f7f093b1424ab78224520d",
+    "build.log": "50fda81afee05c183c26ed24eaf1725d1ada1379dc5f7c4909cffe4718a07842",
+    "container-run.json": "9b69719a0e844bb95be701b3e98325eb52515af7ebdb3173f376a76132ddf9f1",
+    "container-final-inspect.json": "246f7f07fee130f504659decaa8215c028c65143dcdf62c7052f7dbd9e01858b",
+    "build-resource-final.json": "35e763970a81ad4b048a2ddd8dce1883a50e4aa56dcece07a394ff7dee491841",
+    "toolchain-files.json": "a4213c847ac4d96a8282988d4963922337d5b39777b93ae5efe30f2731d0355c",
+    "kernel-licenses.json": "86393f8e19a101d4b9ac072802c923e005d1a380cca9af5e69ff647936aedbec",
+    "receipt/packages.json": "43e1f2438776ee1509463e92e3657f5bea125bb3bb4ff59a457332bff9863712",
+    "receipt/package-archives.json": "33cca73cc68b52db412b069af5e4bce0a65cb2ff66a1f44d873c6bfbe9e6315b",
+    "receipt/sysroot-files.json": "a9d4ac517498b4bb81404e98ed8ea6d37ff73ad02f5f7cfa7d53f163fae258c7",
+    "linked-crypto-symbols.txt": "28ae0868affe47edf53795afdc9cae7d6fa6ed2b0d4867f30a4edb39aa8d2f04",
+    "serial-btf-docker-events.jsonl": "36e8e078caa6e07d32b2d57b8a92284e600dec9ce758478cea2eddb73f0ea3d6"
+  },
+  "evidenceRoot": "spikes/cowork-hvf/out/kernel-crypto",
+  "attempts": [
+    {
+      "name": "initial-minimal-builder",
+      "outcome": "Host utility link failed because ld/startup objects absent; no config or kernel built."
+    },
+    {
+      "name": "2g-btf",
+      "configSha256": "d5e020fd9ba9629ecb96bf3797a413a46b96eea5bc04e0fe0e54214d8c301183",
+      "outcome": "pahole killed; final BTF load failed; cgroup OOM counters unavailable after automatic removal; no final artifact."
+    },
+    {
+      "name": "4g-symlink-validation",
+      "outcome": "Verifier rejected data_filter-normalized symlink; fixed validator and tested normalization."
+    },
+    {
+      "name": "4g-parallel-btf",
+      "configSha256": "d5e020fd9ba9629ecb96bf3797a413a46b96eea5bc04e0fe0e54214d8c301183",
+      "outcome": "pahole killed; final BTF load failed; no final artifact."
+    },
+    {
+      "name": "4g-serial-btf",
+      "configSha256": "d5e020fd9ba9629ecb96bf3797a413a46b96eea5bc04e0fe0e54214d8c301183",
+      "outcome": "Docker oom event recorded then container exit1; no final artifact."
+    },
+    {
+      "name": "4g-btf-off",
+      "configSha256": "f0be0fabe2ee0366a0b8dd26364aaf5b8cc9b827a4d7c0ab12b75bf6806b8afe",
+      "outcome": "Actual Image/vmlinux built; make exits0,0, final container exit0, zero OOM events."
+    }
+  ]
+}

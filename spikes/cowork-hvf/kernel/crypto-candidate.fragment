@@ -1,6 +1,7 @@
-# Proposed bootstrap fragment only. Not built, resolved, selected or production validated.
+# Built-in bootstrap comparison fragment; production acceptance remains separate.
 # Merge against a pinned arm64 kernel configuration, run olddefconfig, then verify every symbol.
 CONFIG_MD=y
+CONFIG_MODULES=n
 CONFIG_BLK_DEV_DM=y
 CONFIG_DM_CRYPT=y
 CONFIG_DM_INTEGRITY=y
@@ -28,3 +29,13 @@ CONFIG_VIRTIO_BLK=y
 CONFIG_VIRTIO_MMIO=y
 CONFIG_VIRTIO_BALLOON=y
 CONFIG_PAGE_REPORTING=y
+# Preserve the restricted reclaim profile: poisoning/free initialization must
+# not refill host-discarded guest pages. Boot command-line overrides are a
+# separate admission check; this configuration does not enforce them.
+CONFIG_PAGE_POISONING=n
+CONFIG_INIT_ON_FREE_DEFAULT_ON=n
+CONFIG_INIT_ON_ALLOC_DEFAULT_ON=n
+# Optional BTF generation exceeded the bounded 4 GiB offline builder even
+# with one pahole job. Keep DWARF debug information; BPF/BTF observability
+# differs from the historical comparison baseline and needs separate review.
+CONFIG_DEBUG_INFO_BTF=n

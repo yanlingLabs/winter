@@ -2,7 +2,7 @@
 import argparse,hashlib,json,lzma,os,shutil,subprocess,tarfile
 from pathlib import Path
 HERE=Path(__file__).resolve().parent
-OUT=HERE.parent/'out/kernel-crypto'
+OUT=Path(os.environ.get('COWORK_KERNEL_OUT',HERE.parent/'out/kernel-crypto'))
 PINS=json.loads((HERE/'crypto-inputs.json').read_text())
 def digest(path):
     with path.open('rb') as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
@@ -38,6 +38,25 @@ def verify_source():
             process.kill();process.wait();raise
     output=(OUT/'source-verification.log').read_text()
     if result!=0 or '[GNUPG:] VALIDSIG '+PINS['kernel']['signerFingerprint']+' ' not in output:raise RuntimeError('Kernel developer signature invalid')
+    return archive
+
+def verify_toolchain():
+    pin=PINS['toolchainCandidate'];archive=OUT/pin['archive']
+    verify(archive,pin['sha256'])
+    verify(HERE/pin['signatureFile'],pin['signatureSha256'])
+    verify(HERE/pin['publicKeyFile'],pin['publicKeySha256'])
+    verify(HERE/pin['licenseFile'],pin['licenseSha256'])
+    home=OUT/'verify-gnupg';home.mkdir(mode=0o700,exist_ok=True)
+    command=['gpgv','--homedir',str(home),'--keyring',str(HERE/pin['publicKeyFile']),'--status-fd','1',str(HERE/pin['signatureFile']),'-']
+    with (OUT/'toolchain-verification.log').open('wb') as log:
+        process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT)
+        try:
+            with lzma.open(archive,'rb') as data:shutil.copyfileobj(data,process.stdin,1024*1024)
+            process.stdin.close();result=process.wait(timeout=60)
+        except BaseException:
+            process.kill();process.wait();raise
+    text=(OUT/'toolchain-verification.log').read_text()
+    if result!=0 or '[GNUPG:] VALIDSIG '+pin['signerFingerprint']+' ' not in text:raise RuntimeError('LLVM release signature invalid')
     return archive
 
 def main():

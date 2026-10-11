@@ -1,0 +1,382 @@
+{
+  "CONFIG_ARCH_SUPPORTS_SHADOW_CALL_STACK": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_ASYNC_CORE": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_ASYNC_XOR": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_AS_IS_GNU": {
+    "base": "y",
+    "resolved": null
+  },
+  "CONFIG_AS_IS_LLVM": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_AS_VERSION": {
+    "base": "23800",
+    "resolved": "200108"
+  },
+  "CONFIG_BCACHE": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_BLK_DEV_DM": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_BLK_DEV_DM_BUILTIN": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_BLK_DEV_INTEGRITY": {
+    "base": "n",
+    "resolved": "y"
+  },
+  "CONFIG_BLK_DEV_MD": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_BLK_MQ_STACKING": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_BLOCK_HOLDER_DEPRECATED": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CC_HAS_ASM_GOTO_OUTPUT": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CC_HAS_ASM_GOTO_TIED_OUTPUT": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CC_HAS_ASSUME": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CC_HAS_AUTO_VAR_INIT_PATTERN": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CC_HAS_AUTO_VAR_INIT_ZERO": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CC_HAS_AUTO_VAR_INIT_ZERO_BARE": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CC_HAS_COUNTED_BY": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CC_HAS_RANDSTRUCT": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CC_HAS_SANE_FUNCTION_ALIGNMENT": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CC_HAVE_SHADOW_CALL_STACK": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CC_IMPLICIT_FALLTHROUGH": {
+    "base": "\"-Wimplicit-fallthrough=5\"",
+    "resolved": "\"-Wimplicit-fallthrough\""
+  },
+  "CONFIG_CC_IS_CLANG": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CC_IS_GCC": {
+    "base": "y",
+    "resolved": null
+  },
+  "CONFIG_CC_NO_ARRAY_BOUNDS": {
+    "base": "y",
+    "resolved": null
+  },
+  "CONFIG_CC_NO_STRINGOP_OVERFLOW": {
+    "base": "y",
+    "resolved": null
+  },
+  "CONFIG_CC_VERSION_TEXT": {
+    "base": "\"gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0\"",
+    "resolved": "\"ClangBuiltLinux clang version 20.1.8 (https://github.com/llvm/llvm-project.git 87f0227cb60147a26a1eeb4fb06e3b505e9c7261)\""
+  },
+  "CONFIG_CFI": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_CLANG_SUPPORTS_DYNAMIC_FTRACE_WITH_ARGS": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CLANG_VERSION": {
+    "base": "0",
+    "resolved": "200108"
+  },
+  "CONFIG_CRC64": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CRC_T10DIF": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CRC_T10DIF_ARCH": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_CRYPTO_ESSIV": {
+    "base": "n",
+    "resolved": "y"
+  },
+  "CONFIG_CRYPTO_USER_API_AEAD": {
+    "base": "n",
+    "resolved": "y"
+  },
+  "CONFIG_CRYPTO_USER_API_SKCIPHER": {
+    "base": "n",
+    "resolved": "y"
+  },
+  "CONFIG_CRYPTO_XTS": {
+    "base": "n",
+    "resolved": "y"
+  },
+  "CONFIG_DEBUG_INFO_BTF": {
+    "base": "y",
+    "resolved": "n"
+  },
+  "CONFIG_DEBUG_INFO_COMPRESSED_ZSTD": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DEBUG_SECTION_MISMATCH": {
+    "base": "n",
+    "resolved": null
+  },
+  "CONFIG_DM_AUDIT": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_DM_BUFIO": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_DM_CACHE": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_CLONE": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_CRYPT": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_DM_DEBUG": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_DEBUG_BLOCK_MANAGER_LOCKING": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_DELAY": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_DUST": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_EBS": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_ERA": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_FLAKEY": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_INIT": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_INTEGRITY": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_DM_LOG_WRITES": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_MIRROR": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_MULTIPATH": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_RAID": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_SNAPSHOT": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_SWITCH": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_THIN_PROVISIONING": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_UEVENT": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_UNSTRIPED": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_VDO": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_VERITY": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_WRITECACHE": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_DM_ZERO": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_GCC_ASM_GOTO_OUTPUT_BROKEN": {
+    "base": "y",
+    "resolved": null
+  },
+  "CONFIG_GCC_SUPPORTS_DYNAMIC_FTRACE_WITH_ARGS": {
+    "base": "y",
+    "resolved": null
+  },
+  "CONFIG_GCC_VERSION": {
+    "base": "110400",
+    "resolved": "0"
+  },
+  "CONFIG_HAS_LTO_CLANG": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_HAVE_CFI_ICALL_NORMALIZE_INTEGERS": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_INIT_STACK_ALL_PATTERN": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_INIT_STACK_ALL_ZERO": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_KCOV": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_LD_CAN_USE_KEEP_IN_OVERLAY": {
+    "base": "y",
+    "resolved": null
+  },
+  "CONFIG_LD_IS_BFD": {
+    "base": "y",
+    "resolved": null
+  },
+  "CONFIG_LD_IS_LLD": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_LD_VERSION": {
+    "base": "23800",
+    "resolved": "0"
+  },
+  "CONFIG_LLD_VERSION": {
+    "base": "0",
+    "resolved": "200108"
+  },
+  "CONFIG_LTO_CLANG_FULL": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_LTO_CLANG_THIN": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_MD": {
+    "base": "n",
+    "resolved": "y"
+  },
+  "CONFIG_NET_SCH_BPF": {
+    "base": "n",
+    "resolved": null
+  },
+  "CONFIG_PAHOLE_HAS_BTF_TAG": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_PROBE_EVENTS_BTF_ARGS": {
+    "base": "n",
+    "resolved": null
+  },
+  "CONFIG_RANDSTRUCT_FULL": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_READABLE_ASM": {
+    "base": "n",
+    "resolved": null
+  },
+  "CONFIG_RELR": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_SCHED_CLASS_EXT": {
+    "base": "n",
+    "resolved": null
+  },
+  "CONFIG_SHADOW_CALL_STACK": {
+    "base": null,
+    "resolved": "n"
+  },
+  "CONFIG_TOOLS_SUPPORT_RELR": {
+    "base": null,
+    "resolved": "y"
+  },
+  "CONFIG_XOR_BLOCKS": {
+    "base": null,
+    "resolved": "y"
+  }
+}

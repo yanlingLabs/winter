@@ -1,6 +1,6 @@
 {
-  "status": "inputs-pinned-build-not-executed",
-  "kernelBuilt": false,
+  "status": "kernel-comparison-built-unbooted",
+  "kernelBuilt": true,
   "initramfsBuilt": false,
   "productionReady": false,
   "kernel": {
@@ -20,9 +20,52 @@
   },
   "fragment": {
     "file": "crypto-candidate.fragment",
-    "sha256": "9c431090d38b05a1fdf0bd3d13a7255b277518878b65e69939fbd08f331c48bc"
+    "sha256": "6e587152b5716f9ca96129c4a529704efd7d138d82e324e81bd3bd2e05555858"
   },
   "toolchainCandidate": {
+    "version": "LLVM-20.1.8",
+    "url": "https://cdn.kernel.org/pub/tools/llvm/files/llvm-20.1.8-aarch64.tar.xz",
+    "archive": "llvm-20.1.8-aarch64.tar.xz",
+    "sha256": "945d22282d4bc623fd828fad50e14698fe7be070855f68f3d351a26305615ba7",
+    "bytes": 130509608,
+    "host": "aarch64-linux",
+    "sourceRevision": "llvmorg-20.1.8",
+    "source": "https://github.com/llvm/llvm-project/tree/llvmorg-20.1.8",
+    "provenance": "Kernel.org slim PGO LLVM; SHA verified plus detached signature over decompressed tar using kernel.org WKD key. Build suitability only, not production toolchain acceptance.",
+    "signatureFile": "llvm-20.1.8-aarch64.tar.sign",
+    "signatureSha256": "9e1bc425061af1b7512a70b9e5335fe4fb2373b59068e6a69429b80bd8c1ec0d",
+    "publicKeyFile": "nathan-public.key",
+    "publicKeySha256": "dc0ffd470f01a27a19fad7a243cf85cf79f063d60b3a4c75090b24d9bdc6e2c8",
+    "signerFingerprint": "7BE325C731319CCD01D8CA921D6B269171C01A96",
+    "primaryFingerprint": "2437CB76E544CB6AB3D9DFD399739260CB6CB716",
+    "publicKeySource": "https://kernel.org/.well-known/openpgpkey/hu/f4fk1gdgyoeakzdpeuk5smpgq6iygc1i?l=nathan",
+    "license": "Upstream Apache-2.0 WITH LLVM-exception; source license hash pinned, no bundled license in slim archive",
+    "licenseFile": "llvm-LICENSE.txt",
+    "licenseSha256": "8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee",
+    "licenseProvenance": "Upstream LLVM20.1.8 source license; slim binary archive has no bundled license file.",
+    "sourceCommit": "87f0227cb60147a26a1eeb4fb06e3b505e9c7261"
+  },
+  "builder": {
+    "required": "Pinned isolated Linux arm64 filesystem/container image digest and host-tools/dependency receipt; offline guest build, <=2 build jobs. No auto-launch or global install.",
+    "selected": true,
+    "imageId": "sha256:8143f5c8e71574a89a9dc0cfbfa43cc4c491f02f6a08b3f0f8910329de137de8",
+    "imageDigestKind": "Docker immutable local image ID; exported image inspection and rootfs diffIDs identify its content",
+    "baseManifest": "sha256:08571ca13e00ca07a2a84eab83a959b4242e22cceb16486a11bef1428c9e93a7",
+    "dockerfile": "Builder.Dockerfile",
+    "dockerfileSha256": "673cd330a04d2d0caa61a6bac16d3953781c07ccddb8999d55772bbaf7718a07",
+    "rootFsDiffIds": [
+      "sha256:1e9178dc90058fa454a60803300219ee8c17e515be8718817ed824b96fa1207b",
+      "sha256:f08117ebb587325ed824b9657897e8d17d0b435a5737e548933ee94a31491030",
+      "sha256:23830f4f0fe151595ca1e82c6d4c6dadaad1bbd680390c940147f22c21ca3782"
+    ],
+    "snapshot": "20261011T000000Z",
+    "savedImageArchiveSha256": "85e8c23e31fc1f58c17a445379d23693924d4b70e1b0774812001dcfb19bef19"
+  },
+  "userspace": {
+    "selected": false,
+    "required": "Pinned cryptsetup/libcryptsetup and complete dependencies/license list, trusted PID1/key receiver, immutable bundle file manifest, synthetic-key-only fixture. No initramfs encryption/unlock readiness claimed."
+  },
+  "supersededToolchainCandidate": {
     "version": "LLVM-20.1.8",
     "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-Linux-ARM64.tar.xz",
     "sha256": "b855cc17d935fdd83da82206b7a7cfc680095efd1e9e8182c4a05e761958bef8",
@@ -31,12 +74,8 @@
     "host": "aarch64-linux",
     "release": "https://github.com/llvm/llvm-project/releases/tag/llvmorg-20.1.8"
   },
-  "builder": {
-    "required": "Pinned isolated Linux arm64 filesystem/container image digest and host-tools/dependency receipt; offline guest build, <=2 build jobs. No auto-launch or global install.",
-    "selected": false
-  },
-  "userspace": {
-    "selected": false,
-    "required": "Pinned cryptsetup/libcryptsetup and complete dependencies/license list, trusted PID1/key receiver, immutable bundle file manifest, synthetic-key-only fixture. No initramfs encryption/unlock readiness claimed."
+  "resolvedConfig": {
+    "file": "resolved-6.18.35.config",
+    "sha256": "f0be0fabe2ee0366a0b8dd26364aaf5b8cc9b827a4d7c0ab12b75bf6806b8afe"
   }
 }
