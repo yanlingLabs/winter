@@ -113,6 +113,19 @@ describe("downloads (a file the page makes itself)", () => {
     expect(chrome.suggested.get(big)).toBeUndefined();
   });
 
+  test("switched off and on again: the arms go, and the new downloads API is listened to afresh", async () => {
+    chrome.grant("downloads");
+    const tabId = await armedTab();
+    await c.handle("downloads.arm", { tabKey: String(tabId), subdir: "Winter/abc123", until: Date.now() + 60_000, maxBytes: 100 });
+    chrome.revoke("downloads");
+    expect(await refusal(c.handle("downloads.arm", { tabKey: String(tabId), subdir: "Winter/abc123", until: Date.now() + 60_000, maxBytes: 100 })))
+      .toEqual({ code: "not_allowed", data: { permission: "downloads" } });
+    chrome.grant("downloads");
+    await c.handle("downloads.arm", { tabKey: String(tabId), subdir: "Winter/def456", until: Date.now() + 60_000, maxBytes: 100 });
+    const id = await chrome.pageDownload({ url: "blob:https://shop.example.com/9", name: "again.txt", bytes: 3, downloadsDir: "/d" });
+    expect(chrome.suggested.get(id)).toBe("Winter/def456/again.txt");
+  });
+
   test("the arm ends at its deadline, when the tab closes, and when the link to Winter drops", async () => {
     chrome.grant("downloads");
     const tabId = await armedTab();

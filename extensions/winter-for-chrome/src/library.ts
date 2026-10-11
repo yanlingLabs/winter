@@ -74,7 +74,10 @@ export class Library {
       if ((p.permissions ?? []).includes("downloads")) this.listen();
     });
     this.chrome.permissions.onRemoved.addListener((p) => {
-      if ((p.permissions ?? []).includes("downloads")) for (const tabId of [...this.arms.keys()]) this.disarm(tabId);
+      if (!(p.permissions ?? []).includes("downloads")) return;
+      for (const tabId of [...this.arms.keys()]) this.disarm(tabId);
+      // Granted again later, the browser hands out a NEW downloads API: its events must be listened to afresh.
+      this.listening = false;
     });
     void this.granted("downloads").then((ok) => { if (ok) this.listen(); });
   }

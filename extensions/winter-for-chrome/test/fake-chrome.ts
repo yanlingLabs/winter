@@ -391,6 +391,16 @@ export class FakeChrome implements ChromeApi {
     this.granted.add(p);
     for (const l of this.permissionsOnAdded.listeners) l({ permissions: [p] });
   }
+  /** …or off again: the browser drops that API — a later grant hands out new event objects (the old ones are dead). */
+  revoke(p: string): void {
+    this.granted.delete(p);
+    if (p === "downloads") {
+      this.downloadsOnCreated.listeners.length = 0;
+      this.downloadsOnDeterminingFilename.listeners.length = 0;
+      this.downloadsOnChanged.listeners.length = 0;
+    }
+    for (const l of this.permissionsOnRemoved.listeners) l({ permissions: [p] });
+  }
   historyItems: Array<{ url?: string; title?: string; lastVisitTime?: number }> = [];
   historyQueries: unknown[] = [];
   bookmarkNodes: Array<{ id: string; url?: string; title?: string; parentId?: string }> = [];
