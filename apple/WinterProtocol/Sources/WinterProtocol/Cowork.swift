@@ -29,16 +29,54 @@ public struct CoworkWorkspaceRecord: Codable, Equatable, Sendable {
     public let configRevision: Int, grantRevision: Int, instructionRevision: Int, leaseEpoch: Int
     public let power: String, createdAt: String, updatedAt: String
 }
+public enum CoworkDetailState: String, Codable, Sendable { case complete, summary }
+public struct CoworkPolicySummary: Codable, Equatable, Sendable {
+    public struct Counts: Codable, Equatable, Sendable { public let toolClasses: Int, hostServices: Int, connectors: Int }
+    public let policyId: String, workspaceId: String
+    public let defaultPolicy: CoworkApprovalPolicy, publication: CoworkPublicationPolicy
+    public let revision: Int, defaultRevision: Int, publicationRevision: Int
+    public let network: String, capabilityCounts: Counts
+}
+public struct CoworkDetailMethods: Codable, Equatable, Sendable { public let sources: String, policy: String }
 public struct CoworkWorkspace: Codable, Equatable, Sendable {
     public let workspaceId: String, ownership: CoworkOwnership, ownerId: String, title: String, state: String
     public let configRevision: Int, grantRevision: Int, instructionRevision: Int, leaseEpoch: Int
     public let power: String, createdAt: String, updatedAt: String
-    public let policy: CoworkWorkspacePolicy, sources: [CoworkSource], automaticPublication: Bool
+    public let automaticPublication: Bool, detailState: CoworkDetailState
+    public let policy: CoworkWorkspacePolicy?, sources: [CoworkSource]?
+    /// Display/recovery metadata; absent capability details never imply an empty grant.
+    public let detailReason: String?, policySummary: CoworkPolicySummary?, sourceCount: Int?, detailMethods: CoworkDetailMethods?
+    private enum CodingKeys: String, CodingKey { case workspaceId, ownership, ownerId, title, state, configRevision, grantRevision, instructionRevision, leaseEpoch, power, createdAt, updatedAt, automaticPublication, detailState, policy, sources, detailReason, policySummary, sourceCount, detailMethods }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceId = try c.decode(String.self, forKey: .workspaceId); ownership = try c.decode(CoworkOwnership.self, forKey: .ownership)
+        ownerId = try c.decode(String.self, forKey: .ownerId); title = try c.decode(String.self, forKey: .title); state = try c.decode(String.self, forKey: .state)
+        configRevision = try c.decode(Int.self, forKey: .configRevision); grantRevision = try c.decode(Int.self, forKey: .grantRevision)
+        instructionRevision = try c.decode(Int.self, forKey: .instructionRevision); leaseEpoch = try c.decode(Int.self, forKey: .leaseEpoch)
+        power = try c.decode(String.self, forKey: .power); createdAt = try c.decode(String.self, forKey: .createdAt); updatedAt = try c.decode(String.self, forKey: .updatedAt)
+        automaticPublication = try c.decode(Bool.self, forKey: .automaticPublication); detailState = try c.decode(CoworkDetailState.self, forKey: .detailState)
+        switch detailState {
+        case .complete:
+            guard !c.contains(.detailReason), !c.contains(.policySummary), !c.contains(.sourceCount), !c.contains(.detailMethods) else { throw DecodingError.dataCorruptedError(forKey: .detailState, in: c, debugDescription: "Complete workspace cannot contain summary details") }
+            policy = try c.decode(CoworkWorkspacePolicy.self, forKey: .policy); sources = try c.decode([CoworkSource].self, forKey: .sources)
+            detailReason = nil; policySummary = nil; sourceCount = nil; detailMethods = nil
+        case .summary:
+            guard !c.contains(.policy), !c.contains(.sources) else { throw DecodingError.dataCorruptedError(forKey: .detailState, in: c, debugDescription: "Summary cannot contain effective capability details") }
+            policy = nil; sources = nil
+            let reason = try c.decode(String.self, forKey: .detailReason), count = try c.decode(Int.self, forKey: .sourceCount), methods = try c.decode(CoworkDetailMethods.self, forKey: .detailMethods)
+            guard reason == "response_limit", count >= 0, methods.sources == "workspace.source.list", methods.policy == "workspace.policy.get" else { throw DecodingError.dataCorruptedError(forKey: .detailState, in: c, debugDescription: "Invalid summary recovery metadata") }
+            detailReason = reason; sourceCount = count; detailMethods = methods; policySummary = try c.decode(CoworkPolicySummary.self, forKey: .policySummary)
+        }
+    }
+}
+public struct CoworkPolicyPage: Codable, Equatable, Sendable {
+    public struct Entry: Codable, Equatable, Sendable { public let kind: String, name: String }
+    public let policy: CoworkPolicySummary, entries: [Entry], nextCursor: String?
 }
 public struct CoworkProject: Codable, Equatable, Sendable { public let projectId: String, workspace: CoworkWorkspace }
 public struct CoworkWorkspacePage: Codable, Equatable, Sendable { public let workspaces: [CoworkWorkspace], nextCursor: String? }
 public struct CoworkProjectPage: Codable, Equatable, Sendable { public let projects: [CoworkProject], nextCursor: String? }
-public struct CoworkSourceList: Codable, Equatable, Sendable { public let sources: [CoworkSource] }
+public struct CoworkSourceList: Codable, Equatable, Sendable { public let sources: [CoworkSource], nextCursor: String? }
 public struct CoworkReceipt<Value: Codable & Equatable & Sendable>: Codable, Equatable, Sendable {
     public let operationId: String, workspaceId: String, revision: Int, value: Value
 }
@@ -72,6 +110,13 @@ extension CoworkRequest where Result == CoworkProjectPage {
 extension CoworkRequest where Result == CoworkWorkspace {
     public static func get(workspaceId: String) -> Self { Self("workspace.get", ["workspaceId": .string(workspaceId)]) }
 }
+extension CoworkRequest where Result == CoworkPolicyPage {
+    public static func policy(workspaceId: String, cursor: String? = nil, limit: Int = 100, expectedRevision: Int? = nil) -> Self {
+        var p: [String: SessionEvent.JSONValue] = ["workspaceId": .string(workspaceId), "limit": .number(Double(limit))]
+        if let cursor { p["cursor"] = .string(cursor) }; if let expectedRevision { p["expectedRevision"] = .number(Double(expectedRevision)) }
+        return Self("workspace.policy.get", p)
+    }
+}
 extension CoworkRequest where Result == CoworkProject {
     public static func getProject(projectId: String) -> Self { Self("project.get", ["projectId": .string(projectId)]) }
 }
@@ -92,7 +137,11 @@ extension CoworkRequest where Result == CoworkReceipt<CoworkWorkspaceRecord> {
     }
 }
 extension CoworkRequest where Result == CoworkSourceList {
-    public static func listSources(workspaceId: String) -> Self { Self("workspace.source.list", ["workspaceId": .string(workspaceId)]) }
+    public static func listSources(workspaceId: String, cursor: String? = nil, limit: Int = 100, expectedRevision: Int? = nil) -> Self {
+        var p: [String: SessionEvent.JSONValue] = ["workspaceId": .string(workspaceId), "limit": .number(Double(limit))]
+        if let cursor { p["cursor"] = .string(cursor) }; if let expectedRevision { p["expectedRevision"] = .number(Double(expectedRevision)) }
+        return Self("workspace.source.list", p)
+    }
 }
 extension CoworkRequest where Result == CoworkSource {
     public static func getSource(workspaceId: String, sourceId: String) -> Self { Self("workspace.source.get", ["workspaceId": .string(workspaceId), "sourceId": .string(sourceId)]) }

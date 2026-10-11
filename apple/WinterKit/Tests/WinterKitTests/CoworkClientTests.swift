@@ -39,16 +39,41 @@ final class CoworkClientTests: XCTestCase {
 
     func testWorkspaceProjectionDecodesEveryCanonicalRecord() throws {
         let json = #"""
-        {"workspaceId":"workspace-fixture","ownership":"project","ownerId":"project-fixture","title":"Fixture","state":"retained","configRevision":3,"grantRevision":2,"instructionRevision":1,"leaseEpoch":1,"power":"starting","createdAt":"2026-10-11","updatedAt":"2026-10-11","policy":{"policyId":"policy-fixture","workspaceId":"workspace-fixture","defaultPolicy":"plan","publication":"github-only-feature-branches","ceiling":{"toolClasses":["read"],"hostServices":[],"connectors":[],"network":"none"},"revision":2,"defaultRevision":2,"publicationRevision":1},"sources":[{"sourceId":"source-fixture","workspaceId":"workspace-fixture","locationId":"location-fixture","kind":"folder","label":"Selected folder","access":"read-only","desired":"present","state":"unavailable","revision":2,"ackRevision":null,"reason":"access_revoked","restartRequired":true,"trust":"revoked","createdAt":"2026-10-11","updatedAt":"2026-10-11"}],"automaticPublication":false}
+        {"workspaceId":"workspace-fixture","ownership":"project","ownerId":"project-fixture","title":"Fixture","state":"retained","configRevision":3,"grantRevision":2,"instructionRevision":1,"leaseEpoch":1,"power":"starting","createdAt":"2026-10-11","updatedAt":"2026-10-11","detailState":"complete","policy":{"policyId":"policy-fixture","workspaceId":"workspace-fixture","defaultPolicy":"plan","publication":"github-only-feature-branches","ceiling":{"toolClasses":["read"],"hostServices":[],"connectors":[],"network":"none"},"revision":2,"defaultRevision":2,"publicationRevision":1},"sources":[{"sourceId":"source-fixture","workspaceId":"workspace-fixture","locationId":"location-fixture","kind":"folder","label":"Selected folder","access":"read-only","desired":"present","state":"unavailable","revision":2,"ackRevision":null,"reason":"access_revoked","restartRequired":true,"trust":"revoked","createdAt":"2026-10-11","updatedAt":"2026-10-11"}],"automaticPublication":false}
         """#
         let value = try JSONDecoder().decode(SessionEvent.JSONValue.self, from: Data(json.utf8))
         let workspace = try CoworkRequest<CoworkWorkspace>.get(workspaceId: "workspace-fixture").decode(value)
-        XCTAssertEqual(workspace.policy.defaultPolicy, .plan)
-        XCTAssertEqual(workspace.sources.first?.reason, "access_revoked")
-        XCTAssertNil(workspace.sources.first?.ackRevision)
-        XCTAssertEqual(workspace.sources.first?.kind, .folder)
+        XCTAssertEqual(workspace.detailState, .complete); XCTAssertNil(workspace.policySummary)
+        XCTAssertEqual(workspace.policy?.defaultPolicy, .plan)
+        XCTAssertEqual(workspace.sources?.first?.reason, "access_revoked")
+        XCTAssertNil(workspace.sources?.first?.ackRevision)
+        XCTAssertEqual(workspace.sources?.first?.kind, .folder)
         XCTAssertFalse(workspace.automaticPublication)
         XCTAssertEqual(try JSONDecoder().decode(CoworkWorkspace.self, from: JSONEncoder().encode(workspace)), workspace)
+    }
+
+    func testSummaryAndPagedRecoveryAreExplicitAndCannotMasqueradeAsCompleteAuthority() throws {
+        let json = #"""
+        {"workspaceId":"workspace-fixture","ownership":"project","ownerId":"project-fixture","title":"Legacy","state":"retained","configRevision":3,"grantRevision":2,"instructionRevision":1,"leaseEpoch":1,"power":"stopped","createdAt":"2026-10-11","updatedAt":"2026-10-11","detailState":"summary","detailReason":"response_limit","policySummary":{"policyId":"policy-fixture","workspaceId":"workspace-fixture","defaultPolicy":"plan","publication":"manual","revision":2,"defaultRevision":1,"publicationRevision":1,"network":"internet","capabilityCounts":{"toolClasses":256,"hostServices":256,"connectors":256}},"sourceCount":22,"automaticPublication":false,"detailMethods":{"sources":"workspace.source.list","policy":"workspace.policy.get"}}
+        """#
+        let workspace = try JSONDecoder().decode(CoworkWorkspace.self, from: Data(json.utf8))
+        XCTAssertEqual(workspace.detailState, .summary); XCTAssertEqual(workspace.detailReason, "response_limit")
+        XCTAssertNil(workspace.policy); XCTAssertNil(workspace.sources)
+        XCTAssertEqual(workspace.sourceCount, 22); XCTAssertEqual(workspace.policySummary?.capabilityCounts.toolClasses, 256)
+        XCTAssertEqual(workspace.detailMethods?.policy, "workspace.policy.get")
+        XCTAssertEqual(try JSONDecoder().decode(CoworkWorkspace.self, from: JSONEncoder().encode(workspace)), workspace)
+        XCTAssertThrowsError(try JSONDecoder().decode(CoworkWorkspace.self, from: Data(json.replacingOccurrences(of: "\"detailState\":\"summary\"", with: "\"detailState\":\"complete\"").utf8)))
+        XCTAssertThrowsError(try JSONDecoder().decode(CoworkWorkspace.self, from: Data(json.replacingOccurrences(of: "\"sourceCount\":22", with: "\"sourceCount\":22,\"sources\":[]").utf8)))
+        let request = CoworkRequest<CoworkPolicyPage>.policy(workspaceId: workspace.workspaceId, cursor: "2:100", limit: 25, expectedRevision: 2)
+        XCTAssertEqual(request.method, "workspace.policy.get")
+        let params = String(decoding: try JSONEncoder().encode(request.params), as: UTF8.self)
+        XCTAssertTrue(params.contains("2:100")); XCTAssertTrue(params.contains("expectedRevision"))
+        let policyJson = #"""
+        {"policy":{"policyId":"policy-fixture","workspaceId":"workspace-fixture","defaultPolicy":"plan","publication":"manual","revision":2,"defaultRevision":1,"publicationRevision":1,"network":"internet","capabilityCounts":{"toolClasses":256,"hostServices":256,"connectors":256}},"entries":[{"kind":"toolClasses","name":"read"}],"nextCursor":"2:101"}
+        """#
+        let page = try request.decode(JSONDecoder().decode(SessionEvent.JSONValue.self, from: Data(policyJson.utf8)))
+        XCTAssertEqual(page.entries.first?.name, "read"); XCTAssertEqual(page.nextCursor, "2:101")
+        XCTAssertEqual(CoworkRequest<CoworkSourceList>.listSources(workspaceId: workspace.workspaceId, cursor: "3:1", limit: 1, expectedRevision: 3).method, "workspace.source.list")
     }
 
     func testConservativeInnerBudgetFitsTheFullyEncodedPairedEnvelope() throws {

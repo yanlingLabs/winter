@@ -12,14 +12,15 @@ The schema/method inventory is `packages/protocol/src/cowork.ts`; RPC routing is
 in `packages/core/src/ipc/server.ts`. Swift typed records/requests live in
 `apple/WinterProtocol/Sources/WinterProtocol/Cowork.swift`, with Mac and paired
 client adapters in WinterKit and WinterSessionKit. All four allowlist mirrors
-now contain 39 methods (the preceding 25 plus 14 workspace routes).
+now contain 40 methods (the preceding 25 plus 15 workspace routes).
 
 | Methods | Result/authority |
 | --- | --- |
-| `workspace.list/get`, `project.list/get` | Safe records, canonical workspace policy and non-detached source projections; list filtering and each record lookup use the same current-authority gate. Pages contain at most 100 entries and fit the byte budget. |
+| `workspace.list/get`, `project.list/get` | Explicit complete snapshots or bounded summaries for oversized legacy records. Each includes workspace identity/revisions; summaries include policy metadata/counts, source count and detail methods. List filtering and each lookup use the same current-authority gate. Pages contain at most 100 entries and fit the byte budget. |
 | `workspace.create`, `project.create` | Host-admitted initial selections and ceiling; durable preparing receipt and reserved standalone owner identity or Project identity. Production is blocked by `unsupported_topology`; paired creation remains unsupported pending persisted peer creation-admission. |
 | `workspace.update`, `project.update` | Title only, expected workspace configuration revision; metadata applies in the transaction and its operation is immediately applied. |
-| `workspace.source.list/get` | Source identities, desired membership, readiness, revisions, restart/trust status and safe reason. Source/workspace scope must match. |
+| `workspace.source.list/get` | Complete source identities, desired membership, readiness, revisions, restart/trust status and safe reason. List pages shrink to the byte budget. Source/workspace scope must match. |
+| `workspace.policy.get` | Bounded canonical policy metadata plus up to 100 capability entries per page. Current workspace scope is mandatory; cursor/optional expected revision bind the current policy revision. |
 | `workspace.source.addFolder` | Local user only, opaque host picker-selection ID. No Mac path, bookmark, root identity or grant reference is accepted from RPC. Production provisioning remains blocked. |
 | `workspace.source.addRepository` | Current workspace scope plus host-resolved admitted repository/account authority; paired account scope is checked again on every request. Production provisioning remains blocked. |
 | `workspace.source.remove/revoke` | Durable desired-state narrowing. Ordinary removal preserves the final-source/replacement invariant; security revocation may make the final source unavailable. Guest cleanup/effect is pending, never implied by the DB receipt. |
@@ -45,9 +46,29 @@ this administration surface.
 Responses explicitly omit host roots, bookmarks, grant/account references,
 backing paths and incarnation details. The 128 KiB inner JSON budget leaves room
 for worst-case base64 slash escaping and the paired outer envelope below 512
-KiB. Mutation responses are checked inside the SQLite transaction before
-commit, so a response-budget refusal rolls back the mutation. List pages shrink
-to fit the same budget; a cursor outside the current scope is refused.
+KiB. Mutation responses and complete workspace aggregates are checked inside
+the SQLite transaction before commit, so a response-budget refusal rolls back
+the mutation, operation and outbox writes. Expansion admission reserves maximum
+revision widths, source lifecycle fields and both single-entry list wrappers,
+including their continuation cursors. A small source/policy receipt cannot
+commit an aggregate that makes subsequent workspace/Project reads fail. List
+pages shrink to fit the same budget; a cursor outside the current scope is
+refused.
+
+Source removal/revocation and capability ceilings that are subsets of the
+current ceiling bypass aggregate admission, while retaining receipt validation.
+This keeps security narrowing available for pre-existing oversized records.
+Their get/list reads return an explicit `detailState: summary` and
+`detailReason: response_limit`; the complete variant uses `detailState: complete`.
+Summary DTOs reject full `policy`/`sources` fields and include bounded policy
+metadata/counts, source count, and scoped source/policy detail method names.
+Counts or missing details never mean an empty capability grant, and summaries
+remain visible alongside healthy workspaces. Creation receipts require complete
+snapshots. Scoped source pages and policy capability pages retrieve all details
+without silently truncating them. Their cursors reject stale desired workspace
+configuration or policy revisions respectively; optional `expectedRevision`
+checks use the same revisions. Narrowing the ceiling restores complete reads
+when the aggregate fits again.
 
 ## Explicitly unsupported integration
 
@@ -83,7 +104,7 @@ cd packages/core
 bun test test/ipc/cowork-workspace-api.test.ts test/cowork/repository.test.ts \
   test/ipc/remote-allowlist-parity.test.ts test/ipc/remote-role.test.ts \
   test/ipc/remote-chat-gate.test.ts
-# 63 tests, 339 assertions passed; actual Unix socket, daemon stop/restart and canonical DB.
+# 69 tests, 644 assertions passed; actual Unix socket, daemon stop/restart and canonical DB.
 
 # From repository root
 bun run typecheck:core
@@ -92,10 +113,11 @@ bun run typecheck:protocol
 ```
 
 Swift verification builds WinterProtocol, WinterSessionKit and WinterKit and
-runs four `CoworkClientTests` plus `GatewayGateTests/testG7` (five tests passed), using a disposable
+runs five `CoworkClientTests` plus `GatewayGateTests/testG7` (six tests passed), using a disposable
 `TMPDIR`. It exercises typed RPC/error propagation, full workspace/source/policy
 projection decoding, opaque source selections, canonical Project policy routing,
-the real serialized envelope budget and the fourth allowlist mirror. This is
+complete/summary discrimination, paged recovery, the real serialized envelope
+budget and the fourth allowlist mirror. This is
 focused host API/client proof, not a full VM feasibility or product E2E verdict.
 
 ```sh

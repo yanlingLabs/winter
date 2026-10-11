@@ -65,7 +65,7 @@ describe("Cowork workspace API through a real isolated daemon and Unix RPC", () 
     const fixture = await boot(), made = await create(fixture.local, "create-one"), workspaceId = made.workspaceId, sourceId = made.value.sources[0].sourceId;
     expect(made.value.sources[0].state).toBe("preparing"); expect(made.value.power).toBe("stopped");
     expect(await create(fixture.local, "create-one")).toEqual(made);
-    const wire = JSON.stringify(made); for (const privateValue of [repo.detail.authorityRef, repo.detail.repositoryId, "detail", "rootIdentity", "grantRef", "incarnationId"]) expect(wire.includes(privateValue)).toBe(false);
+    const wire = JSON.stringify(made); for (const privateValue of [repo.detail.authorityRef, repo.detail.repositoryId, '"detail":', "rootIdentity", "grantRef", "incarnationId"]) expect(wire.includes(privateValue)).toBe(false);
     const epoch = fixture.records.beginIncarnation(workspaceId, "fixture-boot", made.revision);
     fixture.records.acknowledgeSource(epoch, sourceId, 1, "ready");
     const op = await fixture.local.request("workspace.operation.get", { workspaceId, operationId: made.operationId }); expect(op.result.status).toBe("applied");
@@ -141,5 +141,152 @@ describe("Cowork workspace API through a real isolated daemon and Unix RPC", () 
     expect((await production.remote.request("workspace.list")).error.data.code).toBe("authority_denied");
     expect(production.records.list()).toEqual([]);
     expect((await production.local.request("workspace.create", { requestId: "injected", ownership: "standalone", title: "Bad", selections: [{ selectionId: "folder-choice", kind: "folder", path: "/private", grantRef: "forged" }] })).error.data.code).toBe("invalid_request");
+  });
+  test("small source receipts cannot commit an unreadable aggregate; admitted lifecycle changes stay readable", async () => {
+    const fixture = await boot();
+    const names = Array.from({ length: 200 }, (_value, index) => `${index}-` + "x".repeat(187));
+    fixture.ports.creationCeiling = () => ({ toolClasses: names, hostServices: names, connectors: names, network: "none" });
+    fixture.ports.selection = () => ({ ...repo, label: "r".repeat(200) });
+    const made = await create(fixture.local, "aggregate"), workspaceId = made.workspaceId;
+    fixture.scopes.add(workspaceId);
+    let refused = false;
+    for (let index = 0; index < 50; index++) {
+      const revision = fixture.records.get(workspaceId).configRevision;
+      const before = fixture.records.sources(workspaceId).length;
+      const operations = fixture.records.rs.db.query("SELECT count(*) AS n FROM cowork_operations").get();
+      const outbox = fixture.records.rs.db.query("SELECT count(*) AS n FROM cowork_outbox").get();
+      const added = await fixture.remote.request("workspace.source.addRepository", { workspaceId, requestId: `aggregate-${index}`, expectedRevision: revision, selectionId: "repo-choice" });
+      if (added.error) {
+        expect(added.error.data.code).toBe("response_too_large");
+        expect(fixture.records.get(workspaceId).configRevision).toBe(revision);
+        expect(fixture.records.sources(workspaceId)).toHaveLength(before);
+        expect(fixture.records.rs.db.query("SELECT count(*) AS n FROM cowork_operations").get()).toEqual(operations);
+        expect(fixture.records.rs.db.query("SELECT count(*) AS n FROM cowork_outbox").get()).toEqual(outbox);
+        refused = true; break;
+      }
+      expect(added.result.value.label).toHaveLength(200);
+      for (const [method, params] of [["workspace.get", { workspaceId }], ["project.get", { projectId: made.value.ownerId }], ["workspace.list", {}], ["project.list", {}]] as const) {
+        const reply = await fixture.remote.request(method, params); expect(reply.error).toBeUndefined();
+        const snapshot = reply.result.workspace ?? reply.result.workspaces?.[0] ?? reply.result.projects?.[0]?.workspace ?? reply.result;
+        expect(snapshot.detailState).toBe("complete");
+      }
+    }
+    expect(refused).toBe(true);
+    for (const source of fixture.records.sources(workspaceId)) {
+      const revoked = await fixture.remote.request("workspace.source.revoke", { workspaceId, sourceId: source.sourceId, requestId: `revoke-${source.sourceId}`, expectedRevision: fixture.records.get(workspaceId).configRevision });
+      expect(revoked.error).toBeUndefined();
+    }
+    for (const [method, params] of [["workspace.get", { workspaceId }], ["project.get", { projectId: made.value.ownerId }], ["workspace.list", {}], ["project.list", {}]] as const) {
+        const reply = await fixture.remote.request(method, params); expect(reply.error).toBeUndefined();
+        const snapshot = reply.result.workspace ?? reply.result.workspaces?.[0] ?? reply.result.projects?.[0]?.workspace ?? reply.result;
+        expect(snapshot.detailState).toBe("complete");
+      }
+  });
+  test("capability expansion reserves aggregate and list envelopes, not only its policy receipt", async () => {
+    const fixture = await boot();
+    fixture.ports.selection = () => ({ ...repo, label: "r".repeat(200) });
+    const made = await create(fixture.local, "policy-aggregate", Array.from({ length: 40 }, () => ({ selectionId: "repo-choice", kind: "githubRepository" }))), workspaceId = made.workspaceId;
+    const names = Array.from({ length: 200 }, (_value, index) => `${index}-` + "x".repeat(187));
+    const large = { toolClasses: names, hostServices: names, connectors: names, network: "none" as const };
+    fixture.ports.creationCeiling = () => large;
+    // The policy-only response fits, but the 40 source aggregate does not.
+    expect(Buffer.byteLength(JSON.stringify(large))).toBeLessThan(128 * 1024);
+    const refused = await fixture.local.request("workspace.setCapabilityCeiling", { workspaceId, requestId: "policy-expansion", expectedRevision: 1, ceiling: large });
+    expect(refused.error.data.code).toBe("response_too_large");
+    expect(fixture.records.get(workspaceId).configRevision).toBe(1);
+    expect(fixture.records.policy(workspaceId).ceiling).toEqual(ceiling);
+    expect((await fixture.local.request("workspace.get", { workspaceId })).error).toBeUndefined();
+  });
+  test("legacy oversized records remain discoverable with explicit summaries and scoped paged recovery", async () => {
+    const fixture = await boot();
+    const names = Array.from({ length: 256 }, (_value, index) => `${index}-` + "界".repeat(187));
+    // Simulate a record persisted by the internal repository before aggregate API admission.
+    const made = fixture.records.create({ principalId: "migration-fixture", requestId: "legacy" }, { ownership: "project", title: "Legacy", sources: [repo], ceiling: { toolClasses: names, hostServices: names, connectors: names, network: "internet" } });
+    const workspaceId = made.workspaceId, sourceId = made.value.sources[0]!.sourceId;
+    fixture.scopes.add(workspaceId);
+    const healthy = await create(fixture.local, "healthy-after-legacy"); fixture.scopes.add(healthy.workspaceId);
+    const snapshot = (await fixture.remote.request("workspace.get", { workspaceId })).result;
+    expect(snapshot.detailState).toBe("summary"); expect(snapshot.detailReason).toBe("response_limit");
+    expect(snapshot.workspaceId).toBe(workspaceId); expect(snapshot.configRevision).toBe(1);
+    expect(snapshot.sourceCount).toBe(1); expect(snapshot.policySummary.capabilityCounts.toolClasses).toBe(256);
+    expect(snapshot.policy).toBeUndefined(); expect(snapshot.sources).toBeUndefined();
+    expect(snapshot.detailMethods).toEqual({ sources: "workspace.source.list", policy: "workspace.policy.get" });
+    expect(COWORK_RPC["workspace.get"].result.safeParse({ ...snapshot, policy: { ceiling: {} } }).success).toBe(false);
+    expect((await fixture.remote.request("project.get", { projectId: made.value.workspace.ownerId })).result.workspace).toEqual(snapshot);
+    const listed = (await fixture.remote.request("workspace.list")).result.workspaces;
+    expect(listed.map((value: any) => [value.workspaceId, value.detailState])).toEqual([[workspaceId, "summary"], [healthy.workspaceId, "complete"]]);
+    expect((await fixture.remote.request("project.list")).result.projects.map((value: any) => value.workspace.detailState)).toEqual(["summary", "complete"]);
+    let cursor: string | undefined; const entries: { kind: string; name: string }[] = [];
+    do {
+      const page = await fixture.remote.request("workspace.policy.get", { workspaceId, cursor, limit: 100, expectedRevision: 1 });
+      expect(page.error).toBeUndefined(); expect(Buffer.byteLength(JSON.stringify(page.result))).toBeLessThanOrEqual(128 * 1024);
+      entries.push(...page.result.entries); cursor = page.result.nextCursor ?? undefined;
+    } while (cursor);
+    for (const kind of ["toolClasses", "hostServices", "connectors"] as const) expect(entries.filter(value => value.kind === kind).map(value => value.name)).toEqual(fixture.records.policy(workspaceId).ceiling[kind]);
+    expect((await fixture.remote.request("workspace.policy.get", { workspaceId, cursor: "bad" })).error.data.code).toBe("invalid_request");
+    expect((await fixture.remote.request("workspace.policy.get", { workspaceId, cursor: "1:768" })).error.data.code).toBe("invalid_request");
+    expect((await fixture.remote.request("workspace.source.list", { workspaceId })).result.sources[0].sourceId).toBe(sourceId);
+    const revoked = await fixture.remote.request("workspace.source.revoke", { workspaceId, sourceId, requestId: "legacy-revoke", expectedRevision: 1 });
+    expect(revoked.error).toBeUndefined(); expect(revoked.result.value.state).toBe("unavailable");
+    expect((await fixture.remote.request("workspace.source.revoke", { workspaceId, sourceId, requestId: "legacy-revoke", expectedRevision: 1 })).result).toEqual(revoked.result);
+    const recovered = await fixture.local.request("workspace.setCapabilityCeiling", { workspaceId, requestId: "legacy-narrow", expectedRevision: 2, ceiling: { toolClasses: [], hostServices: [], connectors: [], network: "none" } });
+    expect(recovered.error).toBeUndefined();
+    expect((await fixture.remote.request("workspace.policy.get", { workspaceId, cursor: "1:100" })).error.data).toEqual({ code: "revision_conflict", currentRevision: 2 });
+    expect((await fixture.remote.request("workspace.get", { workspaceId })).result.detailState).toBe("complete");
+    for (const [method, params] of [["workspace.get", { workspaceId }], ["project.get", { projectId: made.value.workspace.ownerId }], ["workspace.list", {}], ["project.list", {}]] as const) expect((await fixture.remote.request(method, params)).error).toBeUndefined();
+    expect(fixture.records.source(workspaceId, sourceId).state).toBe("unavailable");
+    fixture.scopes.delete(workspaceId);
+    expect((await fixture.remote.request("workspace.policy.get", { workspaceId })).error.data.code).toBe("authority_denied");
+  });
+  test("scoped source pages preserve complete details and refuse stale configuration cursors", async () => {
+    const fixture = await boot(), made = await create(fixture.local, "source-pages", Array.from({ length: 3 }, () => ({ selectionId: "repo-choice", kind: "githubRepository" }))), workspaceId = made.workspaceId;
+    fixture.scopes.add(workspaceId);
+    const first = await fixture.remote.request("workspace.source.list", { workspaceId, limit: 1, expectedRevision: 1 });
+    expect(first.result.sources).toHaveLength(1); expect(first.result.nextCursor).toBe("1:1");
+    const second = await fixture.remote.request("workspace.source.list", { workspaceId, cursor: first.result.nextCursor, limit: 1 });
+    expect(second.result.sources[0].sourceId).not.toBe(first.result.sources[0].sourceId);
+    const third = await fixture.remote.request("workspace.source.list", { workspaceId, cursor: second.result.nextCursor, limit: 1 });
+    expect(third.result.nextCursor).toBeNull();
+    expect(new Set([first, second, third].map(reply => reply.result.sources[0].sourceId)).size).toBe(3);
+    expect((await fixture.remote.request("workspace.source.revoke", { workspaceId, sourceId: first.result.sources[0].sourceId, requestId: "page-revoke", expectedRevision: 1 })).error).toBeUndefined();
+    expect((await fixture.remote.request("workspace.source.list", { workspaceId, cursor: first.result.nextCursor })).error.data).toEqual({ code: "revision_conflict", currentRevision: 2 });
+    fixture.scopes.clear();
+    expect((await fixture.remote.request("workspace.source.list", { workspaceId })).error.data.code).toBe("authority_denied");
+  });
+  test("legacy maximum-width source details page by serialized bytes and every source remains recoverable", async () => {
+    const fixture = await boot(); let nextId = 0;
+    const legacy = new CoworkRepository(fixture.records.rs, () => "2026-10-11T00:00:00.000Z", prefix => `${prefix}_${nextId++}_`.padEnd(200, "x"));
+    const made = legacy.create({ principalId: "migration-fixture", requestId: "wide-sources" }, { ownership: "project", title: "Legacy", sources: Array.from({ length: 100 }, () => ({ ...repo, label: "界".repeat(200) })), ceiling });
+    const workspaceId = made.workspaceId; fixture.scopes.add(workspaceId);
+    expect((await fixture.remote.request("workspace.get", { workspaceId })).result.detailState).toBe("summary");
+    let cursor: string | undefined; const sources: string[] = [];
+    do {
+      const reply = await fixture.remote.request("workspace.source.list", { workspaceId, cursor, limit: 100, expectedRevision: 1 });
+      expect(reply.error).toBeUndefined(); expect(reply.result.sources.length).toBeGreaterThan(0);
+      expect(Buffer.byteLength(JSON.stringify(reply.result))).toBeLessThanOrEqual(128 * 1024);
+      sources.push(...reply.result.sources.map((value: any) => value.sourceId)); cursor = reply.result.nextCursor ?? undefined;
+    } while (cursor);
+    expect(sources).toEqual(legacy.sources(workspaceId).map(value => value.sourceId)); expect(sources).toHaveLength(100);
+    const revoked = await fixture.remote.request("workspace.source.revoke", { workspaceId, sourceId: sources.at(-1), requestId: "wide-revoke", expectedRevision: 1 });
+    expect(revoked.error).toBeUndefined(); expect(revoked.result.value.state).toBe("unavailable");
+  });
+  test("a full workspace fitting by one byte still needs space for the single-entry Project list envelope", async () => {
+    const fixture = await boot();
+    fixture.ports.selection = () => ({ ...repo, label: "r".repeat(200) });
+    const made = await create(fixture.local, "list-wrapper", Array.from({ length: 20 }, () => ({ selectionId: "repo-choice", kind: "githubRepository" }))), workspaceId = made.workspaceId;
+    const large = { toolClasses: Array.from({ length: 200 }, (_value, index) => `${index}:`), hostServices: Array.from({ length: 200 }, (_value, index) => `${index}:`), connectors: Array.from({ length: 200 }, (_value, index) => `${index}:`), network: "none" as const };
+    const candidate = { ...made.value, configRevision: 2, grantRevision: 2, policy: { ...made.value.policy, revision: 2, ceiling: large } };
+    let needed = 128 * 1024 - 1 - Buffer.byteLength(JSON.stringify(candidate));
+    for (const group of [large.toolClasses, large.hostServices, large.connectors]) for (let index = 0; index < group.length; index++) {
+      const add = Math.min(needed, 200 - group[index]!.length); group[index] += "x".repeat(add); needed -= add;
+    }
+    expect(needed).toBe(0);
+    expect(Buffer.byteLength(JSON.stringify(candidate))).toBe(128 * 1024 - 1);
+    expect(Buffer.byteLength(JSON.stringify({ projects: [{ projectId: made.value.ownerId, workspace: candidate }], nextCursor: workspaceId }))).toBeGreaterThan(128 * 1024);
+    fixture.ports.creationCeiling = () => large;
+    const refused = await fixture.local.request("workspace.setCapabilityCeiling", { workspaceId, requestId: "list-wrapper-expansion", expectedRevision: 1, ceiling: large });
+    expect(refused.error.data.code).toBe("response_too_large");
+    expect(fixture.records.get(workspaceId).configRevision).toBe(1);
+    expect((await fixture.local.request("project.list")).error).toBeUndefined();
   });
 });

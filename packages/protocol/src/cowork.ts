@@ -27,19 +27,30 @@ export const CoworkWorkspaceRecord = z.object({
   grantRevision: Revision, instructionRevision: Revision, leaseEpoch: z.number().int().nonnegative(),
   power: z.enum(["stopped", "starting", "running", "draining", "uncertain"]), createdAt: z.string(), updatedAt: z.string(),
 });
-export const CoworkWorkspace = CoworkWorkspaceRecord.extend({
-  policy: CoworkWorkspacePolicy, sources: z.array(CoworkSource).max(100), automaticPublication: z.boolean(),
+export const CoworkPolicySummary = CoworkWorkspacePolicy.omit({ ceiling: true }).extend({
+  capabilityCounts: z.object({ toolClasses: z.number().int().nonnegative(), hostServices: z.number().int().nonnegative(), connectors: z.number().int().nonnegative() }), network: z.enum(["none", "internet"]),
 });
+export const CoworkCompleteWorkspace = CoworkWorkspaceRecord.extend({
+  detailState: z.literal("complete"), policy: CoworkWorkspacePolicy, sources: z.array(CoworkSource).max(100), automaticPublication: z.boolean(),
+}).strict();
+/** Summary fields are display/recovery metadata, never effective capability authority. */
+export const CoworkSummaryWorkspace = CoworkWorkspaceRecord.extend({
+  detailState: z.literal("summary"), detailReason: z.literal("response_limit"), policySummary: CoworkPolicySummary,
+  sourceCount: z.number().int().nonnegative(), automaticPublication: z.boolean(),
+  detailMethods: z.object({ sources: z.literal("workspace.source.list"), policy: z.literal("workspace.policy.get") }),
+}).strict();
+export const CoworkWorkspace = z.discriminatedUnion("detailState", [CoworkCompleteWorkspace, CoworkSummaryWorkspace]);
 export const CoworkProject = z.object({ projectId: Id, workspace: CoworkWorkspace });
 export const CoworkSelection = z.object({ selectionId: Id, kind: z.enum(["folder", "githubRepository"]) }).strict();
 const NewWorkspace = z.object({ requestId: Id, ownership: z.enum(["standalone", "project"]), title: Label, selections: z.array(CoworkSelection).min(1).max(100) }).strict();
 const NewProject = NewWorkspace.omit({ ownership: true });
 const WorkspaceId = z.object({ workspaceId: Id }).strict();
+const WorkspaceDetailPage = WorkspaceId.extend({ cursor: Id.optional(), limit: z.number().int().min(1).max(100).default(100), expectedRevision: Revision.optional() }).strict();
 const Mutation = WorkspaceId.extend({ requestId: Id, expectedRevision: Revision });
 const ProjectId = z.object({ projectId: Id }).strict();
 const Page = z.object({ cursor: Id.optional(), limit: z.number().int().min(1).max(100).default(100) }).strict();
 const receipt = <T extends z.ZodType>(value: T) => z.object({ operationId: Id, workspaceId: Id, revision: Revision, value });
-export const CoworkWorkspaceReceipt = receipt(CoworkWorkspace);
+export const CoworkWorkspaceReceipt = receipt(CoworkCompleteWorkspace);
 export const CoworkWorkspaceUpdateReceipt = receipt(CoworkWorkspaceRecord);
 export const CoworkSourceReceipt = receipt(CoworkSource);
 export const CoworkPolicyReceipt = receipt(CoworkWorkspacePolicy);
@@ -52,8 +63,9 @@ export const COWORK_RPC = {
   "project.get": { params: ProjectId, result: CoworkProject },
   "project.create": { params: NewProject, result: CoworkWorkspaceReceipt },
   "project.update": { params: ProjectId.extend({ requestId: Id, expectedRevision: Revision, title: Label }).strict(), result: CoworkWorkspaceUpdateReceipt },
-  "workspace.source.list": { params: WorkspaceId, result: z.object({ sources: z.array(CoworkSource).max(100) }) },
+  "workspace.source.list": { params: WorkspaceDetailPage, result: z.object({ sources: z.array(CoworkSource).max(100), nextCursor: Id.nullable() }) },
   "workspace.source.get": { params: WorkspaceId.extend({ sourceId: Id }).strict(), result: CoworkSource },
+  "workspace.policy.get": { params: WorkspaceDetailPage, result: z.object({ policy: CoworkPolicySummary, entries: z.array(z.object({ kind: z.enum(["toolClasses", "hostServices", "connectors"]), name: Label })).max(100), nextCursor: Id.nullable() }) },
   "workspace.source.addFolder": { params: Mutation.extend({ selectionId: Id }).strict(), result: CoworkSourceReceipt },
   "workspace.source.addRepository": { params: Mutation.extend({ selectionId: Id }).strict(), result: CoworkSourceReceipt },
   "workspace.source.remove": { params: Mutation.extend({ sourceId: Id }).strict(), result: CoworkSourceReceipt },
@@ -78,6 +90,7 @@ export const COWORK_METHODS = {
   workspaceSourceAddRepository: "workspace.source.addRepository", workspaceSourceRemove: "workspace.source.remove", workspaceSourceRevoke: "workspace.source.revoke",
   workspaceSetDefaultPolicy: "workspace.setDefaultPolicy", projectSetDefaultPolicy: "project.setDefaultPolicy", workspaceSetCapabilityCeiling: "workspace.setCapabilityCeiling",
   workspaceSetPublicationPolicy: "workspace.setPublicationPolicy", workspaceOperationGet: "workspace.operation.get",
+  workspacePolicyGet: "workspace.policy.get",
 } as const;
 /** Table membership permits routing only; current-record host authority remains mandatory. */
-export const COWORK_REMOTE_METHODS = ["workspace.list", "workspace.get", "workspace.create", "workspace.update", "project.list", "project.get", "project.create", "project.update", "workspace.source.list", "workspace.source.get", "workspace.source.addRepository", "workspace.source.remove", "workspace.source.revoke", "workspace.operation.get"] as const;
+export const COWORK_REMOTE_METHODS = ["workspace.list", "workspace.get", "workspace.create", "workspace.update", "project.list", "project.get", "project.create", "project.update", "workspace.source.list", "workspace.source.get", "workspace.policy.get", "workspace.source.addRepository", "workspace.source.remove", "workspace.source.revoke", "workspace.operation.get"] as const;

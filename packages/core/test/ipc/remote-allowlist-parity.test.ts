@@ -43,12 +43,12 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 // attached to — the daemon only gates it; the frames ride the Gateway's own wire kind, never this socket).
 
 describe("remote allowlist parity (SP2a gate G7)", () => {
-  // The canonical thirty-nine (SP1 §6 + SP3 T4b approval.list + SP3.4 session.create +
+  // The canonical forty (SP1 §6 + SP3 T4b approval.list + SP3.4 session.create +
   // session-history session.history + Chat Slice D session.setModel + Chat Slice D tasks 2/3's
   // five sync verbs + provider-correctness T4's session.setEffort + session-activity-hygiene T3's
   // session.setActivity + working-directories T3's session.setDirs + WS-19's three credential verbs
   // + ComputerV2 Phase 1b's session.mirror + Cowork workspace metadata) — the exact method STRINGS the Swift Gateway mirrors.
-  const THIRTY_NINE = [
+  const FORTY = [
     "workspace.list",
     "workspace.get",
     "workspace.create",
@@ -63,6 +63,7 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
     "workspace.source.remove",
     "workspace.source.revoke",
     "workspace.operation.get",
+    "workspace.policy.get",
 
     METHODS.hello,
     METHODS.sessionList,
@@ -91,15 +92,15 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
     METHODS.sessionMirror,
   ];
 
-  test("REMOTE_ALLOWED_METHODS is EXACTLY the thirty-nine names", () => {
-    expect(REMOTE_ALLOWED_METHODS.size).toBe(39);
-    for (const m of THIRTY_NINE) {
+  test("REMOTE_ALLOWED_METHODS is EXACTLY the forty names", () => {
+    expect(REMOTE_ALLOWED_METHODS.size).toBe(40);
+    for (const m of FORTY) {
       expect(REMOTE_ALLOWED_METHODS.has(m)).toBe(true);
     }
-    expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual([...THIRTY_NINE].sort());
+    expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual([...FORTY].sort());
   });
 
-  test("the thirty-nine string VALUES match the Swift Gateway.remoteAllowedMethods literals", () => {
+  test("the forty string VALUES match the Swift Gateway.remoteAllowedMethods literals", () => {
     expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual(
       [
         "workspace.list",
@@ -116,6 +117,7 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
         "workspace.source.remove",
         "workspace.source.revoke",
         "workspace.operation.get",
+        "workspace.policy.get",
         "protocol.hello",
         "session.list",
         "session.attach",
@@ -152,7 +154,7 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
   // absent METHODS key is `undefined`, and `undefined` is not in the set either — so it is a PIN
   // against a future regression (someone later adding it here without updating the Swift mirror or
   // its own parity test), not a RED driver for this task's TDD cycle. The mirrored lists
-  // themselves (THIRTY_NINE above, and its Swift twin) are DELIBERATELY untouched by this line.
+  // themselves (FORTY above, and its Swift twin) are DELIBERATELY untouched by this line.
   test("panel.readDiff (diff-tabs Task 7) is NOT in REMOTE_ALLOWED_METHODS", () => {
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.panelReadDiff)).toBe(false);
   });

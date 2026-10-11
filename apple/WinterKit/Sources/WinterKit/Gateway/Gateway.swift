@@ -117,6 +117,7 @@ public actor Gateway {
         "workspace.source.remove",
         "workspace.source.revoke",
         "workspace.operation.get",
+        "workspace.policy.get",
 
     ]
 
