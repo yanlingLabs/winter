@@ -334,7 +334,7 @@ describe("ComputerV2: the policy, through a script", () => {
       "Winter asks to bring Notes (com.apple.Notes) to the front and keep it there until this step ends: the editor takes no keys in the background",
     ]);
     // The desktop-switch ruling: a hold is on the user's own desktop only — nothing asks the helper to move desktops.
-    expect(w.fake.calls("target.foreground")).toEqual([{ targetId: expect.any(String) }]);
+    expect(w.fake.calls("target.foreground")).toEqual([{ targetId: expect.any(String), callId: expect.any(String) }]);
     expect(w.fake.calls("target.act").map((a) => a.allowForeground)).toEqual([true, true]);
     // The next run starts without it: asked again.
     await w.run("await notes.click(14)");

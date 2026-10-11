@@ -588,14 +588,19 @@ final class DesktopVisitTests: XCTestCase {
         world()
         core.visitArriveMs = 150
         core.visitLateSwitchMs = 1000
+        core.switchInputObservableOverride = true
         let lock = NSLock()
         var calls = 0
         sys.onFrontWindow = { [unowned self] p, wid, _ in
             if p == pid, wid == 77 {
-                // A busy app answers its AX calls late: the switch lands ~350 ms on, past the deadline (once).
+                // A busy app answers its AX calls late: the switch lands ~350 ms on, past the deadline (once) — while
+                // the user goes on typing in their own app (review of round 3: their keys made it "theirs").
                 let first = lock.withLock { calls += 1; return calls == 1 }
                 if first {
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) { [unowned self] in sys.space = 2; sys.front = pid }
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) { [unowned self] in
+                        core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, now: core.clock.nowSeconds())
+                        sys.space = 2; sys.front = pid
+                    }
                 }
             }
             if p == user { show(1) }
@@ -612,30 +617,64 @@ final class DesktopVisitTests: XCTestCase {
     /// Review of round 2 (MEDIUM): the late-switch watch undid ANY change of the user's view for 1.2 s after a
     /// never-arrived visit's return — a ⌘-Tab of their own included. Their move is left alone and adopted.
     func testTheUserMovingDuringTheLateSwitchWatchIsLeftAlone() async throws {
+        for to in ["mail", "the target"] {
+            world()
+            core.visitArriveMs = 150
+            core.visitLateSwitchMs = 1000
+            core.switchInputObservableOverride = true
+            let dest: pid_t = to == "mail" ? 4242 : pid
+            let lock = NSLock()
+            var returned = false
+            sys.onFrontWindow = { [unowned self] p, _, _ in
+                guard p == user else { return }
+                show(1)
+                let first = lock.withLock { () -> Bool in defer { returned = true }; return !returned }
+                if first {
+                    // 200 ms after being brought back the user ⌘-Tabs (⌘ held: input that can switch apps).
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { [unowned self] in
+                        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: .maskCommand, now: core.clock.nowSeconds())
+                        sys.front = dest
+                    }
+                }
+            }
+            let e = await expect("unsupported") { _ = try await self.click(visit: true) }
+            guard case .object(let v)? = e?.data?["visit"] else { return XCTFail("\(to): no visit on the error") }
+            XCTAssertEqual(v["userMoved"], .bool(true), to)
+            try await Task.sleep(nanoseconds: 300_000_000)
+            XCTAssertEqual(userView, CUUserView(space: 1, front: dest), "\(to): left where they went")
+            XCTAssertEqual(fronted.filter { $0.hasPrefix("\(user):") }.count, 1, "\(to): brought back once, never again over their own move")
+        }
+    }
+
+    /// Review of round 3: with no input source (no session tap, no gesture monitor) whose switch it was can't be told —
+    /// the target's late switch is left alone rather than possibly undoing the user's own move.
+    func testWithNoInputSourceALateSwitchIsLeftAlone() async throws {
         world()
         core.visitArriveMs = 150
         core.visitLateSwitchMs = 1000
-        let mail: pid_t = 4242
+        core.switchInputObservableOverride = false
         let lock = NSLock()
-        var returned = false
-        sys.onFrontWindow = { [unowned self] p, _, _ in
-            guard p == user else { return }
-            show(1)
-            let first = lock.withLock { () -> Bool in defer { returned = true }; return !returned }
-            if first {
-                // 200 ms after being brought back the user ⌘-Tabs to Mail (a key: a hardware action).
-                DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { [unowned self] in
-                    core.noteHardwareInput(now: core.clock.nowSeconds())
-                    sys.front = mail
-                }
+        var calls = 0
+        sys.onFrontWindow = { [unowned self] p, wid, _ in
+            if p == pid, wid == 77, lock.withLock({ calls += 1; return calls == 1 }) {
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) { [unowned self] in sys.space = 2; sys.front = pid }
             }
+            if p == user { show(1) }
         }
         let e = await expect("unsupported") { _ = try await self.click(visit: true) }
         guard case .object(let v)? = e?.data?["visit"] else { return XCTFail("no visit on the error") }
         XCTAssertEqual(v["userMoved"], .bool(true))
         try await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertEqual(userView, CUUserView(space: 1, front: mail), "left where they went")
-        XCTAssertEqual(fronted.filter { $0.hasPrefix("\(user):") }.count, 1, "brought back once, never again over their own move")
+        XCTAssertEqual(userView, CUUserView(space: 2, front: pid), "left: it can't be told whose it was")
+    }
+
+    func testOnlyInputThatCanSwitchCountsAsTheUsersMove() {
+        XCTAssertTrue(CUCore.canSwitch(type: .flagsChanged, flags: .maskCommand), "⌘ (⌘-Tab)")
+        XCTAssertTrue(CUCore.canSwitch(type: .keyDown, flags: .maskControl), "⌃-arrow")
+        XCTAssertFalse(CUCore.canSwitch(type: .keyDown, flags: []), "typing")
+        XCTAssertFalse(CUCore.canSwitch(type: .keyDown, flags: .maskShift), "a capital")
+        XCTAssertFalse(CUCore.canSwitch(type: .scrollWheel, flags: []))
+        XCTAssertTrue(CUCore.canSwitch(type: CGEventType(rawValue: 31)!, flags: []), "a swipe")
     }
 
     func testOnlyTheTargetsOwnLateSwitchIsUndone() {
@@ -673,8 +712,49 @@ final class DesktopVisitTests: XCTestCase {
         closed = try await close()
         report = try XCTUnwrap(closed.first)
         XCTAssertTrue(report.returned, report.detail ?? "")
-        XCTAssertEqual(fronted.filter { $0.hasPrefix("\(user):") }, ["\(user):0"], "the old window never raised over the new one")
+        XCTAssertEqual(fronted.filter { $0.hasPrefix("\(user):") }, ["\(user):502"], "the old window never raised over the new one: the new one")
         XCTAssertFalse(ax.performed.contains("\(AXIdentity(element: userWindow)):AXRaise"))
+    }
+
+    /// Review of round 3 (LOW): the user's app IS the target app and the window they were in closed during the visit —
+    /// the return raised the app's focused window, the target's bound one on the visited desktop, and left them there.
+    /// It raises another of their windows that was on their desktop, or nothing — never the bound window.
+    func testAReturnWhoseWindowClosedNeverAnchorsOnTheTargetsWindow() async throws {
+        for other in [true, false] {
+            world()
+            let mine = fakeElement(96_066), second = fakeElement(96_068)
+            ax.add(mine, role: kAXWindowRole, title: "Mine", frame: CGRect(x: 0, y: 0, width: 400, height: 300))
+            ax.windowIDs[AXIdentity(element: mine)] = 66
+            sys.windows[66] = FakeSystem.window(66, pid: pid, CGRect(x: 0, y: 0, width: 400, height: 300))
+            if other {
+                ax.add(second, role: kAXWindowRole, title: "Mine too", frame: CGRect(x: 500, y: 0, width: 400, height: 300))
+                ax.windowIDs[AXIdentity(element: second)] = 68
+                sys.windows[68] = FakeSystem.window(68, pid: pid, CGRect(x: 500, y: 0, width: 400, height: 300))
+                ax.put(ax.application(pid), [kAXWindowsAttribute: [mine, second]])  // the bound one is on the other desktop
+            }
+            sys.front = pid
+            ax.put(ax.application(pid), [kAXFocusedWindowAttribute: mine])
+            sys.onActivate = { _ in }
+            sys.onFrontWindow = { [unowned self] p, wid, _ in
+                guard p == pid else { return }
+                if wid == 77 { show(2); ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window]) }
+                if wid == 68 { show(1) }
+            }
+            _ = try await click(visit: true)
+            XCTAssertEqual(userView, CUUserView(space: 2, front: pid))
+            ax.dead.insert(AXIdentity(element: mine))  // the window they were in closed meanwhile
+            sys.windows[66] = nil
+            _ = try await close()
+            let returns = sys.frontedWindows.dropFirst().map { "\($0.pid):\($0.windowID)" }
+            XCTAssertFalse(returns.contains("\(pid):77"), "never the target's bound window: \(returns)")
+            XCTAssertFalse(ax.performed.contains("\(AXIdentity(element: window)):AXRaise"), "never raised")
+            if other {
+                XCTAssertEqual(returns.first, "\(pid):68", "another of their windows on their desktop")
+                XCTAssertEqual(userView.space, 1)
+            } else {
+                XCTAssertEqual(returns.first, "\(pid):0", "nothing raised: the app alone")
+            }
+        }
     }
 
     func testTheReturnPutsTheUsersOwnWindowBackWhenTheirAppIsTheTarget() async throws {

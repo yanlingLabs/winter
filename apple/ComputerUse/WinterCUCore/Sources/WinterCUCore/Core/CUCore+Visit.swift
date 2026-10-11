@@ -109,6 +109,10 @@ extension CUCore {
         let userWindow: AXUIElement?
         /// That window's id (for the log; the recorded element is what is raised on the way back).
         let userWindowID: CGWindowID?
+        /// The user's front app's other windows on their desktop when the visit began (never the target's bound window),
+        /// their elements taken then — accessibility lists only the active desktop's windows, so not at the return:
+        /// the way back when the recorded window closed during the visit.
+        var userOtherWindows: [(element: AXUIElement, id: CGWindowID)] = []
         /// The private path is on (a capture-only window's element may be found by remote token).
         let privatePath: Bool
         let startedMs: Double
@@ -224,10 +228,16 @@ extension CUCore {
             CULog.act.notice("visit (\(why.rawValue, privacy: .public)): the user's app has no focused window to come back to, and has windows on other desktops — not visited, nothing moved")
             throw CUError.unsupported("Winter can't tell which window you are in, so it could not be sure to bring you back to this desktop afterwards — nothing was moved; ask the user to click into the window they are working in, or to show \(t.appName)'s window themselves")
         }
-        let base = VisitBase(sessionId: sessionId, callId: callId, targetId: t.id, pid: t.pid, windowID: t.windowID,
+        var base = VisitBase(sessionId: sessionId, callId: callId, targetId: t.id, pid: t.pid, windowID: t.windowID,
                              appName: t.appName, why: why, before: before, userWindow: userWindow,
                              userWindowID: userWindow.flatMap { ax.windowID($0) }, privatePath: privatePath,
                              startedMs: clock.nowMs(), startedAt: clock.nowSeconds())
+        if let user = before.front {
+            let here = Set(sys.windows(pid: user).filter { $0.onScreen }.map(\.id))
+            base.userOtherWindows = ax.elements(ax.application(user), kAXWindowsAttribute).compactMap { e in
+                ax.windowID(e).flatMap { id in here.contains(id) && id != base.userWindowID && id != t.windowID ? (e, id) : nil }
+            }
+        }
         let v: CUOpenVisit = visitLock.withLock {
             visitSeq += 1
             let v = CUOpenVisit(id: "v\(visitSeq)", base: base)
@@ -537,23 +547,28 @@ extension CUCore {
         // A visit that never arrived: the target's raise and activation are AX calls a busy app answers late (each
         // bounded only by the messaging timeout), so its switch can still land after the deadline — even after the
         // user was put back. Watched for `visitLateSwitchMs`, and undone (at most twice) if it lands.
-        // Only THAT switch is undone: the target in front (or its window's desktop shown) with no hardware action of the
-        // user's since the return began — anything else is the user moving (⌘-Tab, a click, a swipe): left alone, and
-        // their new place adopted (the guardian is still in visit mode, so nothing else would).
+        // Only THAT switch is undone: the target in front (or its window's desktop shown) with no input of the user's
+        // that can switch apps or desktops within `lateSwitchInputWindow` before it was seen (⌘-Tab, a swipe, a click on
+        // the target's window or the Dock — never their typing in their own app, which went on while the target's raise
+        // landed: review of round 3). Anything else is the user moving: left alone, and their new place adopted (the
+        // guardian is still in visit mode, so nothing else would). When that input can't be seen at all (no session tap,
+        // no gesture monitor), nothing is undone: whose switch it was can't be told.
         if reason == .neverArrived, let user = s.before.front {
-            let watchFrom = clock.nowSeconds()
             let until = clock.nowMs() + visitLateSwitchMs
+            let canTell = switchInputObservable
             var undone = 0
             var userMoved = false
             while clock.nowMs() < until, undone < 2 {
                 usleep(40_000)
                 let now = userView()
                 guard now != s.before else { continue }
-                let acted = guardianLock.withLock { lastHardwareActionAt >= watchFrom }
-                if !Self.lateSwitchIsTheTarget(now, before: s.before, targetPid: s.pid,
-                                               targetWindowOnScreen: sys.window(id: s.windowID)?.onScreen == true, userActed: acted) {
+                let seenAt = clock.nowSeconds()
+                let acted = guardianLock.withLock { lastSwitchInputAt >= 0 && seenAt - lastSwitchInputAt <= Self.lateSwitchInputWindow }
+                let theTarget = Self.lateSwitchIsTheTarget(now, before: s.before, targetPid: s.pid,
+                                                           targetWindowOnScreen: sys.window(id: s.windowID)?.onScreen == true, userActed: acted)
+                if !theTarget || !canTell {
                     userMoved = true
-                    CULog.act.notice("visit \(v.id, privacy: .public): after the return the view changed by the user's doing (front \(now.front.map(String.init) ?? "?", privacy: .public)) — left there")
+                    CULog.act.notice("visit \(v.id, privacy: .public): after the return the view changed \(theTarget ? "and whose doing it was can't be told (no input source)" : "by the user's doing", privacy: .public) (front \(now.front.map(String.init) ?? "?", privacy: .public)) — left there")
                     guardianLock.withLock {
                         guardianCore.endVisit()
                         guardianCore.adoptUserView(CUGuardedView(app: now.front, space: now.space))
@@ -609,24 +624,35 @@ extension CUCore {
         // window of theirs that closed, nor one raised over a newer window they opened meanwhile (`returnWindow`).
         let w = returnWindow(s)
         _ = sys.bringForward(pid: user, windowID: w.id ?? 0, window: w.element, makeMain: w.element != nil)
-        return restoreUserView(s.before, user: user, window: w.element)
+        // Nothing to raise is "raise nothing", never the app's focused window: that can be the target's bound window on
+        // the visited desktop (the user's app IS the target app), which would keep them there.
+        return restoreUserView(s.before, user: user, window: w.element, raiseFocused: false)
     }
 
     /// The window the return raises: the user's recorded one while it is still there — unless their app's focused
-    /// window now is another of theirs (not the target's bound window): a window they opened during the visit, which
-    /// a raise of the old one would cover. Nil: none is raised (their app is still brought back).
+    /// window now is another of theirs (not the target's bound window), a window they opened during the visit, which a
+    /// raise of the old one would cover: that one. Their recorded window closed: their focused window when it is not
+    /// the target's bound window, else another of their windows that was on their desktop when the visit began (review
+    /// of round 3: the fallback raised the app's focused window — the bound one, on the visited desktop). Nil: none is
+    /// raised (their app is still brought back).
     func returnWindow(_ s: VisitBase) -> (element: AXUIElement?, id: CGWindowID?) {
-        guard let w = s.userWindow, let id = s.userWindowID, ax.isAlive(w) else { return (nil, nil) }
-        if let user = s.before.front, let focused = ax.element(ax.application(user), kAXFocusedWindowAttribute),
-           let fid = ax.windowID(focused), fid != id, fid != s.windowID {
-            return (nil, nil)
+        let user = s.before.front
+        let focused = user.flatMap { ax.element(ax.application($0), kAXFocusedWindowAttribute) }
+        let fid = focused.flatMap { ax.windowID($0) }
+        if let w = s.userWindow, let id = s.userWindowID, ax.isAlive(w) {
+            if let focused, let fid, fid != id, fid != s.windowID { return (focused, fid) }
+            return (w, id)
         }
-        return (w, id)
+        if let focused, let fid, fid != s.windowID, ax.isAlive(focused) { return (focused, fid) }
+        if let other = s.userOtherWindows.first(where: { ax.isAlive($0.element) && sys.window(id: $0.id) != nil }) {
+            return (other.element, other.id)
+        }
+        return (nil, nil)
     }
 
     /// A change of the user's view after a never-arrived visit's return is the target's late switch — to be undone —
-    /// only when the TARGET came to the front (or its window's desktop is now shown) and the user made no hardware
-    /// action since the return; anything else is the user's own move. Pure.
+    /// only when the TARGET came to the front (or its window's desktop is now shown) and no input of the user's that
+    /// can switch apps or desktops came just before it (`userActed`); anything else is the user's own move. Pure.
     static func lateSwitchIsTheTarget(_ now: CUUserView, before: CUUserView, targetPid: pid_t, targetWindowOnScreen: Bool,
                                       userActed: Bool) -> Bool {
         guard !userActed else { return false }

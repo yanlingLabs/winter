@@ -419,6 +419,38 @@ final class OffDesktopActTests: XCTestCase {
         XCTAssertNotNil(try? core.target("t1"), "nothing decided: the target is kept")
     }
 
+    /// Review of round 3 (LOW): the cancel was registered AFTER the watch in screenshot, waitFor and AppleScript, and
+    /// find, foreground and the scripting dictionary/commands had none. Every call that can wait in it now stops on its
+    /// cancel (a cancel that came first, too: it is remembered).
+    func testEveryCallThatWatchesATransitionStopsOnItsCancel() async throws {
+        let calls: [(String, () async throws -> Void)] = [
+            ("screenshot", { _ = try await self.core.targetScreenshot(TargetScreenshotParams(targetId: "t1", budget: CUImageBudget(maxLongEdge: 400, quality: 0.8), callId: "c")) }),
+            ("waitFor", { _ = try await self.core.targetWaitFor(TargetWaitForParams(targetId: "t1", cond: CUWaitCondition(text: "x"), timeoutMs: 100, callId: "c")) }),
+            ("find", { _ = try await self.core.targetFind(TargetFindParams(targetId: "t1", query: .fields(role: nil, name: "x", text: nil), callId: "c")) }),
+            ("applescript", { _ = try await self.core.targetAppleScript(TargetAppleScriptParams(targetId: "t1", source: "get name", callId: "c")) }),
+            ("foreground", { _ = try await self.core.targetForeground(TargetForegroundParams(targetId: "t1", callId: "c")) }),
+            ("scriptingDictionary", { _ = try await self.core.targetScriptingDictionary(TargetScriptingDictionaryParams(targetId: "t1", callId: "c")) }),
+            ("scriptingCommands", { _ = try await self.core.targetScriptingCommands(TargetScriptingCommandsParams(targetId: "t1", callId: "c")) }),
+        ]
+        for (name, call) in calls {
+            _ = transitionWorld(readingsOnNoSpace: nil)
+            core.windowGoneSettleMs = 5_000
+            let t0 = Date()
+            Task {
+                try await Task.sleep(nanoseconds: 150_000_000)
+                _ = try await core.cancel(CancelParams(callId: "c"))
+            }
+            do {
+                try await call()
+                XCTFail("\(name): not stopped")
+            } catch let e as CUError {
+                XCTAssertEqual(e.code, "cancelled", "\(name): \(e.message)")
+            }
+            XCTAssertLessThan(Date().timeIntervalSince(t0), 1.0, "\(name): stopped by the cancel, not after the watch")
+            XCTAssertNotNil(try? core.target("t1"), "\(name): nothing decided")
+        }
+    }
+
     /// Each check may watch for the whole settle: overlapping requests for one pid run ONE watch, then at most one more.
     func testWindowChecksForOnePidAreCoalesced() async throws {
         let lock = transitionWorld(readingsOnNoSpace: nil)

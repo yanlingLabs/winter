@@ -19,7 +19,9 @@ extension CUCore {
 
     public func targetForeground(_ p: TargetForegroundParams) async throws -> TargetForegroundResult {
         let t = try target(p.targetId)
-        try await ensureAlive(t)
+        let token = cancels.begin(p.callId)
+        defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         return try await queues.run(t.pid) { [self] in
             // A window on another desktop: holding it in front would keep the user there until the script ends — never
             // (user ruling 2026-10-10; `moveDesktop` is ignored since 1.7.0). What needs the window on screen asks for

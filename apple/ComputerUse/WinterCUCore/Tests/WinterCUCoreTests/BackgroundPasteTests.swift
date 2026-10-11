@@ -41,9 +41,10 @@ final class BackgroundPasteTests: XCTestCase {
         ax.add(window, role: kAXWindowRole, title: "Doc", frame: CGRect(x: 0, y: 0, width: 900, height: 700),
                extra: [kAXChildrenAttribute: [web]])
         ax.windowIDs[AXIdentity(element: window)] = 77
-        ax.add(web, role: "AXWebArea", frame: CGRect(x: 0, y: 40, width: 900, height: 660), extra: [kAXChildrenAttribute: [doc]])
+        ax.add(web, role: "AXWebArea", frame: CGRect(x: 0, y: 40, width: 900, height: 660),
+               extra: [kAXChildrenAttribute: [doc], kAXWindowAttribute: window])
         ax.add(doc, role: kAXTextAreaRole, title: "Document", frame: CGRect(x: 40, y: 80, width: 800, height: 500),
-               extra: [kAXValueAttribute: "\u{200B}\u{200B}", kAXParentAttribute: web])
+               extra: [kAXValueAttribute: "\u{200B}\u{200B}", kAXParentAttribute: web, kAXWindowAttribute: window])
         if focused { ax.focus(pid: pid, on: doc) }
         ax.put(ax.application(1), [kAXFocusedWindowAttribute: userWindow])
         ax.windowIDs[AXIdentity(element: userWindow)] = 31

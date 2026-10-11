@@ -831,6 +831,9 @@ export class TabDriver {
           text = d.text;
           isDiff = true;
           if (d.shown !== undefined) snap.shown = d.shown; else delete snap.shown;
+        } else if (printed.shown !== undefined && d.seenStill !== undefined) {
+          // Printed instead: what the base showed and is still there unchanged stays seen, folded now or not.
+          snap.shown = new Set([...printed.shown, ...d.seenStill]);
         }
       }
     }

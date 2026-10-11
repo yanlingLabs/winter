@@ -587,7 +587,7 @@ export class ComputerV2Service {
       case "scriptingDictionary": {
         const search = args.search;
         if (search !== undefined && typeof search !== "string") throw bad("scriptingDictionary() takes { search?: string }");
-        const res = await this.helperCall<ScriptingDictionaryResult>(ctx, "target.scriptingDictionary", { targetId, ...(search === undefined ? {} : { search }) }, metric);
+        const res = await this.helperCall<ScriptingDictionaryResult>(ctx, "target.scriptingDictionary", { targetId, callId: ctx.callId, ...(search === undefined ? {} : { search }) }, metric);
         // The dictionary is the app's own text: data, inside the fence.
         ctx.builder.markScreenRead();
         if (args.emit !== false) ctx.builder.text(res.scriptable ? res.text ?? "" : `${t.name} is not scriptable (it has no scripting dictionary)`, { screen: true });
@@ -822,7 +822,7 @@ export class ComputerV2Service {
       query = Object.fromEntries(["role", "name", "text"].filter((k) => typeof o[k] === "string").map((k) => [k, o[k] as string]));
       if (Object.keys(query).length === 0) throw bad("find() takes text, or { role, name, text }");
     } else throw bad("find() takes text, or { role, name, text }");
-    const res = await this.helperCall<FindResult>(ctx, "target.find", { targetId: t.targetId, query }, metric);
+    const res = await this.helperCall<FindResult>(ctx, "target.find", { targetId: t.targetId, query, callId: ctx.callId }, metric);
     ctx.builder.markScreenRead();
     // The page changed since the last state(), or the read was cut short: the helper's fixed words, said even
     // with emit:false (a model reading only the value would miss it).
@@ -1054,7 +1054,7 @@ export class ComputerV2Service {
     }
     // On the user's own desktop only (the desktop-switch ruling): the helper never holds a window on another
     // desktop in front — it says so, and points at the scoped visit (an act asks by itself; a live screenshot).
-    const res = await this.helperCall<{ front: boolean; detail?: string }>(ctx, "target.foreground", { targetId: t.targetId }, metric);
+    const res = await this.helperCall<{ front: boolean; detail?: string }>(ctx, "target.foreground", { targetId: t.targetId, callId: ctx.callId }, metric);
     if (!res.front) {
       const said = helperDetail(res.detail);
       ctx.builder.daemonLine(said ?? `${t.name} could not be brought to the front`);
@@ -1812,6 +1812,7 @@ function refusedWords(reason: string, name: string): string {
     case "focus_not_placed": return `couldn't put the keyboard focus in that field of ${name}, so nothing was typed — use setValue(ref, text) if it takes a value, or click it first and retry`;
     case "focus_not_editable": return `the focus in ${name} is not a text field, so nothing was typed — click the field or pass { into }`;
     case "focus_moved": return `the focus left the field partway in ${name}, so the rest was not typed — check state(), then type the rest with { into }`;
+    case "app_in_front": return `${name} came to the front while the action was being prepared — the user may be using it now, so nothing was sent; check state(), and try again if it is still wanted`;
     case "wrong_field_shape": return `the text does not fit the field that has the focus in ${name} (several lines, or a long text, for a one-line field or the browser's own) — pass { into } for the field you mean`;
     case "auth_dialog": return "that is a system authentication dialog — ask the user to handle it";
     case "privacy_pane": return "System Settings' Privacy & Security panes are off limits — ask the user to change them";

@@ -183,7 +183,11 @@ extension CUCore {
     /// After an act: when the bound window's focus changed (⌘R moves it to the address bar, a click into
     /// another field, Tab), the result says where it is now — name and role only — or that it is unknown now.
     func noteFocusChange(from before: WindowFocus, _ t: CUTarget, _ o: ActOutcome) -> ActOutcome {
-        let after = windowFocus(t, fresh: true)
+        var after = windowFocus(t, fresh: true)
+        // Not the app's own answer now (its focus handed back with the blip's key focus): the one it gave inside the
+        // act's last keyboard blip, after the keys were taken — where they left it (round 4: Tab moved Docs' focus
+        // Find → Replace and the result said "unknown").
+        if after.source != .app, let seen = blipFocusRead(t, start: false) { after = seen }
         t.focusAfterLastAct = (clock.nowMs(), after)
         var o = o
         switch (before.element, after.element) {
@@ -207,6 +211,15 @@ extension CUCore {
         guard t.accessible else {
             o.input = "the window (it has no accessibility here)"
             return o
+        }
+        var e = e
+        // The focus the act's first keyboard blip found, before its first key — the app's own answer for the bound
+        // window while it held the key focus — when the read before the act had none, or named an element of another
+        // window (a native window that is not key answers none of its own; live: "pressed y in [5] B field" for a key
+        // that went into Doc A).
+        if let seen = blipFocusRead(t, start: true)?.element,
+           e == nil || (try? windowElement(t)).map({ inBoundWindow(e!, t, $0) == false }) == true {
+            e = seen
         }
         guard let e else {
             o.inputUnknown = true
@@ -510,7 +523,9 @@ extension CUCore {
         let event = announced ? nil : CursorEvent(kind: "press", point: pt, count: count, button: button.rawValue)
         // Pid events in the background: the window made its app's key window first, so the click is not taken
         // as the one that makes it key.
-        if d.rung == .processEvents { keyForClick(t, privatePath: p.privatePath, clickWindow: windowFor(pt)) }
+        if d.rung == .processEvents, keyForClick(t, privatePath: p.privatePath, clickWindow: windowFor(pt)) == .appInFront {
+            throw clickRefusal(t)
+        }
         return try runEvents(p, t, d, focus: true, token, cursor: event) { route, check in
             try synth.click(pid: t.pid, windowFor: windowFor, at: pt, button: button, count: count, flags: flags,
                             route: route, check: check)
@@ -933,7 +948,9 @@ extension CUCore {
                           _ token: CUCancellation.Token, _ g: TypingFocus) throws -> ActOutcome {
         guard !text.isEmpty else { return ActOutcome(rung: .accessibility, detail: "nothing to type") }
         try token.check()
-        if let e, ax.isSettable(e, kAXSelectedTextAttribute) {
+        // A Tab in the text moves the focus as a person's would: keys, never an insert (measured 2026-10-11 on a
+        // probe app of ours: an insert of "hi\t" put a literal tab into the field and left the focus where it was).
+        if let e, !text.contains("\t"), ax.isSettable(e, kAXSelectedTextAttribute) {
             let before = ax.string(e, kAXValueAttribute)
             let since = clock.nowMs()
             var applied = false
@@ -1456,7 +1473,11 @@ extension CUCore {
         var s = synth
         s.windowSPI = t.privatePath
         let windowFor = self.windowFor(t)
-        if !keyForClick(t, privatePath: t.privatePath, clickWindow: windowFor(c)) { postSyntheticActivation(t, privatePath: t.privatePath) }
+        switch keyForClick(t, privatePath: t.privatePath, clickWindow: windowFor(c)) {
+        case .notApplied: postSyntheticActivation(t, privatePath: t.privatePath)
+        case .prepared: break
+        case .appInFront: return false  // the user may be using it now: no click
+        }
         try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()
         return true
@@ -1605,7 +1626,11 @@ extension CUCore {
         // Key IN ITS APP (the app's focused window): in the background the system-wide key focus is the user's
         // app, always, so it can't tell whether the click only made the window key.
         let wasKey = boundWindowIsKeyInApp(t)
-        if !keyForClick(t, privatePath: t.privatePath, clickWindow: windowFor(c)) { postSyntheticActivation(t, privatePath: t.privatePath) }
+        switch keyForClick(t, privatePath: t.privatePath, clickWindow: windowFor(c)) {
+        case .notApplied: postSyntheticActivation(t, privatePath: t.privatePath)
+        case .prepared: break
+        case .appInFront: return false  // the user may be using it now: no click
+        }
         try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()
         let clicked = waitFocused(e, t, web: web)
@@ -2086,7 +2111,7 @@ extension CUCore {
         // if it validates, else ⌘V (yesterday's only body paste that landed came by ⌘V) — and the window stays key
         // for `blipPasteHoldMs` while the page reads the clipboard. A desktop switch meanwhile stops it.
         let bound = blipKeySettleMs + blipReadMs + blipPasteHoldMs + 150
-        guard let blip = beginBlip(p, t, why: "“\(item.title)”", boundMs: max(Self.blipDeadlineMs, bound)) else { return nil }
+        guard let blip = try beginBlip(p, t, why: "“\(item.title)”", boundMs: max(Self.blipDeadlineMs, bound)) else { return nil }
         defer { blip.end() }
         if blipKeySettleMs > 0 { usleep(useconds_t(blipKeySettleMs * 1000)) }
         activateForMenu(p, t)

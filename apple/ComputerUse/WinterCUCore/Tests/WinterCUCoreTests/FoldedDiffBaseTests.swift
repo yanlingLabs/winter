@@ -53,14 +53,27 @@ final class FoldedDiffBaseTests: XCTestCase {
         let bound = try await state()
         XCTAssertTrue(bound.text.contains("more out of view"), "the bind's print is folded: \(bound.text)")
         XCTAssertFalse(bound.text.contains("\"Row 60\""))
-        offset = 1000  // scrolled: rows ~45… in view now
+        offset = 60  // a few rows scrolled into view
         let after = try await state(since: bound.snapshotId)
         XCTAssertTrue(after.isDiff, after.text)
         XCTAssertFalse(after.text.contains("(no changes)"), after.text)
-        XCTAssertTrue(after.text.contains("+ [160] text field \"Row 60\" value=\"x\" — now shown, in [3] group \"List\""), after.text)
+        XCTAssertTrue(after.text.contains("— now shown, in [3] group \"List\""), after.text)
         // Nothing changed since: the same view again is "(no changes)".
         let again = try await state(since: after.snapshotId)
         XCTAssertTrue(again.text.contains("(no changes)"), again.text)
+        // A whole new screen of rows (review of round 3): the state is printed again — a list of surfaced rows would be
+        // longer than the print.
+        offset = 1000
+        let far = try await state(since: again.snapshotId)
+        XCTAssertFalse(far.isDiff, far.text)
+        XCTAssertTrue(far.text.contains("\"Row 60\""), far.text)
+        let farAgain = try await state(since: far.snapshotId)
+        XCTAssertTrue(farAgain.text.contains("(no changes)"), farAgain.text)
+        // Back to the top: the rows seen before the print stay seen — nothing is surfaced again.
+        offset = 0
+        let top = try await state(since: farAgain.snapshotId)
+        XCTAssertTrue(top.isDiff, top.text)
+        XCTAssertTrue(top.text.contains("(no changes)"), top.text)
     }
 
     func testAChangeUnderAFoldPrintsWithItsContext() async throws {

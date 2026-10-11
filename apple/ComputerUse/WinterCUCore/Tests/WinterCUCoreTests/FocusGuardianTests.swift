@@ -437,6 +437,21 @@ final class FocusGuardianTests: XCTestCase {
         defer { core.stopGuardian() }
         XCTAssertNil(core.onPhysicalClick(at: CGPoint(x: 900, y: 600), userData: 0, now: 10), "the user's own app, not a target")
         XCTAssertTrue(sys.activated.isEmpty)
+        XCTAssertEqual(core.lastSwitchInputAt, -1, "a click in their own app switches nothing")
+    }
+
+    /// Review of round 3: what a visit's late-switch watch counts as the user's move — a click on a target's window or
+    /// on the Dock (either can bring the target forward), never one in their own app.
+    func testAClickOnATargetOrTheDockIsInputThatCanSwitch() {
+        let (core, sys) = clickWorld()
+        defer { core.stopGuardian() }
+        _ = core.onPhysicalClick(at: CGPoint(x: 100, y: 100), userData: 0, now: 10)
+        XCTAssertEqual(core.lastSwitchInputAt, 10)
+        var dock = FakeSystem.window(3, pid: 77, CGRect(x: 500, y: 950, width: 600, height: 50), layer: 20)
+        dock.ownerName = "Dock"
+        sys.stack.insert(dock, at: 0)
+        XCTAssertNil(core.onPhysicalClick(at: CGPoint(x: 800, y: 970), userData: 0, now: 12), "the Dock is no target")
+        XCTAssertEqual(core.lastSwitchInputAt, 12, "but a click on it can switch apps")
     }
 
     func testEveryEventTheHelperPostsCarriesTheStamp() {

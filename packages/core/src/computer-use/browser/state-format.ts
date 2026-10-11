@@ -368,7 +368,10 @@ export function makeSnapshot(id: string, roots: readonly TabNode[], scope?: numb
 }
 
 /** `shown`: what the model has seen once the diff is printed (the base's shown refs still there, plus its lines). */
-export interface TabDiff { text: string; changedRatio: number; shown?: Set<number> }
+/** `shown`: what the model has seen once the diff is printed — the base's shown refs still there, plus the element of
+ *  every line the text KEEPS (a line the cap cut was never seen). `seenStill`: what the base had shown that is still
+ *  there unchanged — kept as seen when the state is printed instead (the caller unions it with the print's own). */
+export interface TabDiff { text: string; changedRatio: number; shown?: Set<number>; seenStill?: Set<number> }
 
 /** `in [p] role "name"` for the nearest ancestor of `ref` the model has seen; undefined when none is known. */
 function seenContext(ref: number, next: TabSnapshot, seen: Set<number> | undefined): string | undefined {
@@ -407,20 +410,28 @@ export function diffState(h: TabHeader, old: TabSnapshot, next: TabSnapshot, lin
     : next.order.filter((r) => shownNow.has(r) && old.facets.has(r) && !seen.has(r) && !modifiedRefs.has(r));
   const union = new Set([...old.order, ...next.order]).size;
   const changed = added.length + removed.length + modified.length + surfaced.length;
-  const changedRatio = union === 0 ? 0 : Math.min(1, changed / union);
+  // Against a folded print, the new lines' share of what it shows counts too: a scroll on a big folded page surfaced
+  // row after row while the union of every ref kept the ratio low, and the diff grew longer than the print.
+  const shareOfPrint = shownNow === undefined || shownNow.size === 0 ? 0 : (added.length + surfaced.length) / shownNow.size;
+  const changedRatio = Math.min(1, Math.max(union === 0 ? 0 : changed / union, shareOfPrint));
   const withContext = (r: number): string => { const c = seenContext(r, next, seen); return c === undefined ? "" : `, ${c}`; };
-  let body: string[] = [
-    ...added.map((r) => `+ ${next.facets.get(r)!.line}`),
-    ...surfaced.map((r) => `+ ${next.facets.get(r)!.line} — now shown${withContext(r)}`),
-    ...modified.map((m) => `~ [${m.ref}] ${m.changes.join("; ")}${seen !== undefined && !seen.has(m.ref) ? ` — ${next.facets.get(m.ref)!.line}${withContext(m.ref)}` : ""}`),
-    ...removed.map((r) => `- [${r}]`),
+  let body: Array<{ text: string; ref?: number }> = [
+    ...added.map((r) => ({ text: `+ ${next.facets.get(r)!.line}`, ref: r })),
+    ...surfaced.map((r) => ({ text: `+ ${next.facets.get(r)!.line} — now shown${withContext(r)}`, ref: r })),
+    ...modified.map((m) => ({ text: `~ [${m.ref}] ${m.changes.join("; ")}${seen !== undefined && !seen.has(m.ref) ? ` — ${next.facets.get(m.ref)!.line}${withContext(m.ref)}` : ""}`, ref: m.ref })),
+    ...removed.map((r) => ({ text: `- [${r}]` })),
   ];
-  if (body.length === 0) body = ["(no changes)"];
+  if (body.length === 0) body = [{ text: "(no changes)" }];
+  let more = 0;
   if (body.length > lineCap) {
-    const more = body.length - lineCap;
-    body = [...body.slice(0, lineCap), `… (${more} more changes — state({full:true}))`];
+    more = body.length - lineCap;
+    body = body.slice(0, lineCap);
   }
-  const shown = seen === undefined ? undefined
-    : new Set([...seen].filter((r) => nextRefs.has(r)).concat(added, surfaced, [...modifiedRefs]));
-  return { text: [...headLines(h), ...body].join("\n"), changedRatio, ...(shown === undefined ? {} : { shown }) };
+  const lines = body.map((b) => b.text);
+  if (more > 0) lines.push(`… (${more} more changes — state({full:true}))`);
+  const stillThere = seen === undefined ? undefined : [...seen].filter((r) => nextRefs.has(r));
+  const shown = stillThere === undefined ? undefined
+    : new Set(stillThere.concat(body.flatMap((b) => (b.ref === undefined ? [] : [b.ref]))));
+  const seenStill = stillThere === undefined ? undefined : new Set(stillThere.filter((r) => !modifiedRefs.has(r)));
+  return { text: [...headLines(h), ...lines].join("\n"), changedRatio, ...(shown === undefined ? {} : { shown }), ...(seenStill === undefined ? {} : { seenStill }) };
 }
