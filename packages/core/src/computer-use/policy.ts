@@ -60,7 +60,9 @@ export const COMPUTER_V2_TOOL_NAME = "ComputerV2";
 export const ACT_PRIMITIVES: ReadonlySet<string> = new Set(["click", "setValue", "type", "paste", "key", "scroll", "drag", "select", "action", "menu", "hover", "applescript",
   "goto", "upload", "back", "forward", "reload", "keep", "handoff", "close",
   // Phase 3 (browser tabs): answering a page dialog, a viewport, muting, the session's tab group, a download
-  "answerDialog", "viewport", "mute", "browsers.group", "download"]);
+  "answerDialog", "viewport", "mute", "browsers.group", "download",
+  // Phase 4: a site's own tool (WebMCP) — always asked for with access "full"
+  "callTool"]);
 /** What a `click`-only app still permits (R17): clicks, scrolls and accessibility actions — and, on a browser's tab,
  *  its history moves, a reload, keeping, handing over or closing a tab Winter opened. */
 export const CLICK_ONLY_PRIMITIVES: ReadonlySet<string> = new Set(["click", "scroll", "action", "hover", "back", "forward", "reload", "keep", "handoff", "close",

@@ -5,6 +5,7 @@
 import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_IO_READ_MAX, CDP_NETWORK_BUFFER_MAX, CDP_RESPONSE_BODY_MAX_CHARS } from "../../src/computer-use/browser/cdp-allowlist";
 import { cdpEventParams } from "../../src/computer-use/browser/cdp-reduce";
 import type { RtClassify, RtHit, RtNode, RtPoint } from "../../src/computer-use/browser/page-runtime/protocol";
+import { listSiteTools, modelContextOf, SiteToolCalls } from "../../src/computer-use/browser/page-runtime/webmcp";
 import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { TransportError, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportDownload, type TransportTab } from "../../src/computer-use/browser/transport";
@@ -50,6 +51,64 @@ export interface FakePage {
   clickDownload?: string;
   /** Phase 3: a click anywhere makes the page save a file it made itself (a `blob:` download) with this name. */
   clickBlob?: { name: string; body: string };
+  /** Phase 4 (WebMCP): the page's `document.modelContext` as the winter world sees it (a `FakeModelContext`, or any
+   *  shape a test wants to try); its tools name `FAKE_TOP_WINDOW` as the top frame's own window. */
+  modelContext?: unknown;
+}
+
+/** Phase 4: the top frame's own window, as a fake page's tools name it. */
+export const FAKE_TOP_WINDOW: object = Object.freeze({ fakeWindow: "top" });
+
+/** Phase 4: a page's WebMCP API, as Chrome answers it — `getTools()` and `executeTool(tool, input, { signal })`, the
+ *  input in the form this "version" takes (`object`: Chrome 155+, a string is a TypeError before the tool runs;
+ *  `string`: Chrome 151–153, an object fails to parse). A tool's own failure rejects `UnknownError`, an aborted signal
+ *  `AbortError`, and the answer is the tool's result as a JSON string. */
+export class FakeModelContext {
+  readonly tools: Array<Record<string, unknown>> = [];
+  inputForm: "object" | "string" = "object";
+  /** Every executeTool call as the browser saw it (`form`) and, when the tool RAN, its parsed input. */
+  readonly calls: Array<{ name: string; form: string; ran: boolean; input?: unknown }> = [];
+  /** What a tool does (by name): its result, or a rejection; it may wait on the signal. */
+  readonly impl = new Map<string, (input: unknown, signal: AbortSignal) => unknown>();
+  getToolsCalls = 0;
+
+  /** Register a tool of the top frame (or another frame/origin with `window`/`origin`). */
+  add(t: { name: string; description: string; title?: string; inputSchema?: unknown; annotations?: Record<string, unknown>; window?: unknown; origin?: string }, impl?: (input: unknown, signal: AbortSignal) => unknown, origin = "https://shop.example.com"): this {
+    this.tools.push({ window: FAKE_TOP_WINDOW, origin, ...t });
+    if (impl !== undefined) this.impl.set(t.name, impl);
+    return this;
+  }
+
+  async getTools(): Promise<unknown> { this.getToolsCalls++; return this.tools.map((t) => ({ ...t })); }
+
+  async executeTool(tool: unknown, input: unknown, opts?: { signal?: AbortSignal }): Promise<unknown> {
+    const name = String((tool as { name?: unknown }).name);
+    const form = typeof input;
+    if (this.inputForm === "object" && (input === null || typeof input !== "object")) {
+      this.calls.push({ name, form, ran: false });
+      throw new TypeError("Failed to execute 'executeTool' on 'ModelContext': invalid input object: value is not an object");
+    }
+    if (this.inputForm === "string" && typeof input !== "string") {
+      this.calls.push({ name, form, ran: false });
+      throw Object.assign(new Error("Failed to parse input arguments"), { name: "UnknownError" });
+    }
+    const parsed = typeof input === "string" ? JSON.parse(input) as unknown : input;
+    this.calls.push({ name, form, ran: true, input: parsed });
+    const signal = opts?.signal ?? new AbortController().signal;
+    const impl = this.impl.get(name) ?? ((i: unknown) => ({ ok: true, input: i }));
+    const work = Promise.resolve().then(() => impl(parsed, signal));
+    const aborted = new Promise<never>((_, reject) => {
+      const fail = (): void => reject(Object.assign(new Error("signal is aborted without reason"), { name: "AbortError" }));
+      if (signal.aborted) fail(); else signal.addEventListener("abort", fail, { once: true });
+    });
+    try {
+      const r = await Promise.race([work, aborted]);
+      return r === null ? null : JSON.stringify(r);
+    } catch (e) {
+      if ((e as { name?: unknown }).name === "AbortError") throw e;
+      throw Object.assign(new Error("Tool was executed but the invocation failed. For example, the script function threw an error"), { name: "UnknownError" });
+    }
+  }
 }
 
 /** Phase 3: what the fake "server" answers for a URL (a download, or a page). */
@@ -107,6 +166,8 @@ export class FakeTab {
   beforeUnload = false;
   pendingNav?: string;
   holders = new Set<string>();
+  /** Phase 4: the site tool calls in flight in this tab's page (`cancelSiteTool` aborts one). */
+  readonly siteCalls = new SiteToolCalls();
   /** Phase 3: CDP sessions with Fetch interception on, the requests paused, the body streams handed out. */
   readonly fetchOn = new Set<string>();
   readonly paused = new Map<string, { session: string; url: string; body: Buffer; taken: boolean; settle(how: "continue" | "fail"): void }>();
@@ -275,7 +336,10 @@ export class FakeCdpTransport implements CdpTransport {
 
   page(url: string): FakePage {
     const p = this.pages[url];
-    return p !== undefined ? structuredClone(p) : { url, title: url, nodes: [{ id: 1, role: "text", name: `page ${url}` }] };
+    if (p === undefined) return { url, title: url, nodes: [{ id: 1, role: "text", name: `page ${url}` }] };
+    // The page's WebMCP object is the page's own (shared, not cloned: a test keeps its handle).
+    const { modelContext, ...rest } = p;
+    return { ...structuredClone(rest), ...(modelContext === undefined ? {} : { modelContext }) };
   }
 
   addTab(page: FakePage, o: { tabKey?: string; sessionId?: string; agent?: boolean } = {}): FakeTab {
@@ -599,7 +663,13 @@ export class FakeCdpTransport implements CdpTransport {
           t.winterObjects.add(objectId);
           return r({ result: { type: "object", objectId } });
         }
-        return r({ result: { type: "object", value: this.op(t, frameId, op, arg) } });
+        const value = this.op(t, frameId, op, arg);
+        if (!(value instanceof Promise)) return r({ result: { type: "object", value } });
+        // An op that waits (a site tool): a navigation meanwhile ends its world, as Chrome answers it.
+        const doc = t.doc;
+        const settled = await Promise.race([value.then((v) => ({ v })), (async () => { while (t.doc === doc) await new Promise((res) => setTimeout(res, 5)); return undefined; })()]);
+        if (settled === undefined) throw new TransportError("cdp_error", "navigated", { cdpCode: -32000, cdpMessage: "Inspected target navigated or closed" });
+        return r({ result: { type: "object", value: settled.v } });
       }
       case "Input.dispatchMouseEvent": {
         if (params.type === "mouseReleased" && session === undefined) {
@@ -864,6 +934,13 @@ export class FakeCdpTransport implements CdpTransport {
         if (!st.includes("checked") && !st.includes("unchecked")) return { checkable: false };
         return { checkable: true, checked: t.values.get(key(n.id)) === undefined ? st.includes("checked") : t.values.get(key(n.id)) === "checked" };
       }
+      // ── Phase 4: WebMCP, through the page runtime's own code (`webmcp.ts`) over the page's fake ModelContext ──
+      case "siteTools":
+        if (frameId !== "top") return null;
+        return listSiteTools(modelContextOf({ modelContext: t.page.modelContext }), { window: FAKE_TOP_WINDOW, origin: new URL(t.page.url).origin }, { describe: arg?.describe === true, listMs: 200 });
+      case "callSiteTool":
+        return t.siteCalls.call(modelContextOf({ modelContext: t.page.modelContext }), { window: FAKE_TOP_WINDOW, origin: new URL(t.page.url).origin }, arg as { name: string; input: unknown; callId: string });
+      case "cancelSiteTool": return t.siteCalls.cancel(arg?.callId);
       default: throw new Error(`fake runtime: unknown op ${op}`);
     }
   }

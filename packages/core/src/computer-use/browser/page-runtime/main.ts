@@ -8,12 +8,14 @@
 // and — before any pointer or keyboard input the engine sends over CDP — checks the target: hit test, visibility,
 // scroll into view once, and the SECURE-FIELD floor (password, one-time-code and payment fields; fails closed).
 // What it never does: start I/O (no fetch, no postMessage to the page, no storage, no cookies), or take anything
-// from the daemon but its op arguments.
+// from the daemon but its op arguments. The one call into the page's own code it makes, besides input events, is
+// WebMCP's `executeTool` (`webmcp.ts`), and only for the model's `tab.callTool()`.
 import type {
   RtCheck, RtClassify, RtCondition, RtFindQuery, RtFound, RtHit, RtId, RtInspect, RtLink, RtNode, RtPoint, RtSnapshot,
 } from "./protocol";
 import { looksLikeUrl, looksSecret, REDACTED, redactText, redactUrl, redactUrlAttribute } from "./redact";
 import { classifyTarget, cssSelectorRefusal, isPaymentHost, isSecureField, isTextEntry as isTextEntryFacts, nativePicker, pickerValueHint, TEXT_INPUT_TYPES, type ElementFacts } from "./rules";
+import { listSiteTools, modelContextOf, SiteToolCalls, type SiteToolOwner } from "./webmcp";
 
 type Any = Record<string, unknown>;
 
@@ -1114,6 +1116,12 @@ type Any = Record<string, unknown>;
     return origin();
   };
 
+  // ── WebMCP: the page's own agent tools (Phase 4) ────────────────────────────────────────────────
+  // Read through THIS world's `document.modelContext` (the page cannot replace it here); only the tools this frame's
+  // own window registered, from its own origin. A call runs the page's own callback, in the page's world.
+  const siteCalls = new SiteToolCalls();
+  const siteOwner = (): SiteToolOwner => ({ window, origin: location.origin });
+
   // ── the entry ───────────────────────────────────────────────────────────────────────────────────
   const call = (op: string, arg: unknown, self: unknown): unknown => {
     const a = (arg ?? null) as Any | null;
@@ -1143,6 +1151,9 @@ type Any = Record<string, unknown>;
       case "assets": return assets(a as { kinds: string[]; max: number });
       case "linkOf": return linkOf(a as { id: RtId });
       case "checkState": return checkState(a as { id: RtId });
+      case "siteTools": return listSiteTools(modelContextOf(document), siteOwner(), { describe: a?.describe === true });
+      case "callSiteTool": return siteCalls.call(modelContextOf(document), siteOwner(), a as { name: string; input: unknown; callId: string });
+      case "cancelSiteTool": return siteCalls.cancel(a?.callId);
       default: throw new Error(`unknown op ${op}`);
     }
   };
