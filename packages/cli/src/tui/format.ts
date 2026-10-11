@@ -42,8 +42,10 @@ export const COMPUTER_V2_HOST_NAME = "computer_v2";
 
 const COMPUTER_V2_VERBS = /\.(state|find|screenshot|click|setValue|type|paste|key|scroll|drag|select|action|menu|waitForIdle|waitForUser|waitFor|windows|useWindow|appAt|hover|goto|back|forward|reload|text|upload|console|networkBody|network|inspect|html|assets|download|viewport|answerDialog)\s*\(/g;
 const APPS_OPEN = /apps\s*\.\s*open\s*\(\s*(["'`])((?:(?!\1)[^\\\n])+)\1/g;
-/** `browsers.open("https://example.com/…")`: the site it opens, shown as its host. */
-const BROWSERS_OPEN = /browsers\s*\.\s*open\s*\(\s*(["'`])((?:(?!\1)[^\\\n]){1,300})\1/g;
+/** A saved script's call (`scripts.exportCsv(…)`, Phase 4), shown as "script exportCsv"; `scripts.save(` is not one. */
+const SAVED_SCRIPT_CALL = /\bscripts\s*\.\s*([a-z][A-Za-z0-9_]{0,47})\s*\(/g;
+/** `browsers.open("https://example.com/…")` / `browsers.read("…")`: the site it opens or reads, shown as its host. */
+const BROWSERS_OPEN = /browsers\s*\.\s*(?:open|read)\s*\(\s*(["'`])((?:(?!\1)[^\\\n]){1,300})\1/g;
 
 function hostOf(url: string): string | undefined {
   if (url.includes("${")) return undefined;
@@ -68,7 +70,11 @@ export function computerV2Label(argsJson: string): string {
     ...[...code.matchAll(APPS_OPEN)].map((m) => ({ at: m.index ?? 0, name: m[2]!.trim() })),
     ...[...code.matchAll(BROWSERS_OPEN)].map((m) => ({ at: m.index ?? 0, name: hostOf(m[2]!.trim()) ?? "" })),
   ].sort((a, b) => a.at - b.at).map((x) => x.name).filter((n) => n.length > 0))];
-  const verbs = [...new Set([...code.matchAll(COMPUTER_V2_VERBS)].map((m) => m[1]!))];
+  // The verbs and the saved scripts it calls, in the order the script uses them.
+  const verbs = [...new Set([
+    ...[...code.matchAll(COMPUTER_V2_VERBS)].map((m) => ({ at: m.index ?? 0, verb: m[1]! })),
+    ...[...code.matchAll(SAVED_SCRIPT_CALL)].filter((m) => m[1] !== "save").map((m) => ({ at: m.index ?? 0, verb: `script ${m[1]!}` })),
+  ].sort((a, b) => a.at - b.at).map((x) => x.verb))];
   const label = [apps.join(", "), verbs.join(", ")].filter((p) => p.length > 0).join(" · ");
   return label.length === 0 ? "Using the computer" : label.slice(0, 80);
 }

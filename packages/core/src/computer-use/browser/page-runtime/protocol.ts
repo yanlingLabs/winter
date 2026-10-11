@@ -84,6 +84,29 @@ export interface RtFound { id: RtId; role: string; name?: string; value?: string
 export interface RtCondition { text?: string; title?: string; url?: string; goneText?: string; ids?: RtId[]; goneIds?: RtId[] }
 export interface RtCheck { met: boolean; seen: string }
 
+/** Phase 4 (WebMCP): one of the page's own agent tools, as the runtime read it — every string the page's own, cut and
+ *  redacted (`webmcp.ts`). `inputSchema` is there only when its JSON fits the cap; else `schemaText` is its cut JSON. */
+export interface RtSiteTool {
+  name: string;
+  title?: string;
+  description: string;
+  inputSchema?: unknown;
+  schemaText?: string;
+  readOnly: boolean;
+  consequential: boolean;
+}
+/** The tools the TOP document registered for its own window and origin: every name (≤ 200) for the state line and the
+ *  call check; `tools` (≤ 50, ≤ 32 KiB) only when described; `more` the ones not described. */
+export interface RtSiteTools { names: string[]; total: number; tools?: RtSiteTool[]; more?: number }
+/** One call's outcome: the page's answer (its JSON string, cut), or why there was none. */
+export type RtSiteToolAnswer =
+  | { ok: true; result: string | null; cut?: true }
+  /** No tool of that name on this page now (it navigated, or never offered it). */
+  | { ok: false; reason: "unknown" }
+  | { ok: false; reason: "aborted" }
+  /** The page's tool failed: the browser's error name and message (the page's words, cut). */
+  | { ok: false; reason: "failed"; name: string; message: string };
+
 /** The ops, by name → argument → answer. */
 export interface RtOps {
   hello: { arg: null; result: { id: string; url: string; title: string; readyState: string } };
@@ -129,6 +152,12 @@ export interface RtOps {
   linkOf: { arg: { id: RtId }; result: RtLink };
   /** Is it a check box, radio or switch, and is it checked? */
   checkState: { arg: { id: RtId }; result: { checkable: boolean; checked?: boolean } };
+  // ── Phase 4 (WebMCP) ──
+  /** The page's own agent tools (`document.modelContext`), top frame only; `null` when the page has no such API. */
+  siteTools: { arg: { describe?: boolean }; result: RtSiteTools | null };
+  /** Run one of them (`executeTool`), abortable by `cancelSiteTool` with the same `callId`. */
+  callSiteTool: { arg: { name: string; input: unknown; callId: string }; result: RtSiteToolAnswer };
+  cancelSiteTool: { arg: { callId: string }; result: boolean };
 }
 export type RtOp = keyof RtOps;
 

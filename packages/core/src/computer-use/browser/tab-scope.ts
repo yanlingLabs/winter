@@ -9,7 +9,8 @@ import type { ResultBuilder } from "../result";
 import type { PrimitiveMetric } from "../telemetry";
 import type { ImageHandle } from "../worker/bridge";
 
-export type TabAuthorizePurpose = { kind: "bind" } | { kind: "act"; primitive: string } | { kind: "observe" };
+/** An act may name its access class: `full` for one that can do whatever the page can (a site's own tool, Phase 4). */
+export type TabAuthorizePurpose = { kind: "bind" } | { kind: "act"; primitive: string; access?: "click" | "full" } | { kind: "observe" };
 
 export interface TabRunScope {
   readonly sessionId: string;
@@ -64,6 +65,10 @@ export interface TabRunScope {
   noteBrowser(id: string): void;
   /** For the audit line: a download() saved a file (a count — never its name, URL or path). */
   noteDownload?(): void;
+  /** Phase 4 (WebMCP): may sites' own tools be read and called (`computerUse.webmcp`, read live)? Absent: yes. */
+  webMcp?(): boolean;
+  /** For the audit line: a site's own tool was called (a count — never its name, input or answer). */
+  noteSiteTool?(): void;
   /** A failure sentence that is the daemon's own words (shown outside the DATA-ONLY fence when it escapes). */
   trusted(sentence: string): void;
 }

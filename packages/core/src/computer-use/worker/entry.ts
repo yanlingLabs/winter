@@ -40,8 +40,20 @@ export function runAutomationWorker(): void {
   });
 
   let buf = "";
+  // The rest of a runaway line is being skipped (up to its newline).
+  let skipping = false;
+  // ONE streaming decoder for the whole pipe: a character split across two chunks is joined, never two U+FFFDs. The
+  // line limit counts characters, as the daemon's own guard does (`worker-host.ts`'s `reply`).
+  const utf8 = new TextDecoder("utf-8");
   process.stdin.on("data", (d: Buffer) => {
-    buf += d.toString("utf8");
+    let text = utf8.decode(d, { stream: true });
+    if (skipping) {
+      const nl = text.indexOf("\n");
+      if (nl < 0) return;
+      text = text.slice(nl + 1);
+      skipping = false;
+    }
+    buf += text;
     let i: number;
     while ((i = buf.indexOf("\n")) >= 0) {
       const line = buf.slice(0, i);
@@ -51,7 +63,14 @@ export function runAutomationWorker(): void {
       try { msg = JSON.parse(line) as HostToWorker; } catch { continue; }
       runtime.handle(msg);
     }
-    if (buf.length > BRIDGE_MAX_LINE) buf = ""; // a runaway line from the host is dropped, never buffered forever
+    // A runaway line from the host is never buffered forever. When it is an answer, the call it answers fails typed
+    // (its id is the line's head) instead of waiting forever; the rest of the line is skipped.
+    if (buf.length > BRIDGE_MAX_LINE) {
+      const id = /^\{"op":"reply","id":(\d{1,15}),/.exec(buf)?.[1];
+      if (id !== undefined) runtime.handle({ op: "reply", id: Number(id), ok: false, error: { kind: "Error", message: "that answer was too large to hand to the script — ask for less at once" } } as HostToWorker);
+      buf = "";
+      skipping = true;
+    }
   });
   // The daemon closing our stdin is the end of the session's runtime.
   process.stdin.on("end", () => process.exit(0));
