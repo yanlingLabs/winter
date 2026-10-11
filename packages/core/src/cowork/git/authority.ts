@@ -4,6 +4,11 @@ import type { CoworkRepository } from "../repository";
 import type { CapabilityCeiling, WorkspaceSource } from "../types";
 import { GitPublicationError, type PublicationAuthority, type PublicationGrant, type PublicationRequest, type Publisher } from "./types";
 
+function capabilitySnapshot(value: CapabilityCeiling): CapabilityCeiling {
+  return { toolClasses: [...new Set(value.toolClasses)].sort(), hostServices: [...new Set(value.hostServices)].sort(),
+    connectors: [...new Set(value.connectors)].sort(), network: value.network };
+}
+
 export interface TaskPublicationResolver {
   /** Canonical host conversation/task restriction, not guest JSON. A missing scope denies.
    * null means explicitly designated whole-workspace access, irrespective of starting cwd. */
@@ -19,13 +24,13 @@ export class CurrentCoworkPublicationAuthority implements PublicationAuthority {
     const source = this.check(publisher, request);
     const bindingRevision = this.records.binding(publisher.sessionId).revision;
     const policyRevision = this.records.policy(request.workspaceId).revision;
-    const capabilities = this.authority.effectiveCapabilities(publisher.sessionId), capabilityDigest = JSON.stringify(capabilities);
+    const capabilities = capabilitySnapshot(this.authority.effectiveCapabilities(publisher.sessionId)), capabilityDigest = JSON.stringify(capabilities);
     const sourceScope = await this.scope(publisher, request.sourceId);
     const task = await this.tasks.resolve(publisher, request, source, capabilities);
     // Narrowing may occur while the host task/account resolver awaits.
     if (JSON.stringify(await this.scope(publisher, request.sourceId)) !== JSON.stringify(sourceScope)) throw new GitPublicationError("authority_denied");
     const current = this.check(publisher, request);
-    if (this.records.binding(publisher.sessionId).revision !== bindingRevision || this.records.policy(request.workspaceId).revision !== policyRevision || JSON.stringify(this.authority.effectiveCapabilities(publisher.sessionId)) !== capabilityDigest) throw new GitPublicationError("authority_denied");
+    if (this.records.binding(publisher.sessionId).revision !== bindingRevision || this.records.policy(request.workspaceId).revision !== policyRevision || JSON.stringify(capabilitySnapshot(this.authority.effectiveCapabilities(publisher.sessionId))) !== capabilityDigest) throw new GitPublicationError("authority_denied");
     if (current.kind !== "githubRepository" || source.kind !== "githubRepository" || current.detail.repositoryId !== source.detail.repositoryId
       || current.detail.authorityRef !== source.detail.authorityRef || task.repositoryId !== current.detail.repositoryId || task.authorityId !== current.detail.authorityRef) throw new GitPublicationError("authority_denied");
     return { ...task, sourceScope, capabilityState: { conversationRevision: bindingRevision, policyRevision, digest: createHash("sha256").update(capabilityDigest).digest("hex") },
