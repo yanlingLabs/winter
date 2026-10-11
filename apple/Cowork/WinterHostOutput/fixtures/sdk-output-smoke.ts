@@ -25,7 +25,7 @@ for(const path of [home,source,temp,coord,store])mkdirSync(path);
 const resources=join(root,"Fixture.app/Contents/Resources"),output=join(resources,"native/host-output");mkdirSync(output,{recursive:true});
 for(const name of ["winter-host-output.node","manifest.json"])copyFileSync(join(bundle,name),join(output,name));
 writeFileSync(join(resources,"winter-core"),"private fixture label");mkdirSync(join(home,"cowork"));
-const nativeFactory=loadFixtureHostOutputFactory({corePath:join(resources,"winter-core"),verifySignature:()=>true});
+const nativeFactory=await loadFixtureHostOutputFactory({corePath:join(resources,"winter-core"),verifySignature:()=>true});
 let factoryCalls=0;
 const factory=async()=>{factoryCalls++;return nativeFactory()};
 let registration!:HostCodeRegistration,created=0,resolveRuntimeExit!:(code:number)=>void,runtimeHandle:WinterRuntimeSdk|undefined;
