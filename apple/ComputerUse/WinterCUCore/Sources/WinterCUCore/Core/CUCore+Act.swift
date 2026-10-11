@@ -60,13 +60,9 @@ extension CUCore {
         do {
             try Self.checkAccess(p.action, access: p.access, appName: t.appName)
             try refuseWhileUserWorks(t)
-            // (On the pid queue only when a floor can apply: a System Settings or Chromium target.)
-            if t.bundleId.map(CUFloors.systemSettingsBundleIds.contains) == true || t.isChromium
-                || t.bundleId.map(CUChromium.bundleIds.contains) == true {
-                try await queues.run(t.pid) { [self] in
-                    try floorCheckPrivacy(t)
-                    try floorCheckRemoteDebugging(p, t)
-                }
+            try await queues.run(t.pid) { [self] in
+                try floorCheckPrivacy(t)
+                try floorCheckRemoteDebugging(p, t)
             }
         } catch {
             cursor(t, "refused")
