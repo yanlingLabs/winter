@@ -653,6 +653,8 @@ public final class CUCore: @unchecked Sendable {
     var focusTheftGuard = CUFocusGuard()
     /// The live CPS tap's run-loop thread and port (best-effort; nil when it could not be created).
     var cpsTapThread: Thread?
+    /// A click into a bound target's background window, waiting for its button to come up (guarded by `guardianLock`).
+    var pendingClickBring: (pid: pid_t, wid: UInt32, at: CGPoint, time: Double)?
     /// The work watcher (`CUCore+WorkWatcher.swift`): its tap's thread and port, while a target is bound.
     let workWatcherLock = NSLock()
     var workWatcherThread: Thread?

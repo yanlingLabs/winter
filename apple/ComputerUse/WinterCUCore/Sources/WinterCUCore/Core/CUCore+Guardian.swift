@@ -796,18 +796,37 @@ extension CUCore {
         if isTarget, sys.frontmostPid() != hit.pid {
             // The window clicked comes forward with its app — never the app's main window elsewhere (an activation alone
             // follows that one, to its desktop: found by the model-based test, a click into the target's window here took
-            // the user to the desktop of its other window).
-            let pid = hit.pid
-            let wid = hit.id
-            let bring = { [weak self] in
-                guard let self else { return }
-                if let w = self.targetWindowElement(pid: pid, windowID: wid) { try? self.ax.perform(w, kAXRaiseAction) }
-                _ = self.sys.activate(pid: pid)
-            }
-            if guardianRestoreSync { bring() } else { DispatchQueue.global(qos: .userInitiated).async(execute: bring) }
+            // the user to the desktop of its other window). Only once the button comes up WITHOUT a drag (review of round
+            // 9, #8): a drag out of a background window activates nothing — a file dragged from a background Finder into
+            // Mail must not bring Finder up over the drop.
+            guardianLock.withLock { pendingClickBring = (hit.pid, hit.id, point, now) }
         }
         return hit.pid
     }
+
+    /// The user's left button came up (the session tap): a click — not a drag — into a bound target's background window
+    /// brings that window forward with its app now.
+    func onPhysicalMouseUp(at point: CGPoint, userData: Int64, now: Double) {
+        guard !CUEventStamp.isOurs(userData) else { return }
+        guard let p = guardianLock.withLock({ () -> (pid: pid_t, wid: UInt32, at: CGPoint, time: Double)? in
+            defer { pendingClickBring = nil }
+            return pendingClickBring
+        }) else { return }
+        guard now - p.time <= 2, hypot(point.x - p.at.x, point.y - p.at.y) <= Self.clickSlop else {
+            CULog.guardian.notice("the user dragged out of \(self.appName(p.pid), privacy: .public)'s window: nothing brought forward")
+            return
+        }
+        guard sys.frontmostPid() != p.pid else { return }
+        let bring = { [weak self] in
+            guard let self else { return }
+            if let w = self.targetWindowElement(pid: p.pid, windowID: p.wid) { try? self.ax.perform(w, kAXRaiseAction) }
+            _ = self.sys.activate(pid: p.pid)
+        }
+        if guardianRestoreSync { bring() } else { DispatchQueue.global(qos: .userInitiated).async(execute: bring) }
+    }
+
+    /// How far the pointer may move between a button's down and up and still be a click (points).
+    static let clickSlop: CGFloat = 4
 
     /// The accessibility element of a bound target's window `windowID` (its bound window's, else the app's listing).
     func targetWindowElement(pid: pid_t, windowID: UInt32) -> AXUIElement? {
@@ -901,6 +920,10 @@ private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
     if type == .leftMouseDown {
         core.onPhysicalClick(at: event.location, userData: event.getIntegerValueField(.eventSourceUserData), flags: event.flags,
                              now: core.clock.nowSeconds())
+        return Unmanaged.passUnretained(event)
+    }
+    if type == .leftMouseUp {
+        core.onPhysicalMouseUp(at: event.location, userData: event.getIntegerValueField(.eventSourceUserData), now: core.clock.nowSeconds())
         return Unmanaged.passUnretained(event)
     }
     guard type.rawValue == CUFocusTaps.processNotificationType else { return Unmanaged.passUnretained(event) }
