@@ -1,7 +1,7 @@
 import Foundation
 import Containerization
 
-protocol ProbeProcess: Sendable {
+public protocol ProbeProcess: Sendable {
     func start() async throws
     func kill(_ signal: Signal) async throws
     func wait(timeoutInSeconds: Int64?) async throws -> ExitStatus
@@ -9,20 +9,20 @@ protocol ProbeProcess: Sendable {
 }
 extension LinuxProcess: ProbeProcess {}
 
-struct ProcessRunFailure: Error, LocalizedError, Sendable {
-    let original: String
-    let cleanupFailures: [String]
-    let cleanupUncertain: Bool
-    var errorDescription: String? {
+public struct ProcessRunFailure: Error, LocalizedError, Sendable {
+    public let original: String
+    public let cleanupFailures: [String]
+    public let cleanupUncertain: Bool
+    public var errorDescription: String? {
         original + (cleanupFailures.isEmpty ? "" : "; cleanup: " + cleanupFailures.joined(separator: "; "))
     }
 }
 
-enum ProcessLifecycle {
+public enum ProcessLifecycle {
     /// Start failures can occur after guest creation or stdio setup. Include
     /// start, wait and delete in the same cleanup boundary. A kill failure
     /// alone does not imply uncertainty when wait+delete establish cleanup.
-    static func run(_ process: some ProbeProcess, timeout: Int64) async throws -> ExitStatus {
+    public static func run(_ process: some ProbeProcess, timeout: Int64) async throws -> ExitStatus {
         do {
             try await process.start()
             let exit = try await process.wait(timeoutInSeconds: timeout)
@@ -42,12 +42,13 @@ enum ProcessLifecycle {
     }
 }
 
-struct ExecHealth: Sendable {
-    private(set) var uncertain: [String: String] = [:]
-    mutating func record(processID: String, failure: ProcessRunFailure) {
+public struct ExecHealth: Sendable {
+    public init() {}
+    public private(set) var uncertain: [String: String] = [:]
+    public mutating func record(processID: String, failure: ProcessRunFailure) {
         if failure.cleanupUncertain { uncertain[processID] = failure.localizedDescription }
     }
-    func requireClean() throws {
+    public func requireClean() throws {
         guard uncertain.isEmpty else {
             throw ProbeFailure(code: "exec_cleanup_uncertain", message: "guest has unreaped/uncertain processes; stop and recreate before another exec")
         }

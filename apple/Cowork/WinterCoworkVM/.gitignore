@@ -1,0 +1,3 @@
+.build/
+.swiftpm/
+node-api/out/

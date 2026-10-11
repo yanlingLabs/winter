@@ -1,0 +1,143 @@
+# Embedded native Cowork controller groundwork
+
+This macOS 26 / Swift 6.2 package contains a tested asynchronous controller,
+bounded native transport and thin Node-API binding. It is not an enabled Cowork
+mode or a passed execution gate. It does not launch a Winter-owned host helper
+process. VZ and its Apple-managed services remain in their normal topology.
+
+`WinterCoworkPrimitives` is the single shared source of the probe's reviewed
+event queue, device-operation gate, process cleanup, share graph validation and
+native diagnostic helpers. Those files were moved from `spikes/cowork-vm/native`
+and the legacy probe imports this product; its 15 tests still pass. This is an
+extraction, not a silent second implementation of the reviewed mechanics.
+`WinterCoworkNative` supplies the controller and concrete VZ backend. The root
+Swift package/iOS products and production daemon packaging are unchanged.
+
+## Ownership and authority
+
+Each controller owns one registered `NativeScope`: `protocolVersion` (1),
+`workspaceId`, `incarnationId`, `grantRevision`, and `leaseEpoch`. Every request
+and event carries that scope. Operational requests cannot change it, register
+new source paths or mint grants. JavaScript-facing revision/epoch values must
+fit safe integers; operation IDs are returned as BigInt and encoded as decimal
+strings in events. Event sequences are monotonic per controller.
+
+The real `VZWorkspaceBackend` accepts a host-created `HostLaunchDescriptor` and
+an injected `HostLaunchAdmission` owner. The latter must authenticate canonical
+DB/home/daemon/lease/source/policy state, hold the durable disk owner, enforce
+feasibility admission, and independently confirm backing termination. A mutable
+manifest or guest JSON is never this authority. Its default implementation
+refuses before reading any artifact or source. Trusted runtime/bootstrap
+process authorization is a separate callback that also defaults to refusal.
+
+The descriptor records exact artifact hashes, device/inode identities, source
+identities/read-only policy, owned storage, immutable supervisor arguments and
+internal resource bounds. Native checks those identities, kernel/init hashes,
+rootfs ownership path, disjoint share graph, and actual VZ read-only flags. It
+never chooses NAT: the concrete backend has no NIC until the reviewed native
+host-owned network endpoint is connected. `authorizeProcess` is for trusted
+supervisor/runtime bootstrap; privileged native exec is not a model tool or
+replacement for confined guest file/shell execution.
+
+The exported C/Node-API factory currently creates only an explicitly requested
+fake backend or a production-blocked backend. The concrete real VZ backend is
+implemented and compiled, but the authenticated host admission/store composition,
+runtime bootstrap, networking and passed-gate enablement are not wired to that
+factory. No JSON `approved:true`, environment toggle or mutable instructions
+can enable a real VM through it. Root authority integration remains required;
+the protocol interface is not a claim that a signed descriptor or live DB
+validator has been implemented by this package.
+
+## Async lifecycle and transport
+
+Requests are at most 64 KiB. At most 128 ordinary operations may be outstanding
+including unconsumed terminal events, with 16 separate input/cancel control slots
+and one reserved stop/shutdown slot. Embedding cleanup also closes admission and
+starts cleanup without an event slot; it cannot fabricate a receipt or release
+unconsumed ownership. Each accepted operation owns exactly one terminal outcome:
+completed, cancelled, failed, or uncertain. A terminal slot is reserved before
+work starts. Allocation retry and output saturation cannot erase a terminal.
+Events include accepted/processRegistered/stdout/stderr/terminal, scoped IDs,
+sequence and bounded payloads. `processRegistered` indicates an input-owning
+handle, not a Linux PID, agent readiness or successful runtime restoration.
+
+Output chunks are at most 16 KiB with a 4 MiB / 4096-event native bound. A full
+queue fails visibly and cancels the relevant real process rather than quietly
+truncating its output. The Node-API callback queue adds at most 64 events. Input
+is at most 16 KiB per operation, with a four-chunk real guest queue; overflow
+returns backpressure and closed input refuses. Callers wait for registration
+and serialize a process's input/closeInput by awaiting each acknowledgment.
+Parallel execs and stats/balloon remain permitted. Input/cancel requires the
+target operation's recorded task owner; authenticated conversation/delegation
+authorization above that task binding belongs to the host integration.
+
+Stop/shutdown closes all new execution/input/start admission before waiting. It
+drains pending start/process creation and queued device work, cancels owned
+processes and invokes backend cleanup. A budget expiry produces one uncertain
+terminal while retaining cleanup/ownership; it does not abandon an in-flight
+VZ call or authorize reattachment. Late confirmed cleanup updates controller
+state but does not rewrite or duplicate the earlier terminal. Release requires
+confirmed closure, no owned process opening/running, and consumed terminal
+events. The real backend delegates durable release to the host proof service,
+not a dead PID or VZ state alone. No daemon-crash recovery result is implied.
+
+Native wakeups use a nonblocking socket FD. The C addon blocks one native event
+thread in `poll(2)` and forwards through a bounded Node-API thread-safe function;
+JavaScript executes only on its own thread. VZ callbacks never call JavaScript
+directly. There is no additional host process. Bun 1.3.14 does not support
+`uv_poll_init`; an initial fake test exposed that limitation, so the binding
+uses no libuv calls. [Bun Node-API](https://bun.com/docs/runtime/node-api),
+[Bun libuv support tracking](https://github.com/oven-sh/bun/issues/18546),
+[Node-API thread-safe callbacks](https://nodejs.org/api/n-api.html#asynchronous-thread-safe-function-calls)
+
+The addon retains its JS/native owner while callbacks are pending, stops the
+reader before release, and pins the library for the embedding process lifetime.
+Manual poll cannot steal subscribed events. Explicit host shutdown/drain is
+required before `close()`. An environment cleanup hook requests best-effort
+shutdown and retains unresolved native ownership; it is not a substitute for
+the daemon's reviewed graceful shutdown sequence or a proved force-stop path.
+
+## Local no-VM validation
+
+```sh
+swift test --package-path apple/Cowork/WinterCoworkVM --jobs 4
+swift test --package-path spikes/cowork-vm/native --jobs 4
+/bin/sh apple/Cowork/WinterCoworkVM/node-api/build.sh
+bun run apple/Cowork/WinterCoworkVM/node-api/smoke.ts
+bun run apple/Cowork/WinterCoworkVM/node-api/client-smoke.ts
+```
+
+The build reads existing Node headers (`WINTER_NODE_API_HEADERS` overrides the
+default Homebrew path); it installs nothing globally and signs nothing. Each
+adapter/library output is copied into a unique `node-api/out/build-*` directory
+so a later build does not overwrite a running artifact. `latest-build.txt` is
+test discovery only. Production must load verified packaged paths, not this
+mutable development pointer. All tests use the fake backend, and no live
+Winter app/home/daemon/Keychain, selected folder or VM is accessed.
+
+Tests cover scope/epoch rejection, concurrent execution, independent task
+cancellation, bounded stdin/output, terminal reservations, allocation retry,
+release ownership, uncertain stop, pending-start drain and late-cleanup budget
+behavior. The addon smoke proves those selected flows through real Bun Node-API
+and native FD delivery; it does not prove real guest cancellation or production
+signing. The concrete VZ path has compiled, not launched in this package.
+
+An independent review found and corrected cancellation masking cleanup
+uncertainty, execution saturation denying shutdown, unrelated request failures
+poisoning pending start, and repeated output failures spawning unlimited cleanup
+tasks. The 15 native tests now include regressions for each. Current grant revision
+is still part of this groundwork's immutable scope; production integration must
+separate transport incarnation identity from per-operation current authority so
+live source changes do not poison existing processes or retain obsolete grants.
+
+Both addon and typed-client smoke were also compiled with Bun's two autoload
+features disabled and run against a unique adapter/library directory. Those
+fake compiled executables exited successfully. This is compiled-Bun embedding
+evidence, not the hardened, team-signed production `winter-core` packaging gate.
+
+Remaining integration: signed daemon/library/addon packaging and verification;
+canonical host authority/admission and disk ownership; protected guest bootstrap
+and authenticated stream; root task/delegation checks; every production tool
+compartment; host network endpoint; signed folder grants/revocation; suspend,
+crash and shutdown ownership proof; actual memory return; SDK durability; and
+the protocol/UI/scheduler acceptance gates. Production spawn stays blocked.
