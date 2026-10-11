@@ -65,8 +65,8 @@ import { DIFF_PATCH_MAX_BYTES, mintDiffId, writeDiff } from "../diffs/store";
 import type { HookResult } from "../plugins/hook-runner";
 import { attachFileDiff } from "./diff-attach";
 import { REVIEWER_ESCALATION_REASON, noteReviewerCleared } from "./bridge-common";
-import { ESCAPE_FENCED_FILENAMES, PROJECT_FENCED_SEGMENTS, homeFenceFor, homeFencedDirs, homeFencedFiles, isHomeWriteOnly } from "./home-fence";
-import { controlPlaneDenialMessage, controlPlaneTargetForCall } from "./control-plane";
+import { ESCAPE_FENCED_FILENAMES, PROJECT_FENCED_SEGMENTS, homeFenceFor, homeFencedDirs, homeFencedFiles, isHomeWriteOnly, hostStorageFenceOptions } from "./home-fence";
+import { controlPlaneDenialMessage, controlPlaneTargetForCall, hostStorageReadTarget } from "./control-plane";
 import { protectedPathsFor, protectedReadDenial, protectedWriteDecision, storeWriteDenial } from "./protected-paths";
 import { baseName, COMMAND_PREFIXES, inPlaceFiles, nestedCommandStrings, quotedOperatorsAsText, shellSegments, shellWords } from "./shell-words";
 export { shellSegments } from "./shell-words";
@@ -468,7 +468,7 @@ function floorNeedles(home: string): FloorNeedle[] {
   const out = new Map<string, boolean>();
   for (const p of [...homeFencedDirs(home), ...homeFencedFiles(home)]) {
     const r = relative(home, p);
-    const writeOnly = isHomeWriteOnly(r);
+    const writeOnly = isHomeWriteOnly(r) || p.endsWith("/cowork");
     const spellings = r.length === 0 || r.startsWith("..") || isAbsolute(r)
       ? [p.toLowerCase()]
       : prefixes.map((pre) => `${pre}/${r}`.toLowerCase());
@@ -1000,6 +1000,9 @@ function bashProtectedWriteHook(home?: string): HookCallback {
  * and execute — only in a write-shaped position (after a redirect or a write verb).
  */
 export function escapeFloorHit(command: string, home: string | undefined, cwd?: string): string | undefined {
+  // A detached escape has no kernel-level control-storage fence. String matching cannot constrain a
+  // script/computed path or a fresh hard link; once Cowork storage is live this route must refuse.
+  if (home && hostStorageFenceOptions(home).coworkStorageActive) return "Cowork host storage: this execution route cannot preserve its control-storage fence";
   // R.3 re-review B-1: the command as written, and once per reading of the child's path variables with each
   // replaced by the absolute value the daemon knows — so `$WINTER_STORE_HOME/../agents`, `cd $OUTDIR &&
   // cd ../..` and every other depth collapse into the literal-path checks below (the normaliser folds
@@ -1073,6 +1076,15 @@ function escapeFloorHitIn(command: string, home: string | undefined, cwd?: strin
   }
   if (home === undefined || home.length === 0) return undefined;
   const bareHome = home.replace(/\/+$/, "");
+  const storageFence = homeFenceFor(bareHome);
+  // A plain nonrecursive directory listing names siblings, not their control-file contents. Keep
+  // ancestor scans refused for recursive commands, chains and every write/replacement shape.
+  const plainListing = writeStart === Infinity && /^ls(?:\s|$)/.test(c) && !/[;&|]/.test(c) && !/\s-[^\s]*r/.test(c);
+  for (const word of c.split(/[\s;&|()<>"']+/)) {
+    if (!word.includes("/")) continue;
+    const hit = hostStorageReadTarget(word, cwd ?? "/", storageFence, !plainListing);
+    if (hit) return "Cowork control storage or host coordination";
+  }
   for (const { needle, writeOnly } of floorNeedles(bareHome)) {
     let at = c.indexOf(needle);
     while (at >= 0) {

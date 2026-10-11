@@ -19,6 +19,7 @@ import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Settings } from "../settings";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { CONTROL_PLANE_FILENAMES } from "./control-plane";
+import { hostStorageReadPatterns, hostStorageWriteRoots, type HostStorageFenceOptions } from "./host-storage-fence";
 import { providerFor, testProviderNameFor } from "./provider-selection";
 import { splitTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
 import { WINTER_ADVERTISED_TOOLS_0_0_4, WINTER_OWN_TOOL_NAMES } from "./tool-names";
@@ -585,6 +586,7 @@ export function controlPlaneDenyRules(home: string): string[] {
   // else — recorded so this form is not re-investigated.
   const claudeResumeStaging = fsRootAnchored([join(lit(tmpdir()), `${RESUME_STAGING_PREFIX}*`), "**"].join("/"));
   const targets = [
+    ...hostStorageWriteRoots(home).flatMap((root) => [fsRootAnchored(lit(root)), fsRootAnchored(`${lit(root)}/**`)]),
     // Any project's control-plane files, at any depth — the project-INDEPENDENT invariant
     // (`controlPlaneFileTarget`'s own doc: "the agent must NEVER write ANY
     // `<any>/.winter/permissions.local.json`, whichever project owns it").
@@ -650,6 +652,7 @@ export function controlPlaneDenyRules(home: string): string[] {
   const stagingRoot = join(lit(tmpdir()), `${RESUME_STAGING_PREFIX}*`);
   const runFolders = [lit(homeCacheDir(home)), "runs", "*"].join("/");
   const readTargets = [
+    ...hostStorageReadPatterns(home).map(({ root, tail }) => fsRootAnchored(`${lit(root)}/${tail}`)),
     fsRootAnchored([lit(join(home, "run")), "**"].join("/")),
     fsRootAnchored([lit(join(home, "runtimes")), "**"].join("/")),
     // WS-21 (spec §7.1, reads): the user's MCP servers (a stdio server's `env` may carry a key) and the
@@ -662,7 +665,7 @@ export function controlPlaneDenyRules(home: string): string[] {
     ...RUN_FOLDER_CONFIG_FILES.map((f) => fsRootAnchored([stagingRoot, f].join("/"))),
     fsRootAnchored([stagingRoot, "backups", "**"].join("/")),
   ];
-  return [...writeTools.flatMap((t) => targets.map((p) => `${t}(${p})`)), ...readTools.flatMap((t) => readTargets.map((p) => `${t}(${p})`))];
+  return [...new Set([...writeTools.flatMap((t) => targets.map((p) => `${t}(${p})`)), ...readTools.flatMap((t) => readTargets.map((p) => `${t}(${p})`))])];
 }
 
 /**
@@ -912,13 +915,14 @@ export function projectScopeAllowRulesFor(cwd: string, deps: {
  * trust record, agent definitions, the user's three control-plane files and the shared runtime home's
  * settings, MCP servers, agents and plugins.
  */
-export function selfGrantDenyWrite(home: string): string[] {
+export function selfGrantDenyWrite(home: string, options?: HostStorageFenceOptions): string[] {
   return [
     join(home, "run"), join(home, "runtimes"), homeCacheDir(home), join(home, "plugins"), approvedProjectRulesDir(home),
     trustRecordFile(home), join(home, "agents"),
     join(sdkHomeFor(home), "settings.json"), join(sdkHomeFor(home), ".winter.json"),
     join(sdkHomeFor(home), "agents"), join(sdkHomeFor(home), "plugins"),
     ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => join(home, f)),
+    ...hostStorageWriteRoots(home, options),
   ];
 }
 
@@ -961,7 +965,7 @@ function projectSandboxDenyWrite(cwd: string): string[] {
   return [...new Set(out)];
 }
 
-export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSettingsConfig {
+export function sandboxConfigFor(home: string, cwd?: string | null, options?: HostStorageFenceOptions): SandboxSettingsConfig {
   return {
     enabled: true,
     filesystem: {
@@ -1014,7 +1018,7 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
       // `sdk/projects` is deliberately absent: a subpath deny there would take the memory directories
       // (which stay allowlisted) with it — its fence is the escape floor's and the path fence hook's.
       denyWrite: [...new Set([
-        ...selfGrantDenyWrite(home),
+        ...selfGrantDenyWrite(home, options),
         // Review I7: the PROTECTED paths (spec §7.2) — a write has to go through a tool and its card, so
         // Bash may not write them at all. A separate list, never part of `selfGrantDenyWrite`: that one
         // feeds the write-tool fence's HARD deny (`homeFencedDirs`), which would swallow the card.
@@ -1030,7 +1034,8 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
       // would be expressible in `childSandboxConfigFor`'s form since both runtimes read the glob grammar —
       // R.3 I-4 — but that row is not added there): the deny rules and the path fence hook carry them
       // (DECISION 12).
-      denyRead: [join(home, "run"), join(home, "runtimes"), join(sdkHomeFor(home), ".winter.json")],
+      denyRead: [...new Set([join(home, "run"), join(home, "runtimes"), join(sdkHomeFor(home), ".winter.json"),
+        ...hostStorageReadPatterns(home, options).filter(({ tail }) => tail === "**").map(({ root }) => root)])],
     },
     // `allowUnsandboxedCommands` is deliberately NOT set. It is consulted only together with
     // `excludedCommands` (`sandbox/spawn.ts:109,122`), which this config does not set, so `false`
@@ -1080,7 +1085,8 @@ export function childSandboxConfigFor(home: string, cwd?: string | null, extraDi
     filesystem: {
       ...fs,
       ...(fs.denyWrite === undefined ? {} : { denyWrite: [...new Set([...fs.denyWrite.map(escapeSandboxGlobPath), ...anyDepth])] }),
-      ...(fs.denyRead === undefined ? {} : { denyRead: fs.denyRead.map(escapeSandboxGlobPath) }),
+      ...(fs.denyRead === undefined ? {} : { denyRead: [...fs.denyRead.map(escapeSandboxGlobPath),
+        ...hostStorageReadPatterns(home).filter(({ tail }) => tail !== "**").map(({ root, tail }) => `${escapeSandboxGlobPath(root)}/${tail}`)] }),
     },
   };
 }

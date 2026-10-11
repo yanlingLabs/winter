@@ -1,8 +1,9 @@
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { COWORK_TABLES, migrateCoworkSchema } from "../cowork/schema";
 
-export const RUNTIME_STATE_SCHEMA_VERSION = 7;
+export const RUNTIME_STATE_SCHEMA_VERSION = 8;
 
 export class RuntimeStateUnavailableError extends Error {
   constructor(public readonly path: string, public readonly reason: "missing" | "corrupt" | "newer-schema" | "unmigrated", cause?: unknown) {
@@ -223,6 +224,9 @@ const MIGRATIONS: ReadonlyArray<{
     db.run(`CREATE INDEX IF NOT EXISTS runtime_sessions_state ON runtime_sessions(state)`);
     db.run(`CREATE TABLE IF NOT EXISTS run_root_quarantine (root TEXT PRIMARY KEY, recorded_at TEXT NOT NULL, detail_json TEXT NOT NULL DEFAULT '{}')`);
   } },
+  // Cowork authority belongs to this protected store; older writers refuse v8.
+  // Additive/idempotent for migration fixtures that rewind only user_version.
+  { version: 8, up: migrateCoworkSchema },
 ];
 
 /** `PRAGMA foreign_key_check`'s row count — how many child rows point at no parent. */
@@ -237,26 +241,34 @@ function foreignKeyViolations(db: Database): number {
  * cleared (the older CHECK has no such kind), `runtime_sessions` rebuilt under the v6 CHECK by SQLite's
  * 12-step procedure (keys off OUTSIDE the transaction, `foreign_key_check` no worse), the quarantine
  * record dropped, `user_version` 6. `"not-needed"` for no store or a store already at v6 or below; a store
- * NEWER than v7 is refused (this build does not know its shape). The daemon must be stopped.
+ * NEWER than v8 is refused. A v8 store may roll back only while every Cowork table is empty; populated authority must be retained. The daemon must be stopped.
  *
  * Dropping `run_root_quarantine` forgets which kept roots were quarantined: after a re-upgrade the boot
  * sweep reconciles those roots AGAIN (they are still on disk — nothing here deletes one). A root that is
  * still unprovable quarantines again: a second evidence copy under `cache/quarantine/`, its sessions
  * re-marked `repair-required` — idempotent, never a loss. Rollback runs this step FIRST (round 3, minor 1).
  */
-export function downgradeRuntimeStateToV6(home: string): { from: 7; to: 6 } | "not-needed" {
+export function downgradeRuntimeStateToV6(home: string): { from: 7 | 8; to: 6 } | "not-needed" {
   const path = join(home, "runtimes", "runtime-state.db");
   if (!existsSync(path)) return "not-needed";
   const db = new Database(path);
   try {
     const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
     if (version <= 6) return "not-needed";
-    if (version > 7) throw new RuntimeStateUnavailableError(path, "newer-schema");
+    if (version > 8) throw new RuntimeStateUnavailableError(path, "newer-schema");
     const row = db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE type='table' AND name='runtime_sessions'").get();
     const v7Check = "IN ('official-spool','sdk-resume-staging','run-folder')";
     db.run("PRAGMA foreign_keys = OFF");
     try {
       db.transaction(() => {
+        // Existing homes may roll back an unused additive v8 schema. Never discard
+        // a home identity, source grant, binding, receipt or retained workspace.
+        if (version === 8) {
+          for (const table of COWORK_TABLES) {
+            if (db.query(`SELECT 1 FROM ${table} LIMIT 1`).get()) throw new RuntimeStateUnavailableError(path, "newer-schema");
+          }
+          for (const table of COWORK_TABLES) db.run(`DROP TABLE ${table}`);
+        }
         const before = foreignKeyViolations(db);
         db.run("UPDATE runtime_sessions SET active_local_write_root = NULL, active_local_write_root_kind = NULL WHERE active_local_write_root_kind = 'run-folder'");
         db.run("UPDATE runtime_generations SET local_write_root = NULL, local_write_root_kind = NULL WHERE local_write_root_kind = 'run-folder'");
@@ -276,11 +288,11 @@ export function downgradeRuntimeStateToV6(home: string): { from: 7; to: 6 } | "n
         const after = foreignKeyViolations(db);
         if (after > before) throw new Error(`the v7→v6 step would break ${after - before} foreign key reference(s)`);
         db.run("PRAGMA user_version = 6");
-      })();
+      }).immediate();
     } finally {
       db.run("PRAGMA foreign_keys = ON");
     }
-    return { from: 7, to: 6 };
+    return { from: version as 7 | 8, to: 6 };
   } finally {
     db.close();
   }

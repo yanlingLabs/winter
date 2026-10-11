@@ -406,7 +406,7 @@ function rekeyTranscripts(home: string, m: MigrationCManifest, log: (line: strin
   try {
     const records = new RuntimeSessionRecords(rs);
     const rows = rs.db.query<{ id: string; kind: string; backend: string; key: string }, []>(
-      "SELECT winter_session_id AS id, runtime_kind AS kind, backend_session_id AS backend, transcript_project_key AS key FROM runtime_sessions WHERE backend_session_id IS NOT NULL ORDER BY winter_session_id",
+      `SELECT winter_session_id AS id, runtime_kind AS kind, backend_session_id AS backend, transcript_project_key AS key FROM runtime_sessions WHERE backend_session_id IS NOT NULL AND ${hostRuntimePredicate(rs.db)} ORDER BY winter_session_id`,
     ).all();
     for (const row of rows) {
       let entry = m.rekeyed.find((e) => e.sessionId === row.id);
@@ -440,6 +440,16 @@ function rekeyTranscripts(home: string, m: MigrationCManifest, log: (line: strin
   } finally { rs.close(); }
   if (moved > 0) log(`migration C: ${moved} session transcript(s) re-keyed to the canonical cwd`);
   return { moved, notMoved: collisions };
+}
+
+/** Cowork store keys and /workspace paths belong to the guest; host cwd canonicalization never owns
+ * them. Old rollback stores predate Cowork; a v8 store missing its binding table is corrupt, not empty. */
+function hostRuntimePredicate(db: Database): string {
+  const exists = db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cowork_conversations'").get();
+  if (exists) return "NOT EXISTS (SELECT 1 FROM cowork_conversations cc WHERE cc.session_id = runtime_sessions.winter_session_id)";
+  const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
+  if (version >= 8) throw new MigrationCRefused("sdk_home_migration_refused", "Cowork conversation bindings are missing from the runtime-state database; host migration cannot classify guest sessions safely");
+  return "1=1";
 }
 
 /**
@@ -641,13 +651,14 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
         const oldPrefix = `${join(home, "projects")}/`;
         const newPrefix = `${join(sdkHomeFor(home), "projects")}/`;
         const roots = officialRoots(home);
-        const rewritten = rs.db.run("UPDATE runtime_sessions SET backend_root = ? || substr(backend_root, ?) WHERE substr(backend_root, 1, ?) = ?", [newPrefix, oldPrefix.length + 1, oldPrefix.length, oldPrefix]).changes;
+        const hostOnly = hostRuntimePredicate(rs.db);
+        const rewritten = rs.db.run(`UPDATE runtime_sessions SET backend_root = ? || substr(backend_root, ?) WHERE substr(backend_root, 1, ?) = ? AND ${hostOnly}`, [newPrefix, oldPrefix.length + 1, oldPrefix.length, oldPrefix]).changes;
         let cleared = 0;
         for (const root of roots) {
           const like = `${root}%`;
-          cleared += rs.db.run("UPDATE runtime_generations SET config_dir = NULL WHERE config_dir LIKE ?", [like]).changes;
-          cleared += rs.db.run("UPDATE runtime_generations SET local_write_root = NULL, local_write_root_kind = NULL WHERE local_write_root LIKE ?", [like]).changes;
-          cleared += rs.db.run("UPDATE runtime_sessions SET active_local_write_root = NULL, active_local_write_root_kind = NULL WHERE active_local_write_root LIKE ?", [like]).changes;
+          cleared += rs.db.run(`UPDATE runtime_generations SET config_dir = NULL WHERE config_dir LIKE ? AND winter_session_id IN (SELECT winter_session_id FROM runtime_sessions WHERE ${hostOnly})`, [like]).changes;
+          cleared += rs.db.run(`UPDATE runtime_generations SET local_write_root = NULL, local_write_root_kind = NULL WHERE local_write_root LIKE ? AND winter_session_id IN (SELECT winter_session_id FROM runtime_sessions WHERE ${hostOnly})`, [like]).changes;
+          cleared += rs.db.run(`UPDATE runtime_sessions SET active_local_write_root = NULL, active_local_write_root_kind = NULL WHERE active_local_write_root LIKE ? AND ${hostOnly}`, [like]).changes;
         }
         detail = { backendRootsRewritten: rewritten, staleConfigDirRowsCleared: cleared };
       } finally { rs.close(); }
@@ -902,7 +913,7 @@ export async function rollbackMigrationC(home: string, deps: Pick<MigrationCDeps
     rawRuntimeState(home, (db) => {
       const sdkPrefix = `${join(sdkHomeFor(home), "projects")}/`;
       const oldPrefix = `${join(home, "projects")}/`;
-      db.run("UPDATE runtime_sessions SET backend_root = ? || substr(backend_root, ?) WHERE substr(backend_root, 1, ?) = ?", [oldPrefix, sdkPrefix.length + 1, sdkPrefix.length, sdkPrefix]);
+      db.run(`UPDATE runtime_sessions SET backend_root = ? || substr(backend_root, ?) WHERE substr(backend_root, 1, ?) = ? AND ${hostRuntimePredicate(db)}`, [oldPrefix, sdkPrefix.length + 1, sdkPrefix.length, sdkPrefix]);
     });
   }
   // copy-files → the copies moved aside (a user edit to one after the upgrade is kept, not lost)

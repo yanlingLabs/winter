@@ -2,6 +2,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LEGACY_HOME_ENV } from "../src/legacy-names";
+// Cowork fences can inspect file identity to reject hard-link aliases. Inject the coordination root
+// before any fence is constructed so even metadata checks never probe the production user ledger.
+process.env.WINTER_COWORK_COORDINATION_DIR = mkdtempSync(join(tmpdir(), "winter-test-cowork-coordination-"));
 // Hermetic guard: tests must never touch the user's real ~/.config/git/ignore
 // (global-gitignore.ts resolves its default path from XDG_CONFIG_HOME).
 process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "winter-test-xdg-"));

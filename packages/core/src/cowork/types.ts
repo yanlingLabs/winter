@@ -1,0 +1,38 @@
+import type { ApprovalPolicy } from "@yanlinglabs/winter-protocol";
+
+export type WorkspaceState = "retained" | "archived" | "deleting" | "deleted";
+export type SourceState = "preparing" | "ready" | "unavailable" | "removing" | "detached";
+export type SourceAccess = "read-only" | "read-write";
+export type PublicationPolicy = "github-only-feature-branches" | "manual";
+export interface CapabilityCeiling { toolClasses: string[]; hostServices: string[]; connectors: string[]; network: "none" | "internet" }
+export interface WorkspacePolicy {
+  policyId: string; workspaceId: string; defaultPolicy: ApprovalPolicy; publication: PublicationPolicy;
+  ceiling: CapabilityCeiling; revision: number; defaultRevision: number; publicationRevision: number;
+}
+export interface Workspace {
+  workspaceId: string; ownership: "standalone" | "project"; ownerId: string; title: string; state: WorkspaceState;
+  configRevision: number; grantRevision: number; instructionRevision: number;
+  incarnationId: string | null; leaseEpoch: number; power: "stopped" | "starting" | "running" | "draining" | "uncertain";
+  createdAt: string; updatedAt: string;
+}
+/** Local grant/root identities are opaque host records, never a caller-supplied mount path or token. */
+export type SourceSelection =
+  | { kind: "folder"; label: string; access: SourceAccess; detail: { grantRef: string; rootIdentity: string } }
+  | { kind: "githubRepository"; label: string; access: SourceAccess; detail: { repositoryId: string; authorityRef: string; initialRef: string } };
+export type WorkspaceSource = SourceSelection & {
+  sourceId: string; workspaceId: string; locationId: string; desired: "present" | "removed"; state: SourceState;
+  revision: number; ackRevision: number | null; ackIncarnationId: string | null; reason: string | null;
+  restartRequired: boolean; trust: "untrusted" | "trusted" | "revoked"; trustDigest: string | null;
+  createdAt: string; updatedAt: string;
+};
+export interface ConversationBinding {
+  sessionId: string; workspaceId: string; projectId: string | null; sourceId: string; relativeCwd: string;
+  policy: ApprovalPolicy; restrictions: CapabilityCeiling; revision: number; state: "active" | "archived" | "deleted"; createdAt: string;
+}
+export interface MutationContext { principalId: string; requestId: string; expectedRevision?: number }
+export interface MutationReceipt<T> { operationId: string; workspaceId: string; revision: number; value: T }
+export interface GuestEpoch { workspaceId: string; incarnationId: string; leaseEpoch: number; configRevision: number; grantRevision: number }
+export type CoworkErrorCode = "not_found" | "revision_conflict" | "request_conflict" | "last_source_required" | "source_unavailable" | "authority_denied" | "invalid_request" | "recovery_required" | "stale_acknowledgment";
+export class CoworkError extends Error {
+  constructor(readonly code: CoworkErrorCode, readonly currentRevision?: number) { super(code); this.name = "CoworkError"; }
+}

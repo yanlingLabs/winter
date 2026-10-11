@@ -1,4 +1,5 @@
 import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { readdirSync, statSync } from "node:fs";
 import { canonicalizeForWrite, resolveLeafSymlinks } from "../agent/paths";
 
 /**
@@ -29,10 +30,9 @@ export function isProjectControlFilename(lowercasedName: string): boolean {
 /**
  * The tool names whose input this fence inspects — the WRITE class, in both vocabularies.
  *
- * **Reads are deliberately absent.** CLAUDE.md's tool-surface rule is that read/glob/grep/ls have
- * no path fence at all (the sole read denial is `~/.winter/run`, which the daemon applies through
- * its own denylist); P8b-27(b)'s "any tool input naming a path" is about what a call can WRITE, and
- * widening it to `Read` would quietly reverse a deliberate, documented product decision.
+ * Reads are absent from this write-class set. `controlPlaneTargetForCall` handles the separate,
+ * narrow host-storage read denial: runtime authority, Cowork control records/volumes and global
+ * coordination. Ordinary project content and Cowork shared content retain their read access.
  *
  * `MultiEdit` has no Winter counterpart (Winter's `edit` is single-file) but is a Winter built-in that
  * writes, so it is fenced under its Winter name alone.
@@ -131,6 +131,15 @@ export function controlPlaneTargetForCall(
   cwd: string,
   fence?: HomeFence,
 ): { path: string; canonical: string; home?: true } | null {
+  if (["read", "glob", "grep", "ls"].includes(toolName.toLowerCase()) && fence) {
+    const paths = writeTargetPathsIn(input);
+    if (paths.length === 0 && ["glob", "grep", "ls"].includes(toolName.toLowerCase())) paths.push(cwd || "/");
+    for (const p of paths) {
+      const hit = hostStorageReadTarget(p, cwd, fence);
+      if (hit) return hit;
+    }
+    return null;
+  }
   if (!WRITE_CLASS_TOOL_NAMES.has(toolName)) return null;
   for (const p of writeTargetPathsIn(input)) {
     const hit = controlPlaneFileTarget(p, cwd) ?? (fence === undefined ? null : homeFenceTarget(p, cwd, fence));
@@ -153,6 +162,59 @@ export interface HomeFence {
   files: readonly string[];
   /** Path segments fenced wherever they appear (`.winter/agents/`). */
   segments: readonly string[];
+  /** Cowork is write-fenced wholesale; only its shared content is directly readable. */
+  coworkRoots?: readonly string[];
+  coordinationDir?: string;
+  readDirs?: readonly string[];
+  controlEntries?: readonly string[];
+}
+
+function pathSpellings(path: string, cwd: string): string[] {
+  const raw = resolve(isAbsolute(path) ? path : resolve(cwd || "/", path));
+  const out = [raw];
+  try { out.push(canonicalizeForWrite(resolveLeafSymlinks(raw))); } catch { /* literal still binds */ }
+  return [...new Set(out.map((p) => p.toLowerCase()))];
+}
+function within(candidate: string, root: string): boolean { return candidate === root || candidate.startsWith(`${root}/`); }
+
+/** Hard links have no different realpath. Compare file identity against known control files, without
+ * reading their content or walking guest disks/shared artifacts. This runs only for a multiply-linked target. */
+function controlFileAlias(path: string, fence: HomeFence): boolean {
+  let target: ReturnType<typeof statSync>;
+  try { target = statSync(path); } catch { return false; }
+  if (!target.isFile() || target.nlink < 2) return false;
+  const controls = [...fence.files, ...(fence.readDirs ?? []).flatMap((root) => ["", "-wal", "-shm"].map((suffix) => `${root}/runtime-state.db${suffix}`))];
+  for (const root of fence.coworkRoots ?? []) {
+    try {
+      for (const entry of readdirSync(`${root}/workspaces`, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        for (const name of fence.controlEntries ?? []) controls.push(`${root}/workspaces/${entry.name}/${name}`);
+      }
+    } catch { /* no Cowork store here */ }
+  }
+  if (fence.coordinationDir) for (const suffix of ["", "-wal", "-shm"]) controls.push(`${fence.coordinationDir}/cowork-admission.sqlite${suffix}`);
+  for (const file of controls) {
+    try { const st = statSync(file); if (st.dev === target.dev && st.ino === target.ino) return true; } catch { /* absent */ }
+  }
+  return false;
+}
+
+export function hostStorageReadTarget(path: string, cwd: string, fence: HomeFence, includeAncestors = true): { path: string; canonical: string; home: true } | null {
+  const candidates = pathSpellings(path, cwd);
+  for (const candidate of candidates) {
+    if ((fence.readDirs ?? []).flatMap((root) => pathSpellings(root, "/")).some((r) => within(candidate, r) || (includeAncestors && within(r, candidate)))) return { path, canonical: candidate, home: true };
+    for (const root of fence.coworkRoots ?? []) {
+      for (const r of pathSpellings(root, "/")) {
+        // A parent scan can expose control records. A shared subtree is the sole content exception.
+        if ((includeAncestors && within(r, candidate)) || (within(candidate, r) && !/^workspaces\/[^/]+\/shared(?:\/|$)/.test(candidate.slice(r.length + 1)))) {
+          return { path, canonical: candidate, home: true };
+        }
+      }
+    }
+    if (fence.coordinationDir && pathSpellings(fence.coordinationDir, "/").some((r) => within(candidate, r) || (includeAncestors && within(r, candidate)))) return { path, canonical: candidate, home: true };
+  }
+  if (controlFileAlias(resolve(cwd || "/", path), fence)) return { path, canonical: candidates[0]!, home: true };
+  return null;
 }
 
 /** A write target the home fence covers, or `null`. Case-folded, and tested on the raw spelling AND
@@ -169,12 +231,15 @@ export function homeFenceTarget(path: string, cwd: string, fence: HomeFence): { 
   };
   const dirs = fence.dirs.flatMap(canonDir);
   const files = fence.files.flatMap(canonDir);
+  const storageRoots = [...(fence.coworkRoots ?? []), ...(fence.coordinationDir ? [fence.coordinationDir] : [])].flatMap(canonDir);
   for (const candidate of new Set([raw.toLowerCase(), canonical.toLowerCase()])) {
+    if (storageRoots.some((r) => within(r, candidate))) return { path, canonical, home: true };
     if (dirs.some((d) => candidate === d || candidate.startsWith(`${d}/`))) return { path, canonical, home: true };
     if (files.includes(candidate)) return { path, canonical, home: true };
     const withSlash = `${candidate}/`;
     if (fence.segments.some((s) => withSlash.includes(`/${s.toLowerCase()}`))) return { path, canonical, home: true };
   }
+  if (controlFileAlias(raw, fence)) return { path, canonical, home: true };
   return null;
 }
 
@@ -182,6 +247,7 @@ export function homeFenceTarget(path: string, cwd: string, fence: HomeFence): { 
  *  named as the model called it. */
 export function controlPlaneDenialMessage(toolName: string, path: string, home?: boolean): string {
   if (home === true) {
+    if (["read", "glob", "grep", "ls"].includes(toolName.toLowerCase())) return `cannot ${toolName} ${path}: Cowork control records, volumes and host coordination are available only through approved metadata and export services`;
     return `cannot ${toolName} ${path}: Winter's own state (its runtimes, plugins, approved rules, cache, agent definitions and directory trust) is never written by a tool — only by Winter itself or by you`;
   }
   if (basename(path).toLowerCase() === "mcp.json") {

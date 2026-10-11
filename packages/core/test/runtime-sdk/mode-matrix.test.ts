@@ -359,7 +359,7 @@ test("the control-plane deny rules cover the four write tools × the control-pla
     expect(deny).not.toContain(`${tool}(${claudeResumeTarget})`);
     for (const f of [".claude.json", ".credentials.json", ".winter.json", "backups/**"]) expect(deny).toContain(`${tool}(/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`)}/${f})`);
   }
-  expect(deny).toHaveLength(4 * 21 + 3 * 11);
+  expect(deny).toHaveLength(4 * 26 + 3 * 17);
 });
 
 // Daemon settings surface batch 3 (item 2): `settings.permissions.deny` (Skill(<name>) toggles,
@@ -368,7 +368,7 @@ test("item 2 (WS-21): the user's sdk/settings.json deny rules (userDeny) are app
   const deny = buildWinterOptions(optionsInput({ home: "/h", userDeny: ["Skill(writing-skills)", "Agent(fork)"] })).permissions!.deny!;
   expect(deny.slice(-2)).toEqual(["Skill(writing-skills)", "Agent(fork)"]);
   // The fixed fence is untouched (same count this file's other test pins).
-  expect(deny).toHaveLength(4 * 21 + 3 * 11 + 2);
+  expect(deny).toHaveLength(4 * 26 + 3 * 17 + 2);
 });
 
 test("WS-21: a STALE settings.permissions.deny (a moved key) never reaches the child's deny list", () => {
@@ -379,7 +379,7 @@ test("WS-21: a STALE settings.permissions.deny (a moved key) never reaches the c
   });
   const deny = buildWinterOptions(optionsInput({ home: "/h", settings })).permissions!.deny!;
   expect(deny).not.toContain("Skill(stale)");
-  expect(deny).toHaveLength(4 * 21 + 3 * 11);
+  expect(deny).toHaveLength(4 * 26 + 3 * 17);
 });
 
 test("WS-21: the user's sdk/settings.json allow rules (userAllow) reach a code child verbatim — never re-translated", () => {
@@ -394,8 +394,8 @@ test("WS-21: the user's sdk/settings.json allow rules (userAllow) reach a code c
 test("item 2: an absent settings.permissions.deny changes nothing — byte-identical to before item 2", () => {
   const withNull = buildWinterOptions(optionsInput({ home: "/h", settings: null })).permissions!.deny!;
   const withUndefined = buildWinterOptions(optionsInput({ home: "/h" })).permissions!.deny!;
-  expect(withNull).toHaveLength(4 * 21 + 3 * 11);
-  expect(withUndefined).toHaveLength(4 * 21 + 3 * 11);
+  expect(withNull).toHaveLength(4 * 26 + 3 * 17);
+  expect(withUndefined).toHaveLength(4 * 26 + 3 * 17);
 });
 
 // Winter Phase 10b (D1-3, W18-9): a read of a `claude-resume-*` staging root is denied — proved
@@ -475,7 +475,7 @@ test("every deny rule is //-anchored, and resolves to the fence target it names"
   expect(specs.has(`/${join(home, "cache", "runs", "*", "backups")}/**`)).toBe(true);
   expect(specs.has(`/${join(tmpdir(), "claude-resume-*", "backups")}/**`)).toBe(true);
   for (const f of [".winter.json", ".claude.json", ".credentials.json"]) expect(specs.has(`/${join(tmpdir(), "claude-resume-*", f)}`)).toBe(true);
-  expect(specs.size).toBe(29);                                       // (runtimes/** was already a READ target)
+  expect(specs.size).toBe(39);                                       // (runtimes/** was already a READ target)
   // The two inert forms must never reappear.
   for (const s of specs) {
     expect({ s, singleSlashAbsolute: /^\/[^/]/.test(s) }).toEqual({ s, singleSlashAbsolute: false });
@@ -520,6 +520,7 @@ test("the Bash sandbox names real DIRECTORIES — plus, since R.3 I-4, the any-d
     "/h/run", "/h/runtimes", "/h/cache", "/h/plugins", "/h/permissions", "/h/trust.json", "/h/agents",
     "/h/sdk/settings.json", "/h/sdk/.winter.json", "/h/sdk/agents", "/h/sdk/plugins",
     "/h/permissions.local.json", "/h/settings.json", "/h/settings.local.json",
+    "/h/cowork", process.env.WINTER_COWORK_COORDINATION_DIR!,
     // review I7: the protected user tier (a separate list — the write TOOLS get a card, not this deny),
     // for the shared runtime home and the store home this build loads from. R.1: on a run-home build the
     // store home IS the shared runtime home (`sdk/`), so the list names it once (router 0.0.11 added the
@@ -532,10 +533,14 @@ test("the Bash sandbox names real DIRECTORIES — plus, since R.3 I-4, the any-d
   ]);
   // CLAUDE.md: "the sole read denial is ~/.winter/run" — reads are otherwise unrestricted.
   // WS-21 (spec §7.1): + the user's MCP server list.
-  expect(sb.filesystem!.denyRead).toEqual(["/h/run", "/h/runtimes", "/h/sdk/.winter.json"]);   // Task 17: runtimes/ is model-denied (8a)
+  expect(sb.filesystem!.denyRead).toEqual(["/h/run", "/h/runtimes", "/h/sdk/.winter.json",
+    process.env.WINTER_COWORK_COORDINATION_DIR!, "/h/cowork/control",
+    "/h/cowork/workspaces/*/manifest.json", "/h/cowork/workspaces/*/env.ext4",
+    "/h/cowork/workspaces/*/data.ext4", "/h/cowork/workspaces/*/control/**"]);   // Task 17: runtimes/ is model-denied (8a)
   for (const p of [...sb.filesystem!.denyWrite!, ...sb.filesystem!.denyRead!]) {
+    const coworkControl = /^\/h\/cowork\/workspaces\/\*\/(?:manifest\.json|env\.ext4|data\.ext4|control\/\*\*)$/.test(p);
     const anyDepth = /^\/repo\/\*\*\/\.winter\/(?:skills|commands|rules|output-styles|agents)$/.test(p);
-    expect({ p, glob: p.includes("*") }).toEqual({ p, glob: anyDepth });
+    expect({ p, glob: p.includes("*") }).toEqual({ p, glob: anyDepth || coworkControl });
   }
   // `allowUnsandboxedCommands` is NOT set: it is consulted only together with `excludedCommands`
   // (`sandbox/spawn.ts:109,122`), which this config does not set, so `false` would be a no-op.
