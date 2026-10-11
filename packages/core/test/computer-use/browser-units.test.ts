@@ -365,6 +365,9 @@ describe("the tool description", () => {
     for (const s of ["type Image", "type Point", "screenshot(", "declare function show", "appAt("]) expect(blind.includes(s)).toBe(false);
     expect(blind).toContain("click(t: Ref, o?:");
   });
+  test("networkBody's redaction is stated as display hygiene, not a security boundary (review MEDIUM 7)", () => {
+    expect(full).toContain("networkBody(id: string, o?: Quiet & { maxChars?: number }): Promise<string>;   // one response's text body; secret-looking values masked for display (best-effort, not a security boundary)");
+  });
   test("it never names the old Browser tool, nor varies with the browsers connected", () => {
     expect(/`Browser`|Browser tool/.test(full)).toBe(false);
   });
