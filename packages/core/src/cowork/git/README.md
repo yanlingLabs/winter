@@ -64,14 +64,16 @@ reviewed bounded transport/object negotiation design and resource enforcement;
 raising these constants alone does not supply either.
 
 `CanonicalPublicationJournal` implements atomic claim and transition in the
-protected runtime-state operations/outbox tables. Opening/reopening this host
-journal atomically rejects outstanding prepared operations: dispatch must commit
-before transport is invoked, so prepared proves the effect was not sent. An older
-live caller loses the prepared-to-dispatched transition and cannot send either.
-Initialize/cache the journal per workspace at host startup; a duplicate claim
-against an already open journal returns a usable pending receipt while its owner
-is still working. Recovery status and outbox notifications commit together, and
-retries still reauthorize before returning the recovered terminal receipt.
+protected runtime-state operations/outbox tables. Opening another handle never
+changes pending work. A prepared operation records its authenticated host-owner
+incarnation, shared by that host's handles. Explicit `recoverPrepared` requires
+host proof that the previous immutable owner terminated; it skips current and
+unknown/legacy owners, and rechecks exact operation/digest/owner/phase after the
+proof awaits. Production must supply this owner from the canonical admission
+lifecycle, with termination evidence; a PID or stale heartbeat is insufficient.
+The current foundation does not invent such proof. Once proven, recovery rejects
+unsent preparations atomically with outbox notifications, and an older caller
+loses its dispatch transition. Retries reauthorize before returning a receipt.
 Dispatched and uncertain effects remain blocked and cannot transition back to
 prepared. Status changes
 and notifications commit together. The digest binds principal/session/task/workspace/source, grant
