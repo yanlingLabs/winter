@@ -14,7 +14,7 @@ function fixture() {
   const open = () => { const db = openRuntimeStateDb(home); dbs.push(db); return new CoworkRepository(db); };
   const records = open();
   const made = records.create({principalId:"user",requestId:"create"}, {ownership:"project",title:"Fixture",sources:[{kind:"githubRepository",label:"Repo",access:"read-write",detail:{repositoryId:"repo",authorityRef:"grant",initialRef:"main"}}],ceiling:{toolClasses:[],hostServices:[],connectors:[],network:"none"}});
-  const workspaceId = made.workspaceId, journal = () => new CanonicalPublicationJournal(open(), workspaceId);
+  const workspaceId = made.workspaceId, journal = (ownerId = "host-a") => new CanonicalPublicationJournal(open(), workspaceId, ownerId);
   const key = JSON.stringify(["user", workspaceId, "request"]);
   const receipt: PublicationReceipt = {operationId:randomUUID(),digest:"a".repeat(64),status:"prepared",repositoryId:"repo",ref:"refs/heads/feature/task",oldOid:null,newOid:"1".repeat(40)};
   return {records,workspaceId,journal,key,receipt};
@@ -39,10 +39,19 @@ test("publication status and outbox commit atomically, duplicate transitions emi
   await expect(journal.transition(f.key,"prepared","rejected")).rejects.toMatchObject({code:"request_conflict"});
   await expect(journal.claim(JSON.stringify(["user","foreign","request"]),f.receipt)).rejects.toMatchObject({code:"invalid_request"});
 });
-test("reopened canonical journal atomically retires prepared work with no possible transport replay", async () => {
+test("explicit dead-owner recovery retires only unsent preparations; opening another handle is harmless", async () => {
   const f = fixture(), before = f.journal(); await before.claim(f.key, f.receipt);
   expect((await before.claim(f.key, { ...f.receipt, operationId: randomUUID() })).receipt.status).toBe("prepared");
-  const reopened = f.journal();
+  const otherLiveHandle = f.journal();
+  expect((await otherLiveHandle.claim(f.key, { ...f.receipt, operationId: randomUUID() })).receipt.status).toBe("prepared");
+  expect(await otherLiveHandle.recoverPrepared(async () => { throw new Error("own live owner cannot be recovery candidate"); })).toBe(0);
+  const reopened = f.journal("host-b");
+  expect(await reopened.recoverPrepared(async () => false)).toBe(0);
+  await expect(reopened.transition(f.key, "prepared", "dispatched")).rejects.toMatchObject({ code: "request_conflict" });
+  expect(await reopened.recoverPrepared(async candidate => {
+    expect(candidate).toEqual({ workspaceId: f.workspaceId, operationId: f.receipt.operationId, ownerId: "host-a" });
+    return true;
+  })).toBe(1);
   expect((await reopened.claim(f.key, { ...f.receipt, operationId: randomUUID() })).receipt.status).toBe("rejected");
   await expect(before.transition(f.key, "prepared", "dispatched")).rejects.toMatchObject({ code: "request_conflict" });
   expect(f.records.operation(f.workspaceId, f.receipt.operationId)).toMatchObject({ status: "failed", terminal: true });
@@ -50,4 +59,22 @@ test("reopened canonical journal atomically retires prepared work with no possib
   expect(statuses.map(row => JSON.parse(row.payload_json).publicationStatus)).toEqual(["prepared", "rejected"]);
   f.journal();
   expect(f.records.rs.db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM cowork_outbox WHERE operation_id=?").get(f.receipt.operationId)?.n).toBe(2);
+});
+
+test("owner proof cannot retire an operation that dispatched while recovery awaited", async () => {
+  const f = fixture(), live = f.journal(), recovery = f.journal("host-b");
+  await live.claim(f.key, f.receipt);
+  expect(await recovery.recoverPrepared(async () => {
+    await live.transition(f.key, "prepared", "dispatched");
+    return true;
+  })).toBe(0);
+  expect((await recovery.claim(f.key, f.receipt)).receipt.status).toBe("dispatched");
+});
+test("legacy preparations without owner evidence remain pending", async () => {
+  const f = fixture(); await f.journal().claim(f.key, f.receipt);
+  const row = f.records.rs.db.query<{result_json:string},[string]>("SELECT result_json FROM cowork_operations WHERE operation_id=?").get(f.receipt.operationId)!;
+  const envelope = JSON.parse(row.result_json); delete envelope.preparationOwner;
+  f.records.rs.db.run("UPDATE cowork_operations SET result_json=? WHERE operation_id=?", [JSON.stringify(envelope), f.receipt.operationId]);
+  expect(await f.journal("host-b").recoverPrepared(async () => { throw new Error("unknown ownership is not termination proof"); })).toBe(0);
+  expect((await f.journal("host-b").claim(f.key, f.receipt)).receipt.status).toBe("prepared");
 });

@@ -86,10 +86,10 @@ test("real local publication is not repeated after reopening canonical receipt s
     const records = new CoworkRepository(db);
     const created = records.create({principalId:actor.principalId,requestId:"workspace"}, {ownership:"project",title:"Fixture",sources:[{kind:"githubRepository",label:"Repo",access:"read-write",detail:{repositoryId:f.grant().repositoryId,authorityRef:f.grant().authorityId,initialRef:"main"}}],ceiling:{toolClasses:[],hostServices:[],connectors:[],network:"none"}});
     const request = {...f.request,workspaceId:created.workspaceId};
-    f.options.journal = new CanonicalPublicationJournal(records,created.workspaceId);
+    f.options.journal = new CanonicalPublicationJournal(records,created.workspaceId,"host-a");
     const receipt = await f.broker().publish(actor,request); expect(receipt.status).toBe("applied");
     db.close(); db = openRuntimeStateDb(f.home);
-    f.options.journal = new CanonicalPublicationJournal(new CoworkRepository(db),created.workspaceId);
+    f.options.journal = new CanonicalPublicationJournal(new CoworkRepository(db),created.workspaceId,"host-b");
     expect(await f.broker().publish(actor,request)).toEqual(receipt);
     expect(f.pushes()).toBe(1);
   } finally { db.close(); }
@@ -274,7 +274,7 @@ test("canonical broker restart retires unsent preparations and never replays dis
       const created = records.create({ principalId: actor.principalId, requestId: "workspace" }, { ownership: "project", title: "Fixture",
         sources: [{ kind: "githubRepository", label: "Repo", access: "read-write", detail: { repositoryId: f.grant().repositoryId, authorityRef: f.grant().authorityId, initialRef: "main" } }],
         ceiling: { toolClasses: [], hostServices: [], connectors: [], network: "none" } });
-      const request = { ...f.request, workspaceId: created.workspaceId }, journal = new CanonicalPublicationJournal(records, created.workspaceId);
+      const request = { ...f.request, workspaceId: created.workspaceId }, journal = new CanonicalPublicationJournal(records, created.workspaceId, "host-a");
       f.options.journal = {
         claim: async (...args) => { const result = await journal.claim(...args); if (phase === "prepared") throw new Error("crash after durable claim"); return result; },
         transition: async (key, from, to) => {
@@ -291,7 +291,9 @@ test("canonical broker restart retires unsent preparations and never replays dis
       const expectedPushes = phase === "uncertain" || phase === "applied-ack-lost" || phase === "rejected-ack-lost" ? 1 : 0;
       expect(f.pushes()).toBe(expectedPushes);
       db.close(); db = openRuntimeStateDb(f.home);
-      f.options.journal = new CanonicalPublicationJournal(new CoworkRepository(db), created.workspaceId);
+      const recovered = new CanonicalPublicationJournal(new CoworkRepository(db), created.workspaceId, "host-b");
+      await recovered.recoverPrepared(async candidate => candidate.ownerId === "host-a"); // Fixture simulates confirmed previous host loss.
+      f.options.journal = recovered;
       const receipts = await Promise.all([f.broker().publish(actor, request), f.broker().publish(actor, request)]);
       expect(receipts[0]!.status).toBe(phase === "prepared" ? "rejected" : phase === "uncertain" ? "uncertain" : "dispatched");
       expect(receipts[0]).toEqual(receipts[1]); expect(f.pushes()).toBe(expectedPushes);
