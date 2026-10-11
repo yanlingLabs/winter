@@ -82,9 +82,9 @@ describe("the browser link (daemon side)", () => {
     expect(e).toBeInstanceOf(TransportError);
     expect(e).toMatchObject({ code: "cdp_error", data: { cdpMessage: "Cannot find context" } });
     const before = a.notes.length;
-    const refused = await t.send("tab-1", "Network.getResponseBody", {}).then(() => undefined, (x: unknown) => x);
+    const refused = await t.send("tab-1", "Network.getCookies", {}).then(() => undefined, (x: unknown) => x);
     expect(refused).toMatchObject({ code: "not_allowed" });
-    const ev = await t.subscribe("tab-1", ["Network.responseReceived"]).then(() => undefined, (x: unknown) => x);
+    const ev = await t.subscribe("tab-1", ["Network.responseReceivedExtraInfo"]).then(() => undefined, (x: unknown) => x);
     expect(ev).toMatchObject({ code: "not_allowed" });
     expect(a.notes.length).toBe(before);
   });
@@ -134,7 +134,7 @@ describe("the browser link (daemon side)", () => {
     t.onTabGone((k, r) => gone.push(`${k}:${r}`));
     a.call(METHODS.browserLinkEvents, { linkId, events: [
       { tabId: "tab-1", method: "Page.frameNavigated", params: { frame: { id: "f" } } },
-      { tabId: "tab-1", method: "Network.responseReceived", params: { response: { headers: {} } } },
+      { tabId: "tab-1", method: "Network.responseReceivedExtraInfo", params: { headers: { "set-cookie": "x" } } },
       { tabId: "tab-1", method: "Runtime.executionContextCreated", params: { context: { id: 3, name: "winter" } }, cdpSessionId: "child" },
     ] });
     expect(seen.map((e) => [e.method, e.cdpSessionId])).toEqual([["Page.frameNavigated", undefined], ["Runtime.executionContextCreated", "child"]]);

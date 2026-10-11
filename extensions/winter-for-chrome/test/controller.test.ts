@@ -347,7 +347,7 @@ describe("events", () => {
   test("forwarded only when subscribed and allowlisted; Network stripped; child sessions named; a winter-NAMED context is not ours", async () => {
     await c.handle("debugger.attach", { tabKey: "101" });
     await c.handle("cdp.send", { tabKey: "101", method: "Runtime.enable", params: {} });
-    expect(await code(c.handle("cdp.subscribe", { tabKey: "101", events: ["Page.frameNavigated", "Network.responseReceived"] }))).toBe("not_allowed");
+    expect(await code(c.handle("cdp.subscribe", { tabKey: "101", events: ["Page.frameNavigated", "Network.responseReceivedExtraInfo"] }))).toBe("not_allowed");
     await c.handle("cdp.subscribe", { tabKey: "101", events: ["Page.frameNavigated", "Network.requestWillBeSent"] });
     chrome.emitCdp(101, "Page.frameNavigated", { frame: { id: "F" } }, "S1");
     chrome.emitCdp(101, "Network.requestWillBeSent", { requestId: "9", timestamp: 1, type: "Fetch", request: { headers: { Cookie: "x" } } });

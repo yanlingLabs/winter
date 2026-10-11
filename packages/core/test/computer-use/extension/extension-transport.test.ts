@@ -69,7 +69,7 @@ describe("requests", () => {
 
   test("a method outside the allowlist is refused before anything is sent", async () => {
     const h = harness();
-    for (const method of ["Network.getCookies", "Storage.getCookies", "Runtime.getProperties", "Page.addScriptToEvaluateOnNewDocument", "Target.sendMessageToTarget", "Fetch.enable"]) {
+    for (const method of ["Network.getCookies", "Storage.getCookies", "Runtime.getProperties", "Page.addScriptToEvaluateOnNewDocument", "Target.sendMessageToTarget", "Fetch.fulfillRequest"]) {
       await expect(h.t.send("418", method)).rejects.toMatchObject({ code: "not_allowed" });
     }
     expect(h.sent).toEqual([]);
@@ -77,7 +77,7 @@ describe("requests", () => {
 
   test("subscribe refuses an event outside the allowlist, sends the rest", async () => {
     const h = harness();
-    await expect(h.t.subscribe("418", ["Page.frameNavigated", "Network.responseReceived"])).rejects.toMatchObject({ code: "not_allowed" });
+    await expect(h.t.subscribe("418", ["Page.frameNavigated", "Network.responseReceivedExtraInfo"])).rejects.toMatchObject({ code: "not_allowed" });
     expect(h.sent).toEqual([]);
     const p = h.t.subscribe("418", ["Page.frameNavigated"]);
     expect(h.sent[0]).toMatchObject({ method: "cdp.subscribe", params: { tabKey: "418", events: ["Page.frameNavigated"] } });
@@ -179,7 +179,7 @@ describe("notifications", () => {
     h.notify("cdp.event", { tabKey: "418", method: "Page.frameNavigated", params: { frame: { id: "F" } }, cdpSessionId: "S1" });
     h.notify("cdp.event", { tabKey: "418", method: "Network.requestWillBeSent", params: { requestId: "1", timestamp: 2, type: "Document", request: { headers: { cookie: "secret" } } } });
     h.notify("cdp.event", { tabKey: "418", method: "Page.loadEventFired", params: {} }); // not subscribed
-    h.notify("cdp.event", { tabKey: "418", method: "Network.responseReceived", params: {} }); // never allowed
+    h.notify("cdp.event", { tabKey: "418", method: "Network.responseReceivedExtraInfo", params: {} }); // never allowed
     h.notify("cdp.event", { tabKey: "419", method: "Page.frameNavigated", params: {} }); // another tab
     expect(events).toEqual([
       { tabKey: "418", method: "Page.frameNavigated", params: { frame: { id: "F" } }, cdpSessionId: "S1" },

@@ -26,15 +26,15 @@ describe("the allowlist", () => {
   test("every listed method passes the method check; anything else is refused", () => {
     const g = new TabGuard();
     for (const m of CDP_ALLOWED_METHODS) expect(isAllowedMethod(m)).toBe(true);
-    for (const m of ["Network.getCookies", "Network.getAllCookies", "Network.getResponseBody", "Storage.getCookies", "DOMStorage.getDOMStorageItems",
+    for (const m of ["Network.getCookies", "Network.getAllCookies", "Network.getRequestPostData", "Storage.getCookies", "DOMStorage.getDOMStorageItems",
       "IndexedDB.requestData", "Runtime.getProperties", "Runtime.compileScript", "Page.addScriptToEvaluateOnNewDocument", "Target.sendMessageToTarget",
-      "Target.attachToTarget", "Target.createTarget", "Browser.close", "Fetch.enable", "Input.synthesizeTapGesture", "Debugger.enable"]) {
+      "Target.attachToTarget", "Target.createTarget", "Browser.close", "Fetch.fulfillRequest", "Input.synthesizeTapGesture", "Debugger.enable"]) {
       expect(isAllowedMethod(m)).toBe(false);
       expect(g.check(m, {})).toMatchObject({ kind: "refuse" });
     }
     expect(isAllowedEvent("Page.frameNavigated")).toBe(true);
-    expect(isAllowedEvent("Network.responseReceived")).toBe(false);
-    expect(isAllowedEvent("Runtime.consoleAPICalled")).toBe(false);
+    expect(isAllowedEvent("Network.responseReceivedExtraInfo")).toBe(false);
+    expect(isAllowedEvent("Network.requestWillBeSentExtraInfo")).toBe(false);
   });
 
   test("Network events leave reduced to requestId, timestamp and type", () => {

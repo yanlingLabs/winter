@@ -18,6 +18,28 @@ export interface TransportTab {
   agent: boolean;
   /** The Winter session it belongs to — winter: the panel tab's session; extension: the Winter group's session. */
   sessionId?: string;
+  /** Phase 3 (extension): when the user last had the tab in front (epoch ms), its tab group's title, its window. */
+  lastAccessed?: number;
+  group?: string;
+  windowId?: number;
+}
+
+/** Phase 3 — one download the browser itself is saving for an armed tab (`CdpTransport.armDownloads`). */
+export interface TransportDownload {
+  /** The backend's own id for this download. */
+  id: string;
+  /** `refused`: a download the tab started while NOT armed (winter: Winter.app refused it; the engine only says so). */
+  state: "started" | "progress" | "done" | "failed" | "refused";
+  /** The suggested file name. */
+  name: string;
+  url?: string;
+  /** `done`: the finished file — inside the armed `dir` (winter), or in the browser's own download folder (extension:
+   *  under the armed `subdir`, unless the user picked another place in the browser's save dialog). */
+  path?: string;
+  bytes: number;
+  totalBytes?: number;
+  mime?: string;
+  error?: string;
 }
 
 export interface CdpEvent {
@@ -53,8 +75,9 @@ export interface CdpTransport {
    *  session's Winter group; winter: the daemon has already minted the panel tab, so this makes its browser live). */
   createTab(opts: { sessionId: string; sessionTitle?: string; url: string; tabKey?: string }): Promise<TransportTab>;
   closeTab(tabKey: string): Promise<void>;
-  /** extension: take it out of the Winter group (it stays as the user's tab); winter: nothing. */
-  keepTab(tabKey: string): Promise<void>;
+  /** extension: take it out of the Winter group (it stays as the user's tab) — into the user's own group named `group`
+   *  in its window when given (Phase 3); winter: nothing. */
+  keepTab(tabKey: string, opts?: { group?: string }): Promise<void>;
   listTabs(opts?: { sessionId?: string }): Promise<TransportTab[]>;
   /** Make the tab drivable — winter: its browser live and held; extension: the debugger attached. Idempotent. */
   attach(tabKey: string, opts: { sessionId: string }): Promise<{ viewport: [w: number, h: number]; dpr: number }>;
@@ -69,6 +92,35 @@ export interface CdpTransport {
   overlay(tabKey: string, o: { active: boolean; cursor?: { x: number; y: number; kind: "move" | "press" | "type" | "scroll" } }): void;
   /** extension: the user pressed the in-page Stop button. winter: never fires. */
   onStop(listener: (tabKey: string) => void): () => void;
+
+  // ── Phase 3: optional members. A backend without one does not offer that capability (the engine says so typed). ──
+
+  /** Show the tab to the user: its window (winter: the session's window) brought forward and the tab selected. ONLY
+   *  for `waitForUser`, after the user's own "Show me the tab" on its card. */
+  present?(tabKey: string, opts: { sessionId: string }): Promise<void>;
+  /** extension: the user answered Done (`true`) or Stop waiting (`false`) in the toolbar for a tab waiting on them. */
+  onUserDone?(listener: (tabKey: string, done: boolean) => void): () => void;
+  setMuted?(tabKey: string, muted: boolean): Promise<void>;
+  /** extension: the session's Winter group — its title (shown "Winter · <title>"), color, collapsed state. */
+  updateGroup?(opts: { sessionId: string; title?: string; color?: string; collapsed?: boolean }): Promise<void>;
+  /** extension: the normal, non-private windows. */
+  listWindows?(): Promise<Array<{ id: number; focused: boolean; tabs: number }>>;
+  /** extension, read-only; refused `not_allowed` with `data.permission` while the user has not granted it. */
+  history?(q: { text: string; startTime?: number; endTime?: number; maxResults: number }): Promise<Array<{ url: string; title: string; lastVisitTime: number }>>;
+  bookmarks?(q: { text?: string; maxResults: number }): Promise<Array<{ url: string; title: string; folder: string }>>;
+  /**
+   * Downloads the BROWSER itself saves for this tab until `until` (epoch ms), at most `maxBytes` each; `null` disarms.
+   * winter: Winter.app's own handler writes into `dir` (Winter's staging, inside its home); extension (its optional
+   * `downloads` permission granted): the browser writes into `<its download folder>/<subdir>/` and may show its own
+   * "save as" dialog if the user asked it to. Each is reported through `onDownload`. Absent, or refused `not_allowed`
+   * (`data.permission`): the engine catches http(s) downloads over CDP Fetch instead.
+   */
+  armDownloads?(tabKey: string, opts: { dir: string; subdir: string; until: number; maxBytes: number } | null): Promise<void>;
+  /** winter: download `url` in that tab's browser (its cookies), caught by the armed handler. */
+  startDownload?(tabKey: string, url: string): Promise<void>;
+  onDownload?(listener: (tabKey: string, d: TransportDownload) => void): () => void;
+  /** The engine has taken the finished file: the browser forgets the item (extension: its downloads list entry). */
+  releaseDownload?(id: string): Promise<void>;
 }
 
 export interface BrowserBackendInfo {
