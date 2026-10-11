@@ -105,6 +105,11 @@ export interface Scenario {
    * touched) to the front, and the focus check becomes "that switch held — never pulled back".
    */
   userSwitchAfterMs?: number;
+  /**
+   * The USER WORKS in the fixture mid-run (round 10): this many ms into the action the runner switches to it (as the
+   * user), records their click into it (`test.userInput`) and focuses its Name field — the agent must be hands-off it.
+   */
+  userWorksAfterMs?: number;
   /** The script prelude (default PRELUDE; the generic app checks bring their own, which includes it). */
   prelude?: string;
   /**
@@ -751,6 +756,35 @@ await form.click(email.ref);
 for (let i = 0; i < 6; i++) { await form.state({ emit: false }); await sleep(500); }
 report({ ok: true });`,
     verify: (ctx) => [ok(ctx)],
+  },
+  {
+    // Round 10 (the user's ruling from the hands-on test): once the user works in the app the agent acts on, the agent
+    // is hands-off it — each act refused at once ("the user is working in … right now"), typed and retryable; reads go
+    // on — and the user's focus is never taken back (the hands-on bug: every agent insert moved it back to Email).
+    name: "guardian: the user working in the app the agent types into — hands off until they leave", group: "guardian",
+    before: [{ role: "main", cmd: "reset" }],
+    userWorksAfterMs: 1_500,
+    code: `
+const form = await win("Fixture Form");
+const email = await pick(form, "Email", "text field");
+let typed = 0, refused = 0, other = "";
+for (let i = 0; i < 8; i++) {
+  try { await form.type("a", { into: email.ref }); typed++; }
+  catch (e) { if (e.name === "Refused" && /working in/.test(e.message)) refused++; else other = e.name + ": " + e.message; }
+  await form.state({ emit: false });  // reading still works
+  await sleep(600);
+}
+report({ typed, refused, other });`,
+    allowExcursionMs: 60_000,
+    verify: (ctx) => {
+      const focuses = eventsSince(ctx.events, ctx.since, "focus");
+      const named = focuses.findIndex((e) => e.id === "name");
+      const backToEmail = named >= 0 && focuses.slice(named + 1).some((e) => e.id === "email");
+      return [ok(ctx),
+        check("acts before the user came were made", Number(fact(ctx, "typed")) >= 1, JSON.stringify(ctx.facts)),
+        check("acts after the user started working were refused (typed, retryable)", Number(fact(ctx, "refused")) >= 1 && fact(ctx, "other") === "", JSON.stringify(ctx.facts)),
+        check("the user's focus (Name) was never taken back to Email", named >= 0 && !backToEmail, JSON.stringify(focuses.slice(-6)))];
+    },
   },
   // ── the focus guardian ─────────────────────────────────────────────────────────────────────────────────────
   {

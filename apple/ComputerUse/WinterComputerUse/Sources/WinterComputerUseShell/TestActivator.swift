@@ -4,6 +4,16 @@ import ApplicationServices
 /// `test.activate {pid}` params (the live suite only — see `RPCDispatcher.init`'s `liveTest`).
 public struct TestActivateParams: Codable, Sendable, Equatable {
     public var pid: Int32
+    /// The activation stands for the USER's switch (round 10): the engine first gets the facts their input would leave
+    /// (hardware input, a switch for that app), so the guardian treats it as theirs, not the agent's indirect effect.
+    public var asUser: Bool?
+    public init(pid: Int32, asUser: Bool? = nil) { self.pid = pid; self.asUser = asUser }
+}
+
+/// `test.userInput {pid}` (round 10, the live suite only): the user WORKS in `pid` (a click into its window while it is
+/// in front) — the agent is then hands-off it until it leaves the front.
+public struct TestUserInputParams: Codable, Sendable, Equatable {
+    public var pid: Int32
     public init(pid: Int32) { self.pid = pid }
 }
 

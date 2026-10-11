@@ -259,7 +259,8 @@ final class GuardianRound8Tests: XCTestCase {
         let (core, sys) = world()
         defer { core.stopGuardian() }
         core.noteGuardianActed(500)
-        core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: core.clock.nowSeconds())  // their click
+        core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: core.clock.nowSeconds())  // their click…
+        core.noteSwitchInput(now: core.clock.nowSeconds(), .app, target: 77)  // …into Mail's window (the click handler's)
         sys.front = 77   // Mail comes forward (never touched)…
         sys.front = 500  // …and the target takes the front 5 ms later
         core.onActivation(pid: 77)

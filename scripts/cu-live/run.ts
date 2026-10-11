@@ -824,7 +824,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     const status = helperCall(built, socket, home, "status", {});
     log(`helper instance pid ${helperPid}: ${JSON.stringify((status.result as { permissions?: unknown } | undefined)?.permissions ?? status)}`);
     /** Put `pid` in front and wait for the monitor to see it (and, when given, the Space). */
-    const bringToFront = async (pid: number, what: string, space?: number | null): Promise<string> => {
+    const bringToFront = async (pid: number, what: string, space?: number | null, asUser = false): Promise<string> => {
       const routes: string[] = [];
       const ok = (): boolean => {
         const last = monitor!.items.at(-1);
@@ -834,7 +834,9 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         stopCheck();
         if (ok()) break;
         if (route === "helper test.activate") {
-          const r = helperCall(built, socket, home, "test.activate", { pid });
+          // `asUser`: the activation stands for the user's own switch — the helper first records the facts their input
+          // would leave (round 10), so the guardian does not take it for the agent's indirect effect.
+          const r = helperCall(built, socket, home, "test.activate", asUser ? { pid, asUser: true } : { pid });
           routes.push(`${route}: ${r.error !== undefined ? JSON.stringify(r.error).slice(0, 80) : JSON.stringify(r.result)}`);
         } else {
           const asn = sh("lsappinfo", ["find", `pid=${pid}`]).stdout.match(/ASN:[^\s"]+/)?.[0];
@@ -983,11 +985,24 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           finderPid = pidsOf("/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder")[0];
           if (finderPid === undefined) throw new Error("Finder is not running");
           switchedAt = Date.now();
-          await bringToFront(finderPid, "Finder (the user's switch)");
+          await bringToFront(finderPid, "Finder (the user's switch)", undefined, true);
+        })();
+        // The user WORKING in the fixture mid-run (`userWorksAfterMs`, round 10): they switch to it, click into its Name
+        // field (the helper records the facts that input would leave) — the agent must be hands-off it from then on.
+        let workedAt: number | undefined;
+        const userWorks = s.userWorksAfterMs === undefined ? undefined : (async () => {
+          await sleep(s.userWorksAfterMs!);
+          const pid = f.mainPid!;
+          await bringToFront(pid, "the fixture (the user's switch)", undefined, true);
+          const r = helperCall(built, socket, home, "test.userInput", { pid });
+          if (r.error !== undefined) throw new Error(`test.userInput failed: ${JSON.stringify(r.error).slice(0, 120)}`);
+          await postCommand(built.tool, f, "main", "userFocus", { id: "name" });
+          workedAt = Date.now();
         })();
         const rig = s.desktopSwitch === undefined ? undefined : desktopSwitchRig(built.tool, s.desktopSwitch);
         const turn = await runTurn(where.client, where.sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer, rig);
         await userSwitch;
+        await userWorks;
         await rig?.done();
         // A prompt during the action stops the run here, before this row is judged (its failure would be the prompt's).
         abortIfPrompt();

@@ -194,4 +194,7 @@ public enum CUFloorReason: String, Codable, Sendable {
     /// The app came to the front while a background act was being prepared (the user's doing, or its own): the keys
     /// or the click were not sent — the user may be using it now.
     case appInFront = "app_in_front"
+    /// The user is working in the app (they clicked, typed or scrolled in its window while it was in front): the agent
+    /// is hands-off it until it leaves the front (user ruling, round 10) — retry later.
+    case userWorking = "user_working"
 }

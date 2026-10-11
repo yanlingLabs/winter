@@ -173,9 +173,10 @@ extension CUCore {
             // Another app in front by the user's move, or an untouched app's (never fought) — not a visit's own switch or the
             // consented foreground, which a visit's return and a give-back are bringing them back FROM.
             if let f = now.front, f != user {
+                // Anything the rule leaves alone (their move, an untouched app, another session's consented foreground or
+                // visit) ends the retries (review of round 9, LOW-MED #7).
                 let owner = judgeMove(now, since: startedAt, from: before, path: "a restore, before trying again")
-                if owner.isUsers { break }
-                if case .unexplained = owner { break }
+                if !owner.undoes { break }
             }
             if now.front != user, clock.nowMs() - lastActivate >= restoreRetryMs, clock.nowMs() < deadline {
                 noteRestore(user)

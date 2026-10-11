@@ -96,7 +96,7 @@ extension CUCore {
     /// activation left them in the held app). Off the caller (it may wait up to the restore's deadline). Review of round 8:
     /// it activated the pid captured at the start, over a move of the user's.
     private func giveBack(_ h: HeldForeground) {
-        guardianLock.withLock { guardianCore.endExempt(h.pid) }
+        let endedAt = clock.nowSeconds(); guardianLock.withLock { guardianCore.endExempt(h.pid, now: endedAt) }
         let back = { [weak self] in
             guard let self, self.sys.frontmostPid() == h.pid else { return }
             let place = self.guardianPlace() ?? h.previousView
