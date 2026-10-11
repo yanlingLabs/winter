@@ -2,7 +2,7 @@
 // placing (never through a link, never over a file, the bytes checked, the quarantine attribute set).
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -119,6 +119,41 @@ describe("placeDownload", () => {
       const tmpPlan = planDownload(undefined, "b.txt", f.roots);
       expect(refusal(() => placeDownload(f.stage("hi"), tmpPlan, { tmpDir: f.tmpDir }))).toMatch(/temp folder is not a plain folder/);
       expect(existsSync(join(outside, "downloads"))).toBe(false);
+    } finally { f.done(); }
+  });
+
+  test("a folder swapped for a link AFTER the walk changes nothing: the file lands in the folder that was checked", () => {
+    const f = fixture();
+    try {
+      const outside = join(f.base, "outside");
+      mkdirSync(outside);
+      writeFileSync(join(outside, "report.csv"), "the user's own file");
+      const plan = planDownload("sub/", "report.csv", f.roots);
+      const placed = placeDownload(f.stage("downloaded"), plan, { tmpDir: f.tmpDir }, {
+        afterWalk: () => { renameSync(join(f.cwd, "sub"), join(f.cwd, "sub.moved")); symlinkSync(outside, join(f.cwd, "sub")); },
+      });
+      expect(placed.name).toBe("report.csv");
+      expect(readFileSync(join(f.cwd, "sub.moved", "report.csv"), "utf8")).toBe("downloaded");
+      expect(readFileSync(join(outside, "report.csv"), "utf8")).toBe("the user's own file");
+    } finally { f.done(); }
+  });
+
+  test("a failure after the file was created removes OUR entry from the checked folder — never a file the swap points at", () => {
+    const f = fixture();
+    try {
+      const outside = join(f.base, "outside");
+      mkdirSync(outside);
+      writeFileSync(join(outside, "notes.md"), "keep me");
+      const plan = planDownload("sub/", "notes.md", f.roots);
+      expect(refusal(() => placeDownload(f.stage("x"), plan, { tmpDir: f.tmpDir }, {
+        afterCreate: () => {
+          renameSync(join(f.cwd, "sub"), join(f.cwd, "sub.moved"));
+          symlinkSync(outside, join(f.cwd, "sub"));
+          throw new Error("disk full");
+        },
+      }))).toBe("other: disk full");
+      expect(readFileSync(join(outside, "notes.md"), "utf8")).toBe("keep me");
+      expect(existsSync(join(f.cwd, "sub.moved", "notes.md"))).toBe(false);
     } finally { f.done(); }
   });
 
