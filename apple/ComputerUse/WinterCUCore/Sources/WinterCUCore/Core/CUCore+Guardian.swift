@@ -334,7 +334,9 @@ extension CUCore {
     /// a menu-bar item's panel goes to THAT process while the bound app stays in front — never work in the bound app
     /// (review of round 10, MEDIUM #3: the key was put on the front app).
     func noteUserInteraction(type: CGEventType, flags: CGEventFlags, keycode: Int64, location: CGPoint?, targetPid: Int64 = 0) {
-        guard guardianRunning, let front = sys.frontmostPid(), boundTargetPids().contains(front) else { return }
+        // (Fed by the guardian's tap while it runs, by the work watcher otherwise — whoever calls has checked the event is
+        // the user's.)
+        guard let front = sys.frontmostPid(), boundTargetPids().contains(front) else { return }
         switch type {
         case .keyDown:
             // Typing (no ⌘ or ⌃): a ⌘/⌃ chord may be the system's (⌘-Space, ⌘-Tab, ⌃-arrows), not work in the app —

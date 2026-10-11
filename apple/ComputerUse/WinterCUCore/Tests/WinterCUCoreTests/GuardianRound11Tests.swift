@@ -161,4 +161,34 @@ final class GuardianRound11Tests: XCTestCase {
         g.appLaunched(905, startedAt: 20.4, now: 40)  // heard 19.6 s after the start
         XCTAssertFalse(g.judge(CUMoveQuery(app: 905, space: 100, appStartedAt: 20.4), now: 41).undoes)
     }
+
+    /// Round 10's MEDIUM #5 (the user's ruling), done in round 12: between scripts — no guardian — the work watcher sees
+    /// the user's own key or click on a bound app in front, so the next script's act on it is refused; a synthetic event
+    /// (another process's) is not theirs.
+    func testTheWorkWatcherSeesWorkBetweenScripts() throws {
+        let sys = FakeSystem()
+        sys.running = [1, 500]; sys.front = 500; sys.space = 100
+        sys.windows[77] = FakeSystem.window(77, pid: 500, CGRect(x: 500, y: 0, width: 400, height: 300))
+        sys.stack = [sys.windows[77]!]
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        let t = CUTarget(id: "t1", sessionId: "s", pid: 500, bundleId: "com.apple.finder", appName: "Finder",
+                         isChromium: false, mirror: false, windowID: 77, windowTitle: "")
+        core.registerForTesting(t, windowElement: nil)
+        XCTAssertFalse(core.guardianRunning)
+        core.noteWatchedEvent(type: .keyDown, sourcePid: 4242, userData: 0, flags: [], keycode: 0, location: .zero, targetPid: 500)
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "another process's key is not theirs")
+        core.noteWatchedEvent(type: .keyDown, sourcePid: 0, userData: 0, flags: [], keycode: 0, location: .zero, targetPid: 500)
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(t), "their key, between scripts")
+        // Another app activates (the always-on observer): over.
+        sys.front = 1
+        core.appActivated(pid: 1)
+        sys.front = 500
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t))
+        // Their click into the bound window, between scripts.
+        core.noteWatchedEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, flags: [], keycode: -1,
+                              location: CGPoint(x: 600, y: 100), targetPid: 0)
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(t))
+        XCTAssertEqual(CUCore.workWatcherMask & (CGEventMask(1) << CGEventMask(CGEventType.mouseMoved.rawValue)), 0, "no pointer moves")
+    }
 }
