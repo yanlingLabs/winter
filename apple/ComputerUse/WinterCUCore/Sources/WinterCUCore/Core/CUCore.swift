@@ -275,7 +275,7 @@ public final class CUCore: @unchecked Sendable {
         var named: (app: String, pid: pid_t)?
         defer { endGuardianLaunch(launch, pid: named?.pid) }
         do {
-            var r = try await bind(p) { named = ($0, $1) }
+            var r = try await CUCore.$bindLaunchToken.withValue(launch) { try await bind(p) { named = ($0, $1) } }
             if let named, let note = viewNoteAfterBind(before, app: named.app, pid: named.pid, route: "bind", since: startedAt) {
                 r.detail = [r.detail, note].compactMap { $0 }.joined(separator: "; ")
             }
@@ -302,10 +302,12 @@ public final class CUCore: @unchecked Sendable {
         if !launched, let existing = reusableTarget(sessionId: p.sessionId, pid: pid, selector: p.window) {
             CULog.bind.notice("bind \(appName, privacy: .public): reused \(existing.id, privacy: .public) (window \(existing.windowID, privacy: .public))")
             let facts = Self.bundleFacts(app.running)
+            let web = try await queues.run(pid) { [self] in hasWebContent(existing) }
             return TargetBindResult(targetId: existing.id,
                                     app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid, path: facts.path, version: facts.version),
                                     window: CUWindowInfo(id: existing.windowID, title: existing.windowTitle,
-                                                         frame: cuFrame(sys.window(id: existing.windowID)?.frame ?? .zero)))
+                                                         frame: cuFrame(sys.window(id: existing.windowID)?.frame ?? .zero)),
+                                    webContent: web ? true : nil)
         }
         monitor.watch(pid: pid)
 
@@ -367,11 +369,51 @@ public final class CUCore: @unchecked Sendable {
         let offDesktop = sys.window(id: chosen.id)?.onScreen == false && !outcome.captureOnly
         let costs = offDesktop ? Self.offDesktopCosts(appName) : nil
         let facts = Self.bundleFacts(app.running)
+        let web = try await queues.run(pid) { [self] in hasWebContent(target) }
         return TargetBindResult(targetId: target.id,
                                 app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid, path: facts.path, version: facts.version),
                                 window: CUWindowInfo(id: chosen.id, title: chosen.title, frame: cuFrame(chosen.frame)),
                                 detail: [found.reopened ? "opened the app's default window" : nil, outcome.detail, costs]
-                                    .compactMap { $0 }.joined(separator: "; ").nonEmptyOrNil)
+                                    .compactMap { $0 }.joined(separator: "; ").nonEmptyOrNil,
+                                webContent: web ? true : nil)
+    }
+
+    /// The bound window holds web content: an `AXWebArea` (found by the page reader's bounded walk). A background web page
+    /// takes no hover from a pointer that is not the real one — WebKit (measured 2026-10-10) and Chromium alike (run111,
+    /// 2026-10-11: a background Chrome page got the private path's moves, but neither a mouseenter nor a :hover, on either
+    /// route). On the target's queue.
+    ///
+    /// WebKit builds a web view's accessibility tree lazily, on the first request (measured, run115: the first walk of a
+    /// fresh WKWebView window saw its host group empty, the web area 20–30 ms later): when the first walk finds none but
+    /// an empty group, it looks again a few times (≤ ~160 ms).
+    func hasWebContent(_ t: CUTarget) -> Bool {
+        guard t.accessible, let win = try? windowElement(t) else { return false }
+        for attempt in 0..<9 {
+            if attempt > 0 { clock.pause(ms: 20) }
+            let (found, emptyGroup) = webAreaWalk(win)
+            if found { return true }
+            if !emptyGroup { return false }
+        }
+        return false
+    }
+
+    /// One bounded breadth-first walk: whether a web area is there, and whether an empty group is (a web view whose tree
+    /// is not built yet).
+    private func webAreaWalk(_ win: AXUIElement, maxNodes: Int = 600, maxMs: Double = 80) -> (found: Bool, emptyGroup: Bool) {
+        let deadline = clock.nowMs() + maxMs
+        var queue = [win]
+        var next = 0
+        var emptyGroup = false
+        while next < queue.count, next < maxNodes, clock.nowMs() < deadline {
+            let n = queue[next]
+            next += 1
+            let role = ax.string(n, kAXRoleAttribute)
+            if role == "AXWebArea" { return (true, emptyGroup) }
+            let kids = ax.elements(n, kAXChildrenAttribute)
+            if kids.isEmpty, role == kAXGroupRole { emptyGroup = true }
+            queue.append(contentsOf: kids)
+        }
+        return (false, emptyGroup)
     }
 
     /// What working a window on another desktop costs (said at bind). Pure.
@@ -549,6 +591,20 @@ public final class CUCore: @unchecked Sendable {
     var guardianRefs = 0
     var guardianObservers: [NSObjectProtocol] = []
     var pendingGuardianNotes: [String] = []
+    /// The apps that came forward after the agent's action with no input of the user's since the last act (for the act's
+    /// result: a metric).
+    var pendingViewMovedBy: [String] = []
+    /// When the last activation notification was handled (a later one of an app seen in front since is no new change).
+    var lastActivationHeardAt: TimeInterval = -.infinity
+    /// The window numbers of the helper's own panels that take clicks (the desktop-switch prompt), as the presentation
+    /// says; nil: by level (`ownWindowTakesClicks`).
+    var ownClickableWindows: (() -> Set<UInt32>)?
+    /// Every note the guardian leaves for the next result, as it is left (the model-based test).
+    var guardianNoted: ((String) -> Void)?
+    /// Whether a bound app is a web browser, as a test says (live: its Info.plist declares http/https).
+    var isWebBrowserOverride: ((CUTarget) -> Bool)?
+    /// The bind whose launch a resolver is naming (`noteGuardianLaunchBundle`).
+    @TaskLocal static var bindLaunchToken: Int?
     /// Sessions with a script running, the latest private-path setting seen, and the pending end of the tail.
     var guardianScripts: Set<String> = []
     var guardianPrivatePath = false
@@ -584,6 +640,16 @@ public final class CUCore: @unchecked Sendable {
     var guardianLiveTapEnabled = true
     /// Whether the guardian's restore runs inline (tests, synchronous) rather than dispatched off-main.
     var guardianRestoreSync = false
+    /// Where the guardian's restore is dispatched, when a test runs it on its own schedule (the model-based test: off
+    /// the observer, as live, but in simulated time). Nil: `guardianRestoreSync` decides.
+    var guardianRestoreDispatch: ((@escaping () -> Void) -> Void)?
+    /// Closes a visit the one rule found the user left by themselves (`noteVisitUserMove`); a test may close it on its own
+    /// schedule (the model-based test, in simulated time). Nil: an async close.
+    var visitCloseDispatch: ((CUOpenVisit, VisitCloseReason) -> Void)?
+    /// Schedules the act's late check (300 ms on); a test may run it on its own clock.
+    var lateCheckSchedule: (Double, @escaping () -> Void) -> Void = { ms, work in
+        DispatchQueue.global().asyncAfter(deadline: .now() + ms / 1000, execute: work)
+    }
     /// How long a press the app answered with an error is watched for its effect (a new window, a value, the
     /// focus). 0 in test cores (one read).
     var pressSettleMs: Double = 500
@@ -753,8 +819,9 @@ public final class CUCore: @unchecked Sendable {
             emit { $0.targetReleased(sessionId: t.sessionId, pid: t.pid, windowID: old) }
             emit { $0.targetBound(sessionId: t.sessionId, pid: t.pid, windowID: chosen.id, appName: t.appName, mirror: t.mirror) }
         }
+        let web = try await queues.run(t.pid) { [self] in hasWebContent(t) }
         return TargetUseWindowResult(window: CUWindowInfo(id: chosen.id, title: chosen.title, frame: cuFrame(chosen.frame)),
-                                     detail: outcome.detail)
+                                     detail: outcome.detail, webContent: web ? true : nil)
     }
 
     public func targetWindows(_ p: TargetWindowsParams) async throws -> TargetWindowsResult {
@@ -1433,6 +1500,7 @@ public final class CUCore: @unchecked Sendable {
 
     /// The pids of all bound targets (for the Focus Guardian's CPS tap).
     func boundTargetPids() -> Set<pid_t> { lock.withLock { Set(targets.values.map(\.pid)) } }
+    func boundTargets() -> [CUTarget] { lock.withLock { Array(targets.values) } }
 
     private func remove(_ id: String) -> CUTarget? {
         lock.lock()

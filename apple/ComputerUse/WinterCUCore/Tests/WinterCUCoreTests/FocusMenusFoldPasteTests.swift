@@ -1097,7 +1097,7 @@ final class FocusMenusFoldPasteTests: XCTestCase {
 
     /// Item 1 (HIGH): a synthetic mark on the TARGET made the user's plain click into Mail mid-burst a theft — the burst
     /// threw "came to the front by itself", handed the key focus back to the app they left and pulled them out of Mail.
-    /// Causes are per app: Mail, which the agent never touched, coming forward is theirs (I1) — no input needed.
+    /// Causes are per app: Mail, which the agent never touched, coming forward after their click is theirs (I1).
     func testAPlainSwitchToAnAppTheAgentNeverTouchedMidBurstIsTheUsers() async throws {
         finder(focusedField: true)
         let mail: pid_t = 7777
@@ -1110,7 +1110,10 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         poster.onPost = { [unowned self] e in
             guard e.type == .keyDown else { return }
             keys += 1
-            if keys == 2 { sys.front = mail; sys.onActivate?(mail) }  // a plain click into Mail: no ⌘, no gesture
+            if keys == 2 {  // a plain click into Mail: no ⌘, no gesture
+                core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: core.clock.nowSeconds())
+                sys.front = mail; sys.onActivate?(mail)
+            }
         }
         let handBacksBefore = FocusSPI.calls.filter { $0.hasPrefix("focus pid 1 ") }.count
         do {
@@ -1177,7 +1180,10 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         sys.front = pid
         core.startGuardian(privatePath: true)  // their place: the target, where they were working
         defer { core.stopGuardian() }
-        sys.front = 1  // their ⌘-Tab back to their own app, not heard of yet
+        // Their ⌘-Tab back to their own app, not heard of yet.
+        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: .maskCommand, now: core.clock.nowSeconds())
+        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: [], now: core.clock.nowSeconds())
+        sys.front = 1
         var landed: CGEvent??
         poster.onPost = { [unowned self] e in
             guard e.type == .keyDown, landed == nil, let tap = installer.handler else { return }
@@ -1251,7 +1257,9 @@ final class FocusMenusFoldPasteTests: XCTestCase {
             onFocus?()
             guard !moved, FocusSPI.calls.last?.hasPrefix("focus pid 1 ") == true else { return }
             moved = true
-            sys.front = mail  // they go to Mail while the blip waits for their app to take the keys back
+            // They click into Mail while the blip waits for their app to take the keys back.
+            core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: core.clock.nowSeconds())
+            sys.front = mail
         }
         try await act(.type(CUTypeAction(text: "a")))
         XCTAssertEqual(FocusSPI.calls.filter { $0.hasPrefix("focus pid 1 ") }.count, 1, "no second hand-back to the app they left: \(FocusSPI.calls)")

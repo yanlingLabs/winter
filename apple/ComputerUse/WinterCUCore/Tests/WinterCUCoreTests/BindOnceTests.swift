@@ -170,6 +170,53 @@ final class BindOnceTests: XCTestCase {
         XCTAssertEqual(reopens, 0)
     }
 
+    // MARK: web content (round 9): the daemon says once per session per app that web pages take no hover
+
+    /// Safari's window on this desktop holding `children` (its AX subtree, one level under the window).
+    private func safariHere(children: [AXUIElement]) {
+        safari(windowElsewhere: false)
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [original]])
+        ax.put(original, [kAXChildrenAttribute: children])
+        sys.windows[77] = FakeSystem.window(77, pid: pid, CGRect(x: 0, y: 0, width: 1200, height: 800), owner: "Safari")
+    }
+
+    func testABindOnAWindowWithAWebPageSaysWebContent() async throws {
+        let group = fakeElement(90_101), area = fakeElement(90_102)
+        safariHere(children: [group])
+        ax.add(group, role: kAXGroupRole)
+        ax.put(group, [kAXChildrenAttribute: [area]])
+        ax.add(area, role: "AXWebArea")
+        let r = try await bind()
+        XCTAssertEqual(r.webContent, true)
+    }
+
+    func testABindOnANativeWindowSaysNothing() async throws {
+        let button = fakeElement(90_111)
+        safariHere(children: [button])
+        ax.add(button, role: kAXButtonRole, title: "OK")
+        let r = try await bind()
+        XCTAssertNil(r.webContent)
+    }
+
+    /// WebKit builds a web view's tree on the first request (measured, run115): the host group is empty on the first
+    /// walk and holds the web area a moment later — the bind looks again.
+    func testAWebViewWhoseTreeIsBuiltLazilyIsSeen() async throws {
+        let host = fakeElement(90_121), area = fakeElement(90_122)
+        safariHere(children: [host])
+        ax.add(host, role: kAXGroupRole)
+        ax.add(area, role: "AXWebArea")
+        var firstRead: Date?
+        let hostToken = "90121:\(kAXChildrenAttribute)"
+        ax.onRead = { [unowned self] what in
+            guard what == hostToken else { return }
+            // Built 15 ms after the first request: no single walk can see it — only a look again.
+            guard let f = firstRead else { firstRead = Date(); return }
+            if Date().timeIntervalSince(f) >= 0.015 { ax.put(host, [kAXChildrenAttribute: [area]]) }
+        }
+        let r = try await bind()
+        XCTAssertEqual(r.webContent, true)
+    }
+
     // MARK: reaching an off-Space / full-screen window without the walk
 
     func testAFullScreenWindowIsReachedThroughTheAppsMainWindowWithNoWalk() async throws {

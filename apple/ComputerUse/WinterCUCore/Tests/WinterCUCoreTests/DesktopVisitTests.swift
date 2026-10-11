@@ -690,11 +690,13 @@ final class DesktopVisitTests: XCTestCase {
         e.event(type: .keyDown, flags: .maskCommand, now: 20.1)
         e.event(type: .flagsChanged, flags: [], now: 20.3)
         XCTAssertFalse(e.explains(from: 19, after: 0, now: 20.4), "a seen chord is no switch")
-        // Under Secure Event Input the tap sees no keys: a hold can't be told from a shortcut.
+        // Under Secure Event Input the tap sees the modifiers but no keys (measured, run107): a ⌘-Tab looks like a ⌘ tap — it
+        // counts, briefly (the switcher acts 10–70 ms after the release).
         var sec = CUSwitchInput()
         sec.event(type: .flagsChanged, flags: .maskCommand, secure: true, now: 25)
         sec.event(type: .flagsChanged, flags: [], secure: true, now: 25.2)
-        XCTAssertFalse(sec.explains(from: 24, after: 0, now: 25.3))
+        XCTAssertTrue(sec.explains(from: 24, after: 0, now: 25.3))
+        XCTAssertFalse(sec.explains(from: 24, after: 0, now: 25.2 + CUSwitchInput.secureLife + 0.1), "only briefly")
         // Typing, a capital, a scroll, the generic gesture: nothing. A swipe: yes.
         var g = CUSwitchInput()
         g.event(type: .keyDown, flags: [], now: 30)
@@ -725,7 +727,11 @@ final class DesktopVisitTests: XCTestCase {
         c.event(type: .flagsChanged, flags: .maskCommand, now: 70)
         c.event(type: .keyDown, flags: .maskCommand, keycode: 1, now: 70.1)    // ⌘S
         c.event(type: .keyDown, flags: .maskCommand, keycode: 48, now: 70.3)   // ⌘-Tab
-        XCTAssertTrue(c.explains(from: 69, after: 0, now: 70.4), "the switch after a chord in one hold")
+        // Round 9: the switcher switches at the RELEASE — nothing is explained while ⌘ is still down, and the switch counts
+        // from the release (an agent's cause between the Tab and the release never outranks it).
+        XCTAssertFalse(c.explains(from: 69, after: 0, now: 70.4), "a ⌘-Tab still held has not switched")
+        c.event(type: .flagsChanged, flags: [], now: 70.5)
+        XCTAssertTrue(c.explains(from: 69, after: 70.45, now: 70.55), "the switch after a chord in one hold, at its release")
         var d = CUSwitchInput()
         d.event(type: .keyDown, flags: .maskControl, keycode: 124, now: 80)    // ⌃→: the next desktop
         XCTAssertTrue(d.explains(from: 79, after: 0, now: 80.2))

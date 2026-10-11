@@ -18,6 +18,8 @@ extension CUCore {
         var pendingOpen: [String]? = nil
         /// What the open stands for in the result ("“File › Open”"), when it came from a menu.
         var openWhat: String? = nil
+        /// The open is a link's (its host): said as the link's, in the default browser.
+        var openLinkHost: String? = nil
         /// For type, paste, key and setValue: the element that received the input (`[14] text area "Comment"`),
         /// or `inputUnknown` when the app reported no focused element.
         var input: String? = nil
@@ -50,7 +52,11 @@ extension CUCore {
         try await ensureAlive(t, token: token)
         try token.check()
         noteGuardianPrivatePath(p.privatePath)
-        noteGuardianActed(t.pid)
+        // The act is an operation on the app: touched while it runs (I1: "while an operation on it runs"), for the causal
+        // window after it — however it ends. A cause that can't raise a window: the user's switch input just before it
+        // still outranks it (#8).
+        beginGuardianSpan(t.pid, raise: false)
+        defer { endGuardianSpan(t.pid, raise: false) }
         do {
             try Self.checkAccess(p.action, access: p.access, appName: t.appName)
         } catch {
@@ -67,7 +73,7 @@ extension CUCore {
         if let paths = outcome.pendingOpen {
             // The queue is released: open now, bounded, and say what happened.
             do {
-                let said = try await finishBackgroundOpen(paths, what: outcome.openWhat, t)
+                let said = try await finishBackgroundOpen(paths, what: outcome.openWhat, t, linkHost: outcome.openLinkHost)
                 outcome.detail = [outcome.detail, said].compactMap { $0 }.joined(separator: "; ")
             } catch {
                 cursor(t, "refused")
@@ -75,14 +81,14 @@ extension CUCore {
                 throw error
             }
         }
-        noteGuardianAfterglow(t.pid)  // an activation in the next seconds may be this act's doing
         CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): \(Self.routeName(outcome.rung), privacy: .public)\(outcome.detail.map { " — " + $0 } ?? "", privacy: .public)")
-        let notes = takeGuardianNotes()
-        let detail = (notes + [outcome.detail].compactMap { $0 }).isEmpty ? nil
-            : (notes + [outcome.detail].compactMap { $0 }).joined(separator: "; ")
-        return TargetActResult(rung: outcome.rung.rawValue, detail: detail, input: outcome.input,
+        // What the guardian did or saw meanwhile goes out on its own (daemon lines), never inside the act's own line.
+        let report = takeGuardianReport()
+        return TargetActResult(rung: outcome.rung.rawValue, detail: outcome.detail, input: outcome.input,
                                inputUnknown: outcome.inputUnknown ? true : nil, focusNow: outcome.focusNow,
-                               focusLost: outcome.focusLost ? true : nil, pageNow: outcome.pageNow, inVisit: inVisit ? true : nil)
+                               focusLost: outcome.focusLost ? true : nil, pageNow: outcome.pageNow, inVisit: inVisit ? true : nil,
+                               guardian: report.notes.isEmpty ? nil : report.notes,
+                               viewMovedBy: report.viewMovedBy.isEmpty ? nil : report.viewMovedBy)
     }
 
     /// The act, with desktop visits (CUCore+Visit): inside the session's open visit when its window is on the
@@ -387,22 +393,44 @@ extension CUCore {
                 try synth.hover(pid: t.pid, windowFor: { _ in t.windowID }, at: pt, route: route, dwellMs: ms)
             }.noting(rested)
         }
-        let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
+        var d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
         let synth = self.synth(p)
         let windowFor = self.windowFor(t)
-        // A WebKit page (not Chromium) never takes a synthetic pointer's hover: measured on 2026-10-10, posted
-        // moves reached its window — and a plain AppKit view's tracking areas in the same state — but no
-        // mouseenter reached the page, in the background or with its app in front and the window key. Watched
-        // here, so the answer says when nothing appeared instead of leaving the model to look.
-        let webKit = d.rung == .processEvents && !t.isChromium && t.accessible
+        // A web page takes no hover from a pointer that is not the real one while its app is in the background:
+        // measured — WebKit on 2026-10-10 (posted moves reached the window, and a plain AppKit view's tracking areas in
+        // the same state, but no mouseenter reached the page, in the background or with the app in front and the window
+        // key), Chromium on 2026-10-11 (run111: a background Chrome page got moves on the private path but neither a
+        // mouseenter nor a :hover, on either route). Watched here, so the answer says when nothing appeared instead of
+        // leaving the model to look.
+        let webPage = t.accessible
             && (a.ref.flatMap { try? element($0, in: t) } ?? elementAt(pt, in: t)).map(isWebContent) == true
-        let before = webKit ? webElementCount(t) : nil
-        let out = try runEvents(p, t, d, focus: false, token) { route, check in
-            try synth.hover(pid: t.pid, windowFor: windowFor, at: pt, route: route, dwellMs: ms, check: check)
+        // The app held in front (requestForeground) or the rung-4 card agreed to: the REAL pointer hovers it — the only
+        // hover a web page takes (what the bind's note and the answer below advise).
+        if webPage, d.rung != .foreground, p.allowForeground {
+            d = CUInputLadder.Decision(rung: .foreground, detail: "\(t.appName)'s web page takes hover only from the real pointer")
         }
-        if let before, let after = webElementCount(t), after == before {
-            CULog.act.notice("hover in \(t.appName, privacy: .public): nothing new appeared in the page (\(before, privacy: .public) elements)")
-            return out.noting("the pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms, and nothing new appeared in the page — \(t.appName)'s web page takes no hover from a pointer that isn't the real one: if the menu or item also opens on a click, click it; else app.requestForeground(reason) for a real hover")
+        let watched = webPage ? webElementCount(t) : nil
+        // With the real pointer, what appeared is counted WHILE it rests there (it goes back to where the user had it
+        // right after, and a hover menu may close with it).
+        var during: Int?
+        let out = try runEvents(p, t, d, focus: false, token) { route, check in
+            let used = try synth.hover(pid: t.pid, windowFor: windowFor, at: pt, route: route, dwellMs: ms, check: check)
+            if route == .hid, watched != nil { during = webElementCount(t) }
+            return used
+        }
+        if let before = watched {
+            let after = webElementCount(t)
+            if d.rung == .foreground {
+                if let during, during > before {
+                    let gone = after.map { $0 <= before } ?? false
+                    return out.noting("the real pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms and \(during - before) new element(s) appeared in the page\(gone ? " — gone again once the pointer went back to where the user had it: if what it opens also opens on a click, click it" : "; state() shows them")")
+                }
+                return out.noting("the real pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms; nothing new appeared in the page")
+            }
+            if let after, after == before {
+                CULog.act.notice("hover in \(t.appName, privacy: .public): nothing new appeared in the page (\(before, privacy: .public) elements)")
+                return out.noting("the pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms, and nothing new appeared in the page — \(t.appName)'s web page takes no hover from a pointer that isn't the real one: if the menu or item also opens on a click, click it; else app.requestForeground(reason) for a real hover")
+            }
         }
         return out.noting(rested)
     }
@@ -450,6 +478,16 @@ extension CUCore {
             }
             // A disabled control does nothing when PRESSED; its context menu (a right click) may still open.
             if button == .left { try requireEnabled(info, ref: ref, t) }
+            // A link in an app that is not a web browser (Mail, Slack, Notes, Messages): pressed, it opens in the default
+            // browser, which comes to the front — the agent changing the user's front app (the user's rule, round 9). Its
+            // URL is opened in the background instead, the way apps.open does (http, https, mailto; anything else is
+            // pressed as before).
+            if button == .left, count == 1, flags.isEmpty, let url = linkURL(e, info), !isWebBrowser(t) {
+                announceTarget(t, info, pressing: true)
+                cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
+                CULog.act.notice("click in \(t.appName, privacy: .public): [\(ref, privacy: .public)] is a link (\(url.scheme ?? "?", privacy: .public)) — opened in the background, not pressed")
+                return try pendingBackgroundOpen([url.absoluteString], what: nil, linkHost: url.host ?? url.absoluteString)
+            }
             try pasteMenuGuard(e, info, p, t)
             t.noteTargeted(e, at: clock.nowMs())
             announceTarget(t, info, pressing: button == .left)
@@ -1213,16 +1251,36 @@ extension CUCore {
 
     /// An outcome that opens `paths` after the act releases the target's queue. The protected-path floor is
     /// checked here, under the queue, so a refusal is an ordinary refused act.
-    func pendingBackgroundOpen(_ paths: [String], what: String?) throws -> ActOutcome {
+    func pendingBackgroundOpen(_ paths: [String], what: String?, linkHost: String? = nil) throws -> ActOutcome {
         if let bad = paths.first(where: { CUFloors.isProtectedSavePath($0) }) {
             throw CUError.refused(.privacyPane, "opening \((bad as NSString).lastPathComponent) is off limits — it is a protected location")
         }
-        return ActOutcome(rung: .accessibility, detail: nil, pendingOpen: paths, openWhat: what)
+        return ActOutcome(rung: .accessibility, detail: nil, pendingOpen: paths, openWhat: what, openLinkHost: linkHost)
+    }
+
+    /// The URL a link element opens — http, https or mailto only — when the element is a link (`AXLink`) or carries an
+    /// `AXURL`. Nil otherwise (it is pressed as before).
+    func linkURL(_ e: AXUIElement, _ info: ElementInfo) -> URL? {
+        let raw = ax.attribute(e, "AXURL")
+        guard info.role == "AXLink" || raw != nil else { return nil }
+        let url: URL? = {
+            guard let raw else { return nil }
+            if CFGetTypeID(raw) == CFURLGetTypeID() { return (raw as! CFURL) as URL }
+            return (raw as? String).flatMap { URL(string: $0) }
+        }()
+        guard let url, let scheme = url.scheme?.lowercased(), ["http", "https", "mailto"].contains(scheme) else { return nil }
+        return url
+    }
+
+    /// Whether the bound app is a web browser (it declares http/https): its links are its own business.
+    func isWebBrowser(_ t: CUTarget) -> Bool {
+        if let o = isWebBrowserOverride { return o(t) }
+        return CUApps.isWebBrowser(bundleURL: NSRunningApplication(processIdentifier: t.pid)?.bundleURL)
     }
 
     /// Opens `paths` in the background, waiting at most `openTimeoutMs` (NSWorkspace's open can't be
     /// cancelled: past the bound it keeps going and the result says so). Throws what the open threw.
-    func finishBackgroundOpen(_ paths: [String], what: String?, _ t: CUTarget) async throws -> String {
+    func finishBackgroundOpen(_ paths: [String], what: String?, _ t: CUTarget, linkHost: String? = nil) async throws -> String {
         let label = paths.count == 1 ? (paths[0] as NSString).lastPathComponent : "\(paths.count) items"
         let prefix = what.map { "\($0): " } ?? ""
         enum Result { case opened(String), failed(Error), timedOut }
@@ -1241,6 +1299,9 @@ extension CUCore {
         }
         switch result {
         case .opened(let app):
+            if let host = linkHost {
+                return "opened \(host) in \(app) in the background (pressing the link would have brought \(app) to the front) — it isn't bound; browsers.open or apps.open to work in it"
+            }
             return "\(prefix)opened \(label) in \(app) in the background (not through Finder, so nothing came to the front)"
         case .failed(let error):
             throw error
@@ -3077,7 +3138,7 @@ extension CUCore {
 
     /// Rung 4: bring the app forward, act with the real pointer, then put the pointer and the user's app back.
     /// Every press, drag step and release is hit-tested by the caller's check.
-    private func inForeground<T>(_ t: CUTarget, _ body: () throws -> T) throws -> T {
+    func inForeground<T>(_ t: CUTarget, _ body: () throws -> T) throws -> T {
         // Bringing an app forward whose window is on ANOTHER desktop takes the user there: never without their
         // say for a desktop visit (user ruling 2026-10-10) — not with `allowForeground`, not for a held app.
         // Inside a visit the window is on screen already.
@@ -3088,10 +3149,16 @@ extension CUCore {
         // The user agreed to this act taking the foreground: the user-view guard and the Focus Guardian leave
         // it alone, for this one action.
         t.consentedForeground = true
-        guardianExempt(t.pid)
-        let previous = sys.frontmostPid()
+        // Held in front for the script (requestForeground): the hold owns the front and its exemption — this action
+        // neither ends it nor gives the front back (that undid the hold: the held app, its exemption ended, read as a theft).
+        let held = holdsForeground(t)
+        judgeBeforeTaking("the consented foreground's start")
+        if !held { guardianExempt(t.pid) }
+        let previous = userView()
         let cursor = sys.cursorLocation()
         _ = sys.activate(pid: t.pid)
+        // Refusable (cooperative activation); accessibility's frontmost is not (as a restore does).
+        if sys.frontmostPid() != t.pid { try? ax.set(ax.application(t.pid), kAXFrontmostAttribute, kCFBooleanTrue) }
         if let w = try? windowElement(t) { try? ax.perform(w, kAXRaiseAction) }
         var front = false
         for _ in 0..<50 {
@@ -3100,7 +3167,15 @@ extension CUCore {
         }
         defer {
             if let c = cursor { sys.warpCursor(to: c) }
-            if let prev = previous, prev != t.pid { _ = sys.activate(pid: prev) }
+            // The front given back to the user's place AS IT IS NOW (the guardian's: the one before this action, unless
+            // they moved), only while this app still has it — a move of theirs is left alone, and an activation that never
+            // landed gives nothing back (review of round 8: it activated the pid captured before, over whatever was in front).
+            if !held { guardianLock.withLock { guardianCore.endExempt(t.pid) } }
+            if !held, sys.frontmostPid() == t.pid,
+               let place = guardianPlace() ?? previous.front.map({ CUGuardedView(app: $0, space: previous.space) }),
+               let user = place.app, user != t.pid {
+                _ = restoreUserView(CUUserView(space: place.space, front: user), user: user)
+            }
         }
         guard front else { throw CUError.unsupported("could not bring \(t.appName) to the front") }
         return try body()

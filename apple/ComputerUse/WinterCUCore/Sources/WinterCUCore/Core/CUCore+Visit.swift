@@ -157,6 +157,7 @@ extension CUCore {
     func noteVisitUserMove() {
         // Only once the visit has arrived (its own switch there is not the user's doing).
         guard let v = visitLock.withLock({ openVisit.flatMap { $0.arrived != nil && !$0.closing ? $0 : nil } }) else { return }
+        if let close = visitCloseDispatch { close(v, .userMoved); return }
         Task { [weak self] in _ = await self?.closeVisit(v, reason: .userMoved) }
     }
 
@@ -207,7 +208,16 @@ extension CUCore {
             CULog.act.notice("visit (\(why.rawValue, privacy: .public)): \(t.appName, privacy: .public)'s window has no element and the app has a window on the user's desktop — not reachable, nothing moved")
             throw CUError.unsupported("\(t.appName)'s window can't be brought forward on its desktop: macOS has not exposed it (it has not been shown there since it opened), and \(t.appName) has a window on this desktop, where it would stay — ask the user to show it once; nothing was moved")
         }
-        let before = userView()
+        // What is in front now is judged first (a move of theirs not heard of yet is their place). A theft the guardian
+        // has not put back yet (an app the agent's action brought forward) is not where they are: the way back is to
+        // their place as the guardian has it (found by the model-based test: an indirect effect in front when a visit
+        // began was the place the visit brought them back to).
+        let live = userView()
+        var before = live
+        if judgeBeforeTaking("a desktop visit's start")?.undoes == true, let place = guardianPlace(), let user = place.app,
+           user != live.front, sys.appRunning(user) {
+            before = CUUserView(space: place.space ?? live.space, front: user)
+        }
         // Where to bring the user back: without their front app, nowhere — so they are not taken anywhere.
         guard before.front != nil else {
             CULog.act.notice("visit (\(why.rawValue, privacy: .public)): the user's front app can't be read — not visited, nothing moved")
@@ -519,7 +529,11 @@ extension CUCore {
         }
         let now = userView()
         let sawUserMove = guardianLock.withLock { guardianCore.visitSawUserInput }
-        if let arrived, sawUserMove, now != s.before, now != arrived {
+        // Where they are now is where they went (their place as the guardian has it) — not the visit's own switch landing
+        // after their move (found by the model-based test: their ⌘-Tab onto the visited desktop was taken for the
+        // arrival, and the visited app coming forward after it was "where they went").
+        let isTheirPlace = guardianPlace().map { p in p.app == now.front && (p.space == nil || now.space == nil || p.space == now.space) } ?? true
+        if let arrived, sawUserMove, now != s.before, now != arrived, isTheirPlace {
             // Theirs, never fought.
             let at = clock.nowSeconds()
             guardianLock.withLock {
@@ -530,9 +544,36 @@ extension CUCore {
             CULog.act.notice("visit \(v.id, privacy: .public) to \(s.appName, privacy: .public)'s desktop (\(reason.rawValue, privacy: .public)): the user moved elsewhere during it — left there (\(ms, privacy: .public) ms, \(actions, privacy: .public) actions)")
             return report(ms, false, true, "the user moved somewhere else during the visit, so Winter left them there")
         }
+        // They moved during the visit, and its own switch landed over their move (it arrived after it): back to where
+        // THEY went — their place as the guardian has it now, never the one recorded when the visit began (I2, found by the
+        // model-based test: a click into another display's window during the way there, then the return to the app
+        // they had left).
+        if sawUserMove, let place = guardianPlace(), let user = place.app,
+           CUUserView(space: place.space, front: user) != s.before, sys.appRunning(user) {
+            let target = CUUserView(space: place.space, front: user)
+            let back = now == target || restoreUserView(target, user: user, visitReturn: true) == target
+            let at = clock.nowSeconds()
+            guardianLock.withLock { _ = guardianCore.endVisit(now: at) }
+            let ms = Int(clock.nowMs() - s.startedMs)
+            CULog.act.notice("visit \(v.id, privacy: .public) to \(s.appName, privacy: .public)'s desktop (\(reason.rawValue, privacy: .public)): the user moved during it and the visit's switch landed after — back to where they went: \(back ? "ok" : "not yet", privacy: .public)")
+            return report(ms, back, true, "the user moved somewhere else during the visit, so Winter brought them back there, not to where the visit began")
+        }
         var back = now == s.before && userWindowBack(s) && displaysBack(s)
+        // The user moved during the return (the rule found it — their switch input, their click): never pulled back again.
+        let movedMeanwhile = { [self] in guardianLock.withLock { guardianCore.visitSawUserInput } }
         if !back, let user = s.before.front {
             back = returnOnce(s, user: user) == s.before && userWindowBack(s) && displaysBack(s)
+            if !back, movedMeanwhile() {
+                let at = clock.nowSeconds()
+                let here = userView()
+                guardianLock.withLock {
+                    guardianCore.endVisit(now: at)
+                    guardianCore.adoptUserView(CUGuardedView(app: here.front, space: here.space), now: at)
+                }
+                let ms = Int(clock.nowMs() - s.startedMs)
+                CULog.act.notice("visit \(v.id, privacy: .public) to \(s.appName, privacy: .public)'s desktop (\(reason.rawValue, privacy: .public)): the user moved while being brought back — left there (\(ms, privacy: .public) ms)")
+                return report(ms, false, true, "the user moved somewhere else while being brought back, so Winter left them there")
+            }
             if !back {
                 // Once more, the way the guardian restores (the app's focused window, the activation retried).
                 CULog.guardian.notice("visit \(v.id, privacy: .public): not back after the first return — trying once more")
@@ -565,7 +606,7 @@ extension CUCore {
                 let now = userView()
                 guard now != s.before else { continue }
                 let owner = judgeMove(now, since: watchFrom, from: s.before, path: "a desktop visit's late-switch watch")
-                if owner.isUsers {
+                if !owner.undoes {
                     userMoved = true
                     CULog.act.notice("visit \(v.id, privacy: .public): after the return the view changed — \(owner.words, privacy: .public) (front \(now.front.map(String.init) ?? "?", privacy: .public)) — left there")
                     break
@@ -624,7 +665,7 @@ extension CUCore {
         _ = sys.bringForward(pid: user, windowID: w.id ?? 0, window: w.element, makeMain: w.element != nil)
         // Nothing to raise is "raise nothing", never the app's focused window: that can be the target's bound window on
         // the visited desktop (the user's app IS the target app), which would keep them there.
-        return restoreUserView(s.before, user: user, window: w.element, raiseFocused: false)
+        return restoreUserView(s.before, user: user, window: w.element, raiseFocused: false, visitReturn: true)
     }
 
     /// The window the return raises: the user's recorded one while it is still there — unless their app's focused

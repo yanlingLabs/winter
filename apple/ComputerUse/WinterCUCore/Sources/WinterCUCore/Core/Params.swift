@@ -141,11 +141,16 @@ public struct TargetBindResult: Codable, Sendable, Equatable {
     /// What the bind had to do to get a usable window (bound one on another Space in place, moved one here,
     /// opened a new one), for the model; absent when it simply bound a window on this desktop.
     public var detail: String?
-    public init(targetId: String, app: CUBoundApp, window: CUWindowInfo, detail: String? = nil) {
+    /// The window holds web content (an `AXWebArea`: Safari, WKWebView apps, Chrome and the Chromium family): its pages
+    /// take no hover from a pointer that is not the real one while the app is in the background (measured for both
+    /// engines) — the daemon says so once per session per app (1.9.8).
+    public var webContent: Bool?
+    public init(targetId: String, app: CUBoundApp, window: CUWindowInfo, detail: String? = nil, webContent: Bool? = nil) {
         self.targetId = targetId
         self.app = app
         self.window = window
         self.detail = detail
+        self.webContent = webContent
     }
 }
 
@@ -160,9 +165,12 @@ public struct TargetUseWindowParams: Codable, Sendable, Equatable {
 public struct TargetUseWindowResult: Codable, Sendable, Equatable {
     public var window: CUWindowInfo
     public var detail: String?
-    public init(window: CUWindowInfo, detail: String? = nil) {
+    /// As `TargetBindResult.webContent` (1.9.8).
+    public var webContent: Bool?
+    public init(window: CUWindowInfo, detail: String? = nil, webContent: Bool? = nil) {
         self.window = window
         self.detail = detail
+        self.webContent = webContent
     }
 }
 
@@ -470,8 +478,14 @@ public struct TargetActResult: Codable, Sendable, Equatable {
     public var pageNow: String?
     /// The act ran inside (or opened) a desktop visit: done on the window's own desktop.
     public var inVisit: Bool?
+    /// What the Focus Guardian did or saw since the last act (helper 1.9.8): the user put back after an app took their
+    /// front, an app that came forward after the agent's action with no input of theirs — said as daemon lines.
+    public var guardian: [String]?
+    /// The apps that came forward after the agent's action with no input of the user's since the last act (a metric).
+    public var viewMovedBy: [String]?
     public init(rung: Int, detail: String? = nil, input: String? = nil, inputUnknown: Bool? = nil,
-                focusNow: String? = nil, focusLost: Bool? = nil, pageNow: String? = nil, inVisit: Bool? = nil) {
+                focusNow: String? = nil, focusLost: Bool? = nil, pageNow: String? = nil, inVisit: Bool? = nil,
+                guardian: [String]? = nil, viewMovedBy: [String]? = nil) {
         self.rung = rung
         self.detail = detail
         self.input = input
@@ -480,6 +494,8 @@ public struct TargetActResult: Codable, Sendable, Equatable {
         self.focusLost = focusLost
         self.pageNow = pageNow
         self.inVisit = inVisit
+        self.guardian = guardian
+        self.viewMovedBy = viewMovedBy
     }
 }
 

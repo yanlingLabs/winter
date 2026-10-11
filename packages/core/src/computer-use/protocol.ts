@@ -164,8 +164,11 @@ export interface TargetBindResult {
   window: { id: number; title: string; frame: Rect };
   /** What the bind had to do to reach a usable window (another Space, moved here, a new one opened). */
   detail?: string;
+  /** helper 1.9.8: the window holds web content (an AXWebArea — WebKit or Chromium): its pages don't react to hover from
+   *  Winter's pointer while the app is in the background — said once per session per app. */
+  webContent?: boolean;
 }
-export interface TargetUseWindowResult { window: { id: number; title: string; frame: Rect }; detail?: string }
+export interface TargetUseWindowResult { window: { id: number; title: string; frame: Rect }; detail?: string; webContent?: boolean }
 export interface SnapshotResult { snapshotId: string; text: string; isDiff: boolean; changedRatio: number; settled: boolean; waitedMs: number }
 export interface FindResult {
   elements: Array<{ ref: number; role: string; name?: string; value?: string; states?: string[] }>;
@@ -207,6 +210,11 @@ export interface ActResult {
   pageNow?: string;
   /** helper 1.7.0: the act ran inside an OPEN desktop visit (it opened it, or ran in it). */
   inVisit?: boolean;
+  /** helper 1.9.8: what the Focus Guardian did or saw since the last act (the user put back after an app took their
+   *  front, an app the agent's action brought forward sent back, a system dialog left for the user) — daemon lines. */
+  guardian?: string[];
+  /** helper 1.9.8: the apps that came forward after the agent's action with no input of the user's (a metric). */
+  viewMovedBy?: string[];
 }
 /** `target.applescript`: the script's result as AppleScript displays it (null: none). */
 export interface AppleScriptResult { result: string | null; detail?: string }

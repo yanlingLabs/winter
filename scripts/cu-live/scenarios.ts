@@ -426,24 +426,48 @@ report({ ok: true });`,
     },
   },
   {
-    // Hover-only UI: a menu that opens on mouseenter (hover(), then its item), and a button that acts only once the
-    // pointer has entered it (a click arrives by the hover path; an accessibility press alone would not arm it).
-    name: "hover: a hover-revealed menu, and a button armed by the pointer entering it", group: "click",
+    // The KNOWN LIMITATION (round 9, the user's ruling): a web page takes no hover from Winter's pointer while its app is
+    // in the background — WebKit (measured 2026-10-10) and Chromium (run111, 2026-10-11) alike. The bind says so once
+    // per session per app (an unfenced daemon line), and a hover that brought nothing up says so with the way out (click
+    // it, or requestForeground for a real hover). A FRESH session, so this scenario's own bind carries the line. (The
+    // page's "Armed Button" — it acts only after a mouseenter — is the same limitation, so it is not asserted.)
+    name: "hover on a web page in the background: nothing appears, and the bind and the hover say why", group: "click",
+    session: "fresh",
     before: [{ role: "main", cmd: "reset" }],
     code: `
 const web = await webWin();
 const trigger = await pick(web, "Hover Menu", "button");
 await web.hover(trigger.ref, { ms: 600 });
-const item = await pick(web, "Hidden Item");
-await web.click(item.ref);
-const armed = await pick(web, "Armed Button", "button");
-await web.click(armed.ref);
 report({ ok: true });`,
     verify: (ctx) => [ok(ctx),
-      check("hover() opened the menu", has(ctx.events, ctx.since, "web.hover", () => true)),
-      check("its hidden item was clicked", eventsSince(ctx.events, ctx.since, "web.hoveritem").length === 1),
-      check("the armed button acted exactly once", eventsSince(ctx.events, ctx.since, "web.armed").length === 1,
-        JSON.stringify(eventsSince(ctx.events, ctx.since, "web.armed")))],
+      check("the bind carried the hover line", /web pages don't react to hover from Winter's pointer while it is in the background — click instead, or app\.requestForeground\(reason\) for a real hover/.test(ctx.output), ctx.output.slice(0, 400)),
+      check("nothing appeared (no mouseenter reached the page)", eventsSince(ctx.events, ctx.since, "web.hover").length === 0,
+        JSON.stringify(eventsSince(ctx.events, ctx.since, "web.hover"))),
+      check("the hover's answer says nothing appeared, and the way out", /nothing new appeared in the page/.test(ctx.output) && /requestForeground\(reason\) for a real hover/.test(ctx.output), ctx.output.slice(0, 400))],
+  },
+  {
+    // A NATIVE view's hover works from the background: the Form window's "Native Hover Area" shows "Native Hidden Item"
+    // when the pointer enters it (an AppKit tracking area), and the item is then clicked. Its window holds no web page,
+    // so its bind says nothing about hover.
+    name: "hover on a native view in the background: the hidden item appears and is clicked", group: "click",
+    session: "fresh",
+    before: [{ role: "main", cmd: "reset" }],
+    code: `
+const form = await win("Fixture Form");
+const area = await pick(form, "Native Hover Area");
+await form.hover(area.ref, { ms: 600 });
+// The item is listed once it is shown (a hidden button is not): looked for up to 2 s.
+let item;
+for (const t0 = Date.now(); ; await sleep(200)) {
+  try { item = await pick(form, "Native Hidden Item", "button"); break; } catch (e) { if (Date.now() - t0 > 2000) throw e; }
+}
+await form.click(item.ref);
+report({ ok: true });`,
+    verify: (ctx) => [ok(ctx),
+      check("the pointer entering the area revealed the item", has(ctx.events, ctx.since, "form.hover", () => true)),
+      check("the revealed item was clicked exactly once", eventsSince(ctx.events, ctx.since, "form.hoveritem").length === 1,
+        JSON.stringify(eventsSince(ctx.events, ctx.since, "form.hoveritem"))),
+      check("the Form window's bind says nothing about hover (no web page in it)", !/don't react to hover/.test(ctx.output), ctx.output.slice(0, 300))],
   },
   {
     // Google Docs' widgets act on a real mouse press: an accessibility press is ignored, and the helper must notice

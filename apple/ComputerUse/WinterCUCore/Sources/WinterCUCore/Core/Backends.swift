@@ -107,13 +107,45 @@ protocol CUSystemBackend: AnyObject {
     /// How long ago `pid`'s process started (seconds); nil when it can't be read. Read only while the agent has a
     /// launch pending (an app started after it is the agent's).
     func processAge(pid: pid_t) -> TimeInterval?
+    /// Whether `pid` is a regular app (one with a Dock icon, whose windows a click activates) — not an agent, a
+    /// background app or a system UI server (Notification Center, the menu extras, Picture in Picture). Nil = unknown.
+    func isRegularApp(_ pid: pid_t) -> Bool?
+    /// The running app with this bundle id (Finder, for a click on the empty desktop), if any.
+    func runningPid(bundleId: String) -> pid_t?
+    /// The running app whose Dock tile is under `point` (the Dock, `dockPid`, read over accessibility: the tile's
+    /// `AXURL` is the app's bundle), if any — so a Dock click is input for THAT app.
+    func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t?
 }
 
 extension CUSystemBackend {
     func processAge(pid: pid_t) -> TimeInterval? { nil }
+    func isRegularApp(_ pid: pid_t) -> Bool? { nil }
+    func runningPid(bundleId: String) -> pid_t? { nil }
+    func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? { nil }
 }
 
 final class CULiveSystem: CUSystemBackend {
+    func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? {
+        let dock = AXUIElementCreateApplication(dockPid)
+        AXUIElementSetMessagingTimeout(dock, 0.1)  // the session tap's thread: never held up by a busy Dock
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(dock, Float(point.x), Float(point.y), &hit) == .success, let item = hit else { return nil }
+        AXUIElementSetMessagingTimeout(item, 0.1)
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(item, "AXURL" as CFString, &raw) == .success, let v = raw else { return nil }
+        let url: URL? = CFGetTypeID(v) == CFURLGetTypeID() ? (v as! URL) : (v as? String).flatMap(URL.init(string:))
+        guard let bundle = url?.standardizedFileURL.resolvingSymlinksInPath() else { return nil }
+        return NSWorkspace.shared.runningApplications.first {
+            !$0.isTerminated && $0.bundleURL?.standardizedFileURL.resolvingSymlinksInPath() == bundle
+        }?.processIdentifier
+    }
+
+    func isRegularApp(_ pid: pid_t) -> Bool? {
+        NSRunningApplication(processIdentifier: pid).map { $0.activationPolicy == .regular }
+    }
+    func runningPid(bundleId: String) -> pid_t? {
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first { !$0.isTerminated }?.processIdentifier
+    }
     func processAge(pid: pid_t) -> TimeInterval? {
         var info = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.stride
