@@ -31,7 +31,7 @@ final class CoworkClientTests: XCTestCase {
         XCTAssertEqual(request.method, "workspace.source.addFolder")
         let encoded = String(decoding: try JSONEncoder().encode(request.params), as: UTF8.self)
         XCTAssertTrue(encoded.contains("selectionId")); XCTAssertFalse(encoded.contains("grantRef")); XCTAssertFalse(encoded.contains("path"))
-        let project = CoworkRequest<CoworkReceipt<CoworkWorkspacePolicy>>.setProjectDefaultPolicy(projectId: "project-fixture", requestId: "policy", expectedRevision: 8, policy: .plan)
+        let project = CoworkRequest<CoworkReceipt<CoworkPolicyValue>>.setProjectDefaultPolicy(projectId: "project-fixture", requestId: "policy", expectedRevision: 8, policy: .plan)
         XCTAssertEqual(project.method, "project.setDefaultPolicy")
         let empty = try CoworkRequest<CoworkWorkspacePage>.list().decode(.object(["workspaces": .array([]), "nextCursor": .null]))
         XCTAssertTrue(empty.workspaces.isEmpty); XCTAssertNil(empty.nextCursor)
@@ -81,5 +81,27 @@ final class CoworkClientTests: XCTestCase {
         let inner = Data(repeating: 0xFF, count: 128 * 1024 + 256)
         let envelope = WireEnvelope(v: 1, pairingEpoch: 1, hostID: String(repeating: "h", count: 200), sessionID: nil, streamID: nil, seq: nil, kind: .rpcResponse, timestamp: 1, payload: inner)
         XCTAssertLessThanOrEqual(try WireFrame.encode(envelope).count, 512 * 1024)
+    }
+    func testPolicyMutationReceiptsDiscriminateCompleteAndBoundedRecoveryValues() throws {
+        let complete = #"""
+        {"operationId":"operation-fixture","workspaceId":"workspace-fixture","revision":2,"value":{"detailState":"complete","policyId":"policy-fixture","workspaceId":"workspace-fixture","defaultPolicy":"plan","publication":"manual","ceiling":{"toolClasses":["read"],"hostServices":[],"connectors":[],"network":"none"},"revision":2,"defaultRevision":1,"publicationRevision":2}}
+        """#
+        let summary = #"""
+        {"operationId":"operation-fixture","workspaceId":"workspace-fixture","revision":2,"value":{"detailState":"summary","detailReason":"response_limit","detailMethod":"workspace.policy.get","policySummary":{"policyId":"policy-fixture","workspaceId":"workspace-fixture","defaultPolicy":"plan","publication":"manual","revision":2,"defaultRevision":1,"publicationRevision":2,"network":"none","capabilityCounts":{"toolClasses":256,"hostServices":256,"connectors":256}}}}
+        """#
+        let request = CoworkRequest<CoworkReceipt<CoworkPolicyValue>>.setPublicationPolicy(workspaceId: "workspace-fixture", requestId: "narrow", expectedRevision: 1, publication: .manual)
+        XCTAssertEqual(request.method, "workspace.setPublicationPolicy")
+        let decoder = JSONDecoder()
+        let full = try request.decode(decoder.decode(SessionEvent.JSONValue.self, from: Data(complete.utf8)))
+        guard case let .complete(policy) = full.value else { return XCTFail("Expected complete policy authority details") }
+        XCTAssertEqual(policy.ceiling.toolClasses, ["read"])
+        let bounded = try request.decode(decoder.decode(SessionEvent.JSONValue.self, from: Data(summary.utf8)))
+        guard case let .summary(metadata) = bounded.value else { return XCTFail("Expected explicit bounded mutation summary") }
+        XCTAssertEqual(metadata.network, "none"); XCTAssertEqual(metadata.publication, .manual); XCTAssertEqual(metadata.capabilityCounts.connectors, 256)
+        for receipt in [full, bounded] { XCTAssertEqual(try decoder.decode(CoworkReceipt<CoworkPolicyValue>.self, from: JSONEncoder().encode(receipt)), receipt) }
+        let confused = summary.replacingOccurrences(of: "\"detailReason\":\"response_limit\"", with: "\"detailReason\":\"response_limit\",\"ceiling\":{}")
+        XCTAssertThrowsError(try decoder.decode(CoworkReceipt<CoworkPolicyValue>.self, from: Data(confused.utf8)))
+        let incomplete = summary.replacingOccurrences(of: "\"detailState\":\"summary\"", with: "\"detailState\":\"complete\"")
+        XCTAssertThrowsError(try decoder.decode(CoworkReceipt<CoworkPolicyValue>.self, from: Data(incomplete.utf8)))
     }
 }

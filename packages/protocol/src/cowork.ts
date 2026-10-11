@@ -53,7 +53,11 @@ const receipt = <T extends z.ZodType>(value: T) => z.object({ operationId: Id, w
 export const CoworkWorkspaceReceipt = receipt(CoworkCompleteWorkspace);
 export const CoworkWorkspaceUpdateReceipt = receipt(CoworkWorkspaceRecord);
 export const CoworkSourceReceipt = receipt(CoworkSource);
-export const CoworkPolicyReceipt = receipt(CoworkWorkspacePolicy);
+export const CoworkPolicyValue = z.discriminatedUnion("detailState", [
+  CoworkWorkspacePolicy.extend({ detailState: z.literal("complete") }).strict(),
+  z.object({ detailState: z.literal("summary"), detailReason: z.literal("response_limit"), policySummary: CoworkPolicySummary, detailMethod: z.literal("workspace.policy.get") }).strict(),
+]);
+export const CoworkPolicyReceipt = receipt(CoworkPolicyValue);
 export const COWORK_RPC = {
   "workspace.list": { params: Page, result: z.object({ workspaces: z.array(CoworkWorkspace).max(100), nextCursor: Id.nullable() }) },
   "workspace.get": { params: WorkspaceId, result: CoworkWorkspace },

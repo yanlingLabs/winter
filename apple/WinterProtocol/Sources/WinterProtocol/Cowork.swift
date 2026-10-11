@@ -37,6 +37,33 @@ public struct CoworkPolicySummary: Codable, Equatable, Sendable {
     public let revision: Int, defaultRevision: Int, publicationRevision: Int
     public let network: String, capabilityCounts: Counts
 }
+/// A mutation summary preserves its recorded policy revision, but contains no capability grant.
+public enum CoworkPolicyValue: Codable, Equatable, Sendable {
+    case complete(CoworkWorkspacePolicy), summary(CoworkPolicySummary)
+    private enum CodingKeys: String, CodingKey { case detailState, detailReason, detailMethod, policySummary, policyId, workspaceId, defaultPolicy, publication, ceiling, revision, defaultRevision, publicationRevision }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(CoworkDetailState.self, forKey: .detailState) {
+        case .complete:
+            guard !c.contains(.detailReason), !c.contains(.detailMethod), !c.contains(.policySummary) else { throw DecodingError.dataCorruptedError(forKey: .detailState, in: c, debugDescription: "Complete policy cannot contain summary details") }
+            self = .complete(try CoworkWorkspacePolicy(from: decoder))
+        case .summary:
+            let policyKeys: [CodingKeys] = [.policyId, .workspaceId, .defaultPolicy, .publication, .ceiling, .revision, .defaultRevision, .publicationRevision]
+            guard !policyKeys.contains(where: c.contains), try c.decode(String.self, forKey: .detailReason) == "response_limit", try c.decode(String.self, forKey: .detailMethod) == "workspace.policy.get" else { throw DecodingError.dataCorruptedError(forKey: .detailState, in: c, debugDescription: "Invalid policy summary recovery metadata") }
+            self = .summary(try c.decode(CoworkPolicySummary.self, forKey: .policySummary))
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .complete(policy):
+            try c.encode(CoworkDetailState.complete, forKey: .detailState); try policy.encode(to: encoder)
+        case let .summary(policy):
+            try c.encode(CoworkDetailState.summary, forKey: .detailState); try c.encode("response_limit", forKey: .detailReason)
+            try c.encode("workspace.policy.get", forKey: .detailMethod); try c.encode(policy, forKey: .policySummary)
+        }
+    }
+}
 public struct CoworkDetailMethods: Codable, Equatable, Sendable { public let sources: String, policy: String }
 public struct CoworkWorkspace: Codable, Equatable, Sendable {
     public let workspaceId: String, ownership: CoworkOwnership, ownerId: String, title: String, state: String
@@ -156,7 +183,7 @@ extension CoworkRequest where Result == CoworkReceipt<CoworkSource> {
         return Self(revoke ? "workspace.source.revoke" : "workspace.source.remove", p)
     }
 }
-extension CoworkRequest where Result == CoworkReceipt<CoworkWorkspacePolicy> {
+extension CoworkRequest where Result == CoworkReceipt<CoworkPolicyValue> {
     public static func setDefaultPolicy(workspaceId: String, requestId: String, expectedRevision: Int, policy: CoworkApprovalPolicy) -> Self {
         var p = mutation(workspaceId, requestId, expectedRevision); p["defaultPolicy"] = .string(policy.rawValue); return Self("workspace.setDefaultPolicy", p)
     }

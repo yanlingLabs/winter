@@ -1,7 +1,8 @@
-import { COWORK_RPC, CoworkSource as SourceDto, CoworkCompleteWorkspace as WorkspaceDto, CoworkSummaryWorkspace as SummaryDto, CoworkPolicySummary as PolicySummaryDto, CoworkWorkspaceRecord as WorkspaceRecordDto, type CoworkMethod, type CoworkResult } from "@yanlinglabs/winter-protocol";
+import { createHash } from "node:crypto";
+import { COWORK_RPC, CoworkSource as SourceDto, CoworkCompleteWorkspace as WorkspaceDto, CoworkSummaryWorkspace as SummaryDto, CoworkWorkspacePolicy as PolicyDto, CoworkPolicySummary as PolicySummaryDto, CoworkWorkspaceRecord as WorkspaceRecordDto, type CoworkMethod, type CoworkResult } from "@yanlinglabs/winter-protocol";
 import { CoworkAuthority, intersectCeilings, type CoworkGrantResolver, type CoworkPrincipal } from "./authority";
 import { CoworkRepository } from "./repository";
-import { CoworkError, type CapabilityCeiling, type MutationContext, type SourceSelection, type WorkspaceSource, type Workspace } from "./types";
+import { CoworkError, type CapabilityCeiling, type MutationContext, type MutationReceipt, type SourceSelection, type WorkspaceSource, type WorkspacePolicy, type Workspace } from "./types";
 
 export interface CoworkConnection { role: string; connectionId: number }
 /** Host-only injection. Never construct from method parameters or clientName. A gateway token
@@ -17,6 +18,7 @@ export interface CoworkHostPorts {
 }
 const NO_GRANTS: CoworkGrantResolver = { folder: () => undefined, repository: () => undefined };
 const RESPONSE_BUDGET = 128 * 1024;
+const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 export const disabledCoworkHost: CoworkHostPorts = {
   principal: connection => connection.role === "harness" || connection.role === "admin" ? { kind: "local-user", id: `local-${connection.role}` } : undefined,
   grants: NO_GRANTS, selection: () => undefined, creationCeiling: () => undefined,
@@ -29,6 +31,17 @@ function projectSource(value: WorkspaceSource) {
 function projectWorkspace(value: Workspace) {
   const { workspaceId, ownership, ownerId, title, state, configRevision, grantRevision, instructionRevision, leaseEpoch, power, createdAt, updatedAt } = value;
   return WorkspaceRecordDto.parse({ workspaceId, ownership, ownerId, title, state, configRevision, grantRevision, instructionRevision, leaseEpoch, power, createdAt, updatedAt });
+}
+function projectPolicySummary(value: WorkspacePolicy) {
+  const { ceiling, ...policy } = value;
+  return PolicySummaryDto.parse({ ...policy, network: ceiling.network, capabilityCounts: { toolClasses: ceiling.toolClasses.length, hostServices: ceiling.hostServices.length, connectors: ceiling.connectors.length } });
+}
+function projectPolicyReceipt(receipt: MutationReceipt<WorkspacePolicy>) {
+  const complete = { ...receipt, value: { ...PolicyDto.parse(receipt.value), detailState: "complete" as const } };
+  if (Buffer.byteLength(JSON.stringify(complete), "utf8") <= RESPONSE_BUDGET) return complete;
+  // Project the recorded policy, not the current DB state, so retries retain their original
+  // revision and summary even after later mutations. The real policy remains canonical.
+  return { ...receipt, value: { detailState: "summary" as const, detailReason: "response_limit" as const, policySummary: projectPolicySummary(receipt.value), detailMethod: "workspace.policy.get" as const } };
 }
 /** One per-record gate, also used by list filtering. Unknown ownership never becomes a grant. */
 export function assertRemoteMayUseWorkspace(records: CoworkRepository, authority: CoworkAuthority, principal: CoworkPrincipal, workspaceId: string, operation: "read" | "narrow" | "admin" = "read") {
@@ -47,18 +60,23 @@ export class CoworkWorkspaceService {
     return WorkspaceDto.parse({ ...safe, detailState: "complete", sources: this.records.sources(workspaceId).filter(source => source.state !== "detached").map(projectSource), policy: this.records.policy(workspaceId), automaticPublication: this.records.policy(workspaceId).publication === "github-only-feature-branches" && this.records.githubOnly(workspaceId) });
   }
   private policySummary(workspaceId: string) {
-    const { ceiling, ...policy } = this.records.policy(workspaceId);
-    return PolicySummaryDto.parse({ ...policy, network: ceiling.network, capabilityCounts: { toolClasses: ceiling.toolClasses.length, hostServices: ceiling.hostServices.length, connectors: ceiling.connectors.length } });
+    return projectPolicySummary(this.records.policy(workspaceId));
   }
-  private detailOffset(request: { cursor?: string; expectedRevision?: number }, revision: number, count: number) {
+  private detailPage(request: { cursor?: string; expectedRevision?: number }, workspaceId: string, kind: "sources" | "policy", revision: number, content: unknown[]) {
     if (request.expectedRevision !== undefined && request.expectedRevision !== revision) throw new CoworkError("revision_conflict", revision);
-    if (!request.cursor) return 0;
-    const match = /^([1-9][0-9]*):([1-9][0-9]*)$/.exec(request.cursor);
-    if (!match) throw new CoworkError("invalid_request");
-    if (Number(match[1]) !== revision) throw new CoworkError("revision_conflict", revision);
-    const offset = Number(match[2]);
-    if (!Number.isSafeInteger(offset) || offset >= count) throw new CoworkError("invalid_request");
-    return offset;
+    // Content includes visible lifecycle state. In particular a detach ACK changes this
+    // generation without advancing desired configRevision, so positional pages cannot skip.
+    const scope = hash(workspaceId), generation = hash(JSON.stringify(content)), prefix = `${kind}:${scope}:${revision}:${generation}:`;
+    let offset = 0;
+    if (request.cursor) {
+      const match = /^(sources|policy):([a-f0-9]{64}):([1-9][0-9]*):([a-f0-9]{64}):([1-9][0-9]*)$/.exec(request.cursor);
+      if (!match || match[1] !== kind || match[2] !== scope) throw new CoworkError("invalid_request");
+      if (Number(match[3]) !== revision) throw new CoworkError("revision_conflict", revision);
+      if (match[4] !== generation) throw new CoworkError("stale_cursor", revision);
+      offset = Number(match[5]);
+      if (!Number.isSafeInteger(offset) || offset >= content.length) throw new CoworkError("invalid_request");
+    }
+    return { offset, cursor: (end: number) => end < content.length ? `${prefix}${end}` : null };
   }
   private readSnapshot(principal: CoworkPrincipal, workspaceId: string) {
     const complete = this.snapshot(principal, workspaceId);
@@ -93,7 +111,9 @@ export class CoworkWorkspaceService {
         const value = method === "workspace.create" || method === "project.create" ? this.snapshot(principal, receipt.workspaceId)
           : method.startsWith("workspace.source.") ? SourceDto.parse(receipt.value)
           : method === "workspace.update" || method === "project.update" ? WorkspaceRecordDto.parse(receipt.value) : receipt.value;
-        this.checkedResponse(method, { ...receipt, value });
+        const response = method === "workspace.setDefaultPolicy" || method === "project.setDefaultPolicy" || method === "workspace.setCapabilityCeiling" || method === "workspace.setPublicationPolicy"
+          ? projectPolicyReceipt(receipt as MutationReceipt<WorkspacePolicy>) : { ...receipt, value };
+        this.checkedResponse(method, response);
         // Security revocation and other explicit narrowing remain possible for older oversized
         // records. New expansion always requires complete read/list admission before COMMIT.
         if (!allowOversizedRecovery) this.requireReadable(principal, receipt.workspaceId);
@@ -170,8 +190,8 @@ export class CoworkWorkspaceService {
         const p = COWORK_RPC[method].params.parse(raw);
         const workspace = assertRemoteMayUseWorkspace(this.records, this.authority, principal, p.workspaceId);
         const all = this.records.sources(p.workspaceId).filter(value => value.state !== "detached").map(projectSource);
-        const offset = this.detailOffset(p, workspace.configRevision, all.length), sources = all.slice(offset, offset + p.limit);
-        const response = () => ({ sources, nextCursor: offset + sources.length < all.length ? `${workspace.configRevision}:${offset + sources.length}` : null });
+        const { offset, cursor } = this.detailPage(p, p.workspaceId, "sources", workspace.configRevision, all), sources = all.slice(offset, offset + p.limit);
+        const response = () => ({ sources, nextCursor: cursor(offset + sources.length) });
         while (Buffer.byteLength(JSON.stringify(response()), "utf8") > RESPONSE_BUDGET) {
           sources.pop(); if (!sources.length) throw new CoworkError("response_too_large");
         }
@@ -182,9 +202,9 @@ export class CoworkWorkspaceService {
         assertRemoteMayUseWorkspace(this.records, this.authority, principal, p.workspaceId);
         const policy = this.records.policy(p.workspaceId);
         const entries = (["toolClasses", "hostServices", "connectors"] as const).flatMap(kind => policy.ceiling[kind].map(name => ({ kind, name })));
-        const offset = this.detailOffset(p, policy.revision, entries.length);
+        const { offset, cursor } = this.detailPage(p, p.workspaceId, "policy", policy.revision, entries);
         const page = entries.slice(offset, offset + p.limit), end = offset + page.length;
-        return { policy: this.policySummary(p.workspaceId), entries: page, nextCursor: end < entries.length ? `${policy.revision}:${end}` : null };
+        return { policy: this.policySummary(p.workspaceId), entries: page, nextCursor: cursor(end) };
       }
       case "workspace.source.addFolder": case "workspace.source.addRepository": {
         const p = COWORK_RPC[method].params.parse(raw);
@@ -205,14 +225,16 @@ export class CoworkWorkspaceService {
         const p = COWORK_RPC[method].params.parse(raw);
         const workspaceId = "workspaceId" in p ? p.workspaceId : this.records.project(p.projectId).workspaceId;
         assertRemoteMayUseWorkspace(this.records, this.authority, principal, workspaceId, "admin");
-        if ("ceiling" in p) {
+        const current = this.records.policy(workspaceId).ceiling;
+        const narrowsCeiling = "ceiling" in p && JSON.stringify(intersectCeilings(p.ceiling, current)) === JSON.stringify(intersectCeilings(p.ceiling, p.ceiling));
+        if ("ceiling" in p && !narrowsCeiling) {
           const allowed = this.host.creationCeiling(principal);
           if (!allowed || JSON.stringify(intersectCeilings(p.ceiling, allowed)) !== JSON.stringify(intersectCeilings(p.ceiling, p.ceiling))) throw new CoworkError("authority_denied");
         }
         const change = "defaultPolicy" in p ? { defaultPolicy: p.defaultPolicy } : "ceiling" in p ? { ceiling: p.ceiling } : { publication: p.publication };
-        const current = this.records.policy(workspaceId).ceiling;
-        const narrowsCeiling = "ceiling" in p && JSON.stringify(intersectCeilings(p.ceiling, current)) === JSON.stringify(intersectCeilings(p.ceiling, p.ceiling));
-        return this.records.updatePolicy(this.context(principal, method, p, narrowsCeiling), workspaceId, change);
+        const narrowsPublication = "publication" in p && p.publication === "manual";
+        const receipt = this.records.updatePolicy(this.context(principal, method, p, narrowsCeiling || narrowsPublication), workspaceId, change);
+        return projectPolicyReceipt(receipt);
       }
       case "workspace.operation.get": {
         const p = COWORK_RPC[method].params.parse(raw);
