@@ -1956,6 +1956,7 @@ export class BrowserEngine {
         scope.builder.text(`the site's tool failed (${out.name})${out.message.length === 0 ? "" : `: ${out.message}`}`, { screen: true });
         throw new Error("the site's tool failed — what it said is printed above");
       case "stopped":
+        if (out.why === "cancel") throw new AutomationFailure("Cancelled", "the run was cancelled — the site's tool was asked to stop");
         throw new AutomationFailure("WaitTimeout", `the site's tool did not answer within ${timeoutMs < 10_000 ? (timeoutMs / 1000).toFixed(1) : Math.round(timeoutMs / 1000)} s — it was asked to stop${out.settled ? "" : ", and may still finish on its own"}; check the page (state()) before calling it again`);
       case "navigated":
         scope.builder.daemonLine("the site's tool navigated the page — every earlier ref is stale; call state()");

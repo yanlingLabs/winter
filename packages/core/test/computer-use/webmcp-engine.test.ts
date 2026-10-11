@@ -218,6 +218,15 @@ describe("tab.callTool()", () => {
     await new Promise((res) => setTimeout(res, 50));
     expect(aborted).toBe(2);
     r.end();
+    // Even where the run's own liveness check would not throw first, a cancel reads as Cancelled, never a timeout.
+    const second = await opened("winter", { mc: new FakeModelContext().add({ name: "slow", description: "x" }, slow) });
+    (second.r.scope as { live: () => void }).live = () => {};
+    const pending2 = second.p("callTool", { name: "slow" });
+    await new Promise((res) => setTimeout(res, 50));
+    second.r.abort.abort();
+    const c = await failure(pending2);
+    expect((c as AutomationFailure).kind).toBe("Cancelled");
+    second.r.end();
   });
 
   test("a tool that navigates the page: a daemon line, null, and the earlier refs stale", async () => {
