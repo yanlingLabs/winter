@@ -7,7 +7,7 @@
 // settings watcher swaps the holder (the `connector-source.ts` `noteWritten` pattern) — the very next call sees it.
 import { PanelOpenTabParams, type NewSessionEvent, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { ApprovalBroker } from "../agent/approvals";
-import { sessionTmpDir } from "../agent/session-tmp";
+import { sessionTmpDir, sessionTmpDirPath } from "../agent/session-tmp";
 import { mintPanelTab } from "../panel/open-tab";
 import { foldPanelTabs } from "../panel/store";
 import { sandboxConfigFor } from "../runtime-sdk/mode-options";
@@ -16,12 +16,12 @@ import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
 import { isHumanTurnOrigin, runningTurnOrigin } from "../sessions/turn-origins";
 import {
-  computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseEnabledFrom, computerUseLegacyComputerFrom, computerUseMirrorFrom,
-  computerUsePrivateEventPathFrom, computerUseScreenshotMaxDimFrom, loadSettings, saveSettings, setComputerUseApp, setComputerUseFlags,
-  type ComputerUseAccess, type Settings,
+  computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseEnabledFrom, computerUseHeadlessEnabledFrom, computerUseLegacyComputerFrom,
+  computerUseMirrorFrom, computerUsePrivateEventPathFrom, computerUseScreenshotMaxDimFrom, computerUseWebMcpFrom, loadSettings, saveSettings,
+  setComputerUseApp, setComputerUseFlags, type ComputerUseAccess, type ComputerUseFlagsPatch, type Settings,
 } from "../settings";
 import { AppAdapters, type AppAdapter } from "./adapters";
-import { systemAppResolver } from "./app-resolve";
+import { installedBrowser, systemAppResolver } from "./app-resolve";
 import { BrowserLink } from "./browser/cef-link/rpc";
 import { BrowserEngine } from "./browser/engine";
 import { BrowserBackendRegistry } from "./browser/registry";
@@ -81,6 +81,10 @@ export interface ComputerUseStatus {
   legacyComputer: boolean;
   mirror: boolean;
   privateEventPath: boolean;
+  /** Phase 4: `computerUse.headless.enabled` (default true). */
+  headlessEnabled: boolean;
+  /** Phase 4: `computerUse.webmcp` (default true). */
+  webmcp: boolean;
   helper: { installed: boolean; running: boolean; version?: string; permissions?: HelperPermissions };
   /** Phase 2: the browsers ComputerV2 can drive (the built-in one, and every user's browser connected or installed). */
   browsers?: Array<{ id: string; name: string; connected: boolean; reason?: string }>;
@@ -105,7 +109,7 @@ export interface ComputerUseControl {
   requestPermission(kind: "accessibility" | "screenRecording"): Promise<void>;
   appsList(): ComputerUseAppRow[];
   appsSet(p: { bundleId: string; name?: string; access?: ComputerUseAccess | null; grant?: "always" | null }): void;
-  setSettings(p: { enabled?: boolean; mirror?: boolean; privateEventPath?: boolean; allowAllApps?: boolean }): void;
+  setSettings(p: ComputerUseFlagsPatch): void;
 }
 
 export interface ComputerUseRuntime {
@@ -254,8 +258,14 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     },
     home: deps.home,
     uploadRoots: (sessionId, cwd) => ({ tmpDir: sessionTmpDir(sessionId), denyRead: sandboxConfigFor(deps.home, cwd).filesystem?.denyRead ?? [] }),
+    downloadRoots: (sessionId, cwd) => {
+      const sandbox = sandboxConfigFor(deps.home, cwd).filesystem;
+      return { tmpDir: sessionTmpDirPath(sessionId), denyWrite: sandbox?.denyWrite ?? [], denyRead: sandbox?.denyRead ?? [] };
+    },
     screenshotMaxDim: () => computerUseScreenshotMaxDimFrom(settings()),
-    installed: deps.inject?.browserInstalled ?? ((bundleId) => systemAppResolver.fromBundleId(bundleId) !== undefined),
+    // A real install only: a copy in the Trash, a cache (Playwright's Chrome for Testing), a translocated or temp copy
+    // does not make a browser "installed" for browsers.list().
+    installed: deps.inject?.browserInstalled ?? ((bundleId) => installedBrowser(bundleId)),
     persistentlyAllowed: (sessionId, bundleId) => policy.persistentlyAllowed(sessionId, bundleId),
     stopScript: (sessionId, reason) => service?.stopScript(sessionId, reason),
     ...(deps.turnRunning === undefined ? {} : { turnRunning: deps.turnRunning }),
@@ -286,6 +296,8 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
         legacyComputer: computerUseLegacyComputerFrom(s),
         mirror: computerUseMirrorFrom(s),
         privateEventPath: computerUsePrivateEventPathFrom(s),
+        headlessEnabled: computerUseHeadlessEnabledFrom(s),
+        webmcp: computerUseWebMcpFrom(s),
         helper: helperStatus,
         browsers: browsers.listRows().map((r) => ({ id: r.id, name: r.name, connected: r.connected, ...(r.reason === undefined ? {} : { reason: r.reason }) })),
       };

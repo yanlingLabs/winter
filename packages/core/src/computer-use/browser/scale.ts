@@ -54,7 +54,7 @@ export function imageSize(base64: string): { width: number; height: number } | u
 }
 
 /** One screenshot's frame: its image size and the viewport rectangle (CSS px) it shows. */
-export interface ShotFrame { width: number; height: number; css: CssRect }
+export interface ShotFrame { width: number; height: number; css: CssRect; /** a full-page shot: for looking only */ fullPage?: true }
 
 /** An image pixel → CSS px of the viewport. */
 export function toCss(shot: ShotFrame, x: number, y: number): { x: number; y: number } {

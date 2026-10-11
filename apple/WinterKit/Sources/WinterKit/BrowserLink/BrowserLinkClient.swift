@@ -39,9 +39,16 @@ public struct BrowserLinkReplier: Sendable {
 /// other and with replies exactly as they are made (one queue), and are dropped when no link is up.
 public protocol BrowserLinkOutput: AnyObject, Sendable {
     /// One CDP event for the daemon. `params` is the event's JSON params as the browser wrote them;
-    /// `stripNetworkParams` cuts them to `CDPAllowlist.networkEventParams` before they leave.
+    /// `stripNetworkParams` reduces them by `CDPEventReducer` (`CDPAllowlist.eventParams`) before they leave.
     func emitEvent(tabId: String, method: String, params: Data, cdpSessionId: String?, stripNetworkParams: Bool)
     func tabGone(tabId: String, reason: BrowserLinkProtocol.TabGoneReason)
+    /// Phase 3: one download the tab's own handler reported (`browserLink.download`) — `download` is the
+    /// `TransportDownload` object (id, state, name, url?, path?, bytes, totalBytes?, mime?, error?).
+    func download(tabId: String, download: JSONValue)
+}
+
+public extension BrowserLinkOutput {
+    func download(tabId: String, download: JSONValue) {}
 }
 
 public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
@@ -130,6 +137,11 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
     public func tabGone(tabId: String, reason: BrowserLinkProtocol.TabGoneReason) {
         guard let linkId else { return }
         outbox.push(.tabGone(linkId: linkId, tabId: tabId, reason: reason.rawValue))
+    }
+
+    public func download(tabId: String, download: JSONValue) {
+        guard let linkId else { return }
+        outbox.push(.download(linkId: linkId, tabId: tabId, download: download))
     }
 
     private func replier(linkId: String, cmdId: String) -> BrowserLinkReplier {
@@ -337,7 +349,7 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
             let event = queued.event
             var params = (try? JSONDecoder().decode(JSONValue.self, from: event.params)) ?? .object([:])
             if case .object = params {} else { params = .object([:]) }
-            if event.strip { params = CDPTabGate.strippedNetworkParams(params) }
+            if event.strip { params = CDPTabGate.reducedParams(method: event.method, params: params) }
             params = BrowserLinkEventLimits.truncatingLongStrings(params, maxBytes: configuration.eventStringMaxBytes)
             var entry: [String: JSONValue] = ["tabId": .string(event.tabId), "method": .string(event.method), "params": params]
             if let session = event.cdpSessionId { entry["cdpSessionId"] = .string(session) }
@@ -389,6 +401,10 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
             guard itemLink == linkId else { return }
             await request(client, BrowserLinkProtocol.Method.tabGone,
                           ["linkId": .string(linkId), "tabId": .string(tabId), "reason": .string(reason)])
+        case .download(let itemLink, let tabId, let download):
+            guard itemLink == linkId else { return }
+            await request(client, BrowserLinkProtocol.Method.download,
+                          ["linkId": .string(linkId), "tabId": .string(tabId), "download": download])
         case .event:
             break // events leave in batches, above
         }
@@ -514,6 +530,7 @@ final class BrowserLinkOutbox: @unchecked Sendable {
         case result(linkId: String, cmdId: String, reply: BrowserLinkReply)
         case event(linkId: String, event: PendingEvent, at: ContinuousClock.Instant)
         case tabGone(linkId: String, tabId: String, reason: String)
+        case download(linkId: String, tabId: String, download: JSONValue)
     }
 
     private let lock = NSLock()

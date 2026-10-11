@@ -13,6 +13,10 @@ describe("computerV2Label for browser tabs", () => {
     expect(computerV2Label(args({ code: "await browsers.open(\"http://localhost:3000/\", { browser: 'chrome' }); await apps.open('Notes'); await t.goto(u); await t.text();" })))
       .toBe("localhost:3000, Notes · goto, text");
   });
+  test("Phase 3's tab members are verbs too", () => {
+    expect(computerV2Label(args({ code: "await tab.console(); await tab.networkBody('r1'); await tab.download(4); await tab.waitForUser('sign in'); await tab.viewport(null);" })))
+      .toBe("console, networkBody, download, waitForUser, viewport");
+  });
   test("an interpolated or unparsable URL names no site", () => {
     expect(computerV2Label(args({ code: "await browsers.open(`https://${host}/`); await tab.upload(4, 'a.pdf');" }))).toBe("upload");
   });

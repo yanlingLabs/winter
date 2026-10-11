@@ -59,3 +59,27 @@ export function redactUrl(url: string): string {
   if (fragment.includes("=")) fragment = redactPairs(fragment);
   return redactText(fragment.length > 0 || hash >= 0 ? `${base}#${fragment}` : base);
 }
+
+/** Attributes whose value is a URL (or, for the srcset pair and `ping`, a list of them). A sign-in redirect, a
+ *  password-reset link or a signed asset carries its credential in the query or the fragment (`?code=`,
+ *  `#access_token=`), which only `redactUrl` takes out — `redactText` sees just token-shaped runs. */
+const URL_ATTRS = new Set(["href", "src", "action", "formaction", "poster", "data", "cite", "background", "longdesc", "manifest", "codebase", "xlink:href", "ping", "srcset", "imagesrcset"]);
+/** Any other value shaped like a URL with a query or a fragment (`data-url`, the `content` of an `og:url`, …). */
+const URLISH = /^(?:[a-z][a-z0-9+.-]*:|\/|\.{1,2}\/|\?)[^\s]*[?#]/i;
+
+export function looksLikeUrl(value: string): boolean { return URLISH.test(value.trim()); }
+
+/** An attribute's value with its URL(s) redacted, or undefined when the attribute does not hold a URL. */
+export function redactUrlAttribute(name: string, value: string): string | undefined {
+  const lname = name.toLowerCase();
+  if (!URL_ATTRS.has(lname) && !looksLikeUrl(value)) return undefined;
+  if (lname === "srcset" || lname === "imagesrcset") {
+    return value.split(",").map((c) => {
+      const t = c.trim();
+      const sp = t.search(/\s/);
+      return sp < 0 ? redactUrl(t) : `${redactUrl(t.slice(0, sp))}${t.slice(sp)}`;
+    }).join(", ");
+  }
+  if (lname === "ping") return value.split(/\s+/).filter((u) => u.length > 0).map(redactUrl).join(" ");
+  return redactUrl(value.trim());
+}

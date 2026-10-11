@@ -222,6 +222,22 @@ final class ComputerUseSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.actionError, "couldn't change Allow all apps — boom")
     }
 
+    func testPhase4SwitchesWriteOnlyTheirKeyAndReadTheDaemonBack() async {
+        let client = Fake()
+        client.statusResults = [.success(Fake.status(headlessEnabled: true, webmcp: true)),
+                                .success(Fake.status(headlessEnabled: false, webmcp: true)),
+                                .success(Fake.status(headlessEnabled: false, webmcp: false))]
+        let model = await loaded(client)
+        XCTAssertEqual(model.status?.headlessEnabled, true)
+
+        await model.setHeadlessEnabled(false)
+        await model.setWebMcp(false)
+        XCTAssertEqual(client.setSettingsCalls, [ComputerUseSettingsPatch(headlessEnabled: false), ComputerUseSettingsPatch(webmcp: false)])
+        XCTAssertEqual(model.status?.headlessEnabled, false)
+        XCTAssertEqual(model.status?.webmcp, false)
+        XCTAssertNil(model.actionError)
+    }
+
     func testTheCaptionFollowsTheSwitch() {
         XCTAssertEqual(computerUseAllowAllAppsCaption(true), "Computer Use may act in any app, except the ones below.")
         XCTAssertEqual(computerUseAllowAllAppsCaption(false), "Computer Use may only use the apps below.")

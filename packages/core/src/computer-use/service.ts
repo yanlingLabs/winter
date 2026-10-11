@@ -246,6 +246,10 @@ interface RunCtx {
   /** Phase 2, for the audit line: the sites (hosts only) and browser backends this run touched. */
   sites?: Set<string>;
   browsers?: Set<string>;
+  /** download() files saved this run (a count, for the audit line). */
+  downloads?: number;
+  /** waitForUser() hand-offs asked for this run (a count, for the audit line). */
+  handoffs?: number;
   /** Phase 2: browser-tab primitives still running (the run's tab locks wait for them at its end). */
   tabWork?: Set<Promise<unknown>>;
 }
@@ -454,6 +458,7 @@ export class ComputerV2Service {
       kind: "automation", sessionId, apps: [...ctx.apps], primitives: Object.fromEntries(ctx.primitives),
       durationMs: this.now() - started, outcome: outcomeWord, ...(ctx.visitsClaimed > 0 ? { desktopVisits: ctx.visitsClaimed } : {}),
       ...(ctx.sites === undefined ? {} : { sites: [...ctx.sites] }), ...(ctx.browsers === undefined ? {} : { browsers: [...ctx.browsers] }),
+      ...(ctx.downloads === undefined ? {} : { downloads: ctx.downloads }), ...(ctx.handoffs === undefined ? {} : { handoffs: ctx.handoffs }),
     });
     return builder.build(error === undefined ? {} : { error });
   }
@@ -845,6 +850,8 @@ export class ComputerV2Service {
     if (typeof q === "string" && q.length > 0) query = q;
     else if (q !== null && typeof q === "object" && !Array.isArray(q)) {
       const o = q as Record<string, unknown>;
+      const tabOnly = ["label", "placeholder", "testId", "css"].filter((k) => o[k] !== undefined);
+      if (tabOnly.length > 0) throw bad(`find()'s ${tabOnly.join(", ")} ${tabOnly.length === 1 ? "is" : "are"} for browser tabs — an app takes { role, name, text }`);
       query = Object.fromEntries(["role", "name", "text"].filter((k) => typeof o[k] === "string").map((k) => [k, o[k] as string]));
       if (Object.keys(query).length === 0) throw bad("find() takes text, or { role, name, text }");
     } else throw bad("find() takes text, or { role, name, text }");
@@ -1472,6 +1479,8 @@ export class ComputerV2Service {
       sessionPolicy: () => this.deps.policy.sessionFacts(ctx.sessionId).policy,
       sessionFacts: () => this.deps.policy.sessionFacts(ctx.sessionId),
       siteCard: (summary) => this.deps.policy.siteCard(ctx.grants, summary, ctx.abort.signal),
+      userCard: (summary, options, timeoutMs, onIssued) => this.deps.policy.userCard(ctx.grants, summary, options, timeoutMs, ctx.abort.signal, onIssued),
+      noteHandoff: () => { ctx.handoffs = (ctx.handoffs ?? 0) + 1; },
       persistentlyAllowed: (bundleId) => this.deps.policy.persistentlyAllowed(ctx.sessionId, bundleId),
       granted: (bundleId) => this.deps.policy.persistentlyAllowed(ctx.sessionId, bundleId) || ctx.grants.once.has(bundleId),
       builder: ctx.builder,
@@ -1482,6 +1491,7 @@ export class ComputerV2Service {
       metric,
       noteSite: (host) => { (ctx.sites ??= new Set()).add(host); },
       noteBrowser: (id) => { (ctx.browsers ??= new Set()).add(id); },
+      noteDownload: () => { ctx.downloads = (ctx.downloads ?? 0) + 1; },
       trusted: (sentence) => { ctx.daemonSentences.add(sentence); },
     };
   }

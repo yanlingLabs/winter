@@ -30,12 +30,14 @@ final class ComputerUseClientTests: XCTestCase {
         let live = LiveComputerUseClient(client: client)
         let result = #"""
         {"enabled":true,"legacyComputer":false,"mirror":true,"privateEventPath":false,"allowAllApps":false,
+         "headlessEnabled":false,"webmcp":true,
          "helper":{"installed":true,"running":true,"version":"0.1.0","permissions":{"accessibility":true,"screenRecording":false}}}
         """#.replacingOccurrences(of: "\n", with: "")
         let (req, status) = try await roundTrip(t, sentIndex: 1, result: result) { try await live.status() }
         XCTAssertEqual(req["method"] as? String, "computerUse.status")
         XCTAssertEqual(status, ComputerUseStatus(
             enabled: true, legacyComputer: false, mirror: true, privateEventPath: false, allowAllApps: false,
+            headlessEnabled: false, webmcp: true,
             helper: ComputerUseHelperStatus(installed: true, running: true, version: "0.1.0",
                                             permissions: ComputerUsePermissions(accessibility: true, screenRecording: false))))
     }
@@ -52,6 +54,8 @@ final class ComputerUseClientTests: XCTestCase {
         XCTAssertEqual(status.helper, ComputerUseHelperStatus(installed: false, running: false))
         XCTAssertNil(status.helper.permissions)
         XCTAssertTrue(status.allowAllApps, "a daemon that predates the master switch reads as on, the default")
+        XCTAssertNil(status.headlessEnabled, "a daemon that predates Phase 4 reports no headless switch, so the page shows none")
+        XCTAssertNil(status.webmcp)
     }
 
     /// An incompatible helper: running, with the daemon's sentence (apple/ComputerUse/PROTOCOL.md, "Compatibility").
@@ -250,6 +254,11 @@ final class ComputerUseClientTests: XCTestCase {
             try await live.setSettings(ComputerUseSettingsPatch(allowAllApps: false))
         }
         XCTAssertEqual(r3["params"] as? [String: Bool], ["allowAllApps": false])
+
+        let (r4, _) = try await roundTrip(t, sentIndex: 4, result: #"{"ok":true}"#) {
+            try await live.setSettings(ComputerUseSettingsPatch(headlessEnabled: false, webmcp: true))
+        }
+        XCTAssertEqual(r4["params"] as? [String: Bool], ["headlessEnabled": false, "webmcp": true])
     }
 
     func testApplyingAPatchReplacesOnlyItsKeys() {
@@ -261,11 +270,19 @@ final class ComputerUseClientTests: XCTestCase {
         XCTAssertFalse(status.applying(ComputerUseSettingsPatch(allowAllApps: false)).allowAllApps)
         XCTAssertTrue(status.allowAllApps, "the default is on")
         XCTAssertEqual(status.applying(ComputerUseSettingsPatch()), status)
+        let phase4 = ComputerUseStatus(enabled: true, legacyComputer: false, mirror: true, privateEventPath: true,
+                                       headlessEnabled: true, webmcp: true,
+                                       helper: ComputerUseHelperStatus(installed: true, running: false))
+        XCTAssertEqual(phase4.applying(ComputerUseSettingsPatch(headlessEnabled: false)).headlessEnabled, false)
+        XCTAssertEqual(phase4.applying(ComputerUseSettingsPatch(headlessEnabled: false)).webmcp, true)
+        XCTAssertEqual(phase4.applying(ComputerUseSettingsPatch(webmcp: false)).webmcp, false)
     }
 
     func testAnEmptyPatchSaysSo() {
         XCTAssertTrue(ComputerUseSettingsPatch().isEmpty)
         XCTAssertFalse(ComputerUseSettingsPatch(enabled: false).isEmpty)
         XCTAssertFalse(ComputerUseSettingsPatch(allowAllApps: true).isEmpty)
+        XCTAssertFalse(ComputerUseSettingsPatch(headlessEnabled: true).isEmpty)
+        XCTAssertFalse(ComputerUseSettingsPatch(webmcp: false).isEmpty)
     }
 }

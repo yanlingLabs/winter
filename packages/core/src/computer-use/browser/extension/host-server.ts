@@ -288,8 +288,10 @@ export class BrowserHostServer {
       previous.phase = "closing";
       previous.end();
     }
+    const features = Array.isArray(params.features) ? params.features.filter((x): x is string => typeof x === "string").slice(0, 64) : [];
     const transport = new ExtensionTransport({
       family: host.app.family,
+      features,
       write: (message) => conn.phase !== "closing" && conn.writer.enqueue(encodeLine(message)),
       ...(this.opts.transportTimeouts === undefined ? {} : { timeouts: this.opts.transportTimeouts }),
       ...(this.opts.log === undefined ? {} : { log: this.opts.log }),

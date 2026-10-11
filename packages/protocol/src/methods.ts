@@ -455,6 +455,10 @@ export const ComputerUseStatusResult = z.object({
   legacyComputer: z.boolean(),
   mirror: z.boolean(),
   privateEventPath: z.boolean(),
+  /** Phase 4: Winter's headless browser is offered (`computerUse.headless.enabled`, default true). */
+  headlessEnabled: z.boolean(),
+  /** Phase 4: sites' own agent tools (WebMCP) are discovered and callable (`computerUse.webmcp`, default true). */
+  webmcp: z.boolean(),
   helper: z.object({
     installed: z.boolean(),
     running: z.boolean(),
@@ -482,7 +486,8 @@ export const ComputerUseStatusResult = z.object({
  *  App → daemon (requests): `browserLink.attach` (a second attach replaces the first; the older link is told
  *  `browserLink.detached`), `browserLink.result` (one per command; an unknown or late `cmdId` is dropped and still
  *  answered `{}`), `browserLink.events` (≤ 256 per batch, only subscribed allowlisted events, Network params stripped),
- *  `browserLink.tabGone`. Daemon → app (notifications, no id): `browserLink.command`, `browserLink.detached`. */
+ *  `browserLink.tabGone`, and (protocol 2) `browserLink.download`. Daemon → app (notifications, no id):
+ *  `browserLink.command`, `browserLink.detached`. */
 export const BrowserLinkAttachParams = z.object({ protocol: z.number().int(), appVersion: z.string().max(64), pid: z.number().int() });
 export const BrowserLinkAttachResult = z.object({ linkId: z.string(), protocol: z.number().int() });
 export const BrowserLinkResultParams = z.union([
@@ -501,8 +506,26 @@ export const BrowserLinkEventsParams = z.object({
   })).max(BROWSER_LINK_EVENTS_MAX),
 });
 export const BrowserLinkTabGoneParams = z.object({ linkId: z.string().min(1), tabId: z.string().min(1).max(256), reason: z.enum(["closed", "crashed", "stopped"]) });
+/** Protocol 2 (ComputerV2 Phase 3): one download a held tab's own handler reported — saved for an armed tab (into the
+ *  daemon's staging folder) or refused for an unarmed one (`TransportDownload`). */
+export const BrowserLinkDownloadParams = z.object({
+  linkId: z.string().min(1),
+  tabId: z.string().min(1).max(256),
+  download: z.object({
+    id: z.string().min(1).max(128),
+    state: z.enum(["started", "progress", "done", "failed", "refused"]),
+    name: z.string().max(1_024),
+    url: z.string().max(8_192).optional(),
+    path: z.string().max(4_096).optional(),
+    bytes: z.number().int().min(0),
+    totalBytes: z.number().int().min(0).optional(),
+    mime: z.string().max(256).optional(),
+    error: z.string().max(1_024).optional(),
+  }),
+});
 export const BrowserLinkAckResult = z.object({});
-/** Daemon → app notifications. `op`: tab.ensure, tab.release, tab.close, tabs.live, cdp.send, cdp.subscribe, overlay. */
+/** Daemon → app notifications. `op`: tab.ensure, tab.release, tab.close, tabs.live, cdp.send, cdp.subscribe, overlay;
+ *  protocol 2: tab.present, tab.mute, tab.downloads, tab.download. */
 export const BrowserLinkCommandNotification = z.object({ linkId: z.string(), cmdId: z.string(), op: z.string(), params: z.record(z.string(), z.unknown()) });
 export const BrowserLinkDetachedNotification = z.object({ linkId: z.string(), reason: z.literal("replaced") });
 
@@ -541,6 +564,8 @@ export const ComputerUseSetSettingsParams = z.object({
   allowAllApps: z.boolean().optional(),
   mirror: z.boolean().optional(),
   privateEventPath: z.boolean().optional(),
+  headlessEnabled: z.boolean().optional(),
+  webmcp: z.boolean().optional(),
 });
 export const ComputerUseSetSettingsResult = z.object({ ok: z.literal(true) });
 
@@ -3220,6 +3245,7 @@ export const METHODS = {
   browserLinkResult: "browserLink.result",
   browserLinkEvents: "browserLink.events",
   browserLinkTabGone: "browserLink.tabGone",
+  browserLinkDownload: "browserLink.download",
   browserLinkCommand: "browserLink.command",
   browserLinkDetached: "browserLink.detached",
   sessionStageImage: "session.stageImage",

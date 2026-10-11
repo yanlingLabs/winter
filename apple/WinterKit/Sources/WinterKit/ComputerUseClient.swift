@@ -14,7 +14,7 @@ import Foundation
 // keeps.
 //
 // **`computerUse.setSettings` is PROPOSED, not pinned.** The booleans the page toggles (`enabled`,
-// `mirror`, `privateEventPath`, `allowAllApps`) have no write door on the wire today: the app writes no
+// `mirror`, `privateEventPath`, `allowAllApps`, and Phase 4's `headlessEnabled` and `webmcp`) have no write door on the wire today: the app writes no
 // `settings.json` key directly (the advisor model's direct write was retired for racing the daemon's
 // watcher), and every other settings write is a purpose-specific RPC. `setSettings` is that RPC for this
 // page — a partial patch, absent keys untouched — and `LiveComputerUseClient` sends it by that name. A
@@ -119,6 +119,12 @@ public struct ComputerUseStatus: Codable, Equatable, Sendable {
     /// The master switch: Computer Use may act in any app except the exceptions (on, the default), or
     /// only in the apps the exceptions list names (off). A daemon that predates the key reads as on.
     public let allowAllApps: Bool
+    /// Phase 4: Winter's headless browser is offered (`computerUse.headless.enabled`). `nil` from a daemon that
+    /// predates it — the page then shows no switch for it (copy names only what exists).
+    public let headlessEnabled: Bool?
+    /// Phase 4: sites' own agent tools (WebMCP) are discovered and callable (`computerUse.webmcp`). `nil` from a
+    /// daemon that predates it.
+    public let webmcp: Bool?
     public let helper: ComputerUseHelperStatus
     /// The browsers ComputerV2 can drive (see `ComputerUseBrowserStatus`). `nil` from a daemon that
     /// predates browsers — and from one whose list this build cannot read, which is never a reason to
@@ -126,13 +132,15 @@ public struct ComputerUseStatus: Codable, Equatable, Sendable {
     public let browsers: [ComputerUseBrowserStatus]?
 
     public init(enabled: Bool, legacyComputer: Bool, mirror: Bool, privateEventPath: Bool,
-                allowAllApps: Bool = true, helper: ComputerUseHelperStatus,
-                browsers: [ComputerUseBrowserStatus]? = nil) {
+                allowAllApps: Bool = true, headlessEnabled: Bool? = nil, webmcp: Bool? = nil,
+                helper: ComputerUseHelperStatus, browsers: [ComputerUseBrowserStatus]? = nil) {
         self.enabled = enabled
         self.legacyComputer = legacyComputer
         self.mirror = mirror
         self.privateEventPath = privateEventPath
         self.allowAllApps = allowAllApps
+        self.headlessEnabled = headlessEnabled
+        self.webmcp = webmcp
         self.helper = helper
         self.browsers = browsers
     }
@@ -144,6 +152,8 @@ public struct ComputerUseStatus: Codable, Equatable, Sendable {
         mirror = try c.decode(Bool.self, forKey: .mirror)
         privateEventPath = try c.decode(Bool.self, forKey: .privateEventPath)
         allowAllApps = try c.decodeIfPresent(Bool.self, forKey: .allowAllApps) ?? true
+        headlessEnabled = try c.decodeIfPresent(Bool.self, forKey: .headlessEnabled)
+        webmcp = try c.decodeIfPresent(Bool.self, forKey: .webmcp)
         helper = try c.decode(ComputerUseHelperStatus.self, forKey: .helper)
         browsers = (try? c.decodeIfPresent([ComputerUseBrowserStatus].self, forKey: .browsers)) ?? nil
     }
@@ -152,7 +162,9 @@ public struct ComputerUseStatus: Codable, Equatable, Sendable {
     public func applying(_ patch: ComputerUseSettingsPatch) -> ComputerUseStatus {
         ComputerUseStatus(enabled: patch.enabled ?? enabled, legacyComputer: legacyComputer,
                           mirror: patch.mirror ?? mirror, privateEventPath: patch.privateEventPath ?? privateEventPath,
-                          allowAllApps: patch.allowAllApps ?? allowAllApps, helper: helper, browsers: browsers)
+                          allowAllApps: patch.allowAllApps ?? allowAllApps,
+                          headlessEnabled: patch.headlessEnabled ?? headlessEnabled, webmcp: patch.webmcp ?? webmcp,
+                          helper: helper, browsers: browsers)
     }
 }
 
@@ -227,15 +239,22 @@ public struct ComputerUseSettingsPatch: Codable, Equatable, Sendable {
     public var mirror: Bool?
     public var privateEventPath: Bool?
     public var allowAllApps: Bool?
+    public var headlessEnabled: Bool?
+    public var webmcp: Bool?
 
-    public init(enabled: Bool? = nil, mirror: Bool? = nil, privateEventPath: Bool? = nil, allowAllApps: Bool? = nil) {
+    public init(enabled: Bool? = nil, mirror: Bool? = nil, privateEventPath: Bool? = nil, allowAllApps: Bool? = nil,
+                headlessEnabled: Bool? = nil, webmcp: Bool? = nil) {
         self.enabled = enabled
         self.mirror = mirror
         self.privateEventPath = privateEventPath
         self.allowAllApps = allowAllApps
+        self.headlessEnabled = headlessEnabled
+        self.webmcp = webmcp
     }
 
-    public var isEmpty: Bool { enabled == nil && mirror == nil && privateEventPath == nil && allowAllApps == nil }
+    public var isEmpty: Bool {
+        enabled == nil && mirror == nil && privateEventPath == nil && allowAllApps == nil && headlessEnabled == nil && webmcp == nil
+    }
 }
 
 /// The app's seam onto the computer-use RPCs.
@@ -308,6 +327,8 @@ public final class LiveComputerUseClient: ComputerUseClient, Sendable {
         if let mirror = patch.mirror { params["mirror"] = .bool(mirror) }
         if let privateEventPath = patch.privateEventPath { params["privateEventPath"] = .bool(privateEventPath) }
         if let allowAllApps = patch.allowAllApps { params["allowAllApps"] = .bool(allowAllApps) }
+        if let headlessEnabled = patch.headlessEnabled { params["headlessEnabled"] = .bool(headlessEnabled) }
+        if let webmcp = patch.webmcp { params["webmcp"] = .bool(webmcp) }
         let r = try await client.request("computerUse.setSettings", params: .object(params))
         guard r["ok"]?.boolValue == true else {
             throw RpcError(code: -3, message: "computerUse.setSettings returned ok:false")

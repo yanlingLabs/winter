@@ -25,7 +25,7 @@ until they agree; keep the lines' exact format.
 
 | Piece | Where | Identity |
 | --- | --- | --- |
-| Extension | Chrome Web Store and Edge Add-ons (publisher yanlingLabs); the dev build unpacked | Store ids assigned at the first upload. Dev: `jikdcokcpbacalfeipkognejnlnobbbf`, fixed by the dev manifest's `key` (`extensions/winter-for-chrome/keys/dev.pub`, a public key) |
+| Extension | Chrome Web Store ("Winter for Chrome") and Edge Add-ons ("Winter for Edge", the same build under another name), publisher yanlingLabs; the dev build unpacked | The store ids (`ExtensionIds.dist`), each assigned by its store at the first upload. Dev: `jikdcokcpbacalfeipkognejnlnobbbf`, fixed by the dev manifest's `key` (`extensions/winter-for-chrome/keys/dev.pub`, a public key) |
 | Native host | `Winter Computer Use.app/Contents/MacOS/winter-browser-host` (the dist helper inside Winter.app, and the dev helper `bun run dev:helper` builds) | codesign identifier `com.winter.browserhost` / `com.winter.browserhost.dev`, Winter's team, hardened runtime, no entitlements, a **stated** designated requirement: `identifier "<id>" and anchor apple generic and certificate leaf[subject.OU] = "37N77U9RSZ"` |
 | Native-messaging host name | the host manifests (§8) | `com.winter.browser` (dist), `com.winter.browser.dev` (dev) |
 | Daemon endpoint | `<home>/run/browser.sock`, mode `0600`, created by the daemon at boot (a stale file unlinked first) | `winter-core` (dist) / `com.winter.core.dev` (dev), Winter's team |
@@ -33,7 +33,9 @@ until they agree; keep the lines' exact format.
 **The extension-id allowlist** is defined once per language and kept equal by the parity test: the daemon's
 `extension-ids.ts`, the host's `ExtensionIds.swift`, Winter.app's manifest writer
 (`apple/Winter/Sources/BrowserExtension/BrowserHostManifest.swift`), and the id the dev key derives. Dist holds the two
-store ids — none until the first upload, so until then the user's browsers stay "not connected" on dist.
+store ids, each assigned by its store at the first upload: Edge Add-ons' `bapmmpefcbjabfdfeehimdhldpjaoemd` and the
+Chrome Web Store's `flfkppajaamjgfmdljlklfdffkdcmicc` (one line in each list). A Release Winter.app allows exactly these in the dist
+host manifest it writes.
 
 **The host's home** comes from its enclosing app's bundle id: `com.winter.computeruse` → `~/.winter`,
 `com.winter.computeruse.dev` → `~/.winter-dev`. Anything else (a bare binary, another app) refuses to start unless it is
@@ -119,9 +121,9 @@ daemon. A first message that is not `host.hello` is answered `protocol_mismatch`
 | --- | --- |
 | chrome | `com.google.Chrome`, `.beta`, `.dev`, `.canary`; `com.google.chrome.for.testing` (matched case-insensitively, as everywhere here) |
 | edge | `com.microsoft.edgemac`, `.Beta`, `.Dev`, `.Canary` |
-| brave | `com.brave.Browser` |
-| vivaldi | `com.vivaldi.Vivaldi` |
-| opera | `com.operasoftware.Opera` |
+| brave | `com.brave.Browser`, `com.brave.Browser.beta`, `com.brave.Browser.nightly` |
+| vivaldi | `com.vivaldi.Vivaldi`, `com.vivaldi.Vivaldi.snapshot` |
+| opera | `com.operasoftware.Opera`, `com.operasoftware.OperaGX`, `com.operasoftware.OperaNext`, `com.operasoftware.OperaDeveloper` |
 | arc | `company.thebrowser.Browser` |
 | chromium | `org.chromium.Chromium` |
 
@@ -142,9 +144,17 @@ from the extension is answered by the host with `data.code: "disconnected"`; any
 On `host.status { daemon: "connected" }` the extension sends:
 
 ```ts
-"hello" { protocol: 1, extensionVersion: string, instanceId: string /* a UUID kept in chrome.storage.local */ }
+"hello" { protocol: 1, extensionVersion: string, instanceId: string /* a UUID kept in chrome.storage.local */, features?: string[] }
   → { protocol: 1, backend: { id: string, name: string } }      // id: "chrome", "chrome#2", "edge", …
 ```
+
+- **Features** (1.1.0, additive — the protocol stays 1): what this build can do beyond 1.0.0's requests. The daemon
+  offers a member only when its feature is named, so an older build answers "update Winter for Chrome" instead of an
+  unknown method. `cdp3` — its bundled allowlist is Phase 3's (without it the engine subscribes to 1.0.0's events only);
+  `present` (`tabs.present`); `userDone` (`user.done`); `mute`; `group` (`group.update`); `keepGroup` (`tabs.keep` with
+  `group`); `windows`; `history`; `bookmarks`; `downloads` (`downloads.arm`/`downloads.release`, `download`); `tabFacts`
+  (`Tab`'s `lastAccessed`, `group`, `windowId`). The daemon's list (`EXTENSION_FEATURES`) names every one it knows; a
+  repo test holds the extension's names to it.
 
 - **Mismatch:** `protocol_mismatch` `{ expected }`, message `"update Winter for Chrome"` (the extension is older) or
   `"update Winter"` (newer). The daemon lists the browser as not connected with the same advice; the extension shows it
@@ -165,7 +175,15 @@ On `host.status { daemon: "connected" }` the extension sends:
 | `tabs.list` | `{}` | `{ tabs: Tab[] }` — every tab of the browser profile, never a private window's |
 | `tabs.create` | `{ url, sessionId, sessionTitle }` | `{ tab: Tab }` — `chrome.tabs.create({ active: false })` in the session's group "Winter · <title>" (created in the window the user used last, never a private one); `url` is http(s) or `about:blank`. Grouping is best effort: the tab is Winter's, and returned, even if the group step fails |
 | `tabs.close` | `{ tabKey }` | `{}` — only an agent tab (`not_allowed` otherwise). The tab is ungrouped first (a group's last tab leaves no group, nor a saved group, behind), then DISCARDED (its page unloads with no `beforeunload`) and removed: a page's "leave this page?" prompt can neither be left as a native dialog nor bring anything forward — the browser brings a tab forward to show that prompt whatever raises it, a close or a navigation (measured on Chrome for Testing 156), and activates a neighbour once it is gone. Only a tab the browser will not discard (the active one, already in front) is closed with the debugger held and Page events on, accepting that agent tab's own prompt — never a user tab's, never outside a close. It answers once the tab is removed, or `timeout` if the page still holds out (10 s) |
-| `tabs.keep` | `{ tabKey }` | `{}` — hands an agent tab to the user for good: no longer an agent tab, out of its Winter group, never closed by Winter |
+| `tabs.keep` | `{ tabKey, group? }` | `{}` — hands an agent tab to the user for good: no longer an agent tab, out of its Winter group, never closed by Winter. With `group` (feature `keepGroup`): into the user's group of that name in its window (an existing one joined — never a Winter group — else a new one) |
+| `tabs.present` | `{ tabKey }` | `{}` — feature `present`, the sign-in hand-off, sent only after the user chose "Show me the tab" on Winter's card: the tab becomes its window's active one and the window is focused — the ONE place the extension moves the user's view (§7.2). The tab is marked waiting: the overlay's waiting pill, a "!" on the toolbar button, and Done / Stop waiting in the popup (`user.done`). The wait ends with Done or Stop waiting, `debugger.attach` of the tab, `overlay {active: false}` from Winter, or the tab closing |
+| `tabs.mute` | `{ tabKey, muted }` | `{}` — feature `mute`; only an agent tab (`not_allowed` otherwise) |
+| `group.update` | `{ sessionId, title?, color?, collapsed? }` | `{}` — feature `group`: the session's own Winter group; the title keeps its "Winter · " prefix; never folded while the user has one of its tabs in front (the browser would switch them away: `not_allowed`) |
+| `windows.list` | `{}` | `{ windows: [{ id, focused, tabs }] }` — feature `windows`; normal windows only, never a private one |
+| `history.search` | `{ text, startTime?, endTime?, maxResults }` | `{ items: [{ url, title, lastVisitTime }] }` — feature `history`, read only; web pages only; `not_allowed` with `data.permission: "history"` until the user grants the optional permission (§7.1) |
+| `bookmarks.search` | `{ text?, maxResults }` | `{ items: [{ url, title, folder }] }` — feature `bookmarks`, read only (no `text`: the most recent); folders and `javascript:`/`data:` bookmarks left out; `not_allowed` with `data.permission: "bookmarks"` until granted |
+| `downloads.arm` | `{ tabKey, subdir, until, maxBytes }` or `{ tabKey, subdir: null }` | `{}` — feature `downloads`: the tab's next download that its page made (its URL or final URL is one the tab's own debugger sessions — its frames' too — announced with `Page.downloadWillBegin` after the arm, and the browser created it after the arm; a same-site item that comes before that announcement is held, its name undecided, for at most 3 s) is named `<subdir>/<name>` in the browser's download folder (`subdir` is `Winter/<hex>`, the daemon's) and reported (`download`); past `maxBytes` or `until` it is cancelled. Every other download is answered at once and left as the browser would have it. `not_allowed` with `data.permission: "downloads"` until granted |
+| `downloads.release` | `{ id }` | `{}` — the daemon took the file: the item leaves the browser's downloads list (never the file itself) |
 | `debugger.attach` | `{ tabKey }` | `{ viewport: [w, h], dpr }` — idempotent; the CSS viewport and the device pixel ratio from `Page.getLayoutMetrics` |
 | `debugger.detach` | `{ tabKey }` | `{}` — idempotent; never closes the tab |
 | `cdp.send` | `{ tabKey, method, params, cdpSessionId? }` | `{ result }` — `cdpSessionId` addresses a flattened child target (an out-of-process iframe). A top-level `Page.navigate` / `Page.reload` / `Page.navigateToHistoryEntry` of a background agent tab whose page may ask "leave this page?" first DISCARDS the page, then runs as asked (§5.3) |
@@ -173,7 +191,8 @@ On `host.status { daemon: "connected" }` the extension sends:
 | `overlay` | `{ tabKey, active, cursor?: { x, y, kind } }` | `{}` — best effort (§7.4) |
 | `ping` | `{}` | `{}` |
 
-`Tab` is `{ tabKey, url, title, active, agent, sessionId? }`: `tabKey` the `chrome.tabs` id as a string; `agent` true for
+`Tab` is `{ tabKey, url, title, active, agent, sessionId?, lastAccessed?, group?, windowId? }` (the last three with
+`tabFacts`: when the tab was last in front, its group's title, its window): `tabKey` the `chrome.tabs` id as a string; `agent` true for
 a tab `tabs.create` opened, by tab id — Chrome's own pin (which takes a tab out of its group) or a drag changes nothing,
 only `tabs.keep` does; `sessionId` its Winter session. A tab the user drags into a Winter group stays the user's.
 
@@ -190,7 +209,9 @@ user's from then on.
 
 | Method | Params | When |
 | --- | --- | --- |
-| `cdp.event` | `{ tabKey, method, params, cdpSessionId? }` | a subscribed, allowlisted event of an attached tab; Network events carry only `requestId`, `timestamp`, `type` |
+| `cdp.event` | `{ tabKey, method, params, cdpSessionId? }` | a subscribed, allowlisted event of an attached tab, its params REDUCED by `cdp-reduce.ts` (`CDP_EVENT_PARAMS`: never headers, cookies, post data, initiators or page objects; strings cut at 4,096, arrays at 32; `Fetch.requestPaused`'s response headers only `content-type`, `content-disposition`, `content-length`). Before 1.1.0: Network events carried only `requestId`, `timestamp`, `type` |
+| `user.done` | `{ tabKey, done }` | feature `userDone`: the popup's Done (`true`) or Stop waiting (`false`) for a tab Winter handed to the user |
+| `download` | `{ tabKey, download: { id, state, name, url?, path?, bytes, totalBytes?, mime?, error? } }` | feature `downloads`: an armed tab's download `started`, `progress` (its bytes so far), `done` (the absolute `path`, and `url`: the http(s) address it came from after its redirects, which the daemon holds to its dangerous-domain floor before taking the file), or `failed` |
 | `tab.gone` | `{ tabKey, reason: "closed" \| "crashed" }` | the tab closed (once per tab), or its renderer crashed |
 | `debugger.detached` | `{ tabKey, reason: "canceled_by_user" \| "target_closed" \| "idle" }` | the user dismissed the browser's debugging bar; the page went where the debugger cannot follow; or 5 minutes without a command |
 | `stop.pressed` | `{ tabKey }` | the user clicked the extension's toolbar button while Winter was driving that tab (one per driven tab) |
@@ -262,17 +283,27 @@ outside the allowlist before sending.
 Exactly `debugger`, `tabs`, `tabGroups`, `nativeMessaging`, `scripting`, `storage`, and host `<all_urls>`. No declared
 content scripts. `incognito: "not_allowed"`.
 
+OPTIONAL (1.1.0): `history`, `bookmarks`, `downloads` — requested only from the toolbar popup, on the user's own click
+(`chrome.permissions.request`), and given back there; never at install, so an update from 1.0.0 carries no new warning
+(a new REQUIRED permission with one would disable the extension until each user re-approved it). Their APIs exist only
+while granted, and the extension asks the browser before each use. A request that needs one the user has not granted
+is refused `not_allowed` with `data.permission`; the toolbar shows a "!" and the popup highlights that switch.
+
 ### 7.2 Never move the user's view
 
-Tabs open with `active: false` only. The extension never calls `tabs.update`, `tabs.highlight`, `windows.update` or
-`windows.create`. `Emulation.setFocusEmulationEnabled(true)` at attach keeps a background tab behaving as focused.
+Tabs open with `active: false` only. The extension never calls `tabs.highlight` or `windows.create`, and calls
+`tabs.update` / `windows.update` in exactly three spellings, all in `background.ts`: `tabs.update(tabId, { muted })`
+(`tabs.setMuted`, a tab's sound only), and `tabs.update(tabId, { active: true })` + `windows.update(windowId, { focused:
+true })` (`tabs.bringForward`) — the sign-in hand-off, reached only from `tabs.present`, which Winter sends only after the
+user's OK on its card. `Emulation.setFocusEmulationEnabled(true)` at attach keeps a background tab behaving as focused.
 
 What keeps those calls out: every module but `background.ts` reaches the browser only through the `ChromeApi` interface
 (`src/chrome-api.ts`), which has none of them, and `background.ts` (which binds the real `chrome`, typed `any`) is
 reviewed by hand. Behind that, the build runs a regex over its bundles (`background.js` and `popup.js`) — and the unit
 tests over the sources — and fails on any of those calls, `active: true`, `focused: true`, a main-world script, or a
-read of cookies or site storage. The regex is a backstop against a slip, not a proof: a call spelled another way would
-pass it.
+read of cookies or site storage, once the three allowed spellings above (`ALLOWED_EXACT_CALLS`) are taken out; a test
+pins each allowed spelling to `background.ts`, once per bundle. The regex is a backstop against a slip, not a proof: a
+call spelled another way would pass it.
 
 ### 7.3 The CDP allowlist and the world rules
 
@@ -289,7 +320,13 @@ Before a command reaches the browser the extension refuses (`not_allowed`):
   in that session;
 - `Page.reload` carrying `scriptToEvaluateOnLoad`, and `Page.navigate` to anything but http, https or exactly
   `about:blank` (both would run code in the page's own world);
-- any other method naming an `objectId` that was not minted in a "winter" world.
+- any other method naming an `objectId` that was not minted in a "winter" world;
+- (1.1.0) `Network.enable` keeping post data, or response buffers over 1 MiB a response / 8 MiB in all; `Fetch.enable`
+  with `handleAuthRequests`, or a pattern not at the Response stage; `Fetch.continueRequest` with anything but its
+  `requestId`; `Fetch.failRequest` with any reason but `Aborted`; `Fetch.takeResponseBodyAsStream` for a request this
+  extension did not see paused at the Response stage in that session, or a second time; `IO.read` / `IO.close` on a
+  stream this extension did not hand out, an `IO.read` over 1 MiB or with an `offset`; `Emulation.setDeviceMetricsOverride`
+  with anything but a screen size. `Network.getResponseBody`'s answer is cut at 1 MiB of text.
 
 A "winter" context is one THIS extension's own `Page.createIsolatedWorld` returned — never one recognised by its name,
 which another extension's world could share. The Runtime domain must be on in that session (so every context's coming
@@ -357,9 +394,11 @@ in history").
   (measured on Chrome for Testing 156).
 
 Directories, under `~/Library/Application Support/`, each with `NativeMessagingHosts/`: `Google/Chrome`,
-`Google/Chrome Beta`, `Google/Chrome Dev`, `Google/Chrome Canary`, `Chromium`, `Microsoft Edge`, `Microsoft Edge Beta`,
-`Microsoft Edge Dev`, `Microsoft Edge Canary`, `BraveSoftware/Brave-Browser`, `Vivaldi`, `com.operasoftware.Opera`,
-`Arc/User Data`.
+`Google/Chrome Beta`, `Google/Chrome Dev`, `Google/Chrome Canary`, `Google/Chrome for Testing`, `Google/ChromeForTesting`,
+`Chromium`, `Microsoft Edge`, `Microsoft Edge Beta`, `Microsoft Edge Dev`, `Microsoft Edge Canary`,
+`BraveSoftware/Brave-Browser`, `BraveSoftware/Brave-Browser-Beta`, `BraveSoftware/Brave-Browser-Nightly`, `Vivaldi`,
+`Vivaldi Snapshot`, `com.operasoftware.Opera`, `com.operasoftware.OperaGX`, `com.operasoftware.OperaNext`,
+`com.operasoftware.OperaDeveloper`, `Arc/User Data`.
 
 ## 9. Test builds
 
@@ -384,3 +423,4 @@ A test build serves the dev extension ids.
 | Browser-host | Extension | Helper | Extension version | Change |
 | --- | --- | --- | --- | --- |
 | 1 | 1 | 1.9.0 | 1.0.0 | Initial. |
+| 1 | 1 | (unchanged) | 1.1.0 | ComputerV2 Phase 3, additive behind `hello.features`: the Phase 3 allowlist (`cdp3`), the hand-off (`tabs.present`, `user.done`), `tabs.mute`, `group.update`, `tabs.keep { group }`, `windows.list`, `Tab` facts, and under the optional permissions `history.search`, `bookmarks.search`, `downloads.arm`/`release` and `download`. More browser channels and their manifest directories. |

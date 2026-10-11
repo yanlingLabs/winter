@@ -23,12 +23,20 @@ const api: ChromeApi = {
     discard: (tabId) => chrome.tabs.discard(tabId),
     group: (p) => chrome.tabs.group(p),
     ungroup: (tabIds) => chrome.tabs.ungroup(tabIds),
+    // The one property `tabs.update` is ever given here (it can't activate or move anything with only this).
+    setMuted: async (tabId, muted) => { await chrome.tabs.update(tabId, { muted }); },
+    // The sign-in hand-off's one door (the only activation anywhere in Winter for Chrome; `tabs.present` alone).
+    bringForward: async (tabId, windowId) => {
+      await chrome.tabs.update(tabId, { active: true });
+      await chrome.windows.update(windowId, { focused: true });
+    },
     onRemoved: chrome.tabs.onRemoved,
     onActivated: chrome.tabs.onActivated,
   },
   tabGroups: {
     get: (groupId) => chrome.tabGroups.get(groupId),
     update: (groupId, p) => chrome.tabGroups.update(groupId, p),
+    query: (q) => chrome.tabGroups.query(q),
     onRemoved: chrome.tabGroups.onRemoved,
   },
   windows: {
@@ -60,6 +68,33 @@ const api: ChromeApi = {
     connectNative: (application) => chrome.runtime.connectNative(application) as ChromePort,
     onMessage: chrome.runtime.onMessage,
   },
+  permissions: {
+    contains: (p) => chrome.permissions.contains(p),
+    onAdded: chrome.permissions.onAdded,
+    onRemoved: chrome.permissions.onRemoved,
+  },
+  // Read when needed: each API exists only while its optional permission is granted. History and bookmarks are bound
+  // to their read-only members alone.
+  optional: () => ({
+    ...(chrome.history === undefined ? {} : { history: { search: (q: unknown) => chrome.history.search(q) } }),
+    ...(chrome.bookmarks === undefined ? {} : {
+      bookmarks: {
+        search: (q: string) => chrome.bookmarks.search(q),
+        getRecent: (n: number) => chrome.bookmarks.getRecent(n),
+        get: (id: string) => chrome.bookmarks.get(id),
+      },
+    }),
+    ...(chrome.downloads === undefined ? {} : {
+      downloads: {
+        search: (q: unknown) => chrome.downloads.search(q),
+        erase: (q: unknown) => chrome.downloads.erase(q),
+        cancel: (id: number) => chrome.downloads.cancel(id),
+        onCreated: chrome.downloads.onCreated,
+        onDeterminingFilename: chrome.downloads.onDeterminingFilename,
+        onChanged: chrome.downloads.onChanged,
+      },
+    }),
+  }),
   randomUUID: () => crypto.randomUUID(),
 };
 
@@ -69,6 +104,8 @@ let connection: HostConnection | undefined;
 const controller = new ExtensionController(api, {
   notify: (method, params) => connection?.notify(method, params),
   onDriven: (count) => status.setDriven(count),
+  onWaiting: (count) => status.setWaiting(count),
+  onNeeds: (needs) => status.setNeeds(needs.length),
   log,
 });
 connection = new HostConnection(api, controller, status, { hostName: __WINTER_HOST_NAME__, log });
@@ -83,10 +120,17 @@ chrome.runtime.onInstalled.addListener((details: { reason?: string }) => {
   controller.noteLaunch(details.reason === "update" ? "update" : details.reason === "chrome_update" ? "startup" : "install");
 });
 api.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (typeof message === "object" && message !== null && (message as { type?: unknown }).type === "winter.status") {
-    if (sender.id !== api.runtimeId) return undefined;
+  if (typeof message !== "object" || message === null || sender.id !== api.runtimeId) return undefined;
+  const m = message as { type?: unknown; tabId?: unknown; done?: unknown };
+  if (m.type === "winter.status") {
     const s = status.get();
-    sendResponse({ state: s.state, sentence: statusSentence(s), ...(s.state === "connected" ? { backend: s.backend } : {}) });
+    sendResponse({ state: s.state, sentence: statusSentence(s), waiting: controller.waitingTabs(), driven: status.drivenTabs(), needs: controller.neededPermissions(), ...(s.state === "connected" ? { backend: s.backend } : {}) });
+  } else if (m.type === "winter.userDone" && typeof m.tabId === "number" && typeof m.done === "boolean") {
+    // The popup's Done / Stop waiting for a tab Winter handed to the user.
+    sendResponse({ ok: controller.userDone(m.tabId, m.done) });
+  } else if (m.type === "winter.stopDriven") {
+    // The popup's Stop, while a hand-off keeps the button a popup.
+    sendResponse({ ok: controller.stopDriven() });
   }
   return undefined;
 });

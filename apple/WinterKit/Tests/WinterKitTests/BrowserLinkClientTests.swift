@@ -9,7 +9,7 @@ import WinterProtocol
 /// with `{}`, and records everything the client sent. The test injects commands with `feed`.
 final class FakeLinkDaemon: WinterTransport, SentLineRecording, @unchecked Sendable {
     enum AttachAnswer {
-        case link(String, protocolVersion: Int = 1)
+        case link(String, protocolVersion: Int = BrowserLinkProtocol.version)
         case methodNotFound
         case protocolMismatch
     }
@@ -46,7 +46,7 @@ final class FakeLinkDaemon: WinterTransport, SentLineRecording, @unchecked Senda
             case .methodNotFound:
                 feed(#"{"jsonrpc":"2.0","id":\#(id),"error":{"code":-32601,"message":"method not found"}}"#)
             case .protocolMismatch:
-                feed(#"{"jsonrpc":"2.0","id":\#(id),"error":{"code":-32602,"message":"protocol","data":{"code":"protocol_mismatch","expected":2}}}"#)
+                feed(#"{"jsonrpc":"2.0","id":\#(id),"error":{"code":-32602,"message":"protocol","data":{"code":"protocol_mismatch","expected":99}}}"#)
             }
         default:
             feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{}}"#)
@@ -160,7 +160,7 @@ final class BrowserLinkClientTests: XCTestCase {
         XCTAssertEqual(hello?["clientName"] as? String, "browser-link")
         XCTAssertEqual(hello?["token"] as? String, "tok-link")
         let attach = daemon.requests("browserLink.attach").first?["params"] as? [String: Any]
-        XCTAssertEqual(attach?["protocol"] as? Int, 1)
+        XCTAssertEqual(attach?["protocol"] as? Int, BrowserLinkProtocol.version)
         XCTAssertEqual(attach?["appVersion"] as? String, "9.9.9")
         XCTAssertEqual(attach?["pid"] as? Int, 4242)
         XCTAssertEqual(link.linkId, "L1")
@@ -302,7 +302,7 @@ final class BrowserLinkClientTests: XCTestCase {
         XCTAssertEqual(order, ["browserLink.events", "browserLink.result"])
     }
 
-    func testNetworkEventParamsLeaveStripped() async throws {
+    func testNetworkEventParamsLeaveReduced() async throws {
         let daemon = FakeLinkDaemon(attach: .link("L1"))
         let handler = FakeLinkHandler()
         let link = makeLink(Daemons([daemon]), handler: handler)
@@ -313,10 +313,12 @@ final class BrowserLinkClientTests: XCTestCase {
                        stripNetworkParams: true)
         await eventually("a batch") { !daemon.requests("browserLink.events").isEmpty }
         let line = try XCTUnwrap(daemon.sent.first { $0.contains("browserLink.events") })
-        XCTAssertFalse(line.contains("secret"))
+        // Phase 3: the request's URL and method may leave (network()); its headers never do.
         XCTAssertFalse(line.contains("Authorization"))
+        XCTAssertFalse(line.contains("Bearer"))
         let params = (((decodeLine(line)["params"] as? [String: Any])?["events"] as? [[String: Any]])?.first?["params"]) as? [String: Any]
-        XCTAssertEqual(Set(params.map { Array($0.keys) } ?? []), ["requestId", "timestamp", "type"])
+        XCTAssertEqual(Set(params.map { Array($0.keys) } ?? []), ["requestId", "timestamp", "type", "request"])
+        XCTAssertEqual(Set(((params?["request"]) as? [String: Any]).map { Array($0.keys) } ?? []), ["url"])
     }
 
     func testATabGoneIsReported() async throws {
@@ -331,6 +333,23 @@ final class BrowserLinkClientTests: XCTestCase {
         XCTAssertEqual(params?["linkId"] as? String, "L1")
         XCTAssertEqual(params?["tabId"] as? String, "t7")
         XCTAssertEqual(params?["reason"] as? String, "crashed")
+    }
+
+    func testADownloadIsReported() async throws {
+        let daemon = FakeLinkDaemon(attach: .link("L1"))
+        let handler = FakeLinkHandler()
+        let link = makeLink(Daemons([daemon]), handler: handler)
+        link.start()
+        await eventually("attached") { handler.attached == ["L1"] }
+        link.download(tabId: "t7", download: .object(["id": .string("cef-1"), "state": .string("done"), "name": .string("a.csv"),
+                                                      "bytes": .number(4), "path": .string("/h/cache/downloads/s/r/a.csv")]))
+        await eventually("download") { !daemon.requests("browserLink.download").isEmpty }
+        let params = daemon.requests("browserLink.download").first?["params"] as? [String: Any]
+        XCTAssertEqual(params?["linkId"] as? String, "L1")
+        XCTAssertEqual(params?["tabId"] as? String, "t7")
+        let download = params?["download"] as? [String: Any]
+        XCTAssertEqual(download?["state"] as? String, "done")
+        XCTAssertEqual(download?["path"] as? String, "/h/cache/downloads/s/r/a.csv")
     }
 
     func testADroppedConnectionLosesTheLinkAndReattachesFresh() async throws {
@@ -403,7 +422,7 @@ final class BrowserLinkClientTests: XCTestCase {
         XCTAssertTrue(handler.attached.isEmpty)
 
         let other = FakeLinkHandler()
-        let wrong = Daemons([], then: { FakeLinkDaemon(attach: .link("LX", protocolVersion: 2)) })
+        let wrong = Daemons([], then: { FakeLinkDaemon(attach: .link("LX", protocolVersion: BrowserLinkProtocol.version + 1)) })
         makeLink(wrong, handler: other).start()
         await eventually("an attempt") { wrong.all.first.map { !$0.requests("browserLink.attach").isEmpty } ?? false }
         try await Task.sleep(nanoseconds: 100_000_000)
@@ -575,6 +594,29 @@ final class BrowserLinkCommandTests: XCTestCase {
                        .cdpSubscribe(tabId: "t", events: ["Page.frameNavigated"]))
         XCTAssertEqual(try op(#"{"linkId":"L","cmdId":"c","op":"overlay","params":{"tabId":"t","active":true}}"#),
                        .overlay(tabId: "t", active: true, cursor: nil))
+        // Protocol 2 (Phase 3).
+        XCTAssertEqual(try op(#"{"linkId":"L","cmdId":"c","op":"tab.present","params":{"sessionId":"s","tabId":"t"}}"#),
+                       .tabPresent(sessionId: "s", tabId: "t"))
+        XCTAssertEqual(try op(#"{"linkId":"L","cmdId":"c","op":"tab.mute","params":{"tabId":"t","muted":true}}"#),
+                       .tabMute(tabId: "t", muted: true))
+        XCTAssertEqual(try op(#"{"linkId":"L","cmdId":"c","op":"tab.downloads","params":{"tabId":"t","dir":"/h/cache/downloads/s/r","until":1760000000000,"maxBytes":209715200}}"#),
+                       .tabDownloads(tabId: "t", arm: .init(dir: "/h/cache/downloads/s/r", until: 1760000000000, maxBytes: 209715200)))
+        XCTAssertEqual(try op(#"{"linkId":"L","cmdId":"c","op":"tab.downloads","params":{"tabId":"t","dir":null}}"#),
+                       .tabDownloads(tabId: "t", arm: nil))
+        XCTAssertEqual(try op(#"{"linkId":"L","cmdId":"c","op":"tab.download","params":{"tabId":"t","url":"https://x/a.csv"}}"#),
+                       .tabDownload(tabId: "t", url: "https://x/a.csv"))
+    }
+
+    func testProtocol2OpsRefuseWhatTheyCannotRead() {
+        for json in [
+            #"{"linkId":"L","cmdId":"c","op":"tab.present","params":{"tabId":"t"}}"#,
+            #"{"linkId":"L","cmdId":"c","op":"tab.mute","params":{"tabId":"t","muted":"yes"}}"#,
+            #"{"linkId":"L","cmdId":"c","op":"tab.downloads","params":{"tabId":"t","dir":"/x"}}"#,
+            #"{"linkId":"L","cmdId":"c","op":"tab.downloads","params":{"tabId":"t","dir":"/x","until":1,"maxBytes":0}}"#,
+            #"{"linkId":"L","cmdId":"c","op":"tab.download","params":{"tabId":"t"}}"#,
+        ] {
+            guard case .failure = parse(json) else { return XCTFail("should be unreadable: \(json)") }
+        }
     }
 
     func testAnUnreadableCommandKeepsWhatItNeedsToBeAnswered() {

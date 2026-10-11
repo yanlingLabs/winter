@@ -4,7 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { redactText, redactUrl, REDACTED } from "../../src/computer-use/browser/page-runtime/redact";
+import { looksLikeUrl, redactText, redactUrl, redactUrlAttribute, REDACTED } from "../../src/computer-use/browser/page-runtime/redact";
 import {
   classifyTarget, FILE_CHOOSER, isPaymentHost, isSecureField, isTextEntry, nativePicker, pickerAdvice, pickerValueHint,
 } from "../../src/computer-use/browser/page-runtime/rules";
@@ -120,6 +120,30 @@ describe("redaction", () => {
     expect(redactUrl("https://x.example/reset/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig")).toBe(`https://x.example/reset/${REDACTED}`);
     // An empty value stays (nothing to hide).
     expect(redactUrl("https://x.example/?code=")).toBe("https://x.example/?code=");
+  });
+
+  test("URL-valued attributes (html(), inspect()): every URL in them is redacted by key, not just token runs", () => {
+    const reset = "https://id.example/reset?token=abc123&lang=en";
+    for (const name of ["href", "src", "action", "formaction", "poster", "data", "cite", "HREF", "xlink:href"]) {
+      expect(redactUrlAttribute(name, reset)).toBe(`https://id.example/reset?token=${REDACTED}&lang=en`);
+    }
+    expect(redactUrlAttribute("href", "/cb#access_token=abc&token_type=bearer")).toBe(`/cb#access_token=${REDACTED}&token_type=bearer`);
+    expect(redactUrlAttribute("srcset", "/a.png?sig=1 1x, /b.png?sig=2&w=2 2x"))
+      .toBe(`/a.png?sig=${REDACTED} 1x, /b.png?sig=${REDACTED}&w=2 2x`);
+    expect(redactUrlAttribute("imagesrcset", "/a.png?key=1 640w")).toBe(`/a.png?key=${REDACTED} 640w`);
+    expect(redactUrlAttribute("ping", "https://t.example/p?session=1 https://u.example/?q=1"))
+      .toBe(`https://t.example/p?session=${REDACTED} https://u.example/?q=1`);
+    // Any other attribute holding a URL with a query or fragment: data-url, a meta's content, a value.
+    expect(redactUrlAttribute("data-url", "https://api.example/x?api_key=k")).toBe(`https://api.example/x?api_key=${REDACTED}`);
+    expect(redactUrlAttribute("content", "https://site.example/?code=c")).toBe(`https://site.example/?code=${REDACTED}`);
+    // Not a URL attribute and not URL-shaped: left to the ordinary text rules.
+    expect(redactUrlAttribute("title", "Sign in? code=1 please")).toBeUndefined();
+    expect(redactUrlAttribute("class", "btn primary")).toBeUndefined();
+    expect(redactUrlAttribute("data-id", "42")).toBeUndefined();
+    // A plain address keeps every byte.
+    expect(redactUrlAttribute("href", "https://shop.example.com/prices.csv")).toBe("https://shop.example.com/prices.csv");
+    expect(looksLikeUrl(" https://x.example/?a=1 ")).toBe(true);
+    expect(looksLikeUrl("https://x.example/plain")).toBe(false);
   });
 });
 

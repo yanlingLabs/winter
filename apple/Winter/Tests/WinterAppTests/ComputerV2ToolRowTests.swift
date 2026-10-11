@@ -79,6 +79,9 @@ final class ComputerV2ToolRowTests: XCTestCase {
 
     func testWaitForIdleIsNotWaitFor() {
         XCTAssertEqual(computerV2Verbs(in: "await n.waitForIdle(); await n.waitFor({ text: 'x' })"), ["waitForIdle", "waitFor"])
+        // Phase 3's tab members.
+        XCTAssertEqual(computerV2Verbs(in: "await t.console(); await t.networkBody('r1'); await t.download(4); await t.waitForUser('sign in'); await t.viewport(null)"),
+                       ["console", "networkBody", "download", "waitForUser", "viewport"])
     }
 
     func testAnAppOnlyScriptNamesTheApp() {
