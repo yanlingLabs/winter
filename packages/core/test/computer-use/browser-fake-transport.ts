@@ -2,7 +2,8 @@
 // what every real transport enforces (`cdp-allowlist.ts`: the methods, the events, and the world rules — code runs
 // only in an isolated world named "winter" whose context it SAW created), and plays the page runtime's ops
 // (`page-runtime/protocol.ts`) from the scripted page, so the engine is exercised exactly as it would drive Chromium.
-import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS } from "../../src/computer-use/browser/cdp-allowlist";
+import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_NETWORK_BUFFER_MAX, CDP_RESPONSE_BODY_MAX_CHARS } from "../../src/computer-use/browser/cdp-allowlist";
+import { cdpEventParams } from "../../src/computer-use/browser/cdp-reduce";
 import type { RtClassify, RtHit, RtNode, RtPoint } from "../../src/computer-use/browser/page-runtime/protocol";
 import { TransportError, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportTab } from "../../src/computer-use/browser/transport";
 
@@ -58,6 +59,9 @@ export class FakeTab {
   /** Winter for Chrome's discard before a top-level navigation (PROTOCOL.md §5.3): the stand-in document's events come
    *  first — on the SAME session — then the command runs as asked. */
   navigateByDiscard = false;
+  /** Phase 3: response bodies the browser keeps (by request id), and the buffers `Network.enable` asked for. */
+  readonly bodies = new Map<string, { body: string; base64Encoded: boolean }>();
+  networkBuffers = { resource: 0, total: 0 };
   /** The fallbacks of §5.3 for a browser that behaves otherwise: "new-session" — the discard ended the debugging
    *  session (an `Inspector.detached`, the command run in a session the engine does not follow, answered `cdp_error`
    *  with `navigated: true`); "new-key" — the tab came back under a new key (`tab.gone` for the old one, then
@@ -231,7 +235,18 @@ export class FakeCdpTransport implements CdpTransport {
 
   emit(tab: FakeTab, method: string, params: Record<string, unknown>, session?: string): void {
     if (!tab.subscribed.includes(method)) return;
-    for (const l of [...this.events]) l({ tabKey: tab.tabKey, method, params, ...(session === undefined ? {} : { cdpSessionId: session }) });
+    // What every real transport does: the event leaves reduced (`cdp-reduce.ts`).
+    const reduced = cdpEventParams(method, params);
+    for (const l of [...this.events]) l({ tabKey: tab.tabKey, method, params: reduced, ...(session === undefined ? {} : { cdpSessionId: session }) });
+  }
+
+  /** Test door: the page logs, throws, or makes a request (with an optional body kept by the browser). */
+  pageEvent(tabKey: string, method: string, params: Record<string, unknown>, session?: string): void {
+    this.emit(this.tab(tabKey), method, params, session);
+  }
+  /** Test door: a response body the browser keeps for `requestId` (`Network.getResponseBody`). */
+  keepBody(tabKey: string, requestId: string, body: string, base64Encoded = false): void {
+    this.tab(tabKey).bodies.set(requestId, { body, base64Encoded });
   }
 
   /** The page navigates by itself (a link the page followed): a new document. */
@@ -332,7 +347,19 @@ export class FakeCdpTransport implements CdpTransport {
     switch (method) {
       case "Runtime.enable": t.runtimeOn.add(session ?? ""); return r({});
       case "Runtime.disable": t.runtimeOn.delete(session ?? ""); return r({});
-      case "Page.enable": case "Network.enable": case "Page.setLifecycleEventsEnabled":
+      case "Network.enable":
+        // Phase 3's rule: request bodies never kept, response buffers capped.
+        if (params.maxPostDataSize !== undefined && params.maxPostDataSize !== 0) throw new TransportError("not_allowed", "Network.enable keeps no post data");
+        if (typeof params.maxResourceBufferSize === "number" && params.maxResourceBufferSize > CDP_NETWORK_BUFFER_MAX.resource) throw new TransportError("not_allowed", "buffer");
+        if (typeof params.maxTotalBufferSize === "number" && params.maxTotalBufferSize > CDP_NETWORK_BUFFER_MAX.total) throw new TransportError("not_allowed", "buffer");
+        t.networkBuffers = { resource: Number(params.maxResourceBufferSize ?? 0), total: Number(params.maxTotalBufferSize ?? 0) };
+        return r({});
+      case "Network.getResponseBody": {
+        const b = t.bodies.get(String(params.requestId));
+        if (b === undefined || t.networkBuffers.resource === 0) throw new TransportError("cdp_error", "No resource with given identifier found", { cdpCode: -32000, cdpMessage: "No resource with given identifier found" });
+        return r(b.body.length > CDP_RESPONSE_BODY_MAX_CHARS ? { body: b.body.slice(0, CDP_RESPONSE_BODY_MAX_CHARS), base64Encoded: b.base64Encoded, truncated: true } : { ...b });
+      }
+      case "Page.enable": case "Page.setLifecycleEventsEnabled": case "Log.enable": case "Log.disable":
       case "Page.setInterceptFileChooserDialog": case "Emulation.setFocusEmulationEnabled": case "Runtime.releaseObject":
       case "Page.disable": case "Network.disable":
         return r({});

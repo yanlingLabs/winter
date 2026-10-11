@@ -220,6 +220,9 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     reload() { return call("reload", tid(this), {}).then(nothing); }
     text(o?: unknown) { return call("text", tid(this), opts(o)); }
     upload(ref: unknown, paths: unknown) { return call("upload", tid(this), { ref, paths }).then(nothing); }
+    console(o?: unknown) { return call("console", tid(this), opts(o)); }
+    network(o?: unknown) { return call("network", tid(this), opts(o)); }
+    networkBody(id: unknown, o?: unknown) { return call("networkBody", tid(this), { id, ...opts(o) }); }
     keep() { return call("keep", tid(this), {}).then(nothing); }
     handoff() { return call("handoff", tid(this), {}).then(nothing); }
     close() { return call("close", tid(this), {}).then(nothing); }

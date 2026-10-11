@@ -27,6 +27,8 @@ import { redactText, redactUrl } from "./page-runtime/redact";
 import { pickerSentence, shownUrl, TabDriver, transportFailure } from "./tab-driver";
 import type { BackendId, BrowserFamily, CdpTransport, TransportTab } from "./transport";
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
+import { BODY_DEFAULT_CHARS, BODY_MAX_CHARS, isTextMime, redactBody } from "./body-redact";
+import { bytesLabel, CONSOLE_LEVELS, consoleLine, requestLine } from "./devtools";
 
 /** `state()`/`screenshot()` settle for at most this long after an act in the same call (Phase 1's cap). */
 const SETTLE_CAP_MS = 1_500;
@@ -35,7 +37,9 @@ const NO_VISION = "this model can't see images — use state()";
 const FOCUS_NOT_EDITABLE = "the focus is not a text field, so nothing was typed — click the field or pass { into }";
 
 /** What a tab primitive is, for the per-app policy (everything not here acts). */
-const OBSERVE_PRIMITIVES: ReadonlySet<string> = new Set(["state", "find", "screenshot", "waitFor", "waitForIdle", "url", "title", "text"]);
+const OBSERVE_PRIMITIVES: ReadonlySet<string> = new Set(["state", "find", "screenshot", "waitFor", "waitForIdle", "url", "title", "text",
+  // Phase 3's readers
+  "console", "network", "networkBody"]);
 
 export interface BrowserEngineDeps {
   registry: BrowserBackendRegistry;
@@ -1085,6 +1089,9 @@ export class BrowserEngine {
         if (args.emit !== false) scope.builder.text(text.length === 0 ? "(the page has no readable text)" : text, { screen: true });
         return text;
       }
+      case "console": return this.consoleCall(scope, driver, args);
+      case "network": return this.networkCall(scope, driver, args);
+      case "networkBody": return await this.networkBodyCall(scope, driver, args);
       case "upload": {
         if (!isRef(args.ref)) throw bad("upload() takes a file input's ref and a path or an array of paths");
         const cwd = (() => { try { return this.deps.sessionInfo(sid).cwd; } catch { return undefined; } })();
@@ -1134,6 +1141,77 @@ export class BrowserEngine {
       default:
         throw bad(`unknown primitive ${primitive}`);
     }
+  }
+
+  // ── Phase 3: the developer readers ─────────────────────────────────────────────────────────────
+
+  private consoleCall(scope: TabRunScope, driver: TabDriver, args: Record<string, unknown>): unknown {
+    const levels = args.levels === undefined ? undefined : stringList(args.levels, "console()'s levels");
+    if (levels !== undefined) {
+      const unknown = levels.filter((l) => !(CONSOLE_LEVELS as readonly string[]).includes(l === "warn" ? "warning" : l));
+      if (unknown.length > 0) throw bad(`console()'s levels are ${CONSOLE_LEVELS.join(", ")} (not ${unknown.join(", ")})`);
+    }
+    const read = driver.devtools.console({
+      ...(levels === undefined ? {} : { levels }), ...(typeof args.filter === "string" && args.filter.length > 0 ? { filter: args.filter } : {}),
+      ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
+    });
+    if (args.clear === true) driver.devtools.clearConsole();
+    scope.builder.markScreenRead();
+    if (args.emit !== false) {
+      const counts = Object.entries(read.counts).map(([l, n]) => `${n} ${l}${n === 1 ? "" : l === "debug" || l === "info" || l === "log" ? "" : "s"}`).join(", ");
+      const head = `console of ${this.labelOf(driver)}: ${counts.length === 0 ? "nothing logged" : counts}${read.total > read.entries.length ? ` (showing the last ${read.entries.length} of ${read.total})` : ""}`;
+      scope.builder.text([head, ...read.entries.map(consoleLine)].join("\n"), { screen: true });
+    }
+    return read.entries;
+  }
+
+  private networkCall(scope: TabRunScope, driver: TabDriver, args: Record<string, unknown>): unknown {
+    const types = args.types === undefined ? undefined : stringList(args.types, "network()'s types");
+    const read = driver.devtools.network({
+      ...(types === undefined ? {} : { types }), ...(typeof args.filter === "string" && args.filter.length > 0 ? { filter: args.filter } : {}),
+      ...(args.failed === true ? { failed: true } : {}), ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
+    });
+    if (args.clear === true) driver.devtools.clearNetwork();
+    scope.builder.markScreenRead();
+    if (args.emit !== false) {
+      const head = `network of ${this.labelOf(driver)}: ${read.total === 0 ? "no requests seen (only those made while Winter worked in the tab)" : `${read.total} request${read.total === 1 ? "" : "s"}`}${read.total > read.entries.length ? ` (showing the last ${read.entries.length})` : ""}`;
+      scope.builder.text([head, ...read.entries.map(requestLine)].join("\n"), { screen: true });
+    }
+    return read.entries;
+  }
+
+  private async networkBodyCall(scope: TabRunScope, driver: TabDriver, args: Record<string, unknown>): Promise<string> {
+    if (typeof args.id !== "string" || args.id.length === 0) throw bad("networkBody() takes a request's id from network() (\"r12\")");
+    const req = driver.devtools.request(args.id);
+    if (req === undefined) throw new Error(`no request ${args.id.slice(0, 20)} in this tab's network log — network() lists them`);
+    if (!req.done) throw new Error(`${req.id} has not finished loading — wait for it (waitForIdle()) and read it again`);
+    if (req.failed !== undefined) throw new Error(`${req.id} failed (${req.failed}) — it has no body`);
+    const maxChars = typeof args.maxChars === "number" && Number.isFinite(args.maxChars) && args.maxChars > 0 ? Math.min(BODY_MAX_CHARS, Math.floor(args.maxChars)) : BODY_DEFAULT_CHARS;
+    let body: { body: string; base64Encoded: boolean; truncated: boolean };
+    try {
+      body = await driver.responseBody(req.session, req.requestId);
+    } catch (err) {
+      if (err instanceof AutomationFailure) throw err;
+      throw new Error(`the browser no longer keeps that response's body (it was larger than 1 MB, the page moved on, or the tab was let go) — reload and read it sooner`);
+    }
+    scope.live();
+    scope.builder.markScreenRead();
+    let out: string;
+    if (!isTextMime(req.mime) && (body.base64Encoded || req.mime !== undefined)) {
+      const bytes = body.base64Encoded ? Math.floor((body.body.length * 3) / 4) : body.body.length;
+      out = `(binary, ${bytesLabel(bytes)}${req.mime === undefined ? "" : `, ${req.mime}`}) — save it with download({ url })`;
+    } else {
+      const raw = body.base64Encoded ? Buffer.from(body.body, "base64").toString("utf8") : body.body;
+      const r = redactBody(raw, req.mime, maxChars);
+      out = r.text + (r.cut || body.truncated ? `\n… (cut — ${body.truncated ? "the browser hands over at most 1 MB" : `pass { maxChars } up to ${BODY_MAX_CHARS}`})` : "");
+    }
+    if (args.emit !== false) scope.builder.text(out, { screen: true });
+    return out;
+  }
+
+  private labelOf(driver: TabDriver): string {
+    const t = driver.shownTitle.replace(/\s+/g, " ").trim();
+    return t.length > 0 ? `Tab "${t.slice(0, 60)}"` : `Tab ${driver.backend}:${driver.tabKey}`;
   }
 
   private async navigate(scope: TabRunScope, b: Binding, driver: TabDriver, go: () => Promise<boolean>): Promise<undefined> {
@@ -1193,6 +1271,13 @@ function noteSiteOf(scope: TabRunScope, url: string): void {
 /** With no `{ browser }` named, a browser that can't be reached or that the user does not allow is skipped. */
 function skippable(err: unknown): boolean {
   return err instanceof AutomationFailure && (err.kind === "BrowserUnavailable" || err.kind === "NotAllowed");
+}
+
+/** A list of strings (or one string) from the model. */
+function stringList(v: unknown, what: string): string[] {
+  if (typeof v === "string") return [v];
+  if (Array.isArray(v) && v.every((x) => typeof x === "string")) return v as string[];
+  throw bad(`${what} take a list of strings`);
 }
 
 function stripFragment(url: string): string {

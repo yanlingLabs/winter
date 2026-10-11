@@ -12,6 +12,8 @@
 // Only `cdp-allowlist.ts`'s methods and events are ever sent or subscribed — the transports refuse anything else.
 import { AutomationFailure } from "../errors";
 import type { ScreenshotBudget } from "../protocol";
+import { CDP_NETWORK_BUFFER_MAX } from "./cdp-allowlist";
+import { TabDevtools } from "./devtools";
 import { buttonOf, keyEvents, keyForChar, modifiersOf, parseCombo, type KeyPress } from "./input";
 import { PAGE_RUNTIME_SOURCE } from "./page-runtime/bundle.generated";
 import { redactText, redactUrl } from "./page-runtime/redact";
@@ -30,7 +32,12 @@ export const TAB_EVENTS: readonly string[] = [
   "Page.javascriptDialogClosed", "Page.fileChooserOpened", "Runtime.executionContextCreated", "Runtime.executionContextDestroyed",
   "Runtime.executionContextsCleared", "Network.requestWillBeSent", "Network.loadingFinished", "Network.loadingFailed",
   "Target.attachedToTarget", "Target.detachedFromTarget", "Inspector.detached", "Inspector.targetCrashed",
+  // Phase 3: the developer readers (console(), network()) and a download the page started by itself.
+  "Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded", "Network.responseReceived", "Page.downloadWillBegin",
 ];
+
+/** What the browser keeps of response bodies while Winter is attached (networkBody()); request bodies never. */
+export const NETWORK_BUFFERS = { maxResourceBufferSize: CDP_NETWORK_BUFFER_MAX.resource, maxTotalBufferSize: CDP_NETWORK_BUFFER_MAX.total, maxPostDataSize: 0 } as const;
 
 export const NAVIGATION_WAIT_MS = 10_000;
 const SNAPSHOTS_KEPT = 8;
@@ -163,6 +170,14 @@ export class TabDriver {
   /** The tab came back under a NEW key after a navigation (Winter for Chrome, when the browser gave a discarded tab a new
    *  id): the engine moves everything it keys by the old one, and this driver follows (`tabKey` is set by it). */
   onRekey?: (newKey: string) => boolean;
+  /** Phase 3: the tab's console and network log (`console()`, `network()`), kept across releases. */
+  readonly devtools: TabDevtools;
+  /** Phase 3: a download the page started by itself that nothing caught (said once, in the next state). */
+  uncaughtDownloads: string[] = [];
+  /** Phase 3: an emulated screen size is on (cleared before the tab is let go). */
+  emulating = false;
+  /** Phase 3: event listeners the engine adds for one wait (a download's `Fetch.requestPaused`). */
+  readonly listeners = new Set<(e: CdpEvent) => void>();
 
   constructor(
     readonly backend: string,
@@ -171,7 +186,9 @@ export class TabDriver {
     /** "Winter's browser", "Google Chrome" — for error sentences. */
     readonly browserName: string,
     private readonly now: () => number = () => Date.now(),
-  ) {}
+  ) {
+    this.devtools = new TabDevtools(now);
+  }
 
   // ── transport ───────────────────────────────────────────────────────────────────────────────────
 
@@ -303,8 +320,10 @@ export class TabDriver {
     await this.send("Page.setLifecycleEventsEnabled", { enabled: true }, session).catch(() => undefined);
     await this.send("Runtime.enable", {}, session);
     this.runtimeOn.add(session ?? "");
-    // Only request timing is read (idle detection); nothing needs a body, so the browser buffers none.
-    await this.send("Network.enable", { maxTotalBufferSize: 0, maxResourceBufferSize: 0, maxPostDataSize: 0 }, session).catch(() => undefined);
+    // Request timing (idle detection, network()) and capped response bodies (networkBody()); request bodies never.
+    await this.send("Network.enable", { ...NETWORK_BUFFERS }, session).catch(() => undefined);
+    // The browser's own page messages (failed loads, CSP, interventions) for console().
+    await this.send("Log.enable", {}, session).catch(() => undefined);
     await this.send("Page.setInterceptFileChooserDialog", { enabled: true }, session).catch(() => undefined);
     await this.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, session).catch(() => undefined);
   }
@@ -327,6 +346,8 @@ export class TabDriver {
         };
         await quiet("Page.setInterceptFileChooserDialog", { enabled: false });
         await quiet("Emulation.setFocusEmulationEnabled", { enabled: false });
+        if (this.emulating) { await quiet("Emulation.clearDeviceMetricsOverride"); this.emulating = false; }
+        await quiet("Log.disable");
         await quiet("Target.setAutoAttach", { autoAttach: false, waitForDebuggerOnStart: false, flatten: true });
         await quiet("Network.disable");
         await quiet("Runtime.disable");
@@ -352,7 +373,18 @@ export class TabDriver {
   onEvent(e: CdpEvent): void {
     const p = e.params as Record<string, any>;
     const session = e.cdpSessionId;
+    for (const l of [...this.listeners]) {
+      try { l(e); } catch { /* a listener never breaks the driver */ }
+    }
     switch (e.method) {
+      case "Runtime.consoleAPICalled": case "Runtime.exceptionThrown": case "Log.entryAdded": case "Network.responseReceived":
+        this.devtools.onEvent(e.method, p, session, (id) => this.isWinterContext(id, session));
+        break;
+      case "Page.downloadWillBegin": {
+        const name = typeof p.suggestedFilename === "string" && p.suggestedFilename.length > 0 ? p.suggestedFilename : "a file";
+        if (this.uncaughtDownloads.length < 5) this.uncaughtDownloads.push(name.slice(0, 120));
+        break;
+      }
       case "Page.frameAttached": {
         const id = String(p.frameId);
         const rec = this.frames.get(id) ?? { frameId: id, url: "", ...(session === undefined ? {} : { session }) };
@@ -374,6 +406,7 @@ export class TabDriver {
         if (f.parentId === undefined && session === undefined) {
           this.topFrameId = f.id;
           this.url = rec.url;
+          this.devtools.newPage(rec.url);
           this.newTopDocument();
           this.navSeq++;
           this.lastCommitLoader = f.loaderId;
@@ -452,10 +485,12 @@ export class TabDriver {
       case "Network.requestWillBeSent":
         this.inflight.add(`${session ?? ""}:${String(p.requestId)}`);
         this.lastRequestAt = this.now();
+        this.devtools.onEvent(e.method, p, session, () => false);
         break;
       case "Network.loadingFinished":
       case "Network.loadingFailed":
         this.inflight.delete(`${session ?? ""}:${String(p.requestId)}`);
+        this.devtools.onEvent(e.method, p, session, () => false);
         break;
       case "Target.attachedToTarget": {
         const child = typeof p.sessionId === "string" ? p.sessionId : undefined;
@@ -515,6 +550,25 @@ export class TabDriver {
       this.gone ??= reason;
     }
     for (const poke of [...this.pokes]) poke();
+  }
+
+  /** Is `id` (in `session`) one of the engine's own "winter" worlds? Its console output is never the page's. */
+  private isWinterContext(id: number, session: string | undefined): boolean {
+    for (const rec of this.frames.values()) if (rec.ctx === id && (rec.ctxSession ?? undefined) === session) return true;
+    return false;
+  }
+
+  /** One response's body (`networkBody`): `Network.getResponseBody` in the request's own session. */
+  async responseBody(session: string | undefined, requestId: string): Promise<{ body: string; base64Encoded: boolean; truncated: boolean }> {
+    const r = await this.send<{ body?: unknown; base64Encoded?: unknown; truncated?: unknown }>("Network.getResponseBody", { requestId }, session);
+    return { body: typeof r.body === "string" ? r.body : "", base64Encoded: r.base64Encoded === true, truncated: r.truncated === true };
+  }
+
+  /** The uncaught downloads said so far, once. */
+  takeUncaughtDownloads(): string[] {
+    const out = this.uncaughtDownloads;
+    this.uncaughtDownloads = [];
+    return out;
   }
 
   /** The URL and title as the model may read them: credentials in a URL, and token-looking text, redacted. */
@@ -794,6 +848,9 @@ export class TabDriver {
   private header(settle?: { settled: boolean; ms: number }, focusedRef?: number, unread?: number, scoped = false): TabHeader {
     const notes: string[] = [];
     if (this.fileChooser !== undefined) notes.push("the page asked for a file — use upload(ref, paths) on its file input");
+    for (const name of this.takeUncaughtDownloads()) {
+      notes.push(`the page started a download of "${redactText(name)}" — ${this.browserName === "Winter's browser" ? "it was not saved" : `${this.browserName} saved it in its own Downloads folder`}; download(ref) saves a file into this session`);
+    }
     return {
       title: this.shownTitle, url: this.shownUrl,
       ...(focusedRef === undefined ? {} : { focusedRef }), ...(settle === undefined ? {} : { settle }),
