@@ -18,7 +18,7 @@ export function intersectCeilings(a: CapabilityCeiling, b: CapabilityCeiling): C
 /** Pure current-record authorization. No VM, local filesystem or credential fallback. */
 export class CoworkAuthority {
   constructor(private readonly records: CoworkRepository, private readonly grants: CoworkGrantResolver) {}
-  requireWorkspace(principal: CoworkPrincipal, workspaceId: string, operation: "read" | "narrow" | "admin"): void {
+  requireWorkspace(principal: CoworkPrincipal, workspaceId: string, operation: "read" | "member" | "admin"): void {
     const workspace = this.records.get(workspaceId);
     if (workspace.state === "deleted" || workspace.state === "deleting") throw new CoworkError("authority_denied");
     if (principal.kind === "local-user") return;

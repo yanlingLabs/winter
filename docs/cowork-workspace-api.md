@@ -48,7 +48,11 @@ only authenticated harness/admin local user roles, denies all source grant
 resolution/provisioning, and denies paired workspace operations without an
 explicit host scope resolver. A shared gateway remote token or client name is
 not a paired peer identity. Runtime principals and plugin callers cannot use
-this administration surface.
+this administration surface. Principal/role resolution precedes parameter parsing.
+Paired missing-record errors are normalized to authority_denied, matching an
+existing out-of-scope record; local users retain typed not_found recovery errors.
+The member operation level means scoped workspace mutations, not narrowing-only
+authority; repository additions still require separately admitted repository authority.
 
 Responses explicitly omit host roots, bookmarks, grant/account references,
 backing paths and incarnation details. The 128 KiB inner JSON budget leaves room
@@ -125,7 +129,7 @@ cd packages/core
 bun test test/ipc/cowork-workspace-api.test.ts test/cowork/repository.test.ts \
   test/ipc/remote-allowlist-parity.test.ts test/ipc/remote-role.test.ts \
   test/ipc/remote-chat-gate.test.ts
-# 73 tests, 719 assertions passed; actual Unix socket, daemon stop/restart and canonical DB.
+# 75 tests, 757 assertions passed; actual Unix socket, daemon stop/restart and canonical DB.
 
 # From repository root
 bun run typecheck:core

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { COWORK_RPC, ConnWriter, LineDecoder, PROTOCOL_VERSION, encodeLine, type WritableSocket } from "@yanlinglabs/winter-protocol";
+import { COWORK_REMOTE_METHODS, COWORK_RPC, ConnWriter, LineDecoder, PROTOCOL_VERSION, encodeLine, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CoworkRepository } from "../../src/cowork/repository";
@@ -92,7 +92,7 @@ describe("Cowork workspace API through a real isolated daemon and Unix RPC", () 
     fixture.scopes.add(first.workspaceId);
     expect((await fixture.remote.request("workspace.list")).result.workspaces.map((value: any) => value.workspaceId)).toEqual([first.workspaceId]);
     expect((await fixture.remote.request("workspace.get", { workspaceId: second.workspaceId })).error.data.code).toBe("authority_denied");
-    expect((await fixture.remote.request("workspace.source.get", { workspaceId: first.workspaceId, sourceId: second.value.sources[0].sourceId })).error.data.code).toBe("not_found");
+    expect((await fixture.remote.request("workspace.source.get", { workspaceId: first.workspaceId, sourceId: second.value.sources[0].sourceId })).error.data.code).toBe("authority_denied");
     const update = await fixture.remote.request("project.update", { projectId: first.value.ownerId, requestId: "rename", expectedRevision: 1, title: "Renamed" }); expect(update.result.value.title).toBe("Renamed");
     expect((await fixture.remote.request("workspace.operation.get", { workspaceId: first.workspaceId, operationId: update.result.operationId })).result.status).toBe("applied");
     const added = await fixture.remote.request("workspace.source.addRepository", { workspaceId: first.workspaceId, requestId: "repo-add", expectedRevision: 2, selectionId: "repo-choice" }); expect(added.error).toBeUndefined();
@@ -102,6 +102,32 @@ describe("Cowork workspace API through a real isolated daemon and Unix RPC", () 
     expect((await fixture.remote.request("workspace.source.addFolder", { workspaceId: first.workspaceId, requestId: "folder", expectedRevision: 3, selectionId: "folder-choice" })).error).toBeDefined();
     fixture.scopes.clear(); expect((await fixture.remote.request("project.get", { projectId: first.value.ownerId })).error.data.code).toBe("authority_denied");
     expect((await fixture.remote.request("workspace.operation.get", { workspaceId: first.workspaceId, operationId: first.operationId })).error.data.code).toBe("authority_denied");
+  });
+  test("paired missing and out-of-scope identifiers have the same refusal", async () => {
+    const fixture = await boot(), hidden = await create(fixture.local, "hidden");
+    for (const workspaceId of [hidden.workspaceId, "missing-workspace"]) {
+      for (const [method, params] of [
+        ["workspace.get", { workspaceId }],
+        ["workspace.source.list", { workspaceId }],
+        ["workspace.source.get", { workspaceId, sourceId: hidden.value.sources[0].sourceId }],
+        ["workspace.policy.get", { workspaceId }],
+        ["workspace.operation.get", { workspaceId, operationId: hidden.operationId }],
+      ] as const) expect((await fixture.remote.request(method, params)).error.data).toEqual({ code: "authority_denied" });
+    }
+    for (const projectId of [hidden.value.ownerId, "missing-project"])
+      expect((await fixture.remote.request("project.get", { projectId })).error.data).toEqual({ code: "authority_denied" });
+    fixture.scopes.add(hidden.workspaceId);
+    expect((await fixture.remote.request("workspace.get", { workspaceId: hidden.workspaceId })).error).toBeUndefined();
+    expect((await fixture.remote.request("workspace.source.get", { workspaceId: hidden.workspaceId, sourceId: "missing-source" })).error.data).toEqual({ code: "authority_denied" });
+    expect((await fixture.remote.request("workspace.operation.get", { workspaceId: hidden.workspaceId, operationId: "missing-operation" })).error.data).toEqual({ code: "authority_denied" });
+    expect((await fixture.local.request("workspace.get", { workspaceId: "missing-workspace" })).error.data).toEqual({ code: "not_found" });
+  });
+  test("every paired route rejects a missing principal before malformed params", async () => {
+    const fixture = await boot(false);
+    for (const method of COWORK_REMOTE_METHODS)
+      expect((await fixture.remote.request(method, { malformed: true })).error.data).toEqual({ code: "authority_denied" });
+    // The local authenticated caller reaches validation with the same shape.
+    expect((await fixture.local.request("workspace.get", { malformed: true })).error.data).toEqual({ code: "invalid_request" });
   });
   test("typed canonical policy setters enforce the host ceiling and scope idempotency to the RPC method", async () => {
     const fixture = await boot(), made = await create(fixture.local, "policy-workspace"), workspaceId = made.workspaceId;
@@ -128,10 +154,14 @@ describe("Cowork workspace API through a real isolated daemon and Unix RPC", () 
     fixture.ports.creationCeiling = () => ceiling;
     const a = await create(fixture.local, "a"), b = await create(fixture.local, "b");
     fixture.scopes.add(a.workspaceId); fixture.scopes.add(b.workspaceId);
+    // Consecutive RPCs can share a millisecond. Exercise the documented ID
+    // tie-break explicitly instead of assuming creation calls advance the clock.
+    fixture.records.rs.db.query("UPDATE cowork_workspaces SET created_at=?").run(a.value.createdAt);
+    const orderedIds = [a.workspaceId, b.workspaceId].sort();
     const page = await fixture.remote.request("workspace.list", { limit: 1 }); expect(page.result.workspaces).toHaveLength(1);
-    expect(page.result.nextCursor).toBe(a.workspaceId);
-    expect((await fixture.remote.request("workspace.list", { limit: 1, cursor: page.result.nextCursor })).result.workspaces[0].workspaceId).toBe(b.workspaceId);
-    fixture.scopes.delete(a.workspaceId);
+    expect(page.result.nextCursor).toBe(orderedIds[0]);
+    expect((await fixture.remote.request("workspace.list", { limit: 1, cursor: page.result.nextCursor })).result.workspaces[0].workspaceId).toBe(orderedIds[1]);
+    fixture.scopes.delete(orderedIds[0]!);
     expect((await fixture.remote.request("workspace.list", { limit: 1, cursor: page.result.nextCursor })).error.data.code).toBe("invalid_request");
     const invalid = await fixture.local.request("workspace.get", { workspaceId: b.workspaceId, principalId: "forged-user" }); expect(invalid.error.data.code).toBe("invalid_request");
   });
