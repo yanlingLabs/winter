@@ -5,7 +5,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build, devKey, FORBIDDEN_IN_BUNDLE } from "../scripts/build";
-import { extensionManifest, HOST_NAME, MINIMUM_CHROME_VERSION } from "../src/manifest";
+import { extensionManifest, FLAVORS, HOST_NAME, MINIMUM_CHROME_VERSION, PRODUCT_NAMES } from "../src/manifest";
 import { drawOverlay, OVERLAY_TAG } from "../src/overlay";
 
 const idFromKey = (key: string): string =>
@@ -13,7 +13,7 @@ const idFromKey = (key: string): string =>
 
 describe("the manifest", () => {
   test("exactly the spine's permissions, all sites, no content scripts, never in private windows", () => {
-    for (const flavor of ["dev", "store"] as const) {
+    for (const flavor of FLAVORS) {
       const m = extensionManifest(flavor, devKey());
       expect(m.manifest_version).toBe(3);
       expect(m.permissions).toEqual(["debugger", "tabs", "tabGroups", "nativeMessaging", "scripting", "storage"]);
@@ -27,21 +27,32 @@ describe("the manifest", () => {
     expect(MINIMUM_CHROME_VERSION).toBe("125");
   });
 
-  test("dev carries the key that fixes its id; store carries none", () => {
+  test("dev carries the key that fixes its id; the store builds carry none", () => {
     const dev = extensionManifest("dev", devKey());
     expect(idFromKey(String(dev.key))).toBe("jikdcokcpbacalfeipkognejnlnobbbf");
     expect("key" in extensionManifest("store")).toBe(false);
+    expect("key" in extensionManifest("edge")).toBe(false);
     expect(() => extensionManifest("dev")).toThrow(/key/);
-    expect(HOST_NAME).toEqual({ dev: "com.winter.browser.dev", store: "com.winter.browser" });
+    expect(HOST_NAME).toEqual({ dev: "com.winter.browser.dev", store: "com.winter.browser", edge: "com.winter.browser" });
+  });
+
+  test("the name the user sees: Winter for Chrome, and Winter for Edge on Edge Add-ons", () => {
+    expect(PRODUCT_NAMES).toEqual({ dev: "Winter for Chrome", store: "Winter for Chrome", edge: "Winter for Edge" });
+    expect(extensionManifest("dev", devKey()).name).toBe("Winter for Chrome (Dev)");
+    for (const flavor of ["store", "edge"] as const) {
+      const m = extensionManifest(flavor);
+      expect(m.name).toBe(PRODUCT_NAMES[flavor]);
+      expect((m.action as { default_title: string }).default_title).toBe(PRODUCT_NAMES[flavor]);
+    }
   });
 });
 
 describe("the build", () => {
-  test("both flavors build, each bound to its own host, with nothing the extension must never do", async () => {
+  test("every flavor builds, each bound to its own host, with nothing the extension must never do", async () => {
     const out = mkdtempSync(join(tmpdir(), "wfc-build-"));
     try {
-      const [devDir, storeDir] = await build(["dev", "store"], out);
-      for (const [dir, host] of [[devDir!, HOST_NAME.dev], [storeDir!, HOST_NAME.store]] as const) {
+      const [devDir, storeDir, edgeDir] = await build(["dev", "store", "edge"], out);
+      for (const [dir, host] of [[devDir!, HOST_NAME.dev], [storeDir!, HOST_NAME.store], [edgeDir!, HOST_NAME.edge]] as const) {
         expect(readdirSync(dir).sort()).toEqual(["background.js", "icons", "manifest.json", "popup.html", "popup.js"]);
         expect(readdirSync(join(dir, "icons")).sort()).toEqual(["128.png", "16.png", "32.png", "48.png"]);
         const bundle = readFileSync(join(dir, "background.js"), "utf8");
@@ -55,6 +66,40 @@ describe("the build", () => {
         expect(bundle).toContain("Page.setInterceptFileChooserDialog");
       }
       expect(JSON.parse(readFileSync(join(devDir!, "manifest.json"), "utf8")).key).toBe(devKey());
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("the edge build is the store build with only the visible name changed", async () => {
+    const out = mkdtempSync(join(tmpdir(), "wfc-build-"));
+    try {
+      const [storeDir, edgeDir] = await build(["store", "edge"], out);
+      const files = (dir: string): string[] => readdirSync(dir, { recursive: true, withFileTypes: true })
+        .filter((e) => e.isFile()).map((e) => join(e.parentPath, e.name).slice(dir.length + 1)).sort();
+      expect(files(edgeDir!)).toEqual(files(storeDir!));
+      const storeManifest = JSON.parse(readFileSync(join(storeDir!, "manifest.json"), "utf8")) as Record<string, unknown>;
+      const edgeManifest = JSON.parse(readFileSync(join(edgeDir!, "manifest.json"), "utf8")) as Record<string, unknown>;
+      expect(edgeManifest.name).toBe("Winter for Edge");
+      expect((edgeManifest.action as { default_title: string }).default_title).toBe("Winter for Edge");
+      // Everything else in the manifest — permissions, hosts, version, description, icons — is the store build's.
+      const renamed: Record<string, unknown> = { ...edgeManifest, name: storeManifest.name, action: { ...(edgeManifest.action as object), default_title: "Winter for Chrome" } };
+      expect(renamed).toEqual(storeManifest);
+      for (const file of files(storeDir!)) {
+        if (file === "manifest.json") continue;
+        const store = readFileSync(join(storeDir!, file));
+        const edge = readFileSync(join(edgeDir!, file));
+        if (file.endsWith(".png")) {
+          expect({ file, same: edge.equals(store) }).toEqual({ file, same: true });
+          continue;
+        }
+        const edgeText = edge.toString("utf8");
+        // The Edge build never calls itself the Chrome one, and differs from it in nothing but that name.
+        expect({ file, chromeName: edgeText.includes("Winter for Chrome") }).toEqual({ file, chromeName: false });
+        expect({ file, text: edgeText.replaceAll("Winter for Edge", "Winter for Chrome") }).toEqual({ file, text: store.toString("utf8") });
+        if (file !== "background.js") expect(edgeText).toContain("Winter for Edge");
+      }
+      expect(readFileSync(join(edgeDir!, "background.js"), "utf8")).toContain("Winter for Edge");
     } finally {
       rmSync(out, { recursive: true, force: true });
     }
