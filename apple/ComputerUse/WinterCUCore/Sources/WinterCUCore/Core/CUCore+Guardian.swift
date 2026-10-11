@@ -163,9 +163,6 @@ extension CUCore {
         guard guardianRefs > 0 else { return }
         guardianRefs = 0
         guardianCore.end()
-        // With the observers gone an activation of a stranded app is no longer seen: the marks would go stale (the
-        // user may give the app a key window meanwhile), so they go now.
-        forgetStranded()
         guardianCauses.removeAll()
         guardianLastCause = -1
         for o in guardianObservers { NSWorkspace.shared.notificationCenter.removeObserver(o) }
@@ -273,7 +270,7 @@ extension CUCore {
     }
 
     func onActivation(pid: pid_t) {
-        noteStranded(pid, false)  // really activated: it has its key window back (or the user picks one)
+        appActivated(pid: pid)  // really activated: it has its key window back (or the user picks one)
         let now = clock.nowSeconds()
         // During a desktop visit only input AFTER it began is the user's (never the click that allowed it).
         let visit = visitInput(now: now)

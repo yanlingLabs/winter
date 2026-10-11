@@ -454,6 +454,7 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         XCTAssertEqual(Array(FocusSPI.calls.suffix(2)), ["defocus pid 5252 window 77", "focus pid 1 window 31"], "handed back as before")
         XCTAssertTrue(sys.activated.isEmpty)
         XCTAssertEqual(sys.frontmostPid(), 1)
+        sys.front = pid  // a real activation: the app in front
         core.onActivation(pid: pid)
         XCTAssertFalse(core.isStranded(pid), "a real activation of the app gives it a key window again")
     }
@@ -569,25 +570,20 @@ final class FocusMenusFoldPasteTests: XCTestCase {
     /// Review of round 3 (MEDIUM, a regression): a "stranded" mark left from an earlier script skipped the key-window
     /// read; meanwhile the user had made ANOTHER window of the app key, so the records alone (which don't take over a
     /// key window) left it key and the keys went into it. The read is made every time — the other window resigns
-    /// first — and the mark is forgotten when the guardian stops and when the app's last target goes.
+    /// first — and the mark only ever turns a "key" answer into "no key window".
     func testAStaleStrandedMarkNeverSkipsTheKeyWindowCheck() async throws {
         finder(focusedField: true)
         let enforcer = FakeFocusEnforcer()
         core.focusEnforcerFactory = { _ in enforcer }
         try await act(.type(CUTypeAction(text: "a")))  // script 1: the hand-back strands the app
         XCTAssertTrue(core.isStranded(pid))
-        core.startGuardian(privatePath: true)
-        core.stopGuardian()                            // the turn ended: no observer sees the app activated any more
-        XCTAssertFalse(core.isStranded(pid), "forgotten with the guardian")
-        // The user makes the app's other window key (and goes back to their app).
+        // The user makes the app's other window key — and no activation of it was seen (the mark survived).
         let other = fakeElement(98_020)
         ax.add(other, role: kAXWindowRole, title: "Other")
         ax.windowIDs[AXIdentity(element: other)] = 78
         let otherField = fakeElement(98_024)
         ax.add(otherField, role: kAXTextFieldRole, extra: [kAXWindowAttribute: other])
         ax.focus(pid: pid, on: otherField)
-        // Even with a mark that survived (no guardian stop seen), the app's own answer decides.
-        core.noteStranded(pid, true)
         FocusSPI.reset()
         try await act(.type(CUTypeAction(text: "b")))  // script 2
         XCTAssertEqual(Array(FocusSPI.order.prefix(6)),
@@ -598,6 +594,50 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         core.noteStranded(pid, true)
         core.lose(target, reason: .windowClosed)
         XCTAssertFalse(core.isStranded(pid))
+    }
+
+    /// Round 5 (live, 2026-10-11): round 4 forgot the marks when the guardian stopped, 3 s after a script — the next
+    /// script's first click into the Docs page read the stale "key" answer, sent no records, and the click only made
+    /// the window key (the page's Tools menu never opened). The mark outlives the guardian: it goes when the app is
+    /// really activated (by anyone), its last target is lost, or its pid dies.
+    func testTheMarkOutlivesTheGuardianAndTheNextScriptsClickNamesTheWindow() async throws {
+        finder(focusedField: true)
+        let enforcer = FakeFocusEnforcer()
+        core.focusEnforcerFactory = { _ in enforcer }
+        try await act(.type(CUTypeAction(text: "a")))  // script 1: the hand-back strands the app
+        XCTAssertTrue(core.isStranded(pid))
+        core.startGuardian(privatePath: true)
+        core.stopGuardian()                            // the turn ended; the guardian stopped 3 s later
+        XCTAssertTrue(core.isStranded(pid), "the guardian's stop changes nothing about the app's key window")
+        // Script 2: accessibility still names the field (the stale answer) — a click names the window first.
+        FocusSPI.reset()
+        var atDown: [String]?
+        poster.onPost = { e in if atDown == nil, e.type == .leftMouseDown { atDown = FocusSPI.order } }
+        try await act(.click(CUClickAction(ref: target.refs.ref(for: AXIdentity(element: field)))))
+        XCTAssertEqual(atDown, ["activate 77", "down pid 5252 window 77", "up pid 5252 window 77"], "the records before the click")
+        XCTAssertFalse(core.isStranded(pid))
+    }
+
+    /// What clears the mark: a REAL activation of the app (it is in front as the notification is handled) — never a late
+    /// notification that arrives after it is back in the background (one our own focus records set off, say).
+    func testOnlyARealActivationClearsTheMark() {
+        finder(focusedField: true)
+        core.noteStranded(pid, true)
+        core.appActivated(pid: pid)  // the user's app still in front: a late notification
+        XCTAssertTrue(core.isStranded(pid))
+        sys.front = pid              // the user brought the app forward
+        core.appActivated(pid: pid)
+        XCTAssertFalse(core.isStranded(pid))
+        // Between turns the user activates the app, makes its other window key and goes back: the mark went with the
+        // activation, and the next blip resigns that window first (the round-3 #2 scenario).
+        sys.front = 1
+        let other = fakeElement(98_020)
+        ax.add(other, role: kAXWindowRole, title: "Other")
+        ax.windowIDs[AXIdentity(element: other)] = 78
+        let otherField = fakeElement(98_024)
+        ax.add(otherField, role: kAXTextFieldRole, extra: [kAXWindowAttribute: other])
+        ax.focus(pid: pid, on: otherField)
+        XCTAssertEqual(core.keyInApp(target), .otherKey)
     }
 
     func testTheMakeKeyStepAppliesOnlyToABackgroundWindowOnThisDesktopAndNotChromium() {

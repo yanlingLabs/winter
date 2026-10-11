@@ -1032,8 +1032,8 @@ targets:
         # marked lines and the generated Info.plist by scripts/computer-helper-lib.ts's syncHelperVersion
         # (version:sync, dev:helper, verify:computer-helper); Winter's own stamp skips the marked lines. The
         # helper reports it as `helperVersion`.
-        CFBundleShortVersionString: "1.9.3" # apple/ComputerUse/VERSION
-        CFBundleVersion: "1.9.3" # apple/ComputerUse/VERSION
+        CFBundleShortVersionString: "1.9.4" # apple/ComputerUse/VERSION
+        CFBundleVersion: "1.9.4" # apple/ComputerUse/VERSION
         LSUIElement: true
         LSMinimumSystemVersion: "26.0"
         NSScreenCaptureUsageDescription: "Winter Computer Use captures the windows Winter works in, and the screen when Winter is asked to look at it."

@@ -441,16 +441,24 @@ extension CUCore {
         }
     }
 
-    /// Apps a blip's hand-back left with no key window (until the make-key step names one, or the app is activated).
-    /// Forgotten when the guardian stops (it alone sees the app activated meanwhile) and when the app's last target is
-    /// lost (a pid can be reused).
+    /// Apps a blip's hand-back left with no key window — until the make-key step names one, the app is really activated
+    /// (by anyone: the always-on activation observer, `appActivated`), its last target is lost, or its pid dies. Never
+    /// tied to the guardian's life (round 4 forgot the marks when it stopped, 3 s after a script: the next script's
+    /// first click into the Docs page read the stale "key" answer, sent no records, and the click only made the window
+    /// key — the page's menu never opened, live 2026-10-11).
     func noteStranded(_ pid: pid_t, _ stranded: Bool) {
         strandLock.withLock { if stranded { strandedPids.insert(pid) } else { strandedPids.remove(pid) } }
     }
 
     func isStranded(_ pid: pid_t) -> Bool { strandLock.withLock { strandedPids.contains(pid) } }
 
-    func forgetStranded() { strandLock.withLock { strandedPids.removeAll() } }
+    /// An app was activated (NSWorkspace): it holds its key window again, so its mark goes — when it is the front app as
+    /// the notification is handled. A notification that comes late, the app no longer in front (one our own focus records
+    /// set off, delivered after the blip's hand-back re-marked it), changes nothing.
+    func appActivated(pid: pid_t) {
+        guard sys.frontmostPid() == pid else { return }
+        noteStranded(pid, false)
+    }
 
     /// The synthetic deactivation, so another of the app's windows resigns key, then `keySwitchGapMs` for the
     /// app to take it before the records that follow (live: with no gap one switch in six was lost; 20 ms
