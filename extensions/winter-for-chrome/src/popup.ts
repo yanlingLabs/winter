@@ -2,6 +2,8 @@
 // optional permissions (history, bookmarks, a file a page makes); and — while Winter has handed the tab in front to the
 // user (a sign-in) — Done / Stop waiting for it, with Stop for the tabs Winter is still driving (the button is the popup
 // then, not Stop).
+import { PRODUCT_NAME } from "./product";
+
 declare const chrome: any;
 
 const line = document.getElementById("status");
@@ -43,7 +45,7 @@ async function permissionSwitches(needed: string[]): Promise<void> {
 chrome.runtime.sendMessage({ type: "winter.status" }).then(
   async (r: { state?: string; sentence?: string; backend?: { id: string; name: string }; waiting?: number[]; driven?: number; needs?: string[] } | undefined) => {
     void permissionSwitches(r?.needs ?? []);
-    if (line !== null) line.textContent = r?.sentence ?? "Winter for Chrome is starting…";
+    if (line !== null) line.textContent = r?.sentence ?? `${PRODUCT_NAME} is starting…`;
     if (backend !== null && r?.backend !== undefined) backend.textContent = `Winter calls this browser "${r.backend.id}".`;
     document.body.dataset.state = r?.state ?? "connecting";
     const front = (r?.waiting ?? []).length > 0 ? await frontTabId() : undefined;
@@ -59,5 +61,5 @@ chrome.runtime.sendMessage({ type: "winter.status" }).then(
       stopAllButton?.addEventListener("click", () => { void chrome.runtime.sendMessage({ type: "winter.stopDriven" }).finally(() => window.close()); });
     }
   },
-  () => { if (line !== null) line.textContent = "Winter for Chrome is starting…"; },
+  () => { if (line !== null) line.textContent = `${PRODUCT_NAME} is starting…`; },
 );

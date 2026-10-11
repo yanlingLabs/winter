@@ -1175,6 +1175,9 @@ export class ComputerV2Service {
       targetId: t.targetId, sessionId: ctx.sessionId, callId: ctx.callId, action,
       access: this.deps.policy.accessFor(t.bundleId) === "click" ? "click" : "full",
       privatePath: computerUsePrivateEventPathFrom(settings),
+      // helper 1.11.0: a link rerouted out of an app that is not a browser comes back here to open, under the opener's
+      // own access and card (an older helper ignores it and opens the link itself, as before).
+      linkOpensViaDaemon: true,
     };
     // A type or paste long enough to outlast the run's time left gets the run extended (or is refused up front)
     // — never killed halfway with the field part-filled.
@@ -1259,7 +1262,31 @@ export class ComputerV2Service {
     // change per target, said once at the end of the script — twenty acts can't flood the result.
     const focus = focusLine(res);
     if (focus !== undefined) ctx.focusLines.set(t.targetId, { app: t.name, line: focus });
+    if (typeof res.linkOpen === "string") await this.openLink(ctx, res.linkOpen, metric);
     return undefined;
+  }
+
+  /** A link the helper rerouted (round 10's MEDIUM #7): opened in the background in its default app through the daemon's
+   *  own door — the opener's effective access and per-app card, like `apps.open` — and NOT bound (the agent's click
+   *  asked for no app to work in). Only http(s) and mailto. */
+  private async openLink(ctx: RunCtx, url: string, metric: PrimitiveMetric): Promise<void> {
+    let parsed: URL;
+    try { parsed = new URL(url); } catch { throw new AutomationFailure("Refused", "the link's address could not be read — nothing was opened"); }
+    if (!["http:", "https:", "mailto:"].includes(parsed.protocol)) {
+      throw new AutomationFailure("Refused", "only web and mail links are opened from another app — nothing was opened");
+    }
+    const settings = this.deps.settings();
+    const who = await this.helperCall<{ bundleId: string; name: string; path: string }>(ctx, "apps.defaultOpener", { urls: [url] }, metric);
+    this.live(ctx);
+    await this.deps.policy.authorize(ctx.grants, { bundleId: who.bundleId, name: who.name }, { kind: "bind" }, ctx.abort.signal);
+    this.live(ctx);
+    const res = await this.helperCall<{ app: { name: string; bundleId: string; pid: number }; windowID?: number }>(
+      ctx, "apps.openDocument",
+      { urls: [url], sessionId: ctx.sessionId, mirror: computerUseMirrorFrom(settings), privatePath: computerUsePrivateEventPathFrom(settings) },
+      metric, undefined, { afterEnd: true });
+    this.live(ctx);
+    const host = parsed.protocol === "mailto:" ? "a mail link" : parsed.host;
+    ctx.builder.daemonLine(`the link (${host}) opened in ${res.app.name} in the background — not bound; apps.open() it to work in it`);
   }
 
   /** The screen's one foreground lock for this primitive (rung 4, a desktop visit, a whole-screen shot) — a no-op

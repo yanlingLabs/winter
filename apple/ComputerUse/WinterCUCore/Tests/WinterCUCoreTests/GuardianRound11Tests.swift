@@ -66,20 +66,21 @@ final class GuardianRound11Tests: XCTestCase {
         XCTAssertFalse(o.undoes, "a system dialog is left for the user to answer: \(o)")
     }
 
-    /// The user's work in an app ends with the guard: a later guard does not refuse acts on it.
-    func testTheUsersWorkDoesNotSurviveTheGuardsStop() {
+    /// Review of round 11, MEDIUM #6: the user's work in an app OUTLASTS the guard (a user still typing in it when the next
+    /// script begins is still working there); another app activating ends it, guarding or not.
+    func testTheUsersWorkOutlastsTheGuardUntilAnotherAppActivates() {
         var g = CUFocusGuardianCore()
         g.begin(view: CUGuardedView(app: 7, space: 100))
         g.userInteracted(7, front: 7, now: 10)
-        XCTAssertTrue(g.userIsWorking(in: 7, front: 7, now: 10.5))
         g.end()
         g.begin(view: CUGuardedView(app: 7, space: 100))
-        XCTAssertFalse(g.userIsWorking(in: 7, front: 7, now: 60))
-        // A click pending its app's activation goes with it too.
-        g.userInteracted(8, front: 7, now: 61)
+        XCTAssertTrue(g.userIsWorking(in: 7, front: 7, now: 30), "still in it, after a pause between scripts")
+        g.otherAppActivated(7)
+        XCTAssertTrue(g.userIsWorking(in: 7, front: 7, now: 31), "its own activation ends nothing")
         g.end()
-        g.begin(view: CUGuardedView(app: 8, space: 100))
-        XCTAssertFalse(g.userIsWorking(in: 8, front: 8, now: 61.2))
+        g.otherAppActivated(8)  // between scripts: they went to another app
+        g.begin(view: CUGuardedView(app: 7, space: 100))
+        XCTAssertFalse(g.userIsWorking(in: 7, front: 7, now: 60), "back to look: not until they interact anew")
     }
 
     /// "Clearly" at a moment reads only the opener acts and launches from before it.
@@ -117,5 +118,97 @@ final class GuardianRound11Tests: XCTestCase {
         XCTAssertNoThrow(try core.refuseWhileUserWorks(t))
         core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: 0, targetPid: 500, now: now)
         XCTAssertThrowsError(try core.refuseWhileUserWorks(t))
+    }
+
+    /// Review of round 11, HIGH #2: a process that is NOT part of the front app — Spotlight's or a launcher's panel, an
+    /// accessory or agent process of its own — never counts as the app receiving the key; a true part of it does (its
+    /// renderer, its WebContent). Decided like the live check, from the process facts.
+    func testAKeyIntoAnAccessoryProcessIsNoWorkButOneIntoAPartOfTheAppIs() throws {
+        let sys = FakeSystem()
+        sys.running = [1, 500]; sys.front = 500; sys.space = 100
+        sys.windows[77] = FakeSystem.window(77, pid: 500, CGRect(x: 500, y: 0, width: 400, height: 300))
+        sys.stack = [sys.windows[77]!]
+        sys.appBundles[500] = "/Applications/Google Chrome.app"
+        sys.processFacts[811] = (responsible: 811, parent: nil, executable: "/System/Library/CoreServices/Spotlight.app/Contents/MacOS/Spotlight")
+        sys.processFacts[900] = (responsible: 996, parent: 500, executable: "/Applications/Google Chrome.app/Contents/Frameworks/Helpers/Renderer")
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        let t = CUTarget(id: "t1", sessionId: "s", pid: 500, bundleId: "com.google.Chrome", appName: "Google Chrome",
+                         isChromium: true, mirror: false, windowID: 77, windowTitle: "")
+        core.registerForTesting(t, windowElement: nil)
+        core.switchInputObservableOverride = true
+        XCTAssertTrue(core.startGuardian(privatePath: true))
+        defer { core.stopGuardian() }
+        let now = core.clock.nowSeconds()
+        core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: 0, targetPid: 811, now: now)  // Spotlight's panel
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t))
+        core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: 0, targetPid: 900, now: now)  // its renderer
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(t))
+        // The pure rule: a bundle path is a prefix only at a path boundary.
+        XCTAssertFalse(CUProcessFacts.isPart(5, of: 4, responsible: 5, parent: nil, executable: "/Applications/Google Chrome.app2/x",
+                                             appBundle: "/Applications/Google Chrome.app"))
+        XCTAssertTrue(CUProcessFacts.isPart(5, of: 4, responsible: 5, parent: nil, executable: "/Applications/Google Chrome.app/Contents/x",
+                                            appBundle: "/Applications/Google Chrome.app"))
+    }
+
+    /// Review of round 11, LOW #10: a launch notice heard long after the process started judges nothing clearly (the facts
+    /// from then are gone) — the launch is not taken for the agent's.
+    func testALateLaunchNoticeJudgesNothingClearly() {
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 100))
+        g.noteCause(500, now: 20)
+        g.noteOpenerCause(now: 20)
+        g.appLaunched(905, startedAt: 20.4, now: 40)  // heard 19.6 s after the start
+        XCTAssertFalse(g.judge(CUMoveQuery(app: 905, space: 100, appStartedAt: 20.4), now: 41).undoes)
+    }
+
+    /// Round 10's MEDIUM #5 (the user's ruling), done in round 12: between scripts — no guardian — the work watcher sees
+    /// the user's own key or click on a bound app in front, so the next script's act on it is refused; a synthetic event
+    /// (another process's) is not theirs.
+    func testTheWorkWatcherSeesWorkBetweenScripts() throws {
+        let sys = FakeSystem()
+        sys.running = [1, 500]; sys.front = 500; sys.space = 100
+        sys.windows[77] = FakeSystem.window(77, pid: 500, CGRect(x: 500, y: 0, width: 400, height: 300))
+        sys.stack = [sys.windows[77]!]
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        let t = CUTarget(id: "t1", sessionId: "s", pid: 500, bundleId: "com.apple.finder", appName: "Finder",
+                         isChromium: false, mirror: false, windowID: 77, windowTitle: "")
+        core.registerForTesting(t, windowElement: nil)
+        XCTAssertFalse(core.guardianRunning)
+        core.noteWatchedEvent(type: .keyDown, sourcePid: 4242, userData: 0, flags: [], keycode: 0, location: .zero, targetPid: 500)
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "another process's key is not theirs")
+        core.noteWatchedEvent(type: .keyDown, sourcePid: 0, userData: 0, flags: [], keycode: 0, location: .zero, targetPid: 500)
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(t), "their key, between scripts")
+        // Another app activates (the always-on observer): over.
+        sys.front = 1
+        core.appActivated(pid: 1)
+        sys.front = 500
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t))
+        // Their click into the bound window, between scripts.
+        core.noteWatchedEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, flags: [], keycode: -1,
+                              location: CGPoint(x: 600, y: 100), targetPid: 0)
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(t))
+        XCTAssertEqual(CUCore.workWatcherMask & (CGEventMask(1) << CGEventMask(CGEventType.mouseMoved.rawValue)), 0, "no pointer moves")
+    }
+
+    /// Round 10's LOW #10: under Secure Event Input the tap sees no key — when the bound app in front holds it itself, the
+    /// user is taken to be working in it; held by another app, nothing changes.
+    func testSecureInputHeldByTheFrontBoundAppIsWork() throws {
+        let sys = FakeSystem()
+        sys.running = [1, 500]; sys.front = 500; sys.space = 100
+        sys.windows[77] = FakeSystem.window(77, pid: 500, CGRect(x: 500, y: 0, width: 400, height: 300))
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        let t = CUTarget(id: "t1", sessionId: "s", pid: 500, bundleId: "com.example.app", appName: "App",
+                         isChromium: false, mirror: false, windowID: 77, windowTitle: "")
+        core.registerForTesting(t, windowElement: nil)
+        core.secureInputOverride = true
+        core.secureInputOwnerOverride = 1
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "another app holds it")
+        core.secureInputOwnerOverride = 500
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(t))
+        sys.front = 1
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "not in front")
     }
 }
