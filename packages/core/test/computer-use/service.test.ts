@@ -108,6 +108,19 @@ describe("ComputerV2: binding, state and the diff base", () => {
     expect(text(r2)).toContain('~ [14] value "a" → "b"');
   }, 30_000);
 
+  macOnly("apps.open with { emit: false } binds without reading or printing the window (queue item 4)", async () => {
+    const w = world();
+    const r = await w.run("const notes = await apps.open('Notes', { emit: false })");
+    expect(r.isError).toBe(false);
+    expect(w.fake.calls("target.bind").length).toBe(1);
+    expect(w.fake.calls("target.snapshot").length).toBe(0);
+    expect(text(r)).not.toContain('Notes — window "Notes window"');
+    expect(text(r)).not.toContain('<screen-data id="');
+    // No base: the first state() afterwards is the whole state.
+    await w.run("await notes.state()");
+    expect(w.fake.calls("target.snapshot")[0]!.since).toBeUndefined();
+  }, 30_000);
+
   macOnly("binding the same window again prints what changed, not the whole tree", async () => {
     const w = world();
     w.fake.handlers["target.bind"] = () => ({ targetId: "t1", app: { name: "Notes", bundleId: "com.apple.Notes", pid: 501 }, window: { id: 7, title: "Notes window", frame: [0, 0, 800, 600] } });

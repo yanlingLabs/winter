@@ -80,13 +80,21 @@ final class GuardianModelTests: XCTestCase {
         (338, "I3: a user key reached T with no reroute while T was in the background (a blip ending during a theft)"),
         (508, "I2: the engine's place U, the user's P — Secure Event Input with the modifiers unseen"),
         (556, "I2: the engine's place U, the user's X — Secure Event Input with the modifiers unseen"),
+        // Round 11's sweep of seeds 1000–1079 (each failed on round 10's engine too; 10 more of its failures are gone):
+        (1011, "I3: the key focus handed to T2 (a visit's return) while the user is at an app the agent launched, on desktop 200"),
+        (1018, "I4: settled at U, should be X@200 — an untouched U sent back as the agent's indirect effect after the user moved"),
+        (1022, "I2: the engine's place T@200, the user's T@100 — the same app on two desktops"),
+        (1038, "I3: the key focus handed to T2 (a visit's return) while the user is at S"),
+        (1055, "I3: the key focus handed to T2 (a visit's return) while the user is at the held app T3"),
+        (1059, "I3: the key focus handed to T2 (a visit's return) while the user is at X@200"),
+        (1067, "I2: the engine's place T2@300 (the visited app), the user's X@200"),
     ]
 
     func testKnownFailingSeedsAreStillKnown() async {
         for (seed, what) in Self.knownFailing {
             let r = await SimRun.execute(SimPlan.generate(seed: UInt64(seed), count: Self.steps))
             if let v = r.violation {
-                XCTExpectFailure("KNOWN, round 11: seed \(seed) — \(what)", strict: true) { XCTFail("seed \(seed): \(v)") }
+                XCTExpectFailure("KNOWN, round 12: seed \(seed) — \(what)", strict: true) { XCTFail("seed \(seed): \(v)") }
             } else {
                 XCTFail("seed \(seed) passes now — take it off GuardianModelTests.knownFailing")
             }

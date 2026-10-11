@@ -294,6 +294,10 @@ public struct CUFocusGuardianCore: Sendable {
         judged = nil
         lastSeen = nil
         restoredAt.removeAll()
+        // The user's work in an app is known only while guarding (review of round 10, MEDIUM #4: it survived a stop, and a
+        // later guard refused acts on an app the user had long left).
+        userWorkingApp = nil
+        pendingWork = nil
         if visitApp != nil { endVisit() }
     }
 
@@ -456,10 +460,31 @@ public struct CUFocusGuardianCore: Sendable {
 
     /// An app was launched (NSWorkspace) — not by the agent when it is not touched by a launch of the agent's: its first
     /// activation is the user's.
-    public mutating func appLaunched(_ pid: pid_t, startedAt: TimeInterval? = nil, bundle: String? = nil, now: TimeInterval) {
+    public mutating func appLaunched(_ pid: pid_t, startedAt: TimeInterval? = nil, bundle: String? = nil, now: TimeInterval,
+                                     inputObservable: Bool = true, secureInput: Bool = false) {
         guard !isTouched(pid, startedAt: startedAt, bundle: bundle, now: now) else { return }
         othersLaunches = othersLaunches.filter { now - $0.value <= Self.launchFirstWindow }
         othersLaunches[pid] = now
+        // Judged at its process START, while the facts from then are at hand (review of round 10, HIGH #1): a launch the
+        // agent's own action caused — a link it pressed opening a browser that was not running — is no launch of the user's.
+        let start = min(startedAt ?? now, now)
+        coldLaunches = coldLaunches.filter { now - $0.value.start <= Self.launchFirstWindow }
+        coldLaunches[pid] = (start, inputObservable && !secureInput && clearlyAt(start, hardwareAt: nil))
+    }
+    /// The untouched launches heard of, by process: its start, and whether it was clearly the agent's then.
+    private var coldLaunches: [pid_t: (start: TimeInterval, clearly: Bool)] = [:]
+
+    /// An untouched app's process start was clearly the agent's (the start is returned): no key or click of the user's in
+    /// the `quietBeforeUndo` before it, and an action of the agent's that can open apps within the causal window before it
+    /// (or a launch of the agent's begun by then). Judged when the launch was heard of; else, for an app started within
+    /// the facts kept, from them. Only an app's FIRST activation (never seen in front).
+    func agentsColdLaunch(_ q: CUMoveQuery, upTo: TimeInterval) -> TimeInterval? {
+        // (The agent's own launches — a bind's — are judged by the ordinary rules: touched while it runs.)
+        guard q.inputObservable, !q.secureInput, let a = q.app, !everFront.contains(a), !agentLaunched.contains(a) else { return nil }
+        if let c = coldLaunches[a] { return c.clearly ? c.start : nil }
+        guard let s = q.appStartedAt, s <= upTo, upTo - s <= Self.keepFacts - Self.quietBeforeUndo,
+              clearlyAt(s, hardwareAt: q.hardwareAt.flatMap { $0 <= s ? $0 : nil }) else { return nil }
+        return s
     }
 
     /// The user's hardware action (a key, a click, a scroll, a gesture — never a pointer move), as the session tap saw it.
@@ -467,7 +492,14 @@ public struct CUFocusGuardianCore: Sendable {
     /// command, an open, an AppleScript, a launch — never a read, typing plain text, a scroll or a hover): round 10's
     /// "clearly the agent's" needs one within the causal window.
     public private(set) var lastOpenerCause: TimeInterval = -.infinity
-    public mutating func noteOpenerCause(now: TimeInterval) { lastOpenerCause = max(lastOpenerCause, now) }
+    public mutating func noteOpenerCause(now: TimeInterval) {
+        lastOpenerCause = max(lastOpenerCause, now)
+        openerTimes.append(now)
+        openerTimes.removeAll { now - $0 > Self.launchFirstWindow }
+    }
+    /// Every opener act, in time order: a state re-judged later counts only those from before it was first seen (review
+    /// of round 10, MEDIUM #8 — the last one alone, read as of now, let an act from after it count).
+    private var openerTimes: [TimeInterval] = []
     /// No input of the user's within this before an untouched app came forward (round 10, the user's ruling: ~2 s;
     /// a little more, since their own open — Spotlight, a launcher, a link — lands up to 2 s after their last key).
     static let quietBeforeUndo: TimeInterval = 2.5
@@ -477,9 +509,22 @@ public struct CUFocusGuardianCore: Sendable {
     /// within the causal window, and Secure Event Input is not hiding their keys.
     func clearlyTheAgents(upTo: TimeInterval, q: CUMoveQuery) -> Bool {
         guard q.inputObservable, !q.secureInput else { return false }
-        if hardwareTimes.contains(where: { $0 <= upTo && upTo - $0 <= Self.quietBeforeUndo }) { return false }
-        if let h = q.hardwareAt, h <= upTo, upTo - h <= Self.quietBeforeUndo { return false }
-        return upTo - lastOpenerCause <= Self.causalWindow || launches.isEmpty == false
+        if clearlyAt(upTo, hardwareAt: q.hardwareAt) { return true }
+        // An app the agent's action cold-launched, coming forward for the first time with no key or click of the user's
+        // since its process started (review of round 10, HIGH #1: a launch outlasts the causal window).
+        guard let s = agentsColdLaunch(q, upTo: upTo) else { return false }
+        if hardwareTimes.contains(where: { $0 > s && $0 <= upTo }) { return false }
+        if let h = q.hardwareAt, h > s, h <= upTo { return false }
+        return true
+    }
+
+    /// No key or click of the user's in the `quietBeforeUndo` up to `t`, and an opener act of the agent's within the
+    /// causal window up to `t` or a launch of the agent's begun by `t` and still pending — the facts from before `t` only.
+    func clearlyAt(_ t: TimeInterval, hardwareAt: TimeInterval?) -> Bool {
+        if hardwareTimes.contains(where: { $0 <= t && t - $0 <= Self.quietBeforeUndo }) { return false }
+        if let h = hardwareAt, h <= t, t - h <= Self.quietBeforeUndo { return false }
+        if openerTimes.contains(where: { $0 <= t && t - $0 <= Self.causalWindow }) { return true }
+        return launches.values.contains { $0.since <= t }
     }
 
     public mutating func noteHardwareAction(now: TimeInterval) {
@@ -688,12 +733,16 @@ public struct CUFocusGuardianCore: Sendable {
         var from = active ? now - Self.switchWindow : min(q.since ?? now, now - Self.switchWindow)
         if visit { from = max(from, visitStartedAt) }
         // The first activation of an app the user launched (not the agent): theirs — during a visit too (they moved).
-        if !front, let a = app, let l = othersLaunches[a], now - l <= Self.launchFirstWindow {
+        // Never a system dialog started on demand (review of round 10, MEDIUM #2: SecurityAgent, CoreServicesUIAgent and
+        // UserNotificationCenter start when asked for — theirs to answer, left, never adopted as the user's place), and
+        // never a launch that was clearly the agent's at its process start (HIGH #1).
+        let launchIsTheirs = !front && !q.appIsSystemUI && agentsColdLaunch(q, upTo: upTo) == nil
+        if launchIsTheirs, let a = app, let l = othersLaunches[a], now - l <= Self.launchFirstWindow {
             return (.user("the first activation of an app the user launched"), nil)
         }
         // The same when the launch notice was never heard: an app started within the window, never seen in front, not the
         // agent's launch (review of round 9, MEDIUM #5).
-        if !front, let a = app, !everFront.contains(a), !agentLaunched.contains(a), let s = q.appStartedAt,
+        if launchIsTheirs, let a = app, !everFront.contains(a), !agentLaunched.contains(a), let s = q.appStartedAt,
            now - s <= Self.launchFirstWindow, now >= s {
             return (.user("the first activation of an app started a moment ago, not by the agent"), nil)
         }
@@ -969,9 +1018,10 @@ public struct CUFocusGuardianCore: Sendable {
     /// to look is not working in it). The agent is hands-off it until it leaves the front (user ruling, round 10).
     public private(set) var userWorkingApp: pid_t?
     /// A click of theirs into a window of an app NOT in front: working in it once its own activation lands (within
-    /// `workClickWindow`) — a drag out of a background window activates nothing and is no work in it.
+    /// `workClickWindow` — the claim's own window: a slow app's activation lands up to 1.5 s after the click, review of
+    /// round 10, MEDIUM #5) — a drag out of a background window activates nothing and is no work in it.
     private var pendingWork: (app: pid_t, until: TimeInterval)?
-    static let workClickWindow: TimeInterval = 0.5
+    static let workClickWindow: TimeInterval = causalWindow
 
     /// Their click, key or scroll in `app`'s window (the caller attributes it), with `front` in front.
     public mutating func userInteracted(_ app: pid_t, front: pid_t?, now: TimeInterval) {

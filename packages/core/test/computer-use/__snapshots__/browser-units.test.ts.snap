@@ -76,7 +76,7 @@ interface Tab extends Target {
 }
 declare const apps: {
   list(o?: Quiet): Promise<{ name: string; bundleId: string; running: boolean }[]>;
-  open(target: string, o?: { window?: string | number; app?: string }): Promise<App>;  // an app (name/bundle id/.app path) to bind, OR a file path / URL to OPEN — opened in the background in \`app\` or its default app, and that app is bound. To open a file or URL, always use apps.open — never Finder's Open, a double-click or a menu. Prints state.
+  open(target: string, o?: { window?: string | number; app?: string; emit?: boolean }): Promise<App>;  // an app (name/bundle id/.app path) to bind, OR a file path / URL to OPEN — opened in the background in \`app\` or its default app, and that app is bound. To open a file or URL, always use apps.open — never Finder's Open, a double-click or a menu. Prints state (\`{ emit: false }\`: binds without printing it).
 };
 declare const browsers: {
   list(o?: Quiet): Promise<{ id: string; name: string; isDefault: boolean; connected: boolean; reason?: string }[]>;
@@ -170,7 +170,7 @@ interface Tab extends Target {
 }
 declare const apps: {
   list(o?: Quiet): Promise<{ name: string; bundleId: string; running: boolean }[]>;
-  open(target: string, o?: { window?: string | number; app?: string }): Promise<App>;  // an app (name/bundle id/.app path) to bind, OR a file path / URL to OPEN — opened in the background in \`app\` or its default app, and that app is bound. To open a file or URL, always use apps.open — never Finder's Open, a double-click or a menu. Prints state.
+  open(target: string, o?: { window?: string | number; app?: string; emit?: boolean }): Promise<App>;  // an app (name/bundle id/.app path) to bind, OR a file path / URL to OPEN — opened in the background in \`app\` or its default app, and that app is bound. To open a file or URL, always use apps.open — never Finder's Open, a double-click or a menu. Prints state (\`{ emit: false }\`: binds without printing it).
 };
 declare const browsers: {
   list(o?: Quiet): Promise<{ id: string; name: string; isDefault: boolean; connected: boolean; reason?: string }[]>;

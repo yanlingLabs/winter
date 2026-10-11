@@ -55,8 +55,7 @@ extension CUCore {
         // The act is an operation on the app: touched while it runs (I1: "while an operation on it runs"), for the causal
         // window after it — however it ends. A cause that can't raise a window: the user's switch input just before it
         // still outranks it (#8).
-        beginGuardianSpan(t.pid, raise: false)
-        defer { endGuardianSpan(t.pid, raise: false) }
+        // (Checked first: a refused act opens no span and records no cause — review of round 10, LOW #9.)
         do {
             try Self.checkAccess(p.action, access: p.access, appName: t.appName)
             try refuseWhileUserWorks(t)
@@ -65,6 +64,8 @@ extension CUCore {
             logAct(p, t, failed: error)
             throw error
         }
+        beginGuardianSpan(t.pid, raise: false)
+        defer { endGuardianSpan(t.pid, raise: false) }
         let opener = Self.actCanOpenApps(p.action)
         if opener { noteGuardianOpener() }
         defer { if opener { noteGuardianOpener() } }  // its end too: what it opened may come forward a moment after
@@ -146,6 +147,7 @@ extension CUCore {
             // A cancel that arrived while this act waited behind others stops it here.
             try token.check()
             try floorCheckPrivacy(t)
+            try floorCheckRemoteDebugging(p, t)
             try saveFloorBeforeAct(p, t)
             do {
                 let focusBefore = t.accessible ? focusBeforeAct(t) : nil
@@ -401,39 +403,46 @@ extension CUCore {
         let synth = self.synth(p)
         let windowFor = self.windowFor(t)
         // A web page takes no hover from a pointer that is not the real one while its app is in the background:
-        // measured — WebKit on 2026-10-10 (posted moves reached the window, and a plain AppKit view's tracking areas in
-        // the same state, but no mouseenter reached the page, in the background or with the app in front and the window
-        // key), Chromium on 2026-10-11 (run111: a background Chrome page got moves on the private path but neither a
+        // measured — WebKit on 2026-10-10 (posted moves reached the window, but no mouseenter reached the page, in the
+        // background or with the app in front and the window key), Chromium on 2026-10-11 (run111: a background Chrome page got moves on the private path but neither a
         // mouseenter nor a :hover, on either route). Watched here, so the answer says when nothing appeared instead of
         // leaving the model to look.
         let webPage = t.accessible
             && (a.ref.flatMap { try? element($0, in: t) } ?? elementAt(pt, in: t)).map(isWebContent) == true
+        // Nor does an AppKit view's tracking area (round 11 — live and run126: a `.activeAlways` area under posted moves,
+        // in the background and after the synthetic activation, never got its mouseEntered: tracking follows the REAL
+        // cursor). Watched the same way, over the window's own tree.
+        let nativeView = t.accessible && !webPage
         // The app held in front (requestForeground) or the rung-4 card agreed to: the REAL pointer hovers it — the only
         // hover a web page takes (what the bind's note and the answer below advise).
-        if webPage, d.rung != .foreground, p.allowForeground {
-            d = CUInputLadder.Decision(rung: .foreground, detail: "\(t.appName)'s web page takes hover only from the real pointer")
+        if webPage || nativeView, d.rung != .foreground, p.allowForeground {
+            d = CUInputLadder.Decision(rung: .foreground, detail: "\(t.appName)'s \(webPage ? "web page" : "window") takes hover only from the real pointer")
         }
-        let watched = webPage ? webElementCount(t) : nil
+        let count = { [self] in webPage ? webElementCount(t) : windowElementCount(t) }
+        let watched = webPage || nativeView ? count() : nil
         // With the real pointer, what appeared is counted WHILE it rests there (it goes back to where the user had it
         // right after, and a hover menu may close with it).
         var during: Int?
         let out = try runEvents(p, t, d, focus: false, token) { route, check in
             let used = try synth.hover(pid: t.pid, windowFor: windowFor, at: pt, route: route, dwellMs: ms, check: check)
-            if route == .hid, watched != nil { during = webElementCount(t) }
+            if route == .hid, watched != nil { during = count() }
             return used
         }
         if let before = watched {
-            let after = webElementCount(t)
+            let after = count()
+            let place = webPage ? "the page" : "the window"
             if d.rung == .foreground {
                 if let during, during > before {
                     let gone = after.map { $0 <= before } ?? false
-                    return out.noting("the real pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms and \(during - before) new element(s) appeared in the page\(gone ? " — gone again once the pointer went back to where the user had it: if what it opens also opens on a click, click it" : "; state() shows them")")
+                    return out.noting("the real pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms and \(during - before) new element(s) appeared in \(place)\(gone ? " — gone again once the pointer went back to where the user had it: if what it opens also opens on a click, click it" : "; state() shows them")")
                 }
-                return out.noting("the real pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms; nothing new appeared in the page")
+                return out.noting("the real pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms; nothing new appeared in \(place)")
             }
             if let after, after == before {
-                CULog.act.notice("hover in \(t.appName, privacy: .public): nothing new appeared in the page (\(before, privacy: .public) elements)")
-                return out.noting("the pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms, and nothing new appeared in the page — \(t.appName)'s web page takes no hover from a pointer that isn't the real one: if the menu or item also opens on a click, click it; else app.requestForeground(reason) for a real hover")
+                CULog.act.notice("hover in \(t.appName, privacy: .public): nothing new appeared in \(place, privacy: .public) (\(before, privacy: .public) elements)")
+                let why = webPage ? "\(t.appName)'s web page takes no hover from a pointer that isn't the real one"
+                    : "\(t.appName)'s views take no hover from a pointer that isn't the real one while it is in the background (hover tracking follows the real cursor)"
+                return out.noting("the pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms, and nothing new appeared in \(place) — \(why): if the menu or item also opens on a click, click it; else app.requestForeground(reason) for a real hover")
             }
         }
         return out.noting(rested)
@@ -442,6 +451,20 @@ extension CUCore {
     /// How many elements accessibility shows in the bound window's web page — the cheap "did anything appear"
     /// fingerprint around a hover. Nil when it has none, or when the walk was cut short (`hoverFingerprintMaxNodes`,
     /// or 200 ms): a capped count is the same before and after whatever appeared, so it proves nothing either way.
+    /// The same fingerprint over the bound window's whole tree (a native window's hover).
+    func windowElementCount(_ t: CUTarget, maxMs: Double = 200) -> Int? {
+        guard let win = try? windowElement(t) else { return nil }
+        let deadline = clock.nowMs() + maxMs
+        var queue = [win]
+        var next = 0
+        while next < queue.count {
+            guard next < hoverFingerprintMaxNodes, clock.nowMs() < deadline else { return nil }
+            queue.append(contentsOf: ax.elements(queue[next], kAXChildrenAttribute))
+            next += 1
+        }
+        return next
+    }
+
     func webElementCount(_ t: CUTarget, maxMs: Double = 200) -> Int? {
         guard let win = try? windowElement(t), let area = firstWebArea(win) else { return nil }
         let deadline = clock.nowMs() + maxMs
@@ -518,12 +541,10 @@ extension CUCore {
                     // still show it, and a click after it would do it twice.
                     let crop = webBefore != nil ? pressCrop(e, info, t) : nil
                     let shotBefore = crop.flatMap { pressShot($0, t) }
+                    var pressed = false
                     do {
                         try ax.perform(e, axAction)
-                        if let webBefore {
-                            return try verifyWebPress(e, info, ref: ref, before: webBefore, crop: crop, shotBefore: shotBefore, p, t, token)
-                        }
-                        return ActOutcome(rung: .accessibility)
+                        pressed = true
                     } catch let error where Self.pressMayHaveActed(error) != nil {
                         // Never fall through to a click here: the press may have acted, and a click would repeat it.
                         let note = try judgeErroredPress(e, t, before: before, code: Self.pressMayHaveActed(error)!,
@@ -534,6 +555,14 @@ extension CUCore {
                     } catch {
                         // The element refused the action outright: fall through to events at its centre.
                     }
+                    // Verified OUTSIDE the press's own catch: what the check throws (a desktop visit to offer, a click it
+                    // refused) is never taken for the element refusing the press — that fell through to a second click.
+                    if pressed {
+                        if let webBefore {
+                            return try verifyWebPress(e, info, ref: ref, before: webBefore, crop: crop, shotBefore: shotBefore, p, t, token)
+                        }
+                        return ActOutcome(rung: .accessibility)
+                    }
                 }
             }
             guard info.center != nil else {
@@ -542,12 +571,47 @@ extension CUCore {
             guard let center = clickablePoint(e, info, t) else {
                 throw CUError.unsupported("[\(ref)] is outside the window and could not be scrolled into view — scroll to it first")
             }
+            // A click on web content that went out as events (no press, or one the element refused) is checked like
+            // the press is: never a silent no-op (live, round 11: clicks on the Web Store page returned nothing while
+            // none of them reached it).
+            // (On another desktop the click's own words say it can't be confirmed there.)
+            if isWebContent(e), button == .left, count == 1, flags.isEmpty, offScreenSubject(t) == nil {
+                let crop = pressCrop(e, info, t)
+                return try webClickVerified(e, t, pressIgnored: false, why: nil, label: Self.elementLabel(ref, info),
+                                            crop: crop, shotBefore: crop.flatMap { pressShot($0, t) }) {
+                    try pointerClick(p, t, at: center, button: button, count: count, flags: flags, token, announced: announced,
+                                     element: e, axTried: announced)
+                }
+            }
             return try pointerClick(p, t, at: center, button: button, count: count, flags: flags, token, announced: announced,
                                     element: e, axTried: announced)
         }
         guard let px = try cuPoint(a.point) else { throw CUError.invalidParams("click needs a ref or a point") }
         let pt = try screenPoint(for: t, shotId: a.shotId, pixel: px)
-        return try pointerClick(p, t, at: pt, button: button, count: count, flags: flags, token)
+        return try pointClickVerified(t, at: pt) {
+            try pointerClick(p, t, at: pt, button: button, count: count, flags: flags, token)
+        }
+    }
+
+    /// A click at a point of a window on this desktop, checked by its pixels around the point and the app's windows (a
+    /// menu or popover opening): a click that changed neither says so — never a silent no-op. Nothing is said when
+    /// there is no picture to compare (no Screen Recording, a blank capture), or for a click the app took in front.
+    func pointClickVerified(_ t: CUTarget, at pt: CGPoint, _ click: () throws -> ActOutcome) throws -> ActOutcome {
+        guard offScreenSubject(t) == nil, let window = sys.window(id: t.windowID)?.frame else { return try click() }
+        let crop = CGRect(x: pt.x - 120, y: pt.y - 80, width: 240, height: 160).intersection(window)
+        guard !crop.isNull, !crop.isEmpty, let before = pressShot(crop, t) else { return try click() }
+        let windowsBefore = Set(sys.windows(pid: t.pid).map(\.id))
+        let o = try click()
+        guard o.rung != .foreground else { return o }
+        let deadline = clock.nowMs() + webPressWatchMs
+        repeat {
+            if Set(sys.windows(pid: t.pid).map(\.id)) != windowsBefore { return o }
+            if let after = pressShot(crop, t), CUImageTools.differs(before, after) { return o }
+            if clock.nowMs() >= deadline { break }
+            clock.pause(ms: 150)
+        } while true
+        CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect at the point")
+        return o.noting("the click at that point had no visible effect (nothing changed there, and no window opened) — check with state() or a screenshot before clicking again")
     }
 
     /// `announced`: the cursor already showed this press (an AX attempt that fell back to events). `element`:
@@ -646,6 +710,13 @@ extension CUCore {
                             let info = ElementInfo(el, ax)
                             if Self.mayActUnseen(info.labels) {
                                 return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.unseenPressNote(Self.elementLabel(nil, info)))")
+                            }
+                            // On ANOTHER desktop, a press that changed nothing on a control a repeat can't undo: a desktop
+                            // visit would click it where it is (live, round 11: the Web Store's controls ignored the press
+                            // from another Space and the visit was never offered).
+                            if !prefersWebClicks(t), !statefulWithoutReadableState(el, info), isOffThisDesktop(t) {
+                                CULog.act.notice("click in \(t.appName, privacy: .public) (another desktop): no visible effect — a desktop visit would click it")
+                                throw CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(Self.elementLabel(nil, info)) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
                             }
                             if !prefersWebClicks(t) || statefulWithoutReadableState(el, info) {
                                 CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): no visible effect — not clicked as well")
@@ -801,9 +872,33 @@ extension CUCore {
     /// Events are routed to the target pid's front-most window under the point (a sheet, popover or panel),
     /// falling back to the bound window. One window-list read per action.
     func windowFor(_ t: CUTarget) -> (CGPoint) -> UInt32 {
-        let stack = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 }
         let bound = t.windowID
+        let mine = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 }
+        // (Accessibility is asked only when the app has another window at the normal level on screen — most acts: none.)
+        let others = mine.contains { $0.layer == 0 && $0.id != bound } ? otherDocumentWindows(t) : []
+        let stack = mine.filter { !others.contains($0.id) }
         return { point in stack.first { $0.frame.contains(point) }?.id ?? bound }
+    }
+
+    /// The app's OTHER document windows: a point of the bound window that one of them covers still goes to the bound
+    /// window (the event names it), never to the window on top — that is another window of the app, often the one
+    /// the user works in (live, round 11: a Chrome window behind another took every click on the Web Store page into
+    /// the user's front Chrome window; the page saw none, focus was never placed). What is drawn over the bound
+    /// window as part of it — a menu, a popover, a sheet, a page's popup, a floating panel — still takes the click
+    /// at its point. An AX standard window of the app; with no accessibility (a capture-only bind), a window at the
+    /// normal level that does not lie within the bound one (a sheet does).
+    func otherDocumentWindows(_ t: CUTarget) -> Set<UInt32> {
+        let bound = t.windowID
+        if t.accessible {
+            var ids = Set<UInt32>()
+            for w in ax.elements(ax.application(t.pid), kAXWindowsAttribute)
+            where ax.string(w, kAXSubroleAttribute) == kAXStandardWindowSubrole {
+                if let id = ax.windowID(w), id != bound { ids.insert(id) }
+            }
+            return ids
+        }
+        guard let frame = sys.window(id: bound)?.frame else { return [] }
+        return Set(sys.windows(pid: t.pid).filter { $0.layer == 0 && $0.id != bound && !frame.contains($0.frame) }.map(\.id))
     }
 
     // MARK: text
@@ -2840,6 +2935,11 @@ extension CUCore {
             CULog.act.notice("click in \(t.appName, privacy: .public): a toggle-like control with no readable state — not clicked as well")
             return ActOutcome(rung: .accessibility, detail: "the accessibility press on \(label) showed no change accessibility can see, and a second press could undo it (it holds a state accessibility doesn't show) — check state() or a screenshot before pressing again")
         }
+        // On ANOTHER desktop: a desktop visit would click it where it is (round 11 — live, never offered).
+        if isOffThisDesktop(t) {
+            CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect, and the window is on another desktop — a desktop visit would click it")
+            throw CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(label) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
+        }
         if offScreenSubject(t) != nil {
             CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect, and the window is not on screen — not clicked as well")
             return ActOutcome(rung: .accessibility, detail: Self.noEffectNote(label))
@@ -2911,14 +3011,26 @@ extension CUCore {
 
     /// Runs `click`, then says what it did: the effect seen (the app's web content ignored the press: counted,
     /// see `prefersWebClicks`), or plainly that nothing changed that accessibility can see — never a silent success.
-    func webClickVerified(_ e: AXUIElement, _ t: CUTarget, pressIgnored: Bool, why: String, label: String,
+    /// `why` nil: a plain click (no press was tried) — nothing said when it took effect; `crop`/`shotBefore`: its
+    /// pixels, so an effect accessibility can't see (a canvas) is not called none.
+    func webClickVerified(_ e: AXUIElement, _ t: CUTarget, pressIgnored: Bool, why: String?, label: String,
+                          crop: CGRect? = nil, shotBefore: CGImage? = nil,
                           _ click: () throws -> ActOutcome) throws -> ActOutcome {
         let before = webPressEvidence(e, t)
         let o = try click()
         if webPressChanged(e, t, since: before) {
             if pressIgnored { noteWebPressIgnored(t) }
             CULog.act.notice("click in \(t.appName, privacy: .public): the window-targeted click took effect")
+            guard let why else { return o }
             return o.noting(pressIgnored ? "\(why); clicked it instead" : "\(why), so \(label) was clicked")
+        }
+        if let crop, let shotBefore, let after = pressShot(crop, t), CUImageTools.differs(shotBefore, after) {
+            CULog.act.notice("click in \(t.appName, privacy: .public): the click changed pixels but nothing accessibility can see")
+            return o
+        }
+        guard let why else {
+            CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect after the window-targeted click")
+            return o.noting("the click on \(label) had no visible effect (nothing changed that accessibility can see) — check with state() or a screenshot before clicking again")
         }
         CULog.act.notice("click in \(t.appName, privacy: .public): nothing changed after the window-targeted click either")
         return o.noting("\(why); clicked \(label), and nothing changed that accessibility can see — check with state() or a screenshot")

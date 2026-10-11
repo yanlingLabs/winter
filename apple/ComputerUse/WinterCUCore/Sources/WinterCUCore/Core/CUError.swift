@@ -197,4 +197,7 @@ public enum CUFloorReason: String, Codable, Sendable {
     /// The user is working in the app (they clicked, typed or scrolled in its window while it was in front): the agent
     /// is hands-off it until it leaves the front (user ruling, round 10) — retry later.
     case userWorking = "user_working"
+    /// Floor F: an act on a Chromium browser's inspect page or its "Allow remote debugging?" dialog — Winter never turns
+    /// on or approves remote debugging (the Phase 4 spine §2.4).
+    case remoteDebugging = "remote_debugging"
 }

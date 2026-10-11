@@ -996,7 +996,10 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           await bringToFront(pid, "the fixture (the user's switch)", undefined, true);
           const r = helperCall(built, socket, home, "test.userInput", { pid });
           if (r.error !== undefined) throw new Error(`test.userInput failed: ${JSON.stringify(r.error).slice(0, 120)}`);
-          await postCommand(built.tool, f, "main", "userFocus", { id: "name" });
+          // (The fixture's answer is read: a focus that did not take is the row's failure, said — round 11, the live row
+          // reported only that Name never got the focus.)
+          const ack = await postCommand(built.tool, f, "main", "userFocus", { id: "name" });
+          if (ack.ev === "cmd.error") throw new Error(`the user's click into Name did not take: ${JSON.stringify(ack).slice(0, 200)}`);
           workedAt = Date.now();
         })();
         const rig = s.desktopSwitch === undefined ? undefined : desktopSwitchRig(built.tool, s.desktopSwitch);
@@ -1028,9 +1031,13 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         const leaked = events.filter((e) => e.role === "user" && (e.ev === "user.key" || e.ev === "user.mouse") && e.t >= since && e.t <= t1);
         checks.push(check("the real pointer stayed put and your app got no keys or clicks (no rung-4 fallback)", moved.length === 0 && leaked.length === 0,
           [moved.length > 0 ? `pointer moved at +${moved.map((t) => t - since).join(", +")} ms` : "", leaked.length > 0 ? `your app got ${leaked.map((e) => e.ev).join(", ")}` : ""].filter(Boolean).join("; ")));
+        // The user moved (to Finder, or into the fixture to work in it): their move is held — never "your app is frontmost
+        // again" (round 11: the hands-off row failed that check for the user's own move).
         const focus = s.userSwitchAfterMs !== undefined
           ? { checks: [userSwitchHeld(monitor!.items, switchedAt, finderPid, t1 + WATCH_AFTER_MS)], longestAwayMs: 0 }
-          : focusChecks(monitor!.items, since, t1 + WATCH_AFTER_MS, baseline!, s.allowExcursionMs, s.maxExcursions);
+          : s.userWorksAfterMs !== undefined
+            ? { checks: [userSwitchHeld(monitor!.items, workedAt, f.mainPid, t1 + WATCH_AFTER_MS)], longestAwayMs: 0 }
+            : focusChecks(monitor!.items, since, t1 + WATCH_AFTER_MS, baseline!, s.allowExcursionMs, s.maxExcursions);
         checks.push(...focus.checks);
         // Whether the deliberate self-activation REALLY took (macOS 14+ may refuse it) — else the scenario proves less.
         const steals = events.filter((e) => e.role === "main" && e.ev === "activated" && e.t >= since);
