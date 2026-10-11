@@ -119,4 +119,16 @@ final class ClickRoutingRound11Tests: XCTestCase {
                                                          allowForeground: false, privatePath: true))
         XCTAssertNil(r.detail)
     }
+
+    /// Queue item 1: a check box's or radio's state is claimed only from 1/0 (true/false) — a value that is not a state
+    /// (a web radio's own value, a label) or a mixed box claims nothing.
+    func testACheckedStateIsClaimedOnlyFromAStateValue() {
+        XCTAssertEqual(AXTreeReader.checkedState("1"), true)
+        XCTAssertEqual(AXTreeReader.checkedState("0"), false)
+        XCTAssertEqual(AXTreeReader.checkedState("true"), true)
+        XCTAssertEqual(AXTreeReader.checkedState("false"), false)
+        XCTAssertNil(AXTreeReader.checkedState("2"))
+        XCTAssertNil(AXTreeReader.checkedState("non-trader"))
+        XCTAssertNil(AXTreeReader.checkedState(""))
+    }
 }
