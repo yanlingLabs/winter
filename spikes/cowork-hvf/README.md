@@ -34,6 +34,23 @@ These observations show no meaningful worker-footprint return during active work
 
 `api-inventory.json` records symbols from the actual built dylib and its link dependencies. The external payload API is `krun_set_kernel(ctx, kernel, KRUN_KERNEL_FORMAT_RAW, initramfs, cmdline)` (`include/libkrun.h:875`). Configuration includes `krun_create_ctx`, `krun_set_vm_config`, and `krun_disable_implicit_vsock` (`include/libkrun.h:1215`). No public runtime memory-target/reclaim API is exported. `krun_start_enter` consumes the context and takes control of the process, exiting when the VM shuts down (`include/libkrun.h:1376`). That ownership is why the slice uses a worker, and why a future Swift wrapper must be worker-local while daemon orchestration remains outside it.
 
+## Reporting instrumentation
+
+```sh
+python3 spikes/cowork-hvf/build.py --instrument-reports
+python3 spikes/cowork-hvf/run.py --run-fixture --instrument-reports
+spikes/cowork-hvf/out/rust/bin/rustc --edition=2021 --test spikes/cowork-hvf/reclaim_ranges.rs -o spikes/cowork-hvf/out/reclaim-range-tests
+spikes/cowork-hvf/out/reclaim-range-tests
+```
+
+`patches/0001-report-instrumentation.patch` adds descriptor receipts to a separate pinned source checkout; it preserves the original advice and queue disposition. `--instrument-reports` builds into `out/instrumented`, so it does not replace the unpatched baseline artifacts. PID 1 additionally emits selected `/proc/vmstat` counters after touching, immediately after freeing, and after the 10-second reporting window. `reporting.py` summarizes actual receipts; cumulative reported bytes may include repeated ranges and **are not returned-byte claims**.
+
+`results/2026-10-11-report-instrumentation*` records a passing bounded run with 18 batches and 299 descriptors: 285 of 4 MiB and 14 of 2 MiB. Every observed HVA/GPA/length was aligned to the 16 KiB host page, and all `MADV_FREE` calls returned 0. During cycles two and three, the guest reported 270,532,608 and 268,435,456 bytes after the free, beginning 2.018 and 2.017 seconds later. Guest `nr_free_pages` rose from roughly 103,000 to 169,000–170,000; `pgscan_kswapd` stayed 0 at the recorded phases. This proves useful free-page reports reached the host handler.
+
+Worker footprint changed from 431,227,840 to 398,541,736 bytes in cycle one (a partial reduction), and remained 646,202,472 and 676,136,064 bytes across frees in cycles two and three. The ratchet persists despite actual reporting and successful advice; this remains a failed active-return gate. The guest continued its heartbeat and passed every retained-range integrity check. The worker exited naturally, with no fixture worker left running.
+
+`reclaim_ranges.rs` is a pure planner prerequisite, presently **not wired into libkrun**. Nine tests pass for complete containment, adjacent-region crossing, integer overflow, partial host pages, duplicates/overlap, one-byte DMA/ring intersection, shared/alias/unaligned registries, and bounded report limits. It performs no memory or HVF operations and establishes no pause/device safety by itself.
+
 ## Safe active-return implementation plan
 
 The following is a plan, not implemented reclaim behavior. The untouched library's reporting queue calls `mem.get_host_address(desc.addr).unwrap()` and passes the descriptor's full length to `madvise`; macOS uses `MADV_FREE` and ignores the return code (`src/devices/src/virtio/balloon/device.rs:88-106`). Start-address translation does not validate the entire span. Do not replace that advice with unmap/discard syscalls.

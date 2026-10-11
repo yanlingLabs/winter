@@ -1,0 +1,33 @@
+diff --git a/src/devices/src/virtio/balloon/device.rs b/src/devices/src/virtio/balloon/device.rs
+index 85b2812..7327f00 100644
+--- a/src/devices/src/virtio/balloon/device.rs
++++ b/src/devices/src/virtio/balloon/device.rs
+@@ -87,6 +87,9 @@ impl Balloon {
+ 
+         while let Some(head) = queues[FRQ_INDEX].queue.pop(mem) {
+             let index = head.index;
++            static RECEIPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++            let receipt = RECEIPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            eprintln!("{{\"kind\":\"report_batch\",\"receipt\":{},\"index\":{}}}", receipt, index);
+             for desc in head.into_iter() {
+                 let host_addr = mem.get_host_address(desc.addr).unwrap();
+                 debug!(
+@@ -97,13 +100,17 @@ impl Balloon {
+                 let advice = libc::MADV_DONTNEED;
+                 #[cfg(target_os = "macos")]
+                 let advice = libc::MADV_FREE;
+-                unsafe {
++                let result = unsafe {
+                     libc::madvise(
+                         host_addr as *mut libc::c_void,
+                         desc.len.try_into().unwrap(),
+                         advice,
+                     )
+                 };
++                let host_page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
++                eprintln!("{{\"kind\":\"report_descriptor\",\"receipt\":{},\"gpa\":{},\"len\":{},\"hostPageBytes\":{},\"hvaAligned\":{},\"gpaAligned\":{},\"lengthAligned\":{},\"advice\":\"MADV_FREE\",\"adviceReturn\":{}}}",
++                    receipt, desc.addr.0, desc.len, host_page, (host_addr as usize) % host_page == 0,
++                    desc.addr.0 % host_page as u64 == 0, desc.len as usize % host_page == 0, result);
+             }
+ 
+             have_used = true;

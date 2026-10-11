@@ -29,6 +29,17 @@ static void text(const char *path, char *buf, size_t size) {
     ssize_t n = read(fd,buf,size-1); close(fd); if (n < 0) n=0; buf[n]=0;
     buf[strcspn(buf,"\n")]=0;
 }
+static void vmstat(unsigned cycle, const char *phase) {
+    FILE *file=fopen("/proc/vmstat","r"); if(!file) fail("vmstat");
+    char key[100]; unsigned long long value;
+    while(fscanf(file,"%99s %llu",key,&value)==2) {
+        if(!strcmp(key,"nr_free_pages") || !strcmp(key,"nr_active_anon") || !strcmp(key,"nr_inactive_anon")
+           || !strcmp(key,"pgfree") || !strcmp(key,"pgalloc_normal") || !strcmp(key,"pgscan_kswapd")
+           || !strcmp(key,"pgsteal_kswapd"))
+            printf("{\"kind\":\"guest_vmstat\",\"cycle\":%u,\"phase\":\"%s\",\"metric\":\"%s\",\"value\":%llu}\n",cycle,phase,key,value);
+    }
+    fclose(file);
+}
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     mkdir("/proc",0755); mkdir("/sys",0755);
@@ -50,12 +61,15 @@ int main(void) {
         for(size_t i=0;i<256*MIB/8;i++) p[i]=value;
         for(size_t i=0;i<256*MIB/8;i++) if(p[i]!=value) fail("allocated integrity");
         printf("{\"kind\":\"guest_touched\",\"cycle\":%u,\"bytes\":268435456,\"liveBytes\":33554432}\n",cycle);
+        vmstat(cycle,"touched");
         sleep(3); if(munmap(p,256*MIB)) fail("free");
         printf("{\"kind\":\"guest_freed\",\"cycle\":%u,\"bytes\":268435456}\n",cycle);
+        vmstat(cycle,"freed");
         unsigned before=atomic_load(&heartbeat); sleep(10);
         for(size_t i=0;i<32*MIB/8;i++) if(live[i]!=0x5a5a900012345678ULL) fail("retained integrity");
         if(atomic_load(&heartbeat)<=before) fail("concurrent progress");
         printf("{\"kind\":\"guest_integrity\",\"cycle\":%u,\"retained\":true,\"progress\":true}\n",cycle);
+        vmstat(cycle,"after-report-delay");
     }
     printf("{\"kind\":\"guest_complete\",\"cycles\":3,\"activeReturnVerified\":false}\n");
     reboot(RB_POWER_OFF); for (;;) pause();

@@ -1,0 +1,113 @@
+{
+  "fixture": "spikes/cowork-hvf/out/fixture-p3ut2ach",
+  "exitCode": 0,
+  "timedOut": false,
+  "sandboxPassed": true,
+  "linuxBoot": {
+    "kind": "linux_boot",
+    "release": "6.18.35",
+    "machine": "aarch64",
+    "bootId": "98ec616d-a963-49b1-ae73-36817e505672",
+    "hostElapsedSeconds": 0.926
+  },
+  "boundedBaselinePassed": true,
+  "deviceInventoryPassed": true,
+  "freePageReportingNegotiated": true,
+  "memory": [
+    {
+      "cycle": 1,
+      "touchedFootprintBytes": 431227840,
+      "postFreeFootprintBytes": 398541736
+    },
+    {
+      "cycle": 2,
+      "touchedFootprintBytes": 646202472,
+      "postFreeFootprintBytes": 646202472
+    },
+    {
+      "cycle": 3,
+      "touchedFootprintBytes": 676136064,
+      "postFreeFootprintBytes": 676136064
+    }
+  ],
+  "activeReturnVerified": false,
+  "productionReady": false,
+  "pins": {
+    "libkrun": {
+      "url": "https://github.com/containers/libkrun.git",
+      "tag": "v1.19.6",
+      "revision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+      "lockSha256": "a73d2ee0e4f2d2b63c7b4a00d2639076e4f7884a40cec495d5d82eed14dcd873",
+      "features": [],
+      "defaultFeatures": false
+    },
+    "rust": {
+      "version": "1.90.0",
+      "url": "https://static.rust-lang.org/dist/rust-1.90.0-aarch64-apple-darwin.tar.xz",
+      "sha256": "9772d20d5cd736079a0ee84d00e6697cf2084f0fc4621b011e24e6f2d08d2d7f"
+    },
+    "kernel": {
+      "cachedPath": "../cowork-vm/out/assets/vmlinux-apple-6.18.35",
+      "sha256": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d",
+      "version": "6.18.35-197-debug",
+      "format": "RAW",
+      "provenance": "Existing cowork-vm/pins.json Apple-recommended Kata archive; verify cached member before copying."
+    },
+    "zig": {
+      "cachedPath": "../cowork-vm/out/tools/zig-aarch64-macos-0.14.1/zig",
+      "version": "0.14.1",
+      "archiveSha256": "39f3dc5e79c22088ce878edc821dedb4ca5a1cd9f5ef915e9b3cc3053e8faefa"
+    }
+  },
+  "artifactDigests": {
+    "cowork-hvf-worker": "e618a4eb76ddd62a6cb29853581f031e615c868edef8441df425302656e6de95",
+    "libkrun.1.dylib": "16eb3915267ea2a72163a9249749dc7e9fe1e900e3d6efc12affc4dd77f72cd0",
+    "kernel": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d",
+    "initramfs.cpio": "210a979757746e0f63600baac571bf42ce4d983a0b588e963682b38ceabf2de9"
+  },
+  "instrumentationPatchSha256": "467168a7b12b2e9393ed8481945ca0de12b9f308757fa610559d93ac4e92238f",
+  "reporting": {
+    "batchCount": 18,
+    "descriptorCount": 299,
+    "cumulativeReportedBytes": 1224736768,
+    "sizesBytes": {
+      "4194304": 285,
+      "2097152": 14
+    },
+    "all16KiBAligned": true,
+    "allAdviceCallsSucceeded": true,
+    "afterGuestFree": [
+      {
+        "cycle": 1,
+        "descriptorCount": 102,
+        "cumulativeReportedBytes": 421527552,
+        "sizesBytes": {
+          "4194304": 99,
+          "2097152": 3
+        },
+        "firstReportAfterFreeSeconds": 0.898
+      },
+      {
+        "cycle": 2,
+        "descriptorCount": 67,
+        "cumulativeReportedBytes": 270532608,
+        "sizesBytes": {
+          "4194304": 62,
+          "2097152": 5
+        },
+        "firstReportAfterFreeSeconds": 2.018
+      },
+      {
+        "cycle": 3,
+        "descriptorCount": 66,
+        "cumulativeReportedBytes": 268435456,
+        "sizesBytes": {
+          "4194304": 62,
+          "2097152": 4
+        },
+        "firstReportAfterFreeSeconds": 2.017
+      }
+    ],
+    "activeReturnVerified": false
+  }
+}

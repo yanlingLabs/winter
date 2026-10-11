@@ -1,0 +1,476 @@
+{"kind": "sandbox", "hostReadDenied": true, "networkOutboundDenied": true, "writesDenied": true, "hostElapsedSeconds": 0.811}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 4866504, "residentBytes": 9273344, "hostElapsedSeconds": 0.811}
+{"kind": "worker", "pid": 26883, "vcpus": 2, "ramMiB": 768, "networkDevices": 0, "vsock": false, "hostShares": 0, "hostElapsedSeconds": 0.813}
+{"kind": "linux_boot", "release": "6.18.35", "machine": "aarch64", "bootId": "98ec616d-a963-49b1-ae73-36817e505672", "hostElapsedSeconds": 0.926}
+{"kind": "virtio_device", "name": "virtio1", "device": "0x0004", "features": "00000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "hostElapsedSeconds": 0.926}
+{"kind": "virtio_device", "name": "virtio2", "device": "0x0003", "features": "11000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "hostElapsedSeconds": 0.926}
+{"kind": "virtio_device", "name": "virtio0", "device": "0x0005", "features": "01010100000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "hostElapsedSeconds": 0.926}
+{"kind": "guest_heartbeat", "tick": 1, "hostElapsedSeconds": 0.926}
+{"kind": "guest_touched", "cycle": 1, "bytes": 268435456, "liveBytes": 33554432, "hostElapsedSeconds": 1.031}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "touched", "metric": "nr_free_pages", "value": 105195, "hostElapsedSeconds": 1.031}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "touched", "metric": "nr_inactive_anon", "value": 73984, "hostElapsedSeconds": 1.031}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "touched", "metric": "nr_active_anon", "value": 0, "hostElapsedSeconds": 1.031}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "touched", "metric": "pgalloc_normal", "value": 0, "hostElapsedSeconds": 1.032}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "touched", "metric": "pgfree", "value": 187970, "hostElapsedSeconds": 1.032}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "touched", "metric": "pgsteal_kswapd", "value": 0, "hostElapsedSeconds": 1.032}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "touched", "metric": "pgscan_kswapd", "value": 0, "hostElapsedSeconds": 1.032}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 431211456, "residentBytes": 438272000, "hostElapsedSeconds": 1.816}
+{"kind": "guest_heartbeat", "tick": 2, "hostElapsedSeconds": 1.928}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 431211456, "residentBytes": 438272000, "hostElapsedSeconds": 2.821}
+{"kind": "report_batch", "receipt": 0, "index": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2629828608, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2625634304, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2621440000, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2617245696, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2613051392, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2608857088, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2604662784, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2600468480, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2596274176, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2592079872, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2587885568, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2583691264, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2579496960, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2575302656, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2571108352, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2566914048, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2562719744, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.924}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2558525440, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2554331136, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2550136832, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2545942528, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2541748224, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2537553920, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2533359616, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2529165312, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2524971008, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2520776704, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2516582400, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2512388096, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2508193792, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2187329536, "len": 2097152, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 0, "gpa": 2204106752, "len": 2097152, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_batch", "receipt": 1, "index": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2764046336, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2759852032, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2755657728, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2751463424, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2747269120, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2743074816, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2738880512, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2734686208, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2730491904, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2726297600, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2722103296, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2717908992, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2713714688, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2709520384, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2705326080, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2701131776, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2696937472, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2692743168, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2688548864, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2684354560, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2680160256, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2675965952, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2671771648, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2667577344, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2663383040, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2659188736, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2654994432, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2650800128, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2646605824, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2642411520, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2638217216, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "report_descriptor", "receipt": 1, "gpa": 2634022912, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 2.925}
+{"kind": "guest_heartbeat", "tick": 3, "hostElapsedSeconds": 2.928}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 431227840, "residentBytes": 438288384, "hostElapsedSeconds": 3.822}
+{"kind": "guest_heartbeat", "tick": 4, "hostElapsedSeconds": 3.932}
+{"kind": "guest_freed", "cycle": 1, "bytes": 268435456, "hostElapsedSeconds": 4.042}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "freed", "metric": "nr_free_pages", "value": 164764, "hostElapsedSeconds": 4.042}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "freed", "metric": "nr_inactive_anon", "value": 8479, "hostElapsedSeconds": 4.042}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "freed", "metric": "nr_active_anon", "value": 2, "hostElapsedSeconds": 4.042}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "freed", "metric": "pgalloc_normal", "value": 0, "hostElapsedSeconds": 4.042}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "freed", "metric": "pgfree", "value": 253510, "hostElapsedSeconds": 4.042}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "freed", "metric": "pgsteal_kswapd", "value": 0, "hostElapsedSeconds": 4.042}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "freed", "metric": "pgscan_kswapd", "value": 0, "hostElapsedSeconds": 4.042}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 431326144, "residentBytes": 438386688, "hostElapsedSeconds": 4.822}
+{"kind": "guest_heartbeat", "tick": 5, "hostElapsedSeconds": 4.932}
+{"kind": "report_batch", "receipt": 2, "index": 0, "hostElapsedSeconds": 4.94}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2348810240, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.94}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2353004544, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.94}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2357198848, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.94}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2361393152, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2365587456, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2369781760, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2373976064, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2378170368, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2382364672, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2386558976, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2390753280, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2394947584, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2399141888, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2403336192, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2407530496, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2411724800, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2415919104, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2420113408, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2424307712, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2428502016, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2432696320, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2436890624, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2441084928, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2445279232, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2449473536, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2453667840, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2457862144, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2462056448, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2466250752, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2470445056, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.941}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2501902336, "len": 2097152, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 2, "gpa": 2233466880, "len": 2097152, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_batch", "receipt": 3, "index": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2789212160, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2785017856, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2780823552, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2776629248, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2503999488, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2235564032, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2239758336, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2243952640, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2248146944, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2252341248, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2256535552, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2260729856, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2264924160, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2269118464, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2273312768, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2277507072, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2281701376, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2285895680, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2290089984, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2294284288, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2298478592, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2302672896, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2306867200, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2311061504, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2315255808, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2319450112, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.942}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2323644416, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.943}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2327838720, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.943}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2332033024, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.943}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2336227328, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.943}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2340421632, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.943}
+{"kind": "report_descriptor", "receipt": 3, "gpa": 2344615936, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 4.943}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 398541736, "residentBytes": 407961600, "hostElapsedSeconds": 5.827}
+{"kind": "guest_heartbeat", "tick": 6, "hostElapsedSeconds": 5.938}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 398541736, "residentBytes": 407961600, "hostElapsedSeconds": 6.829}
+{"kind": "guest_heartbeat", "tick": 7, "hostElapsedSeconds": 6.939}
+{"kind": "report_batch", "receipt": 4, "index": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2923429888, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2919235584, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2915041280, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2910846976, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2906652672, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2902458368, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2898264064, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2894069760, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2889875456, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2885681152, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2881486848, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2877292544, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2873098240, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2868903936, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2864709632, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2860515328, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2856321024, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2852126720, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2847932416, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2843738112, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2839543808, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2835349504, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2831155200, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2826960896, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2822766592, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2818572288, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2814377984, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2810183680, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2805989376, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2801795072, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2797600768, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 4, "gpa": 2793406464, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_batch", "receipt": 5, "index": 0, "hostElapsedSeconds": 6.958}
+{"kind": "report_descriptor", "receipt": 5, "gpa": 2927624192, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 6.958}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 398541736, "residentBytes": 407961600, "hostElapsedSeconds": 7.834}
+{"kind": "guest_heartbeat", "tick": 8, "hostElapsedSeconds": 7.944}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 398541736, "residentBytes": 407961600, "hostElapsedSeconds": 8.834}
+{"kind": "guest_heartbeat", "tick": 9, "hostElapsedSeconds": 8.95}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 398541736, "residentBytes": 407961600, "hostElapsedSeconds": 9.839}
+{"kind": "guest_heartbeat", "tick": 10, "hostElapsedSeconds": 9.953}
+{"kind": "report_batch", "receipt": 6, "index": 0, "hostElapsedSeconds": 9.964}
+{"kind": "report_descriptor", "receipt": 6, "gpa": 2474639360, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 9.965}
+{"kind": "report_descriptor", "receipt": 6, "gpa": 2772434944, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 9.965}
+{"kind": "report_descriptor", "receipt": 6, "gpa": 2768240640, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 9.965}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 398541736, "residentBytes": 407961600, "hostElapsedSeconds": 10.842}
+{"kind": "guest_heartbeat", "tick": 11, "hostElapsedSeconds": 10.958}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 398541736, "residentBytes": 407961600, "hostElapsedSeconds": 11.848}
+{"kind": "guest_heartbeat", "tick": 12, "hostElapsedSeconds": 11.959}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 398541736, "residentBytes": 407961600, "hostElapsedSeconds": 12.853}
+{"kind": "guest_heartbeat", "tick": 13, "hostElapsedSeconds": 12.961}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 398541736, "residentBytes": 407961600, "hostElapsedSeconds": 13.858}
+{"kind": "report_batch", "receipt": 7, "index": 0, "hostElapsedSeconds": 13.933}
+{"kind": "report_descriptor", "receipt": 7, "gpa": 2478833664, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 13.933}
+{"kind": "report_descriptor", "receipt": 7, "gpa": 2483027968, "len": 2097152, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 13.934}
+{"kind": "guest_heartbeat", "tick": 14, "hostElapsedSeconds": 13.963}
+{"kind": "guest_integrity", "cycle": 1, "retained": true, "progress": true, "hostElapsedSeconds": 14.056}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "after-report-delay", "metric": "nr_free_pages", "value": 169467, "hostElapsedSeconds": 14.056}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "after-report-delay", "metric": "nr_inactive_anon", "value": 8476, "hostElapsedSeconds": 14.056}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "after-report-delay", "metric": "nr_active_anon", "value": 2, "hostElapsedSeconds": 14.056}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "after-report-delay", "metric": "pgalloc_normal", "value": 0, "hostElapsedSeconds": 14.056}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "after-report-delay", "metric": "pgfree", "value": 253639, "hostElapsedSeconds": 14.056}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "after-report-delay", "metric": "pgsteal_kswapd", "value": 0, "hostElapsedSeconds": 14.056}
+{"kind": "guest_vmstat", "cycle": 1, "phase": "after-report-delay", "metric": "pgscan_kswapd", "value": 0, "hostElapsedSeconds": 14.057}
+{"kind": "guest_touched", "cycle": 2, "bytes": 268435456, "liveBytes": 33554432, "hostElapsedSeconds": 14.157}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "touched", "metric": "nr_free_pages", "value": 103005, "hostElapsedSeconds": 14.158}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "touched", "metric": "nr_inactive_anon", "value": 73977, "hostElapsedSeconds": 14.158}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "touched", "metric": "nr_active_anon", "value": 2, "hostElapsedSeconds": 14.158}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "touched", "metric": "pgalloc_normal", "value": 0, "hostElapsedSeconds": 14.158}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "touched", "metric": "pgfree", "value": 253657, "hostElapsedSeconds": 14.158}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "touched", "metric": "pgsteal_kswapd", "value": 0, "hostElapsedSeconds": 14.158}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "touched", "metric": "pgscan_kswapd", "value": 0, "hostElapsedSeconds": 14.158}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 646202472, "residentBytes": 655491072, "hostElapsedSeconds": 14.863}
+{"kind": "guest_heartbeat", "tick": 15, "hostElapsedSeconds": 14.968}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 646202472, "residentBytes": 655491072, "hostElapsedSeconds": 15.864}
+{"kind": "guest_heartbeat", "tick": 16, "hostElapsedSeconds": 15.974}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 646202472, "residentBytes": 655491072, "hostElapsedSeconds": 16.868}
+{"kind": "guest_heartbeat", "tick": 17, "hostElapsedSeconds": 16.977}
+{"kind": "guest_freed", "cycle": 2, "bytes": 268435456, "hostElapsedSeconds": 17.167}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "freed", "metric": "nr_free_pages", "value": 165688, "hostElapsedSeconds": 17.167}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "freed", "metric": "nr_inactive_anon", "value": 8491, "hostElapsedSeconds": 17.168}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "freed", "metric": "nr_active_anon", "value": 2, "hostElapsedSeconds": 17.168}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "freed", "metric": "pgalloc_normal", "value": 0, "hostElapsedSeconds": 17.168}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "freed", "metric": "pgfree", "value": 319192, "hostElapsedSeconds": 17.168}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "freed", "metric": "pgsteal_kswapd", "value": 0, "hostElapsedSeconds": 17.168}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "freed", "metric": "pgscan_kswapd", "value": 0, "hostElapsedSeconds": 17.168}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 646202472, "residentBytes": 655491072, "hostElapsedSeconds": 17.873}
+{"kind": "guest_heartbeat", "tick": 18, "hostElapsedSeconds": 17.977}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 646202472, "residentBytes": 655491072, "hostElapsedSeconds": 18.878}
+{"kind": "guest_heartbeat", "tick": 19, "hostElapsedSeconds": 18.98}
+{"kind": "report_batch", "receipt": 8, "index": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2529165312, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2524971008, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2512388096, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2508193792, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2764046336, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2759852032, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2755657728, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2751463424, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2747269120, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2743074816, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2738880512, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2734686208, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2730491904, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2726297600, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2722103296, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2717908992, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2713714688, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2709520384, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2705326080, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.185}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2701131776, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2696937472, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2692743168, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2688548864, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2684354560, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2680160256, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2675965952, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2671771648, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2667577344, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2644508672, "len": 2097152, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2187329536, "len": 2097152, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2204106752, "len": 2097152, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 8, "gpa": 2233466880, "len": 2097152, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_batch", "receipt": 9, "index": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2638217216, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2495610880, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2491416576, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2487222272, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2499805184, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2483027968, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2629828608, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2625634304, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2621440000, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2617245696, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2613051392, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2608857088, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2604662784, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2600468480, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2596274176, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2592079872, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2587885568, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2583691264, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.186}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2579496960, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.187}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2575302656, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.187}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2571108352, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.187}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2566914048, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.187}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2562719744, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.187}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2558525440, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.187}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2554331136, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.187}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2550136832, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.187}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2545942528, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.187}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2541748224, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.187}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2537553920, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.187}
+{"kind": "report_descriptor", "receipt": 9, "gpa": 2533359616, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 19.187}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 646202472, "residentBytes": 655491072, "hostElapsedSeconds": 19.883}
+{"kind": "guest_heartbeat", "tick": 20, "hostElapsedSeconds": 19.995}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 646202472, "residentBytes": 655491072, "hostElapsedSeconds": 20.886}
+{"kind": "guest_heartbeat", "tick": 21, "hostElapsedSeconds": 20.99}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 646202472, "residentBytes": 655491072, "hostElapsedSeconds": 21.891}
+{"kind": "guest_heartbeat", "tick": 22, "hostElapsedSeconds": 21.993}
+{"kind": "report_batch", "receipt": 10, "index": 0, "hostElapsedSeconds": 22.864}
+{"kind": "report_descriptor", "receipt": 10, "gpa": 2516582400, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 22.864}
+{"kind": "report_descriptor", "receipt": 10, "gpa": 2522873856, "len": 2097152, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 22.864}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 646202472, "residentBytes": 655491072, "hostElapsedSeconds": 22.896}
+{"kind": "guest_heartbeat", "tick": 23, "hostElapsedSeconds": 22.998}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 646202472, "residentBytes": 655491072, "hostElapsedSeconds": 23.899}
+{"kind": "guest_heartbeat", "tick": 24, "hostElapsedSeconds": 24.003}
+{"kind": "report_batch", "receipt": 11, "index": 0, "hostElapsedSeconds": 24.878}
+{"kind": "report_descriptor", "receipt": 11, "gpa": 2663383040, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 24.878}
+{"kind": "report_descriptor", "receipt": 11, "gpa": 2520776704, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 24.879}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 646202472, "residentBytes": 655491072, "hostElapsedSeconds": 24.902}
+{"kind": "guest_heartbeat", "tick": 25, "hostElapsedSeconds": 25.006}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 646202472, "residentBytes": 655491072, "hostElapsedSeconds": 25.907}
+{"kind": "guest_heartbeat", "tick": 26, "hostElapsedSeconds": 26.009}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 646202472, "residentBytes": 655491072, "hostElapsedSeconds": 26.91}
+{"kind": "report_batch", "receipt": 12, "index": 0, "hostElapsedSeconds": 26.99}
+{"kind": "report_descriptor", "receipt": 12, "gpa": 2659188736, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 26.99}
+{"kind": "guest_heartbeat", "tick": 27, "hostElapsedSeconds": 27.012}
+{"kind": "guest_integrity", "cycle": 2, "retained": true, "progress": true, "hostElapsedSeconds": 27.174}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "after-report-delay", "metric": "nr_free_pages", "value": 170008, "hostElapsedSeconds": 27.174}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "after-report-delay", "metric": "nr_inactive_anon", "value": 8476, "hostElapsedSeconds": 27.174}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "after-report-delay", "metric": "nr_active_anon", "value": 2, "hostElapsedSeconds": 27.175}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "after-report-delay", "metric": "pgalloc_normal", "value": 0, "hostElapsedSeconds": 27.175}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "after-report-delay", "metric": "pgfree", "value": 319321, "hostElapsedSeconds": 27.175}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "after-report-delay", "metric": "pgsteal_kswapd", "value": 0, "hostElapsedSeconds": 27.175}
+{"kind": "guest_vmstat", "cycle": 2, "phase": "after-report-delay", "metric": "pgscan_kswapd", "value": 0, "hostElapsedSeconds": 27.175}
+{"kind": "guest_touched", "cycle": 3, "bytes": 268435456, "liveBytes": 33554432, "hostElapsedSeconds": 27.217}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "touched", "metric": "nr_free_pages", "value": 103545, "hostElapsedSeconds": 27.218}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "touched", "metric": "nr_inactive_anon", "value": 73977, "hostElapsedSeconds": 27.218}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "touched", "metric": "nr_active_anon", "value": 2, "hostElapsedSeconds": 27.218}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "touched", "metric": "pgalloc_normal", "value": 0, "hostElapsedSeconds": 27.218}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "touched", "metric": "pgfree", "value": 319344, "hostElapsedSeconds": 27.218}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "touched", "metric": "pgsteal_kswapd", "value": 0, "hostElapsedSeconds": 27.218}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "touched", "metric": "pgscan_kswapd", "value": 0, "hostElapsedSeconds": 27.218}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 676136064, "residentBytes": 685408256, "hostElapsedSeconds": 27.915}
+{"kind": "guest_heartbeat", "tick": 28, "hostElapsedSeconds": 28.017}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 676136064, "residentBytes": 685408256, "hostElapsedSeconds": 28.918}
+{"kind": "guest_heartbeat", "tick": 29, "hostElapsedSeconds": 29.022}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 676136064, "residentBytes": 685408256, "hostElapsedSeconds": 29.923}
+{"kind": "guest_heartbeat", "tick": 30, "hostElapsedSeconds": 30.027}
+{"kind": "guest_freed", "cycle": 3, "bytes": 268435456, "hostElapsedSeconds": 30.224}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "freed", "metric": "nr_free_pages", "value": 163604, "hostElapsedSeconds": 30.224}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "freed", "metric": "nr_inactive_anon", "value": 8486, "hostElapsedSeconds": 30.224}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "freed", "metric": "nr_active_anon", "value": 2, "hostElapsedSeconds": 30.225}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "freed", "metric": "pgalloc_normal", "value": 0, "hostElapsedSeconds": 30.225}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "freed", "metric": "pgfree", "value": 384874, "hostElapsedSeconds": 30.225}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "freed", "metric": "pgsteal_kswapd", "value": 0, "hostElapsedSeconds": 30.225}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "freed", "metric": "pgscan_kswapd", "value": 0, "hostElapsedSeconds": 30.225}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 676136064, "residentBytes": 685408256, "hostElapsedSeconds": 30.928}
+{"kind": "guest_heartbeat", "tick": 31, "hostElapsedSeconds": 31.033}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 676136064, "residentBytes": 685408256, "hostElapsedSeconds": 31.929}
+{"kind": "guest_heartbeat", "tick": 32, "hostElapsedSeconds": 32.035}
+{"kind": "report_batch", "receipt": 13, "index": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2441084928, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2445279232, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2449473536, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2462056448, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2466250752, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2470445056, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2789212160, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2785017856, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2780823552, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2776629248, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2503999488, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2235564032, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2239758336, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2243952640, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2248146944, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2252341248, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2256535552, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2260729856, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.241}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2264924160, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2269118464, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2273312768, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2277507072, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2281701376, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2285895680, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2290089984, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2294284288, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2298478592, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2457862144, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2187329536, "len": 2097152, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2204106752, "len": 2097152, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2233466880, "len": 2097152, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 13, "gpa": 2302672896, "len": 2097152, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_batch", "receipt": 14, "index": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2340421632, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2336227328, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.242}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2646605824, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2650800128, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2654994432, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2642411520, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2634022912, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2348810240, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2353004544, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2357198848, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2361393152, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2365587456, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2369781760, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2373976064, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2378170368, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2382364672, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2386558976, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2390753280, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2394947584, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2399141888, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2403336192, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2407530496, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2411724800, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2415919104, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2420113408, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2424307712, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2428502016, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2432696320, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "report_descriptor", "receipt": 14, "gpa": 2436890624, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 32.243}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 676136064, "residentBytes": 685408256, "hostElapsedSeconds": 32.932}
+{"kind": "guest_heartbeat", "tick": 33, "hostElapsedSeconds": 33.038}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 676136064, "residentBytes": 685408256, "hostElapsedSeconds": 33.933}
+{"kind": "guest_heartbeat", "tick": 34, "hostElapsedSeconds": 34.043}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 676136064, "residentBytes": 664076288, "hostElapsedSeconds": 34.934}
+{"kind": "guest_heartbeat", "tick": 35, "hostElapsedSeconds": 35.046}
+{"kind": "report_batch", "receipt": 15, "index": 0, "hostElapsedSeconds": 35.052}
+{"kind": "report_descriptor", "receipt": 15, "gpa": 2302672896, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 35.052}
+{"kind": "report_descriptor", "receipt": 15, "gpa": 2453667840, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 35.053}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 676136064, "residentBytes": 664076288, "hostElapsedSeconds": 35.935}
+{"kind": "guest_heartbeat", "tick": 36, "hostElapsedSeconds": 36.05}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 676136064, "residentBytes": 664043520, "hostElapsedSeconds": 36.938}
+{"kind": "guest_heartbeat", "tick": 37, "hostElapsedSeconds": 37.055}
+{"kind": "report_batch", "receipt": 16, "index": 0, "hostElapsedSeconds": 37.71}
+{"kind": "report_descriptor", "receipt": 16, "gpa": 2306867200, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 37.71}
+{"kind": "report_descriptor", "receipt": 16, "gpa": 2311061504, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 37.71}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 676136064, "residentBytes": 664043520, "hostElapsedSeconds": 37.938}
+{"kind": "guest_heartbeat", "tick": 38, "hostElapsedSeconds": 38.058}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 676136064, "residentBytes": 664043520, "hostElapsedSeconds": 38.941}
+{"kind": "guest_heartbeat", "tick": 39, "hostElapsedSeconds": 39.058}
+{"kind": "report_batch", "receipt": 17, "index": 0, "hostElapsedSeconds": 39.726}
+{"kind": "report_descriptor", "receipt": 17, "gpa": 2315255808, "len": 4194304, "hostPageBytes": 16384, "hvaAligned": true, "gpaAligned": true, "lengthAligned": true, "advice": "MADV_FREE", "adviceReturn": 0, "hostElapsedSeconds": 39.726}
+{"kind": "host_memory", "pid": 26883, "footprintBytes": 676136064, "residentBytes": 664043520, "hostElapsedSeconds": 39.943}
+{"kind": "guest_heartbeat", "tick": 40, "hostElapsedSeconds": 40.063}
+{"kind": "guest_integrity", "cycle": 3, "retained": true, "progress": true, "hostElapsedSeconds": 40.232}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "after-report-delay", "metric": "nr_free_pages", "value": 169570, "hostElapsedSeconds": 40.232}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "after-report-delay", "metric": "nr_inactive_anon", "value": 8476, "hostElapsedSeconds": 40.232}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "after-report-delay", "metric": "nr_active_anon", "value": 2, "hostElapsedSeconds": 40.232}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "after-report-delay", "metric": "pgalloc_normal", "value": 0, "hostElapsedSeconds": 40.232}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "after-report-delay", "metric": "pgfree", "value": 385003, "hostElapsedSeconds": 40.232}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "after-report-delay", "metric": "pgsteal_kswapd", "value": 0, "hostElapsedSeconds": 40.233}
+{"kind": "guest_vmstat", "cycle": 3, "phase": "after-report-delay", "metric": "pgscan_kswapd", "value": 0, "hostElapsedSeconds": 40.233}
+{"kind": "guest_complete", "cycles": 3, "activeReturnVerified": false, "hostElapsedSeconds": 40.233}

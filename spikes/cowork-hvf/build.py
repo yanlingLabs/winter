@@ -1,5 +1,5 @@
 """Slice-local tools only. No package installs; no VM is started by this command."""
-import hashlib, json, os, shutil, stat, subprocess, tarfile, urllib.request
+import argparse, hashlib, json, os, shutil, stat, subprocess, tarfile, urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -29,17 +29,31 @@ def cpio(entries):
     return bytes(data)
 
 def main():
+    parser=argparse.ArgumentParser()
+    parser.add_argument("--instrument-reports",action="store_true")
+    args=parser.parse_args()
     if os.uname().sysname != "Darwin" or os.uname().machine != "arm64":
         raise RuntimeError("Apple Silicon macOS required")
     OUT.mkdir(exist_ok=True)
-    source = OUT / "libkrun"
+    source = OUT / ("libkrun-instrumented" if args.instrument_reports else "libkrun")
+    artifacts=OUT/"instrumented" if args.instrument_reports else OUT
+    artifacts.mkdir(exist_ok=True)
     if not source.exists():
         checked(["git", "clone", "--depth", "1", "--branch", PINS["libkrun"]["tag"], PINS["libkrun"]["url"], source])
     revision = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
     if revision != PINS["libkrun"]["revision"]:
         raise RuntimeError("Unexpected libkrun revision")
     verify(source / "Cargo.lock", PINS["libkrun"]["lockSha256"])
-    if subprocess.check_output(["git", "-C", str(source), "status", "--porcelain"], text=True).strip():
+    patch=ROOT/"patches/0001-report-instrumentation.patch"
+    if args.instrument_reports:
+        status=subprocess.check_output(["git","-C",str(source),"status","--porcelain"],text=True)
+        if not status.strip():
+            checked(["git","-C",source,"apply",patch])
+        elif status != " M src/devices/src/virtio/balloon/device.rs\n":
+            raise RuntimeError("Unexpected changes or untracked files in instrumentation source")
+        if subprocess.check_output(["git","-C",str(source),"diff","--binary"]) != patch.read_bytes():
+            raise RuntimeError("Instrumentation source differs from reviewed patch")
+    elif subprocess.check_output(["git", "-C", str(source), "status", "--porcelain"], text=True).strip():
         raise RuntimeError("libkrun source modified; baseline must be unpatched")
     archive = OUT / "rust-1.90.0-aarch64-apple-darwin.tar.xz"
     if not archive.exists():
@@ -62,27 +76,29 @@ def main():
     env = os.environ.copy()
     env.update(PATH=str(rust / "bin") + ":" + env["PATH"], CARGO_HOME=str(OUT / "cargo-home"))
     checked([rust / "bin/cargo", "build", "--manifest-path", source / "Cargo.toml", "-p", "libkrun", "--locked", "--no-default-features", "--jobs", "4"], env=env)
-    library = OUT / "libkrun.1.dylib"
+    library = artifacts / "libkrun.1.dylib"
     shutil.copy2(source / "target/debug/libkrun.dylib", library)
     checked(["/usr/bin/install_name_tool", "-id", "@rpath/libkrun.1.dylib", library])
     checked(["/usr/bin/codesign", "--force", "--sign", "-", library])
-    checked(["/usr/bin/clang", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations", "-I", source / "include", ROOT / "worker.c", library, "-Wl,-rpath,@executable_path", "-o", OUT / "cowork-hvf-worker"])
-    checked(["/usr/bin/codesign", "--force", "--sign", "-", "--identifier", "dev.cowork.hvf.fixture-worker", "--entitlements", ROOT / "worker.entitlements", OUT / "cowork-hvf-worker"])
+    checked(["/usr/bin/clang", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations", "-I", source / "include", ROOT / "worker.c", library, "-Wl,-rpath,@executable_path", "-o", artifacts / "cowork-hvf-worker"])
+    checked(["/usr/bin/codesign", "--force", "--sign", "-", "--identifier", "dev.cowork.hvf.fixture-worker", "--entitlements", ROOT / "worker.entitlements", artifacts / "cowork-hvf-worker"])
     zig = (ROOT / PINS["zig"]["cachedPath"]).resolve()
     verify(ROOT / "../cowork-vm/out/tools/zig.tar.xz", PINS["zig"]["archiveSha256"])
     if subprocess.check_output([str(zig), "version"], text=True).strip() != PINS["zig"]["version"]:
         raise RuntimeError("Unexpected Zig version")
     zig_env = os.environ.copy()
     zig_env.update(ZIG_GLOBAL_CACHE_DIR=str(OUT/"zig-global-cache"), ZIG_LOCAL_CACHE_DIR=str(OUT/"zig-local-cache"))
-    checked([zig, "cc", "-target", "aarch64-linux-musl", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-pthread", ROOT / "init.c", "-o", OUT / "init"], env=zig_env)
+    checked([zig, "cc", "-target", "aarch64-linux-musl", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-pthread", ROOT / "init.c", "-o", artifacts / "init"], env=zig_env)
     kernel = (ROOT / PINS["kernel"]["cachedPath"]).resolve()
     verify(kernel, PINS["kernel"]["sha256"])
-    shutil.copy2(kernel, OUT / "kernel")
-    (OUT / "initramfs.cpio").write_bytes(cpio([
+    shutil.copy2(kernel, artifacts / "kernel")
+    (artifacts / "initramfs.cpio").write_bytes(cpio([
         ("dev", stat.S_IFDIR | 0o755, b"", 0, 0),
         ("dev/console", stat.S_IFCHR | 0o600, b"", 5, 1),
-        ("init", stat.S_IFREG | 0o755, (OUT / "init").read_bytes(), 0, 0),
+        ("init", stat.S_IFREG | 0o755, (artifacts / "init").read_bytes(), 0, 0),
         ("TRAILER!!!", 0, b"", 0, 0)]))
-    (OUT / "build.json").write_text(json.dumps({"pins":PINS, "librarySha256":digest(library), "workerSha256":digest(OUT/"cowork-hvf-worker"), "initSha256":digest(OUT/"init"), "initramfsSha256":digest(OUT/"initramfs.cpio")}, indent=2) + "\n")
+    info={"pins":PINS, "librarySha256":digest(library), "workerSha256":digest(artifacts/"cowork-hvf-worker"), "initSha256":digest(artifacts/"init"), "initramfsSha256":digest(artifacts/"initramfs.cpio")}
+    if args.instrument_reports: info["instrumentationPatchSha256"]=digest(patch)
+    (artifacts / "build.json").write_text(json.dumps(info, indent=2) + "\n")
 
 if __name__ == "__main__": main()

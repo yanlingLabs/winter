@@ -2,12 +2,14 @@
 import argparse, fcntl, json, os, shutil, subprocess, tempfile, time
 from pathlib import Path
 from build import OUT, digest
+from reporting import summary as reporting_summary
 
 def main():
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--run-fixture", action="store_true")
     group.add_argument("--sandbox-check", action="store_true")
+    parser.add_argument("--instrument-reports", action="store_true")
     args = parser.parse_args()
     # Writable fixture ownership is separate from conversation concurrency.
     with (OUT / "worker.lock").open("w") as lock:
@@ -19,10 +21,11 @@ def main():
                 raise RuntimeError(f"Existing fixture worker pid {parts[0]}; refusing overlap, no process killed")
         fixture = Path(tempfile.mkdtemp(prefix="fixture-", dir=OUT)).resolve()
         fixture.chmod(0o700)
-        build = json.loads((OUT / "build.json").read_text())
+        artifacts=OUT/"instrumented" if args.instrument_reports else OUT
+        build = json.loads((artifacts / "build.json").read_text())
         for name, pin in [("cowork-hvf-worker",build["workerSha256"]),("libkrun.1.dylib",build["librarySha256"]),("kernel",build["pins"]["kernel"]["sha256"]),("initramfs.cpio",build["initramfsSha256"])]:
-            if digest(OUT / name) != pin: raise RuntimeError(f"Artifact changed: {name}")
-            shutil.copy2(OUT / name,fixture / name)
+            if digest(artifacts / name) != pin: raise RuntimeError(f"Artifact changed: {name}")
+            shutil.copy2(artifacts / name,fixture / name)
         mode = "--run-fixture" if args.run_fixture else "--sandbox-check"
         command = [str(fixture/"cowork-hvf-worker"),mode,str(fixture),str(fixture/"kernel"),str(fixture/"initramfs.cpio")]
         rows=[]; start=time.monotonic(); timed_out=False
@@ -80,6 +83,9 @@ def main():
         if args.run_fixture: passed=passed and bool(boot) and bool(complete) and len(memory)==3 and integrity_ok and inventory_ok and "guest_failure" not in kinds
         result={"fixture":str(fixture),"exitCode":code,"timedOut":timed_out,"sandboxPassed":bool(sandbox),"linuxBoot":boot,"boundedBaselinePassed":passed,"deviceInventoryPassed":inventory_ok,"freePageReportingNegotiated":reporting,"memory":memory,"activeReturnVerified":False,"productionReady":False,"pins":build["pins"]}
         result["artifactDigests"]={name:digest(fixture/name) for name in ["cowork-hvf-worker","libkrun.1.dylib","kernel","initramfs.cpio"]}
+        if args.instrument_reports:
+            result["instrumentationPatchSha256"]=build["instrumentationPatchSha256"]
+            result["reporting"]=reporting_summary(rows)
         (fixture/"events.jsonl").write_text("".join(json.dumps(r)+"\n" for r in rows))
         (fixture/"result.json").write_text(json.dumps(result,indent=2)+"\n")
         (OUT/"latest-fixture.txt").write_text(str(fixture)+"\n")
