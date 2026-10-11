@@ -1020,17 +1020,28 @@ export class TabDriver {
    *  reads as none (fails closed). */
   async siteTools(describe: boolean): Promise<RtSiteTools | null> {
     this.requireNoDialog("tools()");
+    // The document the primitive's site floor checked: a read that ends up in any other — a navigation while it waits,
+    // a context gone under it — reads nothing and binds nothing (never a fresh runtime's retry in a new document).
+    const generation = this.generation;
     await this.settleChildSetups();
     const top = this.top();
+    let rt: string | undefined;
+    let r: RtSiteTools | null;
     try {
-      const r = await this.callFresh<RtSiteTools | null>(top, "siteTools", { describe });
-      // This read binds a later call to the document it was made in (as a whole-tab state does).
-      this.toolsReadRt = top.rtId;
-      return r;
+      if (this.generation !== generation) throw new AutomationFailure("StaleRef", SITE_TOOLS_PAGE_CHANGED);
+      await this.ensureRuntime(top);
+      rt = top.rtId;
+      if (rt === undefined || this.generation !== generation) throw new AutomationFailure("StaleRef", SITE_TOOLS_PAGE_CHANGED);
+      r = await this.callIn<RtSiteTools | null>(top, "siteTools", { describe }, { expectRt: rt, staleMessage: SITE_TOOLS_PAGE_CHANGED });
     } catch (err) {
       if (err instanceof AutomationFailure) throw err;
+      if (isContextGone(err) || this.generation !== generation) throw new AutomationFailure("StaleRef", SITE_TOOLS_PAGE_CHANGED);
       return null;
     }
+    if (this.generation !== generation || top.rtId !== rt) throw new AutomationFailure("StaleRef", SITE_TOOLS_PAGE_CHANGED);
+    // This read binds a later call to the document it was made in (as a whole-tab state does).
+    this.toolsReadRt = rt;
+    return r;
   }
 
   /** The names alone, for a state's line, read in the SAME document as the state's tree (`topRt`) — `undefined` (no

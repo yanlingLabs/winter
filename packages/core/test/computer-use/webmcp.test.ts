@@ -106,6 +106,16 @@ describe("discovery", () => {
     expect(escapeInvisible("plain \"json\" — fine")).toBe("plain \"json\" — fine");
   });
 
+  test("the escape and strip sets also cover NEL, U+061C, U+180E and U+2060–2064 (follow-up)", async () => {
+    expect(escapeInvisible("a\u0085b\u061Cc\u180Ed\u2060e\u2061f\u2062g\u2063h\u2064i")).toBe("a\\u0085b\\u061cc\\u180ed\\u2060e\\u2061f\\u2062g\\u2063h\\u2064i");
+    // JSON leaves NEL raw: the escape writes it out.
+    expect(escapeInvisible(JSON.stringify({ t: "x\u0085y" }))).toBe("{\"t\":\"x\\u0085y\"}");
+    const mc = new FakeModelContext().add({ name: "a", title: "T\u061Ci\u2060t", description: "one\u180Etwo\u2064three\u0085four" });
+    const info = (await listSiteTools(mc, OWN, { describe: true }))!.tools![0]!;
+    expect(info.title).toBe("T i t");
+    expect(info.description).toBe("one two three four");
+  });
+
   test("at most 50 described and 32 KiB of them; every name (≤ 200) still listed, the rest counted", async () => {
     const mc = new FakeModelContext();
     for (let i = 0; i < 250; i++) mc.add({ name: `tool_${i}`, description: "d".repeat(400) });
