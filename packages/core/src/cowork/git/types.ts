@@ -8,6 +8,11 @@ export interface Publisher { principalId: string; sessionId: string; taskId: str
 export interface PublicationGrant {
   repositoryId: string; destinationId: string; authorityId: string; authorityRevision: number;
   sourceRevision: number; publicationRevision: number;
+  /** Host-owned scope. null explicitly grants workspace-wide access; cwd is not authority.
+   * Revision must advance on every scope change, including restoring an earlier scope. */
+  sourceScope: { revision: number; sourceIds: string[] | null };
+  /** Canonical authority epochs plus normalized effective-capability digest. */
+  capabilityState: { conversationRevision: number; policyRevision: number; digest: string };
 }
 /** Must recheck canonical source/policy, authenticated runtime/task restrictions and current account grants. */
 export interface PublicationAuthority {
@@ -37,7 +42,7 @@ export interface PublicationJournal {
   claim(key: string, receipt: PublicationReceipt): Promise<{ created: boolean; receipt: PublicationReceipt }>;
   transition(key: string, from: PublicationStatus, to: PublicationStatus): Promise<PublicationReceipt>;
 }
-export interface GitCommand { cwd: string; home: string; args: readonly string[]; signal?: AbortSignal; withinBudget?: () => boolean }
+export interface GitCommand { cwd: string; home: string; args: readonly string[]; signal?: AbortSignal; withinBudget?: () => boolean | Promise<boolean> }
 export interface GitResult { code: number; stdout: string }
 export interface GitExecutor { run(command: GitCommand): Promise<GitResult> }
 export type GitPublicationErrorCode = "invalid_request" | "authority_denied" | "revision_conflict" | "ref_denied" | "remote_conflict" | "invalid_bundle" | "non_fast_forward" | "object_budget" | "command_failed" | "cancelled" | "request_conflict" | "integration_unavailable";
