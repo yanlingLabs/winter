@@ -180,10 +180,33 @@ describe("ComputerV2: binding, state and the diff base", () => {
     expect(r.isError).toBe(false);
     expect(w.fake.calls("target.act")[0]).toMatchObject({ linkOpensViaDaemon: true });
     expect(w.fake.calls("apps.defaultOpener")[0]).toMatchObject({ urls: ["https://news.example.org/a"] });
-    expect(w.fake.calls("apps.openDocument")[0]).toMatchObject({ urls: ["https://news.example.org/a"] });
+    expect(w.fake.calls("apps.openDocument")[0]).toMatchObject({ urls: ["https://news.example.org/a"], app: "com.apple.Safari" });
     expect(cards(w.events).map((c) => c.summary)).toContain("Allow Winter to use Safari (com.apple.Safari)?");
     expect(w.fake.calls("target.bind").length).toBe(1);  // Notes only: the opener is not bound
     expect(text(r)).toContain("opened in Safari in the background — not bound");
+  }, 30_000);
+
+  macOnly("a rerouted link is an ACT in its opener: a click-only browser opens nothing", async () => {
+    const w = world({ apps: { "com.apple.Safari": { access: "click" } } });
+    w.fake.handlers["target.act"] = () => ({ rung: 1, linkOpen: "https://news.example.org/a" });
+    w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.apple.Safari", name: "Safari", path: "/Applications/Safari.app" });
+    w.fake.handlers["apps.openDocument"] = () => ({ app: { name: "Safari", bundleId: "com.apple.Safari", pid: 77 }, windowID: 5 });
+    await w.run("const notes = await apps.open('Notes')");
+    const r = await w.run("await notes.click(14)");
+    expect(r.isError).toBe(true);
+    expect(w.fake.calls("apps.openDocument").length).toBe(0);
+  }, 30_000);
+
+  macOnly("a rerouted link to a dangerous domain is refused before anything opens", async () => {
+    const w = world();
+    w.fake.handlers["target.act"] = () => ({ rung: 1, linkOpen: "https://pastebin.com/raw/x" });
+    w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.apple.Safari", name: "Safari", path: "/Applications/Safari.app" });
+    w.fake.handlers["apps.openDocument"] = () => ({ app: { name: "Safari", bundleId: "com.apple.Safari", pid: 77 }, windowID: 5 });
+    await w.run("const notes = await apps.open('Notes')");
+    const r = await w.run("await notes.click(14)");
+    expect(r.isError).toBe(true);
+    expect(text(r)).toContain("dangerous-domains list");
+    expect(w.fake.calls("apps.openDocument").length).toBe(0);
   }, 30_000);
 
   macOnly("reset: a fresh runtime, the bindings and bases are gone, and the model is told", async () => {
