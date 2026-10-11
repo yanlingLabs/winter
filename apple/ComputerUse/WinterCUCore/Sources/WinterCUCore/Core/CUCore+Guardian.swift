@@ -352,6 +352,17 @@ extension CUCore {
             userInteracted(front)
         case .rightMouseDown, .otherMouseDown, .scrollWheel:
             if guardianLock.withLock({ guardianCore.userWorkingApp == front }) { return }  // marked already: no window lookup
+            // A scroll comes in bursts of dozens of events: the window under the pointer is read at most every 250 ms
+            // (review of round 12, LOW — a full window-list read per event over another app).
+            if type == .scrollWheel {
+                let now = clock.nowSeconds()
+                let due = guardianLock.withLock { () -> Bool in
+                    guard now - lastScrollWorkCheck >= 0.25 else { return false }
+                    lastScrollWorkCheck = now
+                    return true
+                }
+                guard due else { return }
+            }
             guard let point = location, windowUnder(point)?.pid == front else { return }
             userInteracted(front)
         default:
@@ -876,11 +887,20 @@ extension CUCore {
             let source = CFMachPortCreateRunLoopSource(nil, port, 0)
             CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
             CGEvent.tapEnable(tap: port, enable: true)
-            while !Thread.current.isCancelled, CFRunLoopRunInMode(.defaultMode, 0.25, false) != .stopped {}
+            // (A run loop with no source left returns `.finished` at once: the thread ends then, never spins.)
+            while !Thread.current.isCancelled {
+                let r = CFRunLoopRunInMode(.defaultMode, 0.25, false)
+                if r == .stopped || r == .finished { break }
+            }
         }
         thread.name = "Winter CPS focus tap"
         cpsTapThread = thread
         thread.start()
+    }
+
+    /// The CPS tap was disabled by the system (a slow callback, or secure input): on again (review of round 12, LOW).
+    func reenableCPSTap() {
+        guardianLock.withLock { if let port = cpsTapPort { CGEvent.tapEnable(tap: port, enable: true) } }
     }
 
     /// Tears down the CPS tap. Called from `stopGuardian`, which already holds `guardianLock`, so it resets
@@ -901,12 +921,13 @@ final class CUCPSTapContext {
 }
 
 /// The listen-only CPS tap callback: reads the type-21 notification's fields and hands them to the core. It
-/// returns the event unchanged (listen-only ignores the return, but a disabled tap is re-enabled).
+/// returns the event unchanged (listen-only ignores the return); a tap the system disabled is enabled again.
 private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
-    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+    guard let refcon, let core = Unmanaged<CUCPSTapContext>.fromOpaque(refcon).takeUnretainedValue().core else {
         return Unmanaged.passUnretained(event)
     }
-    guard let refcon, let core = Unmanaged<CUCPSTapContext>.fromOpaque(refcon).takeUnretainedValue().core else {
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        core.reenableCPSTap()
         return Unmanaged.passUnretained(event)
     }
     // Hardware-origin input (no source process, not ours, a type a person makes): the user's own — a pointer move

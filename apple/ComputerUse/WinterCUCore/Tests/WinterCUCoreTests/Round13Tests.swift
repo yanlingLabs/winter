@@ -36,4 +36,50 @@ final class Round13Tests: XCTestCase {
                                                selector: .title("Chrome Web Store Developer Dashboard"), privatePath: true, fx)
         XCTAssertEqual(out.window.id, 40)
     }
+
+    // MARK: the review of round 12
+
+    /// MEDIUM #1: the work watcher is decided under one lock — on at the first bind, off at the last release, and never
+    /// started twice or left off with a target bound, however binds and releases interleave.
+    func testTheWorkWatcherFollowsTheBoundTargetsUnderRaces() async throws {
+        let sys = FakeSystem()
+        sys.running = [1, 500]
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        let counts = NSLock()
+        var starts = 0, stops = 0
+        core.workWatcherStarter = {
+            counts.withLock { starts += 1 }
+            return { counts.withLock { stops += 1 } }
+        }
+        func target(_ i: Int) -> CUTarget {
+            CUTarget(id: "w\(i)", sessionId: "s", pid: 500, bundleId: "com.example.app", appName: "App",
+                     isChromium: false, mirror: false, windowID: UInt32(77 + i), windowTitle: "")
+        }
+        core.registerForTesting(target(0), windowElement: nil)
+        core.updateWorkWatcher()
+        XCTAssertTrue(core.workWatcherRunning)
+        _ = try await core.targetRelease(TargetReleaseParams(targetId: "w0"))
+        XCTAssertFalse(core.workWatcherRunning)
+        XCTAssertEqual(counts.withLock { (starts, stops) }.0, 1)
+        // Many binds and updates at once: one start.
+        await withTaskGroup(of: Void.self) { g in
+            for i in 1...40 { g.addTask { core.registerForTesting(target(i), windowElement: nil); core.updateWorkWatcher() } }
+        }
+        XCTAssertTrue(core.workWatcherRunning)
+        XCTAssertEqual(counts.withLock { starts }, 2, "one more start for the whole burst")
+        // Releases racing binds: whatever the order, on iff something is bound at the end.
+        await withTaskGroup(of: Void.self) { g in
+            for i in 1...40 { g.addTask { _ = try? await core.targetRelease(TargetReleaseParams(targetId: "w\(i)")) } }
+            for i in 41...45 { g.addTask { core.registerForTesting(target(i), windowElement: nil); core.updateWorkWatcher() } }
+        }
+        core.updateWorkWatcher()
+        XCTAssertTrue(core.workWatcherRunning, "five targets bound")
+        let (s1, p1) = counts.withLock { (starts, stops) }
+        XCTAssertEqual(s1 - p1, 1, "exactly one watcher running")
+        for i in 41...45 { _ = try await core.targetRelease(TargetReleaseParams(targetId: "w\(i)")) }
+        XCTAssertFalse(core.workWatcherRunning)
+        let (s2, p2) = counts.withLock { (starts, stops) }
+        XCTAssertEqual(s2, p2, "every start stopped")
+    }
 }
