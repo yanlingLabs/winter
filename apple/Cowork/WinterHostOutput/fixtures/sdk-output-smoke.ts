@@ -2,9 +2,10 @@ import { strict as assert } from "node:assert";
 import { copyFileSync,existsSync,mkdirSync,mkdtempSync,realpathSync,rmSync,writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { loadFixtureHostOutputFactory } from "../../../../packages/core/src/runtime-sdk/host-output-loader";
-import { HostCodeExecutionService,withHostCodeBinding,type HostCodeSdkAdapter,type HostCodeRegistration } from "../../../../packages/core/src/runtime-sdk/host-code-broker";
-import { registerHostStorageFences } from "../../../../packages/core/src/runtime-sdk/host-storage-fence";
+import type { HostCodeSdkAdapter,HostCodeRegistration } from "../../../../packages/core/src/runtime-sdk/host-code-broker";
+import type { WinterRuntimeSdk } from "../../../../packages/core/src/runtime-sdk/create";
 // Explicit local checkout fixture. These source imports never enter production
 // loader/service resolution and do not change Winter's installed runtime pin.
 import { createHostCodeProcessRegistration } from "../../../../../winter-agent-sdk/packages/runtime/src/sandbox/host-code-broker";
@@ -16,6 +17,7 @@ import { HOST_CODE_PROCESS_SUBTYPES as ops,type HostCodeProcessStartReply,type H
 import type { Options,SpawnClaudeCodeProcess } from "@yanlinglabs/winter-agent-sdk";
 
 const bundle=process.argv[2];assert(bundle?.startsWith("/"),"explicit output-only fixture bundle required");
+const constructorMode=process.argv[3]==="--constructor";
 const root=realpathSync(mkdtempSync(join(tmpdir(),"winter-sdk-native-output-")));
 try{
 const home=join(root,"home"),source=join(root,"source"),temp=join(root,"temp"),coord=join(root,"coordination"),store=join(root,"runtime-store");
@@ -23,16 +25,44 @@ for(const path of [home,source,temp,coord,store])mkdirSync(path);
 const resources=join(root,"Fixture.app/Contents/Resources"),output=join(resources,"native/host-output");mkdirSync(output,{recursive:true});
 for(const name of ["winter-host-output.node","manifest.json"])copyFileSync(join(bundle,name),join(output,name));
 writeFileSync(join(resources,"winter-core"),"private fixture label");mkdirSync(join(home,"cowork"));
-const unregister=registerHostStorageFences(home,{coordinationDir:coord,coworkStorageActive:true});
-const factory=loadFixtureHostOutputFactory({corePath:join(resources,"winter-core"),verifySignature:()=>true});
-let registration!:HostCodeRegistration,created=0,resolveRuntimeExit!:(code:number)=>void;
+const nativeFactory=loadFixtureHostOutputFactory({corePath:join(resources,"winter-core"),verifySignature:()=>true});
+let factoryCalls=0;
+const factory=async()=>{factoryCalls++;return nativeFactory()};
+let registration!:HostCodeRegistration,created=0,resolveRuntimeExit!:(code:number)=>void,runtimeHandle:WinterRuntimeSdk|undefined;
 const runtimeExit=new Promise<number>(resolve=>{resolveRuntimeExit=resolve});
 const adapter:HostCodeSdkAdapter={requiresNativeOutput:true,
   applyFloor:applyMandatoryFloorToSpawnOptions as HostCodeSdkAdapter["applyFloor"],
-  register:input=>{assert(input.createOutputTransport);created++;registration=createHostCodeProcessRegistration(input as Parameters<typeof createHostCodeProcessRegistration>[0]);return registration},
+  register:input=>{assert.equal(input.createOutputTransport,factory,"constructor must forward the exact host factory");created++;registration=createHostCodeProcessRegistration(input as Parameters<typeof createHostCodeProcessRegistration>[0]);return registration},
   executionLimits:hostCodeExecutionLimitsFor,buildPwdCaptureScript,buildRunInputs:buildHostSandboxRunInputs as HostCodeSdkAdapter["buildRunInputs"]};
 const syntheticRuntimeSpawn:SpawnClaudeCodeProcess=()=>({exited:runtimeExit}) as ReturnType<SpawnClaudeCodeProcess>;
-const service=new HostCodeExecutionService(home,adapter,syntheticRuntimeSpawn,{createOutputTransport:factory});
+const resolvePackage=(name:string)=>Bun.resolveSync(name,fileURLToPath(new URL("../../../../packages/core/src/runtime-sdk/",import.meta.url)));
+if(constructorMode){
+  // This child alone publishes the actual local SDK functions at the package
+  // binding consumed by the default service. No constructor/service is mocked,
+  // no production knob is added, and no installed/released SDK proof is implied.
+  const {mock}=await import("bun:test");
+  // Bun's package resolution may use its canonical cache module identity;
+  // patch the exact ESM path Core resolves, not Node's distinct cache alias.
+  const clientPath=resolvePackage("@yanlinglabs/winter-agent-sdk"),serverPath=resolvePackage("@yanlinglabs/winter-agent-runtime");
+  // Capture base exports through a separate fixture module identity before
+  // Core's canonical bindings load. Adding exports to an already loaded ESM
+  // namespace does not make those capabilities available to its consumers.
+  const client=await import(`${clientPath}?constructor-fixture-base`);
+  mock.module(clientPath,()=>({...client,MANDATORY_FLOOR_CONTRACT_VERSION:1,HOST_CODE_PROCESS_BROKER_VERSION:1,applyMandatoryFloorToSpawnOptions,defaultSpawn:syntheticRuntimeSpawn}));
+  const server=await import(`${serverPath}?constructor-fixture-base`);
+  mock.module(serverPath,()=>({...server,HOST_CODE_EXECUTION_LIMITS_VERSION:1,createHostCodeProcessRegistration:adapter.register,hostCodeExecutionLimitsFor,buildPwdCaptureScript,buildHostSandboxRunInputs}));
+}
+const {registerHostStorageFences}=await import("../../../../packages/core/src/runtime-sdk/host-storage-fence");
+const unregister=registerHostStorageFences(home,{coordinationDir:coord,coworkStorageActive:true});
+if(constructorMode){
+  const {createWinterRuntimeSdk}=await import("../../../../packages/core/src/runtime-sdk/create");
+  const {createInMemoryRuntimeDirectoryStore}=await import(resolvePackage("@yanlinglabs/winter-runtime-sdk"));
+  const {FileSecretStore}=await import("../../../../packages/core/src/auth/secret-store");
+  runtimeHandle=await createWinterRuntimeSdk({home,settings:()=>null,secrets:new FileSecretStore(join(root,"test-secrets")),directoryStore:createInMemoryRuntimeDirectoryStore(),capabilities:[],hostOutputTransportFactory:factory});
+}
+const {HostCodeExecutionService,withHostCodeBinding}=await import("../../../../packages/core/src/runtime-sdk/host-code-broker");
+const service=constructorMode?runtimeHandle!.codeExecution!:new HostCodeExecutionService(home,adapter,syntheticRuntimeSpawn,{createOutputTransport:factory});
+assert(service);
 const abort=new AbortController();let allowed="";
 const options=withHostCodeBinding({sandbox:{enabled:false}} as Options,{home,sessionId:"logical",backendSessionId:"backend",allowedCwds:[source],tempDir:temp,policyRevision:()=>"fixture-policy",authorize:async call=>call.input.command===allowed});
 const generation=service.enroll({options,sessionId:"logical",backendSessionId:"backend",generation:1,abort,isCurrent:()=>true,stop:async()=>{}});
@@ -57,6 +87,7 @@ try{
   const marker=join(home,"cowork/forbidden-marker");await run("floor",`printf denied > '${marker}'; printf survived`);assert(!existsSync(marker));
   const pressure=await run("pressure","dd if=/dev/zero bs=65536 count=32 2>/dev/null");assert.equal(pressure.bytes,2*1024*1024);assert.equal(pressure.exit.code,0);
   acknowledgedOutputBytes=pressure.bytes;
-}finally{generation.dispose();resolveRuntimeExit(0);try{const drain=await registration.drained;assert.equal(drain.status,"confirmed");assert(drain.confirmedProcessCount>=3)}finally{unregister()}}
-console.log(JSON.stringify({actualSdkBroker:true,trustedCoreServiceFactory:true,outputOnlyPackagedAddon:true,noVZDependency:true,exactStdoutStderr:true,mandatoryFloorStillEnforced:true,acknowledgedOutputBytes,ownedDrainConfirmed:true,fixtureRuntimeOnly:true,realVM:false,actualKeychain:false,workflowAuthorityProved:false}));
+  assert(factoryCalls>=3,"real SDK registration must invoke the forwarded native factory");
+}finally{generation.dispose();resolveRuntimeExit(0);try{const drain=await registration.drained;assert.equal(drain.status,"confirmed");assert(drain.confirmedProcessCount>=3)}finally{try{await runtimeHandle?.dispose()}finally{unregister()}}}
+console.log(JSON.stringify({actualSdkBroker:true,trustedCoreServiceFactory:true,constructorDefaultService:constructorMode,packageBinding:constructorMode?"fixture-mocked-with-real-local-sdk-functions":"explicit-local-sdk-adapter",installedReleasedSdk:false,forwardedFactoryCalls:factoryCalls,outputOnlyPackagedAddon:true,noVZDependency:true,exactStdoutStderr:true,mandatoryFloorStillEnforced:true,acknowledgedOutputBytes,ownedDrainConfirmed:true,fixtureRuntimeOnly:true,realVM:false,actualKeychain:false,workflowAuthorityProved:false}));
 }finally{rmSync(root,{recursive:true,force:true})}

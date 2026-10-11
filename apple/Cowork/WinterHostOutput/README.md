@@ -56,3 +56,21 @@ coordination and runtime-store paths. It verifies stdout/stderr,2MiB ACKed
 output and an enforced mandatory floor. Its runtime-envelope process is a test
 double; tool processes and the SDK registration are real. No provider, actual
 Keychain, VM, daemon, live app/home or Workflow worker authority is exercised.
+
+The constructor follow-up is a separate receipt-driven source fixture:
+
+```sh
+python3 apple/Cowork/WinterHostOutput/fixtures/verify-constructor.py \
+  --bundle /absolute/output-only/BUNDLE
+```
+
+It calls `createWinterRuntimeSdk` without a `codeExecution` override and checks
+that its default service forwards the exact supplied host factory into actual
+local SDK registration, which invokes it for three real tool processes. Only
+that private child mocks installed package bindings to expose local SDK functions
+and supplies a fake runtime-envelope spawn. Core's constructor and service are
+real. Its receipt labels `constructorDefaultService:true`, the fixture package
+binding and `installedReleasedSdk:false`; this is not installed/released SDK or
+signed production app evidence. The launcher requires the actual nonempty JSON
+receipt in addition to a zero exit. The ordinary35 unit tests do not themselves
+exercise this separate constructor-to-registration path.

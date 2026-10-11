@@ -71,3 +71,36 @@ Core constructor now supplies the protected output factory when that bundle is
 available, and required floors refuse when it is unavailable. This checkpoint
 does not activate Cowork, prove disk encryption, or close active RAM return.
 No real Keychain, live app/daemon/home, provider, public connection or VM was used.
+
+## Separate constructor follow-up
+
+The original ordinary/compiled smoke above directly constructed the service;
+the35 unit tests did not prove `createWinterRuntimeSdk` factory forwarding.
+The follow-up `WinterHostOutput/fixtures/verify-constructor.py --bundle
+/absolute/BUNDLE` now runs a private receipt-driven source fixture through
+`createWinterRuntimeSdk`, omitting `deps.codeExecution`. Its default service
+passes the exact dependency factory into actual local SDK registration, which
+invokes the factory three times. The same exact stdout/stderr,2MiB ACK,
+mandatory-floor denial and confirmed owned drain checks pass.
+
+Its actual receipt at `/tmp/winter-output-constructor-verified.log` records
+`constructorDefaultService:true`,
+`packageBinding:"fixture-mocked-with-real-local-sdk-functions"` and
+`installedReleasedSdk:false`. Child-only Bun module bindings expose real local
+SDK functions; only the runtime envelope spawn is fake. No production test knob
+or SDK pin was added. A bounded Python launcher requires a nonempty, strictly
+validated receipt and zero exit. This is separate from the unchanged35 unit
+tests and original frozen artifact's three receipts; it does not rewrite their
+manifest or claim compiled-constructor/installed-release acceptance.
+The revised fixture's ordinary and compiled direct-service modes also pass;
+the compiled compatibility receipt remains labeled `constructorDefaultService:false`
+at `/tmp/winter-output-constructor-direct-compiled-smoke.log`. The unchanged
+unit suite passes35/110 at `/tmp/winter-output-constructor-final-core-tests.log`.
+
+An attempted bun:test subprocess launcher was not retained: both Bun.spawn and
+node:child_process capture in that test process returned empty fixture output,
+and even `/bin/echo` failed its capture control. The same absolute fixture CLI
+with a narrowed environment passed through the Python launcher. Empty output
+was never accepted as success; diagnostic logs remain at
+`/tmp/winter-output-constructor-launch-diagnostic.log` and
+`/tmp/winter-output-constructor-only-test.log`.
