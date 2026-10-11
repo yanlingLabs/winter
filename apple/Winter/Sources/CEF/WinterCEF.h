@@ -356,16 +356,24 @@ typedef NS_ENUM(int, WinterCEFCDPStatus) {
 typedef void (^WinterCEFCDPStatusCompletion)(WinterCEFCDPStatus status, NSString *payloadJSON);
 
 /// **Run one DevTools method for the browser link** — on the tab's own session, or, with
-/// `cdpSessionId`, on a flattened child target's (an out-of-process iframe), which
-/// `ExecuteDevToolsMethod` cannot address: that case is sent raw with `SendDevToolsMessage`.
+/// `cdpSessionId`, on a flattened child target's (an out-of-process iframe). Both are sent raw with
+/// `SendDevToolsMessage` (`paramsJSON` placed in the message as given, once checked to be one object that starts
+/// with `{` and nests at most 100 deep; a method or session id that is not UTF-8 is refused with its own sentence).
 ///
 /// Same registry and the same always-answers contract as `WinterCEFExecuteCDP` (the completion fires
 /// exactly once, error never silence), and the same producer posture: **this validates nothing** —
 /// the allowlist and the world rules are the link's (`CDPTabGate`), applied before this is reached.
 ///
-/// Every message id on a browser — this door's, both of its paths', and `WinterCEFExecuteCDP`'s — is
-/// drawn from ONE per-browser counter, so a raw message can never reuse an id CEF assigned (or the
-/// reverse) and settle the wrong call.
+/// **Registered BEFORE it is sent.** A method the browser process answers by itself
+/// (`Page.handleJavaScriptDialog`, for one) answers inside the send, and a registration made after it
+/// would miss that answer and leave the call waiting for its timeout. A child session's RESULT, which
+/// CEF's own parser drops, is settled by the raw observer, read by slicing (never a full parse: Foundation
+/// refuses JSON Chromium writes, such as a lone surrogate) — and one that can't be read is settled as an
+/// error, never left to time out. A call to a child session that detaches before answering fails then.
+///
+/// Every message id on a browser — this door's and `WinterCEFExecuteCDP`'s — is drawn from ONE
+/// per-browser counter, so a raw message can never reuse an id CEF assigned (or the reverse) and
+/// settle the wrong call.
 void WinterCEFSendCDP(NSView *parent,
                      const char *method,
                      const char *paramsJSON,
@@ -485,6 +493,23 @@ NSString *WinterCEFAutomationDecisionsForFlags(uint32_t flags);
 /// raw observer makes on every message before it parses one (results and the tab's own events go to
 /// the structured callbacks). `message` is the message's JSON text. No CEF anywhere.
 NSString *WinterCEFChildSessionOfDevToolsMessage(NSString *message);
+
+/// **Test seam.** The raw observer's decision for one message (`HandleRawDevToolsMessage`), against calls 1…20
+/// pending on a browser with no CEF (15 and 16 of them sent to child session `AB12CD`): `consumed=<0|1>`, then a
+/// `settled <id> ok=<0|1> <payload>` row for each call it settled and an `event <session> <method> <params>` row for each
+/// event it delivered, `;`-joined. Leaves no state.
+NSString *WinterCEFRawMessageTranscriptWithNoCEFAnywhere(NSString *message);
+
+/// **Test seam.** The door's own body (`SendCDPOver`, `WinterCEFSendCDP` with the send injected) driven through its
+/// cases with no CEF — an answer inside the send, a child's result Foundation can't parse, a child's error answered
+/// later, a child session detaching before it answers, and every refusal — one `status=<n> <payload>` row per answer,
+/// `\n`-joined. Leaves no state.
+NSString *WinterCEFSendCDPTranscriptWithNoCEFAnywhere(void);
+
+/// **Test seam.** The raw message `WinterCEFSendCDP` sends for these arguments, or `nil` when it refuses them. No
+/// CEF anywhere.
+NSString *WinterCEFRawDevToolsMessageWithNoCEFAnywhere(int messageId, const char *method, const char *paramsJSON,
+                                                      const char *cdpSessionId);
 
 /// **Test seam.** The printing switch's decision, run with no CEF over the four cases a build can present
 /// — the preference not registered, registered but not settable, set but refused, set — as

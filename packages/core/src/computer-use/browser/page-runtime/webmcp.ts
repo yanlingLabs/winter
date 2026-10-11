@@ -14,6 +14,7 @@
 // never part of telemetry.
 import type { RtSiteTool, RtSiteToolAnswer, RtSiteTools } from "./protocol";
 import { redactText } from "./redact";
+import { sliceUnits } from "./rules";
 
 /** A tool name, as the draft allows it: 1–128 ASCII letters, digits, `_`, `-`, `.`. Anything else is left out. */
 export const SITE_TOOL_NAME = /^[A-Za-z0-9_.-]{1,128}$/;
@@ -59,7 +60,7 @@ export function modelContextOf(doc: unknown): ModelContextLike | undefined {
 const CONTROLS = new RegExp("[\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u180e\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff]+", "g");
 /** One line of the page's words: controls, bidi marks and line breaks become spaces, runs of space collapse. */
 function oneLine(s: string): string { return s.replace(CONTROLS, " ").replace(/\s+/g, " ").trim(); }
-function cut(s: string, n: number): string { return s.length <= n ? s : `${s.slice(0, n)}…`; }
+function cut(s: string, n: number): string { return s.length <= n ? s : `${sliceUnits(s, n)}…`; }
 function pageText(s: string, n: number): string { return cut(redactText(oneLine(s)), n); }
 
 const INVISIBLE = new RegExp("[\\u0085\\u061c\\u180e\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff]", "g");
@@ -205,7 +206,7 @@ export class SiteToolCalls {
       // A tool that returns nothing answers the bare string "undefined" (measured, Chrome 153 and 156): no answer.
       if (result === null || result === undefined || result === "undefined") return { ok: true, result: null };
       const text = typeof result === "string" ? result : (() => { try { return JSON.stringify(result) ?? String(result); } catch { return String(result); } })();
-      return text.length > SITE_TOOL_CAPS.resultChars ? { ok: true, result: text.slice(0, SITE_TOOL_CAPS.resultChars), cut: true } : { ok: true, result: text };
+      return text.length > SITE_TOOL_CAPS.resultChars ? { ok: true, result: sliceUnits(text, SITE_TOOL_CAPS.resultChars), cut: true } : { ok: true, result: text };
     } catch (e) {
       if (ac.signal.aborted) return { ok: false, reason: "aborted" };
       return { ok: false, reason: "failed", name: errorName(e), message: errorMessage(e) };

@@ -6,7 +6,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { looksLikeUrl, redactText, redactUrl, redactUrlAttribute, REDACTED } from "../../src/computer-use/browser/page-runtime/redact";
 import {
-  classifyTarget, FILE_CHOOSER, isPaymentHost, isSecureField, isTextEntry, nativePicker, pickerAdvice, pickerValueHint,
+  classifyTarget, FILE_CHOOSER, isPaymentHost, isSecureField, isTextEntry, nativePicker, pickerAdvice, pickerValueHint, sliceUnits,
 } from "../../src/computer-use/browser/page-runtime/rules";
 
 describe("the secure-field floor", () => {
@@ -164,5 +164,20 @@ describe("the page runtime builds under its own DOM program", () => {
     };
     walk(join(core, "src"));
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("sliceUnits (every cut the page runtime makes)", () => {
+  test("never ends between the halves of a surrogate pair — a lone half is JSON the engine's readers refuse", () => {
+    const s = "ab😀cd"; // 😀 is two UTF-16 units: "ab" + high + low + "cd"
+    expect(sliceUnits(s, 3)).toBe("ab");
+    expect(sliceUnits(s, 4)).toBe("ab😀");
+    expect(sliceUnits(s, 2)).toBe("ab");
+    expect(sliceUnits(s, 100)).toBe(s);
+    expect(sliceUnits(s, 0)).toBe("");
+    // A cap of 200 landing on an emoji's first half backs off one unit.
+    const long = "x".repeat(199) + "😀";
+    expect(sliceUnits(long, 200)).toBe("x".repeat(199));
+    expect(JSON.stringify(sliceUnits(long, 200))).not.toContain("\\ud83d");
   });
 });
