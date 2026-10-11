@@ -520,12 +520,10 @@ extension CUCore {
                     // still show it, and a click after it would do it twice.
                     let crop = webBefore != nil ? pressCrop(e, info, t) : nil
                     let shotBefore = crop.flatMap { pressShot($0, t) }
+                    var pressed = false
                     do {
                         try ax.perform(e, axAction)
-                        if let webBefore {
-                            return try verifyWebPress(e, info, ref: ref, before: webBefore, crop: crop, shotBefore: shotBefore, p, t, token)
-                        }
-                        return ActOutcome(rung: .accessibility)
+                        pressed = true
                     } catch let error where Self.pressMayHaveActed(error) != nil {
                         // Never fall through to a click here: the press may have acted, and a click would repeat it.
                         let note = try judgeErroredPress(e, t, before: before, code: Self.pressMayHaveActed(error)!,
@@ -535,6 +533,14 @@ extension CUCore {
                         throw err
                     } catch {
                         // The element refused the action outright: fall through to events at its centre.
+                    }
+                    // Verified OUTSIDE the press's own catch: what the check throws (a desktop visit to offer, a click it
+                    // refused) is never taken for the element refusing the press — that fell through to a second click.
+                    if pressed {
+                        if let webBefore {
+                            return try verifyWebPress(e, info, ref: ref, before: webBefore, crop: crop, shotBefore: shotBefore, p, t, token)
+                        }
+                        return ActOutcome(rung: .accessibility)
                     }
                 }
             }
@@ -683,6 +689,13 @@ extension CUCore {
                             let info = ElementInfo(el, ax)
                             if Self.mayActUnseen(info.labels) {
                                 return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.unseenPressNote(Self.elementLabel(nil, info)))")
+                            }
+                            // On ANOTHER desktop, a press that changed nothing on a control a repeat can't undo: a desktop
+                            // visit would click it where it is (live, round 11: the Web Store's controls ignored the press
+                            // from another Space and the visit was never offered).
+                            if !prefersWebClicks(t), !statefulWithoutReadableState(el, info), isOffThisDesktop(t) {
+                                CULog.act.notice("click in \(t.appName, privacy: .public) (another desktop): no visible effect — a desktop visit would click it")
+                                throw CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(Self.elementLabel(nil, info)) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
                             }
                             if !prefersWebClicks(t) || statefulWithoutReadableState(el, info) {
                                 CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): no visible effect — not clicked as well")
@@ -2898,6 +2911,11 @@ extension CUCore {
         if statefulWithoutReadableState(e, info) {
             CULog.act.notice("click in \(t.appName, privacy: .public): a toggle-like control with no readable state — not clicked as well")
             return ActOutcome(rung: .accessibility, detail: "the accessibility press on \(label) showed no change accessibility can see, and a second press could undo it (it holds a state accessibility doesn't show) — check state() or a screenshot before pressing again")
+        }
+        // On ANOTHER desktop: a desktop visit would click it where it is (round 11 — live, never offered).
+        if isOffThisDesktop(t) {
+            CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect, and the window is on another desktop — a desktop visit would click it")
+            throw CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(label) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
         }
         if offScreenSubject(t) != nil {
             CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect, and the window is not on screen — not clicked as well")

@@ -784,7 +784,10 @@ extension CUCore {
     /// The helper errors a visit could get past, when the window is on another desktop: the foreground it needs,
     /// a window it can't reach from here, or the foreground rung finding it elsewhere.
     static func visitCouldHelp(_ e: CUError) -> Bool {
-        ["needs_foreground", "window_elsewhere", "needs_desktop_visit"].contains(e.code)
+        if ["needs_foreground", "window_elsewhere", "needs_desktop_visit"].contains(e.code) { return true }
+        // Typing whose field could not be given the focus from another desktop (nothing was typed): on screen, a click
+        // places it (live, round 11: refused with no visit offered).
+        return e.code == "refused" && e.data?["reason"] == .string(CUFloorReason.focusNotPlaced.rawValue)
     }
 
     /// The act needs its window's desktop (with the user's say, or without it).
