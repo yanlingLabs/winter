@@ -18,6 +18,8 @@ final class ClickRoutingRound11Tests: XCTestCase {
     var poster: RecordingPoster!
     var core: CUCore!
     var target: CUTarget!
+    /// What the background opener was asked to open (never the real NSWorkspace from a unit test).
+    var opened: [[String]] = []
 
     /// The bound window 77 at (0,0) 800×600, and another document window 78 of the app on top of it at (100,100)
     /// 800×600; `menu`: a pop-up menu window 79 (layer 101) over both; `sheet`: a sheet window 80 inside the bound one.
@@ -60,6 +62,11 @@ final class ClickRoutingRound11Tests: XCTestCase {
         poster = RecordingPoster()
         core = CUCore(events: nil, clock: CUSystemClock(), skyLight: recordingSkyLight(), poster: poster, ax: ax, sys: sys,
                       pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        opened = []
+        core.openDocumentsOverride = { [unowned self] p in
+            opened.append(p.urls)
+            return OpenDocumentsResult(app: CUBoundApp(name: "Browser", bundleId: "com.example.default", pid: 9), windowID: nil)
+        }
         target = CUTarget(id: "t1", sessionId: "s", pid: pid, bundleId: "com.example.browser", appName: "Browser", isChromium: false,
                           mirror: false, windowID: 77, windowTitle: "Store")
         target.accessible = accessible
@@ -176,5 +183,41 @@ final class ClickRoutingRound11Tests: XCTestCase {
     func testAnEmptyAccessibilityAnswerFallsBackToTheCaptureOnlyRule() {
         world(axWindows: false)
         XCTAssertEqual(core.windowFor(target)(CGPoint(x: 320, y: 320)), 77)
+    }
+
+    /// Round 10's MEDIUM #7: a link to another site is rerouted in an Electron/CEF app too (no blanket exemption), and
+    /// "the same site" is the registrable domain (files.slack.com from app.slack.com stays in the app).
+    func testSameSiteIsTheRegistrableDomain() {
+        XCTAssertEqual(CUCore.registrableDomain("files.slack.com"), "slack.com")
+        XCTAssertEqual(CUCore.registrableDomain("app.slack.com"), "slack.com")
+        XCTAssertEqual(CUCore.registrableDomain("www.bbc.co.uk"), "bbc.co.uk")
+        XCTAssertEqual(CUCore.registrableDomain("localhost"), "localhost")
+        world()
+        let page = fakeElement(98_010), same = fakeElement(98_011), away = fakeElement(98_012)
+        ax.add(page, role: "AXWebArea", extra: ["AXURL": URL(string: "https://app.slack.com/client")! as CFURL])
+        ax.add(same, role: "AXLink", extra: ["AXURL": URL(string: "https://files.slack.com/x")! as CFURL, kAXParentAttribute: page])
+        ax.add(away, role: "AXLink", extra: ["AXURL": URL(string: "https://example.org/a")! as CFURL, kAXParentAttribute: page])
+        XCTAssertNil(core.linkURL(same, ElementInfo(same, ax)))
+        XCTAssertEqual(core.linkURL(away, ElementInfo(away, ax))?.host, "example.org")
+        let electron = CUTarget(id: "t9", sessionId: "s", pid: pid, bundleId: "com.tinyspeck.slackmacgap", appName: "Slack",
+                                isChromium: true, mirror: false, windowID: 77, windowTitle: "Slack")
+        XCTAssertFalse(core.isWebBrowser(electron), "an Electron app declares no http/https: not a browser")
+    }
+
+    /// Round 10's MEDIUM #7: action(ref, "press") on a link in an app that is not a browser opens it in the background too.
+    func testAnAccessibilityPressOnALinkIsRerouted() async throws {
+        world(web: true)
+        core.isWebBrowserOverride = { _ in false }
+        let link = fakeElement(98_013)
+        ax.put(webArea, ["AXURL": URL(string: "https://mail.example.com/inbox")! as CFURL, kAXChildrenAttribute: [field, link]])
+        ax.add(link, role: "AXLink", title: "Story", frame: CGRect(x: 300, y: 400, width: 80, height: 20),
+               extra: ["AXURL": URL(string: "https://news.example.org/a")! as CFURL, kAXParentAttribute: webArea])
+        ax.setActions(link, [kAXPressAction])
+        let ref = target.refs.ref(for: AXIdentity(element: link))
+        _ = try? await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+                                                      action: .action(CUAXAction(ref: ref, name: "press")), access: .full,
+                                                      allowForeground: false, privatePath: true))
+        XCTAssertTrue(ax.performed.isEmpty, "the link is not pressed")
+        XCTAssertEqual(opened, [["https://news.example.org/a"]], "opened in the background instead")
     }
 }

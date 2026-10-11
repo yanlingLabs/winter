@@ -1435,7 +1435,9 @@ extension CUCore {
             for _ in 0..<60 {
                 guard let c = cur else { break }
                 if ax.string(c, kAXRoleAttribute) == "AXWebArea" {
-                    if let page = url(ax.attribute(c, "AXURL")), page.host?.lowercased() == link.host?.lowercased() { return nil }
+                    // (By registrable domain: `files.slack.com` from `app.slack.com` is the same site.)
+                    if let page = url(ax.attribute(c, "AXURL")), page.host != nil,
+                       Self.registrableDomain(page.host) == Self.registrableDomain(link.host) { return nil }
                     break
                 }
                 cur = ax.element(c, kAXParentAttribute)
@@ -1447,9 +1449,21 @@ extension CUCore {
     /// Whether the bound app is a web browser (it declares http/https): its links are its own business.
     func isWebBrowser(_ t: CUTarget) -> Bool {
         if let o = isWebBrowserOverride { return o(t) }
-        // An Electron or CEF app navigates in its own window (review of round 9, MEDIUM #4): never rerouted.
-        if t.isChromium { return true }
+        // A browser declares http/https. An Electron or CEF app does not, so its links to ANOTHER site are rerouted too
+        // (review of round 10, MEDIUM #7: they opened the default browser in front); its own navigation (the same site)
+        // stays in it — `linkURL`'s same-site check.
         return CUApps.isWebBrowser(bundleURL: NSRunningApplication(processIdentifier: t.pid)?.bundleURL)
+    }
+
+    /// The registrable part of a host — its last two labels, or three under a common second-level suffix (`co.uk`,
+    /// `com.au`, …): `files.slack.com` and `app.slack.com` are one site. Pure; an approximation of the public-suffix list.
+    static func registrableDomain(_ host: String?) -> String? {
+        guard let h = host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")), !h.isEmpty else { return nil }
+        let labels = h.split(separator: ".").map(String.init)
+        guard labels.count > 2 else { return h }
+        let secondLevel: Set<String> = ["co", "com", "org", "net", "gov", "ac", "edu", "or", "ne", "go"]
+        let n = labels[labels.count - 1].count == 2 && secondLevel.contains(labels[labels.count - 2]) ? 3 : 2
+        return labels.suffix(n).joined(separator: ".")
     }
 
     /// Opens `paths` in the background, waiting at most `openTimeoutMs` (NSWorkspace's open can't be
@@ -2837,6 +2851,13 @@ extension CUCore {
             return try pendingBackgroundOpen([path], what: nil)
         }
         try requireEnabled(info, ref: a.ref, t)
+        // Pressing a link in an app that is not a web browser opens the default browser IN FRONT: its URL is opened in the
+        // background instead, as for a click (review of round 10, MEDIUM #7: action(ref, "press") went around that).
+        if CUMenuWalker.normalize(a.name) == "press" || a.name == kAXPressAction, let url = linkURL(e, info), !isWebBrowser(t) {
+            announceTarget(t, info, pressing: true)
+            CULog.act.notice("action in \(t.appName, privacy: .public): [\(a.ref, privacy: .public)] is a link (\(url.scheme ?? "?", privacy: .public)) — opened in the background, not pressed")
+            return try pendingBackgroundOpen([url.absoluteString], what: nil, linkHost: url.host ?? url.absoluteString)
+        }
         guard let name = CURoleWords.resolveAction(a.name, among: info.actions) else {
             let have = info.actions.map(CURoleWords.actionWords).joined(separator: ", ")
             throw CUError.invalidParams("[\(a.ref)] has no action “\(a.name)” — it has: \(have.isEmpty ? "none" : have)")
