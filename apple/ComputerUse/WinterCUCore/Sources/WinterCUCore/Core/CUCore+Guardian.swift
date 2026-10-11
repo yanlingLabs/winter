@@ -264,7 +264,13 @@ extension CUCore {
         // then their key passed into the target, the model-based test); else (an app that had taken the front by itself
         // and not been put back yet) their place as the guardian knows it.
         if now.front == user, space == nil || now.space == nil || now.space == space {
-            return startWasTheirs ? user : (guardianPlace()?.app ?? user)
+            guard startWasTheirs else { return guardianPlace()?.app ?? user }
+            // Left alone as the blip began without being their place (the consented foreground, a visit, a dialog): asked
+            // again — a hold that has ended since makes it the agent's now, and the key goes to their place (the
+            // model-based test: a key typed in the 3 ms before the hold's give-back landed went to the held app).
+            if guardianPlace().map({ $0.app == user }) ?? true { return user }
+            let owner = judgeMove(now, since: since, path: "a key of the user's in the focus blip")
+            return owner.undoes ? (guardianPlace()?.app ?? user) : user
         }
         let owner = judgeMove(now, since: since, from: CUUserView(space: space, front: user), path: "a key of the user's in the focus blip")
         // Not undone (their move, a visit, the consented foreground, an untouched app that came forward): the key goes to
@@ -622,8 +628,17 @@ extension CUCore {
         }
         guard hit.pid != own else { return nil }  // a panel of ours that takes clicks: on no other app
         if hit.ownerName == "Dock" {
-            noteSwitchInput(now: now, .app)
-            return nil
+            // A click on an app's Dock tile is input for THAT app — claimed like a click into its window (found by the
+            // model-based test: an untargeted Dock click was taken by an app that came forward on its own a moment
+            // before the clicked one, which was then undone). Anything else in the Dock: an app switch of no known app.
+            guard let app = sys.dockItemApp(at: point, dockPid: hit.pid), app != own else {
+                noteSwitchInput(now: now, .app)
+                return nil
+            }
+            noteSwitchInput(now: now, .app, target: app)
+            guardianLock.withLock { guardianCore.userClicked(app: app, space: nil, now: now) }
+            CULog.guardian.notice("the user clicked \(self.appName(app), privacy: .public) in the Dock: claimed as their move")
+            return app
         }
         guard !flags.contains(.maskCommand) else { return nil }
         // Not an ordinary window of a regular app: what it activates (if anything) is not known from the click.

@@ -139,7 +139,12 @@ extension CUCore {
     /// `raiseFocused`: with no recorded window, raise the app's focused window (the guardian's restore); false raises
     /// nothing then (a visit's return, whose own choice of window found none of the user's).
     @discardableResult
-    func restoreUserView(_ before: CUUserView, user: pid_t, window recorded: AXUIElement? = nil, raiseFocused: Bool = true) -> CUUserView {
+    func restoreUserView(_ before: CUUserView, user: pid_t, window recorded: AXUIElement? = nil, raiseFocused: Bool = true,
+                         visitReturn: Bool = false) -> CUUserView {
+        // A desktop visit open (session's own or another's): it owns the view, and its end brings the user back — a restore
+        // never pulls them out of it (I5; found by the model-based test: a restore's retries went on after a visit began).
+        let visiting = { [self] in !visitReturn && guardianLock.withLock { guardianCore.visiting(now: clock.nowSeconds()) } }
+        if visiting() { return userView() }
         if let space = before.space, userView().space != space,
            let window = recorded ?? (raiseFocused ? windowOn(space, of: user) ?? ax.element(ax.application(user), kAXFocusedWindowAttribute) : nil) {
             try? ax.perform(window, kAXRaiseAction)
@@ -164,7 +169,7 @@ extension CUCore {
             // I2 — while it waits, the restore is never retried over the user: another app in front now is judged by the
             // one rule (their move ends the restore), and their place having moved on meanwhile ends it too (the model-
             // based test: a retry 22 ms after a Dock click of theirs pulled them back out of the app they chose).
-            if guardianPlace() != placeAtStart { break }
+            if guardianPlace() != placeAtStart || visiting() { break }
             // Another app in front by the user's move, or an untouched app's (never fought) — not a visit's own switch or the
             // consented foreground, which a visit's return and a give-back are bringing them back FROM.
             if let f = now.front, f != user {

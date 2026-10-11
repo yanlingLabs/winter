@@ -350,7 +350,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     enum LateFact { case agentCause, hardware }
     var widen: (episode: Int, until: Double, fact: LateFact, alt: Set<SimCand>, why: String)?
     /// Changes the engine has not heard of yet: a restore issued meanwhile may go to the place from before them.
-    var unheard: [(until: Double, places: Set<SPlace>)] = []
+    var unheard: [(until: Double, places: Set<SPlace>, from: SPlace)] = []
     var episode = 0
     var judgedUsers: Set<String> = []
     var actEpisode = 0
@@ -847,7 +847,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
                 schedule(after: d, "the desktop notification (\(space))") { [weak self] in self?.notifySpace() }
                 heardBy = max(heardBy, now + d)
             }
-            unheard.append((heardBy, Set(before.map(\.place))))
+            unheard.append((heardBy, Set(before.map(\.place)), SPlace(app: oldFront, space: oldSpace)))
             scheduleSettle()
         }
     }
@@ -887,7 +887,10 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             case .restore, .giveBack:
                 return [SimCand(place: c.place, expected: c.place, held: c.held, visitPre: c.visitPre)]
             case .visitReturn:
-                return [SimCand(place: c.place, expected: c.expected, held: c.held)]
+                // The way back landing where it was going (their place, or where the visit began): that is where they are
+                // now — even over an app that came forward during the way back (the visit's end returns them).
+                let back = n.app == c.place.app || n.app == c.visitPre?.app
+                return [SimCand(place: c.place, expected: back ? n : c.expected, held: c.held)]
             case .consented(let h):
                 return [SimCand(place: n, expected: n, held: SimHeld(app: h, pre: c.held?.pre ?? c.place, preSeen: c.held?.preSeen ?? c.expected))]
             case .visitThere:
@@ -1023,8 +1026,18 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             // An activation of the engine's landing while a switch of the user's is pending: it may be taken for theirs.
             switch kind {
             case .restore, .giveBack, .visitReturn:
-                if competingSwitch(for: pid, app: n.app != front, desktop: n.space != space) != nil {
+                // Judged by the engine from the last state it HEARD: a change it has not heard of yet (the user's swipe
+                // landing 11 ms before) is folded into this one.
+                let prior = unheard.filter { now <= $0.until }.map(\.from)
+                let appMoved = n.app != front || prior.contains { $0.app != n.app }
+                let deskMoved = n.space != space || prior.contains { $0.space != n.space }
+                if competingSwitch(for: pid, app: appMoved, desktop: deskMoved) != nil {
                     cause = .either([cause, .user(n, "taken for their switch")], "an activation of the engine's landing while a switch of the user's is pending")
+                }
+                // The app session s2 holds in front coming forward (a restore of ours landing late) is the consented
+                // foreground's while the hold lasts (the contract's rule 9): the hold's end gives the place back.
+                if holding, pid == SimPid.held {
+                    cause = .either([cause, .engine(.consented(pid))], "the held app came forward while it is held")
                 }
             case .userClick(let d) where visiting && d.app == SimPid.visited:
                 // Their click into the visited app during a desktop visit: no move away (the contract) — the visit's end
@@ -1179,6 +1192,9 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         ![SimPid.notifications, SimPid.systemUI, SimPid.pip, SimPid.dock, SimPid.coreServices, SimPid.own].contains(pid)
     }
     func runningPid(bundleId: String) -> pid_t? { lock.withLock { bundles.first { $0.value == bundleId }?.key } }
+    /// The Dock tile under the pointer: the app the user is clicking in the Dock (the world knows its own Dock).
+    var dockTileApp: pid_t?
+    func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? { lock.withLock { dockTileApp } }
 }
 
 extension SimPid {

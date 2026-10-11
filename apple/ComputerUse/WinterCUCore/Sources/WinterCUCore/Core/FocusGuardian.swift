@@ -254,6 +254,8 @@ public struct CUFocusGuardianCore: Sendable {
     /// place can be stale, and a desktop switch must never explain an app coming forward on the desktop that was already
     /// shown.
     private var lastSeen: CUGuardedView?
+    /// Since when the last state seen has been in front, unchanged (seen by any path).
+    private var lastSeenSince: TimeInterval = -.infinity
     /// Why the last judgement went as it did, whether it was a fresh one, and whether its theft was a repeat.
     public private(set) var lastReason = ""
     public private(set) var lastFresh = false
@@ -546,6 +548,7 @@ public struct CUFocusGuardianCore: Sendable {
         }
         let previous = lastSeen ?? place
         let current = CUGuardedView(app: q.app, space: q.space)
+        if lastSeen != current { lastSeenSince = now }
         lastSeen = current
         if let a = q.app { seenFront[a] = now }
         if let app = q.app, app == place.app, q.space == nil || place.space == nil || q.space == place.space {
@@ -576,13 +579,19 @@ public struct CUFocusGuardianCore: Sendable {
         // (Only while nothing new of the agent's happened to that app: a new cause means the state may have been left and
         // reached again, unseen.)
         let again = judged.flatMap { $0.app == q.app && $0.space == q.space && $0.cause == lastCause(q.app) ? $0 : nil }
-        let seenAt = again?.seenAt ?? now
+        // (With no verdict kept — a visit's end, a hold's end clear it — the time it has been in front unchanged, with no
+        // new cause of the agent's on that app since: the model-based test, a dialog the visit's return brought back,
+        // judged after the user typed into it, was taken for their move.)
+        let unchangedSince = previous == current && lastCause(q.app) <= lastSeenSince ? lastSeenSince : now
+        let seenAt = again?.seenAt ?? unchangedSince
         let before = again?.before ?? (previous == current ? place : previous)
         let (owner, use) = decide(q, place: place, before: before, upTo: seenAt, now: now)
         switch use {
         case .instant(let at, let keep)?: input.use(at, heardAt: seenAt, keepSecond: keep)
         case .oldest(let app, let desktop)?:
             input.useOldest(from: now - Self.switchWindow, upTo: seenAt, app: app, desktop: desktop, front: q.app, heardAt: seenAt)
+        case .latestAny?:
+            input.useLatestAny(from: now - Self.switchWindow, upTo: seenAt, front: q.app)
         case nil: break
         }
         judged = (q.app, q.space, owner, evidence, lastCause(q.app), seenAt, before)
@@ -622,7 +631,7 @@ public struct CUFocusGuardianCore: Sendable {
 
     /// Which switch input a verdict used up: the one that explained it (`keep`: an untouched app's — it stays a second,
     /// short-lived explanation when heard right after the input), or the oldest one that fits the change.
-    enum InputUse: Equatable { case instant(TimeInterval, keep: Bool), oldest(app: Bool, desktop: Bool) }
+    enum InputUse: Equatable { case instant(TimeInterval, keep: Bool), oldest(app: Bool, desktop: Bool), latestAny }
 
     private func decide(_ q: CUMoveQuery, place: CUGuardedView, before: CUGuardedView, upTo: TimeInterval,
                         now: TimeInterval) -> (CUMoveOwner, InputUse?) {
@@ -658,7 +667,10 @@ public struct CUFocusGuardianCore: Sendable {
                 }
                 return (.indirect("an app the agent never touched came forward right after its action, with no input of the user's since"), nil)
             }
-            return (.user("the agent did not touch it — an app it never touched coming forward after input of theirs is theirs"), nil)
+            // Their input made it: the latest that could (of any kind — a Dock click on the app already in front switches
+            // its desktop) is used up, never left to explain the agent's indirect effect a moment later (found by the
+            // model-based test).
+            return (.user("the agent did not touch it — an app it never touched coming forward after input of theirs is theirs"), .latestAny)
         }
         let late = app.flatMap { restoreLate($0, now: now) } ?? -.infinity
         let cause = max(front ? max(lastCause(app), late) : -.infinity, shown.map { raises[$0] ?? -.infinity }.max() ?? -.infinity)
@@ -812,12 +824,26 @@ public struct CUFocusGuardianCore: Sendable {
         // landing after it, and the end took them to where the visit began).
         let clicked = claim.map { $0.app == app && now <= $0.until } ?? false
         if visiting(now: now) {
-            guard clicked else { return nil }
+            if clicked {
+                visitSawUserInput = true
+                view = CUGuardedView(app: app, space: space ?? view.space)
+                viewAt = now
+                claim = nil
+                return .user("they clicked into its window during a desktop visit")
+            }
+            // Their switch input since the visit began explains it (never the visited app's own coming forward): they
+            // moved, and the visit's end brings them back THERE (found by the model-based test: their ⌘-Tab during the
+            // visit's way there, heard after the visit arrived, and the end took them to where the visit began).
+            guard app != visitApp else { return nil }
+            let q = CUMoveQuery(app: app, space: space, inputObservable: inputObservable, hardwareAt: hardwareAt)
+            let (owner, use) = decide(q, place: view, before: lastSeen ?? view, upTo: now, now: now)
+            guard case .user = owner, case .instant(let at, _)? = use else { return nil }
+            input.use(at, heardAt: now)
             visitSawUserInput = true
             view = CUGuardedView(app: app, space: space ?? view.space)
             viewAt = now
             claim = nil
-            return .user("they clicked into its window during a desktop visit")
+            return owner
         }
         // Already seen in front since the notification before this one: this change was judged then.
         if let s = seenFront[app], s >= seenSince { return nil }
@@ -827,7 +853,10 @@ public struct CUFocusGuardianCore: Sendable {
         // with, made that change the agent's) — unless they CLICKED into that app's window: that was their move, and
         // what came after it is judged from there (the model-based test: a restore landing 6 ms after their click into
         // another display's window).
-        if !clicked, live.app == view.app, live.space == nil || view.space == nil || live.space == view.space { return nil }
+        // (Not when what is in front may be a restore of ours landing late — then it is no move of theirs, and the past
+        // change is judged: the model-based test, the user's own launch coming forward 3 ms before a restore's landing.)
+        let liveRestored = live.app.flatMap { restoredAt[$0] }.map { now - $0 <= Self.restoreLateWindow } ?? false
+        if !clicked, !liveRestored, live.app == view.app, live.space == nil || view.space == nil || live.space == view.space { return nil }
         let q = CUMoveQuery(app: app, space: space, inputObservable: inputObservable, hardwareAt: hardwareAt)
         let (owner, use) = decide(q, place: view, before: lastSeen ?? view, upTo: now, now: now)
         switch owner {
@@ -835,15 +864,27 @@ public struct CUFocusGuardianCore: Sendable {
             switch use {
             case .instant(let at, let keep)?: input.use(at, heardAt: now, keepSecond: keep)
             case .oldest(let a, let d)?: input.useOldest(from: now - Self.switchWindow, upTo: now, app: a, desktop: d, front: app, heardAt: now)
+            case .latestAny?: input.useLatestAny(from: now - Self.switchWindow, upTo: now, front: app)
             case nil: break
             }
             view = CUGuardedView(app: app, space: space)
             lastSeen = CUGuardedView(app: app, space: space)
+            lastSeenSince = now
             viewAt = now
             thefts[app] = nil
             claim = nil
             exemptPrevious = nil
             judged = nil  // what is in front now is judged afresh, as a change from this app
+            return owner
+        case .consented:
+            // The consented foreground's own landing, heard only after something else came forward over it: the held app
+            // is where a theft after it is put back (its end gives the place back — found by the model-based test: a late
+            // landing over rung 4's app was "put back" to the place from before the consent).
+            if exemptPrevious == nil, view.app != app { exemptPrevious = view }
+            view = CUGuardedView(app: app, space: space ?? view.space)
+            lastSeen = CUGuardedView(app: app, space: space)
+            lastSeenSince = now
+            judged = nil
             return owner
         case .unexplained:
             return owner
@@ -1082,6 +1123,16 @@ struct CUSwitchInput {
         let primary: Kind = app ? .app : .desktop
         if let i = instants.last(where: { $0.kind == primary && fitting($0) }) ?? instants.last(where: fitting) {
             use(i.at, heardAt: heardAt, keepSecond: true)
+        }
+    }
+
+    /// A change their input made with no instant of a fitting kind (an untouched app after their input): the latest one
+    /// that could have made it — for that app or for none — is used up.
+    mutating func useLatestAny(from: TimeInterval, upTo: TimeInterval, front: pid_t?) {
+        let pending = pendingTabs(now: upTo)
+        if let i = instants.last(where: { $0.at >= from && $0.at <= upTo && upTo - $0.at <= $0.life && ($0.target == nil || $0.target == front)
+                                            && !pending.contains($0.at) }) {
+            use(i.at)
         }
     }
 

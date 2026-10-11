@@ -461,8 +461,11 @@ final class SimRun {
             w.hardware(observable: true)
             w.log("the user clicks \(SimPid.name(a)) in the Dock")
             core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: clock.nowSeconds())
-            let i = w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, dest: a))
+            // A click on that app's Dock tile: input for THAT app, claimed (the contract).
+            let i = w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, target: a, claim: true, dest: a))
+            w.lock.withLock { w.dockTileApp = a }
             _ = core.onPhysicalClick(at: CGPoint(x: 800, y: 975), userData: 0, now: clock.nowSeconds())
+            w.lock.withLock { w.dockTileApp = nil }
             w.schedule(after: r.double(20, 200), "the Dock activates \(SimPid.name(a))") { [unowned self] in
                 self.landSwitch(i, a, why: "the user clicked \(SimPid.name(a)) in the Dock")
             }
@@ -742,7 +745,13 @@ final class SimRun {
             w.log("  the visit did not open (refused, or never arrived)")
             w.lock.withLock {
                 w.visiting = false
-                w.cands = Set(w.cands.map { SimCand(place: $0.place, expected: $0.place, held: $0.held) })
+                // A visit that never arrived brought them back as any visit does: to their place, or to what was in front
+                // when it began (a dialog left in front for them to answer).
+                w.cands = Set(w.cands.map { c in
+                    // (A return that landed set the expectation to where it went; anything still on the visited app is not.)
+                    let returned = c.expected.app != SimPid.visited && (c.visitPre == nil || c.expected == c.place || c.expected == c.visitPre)
+                    return SimCand(place: c.place, expected: returned ? c.expected : c.place, held: c.held)
+                })
                 w.scheduleSettle()
             }
             return

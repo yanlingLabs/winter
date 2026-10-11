@@ -551,7 +551,7 @@ extension CUCore {
         if sawUserMove, let place = guardianPlace(), let user = place.app,
            CUUserView(space: place.space, front: user) != s.before, sys.appRunning(user) {
             let target = CUUserView(space: place.space, front: user)
-            let back = now == target || restoreUserView(target, user: user) == target
+            let back = now == target || restoreUserView(target, user: user, visitReturn: true) == target
             let at = clock.nowSeconds()
             guardianLock.withLock { _ = guardianCore.endVisit(now: at) }
             let ms = Int(clock.nowMs() - s.startedMs)
@@ -665,7 +665,7 @@ extension CUCore {
         _ = sys.bringForward(pid: user, windowID: w.id ?? 0, window: w.element, makeMain: w.element != nil)
         // Nothing to raise is "raise nothing", never the app's focused window: that can be the target's bound window on
         // the visited desktop (the user's app IS the target app), which would keep them there.
-        return restoreUserView(s.before, user: user, window: w.element, raiseFocused: false)
+        return restoreUserView(s.before, user: user, window: w.element, raiseFocused: false, visitReturn: true)
     }
 
     /// The window the return raises: the user's recorded one while it is still there — unless their app's focused

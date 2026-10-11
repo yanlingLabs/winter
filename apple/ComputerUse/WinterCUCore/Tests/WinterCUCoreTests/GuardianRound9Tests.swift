@@ -115,4 +115,57 @@ final class GuardianRound9Tests: XCTestCase {
         g.noteCause(500, now: 60.4)
         XCTAssertTrue(judge(&g, 77, 200, now: 60.6).undoes, "the click was used: 77's own return is not theirs")
     }
+    /// An app the agent never touched, the user's by their input since the agent's last cause with no instant of a
+    /// fitting kind (a Dock click on the app already in front switched its desktop): that input is used up — never left
+    /// to make the agent's indirect effect a moment later "theirs".
+    func testAnUntouchedAppTheirsByTheirInputUsesItUp() {
+        var g = started(app: 1, space: 100)
+        g.noteCause(500, now: 80.0)
+        g.noteHardwareAction(now: 80.1)
+        g.noteSwitch(now: 80.1, .app)                       // the Dock click
+        XCTAssertTrue(judge(&g, 1, 300, now: 80.2).isUsers) // their own app, on another desktop
+        g.noteCause(500, now: 80.4)                         // the agent acts again
+        XCTAssertTrue(judge(&g, 77, 300, now: 80.7).undoes, "the click was used: an app coming forward next is not theirs by it")
+    }
+
+    /// During a visit, an app coming forward that a switch of theirs since the visit began explains (heard after the visit
+    /// arrived) is their move: the visit's end brings them back THERE.
+    func testDuringAVisitTheirSwitchHeardLateIsTheirMove() {
+        var g = started()
+        g.beginVisit(app: 600, user: 1, now: 90.0)
+        g.inputEvent(type: .flagsChanged, flags: .maskCommand, now: 90.1)
+        g.inputEvent(type: .flagsChanged, flags: [], now: 90.2)
+        let owner = g.adoptPast(77, space: 100, live: CUGuardedView(app: 600, space: 300), hardwareAt: 90.2, now: 90.4)
+        XCTAssertTrue(owner?.isUsers == true)
+        XCTAssertEqual(g.view.app, 77)
+        XCTAssertTrue(g.visitSawUserInput)
+    }
+
+    /// The consented foreground's landing heard only after something else came forward over it: the held app is where
+    /// that theft is put back, and the consent's end gives the place from before it back.
+    func testAConsentedLandingHeardLateIsWhereATheftGoesBack() {
+        var g = started()
+        g.noteCause(600, raise: true, now: 100.0)
+        g.exempt(600, until: 105, now: 100.0)
+        g.noteCause(77, raise: true, now: 100.05)  // a late landing of another app (the agent's)
+        let owner = g.adoptPast(600, space: 100, live: CUGuardedView(app: 77, space: 100), now: 100.1)
+        XCTAssertEqual(owner, .consented)
+        XCTAssertEqual(g.view.app, 600)
+        XCTAssertTrue(judge(&g, 77, now: 100.12).undoes)
+        g.endExempt(600)
+        XCTAssertEqual(g.view.app, 1, "the consent's end gives the place back")
+    }
+
+    /// A state judged again after its verdict was cleared (a visit's end) counts only the facts from before it was first
+    /// seen: the user's typing into a dialog the agent's action brought up does not make it their place.
+    func testFactsAsOfFirstSeenSurviveAClearedVerdict() {
+        var g = started()
+        g.noteCause(500, now: 110.0)
+        let q = CUMoveQuery(app: 880, space: 100, appIsSystemUI: true)
+        if case .unexplained = g.judge(q, now: 110.2) {} else { XCTFail("a system dialog after the agent's action: left alone") }
+        g.beginVisit(app: 600, user: 1, now: 110.3)
+        _ = g.endVisit(now: 110.4)
+        g.noteHardwareAction(now: 110.6)              // the user types into the dialog
+        if case .unexplained = g.judge(q, now: 111.0) {} else { XCTFail("still not their place: their keys came after it was first seen") }
+    }
 }

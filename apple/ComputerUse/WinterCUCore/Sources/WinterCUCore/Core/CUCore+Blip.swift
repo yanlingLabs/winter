@@ -79,7 +79,12 @@ extension CUCore {
         let startedAt = clock.nowSeconds()
         // Where they are as the blip begins, judged once: their place (a move the guardian may not have heard of yet), or
         // an app that took the front by itself and is about to be put back.
-        let startWasTheirs = !guardianRunning || leftAlone(CUUserView(space: space0, front: user), since: nil, path: "the focus blip's start")
+        let startOwner: CUMoveOwner? = guardianRunning ? judgeMove(CUUserView(space: space0, front: user), since: nil, path: "the focus blip's start") : nil
+        let startWasTheirs = startOwner.map { !$0.undoes } ?? true
+        // A system dialog left in front (not their place): the key focus goes back to it — unless something of the
+        // agent's came over it meanwhile, which the guardian puts back to their PLACE (the model-based test: the key focus
+        // went to the dialog, the front to their place).
+        let startUnexplained: Bool = { if case .unexplained? = startOwner { return true }; return false }()
         let reroute = CUKeyReroute(target: t.pid, victim: user, installer: keyTapInstaller, post: keyReroutePost,
                                    destination: { [weak self] in
                                        self?.keyPlace(target: tpid, user: user, space: space0, since: startedAt,
@@ -150,7 +155,8 @@ extension CUCore {
             // model-based test, the focus records left the target holding the keys behind an app that came forward on its
             // own); else (an app that had taken the front by itself, being put back) their place as the guardian knows it
             // (review of round 6: the restore ignored where they had gone).
-            let place = startWasTheirs ? CUGuardedView(app: user, space: space) : (guardianPlace() ?? CUGuardedView(app: user, space: space))
+            let place = startWasTheirs && !(startUnexplained && nowView.front != user)
+                ? CUGuardedView(app: user, space: space) : (guardianPlace() ?? CUGuardedView(app: user, space: space))
             let home = place.app ?? user
             if home == user { undo() }  // the user's key window handed back (the record names their window)
             // The user's app must hold the key focus and the front again within `blipFrontWaitMs` (and before the
