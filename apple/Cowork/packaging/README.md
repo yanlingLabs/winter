@@ -101,6 +101,8 @@ upstream commit/tree. Missing/extra/modified files and symlink aliases fail
 closed. Pin bytes are loaded with git show at the recorded built commit; dirty
 vendor/packaging paths are refused. The recipe independently hashes bounded Git
 blobs from reviewedVendorCommit and requires them to match that committed pin.
+That review commit must be an ancestor of the built revision, so an unrelated
+object left in a shared worktree database cannot stand in for published history.
 A working-tree pin or a self-consistent hash naming unrelated reviewed contents
 cannot become authority. A generated inventory cannot bless unreviewed vendor changes; updating
 the committed pin requires a separately reviewed vendor change.

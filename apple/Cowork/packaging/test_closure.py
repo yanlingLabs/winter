@@ -151,6 +151,38 @@ class ClosureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"reviewedVendorCommit contents"):
                 verify_committed_vendor(root,changed,vendor,pin)
 
+    def test_vendor_pin_refuses_matching_but_unreachable_review_commit(self):
+        with tempfile.TemporaryDirectory(prefix="winter-package-git-") as tmp:
+            root = Path(tmp)
+            vendor = root / VENDOR_PATH
+            vendor.mkdir(parents=True)
+            (vendor / "source.c").write_text("reviewed fixture")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+            env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null", GIT_TERMINAL_PROMPT="0")
+            def git(*args):
+                return subprocess.check_output(["git", "-C", root, "-c", "user.name=Fixture",
+                    "-c", "user.email=fixture@example.invalid", "-c", "core.hooksPath=/dev/null",
+                    "-c", "commit.gpgsign=false", *args], env=env)
+            git("init", "-q")
+            git("add", ".")
+            git("commit", "-qm", "vendor in build history")
+            tree = git("rev-parse", "HEAD^{tree}").decode().strip()
+            # Same tree, but a separate root commit with no branch pointing at
+            # it. Its presence in this object database must not authorize it.
+            unrelated = git("commit-tree", tree, "-m", "unpublished review").decode().strip()
+            hashes = tree_hashes(vendor)
+            pin = root / PIN_PATH
+            pin.parent.mkdir(parents=True)
+            pin.write_text(json.dumps({"format": 1, "upstreamCommit": COMMIT, "upstreamGitTree": TREE,
+                "reviewedVendorCommit": unrelated, "vendoredFileCount": 1,
+                "vendoredTreeSha256": hashlib.sha256(json.dumps(hashes, sort_keys=True,
+                    separators=(",", ":")).encode()).hexdigest()}))
+            git("add", ".")
+            git("commit", "-qm", "pin unreachable review")
+            built = git("rev-parse", "HEAD").decode().strip()
+            with self.assertRaisesRegex(ValueError, "must be an ancestor"):
+                verify_committed_vendor(root, built, vendor, pin)
+
     def test_verification_checks_runpaths_in_every_architecture(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -36,6 +36,13 @@ def verify_committed_vendor(repository, built_commit, vendor, pin_path):
     reviewed = pin.get("reviewedVendorCommit", "")
     if not re.fullmatch(r"[a-f0-9]{40}", reviewed):
         raise ValueError("full reviewed vendor Git commit required")
+    # A shared worktree object database can contain a matching, unpublished
+    # commit that a clean clone of this build cannot resolve. Pin only history
+    # reachable from the built revision, in addition to checking its bytes.
+    try:
+        git("merge-base", "--is-ancestor", reviewed, built_commit)
+    except subprocess.CalledProcessError as error:
+        raise ValueError("reviewed vendor Git commit must be an ancestor of the built commit") from error
     hashes = {}
     total = 0
     for entry in git("ls-tree", "-r", "-z", reviewed, "--", VENDOR_PATH).split(b"\0"):
