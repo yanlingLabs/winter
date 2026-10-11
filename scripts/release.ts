@@ -118,6 +118,7 @@ import {
   BROWSER_HOST, browserHostExecutable, checkSignedBrowserHost, checkSignedHelper, HELPER, HELPER_EMBED_RELATIVE, helperExecutable, helperRequirement, LSREGISTER,
   readHelperVersion,
 } from "./computer-helper-lib";
+import { checkSignedHeadless, HEADLESS, HEADLESS_EMBED_RELATIVE, headlessRequirement } from "./headless-helper-lib";
 import { winterSourceOf } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 import { buildWinter } from "./build-winter";
@@ -485,6 +486,9 @@ console.log(`Built: ${app}`);
 // Winter Computer Use (com.winter.computeruse, the shipped identity) would otherwise sit in LaunchServices
 // beside the user's installed one. Only the copy embedded in Winter.app is ever launched; drop this one.
 probe(`"${LSREGISTER}" -u "${join(dd, "Build", "Products", "Release", `${HELPER.dist.name}.app`)}"`);
+// ComputerV2 Phase 4: the same for the standalone Release build of Winter Headless (the daemon spawns only the copy
+// nested in Winter.app, by path — never through LaunchServices — but no stray registration is left either).
+probe(`"${LSREGISTER}" -u "${join(dd, "Build", "Products", "Release", `${HEADLESS.dist.name}.app`)}"`);
 
 // ---------------------------------------------------------------------------
 // 3b. Re-sign Sparkle.framework's nested helper binaries (T2 finding, see header comment) —
@@ -876,6 +880,33 @@ assertSigned(browserHostPath, "winter-browser-host");
   if (failures.length > 0) fail(`winter-browser-host is not signed the way the daemon and Chrome need:\n  ${failures.join("\n  ")}`);
   console.log(`winter-browser-host verified: ${BROWSER_HOST.dist.identifier}, designated => ${stated}, hardened runtime, no entitlements, no test hooks.`);
 }
+// --- Winter Headless (ComputerV2 Phase 4) ----------------------------------------------------
+// Winter's private, invisible browser: a background-only app the daemon SPAWNS by path (never through LaunchServices)
+// and checks against EXACTLY its stated requirement before it sends anything. Embedded at
+// Contents/Helpers/Winter Headless.app by project.yml's "Embed Winter Headless" phase (scripts/embed-headless-helper.sh).
+// Beyond assertSigned's team + timestamp, a release proves: the identifier com.winter.headless; the stated designated
+// requirement (identifier + team OU); the hardened runtime; NO entitlements at all (it holds no grants, and the
+// hardened runtime's library validation is what lets it load only Winter's own CEF framework); LSBackgroundOnly (no
+// Dock tile, no menu bar); this release's version; and NO Contents/Frameworks of its own — it borrows Winter.app's
+// Chromium, never ships a second copy. `checkSignedHeadless` is the same check `dev:headless` and
+// `verify:headless-helper` run.
+const headlessApp = join(app, HEADLESS_EMBED_RELATIVE);
+assertSigned(headlessApp, "Winter Headless");
+{
+  const plist = probe(`plutil -convert json -o - "${join(headlessApp, "Contents", "Info.plist")}"`);
+  const failures = checkSignedHeadless("dist", TEAM_ID, version, {
+    codesignDvv: probe(`codesign -dvv "${headlessApp}" 2>&1`).stdout,
+    codesignDr: probe(`codesign -d -r- "${headlessApp}" 2>&1`).stdout,
+    entitlementsXml: probe(`codesign -d --entitlements - --xml "${headlessApp}" 2>/dev/null`).stdout,
+    infoPlist: plist.ok ? (JSON.parse(plist.stdout) as Record<string, unknown>) : {},
+    hasFrameworks: existsSync(join(headlessApp, "Contents", "Frameworks")),
+  });
+  const stated = headlessRequirement(HEADLESS.dist.identifier, TEAM_ID);
+  const satisfied = probe(`codesign --verify --strict -R='${stated}' "${headlessApp}" 2>&1`);
+  if (!satisfied.ok) failures.push(`the signature does not satisfy its own stated requirement: ${satisfied.stdout.trim()}`);
+  if (failures.length > 0) fail(`Winter Headless is not signed the way the daemon needs:\n  ${failures.join("\n  ")}`);
+  console.log(`Winter Headless verified: ${HEADLESS.dist.identifier}, designated => ${stated}, hardened runtime, no entitlements, background-only, version ${version}, borrowing Winter.app's Chromium.`);
+}
 // "Start from nothing" pinned where it SHIPS, across every component this repo signs — not just
 // where entitlements are declared. project.yml can hand CODE_SIGN_ENTITLEMENTS to the wrong
 // target, or to four of five, without anything failing to build.
@@ -934,6 +965,8 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // which is not in the cs.* family; checkSignedHelper above pins exactly that one.
   { path: computerHelperApp, label: "Winter Computer Use", expect: [] },
   { path: browserHostPath, label: "winter-browser-host", expect: [] },
+  // ComputerV2 Phase 4 — Winter Headless: no entitlements at all (checkSignedHeadless above pins that whole).
+  { path: headlessApp, label: "Winter Headless", expect: [] },
   // Winter Phase 8d (P8d-2) — `winter` is re-signed at embed time under Winter's own team identity
   // (embed-runtimes.sh), same posture as winter-core/WinterHelper above.
   // A2 (2026-09-22): `winter` is a bun binary too (measured `Bun v1.4.2` in the shipped runtime) —
