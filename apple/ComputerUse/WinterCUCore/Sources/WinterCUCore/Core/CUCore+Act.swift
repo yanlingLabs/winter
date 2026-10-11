@@ -84,6 +84,13 @@ extension CUCore {
         let acted = try await actWithVisits(p, t, token)
         var outcome = acted.0
         let inVisit = acted.1
+        // A link the daemon opens itself (its own door: the opener's access and consent).
+        var linkOpen: String?
+        if p.linkOpensViaDaemon == true, outcome.openLinkHost != nil, let paths = outcome.pendingOpen, paths.count == 1 {
+            linkOpen = paths[0]
+            outcome.pendingOpen = nil
+            CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): a link — handed to the daemon to open")
+        }
         if let paths = outcome.pendingOpen {
             // The queue is released: open now, bounded, and say what happened.
             do {
@@ -102,7 +109,7 @@ extension CUCore {
                                inputUnknown: outcome.inputUnknown ? true : nil, focusNow: outcome.focusNow,
                                focusLost: outcome.focusLost ? true : nil, pageNow: outcome.pageNow, inVisit: inVisit ? true : nil,
                                guardian: report.notes.isEmpty ? nil : report.notes,
-                               viewMovedBy: report.viewMovedBy.isEmpty ? nil : report.viewMovedBy)
+                               viewMovedBy: report.viewMovedBy.isEmpty ? nil : report.viewMovedBy, linkOpen: linkOpen)
     }
 
     /// The act, with desktop visits (CUCore+Visit): inside the session's open visit when its window is on the

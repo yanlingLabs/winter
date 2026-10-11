@@ -220,4 +220,23 @@ final class ClickRoutingRound11Tests: XCTestCase {
         XCTAssertTrue(ax.performed.isEmpty, "the link is not pressed")
         XCTAssertEqual(opened, [["https://news.example.org/a"]], "opened in the background instead")
     }
+
+    /// Round 10's MEDIUM #7, its daemon half (1.11.0): with `linkOpensViaDaemon`, the link is neither pressed nor opened
+    /// by the helper — its URL goes back to the daemon, which opens it through its own door.
+    func testALinkIsHandedToTheDaemonWhenItAsks() async throws {
+        world(web: true)
+        core.isWebBrowserOverride = { _ in false }
+        let link = fakeElement(98_014)
+        ax.put(webArea, ["AXURL": URL(string: "https://mail.example.com/inbox")! as CFURL, kAXChildrenAttribute: [field, link]])
+        ax.add(link, role: "AXLink", title: "Story", frame: CGRect(x: 300, y: 400, width: 80, height: 20),
+               extra: ["AXURL": URL(string: "https://news.example.org/a")! as CFURL, kAXParentAttribute: webArea])
+        ax.setActions(link, [kAXPressAction])
+        let ref = target.refs.ref(for: AXIdentity(element: link))
+        let r = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+                                                         action: .click(CUClickAction(ref: ref)), access: .full,
+                                                         allowForeground: false, privatePath: true, linkOpensViaDaemon: true))
+        XCTAssertEqual(r.linkOpen, "https://news.example.org/a")
+        XCTAssertTrue(opened.isEmpty, "the helper opened nothing")
+        XCTAssertTrue(ax.performed.isEmpty, "nothing pressed")
+    }
 }
