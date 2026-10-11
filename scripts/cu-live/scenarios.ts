@@ -461,7 +461,10 @@ report({ ok: true });`,
     // follows the REAL cursor; posted moves, before and after the synthetic activation, never reached its mouseEntered).
     // The Form window's "Native Hover Area" would show "Native Hidden Item": the hover's answer says nothing appeared and
     // the way out, and nothing is clicked in its place.
-    name: "hover on a native view in the background: nothing appears, and the answer says so", group: "click",
+    // Round 14: the round-12/13 live run saw the area's mouseEntered TWICE once (not reproduced since — run130: four
+    // background hovers, the area under the resting real cursor too, none). The row holds the ANSWER to what happened
+    // (nothing appeared → it says so and the way out; something appeared → it says what), and never a click or a move.
+    name: "hover on a native view in the background: the answer says what appeared (nothing, as measured)", group: "click",
     session: "fresh",
     before: [{ role: "main", cmd: "reset" }],
     code: `
@@ -470,9 +473,9 @@ const area = await pick(form, "Native Hover Area");
 await form.hover(area.ref, { ms: 600 });
 report({ ok: true });`,
     verify: (ctx) => [ok(ctx),
-      check("no mouseEntered reached the area (tracking follows the real cursor)", eventsSince(ctx.events, ctx.since, "form.hover").length === 0,
-        JSON.stringify(eventsSince(ctx.events, ctx.since, "form.hover"))),
-      check("the hover's answer says nothing appeared, and the way out", /nothing new appeared in the window/.test(ctx.output) && /requestForeground\(reason\) for a real hover/.test(ctx.output), ctx.output.slice(0, 400)),
+      ...(eventsSince(ctx.events, ctx.since, "form.hover").length === 0
+        ? [check("the hover's answer says nothing appeared, and the way out", /nothing new appeared in the window/.test(ctx.output) && /requestForeground\(reason\) for a real hover/.test(ctx.output), ctx.output.slice(-600))]
+        : [check("the area's mouseEntered came (unexpected — reported): the answer says what appeared", /new element\(s\) appeared in the window/.test(ctx.output), `${JSON.stringify(eventsSince(ctx.events, ctx.since, "form.hover"))} ${ctx.output.slice(-600)}`)]),
       check("nothing was clicked in its place", eventsSince(ctx.events, ctx.since, "form.hoveritem").length === 0,
         JSON.stringify(eventsSince(ctx.events, ctx.since, "form.hoveritem"))),
       check("the Form window's bind says nothing about hover (no web page in it)", !/don't react to hover/.test(ctx.output), ctx.output.slice(0, 300))],

@@ -455,6 +455,12 @@ extension CUCore {
                 }
                 return out.noting("the real pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms; nothing new appeared in \(place)")
             }
+            // Something appeared after all (round 14, live: a background hover's mouseEntered reached a native tracking
+            // area once — not reproduced since): said as it is, never as "nothing appeared".
+            if let after, after > before {
+                CULog.act.notice("hover in \(t.appName, privacy: .public): \(after - before, privacy: .public) new element(s) appeared in \(place, privacy: .public)")
+                return out.noting("the pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms (window-targeted — the user's cursor did not move), and \(after - before) new element(s) appeared in \(place); state() shows them")
+            }
             if let after, after == before {
                 CULog.act.notice("hover in \(t.appName, privacy: .public): nothing new appeared in \(place, privacy: .public) (\(before, privacy: .public) elements)")
                 let why = webPage ? "\(t.appName)'s web page takes no hover from a pointer that isn't the real one"
