@@ -481,9 +481,10 @@ final class FocusMenusFoldPasteTests: XCTestCase {
     /// popover (measured with a probe app of ours). With one open, nothing new is sent — and the keys go only when the
     /// app's focus is in the bound window (a popover's or context menu's element names it as its window: measured).
     func testWithAMenuOrPopoverOpenNothingIsSentAndTheKeysGoOnlyIntoTheBoundWindow() async throws {
+        // The measured state (review of round 4): an app showing a menu or popover holds its key window — its focused
+        // element is in the bound window — never one our hand-back stranded (a menu or popover closes with that).
         for variant in ["popover", "menu"] {
             finder(focusedField: true)
-            core.noteStranded(pid, true)
             let enforcer = FakeFocusEnforcer()
             core.focusEnforcerFactory = { _ in enforcer }
             switch variant {
@@ -497,6 +498,35 @@ final class FocusMenusFoldPasteTests: XCTestCase {
             XCTAssertEqual(enforcer.deactivated, 0, "\(variant): no deactivation")
             XCTAssertEqual(poster.keyDowns.map(\.unicode), ["a"], "\(variant): the focus is in the bound window — typed")
             FocusSPI.reset()
+        }
+    }
+
+    /// Review of round 4 (LOW): live, an app our hand-back stranded answers NO focused element; an attached completion
+    /// or autocomplete window of the bound window that opened under the first burst (an unlisted window of the app)
+    /// refused the second burst. It survived the loss of the key focus, so it is no menu or popover: the window is named
+    /// with the records and the keys go.
+    func testAnAttachedListOfAStrandedAppNeverRefusesTheNextBurst() async throws {
+        finder(focusedField: true)
+        core.noteStranded(pid, true)
+        ax.focus(pid: pid, on: nil)  // stranded: no focused element
+        sys.stack.append(FakeSystem.window(90, pid: pid, CGRect(x: 120, y: 144, width: 240, height: 120)))  // the list
+        let enforcer = FakeFocusEnforcer()
+        core.focusEnforcerFactory = { _ in enforcer }
+        try await act(.type(CUTypeAction(text: "a")))
+        XCTAssertEqual(FocusSPI.makeKey, ["down pid 5252 window 77", "up pid 5252 window 77"], "the window named")
+        XCTAssertEqual(poster.keyDowns.map(\.unicode), ["a"])
+        // A list that is open while the keys provably go to another window of the app: still refused.
+        FocusSPI.reset()
+        core.noteStranded(pid, true)
+        let panel = fakeElement(98_021)
+        ax.add(panel, role: kAXWindowRole, subrole: kAXFloatingWindowSubrole, title: "Inspector")
+        ax.windowIDs[AXIdentity(element: panel)] = 92
+        ax.focus(pid: pid, on: panel)
+        do {
+            try await act(.type(CUTypeAction(text: "b")))
+            XCTFail("typed")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("focus_not_placed"))
         }
     }
 
@@ -544,7 +574,12 @@ final class FocusMenusFoldPasteTests: XCTestCase {
             XCTAssertTrue(poster.keyDowns.isEmpty, "\(variant): no key sent")
             XCTAssertTrue(FocusSPI.makeKey.isEmpty, "\(variant): no records")
             XCTAssertEqual(enforcer.deactivated, 0, "\(variant): no deactivation")
-            XCTAssertEqual(Array(FocusSPI.calls.suffix(2)), ["defocus pid 5252 window 77", "focus pid 1 window 31"], "\(variant): handed back")
+            if variant == "panel" || variant == "dialog" {
+                XCTAssertEqual(Array(FocusSPI.calls.suffix(2)), ["defocus pid 5252 window 77", "focus pid 1 window 31"], "\(variant): handed back")
+            } else {
+                // Review of round 4: what the focus record isn't needed for is decided before it — nothing posted at all.
+                XCTAssertTrue(FocusSPI.calls.isEmpty, "\(variant): refused before any record: \(FocusSPI.calls)")
+            }
             XCTAssertEqual(installer.removed, installer.installed.count, "\(variant): the reroute tap removed")
             FocusSPI.reset()
         }
@@ -752,6 +787,141 @@ final class FocusMenusFoldPasteTests: XCTestCase {
             XCTAssertEqual(e.data?["reason"], .string("app_in_front"))
         }
         XCTAssertFalse(poster.entries.contains { $0.type == .rightMouseDown || $0.type == .leftMouseDown }, "no click posted")
+        XCTAssertTrue(sys.activated.isEmpty, "the user is not pulled back out of the app they brought forward (review of round 4)")
+    }
+
+    // MARK: round 6 — the reviewer's findings on round 4
+
+    /// The window server's key focus, as the focus records and activations move it (a record names a process).
+    private func trackKeyFocus(loseFirstHandBack: Bool = false) -> () -> pid_t {
+        var keyFocus: pid_t = 1
+        var lost = !loseFirstHandBack
+        FocusSPI.onFocus = { [unowned self] in
+            guard let last = FocusSPI.calls.last, last.hasPrefix("focus pid ") else { return }
+            let p = pid_t(last.split(separator: " ")[2])!
+            if p == 1, !lost { lost = true; return }  // a busy app: the first hand-back record lost
+            keyFocus = p
+            if p == pid { ax.put(trash, [kAXEnabledAttribute: true]) }
+        }
+        sys.onActivate = { p in keyFocus = p }
+        core.keyFocusPidOverride = { keyFocus }
+        return { keyFocus }
+    }
+
+    /// Review of round 4 (HIGH): a refusal after the focus record handed back ONCE, removed the reroute at once and threw
+    /// — and posted nothing at all when the user's focused window could not be read (Finder showing only the desktop),
+    /// so the target kept the user's keys (their next Return would press its dialog's default button). A refusal now
+    /// ends the blip the ordinary way: the hand-back (naming no window if none is known), the wait, a second hand-back,
+    /// the tap removed only then, the guardian's restore — the key focus ends with the user.
+    func testARefusedBlipLeavesTheKeyFocusWithTheUser() async throws {
+        for (unreadable, lose) in [(true, false), (false, true)] {
+            finder(focusedField: true)
+            let keyFocus = trackKeyFocus(loseFirstHandBack: lose)
+            if unreadable { ax.drop(ax.application(1), kAXFocusedWindowAttribute) }  // no window of the user's to name
+            let dialog = fakeElement(98_021)
+            ax.add(dialog, role: kAXWindowRole, subrole: kAXDialogSubrole, title: "Save changes?")
+            ax.windowIDs[AXIdentity(element: dialog)] = 92
+            ax.focus(pid: pid, on: dialog)
+            var tapAtLastRecord = false
+            let onFocus = FocusSPI.onFocus
+            FocusSPI.onFocus = { [unowned self] in onFocus?(); tapAtLastRecord = installer.isInstalled }
+            do {
+                try await act(.type(CUTypeAction(text: "\n")))
+                XCTFail("typed")
+            } catch let e as CUError {
+                XCTAssertEqual(e.data?["reason"], .string("focus_not_placed"))
+            }
+            XCTAssertTrue(poster.keyDowns.isEmpty, "nothing pressed the dialog's default button")
+            XCTAssertEqual(keyFocus(), 1, "unreadable \(unreadable), first hand-back lost \(lose): the key focus ends with the user — \(FocusSPI.calls)")
+            XCTAssertTrue(tapAtLastRecord, "the reroute still on while the key focus was handed back")
+            XCTAssertEqual(installer.removed, installer.installed.count, "and removed after")
+            if unreadable { XCTAssertTrue(FocusSPI.calls.contains("focus pid 1 window 0"), "a hand-back with no window to name") }
+            if lose { XCTAssertEqual(FocusSPI.calls.filter { $0.hasPrefix("focus pid 1 ") }.count, 2, "handed back twice") }
+            FocusSPI.reset()
+            FocusSPI.onFocus = nil
+        }
+    }
+
+    /// Review of round 4 (MEDIUM): the user bringing the target forward during the make-key step read as the STEP moving
+    /// their view — undone, the focus records retired for the helper's life, and the user pulled back to their previous
+    /// app. It is their move: `app_in_front`, nothing undone, nothing retired, the key focus left in the app they chose.
+    func testTheUserBringingTheTargetForwardDuringABlipIsTheirMove() async throws {
+        finder(focusedField: true)
+        let other = fakeElement(98_020)
+        ax.add(other, role: kAXWindowRole, title: "Other")
+        ax.windowIDs[AXIdentity(element: other)] = 78
+        ax.focus(pid: pid, on: other)
+        ax.put(window, [kAXFocusedUIElementAttribute: field])
+        let enforcer = FakeFocusEnforcer()
+        enforcer.onDeactivate = { [unowned self] in sys.front = pid }  // the user ⌘-Tabs into the app meanwhile
+        core.focusEnforcerFactory = { _ in enforcer }
+        core.secondsSinceUserInputOverride = { 0.1 }                    // their keys
+        do {
+            try await act(.type(CUTypeAction(text: "a")))
+            XCTFail("typed")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("app_in_front"))
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty)
+        XCTAssertTrue(sys.activated.isEmpty, "not pulled back out of the app they chose")
+        XCTAssertFalse(core.isRetired(.focusRecords), "the focus records stay in use")
+        XCTAssertFalse(FocusSPI.calls.contains("focus pid 1 window 31"), "the key focus never handed back to the app they left")
+        XCTAssertEqual(installer.removed, installer.installed.count)
+        // Back in their own app later: the next blip runs as ever.
+        sys.front = 1
+        core.secondsSinceUserInputOverride = { 5 }
+        enforcer.onDeactivate = nil
+        FocusSPI.reset()
+        try await act(.type(CUTypeAction(text: "b")))
+        XCTAssertEqual(poster.keyDowns.map(\.unicode), ["b"])
+    }
+
+    /// Review of round 4 (MEDIUM): the click that puts the focus in a field saw the app come to the front and returned a
+    /// silent `false` — the typing carried on, into whatever window of the now-front app held the keys, and the act's
+    /// check then pulled the user back out. Now the refusal stops the act, and the user is left where they went.
+    func testAFocusClickRefusedAsAppInFrontStopsTheTyping() async throws {
+        finder()  // the field not focused: the focus is placed with a window-targeted click
+        ax.put(field, [kAXWindowAttribute: window])
+        let other = fakeElement(98_020)
+        ax.add(other, role: kAXWindowRole, title: "Other")
+        ax.windowIDs[AXIdentity(element: other)] = 78
+        let otherField = fakeElement(98_024)
+        ax.add(otherField, role: kAXTextFieldRole, extra: [kAXWindowAttribute: other])
+        ax.focus(pid: pid, on: otherField)
+        let enforcer = FakeFocusEnforcer()
+        enforcer.onDeactivate = { [unowned self] in sys.front = pid }  // the user clicks into the app meanwhile
+        core.focusEnforcerFactory = { _ in enforcer }
+        do {
+            try await act(.type(CUTypeAction(text: "abc", into: target.refs.ref(for: AXIdentity(element: field)))))
+            XCTFail("typed")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("app_in_front"), e.message)
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty, "nothing typed into the now-front app")
+        XCTAssertFalse(poster.entries.contains { $0.type == .leftMouseDown }, "no click")
+        XCTAssertTrue(sys.activated.isEmpty, "not pulled back out")
+    }
+
+    /// Review of round 4 (MEDIUM, a regression): a focused element with no window of its own (some Java, Qt and custom
+    /// toolkits) read as "no window accessibility can name" and refused for good. The app's focused window is the bound
+    /// one: the keys go.
+    func testAFocusWithNoWindowOfItsOwnInTheBoundWindowTakesTheKeys() async throws {
+        finder()
+        let javaField = fakeElement(98_030)
+        ax.add(javaField, role: kAXTextFieldRole, title: "Name")  // no AXWindow, no parent
+        ax.focus(pid: pid, on: javaField)
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window])
+        try await act(.key(CUKeyAction(combo: "x")))
+        XCTAssertEqual(poster.keyDowns.count, 1, "typed into the bound window")
+        // Its focused window another one: where the keys go can't be told — refused, nothing sent.
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: userWindow])
+        do {
+            try await act(.key(CUKeyAction(combo: "y")))
+            XCTFail("typed")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("focus_not_placed"))
+        }
+        XCTAssertEqual(poster.keyDowns.count, 1)
     }
 
     func testADesktopSwitchDuringATypingBlipStopsTheAct() async throws {

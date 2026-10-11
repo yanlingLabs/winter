@@ -184,10 +184,11 @@ extension CUCore {
     /// another field, Tab), the result says where it is now — name and role only — or that it is unknown now.
     func noteFocusChange(from before: WindowFocus, _ t: CUTarget, _ o: ActOutcome) -> ActOutcome {
         var after = windowFocus(t, fresh: true)
-        // Not the app's own answer now (its focus handed back with the blip's key focus): the one it gave inside the
-        // act's last keyboard blip, after the keys were taken — where they left it (round 4: Tab moved Docs' focus
-        // Find → Replace and the result said "unknown").
-        if after.source != .app, let seen = blipFocusRead(t, start: false) { after = seen }
+        // Nothing readable in the window now (its app's focus handed back with the blip's key focus): the answer it gave
+        // inside the act's last keyboard blip, after the keys were taken — where they left it (round 4: Tab moved Docs'
+        // focus Find → Replace and the result said "unknown"). A fresh read of the page or the window wins over that
+        // older one (a page may move its focus after the keys — review of round 4).
+        if after.element == nil, let seen = blipFocusRead(t, start: false) { after = seen }
         t.focusAfterLastAct = (clock.nowMs(), after)
         var o = o
         switch (before.element, after.element) {
@@ -1000,7 +1001,9 @@ extension CUCore {
             let why = lines > 1 ? "several lines go as a paste into a field that reads them back"
                 : readable ? "more than \(Self.typeKeysMax) characters go as a paste into a field that reads them back"
                 : "more than \(Self.typeKeysMax) characters go as a paste; this field can't be read back"
-            return try pasteText(text, format: .text, p, t, token, g).noting("as a paste (\(why))")
+            // Its tabs are pasted as characters: a paste moves no focus (said, never left to be guessed — review of round 4).
+            let tabs = text.contains("\t") ? "; its tabs went in as characters, moving no focus" : ""
+            return try pasteText(text, format: .text, p, t, token, g).noting("as a paste (\(why)\(tabs))")
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
         let synth = self.synth(p)
@@ -1283,7 +1286,7 @@ extension CUCore {
     /// on the element that holds the selection (the one just worked on, else the window's own focused
     /// element), its selection put back, verified, and once more if the window still isn't key. Also when the
     /// key window can't be read — the click is what makes it certain.
-    func keyForMenu(_ t: CUTarget) {
+    func keyForMenu(_ t: CUTarget) throws {
         guard t.accessible else { return }
         guard boundWindowIsKeyInApp(t) != true else {
             CULog.act.notice("menu in \(t.appName, privacy: .public): the bound window is key in its app — no click to make it key")
@@ -1294,7 +1297,7 @@ extension CUCore {
             return
         }
         for attempt in 1...2 {
-            guard clickKeepingSelection(e, at: c, t) else { return }
+            guard try clickKeepingSelection(e, at: c, t) else { return }
             let key = boundWindowIsKeyInApp(t)
             CULog.act.notice("menu in \(t.appName, privacy: .public): clicked the selection's element to make its window key (try \(attempt, privacy: .public)) — key now: \(Self.yesNo(key), privacy: .public)")
             if key != false { return }
@@ -1311,9 +1314,9 @@ extension CUCore {
     /// A window-targeted click on `e` with its text selection kept: the click moves the caret, so the selection
     /// is put back — after the click has landed (the caret moved, or `selectionHoldMs` passed), since a restore
     /// the app handles before the click is undone by it — and then held. False when no route reaches the window.
-    func clickKeepingSelection(_ e: AXUIElement, at c: CGPoint, _ t: CUTarget) -> Bool {
+    func clickKeepingSelection(_ e: AXUIElement, at c: CGPoint, _ t: CUTarget) throws -> Bool {
         let range = selectionRange(e)
-        guard windowClick(at: c, t) else { return false }
+        guard try windowClick(at: c, t) else { return false }
         guard let range, ax.isSettable(e, kAXSelectedTextRangeAttribute),
               let r = AX.makeRange(location: range.location, length: range.length) else { return true }
         let deadline = clock.nowMs() + selectionHoldMs
@@ -1411,7 +1414,7 @@ extension CUCore {
     func pressBackgroundMenu(_ a: CUMenuAction, _ p: TargetActParams, _ t: CUTarget, blipped: inout Bool) throws -> String? {
         let title = a.path.last ?? ""
         CULog.act.notice("menu in \(t.appName, privacy: .public): validating “\(title, privacy: .public)” in the background — window key in its app: \(Self.yesNo(self.boundWindowIsKeyInApp(t)), privacy: .public); \(self.putSelectionBack(t), privacy: .public)")
-        keyForMenu(t)
+        try keyForMenu(t)
         activateForMenu(p, t)
         func enabledItem() throws -> CUAXMenuNode? {
             do { return try resolveMenu(a, p, t) } catch let e as CUError where e.data?["disabled"] != nil { return nil }
@@ -1441,13 +1444,13 @@ extension CUCore {
     /// not change that). So when the field's window is not its app's key window, it is made key the way a user
     /// does — a window-targeted click on the field, after the synthetic activation, once more if the first only
     /// activated — and the field's selection is put back (the click moved the caret).
-    func makeWindowKeyForField(_ e: AXUIElement, _ t: CUTarget) {
+    func makeWindowKeyForField(_ e: AXUIElement, _ t: CUTarget) throws {
         guard t.accessible, boundWindowIsKeyInApp(t) == false, let c = ElementInfo(e, ax).center else { return }
         let selection = ax.attribute(e, kAXSelectedTextRangeAttribute)
-        guard windowClick(at: c, t) else { return }
+        guard try windowClick(at: c, t) else { return }
         // The first click may only have made the window key (then the window's default responder has the focus):
         // once more, now that it is key.
-        if boundWindowIsKeyInApp(t) != true || focusRelation(e, t) == .elsewhere { _ = windowClick(at: c, t) }
+        if boundWindowIsKeyInApp(t) != true || focusRelation(e, t) == .elsewhere { _ = try windowClick(at: c, t) }
         if let selection, ax.isSettable(e, kAXSelectedTextRangeAttribute) { try? ax.set(e, kAXSelectedTextRangeAttribute, selection) }
         // The click must have left the focus in the field; if it moved it, place it again (press or caret).
         if focusRelation(e, t) != .onIt {
@@ -1465,7 +1468,7 @@ extension CUCore {
     /// A window-targeted left click at `c` in the bound window — on this desktop, or (private path) on another
     /// Space — after the synthetic activation. False when no route reaches the window.
     @discardableResult
-    func windowClick(at c: CGPoint, _ t: CUTarget) -> Bool {
+    func windowClick(at c: CGPoint, _ t: CUTarget) throws -> Bool {
         let onScreen = sys.window(id: t.windowID)?.onScreen == true
         let elsewhere = !onScreen && t.privatePath && skyLight.canSetWindowLocation
         guard onScreen || elsewhere else { return false }
@@ -1476,7 +1479,7 @@ extension CUCore {
         switch keyForClick(t, privatePath: t.privatePath, clickWindow: windowFor(c)) {
         case .notApplied: postSyntheticActivation(t, privatePath: t.privatePath)
         case .prepared: break
-        case .appInFront: return false  // the user may be using it now: no click
+        case .appInFront: throw clickRefusal(t)  // the user may be using it now: no click, and nothing typed after it
         }
         try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()
@@ -1522,7 +1525,7 @@ extension CUCore {
     /// another element focused — nothing is typed, because the keys would go there. When the app reports no
     /// focus at all there is nothing to check against: the focus-unknown floor still governs the typing.
     func placeFocus(_ e: AXUIElement, _ t: CUTarget, ref: Int?) throws {
-        if focusField(e, t) { return }
+        if try focusField(e, t) { return }
         guard t.accessible else { return }
         if focusRelation(e, t) == .elsewhere { throw focusNotPlacedRefusal(t, ref: ref) }
         CULog.act.notice("focus in \(t.appName, privacy: .public): not confirmed (the app reports no focused element)")
@@ -1537,12 +1540,12 @@ extension CUCore {
     /// user-view guard — and if that write trips the guard, the app is remembered so its native fields use the
     /// press route first too, for the helper's lifetime. Returns whether focus is on `e` now.
     @discardableResult
-    func focusField(_ e: AXUIElement, _ t: CUTarget) -> Bool {
+    func focusField(_ e: AXUIElement, _ t: CUTarget) throws -> Bool {
         // A capture-only window has no element of its own to focus: never a write (its "window" element is the
         // application's). Keys reach it after the synthetic activation, in the window a point click made key.
         guard t.accessible else { return false }
-        if isFocused(e, t) || pressToFocus(e, t) {
-            makeWindowKeyForField(e, t)
+        if try isFocused(e, t) || pressToFocus(e, t) {
+            try makeWindowKeyForField(e, t)
             // Whatever the click did, keys go nowhere but the field: elsewhere now means not placed.
             return focusRelation(e, t) != .elsewhere
         }
@@ -1594,7 +1597,7 @@ extension CUCore {
     /// Focuses `e` by pressing it, never by the `AXFocused` write: a listed `AXPress`/`AXConfirm`, else a
     /// window-targeted click at its centre when the window is on screen. Verified against the focused element.
     /// False when nothing placed focus on it.
-    func pressToFocus(_ e: AXUIElement, _ t: CUTarget) -> Bool {
+    func pressToFocus(_ e: AXUIElement, _ t: CUTarget) throws -> Bool {
         let web = isWebContent(e) || keyboardTarget(t, focused: e) != t.pid
         let actions = ax.actions(e)
         for a in [kAXPressAction, "AXConfirm"] where actions.contains(a) {
@@ -1629,7 +1632,7 @@ extension CUCore {
         switch keyForClick(t, privatePath: t.privatePath, clickWindow: windowFor(c)) {
         case .notApplied: postSyntheticActivation(t, privatePath: t.privatePath)
         case .prepared: break
-        case .appInFront: return false  // the user may be using it now: no click
+        case .appInFront: throw clickRefusal(t)  // the user may be using it now: no click, and nothing typed after it
         }
         try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()
@@ -2078,7 +2081,7 @@ extension CUCore {
             }
         }
         aimMenuCommands(at: t)
-        keyForMenu(t)
+        try keyForMenu(t)
         if let item = menuItem(forKey: "v", modifiers: [.command], pid: t.pid, includeDisabled: true),
            let how = try pasteInBlip(item, p, t) {
             return ActOutcome(rung: .accessibility, detail: how)
@@ -2339,7 +2342,7 @@ extension CUCore {
             // Keys go to the focused element: make it the scrolled content, not a search field.
             let content = ax.elements(area, kAXChildrenAttribute).first { ax.string($0, kAXRoleAttribute) != kAXScrollBarRole }
             for target in [content, area].compactMap({ $0 }) where ax.isSettable(target, kAXFocusedAttribute) {
-                focusField(target, t)
+                try focusField(target, t)
                 break
             }
         }
@@ -2530,7 +2533,7 @@ extension CUCore {
         announceTarget(t, info, pressing: false)
         cursor(t, "press", at: info.center, count: 1, button: "left")
         try token.check()
-        focusField(e, t)
+        try focusField(e, t)
         do {
             try ax.set(e, kAXSelectedTextRangeAttribute, r)
         } catch let error where Self.deliveryUncertain(error) {
