@@ -9,7 +9,8 @@ import type { ResultBuilder } from "../result";
 import type { PrimitiveMetric } from "../telemetry";
 import type { ImageHandle } from "../worker/bridge";
 
-export type TabAuthorizePurpose = { kind: "bind" } | { kind: "act"; primitive: string } | { kind: "observe" };
+/** An act may name its access class: `full` for one that can do whatever the page can (a site's own tool, Phase 4). */
+export type TabAuthorizePurpose = { kind: "bind" } | { kind: "act"; primitive: string; access?: "click" | "full" } | { kind: "observe" };
 
 export interface TabRunScope {
   readonly sessionId: string;
@@ -39,6 +40,12 @@ export interface TabRunScope {
   sessionFacts(): SessionFacts;
   /** Raise the dangerous-domain site card (`once` / `session`) — the run's clock is paused while it waits. */
   siteCard(summary: string): Promise<{ approved: boolean; optionId?: string }>;
+  /** Phase 3: a hand-off card (`waitForUser`) — its own options and clock; `onIssued` gets a way to answer it from the
+   *  browser (Winter for Chrome's Done). `by` says who answered ("timeout", "aborted", a client, "browser"). */
+  userCard?(summary: string, options: ReadonlyArray<{ id: string; label: string }>, timeoutMs: number,
+    onIssued?: (answer: (approved: boolean, by: string, optionId?: string) => void) => void): Promise<{ approved: boolean; optionId?: string; by?: string }>;
+  /** For the audit line: a hand-off was asked for (a count). */
+  noteHandoff?(): void;
   /** Did the user allow this app for longer than this run (session/always grant, or bypass)? */
   persistentlyAllowed(bundleId: string): boolean;
   /** Is the app already allowed for this session — so using it raises no card now (a session/always grant, bypass,
@@ -56,6 +63,12 @@ export interface TabRunScope {
   /** For the audit line: a site (host only) and a backend this run touched. */
   noteSite(host: string): void;
   noteBrowser(id: string): void;
+  /** For the audit line: a download() saved a file (a count — never its name, URL or path). */
+  noteDownload?(): void;
+  /** Phase 4 (WebMCP): may sites' own tools be read and called (`computerUse.webmcp`, read live)? Absent: yes. */
+  webMcp?(): boolean;
+  /** For the audit line: a site's own tool was called (a count — never its name, input or answer). */
+  noteSiteTool?(): void;
   /** A failure sentence that is the daemon's own words (shown outside the DATA-ONLY fence when it escapes). */
   trusted(sentence: string): void;
 }

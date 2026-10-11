@@ -5,7 +5,8 @@
 import type { ChromeApi, ChromePort, Clock } from "./chrome-api";
 import { realClock } from "./chrome-api";
 import { ExtensionError, UnknownMethod, type ExtensionController } from "./controller";
-import { EXTENSION_PROTOCOL, RPC_ERROR, RPC_METHOD_NOT_FOUND } from "./protocol";
+import { PRODUCT_NAME } from "./product";
+import { EXTENSION_FEATURES, EXTENSION_PROTOCOL, RPC_ERROR, RPC_METHOD_NOT_FOUND } from "./protocol";
 import type { StatusBoard } from "./status";
 
 const INSTANCE_KEY = "instanceId";
@@ -93,7 +94,7 @@ export class HostConnection {
         this.opts.log?.(`dropped a ${String(message.method)} notification larger than 16 MiB`);
         return;
       }
-      out = { jsonrpc: "2.0", id: message.id, error: { code: RPC_ERROR, message: "the browser's answer is larger than the 16 MiB Winter for Chrome can send — ask for less (a smaller screenshot or region)", data: { code: "cdp_error" } } };
+      out = { jsonrpc: "2.0", id: message.id, error: { code: RPC_ERROR, message: `the browser's answer is larger than the 16 MiB ${PRODUCT_NAME} can send — ask for less (a smaller screenshot or region)`, data: { code: "cdp_error" } } };
     }
     try {
       this.port?.postMessage(out);
@@ -162,7 +163,7 @@ export class HostConnection {
     this.helloId = id;
     this.post({
       jsonrpc: "2.0", id, method: "hello",
-      params: { protocol: EXTENSION_PROTOCOL, extensionVersion: this.chrome.extensionVersion, instanceId: await this.instance() },
+      params: { protocol: EXTENSION_PROTOCOL, extensionVersion: this.chrome.extensionVersion, instanceId: await this.instance(), features: [...EXTENSION_FEATURES] },
     });
   }
 
@@ -176,7 +177,7 @@ export class HostConnection {
     }
     const error = isRecord(m.error) ? m.error : {};
     const data = isRecord(error.data) ? error.data : {};
-    const message = typeof error.message === "string" ? error.message : "Winter refused Winter for Chrome";
+    const message = typeof error.message === "string" ? error.message : `Winter refused ${PRODUCT_NAME}`;
     if (data.code === "protocol_mismatch") {
       this.status.set({ state: "mismatch", message });
       return;
@@ -195,7 +196,7 @@ export class HostConnection {
       this.post({ jsonrpc: "2.0", id, result });
     } catch (err) {
       if (err instanceof UnknownMethod) {
-        this.post({ jsonrpc: "2.0", id, error: { code: RPC_METHOD_NOT_FOUND, message: `Winter for Chrome has no method ${method}`, data: { code: "not_allowed" } } });
+        this.post({ jsonrpc: "2.0", id, error: { code: RPC_METHOD_NOT_FOUND, message: `${PRODUCT_NAME} has no method ${method}`, data: { code: "not_allowed" } } });
         return;
       }
       const e = err instanceof ExtensionError ? err : new ExtensionError("cdp_error", err instanceof Error ? err.message : String(err));

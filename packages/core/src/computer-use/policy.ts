@@ -58,10 +58,15 @@ export const COMPUTER_V2_TOOL_NAME = "ComputerV2";
 
 /** The primitives that ACT on an app (everything else observes). */
 export const ACT_PRIMITIVES: ReadonlySet<string> = new Set(["click", "setValue", "type", "paste", "key", "scroll", "drag", "select", "action", "menu", "hover", "applescript",
-  "goto", "upload", "back", "forward", "reload", "keep", "handoff", "close"]);
+  "goto", "upload", "back", "forward", "reload", "keep", "handoff", "close",
+  // Phase 3 (browser tabs): answering a page dialog, a viewport, muting, the session's tab group, a download
+  "answerDialog", "viewport", "mute", "browsers.group", "download",
+  // Phase 4: a site's own tool (WebMCP) — always asked for with access "full"
+  "callTool"]);
 /** What a `click`-only app still permits (R17): clicks, scrolls and accessibility actions — and, on a browser's tab,
  *  its history moves, a reload, keeping, handing over or closing a tab Winter opened. */
-export const CLICK_ONLY_PRIMITIVES: ReadonlySet<string> = new Set(["click", "scroll", "action", "hover", "back", "forward", "reload", "keep", "handoff", "close"]);
+export const CLICK_ONLY_PRIMITIVES: ReadonlySet<string> = new Set(["click", "scroll", "action", "hover", "back", "forward", "reload", "keep", "handoff", "close",
+  "answerDialog", "viewport", "mute", "browsers.group"]);
 
 /** The system's authentication surfaces — refused as targets (spec §13.3; the helper refuses them too). */
 export const AUTH_DIALOG_BUNDLE_IDS: ReadonlySet<string> = new Set([
@@ -565,18 +570,24 @@ export class ComputerPolicy {
     return outcome;
   }
 
-  /** Raise one daemon-side approval card and wait for it (wait-before-emit, like `buildLeasePolicy`). */
-  private async card(run: RunGrants, summary: string, options: readonly ApprovalOption[], signal?: AbortSignal): Promise<{ approved: boolean; optionId?: string; human: boolean }> {
+  /** Raise one daemon-side approval card and wait for it (wait-before-emit, like `buildLeasePolicy`). `o.timeoutMs`
+   *  bounds the wait (a hand-off card's own clock); `o.onIssued` hands the caller a way to answer it from elsewhere
+   *  (Winter for Chrome's Done button), resolved like any other answer — the first one wins. */
+  private async card(
+    run: RunGrants, summary: string, options: readonly ApprovalOption[], signal?: AbortSignal,
+    o: { timeoutMs?: number; onIssued?: (answer: (approved: boolean, by: string, optionId?: string) => void) => void } = {},
+  ): Promise<{ approved: boolean; optionId?: string; human: boolean; by?: string }> {
     const { sessionId } = run;
     if (signal?.aborted) return { approved: false, human: false };
     const facts = this.deps.session(sessionId);
     const callId = `cu_${randomBytes(6).toString("hex")}`;
     // A relayed dispatch child's card is bounded (its coordinator's prompt promises the user an auto-deny),
     // unless the user started the turn in the child; every other card waits for its human (P8b-19).
-    const parkMs = dispatchChildCardTimeoutMs({
+    const bounded = dispatchChildCardTimeoutMs({
       mode: facts.mode, ...(facts.origin === undefined ? {} : { origin: facts.origin }),
       turnOrigin: () => this.deps.turnOrigin?.(sessionId),
     }) ?? NO_PARK_TIMEOUT_MS;
+    const parkMs = o.timeoutMs === undefined ? bounded : Math.max(1, Math.min(bounded, o.timeoutMs));
     const issuedAt = (this.deps.now ?? Date.now)();
     const expiresAt = issuedAt + parkMs;
     const opts = options.map((o) => ({ ...o }));
@@ -591,6 +602,7 @@ export class ComputerPolicy {
     }
     const onAbort = (): void => { this.deps.approvals.resolve(sessionId, callId, false, "aborted"); };
     signal?.addEventListener("abort", onAbort, { once: true });
+    o.onIssued?.((approved, by, optionId) => { this.deps.approvals.resolve(sessionId, callId, approved, by, optionId); });
     run.onCardWait?.(true);
     let res: { approved: boolean; by: string; optionId?: string };
     try {
@@ -603,7 +615,19 @@ export class ComputerPolicy {
       this.deps.emit(sessionId, { type: "approval_resolved", sessionId, threadId: "main", callId, approved: res.approved, by: res.by } as NewSessionEvent);
     } catch { /* the outcome stands */ }
     const machine = res.by === "timeout" || res.by === "aborted" || res.by === "emit-failure" || res.by === "superseded";
-    return { approved: res.approved, ...(res.optionId === undefined ? {} : { optionId: res.optionId }), human: !machine };
+    return { approved: res.approved, ...(res.optionId === undefined ? {} : { optionId: res.optionId }), human: !machine, by: res.by };
+  }
+
+  /**
+   * Phase 3 — the sign-in hand-off's cards (`waitForUser`): a daemon-raised card with its own options and its own
+   * clock (the run's is paused while it waits), relayed and bounded for a dispatch child like every card. Raised under
+   * every policy the caller allows (the engine refuses `dont-ask` before asking).
+   */
+  async userCard(
+    run: RunGrants, summary: string, options: readonly ApprovalOption[], timeoutMs: number, signal?: AbortSignal,
+    onIssued?: (answer: (approved: boolean, by: string, optionId?: string) => void) => void,
+  ): Promise<{ approved: boolean; optionId?: string; human: boolean; by?: string }> {
+    return await this.card(run, summary, options, signal, { timeoutMs, ...(onIssued === undefined ? {} : { onIssued }) });
   }
 
   // ── browsers (Phase 2): the browser engine's two doors into this policy ──────────────────────────

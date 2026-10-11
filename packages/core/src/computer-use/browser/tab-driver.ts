@@ -12,16 +12,24 @@
 // Only `cdp-allowlist.ts`'s methods and events are ever sent or subscribed — the transports refuse anything else.
 import { AutomationFailure } from "../errors";
 import type { ScreenshotBudget } from "../protocol";
+import { CDP_NETWORK_BUFFER_MAX } from "./cdp-allowlist";
+import { TabDevtools } from "./devtools";
 import { buttonOf, keyEvents, keyForChar, modifiersOf, parseCombo, type KeyPress } from "./input";
 import { PAGE_RUNTIME_SOURCE } from "./page-runtime/bundle.generated";
 import { redactText, redactUrl } from "./page-runtime/redact";
 import { pickerAdvice } from "./page-runtime/rules";
 import {
-  PAGE_RUNTIME_CALL, type RtCheck, type RtClassify, type RtCondition, type RtFindQuery, type RtFound, type RtHit, type RtNode, type RtPoint, type RtSnapshot,
+  PAGE_RUNTIME_CALL, type RtCheck, type RtClassify, type RtCondition, type RtFindQuery, type RtFound, type RtHit, type RtInspect, type RtLink, type RtNode, type RtPoint, type RtSiteToolAnswer, type RtSiteTools, type RtSnapshot,
 } from "./page-runtime/protocol";
 import { fitsBudget, imageSize, outputSize, scaleFor, toCss, type CssRect, type ShotFrame } from "./scale";
 import { diffState, fullState, makeSnapshot, printedState, type TabDialogLine, type TabHeader, type TabNode, type TabSnapshot } from "./state-format";
 import { TransportError, type CdpEvent, type CdpTransport } from "./transport";
+
+/** Phase 3's events: the developer readers (console(), network()) and a download the page started by itself — subscribed
+ *  only where the transport's allowlist has them (a Winter for Chrome built before Phase 3 refuses a subscription naming
+ *  any). */
+const PHASE3_EVENTS = ["Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded", "Network.responseReceived", "Page.downloadWillBegin", "Fetch.requestPaused"];
+export const PHASE3_TAB_EVENTS: ReadonlySet<string> = new Set(PHASE3_EVENTS);
 
 /** The events the engine follows on every tab (a subset of `CDP_ALLOWED_EVENTS`). */
 export const TAB_EVENTS: readonly string[] = [
@@ -30,7 +38,18 @@ export const TAB_EVENTS: readonly string[] = [
   "Page.javascriptDialogClosed", "Page.fileChooserOpened", "Runtime.executionContextCreated", "Runtime.executionContextDestroyed",
   "Runtime.executionContextsCleared", "Network.requestWillBeSent", "Network.loadingFinished", "Network.loadingFailed",
   "Target.attachedToTarget", "Target.detachedFromTarget", "Inspector.detached", "Inspector.targetCrashed",
+  ...PHASE3_EVENTS,
 ];
+
+/** Does this transport carry Phase 3's CDP (the console, network details, response bodies, Fetch, IO, Emulation)? A
+ *  Winter for Chrome says so in its hello (`cdp3`); the built-in browser's link always does. */
+export function transportHasCdp3(transport: CdpTransport): boolean {
+  const features = (transport as { features?: ReadonlySet<string> }).features;
+  return features === undefined || features.has("cdp3");
+}
+
+/** What the browser keeps of response bodies while Winter is attached (networkBody()); request bodies never. */
+export const NETWORK_BUFFERS = { maxResourceBufferSize: CDP_NETWORK_BUFFER_MAX.resource, maxTotalBufferSize: CDP_NETWORK_BUFFER_MAX.total, maxPostDataSize: 0 } as const;
 
 export const NAVIGATION_WAIT_MS = 10_000;
 const SNAPSHOTS_KEPT = 8;
@@ -65,6 +84,21 @@ interface Dialog extends TabDialogLine { session?: string }
 
 export interface TabStateResult { text: string; snapshotId: string; isDiff: boolean; settled?: boolean; waitedMs?: number }
 
+/** Phase 4 (WebMCP): how a site tool's call ended, as the engine reads it. */
+export type SiteToolCall =
+  | { kind: "answered"; result: string | null; cut: boolean }
+  /** The page offers no tool of that name now. */
+  | { kind: "unknown" }
+  | { kind: "failed"; name: string; message: string }
+  /** Asked to stop (`cancel`: the run; `timeout`): the page's signal was aborted; `settled` when the page confirmed it. */
+  | { kind: "stopped"; why: "cancel" | "timeout"; settled: boolean }
+  /** The page navigated while the tool ran (its world went with the document). */
+  | { kind: "navigated" };
+/** After a call is asked to stop, how long its own answer is waited for (at most — the engine keeps it within the run). */
+export const SITE_TOOL_STOP_GRACE_MS = 2_000;
+/** A site tool is called only in the document whose tools were last read (a whole-tab state, or tools()). */
+export const SITE_TOOLS_PAGE_CHANGED = "the page changed since you read it — call state()";
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 const bad = (message: string): Error => Object.assign(new TypeError(message), { name: "TypeError" });
 const stale = (ref: number): AutomationFailure => new AutomationFailure("StaleRef", `[${ref}] is gone — call state()`);
@@ -89,6 +123,8 @@ export function transportFailure(err: unknown, browserName: string): Error {
     case "tab_gone": return new AutomationFailure("TargetLost", "the tab was closed, crashed or stopped — open it again with browsers.open() or bind another with browsers.tab()");
     case "attach_refused": return new AutomationFailure("Refused", "that tab can't be controlled (a browser-internal page, a store page, or another debugger is attached)");
     case "timeout": return new AutomationFailure("TargetBusy", "the browser did not answer in time — the page may be busy; try again in a moment", true);
+    // The backend's own tab or memory budget (headless): its sentence says what to close; not retryable at once.
+    case "capacity": return new AutomationFailure("TargetBusy", err.message);
     case "not_allowed":
       // Winter.app's ceiling on held built-in tabs (`tab.ensure` refused: "… already holds 24 tabs for automation …").
       if (err.data.holdCeiling === true || /already holds \d+ tabs/i.test(err.message)) return new AutomationFailure("TargetBusy", HOLD_CEILING_SENTENCE);
@@ -132,6 +168,8 @@ export class TabDriver {
   busy = 0;
   /** The top frame's runtime at the last state: a different one means a new document even if its event was lost. */
   private lastTopRt?: string;
+  /** Phase 4 (WebMCP): the top frame's runtime (its document) whose site tools were last read — a call runs only there. */
+  private toolsReadRt?: string;
   private viewport: [number, number] = [0, 0];
   private dpr = 1;
   private readonly frames = new Map<string, FrameRec>();
@@ -153,6 +191,7 @@ export class TabDriver {
   private lastCommitLoader?: string;
   private lastCommitType?: string;
   private dclLoader?: string;
+  private loadSeen?: string;
   private readonly pokes = new Set<() => void>();
   private readonly shots = new Map<string, ShotFrame>();
   private shotCounter = 0;
@@ -163,6 +202,19 @@ export class TabDriver {
   /** The tab came back under a NEW key after a navigation (Winter for Chrome, when the browser gave a discarded tab a new
    *  id): the engine moves everything it keys by the old one, and this driver follows (`tabKey` is set by it). */
   onRekey?: (newKey: string) => boolean;
+  /** Phase 3: the tab's console and network log (`console()`, `network()`), kept across releases. */
+  readonly devtools: TabDevtools;
+  /** Phase 3: a download the page started by itself that nothing caught (said once, in the next state). */
+  uncaughtDownloads: string[] = [];
+  /** Phase 3: an emulated screen size is on in the browser (cleared before the tab is let go). */
+  emulating = false;
+  /** Phase 3: the size `viewport()` asked for — taken off when the tab is let go, put back when it is taken again (a
+   *  built-in tab's hold goes at each turn end), until `viewport(null)` or `keep()`. */
+  private viewportWish: { width: number; height: number; mobile: boolean; scale?: number } | undefined;
+  /** Phase 3: event listeners the engine adds for one wait (a download's `Fetch.requestPaused`). */
+  readonly listeners = new Set<(e: CdpEvent) => void>();
+  /** Phase 3: a `download()` capture is armed on this tab (a download the page starts now is the capture's to say). */
+  capturing = 0;
 
   constructor(
     readonly backend: string,
@@ -171,7 +223,9 @@ export class TabDriver {
     /** "Winter's browser", "Google Chrome" — for error sentences. */
     readonly browserName: string,
     private readonly now: () => number = () => Date.now(),
-  ) {}
+  ) {
+    this.devtools = new TabDevtools(now);
+  }
 
   // ── transport ───────────────────────────────────────────────────────────────────────────────────
 
@@ -249,27 +303,41 @@ export class TabDriver {
     this.lastUsed = this.now();
     if (this.attached) return;
     this.attaching ??= (async () => {
-      let info: { viewport: [number, number]; dpr: number } | undefined;
-      for (let attempt = 0; info === undefined; attempt++) {
-        try { info = await this.transport.attach(this.tabKey, { sessionId }); } catch (err) {
-          if (err instanceof TransportError && err.code === "tab_gone") {
-            const moved = movedTo(err);
-            if (moved !== undefined && attempt === 0 && this.onRekey?.(moved) === true) continue;
-            if (o.transient === true) throw new TabBetween();
-            this.gone ??= "closed";
-            throw this.lost();
-          }
-          throw transportFailure(err, this.browserName);
-        }
+      // Taken back after a hand-off: what the page logged while the user had it is replayed by the browser on
+      // Runtime.enable / Log.enable, and is not Winter's to read.
+      const handedOff = this.handedOffAt;
+      if (handedOff !== undefined) {
+        this.devtools.hideWindow(handedOff, this.now());
+        this.devtools.hideUntimed(true);
       }
-      this.viewport = info.viewport;
-      this.dpr = info.dpr > 0 ? info.dpr : 1;
-      try { await this.transport.subscribe(this.tabKey, TAB_EVENTS); } catch (err) { throw transportFailure(err, this.browserName); }
-      await this.enableDomains(undefined);
-      // Background tabs behave as focused (focus events, :focus, caret) — never by raising anything.
-      await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
-      await this.loadTopFrame();
-      this.attached = true;
+      try {
+        let info: { viewport: [number, number]; dpr: number } | undefined;
+        for (let attempt = 0; info === undefined; attempt++) {
+          try { info = await this.transport.attach(this.tabKey, { sessionId }); } catch (err) {
+            if (err instanceof TransportError && err.code === "tab_gone") {
+              const moved = movedTo(err);
+              if (moved !== undefined && attempt === 0 && this.onRekey?.(moved) === true) continue;
+              if (o.transient === true) throw new TabBetween();
+              this.gone ??= "closed";
+              throw this.lost();
+            }
+            throw transportFailure(err, this.browserName);
+          }
+        }
+        this.viewport = info.viewport;
+        this.dpr = info.dpr > 0 ? info.dpr : 1;
+        const events = transportHasCdp3(this.transport) ? TAB_EVENTS : TAB_EVENTS.filter((e) => !PHASE3_TAB_EVENTS.has(e));
+        try { await this.transport.subscribe(this.tabKey, events); } catch (err) { throw transportFailure(err, this.browserName); }
+        await this.enableDomains(undefined);
+        // Background tabs behave as focused (focus events, :focus, caret) — never by raising anything.
+        await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
+        if (this.viewportWish !== undefined) await this.applyViewport(this.viewportWish).catch(() => undefined);
+        await this.loadTopFrame();
+        this.attached = true;
+        this.handedOffAt = undefined;
+      } finally {
+        this.devtools.hideUntimed(false);
+      }
     })().finally(() => { this.attaching = undefined; });
     await this.attaching;
   }
@@ -303,8 +371,10 @@ export class TabDriver {
     await this.send("Page.setLifecycleEventsEnabled", { enabled: true }, session).catch(() => undefined);
     await this.send("Runtime.enable", {}, session);
     this.runtimeOn.add(session ?? "");
-    // Only request timing is read (idle detection); nothing needs a body, so the browser buffers none.
-    await this.send("Network.enable", { maxTotalBufferSize: 0, maxResourceBufferSize: 0, maxPostDataSize: 0 }, session).catch(() => undefined);
+    // Request timing (idle detection, network()) and capped response bodies (networkBody()); request bodies never.
+    await this.send("Network.enable", { ...NETWORK_BUFFERS }, session).catch(() => undefined);
+    // The browser's own page messages (failed loads, CSP, interventions) for console().
+    if (transportHasCdp3(this.transport)) await this.send("Log.enable", {}, session).catch(() => undefined);
     await this.send("Page.setInterceptFileChooserDialog", { enabled: true }, session).catch(() => undefined);
     await this.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, session).catch(() => undefined);
   }
@@ -327,6 +397,8 @@ export class TabDriver {
         };
         await quiet("Page.setInterceptFileChooserDialog", { enabled: false });
         await quiet("Emulation.setFocusEmulationEnabled", { enabled: false });
+        if (this.emulating) { await quiet("Emulation.clearDeviceMetricsOverride"); this.emulating = false; }
+        if (transportHasCdp3(this.transport)) await quiet("Log.disable");
         await quiet("Target.setAutoAttach", { autoAttach: false, waitForDebuggerOnStart: false, flatten: true });
         await quiet("Network.disable");
         await quiet("Runtime.disable");
@@ -336,6 +408,24 @@ export class TabDriver {
     })().finally(() => { this.releasing = undefined; });
     await this.releasing;
   }
+
+  /** When the tab was handed to the user (`handOff`), until Winter attaches again. */
+  private handedOffAt: number | undefined;
+
+  /**
+   * The sign-in hand-off: the tab is let go for EVERY session that holds it — a full detach, so nothing of Winter's
+   * reads it while the user works there, and the built-in browser's hold (which keeps native prompts — passkeys,
+   * permission prompts — from showing) is dropped. Whatever the page logs until Winter attaches again stays out of
+   * `console()`. Another session's next primitive on the tab attaches it afresh (its refs are new).
+   */
+  async handOff(): Promise<void> {
+    this.handedOffAt = this.now();
+    this.holders.clear();
+    await this.release("");
+  }
+
+  /** The tab's top-level frame (a download capture tells its document from a frame's). */
+  get mainFrameId(): string | undefined { return this.topFrameId; }
 
   /** Is the tab attached (held) now? */
   get isAttached(): boolean { return this.attached; }
@@ -352,7 +442,19 @@ export class TabDriver {
   onEvent(e: CdpEvent): void {
     const p = e.params as Record<string, any>;
     const session = e.cdpSessionId;
+    for (const l of [...this.listeners]) {
+      try { l(e); } catch { /* a listener never breaks the driver */ }
+    }
     switch (e.method) {
+      case "Runtime.consoleAPICalled": case "Runtime.exceptionThrown": case "Log.entryAdded": case "Network.responseReceived":
+        this.devtools.onEvent(e.method, p, session, (id) => this.isWinterContext(id, session));
+        break;
+      case "Page.downloadWillBegin": {
+        if (this.capturing > 0) break; // the armed capture says what became of it
+        const name = typeof p.suggestedFilename === "string" && p.suggestedFilename.length > 0 ? p.suggestedFilename : "a file";
+        if (this.uncaughtDownloads.length < 5) this.uncaughtDownloads.push(name.slice(0, 120));
+        break;
+      }
       case "Page.frameAttached": {
         const id = String(p.frameId);
         const rec = this.frames.get(id) ?? { frameId: id, url: "", ...(session === undefined ? {} : { session }) };
@@ -374,6 +476,7 @@ export class TabDriver {
         if (f.parentId === undefined && session === undefined) {
           this.topFrameId = f.id;
           this.url = rec.url;
+          this.devtools.newPage(rec.url);
           this.newTopDocument();
           this.navSeq++;
           this.lastCommitLoader = f.loaderId;
@@ -394,6 +497,9 @@ export class TabDriver {
       }
       case "Page.domContentEventFired":
         if (session === undefined) this.dclLoader = this.lastCommitLoader;
+        break;
+      case "Page.loadEventFired":
+        if (session === undefined) this.loadSeen = this.lastCommitLoader;
         break;
       case "Page.lifecycleEvent":
         if (p.name === "DOMContentLoaded" && p.frameId === this.topFrameId && session === undefined) this.dclLoader = typeof p.loaderId === "string" ? p.loaderId : this.lastCommitLoader;
@@ -452,10 +558,12 @@ export class TabDriver {
       case "Network.requestWillBeSent":
         this.inflight.add(`${session ?? ""}:${String(p.requestId)}`);
         this.lastRequestAt = this.now();
+        this.devtools.onEvent(e.method, p, session, () => false);
         break;
       case "Network.loadingFinished":
       case "Network.loadingFailed":
         this.inflight.delete(`${session ?? ""}:${String(p.requestId)}`);
+        this.devtools.onEvent(e.method, p, session, () => false);
         break;
       case "Target.attachedToTarget": {
         const child = typeof p.sessionId === "string" ? p.sessionId : undefined;
@@ -517,6 +625,35 @@ export class TabDriver {
     for (const poke of [...this.pokes]) poke();
   }
 
+  /** Is `id` (in `session`) one of the engine's own "winter" worlds? Its console output is never the page's. */
+  private isWinterContext(id: number, session: string | undefined): boolean {
+    for (const rec of this.frames.values()) if (rec.ctx === id && (rec.ctxSession ?? undefined) === session) return true;
+    return false;
+  }
+
+  /** One response's body (`networkBody`): `Network.getResponseBody` in the request's own session. */
+  async responseBody(session: string | undefined, requestId: string): Promise<{ body: string; base64Encoded: boolean; truncated: boolean }> {
+    const r = await this.send<{ body?: unknown; base64Encoded?: unknown; truncated?: unknown }>("Network.getResponseBody", { requestId }, session);
+    return { body: typeof r.body === "string" ? r.body : "", base64Encoded: r.base64Encoded === true, truncated: r.truncated === true };
+  }
+
+  /** The CDP sessions of the frames attached in their own process (out-of-process iframes). */
+  childSessions(): string[] {
+    return [...this.runtimeOn].filter((s) => s !== "");
+  }
+
+  /** A download the backend refused while nothing was armed (the built-in browser): said in the next state. */
+  noteUncaughtDownload(name: string): void {
+    if (this.capturing === 0 && this.uncaughtDownloads.length < 5) this.uncaughtDownloads.push((name.length > 0 ? name : "a file").slice(0, 120));
+  }
+
+  /** The uncaught downloads said so far, once. */
+  takeUncaughtDownloads(): string[] {
+    const out = this.uncaughtDownloads;
+    this.uncaughtDownloads = [];
+    return out;
+  }
+
   /** The URL and title as the model may read them: credentials in a URL, and token-looking text, redacted. */
   get shownUrl(): string { return redactUrl(shownUrl(this.url)); }
   get shownTitle(): string { return redactText(this.title); }
@@ -554,6 +691,7 @@ export class TabDriver {
   /** A new top-frame document: every ref is stale, the snapshots go, the next state is full and says "new page". */
   private newTopDocument(): void {
     this.lastTopRt = undefined;
+    this.toolsReadRt = undefined;
     this.generation++;
     this.newPage = true;
     this.snapshots = [];
@@ -622,13 +760,13 @@ export class TabDriver {
   }
 
   /** One page-runtime op in `rec`'s current document. */
-  private async callIn<T>(rec: FrameRec, op: string, arg: unknown, opts: { byValue?: boolean; expectRt?: string } = {}): Promise<T> {
+  private async callIn<T>(rec: FrameRec, op: string, arg: unknown, opts: { byValue?: boolean; expectRt?: string; timeoutMs?: number; staleMessage?: string } = {}): Promise<T> {
     await this.ensureRuntime(rec);
-    if (opts.expectRt !== undefined && rec.rtId !== opts.expectRt) throw new AutomationFailure("StaleRef", "that element is gone (the page changed) — call state()");
+    if (opts.expectRt !== undefined && rec.rtId !== opts.expectRt) throw new AutomationFailure("StaleRef", opts.staleMessage ?? "that element is gone (the page changed) — call state()");
     const res = await this.send<{ result?: { value?: unknown; objectId?: string }; exceptionDetails?: { text?: string; exception?: { description?: string } } }>("Runtime.callFunctionOn", {
       functionDeclaration: PAGE_RUNTIME_CALL, executionContextId: rec.ctx, arguments: [{ value: op }, { value: arg ?? null }],
       returnByValue: opts.byValue !== false, awaitPromise: true,
-    }, rec.ctxSession);
+    }, rec.ctxSession, opts.timeoutMs);
     if (res.exceptionDetails !== undefined) {
       const msg = res.exceptionDetails.exception?.description ?? res.exceptionDetails.text ?? "error";
       const m = /stale:(\d+)/.exec(msg);
@@ -713,23 +851,24 @@ export class TabDriver {
   }
 
   /** Where `rec`'s viewport sits in the top frame's (CSS px), with the point `inner` (in `rec`'s viewport) brought
-   *  into view in every ancestor on the way up — so a click there lands in `rec`. */
-  private async frameOrigin(rec: FrameRec, inner: { x: number; y: number }): Promise<{ x: number; y: number }> {
+   *  into view in every ancestor on the way up — so a click there lands in `rec`. `scroll: false`: read where it is,
+   *  moving nothing. */
+  private async frameOrigin(rec: FrameRec, inner: { x: number; y: number }, scroll = true): Promise<{ x: number; y: number }> {
     if (rec.parentId === undefined) return { x: 0, y: 0 };
     const parent = this.frames.get(rec.parentId);
     if (parent === undefined) throw new AutomationFailure("StaleRef", "that element's frame is gone — call state()");
     await this.ensureRuntime(parent);
     await this.ensureOwners(parent);
     if (rec.owner === undefined) throw new Error("can't place that frame on the page");
-    const off = await this.callIn<{ x: number; y: number } | null>(parent, "frameOffset", { id: rec.owner.id, scroll: true, inner }, { expectRt: rec.owner.parentRt });
+    const off = await this.callIn<{ x: number; y: number } | null>(parent, "frameOffset", { id: rec.owner.id, scroll, inner }, { expectRt: rec.owner.parentRt });
     if (off === null) throw new AutomationFailure("StaleRef", "that element's frame is gone — call state()");
-    const up = await this.frameOrigin(parent, { x: off.x + inner.x, y: off.y + inner.y });
+    const up = await this.frameOrigin(parent, { x: off.x + inner.x, y: off.y + inner.y }, scroll);
     return { x: off.x + up.x, y: off.y + up.y };
   }
 
   // ── state ──────────────────────────────────────────────────────────────────────────────────────
 
-  private async readTree(within: number | undefined): Promise<{ roots: TabNode[]; focusedRef?: number; unread?: number }> {
+  private async readTree(within: number | undefined): Promise<{ roots: TabNode[]; focusedRef?: number; unread?: number; topRt?: string }> {
     await this.settleChildSetups();
     const budget = { frames: 0 };
     if (within !== undefined) {
@@ -749,8 +888,9 @@ export class TabDriver {
     this.title = snap.title;
     const focus: { ref?: number; frame?: { rec: FrameRec; id: number } } = {};
     if (snap.focused !== undefined && top.rtId !== undefined) focus.ref = this.refFor(top.rtId, snap.focused);
+    const topRt = top.rtId;
     const roots = await this.convert(top, snap.roots, budget, 0, focus, snap.focusedFrame);
-    return { roots, ...(focus.ref === undefined ? {} : { focusedRef: focus.ref }), ...(snap.unread === undefined ? {} : { unread: snap.unread }) };
+    return { roots, ...(focus.ref === undefined ? {} : { focusedRef: focus.ref }), ...(snap.unread === undefined ? {} : { unread: snap.unread }), ...(topRt === undefined ? {} : { topRt }) };
   }
 
   private async convert(rec: FrameRec, nodes: readonly RtNode[], budget: { frames: number }, depth: number, focus: { ref?: number }, focusedFrame?: number): Promise<TabNode[]> {
@@ -794,6 +934,9 @@ export class TabDriver {
   private header(settle?: { settled: boolean; ms: number }, focusedRef?: number, unread?: number, scoped = false): TabHeader {
     const notes: string[] = [];
     if (this.fileChooser !== undefined) notes.push("the page asked for a file — use upload(ref, paths) on its file input");
+    for (const name of this.takeUncaughtDownloads()) {
+      notes.push(`the page started a download of "${redactText(name)}" — ${this.browserName === "Winter's browser" ? "it was not saved" : `${this.browserName} saved it in its own Downloads folder`}; download(ref) saves a file into this session`);
+    }
     return {
       title: this.shownTitle, url: this.shownUrl,
       ...(focusedRef === undefined ? {} : { focusedRef }), ...(settle === undefined ? {} : { settle }),
@@ -803,7 +946,7 @@ export class TabDriver {
   }
 
   /** The tab's state: full, or a diff against `since` when that snapshot is still held and less than half changed. */
-  async state(o: { within?: number; full?: boolean; since?: string; settle?: { maxMs: number } }): Promise<TabStateResult> {
+  async state(o: { within?: number; full?: boolean; since?: string; settle?: { maxMs: number }; siteTools?: boolean }): Promise<TabStateResult> {
     let settle: { settled: boolean; ms: number } | undefined;
     if (o.settle !== undefined) {
       const w = await this.waitForIdle(150, o.settle.maxMs);
@@ -817,16 +960,26 @@ export class TabDriver {
     }
     const tree = await this.readTree(o.within);
     const header = this.header(settle, tree.focusedRef, tree.unread, o.within !== undefined);
+    // Phase 4 (WebMCP): the page's own tools, read with every whole-tab state (the set is per document). A page with
+    // none — or no such API, or one that fails — prints nothing.
+    const tools = o.siteTools === true && o.within === undefined && tree.topRt !== undefined ? await this.siteToolNames(tree.topRt) : undefined;
+    const toolsSig = tools === undefined ? undefined : tools.total === 0 ? "" : `${tools.total}:${tools.names.join(",")}`;
+    if (tools !== undefined && tools.total > 0) header.siteTools = tools;
     // A whole-tab, non-full state folds what is out of view first; `full` is everything the read saw (its cap said).
     // What the print shows is kept with the snapshot: a later diff surfaces what it had folded.
     const printed = printedState(header, tree.roots, o.within === undefined && o.full !== true, undefined, o.full === true);
     const snap = makeSnapshot(id, tree.roots, o.within, printed.shown);
+    if (toolsSig !== undefined) snap.siteTools = toolsSig;
     let text = printed.text;
     let isDiff = false;
     if (o.since !== undefined && o.full !== true) {
       const old = this.snapshots.find((s) => s.id === o.since);
       if (old !== undefined && old.scope === o.within) {
-        const d = diffState(header, old, snap, undefined, printed.shown);
+        // A diff names the page's tools only when their set changed since that snapshot.
+        const diffHeader: TabHeader = { ...header };
+        delete diffHeader.siteTools;
+        if (tools !== undefined && toolsSig !== (old.siteTools ?? "")) diffHeader.siteTools = tools;
+        const d = diffState(diffHeader, old, snap, undefined, printed.shown);
         if (d.changedRatio <= 0.5) {
           text = d.text;
           isDiff = true;
@@ -858,6 +1011,111 @@ export class TabDriver {
     await this.settleChildSetups();
     await visit(top, 0);
     return out;
+  }
+
+  // ── Phase 4: WebMCP — the page's own agent tools ──────────────────────────────────────────────
+
+  /** The top document's tools: every name and — `describe` — the first ones described (`page-runtime/webmcp.ts`'s
+   *  caps); `null` when the page has none or no such API. A page-runtime failure other than Winter's own typed ones
+   *  reads as none (fails closed). */
+  async siteTools(describe: boolean): Promise<RtSiteTools | null> {
+    this.requireNoDialog("tools()");
+    // The document the primitive's site floor checked: a read that ends up in any other — a navigation while it waits,
+    // a context gone under it — reads nothing and binds nothing (never a fresh runtime's retry in a new document).
+    const generation = this.generation;
+    await this.settleChildSetups();
+    const top = this.top();
+    let rt: string | undefined;
+    let r: RtSiteTools | null;
+    try {
+      if (this.generation !== generation) throw new AutomationFailure("StaleRef", SITE_TOOLS_PAGE_CHANGED);
+      await this.ensureRuntime(top);
+      rt = top.rtId;
+      if (rt === undefined || this.generation !== generation) throw new AutomationFailure("StaleRef", SITE_TOOLS_PAGE_CHANGED);
+      r = await this.callIn<RtSiteTools | null>(top, "siteTools", { describe }, { expectRt: rt, staleMessage: SITE_TOOLS_PAGE_CHANGED });
+    } catch (err) {
+      if (err instanceof AutomationFailure) throw err;
+      if (isContextGone(err) || this.generation !== generation) throw new AutomationFailure("StaleRef", SITE_TOOLS_PAGE_CHANGED);
+      return null;
+    }
+    if (this.generation !== generation || top.rtId !== rt) throw new AutomationFailure("StaleRef", SITE_TOOLS_PAGE_CHANGED);
+    // This read binds a later call to the document it was made in (as a whole-tab state does).
+    this.toolsReadRt = rt;
+    return r;
+  }
+
+  /** The names alone, for a state's line, read in the SAME document as the state's tree (`topRt`) — `undefined` (no
+   *  line) when the document changed between the two reads; anything else wrong reads as no tools. */
+  private async siteToolNames(topRt: string): Promise<{ names: string[]; total: number } | undefined> {
+    let r: RtSiteTools | null;
+    try {
+      r = await this.callIn<RtSiteTools | null>(this.top(), "siteTools", { describe: false }, { expectRt: topRt });
+    } catch (err) {
+      return err instanceof AutomationFailure && err.kind === "StaleRef" ? undefined : { names: [], total: 0 };
+    }
+    this.toolsReadRt = topRt;
+    return r === null || !Array.isArray(r.names) ? { names: [], total: 0 } : { names: r.names.filter((n) => typeof n === "string"), total: typeof r.total === "number" ? r.total : r.names.length };
+  }
+
+  /**
+   * Run one of the page's own tools (`executeTool` in the top frame's winter world — the page's own callback runs, in
+   * the page's world). It waits at most `timeoutMs`; on that, or on `signal`, the page's AbortSignal is aborted (a
+   * second call into the runtime) and the page's own answer is waited for `stopMs` more (`SITE_TOOL_STOP_GRACE_MS` at
+   * most). A call whose page navigates never answers: read as `navigated`. It runs ONLY in the document whose tools
+   * were last read (a whole-tab state or `tools()`) — the one the model read and the site floor passed: any other is
+   * refused before anything is sent (`SITE_TOOLS_PAGE_CHANGED`), as a stale ref is.
+   */
+  async callSiteTool(name: string, input: unknown, o: { timeoutMs: number; signal: AbortSignal; stopMs?: number }): Promise<SiteToolCall> {
+    this.requireNoDialog("callTool()");
+    const read = this.toolsReadRt;
+    if (read === undefined) throw new AutomationFailure("StaleRef", SITE_TOOLS_PAGE_CHANGED);
+    await this.settleChildSetups();
+    const top = this.top();
+    const generation = this.generation;
+    const stopMs = Math.max(0, Math.min(SITE_TOOL_STOP_GRACE_MS, o.stopMs ?? SITE_TOOL_STOP_GRACE_MS));
+    const callId = `wm${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    type Outcome = { answer: RtSiteToolAnswer } | { err: unknown };
+    const call: Promise<Outcome> = this.callIn<RtSiteToolAnswer>(top, "callSiteTool", { name, input, callId },
+      { timeoutMs: o.timeoutMs + stopMs + 5_000, expectRt: read, staleMessage: SITE_TOOLS_PAGE_CHANGED })
+      .then((answer) => ({ answer }), (err: unknown) => ({ err }));
+    let why: "cancel" | "timeout" | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    const stop = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => { why ??= "timeout"; resolve(undefined); }, Math.max(0, o.timeoutMs));
+      onAbort = () => { why ??= "cancel"; resolve(undefined); };
+      if (o.signal.aborted) onAbort();
+      else o.signal.addEventListener("abort", onAbort, { once: true });
+    });
+    let first: Outcome | undefined;
+    try {
+      first = await Promise.race([call, stop]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      if (onAbort !== undefined) o.signal.removeEventListener("abort", onAbort);
+    }
+    if (first === undefined) {
+      // Asked to stop: abort the page's signal; its own AbortError settles the call (a page that ignores the signal
+      // keeps running — nothing more can stop page code, as for a click's handler). The whole stop fits in `stopMs`.
+      void this.callIn<boolean>(top, "cancelSiteTool", { callId }, { timeoutMs: Math.max(1, stopMs), expectRt: read }).catch(() => undefined);
+      const late = await Promise.race([call, sleep(stopMs).then(() => undefined)]);
+      const settled = late !== undefined && "answer" in late && !late.answer.ok && late.answer.reason === "aborted";
+      return { kind: "stopped", why: why ?? "cancel", settled };
+    }
+    if ("err" in first) {
+      const err = first.err;
+      // The document changed before anything was sent: nothing ran.
+      if (err instanceof AutomationFailure && (err.kind !== "StaleRef" || err.message === SITE_TOOLS_PAGE_CHANGED)) throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (this.generation !== generation || isContextGone(err) || /navigated or closed|navigated meanwhile/i.test(msg)) return { kind: "navigated" };
+      throw err;
+    }
+    const a = first.answer;
+    if (a === null || typeof a !== "object") return { kind: "unknown" };
+    if (a.ok) return { kind: "answered", result: typeof a.result === "string" ? a.result : null, cut: a.cut === true };
+    if (a.reason === "failed") return { kind: "failed", name: typeof a.name === "string" ? a.name : "Error", message: typeof a.message === "string" ? a.message : "" };
+    if (a.reason === "aborted") return { kind: "stopped", why: why ?? "cancel", settled: true };
+    return { kind: "unknown" };
   }
 
   async text(markdown: boolean): Promise<string> {
@@ -1030,7 +1288,178 @@ export class TabDriver {
   pointForShot(shotId: string | undefined, x: number, y: number): { x: number; y: number } {
     const shot = shotId === undefined ? undefined : this.shots.get(shotId);
     if (shot === undefined) throw new AutomationFailure("NotAllowed", "a point is pixels in this tab's latest screenshot — take tab.screenshot() first, or use an element ref");
+    if (shot.fullPage === true) throw new AutomationFailure("NotAllowed", "a full-page screenshot is for looking — take an ordinary screenshot() to act at a point, or use an element ref");
     return toCss(shot, x, y);
+  }
+
+  // ── Phase 3: element readers ───────────────────────────────────────────────────────────────────
+
+  /** Where `rec`'s viewport sits in the top frame's (CSS px), WITHOUT scrolling anything (a read never moves the page);
+   *  undefined when it can't be told. */
+  private async frameOriginQuiet(rec: FrameRec): Promise<{ x: number; y: number } | undefined> {
+    if (rec.parentId === undefined) return { x: 0, y: 0 };
+    const parent = this.frames.get(rec.parentId);
+    if (parent === undefined) return undefined;
+    try {
+      await this.ensureRuntime(parent);
+      await this.ensureOwners(parent);
+      if (rec.owner === undefined) return undefined;
+      const off = await this.callIn<{ x: number; y: number } | null>(parent, "frameOffset", { id: rec.owner.id, scroll: false }, { expectRt: rec.owner.parentRt });
+      if (off === null) return undefined;
+      const up = await this.frameOriginQuiet(parent);
+      return up === undefined ? undefined : { x: off.x + up.x, y: off.y + up.y };
+    } catch { return undefined; }
+  }
+
+  private async withTopBox(rec: FrameRec, info: RtInspect): Promise<{ ref: number; info: RtInspect; frame?: string }> {
+    const ref = this.refFor(rec.rtId!, info.id);
+    if (rec.parentId === undefined) return { ref, info };
+    const o = await this.frameOriginQuiet(rec);
+    const frame = hostLabel(rec.url);
+    if (o === undefined) return { ref, info, frame };
+    return { ref, info: { ...info, box: [info.box[0] + Math.round(o.x), info.box[1] + Math.round(o.y), info.box[2], info.box[3]] }, frame };
+  }
+
+  /** One element by ref. */
+  async inspect(ref: number): Promise<{ ref: number; info: RtInspect; frame?: string }> {
+    this.requireNoDialog("inspect()");
+    const { rec, id, rtId } = this.resolve(ref);
+    const info = await this.callIn<RtInspect | null>(rec, "inspect", { id }, { expectRt: rtId });
+    if (info === null || "frame" in info) throw stale(ref);
+    return await this.withTopBox(rec, info as RtInspect);
+  }
+
+  /** The element at a viewport point (CSS px), looking into frames. */
+  async inspectAt(x: number, y: number): Promise<{ ref: number; info: RtInspect; frame?: string } | undefined> {
+    this.requireNoDialog("inspect()");
+    let rec = this.top();
+    let px = x, py = y;
+    for (let depth = 0; depth <= MAX_FRAME_DEPTH; depth++) {
+      const hit = await this.callFresh<RtInspect | { frame: number } | null>(rec, "inspect", { x: px, y: py });
+      if (hit === null) return undefined;
+      if (!("frame" in hit)) return await this.withTopBox(rec, hit);
+      await this.ensureOwners(rec);
+      const child = this.childFrameFor(rec, hit.frame);
+      if (child === undefined) return undefined;
+      const off = await this.callIn<{ x: number; y: number } | null>(rec, "frameOffset", { id: hit.frame });
+      if (off === null) return undefined;
+      px -= off.x; py -= off.y;
+      rec = child;
+    }
+    return undefined;
+  }
+
+  /** The markup of the page, of one element, or (an iframe's ref) of that frame's document. */
+  async html(ref: number | undefined, maxChars: number): Promise<{ html: string; cut: boolean }> {
+    this.requireNoDialog("html()");
+    await this.settleChildSetups();
+    if (ref === undefined) return await this.callFresh<{ html: string; cut: boolean }>(this.top(), "html", { maxChars });
+    const { rec, id, rtId } = this.resolve(ref);
+    const child = this.childFrameFor(rec, id);
+    if (child !== undefined) return await this.callFresh<{ html: string; cut: boolean }>(child, "html", { maxChars });
+    return await this.callIn<{ html: string; cut: boolean }>(rec, "html", { id, maxChars }, { expectRt: rtId });
+  }
+
+  /** One element's readable text. */
+  async textWithin(ref: number, markdown: boolean): Promise<string> {
+    this.requireNoDialog("text()");
+    const { rec, id, rtId } = this.resolve(ref);
+    const child = this.childFrameFor(rec, id);
+    if (child !== undefined) return await this.callFresh<string>(child, "text", { markdown });
+    return await this.callIn<string>(rec, "text", { markdown, within: id }, { expectRt: rtId });
+  }
+
+  /** The page's assets in every frame (de-duplicated), with what the network log saw of the same kinds. */
+  async assets(kinds: readonly string[], max: number): Promise<Array<{ kind: string; url: string }>> {
+    this.requireNoDialog("assets()");
+    await this.settleChildSetups();
+    const out: Array<{ kind: string; url: string }> = [];
+    const seen = new Set<string>();
+    const add = (a: { kind: string; url: string }): void => {
+      if (out.length >= max || seen.has(a.url)) return;
+      seen.add(a.url);
+      out.push({ kind: a.kind, url: a.url.startsWith("data:") ? a.url : redactUrl(a.url) });
+    };
+    const top = this.top();
+    for (const a of await this.callFresh<Array<{ kind: string; url: string }>>(top, "assets", { kinds, max })) add(a);
+    let frames = 0;
+    for (const c of this.frames.values()) {
+      if (c === top || frames >= MAX_FRAMES || out.length >= max) continue;
+      frames++;
+      try { for (const a of await this.callFresh<Array<{ kind: string; url: string }>>(c, "assets", { kinds, max })) add(a); } catch { /* an unreadable frame */ }
+    }
+    const fromNet: Record<string, string> = { image: "image", media: "media", font: "font", stylesheet: "stylesheet", script: "script" };
+    const want = new Set(kinds.filter((k) => fromNet[k] !== undefined));
+    for (const r of this.devtools.urlsOfTypes(want)) add({ kind: r.type, url: r.url });
+    return out;
+  }
+
+  async linkOf(ref: number): Promise<RtLink> {
+    const { rec, id, rtId } = this.resolve(ref);
+    return await this.callIn<RtLink>(rec, "linkOf", { id }, { expectRt: rtId });
+  }
+
+  async checkState(ref: number): Promise<{ checkable: boolean; checked?: boolean }> {
+    const { rec, id, rtId } = this.resolve(ref);
+    return await this.callIn<{ checkable: boolean; checked?: boolean }>(rec, "checkState", { id }, { expectRt: rtId });
+  }
+
+  /** An element's box in the top frame's viewport (CSS px), brought into view first (for a screenshot of it).
+   *  `scroll: false` (the user's own tab): nothing is moved — an element not wholly in view is refused. */
+  async rectForRef(ref: number, o: { scroll?: boolean } = {}): Promise<CssRect> {
+    const scroll = o.scroll !== false;
+    if (scroll) await this.pointForRef(ref);
+    const { rec, id, rtId } = this.resolve(ref);
+    const info = await this.callIn<RtInspect | null>(rec, "inspect", { id }, { expectRt: rtId });
+    if (info === null || "frame" in info) throw stale(ref);
+    const at = rec.parentId === undefined ? { x: 0, y: 0 } : await this.frameOrigin(rec, { x: 0, y: 0 }, scroll);
+    const rect = { x: info.box[0] + at.x, y: info.box[1] + at.y, width: Math.max(1, info.box[2]), height: Math.max(1, info.box[3]) };
+    if (!scroll) {
+      const [vw, vh] = await this.viewportSize();
+      if (rect.x < -1 || rect.y < -1 || rect.x + rect.width > vw + 1 || rect.y + rect.height > vh + 1) {
+        throw new AutomationFailure("NotAllowed", USER_TAB_SHOT_OUT_OF_VIEW);
+      }
+    }
+    return rect;
+  }
+
+  /** `viewport()`: an emulated screen size (`null`: back to the tab's own). Taken off again before the tab is let go,
+   *  and put back when it is next taken. */
+  async setViewport(size: { width: number; height: number; mobile: boolean; scale?: number } | null): Promise<void> {
+    this.viewportWish = size ?? undefined;
+    if (size === null) {
+      if (this.emulating) await this.send("Emulation.clearDeviceMetricsOverride");
+      this.emulating = false;
+      return;
+    }
+    await this.applyViewport(size);
+  }
+
+  private async applyViewport(size: { width: number; height: number; mobile: boolean; scale?: number }): Promise<void> {
+    await this.send("Emulation.setDeviceMetricsOverride", { width: size.width, height: size.height, deviceScaleFactor: size.scale ?? 0, mobile: size.mobile });
+    this.emulating = true;
+  }
+
+  /** `waitFor({ load })`: the top document reached DOMContentLoaded / load, within `timeoutMs` (else `WaitTimeout`). */
+  async waitForLoad(state: "domcontentloaded" | "load", timeoutMs: number, signal?: AbortSignal): Promise<{ waitedMs: number }> {
+    const t0 = this.now();
+    for (;;) {
+      if (this.loaded(state)) return { waitedMs: this.now() - t0 };
+      // A page that finished before Winter attached sent no event: its document's own ready state says.
+      try {
+        const q = await this.quietInfo();
+        if (q.readyState === "complete" || (state === "domcontentloaded" && q.readyState === "interactive")) return { waitedMs: this.now() - t0 };
+      } catch (err) { if (!isContextGone(err) && !(err instanceof AutomationFailure)) throw err; }
+      const left = timeoutMs - (this.now() - t0);
+      if (signal?.aborted === true) throw new AutomationFailure("Cancelled", "the script was cancelled");
+      if (left <= 0) throw new AutomationFailure("WaitTimeout", `the page did not reach ${state === "load" ? "its load event" : "DOMContentLoaded"} within ${timeoutMs} ms`);
+      await this.waitUntil(() => this.loaded(state), Math.min(100, left), signal);
+    }
+  }
+
+  /** Has the top document reached DOMContentLoaded / load? */
+  loaded(state: "domcontentloaded" | "load"): boolean {
+    return state === "load" ? this.loadSeen === this.lastCommitLoader && this.lastCommitLoader !== undefined : this.dclLoader !== undefined && this.dclLoader === this.lastCommitLoader;
   }
 
   async mouse(type: string, x: number, y: number, extra: Record<string, unknown> = {}): Promise<void> {
@@ -1325,10 +1754,11 @@ export class TabDriver {
   }
 
   /** One JPEG at the budget; its frame is kept so a Point maps back to CSS px. */
-  async screenshot(budget: ScreenshotBudget, region: CssRect | undefined, quality: number): Promise<{ shotId: string; imageBase64: string; width: number; height: number; css: CssRect }> {
+  async screenshot(budget: ScreenshotBudget, region: CssRect | undefined, quality: number, o: { fullPage?: boolean } = {}): Promise<{ shotId: string; imageBase64: string; width: number; height: number; css: CssRect }> {
     this.requireNoDialog("screenshot()");
-    const m = await this.send<{ cssVisualViewport: { pageX: number; pageY: number; clientWidth: number; clientHeight: number } }>("Page.getLayoutMetrics");
+    const m = await this.send<{ cssVisualViewport: { pageX: number; pageY: number; clientWidth: number; clientHeight: number }; cssContentSize?: { width: number; height: number } }>("Page.getLayoutMetrics");
     const vv = m.cssVisualViewport;
+    if (o.fullPage === true) return await this.fullPageShot(budget, quality, vv, m.cssContentSize);
     const css: CssRect = region === undefined
       ? { x: 0, y: 0, width: vv.clientWidth, height: vv.clientHeight }
       : { x: Math.max(0, region.x), y: Math.max(0, region.y), width: Math.max(1, Math.min(region.width, vv.clientWidth - Math.max(0, region.x))), height: Math.max(1, Math.min(region.height, vv.clientHeight - Math.max(0, region.y))) };
@@ -1351,7 +1781,37 @@ export class TabDriver {
     if (this.shots.size > 16) this.shots.delete(this.shots.keys().next().value!);
     return { shotId, imageBase64: shot!.data, width: size!.width, height: size!.height, css };
   }
+
+  /** The whole document (its height capped at FULL_PAGE_MAX_CSS), scaled to the budget. For looking only: a Point in it
+   *  is refused (`pointForShot`). */
+  private async fullPageShot(budget: ScreenshotBudget, quality: number, vv: { clientWidth: number; clientHeight: number }, content: { width: number; height: number } | undefined): Promise<{ shotId: string; imageBase64: string; width: number; height: number; css: CssRect }> {
+    const css: CssRect = { x: 0, y: 0, width: Math.max(1, Math.round(content?.width ?? vv.clientWidth)), height: Math.max(1, Math.min(FULL_PAGE_MAX_CSS, Math.round(content?.height ?? vv.clientHeight))) };
+    let scale = scaleFor(css, this.dpr, budget);
+    let shot: { data: string } | undefined;
+    let size: { width: number; height: number } | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      shot = await this.send<{ data: string }>("Page.captureScreenshot", {
+        format: "jpeg", quality: Math.round(quality * 100), fromSurface: true, captureBeyondViewport: true,
+        clip: { x: 0, y: 0, width: css.width, height: css.height, scale },
+      }, undefined, 20_000);
+      const assumed = outputSize(css, scale, this.dpr);
+      size = imageSize(shot.data) ?? { width: assumed.w, height: assumed.h };
+      if (fitsBudget(size.width, size.height, budget)) break;
+      scale *= Math.min(budget.maxLongEdge / Math.max(size.width, size.height), 0.97);
+    }
+    const shotId = `tshot${++this.shotCounter}`;
+    this.shots.set(shotId, { width: size!.width, height: size!.height, css, fullPage: true });
+    if (this.shots.size > 16) this.shots.delete(this.shots.keys().next().value!);
+    return { shotId, imageBase64: shot!.data, width: size!.width, height: size!.height, css };
+  }
 }
+
+/** A full-page screenshot's document height at most this (CSS px). */
+export const FULL_PAGE_MAX_CSS = 10_000;
+
+/** The user's own tab is never moved for a picture: `fullPage` lays the page out again, `within` would scroll. */
+export const USER_TAB_FULL_PAGE = "screenshot({ fullPage }) lays the page out again, which can move what the user sees — on the user's own tab Winter takes only what is in view: screenshot(), or text() for the whole page";
+export const USER_TAB_SHOT_OUT_OF_VIEW = "that element is not wholly in view, and Winter doesn't scroll the user's own tab for a picture — scroll() it into view first, or take screenshot()";
 
 interface FrameTreeNode { frame: { id: string; parentId?: string; url: string; urlFragment?: string }; childFrames?: FrameTreeNode[] }
 

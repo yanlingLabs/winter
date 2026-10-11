@@ -20,7 +20,10 @@ import Foundation
 public enum BrowserLinkProtocol {
     /// `BROWSER_LINK_PROTOCOL` — bumped on any observable change to the wire. A repo test keeps this
     /// equal to the daemon's constant (`BrowserLinkProtocolParityTests`).
-    public static let version = 1
+    ///
+    /// 2 (ComputerV2 Phase 3): the ops `tab.present`, `tab.mute`, `tab.downloads` and `tab.download`, and the
+    /// app's `browserLink.download` request.
+    public static let version = 2
 
     /// The link's own connection, separate from every other harness the app runs.
     public static let clientName = "browser-link"
@@ -30,6 +33,8 @@ public enum BrowserLinkProtocol {
         public static let result = "browserLink.result"
         public static let events = "browserLink.events"
         public static let tabGone = "browserLink.tabGone"
+        /// Phase 3: one download the built-in browser saved for an armed tab (or refused for an unarmed one).
+        public static let download = "browserLink.download"
         /// Daemon → app notification.
         public static let command = "browserLink.command"
         /// Daemon → app notification.
@@ -45,7 +50,21 @@ public enum BrowserLinkProtocol {
         public static let cdpSend = "cdp.send"
         public static let cdpSubscribe = "cdp.subscribe"
         public static let overlay = "overlay"
+        /// Phase 3: show the session's window with this panel tab selected (the sign-in handoff, on the user's OK).
+        public static let tabPresent = "tab.present"
+        public static let tabMute = "tab.mute"
+        /// Phase 3: arm (or disarm, `dir: null`) the tab's own download handler.
+        public static let tabDownloads = "tab.downloads"
+        /// Phase 3: download a URL in the tab's browser (its cookies), caught by the armed handler.
+        public static let tabDownload = "tab.download"
     }
+
+    /// A download the app reports (`browserLink.download`'s `download.state`).
+    public enum DownloadState: String, Sendable, Equatable {
+        case started, progress, done, failed, refused
+    }
+    /// At most one `progress` report per download this often.
+    public static let downloadProgressInterval: Duration = .milliseconds(500)
 
     /// The codes a failed `browserLink.result` may carry — the whole set; the app answers nothing else.
     public enum ErrorCode: String, Sendable, Equatable {

@@ -12,6 +12,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -525,13 +526,38 @@ static NSMutableArray<WinterCEFPendingBrowser *> *g_pending = nil;
 @property(nonatomic, copy) void (^devToolsEventObserver)(NSString *, NSData *, NSString *);
 /// Told when this tab's renderer dies (`WinterCEFSetRendererCrashObserver`).
 @property(nonatomic, copy) void (^crashObserver)(void);
+/// ComputerV2 Phase 3 — the browser link's download arm (`WinterCEFSetDownloadArm`): where an armed download is
+/// saved, until when (ms since the epoch), and how large one may be. `nil` dir: not armed.
+@property(nonatomic, copy) NSString *downloadArmDir;
+@property(nonatomic) double downloadArmUntil;
+@property(nonatomic) int64_t downloadArmMaxBytes;
+/// Bumped by every arm and disarm: the deadline timer of an earlier arm does nothing.
+@property(nonatomic) NSUInteger armGeneration;
+/// Where this tab's download reports go (`WinterCEFSetDownloadObserver`).
+@property(nonatomic, copy) void (^downloadObserver)(NSDictionary *);
+/// Refused downloads reported so far (their report ids).
+@property(nonatomic) NSUInteger refusedDownloads;
 /// The JS dialog this tab is holding under `WinterCEFAutomationHoldsJSDialogs`, until it is answered.
 - (void)holdDialog:(CefRefPtr<CefJSDialogCallback>)callback;
 - (CefRefPtr<CefJSDialogCallback>)takeHeldDialog;
+/// ComputerV2 Phase 3 — the downloads the arm FOLLOWS: each with its latest CEF item callback (none until its first
+/// update), so a re-arm, a disarm, the link letting go and the deadline CANCEL it rather than leave it running past the
+/// size cap and the time limit. A cancelled one is still reported once its cancel lands.
+- (void)followDownload:(uint32_t)downloadId;
+- (BOOL)followsDownload:(uint32_t)downloadId;
+- (NSUInteger)followedDownloadCount;
+- (void)noteDownload:(uint32_t)downloadId callback:(CefRefPtr<CefDownloadItemCallback>)callback;
+- (void)forgetDownload:(uint32_t)downloadId;
+/// Cancel every followed download (one with no callback yet is cancelled at its first update).
+- (void)cancelDownloads;
+/// A download being cancelled: cancel it now if it can be (its callback), and whether it was one.
+- (BOOL)cancellingDownload:(uint32_t)downloadId callback:(CefRefPtr<CefDownloadItemCallback>)callback;
 @end
 
 @implementation WinterCEFTabBridge {
   CefRefPtr<CefJSDialogCallback> _heldDialog;
+  std::map<uint32_t, CefRefPtr<CefDownloadItemCallback>> _downloads;
+  std::set<uint32_t> _cancelling;
 }
 - (instancetype)init {
   if ((self = [super init])) {
@@ -547,6 +573,34 @@ static NSMutableArray<WinterCEFPendingBrowser *> *g_pending = nil;
   CefRefPtr<CefJSDialogCallback> taken = _heldDialog;
   _heldDialog = nullptr;
   return taken;
+}
+- (void)followDownload:(uint32_t)downloadId {
+  _downloads[downloadId] = nullptr;
+}
+- (BOOL)followsDownload:(uint32_t)downloadId {
+  return _downloads.count(downloadId) > 0;
+}
+- (NSUInteger)followedDownloadCount {
+  return _downloads.size();
+}
+- (void)noteDownload:(uint32_t)downloadId callback:(CefRefPtr<CefDownloadItemCallback>)callback {
+  if (_downloads.count(downloadId) > 0 && callback) _downloads[downloadId] = callback;
+}
+- (void)forgetDownload:(uint32_t)downloadId {
+  _downloads.erase(downloadId);
+  _cancelling.erase(downloadId);
+}
+- (void)cancelDownloads {
+  for (auto &entry : _downloads) {
+    if (entry.second) entry.second->Cancel();
+    _cancelling.insert(entry.first);
+  }
+  _downloads.clear();
+}
+- (BOOL)cancellingDownload:(uint32_t)downloadId callback:(CefRefPtr<CefDownloadItemCallback>)callback {
+  if (_cancelling.count(downloadId) == 0) return NO;
+  if (callback) callback->Cancel();
+  return YES;
 }
 @end
 
@@ -780,6 +834,40 @@ bool AutomationHoldsJSDialogs(uint32_t flags) { return (flags & WinterCEFAutomat
 bool AutomationDeniesPermissions(uint32_t flags) { return (flags & WinterCEFAutomationDeniesPermissions) != 0; }
 bool AutomationCancelsFileChooser(uint32_t flags) { return (flags & WinterCEFAutomationCancelsFileChooser) != 0; }
 bool AutomationCancelsDownloads(uint32_t flags) { return (flags & WinterCEFAutomationCancelsDownloads) != 0; }
+
+// ComputerV2 Phase 3 — the download arm.
+static double NowEpochMs() { return [[NSDate date] timeIntervalSince1970] * 1000.0; }
+static bool DownloadArmed(WinterCEFTabBridge *tab) {
+  return tab != nil && tab.downloadArmDir.length > 0 && NowEpochMs() < tab.downloadArmUntil;
+}
+static NSString *StringOf(const CefString &value) {
+  return [NSString stringWithUTF8String:value.ToString().c_str()] ?: @"";
+}
+static void ReportDownload(WinterCEFTabBridge *tab, NSDictionary *info) {
+  if (tab.downloadObserver != nil) {
+    tab.downloadObserver(info);
+  }
+}
+/// A download item as the link reports it. `name` is the saved file's (or the suggested) name.
+static NSDictionary *DownloadInfoOf(CefRefPtr<CefDownloadItem> item, NSString *state, NSString *name, NSString *error) {
+  NSMutableDictionary *info = [@{
+    @"id" : [NSString stringWithFormat:@"cef-%u", item->GetId()],
+    @"state" : state,
+    @"name" : name ?: @"download",
+    @"bytes" : @(MAX((int64_t)0, item->GetReceivedBytes())),
+  } mutableCopy];
+  NSString *url = StringOf(item->GetURL());
+  if (url.length > 0 && url.length <= 8192) info[@"url"] = url;
+  if (item->GetTotalBytes() > 0) info[@"totalBytes"] = @(item->GetTotalBytes());
+  NSString *mime = StringOf(item->GetMimeType());
+  if (mime.length > 0 && mime.length <= 256) info[@"mime"] = mime;
+  if ([state isEqualToString:@"done"]) {
+    NSString *path = StringOf(item->GetFullPath());
+    if (path.length > 0) info[@"path"] = path;
+  }
+  if (error != nil) info[@"error"] = error;
+  return info;
+}
 bool AutomationSuppressesContextMenus(uint32_t flags) {
   return (flags & WinterCEFAutomationSuppressesContextMenus) != 0;
 }
@@ -1871,11 +1959,98 @@ class WinterClient : public CefClient,
                    const CefString &request_method) override {
     CEF_REQUIRE_UI_THREAD();
     WinterCEFTabBridge *tab = Tab();
+    // ComputerV2 Phase 3: the link armed this tab for `download()` — this one is let through, and saved below.
+    if (DownloadArmed(tab)) {
+      Log("download-allowed (an armed tab)");
+      return true;
+    }
     if (tab != nil && AutomationCancelsDownloads(tab.automationNativeUI)) {
       Log("download-refused (an automated tab)");
+      // Said to the engine, so the tab's next state can say the page tried to download (nothing was saved).
+      NSString *name = WinterCEFDownloadFileName([NSURL URLWithString:StringOf(url)].lastPathComponent ?: @"");
+      tab.refusedDownloads += 1;
+      ReportDownload(tab, @{ @"id" : [NSString stringWithFormat:@"refused-%lu", (unsigned long)tab.refusedDownloads],
+                             @"state" : @"refused", @"name" : name, @"bytes" : @0 });
       return false;
     }
     return true;
+  }
+
+  /// ComputerV2 Phase 3: an armed tab's download is saved with no dialog into the arm's folder, under its suggested
+  /// name. Anything else keeps CEF's own default (`false`: cancelled in this Alloy-style browser, as before).
+  bool OnBeforeDownload(CefRefPtr<CefBrowser> browser,
+                        CefRefPtr<CefDownloadItem> download_item,
+                        const CefString &suggested_name,
+                        CefRefPtr<CefBeforeDownloadCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    WinterCEFTabBridge *tab = Tab();
+    if (!DownloadArmed(tab) || !download_item || !callback) {
+      return false;
+    }
+    if ([tab followedDownloadCount] > 0) {
+      // One download per arm: a second one the page starts meanwhile is not Winter's.
+      return false;
+    }
+    NSString *name = WinterCEFDownloadFileName(StringOf(suggested_name));
+    NSString *path = [tab.downloadArmDir stringByAppendingPathComponent:name];
+    [tab followDownload:download_item->GetId()];
+    callback->Continue(CefString(path.UTF8String), false);
+    Log("download-armed-saving (an armed tab)");
+    ReportDownload(tab, DownloadInfoOf(download_item, @"started", name, nil));
+    return true;
+  }
+
+  void OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
+                         CefRefPtr<CefDownloadItem> download_item,
+                         CefRefPtr<CefDownloadItemCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    WinterCEFTabBridge *tab = Tab();
+    if (tab == nil || !download_item) {
+      return;
+    }
+    const uint32_t key = download_item->GetId();
+    NSString *name = StringOf(download_item->GetFullPath()).lastPathComponent;
+    if (name.length == 0) name = WinterCEFDownloadFileName(StringOf(download_item->GetSuggestedFileName()));
+    // A download a re-arm, a disarm or the deadline cancelled: cancelled now if it was not yet, and said once it lands.
+    if ([tab cancellingDownload:key callback:callback]) {
+      if (download_item->IsCanceled() || download_item->IsInterrupted() || download_item->IsComplete()) {
+        [tab forgetDownload:key];
+        ReportDownload(tab, DownloadInfoOf(download_item, @"failed", name, @"Winter stopped waiting for it"));
+      }
+      return;
+    }
+    if (![tab followsDownload:key]) {
+      return;
+    }
+    [tab noteDownload:key callback:callback];
+    if (download_item->IsComplete()) {
+      [tab forgetDownload:key];
+      ReportDownload(tab, DownloadInfoOf(download_item, @"done", name, nil));
+      return;
+    }
+    if (download_item->IsCanceled() || download_item->IsInterrupted()) {
+      // An interrupted download could RESUME later, past the cap and the deadline: cancelled for good.
+      if (download_item->IsInterrupted() && callback) callback->Cancel();
+      [tab forgetDownload:key];
+      NSString *why = download_item->IsCanceled()
+          ? @"cancelled"
+          : [NSString stringWithFormat:@"interrupted (%d)", static_cast<int>(download_item->GetInterruptReason())];
+      ReportDownload(tab, DownloadInfoOf(download_item, @"failed", name, why));
+      return;
+    }
+    const int64_t received = download_item->GetReceivedBytes();
+    const int64_t total = download_item->GetTotalBytes();
+    NSString *stop = nil;
+    if (tab.downloadArmDir.length == 0) stop = @"Winter stopped waiting for it";
+    else if (received > tab.downloadArmMaxBytes || total > tab.downloadArmMaxBytes) stop = @"too large";
+    else if (NowEpochMs() >= tab.downloadArmUntil) stop = @"timed out";
+    if (stop != nil) {
+      if (callback) callback->Cancel();
+      [tab forgetDownload:key];
+      ReportDownload(tab, DownloadInfoOf(download_item, @"failed", name, stop));
+      return;
+    }
+    ReportDownload(tab, DownloadInfoOf(download_item, @"progress", name, nil));
   }
 
   /// A key the page left unhandled. On macOS CEF hands such an event to the app's MAIN MENU (its
@@ -2996,6 +3171,12 @@ class WinterApp : public CefApp, public CefBrowserProcessHandler {
     }
     command_line->AppendSwitchWithValue(kSwitch, value);
     Log("disable-features=%s (upstream ReadAnythingSoftNavigationObserver null-deref)", value.c_str());
+    // WebMCP (ComputerV2 Phase 4): a site's own agent tools, `document.modelContext` — off by default in this Chromium
+    // (an origin trial). Process-wide and fixed at launch, so always on; the daemon's `computerUse.webmcp` decides
+    // whether Winter reads or calls them. Appended like the switch above.
+    static const char kEnable[] = "enable-features";
+    const std::string enabled = command_line->HasSwitch(kEnable) ? command_line->GetSwitchValue(kEnable).ToString() : "";
+    command_line->AppendSwitchWithValue(kEnable, enabled.empty() ? "WebMCP" : enabled + ",WebMCP");
   }
 
   void OnContextInitialized() override {
@@ -3679,6 +3860,112 @@ BOOL WinterCEFResolveHeldDialog(NSView *parent, WinterCEFHeldDialogAction action
     Log("js-dialog-answered by the link (%s)", action == WinterCEFHeldDialogActionAccept ? "accept" : "dismiss");
   }
   return YES;
+}
+
+void WinterCEFSetDownloadArm(NSView *parent, NSString *dir, double untilMs, int64_t maxBytes) {
+  WinterCEFTabBridge *bridge = BridgeFor(parent);
+  if (bridge == nil) {
+    return;
+  }
+  // Whatever an earlier arm still follows is cancelled — a re-arm, a disarm and the link letting go alike — so nothing
+  // keeps running past its size cap or its deadline into the staging folder.
+  [bridge cancelDownloads];
+  const NSUInteger generation = ++bridge.armGeneration;
+  bridge.downloadArmDir = dir.length > 0 ? dir : nil;
+  bridge.downloadArmUntil = dir.length > 0 ? untilMs : 0;
+  bridge.downloadArmMaxBytes = dir.length > 0 ? maxBytes : 0;
+  if (dir.length > 0) {
+    // The deadline, enforced even if no update ever comes again: the arm ends and its download is cancelled.
+    const double delaySeconds = std::max(0.0, (untilMs - NowEpochMs()) / 1000.0);
+    __weak WinterCEFTabBridge *weakBridge = bridge;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(delaySeconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      WinterCEFTabBridge *b = weakBridge;
+      if (b == nil || b.armGeneration != generation) return;
+      b.downloadArmDir = nil;
+      [b cancelDownloads];
+    });
+  }
+}
+
+void WinterCEFSetDownloadObserver(NSView *parent, void (^observer)(NSDictionary *info)) {
+  BridgeFor(parent).downloadObserver = observer;
+}
+
+BOOL WinterCEFStartDownload(NSView *parent, const char *url) {
+  if (url == nullptr || *url == '\0') {
+    return NO;
+  }
+  if (auto browser = BrowserForParent(parent)) {
+    browser->GetHost()->StartDownload(CefString(url));
+    return YES;
+  }
+  return NO;
+}
+
+void WinterCEFSetAudioMuted(NSView *parent, BOOL muted) {
+  if (auto browser = BrowserForParent(parent)) {
+    browser->GetHost()->SetAudioMuted(muted == YES);
+  }
+}
+
+namespace {
+/// A stand-in `CefDownloadItemCallback` for the test seam: counts its cancels (header-only, no framework symbol).
+class WinterFakeDownloadCallback : public CefDownloadItemCallback {
+ public:
+  int cancels = 0;
+  void Cancel() override { cancels++; }
+  void Pause() override {}
+  void Resume() override {}
+  IMPLEMENT_REFCOUNTING(WinterFakeDownloadCallback);
+};
+}  // namespace
+
+NSString *WinterCEFDownloadFollowingDecisions(void) {
+  WinterCEFTabBridge *b = [[WinterCEFTabBridge alloc] init];
+  CefRefPtr<WinterFakeDownloadCallback> one = new WinterFakeDownloadCallback();
+  CefRefPtr<WinterFakeDownloadCallback> two = new WinterFakeDownloadCallback();
+  [b followDownload:1];
+  [b noteDownload:1 callback:one];
+  [b followDownload:2];
+  const unsigned long before = (unsigned long)[b followedDownloadCount];
+  [b cancelDownloads];
+  const unsigned long after = (unsigned long)[b followedDownloadCount];
+  const BOOL twoCancelling = [b cancellingDownload:2 callback:two];
+  const BOOL unknown = [b cancellingDownload:3 callback:nullptr];
+  return [NSString stringWithFormat:@"followed=%lu;after=%lu;one=%d;two=%d;twoCancelling=%d;unknownCancelling=%d", before, after,
+                                    one->cancels, two->cancels, twoCancelling ? 1 : 0, unknown ? 1 : 0];
+}
+
+BOOL WinterCEFDownloadArmed(NSView *parent) {
+  WinterCEFTabBridge *bridge = ExistingBridgeFor(parent);
+  return bridge != nil && DownloadArmed(bridge);
+}
+
+NSString *WinterCEFDownloadFileName(NSString *suggested) {
+  NSString *name = [[suggested ?: @"" stringByReplacingOccurrencesOfString:@"\\" withString:@"/"] lastPathComponent];
+  NSMutableString *clean = [NSMutableString string];
+  [name enumerateSubstringsInRange:NSMakeRange(0, name.length)
+                           options:NSStringEnumerationByComposedCharacterSequences
+                        usingBlock:^(NSString *ch, NSRange substringRange, NSRange enclosingRange, BOOL *stop) {
+                          unichar c = [ch characterAtIndex:0];
+                          if (c < 0x20 || c == 0x7f || c == '/' || c == '\\' || c == ':') return;
+                          if ((c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069) || c == 0x200e || c == 0x200f) return;
+                          [clean appendString:ch];
+                        }];
+  NSString *out = [clean stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+  while ([out hasPrefix:@"."]) out = [out substringFromIndex:1];
+  out = [out stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+  while ([out lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 200) {
+    NSString *ext = out.pathExtension;
+    NSString *stem = out.stringByDeletingPathExtension;
+    if (stem.length == 0) {
+      out = [out substringToIndex:out.length - 1];
+      continue;
+    }
+    stem = [stem substringToIndex:stem.length - 1];
+    out = ext.length > 0 ? [stem stringByAppendingPathExtension:ext] : stem;
+  }
+  return out.length == 0 ? @"download" : out;
 }
 
 BOOL WinterCEFClientInstallsTheAutomationHandlers(void) {

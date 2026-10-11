@@ -27,7 +27,8 @@ final class BrowserLink {
     /// (the daemon re-creates the item at its own boot, and may have minted a new one) — never once
     /// per reconnect attempt while the daemon is simply down.
     static func start(home: String, keychainService: String, runtime: BrowserRuntime? = nil) -> BrowserLink {
-        let host = BrowserLinkHost(runtime: runtime ?? .shared)
+        let host = BrowserLinkHost(runtime: runtime ?? .shared,
+                                   downloadsRoot: (home as NSString).appendingPathComponent("cache/downloads"))
         let socketPath = WinterPaths.socketPath(home: home)
         let tokens = HarnessTokenCache(service: keychainService)
         let appVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0"

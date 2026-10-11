@@ -334,7 +334,9 @@ extension CUCore {
     /// a menu-bar item's panel goes to THAT process while the bound app stays in front — never work in the bound app
     /// (review of round 10, MEDIUM #3: the key was put on the front app).
     func noteUserInteraction(type: CGEventType, flags: CGEventFlags, keycode: Int64, location: CGPoint?, targetPid: Int64 = 0) {
-        guard guardianRunning, let front = sys.frontmostPid(), boundTargetPids().contains(front) else { return }
+        // (Fed by the guardian's tap while it runs, by the work watcher otherwise — whoever calls has checked the event is
+        // the user's.)
+        guard let front = sys.frontmostPid(), boundTargetPids().contains(front) else { return }
         switch type {
         case .keyDown:
             // Typing (no ⌘ or ⌃): a ⌘/⌃ chord may be the system's (⌘-Space, ⌘-Tab, ⌃-arrows), not work in the app —
@@ -375,7 +377,7 @@ extension CUCore {
 
     /// Whether the user is working in `pid` now (round 10): the agent does not act on it.
     func userIsWorking(in pid: pid_t) -> Bool {
-        guard guardianRunning else { return false }
+        // (Read whether or not the guardian runs: the mark outlasts it, and the always-on activation observer ends it.)
         let front = sys.frontmostPid()
         let now = clock.nowSeconds()
         return guardianLock.withLock { guardianCore.userIsWorking(in: pid, front: front, now: now) }
@@ -398,9 +400,20 @@ extension CUCore {
 
     /// The refusal while the user is working in the target (round 10).
     func refuseWhileUserWorks(_ t: CUTarget) throws {
-        guard userIsWorking(in: t.pid) else { return }
+        // Under Secure Event Input the tap sees no key: when the bound app in front holds it itself (a password or a
+        // secure field of its own has the keyboard), the user is taken to be working in it (review of round 10, LOW #10).
+        let secureOwner = secureInputOn && sys.frontmostPid() == t.pid && secureInputOwnerPid() == t.pid
+        guard secureOwner || userIsWorking(in: t.pid) else { return }
         CULog.act.notice("act in \(t.appName, privacy: .public): refused — the user is working in it")
         throw CUError.refused(.userWorking, "the user is working in \(t.appName) right now — wait and retry, or ask them")
+    }
+
+    /// The process holding Secure Event Input (the session's `kCGSSessionSecureInputPID`), when one does.
+    func secureInputOwnerPid() -> pid_t? {
+        if let o = secureInputOwnerOverride { return o }
+        guard let d = CGSessionCopyCurrentDictionary() as? [String: Any],
+              let n = d["kCGSSessionSecureInputPID"] as? NSNumber, n.int32Value > 0 else { return nil }
+        return n.int32Value
     }
 
     /// A click on the Dock or on another app's window (`.app`), or a trackpad swipe or a click on another display's

@@ -7,10 +7,10 @@ import { TransportError } from "../../../src/computer-use/browser/transport";
 
 interface Sent { jsonrpc: string; id: string; method: string; params: Record<string, unknown> }
 
-function harness(timeouts: Record<string, number> = {}) {
+function harness(timeouts: Record<string, number> = {}, features?: string[]) {
   const sent: Sent[] = [];
   let writable = true;
-  const t = new ExtensionTransport({ family: "chrome", write: (m) => { if (writable) sent.push(m as unknown as Sent); return writable; }, timeouts });
+  const t = new ExtensionTransport({ family: "chrome", write: (m) => { if (writable) sent.push(m as unknown as Sent); return writable; }, timeouts, ...(features === undefined ? {} : { features }) });
   t.bind("chrome");
   const answer = (result: unknown, i = sent.length - 1) => t.handle({ jsonrpc: "2.0", id: sent[i]!.id, result });
   const fail = (code: string, message: string, data: Record<string, unknown> = {}, i = sent.length - 1) =>
@@ -69,7 +69,7 @@ describe("requests", () => {
 
   test("a method outside the allowlist is refused before anything is sent", async () => {
     const h = harness();
-    for (const method of ["Network.getCookies", "Storage.getCookies", "Runtime.getProperties", "Page.addScriptToEvaluateOnNewDocument", "Target.sendMessageToTarget", "Fetch.enable"]) {
+    for (const method of ["Network.getCookies", "Storage.getCookies", "Runtime.getProperties", "Page.addScriptToEvaluateOnNewDocument", "Target.sendMessageToTarget", "Fetch.fulfillRequest"]) {
       await expect(h.t.send("418", method)).rejects.toMatchObject({ code: "not_allowed" });
     }
     expect(h.sent).toEqual([]);
@@ -77,7 +77,7 @@ describe("requests", () => {
 
   test("subscribe refuses an event outside the allowlist, sends the rest", async () => {
     const h = harness();
-    await expect(h.t.subscribe("418", ["Page.frameNavigated", "Network.responseReceived"])).rejects.toMatchObject({ code: "not_allowed" });
+    await expect(h.t.subscribe("418", ["Page.frameNavigated", "Network.responseReceivedExtraInfo"])).rejects.toMatchObject({ code: "not_allowed" });
     expect(h.sent).toEqual([]);
     const p = h.t.subscribe("418", ["Page.frameNavigated"]);
     expect(h.sent[0]).toMatchObject({ method: "cdp.subscribe", params: { tabKey: "418", events: ["Page.frameNavigated"] } });
@@ -179,7 +179,7 @@ describe("notifications", () => {
     h.notify("cdp.event", { tabKey: "418", method: "Page.frameNavigated", params: { frame: { id: "F" } }, cdpSessionId: "S1" });
     h.notify("cdp.event", { tabKey: "418", method: "Network.requestWillBeSent", params: { requestId: "1", timestamp: 2, type: "Document", request: { headers: { cookie: "secret" } } } });
     h.notify("cdp.event", { tabKey: "418", method: "Page.loadEventFired", params: {} }); // not subscribed
-    h.notify("cdp.event", { tabKey: "418", method: "Network.responseReceived", params: {} }); // never allowed
+    h.notify("cdp.event", { tabKey: "418", method: "Network.responseReceivedExtraInfo", params: {} }); // never allowed
     h.notify("cdp.event", { tabKey: "419", method: "Page.frameNavigated", params: {} }); // another tab
     expect(events).toEqual([
       { tabKey: "418", method: "Page.frameNavigated", params: { frame: { id: "F" } }, cdpSessionId: "S1" },
@@ -243,5 +243,75 @@ describe("notifications", () => {
   test("a request from the extension is not the transport's to answer", () => {
     const h = harness();
     expect(h.t.handle({ jsonrpc: "2.0", id: "e5", method: "hello", params: {} })).toBe(false);
+  });
+});
+
+describe("Phase 3: the members an extension's hello names", () => {
+  test("an extension naming no features offers none of them (an older build); keepTab never sends a group then", async () => {
+    const h = harness();
+    for (const m of ["present", "onUserDone", "setMuted", "updateGroup", "listWindows", "history", "bookmarks", "armDownloads", "onDownload", "releaseDownload"] as const) {
+      expect({ m, defined: h.t[m] !== undefined }).toEqual({ m, defined: false });
+    }
+    const kept = h.t.keepTab("418", { group: "Research" });
+    expect(h.sent.at(-1)).toMatchObject({ method: "tabs.keep", params: { tabKey: "418" } });
+    expect(h.sent.at(-1)!.params.group).toBeUndefined();
+    h.answer({});
+    await kept;
+  });
+
+  test("mute, group, keepGroup, windows: each request as sent, each answer as read", async () => {
+    const h = harness({}, ["cdp3", "mute", "group", "keepGroup", "windows", "tabFacts"]);
+    expect(h.t.present).toBeUndefined();
+    const muted = h.t.setMuted!("418", true);
+    expect(h.sent.at(-1)).toMatchObject({ method: "tabs.mute", params: { tabKey: "418", muted: true } });
+    h.answer({});
+    await muted;
+    const grouped = h.t.updateGroup!({ sessionId: "s_1", title: "Flights", collapsed: true });
+    expect(h.sent.at(-1)).toMatchObject({ method: "group.update", params: { sessionId: "s_1", title: "Flights", collapsed: true } });
+    h.answer({});
+    await grouped;
+    const kept = h.t.keepTab("418", { group: "Research" });
+    expect(h.sent.at(-1)).toMatchObject({ method: "tabs.keep", params: { tabKey: "418", group: "Research" } });
+    h.answer({});
+    await kept;
+    const windows = h.t.listWindows!();
+    expect(h.sent.at(-1)).toMatchObject({ method: "windows.list", params: {} });
+    h.answer({ windows: [{ id: 1, focused: true, tabs: 3 }, { id: "x" }, "junk", { id: 2, tabs: 1 }] });
+    expect(await windows).toEqual([{ id: 1, focused: true, tabs: 3 }, { id: 2, focused: false, tabs: 1 }]);
+    const bad = h.t.listWindows!();
+    h.answer({ nope: true });
+    await expect(bad).rejects.toBeInstanceOf(TransportError);
+  });
+
+  test("present: tabs.present { tabKey }", async () => {
+    const h = harness({}, ["present", "userDone"]);
+    const p = h.t.present!("418", { sessionId: "s_1" });
+    expect(h.sent.at(-1)).toMatchObject({ method: "tabs.present", params: { tabKey: "418" } });
+    h.answer({});
+    await p;
+  });
+
+  test("a tab's facts: lastAccessed, group and windowId when well-formed, dropped otherwise", async () => {
+    const h = harness({}, ["tabFacts"]);
+    const listed = h.t.listTabs();
+    h.answer({ tabs: [{ ...tab, lastAccessed: 1_760_000_000_000, group: "Winter · Fix", windowId: 3 }, { ...tab, tabKey: "419", lastAccessed: "soon", group: "", windowId: Number.NaN }] });
+    const [a, b] = await listed;
+    expect(a).toEqual({ ...tab, lastAccessed: 1_760_000_000_000, group: "Winter · Fix", windowId: 3 });
+    expect(b).toEqual({ ...tab, tabKey: "419" });
+  });
+
+  test("user.done and download notifications reach their listeners (well-formed downloads only)", () => {
+    const h = harness({}, ["userDone", "downloads"]);
+    const done: Array<[string, boolean]> = [];
+    const downloads: Array<[string, unknown]> = [];
+    h.t.onUserDone!((k, d) => done.push([k, d]));
+    h.t.onDownload!((k, d) => downloads.push([k, d]));
+    h.notify("user.done", { tabKey: "418", done: true });
+    h.notify("user.done", { tabKey: "418", done: false });
+    h.notify("download", { tabKey: "418", download: { id: "dl1", state: "done", name: "report.csv", bytes: 12, path: "/x/report.csv", mime: "text/csv" } });
+    h.notify("download", { tabKey: "418", download: { id: "dl2", state: "exploded", name: "x", bytes: 1 } });
+    h.notify("download", { tabKey: "418", download: "junk" });
+    expect(done).toEqual([["418", true], ["418", false]]);
+    expect(downloads).toEqual([["418", { id: "dl1", state: "done", name: "report.csv", bytes: 12, path: "/x/report.csv", mime: "text/csv" }]]);
   });
 });

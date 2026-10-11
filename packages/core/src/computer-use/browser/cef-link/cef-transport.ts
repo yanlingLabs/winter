@@ -3,12 +3,15 @@
 // late result is dropped by its `cmdId`. The app enforces the CDP allowlist with its own Swift copy, and so does this
 // transport, before anything is written (both layers). One transport per link: a second attach (or a relaunched app)
 // gets a new one, and the engine's tab drivers start over on it.
-import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_NETWORK_EVENT_PARAMS } from "../cdp-allowlist";
-import { TransportError, type CdpEvent, type CdpTransport, type TransportErrorCode, type TransportTab } from "../transport";
+import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS } from "../cdp-allowlist";
+import { cdpEventParams } from "../cdp-reduce";
+import { TransportError, type CdpEvent, type CdpTransport, type TransportDownload, type TransportErrorCode, type TransportTab } from "../transport";
 
-export const BROWSER_LINK_PROTOCOL = 1;
-/** The ops a `browserLink.command` carries (spine §5.2). */
-export type BrowserLinkOp = "tab.ensure" | "tab.release" | "tab.close" | "tabs.live" | "cdp.send" | "cdp.subscribe" | "overlay";
+/** 2 (ComputerV2 Phase 3): the ops `tab.present`, `tab.mute`, `tab.downloads`, `tab.download`, and the app's
+ *  `browserLink.download` request. */
+export const BROWSER_LINK_PROTOCOL = 2;
+/** The ops a `browserLink.command` carries (spine §5.2; Phase 3's last four). */
+export type BrowserLinkOp = "tab.ensure" | "tab.release" | "tab.close" | "tabs.live" | "cdp.send" | "cdp.subscribe" | "overlay" | "tab.present" | "tab.mute" | "tab.downloads" | "tab.download";
 /** A command line is at most this long (the app's own cap); a result line rides the daemon's 8 MiB authed cap. */
 export const BROWSER_LINK_COMMAND_MAX = 1024 * 1024;
 export const LINK_TIMEOUTS = { send: 15_000, screenshot: 20_000, ensure: 20_000, other: 15_000 } as const;
@@ -45,6 +48,7 @@ export class CefTransport implements CdpTransport {
   private readonly tabSession = new Map<string, string>();
   private readonly events = new Set<(e: CdpEvent) => void>();
   private readonly gone = new Set<(tabKey: string, reason: "closed" | "crashed" | "stopped" | "detached_by_user") => void>();
+  private readonly downloads = new Set<(tabKey: string, d: TransportDownload) => void>();
   private readonly timeouts: Record<keyof typeof LINK_TIMEOUTS, number>;
 
   constructor(readonly linkId: string, private readonly peer: LinkPeer, private readonly opts: CefTransportOptions = {}) {
@@ -88,11 +92,19 @@ export class CefTransport implements CdpTransport {
   /** `browserLink.events`: forward each allowlisted event to the engine. */
   dispatch(e: { tabId: string; method: string; params: Record<string, unknown>; cdpSessionId?: string }): void {
     if (!CDP_ALLOWED_EVENTS.includes(e.method)) return;
-    // The app strips Network events already; so does this side (no header, URL or body ever reaches the engine).
-    const params = e.method.startsWith("Network.") ? Object.fromEntries(Object.entries(e.params).filter(([k]) => CDP_NETWORK_EVENT_PARAMS.includes(k))) : e.params;
+    // The app reduces events already (`cdp-reduce.ts`'s Swift twin); so does this side — no header, cookie, post data or
+    // page object ever reaches the engine.
+    const params = cdpEventParams(e.method, e.params);
     const ev: CdpEvent = { tabKey: e.tabId, method: e.method, params, ...(e.cdpSessionId === undefined ? {} : { cdpSessionId: e.cdpSessionId }) };
     for (const l of [...this.events]) {
       try { l(ev); } catch (err) { this.opts.log?.(`computer-use: a browser event listener failed (${err instanceof Error ? err.message : "error"})`); }
+    }
+  }
+
+  /** `browserLink.download`: one download a tab's own handler reported. */
+  downloadReported(tabId: string, d: TransportDownload): void {
+    for (const l of [...this.downloads]) {
+      try { l(tabId, d); } catch { /* a listener never breaks the link */ }
     }
   }
 
@@ -191,4 +203,29 @@ export class CefTransport implements CdpTransport {
 
   /** The built-in browser has no in-page Stop button (the Mac's stop button is the session's). */
   onStop(): () => void { return () => {}; }
+
+  // ── Phase 3 (link protocol 2) ──────────────────────────────────────────────────────────────────
+
+  /** The sign-in handoff: Winter.app shows the session's window with this tab selected (after the user's OK). */
+  async present(tabKey: string, opts: { sessionId: string }): Promise<void> {
+    await this.command("tab.present", { sessionId: opts.sessionId, tabId: tabKey }, this.timeouts.other);
+  }
+
+  async setMuted(tabKey: string, muted: boolean): Promise<void> {
+    await this.command("tab.mute", { tabId: tabKey, muted }, this.timeouts.other);
+  }
+
+  /** The tab's own download handler: saves into `dir` (inside the app's `<home>/cache/downloads/`) while armed. */
+  async armDownloads(tabKey: string, opts: { dir: string; subdir: string; until: number; maxBytes: number } | null): Promise<void> {
+    await this.command("tab.downloads", opts === null ? { tabId: tabKey, dir: null } : { tabId: tabKey, dir: opts.dir, until: opts.until, maxBytes: opts.maxBytes }, this.timeouts.other);
+  }
+
+  async startDownload(tabKey: string, url: string): Promise<void> {
+    await this.command("tab.download", { tabId: tabKey, url }, this.timeouts.other);
+  }
+
+  onDownload(listener: (tabKey: string, d: TransportDownload) => void): () => void {
+    this.downloads.add(listener);
+    return () => { this.downloads.delete(listener); };
+  }
 }

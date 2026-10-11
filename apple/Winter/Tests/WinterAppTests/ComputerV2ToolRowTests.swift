@@ -50,6 +50,21 @@ final class ComputerV2ToolRowTests: XCTestCase {
         XCTAssertEqual(computerV2AppNames(in: "await browsers.open(`https://${host}/`)"), [])
     }
 
+    func testAPlainReadNamesItsSite() {
+        XCTAssertEqual(computerV2Label(title: nil, code: #"const r = await browsers.read("https://docs.example.com/api"); print(r.text)"#), "docs.example.com")
+        XCTAssertEqual(computerV2AppNames(in: #"await browsers.read('http://localhost:3000/health'); const t = await browsers.open("https://example.com/")"#),
+                       ["localhost:3000", "example.com"])
+        XCTAssertEqual(computerV2AppNames(in: "await Promise.all(urls.map((u) => browsers.read(u)))"), [])
+    }
+
+    func testASavedScriptsCallIsShownAsScriptAndItsName() {
+        XCTAssertEqual(computerV2Verbs(in: "const r = await scripts.exportCsv(sheet, '/tmp/a.csv'); await notes.state()"), ["script exportCsv", "state"])
+        XCTAssertEqual(computerV2Label(title: nil, code: "await scripts.exportCsv(s, p)"), "Using the computer · script exportCsv")
+        // Saving is not a saved script's call; what the saved function does is still read as verbs.
+        XCTAssertEqual(computerV2Verbs(in: "await scripts.save('fill', async (app, v) => { await app.click(3); await app.type(v) })"), ["click", "type"])
+        XCTAssertEqual(computerV2Verbs(in: "await scripts.fill(a, 'x'); await scripts.fill(a, 'y')"), ["script fill"])
+    }
+
     func testAppNameFormsAreShownAsNames() {
         XCTAssertEqual(computerV2AppNames(in: #"await apps.open("com.apple.Notes")"#), ["Notes"])
         XCTAssertEqual(computerV2AppNames(in: #"await apps.open('/Applications/Final Cut Pro.app')"#), ["Final Cut Pro"])
@@ -79,6 +94,9 @@ final class ComputerV2ToolRowTests: XCTestCase {
 
     func testWaitForIdleIsNotWaitFor() {
         XCTAssertEqual(computerV2Verbs(in: "await n.waitForIdle(); await n.waitFor({ text: 'x' })"), ["waitForIdle", "waitFor"])
+        // Phase 3's tab members.
+        XCTAssertEqual(computerV2Verbs(in: "await t.console(); await t.networkBody('r1'); await t.download(4); await t.waitForUser('sign in'); await t.viewport(null)"),
+                       ["console", "networkBody", "download", "waitForUser", "viewport"])
     }
 
     func testAnAppOnlyScriptNamesTheApp() {

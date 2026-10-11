@@ -226,7 +226,7 @@ final class ComputerUseSettingsModel: ObservableObject {
         }
     }
 
-    // MARK: - The three toggles
+    // MARK: - The toggles
 
     func setEnabled(_ value: Bool) async { await write(ComputerUseSettingsPatch(enabled: value), what: "change Computer Use") }
     func setMirror(_ value: Bool) async { await write(ComputerUseSettingsPatch(mirror: value), what: "change the mirror") }
@@ -234,6 +234,10 @@ final class ComputerUseSettingsModel: ObservableObject {
         await write(ComputerUseSettingsPatch(privateEventPath: value), what: "change background clicks")
     }
     func setAllowAllApps(_ value: Bool) async { await write(ComputerUseSettingsPatch(allowAllApps: value), what: "change Allow all apps") }
+    func setHeadlessEnabled(_ value: Bool) async {
+        await write(ComputerUseSettingsPatch(headlessEnabled: value), what: "change the headless browser")
+    }
+    func setWebMcp(_ value: Bool) async { await write(ComputerUseSettingsPatch(webmcp: value), what: "change site tools") }
 
     private func write(_ patch: ComputerUseSettingsPatch, what: String) async {
         guard let client, let before = status, !isSavingSettings, !patch.isEmpty else { return }

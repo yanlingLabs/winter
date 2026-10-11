@@ -8,12 +8,14 @@
 // and — before any pointer or keyboard input the engine sends over CDP — checks the target: hit test, visibility,
 // scroll into view once, and the SECURE-FIELD floor (password, one-time-code and payment fields; fails closed).
 // What it never does: start I/O (no fetch, no postMessage to the page, no storage, no cookies), or take anything
-// from the daemon but its op arguments.
+// from the daemon but its op arguments. The one call into the page's own code it makes, besides input events, is
+// WebMCP's `executeTool` (`webmcp.ts`), and only for the model's `tab.callTool()`.
 import type {
-  RtCheck, RtClassify, RtCondition, RtFindQuery, RtFound, RtHit, RtId, RtNode, RtPoint, RtSnapshot,
+  RtCheck, RtClassify, RtCondition, RtFindQuery, RtFound, RtHit, RtId, RtInspect, RtLink, RtNode, RtPoint, RtSnapshot,
 } from "./protocol";
-import { looksSecret, REDACTED, redactText } from "./redact";
-import { classifyTarget, isPaymentHost, isSecureField, isTextEntry as isTextEntryFacts, nativePicker, pickerValueHint, TEXT_INPUT_TYPES, type ElementFacts } from "./rules";
+import { looksLikeUrl, looksSecret, REDACTED, redactText, redactUrl, redactUrlAttribute } from "./redact";
+import { classifyTarget, cssSelectorRefusal, isPaymentHost, isSecureField, isTextEntry as isTextEntryFacts, nativePicker, pickerValueHint, TEXT_INPUT_TYPES, type ElementFacts } from "./rules";
+import { listSiteTools, modelContextOf, SiteToolCalls, type SiteToolOwner } from "./webmcp";
 
 type Any = Record<string, unknown>;
 
@@ -474,6 +476,7 @@ type Any = Record<string, unknown>;
 
   // ── find ────────────────────────────────────────────────────────────────────────────────────────
   const find = (q: RtFindQuery): RtFound[] => {
+    if (q.css !== undefined || q.testId !== undefined || q.placeholder !== undefined || q.label !== undefined) return findDom(q);
     const snap = snapshot({ maxNodes: 10_000 });
     const lc = (s: string | undefined): string => (s ?? "").toLowerCase();
     const want = { text: lc(q.text), role: lc(q.role), name: lc(q.name) };
@@ -496,10 +499,245 @@ type Any = Record<string, unknown>;
     return out;
   };
 
+  /** Every element matching `selector` in the document and in its open shadow roots (at most `max`). */
+  const deepQuery = (selector: string, max = 2_000): Element[] => {
+    const out: Element[] = [];
+    const seen = new Set<Element>();
+    const roots: Array<Document | ShadowRoot> = [document];
+    for (let i = 0; i < roots.length && out.length < max; i++) {
+      const root = roots[i]!;
+      for (const el of root.querySelectorAll(selector)) {
+        if (!seen.has(el)) { seen.add(el); out.push(el); }
+        if (out.length >= max) break;
+      }
+      for (const el of root.querySelectorAll("*")) if (el.shadowRoot !== null && el.shadowRoot.mode === "open") roots.push(el.shadowRoot);
+    }
+    return out;
+  };
+  const matches = (hay: string | undefined, want: string, exact: boolean): boolean =>
+    hay !== undefined && (exact ? collapse(hay) === want : collapse(hay).toLowerCase().includes(want.toLowerCase()));
+  const TEST_ID = "[data-testid], [data-test-id], [data-test], [data-cy]";
+  const FIELD = "input, textarea, select, [contenteditable], [role=textbox], [role=searchbox], [role=combobox], [role=spinbutton], [role=slider], [role=checkbox], [role=radio], [role=switch], [role=listbox]";
+  /** Phase 3's DOM search: css, testId, placeholder or label — then role, name and text narrow it, as for state(). */
+  const findDom = (q: RtFindQuery): RtFound[] => {
+    const exact = q.exact === true;
+    // The engine refuses a selector outside the safe subset; checked here again (a value test reads hidden values).
+    if (q.css !== undefined) {
+      const why = cssSelectorRefusal(q.css);
+      if (why !== undefined) throw new Error(`css: ${why}`);
+    }
+    let selector = q.css ?? (q.testId !== undefined ? TEST_ID : q.placeholder !== undefined ? "[placeholder]" : FIELD);
+    if (q.css !== undefined && (q.testId !== undefined || q.placeholder !== undefined)) selector = q.css;
+    let candidates: Element[];
+    try { candidates = deepQuery(selector); } catch { throw new Error(`css: "${String(q.css).slice(0, 80)}" is not a valid selector`); }
+    const active = deepActive();
+    const out: RtFound[] = [];
+    for (const el of candidates) {
+      if (out.length >= 50) break;
+      if (isOverlay(el)) continue;
+      const st = styleOf(el);
+      if (hidden(el, st)) continue;
+      if (q.testId !== undefined) {
+        const tid = el.getAttribute("data-testid") ?? el.getAttribute("data-test-id") ?? el.getAttribute("data-test") ?? el.getAttribute("data-cy");
+        if (tid === null || (exact ? tid !== q.testId : tid.toLowerCase() !== q.testId.toLowerCase())) continue;
+      }
+      if (q.placeholder !== undefined && !matches(el.getAttribute("placeholder") ?? undefined, q.placeholder, exact)) continue;
+      const role = roleOf(el) ?? "generic";
+      const name = nameOf(el, role);
+      if (q.label !== undefined && !matches(name, q.label, exact)) continue;
+      if (q.role !== undefined && q.role.length > 0 && !role.toLowerCase().includes(q.role.toLowerCase()) && !roleWord(role, el).toLowerCase().includes(q.role.toLowerCase())) continue;
+      if (q.name !== undefined && q.name.length > 0 && !matches(name, q.name, exact)) continue;
+      const v = valueOf(el, role);
+      if (q.text !== undefined && q.text.length > 0) {
+        const hay = `${name ?? ""} ${v.secure === true ? "" : v.value ?? ""} ${textOf(el, 400)}`;
+        if (!matches(hay, q.text, exact)) continue;
+      }
+      const states = statesOf(el, role, active);
+      out.push({ id: idOf(el), role: roleWord(role, el), ...(name === undefined ? {} : { name: cap(redactText(name)) }), ...(v.value === undefined ? {} : { value: v.value }), ...(states.length === 0 ? {} : { states }) });
+    }
+    return out;
+  };
+
+  // ── Phase 3: one element, the markup, the assets, links and check boxes ────────────────────────
+  const DROP_ATTRS = new Set(["nonce", "integrity"]);
+  const SECRET_META = /csrf|xsrf|token|nonce|secret|api[-_]?key/i;
+  /** An attribute's value as the model may read it. */
+  const attrValue = (el: Element, name: string, value: string): string | undefined => {
+    const lname = name.toLowerCase();
+    if (DROP_ATTRS.has(lname)) return undefined;
+    if (lname === "value" && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) {
+      if ((el instanceof HTMLInputElement && el.type.toLowerCase() === "hidden") || isSecure(el)) return REDACTED;
+    }
+    if (lname === "content" && el.tagName === "META" && SECRET_META.test(`${el.getAttribute("name") ?? ""} ${el.getAttribute("property") ?? ""} ${el.getAttribute("http-equiv") ?? ""}`)) return REDACTED;
+    const asUrl = redactUrlAttribute(lname, value);
+    if (asUrl !== undefined) return cap(asUrl, 500);
+    if (looksSecret(value)) return REDACTED;
+    return cap(redactText(value), 500);
+  };
+  const inspectEl = (el: Element): RtInspect => {
+    const role = roleOf(el) ?? "generic";
+    const name = nameOf(el, role);
+    const v = valueOf(el, role);
+    const attributes: Record<string, string> = {};
+    let n = 0;
+    for (const a of el.attributes) {
+      if (n >= 40) break;
+      const shown = attrValue(el, a.name, a.value);
+      if (shown === undefined) continue;
+      attributes[a.name] = shown;
+      n++;
+    }
+    const r = el.getBoundingClientRect();
+    const st = styleOf(el);
+    const states = statesOf(el, role, deepActive());
+    const text = role === "textbox" || isSecure(el) ? undefined : collapse((el as HTMLElement).innerText ?? el.textContent ?? "");
+    return {
+      id: idOf(el), tag: el.tagName.toLowerCase(), role: roleWord(role, el),
+      ...(name === undefined ? {} : { name: cap(redactText(name)) }),
+      ...(text === undefined || text.length === 0 ? {} : { text: cap(redactText(text), 2_000) }),
+      ...(v.value === undefined ? {} : { value: v.value }),
+      attributes, box: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+      visible: !hidden(el, st) && r.width > 0 && r.height > 0, enabled: !isDisabled(el),
+      ...(states.length === 0 ? {} : { states }),
+    };
+  };
+  const inspect = (arg: { id?: RtId; x?: number; y?: number }): RtInspect | { frame: RtId } | null => {
+    if (arg.id !== undefined) {
+      const el = elementOf(arg.id);
+      if (el === undefined) throw new Error(`stale:${arg.id}`);
+      return inspectEl(el);
+    }
+    if (typeof arg.x !== "number" || typeof arg.y !== "number") return null;
+    const hit = deepFromPoint(arg.x, arg.y);
+    if (hit === null) return null;
+    if (hit instanceof HTMLIFrameElement || hit.tagName === "FRAME") return { frame: idOf(hit) };
+    return inspectEl(hit);
+  };
+
+  const VOID_TAGS = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]);
+  const escText = (t: string): string => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const escAttr = (t: string): string => t.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+  const html = (arg: { id?: RtId; maxChars: number }): { html: string; cut: boolean } => {
+    const max = Math.max(1_000, Math.min(500_000, arg.maxChars));
+    const root = arg.id === undefined ? document.documentElement : elementOf(arg.id);
+    if (root === undefined || root === null) throw new Error(`stale:${arg.id}`);
+    let out = "";
+    let cut = false;
+    const put = (s: string): void => {
+      if (cut) return;
+      if (out.length + s.length > max) { out += s.slice(0, max - out.length); cut = true; return; }
+      out += s;
+    };
+    const ser = (node: Node): void => {
+      if (cut) return;
+      if (node.nodeType === Node.TEXT_NODE) { put(escText(redactText(node.textContent ?? ""))); return; }
+      if (!(node instanceof Element)) { for (const c of node.childNodes) ser(c); return; }
+      const el = node;
+      if (isOverlay(el)) return;
+      const tag = el.tagName.toLowerCase();
+      let open = `<${tag}`;
+      for (const a of el.attributes) {
+        const shown = attrValue(el, a.name, a.value);
+        if (shown !== undefined) open += ` ${a.name}="${escAttr(shown)}"`;
+      }
+      // A field's live value (what the user or Winter typed), with the secure-field floor.
+      if ((el instanceof HTMLInputElement && !["checkbox", "radio", "file", "button", "submit", "reset", "image"].includes(el.type.toLowerCase())) && !el.hasAttribute("value")) {
+        const live = el.type.toLowerCase() === "hidden" || isSecure(el) ? REDACTED : looksSecret(el.value) ? REDACTED : looksLikeUrl(el.value) ? redactUrl(el.value.trim()) : el.value;
+        if (live.length > 0) open += ` value="${escAttr(live)}"`;
+      }
+      put(`${open}>`);
+      if (VOID_TAGS.has(tag)) return;
+      if (tag === "script") { put(`/* ${(el.textContent ?? "").length} chars */</script>`); return; }
+      if (el instanceof HTMLTextAreaElement) { put(`${escText(isSecure(el) ? REDACTED : looksSecret(el.value) ? REDACTED : el.value)}</textarea>`); return; }
+      if (el.shadowRoot !== null && el.shadowRoot.mode === "open") {
+        put(`<template shadowrootmode="open">`);
+        for (const c of el.shadowRoot.childNodes) ser(c);
+        put("</template>");
+      }
+      const kids = el instanceof HTMLTemplateElement ? el.content.childNodes : el.childNodes;
+      for (const c of kids) ser(c);
+      put(`</${tag}>`);
+    };
+    if (arg.id === undefined) put("<!doctype html>\n");
+    ser(root);
+    return { html: out, cut };
+  };
+
+  const assetUrl = (raw: string | null | undefined): string | undefined => {
+    if (raw === null || raw === undefined || raw.length === 0) return undefined;
+    if (raw.startsWith("data:")) {
+      const m = /^data:([^;,]*)/.exec(raw);
+      return `data:${m?.[1] || "text/plain"} (${raw.length} bytes)`;
+    }
+    try {
+      const u = new URL(raw, location.href);
+      return u.protocol === "http:" || u.protocol === "https:" ? u.href : undefined;
+    } catch { return undefined; }
+  };
+  const assets = (arg: { kinds: string[]; max: number }): Array<{ kind: string; url: string }> => {
+    const want = new Set(arg.kinds);
+    const max = Math.max(1, Math.min(1_000, arg.max));
+    const out: Array<{ kind: string; url: string }> = [];
+    const seen = new Set<string>();
+    const add = (kind: string, raw: string | null | undefined): void => {
+      if (!want.has(kind) || out.length >= max) return;
+      const url = assetUrl(raw);
+      if (url === undefined || seen.has(url)) return;
+      seen.add(url);
+      out.push({ kind, url });
+    };
+    for (const img of deepQuery("img")) add("image", (img as HTMLImageElement).currentSrc || (img as HTMLImageElement).src);
+    for (const v of deepQuery("video")) { add("media", (v as HTMLVideoElement).currentSrc || (v as HTMLVideoElement).src); add("image", (v as HTMLVideoElement).poster); }
+    for (const a of deepQuery("audio")) add("media", (a as HTMLAudioElement).currentSrc || (a as HTMLAudioElement).src);
+    for (const s of deepQuery("video source[src], audio source[src]")) add("media", (s as HTMLSourceElement).src);
+    for (const l of deepQuery("link[href]")) {
+      const rel = (l.getAttribute("rel") ?? "").toLowerCase();
+      const href = (l as HTMLLinkElement).href;
+      if (/\bstylesheet\b/.test(rel)) add("stylesheet", href);
+      else if (/\bicon\b/.test(rel)) add("image", href);
+      else if (/\bpreload\b/.test(rel) && l.getAttribute("as") === "font") add("font", href);
+    }
+    for (const sc of deepQuery("script[src]")) add("script", (sc as HTMLScriptElement).src);
+    if (want.has("image")) {
+      let n = 0;
+      for (const el of deepQuery("*", 3_000)) {
+        if (out.length >= max || n++ > 3_000) break;
+        const bg = styleOf(el)?.backgroundImage ?? "";
+        for (const m of bg.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/g)) add("image", m[1]);
+      }
+    }
+    return out.map((x) => ({ kind: x.kind, url: x.url.startsWith("data:") ? x.url : redactUrlText(x.url) }));
+  };
+  /** A URL's credential-looking query values, as the page runtime can tell (the engine redacts again). */
+  const redactUrlText = (u: string): string => redactText(u);
+
+  const linkOf = (arg: { id: RtId }): RtLink => {
+    const el = elementOf(arg.id);
+    if (el === undefined) throw new Error(`stale:${arg.id}`);
+    const a = el.closest("a[href], area[href]") as HTMLAnchorElement | null;
+    if (a !== null) return { kind: "link", url: a.href, ...(a.hasAttribute("download") ? { download: a.getAttribute("download") ?? "" } : {}) };
+    if (el instanceof HTMLImageElement) return { kind: "media", url: el.currentSrc || el.src };
+    if (el instanceof HTMLMediaElement) return { kind: "media", url: el.currentSrc || el.src };
+    if (el instanceof HTMLSourceElement && el.src.length > 0) return { kind: "media", url: el.src };
+    return { kind: "other" };
+  };
+  const checkState = (arg: { id: RtId }): { checkable: boolean; checked?: boolean } => {
+    const el = elementOf(arg.id);
+    if (el === undefined) throw new Error(`stale:${arg.id}`);
+    if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")) return { checkable: true, checked: el.checked };
+    const role = roleOf(el);
+    if (role === "checkbox" || role === "radio" || role === "switch" || role === "menuitemcheckbox" || role === "menuitemradio") {
+      return { checkable: true, checked: el.getAttribute("aria-checked") === "true" };
+    }
+    return { checkable: false };
+  };
+
   // ── readable text ───────────────────────────────────────────────────────────────────────────────
   const BOILERPLATE = new Set(["NAV", "HEADER", "FOOTER", "ASIDE"]);
-  const readable = (markdown: boolean): string => {
-    const main = document.querySelector("main, [role=main], article") ?? document.body;
+  const readable = (markdown: boolean, within?: RtId): string => {
+    const scoped = within === undefined ? undefined : elementOf(within);
+    if (within !== undefined && scoped === undefined) throw new Error(`stale:${within}`);
+    const main = scoped ?? document.querySelector("main, [role=main], article") ?? document.body;
     if (main === null) return "";
     const lines: string[] = [];
     let line = "";
@@ -524,7 +762,7 @@ type Any = Record<string, unknown>;
       if (markdown && tag === "PRE") { brk(); lines.push("```"); lines.push((n.textContent ?? "").replace(/\n+$/, "")); lines.push("```"); return; }
       if (markdown && tag === "A" && (n as HTMLAnchorElement).href) {
         const label = textOf(n);
-        if (label.length > 0) { line += ` [${label}](${(n as HTMLAnchorElement).href}) `; return; }
+        if (label.length > 0) { line += ` [${label}](${redactUrl((n as HTMLAnchorElement).href)}) `; return; }
       }
       if (markdown && (tag === "STRONG" || tag === "B")) { line += " **"; for (const c of composedChildren(n)) walk(c, depth + 1); line += "** "; return; }
       if (markdown && tag === "CODE") { line += " `"; for (const c of composedChildren(n)) walk(c, depth + 1); line += "` "; return; }
@@ -878,6 +1116,12 @@ type Any = Record<string, unknown>;
     return origin();
   };
 
+  // ── WebMCP: the page's own agent tools (Phase 4) ────────────────────────────────────────────────
+  // Read through THIS world's `document.modelContext` (the page cannot replace it here); only the tools this frame's
+  // own window registered, from its own origin. A call runs the page's own callback, in the page's world.
+  const siteCalls = new SiteToolCalls();
+  const siteOwner = (): SiteToolOwner => ({ window, origin: location.origin });
+
   // ── the entry ───────────────────────────────────────────────────────────────────────────────────
   const call = (op: string, arg: unknown, self: unknown): unknown => {
     const a = (arg ?? null) as Any | null;
@@ -885,7 +1129,7 @@ type Any = Record<string, unknown>;
       case "hello": return { id: RUNTIME_ID, url: location.href, title: document.title, readyState: document.readyState };
       case "snapshot": return snapshot(a as { within?: RtId; maxNodes?: number } | null);
       case "find": return find((a ?? {}) as RtFindQuery);
-      case "text": return readable(a?.markdown === true);
+      case "text": return readable(a?.markdown === true, typeof a?.within === "number" ? a.within : undefined);
       case "owner": return self instanceof Node ? idOf(self) : null;
       case "frameOffset": return frameOffset(a as { id: RtId; scroll?: boolean; inner?: { x: number; y: number } });
       case "point": return point(a as { id: RtId; scroll?: boolean; settle?: boolean; guardMenu?: boolean });
@@ -902,6 +1146,14 @@ type Any = Record<string, unknown>;
       case "waitChange": return waitChange(a as { maxMs: number });
       case "check": return check((a ?? {}) as RtCondition);
       case "alive": return ((a as { ids: RtId[] }).ids ?? []).filter((id) => nodeOf(id) !== undefined);
+      case "inspect": return inspect((a ?? {}) as { id?: RtId; x?: number; y?: number });
+      case "html": return html(a as { id?: RtId; maxChars: number });
+      case "assets": return assets(a as { kinds: string[]; max: number });
+      case "linkOf": return linkOf(a as { id: RtId });
+      case "checkState": return checkState(a as { id: RtId });
+      case "siteTools": return listSiteTools(modelContextOf(document), siteOwner(), { describe: a?.describe === true });
+      case "callSiteTool": return siteCalls.call(modelContextOf(document), siteOwner(), a as { name: string; input: unknown; callId: string });
+      case "cancelSiteTool": return siteCalls.cancel(a?.callId);
       default: throw new Error(`unknown op ${op}`);
     }
   };

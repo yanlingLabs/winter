@@ -27,8 +27,13 @@ import Foundation
 ///     browser's `uniqueId` wherever it reported one: a process-local `contextId` can be handed out
 ///     again after a cross-process navigation, so an id the gate once saw as "winter" is "winter" only
 ///     while the LATEST context the browser reported under that id is the winter one.
-///  3. **The events** — only subscribed, allowlisted ones leave, and a `Network.*` event leaves with its
-///     params cut to `requestId`, `timestamp` and `type`.
+///  3. **The events** — only subscribed, allowlisted ones leave, and an event `CDPAllowlist.eventParams`
+///     lists leaves reduced by `CDPEventReducer` (the twin of the daemon's `cdp-reduce.ts`): no header,
+///     cookie, post data or page object.
+///  4. **Phase 3's rules** — `Network.enable` keeps no post data and capped buffers; a response body is
+///     cut (`filterResult`); `Emulation.setDeviceMetricsOverride` takes a screen size only; and the link
+///     refuses `Fetch.*` and `IO.*` outright — the built-in browser saves downloads through Winter.app's
+///     own handler, never by reading a response here.
 public final class CDPTabGate {
     /// Why a send was refused — the message of a `not_allowed` answer.
     public struct Refusal: Error, Equatable, Sendable {
@@ -39,7 +44,7 @@ public final class CDPTabGate {
     public enum EventDisposition: Equatable, Sendable {
         case drop
         case forward
-        /// Forward, with params cut to `CDPAllowlist.networkEventParams`.
+        /// Forward, with params reduced by `CDPEventReducer` (`CDPAllowlist.eventParams`).
         case forwardStripped
     }
 
@@ -118,14 +123,24 @@ public final class CDPTabGate {
     /// What happens to one event the browser reported for this tab.
     public func disposition(forEvent method: String) -> EventDisposition {
         guard CDPAllowlist.eventSet.contains(method), subscribed.contains(method) else { return .drop }
-        return method.hasPrefix("Network.") ? .forwardStripped : .forward
+        return CDPEventReducer.reduces(method) ? .forwardStripped : .forward
     }
 
-    /// A `Network.*` event's params, cut to the three keys idle detection needs. Anything that is not an
-    /// object becomes an empty one.
-    public static func strippedNetworkParams(_ params: JSONValue) -> JSONValue {
-        guard case .object(let all) = params else { return .object([:]) }
-        return .object(all.filter { CDPAllowlist.networkEventParamSet.contains($0.key) })
+    /// An event's params as they may leave the app (`CDPEventReducer`). For a reduced event anything that
+    /// is not an object becomes an empty one.
+    public static func reducedParams(method: String, params: JSONValue) -> JSONValue {
+        CDPEventReducer.reduce(method: method, params: params)
+    }
+
+    /// An answer as it may leave the app: `Network.getResponseBody`'s `body` is cut at
+    /// `CDPAllowlist.responseBodyMaxChars` (UTF-16 units, as the daemon counts) with `truncated: true`.
+    public static func filterResult(method: String, result: JSONValue) -> JSONValue {
+        guard method == "Network.getResponseBody", case .object(var o) = result, case .string(let body)? = o["body"] else { return result }
+        let units = Array(body.utf16)
+        guard units.count > CDPAllowlist.responseBodyMaxChars else { return result }
+        o["body"] = .string(String(decoding: units.prefix(CDPAllowlist.responseBodyMaxChars), as: UTF16.self))
+        o["truncated"] = .bool(true)
+        return .object(o)
     }
 
     /// Whether `noteEvent` needs this event's params — the host parses only these, whatever is subscribed.
@@ -215,7 +230,38 @@ public final class CDPTabGate {
                 return Refusal("Page.reload: scriptToEvaluateOnLoad would run in the page's own world")
             }
             return nil
+        case "Network.enable":
+            // Every cap STATED: left out, the browser's own defaults keep request bodies and buffer far more.
+            guard params["maxPostDataSize"]?.intValue == 0 else {
+                return Refusal("Network.enable never keeps request bodies (maxPostDataSize: 0 is required)")
+            }
+            for (key, max) in [("maxResourceBufferSize", CDPAllowlist.networkBufferMaxResource),
+                               ("maxTotalBufferSize", CDPAllowlist.networkBufferMaxTotal)] {
+                guard let value = params[key]?.intValue, value >= 0, value <= max else {
+                    return Refusal("Network.enable needs \(key), at most \(max)")
+                }
+            }
+            return nil
+        case "Emulation.setDeviceMetricsOverride":
+            guard case .object(let o) = params else { return Refusal("Emulation.setDeviceMetricsOverride takes a screen size") }
+            let extra = o.keys.filter { !["width", "height", "deviceScaleFactor", "mobile"].contains($0) }
+            if !extra.isEmpty {
+                return Refusal("Emulation.setDeviceMetricsOverride takes a screen size only (not \(extra.sorted().joined(separator: ", ")))")
+            }
+            for key in ["width", "height"] {
+                guard let v = o[key]?.intValue, v >= 0, v <= 4096 else {
+                    return Refusal("the emulated width and height are whole numbers up to 4096")
+                }
+            }
+            if let dsf = o["deviceScaleFactor"] {
+                guard case .number(let n) = dsf, n.isFinite, n >= 0, n <= 4 else { return Refusal("the emulated scale is 0–4") }
+            }
+            if let mobile = o["mobile"], mobile.boolValue == nil { return Refusal("mobile is true or false") }
+            return nil
         default:
+            if method.hasPrefix("Fetch.") || method.hasPrefix("IO.") {
+                return Refusal("\(method): Winter's built-in browser saves downloads itself — nothing reads a response here")
+            }
             return nil
         }
     }

@@ -9,7 +9,7 @@ import WinterKit
 // app and the two macOS permissions it needs, the Mirror and background-click switches, and the Apps
 // section — a master "Allow all apps" switch, the list of exceptions (an access level per app, each
 // removable), an "Add exception…" sheet over the installed apps, and the apps the user has chosen
-// "Always allow" for.
+// "Always allow" for — then the browsers, and Phase 4's headless-browser and site-tools switches.
 //
 // Copy names only what exists: `legacyComputer` is shown only because the daemon reports it, and the
 // access levels are exactly the daemon's four.
@@ -29,6 +29,12 @@ let settingsComputerUseAppsFootnote =
     "Exceptions set the most Computer Use can do in an app, under every approval policy (Bypass "
     + "included). When a session first uses an app, you approve it once, for the session, or always "
     + "— within that limit. Don't allow also keeps the app out of whole-screen screenshots."
+let settingsComputerUseHeadlessDescription =
+    "Lets Winter open web pages in its own invisible browser, to research and read in the background. Nothing it "
+    + "opens there appears on your screen, and its pages close when each turn ends."
+let settingsComputerUseWebMcpDescription =
+    "When a website offers its own tools for AI agents, Winter can use them directly instead of clicking through "
+    + "the page. Each use counts as an action on that site, like a click."
 let settingsComputerUseLegacyNote =
     "The previous computer tool is in use (computerUse.legacyComputer is set in settings.json), so "
     + "the helper, the mirror and the app settings below do not apply to new sessions."
@@ -63,6 +69,7 @@ struct SettingsComputerUseSection: View {
                 SettingsRowNote(settingsComputerUseAppsFootnote)
                     .padding(.horizontal, SettingsChrome.rowHorizontalPadding)
                 SettingsBrowsersGroup(status: status)
+                if status.headlessEnabled != nil || status.webmcp != nil { webGroup(status) }
                 if let actionError = model.actionError {
                     SettingsGroup {
                         SettingsNoteRow(actionError, isError: true)
@@ -122,6 +129,25 @@ struct SettingsComputerUseSection: View {
                         description: settingsComputerUsePrivateEventPathDescription) {
                 SettingsToggle(isOn: toggle(status.privateEventPath) { value in await model.setPrivateEventPath(value) })
                     .disabled(model.isSavingSettings)
+            }
+        }
+    }
+
+    /// Phase 4's two switches, each shown only when the daemon reports it (an older daemon has neither).
+    @ViewBuilder
+    private func webGroup(_ status: ComputerUseStatus) -> some View {
+        SettingsGroup {
+            if let headless = status.headlessEnabled {
+                SettingsRow("Headless browser", description: settingsComputerUseHeadlessDescription) {
+                    SettingsToggle(isOn: toggle(headless) { value in await model.setHeadlessEnabled(value) })
+                        .disabled(model.isSavingSettings)
+                }
+            }
+            if let webmcp = status.webmcp {
+                SettingsRow("Site tools", description: settingsComputerUseWebMcpDescription) {
+                    SettingsToggle(isOn: toggle(webmcp) { value in await model.setWebMcp(value) })
+                        .disabled(model.isSavingSettings)
+                }
             }
         }
     }

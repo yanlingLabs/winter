@@ -530,6 +530,12 @@ export const Settings = z.object({
      *  row that is not an object, or an unknown value, never invalidates the file; `computerUseAppsFrom`
      *  reads an unknown access as `deny` (fail closed) and an unknown grant as none. */
     apps: z.record(z.string(), z.unknown()).optional(),
+    /** ComputerV2 Phase 4: Winter's headless browser (`browsers.open(url, { browser: "headless" })`) — offered unless
+     *  `enabled` is false (`computerUseHeadlessEnabledFrom`); off, `browsers.list()` shows it with its reason. */
+    headless: z.object({ enabled: z.boolean().optional() }).optional(),
+    /** ComputerV2 Phase 4: a site's own agent tools (WebMCP) — discovered and callable unless false
+     *  (`computerUseWebMcpFrom`). Gates the daemon only; never changes a browser's command line. */
+    webmcp: z.boolean().optional(),
   }).optional(),
   /** web_search backend (4g Task 6). `provider` defaults to "brave" when the block/field is
    *  absent — the literal union is forward-room for other search backends later; today "brave"
@@ -1347,6 +1353,12 @@ export const computerUseLegacyComputerFrom = (s: Settings | null | undefined): b
  *  allowing exception is `deny` (`computer-use/policy.ts`'s `effectiveAccess`). */
 export const computerUseAllowAllAppsFrom = (s: Settings | null | undefined): boolean => s?.computerUse?.allowAllApps !== false;
 
+/** ComputerV2 Phase 4: the ONE reader of `computerUse.headless.enabled` — default ON (only `false` turns it off). */
+export const computerUseHeadlessEnabledFrom = (s: Settings | null | undefined): boolean => s?.computerUse?.headless?.enabled !== false;
+
+/** ComputerV2 Phase 4: the ONE reader of `computerUse.webmcp` — default ON (user ruling D9; only `false` turns it off). */
+export const computerUseWebMcpFrom = (s: Settings | null | undefined): boolean => s?.computerUse?.webmcp !== false;
+
 /** ComputerV2: the ONE reader of `computerUse.screenshotMaxDim` — `undefined` when unset (no extra bound). */
 export const computerUseScreenshotMaxDimFrom = (s: Settings | null | undefined): number | undefined => s?.computerUse?.screenshotMaxDim;
 
@@ -1410,14 +1422,25 @@ export function setComputerUseApp(settings: Settings, bundleId: string, patch: {
   return { ...settings, computerUse: Object.keys(apps).length === 0 ? rest : { ...rest, apps } };
 }
 
+/** The booleans `computerUse.setSettings` writes (each optional; an absent one is left untouched). */
+export interface ComputerUseFlagsPatch {
+  enabled?: boolean; mirror?: boolean; privateEventPath?: boolean; allowAllApps?: boolean;
+  /** Phase 4: `computerUse.headless.enabled`. */
+  headlessEnabled?: boolean;
+  /** Phase 4: `computerUse.webmcp`. */
+  webmcp?: boolean;
+}
+
 /** ComputerV2: `computerUse.setSettings`' pure transform — each key present is written, each absent one is left
  *  untouched (spine §6). The caller owes `saveSettings` a call; every key is read live by its one reader. */
-export function setComputerUseFlags(settings: Settings, patch: { enabled?: boolean; mirror?: boolean; privateEventPath?: boolean; allowAllApps?: boolean }): Settings {
+export function setComputerUseFlags(settings: Settings, patch: ComputerUseFlagsPatch): Settings {
   const next = { ...(settings.computerUse ?? {}) };
   if (patch.enabled !== undefined) next.enabled = patch.enabled;
   if (patch.allowAllApps !== undefined) next.allowAllApps = patch.allowAllApps;
   if (patch.mirror !== undefined) next.mirror = patch.mirror;
   if (patch.privateEventPath !== undefined) next.privateEventPath = patch.privateEventPath;
+  if (patch.headlessEnabled !== undefined) next.headless = { ...(next.headless ?? {}), enabled: patch.headlessEnabled };
+  if (patch.webmcp !== undefined) next.webmcp = patch.webmcp;
   return { ...settings, computerUse: next };
 }
 

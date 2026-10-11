@@ -18,12 +18,17 @@ export interface OverlayArgs {
   active: boolean;
   cursor?: { x: number; y: number; kind: string };
   label?: string;
+  /** The tab is handed to the user (the sign-in hand-off): the pill only — no glow, no cursor. */
+  waiting?: boolean;
 }
+
+/** The pill while a tab waits on the user. */
+export const WAITING_LABEL = "Winter is waiting for you — press Done in Winter, or in Winter's toolbar button";
 
 export function drawOverlay(a: OverlayArgs): void {
   const TAG = "winter-agent-overlay";
   const KEY = "__winterAgentOverlay";
-  const w = window as unknown as Record<string, { host: HTMLElement; cursor: HTMLElement; pill: HTMLElement } | undefined>;
+  const w = window as unknown as Record<string, { host: HTMLElement; glow: HTMLElement; cursor: HTMLElement; pill: HTMLElement } | undefined>;
   const existing = w[KEY];
   if (!a.active) {
     if (existing !== undefined) existing.host.remove();
@@ -67,11 +72,13 @@ export function drawOverlay(a: OverlayArgs): void {
     pill.className = "pill";
     root.append(glow, cursor, pill);
     (document.documentElement ?? document.body).appendChild(host);
-    st = { host, cursor, pill };
+    st = { host, glow, cursor, pill };
     w[KEY] = st;
   }
   st.pill.textContent = a.label ?? "Winter is working — stop it from the toolbar";
-  if (a.cursor !== undefined && Number.isFinite(a.cursor.x) && Number.isFinite(a.cursor.y)) {
+  st.glow.style.display = a.waiting === true ? "none" : "";
+  if (a.waiting === true) st.cursor.style.display = "none";
+  else if (a.cursor !== undefined && Number.isFinite(a.cursor.x) && Number.isFinite(a.cursor.y)) {
     st.cursor.style.display = "block";
     st.cursor.style.transform = `translate(${Math.round(a.cursor.x)}px, ${Math.round(a.cursor.y)}px)`;
     st.cursor.dataset.kind = a.cursor.kind;
