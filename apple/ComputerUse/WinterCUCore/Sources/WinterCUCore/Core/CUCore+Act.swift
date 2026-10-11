@@ -516,6 +516,19 @@ extension CUCore {
                 return try pendingBackgroundOpen([url.absoluteString], what: nil, linkHost: url.host ?? url.absoluteString)
             }
             try pasteMenuGuard(e, info, p, t)
+            // Its press from another desktop showed no effect and the visit was offered: never pressed again — still
+            // from there, the visit is asked for again; on its desktop now (the visit), clicked where it is, once.
+            if button == .left, count == 1, flags.isEmpty, let mark = t.unconfirmedPress, mark.element == AXIdentity(element: e),
+               clock.nowMs() - mark.atMs < Self.unconfirmedPressMs {
+                if isOffThisDesktop(t) {
+                    throw CUError.needsDesktopVisit(t.appName, why: .act, "[\(ref)]'s press from here had no visible effect, and it is not pressed again — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
+                }
+                t.unconfirmedPress = nil
+                announceTarget(t, info, pressing: true)
+                cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
+                CULog.act.notice("click in \(t.appName, privacy: .public): its press from another desktop was unconfirmed — clicked where it is, not pressed again")
+                return try clickWebElement(e, info, ref: ref, p, t, token, pressIgnored: true, why: "the accessibility press from the other desktop had no visible effect")
+            }
             t.noteTargeted(e, at: clock.nowMs())
             announceTarget(t, info, pressing: button == .left)
             var announced = false
@@ -689,6 +702,11 @@ extension CUCore {
         if !announced { cursor(t, "press", at: pt, count: count, button: button.rawValue) }
         try token.check()
         if let target {
+            // Its press from here already showed no effect (the visit was offered): not pressed again.
+            if let mark = t.unconfirmedPress, mark.element == AXIdentity(element: target), clock.nowMs() - mark.atMs < Self.unconfirmedPressMs,
+               isOffThisDesktop(t) {
+                throw CUError.needsDesktopVisit(t.appName, why: .act, "its press from here had no visible effect, and it is not pressed again — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
+            }
             let tries: [AXUIElement]
             let action: String?
             switch route {
@@ -729,8 +747,10 @@ extension CUCore {
                         // visit would click it where it is (live, round 11: the Web Store's controls ignored the press
                         // from another Space and the visit was never offered).
                         if !prefersWebClicks(t), !statefulWithoutReadableState(el, info), isOffThisDesktop(t) {
-                            CULog.act.notice("click in \(t.appName, privacy: .public) (another desktop): no visible effect — a desktop visit would click it")
-                            throw CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(Self.elementLabel(nil, info)) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
+                            if let why = noVisitForUnconfirmedPress(el, info, t) {
+                                return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.noEffectNote(Self.elementLabel(nil, info))) (\(why))")
+                            }
+                            throw offerVisitAfterPress(el, info, t)
                         }
                         if !prefersWebClicks(t) || statefulWithoutReadableState(el, info) {
                             CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): no visible effect — not clicked as well")
@@ -2976,8 +2996,10 @@ extension CUCore {
         }
         // On ANOTHER desktop: a desktop visit would click it where it is (round 11 — live, never offered).
         if isOffThisDesktop(t) {
-            CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect, and the window is on another desktop — a desktop visit would click it")
-            throw CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(label) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
+            if let why = noVisitForUnconfirmedPress(e, info, t) {
+                return ActOutcome(rung: .accessibility, detail: "\(Self.noEffectNote(label)) (\(why))")
+            }
+            throw offerVisitAfterPress(e, info, t)
         }
         if offScreenSubject(t) != nil {
             CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect, and the window is not on screen — not clicked as well")
@@ -2993,6 +3015,35 @@ extension CUCore {
         }
         CULog.act.notice("click in \(t.appName, privacy: .public): the accessibility press on web content changed nothing, not even pixels — a window-targeted click instead")
         return try clickWebElement(e, info, ref: ref, p, t, token, pressIgnored: true, why: "the accessibility press did nothing")
+    }
+
+    /// How long an unconfirmed press keeps its element from being pressed again.
+    static let unconfirmedPressMs: Double = 180_000
+
+    /// The desktop visit offered after a press from another desktop showed no effect (the element marked: never
+    /// pressed again).
+    func offerVisitAfterPress(_ e: AXUIElement, _ info: ElementInfo, _ t: CUTarget) -> CUError {
+        t.unconfirmedPress = (AXIdentity(element: e), clock.nowMs())
+        CULog.act.notice("click in \(t.appName, privacy: .public) (another desktop): no visible effect — a desktop visit would click it")
+        return CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(Self.elementLabel(nil, info)) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
+    }
+
+    /// Why a press that showed no effect from another desktop is NOT worth moving the user for (review of round 11,
+    /// MEDIUM #5): the element is already in its pressed state (a selected tab or radio, a checked box, the focused
+    /// field), or it is a command whose effect is not on the page (copy, refresh). Nil: the visit may be offered.
+    func noVisitForUnconfirmedPress(_ e: AXUIElement, _ info: ElementInfo, _ t: CUTarget) -> String? {
+        if ax.bool(e, kAXSelectedAttribute) == true { return "it is already selected" }
+        let role = info.role ?? ""
+        if ["AXRadioButton", "AXCheckBox", "AXTab"].contains(role) || info.subrole == "AXTabButton",
+           let v = ax.string(e, kAXValueAttribute), AXTreeReader.checkedState(v) == true {
+            return "it is already selected"
+        }
+        if focusRelation(e, t) == .onIt { return "it already has the focus" }
+        let words = info.labels.compactMap { $0 }.joined(separator: " ").lowercased()
+        if words.range(of: #"\b(copy|copied|refresh|reload)\b"#, options: .regularExpression) != nil {
+            return "a command whose effect does not show on the page"
+        }
+        return nil
     }
 
     static func noEffectNote(_ label: String) -> String {

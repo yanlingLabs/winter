@@ -372,6 +372,49 @@ final class OffDesktopActTests: XCTestCase {
         XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown || $0.type == .leftMouseUp }.isEmpty, "no window-targeted click")
     }
 
+    /// Review of round 11, MEDIUM #5: once the visit was offered for an unconfirmed press, the element is never pressed
+    /// again — asked again from here, the visit is asked for again; in the visit (its window on screen now), it is
+    /// clicked where it is, once.
+    func testAnUnconfirmedPressIsNeverRepeatedAndTheVisitClicksItOnce() async throws {
+        world()
+        let go = fakeElement(95_034)
+        ax.add(go, role: kAXButtonRole, title: "Continue", frame: CGRect(x: 120, y: 400, width: 120, height: 30),
+               extra: [kAXParentAttribute: webArea])
+        ax.setActions(go, [kAXPressAction])
+        let r = ref(go)
+        for _ in 0..<2 {
+            do { _ = try await act(.click(CUClickAction(ref: r))); XCTFail("expected needs_desktop_visit") }
+            catch let e as CUError { XCTAssertEqual(e.code, "needs_desktop_visit", e.message) }
+        }
+        XCTAssertEqual(ax.performed, ["\(token(go)):AXPress"], "pressed once, never again")
+        // The visit: the window is on screen now.
+        var w = sys.windows[77]!
+        w.onScreen = true
+        sys.windows[77] = w
+        sys.stack = [w]
+        _ = try? await act(.click(CUClickAction(ref: r)))
+        XCTAssertEqual(ax.performed.count, 1, "not pressed in the visit either")
+        XCTAssertEqual(poster.entries.filter { $0.type == .leftMouseDown }.count, 1, "clicked where it is, once")
+    }
+
+    /// No visit is offered for an element already in its pressed state (a selected tab) or a command whose effect is not
+    /// on the page (Copy): the press's answer says so instead.
+    func testNoVisitIsOfferedForAnAlreadySelectedTabOrACopyCommand() async throws {
+        world()
+        let tab = fakeElement(95_035)
+        ax.add(tab, role: kAXRadioButtonRole, title: "Overview", frame: CGRect(x: 120, y: 400, width: 120, height: 30),
+               extra: [kAXParentAttribute: webArea, kAXValueAttribute: 1])
+        ax.setActions(tab, [kAXPressAction])
+        let copy = fakeElement(95_036)
+        ax.add(copy, role: kAXButtonRole, title: "Copy link", frame: CGRect(x: 260, y: 400, width: 120, height: 30),
+               extra: [kAXParentAttribute: webArea])
+        ax.setActions(copy, [kAXPressAction])
+        let r1 = try await act(.click(CUClickAction(ref: ref(tab))))
+        XCTAssertTrue(r1.detail?.contains("it is already selected") == true, r1.detail ?? "-")
+        let r2 = try await act(.click(CUClickAction(ref: ref(copy))))
+        XCTAssertTrue(r2.detail?.contains("does not show on the page") == true, r2.detail ?? "-")
+    }
+
     func testSetValueOnAScrollBarSetsANumberInZeroToOne() async throws {
         world(scrollBar: true)
         try await act(.setValue(CUSetValueAction(ref: ref(bar), value: "0.5")))
