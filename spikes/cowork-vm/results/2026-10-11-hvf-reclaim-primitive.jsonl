@@ -1,0 +1,7 @@
+{"kind":"bounded_hvf_primitive","ramBytes":402653184,"returnBytes":268435456,"baselineBytes":1802696,"pressure":false,"linux":false}
+{"cycle":1,"beforeBytes":404685568,"afterBytes":136118848,"returnedBytes":268566720,"reusedBytes":404685568,"reclaimNs":4057000,"liveWordsPreserved":true,"discardedWordsZero":true,"reuseVerified":true}
+{"cycle":2,"beforeBytes":404685568,"afterBytes":136118848,"returnedBytes":268566720,"reusedBytes":404685568,"reclaimNs":6017000,"liveWordsPreserved":true,"discardedWordsZero":true,"reuseVerified":true}
+{"cycle":3,"beforeBytes":404685568,"afterBytes":136118848,"returnedBytes":268566720,"reusedBytes":404685568,"reclaimNs":4495000,"liveWordsPreserved":true,"discardedWordsZero":true,"reuseVerified":true}
+{"cycle":4,"beforeBytes":404685568,"afterBytes":136118848,"returnedBytes":268566720,"reusedBytes":404685568,"reclaimNs":5029000,"liveWordsPreserved":true,"discardedWordsZero":true,"reuseVerified":true}
+{"cycle":5,"beforeBytes":404685568,"afterBytes":136118848,"returnedBytes":268566720,"reusedBytes":404685568,"reclaimNs":4633000,"liveWordsPreserved":true,"discardedWordsZero":true,"reuseVerified":true}
+{"completed":true,"vmDestroyed":true,"finalBytes":1704368}

@@ -86,8 +86,8 @@ of balloon return. The summary includes the corresponding category rows. The
 dedicated reusable-page counter was not captured, so these categories do not
 prove that every possible lazy-release mechanism is absent.
 
-Next compare a matched kernel at or above the package's tested baseline,
-changing one variable at a time. No deliberate host-allocation/pressure test
+The matched-kernel comparison and acknowledged-page follow-up below complete
+that next investigation. No deliberate host-allocation/pressure test
 was run; such an experiment needs separate user approval on this shared Mac.
 This result is not a claim that every Apple VM backend fails reclaim.
 
@@ -164,7 +164,34 @@ not a claim that the adapter implements a complete recovery gate for all execs.
 
 Independent review of `9bfc7968` accepted these fixes with no further findings
 for this bounded prototype. [PR #13](https://github.com/yanlingLabs/winter/pull/13)
-remains draft; this review does not pass gate 1 or validate production integration.
+was subsequently merged as the scoped probe; this review does not pass gate 1 or
+validate production integration.
+
+## Matched kernel, page ownership and active-return requirement
+
+Pinned kernel profiles now preserve the historical 6.12.28 baseline and add the
+Apple-package-matched 6.18.35 kernel. Their separate
+[baseline](../../spikes/cowork-vm/results/2026-10-11-kernel-6.12.28-memory.json) and
+[matched](../../spikes/cowork-vm/results/2026-10-11-kernel-6.18.35-memory.json)
+records retain a one-VM, 1 GiB-ceiling, 384 MiB bounded workload. Neither
+negotiated free-page hinting or reporting; neither showed host footprint return.
+
+A privileged diagnostic then measured aligned, fully donated 16 KiB page groups,
+with a subsequent inflation batch witnessing acknowledgment of the earlier
+donation. Both ordinary and compacted conditions contained more than 125 MiB of
+provable overlap with previously touched memory, yet footprint stayed flat. This
+rules out incomplete host-page groups as an adequate explanation for the entire
+observation. It is not a claim about every VZ version or undocumented path. The
+[decision record](../../spikes/cowork-vm/kernel/memory-reclaim-decision.md) links
+the raw results, kernel interpretation and exact limits.
+
+The user requires RAM return during **active work**. Idle shutdown is not an
+acceptable replacement. A separate bounded bare-metal Hypervisor fixture returned
+256 MiB in five cycles while preserving other live data and verifying zero-fill
+and reuse. It has no Linux kernel or devices and does not pass the product gate.
+Apple's one-VM-per-process restriction creates a topology decision before adopting
+that lower-level backend. Linux ownership, DMA/vCPU synchronization and sustained
+workload validation remain open; no production backend change is implied.
 
 ## Validation and remaining scope
 

@@ -4,11 +4,21 @@ import { join } from "node:path";
 import pins from "./pins.json";
 import { acquireOrchestrator } from "./claims";
 import { build, checked, out, root, sha256 } from "./build";
+import { DEFAULT_KERNEL_PROFILE, getKernelProfile, type KernelProfileID } from "./kernel/profiles";
 
-if (process.argv.slice(2).some(arg => !["--run-vm", "--confinement-only"].includes(arg))) throw new Error("Only --run-vm and --confinement-only are supported; old fixtures are retained for inspection, never restaged.");
-if (!process.argv.includes("--run-vm")) throw new Error("Explicit opt-in required: bun run spikes/cowork-vm/run.ts --run-vm");
-const probePhases = process.argv.includes("--confinement-only") ? ["prepare", "smoke", "resume", "direct"] : ["prepare", "smoke", "resume", "direct", "memory", "memory-compact"];
-const artifacts = await build();
+const args = process.argv.slice(2), flags = new Set<string>();
+let kernelProfile: KernelProfileID = DEFAULT_KERNEL_PROFILE;
+for (let index = 0; index < args.length; index++) {
+  const arg = args[index]!;
+  if (flags.has(arg)) throw new Error(`Duplicate argument: ${arg}`);
+  flags.add(arg);
+  if (arg === "--kernel-profile") { const value = args[++index] ?? ""; getKernelProfile(value); kernelProfile = value as KernelProfileID; }
+  else if (!["--run-vm", "--confinement-only", "--memory-only", "--page-groups"].includes(arg)) throw new Error(`Unsupported argument: ${arg}; old fixtures are never restaged.`);
+}
+if (!flags.has("--run-vm")) throw new Error("Explicit opt-in required: bun run spikes/cowork-vm/run.ts --run-vm");
+if (flags.has("--confinement-only") && flags.has("--memory-only")) throw new Error("Choose one scoped suite");
+const probePhases = flags.has("--confinement-only") ? ["prepare", "smoke", "resume", "direct"] : flags.has("--memory-only") ? ["prepare", "memory", "memory-compact"] : ["prepare", "smoke", "resume", "direct", "memory", "memory-compact"];
+const artifacts = await build({ kernelProfile });
 const space = statfsSync(tmpdir());
 if (space.bavail * space.bsize < 8 * 1024 ** 3) throw new Error("less than 8 GiB available for disposable probe");
 const fixture = realpathSync(mkdtempSync(join(tmpdir(), "winter-cowork-vm-")));
@@ -22,7 +32,7 @@ try {
   }
   writeFileSync(join(fixture, ".winter-cowork-vm-fixture"), "winter-cowork-vm-disposable-v1\n", { mode: 0o600 });
   writeFileSync(join(fixture, "source/.cowork-gate1-disposable"), "cowork-gate1-disposable-v1\n");
-  copyFileSync(join(out, "assets/vmlinux"), join(fixture, "vmlinux"));
+  copyFileSync(artifacts.kernelPath, join(fixture, "vmlinux"));
   // Fixture DAC only: never modify real selected-folder ownership/permissions.
   chmodSync(join(fixture, "source"), 0o2777);
   const seed = join(fixture, "source/seed.txt");
@@ -51,12 +61,15 @@ try {
   mkdirSync(join(fixture, "shared-rw/writable-memory"), { mode: 0o755 });
   writeFileSync(join(fixture, "shared-rw/writable-memory/seed.txt"), "host-writable-memory\n", { mode: 0o644 });
   const payloadDigests: Record<string, string> = {};
-  for (const name of ["run.sh", "tool-smoke.sh", "run-direct.sh", "tool-direct.sh", "denials.sh", "confine", "memprobe"]) {
-    const from = name.endsWith(".sh") ? join(root, "guest", name) : artifacts.helpers[name]!;
-    copyFileSync(from, join(fixture, "payload", name)); chmodSync(join(fixture, "payload", name), 0o555);
+  const payloadFiles: Record<string, string> = {
+    ...Object.fromEntries(["run.sh", "tool-smoke.sh", "run-direct.sh", "tool-direct.sh", "denials.sh"].map(name => [name, join(root, "guest", name)])),
+    ...artifacts.helpers, "guest-memory-diagnostics.sh": join(root, "kernel/guest-memory-diagnostics.sh"), "kernel.config": artifacts.kernelConfigPath,
+  };
+  for (const [name, from] of Object.entries(payloadFiles)) {
+    copyFileSync(from, join(fixture, "payload", name)); chmodSync(join(fixture, "payload", name), name === "kernel.config" ? 0o444 : 0o555);
     payloadDigests[name] = await sha256(join(fixture, "payload", name));
   }
-  writeFileSync(join(fixture, "config.json"), JSON.stringify({ ...pins, probePhases, payloadDigests, createdAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+  writeFileSync(join(fixture, "config.json"), JSON.stringify({ ...pins, pageGroups: flags.has("--page-groups"), kernelProfile: artifacts.kernelProfileID, kernelProfileMetadata: artifacts.kernelProfile, kernelArchive: { url: artifacts.kernelProfile.url, sha256: artifacts.kernelProfile.archiveSha256, member: artifacts.kernelProfile.member, provenance: artifacts.kernelProfile.provenance }, probePhases, payloadDigests, createdAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
   writeFileSync(join(out, "latest-fixture.txt"), fixture + "\n");
   console.log(`Disposable fixture: ${fixture}`);
   const env = {

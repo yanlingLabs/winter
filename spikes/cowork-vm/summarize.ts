@@ -25,7 +25,7 @@ const summary = {
   productionCoworkImplemented: false,
   executedPhases: phases,
   measurementConditions: { nativeBuild: "Swift debug", hostCache: "warm", guestExecution: "one VM at a time, sequential tool views" },
-  inputs: { containerizationRevision: config.containerizationRevision, initImage: config.initImage, rootImage: config.rootImage, kernelArchive: config.kernelArchive, payloadDigests: config.payloadDigests },
+  inputs: { containerizationRevision: config.containerizationRevision, initImage: config.initImage, rootImage: config.rootImage, kernelArchive: config.kernelArchive, kernelProfile: config.kernelProfile, kernelProfileMetadata: config.kernelProfileMetadata, payloadDigests: config.payloadDigests },
   phases: reports.map(report => {
     const memory = report.phase.startsWith("memory") ? memoryObservation(report) : undefined;
     const { backingPid: _omittedPid, ...safeMemory } = (memory ?? {}) as any;
@@ -43,6 +43,8 @@ const summary = {
       strictSourceMetadataUnchanged: report.directMetadata ? JSON.stringify(report.directMetadata.before) === JSON.stringify(report.directMetadata.after) : undefined,
       coldIdentityChangedAndContentVerified: report.phase === "resume" && report.status === "passed-selected-checks" ? true : undefined,
       ...(memory ? { memory: safeMemory } : {}),
+      ...(memory ? { guestMemoryDiagnostics: report.memoryDiagnostics } : {}),
+      ...(report.pageGroupBaseline ? { pageGroups: { baseline: report.pageGroupBaseline, beforeWitness: report.pageGroupBeforeWitness, acknowledgmentWitness: report.pageGroupAcknowledgmentWitness, afterWitness: report.pageGroupAfterWitness } } : {}),
       ...(memory ? { passiveCategoryCapture: report.samples.map((sample: any) => ({ label: sample.label, footprint: typeof sample.categories?.footprintCategories === "string" && !sample.categories.footprintCategories.startsWith("unavailable"), vmmap: typeof sample.categories?.vmmapSummary === "string" && !sample.categories.vmmapSummary.startsWith("unavailable") })) } : {}),
       ...(memory ? { passiveCategoryExcerpts: report.samples.map(categoryExcerpt) } : {}),
       ...(memory ? { guestMemorySamples: report.samples.map((sample: any) => ({ label: sample.label, counters: String(sample.guest).split("\n").filter(line => /^(MemTotal|MemAvailable|AnonPages|SwapFree):|^balloon_|^compact_(migrate_scanned|free_scanned)/.test(line)) })) } : {}),

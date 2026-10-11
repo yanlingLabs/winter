@@ -8,6 +8,32 @@
     "member": "./opt/kata/share/kata-containers/vmlinux-6.12.28-153",
     "provenance": "Release URL named by the pinned Containerization Makefile; archive checksum measured from that upstream download, not an upstream signature claim."
   },
+  "kernelProfiles": {
+    "kata-6.12.28": {
+      "version": "6.12.28-153",
+      "url": "https://github.com/kata-containers/kata-containers/releases/download/3.17.0/kata-static-3.17.0-arm64.tar.xz",
+      "archiveSha256": "647c7612e6edf789d5e14698c48c99d8bac15ad139ffaa1c8bb7d229f748d181",
+      "member": "./opt/kata/share/kata-containers/vmlinux-6.12.28-153",
+      "binarySha256": "67bac9f416af4cdc9b151e4ba4962d6515e0ad7acc53816761cf964aa6af6ea0",
+      "configMember": "./opt/kata/share/kata-containers/config-6.12.28-153",
+      "configSha256": "1b27ba1ecabb23ae1330dad745acf2660166a82435497f9a0e76140ff9890ab5",
+      "archiveName": "kata-static-3.17.0-arm64.tar.xz",
+      "source": "https://github.com/apple/containerization/blob/bc994b88df46207fad7775b0eabc51947e315881/Makefile",
+      "provenance": "Historical downloadable fallback used by the first probe. Local measured archive/kernel/config hashes; below the README's tested kernel baseline."
+    },
+    "apple-6.18.35": {
+      "version": "6.18.35-197-debug",
+      "url": "https://github.com/kata-containers/kata-containers/releases/download/3.32.0/kata-static-3.32.0-arm64.tar.zst",
+      "archiveSha256": "8736c054d9223974735394f822000823baef509e1c33405ec798240fa9b6e4b5",
+      "member": "./opt/kata/share/kata-containers/vmlinux-6.18.35-197-debug",
+      "binarySha256": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d",
+      "configMember": "./opt/kata/share/kata-containers/config-6.18.35-197-debug",
+      "configSha256": "a5dfc1ee37dcd4bc6d727e4de617bc45a40cf32e7ebc52fb6f0472c8fbf60c21",
+      "archiveName": "kata-static-3.32.0-arm64.tar.zst",
+      "source": "https://github.com/apple/container/blob/d265d669ecae041bf338cb3b39c4118316d138f0/Sources/ContainerPersistence/ContainerSystemConfig.swift#L168",
+      "provenance": "Recommended kernel/archive digest in released Apple container 1.5.0, whose Package.swift pins Containerization 0.47.0 matching this probe. GitHub release API agrees on archive SHA256; kernel/config hashes measured after extracting only these ordinary members. Recommendation is not Winter memory-return evidence."
+    }
+  },
   "zig": {
     "url": "https://ziglang.org/download/0.14.1/zig-aarch64-macos-0.14.1.tar.xz",
     "sha256": "39f3dc5e79c22088ce878edc821dedb4ca5a1cd9f5ef915e9b3cc3053e8faefa",

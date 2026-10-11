@@ -16,7 +16,7 @@ Independent review accepted specification commit `21e3e5f4` for planning gates 1
 | Project messaging | Conversations in the same Project can message each other through SendMessage. |
 | Concurrent edits | Use ordinary shared-filesystem/Git behavior. Agents coordinate and choose worktrees themselves; no new Cowork locking or transactional conflict-management layer. |
 | Project memory | Conversations share persistent Project memory. Their logical transcripts remain separate and are not automatically concatenated into one context. Shared files/memory do not establish confidentiality between conversations. |
-| Resource management | No manual per-VM CPU/RAM/GPU allocation workflow. Aim for automatic use of available host capacity and return of unused resources, with actual VM ceilings and reclaim limits stated explicitly. |
+| Resource management | No manual per-VM CPU/RAM/GPU allocation workflow. Automatic use of available host capacity must include RAM return during active work; the user explicitly rejected idle shutdown as the sole memory-return mechanism. Keep actual VM ceilings and reclaim limits explicit. |
 | Execution | Winter's agent loop and its subagents run inside a Linux VM, using the Containerization/VZ direction below, subject to its feasibility gates. |
 | Host process preference | Avoid a Winter-owned host process per conversation; prefer VM controllers inside the existing daemon. Apple-managed VM execution services must be distinguished from Winter-owned controller processes. |
 | Workspace inputs | At least one explicitly allowed host directory or one selected GitHub repository. A GitHub account connection alone is not a selected repository. Combining directories and repositories is allowed. |

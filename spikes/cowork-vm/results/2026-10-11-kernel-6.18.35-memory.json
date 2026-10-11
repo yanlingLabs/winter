@@ -1,0 +1,814 @@
+{
+  "schema": 1,
+  "scope": "offline compiled-Bun/Swift embedding and disposable guest fixtures",
+  "gate1Passed": false,
+  "productionCoworkImplemented": false,
+  "executedPhases": [
+    "prepare",
+    "memory",
+    "memory-compact"
+  ],
+  "measurementConditions": {
+    "nativeBuild": "Swift debug",
+    "hostCache": "warm",
+    "guestExecution": "one VM at a time, sequential tool views"
+  },
+  "inputs": {
+    "containerizationRevision": "bc994b88df46207fad7775b0eabc51947e315881",
+    "initImage": "ghcr.io/apple/containerization/vminit@sha256:4c1836052eafcbc944c403fb23ded06562962d2402c9dcc651495a32300614df",
+    "rootImage": "docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8",
+    "kernelArchive": {
+      "url": "https://github.com/kata-containers/kata-containers/releases/download/3.32.0/kata-static-3.32.0-arm64.tar.zst",
+      "sha256": "8736c054d9223974735394f822000823baef509e1c33405ec798240fa9b6e4b5",
+      "member": "./opt/kata/share/kata-containers/vmlinux-6.18.35-197-debug",
+      "provenance": "Recommended kernel/archive digest in released Apple container 1.5.0, whose Package.swift pins Containerization 0.47.0 matching this probe. GitHub release API agrees on archive SHA256; kernel/config hashes measured after extracting only these ordinary members. Recommendation is not Winter memory-return evidence."
+    },
+    "kernelProfile": "apple-6.18.35",
+    "kernelProfileMetadata": {
+      "version": "6.18.35-197-debug",
+      "url": "https://github.com/kata-containers/kata-containers/releases/download/3.32.0/kata-static-3.32.0-arm64.tar.zst",
+      "archiveSha256": "8736c054d9223974735394f822000823baef509e1c33405ec798240fa9b6e4b5",
+      "member": "./opt/kata/share/kata-containers/vmlinux-6.18.35-197-debug",
+      "binarySha256": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d",
+      "configMember": "./opt/kata/share/kata-containers/config-6.18.35-197-debug",
+      "configSha256": "a5dfc1ee37dcd4bc6d727e4de617bc45a40cf32e7ebc52fb6f0472c8fbf60c21",
+      "archiveName": "kata-static-3.32.0-arm64.tar.zst",
+      "source": "https://github.com/apple/container/blob/d265d669ecae041bf338cb3b39c4118316d138f0/Sources/ContainerPersistence/ContainerSystemConfig.swift#L168",
+      "provenance": "Recommended kernel/archive digest in released Apple container 1.5.0, whose Package.swift pins Containerization 0.47.0 matching this probe. GitHub release API agrees on archive SHA256; kernel/config hashes measured after extracting only these ordinary members. Recommendation is not Winter memory-return evidence."
+    },
+    "payloadDigests": {
+      "run.sh": "35e25c37721d21cdfc7b7e37b6afe02674d201422c679269436b50c33fa820b7",
+      "tool-smoke.sh": "7e18b9d5f2ddaddf8a96dd21a1de7e7649dccb0e3b4bdf3b3d9a47d53984dce5",
+      "run-direct.sh": "bdad971045a66edb8ab10ae0c7064e367685161e78ceadfa3f4b3fa6c05c3dda",
+      "tool-direct.sh": "d0c5ecd3f56ef67a1f37a8ec136bf96acdcd454050d98e153f6b121d8400b929",
+      "denials.sh": "a49db0ceaf3bead4f6fc047a6643f06211fe89a760a1c919b30ebc895a015a63",
+      "confine": "b7aa00185e891ada1520caeb906b960fc26f4c51a97c001011c5d08507bd61a6",
+      "memprobe": "ed4a4d3d4baa0b5f594cd516afdba52f4ba75dceed22743e46336fc19f7240d6",
+      "guest-memory-diagnostics.sh": "976fde3a3493c38fc4672c645e053d8657baead2b4d68dd877eb7dd7da714752",
+      "kernel.config": "a5dfc1ee37dcd4bc6d727e4de617bc45a40cf32e7ebc52fb6f0472c8fbf60c21"
+    }
+  },
+  "phases": [
+    {
+      "phase": "prepare",
+      "status": "passed-selected-checks",
+      "startedAt": "2026-10-11T12:54:51.444Z",
+      "completedAt": "2026-10-11T12:55:10.940Z",
+      "maxHeartbeatDelayMs": 1.2651670000004742,
+      "network": "public host provisioning"
+    },
+    {
+      "phase": "memory",
+      "status": "passed-selected-checks",
+      "startedAt": "2026-10-11T12:55:10.966Z",
+      "completedAt": "2026-10-11T12:55:31.512Z",
+      "guestReadyMs": 370.28133299999996,
+      "maxHeartbeatDelayMs": 2.287791999999996,
+      "network": "no guest NIC",
+      "stop": {
+        "stopped": true,
+        "vzStoppedObserved": true,
+        "flushSucceeded": true
+      },
+      "builtSharePolicy": [
+        {
+          "guestPath": "/workspace/source",
+          "readOnly": false
+        },
+        {
+          "guestPath": "/opt/cowork-fixture",
+          "readOnly": true
+        },
+        {
+          "guestPath": "/workspace/host-ro",
+          "readOnly": true
+        },
+        {
+          "guestPath": "/workspace/host-rw",
+          "readOnly": false
+        }
+      ],
+      "memory": {
+        "beforeFootprintMB": 617,
+        "afterFootprintMB": [
+          617,
+          617,
+          617,
+          617
+        ],
+        "backingFootprintDecreaseObserved": false,
+        "thresholdMB": 16,
+        "reclaimVerified": false,
+        "reason": "Compare sustained owned footprint, guest compliance, compaction and host compression/swap; this metric alone is not full gate-1 proof."
+      },
+      "guestMemoryDiagnostics": {
+        "rows": [
+          {
+            "kind": "kernel",
+            "release": "6.18.35",
+            "machine": "aarch64"
+          },
+          {
+            "kind": "virtio-balloon",
+            "device": "virtio6",
+            "features": "10100000000000000000000000001100101000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "bitOrder": "least-feature-index-first",
+            "hostReclaimVerified": false
+          },
+          {
+            "kind": "balloon-discovery",
+            "found": true,
+            "hostReclaimVerified": false
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_ARM64_4K_PAGES",
+            "value": "y"
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_ARM64_16K_PAGES",
+            "value": "n"
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_ARM64_64K_PAGES",
+            "value": "n"
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_MEMORY_BALLOON",
+            "value": "y"
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_BALLOON_COMPACTION",
+            "value": "n"
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_COMPACTION",
+            "value": "y"
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_PAGE_REPORTING",
+            "value": "y"
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_VIRTIO_BALLOON",
+            "value": "y"
+          }
+        ],
+        "devices": [
+          {
+            "kind": "virtio-balloon",
+            "device": "virtio6",
+            "features": "10100000000000000000000000001100101000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "bitOrder": "least-feature-index-first",
+            "hostReclaimVerified": false,
+            "negotiated": {
+              "raw": "10100000000000000000000000001100101000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+              "bitOrder": "least-feature-index-first",
+              "mustTellHost": true,
+              "statsQueue": false,
+              "deflateOnOOM": true,
+              "freePageHint": false,
+              "pagePoison": false,
+              "freePageReporting": false,
+              "hostReclaimVerified": false
+            }
+          }
+        ],
+        "reportingNegotiated": false,
+        "hostReclaimVerified": false
+      },
+      "passiveCategoryCapture": [
+        {
+          "label": "baseline",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "allocated",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "freed-without-balloon",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "balloon-0",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "balloon-1",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "balloon-2",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "balloon-3",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "reallocated-after-deflation",
+          "footprint": true,
+          "vmmap": true
+        }
+      ],
+      "passiveCategoryExcerpts": [
+        {
+          "label": "baseline",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "203325440 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   193.9M   193.9M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "allocated",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "607207424 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   579.1M   579.1M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "freed-without-balloon",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "607846400 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   579.7M   579.7M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "balloon-0",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "608157696 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   580.0M   580.0M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "balloon-1",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "608157696 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   580.0M   580.0M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "balloon-2",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "608157696 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   580.0M   580.0M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "balloon-3",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "608157696 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   580.0M   580.0M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "reallocated-after-deflation",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "616628224 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   588.1M   588.1M       0K       0K       0K       0K        8"
+        }
+      ],
+      "guestMemorySamples": [
+        {
+          "label": "baseline",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     958028 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3468 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 0",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "allocated",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     561184 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:        396976 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 0",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "freed-without-balloon",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     912400 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3736 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 0",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-0",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     168108 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3684 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-1",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     168100 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3736 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-2",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     168100 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3692 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-3",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     168100 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3764 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "reallocated-after-deflation",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     916208 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3688 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 196608",
+            "balloon_deflate 196608"
+          ]
+        }
+      ]
+    },
+    {
+      "phase": "memory-compact",
+      "status": "passed-selected-checks",
+      "startedAt": "2026-10-11T12:55:31.537Z",
+      "completedAt": "2026-10-11T12:55:52.400Z",
+      "guestReadyMs": 334.07912500000003,
+      "maxHeartbeatDelayMs": 1.9723329999978887,
+      "network": "no guest NIC",
+      "stop": {
+        "stopped": true,
+        "vzStoppedObserved": true,
+        "flushSucceeded": true
+      },
+      "builtSharePolicy": [
+        {
+          "guestPath": "/workspace/source",
+          "readOnly": false
+        },
+        {
+          "guestPath": "/opt/cowork-fixture",
+          "readOnly": true
+        },
+        {
+          "guestPath": "/workspace/host-ro",
+          "readOnly": true
+        },
+        {
+          "guestPath": "/workspace/host-rw",
+          "readOnly": false
+        }
+      ],
+      "memory": {
+        "beforeFootprintMB": 621,
+        "afterFootprintMB": [
+          621,
+          621,
+          621,
+          621
+        ],
+        "backingFootprintDecreaseObserved": false,
+        "thresholdMB": 16,
+        "reclaimVerified": false,
+        "reason": "Compare sustained owned footprint, guest compliance, compaction and host compression/swap; this metric alone is not full gate-1 proof."
+      },
+      "guestMemoryDiagnostics": {
+        "rows": [
+          {
+            "kind": "kernel",
+            "release": "6.18.35",
+            "machine": "aarch64"
+          },
+          {
+            "kind": "virtio-balloon",
+            "device": "virtio6",
+            "features": "10100000000000000000000000001100101000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "bitOrder": "least-feature-index-first",
+            "hostReclaimVerified": false
+          },
+          {
+            "kind": "balloon-discovery",
+            "found": true,
+            "hostReclaimVerified": false
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_ARM64_4K_PAGES",
+            "value": "y"
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_ARM64_16K_PAGES",
+            "value": "n"
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_ARM64_64K_PAGES",
+            "value": "n"
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_MEMORY_BALLOON",
+            "value": "y"
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_BALLOON_COMPACTION",
+            "value": "n"
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_COMPACTION",
+            "value": "y"
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_PAGE_REPORTING",
+            "value": "y"
+          },
+          {
+            "kind": "kernel-config",
+            "name": "CONFIG_VIRTIO_BALLOON",
+            "value": "y"
+          }
+        ],
+        "devices": [
+          {
+            "kind": "virtio-balloon",
+            "device": "virtio6",
+            "features": "10100000000000000000000000001100101000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "bitOrder": "least-feature-index-first",
+            "hostReclaimVerified": false,
+            "negotiated": {
+              "raw": "10100000000000000000000000001100101000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+              "bitOrder": "least-feature-index-first",
+              "mustTellHost": true,
+              "statsQueue": false,
+              "deflateOnOOM": true,
+              "freePageHint": false,
+              "pagePoison": false,
+              "freePageReporting": false,
+              "hostReclaimVerified": false
+            }
+          }
+        ],
+        "reportingNegotiated": false,
+        "hostReclaimVerified": false
+      },
+      "passiveCategoryCapture": [
+        {
+          "label": "baseline",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "allocated",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "freed-without-balloon",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "compacted-before-balloon",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "balloon-0",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "balloon-1",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "balloon-2",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "balloon-3",
+          "footprint": true,
+          "vmmap": true
+        },
+        {
+          "label": "reallocated-after-deflation",
+          "footprint": true,
+          "vmmap": true
+        }
+      ],
+      "passiveCategoryExcerpts": [
+        {
+          "label": "baseline",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "204718080 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   195.2M   195.2M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "allocated",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "610222080 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   582.0M   582.0M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "freed-without-balloon",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "611155968 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   582.8M   582.8M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "compacted-before-balloon",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "611155968 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   582.8M   582.8M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "balloon-0",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "611598336 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   583.3M   583.3M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "balloon-1",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "611647488 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   583.3M   583.3M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "balloon-2",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "611647488 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   583.3M   583.3M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "balloon-3",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "611696640 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   583.4M   583.4M       0K       0K       0K       0K        8"
+        },
+        {
+          "label": "reallocated-after-deflation",
+          "footprintColumns": "Dirty     (Swapped)         Clean   Reclaimable       (Wired)    Regions    Category",
+          "footprintAppTag": "622379008 B           0 B           0 B           0 B           0 B          8    app-specific tag 1",
+          "vmmapColumns": [
+            "VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION",
+            "REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced)"
+          ],
+          "vmmapTag": "Memory Tag 240                     1.0G   593.5M   593.5M       0K       0K       0K       0K        8"
+        }
+      ],
+      "guestMemorySamples": [
+        {
+          "label": "baseline",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     951484 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3468 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 0",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "allocated",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     559880 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:        396884 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 0",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "freed-without-balloon",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     913932 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3748 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 0",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "compacted-before-balloon",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     916036 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3816 kB",
+            "compact_migrate_scanned 7713",
+            "compact_free_scanned 10349",
+            "balloon_inflate 0",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-0",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     129796 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3824 kB",
+            "compact_migrate_scanned 15905",
+            "compact_free_scanned 12269",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-1",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     143484 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3760 kB",
+            "compact_migrate_scanned 15905",
+            "compact_free_scanned 12269",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-2",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     146756 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3764 kB",
+            "compact_migrate_scanned 15905",
+            "compact_free_scanned 12269",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-3",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     156476 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3768 kB",
+            "compact_migrate_scanned 15905",
+            "compact_free_scanned 12269",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "reallocated-after-deflation",
+          "counters": [
+            "MemTotal:        1001860 kB",
+            "MemAvailable:     905360 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3828 kB",
+            "compact_migrate_scanned 15905",
+            "compact_free_scanned 12269",
+            "balloon_inflate 196608",
+            "balloon_deflate 196608"
+          ]
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Guest boot readiness excludes image provisioning, library loading and a real Winter agent runtime.",
+    "Tool identities exercised sequentially; no concurrent Project conversation or multiple-VM claim.",
+    "Host-backed owner-only source fixture; mixed ownership, ACLs, TCC and revocation untested.",
+    "No guest NIC is not a validated outbound network enforcement boundary.",
+    "Balloon guest compliance and host footprint are distinct; tested memory return was not demonstrated.",
+    "Other host applications/VMs and compression/swap were present; not a controlled system-wide memory benchmark.",
+    "Ad-hoc C ABI/FFI probe is not production Node-API/signing/daemon integration."
+  ]
+}

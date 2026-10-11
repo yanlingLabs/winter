@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { validateConfinement, validateDirect, memoryObservation } from "./evidence";
 import { assertOrchestrator } from "./claims";
+import { parseGuestMemoryDiagnostics } from "./kernel/profiles";
 import { NativeClient } from "./client";
 import { footprint, hostMetrics, memoryCategories } from "./metrics";
 
@@ -124,7 +125,19 @@ async function main() {
         report.directMetadata = { before, after };
         mark("direct-strict-source", { records: records.length, before, after, limitation: "owner-only fixture, not mixed ownership/ACL/TCC proof" });
       } else {
+        report.memoryDiagnostics = parseGuestMemoryDiagnostics(await exec(["/bin/sh", "/opt/cowork-fixture/guest-memory-diagnostics.sh"]));
+        report.kernelProfile = config.kernelProfile;
+        mark("guest-balloon-features", report.memoryDiagnostics);
         await sample("baseline");
+        const pageGroups = async (operation: "baseline" | "compare") => {
+          const result = JSON.parse(await exec(["/opt/cowork-fixture/page-groups", operation, "--dir", "/var/lib/cowork-fixture/page-groups", "--file", `${phase}.bin`, "--ram-mib", "1024"]));
+          check(result.ok === true && result.coverageValidated === true, "page-group diagnostic coverage unproven");
+          return result;
+        };
+        if (config.pageGroups) {
+          await exec(["/bin/sh", "-c", "mkdir -p /var/lib/cowork-fixture/page-groups; chmod 0700 /var/lib/cowork-fixture/page-groups"]);
+          report.pageGroupBaseline = await pageGroups("baseline");
+        }
         await exec(["/bin/sh", "-c", "rm -f /tmp/cowork-memprobe.log /tmp/cowork-memprobe.pid"]);
         memoryRun = client.request({ method: "exec", id: "probe", args: ["/bin/sh", "-c", "echo $$ > /tmp/cowork-memprobe.pid; exec /opt/cowork-fixture/memprobe 384 180 > /tmp/cowork-memprobe.log 2>&1"], timeoutSeconds: 300 }, 315_000);
         memoryRun.catch(() => {}); // Retain explicit await/cleanup below; no detached untracked child.
@@ -141,8 +154,29 @@ async function main() {
           await exec(["/bin/sh", "-c", "mkdir -p /tmp/cowork-proc; mount -t proc proc /tmp/cowork-proc; trap 'umount /tmp/cowork-proc' EXIT; echo 1 > /tmp/cowork-proc/sys/vm/compact_memory"]);
           await sample("compacted-before-balloon");
         }
+        if (config.pageGroups) {
+          mark("balloon-before-ack-witness", await client.request({ method: "balloon", id: "probe", targetBytes: 257 * 1024 * 1024 }));
+          report.pageGroupBeforeWitness = [];
+          for (let attempt = 0; attempt < 20; attempt++) {
+            await sleep(250);
+            const observed = { groups: await pageGroups("compare"), counters: await exec(["/bin/sh", "-c", "grep '^balloon_' /proc/vmstat"]) };
+            report.pageGroupBeforeWitness.push(observed);
+            const recent = report.pageGroupBeforeWitness.slice(-3);
+            if (recent.length === 3 && recent.every((value: any) => value.groups.currentBitmapDigest === recent[0].groups.currentBitmapDigest && value.counters === recent[0].counters) && /balloon_inflate 196352(?:\n|$)/.test(observed.counters)) break;
+          }
+          const recent = report.pageGroupBeforeWitness.slice(-3);
+          check(recent.length === 3 && recent.every((value: any) => value.groups.currentBitmapDigest === recent[0].groups.currentBitmapDigest && value.counters === recent[0].counters) && /balloon_inflate 196352(?:\n|$)/.test(recent[0].counters) && /balloon_deflate 0(?:\n|$)/.test(recent[0].counters), "page-group observations did not stabilize before ACK witness");
+        }
         mark("balloon-request", await client.request({ method: "balloon", id: "probe", targetBytes: 256 * 1024 * 1024 }));
         for (let i = 0; i < 4; i++) { await sleep(2000); await sample(`balloon-${i}`); }
+        if (config.pageGroups) {
+          const counters = await exec(["/bin/sh", "-c", "grep '^balloon_' /proc/vmstat"]);
+          check(/balloon_inflate 196608(?:\n|$)/.test(counters) && /balloon_deflate 0(?:\n|$)/.test(counters), "additional balloon inflation ACK witness missing");
+          const before = report.pageGroupBeforeWitness.at(-1).groups;
+          report.pageGroupAcknowledgmentWitness = { previousInflatePages: 196352, subsequentInflatePages: 196608, noDeflation: true, observedGroups: before.newlyFullOffline16KiBGroups, observedGroupBytes: before.newlyFullOfflineBytes, touchedOverlapLowerBoundBytes: Math.max(0, before.newlyFullOfflineBytes + 384 * 1024 ** 2 - 1024 ** 3), hostReclaimVerified: false, counters };
+          report.pageGroupAfterWitness = await pageGroups("compare");
+          mark("page-group-ack-witness", report.pageGroupAcknowledgmentWitness);
+        }
         mark("balloon-deflate", await client.request({ method: "balloon", id: "probe", targetBytes: 1024 * 1024 * 1024 }));
         await sleep(1000);
         await exec(["/bin/sh", "-c", "kill -TERM $(cat /tmp/cowork-memprobe.pid)"]);
