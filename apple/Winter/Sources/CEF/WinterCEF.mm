@@ -702,11 +702,16 @@ WinterCEFOpenBrowser *OpenBrowserRecordFor(CefRefPtr<CefBrowser> browser) {
 /// always-answers contract true. A flat map keyed by a packed pair would make the fail-all a scan of
 /// every pending call in the process on each close.
 ///
-/// Message ids are assigned by CEF and are per-browser (`ExecuteDevToolsMethod`'s own doc:
-/// "an incremental number ... based on previous values"), so the browser id is a necessary part of
-/// the key — two tabs can legitimately be waiting on the same number.
+/// Message ids are per browser — drawn from one per-browser counter (`SuggestedCDPMessageId`) by both
+/// doors, `WinterCEFSendCDP`'s raw messages and `WinterCEFExecuteCDP`'s `ExecuteDevToolsMethod` — so the
+/// browser id is a necessary part of the key: two tabs can legitimately be waiting on the same number.
 static NSMutableDictionary<NSNumber *, NSMutableDictionary<NSNumber *, WinterCEFCDPCompletion> *>
     *g_pending_cdp = nil;
+
+/// Browser identifier → (message id → the flattened child session the call was sent to), for the calls sent to
+/// one. A child session that detaches before it answers would leave its calls waiting until the browser closed:
+/// `FailPendingCDPOfSession` fails them when the browser says it detached (`Target.detachedFromTarget`).
+static NSMutableDictionary<NSNumber *, NSMutableDictionary<NSNumber *, NSString *> *> *g_pending_cdp_sessions = nil;
 
 /// The DevTools observer registration for each open browser, filled beside its `WinterCEFOpenBrowser`
 /// record in `RememberOpenBrowser` and dropped beside it in `ForgetOpenBrowser` — the same
@@ -735,8 +740,9 @@ NSString *CDPReasonJSON(NSString *message) {
   return json ?: @"{\"message\":\"the browser could not report why this failed\"}";
 }
 
-/// Register a completion against the id CEF assigned its method call.
-void RememberPendingCDP(int browser_id, int message_id, WinterCEFCDPCompletion completion) {
+/// Register a completion against its call's message id — and, for a call sent to a flattened child session, that
+/// session.
+void RememberPendingCDP(int browser_id, int message_id, WinterCEFCDPCompletion completion, NSString *session = nil) {
   if (g_pending_cdp == nil) {
     g_pending_cdp = [[NSMutableDictionary alloc] init];
   }
@@ -746,6 +752,36 @@ void RememberPendingCDP(int browser_id, int message_id, WinterCEFCDPCompletion c
     g_pending_cdp[@(browser_id)] = byMessage;
   }
   byMessage[@(message_id)] = [completion copy];
+  if (session.length > 0) {
+    if (g_pending_cdp_sessions == nil) {
+      g_pending_cdp_sessions = [[NSMutableDictionary alloc] init];
+    }
+    NSMutableDictionary<NSNumber *, NSString *> *sessions = g_pending_cdp_sessions[@(browser_id)];
+    if (sessions == nil) {
+      sessions = [[NSMutableDictionary alloc] init];
+      g_pending_cdp_sessions[@(browser_id)] = sessions;
+    }
+    sessions[@(message_id)] = [session copy];
+  }
+}
+
+/// Take one call's entry out of both maps, unanswered; its completion, if it was still pending.
+WinterCEFCDPCompletion TakePendingCDP(int browser_id, int message_id) {
+  NSMutableDictionary<NSNumber *, WinterCEFCDPCompletion> *byMessage = g_pending_cdp[@(browser_id)];
+  WinterCEFCDPCompletion completion = byMessage[@(message_id)];
+  if (completion == nil) {
+    return nil;
+  }
+  [byMessage removeObjectForKey:@(message_id)];
+  if (byMessage.count == 0) {
+    [g_pending_cdp removeObjectForKey:@(browser_id)];
+  }
+  NSMutableDictionary<NSNumber *, NSString *> *sessions = g_pending_cdp_sessions[@(browser_id)];
+  [sessions removeObjectForKey:@(message_id)];
+  if (sessions != nil && sessions.count == 0) {
+    [g_pending_cdp_sessions removeObjectForKey:@(browser_id)];
+  }
+  return completion;
 }
 
 /// Settle exactly one pending call. **Erase THEN call** — the same delete-then-resolve ordering the
@@ -757,14 +793,9 @@ void RememberPendingCDP(int browser_id, int message_id, WinterCEFCDPCompletion c
 /// a DevTools front-end attached to the same browser, or an event message that reached
 /// `OnDevToolsMethodResult` for a call this app never made, has no completion to be owed one.
 void SettlePendingCDP(int browser_id, int message_id, BOOL ok, NSString *payloadJSON) {
-  NSMutableDictionary<NSNumber *, WinterCEFCDPCompletion> *byMessage = g_pending_cdp[@(browser_id)];
-  WinterCEFCDPCompletion completion = byMessage[@(message_id)];
+  WinterCEFCDPCompletion completion = TakePendingCDP(browser_id, message_id);
   if (completion == nil) {
     return;
-  }
-  [byMessage removeObjectForKey:@(message_id)];
-  if (byMessage.count == 0) {
-    [g_pending_cdp removeObjectForKey:@(browser_id)];
   }
   completion(ok, payloadJSON);
 }
@@ -782,6 +813,7 @@ void FailAllPendingCDP(int browser_id, NSString *reason) {
     return;
   }
   [g_pending_cdp removeObjectForKey:@(browser_id)];
+  [g_pending_cdp_sessions removeObjectForKey:@(browser_id)];
   NSString *payload = CDPReasonJSON(reason);
   Log("cdp-pending-failed (id=%d, %lu call(s), %s)", browser_id,
       static_cast<unsigned long>(byMessage.count), reason.UTF8String);
@@ -790,6 +822,35 @@ void FailAllPendingCDP(int browser_id, NSString *reason) {
     if (completion != nil) {
       completion(NO, payload);
     }
+  }
+}
+
+/// **Fail every call one flattened child session stranded** — it detached (its frame went away, or navigated to
+/// another process) before answering. Same order as the fail-all: every entry out first, then each completion.
+void FailPendingCDPOfSession(int browser_id, NSString *session, NSString *reason) {
+  NSDictionary<NSNumber *, NSString *> *sessions = [g_pending_cdp_sessions[@(browser_id)] copy];
+  if (sessions.count == 0 || session.length == 0) {
+    return;
+  }
+  NSMutableArray<WinterCEFCDPCompletion> *stranded = [[NSMutableArray alloc] init];
+  // In the order the calls were made.
+  for (NSNumber *messageId in [[sessions allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+    if (![sessions[messageId] isEqualToString:session]) {
+      continue;
+    }
+    WinterCEFCDPCompletion completion = TakePendingCDP(browser_id, messageId.intValue);
+    if (completion != nil) {
+      [stranded addObject:completion];
+    }
+  }
+  if (stranded.count == 0) {
+    return;
+  }
+  Log("cdp-pending-failed (id=%d, %lu call(s) of a detached child session)", browser_id,
+      static_cast<unsigned long>(stranded.count));
+  NSString *payload = CDPReasonJSON(reason);
+  for (WinterCEFCDPCompletion completion in stranded) {
+    completion(NO, payload);
   }
 }
 
@@ -816,6 +877,112 @@ void NoteCDPMessageId(int browser_id, int message_id) {
   }
 }
 
+/// The deepest the params may nest. Foundation accepts any depth; Chromium refuses a deep message with an answer that
+/// names no id — which would leave the call waiting for its timeout.
+const int kCDPParamsMaxDepth = 100;
+
+/// Whether JSON text nests no deeper than `maxDepth` objects and arrays (a byte scan, strings skipped).
+bool JSONNestsWithin(const char *bytes, size_t size, int maxDepth) {
+  int depth = 0;
+  bool inString = false;
+  bool escaped = false;
+  for (size_t i = 0; i < size; i++) {
+    const char c = bytes[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (c == '\\') {
+        escaped = true;
+      } else if (c == '"') {
+        inString = false;
+      }
+    } else if (c == '"') {
+      inString = true;
+    } else if (c == '{' || c == '[') {
+      if (++depth > maxDepth) {
+        return false;
+      }
+    } else if (c == '}' || c == ']') {
+      depth -= 1;
+    }
+  }
+  return true;
+}
+
+/// One raw DevTools message, `{"id":…,"method":…,"params":…[,"sessionId":…]}`, with `paramsJSON` placed in it
+/// exactly as given once it is checked: ONE JSON object, starting with `{` (no byte-order mark), nesting at most
+/// `kCDPParamsMaxDepth` deep. The params are never re-encoded, so what the engine sent is what the browser reads.
+/// `nil`, with `outReason` (a `{"message": …}` sentence) set, when it can't be sent.
+NSData *RawDevToolsMessage(int messageId, const char *method, const char *paramsJSON, const char *cdpSessionId,
+                           NSString **outReason) {
+  auto refuse = [&](NSString *why) -> NSData * {
+    if (outReason != nullptr) {
+      *outReason = CDPReasonJSON(why);
+    }
+    return nil;
+  };
+  NSString *methodName = method != nullptr ? [NSString stringWithUTF8String:method] : nil;
+  if (method == nullptr || *method == '\0') {
+    return refuse(@"no DevTools method was named");
+  }
+  if (methodName == nil) {
+    return refuse(@"the DevTools method name is not valid UTF-8");
+  }
+  NSString *session = nil;
+  if (cdpSessionId != nullptr && *cdpSessionId != '\0') {
+    session = [NSString stringWithUTF8String:cdpSessionId];
+    if (session == nil) {
+      return refuse(@"the DevTools session id is not valid UTF-8");
+    }
+  }
+  NSData *params = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+  if (paramsJSON != nullptr && *paramsJSON != '\0') {
+    const size_t length = strlen(paramsJSON);
+    if (*paramsJSON != '{') {
+      return refuse(@"the DevTools params were not a JSON object");
+    }
+    if (!JSONNestsWithin(paramsJSON, length, kCDPParamsMaxDepth)) {
+      return refuse(@"the DevTools params nest too deeply");
+    }
+    params = [NSData dataWithBytes:paramsJSON length:length];
+    id parsed = [NSJSONSerialization JSONObjectWithData:params options:0 error:nil];
+    if (![parsed isKindOfClass:[NSDictionary class]]) {
+      return refuse(@"the DevTools params were not a JSON object");
+    }
+  }
+  NSData *methodJSON = [NSJSONSerialization dataWithJSONObject:methodName options:NSJSONWritingFragmentsAllowed error:nil];
+  NSData *sessionJSON = session == nil ? nil : [NSJSONSerialization dataWithJSONObject:session options:NSJSONWritingFragmentsAllowed error:nil];
+  if (methodJSON == nil || (session != nil && sessionJSON == nil)) {
+    return refuse(@"the DevTools message could not be encoded");
+  }
+  NSMutableData *out = [[NSMutableData alloc] init];
+  [out appendData:[[NSString stringWithFormat:@"{\"id\":%d,\"method\":", messageId] dataUsingEncoding:NSUTF8StringEncoding]];
+  [out appendData:methodJSON];
+  [out appendData:[@",\"params\":" dataUsingEncoding:NSUTF8StringEncoding]];
+  [out appendData:params];
+  if (sessionJSON != nil) {
+    [out appendData:[@",\"sessionId\":" dataUsingEncoding:NSUTF8StringEncoding]];
+    [out appendData:sessionJSON];
+  }
+  [out appendData:[@"}" dataUsingEncoding:NSUTF8StringEncoding]];
+  return out;
+}
+
+/// **Register, THEN send.** A method the browser process answers by itself (`Page.handleJavaScriptDialog`, for
+/// one) answers INSIDE the send — CEF hands the reply to the observer before `SendDevToolsMessage` returns — so a
+/// registration made after the send would miss it and leave the call waiting for its timeout. `send` answers
+/// whether the message was submitted. Refused: the registration is taken back unanswered and this returns false
+/// (the caller answers the refusal). Submitted, or already answered from inside the send: true.
+bool RegisterThenSend(int browser_id, int message_id, WinterCEFCDPCompletion settle, const std::function<bool()> &send,
+                      NSString *session = nil) {
+  RememberPendingCDP(browser_id, message_id, settle, session);
+  if (send()) {
+    return true;
+  }
+  // Answered from inside the send after all: that answer stands. Otherwise the entry is taken back unanswered.
+  return TakePendingCDP(browser_id, message_id) == nil;
+}
+
 /// Whether a failure payload is the browser's own protocol error (`{"code": …, "message": …}`) rather
 /// than one this file synthesised (`CDPReasonJSON`, `{"message": …}` only).
 bool PayloadIsProtocolError(NSString *payload) {
@@ -824,8 +991,42 @@ bool PayloadIsProtocolError(NSString *payload) {
     return false;
   }
   id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+  if (parsed == nil) {
+    // Unparseable here (Foundation refuses a lone surrogate) — but the browser's own error object starts with its
+    // code, which this file's synthesised `{"message": …}` never carries.
+    return [payload hasPrefix:@"{\"code\":"];
+  }
   return [parsed isKindOfClass:[NSDictionary class]] &&
          [((NSDictionary *)parsed)[@"code"] isKindOfClass:[NSNumber class]];
+}
+
+/// **The browser link's door, with the send injected** (`WinterCEFSendCDP` passes `SendDevToolsMessage`): ONE path
+/// for the tab's own session and a flattened child's — a raw message (`RawDevToolsMessage`) with an id from the
+/// per-browser counter, REGISTERED BEFORE IT IS SENT (`RegisterThenSend`: a browser-side method answers inside the
+/// send), with the child session it went to (so a detach fails it). The completion fires exactly once: a refusal
+/// here, synchronously; otherwise the answer, an error, or a fail-all.
+void SendCDPOver(int browser_id, const char *method, const char *paramsJSON, const char *cdpSessionId,
+                 WinterCEFCDPStatusCompletion answer, const std::function<bool(NSData *)> &send) {
+  const int messageId = SuggestedCDPMessageId(browser_id);
+  NSString *reason = nil;
+  NSData *message = RawDevToolsMessage(messageId, method, paramsJSON, cdpSessionId, &reason);
+  if (message == nil) {
+    answer(WinterCEFCDPStatusRefused, reason ?: CDPReasonJSON(@"the DevTools message could not be encoded"));
+    return;
+  }
+  NoteCDPMessageId(browser_id, messageId);
+  WinterCEFCDPCompletion settle = ^(BOOL ok, NSString *payload) {
+    if (ok) {
+      answer(WinterCEFCDPStatusOK, payload ?: @"{}");
+    } else {
+      answer(PayloadIsProtocolError(payload) ? WinterCEFCDPStatusProtocolError : WinterCEFCDPStatusGone,
+             payload ?: CDPReasonJSON(@"the DevTools method failed without a reason"));
+    }
+  };
+  NSString *session = (cdpSessionId != nullptr && *cdpSessionId != '\0') ? [NSString stringWithUTF8String:cdpSessionId] : nil;
+  if (!RegisterThenSend(browser_id, messageId, settle, [&] { return send(message); }, session)) {
+    answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the browser refused to submit the DevTools message"));
+  }
 }
 
 /// **The decisions behind `WinterCEFAutomationNativeUI`**, one function per kind — called by the
@@ -920,63 +1121,213 @@ bool HoldJSDialog(WinterCEFTabBridge *bridge, CefRefPtr<CefJSDialogCallback> cal
   return true;
 }
 
-/// The child session a raw DevTools message is an EVENT of, or `nil`.
-///
-/// A flattened child target's messages (an out-of-process iframe) arrive on the browser's one
-/// DevTools connection with a top-level `"sessionId"` — and CEF's structured `OnDevToolsEvent` drops
-/// that key, so the raw observer must catch them. It runs on EVERY message, a multi-megabyte
-/// screenshot result included, so it first makes a byte test that parses nothing: Chromium appends a
-/// child's `sessionId` as the message's LAST key, so only a message ending `,"sessionId":"<id>"}` can
-/// be one (a nested `sessionId`, as in `Target.attachedToTarget`'s params, ends `"}}`). Results go to
-/// `OnDevToolsMethodResult` like the tab's own (their ids are unique per browser); only events with a
-/// session are parsed here.
-NSString *ChildSessionEventOf(const char *bytes, size_t size, NSString **outMethod, NSData **outParams) {
+/// Where a raw DevTools message's flattened-child suffix `,"sessionId":"<id>"}` starts, and the id — or false. The
+/// byte test, parsing nothing, that every message passes through (a multi-megabyte screenshot result included).
+/// Chromium appends a flattened child's `sessionId` as the message's LAST key, so only such a message can be a
+/// child's (a nested `sessionId`, as in `Target.attachedToTarget`'s params, ends `"}}`).
+bool ChildSessionSuffix(const char *bytes, size_t size, size_t *outKeyStart, NSString **outSession) {
   static const char kKey[] = ",\"sessionId\":\"";
   const size_t keyLength = sizeof(kKey) - 1;
   if (bytes == nullptr || size < keyLength + 3 || bytes[size - 1] != '}' || bytes[size - 2] != '"') {
-    return nil;
+    return false;
   }
   const size_t closingQuote = size - 2;
   size_t valueStart = closingQuote;
   while (valueStart > 0 && bytes[valueStart - 1] != '"') {
     const unsigned char c = static_cast<unsigned char>(bytes[valueStart - 1]);
     if (!(isalnum(c) || c == '-' || c == '_' || c == '.') || closingQuote - valueStart >= 128) {
-      return nil;
+      return false;
     }
     valueStart -= 1;
   }
   if (valueStart == closingQuote || valueStart < keyLength) {
-    return nil;
+    return false;
   }
   if (memcmp(bytes + valueStart - keyLength, kKey, keyLength) != 0) {
+    return false;
+  }
+  if (outKeyStart != nullptr) {
+    *outKeyStart = valueStart - keyLength;
+  }
+  if (outSession != nullptr) {
+    *outSession = [[NSString alloc] initWithBytes:bytes + valueStart length:closingQuote - valueStart encoding:NSASCIIStringEncoding];
+  }
+  return true;
+}
+
+/// Whether a raw DevTools message is a method RESULT (`{"id":…` first) rather than an event.
+bool IsDevToolsResult(const char *bytes, size_t size) {
+  return bytes != nullptr && size >= 6 && memcmp(bytes, "{\"id\":", 6) == 0;
+}
+
+/// The JSON object text between `start` and `end` (whitespace trimmed) — `{` … `}` — or nil.
+NSData *JSONObjectSlice(const char *bytes, size_t start, size_t end) {
+  while (start < end && isspace(static_cast<unsigned char>(bytes[start]))) start++;
+  while (end > start && isspace(static_cast<unsigned char>(bytes[end - 1]))) end--;
+  if (end - start < 2 || bytes[start] != '{' || bytes[end - 1] != '}') {
     return nil;
   }
-  if (size >= 6 && memcmp(bytes, "{\"id\":", 6) == 0) {
-    return nil;  // a result — it settles through `OnDevToolsMethodResult`
+  return [NSData dataWithBytes:bytes + start length:end - start];
+}
+
+/// What one raw DevTools message is, for the raw observer.
+enum class RawDevToolsKind {
+  /// Not a flattened child's: CEF's structured callbacks take it.
+  NotAChilds,
+  /// A child's result, read: `id`, `ok`, `payload` (the result or error object's own text).
+  ChildResult,
+  /// A child's result whose id was read but whose body could not be: settled as an error.
+  UnreadableChildResult,
+  /// A child's event, read: `session`, `method`, `params` (its own text).
+  ChildEvent,
+  /// A child's message that could not be read at all: consumed and dropped (never left to CEF, which would drop
+  /// its session and hand it on as the tab's own).
+  UnreadableChildMessage,
+};
+
+struct RawDevToolsRead {
+  RawDevToolsKind kind = RawDevToolsKind::NotAChilds;
+  int messageId = 0;
+  BOOL ok = NO;
+  NSString *payload = nil;
+  NSString *session = nil;
+  NSString *method = nil;
+  NSData *params = nil;
+};
+
+/// **A flattened child session's message, read by SLICING, never by a full parse.** Once a message ends with a
+/// child's session (`ChildSessionSuffix`) it is a child's, and is never left to CEF: CEF's parser drops a child's
+/// RESULT (it takes a result only as `{"id":…,"result":…}`, logging "Failed to parse message"), and a child's EVENT
+/// would reach the structured callback with its session dropped — attributed to the tab itself. And it is not parsed
+/// whole: Foundation refuses JSON Chromium writes (a lone surrogate, `\ud83d`, from a string cut mid-pair), and a
+/// re-encode would change number text. So:
+///   * a RESULT, `{"id":N,"result":{…},"sessionId":"…"}` (or `"error"`): `N` read from the bytes, and the object
+///     between the key and the suffix handed on as it is;
+///   * an EVENT, `{"method":"M","params":{…},"sessionId":"…"}` (params may be absent): the same.
+/// Anything of a child's that doesn't fit is "unreadable" — a result with an id is still settled, as an error.
+RawDevToolsRead ReadRawDevToolsMessage(const char *bytes, size_t size) {
+  RawDevToolsRead read;
+  size_t suffix = 0;
+  NSString *session = nil;
+  if (!ChildSessionSuffix(bytes, size, &suffix, &session)) {
+    return read;
   }
-  NSData *data = [NSData dataWithBytes:bytes length:size];
-  id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+  read.kind = RawDevToolsKind::UnreadableChildMessage;
+  read.session = session;
+  if (IsDevToolsResult(bytes, size)) {
+    size_t i = 6;
+    long long id = 0;
+    const size_t digits = i;
+    while (i < suffix && isdigit(static_cast<unsigned char>(bytes[i])) && i - digits < 10) {
+      id = id * 10 + (bytes[i] - '0');
+      i++;
+    }
+    if (i == digits || id > INT_MAX) {
+      return read;
+    }
+    read.messageId = static_cast<int>(id);
+    read.kind = RawDevToolsKind::UnreadableChildResult;
+    static const char kResult[] = ",\"result\":";
+    static const char kError[] = ",\"error\":";
+    size_t bodyStart = 0;
+    if (suffix - i >= sizeof(kResult) - 1 && memcmp(bytes + i, kResult, sizeof(kResult) - 1) == 0) {
+      read.ok = YES;
+      bodyStart = i + sizeof(kResult) - 1;
+    } else if (suffix - i >= sizeof(kError) - 1 && memcmp(bytes + i, kError, sizeof(kError) - 1) == 0) {
+      read.ok = NO;
+      bodyStart = i + sizeof(kError) - 1;
+    } else {
+      return read;
+    }
+    NSData *body = JSONObjectSlice(bytes, bodyStart, suffix);
+    NSString *payload = body == nil ? nil : [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
+    if (payload == nil) {
+      return read;
+    }
+    read.payload = payload;
+    read.kind = RawDevToolsKind::ChildResult;
+    return read;
+  }
+  static const char kMethod[] = "{\"method\":\"";
+  const size_t methodLength = sizeof(kMethod) - 1;
+  if (suffix < methodLength || memcmp(bytes, kMethod, methodLength) != 0) {
+    return read;
+  }
+  size_t i = methodLength;
+  while (i < suffix && bytes[i] != '"' && bytes[i] != '\\') i++;
+  if (i >= suffix || bytes[i] != '"' || i == methodLength) {
+    return read;
+  }
+  NSString *method = [[NSString alloc] initWithBytes:bytes + methodLength length:i - methodLength encoding:NSUTF8StringEncoding];
+  if (method == nil) {
+    return read;
+  }
+  i++;  // the closing quote
+  NSData *params = nil;
+  static const char kParams[] = ",\"params\":";
+  if (i == suffix) {
+    params = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+  } else if (suffix - i >= sizeof(kParams) - 1 && memcmp(bytes + i, kParams, sizeof(kParams) - 1) == 0) {
+    params = JSONObjectSlice(bytes, i + sizeof(kParams) - 1, suffix);
+  }
+  if (params == nil) {
+    return read;
+  }
+  read.kind = RawDevToolsKind::ChildEvent;
+  read.method = method;
+  read.params = params;
+  return read;
+}
+
+/// The child session a DevTools EVENT says detached (`Target.detachedFromTarget`'s `params.sessionId`), or nil.
+NSString *DetachedSessionOf(NSString *method, NSData *params) {
+  if (![method isEqualToString:@"Target.detachedFromTarget"] || params == nil) {
+    return nil;
+  }
+  id parsed = [NSJSONSerialization JSONObjectWithData:params options:0 error:nil];
   if (![parsed isKindOfClass:[NSDictionary class]]) {
     return nil;
   }
-  NSDictionary *message = parsed;
-  NSString *method = message[@"method"];
-  NSString *session = message[@"sessionId"];
-  if (message[@"id"] != nil || ![method isKindOfClass:[NSString class]] ||
-      ![session isKindOfClass:[NSString class]]) {
-    return nil;
+  NSString *session = ((NSDictionary *)parsed)[@"sessionId"];
+  return [session isKindOfClass:[NSString class]] ? session : nil;
+}
+
+/// An event of the browser's (its own, or a child's): a child session that detached fails the calls it still owed.
+void NoteDevToolsEvent(int browser_id, NSString *method, NSData *params) {
+  if (NSString *detached = DetachedSessionOf(method, params)) {
+    FailPendingCDPOfSession(browser_id, detached, @"the frame's DevTools session ended before it answered");
   }
-  id params = message[@"params"];
-  if (![params isKindOfClass:[NSDictionary class]]) {
-    params = @{};
+}
+
+/// **The raw observer's whole decision for one message** (`WinterCDPObserver::OnDevToolsMessage`), with no CEF: a
+/// flattened child's RESULT settles its pending call by id (an unreadable body as an error); a child's EVENT goes to
+/// `deliver` with its session; a child's message nothing could be read of is dropped. Every child's message is
+/// consumed (`true`); anything else is left to CEF's structured callbacks (`false`).
+bool HandleRawDevToolsMessage(int browser_id, const char *bytes, size_t size,
+                              void (^deliver)(NSString *method, NSData *params, NSString *session)) {
+  RawDevToolsRead read = ReadRawDevToolsMessage(bytes, size);
+  switch (read.kind) {
+    case RawDevToolsKind::NotAChilds:
+      return false;
+    case RawDevToolsKind::ChildResult:
+      SettlePendingCDP(browser_id, read.messageId, read.ok, read.payload);
+      return true;
+    case RawDevToolsKind::UnreadableChildResult:
+      Log("cdp-child-result-unreadable (id=%d, message %d)", browser_id, read.messageId);
+      SettlePendingCDP(browser_id, read.messageId, NO,
+                       @"{\"code\":-32603,\"message\":\"the child session's result could not be read\"}");
+      return true;
+    case RawDevToolsKind::ChildEvent:
+      NoteDevToolsEvent(browser_id, read.method, read.params);
+      if (deliver != nil) {
+        deliver(read.method, read.params, read.session);
+      }
+      return true;
+    case RawDevToolsKind::UnreadableChildMessage:
+      Log("cdp-child-message-unreadable (id=%d, %zu bytes) — dropped", browser_id, size);
+      return true;
   }
-  if (outMethod != nullptr) {
-    *outMethod = method;
-  }
-  if (outParams != nullptr) {
-    *outParams = [NSJSONSerialization dataWithJSONObject:params options:0 error:nil] ?: [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
-  }
-  return session;
+  return true;
 }
 
 /// **The reply side of the CDP door.** One instance per open browser, alive for exactly as long as
@@ -988,10 +1339,11 @@ NSString *ChildSessionEventOf(const char *bytes, size_t size, NSString **outMeth
 ///
 ///   * `OnDevToolsEvent` — the tab's own events, handed to the tab's `devToolsEventObserver` (unset
 ///     for every tab the link does not hold, so nothing changes for those);
-///   * `OnDevToolsMessage` — answers `true` (handled) ONLY for a flattened child target's event,
-///     which the structured callback would deliver without its session (`ChildSessionEventOf`).
-///     Every other message — every result, the old consumer's included, and every event of the tab
-///     itself — answers `false` and reaches the structured callbacks exactly as before.
+///   * `OnDevToolsMessage` — answers `true` (handled) ONLY for a flattened child target's message
+///     (`HandleRawDevToolsMessage`): its event, which the structured callback would deliver without its
+///     session, and its RESULT, which CEF's parser drops and which is settled here by its id. Every other
+///     message — every result of the tab's own session, the old consumer's included, and every event of
+///     the tab itself — answers `false` and reaches the structured callbacks exactly as before.
 ///
 /// `OnDevToolsAgentAttached` is a fact with no consequence for a caller that is already waiting.
 class WinterCDPObserver : public CefDevToolsMessageObserver {
@@ -1001,17 +1353,9 @@ class WinterCDPObserver : public CefDevToolsMessageObserver {
     if (!browser) {
       return false;
     }
-    NSString *method = nil;
-    NSData *params = nil;
-    NSString *session = ChildSessionEventOf(static_cast<const char *>(message), message_size, &method, &params);
-    if (session == nil) {
-      return false;
-    }
     WinterCEFTabBridge *bridge = OpenBrowserRecordFor(browser).bridge;
-    if (bridge.devToolsEventObserver != nil) {
-      bridge.devToolsEventObserver(method, params, session);
-    }
-    return true;
+    void (^observer)(NSString *, NSData *, NSString *) = bridge.devToolsEventObserver;
+    return HandleRawDevToolsMessage(browser->GetIdentifier(), static_cast<const char *>(message), message_size, observer);
   }
 
   void OnDevToolsEvent(CefRefPtr<CefBrowser> browser,
@@ -1022,6 +1366,11 @@ class WinterCDPObserver : public CefDevToolsMessageObserver {
     if (!browser) {
       return;
     }
+    NSString *name = [NSString stringWithUTF8String:method.ToString().c_str()] ?: @"";
+    // A child session that detached fails the calls it still owed — whether or not anyone observes events.
+    if ([name isEqualToString:@"Target.detachedFromTarget"] && params != nullptr && params_size > 0) {
+      NoteDevToolsEvent(browser->GetIdentifier(), name, [NSData dataWithBytes:params length:params_size]);
+    }
     WinterCEFTabBridge *bridge = OpenBrowserRecordFor(browser).bridge;
     if (bridge.devToolsEventObserver == nil) {
       return;
@@ -1029,11 +1378,12 @@ class WinterCDPObserver : public CefDevToolsMessageObserver {
     // "|params| is only valid for the scope of this callback" — copied, since the observer hands it on.
     NSData *data = (params != nullptr && params_size > 0) ? [NSData dataWithBytes:params length:params_size]
                                                           : [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
-    bridge.devToolsEventObserver([NSString stringWithUTF8String:method.ToString().c_str()] ?: @"", data, nil);
+    bridge.devToolsEventObserver(name, data, nil);
   }
 
-  /// A method call finished. `message_id` is the id `ExecuteDevToolsMethod` returned to the caller,
-  /// which is the whole correlation: `result` is the protocol's `"result"` dictionary on success and
+  /// A method call finished. `message_id` is the call's own id — the one `WinterCEFExecuteCDP`'s
+  /// `ExecuteDevToolsMethod` returned, or the one `WinterCEFSendCDP` put in its raw message — which is the
+  /// whole correlation: `result` is the protocol's `"result"` dictionary on success and
   /// its `"error"` dictionary on failure (`cef_devtools_message_observer.h`), and both are already
   /// the JSON object this door's completion promises — so neither is reshaped here.
   void OnDevToolsMethodResult(CefRefPtr<CefBrowser> browser,
@@ -3714,12 +4064,12 @@ void WinterCEFExecuteCDP(NSView *parent,
     return;
   }
   NoteCDPMessageId(browserId, messageId);
-  // **The ordering assumption, stated rather than assumed.** A DevTools method result travels back
-  // through the agent, never re-entrantly out of the call above, so registering after the submit is
-  // safe — but if that were ever untrue the reply would find no pending entry and be dropped, and
-  // this completion would never fire. That is the one hole in the always-answers contract that lives
-  // on this line, and the caller's own deadline is what covers it (`PanelCommandConsumer`'s
-  // abandonment timer, which exists for the app-is-wedged case anyway).
+  // **The ordering assumption, and where it is FALSE.** A method the browser process answers by itself
+  // (`Page.handleJavaScriptDialog`, for one) answers re-entrantly, from INSIDE the call above — measured on the
+  // browser link's door, which therefore registers before it sends (`RegisterThenSend`). Registered after the
+  // submit, as here, such an answer finds no pending entry and is dropped, and this completion never fires. This
+  // door's verbs (the old `Browser` tool's) send no such method; the caller's own deadline is what covers it if one
+  // ever does (`PanelCommandConsumer`'s abandonment timer, which exists for the app-is-wedged case anyway).
   RememberPendingCDP(browser->GetIdentifier(), messageId, answer);
 }
 
@@ -3750,73 +4100,9 @@ void WinterCEFSendCDP(NSView *parent,
     answer(WinterCEFCDPStatusNotLive, CDPReasonJSON(@"this tab has no live browser"));
     return;
   }
-  const int browserId = browser->GetIdentifier();
-  // The shared registry speaks `(ok, payload)`; this door's caller needs the KIND of failure. A failure
-  // the browser reported carries the protocol's numeric `code`; one this file decided (the browser
-  // closed, the agent detached — `FailAllPendingCDP`) carries only a message.
-  WinterCEFCDPCompletion settle = ^(BOOL ok, NSString *payload) {
-    if (ok) {
-      answer(WinterCEFCDPStatusOK, payload ?: @"{}");
-    } else {
-      answer(PayloadIsProtocolError(payload) ? WinterCEFCDPStatusProtocolError : WinterCEFCDPStatusGone,
-             payload ?: CDPReasonJSON(@"the DevTools method failed without a reason"));
-    }
-  };
-
-  if (cdpSessionId == nullptr || *cdpSessionId == '\0') {
-    // The tab's own session: the structured door, as `WinterCEFExecuteCDP` uses it.
-    CefRefPtr<CefDictionaryValue> params;
-    if (paramsJSON != nullptr && *paramsJSON != '\0') {
-      CefRefPtr<CefValue> parsed = CefParseJSON(CefString(paramsJSON), JSON_PARSER_RFC);
-      if (!parsed || parsed->GetType() != VTYPE_DICTIONARY) {
-        answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the DevTools params were not a JSON object"));
-        return;
-      }
-      params = parsed->GetDictionary();
-    }
-    const int messageId =
-        browser->GetHost()->ExecuteDevToolsMethod(SuggestedCDPMessageId(browserId), CefString(method), params);
-    if (messageId <= 0) {
-      answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the browser refused to submit the DevTools method"));
-      return;
-    }
-    NoteCDPMessageId(browserId, messageId);
-    RememberPendingCDP(browserId, messageId, settle);
-    return;
-  }
-
-  // A child target's session: raw, because only the raw message can name a `sessionId`. Its result
-  // still arrives through `OnDevToolsMethodResult` by id — which is why the id comes from the same
-  // counter as every other on this browser.
-  id params = @{};
-  if (paramsJSON != nullptr && *paramsJSON != '\0') {
-    NSData *data = [NSData dataWithBytes:paramsJSON length:strlen(paramsJSON)];
-    params = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    if (![params isKindOfClass:[NSDictionary class]]) {
-      answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the DevTools params were not a JSON object"));
-      return;
-    }
-  }
-  const int messageId = SuggestedCDPMessageId(browserId);
-  NSDictionary *message = @{
-    @"id" : @(messageId),
-    @"method" : [NSString stringWithUTF8String:method] ?: @"",
-    @"params" : params,
-    @"sessionId" : [NSString stringWithUTF8String:cdpSessionId] ?: @"",
-  };
-  NSData *encoded = [NSJSONSerialization dataWithJSONObject:message options:0 error:nil];
-  if (encoded == nil) {
-    answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the DevTools message could not be encoded"));
-    return;
-  }
-  NoteCDPMessageId(browserId, messageId);
-  if (!browser->GetHost()->SendDevToolsMessage(encoded.bytes, encoded.length)) {
-    answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the browser refused to submit the DevTools message"));
-    return;
-  }
-  // Registered after the submit, as `WinterCEFExecuteCDP` does and on the same ordering argument: a
-  // reply travels back through the agent, never re-entrantly out of the call above.
-  RememberPendingCDP(browserId, messageId, settle);
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  SendCDPOver(browser->GetIdentifier(), method, paramsJSON, cdpSessionId, answer,
+              [&](NSData *message) { return host->SendDevToolsMessage(message.bytes, message.length); });
 }
 
 void WinterCEFSetDevToolsEventObserver(NSView *parent,
@@ -3997,12 +4283,94 @@ NSString *WinterCEFAutomationDecisionsForFlags(uint32_t flags) {
 
 NSString *WinterCEFChildSessionOfDevToolsMessage(NSString *message) {
   NSData *data = [message dataUsingEncoding:NSUTF8StringEncoding];
-  NSString *method = nil;
-  NSData *params = nil;
-  NSString *session = ChildSessionEventOf(static_cast<const char *>(data.bytes), data.length, &method, &params);
-  return session != nil ? [NSString stringWithFormat:@"%@ %@ %@", session, method,
-                                    [[NSString alloc] initWithData:params encoding:NSUTF8StringEncoding]]
-                        : nil;
+  RawDevToolsRead read = ReadRawDevToolsMessage(static_cast<const char *>(data.bytes), data.length);
+  if (read.kind != RawDevToolsKind::ChildEvent) {
+    return nil;
+  }
+  return [NSString stringWithFormat:@"%@ %@ %@", read.session, read.method,
+                                    [[NSString alloc] initWithData:read.params encoding:NSUTF8StringEncoding]];
+}
+
+NSString *WinterCEFRawMessageTranscriptWithNoCEFAnywhere(NSString *message) {
+  // A browser id no real browser can have (CEF never starts in the unit-test host), with calls 1…20 pending — 15 and
+  // 16 of them sent to a child session "AB12CD".
+  const int browserId = -717171;
+  NSMutableArray<NSString *> *rows = [[NSMutableArray alloc] init];
+  for (int id = 1; id <= 20; id++) {
+    RememberPendingCDP(browserId, id, ^(BOOL ok, NSString *payload) {
+      [rows addObject:[NSString stringWithFormat:@"settled %d ok=%d %@", id, ok ? 1 : 0, payload]];
+    }, (id == 15 || id == 16) ? @"AB12CD" : nil);
+  }
+  NSData *data = [message dataUsingEncoding:NSUTF8StringEncoding];
+  const bool consumed = HandleRawDevToolsMessage(browserId, static_cast<const char *>(data.bytes), data.length,
+                                                 ^(NSString *method, NSData *params, NSString *session) {
+    [rows addObject:[NSString stringWithFormat:@"event %@ %@ %@", session, method,
+                                               [[NSString alloc] initWithData:params encoding:NSUTF8StringEncoding]]];
+  });
+  [rows insertObject:[NSString stringWithFormat:@"consumed=%d", consumed ? 1 : 0] atIndex:0];
+  for (int id = 1; id <= 20; id++) {
+    (void)TakePendingCDP(browserId, id);
+  }
+  return [rows componentsJoinedByString:@";"];
+}
+
+NSString *WinterCEFSendCDPTranscriptWithNoCEFAnywhere(void) {
+  const int browserId = -818181;
+  NSMutableArray<NSString *> *rows = [[NSMutableArray alloc] init];
+  WinterCEFCDPStatusCompletion record = ^(WinterCEFCDPStatus status, NSString *payload) {
+    [rows addObject:[NSString stringWithFormat:@"status=%d %@", static_cast<int>(status), payload]];
+  };
+  // The id the door put in a message it sent.
+  auto idOf = [](NSData *message) -> int {
+    const char *bytes = static_cast<const char *>(message.bytes);
+    return message.length > 6 ? atoi(bytes + 6) : 0;
+  };
+  // 1. A browser-side method answered INSIDE the send (the tab's own session: CEF's structured callback).
+  SendCDPOver(browserId, "Page.handleJavaScriptDialog", "{\"accept\":true}", nullptr, record, [&](NSData *m) {
+    SettlePendingCDP(browserId, idOf(m), YES, @"{}");
+    return true;
+  });
+  // 2. A child session's result, with a lone surrogate Foundation refuses, answered inside the send through the raw
+  //    observer's own path.
+  SendCDPOver(browserId, "Runtime.callFunctionOn", "{\"returnByValue\":true}", "AB12CD", record, [&](NSData *m) {
+    NSString *raw = [NSString stringWithFormat:@"{\"id\":%d,\"result\":{\"result\":{\"type\":\"string\",\"value\":\"x\\ud83d\"}},\"sessionId\":\"AB12CD\"}", idOf(m)];
+    NSData *bytes = [raw dataUsingEncoding:NSUTF8StringEncoding];
+    HandleRawDevToolsMessage(browserId, static_cast<const char *>(bytes.bytes), bytes.length, nil);
+    return true;
+  });
+  // 3. A child session's error, answered later.
+  int later = 0;
+  SendCDPOver(browserId, "DOM.resolveNode", "{}", "AB12CD", record, [&](NSData *m) { later = idOf(m); return true; });
+  NSString *error = [NSString stringWithFormat:@"{\"id\":%d,\"error\":{\"code\":-32000,\"message\":\"No node\"},\"sessionId\":\"AB12CD\"}", later];
+  NSData *errorBytes = [error dataUsingEncoding:NSUTF8StringEncoding];
+  HandleRawDevToolsMessage(browserId, static_cast<const char *>(errorBytes.bytes), errorBytes.length, nil);
+  // 4. A child session that detaches before it answers: its call fails; a call on the tab's own session does not.
+  SendCDPOver(browserId, "Page.enable", nullptr, "EF34", record, [](NSData *) { return true; });
+  int own = 0;
+  SendCDPOver(browserId, "Page.enable", nullptr, nullptr, record, [&](NSData *m) { own = idOf(m); return true; });
+  NoteDevToolsEvent(browserId, @"Target.detachedFromTarget", [@"{\"sessionId\":\"EF34\",\"targetId\":\"T\"}" dataUsingEncoding:NSUTF8StringEncoding]);
+  [rows addObject:[NSString stringWithFormat:@"own pending=%d", g_pending_cdp[@(browserId)][@(own)] != nil ? 1 : 0]];
+  (void)TakePendingCDP(browserId, own);
+  // 5. Refused before anything is sent: a refused send; params that are not one object, or start with a BOM, or nest
+  //    too deep; a method that is not UTF-8.
+  SendCDPOver(browserId, "Page.enable", nullptr, nullptr, record, [](NSData *) { return false; });
+  SendCDPOver(browserId, "Page.enable", "[1]", nullptr, record, [](NSData *) { return true; });
+  SendCDPOver(browserId, "Page.enable", "\xEF\xBB\xBF{}", nullptr, record, [](NSData *) { return true; });
+  std::string deep(101, '[');
+  deep = "{\"a\":" + deep + std::string(101, ']') + "}";
+  SendCDPOver(browserId, "Page.enable", deep.c_str(), nullptr, record, [](NSData *) { return true; });
+  SendCDPOver(browserId, "Page.\xFF", nullptr, nullptr, record, [](NSData *) { return true; });
+  [rows addObject:[NSString stringWithFormat:@"pending=%lu", static_cast<unsigned long>(g_pending_cdp[@(browserId)].count)]];
+  [g_pending_cdp removeObjectForKey:@(browserId)];
+  [g_pending_cdp_sessions removeObjectForKey:@(browserId)];
+  g_cdp_last_message_id.erase(browserId);
+  return [rows componentsJoinedByString:@"\n"];
+}
+
+NSString *WinterCEFRawDevToolsMessageWithNoCEFAnywhere(int messageId, const char *method, const char *paramsJSON,
+                                                      const char *cdpSessionId) {
+  NSData *data = RawDevToolsMessage(messageId, method, paramsJSON, cdpSessionId, nullptr);
+  return data != nil ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
 }
 
 NSString *WinterCEFPrintingPreferenceDecisions(void) {
