@@ -9,7 +9,7 @@ import Foundation
 // `browserLink.command {linkId, cmdId, op, params}` notifications; this side answers each with ONE
 // `browserLink.result` notification and sends `browserLink.events` / `browserLink.tabGone` of its own. Three
 // differences from Winter.app's link:
-//   * this side speaks first: `headless.hello {protocol, linkId, pid}` once CEF is up — the linkId is this
+//   * this side speaks first: `headless.hello {protocol, linkId, pid, version}` once CEF is up — the linkId is this
 //     process's, and every command must carry it;
 //   * one more op, `context.dispose {sessionId}` → `{closed}`, read here before `BrowserLinkCommand.parse`
 //     (Winter.app's op set, and its protocol number, do not change);
@@ -202,10 +202,11 @@ final class HeadlessOutbox {
         return lines
     }
 
-    func hello(pid: Int32) -> Data {
-        Self.line(method: HeadlessWire.Method.hello,
-                  params: ["protocol": .number(Double(HeadlessWire.protocolVersion)), "linkId": .string(linkId),
-                           "pid": .number(Double(pid))])
+    func hello(pid: Int32, version: String?) -> Data {
+        var params: [String: JSONValue] = ["protocol": .number(Double(HeadlessWire.protocolVersion)), "linkId": .string(linkId),
+                                           "pid": .number(Double(pid))]
+        if let version { params["version"] = .string(version) }
+        return Self.line(method: HeadlessWire.Method.hello, params: params)
     }
 
     // MARK: - Lines

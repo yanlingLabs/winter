@@ -186,6 +186,14 @@ try {
     childEval = String(((await cdp("Runtime.evaluate", { expression: "document.getElementById('f').textContent", contextId: cworld.executionContextId, returnByValue: true }, childSession)) as { result?: { value?: unknown } }).result?.value);
   }
   check("an out-of-process iframe attaches as a flattened child session", child && childEval === "inside the frame", childEval);
+  if (childSession) {
+    // A child session's answer holding a lone surrogate (a string cut mid-pair): it must come back — never wait out a
+    // timeout. (Read or refused as unreadable, but answered.)
+    const t0 = Date.now();
+    const lone = await command("cdp.send", { tabId: "w-1", method: "Runtime.evaluate", params: { expression: "'x' + String.fromCharCode(0xd83d)", contextId: (await cdp("Page.createIsolatedWorld", { frameId: ((await cdp("Page.getFrameTree", {}, childSession)) as { frameTree?: { frame?: { id?: string } } }).frameTree?.frame?.id, worldName: "winter" }, childSession) as { executionContextId?: number }).executionContextId, returnByValue: true }, cdpSessionId: childSession }, 8_000).then(
+      (r) => `answered ${JSON.stringify(r).slice(0, 120)}`, (e) => `refused ${(e as Error).message.slice(0, 160)}`);
+    check("a child session's answer with a lone surrogate comes back at once", Date.now() - t0 < 5_000 && !lone.includes("timed out"), lone);
+  }
 
   // A JS dialog: held (never shown), reported over DevTools, answered by the engine.
   await evalWinter("setTimeout(() => { window.answer = confirm('proceed?'); }, 0); 1");

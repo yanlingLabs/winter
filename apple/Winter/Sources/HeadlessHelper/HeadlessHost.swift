@@ -281,7 +281,12 @@ final class HeadlessHost {
                     reply(BrowserLinkProtocol.resultTooLarge(bytes: payload.utf8.count))
                     return
                 }
-                let result = Self.decode(payload) ?? .object([:])
+                // Unreadable here (Swift's decoder refuses a lone surrogate the browser may write): an error, never a
+                // silently empty result the engine would take for "nothing there".
+                guard let result = Self.decode(payload) else {
+                    reply(Self.unreadableResult(method))
+                    return
+                }
                 tabs[tabId]?.gate?.noteResult(method: method, params: params, cdpSessionId: cdpSessionId, result: result)
                 reply(.ok(.object(["result": result])))
             } else if method == "Network.getResponseBody" {
@@ -289,8 +294,11 @@ final class HeadlessHost {
                     reply(BrowserLinkProtocol.resultTooLarge(bytes: payload.utf8.count))
                     return
                 }
-                let result = CDPTabGate.filterResult(method: method, result: Self.decode(payload) ?? .object([:]))
-                reply(.ok(.object(["result": result])))
+                guard let decoded = Self.decode(payload) else {
+                    reply(Self.unreadableResult(method))
+                    return
+                }
+                reply(.ok(.object(["result": CDPTabGate.filterResult(method: method, result: decoded)])))
             } else {
                 reply(.okRaw(key: "result", json: payload))
             }
@@ -338,6 +346,12 @@ final class HeadlessHost {
     }
 
     // MARK: - JSON
+
+    /// The answer for a browser result this side must read but can't: the browser's own `-32603` shape.
+    static func unreadableResult(_ method: String) -> BrowserLinkReply {
+        .failure(code: .cdpError, message: "the browser's answer to \(method) could not be read",
+                 data: .object(["cdpCode": .number(-32603), "cdpMessage": .string("unreadable result")]))
+    }
 
     static func decode(_ text: String) -> JSONValue? { decode(Data(text.utf8)) }
     static func decode(_ data: Data) -> JSONValue? { try? JSONDecoder().decode(JSONValue.self, from: data) }

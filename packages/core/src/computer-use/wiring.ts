@@ -25,6 +25,9 @@ import { installedBrowser, systemAppResolver } from "./app-resolve";
 import { BrowserLink } from "./browser/cef-link/rpc";
 import { BrowserEngine } from "./browser/engine";
 import { BrowserBackendRegistry } from "./browser/registry";
+import { resolveWinterHeadless } from "./browser/headless/engines";
+import { HEADLESS_NAME, HeadlessPool, sweepHeadless, type HeadlessPoolDeps } from "./browser/headless/pool";
+import { processSatisfiesRequirement } from "./helper-verify";
 import { DiffBases } from "./diff-base";
 import { HelperClient, type HelperLauncher, type HelperTransport, type HelperVerifier } from "./helper-client";
 import { ComputerPolicy, DEFAULT_APP_EXCEPTIONS, defaultAppException, type DesktopVisitPanel } from "./policy";
@@ -49,6 +52,8 @@ export interface ComputerUseInjection {
   adapters?: readonly AppAdapter[];
   /** Phase 2: is a browser app installed (default: a LaunchServices lookup, never a launch)? */
   browserInstalled?: (bundleId: string) => boolean;
+  /** Phase 4: the headless pool's engine seams (a fake helper on its pipe, no signature check) — tests only. */
+  headless?: Partial<Pick<HeadlessPoolDeps, "resolve" | "spawn" | "verify" | "rssOf" | "idleExitMs" | "enabledPollMs" | "timeouts">>;
 }
 
 export interface ComputerUseRuntimeDeps {
@@ -125,6 +130,8 @@ export interface ComputerUseRuntime {
   browsers: BrowserEngine;
   backends: BrowserBackendRegistry;
   browserLink: BrowserLink;
+  /** Phase 4: Winter's headless browser (the `headless` backend). */
+  headless: HeadlessPool;
   stop(): void;
 }
 
@@ -239,6 +246,25 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     registry: backends, log,
     tabUrl: (sessionId, tabId) => winterWebTabs(sessionId).tabs.find((t) => t.tabId === tabId)?.url,
   });
+  // Phase 4: Winter's headless browser — the `headless` backend, its engine started on the first tab. A helper and a
+  // cache an earlier daemon left behind go first (this daemon is starting: nothing of them can be in use).
+  const telemetry = new AutomationTelemetry(deps.home);
+  sweepHeadless(deps.home, { log });
+  const headless = new HeadlessPool({
+    home: deps.home,
+    enabled: () => computerUseHeadlessEnabledFrom(settings()),
+    // A daemon off its profile's own home finds the helper only through `$WINTER_HEADLESS_APP` (never an installed one).
+    resolve: deps.inject?.headless?.resolve ?? (() => resolveWinterHeadless(deps.profile, { overrideOnly: !(deps.inject?.launchAllowed ?? deps.launchAllowed) })),
+    ...(deps.inject?.headless?.spawn === undefined ? {} : { spawn: deps.inject.headless.spawn }),
+    verify: deps.inject?.headless?.verify ?? processSatisfiesRequirement,
+    ...(deps.inject?.headless?.rssOf === undefined ? {} : { rssOf: deps.inject.headless.rssOf }),
+    ...(deps.inject?.headless?.idleExitMs === undefined ? {} : { idleExitMs: deps.inject.headless.idleExitMs }),
+    ...(deps.inject?.headless?.enabledPollMs === undefined ? {} : { enabledPollMs: deps.inject.headless.enabledPollMs }),
+    ...(deps.inject?.headless?.timeouts === undefined ? {} : { timeouts: deps.inject.headless.timeouts }),
+    metric: (m) => telemetry.primitive(m),
+    log,
+  });
+  backends.register(headless, { family: "headless", name: HEADLESS_NAME, instanceKey: "headless" });
   const browsers = new BrowserEngine({
     registry: backends,
     // The old Browser's door: parsed through the panel's schema (the http/https guard and the caps), then minted —
@@ -269,12 +295,14 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     persistentlyAllowed: (sessionId, bundleId) => policy.persistentlyAllowed(sessionId, bundleId),
     stopScript: (sessionId, reason) => service?.stopScript(sessionId, reason),
     ...(deps.turnRunning === undefined ? {} : { turnRunning: deps.turnRunning }),
+    headlessSessionEnded: (sessionId) => headless.disposeSession(sessionId),
+    headlessReason: () => headless.reason,
     log,
   });
 
   service = new ComputerV2Service({
     helper, policy, settings, diffBases, recentApps, adapters, browsers,
-    telemetry: new AutomationTelemetry(deps.home),
+    telemetry,
     ...(deps.audit === undefined ? {} : { audit: deps.audit }),
     ...(deps.interrupt === undefined ? {} : { interrupt: deps.interrupt }),
     // The worker never reads the daemon's own home, whatever its profile would otherwise allow (review I2).
@@ -365,6 +393,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     browsers,
     backends,
     browserLink,
+    headless,
     observe(event) {
       diffBases.observe(event);
       adapters.observe(event);
@@ -382,6 +411,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     stop() {
       svc.stop();
       browserLink.stop();
+      headless.stop();
       helper.close();
     },
   };

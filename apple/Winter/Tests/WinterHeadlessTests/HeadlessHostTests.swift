@@ -190,6 +190,21 @@ final class HeadlessHostTests: XCTestCase {
         XCTAssertEqual(failureCode(run(.cdpSend(tabId: "w-none", method: "Page.captureScreenshot", params: .object([:]), cdpSessionId: nil))), .tabGone)
     }
 
+    func testAWorldResultThatCantBeReadIsAnErrorNotEmpty() {
+        _ = open("w-1")
+        fake.sendAnswer = { method in
+            method == "Page.createIsolatedWorld" ? (.ok, #"{"executionContextId":7}"#) : (.ok, #"{"result":{"type":"string","value":"x\ud83d"}}"#)
+        }
+        _ = run(.cdpSend(tabId: "w-1", method: "Page.createIsolatedWorld",
+                         params: .object(["frameId": .string("F"), "worldName": .string("winter")]), cdpSessionId: nil))
+        let reply = run(.cdpSend(tabId: "w-1", method: "Runtime.evaluate",
+                                 params: .object(["expression": .string("1"), "contextId": .number(7)]), cdpSessionId: nil))
+        guard case .failure(let code, let message, let data)? = reply else { return XCTFail("an unreadable result must not read as empty") }
+        XCTAssertEqual(code, .cdpError)
+        XCTAssertEqual(message, "the browser's answer to Runtime.evaluate could not be read")
+        XCTAssertEqual(data?["cdpCode"]?.intValue, -32603)
+    }
+
     func testTheHeldDialogFallbackAnswersWhatDevToolsCannotReach() {
         _ = open("w-1")
         fake.heldDialog = true

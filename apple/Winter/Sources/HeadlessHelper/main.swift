@@ -26,6 +26,9 @@ for fd: Int32 in [3, 4] {
     let flags = fcntl(fd, F_GETFD)
     guard flags != -1 else { fail("started without its pipe (fds 3 and 4) — only Winter starts this", code: 2) }
     _ = fcntl(fd, F_SETFD, flags | FD_CLOEXEC)
+    // Blocking: the reader and the writer each have a thread of their own.
+    let status = fcntl(fd, F_GETFL)
+    if status != -1 { _ = fcntl(fd, F_SETFL, status & ~O_NONBLOCK) }
 }
 
 guard let arguments = HeadlessArguments.parse(CommandLine.arguments) else {

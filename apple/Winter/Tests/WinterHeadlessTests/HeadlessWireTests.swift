@@ -114,11 +114,12 @@ final class HeadlessWireTests: XCTestCase {
     }
 
     func testHelloNamesTheProtocolTheLinkAndThePid() throws {
-        let value = try XCTUnwrap(decode(HeadlessOutbox(linkId: "h-9").hello(pid: 42)))
+        let value = try XCTUnwrap(decode(HeadlessOutbox(linkId: "h-9").hello(pid: 42, version: "0.124.0")))
         XCTAssertEqual(value["method"], .string("headless.hello"))
         XCTAssertEqual(value["params"]?["protocol"], .number(Double(HeadlessWire.protocolVersion)))
         XCTAssertEqual(value["params"]?["linkId"], .string("h-9"))
         XCTAssertEqual(value["params"]?["pid"], .number(42))
+        XCTAssertEqual(value["params"]?["version"], .string("0.124.0"))
     }
 
     func testTabGoneFlushesFirst() throws {

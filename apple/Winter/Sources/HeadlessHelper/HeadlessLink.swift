@@ -50,6 +50,12 @@ final class HeadlessLink: HeadlessOutput, @unchecked Sendable {
             let n = buffer.withUnsafeMutableBytes { read(readFD, $0.baseAddress, $0.count) }
             if n < 0 {
                 if errno == EINTR { continue }
+                if errno == EAGAIN {
+                    // A descriptor the spawner left non-blocking: wait for it rather than spin or give up.
+                    var fds = pollfd(fd: readFD, events: Int16(POLLIN), revents: 0)
+                    _ = poll(&fds, 1, -1)
+                    continue
+                }
                 closeOnce("the pipe failed to read (errno \(errno))")
                 return
             }
@@ -89,7 +95,8 @@ final class HeadlessLink: HeadlessOutput, @unchecked Sendable {
 
     func hello() {
         let pid = getpid()
-        out.async { [self] in write(outbox.hello(pid: pid)) }
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        out.async { [self] in write(outbox.hello(pid: pid, version: version)) }
     }
 
     func reply(cmdId: String, _ reply: BrowserLinkReply) {
@@ -129,7 +136,12 @@ final class HeadlessLink: HeadlessOutput, @unchecked Sendable {
             while left > 0 {
                 let n = Darwin.write(writeFD, base, left)
                 if n < 0 {
-                    if errno == EINTR || errno == EAGAIN { continue }
+                    if errno == EINTR { continue }
+                    if errno == EAGAIN {
+                        var fds = pollfd(fd: writeFD, events: Int16(POLLOUT), revents: 0)
+                        _ = poll(&fds, 1, -1)
+                        continue
+                    }
                     return false
                 }
                 left -= n

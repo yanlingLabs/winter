@@ -13,6 +13,11 @@
 //   - the daemon stopping, or the computer-use runtime idling out, closes nothing.
 // Tabs the user already had open are never closed (they are released at turn end). Tabs in Winter's own browser are
 // never closed by this rule: they live in the session's panel strip and go with the session.
+//
+// Winter's HEADLESS browser (Phase 4, D2): every tab in it is an agent tab, and the same rule applies with two
+// differences — `keep()` is refused there (nobody can see the tab, so it is never handed to anyone), and the runtime
+// idling out closes them too (the session's private context goes then anyway). The daemon stopping still closes
+// nothing per tab: the headless browser itself exits, and every tab with it.
 import type { BrowserFamily } from "./transport";
 
 export type AgentTabEvent = "turn-ended" | "session-deleted" | "session-archived" | "restart-orphan" | "idle-ended" | "daemon-stop";
@@ -37,7 +42,7 @@ export function shouldCloseAgentTab(f: AgentTabFacts): boolean {
     case "session-archived":
       return true;
     case "restart-orphan": return f.turnRunning !== true;
-    case "idle-ended":
+    case "idle-ended": return f.family === "headless";
     case "daemon-stop":
       return false;
   }

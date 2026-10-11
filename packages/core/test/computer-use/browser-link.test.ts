@@ -287,7 +287,7 @@ describe("browserLink.* through the IPC server", () => {
     fake.running = false;
     const runtime = createComputerUseRuntime({
       home, profile: "dev", settings: () => live, settingsPath, approvals: new ApprovalBroker(), hub, store, launchAllowed: true,
-      inject: { transport: fake.transport, launcher: fake.launcher, verifier: fake.verifier, browserInstalled: () => false },
+      inject: { transport: fake.transport, launcher: fake.launcher, verifier: fake.verifier, browserInstalled: () => false, headless: { resolve: () => ({ missing: "Winter's headless browser is missing — reinstall Winter" }) } },
     });
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -304,7 +304,8 @@ describe("browserLink.* through the IPC server", () => {
   test("the app attaches on its own connection, answers a command, and the link closing marks Winter's browser down", async () => {
     const { socketPath, tokens, runtime } = await boot();
     const before = await (async () => { const c = await TestClient.connect(socketPath); await c.hello(tokens.harness, "mac"); const r = await c.request(METHODS.computerUseStatus, {}); c.close(); return r; })();
-    expect(before.result.browsers).toEqual([{ id: "winter", name: "Winter (built-in)", connected: false, reason: "Winter isn't running" }]);
+    expect(before.result.browsers).toEqual([{ id: "winter", name: "Winter (built-in)", connected: false, reason: "Winter isn't running" },
+      { id: "headless", name: "Winter (headless)", connected: false, reason: "Winter's headless browser is missing — reinstall Winter" }]);
     const appConn = await TestClient.connect(socketPath);
     expect((await appConn.hello(tokens.harness, "browser-link")).error).toBeUndefined();
     const att = await appConn.request(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "0.124.0", pid: 7 });
