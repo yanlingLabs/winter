@@ -115,4 +115,16 @@ final class Round14Tests: XCTestCase {
         sys.space = 1
         XCTAssertFalse(core.insideArrivedVisit(t), "not on the visited desktop")
     }
+
+    // MARK: review of round 13, the missing tests
+
+    /// Round 13 (seed 1067): a click into the app already in front is a QUIET instant — it explains only that app's own
+    /// change, and is no switch input by itself (`lastAt` stays).
+    func testAQuietInstantExplainsOnlyItsOwnApp() {
+        var input = CUSwitchInput()
+        input.note(10, .app, target: 500, quiet: true)
+        XCTAssertEqual(input.lastAt, -1, "no switch input by itself")
+        XCTAssertNotNil(input.explanation(from: 9, after: -.infinity, raiseAfter: -.infinity, now: 10.1, front: 500), "its own app")
+        XCTAssertNil(input.explanation(from: 9, after: -.infinity, raiseAfter: -.infinity, now: 10.1, front: 600), "never another app")
+    }
 }

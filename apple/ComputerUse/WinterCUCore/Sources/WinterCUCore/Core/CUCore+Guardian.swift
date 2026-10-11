@@ -449,18 +449,47 @@ extension CUCore {
         // Corroborated (review of round 12, MEDIUM #3: Terminal's Secure Keyboard Entry holds it whenever Terminal is in
         // front, and a user switching there only to look must block nothing): a secure field of the app has the focus, or
         // input of theirs came in the last 2.5 s. The owner may be a true part of the app (a WebContent's password field).
+        // Review of round 13, MEDIUM #6: recent hardware input is no corroboration (the ⌘-Tab that brought the app forward
+        // blocked a looker for 2.5 s, and letters typed under it are never seen) — TYPING is: the focused element's text
+        // changed since the agent last looked (`secureTypingBase`, refreshed at each of its acts' end), which marks the
+        // user working in the app until it leaves the front (the ordinary I6 mark).
         let secureOwner: Bool = {
             guard secureInputOn, sys.frontmostPid() == t.pid, let owner = secureInputOwnerPid(),
-                  owner == t.pid || sys.isContentProcess(owner, of: t.pid) else { return false }
-            let now = clock.nowSeconds()
-            let recent = guardianLock.withLock { now - lastHardwareActionAt <= 2.5 }
-            let secureField = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
-                .flatMap { ax.string($0, kAXSubroleAttribute) } == kAXSecureTextFieldSubrole
-            return recent || secureField
+                  owner == t.pid || sys.isContentProcess(owner, of: t.pid) else {
+                guardianLock.withLock { t.secureTypingBase = nil }
+                return false
+            }
+            let focused = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
+            if focused.flatMap({ ax.string($0, kAXSubroleAttribute) }) == kAXSecureTextFieldSubrole { return true }
+            let now = secureTypingState(t)
+            let base = guardianLock.withLock { () -> (focus: AXIdentity?, chars: Int?)? in
+                let b = t.secureTypingBase
+                if b == nil || b?.focus != now.focus { t.secureTypingBase = now }
+                return b
+            }
+            guard let base, base.focus == now.focus, let a = base.chars, let b = now.chars, a != b else { return false }
+            CULog.act.notice("act in \(t.appName, privacy: .public): its text changed since the agent's last act, under Secure Event Input — the user typing")
+            userInteracted(t.pid)
+            return true
         }()
         guard secureOwner || userIsWorking(in: t.pid) else { return }
         CULog.act.notice("act in \(t.appName, privacy: .public): refused — the user is working in it")
         throw CUError.refused(.userWorking, "the user is working in \(t.appName) right now — wait and retry, or ask them")
+    }
+
+    /// The focused element of `t`'s app and how many characters it holds (Secure Event Input's typing evidence).
+    func secureTypingState(_ t: CUTarget) -> (focus: AXIdentity?, chars: Int?) {
+        let focused = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
+        let chars = focused.flatMap { ax.attribute($0, "AXNumberOfCharacters") as? NSNumber }?.intValue
+            ?? focused.flatMap { ax.string($0, kAXValueAttribute) }?.utf16.count
+        return (focused.map { AXIdentity(element: $0) }, chars)
+    }
+
+    /// After an act on `t` under Secure Event Input: what it typed is the agent's, never taken for the user's typing.
+    func refreshSecureTypingBase(_ t: CUTarget) {
+        guard secureInputOn, sys.frontmostPid() == t.pid else { return }
+        let now = secureTypingState(t)
+        guardianLock.withLock { t.secureTypingBase = now }
     }
 
     /// The process holding Secure Event Input (the session's `kCGSSessionSecureInputPID`), when one does.

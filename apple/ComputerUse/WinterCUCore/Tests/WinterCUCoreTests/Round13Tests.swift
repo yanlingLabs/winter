@@ -35,6 +35,16 @@ final class Round13Tests: XCTestCase {
         let out = try CUWindowResolver.resolve(appName: "Google Chrome", axWindows: [findBar], server: [there],
                                                selector: .title("Chrome Web Store Developer Dashboard"), privatePath: true, fx)
         XCTAssertEqual(out.window.id, 40)
+        // Review of round 13, MEDIUM #7: with no remote token the window is never MOVED here — the window here is bound.
+        var moved = false
+        let noToken = CUWindowResolver.Effects(
+            remote: { _ in [:] },
+            describe: { e, s in CUAXWindow(element: e, id: s.id, title: s.title, frame: s.frame, focused: false, main: false) },
+            moveToActiveSpace: { _ in moved = true; return true }, axWindows: { [] }, wait: { $0() }, appElement: fakeElement(61_101))
+        let here = try CUWindowResolver.resolve(appName: "Google Chrome", axWindows: [findBar], server: [there],
+                                                selector: .title("Chrome Web Store Developer Dashboard"), privatePath: true, noToken)
+        XCTAssertFalse(moved, "a bind never moves a window")
+        XCTAssertEqual(here.window.id, 5)
     }
 
     // MARK: the review of round 12

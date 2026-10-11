@@ -119,6 +119,9 @@ final class CUTarget: @unchecked Sendable {
     /// opened — kept while they are on screen: they belong to the bound window even where another document window of the
     /// app lies between them and it in the z-order (review of round 12, LOW). Pid-queue only.
     var agentPopups: Set<UInt32> = []
+    /// Under Secure Event Input, the focused element's text as the agent last saw it (its own acts' end): a change since
+    /// is the user typing (review of round 13, MEDIUM #6). Under the guardian lock.
+    var secureTypingBase: (focus: AXIdentity?, chars: Int?)?
 
     /// The focus read after the last act, and when: the next act's "before". Pid-queue only.
     var focusAfterLastAct: (atMs: Double, focus: CUCore.WindowFocus)?

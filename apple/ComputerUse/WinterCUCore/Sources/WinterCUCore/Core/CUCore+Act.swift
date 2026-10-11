@@ -79,6 +79,7 @@ extension CUCore {
             await MainActor.run { [weak self] in self?.events?.willSendEscape() }
         }
         let acted = try await actWithVisits(p, t, token)
+        refreshSecureTypingBase(t)  // what it typed is the agent's (Secure Event Input's typing evidence)
         var outcome = acted.0
         let inVisit = acted.1
         // A link the daemon opens itself (its own door: the opener's access and consent).
@@ -612,6 +613,12 @@ extension CUCore {
                 throw CUError.unsupported("[\(ref)] has no position on screen — try action() or a screenshot point")
             }
             guard let center = clickablePoint(e, info, t) else {
+                // An editable web element that stays outside the window even after `AXScrollToVisible` is a page's
+                // parked stand-in for its document (review of round 13, LOW — the hidden-input rule no longer counts
+                // one merely above or below the window): said so, with what works.
+                if isWebContent(e), editableElement(e), ax.string(e, kAXRoleAttribute) != kAXComboBoxRole {
+                    throw CUError.unsupported("[\(ref)] is the page's hidden text input (it types into the document): it has no place on screen to click, even scrolled to — type or paste into it with type(text, { into: \(ref) }) or paste(text, { into: \(ref) }); to put the caret somewhere in the document, click the document's text where you want it")
+                }
                 throw CUError.unsupported("[\(ref)] is outside the window and could not be scrolled into view — scroll to it first")
             }
             // A click on web content that went out as events (no press, or one the element refused) is checked like
@@ -2264,9 +2271,14 @@ extension CUCore {
             // round 13: ⌘⇧G into Chrome's open panel ran Chrome's own "Find Previous" instead of the panel's Go to Folder).
             let intoPanel = g.explicit.map { inSheetOrPanel($0, t) } ?? false
             if intoPanel { CULog.act.notice("key in \(t.appName, privacy: .public): aimed into a sheet or panel — keys, never its menu bar") }
+            // Every ⌘-chord, before the split: with the app in front and another of its windows key, the keys or the menu
+            // command would act in the user's window (review of round 13, LOW: a ⌘⇧H aimed into a sheet went to the
+            // user's tab).
+            if chord.modifiers.contains(.command), let refusal = coveredWindowRefusal(t, allowForeground: p.allowForeground, menu: true) {
+                throw refusal
+            }
             if !editing, !intoPanel, t.accessible, let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
-                // (The app in front with the user's window key: its menu command would act there — review of round 12, M4.)
-                if let refusal = coveredWindowRefusal(t, allowForeground: p.allowForeground, menu: true) { throw refusal }
+                // (The app in front with the user's window key was refused above, for every ⌘-chord — review of round 12, M4.)
                 if CUPasteMenu.isPasteTitle(item.title) { try requirePasteSafe(p, t, g) }
                 // Another of the app's windows is its key window (the user's, perhaps): the menu action would go
                 // there (live: Open Location acted on another window). Pressed only with the bound window key.
@@ -2314,6 +2326,15 @@ extension CUCore {
             guard (try? ax.set(row, kAXSelectedAttribute, kCFBooleanTrue)) != nil else { return nil }
             clock.pause(ms: min(pressSettleMs, 150))
             guard ax.bool(row, kAXSelectedAttribute) == true else { return nil }
+            // A multi-selection table may EXTEND its selection: the row must be the one selected (review of round 13, LOW).
+            if let table = ax.element(row, kAXParentAttribute), ax.attribute(table, kAXSelectedRowsAttribute) != nil {
+                let rows = ax.elements(table, kAXSelectedRowsAttribute)
+                if rows.count > 1 || (rows.count == 1 && !CFEqual(rows[0], row)) {
+                    if ax.isSettable(table, kAXSelectedRowsAttribute) { _ = try? ax.set(table, kAXSelectedRowsAttribute, [row] as CFArray) }
+                    let now = ax.elements(table, kAXSelectedRowsAttribute)
+                    guard now.count == 1, CFEqual(now[0], row) else { return nil }
+                }
+            }
             CULog.act.notice("click in \(t.appName, privacy: .public): a row in a sheet or panel — selected over accessibility")
             return "the row was selected over accessibility (a sheet or panel of the app)"
         }
@@ -3087,10 +3108,18 @@ extension CUCore {
         var alive: Bool
     }
 
+    /// Only what belongs to the BOUND window (review of round 13, LOW): the app's windows over it (a sheet, a panel, a
+    /// dialog it opened), and the focus when it is in it — a change in another of the app's windows (the user's) is no
+    /// effect of the press.
     func pressEvidence(_ e: AXUIElement, _ t: CUTarget) -> PressEvidence {
-        PressEvidence(windows: Set(sys.windows(pid: t.pid).filter { $0.layer == 0 }.map(\.id)),
-                      focused: ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute).map { AXIdentity(element: $0) },
-                      value: ax.string(e, kAXValueAttribute), alive: ax.isAlive(e))
+        let bound = sys.window(id: t.windowID)?.frame
+        let windows = sys.windows(pid: t.pid).filter { w in
+            w.layer == 0 && (w.id == t.windowID || bound.map { $0.intersects(w.frame) } ?? true)
+        }
+        let focus = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
+        let inBound = focus.map { f in ax.element(f, kAXWindowAttribute).flatMap { ax.windowID($0) }.map { $0 == t.windowID } ?? true } ?? false
+        return PressEvidence(windows: Set(windows.map(\.id)), focused: inBound ? focus.map { AXIdentity(element: $0) } : nil,
+                             value: ax.string(e, kAXValueAttribute), alive: ax.isAlive(e))
     }
 
     /// An action the app REFUSED (unsupported, not implemented) that changed something anyway, watched for up to

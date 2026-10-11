@@ -89,6 +89,15 @@ final class GuardianModelTests: XCTestCase {
         (1022, "I2: the engine's place T@200, the user's T@100 — the same app on two desktops"),
     ]
 
+    /// Seeds fixed in an earlier round, pinned so they stay fixed (review of round 13: 1067 — a click into the app already
+    /// in front, the quiet instant).
+    func testFixedSeedsStayFixed() async {
+        for seed in [1011, 1038, 1055, 1059, 1067] {
+            let r = await SimRun.execute(SimPlan.generate(seed: UInt64(seed), count: Self.steps))
+            XCTAssertNil(r.violation, "seed \(seed): \(r.violation ?? "")")
+        }
+    }
+
     func testKnownFailingSeedsAreStillKnown() async {
         for (seed, what) in Self.knownFailing {
             let r = await SimRun.execute(SimPlan.generate(seed: UInt64(seed), count: Self.steps))

@@ -198,11 +198,15 @@ final class GuardianRound11Tests: XCTestCase {
         let sys = FakeSystem()
         sys.running = [1, 500]; sys.front = 500; sys.space = 100
         sys.windows[77] = FakeSystem.window(77, pid: 500, CGRect(x: 500, y: 0, width: 400, height: 300))
-        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+        let ax = FakeAX()
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: ax, sys: sys,
                           pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
         let t = CUTarget(id: "t1", sessionId: "s", pid: 500, bundleId: "com.example.app", appName: "App",
                          isChromium: false, mirror: false, windowID: 77, windowTitle: "")
         core.registerForTesting(t, windowElement: nil)
+        let text = fakeElement(97_500)
+        ax.add(text, role: kAXTextAreaRole, extra: [kAXValueAttribute: "$ "])
+        ax.focus(pid: 500, on: text)
         core.secureInputOverride = true
         core.secureInputOwnerOverride = 1
         XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "another app holds it")
@@ -210,10 +214,16 @@ final class GuardianRound11Tests: XCTestCase {
         // Review of round 12, MEDIUM #3: held by the app in front, but the user is only looking (Terminal's Secure
         // Keyboard Entry): nothing corroborates work — not refused.
         XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "only looking")
-        // Input of theirs a moment ago: working.
+        // Review of round 13, MEDIUM #6: hardware input a moment ago (the ⌘-Tab that brought it forward) is no work…
         core.noteHardwareInput(now: core.clock.nowSeconds(), move: false)
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "a looker who just switched there")
+        // …their TYPING is (the text changed since the agent last looked), and it holds while the app is in front.
+        ax.put(text, [kAXValueAttribute: "$ ls -la"])
         XCTAssertThrowsError(try core.refuseWhileUserWorks(t))
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(t), "sticky")
+        // What the agent's own act typed is never the user's: the base is refreshed at its end.
         sys.front = 1
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "not in front")
         XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "not in front")
     }
 }
