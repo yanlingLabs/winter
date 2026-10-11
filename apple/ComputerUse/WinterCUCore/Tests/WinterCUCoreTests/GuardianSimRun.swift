@@ -914,11 +914,12 @@ final class SimRun {
                 w.actEpisode = w.episode
                 w.actStartFront = w.front
             }
-            w.agentBegins(tpid)
-            defer { w.agentEnds(tpid) }
             // I6 (round 10): an act on the app the user is working in is refused at once; any other act is not refused for it.
+            // A refused act is no operation on the app and no opener act (round 11 — the review of round 10, LOW #9).
             let working = w.userWorks(in: tpid)
-            let opener = CUCore.actCanOpenApps(action)
+            if !working { w.agentBegins(tpid) }
+            defer { if !working { w.agentEnds(tpid) } }
+            let opener = CUCore.actCanOpenApps(action) && !working
             if opener { w.lock.withLock { w.lastOpenerAt = w.now } }
             defer { if opener { w.lock.withLock { w.lastOpenerAt = w.now } } }
             do {
@@ -960,9 +961,13 @@ final class SimRun {
                 let app = (dialog ?? !r.chance(0.7)) ? SimPid.coreServices : SimPid.preview
                 indirect(app, after: ms ?? r.double(200, min(1_000, seconds * 1000)), why: "what the agent's AppleScript opened")
             }
-            w.agentBegins(tpid, raise: true)
-            w.lock.withLock { w.lastOpenerAt = w.now }
-            defer { w.agentEnds(tpid); w.lock.withLock { w.lastOpenerAt = w.now } }
+            // (Refused at once while the user works in T: no operation on the app, no opener act — as the engine.)
+            let working = w.userWorks(in: tpid)
+            if !working {
+                w.agentBegins(tpid, raise: true)
+                w.lock.withLock { w.lastOpenerAt = w.now }
+            }
+            defer { if !working { w.agentEnds(tpid); w.lock.withLock { w.lastOpenerAt = w.now } } }
             do {
                 _ = try await core.targetAppleScript(TargetAppleScriptParams(targetId: "tsim", source: "tell application \"Finder\" to get name"))
             } catch { w.log("the script: \((error as? CUError)?.message ?? "\(error)")") }
