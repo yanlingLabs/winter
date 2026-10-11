@@ -77,7 +77,7 @@ describe("the helper's error codes", () => {
   });
 });
 
-describe("D2's lifecycle row", () => {
+describe("the lifecycle row for headless tabs", () => {
   test("a headless tab closes at the turn's end unless handed off, at deletion, archiving and the runtime's idle end — never at daemon stop", () => {
     const f = (event: Parameters<typeof shouldCloseAgentTab>[0]["event"], extra: Partial<Parameters<typeof shouldCloseAgentTab>[0]> = {}) =>
       shouldCloseAgentTab({ event, family: "headless", kept: false, ...extra });

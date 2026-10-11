@@ -172,7 +172,7 @@ export class HeadlessPool implements CdpTransport {
     return "missing" in r ? r.missing : undefined;
   }
 
-  /** The engines this pool can run now (`browsers.list()`'s `engines`, once H2 declares it). */
+  /** The engines this pool can run now (`browsers.list()`'s `engines`, once installed engines exist to choose from). */
   engines(): string[] { return "missing" in this.engineFor() ? [] : [DEFAULT_HEADLESS_ENGINE]; }
 
   /** Is the helper running now (for tests and status)? */

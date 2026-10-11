@@ -1,5 +1,5 @@
 // ComputerV2 Phase 4 — the `headless` family threaded through the browser engine, over a FAKE headless backend: Winter's
-// own (no per-app card, `plan` observe-only), the private-network rule (D4), D2's tab lifecycle (closed at the turn's
+// own (no per-app card, `plan` observe-only), the private-network rule, the headless tab lifecycle (closed at the turn's
 // end unless handoff(), keep() refused, closed and disposed when the runtime ends), the engine option, the budget read
 // as TargetBusy, and the listing.
 import { describe, expect, test } from "bun:test";
@@ -73,7 +73,7 @@ describe("Winter's own browser: no card, plan observe-only", () => {
   });
 });
 
-describe("the local network (D4)", () => {
+describe("the local network (refused; this Mac allowed)", () => {
   test("a LAN URL is refused before anything opens; this Mac is allowed", async () => {
     const h = withHeadless();
     const r = h.run();
@@ -122,7 +122,7 @@ describe("the local network (D4)", () => {
   });
 });
 
-describe("the tab lifecycle (D2)", () => {
+describe("the tab lifecycle (closed at the turn's end, never handed over)", () => {
   test("keep() is refused; waitForUser, download and unmuting are refused; mute() is fine", async () => {
     const h = withHeadless();
     const r = h.run();

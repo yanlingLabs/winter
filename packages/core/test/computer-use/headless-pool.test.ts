@@ -132,7 +132,7 @@ describe("the headless pool's engine", () => {
   });
 });
 
-describe("the budget (D3)", () => {
+describe("the budget (8 per session, 24 in all, 3 GB)", () => {
   test(`at most ${HEADLESS_TABS_PER_SESSION} open tabs per session and ${HEADLESS_TABS_GLOBAL} in all — capacity, nothing closed`, async () => {
     const r = rig();
     await Promise.all(Array.from({ length: HEADLESS_TABS_PER_SESSION }, (_, i) => r.pool.createTab({ sessionId: "s1", url: `https://a.example/${i}` })));

@@ -152,9 +152,10 @@ export const USER_TAB_NAVIGATION = "this is the user's own tab — navigating it
 const RECENTLY_CLOSED_MS = 30_000;
 export const HOLDS_GLOBAL = 16;
 
-/** Phase 4 (D2): a headless tab is nobody's but the agent's — never handed over, never shown. */
+/** Phase 4 (the user's ruling on headless tabs): a headless tab is nobody's but the agent's — never handed over, never
+ *  shown. */
 export const HEADLESS_KEEP = "a headless tab can't be handed to the user — nobody can see it; open the page with browsers.open(url) in Winter's browser to show them";
-/** What a headless tab can't do, by primitive (D2; the headless browser never downloads and has no sound). */
+/** What a headless tab can't do, by primitive (the same ruling; the headless browser never downloads and has no sound). */
 function headlessRefusal(primitive: string, args: Record<string, unknown>): string | undefined {
   switch (primitive) {
     case "keep": return HEADLESS_KEEP;
@@ -1017,7 +1018,7 @@ export class BrowserEngine {
     const cwd = this.cwdOf(scope.sessionId);
     const url = driver.url;
     if (url.length === 0) return;
-    // D4: a headless tab that landed on the local network (a redirect, the page's own script) is read and acted on no
+    // The user's ruling (the LAN is refused): a headless tab that landed on the local network (a redirect, the page's own script) is read and acted on no
     // further — only the members a blocked tab keeps work until it navigates away.
     if (this.isHeadless(b.backend) && isPrivateNetworkUrl(url)) {
       throw new AutomationFailure("NotAllowed", `${HEADLESS_LAN_REFUSAL}. This tab is on one — only ${blockedTabMembers()} work on it until it navigates away`);

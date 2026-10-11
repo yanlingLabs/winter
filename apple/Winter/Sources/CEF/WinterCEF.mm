@@ -4888,7 +4888,7 @@ BOOL WinterCEFDidShutdown(void) {
 namespace {
 
 /// Low on purpose: nobody sees these frames, and a page's own animation work is bound to this rate.
-/// `Page.captureScreenshot` asks for a fresh frame of its own. (Tuned by the live gate's memory/CPU drill.)
+/// `Page.captureScreenshot` asks for a fresh frame of its own. (To be tuned by measuring memory and CPU on a live run.)
 const int kHeadlessFrameRate = 10;
 
 bool g_headless = false;

@@ -14,7 +14,7 @@
 // Tabs the user already had open are never closed (they are released at turn end). Tabs in Winter's own browser are
 // never closed by this rule: they live in the session's panel strip and go with the session.
 //
-// Winter's HEADLESS browser (Phase 4, D2): every tab in it is an agent tab, and the same rule applies with two
+// Winter's HEADLESS browser (Phase 4, the user's ruling on headless tabs): every tab in it is an agent tab, and the same rule applies with two
 // differences — `keep()` is refused there (nobody can see the tab, so it is never handed to anyone), and the runtime
 // idling out closes them too (the session's private context goes then anyway). The daemon stopping still closes
 // nothing per tab: the headless browser itself exits, and every tab with it.

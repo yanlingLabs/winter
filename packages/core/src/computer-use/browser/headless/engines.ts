@@ -1,6 +1,7 @@
-// ComputerV2 Phase 4 — the headless pool's ENGINES and where each one is. H1 has one: `winter`, Winter Headless — the
-// separate, windowless CEF helper app Winter ships (apple/Winter/Sources/HeadlessHelper). Installed browsers run
-// headless are H2's, only if they pass the plug-and-play gates; until then `winter` is the only engine.
+// ComputerV2 Phase 4 — the headless pool's ENGINES and where each one is. There is one: `winter`, Winter Headless — the
+// separate, windowless CEF helper app Winter ships (apple/Winter/Sources/HeadlessHelper), driven only through the
+// browser link's ops (no browser-level CDP command list: that, `browser-commands.ts`, belongs to installed browsers run
+// headless, a later stage, and only for those that pass the plug-and-play gates).
 //
 // THE LADDER, in the `resolveWinterExecutable` convention (an explicit path is authoritative — a missing one is the
 // failure, never a fall-through to another copy):

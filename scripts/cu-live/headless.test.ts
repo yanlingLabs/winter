@@ -1,11 +1,11 @@
-// Winter Headless's live drills (`headless.ts`), without a screen: the command line, whose a change of the front app or
-// Space is, the window and application-type readers, the leftover-process finder, and the fixtures.
+// Winter Headless's live checks (`headless.ts`), without a screen: the command line, whose a change of the front app or
+// Space is, the window, process-tree and application-type readers, the leftover-process finder, and the fixtures.
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import type { MonitorSample } from "./lib";
 import {
-  attributeFrontChanges, cookieUser, HEADLESS_LIVE_DRILLS, heavySvg, helperNames, LAN_PROBE, mediaPage, mib, parseApplicationType, parseHeadlessOptions,
-  parseWindowsLines, PERMISSIONS_PROBE, processesInside, siteHome, siteLogin, wavTone,
+  attributeFrontChanges, CLIENT_CERT_PROBE_URL, cookieUser, HEADLESS_CHECKS, HEADLESS_LIVE_BY_HAND, heavySvg, helperNames, LAN_PROBE, mediaPage, mib,
+  parseApplicationType, parseHeadlessOptions, PERMISSIONS_PROBE, processesInside, processTree, siteHome, siteLogin, wavTone, WINDOW_LIST_JXA, windowsOf,
 } from "./headless";
 
 const APP = "/tmp/x/Winter Headless Dev.app";
@@ -15,18 +15,18 @@ describe("the command line", () => {
     const o = parseHeadlessOptions([], { WINTER_HEADLESS_APP: APP });
     if ("error" in o) throw new Error(o.error);
     expect(o).toMatchObject({ app: APP, verify: true, userTyping: false, load: false, promptProbes: false, keepTemp: false });
-    expect([...o.drills].sort()).toEqual([2, 3, 4]);
+    expect([...o.checks].sort()).toEqual([...HEADLESS_CHECKS].sort());
     expect(o.report.endsWith(join("out", "cu-live", "headless.json"))).toBe(true);
-    const all = parseHeadlessOptions(["--app", APP, "--no-verify", "--user-typing", "--load", "--prompt-probes", "--keep-temp", "--only", "2,4", "--report", "/tmp/r.json"], {});
+    const all = parseHeadlessOptions(["--app", APP, "--no-verify", "--user-typing", "--load", "--prompt-probes", "--keep-temp", "--only", "view,isolation", "--report", "/tmp/r.json"], {});
     if ("error" in all) throw new Error(all.error);
     expect(all).toMatchObject({ verify: false, userTyping: true, load: true, promptProbes: true, keepTemp: true, report: "/tmp/r.json" });
-    expect([...all.drills].sort()).toEqual([2, 4]);
+    expect([...all.checks].sort()).toEqual(["isolation", "view"]);
   });
 
   test("what it refuses", () => {
     expect(parseHeadlessOptions([], {})).toEqual({ error: expect.stringContaining("--app") });
     expect(parseHeadlessOptions(["--app", "/tmp/not-an-app"], {})).toEqual({ error: expect.stringContaining(".app bundle") });
-    expect(parseHeadlessOptions(["--app", APP, "--only", "1"], {})).toEqual({ error: expect.stringContaining("--only") });
+    expect(parseHeadlessOptions(["--app", APP, "--only", "2"], {})).toEqual({ error: expect.stringContaining("--only") });
     expect(parseHeadlessOptions(["--app", APP, "--only"], {})).toEqual({ error: expect.stringContaining("--only") });
     expect(parseHeadlessOptions(["--app", APP, "--yes"], {})).toEqual({ error: "unknown argument --yes" });
     expect(parseHeadlessOptions(["--app"], {})).toEqual({ error: "--app needs a path" });
@@ -75,12 +75,22 @@ describe("whose a change of the front app or Space is", () => {
 });
 
 describe("the readers", () => {
-  test("cu-live-tool windows lines", () => {
-    const out = '{"id":12,"layer":0,"onScreen":false,"bounds":[0,0,500,500]}\n{"id":13,"layer":25,"onScreen":true,"bounds":[1,2,3,4]}\nnot json\n\n';
-    expect(parseWindowsLines(out)).toEqual([
-      { id: 12, layer: 0, onScreen: false, bounds: [0, 0, 500, 500] },
-      { id: 13, layer: 25, onScreen: true, bounds: [1, 2, 3, 4] },
+  test("the window list, kept to the helper's process tree", () => {
+    const out = JSON.stringify([[12, 101, 0, false], [13, 102, 25, true], [14, 999, 0, true], ["x", 101, 0, true], [15, 101]]);
+    expect(windowsOf(out, new Set([101, 102]))).toEqual([
+      { id: 12, pid: 101, layer: 0, onScreen: false },
+      { id: 13, pid: 102, layer: 25, onScreen: true },
+      { id: 15, pid: 101, layer: 0, onScreen: false },
     ]);
+    expect(windowsOf("not json", new Set([101]))).toEqual([]);
+    expect(WINDOW_LIST_JXA).toContain("CGWindowListCopyWindowInfo");
+    expect(WINDOW_LIST_JXA).not.toMatch(/Application\(|kCGWindowName|tell /);
+  });
+
+  test("the process tree under the helper: its CEF subprocesses by parent pid", () => {
+    const ps = ["  1     0", "100     1", "101   100", "102   100", "103   101", "200     1", "  garbage"].join("\n");
+    expect([...processTree(ps, [100])].sort()).toEqual([100, 101, 102, 103]);
+    expect([...processTree(ps, [999])]).toEqual([999]);
   });
 
   test("lsappinfo's ApplicationType", () => {
@@ -143,12 +153,14 @@ describe("the fixtures", () => {
   });
 
   test("the probes ask for each permission and fetch a LAN address and an mDNS name", () => {
-    for (const asked of ["video: true", "audio: true", "getCurrentPosition", "requestPermission"]) expect(PERMISSIONS_PROBE).toContain(asked);
+    for (const asked of ["video: true", "audio: true", "getDisplayMedia", "getCurrentPosition", "requestPermission", "credentials?.create"]) expect(PERMISSIONS_PROBE).toContain(asked);
+    expect(PERMISSIONS_PROBE).toContain("<button id=ask>Ask</button>");
+    expect(CLIENT_CERT_PROBE_URL.startsWith("https://")).toBe(true);
     expect(LAN_PROBE).toContain("http://192.168.1.1/");
     expect(LAN_PROBE).toMatch(/\.local\//);
   });
 
-  test("drill 1 is listed for the user", () => {
-    expect(HEADLESS_LIVE_DRILLS[0]).toMatch(/^Drill 1/);
+  test("the first start is listed for the user, by hand", () => {
+    expect(HEADLESS_LIVE_BY_HAND[0]).toMatch(/^First start/);
   });
 });

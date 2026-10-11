@@ -1,49 +1,52 @@
 /**
- * ComputerV2 Phase 4 — Winter Headless's LIVE drills 2–4 (lane H1): the real browser engine over the real headless pool
- * and a real, signed Winter Headless, on this Mac, while the cu-live monitor samples the user's frontmost app and Space
- * every 20 ms. The controller runs it, with the user's go-ahead; it is never run by an agent on its own.
+ * ComputerV2 Phase 4 — Winter Headless's LIVE checks: the real browser engine over the real headless pool and a real,
+ * signed Winter Headless, on this Mac, while the cu-live monitor samples the user's frontmost app and Space every 20 ms.
+ * The controller runs it, with the user's go-ahead; it is never run by an agent on its own.
  *
  *   WINTER_CU_LIVE_TESTS=1 bun scripts/cu-live/headless.ts --app "<Winter Headless .app>" [options]
  *
- *   --app <path>        the helper to drive (default `$WINTER_HEADLESS_APP`); a dev build from `bun run dev:headless`
+ *   --app <path>        the helper to drive (default `$WINTER_HEADLESS_APP`); a dev build from `bun run dev:headless`,
+ *                       or a Release Winter.app's nested `Contents/Helpers/Winter Headless.app`
  *   --no-verify         skip the signature check of the spawned process (an unsigned build only)
- *   --user-typing       drill 2's second variant: put another app in front and keep typing in it — the run starts 10 s
- *                       later; the user's own switches are then reported, never failed. They are told apart by the
- *                       monitor's hardware tap, which sees KEYS only when the terminal has Input Monitoring: switch apps
- *                       with the pointer (a click, the Dock), or grant it — a ⌘-Tab it cannot see reads as unexplained
- *   --load              drill 2's cold start on a LOADED Mac: one `yes > /dev/null` per core while the helper starts
- *   --prompt-probes     ALSO the pages that ask for the camera, microphone, location and notifications, and fetch a LAN
- *                       address and an mDNS name. They may raise a macOS prompt (TCC, Local Network) — the drill's
- *                       question, so only with the user at the Mac: a denial is remembered for the identity macOS blames.
- *                       NOTE: spawned from a terminal, a prompt is attributed to the terminal's process chain, not to
- *                       Winter Headless — these probes say WHETHER one appears; only the daemon-spawned drill 1 shows
- *                       which name it carries.
- *   --only <2|3|4,…>    run only those drills (default all three)
+ *   --user-typing       the view check's second variant: put another app in front and keep typing in it — the run
+ *                       starts 10 s later; the user's own switches are then reported, never failed. They are told apart
+ *                       by the monitor's hardware tap, which sees KEYS only when the terminal has Input Monitoring:
+ *                       switch apps with the pointer (a click, the Dock), or grant it — a ⌘-Tab it cannot see reads as
+ *                       unexplained
+ *   --load              the cold start on a LOADED Mac: one `yes > /dev/null` per core while the helper starts
+ *   --prompt-probes     ALSO the pages that ask (on a click, so with a user gesture) for the camera, microphone, screen
+ *                       capture, location, notifications and a passkey (WebAuthn), that fetch a LAN address and an mDNS
+ *                       name, and a public site that asks for a client certificate (client.badssl.com — needs the
+ *                       internet). They may raise a macOS prompt (TCC, Local Network) — the question these probes ask,
+ *                       so only with the user at the Mac: a denial is remembered for the identity macOS blames. NOTE:
+ *                       spawned from a terminal, a prompt is attributed to the terminal's process chain, not to Winter
+ *                       Headless — these probes say WHETHER one appears; only a daemon-spawned run shows which name it
+ *                       carries
+ *   --only <view,memory,isolation>  run only those checks (default all three)
  *   --report <file>     where the JSON report goes (default out/cu-live/headless.json)
  *   --keep-temp         keep the temp home (the helper's cache dirs are removed by the pool either way)
  *
- * What it checks (spine §9.3):
- *   2. never move the view — 10 headless tabs opened at once on media-heavy pages (two sessions of 5: a session holds at
- *      most 8), each read with text() and closed; cold, then warm. Across the WHOLE run: the helper is never the
- *      frontmost app; the frontmost app and the Space never change without the user's hardware input just before; no
- *      permission prompt (UserNotificationCenter, SecurityAgent, CoreServicesUIAgent) comes to the front; the helper's
- *      process never owns an on-screen window (`cu-live-tool windows "<its name>"`; off-screen ones are reported) and is
- *      never a Foreground app (`lsappinfo`'s ApplicationType — a Dock tile). The CEF subprocesses ("Winter Helper …")
- *      share their names with Winter.app's, so the window check cannot tell them apart and does not look at them.
- *   3. cold start and memory — reported, not asserted: the first open to its state (cold, and with --load), and the
- *      helper's process-tree RSS at 1, 8 and 24 tabs; asserted: a session's 9th tab and the 25th tab are TargetBusy (a
+ * What it checks:
+ *   view — never move the view: 10 headless tabs opened at once on media-heavy pages (two sessions of 5: a session
+ *      holds at most 8), each read with text() and closed; cold, then warm. Across the WHOLE run: the helper is never
+ *      the frontmost app; the frontmost app and the Space never change without the user's hardware input just before;
+ *      no permission prompt (UserNotificationCenter, SecurityAgent, CoreServicesUIAgent) comes to the front; no process
+ *      of the helper's tree — the helper and every CEF subprocess it started, found by parent pid — ever owns an
+ *      on-screen window (CoreGraphics' window list, read through JavaScript for Automation with no Apple Event to any
+ *      app; off-screen windows are reported); and the helper is never a Foreground app (`lsappinfo`: a Dock tile).
+ *   memory — reported, not asserted: the first open to its state (cold, and with --load), and the helper's
+ *      process-tree RSS at 1, 8 and 24 tabs; asserted: a session's 9th tab and the 25th tab are TargetBusy (a
  *      memory-guard refusal before 24 is recorded as the finding it is).
- *   4. isolation and lifecycle — two sessions sign in to the same local site as different users and each sees only its
- *      own (cookies and localStorage); after a session's runtime ends its context is gone (signed out); tabs close at
- *      the turn's end, handoff() keeps one for exactly one more turn, keep() is NotAllowed; the helper SIGKILLed during
- *      a waitFor → TargetLost, and the next open relaunches it; a "daemon" (a child process owning the pool) SIGKILLed
- *      takes the helper with it (the pipe's EOF); and at the end the pool's stop leaves nothing from the helper app
- *      running.
+ *   isolation — two sessions sign in to the same local site as different users and each sees only its own (cookies
+ *      and localStorage); after a session's runtime ends its context is gone (signed out); tabs close at the turn's end,
+ *      handoff() keeps one for exactly one more turn, keep() is NotAllowed; the helper SIGKILLed during a waitFor →
+ *      TargetLost, and the next open relaunches it; a "daemon" (a child process owning the pool) SIGKILLed takes the
+ *      helper with it (the pipe's EOF); and at the end the pool's stop leaves nothing from the helper app running.
  *
  * Drives the engine directly (as `scripts/browser-e2e/headless/engine-smoke.ts` does), not a daemon and a script: a
  * headless tab never touches the Computer Use helper, a card or the user's browsers, and concurrent `engine.global`
- * calls are what a script's `Promise.all` becomes. Drill 1 — the DAEMON starting a Release-signed helper inside
- * Winter.app with Winter.app closed — is by hand (`HEADLESS_LIVE_DRILLS`). Everything is on a temp home
+ * calls are what a script's `Promise.all` becomes. The FIRST START — a daemon starting a Release-signed helper inside
+ * Winter.app with Winter.app closed — is checked by hand (`HEADLESS_LIVE_BY_HAND`). Everything is on a temp home
  * (`<tmp>/winter-cu-live-headless-*`): no Keychain (the helper runs with `--use-mock-keychain`), nothing under
  * `~/.winter*`. SIGINT/SIGTERM/SIGHUP stop the helper, the monitor, the load and the child, then exit 128+n.
  */
@@ -78,17 +81,21 @@ export interface HeadlessLiveOptions {
   userTyping: boolean;
   load: boolean;
   promptProbes: boolean;
-  drills: ReadonlySet<2 | 3 | 4>;
+  checks: ReadonlySet<HeadlessCheck>;
   report: string;
   keepTemp: boolean;
 }
 
-/** The command line, or why it is wrong. `--child-pool` is the internal "daemon" of drill 4's last check. */
+/** The live checks, by name. */
+export const HEADLESS_CHECKS = ["view", "memory", "isolation"] as const;
+export type HeadlessCheck = (typeof HEADLESS_CHECKS)[number];
+
+/** The command line, or why it is wrong. `--child-pool` is the internal "daemon" of the isolation check's last step. */
 export function parseHeadlessOptions(argv: readonly string[], env: Readonly<Record<string, string | undefined>>): HeadlessLiveOptions | { error: string } {
   let app = env.WINTER_HEADLESS_APP;
   let report = join(OUT_DIR, "headless.json");
   const o = { verify: true, userTyping: false, load: false, promptProbes: false, keepTemp: false };
-  let drills = new Set<2 | 3 | 4>([2, 3, 4]);
+  let checks = new Set<HeadlessCheck>(HEADLESS_CHECKS);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     const value = (): string | undefined => { const v = argv[i + 1]; i++; return v === undefined || v.startsWith("--") ? undefined : v; };
@@ -97,8 +104,8 @@ export function parseHeadlessOptions(argv: readonly string[], env: Readonly<Reco
     else if (a === "--only") {
       const v = value();
       const picked = (v ?? "").split(",").map((x) => x.trim()).filter((x) => x.length > 0);
-      if (picked.length === 0 || picked.some((x) => !["2", "3", "4"].includes(x))) return { error: "--only takes drill numbers 2, 3 and 4 (comma-separated)" };
-      drills = new Set(picked.map((x) => Number(x) as 2 | 3 | 4));
+      if (picked.length === 0 || picked.some((x) => !(HEADLESS_CHECKS as readonly string[]).includes(x))) return { error: `--only takes ${HEADLESS_CHECKS.join(", ")} (comma-separated)` };
+      checks = new Set(picked as HeadlessCheck[]);
     }
     else if (a === "--no-verify") o.verify = false;
     else if (a === "--user-typing") o.userTyping = true;
@@ -109,7 +116,7 @@ export function parseHeadlessOptions(argv: readonly string[], env: Readonly<Reco
   }
   if (app === undefined || app.trim().length === 0) return { error: "name the helper: --app <Winter Headless .app> (or $WINTER_HEADLESS_APP; `bun run dev:headless` builds one)" };
   if (!/\.app\/?$/.test(app.trim())) return { error: `--app must be an .app bundle (got ${app})` };
-  return { app: resolve(app.trim()), report: resolve(report), drills, ...o };
+  return { app: resolve(app.trim()), report: resolve(report), checks, ...o };
 }
 
 /** The app's executable and its window-server owner name (its bundle name: "Winter Headless", "Winter Headless Dev"). */
@@ -151,18 +158,44 @@ export function attributeFrontChanges(samples: readonly MonitorSample[], from: n
   return out;
 }
 
-/** `cu-live-tool windows <owner>`'s lines. */
-export interface OwnedWindow { id: number; layer: number; onScreen: boolean; bounds: [number, number, number, number] }
+/** One window of the window server, as `WINDOW_LIST_JXA` reports it. */
+export interface ServerWindow { id: number; pid: number; layer: number; onScreen: boolean }
 
-export function parseWindowsLines(stdout: string): OwnedWindow[] {
-  const out: OwnedWindow[] = [];
-  for (const line of stdout.split("\n")) {
-    if (line.trim().length === 0) continue;
-    try {
-      const o = JSON.parse(line) as Record<string, unknown>;
-      const b = Array.isArray(o.bounds) && o.bounds.length === 4 && o.bounds.every((n) => typeof n === "number") ? o.bounds as [number, number, number, number] : [0, 0, 0, 0] as [number, number, number, number];
-      if (typeof o.id === "number") out.push({ id: o.id, layer: typeof o.layer === "number" ? o.layer : 0, onScreen: o.onScreen === true, bounds: b });
-    } catch { /* not a window line */ }
+/** JavaScript for Automation that prints every window's id, owner pid, layer and on-screen flag (CoreGraphics' window
+ *  list — no Apple Event to any app, no permission: names and titles are not asked for). */
+export const WINDOW_LIST_JXA = `ObjC.import("CoreGraphics");
+const list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionAll, 0))) || [];
+JSON.stringify(list.map((w) => [w.kCGWindowNumber, w.kCGWindowOwnerPID, w.kCGWindowLayer, w.kCGWindowIsOnscreen === true]));`;
+
+/** `WINDOW_LIST_JXA`'s output, the windows of the given processes only. */
+export function windowsOf(stdout: string, pids: ReadonlySet<number>): ServerWindow[] {
+  let rows: unknown;
+  try { rows = JSON.parse(stdout.trim()); } catch { return []; }
+  if (!Array.isArray(rows)) return [];
+  const out: ServerWindow[] = [];
+  for (const r of rows) {
+    if (!Array.isArray(r) || typeof r[0] !== "number" || typeof r[1] !== "number" || !pids.has(r[1])) continue;
+    out.push({ id: r[0], pid: r[1], layer: typeof r[2] === "number" ? r[2] : 0, onScreen: r[3] === true });
+  }
+  return out;
+}
+
+/** Every process under the roots (the roots included), from `ps -A -o pid=,ppid=`. */
+export function processTree(psOutput: string, roots: Iterable<number>): Set<number> {
+  const children = new Map<number, number[]>();
+  for (const line of psOutput.split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+    if (m === null) continue;
+    const list = children.get(Number(m[2]));
+    if (list === undefined) children.set(Number(m[2]), [Number(m[1])]); else list.push(Number(m[1]));
+  }
+  const out = new Set<number>();
+  const stack = [...roots];
+  while (stack.length > 0) {
+    const pid = stack.pop()!;
+    if (out.has(pid)) continue;
+    out.add(pid);
+    stack.push(...(children.get(pid) ?? []));
   }
   return out;
 }
@@ -218,7 +251,7 @@ export function mediaPage(n: number): string {
   const images = Array.from({ length: 6 }, (_, k) => `<img alt="art ${n}-${k}" width=600 height=400 src="/img/${n}-${k}.svg">`).join("");
   return `<!doctype html><meta charset=utf-8><title>Media ${n}</title>
 <style>@keyframes spin{to{transform:rotate(360deg)}}.s{display:inline-block;width:24px;height:24px;margin:2px;background:hsl(var(--h),70%,50%);animation:spin 1s linear infinite}</style>
-<h1>Media ${n}</h1><p>Headless drill page ${n}: images, canvas, WebGL, animations and sound.</p>
+<h1>Media ${n}</h1><p>Headless live page ${n}: images, canvas, WebGL, animations and sound.</p>
 <audio autoplay loop src="/tone.wav"></audio>
 <canvas id=c width=1024 height=600></canvas><canvas id=g width=512 height=512></canvas>
 <div>${squares}</div><div>${images}</div>
@@ -252,27 +285,38 @@ export function cookieUser(cookieHeader: string | null): string | undefined {
   return m?.[1];
 }
 
-/** The pages the opt-in prompt probes load: each reports what the browser answered. */
-export const PERMISSIONS_PROBE = `<!doctype html><meta charset=utf-8><title>Permissions probe</title><h1>Permissions probe</h1><ul id=out></ul>
+/** The pages the opt-in prompt probes load: each asks on a click (a user gesture, as a person's would be) and reports
+ *  what the browser answered. */
+export const PERMISSIONS_PROBE = `<!doctype html><meta charset=utf-8><title>Permissions probe</title><h1>Permissions probe</h1>
+<button id=ask>Ask</button><ul id=out></ul>
 <script>
 const out = (k, v) => { const li = document.createElement("li"); li.textContent = k + ": " + v; document.getElementById("out").append(li); };
-navigator.mediaDevices?.getUserMedia({ video: true }).then(() => out("camera", "granted"), (e) => out("camera", e.name));
-navigator.mediaDevices?.getUserMedia({ audio: true }).then(() => out("microphone", "granted"), (e) => out("microphone", e.name));
-navigator.geolocation?.getCurrentPosition(() => out("location", "granted"), (e) => out("location", "denied " + e.code));
-typeof Notification === "undefined" ? out("notifications", "no API") : Notification.requestPermission().then((r) => out("notifications", r), (e) => out("notifications", e.name));
+document.getElementById("ask").onclick = () => {
+  navigator.mediaDevices?.getUserMedia({ video: true }).then(() => out("camera", "granted"), (e) => out("camera", e.name));
+  navigator.mediaDevices?.getUserMedia({ audio: true }).then(() => out("microphone", "granted"), (e) => out("microphone", e.name));
+  navigator.mediaDevices?.getDisplayMedia ? navigator.mediaDevices.getDisplayMedia({ video: true }).then(() => out("screen", "granted"), (e) => out("screen", e.name)) : out("screen", "no API");
+  navigator.geolocation?.getCurrentPosition(() => out("location", "granted"), (e) => out("location", "denied " + e.code));
+  typeof Notification === "undefined" ? out("notifications", "no API") : Notification.requestPermission().then((r) => out("notifications", r), (e) => out("notifications", e.name));
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  navigator.credentials?.create({ publicKey: { challenge, rp: { name: "Winter probe" }, user: { id: new Uint8Array(8), name: "probe", displayName: "Probe" },
+    pubKeyCredParams: [{ type: "public-key", alg: -7 }], timeout: 5000 } }).then(() => out("passkey", "created"), (e) => out("passkey", e.name));
+};
 </script>`;
+
+/** A public site that asks for a client certificate (a TLS handshake that requests one); it says what it received. */
+export const CLIENT_CERT_PROBE_URL = "https://client.badssl.com/";
 
 export const LAN_PROBE = `<!doctype html><meta charset=utf-8><title>LAN probe</title><h1>LAN probe</h1><ul id=out></ul>
 <script>
 const out = (k, v) => { const li = document.createElement("li"); li.textContent = k + ": " + v; document.getElementById("out").append(li); };
-for (const [k, u] of [["lan", "http://192.168.1.1/"], ["mdns", "http://winter-drill-printer.local/"]]) {
+for (const [k, u] of [["lan", "http://192.168.1.1/"], ["mdns", "http://winter-probe-printer.local/"]]) {
   fetch(u, { mode: "no-cors", signal: AbortSignal.timeout(4000) }).then(() => out(k, "reached"), (e) => out(k, e.name));
 }
 </script>`;
 
-/** Drill 1, by hand with the user before merge (it needs a Release-signed Winter.app and the daemon). */
-export const HEADLESS_LIVE_DRILLS: readonly string[] = [
-  "Drill 1 (before merge): a Release-signed Winter.app's daemon starts Winter Headless with Winter.app itself closed; the helper borrows Winter.app's CEF framework and its \"Winter Helper\" bundles (no second Chromium); a headless tab answers state(), screenshot() (a vision model), a click and typing, an out-of-process iframe, a dialog and a file chooser; killing the daemon ends the helper (its pipe's EOF); document.modelContext exists (--enable-features=WebMCP).",
+/** By hand with the user before merge (it needs a Release-signed Winter.app and the daemon). */
+export const HEADLESS_LIVE_BY_HAND: readonly string[] = [
+  "First start (before merge): a Release-signed Winter.app's daemon starts Winter Headless with Winter.app itself closed; the helper borrows Winter.app's CEF framework and its \"Winter Helper\" bundles (no second Chromium); a headless tab answers state(), screenshot() (a vision model), a click and typing, an out-of-process iframe, a dialog and a file chooser; killing the daemon ends the helper (its pipe's EOF); document.modelContext exists (--enable-features=WebMCP).",
   "With the daemon (not this script): note which name a macOS prompt would carry, if --prompt-probes ever raised one here.",
 ];
 
@@ -300,7 +344,8 @@ class Lines<T> {
   }
 }
 
-/** The "daemon" of drill 4's last check: a separate process that owns a pool, opens one tab and waits to be killed. */
+/** The "daemon" of the isolation check's last step: a separate process that owns a pool, opens one tab and waits to
+ *  be killed. */
 async function childPool(home: string, app: string, verify: boolean): Promise<void> {
   const { executable } = helperNames(app);
   const pool = new HeadlessPool({
@@ -326,7 +371,7 @@ async function main(): Promise<void> {
   const parsed = parseHeadlessOptions(process.argv.slice(2), process.env);
   if ("error" in parsed) { console.error(`cu-live headless: ${parsed.error}`); process.exit(64); }
   const o = parsed;
-  const { executable, owner } = helperNames(o.app);
+  const { executable } = helperNames(o.app);
   if (!existsSync(executable)) { console.error(`cu-live headless: no helper executable at ${executable}`); process.exit(64); }
 
   const log = (line: string): void => console.log(line);
@@ -394,7 +439,7 @@ async function main(): Promise<void> {
   const registry = new BrowserBackendRegistry();
   registry.register(pool, { family: "headless", name: HEADLESS_NAME, instanceKey: "headless" });
   const engine = new BrowserEngine({
-    registry, mintWinterTab: () => "unused", winterTabs: () => ({ tabs: [] }), sessionInfo: () => ({ cwd: root, title: "headless drill" }),
+    registry, mintWinterTab: () => "unused", winterTabs: () => ({ tabs: [] }), sessionInfo: () => ({ cwd: root, title: "headless live check" }),
     home, headlessSessionEnded: (sid) => pool.disposeSession(sid), headlessReason: () => pool.reason,
   });
   const locks = new TargetLocks();
@@ -434,18 +479,23 @@ async function main(): Promise<void> {
 
   // ── the samplers ──
   const monitor = new Lines<MonitorSample>(spawn(tool, ["monitor", "--interval-ms", "20"], { stdio: ["pipe", "pipe", "ignore"] }), parseMonitorLine);
-  const windowsSeen = new Map<number, { onScreen: boolean; layer: number; bounds: number[]; firstAt: number }>();
+  const windowsSeen = new Map<number, { pid: number; onScreen: boolean; layer: number; firstAt: number }>();
   const appTypes = new Map<string, number>();
+  const treeSeen = new Set<number>();
   let sampling = true;
   const windowSampler = (async () => {
     while (sampling) {
       const pid = pool.pid;
       if (pid !== undefined) helperPids.add(pid);
       if (helperPids.size > 0) {
-        const w = Bun.spawn([tool, "windows", owner], { stdout: "pipe", stderr: "ignore" });
-        for (const win of parseWindowsLines(await new Response(w.stdout).text())) {
+        // The helper and every process it started (its CEF subprocesses), by parent pid.
+        const ps = Bun.spawn(["/bin/ps", "-A", "-o", "pid=,ppid="], { stdout: "pipe", stderr: "ignore", env: { ...process.env, LC_ALL: "C" } });
+        const tree = processTree(await new Response(ps.stdout).text(), helperPids);
+        for (const p of tree) treeSeen.add(p);
+        const w = Bun.spawn(["/usr/bin/osascript", "-l", "JavaScript", "-e", WINDOW_LIST_JXA], { stdout: "pipe", stderr: "ignore" });
+        for (const win of windowsOf(await new Response(w.stdout).text(), tree)) {
           const seen = windowsSeen.get(win.id);
-          if (seen === undefined) windowsSeen.set(win.id, { onScreen: win.onScreen, layer: win.layer, bounds: win.bounds, firstAt: Date.now() });
+          if (seen === undefined) windowsSeen.set(win.id, { pid: win.pid, onScreen: win.onScreen, layer: win.layer, firstAt: Date.now() });
           else if (win.onScreen) seen.onScreen = true;
         }
         if (pid !== undefined) {
@@ -454,7 +504,7 @@ async function main(): Promise<void> {
           appTypes.set(type, (appTypes.get(type) ?? 0) + 1);
         }
       }
-      await Bun.sleep(200);
+      await Bun.sleep(250);
     }
   })();
 
@@ -486,9 +536,9 @@ async function main(): Promise<void> {
     }
     const from = Date.now();
 
-    // ── drill 2: never move the view ──
-    if (o.drills.has(2)) {
-      await scenario("drill 2: 10 headless tabs at once on media-heavy pages, cold — read and closed", "drill 2", async () => {
+    // ── view: never move the view ──
+    if (o.checks.has("view")) {
+      await scenario("view: 10 headless tabs at once on media-heavy pages, cold — read and closed", "view", async () => {
         if (o.load) for (let i = 0; i < cpus().length; i++) loads.push(spawn("/usr/bin/yes", [], { stdio: ["ignore", "ignore", "ignore"] }));
         const a = scope("s_view_a"); const b = scope("s_view_b");
         const t0 = Date.now();
@@ -514,7 +564,7 @@ async function main(): Promise<void> {
           note: `cold start${o.load ? " on a loaded Mac" : ""}: the first state after ${firstState ?? "?"} ms, all 10 after ${allOpen} ms`,
         };
       });
-      await scenario("drill 2: the same again, warm", "drill 2", async () => {
+      await scenario("view: the same again, warm", "view", async () => {
         const a = scope("s_view_a"); const b = scope("s_view_b");
         const t0 = Date.now();
         const tabs = await Promise.all([...[10, 11, 12, 13, 14].map(async (n) => [a, await a.open(`${BASE}/media/${n}`), n] as const), ...[15, 16, 17, 18, 19].map(async (n) => [b, await b.open(`${BASE}/media/${n}`), n] as const)]);
@@ -530,9 +580,9 @@ async function main(): Promise<void> {
       });
     }
 
-    // ── drill 3: memory at 1, 8 and 24 tabs; the caps ──
-    if (o.drills.has(3)) {
-      await scenario("drill 3: the helper's memory at 1, 8 and 24 tabs; a session's 9th and the 25th tab are TargetBusy", "drill 3", async () => {
+    // ── memory: at 1, 8 and 24 tabs; the caps ──
+    if (o.checks.has("memory")) {
+      await scenario("memory: the helper's memory at 1, 8 and 24 tabs; a session's 9th and the 25th tab are TargetBusy", "memory", async () => {
         const sessions = ["s_mem_1", "s_mem_2", "s_mem_3"].map((sid) => ({ sid, sc: scope(sid) }));
         const rss: Record<string, string> = {};
         const sample = async (label: string): Promise<void> => { await Bun.sleep(1_500); rss[label] = mib(pool.pid === undefined ? undefined : processTreeRss(pool.pid)); };
@@ -567,9 +617,9 @@ async function main(): Promise<void> {
       });
     }
 
-    // ── drill 4: isolation and lifecycle ──
-    if (o.drills.has(4)) {
-      await scenario("drill 4: two sessions signed in as different users each see only their own", "drill 4", async () => {
+    // ── isolation and lifecycle ──
+    if (o.checks.has("isolation")) {
+      await scenario("isolation: two sessions signed in as different users each see only their own", "isolation", async () => {
         const alice = scope("s_alice"); const bob = scope("s_bob");
         const [ta, tb] = await Promise.all([alice.open(`${BASE}/site/login?user=alice`), bob.open(`${BASE}/site/login?user=bob`)]);
         await Promise.all([alice.p(ta, "waitFor", { cond: { text: "signed in as alice" }, timeoutMs: 5_000 }), bob.p(tb, "waitFor", { cond: { text: "signed in as bob" }, timeoutMs: 5_000 })]);
@@ -583,7 +633,7 @@ async function main(): Promise<void> {
           check("a second tab of alice's session shares her sign-in", xa2.includes("signed in as alice") && xa2.includes("local: alice"), xa2.slice(0, 200)),
         ] };
       });
-      await scenario("drill 4: after a session's runtime ends its context is gone; the other's stays", "drill 4", async () => {
+      await scenario("isolation: after a session's runtime ends its context is gone; the other's stays", "isolation", async () => {
         engine.sessionEnded("s_alice", "idle");
         const alice = scope("s_alice"); const bob = scope("s_bob");
         const ta = await alice.open(`${BASE}/site/`);
@@ -595,7 +645,7 @@ async function main(): Promise<void> {
           check("bob is still signed in", xb.includes("signed in as bob") && xb.includes("local: bob"), xb.slice(0, 200)),
         ] };
       });
-      await scenario("drill 4: tabs close at the turn's end; handoff() keeps one for one more turn; keep() is refused", "drill 4", async () => {
+      await scenario("isolation: tabs close at the turn's end; handoff() keeps one for one more turn; keep() is refused", "isolation", async () => {
         engine.turnEnded("s_alice"); engine.turnEnded("s_bob");
         const closedAtTurnEnd = await waitUntil(() => pool.tabCount("s_alice") === 0 && pool.tabCount("s_bob") === 0, 3_000);
         const h = scope("s_hand");
@@ -615,7 +665,7 @@ async function main(): Promise<void> {
           check("…and the next turn's end closed it", goneAfter),
         ] };
       });
-      await scenario("drill 4: the helper killed mid-script → TargetLost; the next open relaunches it", "drill 4", async () => {
+      await scenario("isolation: the helper killed mid-script → TargetLost; the next open relaunches it", "isolation", async () => {
         const k = scope("s_kill");
         const tab = await k.open(`${BASE}/slow`);
         const before = pool.pid;
@@ -635,7 +685,7 @@ async function main(): Promise<void> {
           check("the next browsers.open relaunched it (a new pid) and works", after !== undefined && after !== before && read.includes("signed out"), `${before} → ${after}`),
         ] };
       });
-      await scenario("drill 4: a daemon that dies takes the helper with it (the pipe's EOF)", "drill 4", async () => {
+      await scenario("isolation: a daemon that dies takes the helper with it (the pipe's EOF)", "isolation", async () => {
         const childHome = join(root, "child-home");
         mkdirSync(childHome, { recursive: true });
         child = spawn(process.execPath, [import.meta.path, "--child-pool", childHome, o.app, o.verify ? "verify" : "no-verify"], { stdio: ["ignore", "pipe", "inherit"], env: { ...process.env } });
@@ -656,11 +706,23 @@ async function main(): Promise<void> {
     // ── the opt-in prompt probes ──
     if (o.promptProbes) {
       log("--prompt-probes: these pages ask for the camera, microphone, location and notifications, and fetch a LAN address and an mDNS name — a macOS prompt, if one appears, is the finding (answer Don't Allow)");
-      await scenario("probes: permission requests and LAN fetches raise no prompt", "probes", async () => {
+      await scenario("probes: permission requests (with a gesture), a passkey, LAN fetches and a client certificate raise no prompt", "probes", async () => {
         const p = scope("s_probe");
         const t0 = Date.now();
         const perms = await p.open(`${BASE}/probe/permissions`);
+        const state = await p.p(perms, "state", { full: true, emit: false }) as string;
+        const ask = Number(/\[(\d+)\] button "Ask"/.exec(state)?.[1]);
+        if (!Number.isInteger(ask)) throw new Error(`no Ask button in the probe page: ${state.slice(0, 300)}`);
+        await p.p(perms, "click", { target: ask });
         const lan = await p.open(`${BASE}/probe/lan`);
+        let cert = "";
+        try {
+          const ct = await p.open(CLIENT_CERT_PROBE_URL);
+          await Bun.sleep(3_000);
+          cert = (await p.p(ct, "text", { emit: false }) as string).replace(/\s+/g, " ").slice(0, 200);
+        } catch (err) {
+          cert = `could not load (${err instanceof Error ? err.message.slice(0, 160) : "error"})`;
+        }
         await Bun.sleep(6_000);
         const [xp, xl] = await Promise.all([p.p(perms, "text", { emit: false }) as Promise<string>, p.p(lan, "text", { emit: false }) as Promise<string>]);
         p.end();
@@ -668,7 +730,7 @@ async function main(): Promise<void> {
         const prompt = promptAppeared(monitor.items, t0, Date.now());
         return {
           checks: [check("no permission prompt came to the front", prompt === undefined, prompt === undefined ? "" : `${prompt.front} at +${prompt.t - t0} ms`)],
-          note: `the pages read: ${xp.replace(/\s+/g, " ").slice(0, 300)} | ${xl.replace(/\s+/g, " ").slice(0, 300)}`,
+          note: `the pages read: ${xp.replace(/\s+/g, " ").slice(0, 400)} | ${xl.replace(/\s+/g, " ").slice(0, 300)} | the client-certificate site: ${cert}`,
         };
       });
     }
@@ -683,6 +745,7 @@ async function main(): Promise<void> {
     const foreground = appTypes.get("Foreground") ?? 0;
     measures.frontChanges = changes;
     measures.windows = [...windowsSeen.entries()].map(([id, w]) => ({ id, ...w }));
+    measures.helperProcesses = treeSeen.size;
     measures.applicationTypes = Object.fromEntries(appTypes);
     measures.helperPids = [...helperPids];
     const keysWatched = monitor.items.some((s) => s.hwKeys === true);
@@ -693,19 +756,19 @@ async function main(): Promise<void> {
         o.userTyping ? !changes.some((c) => c.by === "unexplained") : changes.length === 0,
         changes.map((c) => `+${c.t - from} ms ${c.what} (${c.by})`).join("; ")),
       check("no permission prompt came to the front", prompt === undefined, prompt === undefined ? "" : `${prompt.front} at +${prompt.t - from} ms`),
-      check("the helper never owned an on-screen window", onScreen.length === 0, onScreen.map(([id, w]) => `window ${id} layer ${w.layer} ${w.bounds.join("×")}`).join("; ")),
+      check("no process of the helper's tree (the helper, its CEF subprocesses) ever owned an on-screen window", onScreen.length === 0, onScreen.map(([id, w]) => `window ${id} of pid ${w.pid}, layer ${w.layer}`).join("; ")),
       check("the helper was never a Foreground app (no Dock tile)", foreground === 0, JSON.stringify(Object.fromEntries(appTypes))),
       check("the screen stayed usable (not locked)", locked === undefined, locked === undefined ? "" : locked.what),
     ];
-    results.push({ name: "the whole run: never move the view", group: "drill 2", status: statusOf(runChecks), ms: to - from, checks: runChecks,
-      note: `${changes.length} front/Space change(s) (${changes.filter((c) => c.by === "user").length} the user's${keysWatched ? "" : "; the user's keys were not visible to the monitor (no Input Monitoring), so a keyboard-only switch reads as unexplained"}); ${windowsSeen.size} window(s) owned by ${owner} (${onScreen.length} on screen); application types ${JSON.stringify(Object.fromEntries(appTypes))}` });
+    results.push({ name: "the whole run: never move the view", group: "view", status: statusOf(runChecks), ms: to - from, checks: runChecks,
+      note: `${changes.length} front/Space change(s) (${changes.filter((c) => c.by === "user").length} the user's${keysWatched ? "" : "; the user's keys were not visible to the monitor (no Input Monitoring), so a keyboard-only switch reads as unexplained"}); ${windowsSeen.size} window(s) owned by the helper's ${treeSeen.size} process(es) (${onScreen.length} on screen); application types ${JSON.stringify(Object.fromEntries(appTypes))}` });
 
     // The daemon's stop ends the helper and everything it started.
     pool.stop();
     const inside = (): Array<{ pid: number; command: string }> => processesInside(spawnSync("/bin/ps", ["-A", "-o", "pid=,command="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).stdout ?? "", o.app);
     const clean = await waitUntil(() => inside().length === 0, 8_000);
     const left = inside();
-    results.push({ name: "the pool's stop leaves no helper process behind", group: "drill 4", status: clean ? "pass" : "fail", ms: 0,
+    results.push({ name: "the pool's stop leaves no helper process behind", group: "isolation", status: clean ? "pass" : "fail", ms: 0,
       checks: [check("nothing from the helper app is still running 8 s after the stop", clean, left.map((p) => `${p.pid} ${p.command.slice(0, 120)}`).join("; "))] });
     for (const p of left) { try { process.kill(p.pid, "SIGKILL"); } catch { /* gone */ } }
     exitCode = results.every((r) => r.status !== "fail") ? 0 : 1;
@@ -726,13 +789,13 @@ async function main(): Promise<void> {
     mkdirSync(dirname(o.report), { recursive: true });
     writeFileSync(o.report, `${JSON.stringify({
       startedAt: new Date(startedAt).toISOString(), durationMs: Date.now() - startedAt, app: o.app, verified: o.verify,
-      options: { userTyping: o.userTyping, load: o.load, promptProbes: o.promptProbes, drills: [...o.drills] },
-      results, measures, metrics: metrics.filter((m) => m.primitive.startsWith("headless.")), drillsByHand: HEADLESS_LIVE_DRILLS,
+      options: { userTyping: o.userTyping, load: o.load, promptProbes: o.promptProbes, checks: [...o.checks] },
+      results, measures, metrics: metrics.filter((m) => m.primitive.startsWith("headless.")), byHand: HEADLESS_LIVE_BY_HAND,
     }, null, 2)}\n`);
     console.log(`\n${renderTable(results)}`);
     console.log(`report: ${o.report}${o.keepTemp ? ` (temp kept: ${root})` : ""}`);
     console.log("by hand, with the user:");
-    for (const d of HEADLESS_LIVE_DRILLS) console.log(`  - ${d}`);
+    for (const d of HEADLESS_LIVE_BY_HAND) console.log(`  - ${d}`);
     process.exit(exitCode);
   }
 }
