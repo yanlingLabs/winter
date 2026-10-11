@@ -124,10 +124,13 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const m = message as { type?: unknown; tabId?: unknown; done?: unknown };
   if (m.type === "winter.status") {
     const s = status.get();
-    sendResponse({ state: s.state, sentence: statusSentence(s), waiting: controller.waitingTabs(), needs: controller.neededPermissions(), ...(s.state === "connected" ? { backend: s.backend } : {}) });
+    sendResponse({ state: s.state, sentence: statusSentence(s), waiting: controller.waitingTabs(), driven: status.drivenTabs(), needs: controller.neededPermissions(), ...(s.state === "connected" ? { backend: s.backend } : {}) });
   } else if (m.type === "winter.userDone" && typeof m.tabId === "number" && typeof m.done === "boolean") {
     // The popup's Done / Stop waiting for a tab Winter handed to the user.
     sendResponse({ ok: controller.userDone(m.tabId, m.done) });
+  } else if (m.type === "winter.stopDriven") {
+    // The popup's Stop, while a hand-off keeps the button a popup.
+    sendResponse({ ok: controller.stopDriven() });
   }
   return undefined;
 });

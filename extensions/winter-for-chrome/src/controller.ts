@@ -236,7 +236,9 @@ export class ExtensionController {
   /** The link to Winter dropped: nothing is bound any more, so every debugger detaches and every overlay goes, and no
    *  download is waited for. */
   async releaseAll(): Promise<void> {
-    this.library.disarmAll();
+    this.library.disarmAll("the link to Winter dropped");
+    // Nobody waits on a handed-over tab any more: its pill and the toolbar's "!" go.
+    for (const tabId of [...this.waiting]) this.endWait(tabId);
     for (const tabId of [...this.attached.keys()]) await this.detach(tabId);
   }
 
@@ -882,7 +884,7 @@ export class ExtensionController {
     void this.book.dropTab(tabId);
     this.mayPrompt.delete(tabId);
     if (this.waiting.delete(tabId)) this.waitingChanged();
-    this.library.disarm(tabId);
+    this.library.disarm(tabId, "the tab was closed");
     this.settleWaiters.get(tabId)?.();
     this.removedWaiters.get(tabId)?.();
     this.removedWaiters.delete(tabId);

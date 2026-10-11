@@ -367,7 +367,9 @@ async function main(): Promise<void> {
     await transport.subscribe(tab.tabKey, ["Page.frameNavigated", "Page.loadEventFired", "Runtime.executionContextCreated", "Network.requestWillBeSent", "Target.attachedToTarget", "Page.javascriptDialogOpening"]);
     await transport.send(tab.tabKey, "Page.enable");
     await transport.send(tab.tabKey, "Runtime.enable");
-    await transport.send(tab.tabKey, "Network.enable");
+    // Every cap stated (the extension refuses a Network.enable that leaves one out).
+    check(await code(transport.send(tab.tabKey, "Network.enable")) === "not_allowed", "Network.enable without its caps is refused");
+    await transport.send(tab.tabKey, "Network.enable", { maxResourceBufferSize: 1_048_576, maxTotalBufferSize: 8_388_608, maxPostDataSize: 0 });
     await transport.send(tab.tabKey, "Page.reload", { ignoreCache: true });
     await waitFor(() => events.find((e) => e.method === "Page.loadEventFired"), 10_000);
 

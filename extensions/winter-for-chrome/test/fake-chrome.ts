@@ -354,11 +354,14 @@ export class FakeChrome implements ChromeApi {
     setBadgeText: async (p: { text: string }) => { this.record("action.setBadgeText", p); },
     setBadgeBackgroundColor: async (_p: { color: string }) => undefined,
     setTitle: async (p: { title: string }) => { this.record("action.setTitle", p); },
-    setPopup: async (p: { popup: string }) => { this.record("action.setPopup", p); },
+    setPopup: async (p: { popup: string }) => { this.record("action.setPopup", p); this.popup = p.popup; },
     onClicked: this.actionOnClicked,
   };
-  /** The user clicks the extension's toolbar button. */
+  /** The toolbar button's popup now ("" = none: a click reaches `action.onClicked`). */
+  popup = "";
+  /** The user clicks the extension's toolbar button: its popup opens, or — with none — `action.onClicked` fires. */
   clickAction(): void {
+    if (this.popup !== "") return;
     for (const l of this.actionOnClicked.listeners) l({ windowId: 1, active: true, groupId: -1, incognito: false, id: 100 });
   }
 

@@ -514,7 +514,8 @@ export class FakeCdpTransport implements CdpTransport {
       case "Runtime.disable": t.runtimeOn.delete(session ?? ""); return r({});
       case "Network.enable":
         // Phase 3's rule: request bodies never kept, response buffers capped.
-        if (params.maxPostDataSize !== undefined && params.maxPostDataSize !== 0) throw new TransportError("not_allowed", "Network.enable keeps no post data");
+        if (params.maxPostDataSize !== 0) throw new TransportError("not_allowed", "Network.enable keeps no post data (maxPostDataSize: 0 is required)");
+        for (const k of ["maxResourceBufferSize", "maxTotalBufferSize"]) if (typeof params[k] !== "number") throw new TransportError("not_allowed", `Network.enable needs ${k}`);
         if (typeof params.maxResourceBufferSize === "number" && params.maxResourceBufferSize > CDP_NETWORK_BUFFER_MAX.resource) throw new TransportError("not_allowed", "buffer");
         if (typeof params.maxTotalBufferSize === "number" && params.maxTotalBufferSize > CDP_NETWORK_BUFFER_MAX.total) throw new TransportError("not_allowed", "buffer");
         t.networkBuffers = { resource: Number(params.maxResourceBufferSize ?? 0), total: Number(params.maxTotalBufferSize ?? 0) };
@@ -645,7 +646,7 @@ export class FakeCdpTransport implements CdpTransport {
       }
       case "IO.read": {
         const st = t.streams.get(String(params.handle));
-        if (st === undefined || st.session !== (session ?? "") || params.offset !== undefined || Number(params.size) > CDP_IO_READ_MAX) throw new TransportError("not_allowed", "IO.read: only our own stream, no offset, at most 1 MiB");
+        if (st === undefined || st.session !== (session ?? "") || params.offset !== undefined || typeof params.size !== "number" || params.size < 1 || params.size > CDP_IO_READ_MAX) throw new TransportError("not_allowed", "IO.read: only our own stream, no offset, at most 1 MiB");
         const chunk = st.data.subarray(st.off, st.off + Math.min(Number(params.size ?? CDP_IO_READ_MAX), 64 * 1024));
         st.off += chunk.length;
         return r({ data: chunk.toString("base64"), base64Encoded: true, eof: st.off >= st.data.length });

@@ -1,7 +1,9 @@
 // Winter for Chrome — what the toolbar button says and does. Idle: whether Winter can use this browser (a "!" badge
 // whenever it cannot; the popup and the tooltip say why). While Winter is driving any tab: the button IS Stop — a red
 // "STOP" badge, no popup, and a click stops Winter in every driven tab (the controller's `stopDriven`). Stop lives here,
-// in the browser's own toolbar, because nothing a page shows can be trusted to be Winter's.
+// in the browser's own toolbar, because nothing a page shows can be trusted to be Winter's. While Winter WAITS on a tab
+// it handed to the user (a sign-in), the button stays the popup — its Done for that tab first, and Stop as a button
+// there when Winter is also driving other tabs — so the user's click never stops another task instead of answering.
 import type { ChromeApi } from "./chrome-api";
 
 export type ExtensionStatus =
@@ -73,7 +75,7 @@ export class StatusBoard {
 
   private render(): void {
     // Best effort throughout: the action may not be ready while the worker starts.
-    if (this.driven > 0) {
+    if (this.driven > 0 && this.waiting === 0) {
       void this.chrome.action.setPopup({ popup: "" }).catch(() => undefined);
       void this.chrome.action.setBadgeText({ text: STOP_BADGE }).catch(() => undefined);
       void this.chrome.action.setBadgeBackgroundColor({ color: "#c62828" }).catch(() => undefined);
@@ -85,7 +87,9 @@ export class StatusBoard {
     if (this.waiting > 0) {
       void this.chrome.action.setBadgeText({ text: "!" }).catch(() => undefined);
       void this.chrome.action.setBadgeBackgroundColor({ color: "#3b6fd8" }).catch(() => undefined);
-      void this.chrome.action.setTitle({ title: "Winter is waiting for you — open this menu when you're done" }).catch(() => undefined);
+      void this.chrome.action.setTitle({ title: this.driven > 0
+        ? "Winter is waiting for you — open this menu when you're done (Stop Winter is there too)"
+        : "Winter is waiting for you — open this menu when you're done" }).catch(() => undefined);
       return;
     }
     void this.chrome.action.setBadgeText({ text: (ok || this.current.state === "connecting") && this.needs === 0 ? "" : "!" }).catch(() => undefined);

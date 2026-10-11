@@ -231,15 +231,14 @@ public final class CDPTabGate {
             }
             return nil
         case "Network.enable":
-            if let post = params["maxPostDataSize"], post.intValue != 0 {
-                return Refusal("Network.enable never keeps request bodies (maxPostDataSize must be 0)")
+            // Every cap STATED: left out, the browser's own defaults keep request bodies and buffer far more.
+            guard params["maxPostDataSize"]?.intValue == 0 else {
+                return Refusal("Network.enable never keeps request bodies (maxPostDataSize: 0 is required)")
             }
             for (key, max) in [("maxResourceBufferSize", CDPAllowlist.networkBufferMaxResource),
                                ("maxTotalBufferSize", CDPAllowlist.networkBufferMaxTotal)] {
-                if let raw = params[key] {
-                    guard let value = raw.intValue, value >= 0, value <= max else {
-                        return Refusal("Network.enable's \(key) is at most \(max)")
-                    }
+                guard let value = params[key]?.intValue, value >= 0, value <= max else {
+                    return Refusal("Network.enable needs \(key), at most \(max)")
                 }
             }
             return nil

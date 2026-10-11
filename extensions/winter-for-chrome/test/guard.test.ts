@@ -47,10 +47,13 @@ describe("the allowlist", () => {
 });
 
 describe("Phase 3's rules", () => {
-  test("Network.enable: no post data, capped buffers", () => {
+  test("Network.enable: no post data, capped buffers — every cap stated (left out, the browser's defaults apply)", () => {
     const g = new TabGuard();
-    expect(g.check("Network.enable", {})).toEqual(send);
+    expect(refused(g, "Network.enable", {})).toBe(true);
+    expect(refused(g, "Network.enable", { maxResourceBufferSize: 1_048_576, maxTotalBufferSize: 8_388_608 })).toBe(true);
+    expect(refused(g, "Network.enable", { maxPostDataSize: 0 })).toBe(true);
     expect(g.check("Network.enable", { maxResourceBufferSize: 1_048_576, maxTotalBufferSize: 8_388_608, maxPostDataSize: 0 })).toEqual(send);
+    expect(g.check("Network.enable", { maxResourceBufferSize: 0, maxTotalBufferSize: 0, maxPostDataSize: 0 })).toEqual(send); // a Phase 2 daemon's
     expect(refused(g, "Network.enable", { maxPostDataSize: 1 })).toBe(true);
     expect(refused(g, "Network.enable", { maxResourceBufferSize: 1_048_577 })).toBe(true);
     expect(refused(g, "Network.enable", { maxTotalBufferSize: 100_000_000 })).toBe(true);
@@ -97,7 +100,8 @@ describe("Phase 3's rules", () => {
     expect(refused(g, "Fetch.takeResponseBodyAsStream", { requestId: "r1" })).toBe(true); // once
     expect(g.check("IO.read", { handle: "7", size: 1_048_576 })).toEqual(send);
     expect(refused(g, "IO.read", { handle: "7", size: 1_048_577 })).toBe(true);
-    expect(refused(g, "IO.read", { handle: "7", offset: 0 })).toBe(true);
+    expect(refused(g, "IO.read", { handle: "7", offset: 0, size: 10 })).toBe(true);
+    expect(refused(g, "IO.read", { handle: "7" })).toBe(true); // no size: the browser would pick it
     expect(refused(g, "IO.read", { handle: "8" })).toBe(true);
     expect(g.check("IO.close", { handle: "7" })).toEqual(send);
     g.observeResult("IO.close", { handle: "7" }, {});

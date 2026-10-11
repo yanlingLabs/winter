@@ -49,8 +49,9 @@ final class CDPTabGateTests: XCTestCase {
         let gate = CDPTabGate()
         let worldRuled: Set<String> = ["Runtime.evaluate", "Runtime.callFunctionOn", "DOM.resolveNode",
                                        "Page.createIsolatedWorld", "Page.navigate",
-                                       // Phase 3: a screen size is required; the link refuses Fetch and IO outright.
-                                       "Emulation.setDeviceMetricsOverride",
+                                       // Phase 3: a screen size and Network.enable's caps are required; the link
+                                       // refuses Fetch and IO outright.
+                                       "Emulation.setDeviceMetricsOverride", "Network.enable",
                                        "Fetch.enable", "Fetch.disable", "Fetch.continueRequest", "Fetch.failRequest",
                                        "Fetch.takeResponseBodyAsStream", "IO.read", "IO.close"]
         for method in CDPAllowlist.methods where !worldRuled.contains(method) {
@@ -220,7 +221,15 @@ final class CDPTabGateTests: XCTestCase {
 
     func testNetworkEnableKeepsNoPostDataAndCappedBuffers() {
         let gate = CDPTabGate()
-        XCTAssertNil(gate.check(method: "Network.enable", params: obj([:]), cdpSessionId: nil))
+        // Every cap must be stated: left out, the browser's defaults would apply.
+        XCTAssertNotNil(gate.check(method: "Network.enable", params: obj([:]), cdpSessionId: nil))
+        XCTAssertNotNil(gate.check(method: "Network.enable", params: obj(["maxResourceBufferSize": .number(1_048_576),
+                                                                           "maxTotalBufferSize": .number(8_388_608)]), cdpSessionId: nil))
+        XCTAssertNotNil(gate.check(method: "Network.enable", params: obj(["maxPostDataSize": .number(0)]), cdpSessionId: nil))
+        // A Phase 2 daemon's zero buffers are stated caps too.
+        XCTAssertNil(gate.check(method: "Network.enable", params: obj(["maxResourceBufferSize": .number(0),
+                                                                        "maxTotalBufferSize": .number(0),
+                                                                        "maxPostDataSize": .number(0)]), cdpSessionId: nil))
         XCTAssertNil(gate.check(method: "Network.enable", params: obj(["maxResourceBufferSize": .number(1_048_576),
                                                                         "maxTotalBufferSize": .number(8_388_608),
                                                                         "maxPostDataSize": .number(0)]), cdpSessionId: nil))

@@ -8,7 +8,7 @@
 // not ask for: a download is Winter's only when the ARMED TAB'S OWN debugger sessions said it began
 // (`Page.downloadWillBegin`, after the arm) and the browser's item has that very URL — a download the user starts from
 // another tab of the same site never matches — and every other download is left exactly as the browser would have it.
-import type { ChromeApi, ChromeDownloadItem, Clock } from "./chrome-api";
+import type { ChromeApi, ChromeDownloadItem, ChromeDownloads, Clock } from "./chrome-api";
 
 export type OptionalPermission = "history" | "bookmarks" | "downloads";
 export const OPTIONAL_PERMISSIONS: readonly OptionalPermission[] = ["history", "bookmarks", "downloads"];
@@ -50,6 +50,12 @@ function safeSegment(name: string): string {
 
 interface Arm {
   tabId: number; subdir: string; until: number; maxBytes: number; origin?: string; armedAt: number; downloadId?: number; timer?: unknown;
+  /** The downloads API the arm was made with — still the one to cancel through when the permission is being removed. */
+  api?: ChromeDownloads;
+  /** Its download finished (done or failed, said to Winter): nothing is left to cancel. */
+  finished?: boolean;
+  /** The caught download's file name, for what Winter is told. */
+  name?: string;
   /** The URLs the armed tab's own pages said they began downloading after the arm (`Page.downloadWillBegin`). */
   urls: Set<string>;
   /** The progress poll while the download runs (`chrome.downloads.onChanged` carries no byte counts). */
@@ -89,7 +95,7 @@ export class Library {
     });
     this.chrome.permissions.onRemoved.addListener((p) => {
       if (!(p.permissions ?? []).includes("downloads")) return;
-      for (const tabId of [...this.arms.keys()]) this.disarm(tabId);
+      for (const tabId of [...this.arms.keys()]) this.disarm(tabId, "the user switched downloads off in Winter for Chrome");
       // Granted again later, the browser hands out a NEW downloads API: its events must be listened to afresh.
       this.listening = false;
     });
@@ -160,16 +166,17 @@ export class Library {
 
   /** `downloads.arm {tabKey, subdir, until, maxBytes}` (or `subdir: null` to disarm). */
   async arm(tabId: number, tabUrl: string | undefined, params: Record<string, unknown>): Promise<void> {
-    if (params.subdir === null) { this.disarm(tabId); return; }
+    if (params.subdir === null) { this.disarm(tabId, "Winter stopped waiting for it"); return; }
     const subdir = params.subdir;
     if (typeof subdir !== "string" || !/^Winter\/[0-9a-f]{6,32}$/.test(subdir)) throw new LibraryRefusal("not_allowed", "downloads.arm needs Winter's own subfolder");
     await this.require("downloads");
     this.listen();
-    this.disarm(tabId);
+    this.disarm(tabId, "Winter armed the tab again");
     const until = clampInt(params.until, 0, Number.MAX_SAFE_INTEGER, this.now() + 60_000);
     const maxBytes = clampInt(params.maxBytes, 1, 2 ** 40, 200 * 1024 * 1024);
     const origin = originOf(tabUrl);
-    const arm: Arm = { tabId, subdir, until, maxBytes, armedAt: this.now(), urls: new Set(), ...(origin === undefined ? {} : { origin }) };
+    const api = this.chrome.optional().downloads;
+    const arm: Arm = { tabId, subdir, until, maxBytes, armedAt: this.now(), urls: new Set(), ...(origin === undefined ? {} : { origin }), ...(api === undefined ? {} : { api }) };
     arm.timer = this.opts.clock.setTimeout(() => this.expire(arm), Math.max(0, until - this.now()));
     this.arms.set(tabId, arm);
   }
@@ -182,13 +189,32 @@ export class Library {
     try { await api.erase({ id: n }); } catch { /* already gone */ }
   }
 
-  /** The tab went away, or the link to Winter dropped: its arm goes. */
-  disarm(tabId: number): void {
+  /**
+   * The arm goes — Winter took it off, armed the tab again, the deadline passed, the tab closed, the link to Winter
+   * dropped, or the user switched downloads off. A download it caught that is still RUNNING is cancelled and leaves the
+   * browser's list (nothing half-made is left in Winter's subfolder), and Winter is told it failed, with `why`.
+   */
+  disarm(tabId: number, why: string): void {
     const a = this.arms.get(tabId);
     if (a === undefined) return;
     this.arms.delete(tabId);
     if (a.timer !== undefined) this.opts.clock.clearTimeout(a.timer);
     if (a.poll !== undefined) this.opts.clock.clearTimeout(a.poll);
+    if (a.downloadId === undefined || a.finished === true) return;
+    a.finished = true;
+    const id = a.downloadId;
+    const api = this.chrome.optional().downloads ?? a.api;
+    void (async () => {
+      try { await api?.cancel(id); } catch { /* finished meanwhile, or the API is gone */ }
+      try { await api?.erase({ id }); } catch { /* already gone */ }
+    })();
+    this.tell(a, { id: String(id), state: "failed", name: a.name ?? "download", bytes: 0, error: why.slice(0, 200) });
+  }
+
+  /** Its download finished and was said: the arm goes with nothing to cancel. */
+  private finish(a: Arm): void {
+    a.finished = true;
+    this.disarm(a.tabId, "finished");
   }
 
   /** While the arm's download runs: its received bytes, every DOWNLOAD_PROGRESS_POLL_MS, as `progress` when they grew. */
@@ -204,9 +230,7 @@ export class Library {
     if (this.arms.get(a.tabId) !== a) return;
     if (item !== undefined && item.state === "in_progress") {
       if (item.bytesReceived > a.maxBytes) {
-        void api?.cancel(item.id).catch(() => undefined);
-        this.tell(a, { id: String(item.id), state: "failed", name: safeSegment(item.filename), bytes: item.bytesReceived, error: "too large" });
-        this.disarm(a.tabId);
+        this.disarm(a.tabId, "too large");
         return;
       }
       if (item.bytesReceived !== a.lastBytes) {
@@ -217,16 +241,11 @@ export class Library {
     if (item === undefined || item.state === "in_progress") this.schedulePoll(a);
   }
 
-  disarmAll(): void { for (const tabId of [...this.arms.keys()]) this.disarm(tabId); }
+  disarmAll(why: string): void { for (const tabId of [...this.arms.keys()]) this.disarm(tabId, why); }
 
   private expire(a: Arm): void {
     if (this.arms.get(a.tabId) !== a) return;
-    if (a.downloadId !== undefined) {
-      const api = this.chrome.optional().downloads;
-      void api?.cancel(a.downloadId).catch(() => undefined);
-      this.tell(a, { id: String(a.downloadId), state: "failed", name: "download", bytes: 0, error: "timed out" });
-    }
-    this.disarm(a.tabId);
+    this.disarm(a.tabId, "timed out");
   }
 
   /** Downloads created after an arm, from the armed tab's site, that no `Page.downloadWillBegin` has matched YET: held
@@ -299,10 +318,9 @@ export class Library {
       if (Number.isFinite(started) && started < a.armedAt) continue;
       if (!a.urls.has(item.url) && !(item.finalUrl !== undefined && a.urls.has(item.finalUrl))) continue;
       a.downloadId = item.id;
+      a.name = safeSegment(item.filename);
       if (item.totalBytes > a.maxBytes) {
-        void this.chrome.optional().downloads?.cancel(item.id).catch(() => undefined);
-        this.tell(a, { id: String(item.id), state: "failed", name: safeSegment(item.filename), bytes: 0, error: "too large" });
-        this.disarm(a.tabId);
+        this.disarm(a.tabId, "too large");
         return undefined;
       }
       this.schedulePoll(a);
@@ -322,9 +340,7 @@ export class Library {
     if (api === undefined) return;
     const total = delta.totalBytes?.current;
     if (typeof total === "number" && total > a.maxBytes) {
-      void api.cancel(delta.id).catch(() => undefined);
-      this.tell(a, { id: String(delta.id), state: "failed", name: "download", bytes: 0, error: "too large" });
-      this.disarm(a.tabId);
+      this.disarm(a.tabId, "too large");
       return;
     }
     const state = delta.state?.current;
@@ -333,16 +349,17 @@ export class Library {
     try { item = (await api.search({ id: delta.id }))[0]; } catch { item = undefined; }
     if (item === undefined) return;
     if (state === "interrupted") {
-      this.tell(a, { id: String(item.id), state: "failed", name: safeSegment(item.filename), bytes: item.bytesReceived, error: (delta.error?.current ?? item.error ?? "interrupted").slice(0, 200) });
-    } else {
-      // Where the file came from after its redirects: Winter holds it to its dangerous-domain floor before taking it.
-      const from = webUrl(item.finalUrl) ? item.finalUrl : webUrl(item.url) ? item.url : undefined;
-      this.tell(a, {
-        id: String(item.id), state: "done", name: baseName(item.filename), bytes: item.fileSize > 0 ? item.fileSize : item.bytesReceived, path: item.filename,
-        ...(typeof item.mime === "string" ? { mime: item.mime } : {}), ...(from === undefined ? {} : { url: from }),
-      });
+      // Nothing of it is Winter's to keep: it leaves the list too.
+      this.disarm(a.tabId, delta.error?.current ?? item.error ?? "interrupted");
+      return;
     }
-    this.disarm(a.tabId);
+    // Where the file came from after its redirects: Winter holds it to its dangerous-domain floor before taking it.
+    const from = webUrl(item.finalUrl) ? item.finalUrl : webUrl(item.url) ? item.url : undefined;
+    this.tell(a, {
+      id: String(item.id), state: "done", name: baseName(item.filename), bytes: item.fileSize > 0 ? item.fileSize : item.bytesReceived, path: item.filename,
+      ...(typeof item.mime === "string" ? { mime: item.mime } : {}), ...(from === undefined ? {} : { url: from }),
+    });
+    this.finish(a);
   }
 
   private tell(a: Arm, download: Record<string, unknown>): void {

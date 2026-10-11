@@ -8,7 +8,7 @@
     h1 { margin: 0 0 6px; font-size: 14px; }
     p { margin: 0 0 6px; }
     #backend { color: #5b6476; font-size: 12px; }
-    #waiting { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(127, 127, 127, 0.25); }
+    #waiting, #driving { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(127, 127, 127, 0.25); }
     button { font: inherit; padding: 4px 12px; }
     #permissions { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(127, 127, 127, 0.25); }
     #permissions label { display: block; margin: 3px 0; }
@@ -32,6 +32,10 @@
   <div id="waiting" hidden>
     <p><strong>Winter is waiting for you on this tab.</strong> Finish what it asked, then press Done.</p>
     <button id="done" type="button">Done</button> <button id="stop" type="button">Stop waiting</button>
+  </div>
+  <div id="driving" hidden>
+    <p id="driving-line">Winter is also working in this browser.</p>
+    <button id="stop-all" type="button">Stop Winter</button>
   </div>
   <script type="module" src="popup.js"></script>
 </body>

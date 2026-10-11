@@ -99,6 +99,44 @@ describe("downloads (a file the page makes itself)", () => {
     expect(chrome.erased).toEqual([id]);
   });
 
+  test("a RUNNING download Winter stops waiting for is cancelled and leaves the list, and Winter is told why — disarmed, re-armed, timed out, its tab closed, the link dropped, downloads switched off", async () => {
+    chrome.grant("downloads");
+    const cases: Array<[string, (tabId: number) => Promise<unknown>]> = [
+      ["Winter stopped waiting for it", (t) => c.handle("downloads.arm", { tabKey: String(t), subdir: null })],
+      ["Winter armed the tab again", (t) => c.handle("downloads.arm", { tabKey: String(t), subdir: "Winter/def456", until: Date.now() + 60_000, maxBytes: 1_000_000 })],
+      ["timed out", () => clock.advance(60_001)],
+      ["the tab was closed", (t) => chrome.closeTab(t)],
+      ["the link to Winter dropped", () => c.releaseAll()],
+      ["the user switched downloads off in Winter for Chrome", async () => { chrome.revoke("downloads"); }],
+    ];
+    let n = 0;
+    for (const [why, stop] of cases) {
+      const tabId = await armedTab();
+      await c.handle("downloads.arm", { tabKey: String(tabId), subdir: "Winter/abc123", until: Date.now() + 60_000, maxBytes: 1_000_000 });
+      const id = await chrome.pageDownload({ url: `blob:https://shop.example.com/run-${n++}`, name: "slow.bin", bytes: 900_000, downloadsDir: "/d", complete: false, fromTab: tabId });
+      expect(chrome.suggested.get(id)).toBe("Winter/abc123/slow.bin");
+      await stop(tabId);
+      await flush();
+      expect({ why, cancelled: chrome.cancelled.includes(id), erased: chrome.erased.includes(id) }).toEqual({ why, cancelled: true, erased: true });
+      const failed = notes.filter((x) => x.method === "download").map((x) => x.params.download as Record<string, unknown>).filter((d) => d.id === String(id) && d.state === "failed");
+      expect(failed).toEqual([{ id: String(id), state: "failed", name: "slow.bin", bytes: 0, error: why }]);
+    }
+  });
+
+  test("a FINISHED download is not cancelled or erased when its arm goes — only when Winter has taken it (release)", async () => {
+    chrome.grant("downloads");
+    const tabId = await armedTab();
+    await c.handle("downloads.arm", { tabKey: String(tabId), subdir: "Winter/abc123", until: Date.now() + 60_000, maxBytes: 1000 });
+    const id = await chrome.pageDownload({ url: "blob:https://shop.example.com/done", name: "made.txt", bytes: 5, downloadsDir: "/d", fromTab: tabId });
+    await c.handle("downloads.arm", { tabKey: String(tabId), subdir: null });
+    await c.releaseAll();
+    await flush();
+    expect(chrome.cancelled).toEqual([]);
+    expect(chrome.erased).toEqual([]);
+    expect(notes.filter((x) => x.method === "download").map((x) => (x.params.download as { state: string }).state)).toEqual(["started", "done"]);
+    void id;
+  });
+
   test("a finished download names the address it came from after its redirects (Winter holds it to its dangerous-domain floor)", async () => {
     chrome.grant("downloads");
     const tabId = await armedTab();

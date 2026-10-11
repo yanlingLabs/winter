@@ -178,9 +178,10 @@ export class TabGuard {
         if (!ourObject(params.objectId)) return { kind: "answer", result: {} };
         break;
       case "Network.enable": {
-        if (params.maxPostDataSize !== undefined && params.maxPostDataSize !== 0) return { kind: "refuse", reason: "Network.enable never keeps request bodies (maxPostDataSize must be 0)" };
+        // Every cap STATED: left out, the browser's own defaults keep request bodies and buffer far more.
+        if (params.maxPostDataSize !== 0) return { kind: "refuse", reason: "Network.enable never keeps request bodies (maxPostDataSize: 0 is required)" };
         for (const [k, max] of [["maxResourceBufferSize", CDP_NETWORK_BUFFER_MAX.resource], ["maxTotalBufferSize", CDP_NETWORK_BUFFER_MAX.total]] as const) {
-          if (params[k] !== undefined && !intIn(params[k], 0, max)) return { kind: "refuse", reason: `Network.enable's ${k} is at most ${max}` };
+          if (!intIn(params[k], 0, max)) return { kind: "refuse", reason: `Network.enable needs ${k}, at most ${max}` };
         }
         break;
       }
@@ -210,7 +211,8 @@ export class TabGuard {
       case "IO.read":
         if (typeof params.handle !== "string" || !w.streams.has(params.handle)) return { kind: "refuse", reason: "IO.read reads only a download Winter caught" };
         if (params.offset !== undefined) return { kind: "refuse", reason: "IO.read reads in order (no offset)" };
-        if (params.size !== undefined && !intIn(params.size, 1, CDP_IO_READ_MAX)) return { kind: "refuse", reason: `IO.read reads at most ${CDP_IO_READ_MAX} bytes at a time` };
+        // The size STATED: left out, the browser picks it.
+        if (!intIn(params.size, 1, CDP_IO_READ_MAX)) return { kind: "refuse", reason: `IO.read needs a size, at most ${CDP_IO_READ_MAX} bytes at a time` };
         break;
       case "IO.close":
         if (typeof params.handle !== "string" || !w.streams.has(params.handle)) return { kind: "refuse", reason: "IO.close closes only a download Winter caught" };
