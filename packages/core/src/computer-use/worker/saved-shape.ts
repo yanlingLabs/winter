@@ -42,6 +42,10 @@ function matchClose(toks: readonly Tok[], open: number): number {
   return -1;
 }
 
+/** The refusals that name what to change; anything else the check refuses gets its caller's general sentence. */
+export const SAVED_SCRIPT_REGEX_AFTER_WORD = "a regular expression right after `of`, `yield` or `await` can't be saved — put it in a variable first (const re = /…/)";
+export const SAVED_SCRIPT_HTML_COMMENT = "`<!--` and `-->` can't appear in a saved script — write `x-- > 0` with a space, or split the string";
+
 /** Words after which the lexer reads a `/` as a regular expression although the engine may read a division:
  *  `of`, `yield` and `await` are plain identifiers in sloppy code. A regex there is refused. */
 const MAYBE_IDENTIFIER = new Set(["of", "yield", "await"]);
@@ -65,13 +69,25 @@ const blockToEnd = (toks: readonly Tok[], at: number): boolean => is(toks[at], "
  * body is a block ending the source, or an expression body with balanced brackets and no `,` or `;` at its own level.
  */
 export function savedScriptShapeOk(source: string): boolean {
+  return savedScriptShapeProblem(source) === undefined;
+}
+
+/**
+ * Why `source` is not a savable shape: one of the fixed sentences above when the refusal is one of those, `"shape"`
+ * for anything else (the caller words it), `undefined` when it is fine. Never echoes the source.
+ */
+export function savedScriptShapeProblem(source: string): typeof SAVED_SCRIPT_REGEX_AFTER_WORD | typeof SAVED_SCRIPT_HTML_COMMENT | "shape" | undefined {
   // HTML-like comments (`<!--`, and `-->` where it starts a line) are comments to the engine in sloppy code but
   // operators to the lexer: refused anywhere, so the two can never disagree about what is code.
-  if (source.includes("<!--") || source.includes("-->")) return false;
+  if (source.includes("<!--") || source.includes("-->")) return SAVED_SCRIPT_HTML_COMMENT;
   let toks: Tok[];
-  try { toks = tokenize(source); } catch { return false; }
-  if (toks.length === 0) return false;
-  if (!regexReadingsAgree(toks)) return false;
+  try { toks = tokenize(source); } catch { return "shape"; }
+  if (toks.length === 0) return "shape";
+  if (!regexReadingsAgree(toks)) return SAVED_SCRIPT_REGEX_AFTER_WORD;
+  return shapeOk(toks) ? undefined : "shape";
+}
+
+function shapeOk(toks: readonly Tok[]): boolean {
   let i = 0;
   // `async` as a prefix — not a parameter named `async` (`async => …`).
   if (is(toks[0], "ident", "async") && !is(toks[1], "punct", "=>") && !toks[1]?.nl) i = 1;

@@ -17,7 +17,7 @@
 import {
   SAVED_SCRIPT_MAX_BYTES, SAVED_SCRIPTS_MAX_COUNT, SAVED_SCRIPTS_MAX_TOTAL_BYTES, savedScriptNameOk, savedScriptTooLarge, type SavedScriptSource,
 } from "./worker/bridge";
-import { savedScriptShapeOk } from "./worker/saved-shape";
+import { savedScriptShapeProblem } from "./worker/saved-shape";
 
 /** Across every session: past this, the least recently used other session's scripts are cleared. */
 export const SAVED_SCRIPTS_DAEMON_MAX_BYTES = 16 * 1024 * 1024;
@@ -47,9 +47,11 @@ export class SavedScripts {
     if (typeof source !== "string" || source.trim().length === 0) return { refused: "scripts.save() takes a function written in your script" };
     const bytes = sizeOf(source);
     if (bytes > SAVED_SCRIPT_MAX_BYTES) return { refused: savedScriptTooLarge(bytes) };
-    if (!savedScriptShapeOk(source)) {
+    const problem = savedScriptShapeProblem(source);
+    if (problem === "shape") {
       return { refused: "scripts.save() takes one function or arrow expression and nothing else — write it as scripts.save(\"name\", async (a, b) => { … })" };
     }
+    if (problem !== undefined) return { refused: problem };
     const mine = this.bySession.get(sessionId) ?? new Map<string, string>();
     const old = mine.get(name);
     if (old === undefined && mine.size >= SAVED_SCRIPTS_MAX_COUNT) {

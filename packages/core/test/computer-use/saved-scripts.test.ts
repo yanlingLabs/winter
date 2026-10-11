@@ -3,7 +3,7 @@
 // reset, the idle end, a crash; gone with the session; the metric and the audit line carry names only.
 import { afterEach, describe, expect, test } from "bun:test";
 import { SAVED_SCRIPTS_DAEMON_MAX_BYTES, SavedScripts } from "../../src/computer-use/saved-scripts";
-import { savedScriptShapeOk } from "../../src/computer-use/worker/saved-shape";
+import { SAVED_SCRIPT_HTML_COMMENT, SAVED_SCRIPT_REGEX_AFTER_WORD, savedScriptShapeOk, savedScriptShapeProblem } from "../../src/computer-use/worker/saved-shape";
 import { SAVED_SCRIPT_MAX_BYTES, SAVED_SCRIPTS_MAX_COUNT, savedScriptNameOk, type WorkerToHost } from "../../src/computer-use/worker/bridge";
 import { createAutomationRuntime, type AutomationRuntime } from "../../src/computer-use/worker/runtime";
 import { computerV2Description, COMPUTER_V2_INPUT_SCHEMA } from "../../src/computer-use/description";
@@ -64,13 +64,27 @@ describe("SavedScripts (the daemon's store, memory only)", () => {
     }
   });
 
-  test("the shape check refuses where its lexer and the engine could read the text differently", () => {
+  test("the shape check refuses where its lexer and the engine could read the text differently — in words that say what to change", () => {
     const s = new SavedScripts();
-    // A `/` right after `of`, `yield` or `await` (plain identifiers in sloppy code), and any HTML-like comment.
-    for (const bad of ["(s) => { for (const m of /a/.exec(s)) print(m) }", "function* g() { yield /a/ }", "async () => await /a/",
-      "() => 1 <!-- x", "() => 1\n--> x", "() => {\n  --> x\n}"]) {
+    // A `/` right after `of`, `yield` or `await` (plain identifiers in sloppy code).
+    for (const bad of ["(s) => { for (const m of /a/.exec(s)) print(m) }", "function* g() { yield /a/ }", "async () => await /a/"]) {
       expect(savedScriptShapeOk(bad)).toBe(false);
-      expect(s.save("s1", "bad", bad)).toMatchObject({ refused: expect.stringContaining("one function or arrow expression") });
+      expect(savedScriptShapeProblem(bad)).toBe(SAVED_SCRIPT_REGEX_AFTER_WORD);
+      expect(s.save("s1", "bad", bad)).toEqual({ refused: "a regular expression right after `of`, `yield` or `await` can't be saved — put it in a variable first (const re = /…/)" });
+    }
+    // Any HTML-like comment.
+    for (const bad of ["() => 1 <!-- x", "() => 1\n--> x", "() => {\n  --> x\n}", "(n) => n-->0", "() => '<!-- a -->'"]) {
+      expect(savedScriptShapeOk(bad)).toBe(false);
+      expect(savedScriptShapeProblem(bad)).toBe(SAVED_SCRIPT_HTML_COMMENT);
+      expect(s.save("s1", "bad", bad)).toEqual({ refused: "`<!--` and `-->` can't appear in a saved script — write `x-- > 0` with a space, or split the string" });
+    }
+    // Everything else keeps the general sentence.
+    expect(savedScriptShapeProblem("(x) => x; y()")).toBe("shape");
+    expect(s.save("s1", "bad", "(x) => x; y()")).toMatchObject({ refused: expect.stringContaining("one function or arrow expression") });
+    // The fixes the sentences name are savable.
+    for (const ok of ["(s) => { const re = /a/; for (const m of re.exec(s)) print(m) }", "(n) => n-- > 0", "() => '<!' + '-- a --' + '>'"]) {
+      expect(savedScriptShapeProblem(ok)).toBeUndefined();
+      expect(s.save("s1", "fine", ok)).toMatchObject({ ok: true });
     }
     // The same words before anything else stay fine.
     for (const ok of ["(xs) => { for (const x of xs) print(x / 2) }", "function* g() { yield 1 / 2 }", "async (p) => (await p) / 2", "(a, b) => a < b && b > a"]) {
@@ -221,6 +235,15 @@ describe("the worker's scripts", () => {
     }
   });
 
+  test("the worker says the specific sentence too, before the bridge", async () => {
+    const { run } = runtime();
+    const re = await run("await scripts.save('gen', function* (s) { yield /a/ })");
+    expect(re.done.error).toMatchObject({ name: "TypeError", message: SAVED_SCRIPT_REGEX_AFTER_WORD });
+    const html = await run("await scripts.save('countdown', (n) => { while (n-->0) print(n) })");
+    expect(html.done.error).toMatchObject({ name: "TypeError", message: SAVED_SCRIPT_HTML_COMMENT });
+    expect([...re.calls, ...html.calls]).toEqual([]);
+  });
+
   test("TypeScript: the transpiled source is what is saved; a function declaration saves too", async () => {
     const { run } = runtime();
     const r = await run("async function twice(n: number): Promise<number> { return n * 2 }\nawait scripts.save('twice', twice)");
@@ -353,6 +376,8 @@ describe("saved scripts in the service", () => {
       { op: "call", id: 90_002, runId, primitive: "scripts.save", args: { name: "Not OK", source: "() => 1" } },
       { op: "call", id: 90_003, runId, primitive: "scripts.run", args: { name: "neverSaved" } },
       { op: "call", id: 90_004, runId, primitive: "scripts.save", args: { name: "helper", source: "(setTimeout(() => print('GHOST'), 5), () => 1)" } },
+      { op: "call", id: 90_005, runId, primitive: "scripts.save", args: { name: "afterOf", source: "function f(){ of /2/ }" } },
+      { op: "call", id: 90_006, runId, primitive: "scripts.save", args: { name: "htmlLike", source: "() => 1 <!-- x" } },
     ];
     await w.run("await sleep(20)");
     await sleepMs(20);
@@ -361,6 +386,8 @@ describe("saved scripts in the service", () => {
     expect(answers[90_002]).toMatchObject({ ok: false, error: { kind: "TypeError", message: expect.stringContaining("lowercase letter") } });
     expect(answers[90_003]).toMatchObject({ ok: false, error: { kind: "TypeError", message: "no script was saved under that name in this session" } });
     expect(answers[90_004]).toMatchObject({ ok: false, error: { kind: "TypeError", message: expect.stringContaining("one function or arrow expression") } });
+    expect(answers[90_005]).toMatchObject({ ok: false, error: { kind: "TypeError", message: SAVED_SCRIPT_REGEX_AFTER_WORD } });
+    expect(answers[90_006]).toMatchObject({ ok: false, error: { kind: "TypeError", message: SAVED_SCRIPT_HTML_COMMENT } });
     expect(w.svc.savedScripts.any("s1")).toBe(false);
     // Nothing a forged save sent can run at a later worker's start: the reset's run prints only its own text.
     const after = await w.run("await sleep(30)\nprint('clean')", { reset: true });

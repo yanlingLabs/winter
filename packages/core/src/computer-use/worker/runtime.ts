@@ -9,7 +9,7 @@
 // the store, so top-level declarations persist and may be redeclared, and top-level `await` just works.
 // Sloppy mode, deliberately — `with` and block-level function hoisting need it.
 import { AUTOMATION_ERROR_KINDS, type AutomationErrorKind } from "../errors";
-import { savedScriptShapeOk } from "./saved-shape";
+import { savedScriptShapeOk, savedScriptShapeProblem } from "./saved-shape";
 import { SAVED_SCRIPT_MAX_BYTES, savedScriptNameOk, savedScriptTooLarge, type AppHandle, type HostToWorker, type ImageHandle, type SavedScriptSource, type TabHandle, type WorkerToHost } from "./bridge";
 import { prepareScript, type PreparedScript } from "./repl";
 
@@ -391,7 +391,8 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     const bytes = new TextEncoder().encode(source).length;
     if (bytes > SAVED_SCRIPT_MAX_BYTES) throw new TypeError(savedScriptTooLarge(bytes));
     const notShaped = "scripts.save() could not re-create that function from its source — write it as an arrow or function expression: scripts.save(\"name\", async (a, b) => { … })";
-    if (!savedScriptShapeOk(source)) throw new TypeError(notShaped);
+    const problem = savedScriptShapeProblem(source);
+    if (problem !== undefined) throw new TypeError(problem === "shape" ? notShaped : problem);
     let compiled: (...a: unknown[]) => unknown;
     try { compiled = compileSaved(name, source); } catch { throw new TypeError(notShaped); }
     await call("scripts.save", undefined, { name, source });
