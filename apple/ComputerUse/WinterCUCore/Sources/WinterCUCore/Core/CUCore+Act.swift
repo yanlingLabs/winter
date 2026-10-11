@@ -784,7 +784,9 @@ extension CUCore {
                             if let why = noVisitForUnconfirmedPress(el, info, t) {
                                 return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.noEffectNote(Self.elementLabel(nil, info))) (\(why))")
                             }
-                            throw offerVisitAfterPress(el, info, t, before: webBefore)
+                            // (Marked on the element the click was FOR — what a later act names — even when an ancestor took
+                            // the press: review of round 12, LOW.)
+                            throw offerVisitAfterPress(target, info, t, before: webBefore)
                         }
                         if !prefersWebClicks(t) || statefulWithoutReadableState(el, info) {
                             CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): no visible effect — not clicked as well")
@@ -1474,13 +1476,31 @@ extension CUCore {
     /// The registrable part of a host — its last two labels, or three under a common second-level suffix (`co.uk`,
     /// `com.au`, …): `files.slack.com` and `app.slack.com` are one site. Pure; an approximation of the public-suffix list.
     static func registrableDomain(_ host: String?) -> String? {
-        guard let h = host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")), !h.isEmpty else { return nil }
+        guard var h = host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")), !h.isEmpty else { return nil }
+        // An IP address is its own site, whole (review of round 12, LOW: 10.0.0.5 and 192.168.0.5 read as one).
+        if h.hasPrefix("["), h.hasSuffix("]") { h = String(h.dropFirst().dropLast()) }
+        if h.contains(":") || h.split(separator: ".").allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }) { return h }
         let labels = h.split(separator: ".").map(String.init)
-        guard labels.count > 2 else { return h }
+        guard labels.count > 2 || sharedSuffixes.contains(h) else { return h }
+        // A suffix where unrelated people's sites sit side by side (github.io, vercel.app, co.uk…): one label more —
+        // in doubt, two sites, which reroutes (the safe direction).
+        for n in [3, 2] where labels.count > n {
+            let suffix = labels.suffix(n).joined(separator: ".")
+            if sharedSuffixes.contains(suffix) { return labels.suffix(n + 1).joined(separator: ".") }
+        }
+        if labels.count == 2 || sharedSuffixes.contains(labels.suffix(2).joined(separator: ".")) { return h }
         let secondLevel: Set<String> = ["co", "com", "org", "net", "gov", "ac", "edu", "or", "ne", "go"]
         let n = labels[labels.count - 1].count == 2 && secondLevel.contains(labels[labels.count - 2]) ? 3 : 2
         return labels.suffix(n).joined(separator: ".")
     }
+
+    /// Public suffixes of shared hosting and country second levels (a small list of the common ones).
+    static let sharedSuffixes: Set<String> = [
+        "github.io", "gitlab.io", "vercel.app", "netlify.app", "pages.dev", "workers.dev", "herokuapp.com", "web.app",
+        "firebaseapp.com", "appspot.com", "azurewebsites.net", "cloudfront.net", "s3.amazonaws.com", "blogspot.com",
+        "wordpress.com", "glitch.me", "fly.dev", "onrender.com", "repl.co", "surge.sh",
+        "co.uk", "org.uk", "me.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.jp", "co.nz", "com.br", "co.in",
+    ]
 
     /// Opens `paths` in the background, waiting at most `openTimeoutMs` (NSWorkspace's open can't be
     /// cancelled: past the bound it keeps going and the result says so). Throws what the open threw.
@@ -1765,6 +1785,9 @@ extension CUCore {
     /// (a capture-only bind), the app's topmost window on screen stands for its key window.
     func coveredWindowRefusal(_ t: CUTarget, allowForeground: Bool, menu: Bool = false) -> CUError? {
         guard !allowForeground, sys.frontmostPid() == t.pid else { return nil }
+        // Inside a desktop visit to its window the app is in front by the visit's own doing (review of round 12, LOW: the
+        // focus click there was refused exactly when it was needed).
+        if let v = openVisit(of: t.sessionId), onVisitedDesktop(v, t) { return nil }
         let topmost = { [self] in sys.windowStack().first { $0.pid == t.pid && $0.layer == 0 && $0.alpha > 0 }.map { $0.id == t.windowID } }
         let isKey: Bool? = (t.accessible ? boundWindowIsKeyInApp(t) : nil) ?? topmost()
         guard isKey != true else { return nil }
@@ -2924,7 +2947,8 @@ extension CUCore {
         try requireEnabled(info, ref: a.ref, t)
         // Pressing a link in an app that is not a web browser opens the default browser IN FRONT: its URL is opened in the
         // background instead, as for a click (review of round 10, MEDIUM #7: action(ref, "press") went around that).
-        if CUMenuWalker.normalize(a.name) == "press" || a.name == kAXPressAction, let url = linkURL(e, info), !isWebBrowser(t) {
+        if ["press", "open"].contains(CUMenuWalker.normalize(a.name)) || a.name == kAXPressAction || a.name == "AXOpen",
+           let url = linkURL(e, info), !isWebBrowser(t) {
             announceTarget(t, info, pressing: true)
             CULog.act.notice("action in \(t.appName, privacy: .public): [\(a.ref, privacy: .public)] is a link (\(url.scheme ?? "?", privacy: .public)) — opened in the background, not pressed")
             return try pendingBackgroundOpen([url.absoluteString], what: nil, linkHost: url.host ?? url.absoluteString)

@@ -192,6 +192,12 @@ final class ClickRoutingRound11Tests: XCTestCase {
         XCTAssertEqual(CUCore.registrableDomain("app.slack.com"), "slack.com")
         XCTAssertEqual(CUCore.registrableDomain("www.bbc.co.uk"), "bbc.co.uk")
         XCTAssertEqual(CUCore.registrableDomain("localhost"), "localhost")
+        // Review of round 12, LOW: whole IPs, and shared-hosting suffixes as separate sites.
+        XCTAssertNotEqual(CUCore.registrableDomain("10.0.0.5"), CUCore.registrableDomain("192.168.0.5"))
+        XCTAssertNotEqual(CUCore.registrableDomain("alice.github.io"), CUCore.registrableDomain("bob.github.io"))
+        XCTAssertNotEqual(CUCore.registrableDomain("a.vercel.app"), CUCore.registrableDomain("b.vercel.app"))
+        XCTAssertEqual(CUCore.registrableDomain("www.example.co.uk"), "example.co.uk")
+        XCTAssertNotEqual(CUCore.registrableDomain("x.me.uk"), CUCore.registrableDomain("y.me.uk"))
         world()
         let page = fakeElement(98_010), same = fakeElement(98_011), away = fakeElement(98_012)
         ax.add(page, role: "AXWebArea", extra: ["AXURL": URL(string: "https://app.slack.com/client")! as CFURL])
