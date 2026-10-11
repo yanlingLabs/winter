@@ -12,6 +12,19 @@
 //     element (`showPicker()`, `input.click()` from a button's handler);
 //   - FAIL CLOSED: a keyboard target that cannot be determined is `unknown`, which the engine refuses.
 
+/**
+ * The first `n` UTF-16 units of `s`, never ending between the two halves of a surrogate pair (an emoji, any character
+ * outside the Basic Multilingual Plane): a cut there would leave a lone high surrogate, which Chromium writes into its
+ * DevTools answer as `\ud83d` — JSON that the readers on the way to the engine (Foundation's, Swift's) refuse. Every
+ * cut the runtime makes in text it returns goes through this.
+ */
+export function sliceUnits(s: string, n: number): string {
+  if (n <= 0) return "";
+  if (s.length <= n) return s;
+  const last = s.charCodeAt(n - 1);
+  return last >= 0xd800 && last <= 0xdbff ? s.slice(0, n - 1) : s.slice(0, n);
+}
+
 /** What the runtime reads off an element for the rules. */
 export interface ElementFacts {
   /** Upper-case tag name ("INPUT", "SELECT", …). */

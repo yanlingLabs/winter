@@ -14,7 +14,7 @@ import type {
   RtCheck, RtClassify, RtCondition, RtFindQuery, RtFound, RtHit, RtId, RtInspect, RtLink, RtNode, RtPoint, RtSnapshot,
 } from "./protocol";
 import { looksLikeUrl, looksSecret, REDACTED, redactText, redactUrl, redactUrlAttribute } from "./redact";
-import { classifyTarget, cssSelectorRefusal, isPaymentHost, isSecureField, isTextEntry as isTextEntryFacts, nativePicker, pickerValueHint, TEXT_INPUT_TYPES, type ElementFacts } from "./rules";
+import { classifyTarget, cssSelectorRefusal, isPaymentHost, isSecureField, isTextEntry as isTextEntryFacts, nativePicker, pickerValueHint, sliceUnits, TEXT_INPUT_TYPES, type ElementFacts } from "./rules";
 import { listSiteTools, modelContextOf, SiteToolCalls, type SiteToolOwner } from "./webmcp";
 
 type Any = Record<string, unknown>;
@@ -126,7 +126,8 @@ type Any = Record<string, unknown>;
   };
 
   const collapse = (s: string): string => s.replace(/\s+/g, " ").trim();
-  const cap = (s: string, n = 200): string => (s.length <= n ? s : `${s.slice(0, n)}…`);
+  // Never between the halves of a surrogate pair (`sliceUnits`).
+  const cap = (s: string, n = 200): string => (s.length <= n ? s : `${sliceUnits(s, n)}…`);
 
   // ── roles ───────────────────────────────────────────────────────────────────────────────────────
   const ROLE_WORDS: Record<string, string> = {
@@ -529,7 +530,7 @@ type Any = Record<string, unknown>;
     let selector = q.css ?? (q.testId !== undefined ? TEST_ID : q.placeholder !== undefined ? "[placeholder]" : FIELD);
     if (q.css !== undefined && (q.testId !== undefined || q.placeholder !== undefined)) selector = q.css;
     let candidates: Element[];
-    try { candidates = deepQuery(selector); } catch { throw new Error(`css: "${String(q.css).slice(0, 80)}" is not a valid selector`); }
+    try { candidates = deepQuery(selector); } catch { throw new Error(`css: "${sliceUnits(String(q.css), 80)}" is not a valid selector`); }
     const active = deepActive();
     const out: RtFound[] = [];
     for (const el of candidates) {
@@ -625,7 +626,7 @@ type Any = Record<string, unknown>;
     let cut = false;
     const put = (s: string): void => {
       if (cut) return;
-      if (out.length + s.length > max) { out += s.slice(0, max - out.length); cut = true; return; }
+      if (out.length + s.length > max) { out += sliceUnits(s, max - out.length); cut = true; return; }
       out += s;
     };
     const ser = (node: Node): void => {
@@ -1077,7 +1078,7 @@ type Any = Record<string, unknown>;
     if (met && c.url !== undefined && !location.href.includes(c.url)) met = false;
     if (met && c.ids !== undefined && c.ids.some((id) => nodeOf(id) === undefined)) met = false;
     if (met && c.goneIds !== undefined && c.goneIds.some((id) => nodeOf(id) !== undefined)) met = false;
-    const seenText = collapse(vt()).slice(0, 300);
+    const seenText = sliceUnits(collapse(vt()), 300);
     return { met, seen: redactText(`title "${cap(document.title, 80)}" · ${seenText}`) };
   };
   const waitChange = (arg: { maxMs: number }): Promise<boolean> => new Promise((resolve) => {
