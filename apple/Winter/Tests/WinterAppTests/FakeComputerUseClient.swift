@@ -20,9 +20,11 @@ final class FakeComputerUseClient: ComputerUseClient, @unchecked Sendable {
 
     static func status(enabled: Bool = true, legacyComputer: Bool = false, mirror: Bool = true,
                        privateEventPath: Bool = true, allowAllApps: Bool = true,
+                       headlessEnabled: Bool? = nil, webmcp: Bool? = nil,
                        helper: ComputerUseHelperStatus = FakeComputerUseClient.idleHelper) -> ComputerUseStatus {
         ComputerUseStatus(enabled: enabled, legacyComputer: legacyComputer, mirror: mirror,
-                          privateEventPath: privateEventPath, allowAllApps: allowAllApps, helper: helper)
+                          privateEventPath: privateEventPath, allowAllApps: allowAllApps,
+                          headlessEnabled: headlessEnabled, webmcp: webmcp, helper: helper)
     }
 
     static func running(accessibility: Bool, screenRecording: Bool) -> ComputerUseHelperStatus {

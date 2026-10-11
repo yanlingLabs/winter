@@ -14,7 +14,8 @@ import { REMOTE_ALLOWED_METHODS, startIpcServer } from "../../src/ipc/server";
 import { SessionHub } from "../../src/sessions/hub";
 import { SessionStore } from "../../src/sessions/store";
 import {
-  computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseLegacyComputerFrom, computerUseMirrorFrom, computerUsePrivateEventPathFrom,
+  computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseHeadlessEnabledFrom, computerUseLegacyComputerFrom, computerUseMirrorFrom,
+  computerUsePrivateEventPathFrom, computerUseWebMcpFrom,
   loadSettings, setComputerUseApp, setComputerUseFlags, Settings,
 } from "../../src/settings";
 import { FakeHelper } from "./fake-helper";
@@ -86,7 +87,8 @@ describe("computerUse.* (local-only RPCs)", () => {
     await c.hello(tokens.harness, "app");
     const r1 = await c.request(METHODS.computerUseStatus, {});
     expect(r1.result).toEqual({
-      enabled: true, allowAllApps: true, legacyComputer: false, mirror: false, privateEventPath: true, helper: { installed: true, running: false },
+      enabled: true, allowAllApps: true, legacyComputer: false, mirror: false, privateEventPath: true, headlessEnabled: true, webmcp: true,
+      helper: { installed: true, running: false },
       browsers: [{ id: "winter", name: "Winter (built-in)", connected: false, reason: "Winter isn't running" }],
     });
     expect(fake.launched).toEqual([]);
@@ -232,6 +234,21 @@ describe("computerUse.* (local-only RPCs)", () => {
     c.close();
   });
 
+  test("Phase 4's two switches: headlessEnabled writes computerUse.headless.enabled, webmcp computerUse.webmcp; both default on and are read live", async () => {
+    const { socketPath, tokens, settingsPath, runtime } = await boot({ computerUse: { mirror: false } });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "app");
+    expect((await c.request(METHODS.computerUseStatus, {})).result).toMatchObject({ headlessEnabled: true, webmcp: true });
+    await c.request(METHODS.computerUseSetSettings, { headlessEnabled: false, webmcp: false });
+    expect(loadSettings(settingsPath).computerUse).toMatchObject({ headless: { enabled: false }, webmcp: false });
+    expect(computerUseHeadlessEnabledFrom(runtime.settings())).toBe(false);
+    expect(computerUseWebMcpFrom(runtime.settings())).toBe(false);
+    expect((await c.request(METHODS.computerUseStatus, {})).result).toMatchObject({ headlessEnabled: false, webmcp: false });
+    await c.request(METHODS.computerUseSetSettings, { webmcp: true });
+    expect((await c.request(METHODS.computerUseStatus, {})).result).toMatchObject({ headlessEnabled: false, webmcp: true });
+    c.close();
+  });
+
   test("allowAllApps: the master switch round-trips through setSettings and status, and the policy reads it at once", async () => {
     const { socketPath, tokens, settingsPath, runtime } = await boot({ computerUse: { apps: { "com.apple.Notes": { access: "view" } } } });
     const c = await TestClient.connect(socketPath);
@@ -278,6 +295,12 @@ describe("the computerUse settings — one reader each, hot writes", () => {
     expect(computerUseMirrorFrom(null)).toBe(true);
     expect(computerUsePrivateEventPathFrom(undefined)).toBe(true);
     expect(computerUseLegacyComputerFrom(null)).toBe(false);
+    // Phase 4: Winter's headless browser and sites' own tools (WebMCP, user ruling D9) — on unless `false`.
+    expect(computerUseHeadlessEnabledFrom(null)).toBe(true);
+    expect(computerUseHeadlessEnabledFrom({ computerUse: { headless: {} } } as unknown as Settings)).toBe(true);
+    expect(computerUseHeadlessEnabledFrom({ computerUse: { headless: { enabled: false } } } as unknown as Settings)).toBe(false);
+    expect(computerUseWebMcpFrom(undefined)).toBe(true);
+    expect(computerUseWebMcpFrom({ computerUse: { webmcp: false } } as unknown as Settings)).toBe(false);
     const s = { computerUse: { legacyComputer: true, mirror: false, apps: { a: { access: "view", grant: "always", name: "A" }, b: { access: "bogus", grant: "sometimes" }, c: "not-a-row", d: { removed: true }, e: { removed: "yes" } } } } as unknown as Settings;
     expect(computerUseLegacyComputerFrom(s)).toBe(true);
     expect(computerUseMirrorFrom(s)).toBe(false);

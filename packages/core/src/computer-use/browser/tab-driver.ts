@@ -108,6 +108,8 @@ export function transportFailure(err: unknown, browserName: string): Error {
     case "tab_gone": return new AutomationFailure("TargetLost", "the tab was closed, crashed or stopped — open it again with browsers.open() or bind another with browsers.tab()");
     case "attach_refused": return new AutomationFailure("Refused", "that tab can't be controlled (a browser-internal page, a store page, or another debugger is attached)");
     case "timeout": return new AutomationFailure("TargetBusy", "the browser did not answer in time — the page may be busy; try again in a moment", true);
+    // The backend's own tab or memory budget (headless): its sentence says what to close; not retryable at once.
+    case "capacity": return new AutomationFailure("TargetBusy", err.message);
     case "not_allowed":
       // Winter.app's ceiling on held built-in tabs (`tab.ensure` refused: "… already holds 24 tabs for automation …").
       if (err.data.holdCeiling === true || /already holds \d+ tabs/i.test(err.message)) return new AutomationFailure("TargetBusy", HOLD_CEILING_SENTENCE);

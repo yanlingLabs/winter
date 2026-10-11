@@ -455,6 +455,10 @@ export const ComputerUseStatusResult = z.object({
   legacyComputer: z.boolean(),
   mirror: z.boolean(),
   privateEventPath: z.boolean(),
+  /** Phase 4: Winter's headless browser is offered (`computerUse.headless.enabled`, default true). */
+  headlessEnabled: z.boolean(),
+  /** Phase 4: sites' own agent tools (WebMCP) are discovered and callable (`computerUse.webmcp`, default true). */
+  webmcp: z.boolean(),
   helper: z.object({
     installed: z.boolean(),
     running: z.boolean(),
@@ -560,6 +564,8 @@ export const ComputerUseSetSettingsParams = z.object({
   allowAllApps: z.boolean().optional(),
   mirror: z.boolean().optional(),
   privateEventPath: z.boolean().optional(),
+  headlessEnabled: z.boolean().optional(),
+  webmcp: z.boolean().optional(),
 });
 export const ComputerUseSetSettingsResult = z.object({ ok: z.literal(true) });
 

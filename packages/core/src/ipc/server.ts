@@ -3448,6 +3448,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
               control.setSettings({
                 ...(p.enabled === undefined ? {} : { enabled: p.enabled }), ...(p.allowAllApps === undefined ? {} : { allowAllApps: p.allowAllApps }),
                 ...(p.mirror === undefined ? {} : { mirror: p.mirror }), ...(p.privateEventPath === undefined ? {} : { privateEventPath: p.privateEventPath }),
+                ...(p.headlessEnabled === undefined ? {} : { headlessEnabled: p.headlessEnabled }), ...(p.webmcp === undefined ? {} : { webmcp: p.webmcp }),
               });
               return { ok: true };
             }

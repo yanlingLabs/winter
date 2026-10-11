@@ -325,6 +325,9 @@ describe("keys and URLs", () => {
     expect(transportFailure(new TransportError("disconnected", "x"), "Winter's browser")).toMatchObject({ kind: "BrowserUnavailable", message: "Winter's browser can't be reached: Winter isn't running — ask the user to open Winter" });
     expect(transportFailure(new TransportError("tab_gone", "x"), "Google Chrome")).toMatchObject({ kind: "TargetLost" });
     expect(transportFailure(new TransportError("protocol_mismatch", "x", { side: "extension" }), "Google Chrome").message).toContain("update Winter for Chrome");
+    // Phase 4: a backend's own budget spent (headless) — TargetBusy in the transport's words, not retryable at once.
+    expect(transportFailure(new TransportError("capacity", "8 headless tabs are open in this session — close some with tab.close()"), "Winter (headless)"))
+      .toMatchObject({ kind: "TargetBusy", message: "8 headless tabs are open in this session — close some with tab.close()", retryable: false });
     expect(transportFailure(new TransportError("cdp_error", "x", { cdpCode: -32603, cdpMessage: "too big" }), "Winter's browser").message).toContain("too large or unreadable");
     expect(transportFailure(new TransportError("cdp_error", "x", { cdpCode: -32000, cdpMessage: "No node with given id" }), "Winter's browser").message).toBe("No node with given id");
   });
