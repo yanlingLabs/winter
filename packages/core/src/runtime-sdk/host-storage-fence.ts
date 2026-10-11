@@ -13,7 +13,7 @@ export interface HostStorageFenceOptions {
 const registered = new Map<string, HostStorageFenceOptions>();
 export class HostStorageFenceUnavailable extends Error {
   readonly code="winter_leg_unavailable" as const;
-  constructor(readonly reason:"cowork-root-symlink"|"cowork-root-not-directory"|"cowork-root-unavailable") {
+  constructor(readonly reason:"cowork-root-symlink"|"cowork-root-not-directory"|"cowork-root-unavailable"|"cowork-root-missing") {
     super("Protected Cowork storage cannot be inspected safely; host runtime execution remains blocked until its storage identity is recovered");
     this.name="HostStorageFenceUnavailable";
   }
@@ -73,6 +73,7 @@ export function protectedHostStorageFences(home: string, options?: HostStorageFe
       } catch (error) {
         if (error instanceof HostStorageFenceUnavailable) throw error;
         if ((error as NodeJS.ErrnoException).code!=="ENOENT") throw new HostStorageFenceUnavailable("cowork-root-unavailable");
+        if (h===resolve(owner)) throw new HostStorageFenceUnavailable("cowork-root-missing");
       }
     }
     if (retained) coordinationDirs.add(hostStorageFenceOptions(owner, registration).coordinationDir);

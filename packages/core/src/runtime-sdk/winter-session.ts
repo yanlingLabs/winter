@@ -1081,7 +1081,7 @@ class WinterSessionImpl implements WinterSession {
           const current = hostCode;
           options.hooks = { ...options.hooks, PreToolUse: [...(options.hooks?.PreToolUse ?? []), {
             matcher: "Bash|Monitor|Workflow|Agent|Task", failClosed: true,
-            hooks: [async (input) => { current.noteHook(input); return {}; }],
+            hooks: [async (input, _toolUseId, context) => { await current.completeHook(input, context.signal); return {}; }],
           }] };
         }
         query = this.deps.runtime.sdk.query({ prompt: queue, options });

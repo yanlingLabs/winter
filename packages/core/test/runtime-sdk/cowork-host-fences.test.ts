@@ -16,7 +16,7 @@ describe("Cowork host storage fences", () => {
     root = realpathSync(mkdtempSync(join(tmpdir(), "winter-cowork-fences-")));
     home = join(root, "home [fixture]"); other = join(root, "custom-profile"); coordination = join(root, "coordination");
     workspace = join(other, "cowork/workspaces/ws-a");
-    for (const dir of [home, join(workspace, "shared/outputs"), coordination]) mkdirSync(dir, { recursive: true });
+    for (const dir of [join(home,"cowork"), join(workspace, "shared/outputs"), coordination]) mkdirSync(dir, { recursive: true });
     writeFileSync(join(workspace, "manifest.json"), "{}");
     writeFileSync(join(workspace, "data.ext4"), "fixture disk");
     writeFileSync(join(workspace, "shared/outputs/manifest.json"), "ordinary shared artifact");
@@ -35,6 +35,16 @@ describe("Cowork host storage fences", () => {
     expect(()=>hostStorageFloorDescriptor(home)).toThrow("cannot be inspected safely");
     rmSync(cowork);writeFileSync(cowork,"not a storage root");
     expect(()=>hostStorageFloorDescriptor(home)).toThrow("cannot be inspected safely");
+  });
+  test("a missing active owner's root refuses recovery while unrelated absent homes are ignored",()=>{
+    const restore=registerHostStorageFences(home,{participatingHomes:[other,join(root,"unrelated-absent")],coordinationDir:coordination,coworkStorageActive:true});
+    try {
+      expect(hostStorageFloorDescriptor(home).denyReadPaths).toContain(coordination);
+      expect(hostStorageFloorDescriptor(home).denyReadPaths).toContain(join(home,"runtimes/runtime-state.db"));
+      rmSync(join(home,"cowork"),{recursive:true});
+      expect(()=>hostStorageFloorDescriptor(home)).toThrow("cannot be inspected safely");
+      expect(()=>childSandboxConfigFor(home)).toThrow("cannot be inspected safely");
+    } finally {restore();}
   });
   test.skipIf(process.geteuid?.()===0)("a non-ENOENT failure inspecting active storage never removes the floor",()=>{
     chmodSync(other,0);
@@ -136,13 +146,13 @@ describe("Cowork host storage fences", () => {
   });
 });
 
-test("disabled, unregistered and unmaterialized Cowork preserve ordinary Code scans and escapes at HOME", () => {
+test("disabled and unregistered Cowork preserve ordinary Code scans and escapes at HOME", () => {
   const root=realpathSync(mkdtempSync(join(tmpdir(),"winter-cowork-disabled-")));
   const userHome=join(root,"user-home"), home=join(userHome,".winter"), coordination=join(root,"coordination");
   mkdirSync(home,{recursive:true}); mkdirSync(coordination);
   writeFileSync(join(home,"trust.json"),"{}"); linkSync(join(home,"trust.json"),join(root,"trust-alias.json"));
   try {
-    for (const config of [{registered:false,active:false,exists:false},{registered:true,active:false,exists:true},{registered:true,active:true,exists:false}]) {
+    for (const config of [{registered:false,active:false,exists:false},{registered:true,active:false,exists:true}]) {
       if (config.exists) mkdirSync(join(home,"cowork")); else rmSync(join(home,"cowork"),{recursive:true,force:true});
       const dispose=config.registered ? registerHostStorageFences(home,{coordinationDir:coordination,coworkStorageActive:config.active}) : () => {};
       try {

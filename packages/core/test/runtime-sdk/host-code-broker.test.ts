@@ -287,6 +287,15 @@ test("nested descendant matches immediate tracked thread", async () => {
     name: "Agent",
     argsJson: JSON.stringify({ subagent_type: "general-purpose" }),
   } as NewSessionEvent);
+  await g.completeHook(
+    {
+      tool_name: "Agent",
+      tool_use_id: "outer-call",
+      session_id: "backend",
+      cwd: source,
+    },
+    f.abort.signal,
+  );
   g.observe({
     type: "thread_started",
     sessionId: "logical",
@@ -300,6 +309,15 @@ test("nested descendant matches immediate tracked thread", async () => {
     name: "Agent",
     argsJson: JSON.stringify({ subagent_type: "general-purpose" }),
   } as NewSessionEvent);
+  await g.completeHook(
+    {
+      tool_name: "Agent",
+      tool_use_id: "inner-call",
+      session_id: "backend",
+      cwd: source,
+    },
+    f.abort.signal,
+  );
   g.observe({
     type: "thread_started",
     sessionId: "logical",
@@ -563,7 +581,7 @@ test("permission change while host callback awaits never records an old receipt"
   );
   f.setRevision("changed");
   permission.resolve();
-  await pending;
+  await expect(pending).rejects.toThrow("host-prompt-context-changed");
   expect(recorded).toBe(false);
   g.dispose();
   f.exited.resolve(0);
@@ -658,4 +676,247 @@ test("installed-adapter enrollment refuses absent bounded native output transpor
   const f = fixture();
   f.adapter.requiresNativeOutput = true;
   expect(() => f.enroll()).toThrow("native-output-transport-missing");
+});
+
+test("authorized background Agent lineage survives launch ACK, but not thread completion", async () => {
+  const f = fixture(),
+    g = f.enroll();
+  f.spawnGeneration(g);
+  g.observe({
+    type: "tool_call",
+    sessionId: "logical",
+    callId: "agent",
+    threadId: "main",
+    name: "Agent",
+    argsJson: JSON.stringify({
+      subagent_type: "general-purpose",
+      run_in_background: true,
+    }),
+  } as NewSessionEvent);
+  await g.completeHook(
+    {
+      tool_name: "Agent",
+      tool_use_id: "agent",
+      session_id: "backend",
+      cwd: source,
+    },
+    f.abort.signal,
+  );
+  g.observe({
+    type: "thread_started",
+    sessionId: "logical",
+    threadId: "agent",
+  } as NewSessionEvent);
+  g.observe({
+    type: "tool_result",
+    sessionId: "logical",
+    callId: "agent",
+    threadId: "main",
+    output: "async_launched",
+    isError: false,
+  } as NewSessionEvent);
+  f.call(g, "agent");
+  expect(
+    (await f.resolve(g, { parentToolUseId: "agent" })).scope.parentToolUseId,
+  ).toBe("agent");
+  await expect(
+    f.resolve(g, { toolUseId: "agent", parentToolUseId: undefined }),
+  ).rejects.toThrow("unobserved-active-call");
+  g.observe({
+    type: "thread_completed",
+    sessionId: "logical",
+    threadId: "agent",
+  } as NewSessionEvent);
+  await expect(f.resolve(g, { parentToolUseId: "agent" })).rejects.toThrow(
+    "unobserved-active-call",
+  );
+  g.dispose();
+  f.exited.resolve(0);
+});
+
+test("observed or denied Agent launches never grant descendant authority", async () => {
+  const f = fixture();
+  f.binding.authorize = async (call) => call.name !== "Agent";
+  f.options.canUseTool = async () => ({
+    behavior: "deny",
+    message: "host refused launch",
+  });
+  const g = f.enroll();
+  f.spawnGeneration(g);
+  g.observe({
+    type: "tool_call",
+    sessionId: "logical",
+    callId: "agent",
+    threadId: "main",
+    name: "Agent",
+    argsJson: JSON.stringify({ subagent_type: "general-purpose" }),
+  } as NewSessionEvent);
+  g.noteHook({
+    tool_name: "Agent",
+    tool_use_id: "agent",
+    session_id: "backend",
+    cwd: source,
+  });
+  g.observe({
+    type: "thread_started",
+    sessionId: "logical",
+    threadId: "agent",
+  } as NewSessionEvent);
+  f.call(g, "agent");
+  await expect(f.resolve(g, { parentToolUseId: "agent" })).rejects.toThrow(
+    "descendant-authority-not-observed",
+  );
+  await g.completeHook(
+    {
+      tool_name: "Agent",
+      tool_use_id: "agent",
+      session_id: "backend",
+      cwd: source,
+    },
+    f.abort.signal,
+  );
+  const denied = await g.options.canUseTool!(
+    "Agent",
+    { subagent_type: "general-purpose" },
+    { toolUseID: "agent", requestId: "launch-card", signal: f.abort.signal },
+  );
+  expect(denied?.behavior).toBe("deny");
+  await expect(f.resolve(g, { parentToolUseId: "agent" })).rejects.toThrow(
+    "descendant-authority-not-observed",
+  );
+  g.dispose();
+  f.exited.resolve(0);
+});
+
+test("host-approved modified command is sealed and the old command loses authority", async () => {
+  const f = fixture();
+  f.options.canUseTool = async () => ({
+    behavior: "allow",
+    updatedInput: { command: "cat approved" },
+  });
+  let receipt: unknown;
+  f.binding.recordPromptResult = (value) => {
+    receipt = value;
+  };
+  const g = f.enroll();
+  f.spawnGeneration(g);
+  f.call(g);
+  await g.options.canUseTool!(
+    "Bash",
+    { command: "cat note" },
+    { toolUseID: "call", requestId: "edit-card", signal: f.abort.signal },
+  );
+  expect(receipt).toMatchObject({ input: { command: "cat approved" } });
+  await expect(f.resolve(g)).rejects.toThrow("command-not-observed-call");
+  expect(
+    (await f.resolve(g, { command: "cat approved" })).scope.toolUseId,
+  ).toBe("call");
+  g.dispose();
+  f.exited.resolve(0);
+});
+
+test("completed call IDs cannot be reused while old authorization is awaiting", async () => {
+  const permission = deferred<boolean>(),
+    f = fixture({ authorize: () => permission.promise }),
+    g = f.enroll();
+  f.spawnGeneration(g);
+  f.call(g);
+  const pending = f.resolve(g);
+  g.observe({
+    type: "tool_result",
+    sessionId: "logical",
+    callId: "call",
+    threadId: "main",
+  } as NewSessionEvent);
+  expect(() => f.call(g, "main", "Bash", { command: "replacement" })).toThrow(
+    "ambiguous-or-unbounded-tool-calls",
+  );
+  permission.resolve(true);
+  await expect(pending).rejects.toThrow("stale-generation");
+  expect(f.abort.signal.aborted).toBe(true);
+  g.dispose();
+  f.exited.resolve(0);
+});
+
+test("approved input replacement during authorization cannot admit the old command", async () => {
+  const permission = deferred<boolean>(),
+    f = fixture({ authorize: () => permission.promise });
+  f.options.canUseTool = async () => ({
+    behavior: "allow",
+    updatedInput: { command: "cat approved" },
+  });
+  const g = f.enroll();
+  f.spawnGeneration(g);
+  f.call(g);
+  const pending = f.resolve(g);
+  await g.options.canUseTool!(
+    "Bash",
+    { command: "cat note" },
+    { toolUseID: "call", requestId: "edit-card", signal: f.abort.signal },
+  );
+  permission.resolve(true);
+  await expect(pending).rejects.toThrow(
+    "call-or-policy-changed-during-admission",
+  );
+  expect(
+    (await f.resolve(g, { command: "cat approved" })).scope.toolUseId,
+  ).toBe("call");
+  g.dispose();
+  f.exited.resolve(0);
+});
+
+test("Agent lineage awaits the exact completed host permission receipt", async () => {
+  const f = fixture(),
+    permission = deferred<void>();
+  let receipt = false;
+  f.binding.authorize = async (call) => call.name !== "Agent" || receipt;
+  f.binding.recordPromptResult = () => {
+    receipt = true;
+  };
+  f.options.canUseTool = async (_name, input) => {
+    await permission.promise;
+    return { behavior: "allow", updatedInput: input };
+  };
+  const g = f.enroll();
+  f.spawnGeneration(g);
+  g.observe({
+    type: "tool_call",
+    sessionId: "logical",
+    callId: "agent",
+    threadId: "main",
+    name: "Agent",
+    argsJson: JSON.stringify({ subagent_type: "general-purpose" }),
+  } as NewSessionEvent);
+  await g.completeHook(
+    {
+      tool_name: "Agent",
+      tool_use_id: "agent",
+      session_id: "backend",
+      cwd: source,
+    },
+    f.abort.signal,
+  );
+  g.observe({
+    type: "thread_started",
+    sessionId: "logical",
+    threadId: "agent",
+  } as NewSessionEvent);
+  f.call(g, "agent");
+  const pending = g.options.canUseTool!(
+    "Agent",
+    { subagent_type: "general-purpose" },
+    { toolUseID: "agent", requestId: "launch-card", signal: f.abort.signal },
+  );
+  await expect(f.resolve(g, { parentToolUseId: "agent" })).rejects.toThrow(
+    "descendant-authority-not-observed",
+  );
+  expect(receipt).toBe(false);
+  permission.resolve();
+  await pending;
+  expect(receipt).toBe(true);
+  expect(
+    (await f.resolve(g, { parentToolUseId: "agent" })).scope.parentToolUseId,
+  ).toBe("agent");
+  g.dispose();
+  f.exited.resolve(0);
 });

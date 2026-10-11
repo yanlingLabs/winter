@@ -290,6 +290,8 @@ export interface HostCodeGeneration {
   generationId: string;
   observe(event: NewSessionEvent): void;
   noteHook(input: unknown): void;
+  /** Runs only after the existing host pre-hooks completed; absence of permission is no grant. */
+  completeHook(input: unknown, signal: AbortSignal): Promise<void>;
   dispose(): void;
 }
 interface LiveGeneration {
@@ -397,6 +399,8 @@ export class HostCodeExecutionService {
       throw new HostCodeUnavailable("guest-host-delegation-denied");
     const id = `${input.sessionId}:${input.generation}:${randomUUID()}`,
       calls = new Map<string, HostCodeInvocation>(),
+      usedCallIds = new Set<string>(),
+      lineage = new Map<string, { call: HostCodeInvocation; policy: string }>(),
       admittedCalls = new Set<string>(),
       hooks = new Map<
         string,
@@ -423,10 +427,12 @@ export class HostCodeExecutionService {
       const ancestors: HostCodeCall[] = [];
       let actor = threadId === "main" ? undefined : threadId;
       while (actor !== undefined) {
-        const ancestor = calls.get(actor);
+        const admitted = lineage.get(actor),
+          ancestor = admitted?.call;
         if (
           !ancestor ||
           !["Agent", "Task"].includes(ancestor.name) ||
+          admitted?.policy !== binding!.policyRevision() ||
           !threads.has(actor) ||
           ancestors.length >= 32 ||
           ancestors.some((previous) => previous.callId === actor)
@@ -465,6 +471,55 @@ export class HostCodeExecutionService {
           signal: AbortSignal,
         ) => Promise<void>)
       | undefined;
+    const admitLineage = async (
+      call: HostCodeInvocation,
+      hook: NonNullable<ReturnType<typeof hooks.get>>,
+      signal: AbortSignal,
+      agentId?: string,
+    ) => {
+      if (!["Agent", "Task"].includes(call.name)) return;
+      if (needsHostHooks) await replayHostHooks!(call, hook, signal);
+      if (hook.decision?.decision === "deny" || hook.decision?.interrupt)
+        return;
+      const policy = hook.policy,
+        cwd = canonicalDirectory(hook.cwd);
+      if (binding!.policyRevision() !== policy) return;
+      const ancestors = ancestryFor(call.threadId),
+        effectiveInput = hook.effectiveInput ?? call.input;
+      const admitted: HostCodeInvocation = {
+        ...call,
+        input: structuredClone(effectiveInput),
+        ancestors,
+        scope: {
+          generationId: id,
+          sessionId: input.backendSessionId,
+          toolUseId: call.callId,
+          ...(agentId === undefined ? {} : { agentId }),
+          ...(call.threadId === "main"
+            ? {}
+            : { parentToolUseId: call.threadId }),
+        },
+        ...(hook.decision ? { preHookDecision: hook.decision } : {}),
+      };
+      const allowed = await binding!.authorize(admitted, cwd, signal);
+      requireCurrent();
+      if (
+        signal.aborted ||
+        calls.get(call.callId) !== call ||
+        hooks.get(call.callId) !== hook ||
+        binding!.policyRevision() !== policy ||
+        (hook.effectiveInput ?? call.input) !== effectiveInput ||
+        canonicalDirectory(hook.cwd) !== cwd ||
+        ancestors.some(
+          (ancestor) =>
+            lineage.get(ancestor.callId)?.call !== ancestor ||
+            !threads.has(ancestor.callId),
+        )
+      )
+        throw new HostCodeUnavailable("lineage-changed-during-admission");
+      if (allowed === true)
+        lineage.set(call.callId, { call: admitted, policy });
+    };
     if (required) {
       registration = this.adapter!.register({
         generationId: id,
@@ -548,10 +603,13 @@ export class HostCodeExecutionService {
           if (admittedCalls.has(call.callId))
             throw new HostCodeUnavailable("call-already-admitted");
           if (
-            !calls.has(call.callId) ||
+            calls.get(call.callId) !== call ||
+            hooks.get(call.callId) !== hook ||
+            (hook.effectiveInput ?? call.input) !== effectiveCall.input ||
+            context.signal.aborted ||
             ancestors.some(
               (ancestor) =>
-                calls.get(ancestor.callId) !== ancestor ||
+                lineage.get(ancestor.callId)?.call !== ancestor ||
                 !threads.has(ancestor.callId),
             ) ||
             binding!.policyRevision() !== hook.policy
@@ -777,15 +835,36 @@ export class HostCodeExecutionService {
           hook.decision?.decision === "ask" && hook.decision.message
             ? { ...context, decisionReason: hook.decision.message }
             : context;
+        lineage.delete(call.callId);
         const result = await canUseTool(toolName, toolInput, actualContext);
         requireCurrent();
+        if (
+          context.signal.aborted ||
+          calls.get(call.callId) !== call ||
+          hooks.get(call.callId) !== hook ||
+          hook.policy !== revision ||
+          binding!.policyRevision() !== revision ||
+          canonicalDirectory(hook.cwd) !== cwd
+        )
+          throw new HostCodeUnavailable("host-prompt-context-changed");
         if (
           result?.behavior === "allow" &&
           !context.signal.aborted &&
           calls.get(call.callId) === call &&
+          hooks.get(call.callId) === hook &&
+          hook.policy === revision &&
           binding!.policyRevision() === revision &&
           canonicalDirectory(hook.cwd) === cwd
         ) {
+          const approvedInput = structuredClone(
+            result.updatedInput ?? toolInput,
+          );
+          hook.effectiveInput = approvedInput;
+          if (hook.decision?.transformedInput)
+            hook.decision = {
+              ...hook.decision,
+              transformedInput: approvedInput,
+            };
           binding!.recordPromptResult?.({
             generationId: id,
             sessionId: input.backendSessionId,
@@ -795,13 +874,14 @@ export class HostCodeExecutionService {
             ...(context.agentID === undefined
               ? {}
               : { agentId: context.agentID }),
-            input: result.updatedInput ?? toolInput,
+            input: approvedInput,
             cwd,
             policyRevision: revision,
             ancestors: ancestryFor(call.threadId),
             ...(hook.decision ? { preHookDecision: hook.decision } : {}),
             result,
           });
+          await admitLineage(call, hook, context.signal, context.agentID);
         }
         return result;
       };
@@ -815,6 +895,7 @@ export class HostCodeExecutionService {
         if (event.type === "thread_started") threads.add(event.threadId);
         else if (event.type === "thread_completed") {
           threads.delete(event.threadId);
+          lineage.delete(event.threadId);
           for (const [callId, call] of calls)
             if (call.threadId === event.threadId) {
               calls.delete(callId);
@@ -827,12 +908,13 @@ export class HostCodeExecutionService {
           ["Bash", "Monitor", "Workflow", "Agent", "Task"].includes(event.name)
         ) {
           if (
-            calls.has(event.callId) ||
+            usedCallIds.has(event.callId) ||
+            usedCallIds.size >= 16384 ||
             calls.size >= 512 ||
+            lineage.size >= 512 ||
             event.argsJson.length > 262144
           ) {
-            closed = true;
-            registration?.dispose?.();
+            generation.dispose();
             input.abort.abort();
             throw new HostCodeUnavailable("ambiguous-or-unbounded-tool-calls");
           }
@@ -844,6 +926,7 @@ export class HostCodeExecutionService {
           }
           if (!data || typeof data !== "object" || Array.isArray(data))
             throw new HostCodeUnavailable("tool-call-input-invalid");
+          usedCallIds.add(event.callId);
           calls.set(event.callId, {
             callId: event.callId,
             threadId: event.threadId,
@@ -890,12 +973,24 @@ export class HostCodeExecutionService {
           completed: !needsHostHooks,
         });
       },
+      completeHook: async (value, signal) => {
+        generation.noteHook(value);
+        if (!required) return;
+        const callId = (value as { tool_use_id?: string }).tool_use_id;
+        const call = callId === undefined ? undefined : calls.get(callId);
+        const hook = callId === undefined ? undefined : hooks.get(callId);
+        if (!call || !hook)
+          throw new HostCodeUnavailable("hook-call-not-authenticated");
+        await admitLineage(call, hook, signal);
+      },
       dispose: () => {
         if (closed) return;
         closed = true;
         registration?.dispose?.();
         registration?.stopAll?.();
         calls.clear();
+        lineage.clear();
+        usedCallIds.clear();
         hooks.clear();
         admittedCalls.clear();
         binding?.dispose?.();
