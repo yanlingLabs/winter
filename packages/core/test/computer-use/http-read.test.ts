@@ -530,9 +530,31 @@ describe("M1: a card's wait is not the read's time", () => {
   });
 });
 
+describe("re-review: waiting for a host's place is not the read's time either", () => {
+  test("a read queued behind the host's four slow reads still reads within its own short budget", async () => {
+    const hz = harness();
+    const n = net({
+      names: { "busy.example": ["93.184.216.34"] },
+      pages: {
+        ...Object.fromEntries(Array.from({ length: 4 }, (_, i) => [`busy.example/slow${i}`, () => new Promise<Response>((res) => setTimeout(() => res(new Response("slow", { headers: { "content-type": "text/plain" } })), 400))])),
+        "busy.example/fast": () => new Response("fast", { headers: { "content-type": "text/plain" } }),
+      },
+    });
+    const reader = new HttpReader(n.deps);
+    const policy = { approvals: new SiteApprovals(), site: {}, cwd: undefined };
+    const holders = hz.run("s-holders");
+    const slow = Array.from({ length: 4 }, (_, i) => reader.read(holders.scope, `https://busy.example/slow${i}`, { emit: false }, policy));
+    await new Promise((res) => setTimeout(res, 20));
+    const late = hz.run("s-late");
+    late.scope.timeLeft = () => 150; // its own budget is 150 ms; the slot frees after ~400 ms
+    expect((await reader.read(late.scope, "https://busy.example/fast", { emit: false }, policy)).text).toBe("fast");
+    await Promise.all(slow);
+  });
+});
+
 describe("M2: control characters never swell the answer", () => {
   test("C0, C1 and bidirectional controls are removed — written, or decoded from references — tab, newline and return kept", async () => {
-    expect(stripControls("a\u0001b\u0085c‮d⁦e\tf\ng\rh‏i")).toBe("abcde\tf\ng\rhi");
+    expect(stripControls("a\u0001b\u0085c\u202Ed\u2066e\tf\ng\rh\u200Fi")).toBe("abcde\tf\ng\rhi");
     const t = setup({
       names: { "c.example": ["93.184.216.34"] },
       pages: {
@@ -629,12 +651,29 @@ describe("the review's smaller findings", () => {
     expect(privateAddressRefusal("http://10.0.0.1/")).toBeDefined();
   });
 
-  test("an environment proxy: the read refuses rather than go through it; only NO_PROXY of * or the exact address keeps it direct", async () => {
-    expect(proxyFor("93.184.216.34", {})).toBeUndefined();
-    expect(proxyFor("93.184.216.34", { HTTPS_PROXY: "http://proxy:3128" })).toBe("HTTPS_PROXY");
-    expect(proxyFor("127.0.0.1", { http_proxy: "http://proxy:3128", NO_PROXY: "localhost" })).toBe("http_proxy");
-    expect(proxyFor("127.0.0.1", { HTTP_PROXY: "http://proxy:3128", NO_PROXY: "example.com, 127.0.0.1" })).toBeUndefined();
-    expect(proxyFor("::1", { ALL_PROXY: "socks5://p:1", no_proxy: "*" })).toBeUndefined();
+  test("an environment proxy: proxyFor follows Bun's measured rules exactly, and the read refuses rather than go through one", async () => {
+    const http = (p: number | "" = 3000) => new URL(`http://127.0.0.1${p === "" ? "" : `:${p}`}/`);
+    const https = new URL("https://example.com/");
+    const v6 = new URL("http://[::1]:3000/");
+    expect(proxyFor("93.184.216.34", https, {})).toBeUndefined();
+    // The scheme picks the variable; ALL_PROXY is ignored.
+    expect(proxyFor("93.184.216.34", https, { HTTPS_PROXY: "http://proxy:3128" })).toBe("HTTPS_PROXY");
+    expect(proxyFor("93.184.216.34", https, { HTTP_PROXY: "http://proxy:3128" })).toBeUndefined();
+    expect(proxyFor("127.0.0.1", http(), { https_proxy: "http://proxy:3128" })).toBeUndefined();
+    expect(proxyFor("127.0.0.1", http(), { http_proxy: "http://proxy:3128" })).toBe("http_proxy");
+    expect(proxyFor("127.0.0.1", http(), { ALL_PROXY: "http://proxy:3128" })).toBeUndefined();
+    // NO_PROXY: *, the host exactly, host:port with the dial's own port — an IPv6 address only bracketed.
+    const P = { HTTP_PROXY: "http://proxy:3128" };
+    expect(proxyFor("127.0.0.1", http(), { ...P, NO_PROXY: "example.com, 127.0.0.1" })).toBeUndefined();
+    expect(proxyFor("127.0.0.1", http(), { ...P, no_proxy: "*" })).toBeUndefined();
+    expect(proxyFor("127.0.0.1", http(), { ...P, NO_PROXY: "127.0.0.1:3000" })).toBeUndefined();
+    expect(proxyFor("127.0.0.1", http(), { ...P, NO_PROXY: "127.0.0.1:1" })).toBe("HTTP_PROXY");
+    expect(proxyFor("127.0.0.1", http(""), { ...P, NO_PROXY: "127.0.0.1:80" })).toBe("HTTP_PROXY");
+    expect(proxyFor("::1", v6, { ...P, NO_PROXY: "[::1]" })).toBeUndefined();
+    expect(proxyFor("::1", v6, { ...P, NO_PROXY: "::1" })).toBe("HTTP_PROXY");
+    for (const np of ["localhost", ".localhost", "127.0.0.0/8", "::1"]) expect(proxyFor("127.0.0.1", http(), { ...P, NO_PROXY: np })).toBe("HTTP_PROXY");
+    // Both spellings set: only an entry in both counts.
+    expect(proxyFor("127.0.0.1", http(), { ...P, NO_PROXY: "127.0.0.1", no_proxy: "example.com" })).toBe("HTTP_PROXY");
     const hz = harness();
     const n = net({ names: { "a.example": ["93.184.216.34"] }, pages: { "a.example/": () => html("<p>x</p>") } });
     const reader = new HttpReader({ ...n.deps, env: { HTTPS_PROXY: "http://proxy.example:3128" } });
@@ -643,6 +682,34 @@ describe("the review's smaller findings", () => {
     expect(e.message).toContain("a network proxy is set for Winter (HTTPS_PROXY)");
     expect(n.sent).toEqual([]);
   });
+
+  test("proxyFor never calls a dial direct that Bun itself would send through the proxy (measured in child processes)", async () => {
+    const hits: string[] = [];
+    const proxy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch(req) { hits.push(req.url); return new Response("from-proxy"); } });
+    const o4 = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("from-origin") });
+    const o6 = Bun.serve({ port: 0, hostname: "::1", fetch: () => new Response("from-origin") });
+    servers.push(proxy, o4, o6);
+    const child = "const r = await fetch(process.argv.at(-1), { headers: { Host: 'localhost' } }); console.log(await r.text())";
+    const seen = { proxied: 0, direct: 0 };
+    for (const [address, port] of [["127.0.0.1", o4.port], ["::1", o6.port]] as const) {
+      const url = new URL(`http://${address.includes(":") ? `[${address}]` : address}:${port}/`);
+      for (const np of ["*", "127.0.0.1", "::1", "[::1]", "localhost", `127.0.0.1:${port}`, `[::1]:${port}`, "127.0.0.0/8"]) {
+        for (const pv of ["HTTP_PROXY", "ALL_PROXY"]) {
+          const env: Record<string, string> = { PATH: process.env.PATH ?? "", [pv]: `http://127.0.0.1:${proxy.port}`, NO_PROXY: np };
+          const p = Bun.spawn([process.execPath, "-e", child, url.href], { env, stdout: "pipe", stderr: "ignore" });
+          const out = (await new Response(p.stdout).text()).trim();
+          await p.exited;
+          const proxied = hits.splice(0).length > 0;
+          expect(out).toBe(proxied ? "from-proxy" : "from-origin");
+          seen[proxied ? "proxied" : "direct"]++;
+          const judged = proxyFor(address, url, env) !== undefined;
+          if (proxied) expect({ address, np, pv, judged }).toEqual({ address, np, pv, judged: true });
+        }
+      }
+    }
+    expect(seen.proxied).toBeGreaterThan(0);
+    expect(seen.direct).toBeGreaterThan(0);
+  }, 60_000);
 
   test("link URLs in the text are redacted like tab URLs; references are decoded once; the title is the <title>, else the first <h1>", async () => {
     const t = setup({

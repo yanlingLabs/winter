@@ -100,21 +100,29 @@ function isLocalhostName(host: string): boolean {
   return h === "localhost" || h.endsWith(".localhost");
 }
 
-/** The proxy variables Bun's fetch obeys. */
-const PROXY_VARS = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] as const;
-
 /**
- * The environment proxy a pinned dial to `address` would go through, by its variable's name — or undefined. Bun's
- * fetch takes no per-request opt-out (measured: `proxy: ""`, `false` and `undefined` all still proxy); only a
- * `NO_PROXY` entry of `*` or of exactly the dialled address is relied on to keep a request direct (both measured),
- * anything less counts as proxied. Nothing here changes the environment.
+ * The environment proxy a pinned dial would go through, by its variable's name — or undefined. Bun's fetch, measured
+ * (1.3): an `http:` URL obeys `HTTP_PROXY`/`http_proxy` and an `https:` one `HTTPS_PROXY`/`https_proxy`; `ALL_PROXY`
+ * is ignored; there is no per-request way out (`proxy: ""`, `false` and `undefined` all still proxy). `NO_PROXY` (or
+ * `no_proxy`; a comma list, spaces trimmed) keeps a dial direct for `*`, for the dialled host exactly — an IPv6 address
+ * only in its bracketed `[addr]` spelling (`::1` alone still proxies) — and for `host:port` with the dial's own
+ * explicit port. Nothing looser (a suffix, a CIDR, `localhost` for 127.0.0.1) is relied on: those count as proxied.
+ * When both `NO_PROXY` and `no_proxy` are set only an entry in both is relied on. Nothing here changes the environment.
  */
-export function proxyFor(address: string, env: Record<string, string | undefined>): string | undefined {
-  const set = PROXY_VARS.find((v) => (env[v] ?? "").trim() !== "");
+export function proxyFor(address: string, url: URL, env: Record<string, string | undefined>): string | undefined {
+  const vars = url.protocol === "https:" ? ["HTTPS_PROXY", "https_proxy"] : ["HTTP_PROXY", "http_proxy"];
+  const set = vars.find((v) => (env[v] ?? "").trim() !== "");
   if (set === undefined) return undefined;
-  const bare = address.replace(/^\[|\]$/g, "").toLowerCase();
-  const noProxy = `${env.NO_PROXY ?? ""},${env.no_proxy ?? ""}`.split(",").map((e) => e.trim().toLowerCase()).filter((e) => e.length > 0);
-  return noProxy.some((e) => e === "*" || e === bare) ? undefined : set;
+  const host = address.includes(":") ? `[${address.replace(/^\[|\]$/g, "").toLowerCase()}]` : address.toLowerCase();
+  const list = (raw: string | undefined): string[] | undefined => {
+    const entries = (raw ?? "").split(",").map((e) => e.trim().toLowerCase()).filter((e) => e.length > 0);
+    return entries.length === 0 ? undefined : entries;
+  };
+  const upper = list(env.NO_PROXY);
+  const lower = list(env.no_proxy);
+  const entries = upper !== undefined && lower !== undefined ? upper.filter((e) => lower.includes(e)) : upper ?? lower ?? [];
+  const direct = entries.some((e) => e === "*" || e === host || (url.port !== "" && e === `${host}:${url.port}`));
+  return direct ? undefined : set;
 }
 
 /** A counting gate: `acquire` waits (cancellable) until a slot is free; the releaser it hands back is idempotent. */
@@ -222,7 +230,7 @@ function sniff(bytes: Uint8Array): "html" | "text" | undefined {
 
 /** C0 and C1 controls but tab, newline and carriage return, and the bidirectional marks and overrides — removed from
  *  what is returned (a page of controls would otherwise swell several-fold in the bridge's JSON). */
-const CONTROLS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F؜‎‏‪-‮⁦-⁩]/g;
+const CONTROLS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
 export function stripControls(text: string): string {
   return text.replace(CONTROLS, "");
 }
@@ -374,7 +382,9 @@ export class HttpReader {
       clock.pause();
       try { await ensureSiteAllowed(scope, policy.approvals, policy.site, url.href, READER_NAME, policy.cwd); } finally { clock.resume(scope.timeLeft()); }
       scope.live();
-      await takeHost(url.host.toLowerCase());
+      // Waiting for this host's place is not the read's time either.
+      clock.pause();
+      try { await takeHost(url.host.toLowerCase()); } finally { clock.resume(scope.timeLeft()); }
       scope.live();
       const lexical = addressClassOf(url.href);
       if (lexical?.cls === "private") return { refused: first ? privateSentence(url.hostname) : REDIRECT_REFUSED };
@@ -399,7 +409,7 @@ export class HttpReader {
             ? `${url.hostname} resolved to an address outside this Mac — browsers.read() reads only this Mac's own servers by that name`
             : `${url.hostname} resolves to this Mac or the local network — browsers.read() reads public sites by name, and this Mac's own servers only as localhost` };
         }
-        const proxy = proxyFor(a, env);
+        const proxy = proxyFor(a, url, env);
         if (proxy !== undefined) {
           return { refused: `a network proxy is set for Winter (${proxy}), and browsers.read() never reads through one — open the page in a tab, or remove the proxy setting from Winter's environment` };
         }
