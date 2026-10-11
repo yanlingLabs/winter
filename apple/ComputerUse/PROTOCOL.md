@@ -570,6 +570,29 @@ the change, run108; the world allows 120 ms, a stress sweep 400 ms) and Secure E
   in front when it began, never the visit's own late landing after their move); a hold's give-back and rung 4's go to
   the guardian's place, only while the held app still has the front. No restore runs while a desktop visit is open (the
   visit's own return aside): the visit owns the view, and its end brings the user back.
+- **I2′ — the user's ruling, NOT YET ENFORCED (round 10's MEDIUM #6; tried in round 12, reverted).** When an app was left
+  in front around the agent's action (an `.unexplained` verdict — the user may have opened it) and then the agent's app
+  jumps in, the restore returns the user to THAT app — what was in front just before — never to an older place. A
+  narrow version (the theft's own `before` is the state left in front, no late restore landing, no hold) passed the
+  default 20 seeds but failed 11 more of seeds 1000–1079. The engine and the model-based test's oracle disagree in four
+  classes; which side is right, by the ruling (round 13):
+  1. *A visit's return lands on what was in front when the visit began (itself left in front), then the agent's app
+     jumps in* (seed 1009): the ruling restores to that app. **The oracle is wrong** — it marks only an untouched app's
+     coming forward as "left there", never a visit's return to it; the engine was right only because it took its own
+     late return landing for an unexplained change, which it must not (a visit's return landing is the engine's).
+  2. *The user's own place, an app the agent touched, comes back by itself over the app left in front* (seed 1027): the
+     agent's doing — undone, back to the app left in front. **The oracle is right; the engine is wrong**: its "back to
+     their place" shortcut takes any return to the place as theirs, before weighing the agent's cause.
+  3. *A second untouched app comes forward over the app left in front* (seeds 1041, 1044): when it is undone, the target
+     is the app left in front (the engine is right on the target), but the engine and the oracle already disagree on
+     whether it is CLEARLY the agent's at all (input of the user's the oracle counts and the engine does not) — a "clearly"
+     disagreement of its own, to settle first.
+  4. *The user's own move (a Dock click) not yet heard when an app comes forward and is left there* (seed 1028): the user's
+     move wins — **the oracle is right**; the engine, never having heard it, restores to a stale state either way.
+  So before I2′ can hold, the engine must (2) weigh the agent's cause before "back to their place" while a state left in
+  front is current, (1) tell its own visit-return landing from an unexplained change, and (4) fold a move heard late
+  before choosing a restore target; the oracle must (1) carry "left there" through a visit's return. The oracle is never
+  loosened to pass.
 - **I3.** A key the user types while a focus blip's reroute is on reaches their place by this rule: into the target
   only when they moved there themselves, never into a target that took the front without being judged their move,
   never into an app they left, never into a held app once its hold has ended; and the key focus is never handed back
