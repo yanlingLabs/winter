@@ -350,6 +350,28 @@ final class OffDesktopActTests: XCTestCase {
         }
     }
 
+    /// The clickElsewhere path (review of round 11, HIGH #1): a web element that lists NO press, its unlisted press
+    /// changing nothing, on another desktop — the visit is offered, and nothing more is sent: no ancestor pressed, no
+    /// window-targeted click on a window nobody sees.
+    func testANoEffectUnlistedPressOnAnotherDesktopOffersTheVisitAndSendsNothingMore() async throws {
+        world()
+        let tile = fakeElement(95_032)
+        let row = fakeElement(95_033)
+        ax.add(row, role: kAXGroupRole, frame: CGRect(x: 110, y: 440, width: 400, height: 60),
+               extra: [kAXParentAttribute: webArea, kAXChildrenAttribute: [tile]])
+        ax.setActions(row, [kAXPressAction])
+        ax.add(tile, role: kAXGroupRole, title: "Plan", frame: CGRect(x: 120, y: 450, width: 120, height: 30),
+               extra: [kAXParentAttribute: row])
+        do {
+            let r = try await act(.click(CUClickAction(ref: ref(tile))))
+            XCTFail("expected needs_desktop_visit: \(r.rung) \(r.detail ?? "-")")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "needs_desktop_visit", e.message)
+        }
+        XCTAssertEqual(ax.performed, ["\(token(tile)):AXPress"], "the element alone, never its ancestor")
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown || $0.type == .leftMouseUp }.isEmpty, "no window-targeted click")
+    }
+
     func testSetValueOnAScrollBarSetsANumberInZeroToOne() async throws {
         world(scrollBar: true)
         try await act(.setValue(CUSetValueAction(ref: ref(bar), value: "0.5")))

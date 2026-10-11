@@ -702,35 +702,6 @@ extension CUCore {
                     do {
                         try ax.perform(el, action)
                         CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): AX \(action, privacy: .public)")
-                        if let webBefore, !webPressChanged(el, t, since: webBefore) {
-                            // Web content that acts on a real mouse press (Google Docs' widgets) ignores the
-                            // accessibility press. Off screen its pixels may be stale, so the window-targeted click
-                            // below only for an app LEARNED to ignore presses (a click there once had an effect
-                            // accessibility saw), and never where a repeat could do harm.
-                            let info = ElementInfo(el, ax)
-                            if Self.mayActUnseen(info.labels) {
-                                return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.unseenPressNote(Self.elementLabel(nil, info)))")
-                            }
-                            // On ANOTHER desktop, a press that changed nothing on a control a repeat can't undo: a desktop
-                            // visit would click it where it is (live, round 11: the Web Store's controls ignored the press
-                            // from another Space and the visit was never offered).
-                            if !prefersWebClicks(t), !statefulWithoutReadableState(el, info), isOffThisDesktop(t) {
-                                CULog.act.notice("click in \(t.appName, privacy: .public) (another desktop): no visible effect — a desktop visit would click it")
-                                throw CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(Self.elementLabel(nil, info)) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
-                            }
-                            if !prefersWebClicks(t) || statefulWithoutReadableState(el, info) {
-                                CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): no visible effect — not clicked as well")
-                                return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.noEffectNote(Self.elementLabel(nil, info)))")
-                            }
-                            CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): the accessibility press changed nothing — clicking instead")
-                            return try webClickVerified(el, t, pressIgnored: true, why: "the accessibility press did nothing", label: Self.elementLabel(nil, info)) {
-                                try eventsElsewhere(p, t, token, cursor: nil, what: "the click", subject: subject) { synth, route in
-                                    try synth.click(pid: t.pid, windowFor: { _ in t.windowID }, at: pt, button: button, count: count, flags: flags, route: route)
-                                }
-                            }
-                        }
-                        return ActOutcome(rung: .accessibility,
-                                          detail: "\(subject), so the element was sent \(CURoleWords.actionWords(action)) over accessibility")
                     } catch let error where Self.pressMayHaveActed(error) != nil {
                         // Not the next ancestor, not events: the press may have acted.
                         let note = try judgeErroredPress(el, t, before: before, code: Self.pressMayHaveActed(error)!,
@@ -741,6 +712,38 @@ extension CUCore {
                     } catch {
                         continue  // refused: the next, then the events below
                     }
+                    // The press went out. What follows is checked OUTSIDE the press's own catch (review of round 11, HIGH
+                    // #1): a desktop visit to offer, or a failure of the verified click, is never taken for the element
+                    // refusing the press — that pressed the ancestors and clicked a window nobody sees.
+                    if let webBefore, !webPressChanged(el, t, since: webBefore) {
+                        // Web content that acts on a real mouse press (Google Docs' widgets) ignores the
+                        // accessibility press. Off screen its pixels may be stale, so the window-targeted click
+                        // below only for an app LEARNED to ignore presses (a click there once had an effect
+                        // accessibility saw), and never where a repeat could do harm.
+                        let info = ElementInfo(el, ax)
+                        if Self.mayActUnseen(info.labels) {
+                            return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.unseenPressNote(Self.elementLabel(nil, info)))")
+                        }
+                        // On ANOTHER desktop, a press that changed nothing on a control a repeat can't undo: a desktop
+                        // visit would click it where it is (live, round 11: the Web Store's controls ignored the press
+                        // from another Space and the visit was never offered).
+                        if !prefersWebClicks(t), !statefulWithoutReadableState(el, info), isOffThisDesktop(t) {
+                            CULog.act.notice("click in \(t.appName, privacy: .public) (another desktop): no visible effect — a desktop visit would click it")
+                            throw CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(Self.elementLabel(nil, info)) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
+                        }
+                        if !prefersWebClicks(t) || statefulWithoutReadableState(el, info) {
+                            CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): no visible effect — not clicked as well")
+                            return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.noEffectNote(Self.elementLabel(nil, info)))")
+                        }
+                        CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): the accessibility press changed nothing — clicking instead")
+                        return try webClickVerified(el, t, pressIgnored: true, why: "the accessibility press did nothing", label: Self.elementLabel(nil, info)) {
+                            try eventsElsewhere(p, t, token, cursor: nil, what: "the click", subject: subject) { synth, route in
+                                try synth.click(pid: t.pid, windowFor: { _ in t.windowID }, at: pt, button: button, count: count, flags: flags, route: route)
+                            }
+                        }
+                    }
+                    return ActOutcome(rung: .accessibility,
+                                      detail: "\(subject), so the element was sent \(CURoleWords.actionWords(action)) over accessibility")
                 }
             }
         }
