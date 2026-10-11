@@ -142,6 +142,17 @@ extension CUCore {
         return now == there
     }
 
+    /// Whether `t` acts inside a visit that has ARRIVED and was made FOR it — the visit's own app and window, on the
+    /// visited desktop now (review of round 13, MEDIUM #3): what lets the front-app refusals step aside and counts the
+    /// app in front as consented. Never before the arrival (the switch may still be under way), never another target
+    /// of the session (its app is not in front by the visit's doing).
+    func insideArrivedVisit(_ t: CUTarget) -> Bool {
+        guard let v = openVisit(of: t.sessionId), v.base.pid == t.pid, v.base.windowID == t.windowID,
+              sys.window(id: t.windowID)?.onScreen == true else { return false }
+        guard let there = visitLock.withLock({ v.arrived?.space }), let now = sys.activeSpace() else { return false }
+        return now == there
+    }
+
     /// Whether `t` runs inside its session's open visit now (the per-act guard and `inForeground` read it).
     func isVisiting(_ t: CUTarget) -> Bool {
         guard let v = openVisit(of: t.sessionId) else { return false }

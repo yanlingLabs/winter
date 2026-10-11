@@ -261,6 +261,43 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertEqual(downs.first?.location.y ?? 0, 312, accuracy: 1, "at the field's centre where it is now")
     }
 
+    /// Review of round 13, MEDIUM #5: a paste the field took but shows otherwise (a formatting input, a rich target, a
+    /// block editor) is done and said — never Uncertain; Markdown is looked for rendered too.
+    func testAPasteTheFieldReformattedIsDoneAndSaid() async throws {
+        safari(fieldOwner: pid)
+        ax.put(field, [kAXValueAttribute: ""])
+        poster.onPost = { [unowned self] e in
+            if e.type == .keyDown, e.flags.contains(.maskCommand) { ax.put(field, [kAXValueAttribute: "(555) 123-4567"]) }
+        }
+        let r = try await act(.paste(CUPasteAction(text: "5551234567", into: ref(field))))
+        XCTAssertTrue(r.detail?.contains("does not show the text exactly as sent") ?? false, r.detail ?? "")
+        XCTAssertEqual(CUPasteSequence.rendered(text: "**Note:** see [the doc](https://example.org)", format: .markdown), "Note: see the doc")
+        let ev = CUEditEvidence(readValue: { "Note: see the doc" }, nowMs: { 0 }, sleepMs: { _ in })
+        XCTAssertTrue(ev.wait(before: "", expect: "**Note:** see [the doc](https://example.org)", also: "Note: see the doc", capMs: 0))
+    }
+
+    /// Review of round 13, MEDIUM #4: the guards come before the scroll — a focus click refused (the app in front with
+    /// another of its windows key) has scrolled nothing.
+    func testARefusedFocusClickScrollsNothing() async throws {
+        safari(fieldOwner: pid)
+        _ = searchHasFocus()
+        ax.put(field, [kAXFocusedAttribute: kCFBooleanFalse])
+        var below = CGPoint(x: 20, y: 1400)
+        ax.put(field, [kAXPositionAttribute: AXValueCreate(.cgPoint, &below)!])
+        ax.refuses.insert("\(token(field)):\(kAXPressAction)")
+        sys.front = pid
+        let userWindow = fakeElement(93_098)
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [userWindow, window], kAXFocusedWindowAttribute: userWindow])
+        do {
+            _ = try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("app_in_front"), e.message)
+        }
+        XCTAssertFalse(ax.performed.contains("\(token(field)):AXScrollToVisible"), "nothing scrolled: \(ax.performed)")
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty)
+    }
+
     func testAMenuCommandMakesTheBoundWindowKeyThroughTheElementJustWorkedOn() async throws {
         safari(fieldOwner: pid)
         ax.makeSettable(field, kAXValueAttribute)

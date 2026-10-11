@@ -83,4 +83,36 @@ final class Round14Tests: XCTestCase {
         XCTAssertFalse(CUOpenerScope.apps(["com.google.Chrome"]).covers(nil))
         XCTAssertTrue(CUOpenerScope.any.covers(nil))
     }
+
+    // MARK: review of round 13, MEDIUM #3 — the visit's exception
+
+    /// The front-app refusals step aside only inside a visit that has ARRIVED, and only for the visit's own app and
+    /// window — never while the switch is under way, never for another target of the session.
+    func testTheVisitsExceptionNeedsAnArrivedVisitForThatTarget() {
+        let sys = FakeSystem()
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(),
+                          sys: sys, pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        var w = FakeSystem.window(77, pid: 4242, CGRect(x: 0, y: 0, width: 800, height: 600), owner: "Far")
+        w.onScreen = true
+        sys.windows[77] = w
+        var o = FakeSystem.window(88, pid: 4343, CGRect(x: 0, y: 0, width: 800, height: 600), owner: "Other")
+        o.onScreen = true
+        sys.windows[88] = o
+        sys.space = 2
+        let t = CUTarget(id: "t1", sessionId: "s", pid: 4242, bundleId: "com.example.far", appName: "Far", isChromium: false,
+                         mirror: false, windowID: 77, windowTitle: "Far")
+        let other = CUTarget(id: "t2", sessionId: "s", pid: 4343, bundleId: "com.example.other", appName: "Other", isChromium: false,
+                             mirror: false, windowID: 88, windowTitle: "Other")
+        let base = CUCore.VisitBase(sessionId: "s", callId: "c", targetId: "t1", pid: 4242, windowID: 77, appName: "Far", why: .act,
+                                    before: CUUserView(space: 1, front: 1), userWindow: nil, userWindowID: nil,
+                                    privatePath: true, startedMs: 0, startedAt: 0)
+        let v = CUOpenVisit(id: "v1", base: base)
+        core.visitLock.withLock { core.openVisit = v }
+        XCTAssertFalse(core.insideArrivedVisit(t), "not arrived yet")
+        core.visitLock.withLock { v.arrived = CUUserView(space: 2, front: 4242) }
+        XCTAssertTrue(core.insideArrivedVisit(t))
+        XCTAssertFalse(core.insideArrivedVisit(other), "another target of the session")
+        sys.space = 1
+        XCTAssertFalse(core.insideArrivedVisit(t), "not on the visited desktop")
+    }
 }

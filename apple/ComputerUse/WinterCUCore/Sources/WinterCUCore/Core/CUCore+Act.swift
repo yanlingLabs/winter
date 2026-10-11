@@ -165,8 +165,9 @@ extension CUCore {
             do {
                 let focusBefore = t.accessible ? focusBeforeAct(t) : nil
                 let pageBefore = pageBeforeAct(t)
-                let windowsBefore = Set(sys.windowStack().lazy.filter { $0.pid == t.pid }.map(\.id))
-                defer { noteAgentPopups(t, before: windowsBefore) }
+                let opensPopups = Self.actCanOpenPopups(p.action)
+                let windowsBefore = opensPopups ? Set(sys.windowStack().lazy.filter { $0.pid == t.pid }.map(\.id)) : []
+                defer { noteAgentPopups(t, before: windowsBefore, opens: opensPopups) }
                 var o: ActOutcome
                 do {
                     o = try guardingUserView(p, t) { try perform(p, on: t, token: token) }
@@ -541,9 +542,10 @@ extension CUCore {
                 t.unconfirmedPress = nil
                 // Looked at first, on its desktop now (dogfood, round 13: the press from the other desktop HAD landed — the
                 // dialog it opened was there): what it changed shows now, and it is not clicked a second time.
-                if let before = mark.before, Self.pressShowed(webPressEvidence(e, t), since: before) {
+                if let before = mark.before, case let now = webPressEvidence(e, t),
+                   Self.pressShowed(now, since: before) || newDialogNear(now, since: before) {
                     CULog.act.notice("click in \(t.appName, privacy: .public): its press from another desktop took effect after all — not clicked again")
-                    return ActOutcome(rung: .accessibility, detail: "the press on \(Self.elementLabel(ref, info)) from the other desktop took effect (seen now, on its desktop) — it was not clicked again")
+                    return ActOutcome(rung: .accessibility, detail: "the press on \(Self.elementLabel(ref, info)) from the other desktop took effect (its own state changed, seen now on its desktop) — it was not clicked again; check state() to see what it did")
                 }
                 announceTarget(t, info, pressing: true)
                 cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
@@ -755,6 +757,11 @@ extension CUCore {
                 for el in tries {
                     let before = pressEvidence(el, t)
                     let webBefore = action == kAXPressAction && isWebContent(el) ? webPressEvidence(el, t) : nil
+                    // The evidence the visit offer's mark keeps is the NAMED element's own, read before the press (review
+                    // of round 13, HIGH #1: the ancestor's was kept and compared with the named element's — always
+                    // "different", a click that never happened reported done).
+                    let markBefore = webBefore == nil ? nil
+                        : AXIdentity(element: el) == AXIdentity(element: target) ? webBefore : webPressEvidence(target, t)
                     do {
                         try ax.perform(el, action)
                         CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): AX \(action, privacy: .public)")
@@ -789,7 +796,7 @@ extension CUCore {
                             }
                             // (Marked on the element the click was FOR — what a later act names — even when an ancestor took
                             // the press: review of round 12, LOW.)
-                            throw offerVisitAfterPress(target, info, t, before: webBefore)
+                            throw offerVisitAfterPress(target, info, t, before: markBefore)
                         }
                         if !prefersWebClicks(t) || statefulWithoutReadableState(el, info) {
                             CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): no visible effect — not clicked as well")
@@ -867,6 +874,26 @@ extension CUCore {
         let deadline = clock.nowMs() + 300
         repeat {
             if let moved = ElementInfo(e, ax).center, window.contains(moved) { return moved }
+            clock.pause(ms: 30)
+        } while clock.nowMs() < deadline
+        return nil
+    }
+
+    /// Where a focus click on `e` goes: its centre when the window that takes the bound window's click there (the bound
+    /// one, or a popover or child window over it) contains it; else after `AXScrollToVisible` — sent only once the
+    /// guards have passed; nil when it stays outside (review of round 13, MEDIUM #4).
+    func focusClickPoint(_ e: AXUIElement, _ t: CUTarget, windowFor: (CGPoint) -> UInt32) -> CGPoint? {
+        func inside(_ c: CGPoint) -> Bool {
+            guard let bound = sys.window(id: t.windowID)?.frame else { return true }
+            let taker = windowFor(c)
+            return taker == t.windowID ? bound.contains(c) : sys.window(id: taker)?.frame.contains(c) == true
+        }
+        guard let c = ElementInfo(e, ax).center else { return nil }
+        if inside(c) { return c }
+        guard (try? ax.perform(e, "AXScrollToVisible")) != nil else { return nil }
+        let deadline = clock.nowMs() + 300
+        repeat {
+            if let moved = ElementInfo(e, ax).center, inside(moved) { return moved }
             clock.pause(ms: 30)
         } while clock.nowMs() < deadline
         return nil
@@ -955,10 +982,22 @@ extension CUCore {
 
     /// After an act: the app's windows that appeared while it ran join `agentPopups` (the ones gone leave it). A window
     /// that is a document window is never taken for a popup (`windowFor` checks documents first).
-    func noteAgentPopups(_ t: CUTarget, before: Set<UInt32>) {
-        let now = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 }
-        let ids = Set(now.map(\.id))
-        t.agentPopups = t.agentPopups.intersection(ids).union(ids.subtracting(before).subtracting([t.windowID]))
+    /// Review of round 13, MEDIUM #2: a window the user opened during a long act (their ⌘F bar, picture in picture, a
+    /// download bubble) is never taken for the agent's popup. So only an act that can open one counts (a click, a
+    /// press, a key, a selection — short), only a window tied to the bound window (a menu or popover over it, a sheet
+    /// inside it), and only for the NEXT act: each act starts the list afresh.
+    func noteAgentPopups(_ t: CUTarget, before: Set<UInt32>, opens: Bool = true) {
+        guard opens, let bound = sys.window(id: t.windowID)?.frame else { t.agentPopups = []; return }
+        let fresh = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 && $0.id != t.windowID && !before.contains($0.id) }
+        t.agentPopups = Set(fresh.filter { w in w.frame.intersects(bound) && (w.layer != 0 || bound.contains(w.frame)) }.map(\.id))
+    }
+
+    /// The acts that can open a popup of the bound window (a menu, a popover, a page's dropdown).
+    static func actCanOpenPopups(_ a: CUAction) -> Bool {
+        switch a {
+        case .click, .action, .key, .select: return true
+        default: return false
+        }
     }
 
     /// The app's OTHER document windows: a point of the bound window that one of them covers still goes to the bound
@@ -1800,7 +1839,7 @@ extension CUCore {
         guard !allowForeground, sys.frontmostPid() == t.pid else { return nil }
         // Inside a desktop visit to its window the app is in front by the visit's own doing (review of round 12, LOW: the
         // focus click there was refused exactly when it was needed).
-        if let v = openVisit(of: t.sessionId), onVisitedDesktop(v, t) { return nil }
+        if insideArrivedVisit(t) { return nil }
         let topmost = { [self] in sys.windowStack().first { $0.pid == t.pid && $0.layer == 0 && $0.alpha > 0 }.map { $0.id == t.windowID } }
         let isKey: Bool? = (t.accessible ? boundWindowIsKeyInApp(t) : nil) ?? topmost()
         guard isKey != true else { return nil }
@@ -1942,11 +1981,8 @@ extension CUCore {
             }
         }
         // AXPress may not focus a web textarea: a window-targeted click at its centre, on this desktop or (with
-        // the private path) on another Space, after the synthetic activation so it isn't taken as activation. An
-        // element scrolled out of view is scrolled to first (round 13's dogfood item 13: Return into an off-screen
-        // button was refused focus_not_placed); one that stays outside the window gets no click — it would land on
-        // something else.
-        guard let c = clickablePoint(e, ElementInfo(e, ax), t) else { return false }
+        // the private path) on another Space, after the synthetic activation so it isn't taken as activation.
+        guard ElementInfo(e, ax).center != nil else { return false }
         let onScreen = sys.window(id: t.windowID)?.onScreen == true
         let elsewhere = !onScreen && t.privatePath && skyLight.canSetWindowLocation
         guard onScreen || elsewhere else { return false }
@@ -1955,6 +1991,10 @@ extension CUCore {
         s.windowSPI = t.privatePath
         let windowFor = self.windowFor(t)
         if onScreen, let refusal = coveredWindowRefusal(t, allowForeground: holdsForeground(t)) { throw refusal }
+        // Only then the point (review of round 13, MEDIUM #4): an element scrolled out of view is scrolled to (round 13's
+        // dogfood item 13 — Return into an off-screen button was refused focus_not_placed); one that stays outside the
+        // window that takes the click there gets none — it would land on something else.
+        guard let c = focusClickPoint(e, t, windowFor: windowFor) else { return false }
         // Key IN ITS APP (the app's focused window): in the background the system-wide key focus is the user's
         // app, always, so it can't tell whether the click only made the window key.
         let wasKey = boundWindowIsKeyInApp(t)
@@ -1981,12 +2021,12 @@ extension CUCore {
     }
 
     /// Polls for evidence that an edit landed: the value changed, or a value-change notification arrived.
-    func waitForEdit(_ t: CUTarget, _ e: AXUIElement?, before: String?, expect: String?, capMs: Double) -> Bool {
+    func waitForEdit(_ t: CUTarget, _ e: AXUIElement?, before: String?, expect: String?, also: String? = nil, capMs: Double) -> Bool {
         let ax = self.ax, clock = self.clock
         let evidence = CUEditEvidence(readValue: { e.flatMap { ax.string($0, kAXValueAttribute) } },
                                       nowMs: { clock.nowMs() },
                                       sleepMs: { clock.pause(ms: $0) })
-        return evidence.wait(before: before, expect: expect, capMs: capMs)
+        return evidence.wait(before: before, expect: expect, also: also, capMs: capMs)
     }
 
     /// An element's selected range as text ("12+0"), when it has one.
@@ -2006,6 +2046,7 @@ extension CUCore {
         let before = focus.flatMap { ax.string($0, kAXValueAttribute) }
         let confirmable = focus.map { readsBack($0, t, value: before) } ?? false
         let expect = CUPasteSequence.plain(text: text, format: format)
+        let rendered = CUPasteSequence.rendered(text: text, format: format)
         // Web content takes a paste late, if at all (Docs' title took none from the background): a short look
         // at the value, then the answer — unconfirmed, the clipboard restored once the page has had time.
         let web = isWebContent(focus) || (focus.map { keyboardTarget(t, focused: $0) != t.pid } ?? false)
@@ -2022,7 +2063,8 @@ extension CUCore {
             // clipboard late must not get the user's own contents instead.
             waitForEvidence: {
                 _ = since
-                return self.waitForEdit(t, focus, before: before, expect: expect, capMs: web ? 800 : 1500)
+                return self.waitForEdit(t, focus, before: before, expect: expect, also: rendered == expect ? nil : rendered,
+                                        capMs: web ? 800 : 1500)
             })
         // An earlier unconfirmed paste's restore still pending: its saved clipboard is the user's (what is on the
         // clipboard now is Winter's text), unless the user copied something since.
@@ -2035,22 +2077,33 @@ extension CUCore {
         let result = try seq.run(items: CUPasteSequence.items(text: text, format: format),
                                  plain: CUPasteSequence.plain(text: text, format: format))
         var o = sent ?? ActOutcome(rung: .processEvents)
+        // A field that shows its text and does NOT show the paste as sent: what it holds now decides (review of round 13,
+        // MEDIUM #5). Changed some other way (a rich target reformats, a block editor splits paragraphs, an input formats
+        // a number): done, said. Holding exactly that text already: done. Unchanged: never a success (round 13's dogfood
+        // item 12 — a Material page's field took no ⌘V from the background) — `Uncertain`: the paste was sent and may
+        // still land late, never retried, the model checks state() first.
+        func notShown(late: Bool) throws -> String {
+            let now = CUEditEvidence.normalized(focus.flatMap { ax.string($0, kAXValueAttribute) } ?? "")
+            let was = CUEditEvidence.normalized(before ?? "")
+            if now != was { return "the field changed, but does not show the text exactly as sent (it may have reformatted it) — check state()" }
+            if !now.isEmpty, now == CUEditEvidence.normalized(expect) || now == CUEditEvidence.normalized(rendered) {
+                return "the field shows the text (it held it already)"
+            }
+            CULog.act.notice("paste in \(t.appName, privacy: .public): the field does not show the pasted text — uncertain")
+            throw CUError.uncertain([o.detail, late
+                ? "the paste was sent, but the field does not show the pasted text yet — check state() before pasting again; the clipboard is restored once \(t.appName) has had time to read it"
+                : "the paste was sent, but the field does not show the pasted text (within 1.5 s) — check state() before pasting again"]
+                .compactMap { $0 }.joined(separator: "; "))
+        }
         switch result {
         case .leftAlone:
             o.detail = [o.detail, "the clipboard changed meanwhile, so it was not restored"].compactMap { $0 }.joined(separator: "; ")
-        // A field that shows its text and does NOT show the paste: never a success (round 13's dogfood item 12 — a
-        // Material page's field took no ⌘V from the background and the act read as done). `Uncertain`: the paste was
-        // sent and may still land late — never retried, the model checks state() first.
         case .restored(let evidence) where !evidence:
-            CULog.act.notice("paste in \(t.appName, privacy: .public): the field does not show the pasted text (1.5 s) — uncertain")
-            throw CUError.uncertain([o.detail, "the paste was sent, but the field does not show the pasted text (within 1.5 s) — check state() before pasting again"]
-                .compactMap { $0 }.joined(separator: "; "))
+            o.detail = [o.detail, try notShown(late: false)].compactMap { $0 }.joined(separator: "; ")
         case .restored:
             o.detail = [o.detail, "the field shows the pasted text"].compactMap { $0 }.joined(separator: "; ")
         case .unconfirmed:
-            CULog.act.notice("paste in \(t.appName, privacy: .public): the web field does not show the pasted text yet — uncertain")
-            throw CUError.uncertain([o.detail, "the paste was sent, but the field does not show the pasted text yet — check state() before pasting again; the clipboard is restored once \(t.appName) has had time to read it"]
-                .compactMap { $0 }.joined(separator: "; "))
+            o.detail = [o.detail, try notShown(late: true)].compactMap { $0 }.joined(separator: "; ")
         case .deferred:
             o.detail = [o.detail, "unconfirmed — can't be read back: \(t.appName) doesn't show this editor's text to accessibility; check something the app shows (a word count) or a screenshot before pasting again; the clipboard is restored once \(t.appName) has had time to read it"]
                 .compactMap { $0 }.joined(separator: "; ")
@@ -3230,15 +3283,29 @@ extension CUCore {
         return nil
     }
 
-    /// What a press changed, judged from evidence read on ANOTHER desktop before it — the focus and the window list
-    /// left out (a desktop visit moves the focus and brings the app's other windows on screen by itself). Pure.
+    /// What a press changed, judged from evidence read on ANOTHER desktop before it, up to minutes earlier — ONLY the
+    /// element's own state: it went away, its value, selected or expanded state, or the page's address (a link that
+    /// navigated). Never its title, frame or neighbours, the focus, the window list or the window's title: the window
+    /// coming on screen shifts the layout, an unread count changes a title (review of round 13, HIGH #1). Pure.
     static func pressShowed(_ now: WebPressEvidence, since before: WebPressEvidence) -> Bool {
-        var a = now, b = before
-        a.focused = nil
-        b.focused = nil
-        a.windows = []
-        b.windows = []
-        return a != b
+        if now.alive != before.alive { return true }
+        if now.value != before.value || now.selected != before.selected || now.expanded != before.expanded { return true }
+        if let a = now.page?.url, let b = before.page?.url, a != b { return true }
+        return false
+    }
+
+    /// A dialog-like node that appeared near the element since `before` (a dialog or alert the press opened — a web
+    /// page's `role=dialog`, a sheet): the only change in its neighbourhood that counts in `pressShowed`'s place.
+    func newDialogNear(_ now: WebPressEvidence, since before: WebPressEvidence) -> Bool {
+        let old = Set(before.near)
+        for n in now.near where !old.contains(n) {
+            let e = n.element
+            let role = ax.string(e, kAXRoleAttribute) ?? "", sub = ax.string(e, kAXSubroleAttribute) ?? ""
+            if role == "AXSheet" || ["AXDialog", "AXSystemDialog", "AXApplicationDialog", "AXApplicationAlertDialog", "AXApplicationAlert"].contains(sub) {
+                return true
+            }
+        }
+        return false
     }
 
     static func noEffectNote(_ label: String) -> String {
