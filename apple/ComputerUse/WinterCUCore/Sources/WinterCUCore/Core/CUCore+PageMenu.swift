@@ -36,15 +36,19 @@ extension CUCore {
             }
             let last = depth == a.path.count - 1
             let menusBefore = Set(pageMenus(in: area).map { AXIdentity(element: $0) })
-            guard let point = ElementInfo(item, ax).center, windowClick(at: point, t) else {
+            guard let point = ElementInfo(item, ax).center, try windowClick(at: point, t) else {
                 closePageMenu(t)
                 throw CUError.unsupported("the page's “\(label)” menu item can't be clicked here (it is outside the window, or the window can't be reached) — scroll it into view, or call app.requestForeground(reason)")
             }
             if last {
                 // Chosen: its menu closes (or the item goes away).
+                // A closed menu may stay alive to accessibility with its old frame (WebKit keeps a `hidden` menu's
+                // element): it is closed once the page lists it among its menus no more.
                 let closed = waitFor(Self.pageMenuWaitMs) {
                     guard let m = openMenu else { return !self.ax.isAlive(item) }
-                    return !self.ax.isAlive(m) || (self.ax.frame(m).map { $0.width <= 0 || $0.height <= 0 } ?? true)
+                    if !self.ax.isAlive(m) || (self.ax.frame(m).map { $0.width <= 0 || $0.height <= 0 } ?? true) { return true }
+                    let id = AXIdentity(element: m)
+                    return !self.pageMenus(in: area).contains { AXIdentity(element: $0) == id }
                 }
                 let path = a.path.joined(separator: " › ")
                 CULog.act.notice("menu in \(t.appName, privacy: .public): the page's menu item clicked — menu \(closed ? "closed" : "still open", privacy: .public)")
@@ -87,7 +91,7 @@ extension CUCore {
         repeat {
             if done() { return true }
             if clock.nowMs() >= deadline { return false }
-            usleep(30_000)
+            clock.pause(ms: 30)
         } while true
     }
 

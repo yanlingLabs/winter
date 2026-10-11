@@ -24,6 +24,8 @@ const TEXT_PIECE_CAP = RESULT_TEXT_CAP;
 /** Text the builder keeps at all: anything past this is dropped as it arrives (the result is cut at 64 KiB anyway),
  *  so a script printing in a loop can never grow the daemon's memory. */
 const TEXT_ACCUMULATION_CAP = RESULT_TEXT_CAP + 4_096;
+/** One `guide()` block, at most (the adapters cap a guide at 2,000 bytes and the whole block well under this). */
+const GUIDE_BLOCK_CAP = 8_192;
 
 /** The script's escaped error. `trusted`: the DAEMON's own sentence (a typed failure it sent, a cancel, a
  *  restart) — shown OUTSIDE the DATA-ONLY fence; anything the script could have written goes inside it. */
@@ -54,6 +56,13 @@ export class ResultBuilder {
    *  against the text cap. */
   daemonLine(text: string): void {
     if (text.length > 0) this.items.push({ kind: "daemon", text });
+  }
+
+  /** Winter's own reviewed prose IN PLACE (an app's extras block and guide, `adapters/`): an unfenced daemon block,
+   *  not counted against the text cap; bounded by the adapters' own caps, and here at `GUIDE_BLOCK_CAP` as a belt. */
+  guide(text: string): void {
+    const t = text.trimEnd();
+    if (t.length > 0) this.items.push({ kind: "daemon", text: t.length > GUIDE_BLOCK_CAP ? `${t.slice(0, GUIDE_BLOCK_CAP)}…` : t });
   }
 
   text(text: string, opts: { screen?: boolean } = {}): void {

@@ -6,11 +6,12 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { liveHomeRefusal } from "./daemon-entry";
 import {
-  callLine, computerV2Message, describeViolations, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hardwareInputTimes, hardwareIdleMs, lastValue, pointerMoves, promptAppeared, PROMPT_BUNDLE_IDS, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, parseDuration, parseFrontReading, startPlan, describeStartPlan, markerFacts, MIXED_TEXT,
-  parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type FixtureEvent, type MonitorSample, type ScenarioResult,
+  callLine, computerV2Message, describeViolations, excursions, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hardwareInputTimes, hardwareIdleMs, lastValue, pointerMoves, promptAppeared, PROMPT_BUNDLE_IDS, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, UNATTENDED_POLL_MS, parseDuration, parseFrontReading, startPlan, describeStartPlan, markerFacts, MIXED_TEXT,
+  idleAfterUnlock, installStopHandler, LOGIN_WINDOW_BUNDLE_ID, parseSessionReading, screenUnavailable, screenUnavailableAt, STOP_EXIT_CODES, STOP_HARD_EXIT_MS, STOP_SIGNALS, type SessionState, type StopSignal,
+  parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { minimalPdf, REAL_APP_SCENARIOS, REAL_DIR_TOKEN, withRealDir } from "./real-apps";
-import { DOCS_DASH_TEXT, DOCS_LINES_TEXT, DOCS_SHORT_PASTE, DOCS_BIG_PASTE, DOCS_TEXT, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage } from "./scenarios";
+import { DESKTOP_VISIT_MAX_AWAY_MS, DOCS_DASH_TEXT, DOCS_LINES_TEXT, DOCS_SHORT_PASTE, DOCS_BIG_PASTE, DOCS_TEXT, LIVE_REASON, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage } from "./scenarios";
 
 const sample = (t: number, frontPid: number, space: number | null, hidIdleMs: number | null = 1000): MonitorSample => ({ t, front: `app${frontPid}`, frontPid, space, hidIdleMs });
 
@@ -75,19 +76,93 @@ describe("the monitor analysis", () => {
   });
 
   test("the start: an unattended run waits for 3 min with no HARDWARE input, up to --max-wait", () => {
-    expect(idleGate(5, 0, 1_000, false)).toEqual({ kind: "go" });
+    const open: SessionState = { locked: false, onConsole: true };
+    expect(idleGate(5, 0, 1_000, false, UNATTENDED_IDLE_MS, open)).toEqual({ kind: "go" });
     expect(UNATTENDED_IDLE_MS).toBe(180_000);
-    expect(idleGate(61_000, 0, 10_800_000, true).kind).toBe("wait");
-    expect(idleGate(181_000, 0, 10_800_000, true)).toEqual({ kind: "go" });
-    expect(idleGate(61_000, 0, 10_800_000, true, 60_000)).toEqual({ kind: "go" });
-    expect(idleGate(3_000, 60_000, 10_800_000, true)).toMatchObject({ kind: "wait", reason: expect.stringContaining("no hardware input") });
-    expect(idleGate(3_000, 10_797_000, 10_800_000, true)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("never idle") });
-    expect(idleGate(null, 0, 10_800_000, true)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("tap did not start") });
+    expect(idleGate(61_000, 0, 10_800_000, true, UNATTENDED_IDLE_MS, open).kind).toBe("wait");
+    expect(idleGate(181_000, 0, 10_800_000, true, UNATTENDED_IDLE_MS, open)).toEqual({ kind: "go" });
+    expect(idleGate(61_000, 0, 10_800_000, true, 60_000, open)).toEqual({ kind: "go" });
+    expect(idleGate(3_000, 60_000, 10_800_000, true, UNATTENDED_IDLE_MS, open)).toMatchObject({ kind: "wait", reason: expect.stringContaining("no hardware input") });
+    expect(idleGate(3_000, 10_797_000, 10_800_000, true, UNATTENDED_IDLE_MS, open)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("never idle") });
+    expect(idleGate(null, 0, 10_800_000, true, UNATTENDED_IDLE_MS, open)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("tap did not start") });
     expect(parseDuration("3h")).toBe(10_800_000);
     expect(parseDuration("45m")).toBe(2_700_000);
     expect(parseDuration("90")).toBe(90_000);
     expect(parseDuration("1.5h")).toBe(5_400_000);
     expect(parseDuration("soon")).toBeUndefined();
+  });
+
+  test("a locked screen is NEVER a go: the unattended gate waits for the unlock (counted toward --max-wait), a hand-started run refuses", () => {
+    const locked: SessionState = { locked: true, onConsole: true };
+    const away: SessionState = { locked: false, onConsole: false };
+    const open: SessionState = { locked: false, onConsole: true };
+    const idle = UNATTENDED_IDLE_MS;
+    // Locked for hours of "idle" — the incident: the Mac locked itself while the gate counted its 180 s.
+    expect(idleGate(999_999_999, 0, 10_800_000, true, idle, locked)).toEqual({ kind: "wait", reason: "the screen is locked — waiting for it to be unlocked" });
+    expect(idleGate(0, 0, 10_800_000, true, idle, locked).kind).toBe("wait");
+    // Not the console's session (another user is active / fast user switching): the same.
+    expect(idleGate(999_999_999, 0, 10_800_000, true, idle, away)).toMatchObject({ kind: "wait", reason: expect.stringContaining("not the one on the console") });
+    // An unreadable state is never a go either.
+    expect(idleGate(999_999_999, 0, 10_800_000, true, idle, null)).toMatchObject({ kind: "wait", reason: expect.stringContaining("could not be read") });
+    // The wait keeps counting toward --max-wait: refused when the next poll would pass it.
+    expect(idleGate(0, 10_800_000 - UNATTENDED_POLL_MS, 10_800_000, true, idle, locked)).toEqual({ kind: "wait", reason: "the screen is locked — waiting for it to be unlocked" });
+    expect(idleGate(0, 10_800_000 - UNATTENDED_POLL_MS + 1, 10_800_000, true, idle, locked)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("the screen is locked — the run was not started") });
+    expect(idleGate(0, 86_000, 90_000, true, idle, away)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("not the one on the console") });
+    // A hand-started run (nobody is waiting at a lock screen to be asked) refuses at once, whatever the idle time says.
+    expect(idleGate(null, 0, 10_800_000, false, idle, locked)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("the screen is locked") });
+    expect(idleGate(5, 0, 1_000, false, idle, null).kind).toBe("refuse");
+    // The lock comes first: a tap that could not start while locked is the unlock's business, not a refusal.
+    expect(idleGate(null, 0, 10_800_000, true, idle, locked).kind).toBe("wait");
+    // Unlocked again: the ordinary gate (the tap check included).
+    expect(idleGate(null, 0, 10_800_000, true, idle, open)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("tap did not start") });
+    expect(idleGate(idle, 0, 10_800_000, true, idle, open)).toEqual({ kind: "go" });
+  });
+
+  test("the session reading, the login window and the monitor's lock fields", () => {
+    expect(parseSessionReading('{"locked":false,"onConsole":true}\n')).toEqual({ locked: false, onConsole: true });
+    expect(parseSessionReading('noise\n{"locked":true,"onConsole":true}')).toEqual({ locked: true, onConsole: true });
+    expect(parseSessionReading("")).toBeUndefined();
+    expect(parseSessionReading("not json")).toBeUndefined();
+    expect(parseSessionReading('{"locked":1,"onConsole":true}')).toBeUndefined();
+    expect(parseSessionReading('{"locked":true}')).toBeUndefined();
+    expect(screenUnavailable({ locked: false, onConsole: true })).toBeUndefined();
+    expect(screenUnavailable({ locked: false, onConsole: true }, "com.apple.finder")).toBeUndefined();
+    expect(screenUnavailable({ locked: true, onConsole: true })?.what).toBe("the screen is locked");
+    expect(screenUnavailable({ locked: false, onConsole: false })?.what).toContain("not the one on the console");
+    expect(screenUnavailable(null)?.what).toContain("could not be read");
+    // The login window in front is the lock screen even when the flags say otherwise (the incident's frontmost app).
+    expect(LOGIN_WINDOW_BUNDLE_ID).toBe("com.apple.loginwindow");
+    expect(screenUnavailable({ locked: false, onConsole: true }, "com.apple.loginwindow")?.what).toBe("the login window is in front");
+    // The monitor line carries the flags only when the tool sent both.
+    expect(parseMonitorLine('{"t":5,"front":"x","frontPid":1,"space":2,"hidIdleMs":3,"locked":true,"onConsole":true}')).toMatchObject({ locked: true, onConsole: true });
+    expect(parseMonitorLine('{"t":5,"front":"x","frontPid":1,"space":2,"hidIdleMs":3,"locked":false,"onConsole":false}')).toMatchObject({ locked: false, onConsole: false });
+    const older = parseMonitorLine('{"t":5,"front":"x","frontPid":1,"space":2,"hidIdleMs":3}')!;
+    expect(older.locked).toBeUndefined();
+    expect(older.onConsole).toBeUndefined();
+  });
+
+  test("a screen that locks during the run is found like real input: the first unusable sample in the window", () => {
+    const at = (t: number, extra: Partial<MonitorSample> = {}): MonitorSample => ({ ...sample(t, 7, 3), locked: false, onConsole: true, ...extra });
+    const quiet = [at(0), at(20), at(40)];
+    expect(screenUnavailableAt(quiet, 0, 100)).toBeUndefined();
+    expect(screenUnavailableAt([...quiet, at(60, { locked: true })], 0, 100)).toEqual({ t: 60, what: "the screen is locked" });
+    // A lock that came and went before the check is still found (it counts since the window's start), and one before `from` is not.
+    expect(screenUnavailableAt([at(0), at(20, { locked: true }), at(40), at(60)], 0, 100)?.t).toBe(20);
+    expect(screenUnavailableAt([at(0, { locked: true }), at(20), at(40)], 10, 100)).toBeUndefined();
+    expect(screenUnavailableAt([at(0), at(20, { onConsole: false })], 0, 100)?.what).toContain("not the one on the console");
+    // The login window in front alone (a sample with no flags, from an older monitor) is enough.
+    expect(screenUnavailableAt([{ t: 5, front: "com.apple.loginwindow", frontPid: 396, space: 1, hidIdleMs: 1 }], 0, 10)).toEqual({ t: 5, what: "the login window is in front" });
+    expect(screenUnavailableAt([{ t: 5, front: "com.apple.finder", frontPid: 5, space: 1, hidIdleMs: 1 }], 0, 10)).toBeUndefined();
+  });
+
+  test("whoever unlocks the Mac is at it: the idle clock restarts when the screen stops being unavailable", () => {
+    expect(idleAfterUnlock(500_000, 1_000_000, undefined)).toBe(500_000);
+    expect(idleAfterUnlock(null, 1_000_000, 900_000)).toBeNull();
+    // The tap saw no input for 500 s, but the screen was locked 4 s ago: 4 s of presence-free time so far.
+    expect(idleAfterUnlock(500_000, 1_000_000, 996_000)).toBe(4_000);
+    // Long after the unlock the hardware idle time is the smaller one again.
+    expect(idleAfterUnlock(30_000, 1_000_000, 100_000)).toBe(30_000);
+    expect(idleAfterUnlock(30_000, 1_000_000, 1_000_500)).toBe(0);
   });
 
   test("the countdown: any input postpones (the gate starts over); only an untouched countdown starts the run", () => {
@@ -241,17 +316,27 @@ describe("the scenarios", () => {
     expect(DOCS_BIG_PASTE.length).toBe(3_000);
     expect(DOCS_BIG_PASTE.split("\n").length).toBeGreaterThan(20);
     const ev = (ev: string, o: Record<string, unknown>): FixtureEvent => ({ t: 5, role: "main", ev, ...o });
-    const judge = (name: string, facts: Record<string, unknown>, events: FixtureEvent[], output = "", state?: Record<string, unknown>): boolean =>
-      docs.find((s) => s.name.startsWith(name))!.verify({ output, isError: false, facts, events, since: 0, probe: [], metrics: [], shots: [], ...(state === undefined ? {} : { state }) }).every((c) => c.ok);
+    const judge = (name: string, facts: Record<string, unknown>, events: FixtureEvent[], output = "", state?: Record<string, unknown>,
+                   metrics: Array<Record<string, unknown>> = []): boolean =>
+      docs.find((s) => s.name.startsWith(name))!.verify({ output, isError: false, facts, events, since: 0, probe: [], metrics, shots: [], ...(state === undefined ? {} : { state }) }).every((c) => c.ok);
     // 1. typing: focus in the hidden input, the exact text, the receiver named, "can't be read back".
     const typed = [ev("docs.focus", { id: "doc" }), ev("docs.text", { text: DOCS_TEXT })];
     expect(judge("Docs: type", {}, typed, "sent 40 characters to [9] text area \"Document content\"; received: unverifiable — it can't be read back here")).toBe(true);
     expect(judge("Docs: type", {}, typed, "sent 40 characters to [9] text area")).toBe(false);
-    // 2. the Close button: a click it ignored must be followed by a said fallback; the panel closed.
+    // 2. the Close button: the panel closed. WebKit's accessibility press is itself a mousedown + mouseup + an (ignored)
+    // click, so ONE press passes with no fallback said; a second press is the helper's click and must be said.
     const closed = [ev("docs.mouse", { id: "find-close", phase: "down" }), ev("docs.mouse", { id: "find-close", phase: "up" }), ev("docs.panel", { open: false })];
+    const pressed = [ev("docs.mouse", { id: "find-close", phase: "down" }), ev("docs.mouse", { id: "find-close", phase: "up" }), ev("docs.click", { id: "find-close", ignored: true })];
     expect(judge("Docs: press", {}, closed, "", { docs: { panelOpen: false } })).toBe(true);
-    expect(judge("Docs: press", {}, [ev("docs.click", { id: "find-close", ignored: true }), ...closed], "", { docs: { panelOpen: false } })).toBe(false);
-    expect(judge("Docs: press", {}, [ev("docs.click", { id: "find-close", ignored: true }), ...closed], "the AX press did nothing — clicked instead", { docs: { panelOpen: false } })).toBe(true);
+    expect(judge("Docs: press", {}, [ev("docs.click", { id: "find-close", ignored: true }), ...closed], "", { docs: { panelOpen: false } })).toBe(true);
+    expect(judge("Docs: press", {}, [...pressed, ...closed], "", { docs: { panelOpen: false } })).toBe(false);
+    expect(judge("Docs: press", {}, [...pressed, ...closed], "the AX press did nothing — clicked instead", { docs: { panelOpen: false } })).toBe(true);
+    // ONE press that was the helper's click (the AX press produced no mousedown; the click's rung is an event rung):
+    // the sentence is required — the case the check exists for.
+    const viaClick = [{ primitive: "click", rung: 2 }];
+    expect(judge("Docs: press", {}, closed, "", { docs: { panelOpen: false } }, viaClick)).toBe(false);
+    expect(judge("Docs: press", {}, closed, "the accessibility press did nothing; clicked it instead", { docs: { panelOpen: false } }, viaClick)).toBe(true);
+    expect(judge("Docs: press", {}, closed, "", { docs: { panelOpen: false } }, [{ primitive: "click", rung: 1 }])).toBe(true);
     // 3./4. refusals: the reason, and nothing pasted.
     const titleFocus = [ev("docs.focus", { id: "title" })];
     expect(judge("Docs: paste with no into, multi-line", { refused: "Refused: wrong_field_shape — the title takes one line" }, titleFocus)).toBe(true);
@@ -304,6 +389,56 @@ describe("the scenarios", () => {
     expect(actOk("sent", [focus, { t: 2, role: "main", ev: "field.change", id: "offspace", value: "off-Space ✓ Typed" }])).toBe(true);
   });
 
+  test("the desktop switch: refused first (nothing moves), then allowed (one visit, back within the bound); judged by the prompt and the metrics", () => {
+    const refused = SCENARIOS.find((s) => s.name.startsWith("desktop switch: a live screenshot off-Space, refused"))!;
+    const allowed = SCENARIOS.find((s) => s.name.startsWith("desktop switch: two live screenshots off-Space"))!;
+    const captureOnly = SCENARIOS.find((s) => s.name.startsWith("bind off-Space (full screen, never seen here)"))!;
+    const act = SCENARIOS.find((s) => s.name.startsWith("act in the off-Space window"))!;
+    // A visit shows the window on screen (accessibility may see it after): never before the capture-only rows.
+    for (const s of [refused, allowed]) {
+      expect(SCENARIOS.indexOf(s)).toBeGreaterThan(SCENARIOS.indexOf(captureOnly));
+      expect(SCENARIOS.indexOf(s)).toBeGreaterThan(SCENARIOS.indexOf(act));
+      expect(s.code).toContain(`live: true, reason: ${JSON.stringify(LIVE_REASON)}`);
+    }
+    expect(allowed.maxExcursions).toBe(1);
+    expect(allowed.code.match(/live: true/g)).toHaveLength(2);
+    expect(refused.desktopSwitch).toEqual({ answer: "refuse", afterMs: 1_000 });
+    expect(refused.allowExcursionMs).toBeUndefined(); // refused: the strict focus check — nothing may move
+    expect(allowed.desktopSwitch?.answer).toBe("allow");
+    expect(allowed.allowExcursionMs).toBe(DESKTOP_VISIT_MAX_AWAY_MS);
+    const card = { toolName: "ComputerV2", onTimeout: "allow", issuedAt: 1_000, expiresAt: 61_000, summary: `Switch to Winter CU Fixture's desktop for a moment? Winter CU Fixture (dev.cu-live.fixture) — ${LIVE_REASON}. …` };
+    const prompt = { cards: [card], panelSeen: true, panelGone: true };
+    const ctx = (over: Record<string, unknown>) => ({ output: "", isError: false, facts: {}, events: [], since: 0, probe: [], metrics: [], shots: [], prompt, ...over });
+    const passes = (sc: typeof allowed, c: Record<string, unknown>): boolean => sc.verify(ctx(c) as never).every((x) => x.ok);
+    const shot = { file: "a.jpg", width: 800, height: 600, stddevLuma: 30, blank: false, sentinelPixels: 900 };
+    const visitLine = { primitive: "desktop.visit", visit: { actions: 2, ms: 1_400, returned: true } };
+    const allowedOk = {
+      facts: { w: 800, h: 600, w2: 800 }, shots: [shot], output: "moved the user to Winter CU Fixture's desktop for 1.4 s (2 actions) and back\n",
+      metrics: [{ primitive: "screenshot", visitAnswer: "allow", inVisit: true }, { primitive: "screenshot", inVisit: true }, visitLine],
+    };
+    expect(passes(allowed, allowedOk)).toBe(true);
+    expect(passes(allowed, { ...allowedOk, prompt: { ...prompt, panelSeen: false } })).toBe(false);
+    expect(passes(allowed, { ...allowedOk, prompt: { ...prompt, cards: [card, card] } })).toBe(false);
+    // Back and forth: two visits (two lines, two metrics entries) fail it.
+    expect(passes(allowed, { ...allowedOk, metrics: [...allowedOk.metrics, visitLine] })).toBe(false);
+    expect(passes(allowed, { ...allowedOk, output: allowedOk.output + allowedOk.output })).toBe(false);
+    expect(passes(allowed, { ...allowedOk, metrics: [allowedOk.metrics[0]!, { primitive: "desktop.visit", visit: { actions: 2, ms: 1, returned: false } }] })).toBe(false);
+    expect(passes(allowed, { ...allowedOk, output: "" })).toBe(false);
+    const refusedOk = { facts: { error: "NeedsForeground", message: "the user refused to be moved to Winter CU Fixture's desktop — ask them in your reply if it is needed" }, metrics: [{ primitive: "screenshot", visitAnswer: "refuse" }] };
+    expect(passes(refused, refusedOk)).toBe(true);
+    expect(passes(refused, { ...refusedOk, metrics: [...refusedOk.metrics, { primitive: "desktop.visit", visit: { actions: 1, ms: 1, returned: true } }] })).toBe(false);
+    expect(passes(refused, { ...refusedOk, prompt: { ...prompt, panelGone: false } })).toBe(false);
+  });
+
+  test("excursions: consecutive away samples are one trip; back and forth is two", () => {
+    const base = { frontPid: 1, space: 10 } as FocusBaseline;
+    const at = (t: number, frontPid: number, space: number) => ({ t, frontPid, space, front: "x" }) as unknown as MonitorSample;
+    const once = [at(0, 1, 10), at(20, 1, 11), at(40, 9, 11), at(60, 1, 10), at(80, 1, 10)];
+    expect(excursions(once, 0, 100, base)).toEqual([{ start: 20, end: 40 }]);
+    const twice = [...once, at(100, 1, 11), at(120, 1, 10)];
+    expect(excursions(twice, 0, 200, base)).toHaveLength(2);
+  });
+
   test("Finder: the helper opens the folder (no AppleScript, no TCC prompt); reuse or capture only is a skip", () => {
     const finder = REAL_APP_SCENARIOS.find((s) => s.name.startsWith("Finder"))!;
     expect(finder.code).toContain("await apps.open(folder)");
@@ -322,7 +457,7 @@ describe("the scenarios", () => {
   test("names are unique; every group the suite promises is covered", () => {
     expect(new Set(all.map((s) => s.name)).size).toBe(all.length);
     const groups = new Set(SCENARIOS.map((s) => s.group));
-    for (const g of ["bind", "click", "type", "scroll", "menu", "applescript", "screenshot", "guardian", "document", "card", "docs"]) expect(groups.has(g)).toBe(true);
+    for (const g of ["bind", "click", "type", "scroll", "menu", "applescript", "screenshot", "desktop-switch", "guardian", "document", "card", "docs"]) expect(groups.has(g)).toBe(true);
     // The undo scenario runs in the ask session too (its foreground card is denied there): once, once, false.
     expect(SCENARIOS.filter((s) => s.session === "ask").map((s) => s.answer)).toEqual(["once", "once", false]);
   });
@@ -373,5 +508,100 @@ describe("the real-apps documents", () => {
     expect(offsets).toHaveLength(5);
     offsets.forEach((o, i) => expect(pdf.slice(o, o + `${i + 1} 0 obj`.length)).toBe(`${i + 1} 0 obj`));
     expect(pdf).toContain("(Hello world) Tj");
+  });
+});
+
+describe("stopping the run on SIGINT / SIGTERM / SIGHUP", () => {
+  /** A fake process: records the handlers, the timers and the exits; a signal is delivered by hand. */
+  function rig() {
+    const handlers = new Map<StopSignal, Array<() => void>>();
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    const exits: number[] = [];
+    const logs: string[] = [];
+    const order: string[] = [];
+    const state = installStopHandler({
+      on: (signal, handler) => { handlers.set(signal, [...(handlers.get(signal) ?? []), handler]); },
+      setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+      exit: (code) => { exits.push(code); order.push(`exit ${code}`); },
+      log: (line) => logs.push(line),
+      onHardExit: () => { order.push("kill what is owned"); },
+    });
+    const deliver = (signal: StopSignal): void => { for (const h of handlers.get(signal) ?? []) h(); };
+    return { state, handlers, timers, exits, logs, order, deliver };
+  }
+
+  test("registers exactly SIGINT, SIGTERM and SIGHUP — one handler each — and does nothing until one arrives", () => {
+    const r = rig();
+    expect([...r.handlers.keys()].sort()).toEqual(["SIGHUP", "SIGINT", "SIGTERM"]);
+    expect([...STOP_SIGNALS].sort()).toEqual(["SIGHUP", "SIGINT", "SIGTERM"]);
+    for (const hs of r.handlers.values()) expect(hs).toHaveLength(1);
+    expect(r.state.requested).toBeUndefined();
+    expect(r.state.inCleanup).toBe(false);
+    expect(r.state.exitCode).toBe(1);
+    expect(r.timers).toHaveLength(0);
+    expect(r.logs).toHaveLength(0);
+  });
+
+  test("the first signal flags the run, arms ONE 20 s hard exit and resolves `stopped`; the exit code is 128 + the signal", async () => {
+    for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
+      const r = rig();
+      let seen: StopSignal | undefined;
+      void r.state.stopped.then((s) => { seen = s; });
+      r.deliver(signal);
+      await Promise.resolve();
+      expect(r.state.requested).toBe(signal);
+      expect(r.state.exitCode).toBe(code);
+      expect(STOP_EXIT_CODES[signal]).toBe(code);
+      expect(seen).toBe(signal);
+      expect(r.timers).toHaveLength(1);
+      expect(r.timers[0]!.ms).toBe(STOP_HARD_EXIT_MS);
+      expect(STOP_HARD_EXIT_MS).toBe(20_000);
+      expect(r.exits).toEqual([]);   // the handler never exits by itself: the run's cleanup does, after the report
+      expect(r.logs).toHaveLength(1);
+      expect(r.logs[0]).toContain(signal);
+    }
+  });
+
+  test("idempotent: a second signal (the same or another) during the cleanup re-enters nothing — no second timer, no change of state", async () => {
+    const r = rig();
+    r.deliver("SIGINT");
+    r.deliver("SIGINT");
+    r.deliver("SIGTERM");
+    r.deliver("SIGHUP");
+    expect(r.state.requested).toBe("SIGINT");
+    expect(r.state.exitCode).toBe(130);
+    expect(r.timers).toHaveLength(1);
+    expect(r.exits).toEqual([]);
+    expect(r.logs).toHaveLength(4);
+    expect(r.logs.slice(1).every((l) => l.includes("already running; ignored"))).toBe(true);
+    // `stopped` resolved once, with the first signal.
+    expect(await r.state.stopped).toBe("SIGINT");
+  });
+
+  test("bounded: when the cleanup outlives the budget the hard exit kills what is owned FIRST, then exits with the signal's code", () => {
+    const r = rig();
+    r.deliver("SIGTERM");
+    r.timers[0]!.fn();
+    expect(r.order).toEqual(["kill what is owned", "exit 143"]);
+    expect(r.exits).toEqual([143]);
+    expect(r.logs.at(-1)).toContain("did not finish in 20 s");
+  });
+
+  test("a throwing last-resort kill still exits", () => {
+    const exits: number[] = [];
+    const timers: Array<() => void> = [];
+    const handlers: Array<() => void> = [];
+    installStopHandler({ on: (_s, h) => { handlers.push(h); }, setTimeout: (fn) => { timers.push(fn); return 0; }, exit: (c) => { exits.push(c); }, log: () => {}, onHardExit: () => { throw new Error("boom"); } });
+    handlers[1]!();   // SIGTERM
+    timers[0]!();
+    expect(exits).toEqual([143]);
+  });
+
+  test("`inCleanup` is the run's switch: a pending stop is acted on only while it is false", () => {
+    const r = rig();
+    r.deliver("SIGINT");
+    expect(r.state.requested !== undefined && !r.state.inCleanup).toBe(true);    // the running work aborts here
+    r.state.inCleanup = true;
+    expect(r.state.requested !== undefined && !r.state.inCleanup).toBe(false);   // the cleanup's own waits run to the end
   });
 });

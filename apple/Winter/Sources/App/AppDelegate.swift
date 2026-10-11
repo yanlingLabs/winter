@@ -100,7 +100,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) lazy var mirrorCoordinator: MirrorCoordinator? = {
         guard !Self.isRunningUnitTests else { return nil }
         return MirrorCoordinator(client: LiveComputerUseHelperClient(home: AppProfile.winterHome),
-                                 log: { OrbDebug.log("mirror: \($0)") })
+                                 log: { OrbDebug.log("mirror: \($0)") },
+                                 remote: remoteMirrorHub)
+    }()
+    /// ComputerV2 Phase 1b: the phone mirror's source — every session's mirror sink is teed to it, and the paired
+    /// phone's Gateway relays from it (`RemoteAccessCoordinator`). A phone watch is a viewer of `mirrorCoordinator`
+    /// (made on the phone's first watch if no window needed it yet), which subscribes the session with pictures while
+    /// the phone watches. Nil under the unit-test host, like the coordinator.
+    private(set) lazy var remoteMirrorHub: RemoteMirrorHub? = {
+        guard !Self.isRunningUnitTests else { return nil }
+        let hub = RemoteMirrorHub()
+        hub.makeCoordinator = { [weak self] in self?.mirrorCoordinator }
+        return hub
     }()
     /// browser-runtime T5: the browser lifecycle's assembly point (`BrowserSignals.swift`) —
     /// constructed once, beside the shell's own `ShellSessionHost`, and held for the app's life
@@ -113,6 +124,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// host's `onPanelCommand` hook holds weakly. `nil` until the shell is first summoned, exactly
     /// like the coordinator above — with no shell there is no harness, so no command can arrive.
     private(set) var panelCommands: PanelCommandConsumer?
+    /// ComputerV2 Phase 2: the browser link (`BrowserLink/`) — how the daemon's browser engine drives
+    /// the built-in browser. Started in `boot()` with the main connection, NOT with the shell: it must
+    /// work with no window ever opened. `nil` when there is no harness token (or under unit tests).
+    private(set) var browserLink: BrowserLink?
     /// editor-product T8: the main menu's ⌘S — the third save trigger, and the only one reachable
     /// with the keyboard focus outside the editor. Held for the app's life because an `NSMenuItem`
     /// does NOT retain its target: nothing else owns this object, and a deallocated target is a menu
@@ -1037,6 +1052,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // identity. `setenv(…, 0)` never overwrites an explicit env, so tests/power users still win.
         // Placed AFTER the unit-test guard so the xctest host launch never stamps `~/.winter-dev`.
         AppProfile.bootstrapEnvironment()
+        // Winter for Chrome: every browser's native-messaging manifest points at THIS bundle's host (Release only — the
+        // dev manifest is `bun run dev:helper`'s; BrowserExtension/BrowserHostManifest.swift).
+        #if !DEBUG
+        BrowserHostManifest.writeForThisApp { NSLog("%@", $0) }
+        #endif
         _ = boot()
         #if DEBUG
         // panel-cef Task 6a: the window half of the panel smoke door (`ShellRootView`'s `.onAppear`
@@ -1287,7 +1307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // SP2b T5: constructing the coordinator does no I/O of its own (its `RemoteHost` is a
         // `lazy var`, untouched until a pairing window is actually requested) — safe
         // unconditionally, same posture as `HelperClient()`/`LoginItemController` above.
-        remoteAccessCoordinator = RemoteAccessCoordinator()
+        remoteAccessCoordinator = RemoteAccessCoordinator(mirrorSource: remoteMirrorHub)
 
         // Autostart follow-up (CN combined-review Important 2): start the remote listener NOW if
         // this Mac already has ≥1 paired device — `RemoteHost.startIfNeeded()`'s own gate
@@ -1727,6 +1747,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await model?.start()
                 mb?.refresh()
             }
+            browserLink = BrowserLink.start(home: AppProfile.winterHome, keychainService: AppProfile.keychainService)
         }
         // The menu's state line and login-item checkbox are refreshed when the menu is OPENED (`MenuBarController`
         // observes `NSMenu.didBeginTrackingNotification`), not on a clock: nobody reads them while it is closed, and

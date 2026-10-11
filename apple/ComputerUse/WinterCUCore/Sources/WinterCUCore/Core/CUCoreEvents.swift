@@ -22,4 +22,25 @@ import Foundation
     func permissionsChanged(accessibility: Bool, screenRecording: Bool)
     /// The core is about to send Escape itself → the shell lets synthetic Escapes through the Esc tap.
     func willSendEscape()
+    /// A desktop visit that moved (or tried to move) the user CLOSED, whatever its outcome — the work done, a failed
+    /// primitive, a cancelled request, a window that never came on screen — so the daemon counts every one.
+    func desktopVisited(_ visit: CUDesktopVisitEvent)
+}
+
+extension CUCoreEvents {
+    public func desktopVisited(_ visit: CUDesktopVisitEvent) {}
+}
+
+/// One closed desktop visit, as the daemon is told of it (`desktopVisited`).
+public struct CUDesktopVisitEvent: Sendable, Equatable {
+    public let sessionId: String
+    /// The request that opened it, when it had a call id.
+    public let callId: String?
+    public let report: CUVisitReport
+
+    public init(sessionId: String, callId: String?, report: CUVisitReport) {
+        self.sessionId = sessionId
+        self.callId = callId
+        self.report = report
+    }
 }

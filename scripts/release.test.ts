@@ -220,7 +220,7 @@ describe("ComputerV2: release.ts signs, verifies and scans the Winter Computer U
   });
 
   test("the embed re-signs with the hardened runtime, a timestamp, the stable identifier, the STATED requirement — and the Apple Events entitlement only", () => {
-    const sign = embedScript.split("\n").findIndex((l) => l.startsWith("codesign --force"));
+    const sign = embedScript.split("\n").findIndex((l) => l.startsWith("codesign --force") && l.includes('"${IDENTIFIER}"'));
     const line = `${embedScript.split("\n")[sign]} ${embedScript.split("\n")[sign + 1]}`;
     expect(line).toContain('--identifier "${IDENTIFIER}"');
     expect(line).toContain("--options runtime");
@@ -245,6 +245,30 @@ describe("ComputerV2: release.ts signs, verifies and scans the Winter Computer U
 
   test("HARDENING_PINS enrolls it with exactly no cs.* entitlement", () => {
     expect(source).toContain('{ path: computerHelperApp, label: "Winter Computer Use", expect: [] }');
+    expect(source).toContain('{ path: browserHostPath, label: "winter-browser-host", expect: [] }');
+  });
+
+  test("winter-browser-host: the embed signs it FIRST with its own identity, stated requirement, runtime, timestamp and no entitlements", () => {
+    const lines = embedScript.split("\n");
+    const host = lines.findIndex((l) => l.startsWith("codesign --force") && l.includes('"${HOST_IDENTIFIER}"'));
+    const helper = lines.findIndex((l) => l.startsWith("codesign --force") && l.includes('"${IDENTIFIER}"'));
+    expect(host).toBeGreaterThan(-1);
+    expect(host).toBeLessThan(helper);
+    const line = `${lines[host]} ${lines[host + 1]}`;
+    expect(line).toContain("--options runtime");
+    expect(line).toContain("--timestamp");
+    expect(line).toContain('"-r=designated => ${HOST_REQUIREMENT}"');
+    expect(line).not.toContain("--entitlements");
+    expect(embedScript).toContain('HOST_IDENTIFIER="com.winter.browserhost"');
+    expect(embedScript).toContain('HOST_REQUIREMENT="identifier \\"${HOST_IDENTIFIER}\\" and anchor apple generic and certificate leaf[subject.OU] = \\"${TEAM}\\""');
+    expect(embedScript).not.toMatch(/codesign[^\n]*--deep[^\n]*--sign/);
+  });
+
+  test("release.ts verifies the host it ships: team + timestamp, checkSignedBrowserHost, its stated requirement satisfied", () => {
+    expect(source).toContain("const browserHostPath = browserHostExecutable(computerHelperApp);");
+    expect(source).toContain('assertSigned(browserHostPath, "winter-browser-host");');
+    expect(source).toContain('checkSignedBrowserHost("dist", TEAM_ID, {');
+    expect(source).toMatch(/codesign --verify --strict -R='\$\{stated\}' "\$\{browserHostPath\}"/);
   });
 
   test("the identity scan covers it whole: release.ts refuses any exclusion reaching into Contents/Helpers", () => {

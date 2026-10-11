@@ -2,8 +2,12 @@
  * ComputerV2 — build and sign the DEV Winter Computer Use helper ("Winter Computer Use Dev",
  * com.winter.computeruse.dev) into `dist/dev/`, and register it with LaunchServices.
  *
- *   bun run dev:helper                  build, sign, register
+ *   bun run dev:helper                  build, sign, register, and write the dev Winter for Chrome host manifests
  *   bun run dev:helper --no-register    build and sign only (nothing touches LaunchServices)
+ *   bun run dev:helper --no-manifests   leave the browsers' NativeMessagingHosts alone
+ *   bun run dev:helper --out <dir>      build and sign into <dir> instead of dist/dev (implies --no-register and
+ *                                       --no-manifests; the dev helper in dist/dev is never touched — a proof build)
+ *   bun run dev:helper --manifests-root <dir>   write the manifests under <dir> instead of ~/Library/Application Support
  *
  * Why it is signed here, the `scripts/dev-daemon.ts` way: the helper holds its OWN Accessibility and Screen
  * Recording grants, and TCC keys a grant on the app's designated requirement. Xcode's derived requirement
@@ -24,15 +28,24 @@
  *
  * Refuses while a dev helper is running (it names the pid): the running copy would keep serving the old
  * build until its idle quit. The daemon launches it through LaunchServices, never as a child.
+ *
+ * Winter for Chrome: the bundle carries `Contents/MacOS/winter-browser-host`, signed FIRST with its own identity
+ * (`com.winter.browserhost.dev`, the hardened runtime, no entitlements, its stated requirement), then the helper around
+ * it. Once the dev helper is in place, `com.winter.browser.dev.json` — the native-messaging manifest pointing Chrome at
+ * that host for the dev extension id — is written into each Chromium browser's `NativeMessagingHosts/` whose support
+ * directory exists (atomically, only when it differs, never deleting anything).
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WINTER_TEAM_ID } from "../packages/core/src/auth/app-token-acl";
+import { allowedOrigins, EXTENSION_IDS, NATIVE_HOST_NAME } from "../packages/core/src/computer-use/browser/extension/extension-ids";
+import { hostManifest, writeHostManifests } from "../packages/core/src/computer-use/browser/extension/manifest";
 import {
-  checkSignedHelper, HELPER, helperBuildArgs, helperExecutable, helperRequirement, helperSignArgs, builtHelperPath, LSREGISTER, pidsRunning,
-  readHelperVersion, syncHelperVersion, type HelperFlavor,
+  BROWSER_HOST, browserHostExecutable, browserHostSignArgs, checkSignedBrowserHost, checkSignedHelper, HELPER, helperBuildArgs, helperExecutable,
+  helperRequirement, helperSignArgs, builtHelperPath, LSREGISTER, pidsRunning, readHelperVersion, syncHelperVersion, type HelperFlavor,
 } from "./computer-helper-lib";
 import { resolveDevSigningIdentity } from "./dev-daemon-lib";
 
@@ -90,8 +103,13 @@ export function buildHelper(flavor: "dev" | "test", log: (line: string) => void)
   return product;
 }
 
-/** Signs `appPath` as `flavor` and returns the check failures (empty = good). */
+/** Signs `appPath` as `flavor` — the nested winter-browser-host first, with its own identity, then the helper around it
+ *  (never `--deep`) — and returns the check failures (empty = good). */
 export function signHelper(appPath: string, flavor: HelperFlavor, identityHash: string): string[] {
+  const host = browserHostExecutable(appPath);
+  if (!existsSync(host)) return [`no winter-browser-host at ${host} — the WinterBrowserHost target did not build into the helper`];
+  const hostSigned = run("codesign", browserHostSignArgs({ identityHash, flavor, teamId: WINTER_TEAM_ID, path: host }));
+  if (hostSigned.status !== 0) return [`codesign of winter-browser-host failed: ${hostSigned.stderr.trim()}`];
   const signed = run("codesign", helperSignArgs({ identityHash, flavor, teamId: WINTER_TEAM_ID, appPath }));
   if (signed.status !== 0) return [`codesign failed: ${signed.stderr.trim()}`];
   return inspectHelper(appPath, flavor);
@@ -112,17 +130,55 @@ export function inspectHelper(appPath: string, flavor: HelperFlavor): string[] {
   });
   const strict = run("codesign", ["--verify", "--deep", "--strict", `-R=${helperRequirement(HELPER[flavor].identifier, WINTER_TEAM_ID)}`, appPath]);
   if (strict.status !== 0) failures.push(`codesign --verify --deep --strict against the stated requirement failed: ${strict.stderr.trim()}`);
+  failures.push(...inspectBrowserHost(appPath, flavor));
   return failures;
+}
+
+/** The nested winter-browser-host's signature checks (its own identifier, team, runtime, stated requirement, no
+ *  entitlements, test hooks only in the test flavor) plus a strict verify against its stated requirement. */
+export function inspectBrowserHost(appPath: string, flavor: HelperFlavor): string[] {
+  const host = browserHostExecutable(appPath);
+  if (!existsSync(host)) return [`no winter-browser-host at ${host}`];
+  const dr = run("codesign", ["-d", "-r-", host]);
+  const failures = checkSignedBrowserHost(flavor, WINTER_TEAM_ID, {
+    codesignDvv: run("codesign", ["-dvv", host]).stderr,
+    codesignDr: `${dr.stdout}\n${dr.stderr}`,
+    entitlementsXml: run("codesign", ["-d", "--entitlements", "-", "--xml", host]).stdout,
+    executable: readFileSync(host),
+  });
+  const strict = run("codesign", ["--verify", "--strict", `-R=${helperRequirement(BROWSER_HOST[flavor].identifier, WINTER_TEAM_ID)}`, host]);
+  if (strict.status !== 0) failures.push(`winter-browser-host does not satisfy its stated requirement: ${strict.stderr.trim()}`);
+  return failures;
+}
+
+/** Writes `com.winter.browser.dev.json`, pointing at the dev helper's host, into every Chromium browser's
+ *  NativeMessagingHosts under `supportRoot` whose support directory exists. Returns one line per browser written. */
+export function writeDevHostManifests(appPath: string, supportRoot: string): string[] {
+  const manifest = hostManifest({ name: NATIVE_HOST_NAME.dev, path: browserHostExecutable(appPath), allowedOrigins: allowedOrigins(EXTENSION_IDS.dev) });
+  return writeHostManifests(supportRoot, manifest).filter((o) => o.outcome !== "skipped").map((o) => `${o.dir}: ${o.outcome}`);
 }
 
 function main(): void {
   if (process.platform !== "darwin") die("the helper is macOS-only");
   const argv = process.argv.slice(2);
-  const unknown = argv.filter((a) => a !== "--no-register");
-  if (unknown.length > 0) die(`unknown argument ${unknown[0]} (only --no-register)`);
-  const register = !argv.includes("--no-register");
+  const valueOf = (flag: string): string | undefined => {
+    const i = argv.indexOf(flag);
+    if (i < 0) return undefined;
+    const v = argv[i + 1];
+    if (v === undefined || v.startsWith("--")) die(`${flag} needs a directory`);
+    return v;
+  };
+  const outDir = valueOf("--out");
+  const manifestsRoot = valueOf("--manifests-root");
+  const known = new Set(["--no-register", "--no-manifests", "--out", "--manifests-root", outDir, manifestsRoot]);
+  const unknown = argv.filter((a) => !known.has(a));
+  if (unknown.length > 0) die(`unknown argument ${unknown[0]} (only --no-register, --no-manifests, --out <dir>, --manifests-root <dir>)`);
+  // A proof build elsewhere never registers anything and never points a browser at itself.
+  const target = outDir === undefined ? DEV_HELPER_APP : join(resolve(outDir), `${HELPER.dev.name}.app`);
+  const register = outDir === undefined && !argv.includes("--no-register");
+  const manifests = (outDir === undefined || manifestsRoot !== undefined) && !argv.includes("--no-manifests");
 
-  const running = pidsRunning(run("ps", ["-axo", "pid=,command="]).stdout, helperExecutable(DEV_HELPER_APP, "dev"));
+  const running = pidsRunning(run("ps", ["-axo", "pid=,command="]).stdout, helperExecutable(target, "dev"));
   if (running.length > 0) die(`the dev helper is running (pid ${running.join(", ")}) — quit it first (kill ${running.join(" ")}); it relaunches on the next ComputerV2 call`);
 
   const identity = signingIdentity();
@@ -134,9 +190,9 @@ function main(): void {
     die((err as Error).message);
   }
 
-  mkdirSync(dirname(DEV_HELPER_APP), { recursive: true });
-  const tmp = join(dirname(DEV_HELPER_APP), `.${HELPER.dev.name}.${process.pid}.tmp.app`);
-  const old = join(dirname(DEV_HELPER_APP), `.${HELPER.dev.name}.${process.pid}.old.app`);
+  mkdirSync(dirname(target), { recursive: true });
+  const tmp = join(dirname(target), `.${HELPER.dev.name}.${process.pid}.tmp.app`);
+  const old = join(dirname(target), `.${HELPER.dev.name}.${process.pid}.old.app`);
   let failure: string | undefined;
   try {
     rmSync(tmp, { recursive: true, force: true });
@@ -146,11 +202,11 @@ function main(): void {
     if (failures.length > 0) throw new Error(`the signed helper is not what TCC and the daemon need:\n  ${failures.join("\n  ")}`);
     // Swap in: the old bundle aside, the new one in, the old one gone — never a moment with a half-copied
     // bundle at the registered path.
-    if (existsSync(DEV_HELPER_APP)) {
-      run(LSREGISTER, ["-u", DEV_HELPER_APP]);
-      renameSync(DEV_HELPER_APP, old);
+    if (existsSync(target)) {
+      if (register) run(LSREGISTER, ["-u", target]);
+      renameSync(target, old);
     }
-    renameSync(tmp, DEV_HELPER_APP);
+    renameSync(tmp, target);
     rmSync(old, { recursive: true, force: true });
   } catch (err) {
     failure = (err as Error).message;
@@ -160,13 +216,21 @@ function main(): void {
   if (failure !== undefined) die(failure);
 
   if (register) {
-    const registered = run(LSREGISTER, ["-f", DEV_HELPER_APP]);
+    const registered = run(LSREGISTER, ["-f", target]);
     if (registered.status !== 0) die(`lsregister -f failed: ${registered.stderr.trim()}`);
   }
   console.error(
-    `dev:helper: ${DEV_HELPER_APP} — ${HELPER.dev.identifier}, team ${WINTER_TEAM_ID}, designated => ${helperRequirement(HELPER.dev.identifier, WINTER_TEAM_ID)}` +
-      (register ? "; registered with LaunchServices" : "; NOT registered (--no-register)"),
+    `dev:helper: ${target} — ${HELPER.dev.identifier}, team ${WINTER_TEAM_ID}, designated => ${helperRequirement(HELPER.dev.identifier, WINTER_TEAM_ID)}` +
+      (register ? "; registered with LaunchServices" : "; NOT registered") +
+      `; winter-browser-host => ${helperRequirement(BROWSER_HOST.dev.identifier, WINTER_TEAM_ID)}`,
   );
+  if (manifests) {
+    const root = manifestsRoot === undefined ? join(homedir(), "Library", "Application Support") : resolve(manifestsRoot);
+    const written = writeDevHostManifests(target, root);
+    console.error(`dev:helper: Winter for Chrome host manifest ${NATIVE_HOST_NAME.dev}.json under ${root}: ${written.length === 0 ? "no Chromium browser found" : written.join(", ")}`);
+  } else {
+    console.error("dev:helper: Winter for Chrome host manifests NOT written");
+  }
 }
 
 if (import.meta.main) main();

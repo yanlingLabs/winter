@@ -359,7 +359,9 @@ final class HtmlToTextScanTests: XCTestCase {
             doc += #"<a name="s\#(i)">Section \#(i)</a><li x>item<br><p>text</p>"#
             i += 1
         }
-        let budget = Duration.seconds(4) // 3x the measured 1.355 s
+        // Measured 1.355 s here; a shared CI runner took ~5 s. A quadratic regression on 5 MB takes minutes, so 15 s still
+        // catches it without failing on a slow runner.
+        let budget = Duration.seconds(15)
         for (what, body) in [("cleaner", { _ = htmlToText(doc) }), ("extractTitle", { _ = extractTitle(doc) })]
             as [(String, () -> Void)] {
             let started = ContinuousClock.now

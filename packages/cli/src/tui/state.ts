@@ -97,7 +97,9 @@ export type PendingCard =
   // daemon's allow-rule choices (Task 5's `approvalOptionsFor`). Same omit-when-absent discipline:
   // a reviewer-escalation/grant/worktree card or an older daemon carries none, and the card renders
   // exactly as before this field existed (pending-cards.tsx's (d1a) byte-identical pin).
-  | { kind: "approval"; callId: string; toolName: string; summary: string; reviewerReason?: string; options?: ApprovalOption[] }
+  // expiresAt/onTimeout (ComputerV2's desktop-switch prompt, 2026-10-10): a card that DEFAULT-ALLOWS at
+  // `expiresAt` (`onTimeout: "allow"`) — the card shows its countdown. Omitted on every other card.
+  | { kind: "approval"; callId: string; toolName: string; summary: string; reviewerReason?: string; options?: ApprovalOption[]; expiresAt?: number; onTimeout?: "allow" }
   | { kind: "question"; callId: string; questions: unknown[] }
   | { kind: "plan"; callId: string; plan: string }
   // WS-27: an MCP server's URL-mode elicitation. The link itself is never here — only its host; the
@@ -543,6 +545,7 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
           summary: str(e.summary),
           ...(reviewerReason !== undefined ? { reviewerReason } : {}),
           ...(options !== undefined ? { options } : {}),
+          ...(e.onTimeout === "allow" && typeof e.expiresAt === "number" ? { expiresAt: e.expiresAt, onTimeout: "allow" as const } : {}),
         }),
       };
     }
@@ -550,7 +553,7 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
     case "approval_resolved": {
       const held = heldCard(s, `call:${str(e.callId)}`);
       const toolName = held?.kind === "approval" ? held.toolName : str(e.callId);
-      const text = `${e.approved ? "approved" : "denied"} ${toolName}`;
+      const text = approvalResolvedNote(toolName, e.approved === true, str(e.by));
       // task-5: the release half of approval_requested's roster feed above — the child is off the
       // human's hook and its silence is measurable again from here.
       const fed = feedAgents(s, e);
@@ -856,4 +859,13 @@ export function statusChromeModel(input: StatusChromeInput): { lines: StatusLine
 
   lines.push({ key: "status", sep: " · ", segments });
   return { lines };
+}
+
+/** The transcript note for an `approval_resolved`: "approved X" / "denied X" — and, for ComputerV2's default-allow
+ *  desktop-switch card, what actually happened when nobody answered (`by: "timeout"` with `approved: true` is NOT a
+ *  person's approval), or that the answer came from the helper's on-screen prompt. */
+export function approvalResolvedNote(toolName: string, approved: boolean, by: string): string {
+  if (by === "timeout" && approved) return `allowed ${toolName} — no answer in time`;
+  const where = by === "desktop-prompt" ? " (on the on-screen prompt)" : "";
+  return `${approved ? "approved" : "denied"} ${toolName}${where}`;
 }

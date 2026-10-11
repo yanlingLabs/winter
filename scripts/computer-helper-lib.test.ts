@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  BROWSER_HOST,
+  BROWSER_HOST_TEST_HOOK_MARKERS,
+  browserHostExecutable,
+  browserHostSignArgs,
   builtHelperPath,
+  checkSignedBrowserHost,
   checkSignedHelper,
   DAEMON_IDENTIFIER,
   HELPER,
@@ -23,6 +28,7 @@ import {
   stampHelperProjectYml,
   syncHelperVersion,
   type SignedHelperFacts,
+  type SignedHostFacts,
 } from "./computer-helper-lib";
 import { HELPER_PROTOCOL } from "../packages/core/src/computer-use/protocol";
 
@@ -140,6 +146,61 @@ describe("checkSignedHelper", () => {
     expect(checkSignedHelper("dist", TEAM, "0.124.0", good("dist", { executable: new TextEncoder().encode(`${HELPER_TEST_HOOK_MARKER}IDLE_SECONDS`) })).join()).toContain("contains test hooks");
     expect(checkSignedHelper("dev", TEAM, "0.124.0", good("dev", { executable: new TextEncoder().encode(`${HELPER_TEST_HOOK_MARKER}IDLE_SECONDS`) })).join()).toContain("contains test hooks");
     expect(checkSignedHelper("test", TEAM, "0.124.0", good("test", { executable: new TextEncoder().encode("clean") })).join()).toContain("no test hooks compiled in");
+  });
+});
+
+describe("winter-browser-host (nested in the helper)", () => {
+  const good = (flavor: "dist" | "dev" | "test", over: Partial<SignedHostFacts> = {}): SignedHostFacts => ({
+    codesignDvv: `Executable=/x\nIdentifier=${BROWSER_HOST[flavor].identifier}\nCodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1+3 location=embedded\nTeamIdentifier=${TEAM}\n`,
+    codesignDr: `Executable=/x\ndesignated => ${helperRequirement(BROWSER_HOST[flavor].identifier, TEAM)}\n`,
+    entitlementsXml: "",
+    executable: new TextEncoder().encode(flavor === "test" ? "...WINTER_BROWSER_HOST_HOME...WINTER_CU_TEST_DAEMON_REQUIREMENT..." : "...nothing..."),
+    ...over,
+  });
+
+  test("its identities, its place in the bundle and how it is signed", () => {
+    expect(BROWSER_HOST).toEqual({ dist: { identifier: "com.winter.browserhost" }, dev: { identifier: "com.winter.browserhost.dev" }, test: { identifier: "com.winter.browserhost.test" } });
+    expect(browserHostExecutable("/x/Winter Computer Use Dev.app")).toBe("/x/Winter Computer Use Dev.app/Contents/MacOS/winter-browser-host");
+    expect(browserHostSignArgs({ identityHash: "H", flavor: "dev", teamId: TEAM, path: "/x/h" })).toEqual([
+      "--force", "--sign", "H", "--identifier", "com.winter.browserhost.dev", "--options", "runtime", "--timestamp=none",
+      `-r=designated => identifier "com.winter.browserhost.dev" and anchor apple generic and certificate leaf[subject.OU] = "${TEAM}"`, "/x/h",
+    ]);
+    expect(browserHostSignArgs({ identityHash: "H", flavor: "dev", teamId: TEAM, path: "/x/h" }).join(" ")).not.toContain("--entitlements");
+  });
+
+  test("a correctly signed host passes, for every flavor", () => {
+    for (const flavor of ["dist", "dev", "test"] as const) expect(checkSignedBrowserHost(flavor, TEAM, good(flavor))).toEqual([]);
+  });
+
+  test("the wrong identifier (the helper's, from a --deep re-sign), team, no runtime, a derived requirement or any entitlement fail", () => {
+    const f = checkSignedBrowserHost("dist", TEAM, good("dist", {
+      codesignDvv: "Identifier=com.winter.computeruse\nCodeDirectory v=1 size=1 flags=0x2(adhoc) hashes=1\nTeamIdentifier=not set\n",
+      codesignDr: `designated => identifier "com.winter.browserhost" and anchor apple generic and certificate leaf[subject.CN] = "Someone"\n`,
+      entitlementsXml: "<plist><dict><key>com.apple.security.automation.apple-events</key><true/></dict></plist>",
+    })).join("\n");
+    for (const needle of ["codesign identifier", "TeamIdentifier", "hardened runtime", "designated requirement", "carries entitlements"]) expect(f).toContain(needle);
+  });
+
+  test("test hooks: required in the test flavor, refused in dev and dist — by either variable's name", () => {
+    expect(BROWSER_HOST_TEST_HOOK_MARKERS).toEqual(["WINTER_CU_TEST_", "WINTER_BROWSER_HOST_HOME"]);
+    for (const marker of ["WINTER_BROWSER_HOST_HOME", "WINTER_CU_TEST_DAEMON_REQUIREMENT"]) {
+      expect(checkSignedBrowserHost("dist", TEAM, good("dist", { executable: new TextEncoder().encode(marker) })).join()).toContain("contains test hooks");
+      expect(checkSignedBrowserHost("dev", TEAM, good("dev", { executable: new TextEncoder().encode(marker) })).join()).toContain("contains test hooks");
+    }
+    expect(checkSignedBrowserHost("test", TEAM, good("test", { executable: new TextEncoder().encode("clean") })).join()).toContain("no test hooks compiled in");
+  });
+
+  test("the hooks live only in the tool's main.swift, under the test-build condition; the library names neither variable", () => {
+    const host = join(REPO_ROOT, "apple", "ComputerUse", "WinterBrowserHost");
+    const main = readFileSync(join(host, "Tool", "main.swift"), "utf8");
+    const guarded = main.slice(main.indexOf("#if WINTER_CU_TEST_BUILD"), main.indexOf("#else"));
+    for (const name of ["WINTER_BROWSER_HOST_HOME", "WINTER_CU_TEST_DAEMON_REQUIREMENT"]) expect(guarded).toContain(name);
+    expect(main.slice(main.indexOf("#else"))).not.toContain("WINTER_");
+    const lib = join(host, "Sources", "WinterBrowserHostCore");
+    for (const file of readdirSync(lib)) {
+      const text = readFileSync(join(lib, file), "utf8");
+      for (const m of BROWSER_HOST_TEST_HOOK_MARKERS) expect({ file, m, found: text.includes(m) }).toEqual({ file, m, found: false });
+    }
   });
 });
 

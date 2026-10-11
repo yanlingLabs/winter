@@ -113,10 +113,15 @@ public struct CUBoundApp: Codable, Sendable, Equatable {
     public var name: String
     public var bundleId: String
     public var pid: Int32
-    public init(name: String, bundleId: String, pid: Int32) {
+    /// helper 1.8.0, on `target.bind`: the running bundle's path and its `CFBundleShortVersionString`.
+    public var path: String?
+    public var version: String?
+    public init(name: String, bundleId: String, pid: Int32, path: String? = nil, version: String? = nil) {
         self.name = name
         self.bundleId = bundleId
         self.pid = pid
+        self.path = path
+        self.version = version
     }
 }
 public struct CUWindowInfo: Codable, Sendable, Equatable {
@@ -136,11 +141,16 @@ public struct TargetBindResult: Codable, Sendable, Equatable {
     /// What the bind had to do to get a usable window (bound one on another Space in place, moved one here,
     /// opened a new one), for the model; absent when it simply bound a window on this desktop.
     public var detail: String?
-    public init(targetId: String, app: CUBoundApp, window: CUWindowInfo, detail: String? = nil) {
+    /// The window holds web content (an `AXWebArea`: Safari, WKWebView apps, Chrome and the Chromium family): its pages
+    /// take no hover from a pointer that is not the real one while the app is in the background (measured for both
+    /// engines) — the daemon says so once per session per app (1.9.8).
+    public var webContent: Bool?
+    public init(targetId: String, app: CUBoundApp, window: CUWindowInfo, detail: String? = nil, webContent: Bool? = nil) {
         self.targetId = targetId
         self.app = app
         self.window = window
         self.detail = detail
+        self.webContent = webContent
     }
 }
 
@@ -155,9 +165,12 @@ public struct TargetUseWindowParams: Codable, Sendable, Equatable {
 public struct TargetUseWindowResult: Codable, Sendable, Equatable {
     public var window: CUWindowInfo
     public var detail: String?
-    public init(window: CUWindowInfo, detail: String? = nil) {
+    /// As `TargetBindResult.webContent` (1.9.8).
+    public var webContent: Bool?
+    public init(window: CUWindowInfo, detail: String? = nil, webContent: Bool? = nil) {
         self.window = window
         self.detail = detail
+        self.webContent = webContent
     }
 }
 
@@ -238,9 +251,12 @@ public struct TargetSnapshotResult: Codable, Sendable, Equatable {
 public struct TargetFindParams: Codable, Sendable, Equatable {
     public var targetId: String
     public var query: CUFindQuery
-    public init(targetId: String, query: CUFindQuery) {
+    /// Optional extension (see `TargetSnapshotParams.callId`): a cancel reaches a window watched through a transition.
+    public var callId: String?
+    public init(targetId: String, query: CUFindQuery, callId: String? = nil) {
         self.targetId = targetId
         self.query = query
+        self.callId = callId
     }
 }
 public struct CUElementSummary: Codable, Sendable, Equatable {
@@ -276,7 +292,12 @@ public struct CUImageBudget: Codable, Sendable, Equatable {
     public var tile: Int?
     public var maxTiles: Int?
     public var quality: Double
-    public init(maxLongEdge: Int, tile: Int? = nil, maxTiles: Int? = nil, quality: Double) {
+    /// When the encoded JPEG is over this many bytes, the SAME captured image is encoded again at the next lower
+    /// quality (0.8, 0.6, 0.45, 0.3 — only those below `quality`) and the first that fits is returned, else the
+    /// last: a picture is captured once (a visited live shot is never taken again for size).
+    public var maxBytes: Int?
+    public init(maxLongEdge: Int, tile: Int? = nil, maxTiles: Int? = nil, quality: Double, maxBytes: Int? = nil) {
+        self.maxBytes = maxBytes
         self.maxLongEdge = maxLongEdge
         self.tile = tile
         self.maxTiles = maxTiles
@@ -292,15 +313,73 @@ public struct TargetScreenshotParams: Codable, Sendable, Equatable {
     public var settle: CUSettleOption?
     /// Optional extension (see `TargetSnapshotParams.callId`).
     public var callId: String?
+    /// The model needs what is on screen NOW. A window on screen is captured as ever; a window on another
+    /// desktop is taken from the window server first, and returned when that picture is known live (it changed
+    /// since the last one); otherwise it needs a moment on its desktop (`needs_desktop_visit`, `why: "live"`).
+    public var live: Bool?
+    /// The user allowed a brief visit to the window's desktop for this (the daemon's desktop-switch prompt).
+    public var desktopVisit: Bool?
+    /// With `desktopVisit`: how long that visit may last (the primitive's own deadline) — the guardian's visit mode
+    /// lasts that long, clamped to 10…330 s (absent: 10 s).
+    public var visitMaxMs: Int?
     public init(targetId: String, region: [Double]? = nil, budget: CUImageBudget, settle: CUSettleOption? = nil,
-                callId: String? = nil) {
+                callId: String? = nil, live: Bool? = nil, desktopVisit: Bool? = nil, visitMaxMs: Int? = nil) {
+        self.visitMaxMs = visitMaxMs
         self.targetId = targetId
         self.region = region
         self.budget = budget
         self.settle = settle
         self.callId = callId
+        self.live = live
+        self.desktopVisit = desktopVisit
     }
 }
+
+/// One CLOSED desktop visit (user ruling 2026-10-10, 5d): the user was taken to a window's desktop for a stretch of
+/// work — every primitive that needed it — and brought back after the last one. `visit.close` returns each once,
+/// and the `desktopVisited` notification announces it.
+public struct CUVisitReport: Codable, Sendable, Equatable {
+    /// A helper-unique id ("v<N>").
+    public var visitId: String
+    /// The target whose window the visit was opened for.
+    public var targetId: String
+    public var app: String
+    /// What opened it: "act" | "live".
+    public var why: String
+    /// How many primitives ran in it.
+    public var actions: Int
+    /// How long the user was away (from the switch to back, or to the end).
+    public var ms: Int
+    public var returned: Bool
+    /// The user moved somewhere of their own during it: left there, never fought.
+    public var userMoved: Bool?
+    /// Said when the user is not back.
+    public var detail: String?
+    public init(visitId: String, targetId: String, app: String, why: String, actions: Int, ms: Int, returned: Bool,
+                userMoved: Bool? = nil, detail: String? = nil) {
+        self.visitId = visitId
+        self.targetId = targetId
+        self.app = app
+        self.why = why
+        self.actions = actions
+        self.ms = ms
+        self.returned = returned
+        self.userMoved = userMoved
+        self.detail = detail
+    }
+}
+
+/// `visit.close`: the session's open visit is closed (the user returned) and every closed, unclaimed report of the
+/// session comes back once.
+public struct VisitCloseParams: Codable, Sendable, Equatable {
+    public var sessionId: String
+    public init(sessionId: String) { self.sessionId = sessionId }
+}
+public struct VisitCloseResult: Codable, Sendable, Equatable {
+    public var visits: [CUVisitReport]
+    public init(visits: [CUVisitReport]) { self.visits = visits }
+}
+
 public struct TargetScreenshotResult: Codable, Sendable, Equatable {
     public var imageBase64: String
     public var mime: String
@@ -314,8 +393,10 @@ public struct TargetScreenshotResult: Codable, Sendable, Equatable {
     public var pointsHeight: Double?
     /// What was done to take it (e.g. the window was moved here from another Space).
     public var detail: String?
+    /// The capture ran inside (or opened) a desktop visit: taken on the window's own desktop.
+    public var inVisit: Bool?
     public init(imageBase64: String, mime: String, width: Int, height: Int, shotId: String, settled: Bool, waitedMs: Int,
-                pointsWidth: Double? = nil, pointsHeight: Double? = nil, detail: String? = nil) {
+                pointsWidth: Double? = nil, pointsHeight: Double? = nil, detail: String? = nil, inVisit: Bool? = nil) {
         self.imageBase64 = imageBase64
         self.mime = mime
         self.width = width
@@ -326,6 +407,7 @@ public struct TargetScreenshotResult: Codable, Sendable, Equatable {
         self.pointsWidth = pointsWidth
         self.pointsHeight = pointsHeight
         self.detail = detail
+        self.inVisit = inVisit
     }
 }
 
@@ -334,13 +416,17 @@ public struct TargetScreenshotResult: Codable, Sendable, Equatable {
 public enum CUAccess: String, Codable, Sendable { case full, click }
 
 /// `target.foreground`: the user agreed (the daemon's card) that the app may come to the front and stay there
-/// until the session's script ends (`script.active` false).
+/// until the session's script ends (`script.active` false) — on the user's own desktop only.
 public struct TargetForegroundParams: Codable, Sendable, Equatable {
     public var targetId: String
-    /// The user answered a card for this (not a session that asks none): a window on another desktop may be
-    /// brought forward, taking the user there. Without it, such a window is not.
+    /// Accepted and IGNORED since helper 1.7.0: a window on another desktop is never held in front (that would
+    /// keep the user there); an act that needs it on screen asks for a brief visit instead (`desktopVisit`).
     public var moveDesktop: Bool?
-    public init(targetId: String, moveDesktop: Bool? = nil) { self.targetId = targetId; self.moveDesktop = moveDesktop }
+    /// Optional extension (see `TargetSnapshotParams.callId`).
+    public var callId: String?
+    public init(targetId: String, moveDesktop: Bool? = nil, callId: String? = nil) {
+        self.targetId = targetId; self.moveDesktop = moveDesktop; self.callId = callId
+    }
 }
 public struct TargetForegroundResult: Codable, Sendable, Equatable {
     /// The app is in front now.
@@ -357,8 +443,16 @@ public struct TargetActParams: Codable, Sendable, Equatable {
     public var access: CUAccess
     public var allowForeground: Bool
     public var privatePath: Bool
+    /// The user allowed a brief visit to the window's desktop for this app (the daemon's desktop-switch prompt).
+    /// The act is still tried in the background first; only when that needs the window on screen and it is on
+    /// another desktop is it done once more inside a visit (the foreground implied there).
+    public var desktopVisit: Bool?
+    /// With `desktopVisit`: how long that visit may last (the act's own deadline, a long type/paste's included) —
+    /// the guardian's visit mode lasts that long, clamped to 10…330 s (absent: 10 s).
+    public var visitMaxMs: Int?
     public init(targetId: String, sessionId: String, callId: String, action: CUAction, access: CUAccess,
-                allowForeground: Bool, privatePath: Bool) {
+                allowForeground: Bool, privatePath: Bool, desktopVisit: Bool? = nil, visitMaxMs: Int? = nil) {
+        self.visitMaxMs = visitMaxMs
         self.targetId = targetId
         self.sessionId = sessionId
         self.callId = callId
@@ -366,6 +460,7 @@ public struct TargetActParams: Codable, Sendable, Equatable {
         self.access = access
         self.allowForeground = allowForeground
         self.privatePath = privatePath
+        self.desktopVisit = desktopVisit
     }
 }
 public struct TargetActResult: Codable, Sendable, Equatable {
@@ -381,8 +476,16 @@ public struct TargetActResult: Codable, Sendable, Equatable {
     public var focusLost: Bool?
     /// The act changed the bound window's page (a link navigated, a tab switched): its title now.
     public var pageNow: String?
+    /// The act ran inside (or opened) a desktop visit: done on the window's own desktop.
+    public var inVisit: Bool?
+    /// What the Focus Guardian did or saw since the last act (helper 1.9.8): the user put back after an app took their
+    /// front, an app that came forward after the agent's action with no input of theirs — said as daemon lines.
+    public var guardian: [String]?
+    /// The apps that came forward after the agent's action with no input of the user's since the last act (a metric).
+    public var viewMovedBy: [String]?
     public init(rung: Int, detail: String? = nil, input: String? = nil, inputUnknown: Bool? = nil,
-                focusNow: String? = nil, focusLost: Bool? = nil, pageNow: String? = nil) {
+                focusNow: String? = nil, focusLost: Bool? = nil, pageNow: String? = nil, inVisit: Bool? = nil,
+                guardian: [String]? = nil, viewMovedBy: [String]? = nil) {
         self.rung = rung
         self.detail = detail
         self.input = input
@@ -390,6 +493,9 @@ public struct TargetActResult: Codable, Sendable, Equatable {
         self.focusNow = focusNow
         self.focusLost = focusLost
         self.pageNow = pageNow
+        self.inVisit = inVisit
+        self.guardian = guardian
+        self.viewMovedBy = viewMovedBy
     }
 }
 
@@ -563,9 +669,12 @@ public struct TargetAppleScriptResult: Codable, Sendable, Equatable {
 public struct TargetScriptingDictionaryParams: Codable, Sendable, Equatable {
     public var targetId: String
     public var search: String?
-    public init(targetId: String, search: String? = nil) {
+    /// Optional extension (see `TargetSnapshotParams.callId`).
+    public var callId: String?
+    public init(targetId: String, search: String? = nil, callId: String? = nil) {
         self.targetId = targetId
         self.search = search
+        self.callId = callId
     }
 }
 
@@ -576,6 +685,89 @@ public struct TargetScriptingDictionaryResult: Codable, Sendable, Equatable {
     public init(scriptable: Bool, text: String? = nil, truncated: Bool? = nil) {
         self.scriptable = scriptable
         self.text = text
+        self.truncated = truncated
+    }
+}
+
+/// `target.scriptingCommands` (helper 1.8.0): the bound app's dictionary COMMANDS, structured, for typed wrappers —
+/// read from its sdef like `target.scriptingDictionary`, never by asking the app.
+public struct TargetScriptingCommandsParams: Codable, Sendable, Equatable {
+    public var targetId: String
+    public var search: String?
+    /// Optional extension (see `TargetSnapshotParams.callId`).
+    public var callId: String?
+    public init(targetId: String, search: String? = nil, callId: String? = nil) {
+        self.targetId = targetId
+        self.search = search
+        self.callId = callId
+    }
+}
+
+public struct ScriptingCommandDirect: Codable, Sendable, Equatable {
+    public var type: String
+    public var optional: Bool
+    public var description: String?
+    public init(type: String, optional: Bool, description: String? = nil) {
+        self.type = type
+        self.optional = optional
+        self.description = description
+    }
+}
+
+public struct ScriptingCommandParam: Codable, Sendable, Equatable {
+    public var name: String
+    public var type: String
+    public var optional: Bool
+    public var description: String?
+    /// The enumerators of an enumeration type (`save options` → yes, no, ask).
+    public var enumerators: [String]?
+    public init(name: String, type: String, optional: Bool, description: String? = nil, enumerators: [String]? = nil) {
+        self.name = name
+        self.type = type
+        self.optional = optional
+        self.description = description
+        self.enumerators = enumerators
+    }
+}
+
+public struct ScriptingCommandResultType: Codable, Sendable, Equatable {
+    public var type: String
+    public init(type: String) { self.type = type }
+}
+
+public struct ScriptingCommandInfo: Codable, Sendable, Equatable {
+    public var name: String
+    public var suite: String
+    /// The 8-character Apple Event code (`aevtodoc`).
+    public var eventCode: String
+    /// At most 200 characters.
+    public var description: String?
+    public var direct: ScriptingCommandDirect?
+    public var params: [ScriptingCommandParam]
+    public var result: ScriptingCommandResultType?
+    public init(name: String, suite: String, eventCode: String, description: String? = nil, direct: ScriptingCommandDirect? = nil,
+                params: [ScriptingCommandParam], result: ScriptingCommandResultType? = nil) {
+        self.name = name
+        self.suite = suite
+        self.eventCode = eventCode
+        self.description = description
+        self.direct = direct
+        self.params = params
+        self.result = result
+    }
+}
+
+public struct TargetScriptingCommandsResult: Codable, Sendable, Equatable {
+    public var scriptable: Bool
+    /// The app's `CFBundleVersion` (clients cache what they make of the list by it).
+    public var bundleVersion: String?
+    /// At most 300; hidden ones, hidden suites and the helper's refused doors left out.
+    public var commands: [ScriptingCommandInfo]
+    public var truncated: Bool?
+    public init(scriptable: Bool, bundleVersion: String? = nil, commands: [ScriptingCommandInfo] = [], truncated: Bool? = nil) {
+        self.scriptable = scriptable
+        self.bundleVersion = bundleVersion
+        self.commands = commands
         self.truncated = truncated
     }
 }

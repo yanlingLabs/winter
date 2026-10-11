@@ -50,6 +50,25 @@ public enum CUCaptureBudget {
         return out
     }
 
+    /// The qualities a picture over the caller's `maxBytes` is encoded at again, in order — only those below the
+    /// quality asked for. Pure.
+    public static func maxBytesLadder(below quality: Double) -> [Double] {
+        [0.8, 0.6, 0.45, 0.3].filter { $0 < quality - 1e-9 }
+    }
+
+    /// `first` (encoded at `quality`) when it fits `maxBytes`; else the same picture re-encoded down the ladder —
+    /// the first that fits, else the last that could be encoded (or `first` when none could). Pure.
+    public static func fitMaxBytes(_ first: Data, quality: Double, maxBytes: Int, encode: (Double) -> Data?) -> Data {
+        guard first.count > maxBytes else { return first }
+        var last = first
+        for q in maxBytesLadder(below: quality) {
+            guard let d = encode(q) else { continue }
+            last = d
+            if d.count <= maxBytes { return d }
+        }
+        return last
+    }
+
     /// Encodes with `encode(width, height, quality) -> bytes`, stepping quality and then size down until the
     /// result fits `byteCap`. Returns the bytes and the final size; nil when the encoder fails.
     public static func encodeWithinCap(

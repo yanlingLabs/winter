@@ -396,9 +396,15 @@ describe("robustness", () => {
     ];
     for (const input of inputs) {
       readOnly(input);
-      const start = performance.now();
-      readOnly(input);
-      expect(performance.now() - start).toBeLessThan(25);
+      // The best of three: a super-linear check is slow EVERY time (the regressions took 15-120 ms), while a loaded CI
+      // runner's scheduler only stretches the odd run (one took 49 ms).
+      let best = Infinity;
+      for (let i = 0; i < 3; i++) {
+        const start = performance.now();
+        readOnly(input);
+        best = Math.min(best, performance.now() - start);
+      }
+      expect(best).toBeLessThan(25);
     }
   });
 });

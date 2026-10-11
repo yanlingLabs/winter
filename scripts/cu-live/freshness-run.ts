@@ -38,9 +38,19 @@ export interface FreshDeps {
   monitor(): readonly MonitorSample[];
   baseline: FocusBaseline;
   abortIfInput(): void;
+  /**
+   * Runs `fn` with the runner's stop checks suspended: a measurement's own cleanup (stop the Fresh window, quit the
+   * Safari it launched, restore the preferences it changed, return the user) must finish even while the run is being
+   * stopped (a signal, real input, a lock). Default: just runs it.
+   */
+  shield?<T>(fn: () => Promise<T>): Promise<T>;
+  /** Whether `err` is the run being stopped (an abort): the measurement cleans up, then rethrows it instead of reporting a failed variant. Default: never. */
+  isAbort?(err: unknown): boolean;
   /** Injectable for tests (default: real time). */
   sleep?(ms: number): Promise<void>;
 }
+
+const shielded = <T>(d: FreshDeps, fn: () => Promise<T>): Promise<T> => (d.shield === undefined ? fn() : d.shield(fn));
 
 export interface VariantResult {
   variant: string;
@@ -165,11 +175,14 @@ export async function measureFixtureVariant(d: FreshDeps, variant: string, occlu
       occlusion: d.events().filter((e) => e.ev === "fresh.occlusion" && e.t >= since).map((e) => ({ t: e.t, visible: e.visible === true })),
     };
   } catch (err) {
+    if (d.isAbort?.(err) === true) throw err;   // the run is being stopped: the finally cleans up, the runner reports it
     return { ...base, error: err instanceof Error ? err.message : String(err) };
   } finally {
-    await d.post("freshStop", {}, 20_000).catch(() => undefined);
-    await (d.sleep ?? sleep)(800);
-    await d.returnUser().catch(() => undefined);
+    await shielded(d, async () => {
+      await d.post("freshStop", {}, 20_000).catch(() => undefined);
+      await (d.sleep ?? sleep)(800);
+      await d.returnUser().catch(() => undefined);
+    });
   }
 }
 
@@ -206,6 +219,8 @@ export async function measureSafari(d: FreshDeps, variant: string): Promise<Vari
   let windowId: number | undefined;
   let fullScreen = false;
   let result: VariantResult;
+  /** The run being stopped: the cleanup below still runs (shielded), then it is rethrown. */
+  let stopped: unknown;
   // Only a Safari of the test's own: a running Safari holds the user's windows, and neither a URL handed in from
   // outside (it tabs into their last active window) nor a quit (a relaunch need not bring their windows back — it
   // did not on the dev Mac, and two runs cost a user's window) may touch them.
@@ -256,44 +271,48 @@ else {
     d.abortIfInput();
     result = { ...base, ok: true, windowId, placement: "full screen (its own button)", ...m, notes: [...base.notes, ...m.notes] };
   } catch (err) {
+    if (d.isAbort?.(err) === true) stopped = err;
     result = { ...base, ...(windowId === undefined ? {} : { windowId }), error: err instanceof Error ? err.message : String(err) };
   }
-  if (windowId !== undefined) {
-    // Out of full screen, then ONLY that window closed — by its own buttons, through the handle that is still bound
-    // to it (`sfFresh`, else a bind of the window, which is on this desktop then). Verified through the app's own
-    // window list (`sfApp`, bound in the first turn): a window left behind fails the variant.
-    const id = windowId;
-    const handle = fullScreen ? "sfFresh" : `(await apps.open("com.apple.Safari", { window: ${id} }))`;
-    let open: boolean | undefined = true;
-    for (let attempt = 1; attempt <= 2 && open !== false; attempt++) {
-      const c = await d.turn(`
-const sfClose = ${attempt === 1 ? handle : `(await apps.open("com.apple.Safari", { window: ${id} }))`};
-${fullScreen ? `// Out of full screen first. A full-screen window's title-bar buttons are not in its tree; the menu item is
-// matched by its EXACT title, so if another window were the one menus act on, the item would read "Enter Full
-// Screen" and this throws instead of acting there.
-const sfFsb = (await sfClose.find({ role: "full screen button" }, { emit: false }))[0];
-try {
-  if (sfFsb) await sfClose.action(sfFsb.ref, "press"); else await sfClose.menu(["View", "Exit Full Screen"]);
-  await sleep(2500);
-} catch (e) { print("exit full screen: " + String(e?.name ?? e) + " " + String(e?.message ?? "").slice(0, 160)); }` : ""}
-const sfBtn = (await sfClose.find({ role: "close button" }, { emit: false }))[0];
-if (sfBtn) { await sfClose.action(sfBtn.ref, "press"); report({ closed: true }); } else report({ closed: false });`).catch((err: unknown) => ({ output: String(err), isError: true, facts: {} as Record<string, unknown> }));
-      await (d.sleep ?? sleep)(1_500);
-      const check = await d.turn(`
-try { report({ open: (await sfApp.windows()).some((w) => w.id === ${id}) }); } catch (e) { report({ checkError: String(e?.name ?? e) }); }`).catch(() => undefined);
-      open = typeof check?.facts.open === "boolean" ? check.facts.open : undefined;
-      d.log(`freshness ${variant}: closing the test's Safari window ${id} (try ${attempt}): ${JSON.stringify(c.facts)}${c.isError ? ` — ${c.output.slice(-200)}` : ""}${/exit full screen: [^\n<]*/.exec(c.output) ? ` (${/exit full screen: [^\n<]*/.exec(c.output)![0]})` : ""}; still in Safari's window list: ${open === undefined ? `unknown (${JSON.stringify(check?.facts ?? {})})` : open}`);
+  await shielded(d, async () => {
+    if (windowId !== undefined) {
+      // Out of full screen, then ONLY that window closed — by its own buttons, through the handle that is still bound
+      // to it (`sfFresh`, else a bind of the window, which is on this desktop then). Verified through the app's own
+      // window list (`sfApp`, bound in the first turn): a window left behind fails the variant.
+      const id = windowId;
+      const handle = fullScreen ? "sfFresh" : `(await apps.open("com.apple.Safari", { window: ${id} }))`;
+      let open: boolean | undefined = true;
+      for (let attempt = 1; attempt <= 2 && open !== false; attempt++) {
+        const c = await d.turn(`
+  const sfClose = ${attempt === 1 ? handle : `(await apps.open("com.apple.Safari", { window: ${id} }))`};
+  ${fullScreen ? `// Out of full screen first. A full-screen window's title-bar buttons are not in its tree; the menu item is
+  // matched by its EXACT title, so if another window were the one menus act on, the item would read "Enter Full
+  // Screen" and this throws instead of acting there.
+  const sfFsb = (await sfClose.find({ role: "full screen button" }, { emit: false }))[0];
+  try {
+    if (sfFsb) await sfClose.action(sfFsb.ref, "press"); else await sfClose.menu(["View", "Exit Full Screen"]);
+    await sleep(2500);
+  } catch (e) { print("exit full screen: " + String(e?.name ?? e) + " " + String(e?.message ?? "").slice(0, 160)); }` : ""}
+  const sfBtn = (await sfClose.find({ role: "close button" }, { emit: false }))[0];
+  if (sfBtn) { await sfClose.action(sfBtn.ref, "press"); report({ closed: true }); } else report({ closed: false });`).catch((err: unknown) => ({ output: String(err), isError: true, facts: {} as Record<string, unknown> }));
+        await (d.sleep ?? sleep)(1_500);
+        const check = await d.turn(`
+  try { report({ open: (await sfApp.windows()).some((w) => w.id === ${id}) }); } catch (e) { report({ checkError: String(e?.name ?? e) }); }`).catch(() => undefined);
+        open = typeof check?.facts.open === "boolean" ? check.facts.open : undefined;
+        d.log(`freshness ${variant}: closing the test's Safari window ${id} (try ${attempt}): ${JSON.stringify(c.facts)}${c.isError ? ` — ${c.output.slice(-200)}` : ""}${/exit full screen: [^\n<]*/.exec(c.output) ? ` (${/exit full screen: [^\n<]*/.exec(c.output)![0]})` : ""}; still in Safari's window list: ${open === undefined ? `unknown (${JSON.stringify(check?.facts ?? {})})` : open}`);
+      }
+      if (open !== false) d.log(`freshness ${variant}: the test's Safari window ${id} did not close by its buttons — quitting the test's Safari takes it`);
+      await d.returnUser().catch(() => undefined);
     }
-    if (open !== false) d.log(`freshness ${variant}: the test's Safari window ${id} did not close by its buttons — quitting the test's Safari takes it`);
-    await d.returnUser().catch(() => undefined);
-  }
-  // The Safari this measurement launched goes with it: every window in it was the test's.
-  await quitSafari(d).catch(() => undefined);
-  if (safariRunning(d)) {
-    const left = "the Safari this measurement launched is still running — quit it by hand";
-    d.log(`freshness ${variant}: ${left}`);
-    result = { ...result, ok: false, error: [result.error, left].filter(Boolean).join("; ") };
-  }
+    // The Safari this measurement launched goes with it: every window in it was the test's.
+    await quitSafari(d).catch(() => undefined);
+    if (safariRunning(d)) {
+      const left = "the Safari this measurement launched is still running — quit it by hand";
+      d.log(`freshness ${variant}: ${left}`);
+      result = { ...result, ok: false, error: [result.error, left].filter(Boolean).join("; ") };
+    }
+  });
+  if (stopped !== undefined) throw stopped;
   return result;
 }
 
@@ -376,18 +395,24 @@ export async function measureSafariWithPrefs(d: FreshDeps, outDir: string, varia
   writeFileSync(safariPrefsBackupPath(outDir), JSON.stringify({ domain, originals, writtenAt: new Date().toISOString() }, null, 2));
   d.log(`Safari's originals recorded (${safariPrefsBackupPath(outDir)}): ${JSON.stringify(originals)}`);
   let result: VariantResult;
+  /** The run being stopped: the restore below still runs (shielded), then it is rethrown. */
+  let stopped: unknown;
   try {
     const failed = runDefaults(d, plan.apply);
     if (failed.length > 0) throw new Error(failed.join("; "));
     result = await measureSafari(d, variant); // launches its own Safari and quits it
     result.notes.push(`with ${SAFARI_PREF_KEYS.join(", ")} = NO`);
   } catch (err) {
+    if (d.isAbort?.(err) === true) stopped = err;
     result = { variant, ok: false, error: err instanceof Error ? err.message : String(err), notes: [], occlusion: [], captures: 0, cells: [] };
   } finally {
-    await quitSafari(d).catch(() => undefined); // the test's own, should measureSafari have left it running
-    const failed = safariRunning(d) ? ["the test's Safari is still running"] : runDefaults(d, plan.restore);
-    if (failed.length === 0) rmSync(safariPrefsBackupPath(outDir), { force: true });
-    else d.log(`!!! Safari's preferences were NOT fully restored (${failed.join("; ")}); the backup stays at ${safariPrefsBackupPath(outDir)} and the next --safari-webkit-prefs run restores it first`);
+    await shielded(d, async () => {
+      await quitSafari(d).catch(() => undefined); // the test's own, should measureSafari have left it running
+      const failed = safariRunning(d) ? ["the test's Safari is still running"] : runDefaults(d, plan.restore);
+      if (failed.length === 0) rmSync(safariPrefsBackupPath(outDir), { force: true });
+      else d.log(`!!! Safari's preferences were NOT fully restored (${failed.join("; ")}); the backup stays at ${safariPrefsBackupPath(outDir)} and the next --safari-webkit-prefs run restores it first`);
+    });
   }
+  if (stopped !== undefined) throw stopped;
   return result!;
 }

@@ -43,6 +43,12 @@ public enum CUAppleScriptPolicy {
         for (phrase, why) in bridges where text.contains(phrase) {
             throw CUError.notAllowed("applescript", "the script was not run: \(why)")
         }
+        // A `javascript:` URL runs JavaScript in a page in ANY browser it is handed to (Safari's `URL of tab`, a
+        // Chromium `URL` …): refused as a literal, the way a browser reads a scheme — case aside, whitespace and control
+        // characters ignored.
+        for literal in strings where isJavaScriptURL(literal) {
+            throw CUError.notAllowed("applescript", "the script was not run: it holds a javascript: URL, which would run JavaScript in a page — read the page with state() or find()")
+        }
         // Every application specifier must be a literal naming the bound app: naming another launches it.
         let pattern = #"\b(?:application|app)\b\s*(id\s+)?(\S+)"#
         let regex = try! NSRegularExpression(pattern: pattern)
@@ -62,6 +68,13 @@ public enum CUAppleScriptPolicy {
                 throw CUError.notAllowed("applescript", "the script was not run: it names \(byId ? "the app id " : "")“\(named)”, but only the bound app, \(bound.name), may be scripted (naming an app launches it)")
             }
         }
+    }
+
+    /// Does this string literal begin with the `javascript:` scheme, read as a browser reads it (case-insensitive, every
+    /// whitespace and control character dropped)?
+    static func isJavaScriptURL(_ literal: String) -> Bool {
+        let kept = literal.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) && !CharacterSet.controlCharacters.contains($0) }
+        return String(String.UnicodeScalarView(kept)).lowercased().hasPrefix("javascript:")
     }
 
     /// Whether a literal names the bound app: its bundle id (for `application id`), else its name (with or
@@ -156,6 +169,10 @@ public enum CUAppleScriptPolicy {
         "aevt/rapp": "`reopen` would bring the app in front of the user's work",
         "aevt/oapp": "`run` would bring the app in front of the user's work",
         "sfri/dojs": "Safari's `do JavaScript` isn't allowed — read the page with state() or find()",
+        // The Chromium family's `execute … javascript` (Chrome's sdef, `CrSuExJa`; Chromium's own dictionary, which
+        // Edge, Brave, Vivaldi and Opera ship too). Any other app's JavaScript door is refused per run, by its
+        // dictionary (`CUScriptingDictionary.javaScriptDoorRefusals`).
+        "CrSu/ExJa": "the browser's `execute … javascript` isn't allowed — read the page with state() or find()",
         "ascr/psbr": "the Objective-C bridge runs Cocoa inside Winter's helper",
     ]
     /// Whole classes refused wherever they go: the rest of Standard Additions, file reads and writes, the
@@ -174,13 +191,19 @@ public enum CUAppleScriptPolicy {
         "ears/ffdr",  // path to
     ]
 
-    /// One event's verdict. `targetPid`: the process it is addressed to (nil when that can't be told).
+    /// Is this event (`"clas/id"`) refused wherever it is sent — one door, or its whole class?
+    public static func refusesEverywhere(_ key: String) -> Bool {
+        refusedAnywhere[key] != nil || refusedClasses[String(key.prefix(4))] != nil
+    }
+
+    /// One event's verdict. `targetPid`: the process it is addressed to (nil when that can't be told). `alsoRefused`:
+    /// this run's own refusals (the bound app's JavaScript doors, read from its dictionary).
     public static func verdict(eventClass: String, eventID: String, targetPid: pid_t?, ownPid: pid_t, boundPid: pid_t,
-                               boundName: String) -> Verdict {
+                               boundName: String, alsoRefused: [String: String] = [:]) -> Verdict {
         let key = "\(eventClass)/\(eventID)"
         guard let targetPid else { return .refuse("an Apple Event (\(key)) whose target app can't be told") }
         let own = targetPid == ownPid
-        if let why = refusedAnywhere[key] { return .refuse("\(why) (\(key))") }
+        if let why = refusedAnywhere[key] ?? alsoRefused[key] { return .refuse("\(why) (\(key))") }
         if own, ownProcessAllowed.contains(key) { return .allow }
         if let what = refusedClasses[eventClass] { return .refuse("\(what) isn't run from Winter's AppleScript (\(key))") }
         if own { return .refuse("an Apple Event to Winter's helper itself (\(key)) — only the language's own helpers run there") }

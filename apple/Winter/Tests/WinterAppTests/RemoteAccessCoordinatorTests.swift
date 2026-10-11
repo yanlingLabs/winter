@@ -22,8 +22,10 @@ final class RemoteAccessCoordinatorTests: XCTestCase {
     }
 
     private func tempStoreDir() -> URL {
-        FileManager.default.temporaryDirectory
+        let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("winter-remote-access-coordinator-tests-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir
     }
 
     /// Seeds a device directly into the SAME on-disk store the scripted `RemoteHost` below will

@@ -51,6 +51,8 @@ final class BrowserLifecycleTests: XCTestCase {
                       pendingStops: [String: Date] = [:],
                       lruOrder: [String] = [],
                       memoryBytesByTab: [String: UInt64] = [:],
+                      held: [String: BrowserHold] = [:],
+                      closing: Set<String> = [],
                       now: Date? = nil) -> [BrowserAction] {
         BrowserLifecycleEngine.plan(sessions: sessions,
                                     tabs: tabs,
@@ -59,6 +61,8 @@ final class BrowserLifecycleTests: XCTestCase {
                                     pendingStops: pendingStops,
                                     lruOrder: lruOrder,
                                     memoryBytesByTab: memoryBytesByTab,
+                                    held: held,
+                                    closing: closing,
                                     now: now ?? t0)
     }
 
@@ -1032,5 +1036,158 @@ final class BrowserLifecycleTests: XCTestCase {
                          tabs: ["a": tabs],
                          sim: Sim(live: ids, lruOrder: tabs.map(\.tabId)),
                          memoryBytesByTab: bytes(ids, nFit: 8))
+    }
+
+    // MARK: - Rule H: the browser link's holds (ComputerV2 Phase 2)
+
+    private func hold(_ session: String, url: String? = nil) -> BrowserHold {
+        BrowserHold(sessionId: session, url: url)
+    }
+
+    /// The headline case: the daemon drives a session this app has never shown. No fold lists the tab,
+    /// no window is open — and the hold alone is enough to create it, at the hold's URL.
+    func test_held_tabInNoListAndNotLive_isCreatedAtTheHoldsURL() {
+        XCTAssertEqual(plan(held: ["t9": hold("s9", url: "https://held")]),
+                       [.create(tabId: "t9", url: "https://held")])
+    }
+
+    /// …and once live it is not the belt's: a hold is the daemon's word that the tab exists.
+    func test_held_tabInNoList_isNotBelted() {
+        XCTAssertEqual(plan(live: ["t9", "ghost"], held: ["t9": hold("s9")]), [.stop(tabId: "ghost")])
+    }
+
+    /// Released (no longer held) and in no list → an orphan again, and the belt takes it.
+    func test_released_tabInNoList_isBeltedAgain() {
+        XCTAssertEqual(plan(live: ["t9"], held: [:]), [.stop(tabId: "t9")])
+    }
+
+    /// The fold's URL is the fallback for a hold that named none; the hold's own beats it.
+    func test_held_createURL_holdBeatsFold() {
+        XCTAssertEqual(plan(sessions: ["s1": sig()], tabs: ["s1": [tab("t1", url: "https://fold")]],
+                            held: ["t1": hold("s1")]),
+                       [.create(tabId: "t1", url: "https://fold")])
+        XCTAssertEqual(plan(sessions: ["s1": sig()], tabs: ["s1": [tab("t1", url: "https://fold")]],
+                            held: ["t1": hold("s1", url: "https://held")]),
+                       [.create(tabId: "t1", url: "https://held")])
+    }
+
+    /// A shown session whose held tab is also its shown tab gets ONE create, the hold's.
+    func test_held_shownTab_isCreatedOnce() {
+        let actions = plan(sessions: ["s1": sig(attachedHere: true)],
+                           tabs: ["s1": [tab("t1", url: "https://fold", shown: true)]],
+                           held: ["t1": hold("s1", url: "https://held")])
+        XCTAssertEqual(actions, [.create(tabId: "t1", url: "https://held"), .attachViewport(tabId: "t1")])
+    }
+
+    /// Held tabs are created in sorted order (rule 10).
+    func test_held_severalCreates_inSortedOrder() {
+        XCTAssertEqual(plan(held: ["zz": hold("s"), "aa": hold("s"), "mm": hold("s")]),
+                       [.create(tabId: "aa", url: nil), .create(tabId: "mm", url: nil), .create(tabId: "zz", url: nil)])
+    }
+
+    /// An archived session's browsers stop at once — except the one a script is driving.
+    func test_held_archivedSession_keepsTheHeldTabStopsTheRest() {
+        let actions = plan(sessions: ["s1": sig(archived: true)],
+                           tabs: ["s1": [tab("t1", shown: true), tab("t2")]],
+                           live: ["t1", "t2"],
+                           held: ["t1": hold("s1")])
+        XCTAssertEqual(actions, [.stop(tabId: "t2")])
+    }
+
+    /// Closing the window does not pull a page out from under a script ("works with no window open").
+    func test_held_windowClose_doesNotStopTheHeldTab() {
+        let actions = plan(sessions: ["s1": sig(attachedHere: true, stopImmediately: true)],
+                           tabs: ["s1": [tab("t1", shown: true)]],
+                           live: ["t1"],
+                           held: ["t1": hold("s1")])
+        XCTAssertEqual(actions, [])
+    }
+
+    /// A quiet session whose only live tab is held arms no linger at all — there is nothing to stop.
+    func test_held_quietSession_onlyHeldLive_armsNoLinger() {
+        XCTAssertEqual(plan(sessions: ["s1": sig()], tabs: ["s1": [tab("t1", shown: true)]],
+                            live: ["t1"], held: ["t1": hold("s1")]),
+                       [])
+    }
+
+    /// The linger expires: the held tab survives it, its unheld sibling does not.
+    func test_held_lingerExpiry_stopsOnlyTheUnheld() {
+        let actions = plan(sessions: ["s1": sig()],
+                           tabs: ["s1": [tab("t1", shown: true), tab("t2")]],
+                           live: ["t1", "t2"],
+                           pendingStops: ["s1": t0.addingTimeInterval(-1)],
+                           held: ["t1": hold("s1")])
+        XCTAssertEqual(actions, [.stop(tabId: "t2"), .cancelScheduledStop(sessionId: "s1")])
+    }
+
+    /// Over the count backstop: least-recently-used goes first — but never a held tab, however old.
+    func test_held_cap_neverEvictsAHeldTab() {
+        let max = BrowserLifecycleEngine.maxLiveBackstop
+        let tabs = (0...max).map { tab("t\($0)") }
+        let ids = Set(tabs.map(\.tabId))
+        let actions = plan(sessions: ["a": sig()],
+                           tabs: ["a": tabs],
+                           live: ids,
+                           pendingStops: ["a": t0.addingTimeInterval(60)],
+                           lruOrder: tabs.map(\.tabId),
+                           held: ["t0": hold("a"), "t1": hold("a")])
+        XCTAssertEqual(actions, [.stop(tabId: "t2")], "one over the backstop: the oldest UNHELD tab goes")
+    }
+
+    /// Holds count against the backstop: a held tab being created is a real renderer.
+    func test_held_createsCountAgainstTheBackstop() {
+        let max = BrowserLifecycleEngine.maxLiveBackstop
+        let tabs = (0..<max).map { tab("t\($0)") }
+        let ids = Set(tabs.map(\.tabId))
+        let actions = plan(sessions: ["a": sig()],
+                           tabs: ["a": tabs],
+                           live: ids,
+                           pendingStops: ["a": t0.addingTimeInterval(60)],
+                           lruOrder: tabs.map(\.tabId),
+                           held: ["h": hold("b")])
+        XCTAssertEqual(actions, [.stop(tabId: "t0"), .create(tabId: "h", url: nil)])
+    }
+
+    func test_idempotent_heldTabInNoList() {
+        assertIdempotentHeld(held: ["t9": hold("s9", url: "https://held")], sim: Sim(live: []))
+    }
+
+    private func assertIdempotentHeld(held: [String: BrowserHold], sim: Sim,
+                                      file: StaticString = #filePath, line: UInt = #line) {
+        var state = sim
+        let first = plan(live: state.live, viewport: state.viewport, pendingStops: state.pendingStops,
+                         lruOrder: state.lruOrder, held: held)
+        XCTAssertFalse(first.isEmpty, file: file, line: line)
+        state.apply(first)
+        let second = plan(live: state.live, viewport: state.viewport, pendingStops: state.pendingStops,
+                          lruOrder: state.lruOrder, held: held)
+        XCTAssertEqual(second, [], file: file, line: line)
+    }
+
+    // MARK: - Rule C: what the browser link closed
+
+    /// `tab.close` on a SHOWN tab of the displayed session: the fold still lists it (the daemon's
+    /// `panel_tab_closed` is a beat behind), yet it is stopped now — detached first — and not created
+    /// again, by rule 8 or 8b, in the meantime.
+    func test_closing_shownTab_isStoppedAndNotRecreated() {
+        let actions = plan(sessions: ["s1": sig(attachedHere: true)],
+                           tabs: ["s1": [tab("t1", shown: true), tab("t2")]],
+                           live: ["t1", "t2"],
+                           viewport: "t1",
+                           closing: ["t1"])
+        XCTAssertEqual(actions, [.detachViewport(tabId: "t1"), .stop(tabId: "t1")])
+
+        let after = plan(sessions: ["s1": sig(attachedHere: true)],
+                         tabs: ["s1": [tab("t1", shown: true), tab("t2")]],
+                         live: ["t2"],
+                         closing: ["t1"])
+        XCTAssertEqual(after, [], "nothing re-creates the closed tab before its close is folded")
+    }
+
+    /// Closing beats holding — the link drops a hold before it closes, so both at once is incoherent,
+    /// and it is decided the safe way.
+    func test_closing_beatsHolding() {
+        XCTAssertEqual(plan(live: ["t1"], held: ["t1": hold("s")], closing: ["t1"]), [.stop(tabId: "t1")])
+        XCTAssertEqual(plan(held: ["t1": hold("s")], closing: ["t1"]), [], "and a closed tab is not created")
     }
 }

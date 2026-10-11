@@ -30,7 +30,7 @@ import { join } from "node:path";
 import type { WinterProfile } from "../profile";
 import { processSatisfiesRequirement } from "./helper-verify";
 import {
-  HELPER_MAX_RESPONSE_LINE, HELPER_PROTOCOL, HelperProtocolMismatchError, HelperRpcError, HelperUnavailableError, helperAppPathFor,
+  HELPER_MAX_RESPONSE_LINE, HELPER_MIN_VERSION, HELPER_PROTOCOL, HelperOutdatedError, HelperProtocolMismatchError, HelperRpcError, HelperUnavailableError, helperAppPathFor, helperVersionAtLeast,
   helperBundleIdFor, helperRequirementFor, helperSocketPath, type HelloResult, type HelperNotification, type HelperPermissions,
   type HelperProtocolMismatch, type StatusResult,
 } from "./protocol";
@@ -64,6 +64,9 @@ export interface HelperClientDeps {
   connectTimeoutMs?: number;
   requestTimeoutMs?: number;
   onNotification?: (n: HelperNotification) => void;
+  /** Ends an OUTDATED helper (older than `HELPER_MIN_VERSION`, verified by its signature first) so its current
+   *  version can start: SIGTERM, on which the helper quits cleanly. Test seam; default `process.kill`. */
+  terminate?: (pid: number) => void;
   /** The connection closed (helper quit or crashed): every target it held is gone. */
   onDisconnect?: () => void;
   log?: (line: string) => void;
@@ -139,6 +142,8 @@ export class HelperClient {
    *  the last attempt (an incompatible helper idle-quits like any other — then it is not running). */
   private lastMismatch: HelperProtocolMismatch | undefined;
   private mismatchedHelperRunning = false;
+  /** The last handshake found a helper older than `HELPER_MIN_VERSION` (its version), until one succeeds. */
+  private lastOutdated: string | undefined;
   private permissionsCache: HelperPermissions | undefined;
   private closedByUs = false;
   private connectionGeneration = 0;
@@ -188,6 +193,41 @@ export class HelperClient {
   }
 
   private async open(launch: boolean): Promise<HelperConnection> {
+    try {
+      return await this.openOnce(launch);
+    } catch (err) {
+      // An OUTDATED helper (still running after an update, or a dev helper not rebuilt) would move desktops without
+      // the prompt: it is ended and the current one launched — once. Still old after that: refused, typed.
+      if (!(err instanceof OutdatedHelper) || !launch || !this.deps.launchAllowed) throw this.outdated(err);
+      this.log(`computer-use: Winter Computer Use ${err.version ?? "(unknown version)"} is older than ${HELPER_MIN_VERSION} — quitting it so its current version starts`);
+      try { (this.deps.terminate ?? ((pid: number) => process.kill(pid, "SIGTERM")))(err.pid); } catch { /* already gone */ }
+      const socketPath = helperSocketPath(this.deps.home);
+      const gone = Date.now() + (this.deps.connectTimeoutMs ?? CONNECT_TIMEOUT_MS);
+      for (;;) {
+        const still = await this.tryConnect(socketPath);
+        if (still === undefined) break;
+        try { still.close(); } catch { /* closed */ }
+        if (Date.now() >= gone) throw new HelperOutdatedError(err.version);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      try {
+        return await this.openOnce(true);
+      } catch (again) {
+        throw this.outdated(again);
+      }
+    }
+  }
+
+  /** The internal "too old" marker becomes the typed refusal (remembered for `status()`), anything else passes. */
+  private outdated(err: unknown): unknown {
+    if (!(err instanceof OutdatedHelper)) return err;
+    const typed = new HelperOutdatedError(err.version);
+    if (this.lastOutdated !== err.version) this.log(`computer-use: ${typed.message}`);
+    this.lastOutdated = err.version ?? "unknown";
+    return typed;
+  }
+
+  private async openOnce(launch: boolean): Promise<HelperConnection> {
     const socketPath = helperSocketPath(this.deps.home);
     let conn = await this.tryConnect(socketPath);
     if (conn === undefined) {
@@ -243,8 +283,14 @@ export class HelperClient {
       this.log(`computer-use: the process on ${helperSocketPath(this.deps.home)} (pid ${hello.pid}) is not a verified Winter Computer Use — connection closed`);
       throw new HelperUnavailableError("the process answering on the computer-use socket is not a verified Winter Computer Use", false);
     }
+    if (!helperVersionAtLeast(hello.helperVersion)) {
+      // Verified as OUR helper (above), but too old to be trusted with the desktop switch.
+      this.drop(conn);
+      throw new OutdatedHelper(typeof hello.helperVersion === "string" ? hello.helperVersion : undefined, hello.pid);
+    }
     this.helperVersion = hello.helperVersion;
     this.lastMismatch = undefined;
+    this.lastOutdated = undefined;
     this.conn = conn;
     this.connectionGeneration++;
     this.closedByUs = false;
@@ -373,6 +419,12 @@ export class HelperClient {
     if (this.conn === undefined) {
       // It answered, in another protocol: unusable until Winter is updated (running while it still answers).
       if (this.lastMismatch !== undefined) return { installed, running: this.mismatchedHelperRunning, protocolMismatch: this.lastMismatch };
+      // Too old (it answered, in our protocol, but predates the desktop-switch prompt): the same "update Winter" state.
+      if (this.lastOutdated !== undefined) {
+        const message = new HelperOutdatedError(this.lastOutdated === "unknown" ? undefined : this.lastOutdated).message;
+        return { installed, running: true, ...(this.lastOutdated === "unknown" ? {} : { version: this.lastOutdated }),
+          protocolMismatch: { helperProtocol: HELPER_PROTOCOL, ...(this.lastOutdated === "unknown" ? {} : { helperVersion: this.lastOutdated }), winterProtocol: HELPER_PROTOCOL, message } };
+      }
       return { installed, running: false };
     }
     try {
@@ -387,5 +439,12 @@ export class HelperClient {
   close(): void {
     const conn = this.conn;
     if (conn !== undefined) this.drop(conn);
+  }
+}
+
+/** Internal: a verified helper answered `hello` with a version older than `HELPER_MIN_VERSION` (its pid, to end it). */
+class OutdatedHelper extends Error {
+  constructor(readonly version: string | undefined, readonly pid: number) {
+    super(`Winter Computer Use ${version ?? "(unknown)"} is older than ${HELPER_MIN_VERSION}`);
   }
 }

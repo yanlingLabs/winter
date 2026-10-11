@@ -145,6 +145,11 @@ final class EventBacklogTests: XCTestCase {
     func testAYieldOntoAFinishedStreamIsNotCounted() async throws {
         let (client, _) = try await connectedClient()
         await client.close()
+        // The transport delivers `.closed` after `close()` returns and the pump emits its own
+        // `.connection(.disconnected)` onto the finished stream — concurrently with this test's emits below, so the
+        // ledger can read 1 for an instant in between (a yield that has been noted and not yet taken back). Wait
+        // until the pump is done, then everything that follows is this test's alone.
+        await client.pumpFinishedForTesting()
         XCTAssertEqual(client.traffic.backlog, 0)
         client.emit(.connection(.disconnected))
         client.emit(.connection(.reconnecting(attempt: 1)))
@@ -163,8 +168,8 @@ final class EventBacklogTests: XCTestCase {
         }
         await client.close()
         await reader.value
-        // The pump delivers `.closed` after close() returns; give it time to run (nothing observable says when).
-        try await Task.sleep(nanoseconds: 300_000_000)
+        // The pump delivers `.closed` after close() returns; wait until it has, rather than for a while.
+        await client.pumpFinishedForTesting()
         XCTAssertEqual(client.traffic.backlog, 0, "a .disconnected yielded onto the finished stream was counted as waiting")
         XCTAssertEqual(client.traffic.oldestAge, 0)
     }
@@ -184,8 +189,12 @@ final class EventBacklogTests: XCTestCase {
         await consumer.value
         XCTAssertTrue(client.traffic.isRetired, "the stream was cancelled under its consumer")
         XCTAssertEqual(client.traffic.backlog, 0)
+        // A side stream sees every event the client emits, so when it has seen event 4 the client has been through
+        // `emit` for it — no waiting for a while and hoping that has happened.
+        var emitted = client.observe { _ in true }.makeAsyncIterator()
         t.feedEvent(sessionCreated(4))
-        try await Task.sleep(nanoseconds: 100_000_000)
+        guard case .session(let e)? = await emitted.next() else { return XCTFail("the client never emitted event 4") }
+        XCTAssertEqual(e.seq, 4)
         XCTAssertEqual(client.traffic.backlog, 0, "and nothing more is counted onto a stream that takes nothing")
     }
 

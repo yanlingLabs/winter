@@ -235,11 +235,16 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
 
   test("(1c) THREE SpawnSession calls in ONE model round run AT ONCE (agent SDK 0.0.41 concurrentTools) and make three correct children", async () => {
     // User ruling 2026-10-03: claude runs several Agent calls of a round at once; Dispatch's SpawnSession
-    // likewise. Proved CAUSALLY, never by milliseconds: the FIRST spawn's child start (the driver table's
-    // `create`, inside the creation transaction) is held until all three spawns have reached theirs. Run one
-    // after the other, the second spawn could never get there while the first is held — the hold gives up
+    // likewise. Proved CAUSALLY, never by milliseconds: EVERY spawn's child start (the driver table's `create`,
+    // inside the creation transaction) is held at a barrier until all three spawns have reached theirs. Run one
+    // after the other, the second spawn could never get there while the first is held — the barrier gives up
     // after 15 s and the assertion below fails rather than hangs. And a spawn appends its child's `running`
-    // child_update only at its very end, so no creation may see one of this round's updates yet.
+    // child_update only at its very end, after its start has been released — so no spawn can have finished
+    // while another has yet to be created, and no creation may see one of this round's updates.
+    // (An earlier version held only the FIRST spawn. The runtime hands the three calls over a few tens of
+    // milliseconds apart on a loaded machine, so the second, unheld spawn could run to its `running` update
+    // before the third had even begun -- [0, 0, 1] -- which says nothing about concurrency, only about when
+    // the third call arrived.)
     await h.daemon!.winter.get(h.dispatchId)?.end();
     h.daemon!.sessions.setModel(h.dispatchId, "winter-test/calls");
     const store = h.daemon!.sessions;
@@ -249,15 +254,19 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
     const baseline = h.updates().length;
     const updatesSeenAtCreation: number[] = [];
     let arrived = 0;
-    let allArrivedWhileFirstHeld: boolean | undefined;
+    let allArrivedAtTheBarrier: boolean | undefined;
+    let openBarrier!: () => void;
+    const barrier = new Promise<void>((resolve) => { openBarrier = resolve; });
+    const giveUp = setTimeout(openBarrier, 15_000); // the failure bound: sequential spawns never reach three
     store.createSession = ((scope, opts) => {
       if (opts?.origin === "dispatch-child") updatesSeenAtCreation.push(h.updates().length - baseline);
       return realCreate(scope, opts);
     }) as typeof store.createSession;
     drivers.create = async (sessionId) => {
-      if (store.meta(sessionId).origin === "dispatch-child" && ++arrived === 1) {
-        for (let n = 0; n < 1500 && arrived < 3; n++) await Bun.sleep(10);
-        allArrivedWhileFirstHeld = arrived >= 3;
+      if (store.meta(sessionId).origin === "dispatch-child") {
+        if (++arrived >= 3) openBarrier();
+        await barrier;
+        allArrivedAtTheBarrier = arrived >= 3;
       }
       return realStart(sessionId);
     };
@@ -269,9 +278,9 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
       await h.client.call(METHODS.sessionSend, { sessionId: h.dispatchId, text: script });
       await until(() => h.client.events.some((e) => h.client.events.indexOf(e) >= before && e.type === "turn_completed" && e.sessionId === h.dispatchId) || undefined, 60_000, "the coordinator's spawning turn");
       await until(() => h.log(h.dispatchId).filter((e) => e.type === "turn_completed").length > turnsBefore || undefined, 10_000, "the spawning turn on the log");
-      // THE proof: all three spawns reached their child's start while the first was still held there, and
+      // THE proof: all three spawns reached their child's start while every one of them was held there, and
       // all three creations began before any of the three spawns had finished.
-      expect(allArrivedWhileFirstHeld).toBe(true);
+      expect(allArrivedAtTheBarrier).toBe(true);
       expect(updatesSeenAtCreation).toEqual([0, 0, 0]);
 
       // One round of three calls, each answered once, none an error, each naming its own child.
@@ -306,6 +315,7 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
         expect(reply?.text ?? "").toContain(specs[i]!.prompt);
       }
     } finally {
+      clearTimeout(giveUp);
       store.createSession = realCreate;
       drivers.create = realStart;
       await h.daemon!.winter.get(h.dispatchId)?.end();

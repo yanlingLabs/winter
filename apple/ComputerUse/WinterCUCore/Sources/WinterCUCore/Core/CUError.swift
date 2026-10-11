@@ -111,6 +111,24 @@ public struct CUError: Error, Codable, Sendable, Equatable, CustomStringConverti
         CUError(code: "stale_ref", message: "[\(ref)] is gone — call state()", data: ["ref": .int(ref)])
     }
 
+    /// Why a desktop visit would be needed: an act that can't land from this desktop, or a live picture.
+    public enum DesktopVisitWhy: String, Sendable { case act, live }
+
+    /// The work can't be done — or a LIVE picture can't be had — without moving the user to the window's
+    /// desktop for a moment, and the request did not carry the user's say (`desktopVisit`). Nothing was moved.
+    /// The message names the app and why, never screen text.
+    public static func needsDesktopVisit(_ app: String, why: DesktopVisitWhy, _ message: String? = nil) -> CUError {
+        let said = message ?? {
+            switch why {
+            case .act:
+                return "\(app)'s window is on another desktop, and this action needs it on screen — Winter would have to take the user to that desktop for a moment (and bring them back)"
+            case .live:
+                return "\(app)'s window is on another desktop, and its picture there is stale or not yet known (an app may stop redrawing a window it can't show) — a live picture needs the user taken to that desktop for a moment (and brought back)"
+            }
+        }()
+        return CUError(code: "needs_desktop_visit", message: said, data: ["why": .string(why.rawValue)])
+    }
+
     public static func needsForeground(_ app: String) -> CUError {
         CUError(code: "needs_foreground",
                 message: "\(app) only accepts this input in the foreground — Winter must bring it to the front and use the mouse")
@@ -171,4 +189,15 @@ public enum CUFloorReason: String, Codable, Sendable {
     case wrongFieldShape = "wrong_field_shape"
     /// Typing stopped: the focus left the field it was typing into (the rest would have landed elsewhere).
     case focusMoved = "focus_moved"
+    /// A desktop visit was not made: the app the user is in can't be read, so they could not be brought back.
+    case frontUnknown = "front_unknown"
+    /// The app came to the front while a background act was being prepared (the user's doing, or its own): the keys
+    /// or the click were not sent — the user may be using it now.
+    case appInFront = "app_in_front"
+    /// The user is working in the app (they clicked, typed or scrolled in its window while it was in front): the agent
+    /// is hands-off it until it leaves the front (user ruling, round 10) — retry later.
+    case userWorking = "user_working"
+    /// Floor F: an act on a Chromium browser's inspect page or its "Allow remote debugging?" dialog — Winter never turns
+    /// on or approves remote debugging (the Phase 4 spine §2.4).
+    case remoteDebugging = "remote_debugging"
 }

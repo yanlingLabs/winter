@@ -50,7 +50,8 @@ export const DELTA_COALESCE_MS = 16;
 
 export type DeltaCoalescer = { push(e: SessionEvent): void; dispose(): void };
 
-type TimerFns = { set: (fn: () => void, ms: number) => unknown; clear: (id: unknown) => void };
+/** The coalescer's timer seam: real `setTimeout` in production, a hand-driven clock in tests. */
+export type TimerFns = { set: (fn: () => void, ms: number) => unknown; clear: (id: unknown) => void };
 const realTimers: TimerFns = {
   set: (fn, ms) => setTimeout(fn, ms),
   clear: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),

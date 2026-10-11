@@ -18,6 +18,8 @@ extension CUCore {
         var pendingOpen: [String]? = nil
         /// What the open stands for in the result ("“File › Open”"), when it came from a menu.
         var openWhat: String? = nil
+        /// The open is a link's (its host): said as the link's, in the default browser.
+        var openLinkHost: String? = nil
         /// For type, paste, key and setValue: the element that received the input (`[14] text area "Comment"`),
         /// or `inputUnknown` when the app reported no focused element.
         var input: String? = nil
@@ -44,53 +46,39 @@ extension CUCore {
         // Held in front for this script (the user agreed): the foreground rung needs no second asking.
         var p = p
         if holdsForeground(t) { p.allowForeground = true }
-        try ensureAlive(t)
+        // The call's cancel first: a window watched through a transition (`ensureAlive`) is waited for under it.
         let token = cancels.begin(p.callId)
         defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         try token.check()
         noteGuardianPrivatePath(p.privatePath)
-        noteGuardianActed(t.pid)
+        // The act is an operation on the app: touched while it runs (I1: "while an operation on it runs"), for the causal
+        // window after it — however it ends. A cause that can't raise a window: the user's switch input just before it
+        // still outranks it (#8).
+        // (Checked first: a refused act opens no span and records no cause — review of round 10, LOW #9.)
         do {
             try Self.checkAccess(p.action, access: p.access, appName: t.appName)
+            try refuseWhileUserWorks(t)
         } catch {
             cursor(t, "refused")
             logAct(p, t, failed: error)
             throw error
         }
+        beginGuardianSpan(t.pid, raise: false)
+        defer { endGuardianSpan(t.pid, raise: false) }
+        let opener = Self.actCanOpenApps(p.action)
+        if opener { noteGuardianOpener() }
+        defer { if opener { noteGuardianOpener() } }  // its end too: what it opened may come forward a moment after
         if case .key(let k) = p.action, (try? CUKeyChord.parse(k.combo))?.isEscape == true {
             await MainActor.run { [weak self] in self?.events?.willSendEscape() }
         }
-        var outcome = try await queues.run(t.pid) { [self] () -> ActOutcome in
-            do {
-                // A cancel that arrived while this act waited behind others stops it here.
-                try token.check()
-                try floorCheckPrivacy(t)
-                try saveFloorBeforeAct(p, t)
-                do {
-                    let focusBefore = t.accessible ? focusBeforeAct(t) : nil
-                    let pageBefore = pageBeforeAct(t)
-                    var o = try guardingUserView(p, t) { try perform(p, on: t, token: token) }
-                    t.lastActionMs = clock.nowMs()
-                    if let focusBefore { o = noteFocusChange(from: focusBefore, t, o) }
-                    o = notePageChange(from: pageBefore, t, o)
-                    return o
-                } catch let e as CUError where e.code == "stale_element" {
-                    if let ref = Self.primaryRef(p.action) { t.refs.forget(ref); throw CUError.staleRef(ref) }
-                    // The target is still bound; only the element moved under the action.
-                    throw CUError.busy("the \(t.appName) UI changed under the action — call state() and retry")
-                }
-            } catch {
-                // A refusal or a failure: a gentle "no" where the act was aimed. Not for a cancel (the user
-                // or the script stopped it) or a target that is gone (its cursor goes with it).
-                if Self.showsRefusal(error) { cursor(t, "refused", at: attemptPoint(p.action, t)) }
-                logAct(p, t, failed: error)
-                throw error
-            }
-        }
+        let acted = try await actWithVisits(p, t, token)
+        var outcome = acted.0
+        let inVisit = acted.1
         if let paths = outcome.pendingOpen {
             // The queue is released: open now, bounded, and say what happened.
             do {
-                let said = try await finishBackgroundOpen(paths, what: outcome.openWhat, t)
+                let said = try await finishBackgroundOpen(paths, what: outcome.openWhat, t, linkHost: outcome.openLinkHost)
                 outcome.detail = [outcome.detail, said].compactMap { $0 }.joined(separator: "; ")
             } catch {
                 cursor(t, "refused")
@@ -98,14 +86,103 @@ extension CUCore {
                 throw error
             }
         }
-        noteGuardianActed(t.pid)  // an activation in the next seconds may be this act's doing
         CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): \(Self.routeName(outcome.rung), privacy: .public)\(outcome.detail.map { " — " + $0 } ?? "", privacy: .public)")
-        let notes = takeGuardianNotes()
-        let detail = (notes + [outcome.detail].compactMap { $0 }).isEmpty ? nil
-            : (notes + [outcome.detail].compactMap { $0 }).joined(separator: "; ")
-        return TargetActResult(rung: outcome.rung.rawValue, detail: detail, input: outcome.input,
+        // What the guardian did or saw meanwhile goes out on its own (daemon lines), never inside the act's own line.
+        let report = takeGuardianReport()
+        return TargetActResult(rung: outcome.rung.rawValue, detail: outcome.detail, input: outcome.input,
                                inputUnknown: outcome.inputUnknown ? true : nil, focusNow: outcome.focusNow,
-                               focusLost: outcome.focusLost ? true : nil, pageNow: outcome.pageNow)
+                               focusLost: outcome.focusLost ? true : nil, pageNow: outcome.pageNow, inVisit: inVisit ? true : nil,
+                               guardian: report.notes.isEmpty ? nil : report.notes,
+                               viewMovedBy: report.viewMovedBy.isEmpty ? nil : report.viewMovedBy)
+    }
+
+    /// The act, with desktop visits (CUCore+Visit): inside the session's open visit when its window is on the
+    /// visited desktop; else in the background; and when that needs its window's desktop — the session's open visit
+    /// (another desktop) is closed first and the act tried again where the user is now (its window may be there:
+    /// no prompt), then, still needing it, a visit opened with the user's say (`desktopVisit`) or
+    /// `needs_desktop_visit` without it. Returns whether it ran inside a visit.
+    func actWithVisits(_ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) async throws -> (ActOutcome, Bool) {
+        // Inside the visit the foreground is implied (the app is in front on its own desktop).
+        var inner = p
+        inner.allowForeground = true
+        if let v = openVisit(of: p.sessionId), onVisitedDesktop(v, t),
+           let id = beginVisitActivity(v, t, callId: p.callId, maxMs: p.visitMaxMs) {
+            defer { endVisitActivity(v, id) }
+            do { return (try await queues.run(t.pid) { [self] in try actOnce(inner, t, token, inVisit: true) }, true) }
+            catch { throw Self.markedInVisit(error) }
+        }
+        var lastNeed: Error
+        do {
+            return (try await queues.run(t.pid) { [self] in try actOnce(p, t, token, inVisit: false) }, false)
+        } catch where Self.needsItsDesktop(error) {
+            lastNeed = error
+        }
+        // It needs its window's desktop: never asked for (nor answered) while the session sits on another one.
+        if await closeVisit(of: p.sessionId, reason: .otherDesktop) {
+            do {
+                return (try await queues.run(t.pid) { [self] in try actOnce(p, t, token, inVisit: false) }, false)
+            } catch where Self.needsItsDesktop(error) {
+                lastNeed = error
+            }
+        }
+        guard p.desktopVisit == true else {
+            throw lastNeed is CUVisitNeeded ? CUError.needsDesktopVisit(t.appName, why: .act) : lastNeed
+        }
+        try token.check()
+        let v = try await openDesktopVisit(t, why: .act, privatePath: p.privatePath, sessionId: p.sessionId, callId: p.callId,
+                                           maxMs: p.visitMaxMs)
+        let id = beginVisitActivity(v, t, callId: p.callId, maxMs: p.visitMaxMs)
+        defer { endVisitActivity(v, id) }
+        do { return (try await queues.run(t.pid) { [self] in try actOnce(inner, t, token, inVisit: true) }, true) }
+        catch { throw Self.markedInVisit(error) }
+    }
+
+    /// One attempt at the act on the target's pid queue: the floors, the act under the user-view guard, what it
+    /// changed. When it can't land from here and its window is on ANOTHER DESKTOP (it needs the foreground, the
+    /// window can't be reached, or the foreground rung found it elsewhere), the user's say decides: without it
+    /// `needs_desktop_visit` (nothing was moved); with it (`desktopVisit`), `CUVisitNeeded` — the caller does it
+    /// once more inside a visit. `inVisit`: this IS that once more.
+    func actOnce(_ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token, inVisit: Bool) throws -> ActOutcome {
+        do {
+            // A cancel that arrived while this act waited behind others stops it here.
+            try token.check()
+            try floorCheckPrivacy(t)
+            try floorCheckRemoteDebugging(p, t)
+            try saveFloorBeforeAct(p, t)
+            do {
+                let focusBefore = t.accessible ? focusBeforeAct(t) : nil
+                let pageBefore = pageBeforeAct(t)
+                var o: ActOutcome
+                do {
+                    o = try guardingUserView(p, t) { try perform(p, on: t, token: token) }
+                } catch let e as CUError where !inVisit && Self.visitCouldHelp(e) && isOffThisDesktop(t) {
+                    if p.desktopVisit == true {
+                        CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): can't land from this desktop (\(e.code, privacy: .public)) — once more inside a desktop visit, as the user allowed")
+                        throw CUVisitNeeded()
+                    }
+                    CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): can't land from this desktop (\(e.code, privacy: .public)) — needs the user's say for a desktop visit")
+                    throw e.code == "needs_desktop_visit" ? e : CUError.needsDesktopVisit(
+                        t.appName, why: .act, "\(e.message) — a desktop visit would do it (the user taken to that desktop for a moment and brought back)")
+                }
+                t.lastActionMs = clock.nowMs()
+                if let focusBefore { o = noteFocusChange(from: focusBefore, t, o) }
+                o = notePageChange(from: pageBefore, t, o)
+                return o
+            } catch let e as CUError where e.code == "stale_element" {
+                if let ref = Self.primaryRef(p.action) { t.refs.forget(ref); throw CUError.staleRef(ref) }
+                // The target is still bound; only the element moved under the action.
+                throw CUError.busy("the \(t.appName) UI changed under the action — call state() and retry")
+            }
+        } catch is CUVisitNeeded {
+            throw CUVisitNeeded()
+        } catch {
+            // A refusal or a failure: a gentle "no" where the act was aimed. Not for a cancel (the user
+            // or the script stopped it), a target that is gone (its cursor goes with it), or a desktop visit to
+            // ask for (nothing was refused).
+            if Self.showsRefusal(error) { cursor(t, "refused", at: attemptPoint(p.action, t)) }
+            logAct(p, t, failed: error)
+            throw error
+        }
     }
 
     /// The focus before an act: the one read after the last act when that is recent (one read per act), else a
@@ -118,7 +195,12 @@ extension CUCore {
     /// After an act: when the bound window's focus changed (⌘R moves it to the address bar, a click into
     /// another field, Tab), the result says where it is now — name and role only — or that it is unknown now.
     func noteFocusChange(from before: WindowFocus, _ t: CUTarget, _ o: ActOutcome) -> ActOutcome {
-        let after = windowFocus(t, fresh: true)
+        var after = windowFocus(t, fresh: true)
+        // Nothing readable in the window now (its app's focus handed back with the blip's key focus): the answer it gave
+        // inside the act's last keyboard blip, after the keys were taken — where they left it (round 4: Tab moved Docs'
+        // focus Find → Replace and the result said "unknown"). A fresh read of the page or the window wins over that
+        // older one (a page may move its focus after the keys — review of round 4).
+        if after.element == nil, let seen = blipFocusRead(t, start: false) { after = seen }
         t.focusAfterLastAct = (clock.nowMs(), after)
         var o = o
         switch (before.element, after.element) {
@@ -142,6 +224,15 @@ extension CUCore {
         guard t.accessible else {
             o.input = "the window (it has no accessibility here)"
             return o
+        }
+        var e = e
+        // The focus the act's first keyboard blip found, before its first key — the app's own answer for the bound
+        // window while it held the key focus — when the read before the act had none, or named an element of another
+        // window (a native window that is not key answers none of its own; live: "pressed y in [5] B field" for a key
+        // that went into Doc A).
+        if let seen = blipFocusRead(t, start: true)?.element,
+           e == nil || (try? windowElement(t)).map({ inBoundWindow(e!, t, $0) == false }) == true {
+            e = seen
         }
         guard let e else {
             o.inputUnknown = true
@@ -188,7 +279,7 @@ extension CUCore {
 
     static func showsRefusal(_ error: Error) -> Bool {
         guard let e = error as? CUError else { return true }
-        return e.code != "cancelled" && e.code != "target_lost"
+        return e.code != "cancelled" && e.code != "target_lost" && e.code != "needs_desktop_visit"
     }
 
     /// Where a failed act was aimed: its element's centre, else its point, else the cursor's last place.
@@ -308,12 +399,83 @@ extension CUCore {
                 try synth.hover(pid: t.pid, windowFor: { _ in t.windowID }, at: pt, route: route, dwellMs: ms)
             }.noting(rested)
         }
-        let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
+        var d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
         let synth = self.synth(p)
         let windowFor = self.windowFor(t)
-        return try runEvents(p, t, d, focus: false, token) { route, check in
-            try synth.hover(pid: t.pid, windowFor: windowFor, at: pt, route: route, dwellMs: ms, check: check)
-        }.noting(rested)
+        // A web page takes no hover from a pointer that is not the real one while its app is in the background:
+        // measured — WebKit on 2026-10-10 (posted moves reached the window, but no mouseenter reached the page, in the
+        // background or with the app in front and the window key), Chromium on 2026-10-11 (run111: a background Chrome page got moves on the private path but neither a
+        // mouseenter nor a :hover, on either route). Watched here, so the answer says when nothing appeared instead of
+        // leaving the model to look.
+        let webPage = t.accessible
+            && (a.ref.flatMap { try? element($0, in: t) } ?? elementAt(pt, in: t)).map(isWebContent) == true
+        // Nor does an AppKit view's tracking area (round 11 — live and run126: a `.activeAlways` area under posted moves,
+        // in the background and after the synthetic activation, never got its mouseEntered: tracking follows the REAL
+        // cursor). Watched the same way, over the window's own tree.
+        let nativeView = t.accessible && !webPage
+        // The app held in front (requestForeground) or the rung-4 card agreed to: the REAL pointer hovers it — the only
+        // hover a web page takes (what the bind's note and the answer below advise).
+        if webPage || nativeView, d.rung != .foreground, p.allowForeground {
+            d = CUInputLadder.Decision(rung: .foreground, detail: "\(t.appName)'s \(webPage ? "web page" : "window") takes hover only from the real pointer")
+        }
+        let count = { [self] in webPage ? webElementCount(t) : windowElementCount(t) }
+        let watched = webPage || nativeView ? count() : nil
+        // With the real pointer, what appeared is counted WHILE it rests there (it goes back to where the user had it
+        // right after, and a hover menu may close with it).
+        var during: Int?
+        let out = try runEvents(p, t, d, focus: false, token) { route, check in
+            let used = try synth.hover(pid: t.pid, windowFor: windowFor, at: pt, route: route, dwellMs: ms, check: check)
+            if route == .hid, watched != nil { during = count() }
+            return used
+        }
+        if let before = watched {
+            let after = count()
+            let place = webPage ? "the page" : "the window"
+            if d.rung == .foreground {
+                if let during, during > before {
+                    let gone = after.map { $0 <= before } ?? false
+                    return out.noting("the real pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms and \(during - before) new element(s) appeared in \(place)\(gone ? " — gone again once the pointer went back to where the user had it: if what it opens also opens on a click, click it" : "; state() shows them")")
+                }
+                return out.noting("the real pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms; nothing new appeared in \(place)")
+            }
+            if let after, after == before {
+                CULog.act.notice("hover in \(t.appName, privacy: .public): nothing new appeared in \(place, privacy: .public) (\(before, privacy: .public) elements)")
+                let why = webPage ? "\(t.appName)'s web page takes no hover from a pointer that isn't the real one"
+                    : "\(t.appName)'s views take no hover from a pointer that isn't the real one while it is in the background (hover tracking follows the real cursor)"
+                return out.noting("the pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms, and nothing new appeared in \(place) — \(why): if the menu or item also opens on a click, click it; else app.requestForeground(reason) for a real hover")
+            }
+        }
+        return out.noting(rested)
+    }
+
+    /// How many elements accessibility shows in the bound window's web page — the cheap "did anything appear"
+    /// fingerprint around a hover. Nil when it has none, or when the walk was cut short (`hoverFingerprintMaxNodes`,
+    /// or 200 ms): a capped count is the same before and after whatever appeared, so it proves nothing either way.
+    /// The same fingerprint over the bound window's whole tree (a native window's hover).
+    func windowElementCount(_ t: CUTarget, maxMs: Double = 200) -> Int? {
+        guard let win = try? windowElement(t) else { return nil }
+        let deadline = clock.nowMs() + maxMs
+        var queue = [win]
+        var next = 0
+        while next < queue.count {
+            guard next < hoverFingerprintMaxNodes, clock.nowMs() < deadline else { return nil }
+            queue.append(contentsOf: ax.elements(queue[next], kAXChildrenAttribute))
+            next += 1
+        }
+        return next
+    }
+
+    func webElementCount(_ t: CUTarget, maxMs: Double = 200) -> Int? {
+        guard let win = try? windowElement(t), let area = firstWebArea(win) else { return nil }
+        let deadline = clock.nowMs() + maxMs
+        var queue = [area]
+        var next = 0
+        while next < queue.count {
+            guard next < hoverFingerprintMaxNodes, clock.nowMs() < deadline else { return nil }
+            queue.append(contentsOf: ax.elements(queue[next], kAXChildrenAttribute))
+            next += 1
+        }
+        return next
     }
 
     /// An AX action or write that timed out may still run later: never follow it with events (that would do
@@ -343,6 +505,16 @@ extension CUCore {
             }
             // A disabled control does nothing when PRESSED; its context menu (a right click) may still open.
             if button == .left { try requireEnabled(info, ref: ref, t) }
+            // A link in an app that is not a web browser (Mail, Slack, Notes, Messages): pressed, it opens in the default
+            // browser, which comes to the front — the agent changing the user's front app (the user's rule, round 9). Its
+            // URL is opened in the background instead, the way apps.open does (http, https, mailto; anything else is
+            // pressed as before).
+            if button == .left, count == 1, flags.isEmpty, let url = linkURL(e, info), !isWebBrowser(t) {
+                announceTarget(t, info, pressing: true)
+                cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
+                CULog.act.notice("click in \(t.appName, privacy: .public): [\(ref, privacy: .public)] is a link (\(url.scheme ?? "?", privacy: .public)) — opened in the background, not pressed")
+                return try pendingBackgroundOpen([url.absoluteString], what: nil, linkHost: url.host ?? url.absoluteString)
+            }
             try pasteMenuGuard(e, info, p, t)
             t.noteTargeted(e, at: clock.nowMs())
             announceTarget(t, info, pressing: button == .left)
@@ -369,12 +541,10 @@ extension CUCore {
                     // still show it, and a click after it would do it twice.
                     let crop = webBefore != nil ? pressCrop(e, info, t) : nil
                     let shotBefore = crop.flatMap { pressShot($0, t) }
+                    var pressed = false
                     do {
                         try ax.perform(e, axAction)
-                        if let webBefore {
-                            return try verifyWebPress(e, info, ref: ref, before: webBefore, crop: crop, shotBefore: shotBefore, p, t, token)
-                        }
-                        return ActOutcome(rung: .accessibility)
+                        pressed = true
                     } catch let error where Self.pressMayHaveActed(error) != nil {
                         // Never fall through to a click here: the press may have acted, and a click would repeat it.
                         let note = try judgeErroredPress(e, t, before: before, code: Self.pressMayHaveActed(error)!,
@@ -385,6 +555,14 @@ extension CUCore {
                     } catch {
                         // The element refused the action outright: fall through to events at its centre.
                     }
+                    // Verified OUTSIDE the press's own catch: what the check throws (a desktop visit to offer, a click it
+                    // refused) is never taken for the element refusing the press — that fell through to a second click.
+                    if pressed {
+                        if let webBefore {
+                            return try verifyWebPress(e, info, ref: ref, before: webBefore, crop: crop, shotBefore: shotBefore, p, t, token)
+                        }
+                        return ActOutcome(rung: .accessibility)
+                    }
                 }
             }
             guard info.center != nil else {
@@ -393,12 +571,47 @@ extension CUCore {
             guard let center = clickablePoint(e, info, t) else {
                 throw CUError.unsupported("[\(ref)] is outside the window and could not be scrolled into view — scroll to it first")
             }
+            // A click on web content that went out as events (no press, or one the element refused) is checked like
+            // the press is: never a silent no-op (live, round 11: clicks on the Web Store page returned nothing while
+            // none of them reached it).
+            // (On another desktop the click's own words say it can't be confirmed there.)
+            if isWebContent(e), button == .left, count == 1, flags.isEmpty, offScreenSubject(t) == nil {
+                let crop = pressCrop(e, info, t)
+                return try webClickVerified(e, t, pressIgnored: false, why: nil, label: Self.elementLabel(ref, info),
+                                            crop: crop, shotBefore: crop.flatMap { pressShot($0, t) }) {
+                    try pointerClick(p, t, at: center, button: button, count: count, flags: flags, token, announced: announced,
+                                     element: e, axTried: announced)
+                }
+            }
             return try pointerClick(p, t, at: center, button: button, count: count, flags: flags, token, announced: announced,
                                     element: e, axTried: announced)
         }
         guard let px = try cuPoint(a.point) else { throw CUError.invalidParams("click needs a ref or a point") }
         let pt = try screenPoint(for: t, shotId: a.shotId, pixel: px)
-        return try pointerClick(p, t, at: pt, button: button, count: count, flags: flags, token)
+        return try pointClickVerified(t, at: pt) {
+            try pointerClick(p, t, at: pt, button: button, count: count, flags: flags, token)
+        }
+    }
+
+    /// A click at a point of a window on this desktop, checked by its pixels around the point and the app's windows (a
+    /// menu or popover opening): a click that changed neither says so — never a silent no-op. Nothing is said when
+    /// there is no picture to compare (no Screen Recording, a blank capture), or for a click the app took in front.
+    func pointClickVerified(_ t: CUTarget, at pt: CGPoint, _ click: () throws -> ActOutcome) throws -> ActOutcome {
+        guard offScreenSubject(t) == nil, let window = sys.window(id: t.windowID)?.frame else { return try click() }
+        let crop = CGRect(x: pt.x - 120, y: pt.y - 80, width: 240, height: 160).intersection(window)
+        guard !crop.isNull, !crop.isEmpty, let before = pressShot(crop, t) else { return try click() }
+        let windowsBefore = Set(sys.windows(pid: t.pid).map(\.id))
+        let o = try click()
+        guard o.rung != .foreground else { return o }
+        let deadline = clock.nowMs() + webPressWatchMs
+        repeat {
+            if Set(sys.windows(pid: t.pid).map(\.id)) != windowsBefore { return o }
+            if let after = pressShot(crop, t), CUImageTools.differs(before, after) { return o }
+            if clock.nowMs() >= deadline { break }
+            clock.pause(ms: 150)
+        } while true
+        CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect at the point")
+        return o.noting("the click at that point had no visible effect (nothing changed there, and no window opened) — check with state() or a screenshot before clicking again")
     }
 
     /// `announced`: the cursor already showed this press (an AX attempt that fell back to events). `element`:
@@ -415,6 +628,15 @@ extension CUCore {
         let synth = self.synth(p)
         let windowFor = self.windowFor(t)
         let event = announced ? nil : CursorEvent(kind: "press", point: pt, count: count, button: button.rawValue)
+        // Pid events in the background: the window made its app's key window first, so the click is not taken
+        // as the one that makes it key.
+        if d.rung == .processEvents {
+            switch keyForClick(t, privatePath: p.privatePath, clickWindow: windowFor(pt)) {
+            case .appInFront: throw clickRefusal(t)
+            case .activatedItself: throw clickActivatedItselfRefusal(t)
+            case .notApplied, .prepared: break
+            }
+        }
         return try runEvents(p, t, d, focus: true, token, cursor: event) { route, check in
             try synth.click(pid: t.pid, windowFor: windowFor, at: pt, button: button, count: count, flags: flags,
                             route: route, check: check)
@@ -488,6 +710,13 @@ extension CUCore {
                             let info = ElementInfo(el, ax)
                             if Self.mayActUnseen(info.labels) {
                                 return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.unseenPressNote(Self.elementLabel(nil, info)))")
+                            }
+                            // On ANOTHER desktop, a press that changed nothing on a control a repeat can't undo: a desktop
+                            // visit would click it where it is (live, round 11: the Web Store's controls ignored the press
+                            // from another Space and the visit was never offered).
+                            if !prefersWebClicks(t), !statefulWithoutReadableState(el, info), isOffThisDesktop(t) {
+                                CULog.act.notice("click in \(t.appName, privacy: .public) (another desktop): no visible effect — a desktop visit would click it")
+                                throw CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(Self.elementLabel(nil, info)) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
                             }
                             if !prefersWebClicks(t) || statefulWithoutReadableState(el, info) {
                                 CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): no visible effect — not clicked as well")
@@ -575,7 +804,7 @@ extension CUCore {
         let deadline = clock.nowMs() + 300
         repeat {
             if let moved = ElementInfo(e, ax).center, window.contains(moved) { return moved }
-            usleep(30_000)
+            clock.pause(ms: 30)
         } while clock.nowMs() < deadline
         return nil
     }
@@ -643,9 +872,33 @@ extension CUCore {
     /// Events are routed to the target pid's front-most window under the point (a sheet, popover or panel),
     /// falling back to the bound window. One window-list read per action.
     func windowFor(_ t: CUTarget) -> (CGPoint) -> UInt32 {
-        let stack = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 }
         let bound = t.windowID
+        let mine = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 }
+        // (Accessibility is asked only when the app has another window at the normal level on screen — most acts: none.)
+        let others = mine.contains { $0.layer == 0 && $0.id != bound } ? otherDocumentWindows(t) : []
+        let stack = mine.filter { !others.contains($0.id) }
         return { point in stack.first { $0.frame.contains(point) }?.id ?? bound }
+    }
+
+    /// The app's OTHER document windows: a point of the bound window that one of them covers still goes to the bound
+    /// window (the event names it), never to the window on top — that is another window of the app, often the one
+    /// the user works in (live, round 11: a Chrome window behind another took every click on the Web Store page into
+    /// the user's front Chrome window; the page saw none, focus was never placed). What is drawn over the bound
+    /// window as part of it — a menu, a popover, a sheet, a page's popup, a floating panel — still takes the click
+    /// at its point. An AX standard window of the app; with no accessibility (a capture-only bind), a window at the
+    /// normal level that does not lie within the bound one (a sheet does).
+    func otherDocumentWindows(_ t: CUTarget) -> Set<UInt32> {
+        let bound = t.windowID
+        if t.accessible {
+            var ids = Set<UInt32>()
+            for w in ax.elements(ax.application(t.pid), kAXWindowsAttribute)
+            where ax.string(w, kAXSubroleAttribute) == kAXStandardWindowSubrole {
+                if let id = ax.windowID(w), id != bound { ids.insert(id) }
+            }
+            return ids
+        }
+        guard let frame = sys.window(id: bound)?.frame else { return [] }
+        return Set(sys.windows(pid: t.pid).filter { $0.layer == 0 && $0.id != bound && !frame.contains($0.frame) }.map(\.id))
     }
 
     // MARK: text
@@ -837,7 +1090,9 @@ extension CUCore {
                           _ token: CUCancellation.Token, _ g: TypingFocus) throws -> ActOutcome {
         guard !text.isEmpty else { return ActOutcome(rung: .accessibility, detail: "nothing to type") }
         try token.check()
-        if let e, ax.isSettable(e, kAXSelectedTextAttribute) {
+        // A Tab in the text moves the focus as a person's would: keys, never an insert (measured 2026-10-11 on a
+        // probe app of ours: an insert of "hi\t" put a literal tab into the field and left the focus where it was).
+        if let e, !text.contains("\t"), ax.isSettable(e, kAXSelectedTextAttribute) {
             let before = ax.string(e, kAXValueAttribute)
             let since = clock.nowMs()
             var applied = false
@@ -887,7 +1142,9 @@ extension CUCore {
             let why = lines > 1 ? "several lines go as a paste into a field that reads them back"
                 : readable ? "more than \(Self.typeKeysMax) characters go as a paste into a field that reads them back"
                 : "more than \(Self.typeKeysMax) characters go as a paste; this field can't be read back"
-            return try pasteText(text, format: .text, p, t, token, g).noting("as a paste (\(why))")
+            // Its tabs are pasted as characters: a paste moves no focus (said, never left to be guessed — review of round 4).
+            let tabs = text.contains("\t") ? "; its tabs went in as characters, moving no focus" : ""
+            return try pasteText(text, format: .text, p, t, token, g).noting("as a paste (\(why)\(tabs))")
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
         let synth = self.synth(p)
@@ -972,7 +1229,7 @@ extension CUCore {
                 return Received(word: "verified", words: "verified (the field holds it)")
             }
             if clock.nowMs() >= deadline { break }
-            usleep(30_000)
+            clock.pause(ms: 30)
         } while true
         // The longest leading part that arrived, counted in the characters that were sent (binary search over its
         // length; a part that is only whitespace counts as there).
@@ -1040,7 +1297,7 @@ extension CUCore {
                 if now != before, now.contains(text) { return .landed }
             }
             if clock.nowMs() >= deadline { break }
-            usleep(25_000)
+            clock.pause(ms: 25)
         } while true
         return readAny ? .missing : .unreadable
     }
@@ -1093,16 +1350,52 @@ extension CUCore {
 
     /// An outcome that opens `paths` after the act releases the target's queue. The protected-path floor is
     /// checked here, under the queue, so a refusal is an ordinary refused act.
-    func pendingBackgroundOpen(_ paths: [String], what: String?) throws -> ActOutcome {
+    func pendingBackgroundOpen(_ paths: [String], what: String?, linkHost: String? = nil) throws -> ActOutcome {
         if let bad = paths.first(where: { CUFloors.isProtectedSavePath($0) }) {
             throw CUError.refused(.privacyPane, "opening \((bad as NSString).lastPathComponent) is off limits — it is a protected location")
         }
-        return ActOutcome(rung: .accessibility, detail: nil, pendingOpen: paths, openWhat: what)
+        return ActOutcome(rung: .accessibility, detail: nil, pendingOpen: paths, openWhat: what, openLinkHost: linkHost)
+    }
+
+    /// The URL a link element opens — http, https or mailto only — when the element is a link (`AXLink`) or carries an
+    /// `AXURL`. Nil otherwise (it is pressed as before).
+    func linkURL(_ e: AXUIElement, _ info: ElementInfo) -> URL? {
+        // A LINK only (review of round 9, MEDIUM #4): an image's src, a web area's own URL are no link to follow.
+        guard info.role == "AXLink" else { return nil }
+        func url(_ raw: CFTypeRef?) -> URL? {
+            guard let raw else { return nil }
+            if CFGetTypeID(raw) == CFURLGetTypeID() { return (raw as! CFURL) as URL }
+            return (raw as? String).flatMap { URL(string: $0) }
+        }
+        guard let link = url(ax.attribute(e, "AXURL")), let scheme = link.scheme?.lowercased(), ["http", "https", "mailto"].contains(scheme) else {
+            return nil
+        }
+        // A link to the same site as the page it is on (in-page `#` links included) stays in the app: its own navigation.
+        if scheme != "mailto" {
+            var cur: AXUIElement? = ax.element(e, kAXParentAttribute)
+            for _ in 0..<60 {
+                guard let c = cur else { break }
+                if ax.string(c, kAXRoleAttribute) == "AXWebArea" {
+                    if let page = url(ax.attribute(c, "AXURL")), page.host?.lowercased() == link.host?.lowercased() { return nil }
+                    break
+                }
+                cur = ax.element(c, kAXParentAttribute)
+            }
+        }
+        return link
+    }
+
+    /// Whether the bound app is a web browser (it declares http/https): its links are its own business.
+    func isWebBrowser(_ t: CUTarget) -> Bool {
+        if let o = isWebBrowserOverride { return o(t) }
+        // An Electron or CEF app navigates in its own window (review of round 9, MEDIUM #4): never rerouted.
+        if t.isChromium { return true }
+        return CUApps.isWebBrowser(bundleURL: NSRunningApplication(processIdentifier: t.pid)?.bundleURL)
     }
 
     /// Opens `paths` in the background, waiting at most `openTimeoutMs` (NSWorkspace's open can't be
     /// cancelled: past the bound it keeps going and the result says so). Throws what the open threw.
-    func finishBackgroundOpen(_ paths: [String], what: String?, _ t: CUTarget) async throws -> String {
+    func finishBackgroundOpen(_ paths: [String], what: String?, _ t: CUTarget, linkHost: String? = nil) async throws -> String {
         let label = paths.count == 1 ? (paths[0] as NSString).lastPathComponent : "\(paths.count) items"
         let prefix = what.map { "\($0): " } ?? ""
         enum Result { case opened(String), failed(Error), timedOut }
@@ -1121,6 +1414,9 @@ extension CUCore {
         }
         switch result {
         case .opened(let app):
+            if let host = linkHost {
+                return "opened \(host) in \(app) in the background (pressing the link would have brought \(app) to the front) — it isn't bound; browsers.open or apps.open to work in it"
+            }
             return "\(prefix)opened \(label) in \(app) in the background (not through Finder, so nothing came to the front)"
         case .failed(let error):
             throw error
@@ -1135,7 +1431,7 @@ extension CUCore {
     /// if the app still activates, the guard's note says it had to be undone.
     func enforceFocus(_ p: TargetActParams, _ t: CUTarget) {
         guard let enforcer = focusEnforcer(for: t, privatePath: p.privatePath) else { return }
-        noteSyntheticActivation()  // the guardian must not read the activation this posts as the user's
+        noteSyntheticActivation(t.pid)  // the guardian must not read the activation this posts as the user's
         // Advisory now that focus no longer uses the AXFocused write: if the guard still logs a fault on this
         // act the synthetic activation did not help, and we can drop it; if the enforcer ran and no fault
         // follows, it was unneeded or it held. The guard is authoritative either way.
@@ -1170,7 +1466,7 @@ extension CUCore {
     /// on the element that holds the selection (the one just worked on, else the window's own focused
     /// element), its selection put back, verified, and once more if the window still isn't key. Also when the
     /// key window can't be read — the click is what makes it certain.
-    func keyForMenu(_ t: CUTarget) {
+    func keyForMenu(_ t: CUTarget) throws {
         guard t.accessible else { return }
         guard boundWindowIsKeyInApp(t) != true else {
             CULog.act.notice("menu in \(t.appName, privacy: .public): the bound window is key in its app — no click to make it key")
@@ -1181,7 +1477,7 @@ extension CUCore {
             return
         }
         for attempt in 1...2 {
-            guard clickKeepingSelection(e, at: c, t) else { return }
+            guard try clickKeepingSelection(e, at: c, t) else { return }
             let key = boundWindowIsKeyInApp(t)
             CULog.act.notice("menu in \(t.appName, privacy: .public): clicked the selection's element to make its window key (try \(attempt, privacy: .public)) — key now: \(Self.yesNo(key), privacy: .public)")
             if key != false { return }
@@ -1198,13 +1494,13 @@ extension CUCore {
     /// A window-targeted click on `e` with its text selection kept: the click moves the caret, so the selection
     /// is put back — after the click has landed (the caret moved, or `selectionHoldMs` passed), since a restore
     /// the app handles before the click is undone by it — and then held. False when no route reaches the window.
-    func clickKeepingSelection(_ e: AXUIElement, at c: CGPoint, _ t: CUTarget) -> Bool {
+    func clickKeepingSelection(_ e: AXUIElement, at c: CGPoint, _ t: CUTarget) throws -> Bool {
         let range = selectionRange(e)
-        guard windowClick(at: c, t) else { return false }
+        guard try windowClick(at: c, t) else { return false }
         guard let range, ax.isSettable(e, kAXSelectedTextRangeAttribute),
               let r = AX.makeRange(location: range.location, length: range.length) else { return true }
         let deadline = clock.nowMs() + selectionHoldMs
-        while clock.nowMs() < deadline, let now = selectionRange(e), now == range { usleep(20_000) }
+        while clock.nowMs() < deadline, let now = selectionRange(e), now == range { clock.pause(ms: 20) }
         try? ax.set(e, kAXSelectedTextRangeAttribute, r)
         holdSelection(e, range, t, what: "menu")
         return true
@@ -1228,7 +1524,7 @@ extension CUCore {
         let deadline = clock.nowMs() + selectionHoldMs
         var resets = 0
         while clock.nowMs() < deadline {
-            usleep(30_000)
+            clock.pause(ms: 30)
             guard let now = selectionRange(e), now != want else { continue }
             guard resets < 2 else { break }
             resets += 1
@@ -1261,7 +1557,7 @@ extension CUCore {
             CULog.act.notice("menu in \(t.appName, privacy: .public): no synthetic activation (the private path is off)")
             return
         }
-        noteSyntheticActivation()  // the guardian must not read the activation this posts as the user's
+        noteSyntheticActivation(t.pid)  // the guardian must not read the activation this posts as the user's
         let posted = enforcer.forceActivation(windowID: t.windowID)
         CULog.act.notice("menu in \(t.appName, privacy: .public): \(posted ? "posted the synthetic activation before validating (whatever the app was believed to be)" : "no synthetic activation: the app is in front", privacy: .public)")
     }
@@ -1284,7 +1580,7 @@ extension CUCore {
                     CULog.act.notice("menu in \(t.appName, privacy: .public): “\(title, privacy: .public)” still disabled after \(reads, privacy: .public) reads (\(Int(self.clock.nowMs() - start), privacy: .public) ms)")
                     throw e
                 }
-                usleep(40_000)
+                clock.pause(ms: 40)
             }
         }
     }
@@ -1298,7 +1594,7 @@ extension CUCore {
     func pressBackgroundMenu(_ a: CUMenuAction, _ p: TargetActParams, _ t: CUTarget, blipped: inout Bool) throws -> String? {
         let title = a.path.last ?? ""
         CULog.act.notice("menu in \(t.appName, privacy: .public): validating “\(title, privacy: .public)” in the background — window key in its app: \(Self.yesNo(self.boundWindowIsKeyInApp(t)), privacy: .public); \(self.putSelectionBack(t), privacy: .public)")
-        keyForMenu(t)
+        try keyForMenu(t)
         activateForMenu(p, t)
         func enabledItem() throws -> CUAXMenuNode? {
             do { return try resolveMenu(a, p, t) } catch let e as CUError where e.data?["disabled"] != nil { return nil }
@@ -1328,13 +1624,13 @@ extension CUCore {
     /// not change that). So when the field's window is not its app's key window, it is made key the way a user
     /// does — a window-targeted click on the field, after the synthetic activation, once more if the first only
     /// activated — and the field's selection is put back (the click moved the caret).
-    func makeWindowKeyForField(_ e: AXUIElement, _ t: CUTarget) {
+    func makeWindowKeyForField(_ e: AXUIElement, _ t: CUTarget) throws {
         guard t.accessible, boundWindowIsKeyInApp(t) == false, let c = ElementInfo(e, ax).center else { return }
         let selection = ax.attribute(e, kAXSelectedTextRangeAttribute)
-        guard windowClick(at: c, t) else { return }
+        guard try windowClick(at: c, t) else { return }
         // The first click may only have made the window key (then the window's default responder has the focus):
         // once more, now that it is key.
-        if boundWindowIsKeyInApp(t) != true || focusRelation(e, t) == .elsewhere { _ = windowClick(at: c, t) }
+        if boundWindowIsKeyInApp(t) != true || focusRelation(e, t) == .elsewhere { _ = try windowClick(at: c, t) }
         if let selection, ax.isSettable(e, kAXSelectedTextRangeAttribute) { try? ax.set(e, kAXSelectedTextRangeAttribute, selection) }
         // The click must have left the focus in the field; if it moved it, place it again (press or caret).
         if focusRelation(e, t) != .onIt {
@@ -1352,15 +1648,21 @@ extension CUCore {
     /// A window-targeted left click at `c` in the bound window — on this desktop, or (private path) on another
     /// Space — after the synthetic activation. False when no route reaches the window.
     @discardableResult
-    func windowClick(at c: CGPoint, _ t: CUTarget) -> Bool {
+    func windowClick(at c: CGPoint, _ t: CUTarget) throws -> Bool {
         let onScreen = sys.window(id: t.windowID)?.onScreen == true
         let elsewhere = !onScreen && t.privatePath && skyLight.canSetWindowLocation
         guard onScreen || elsewhere else { return false }
         let route: CURoute = elsewhere && t.isChromium && skyLight.isAvailable ? .skyLight : .publicPid
         var s = synth
         s.windowSPI = t.privatePath
-        postSyntheticActivation(t, privatePath: t.privatePath)
-        try? s.click(pid: t.pid, windowFor: windowFor(t), at: c, button: .left, count: 1, flags: [], route: route)
+        let windowFor = self.windowFor(t)
+        switch keyForClick(t, privatePath: t.privatePath, clickWindow: windowFor(c)) {
+        case .notApplied: postSyntheticActivation(t, privatePath: t.privatePath)
+        case .prepared: break
+        case .appInFront: throw clickRefusal(t)  // the user may be using it now: no click, and nothing typed after it
+        case .activatedItself: throw clickActivatedItselfRefusal(t)
+        }
+        try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()
         return true
     }
@@ -1404,7 +1706,7 @@ extension CUCore {
     /// another element focused — nothing is typed, because the keys would go there. When the app reports no
     /// focus at all there is nothing to check against: the focus-unknown floor still governs the typing.
     func placeFocus(_ e: AXUIElement, _ t: CUTarget, ref: Int?) throws {
-        if focusField(e, t) { return }
+        if try focusField(e, t) { return }
         guard t.accessible else { return }
         if focusRelation(e, t) == .elsewhere { throw focusNotPlacedRefusal(t, ref: ref) }
         CULog.act.notice("focus in \(t.appName, privacy: .public): not confirmed (the app reports no focused element)")
@@ -1419,12 +1721,12 @@ extension CUCore {
     /// user-view guard — and if that write trips the guard, the app is remembered so its native fields use the
     /// press route first too, for the helper's lifetime. Returns whether focus is on `e` now.
     @discardableResult
-    func focusField(_ e: AXUIElement, _ t: CUTarget) -> Bool {
+    func focusField(_ e: AXUIElement, _ t: CUTarget) throws -> Bool {
         // A capture-only window has no element of its own to focus: never a write (its "window" element is the
         // application's). Keys reach it after the synthetic activation, in the window a point click made key.
         guard t.accessible else { return false }
-        if isFocused(e, t) || pressToFocus(e, t) {
-            makeWindowKeyForField(e, t)
+        if try isFocused(e, t) || pressToFocus(e, t) {
+            try makeWindowKeyForField(e, t)
             // Whatever the click did, keys go nowhere but the field: elsewhere now means not placed.
             return focusRelation(e, t) != .elsewhere
         }
@@ -1461,7 +1763,7 @@ extension CUCore {
         repeat {
             if isFocused(e, t) { return true }
             if clock.nowMs() >= deadline { return false }
-            usleep(30_000)
+            clock.pause(ms: 30)
         } while true
     }
 
@@ -1469,14 +1771,14 @@ extension CUCore {
     /// activation (only with the private path, like the rest of the enforcer).
     func postSyntheticActivation(_ t: CUTarget, privatePath: Bool) {
         guard let enforcer = focusEnforcer(for: t, privatePath: privatePath) else { return }
-        noteSyntheticActivation()  // the guardian must not read the activation this posts as the user's
+        noteSyntheticActivation(t.pid)  // the guardian must not read the activation this posts as the user's
         _ = enforcer.enforce(windowID: t.windowID)
     }
 
     /// Focuses `e` by pressing it, never by the `AXFocused` write: a listed `AXPress`/`AXConfirm`, else a
     /// window-targeted click at its centre when the window is on screen. Verified against the focused element.
     /// False when nothing placed focus on it.
-    func pressToFocus(_ e: AXUIElement, _ t: CUTarget) -> Bool {
+    func pressToFocus(_ e: AXUIElement, _ t: CUTarget) throws -> Bool {
         let web = isWebContent(e) || keyboardTarget(t, focused: e) != t.pid
         let actions = ax.actions(e)
         for a in [kAXPressAction, "AXConfirm"] where actions.contains(a) {
@@ -1508,7 +1810,12 @@ extension CUCore {
         // Key IN ITS APP (the app's focused window): in the background the system-wide key focus is the user's
         // app, always, so it can't tell whether the click only made the window key.
         let wasKey = boundWindowIsKeyInApp(t)
-        postSyntheticActivation(t, privatePath: t.privatePath)
+        switch keyForClick(t, privatePath: t.privatePath, clickWindow: windowFor(c)) {
+        case .notApplied: postSyntheticActivation(t, privatePath: t.privatePath)
+        case .prepared: break
+        case .appInFront: throw clickRefusal(t)  // the user may be using it now: no click, and nothing typed after it
+        case .activatedItself: throw clickActivatedItselfRefusal(t)
+        }
         try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()
         let clicked = waitFocused(e, t, web: web)
@@ -1530,7 +1837,7 @@ extension CUCore {
         let ax = self.ax, clock = self.clock
         let evidence = CUEditEvidence(readValue: { e.flatMap { ax.string($0, kAXValueAttribute) } },
                                       nowMs: { clock.nowMs() },
-                                      sleepMs: { usleep(useconds_t($0 * 1000)) })
+                                      sleepMs: { clock.pause(ms: $0) })
         return evidence.wait(before: before, expect: expect, capMs: capMs)
     }
 
@@ -1681,7 +1988,7 @@ extension CUCore {
         repeat {
             if let now = pageSignature(t), !Self.isSamePage(before, now) { return true }
             if clock.nowMs() >= deadline { return false }
-            usleep(100_000)
+            clock.pause(ms: 100)
         } while true
     }
 
@@ -1907,7 +2214,7 @@ extension CUCore {
                         return ActOutcome(rung: .accessibility, detail: "the \(command.rawValue) was done through \(t.appName)'s Edit › \(item.title) and the field changed")
                     }
                     if clock.nowMs() >= deadline { break }
-                    usleep(30_000)
+                    clock.pause(ms: 30)
                 } while true
             }
             CULog.act.notice("key in \(t.appName, privacy: .public): \(command.rawValue, privacy: .public) took no effect in the background — asking for the foreground")
@@ -1956,7 +2263,7 @@ extension CUCore {
             }
         }
         aimMenuCommands(at: t)
-        keyForMenu(t)
+        try keyForMenu(t)
         if let item = menuItem(forKey: "v", modifiers: [.command], pid: t.pid, includeDisabled: true),
            let how = try pasteInBlip(item, p, t) {
             return ActOutcome(rung: .accessibility, detail: how)
@@ -1989,15 +2296,15 @@ extension CUCore {
         // if it validates, else ⌘V (yesterday's only body paste that landed came by ⌘V) — and the window stays key
         // for `blipPasteHoldMs` while the page reads the clipboard. A desktop switch meanwhile stops it.
         let bound = blipKeySettleMs + blipReadMs + blipPasteHoldMs + 150
-        guard let blip = beginBlip(p, t, why: "“\(item.title)”", boundMs: max(Self.blipDeadlineMs, bound)) else { return nil }
+        guard let blip = try beginBlip(p, t, why: "“\(item.title)”", boundMs: max(Self.blipDeadlineMs, bound)) else { return nil }
         defer { blip.end() }
-        if blipKeySettleMs > 0 { usleep(useconds_t(blipKeySettleMs * 1000)) }
+        if blipKeySettleMs > 0 { clock.pause(ms: blipKeySettleMs) }
         activateForMenu(p, t)
         var how: String
         let until = clock.nowMs() + blipReadMs
         var enabled = ax.bool(item.element, kAXEnabledAttribute) == true
         while !enabled, clock.nowMs() < until, !blip.isEnded {
-            usleep(20_000)
+            clock.pause(ms: 20)
             enabled = ax.bool(item.element, kAXEnabledAttribute) == true
         }
         if enabled {
@@ -2023,7 +2330,7 @@ extension CUCore {
                 throw CUError.uncertain("macOS began switching desktops during the paste into \(t.appName), so it was stopped (the user's desktop is being put back); the paste may have landed — check state() before pasting again")
             }
             if clock.nowMs() >= hold || blip.isEnded { break }
-            usleep(15_000)
+            clock.pause(ms: 15)
         } while true
 
         return how
@@ -2209,7 +2516,7 @@ extension CUCore {
                 if probes.map({ ax.frame($0) }) != before {
                     return ActOutcome(rung: wheel.rung, detail: "\(subject): the scroll was sent to that window as wheel events, and its content moved")
                 }
-                usleep(30_000)
+                clock.pause(ms: 30)
             }
             CULog.act.notice("scroll in \(t.appName, privacy: .public) (off screen): the wheel moved nothing — Page keys")
         }
@@ -2217,7 +2524,7 @@ extension CUCore {
             // Keys go to the focused element: make it the scrolled content, not a search field.
             let content = ax.elements(area, kAXChildrenAttribute).first { ax.string($0, kAXRoleAttribute) != kAXScrollBarRole }
             for target in [content, area].compactMap({ $0 }) where ax.isSettable(target, kAXFocusedAttribute) {
-                focusField(target, t)
+                try focusField(target, t)
                 break
             }
         }
@@ -2408,7 +2715,7 @@ extension CUCore {
         announceTarget(t, info, pressing: false)
         cursor(t, "press", at: info.center, count: 1, button: "left")
         try token.check()
-        focusField(e, t)
+        try focusField(e, t)
         do {
             try ax.set(e, kAXSelectedTextRangeAttribute, r)
         } catch let error where Self.deliveryUncertain(error) {
@@ -2528,7 +2835,7 @@ extension CUCore {
         let deadline = clock.nowMs() + pressSettleMs
         var after = pressEvidence(e, t)
         while after == before, clock.nowMs() < deadline {
-            usleep(50_000)
+            clock.pause(ms: 50)
             after = pressEvidence(e, t)
         }
         guard after != before else {
@@ -2584,7 +2891,7 @@ extension CUCore {
         repeat {
             if webPressEvidence(e, t) != before { return true }
             if clock.nowMs() >= deadline { return false }
-            usleep(50_000)
+            clock.pause(ms: 50)
         } while true
     }
 
@@ -2627,6 +2934,11 @@ extension CUCore {
         if statefulWithoutReadableState(e, info) {
             CULog.act.notice("click in \(t.appName, privacy: .public): a toggle-like control with no readable state — not clicked as well")
             return ActOutcome(rung: .accessibility, detail: "the accessibility press on \(label) showed no change accessibility can see, and a second press could undo it (it holds a state accessibility doesn't show) — check state() or a screenshot before pressing again")
+        }
+        // On ANOTHER desktop: a desktop visit would click it where it is (round 11 — live, never offered).
+        if isOffThisDesktop(t) {
+            CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect, and the window is on another desktop — a desktop visit would click it")
+            throw CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(label) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
         }
         if offScreenSubject(t) != nil {
             CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect, and the window is not on screen — not clicked as well")
@@ -2699,14 +3011,26 @@ extension CUCore {
 
     /// Runs `click`, then says what it did: the effect seen (the app's web content ignored the press: counted,
     /// see `prefersWebClicks`), or plainly that nothing changed that accessibility can see — never a silent success.
-    func webClickVerified(_ e: AXUIElement, _ t: CUTarget, pressIgnored: Bool, why: String, label: String,
+    /// `why` nil: a plain click (no press was tried) — nothing said when it took effect; `crop`/`shotBefore`: its
+    /// pixels, so an effect accessibility can't see (a canvas) is not called none.
+    func webClickVerified(_ e: AXUIElement, _ t: CUTarget, pressIgnored: Bool, why: String?, label: String,
+                          crop: CGRect? = nil, shotBefore: CGImage? = nil,
                           _ click: () throws -> ActOutcome) throws -> ActOutcome {
         let before = webPressEvidence(e, t)
         let o = try click()
         if webPressChanged(e, t, since: before) {
             if pressIgnored { noteWebPressIgnored(t) }
             CULog.act.notice("click in \(t.appName, privacy: .public): the window-targeted click took effect")
+            guard let why else { return o }
             return o.noting(pressIgnored ? "\(why); clicked it instead" : "\(why), so \(label) was clicked")
+        }
+        if let crop, let shotBefore, let after = pressShot(crop, t), CUImageTools.differs(shotBefore, after) {
+            CULog.act.notice("click in \(t.appName, privacy: .public): the click changed pixels but nothing accessibility can see")
+            return o
+        }
+        guard let why else {
+            CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect after the window-targeted click")
+            return o.noting("the click on \(label) had no visible effect (nothing changed that accessibility can see) — check with state() or a screenshot before clicking again")
         }
         CULog.act.notice("click in \(t.appName, privacy: .public): nothing changed after the window-targeted click either")
         return o.noting("\(why); clicked \(label), and nothing changed that accessibility can see — check with state() or a screenshot")
@@ -2946,23 +3270,44 @@ extension CUCore {
 
     /// Rung 4: bring the app forward, act with the real pointer, then put the pointer and the user's app back.
     /// Every press, drag step and release is hit-tested by the caller's check.
-    private func inForeground<T>(_ t: CUTarget, _ body: () throws -> T) throws -> T {
+    func inForeground<T>(_ t: CUTarget, _ body: () throws -> T) throws -> T {
+        // Bringing an app forward whose window is on ANOTHER desktop takes the user there: never without their
+        // say for a desktop visit (user ruling 2026-10-10) — not with `allowForeground`, not for a held app.
+        // Inside a visit the window is on screen already.
+        if !isVisiting(t), isOffThisDesktop(t) {
+            CULog.act.notice("foreground in \(t.appName, privacy: .public): its window is on another desktop — not brought forward without the user's say for a visit")
+            throw CUError.needsDesktopVisit(t.appName, why: .act)
+        }
         // The user agreed to this act taking the foreground: the user-view guard and the Focus Guardian leave
         // it alone, for this one action.
         t.consentedForeground = true
-        guardianExempt(t.pid)
-        let previous = sys.frontmostPid()
+        // Held in front for the script (requestForeground): the hold owns the front and its exemption — this action
+        // neither ends it nor gives the front back (that undid the hold: the held app, its exemption ended, read as a theft).
+        let held = holdsForeground(t)
+        judgeBeforeTaking("the consented foreground's start")
+        if !held { guardianExempt(t.pid) }
+        let previous = userView()
         let cursor = sys.cursorLocation()
         _ = sys.activate(pid: t.pid)
+        // Refusable (cooperative activation); accessibility's frontmost is not (as a restore does).
+        if sys.frontmostPid() != t.pid { try? ax.set(ax.application(t.pid), kAXFrontmostAttribute, kCFBooleanTrue) }
         if let w = try? windowElement(t) { try? ax.perform(w, kAXRaiseAction) }
         var front = false
         for _ in 0..<50 {
             if sys.frontmostPid() == t.pid { front = true; break }
-            usleep(20_000)
+            clock.pause(ms: 20)
         }
         defer {
             if let c = cursor { sys.warpCursor(to: c) }
-            if let prev = previous, prev != t.pid { _ = sys.activate(pid: prev) }
+            // The front given back to the user's place AS IT IS NOW (the guardian's: the one before this action, unless
+            // they moved), only while this app still has it — a move of theirs is left alone, and an activation that never
+            // landed gives nothing back (review of round 8: it activated the pid captured before, over whatever was in front).
+            if !held { let endedAt = clock.nowSeconds(); guardianLock.withLock { guardianCore.endExempt(t.pid, now: endedAt) } }
+            if !held, sys.frontmostPid() == t.pid,
+               let place = guardianPlace() ?? previous.front.map({ CUGuardedView(app: $0, space: previous.space) }),
+               let user = place.app, user != t.pid {
+                _ = restoreUserView(CUUserView(space: place.space, front: user), user: user)
+            }
         }
         guard front else { throw CUError.unsupported("could not bring \(t.appName) to the front") }
         return try body()

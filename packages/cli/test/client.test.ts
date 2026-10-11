@@ -62,6 +62,44 @@ describe("WinterClient", () => {
     client.close();
   });
 
+  // Review finding (version skew): a FILE attachment stages nothing, so the client learns from the hello answer — before
+  // it sends anything — whether the daemon takes an original image path in `images`.
+  test("the client reads the daemon's hello features: a current daemon takes original image paths", async () => {
+    await boot();
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli-test", onEvent: () => {} });
+    expect(client.supportsOriginalImagePaths()).toBe(true);
+    client.close();
+  });
+
+  test("…and an older daemon, whose hello says nothing, does not (the TUI then puts the path in the text)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-oldhello-"));
+    const socketPath = join(dir, "old.sock");
+    const answer = (features?: string[]) => ({ ok: true, serverVersion: "0.0.1", protocolVersion: PROTOCOL_VERSION, ...(features === undefined ? {} : { features }) });
+    const servers: Array<{ stop(): void }> = [];
+    try {
+      for (const [name, reply, expected] of [["older", answer(), false], ["unrelated features only", answer(["something-else"]), false], ["announced", answer(["image-original-paths"]), true]] as const) {
+        const path = `${socketPath}-${name.split(" ")[0]}`;
+        const server = Bun.listen({
+          unix: path,
+          socket: {
+            data(socket, chunk) {
+              for (const line of new TextDecoder().decode(chunk).split("\n").filter(Boolean)) {
+                const req = JSON.parse(line);
+                socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: req.id, result: reply })}\n`);
+              }
+            },
+          },
+        });
+        servers.push(server);
+        const client = await WinterClient.connect({ socketPath: path, token: "t", clientName: "cli-test", onEvent: () => {} });
+        expect({ name, supports: client.supportsOriginalImagePaths() }).toEqual({ name, supports: expected });
+        client.close();
+      }
+    } finally {
+      for (const s of servers) s.stop();
+    }
+  });
+
   test("bad token raises a clear error", async () => {
     await boot();
     await expect(WinterClient.connect({
@@ -156,7 +194,11 @@ describe("WinterClient", () => {
     const skills = await client.listSkills(process.cwd()); // throws if any element fails schema validation
     // Lane B (2026-09-22): + the truthful session-availability pair (a built-in skill cannot reach a
     // session's runtime child yet) — and it must pass the VALIDATED path, which is this test's point.
-    expect(skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String), loadsInSessions: false, sessionNote: expect.any(String) }]);
+    // + the weak-model computer-use skill every boot seeds as a managed copy into sdk/skills (a user-scope skill).
+    expect(skills).toEqual([
+      { name: "computer-use", description: expect.any(String), source: "user", path: expect.stringMatching(/sdk\/skills\/computer-use\/SKILL\.md$/), loadsInSessions: true },
+      { name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String), loadsInSessions: false, sessionNote: expect.any(String) },
+    ]);
     client.close();
   });
 

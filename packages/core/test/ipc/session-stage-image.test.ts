@@ -1,8 +1,10 @@
-// Code-mode image input (2026-09-29): `session.stageImage` — a composer image staged into the
-// session's own temp directory (`sessionTmpDir(sessionId)/images/image_<k>.<ext>`). Local clients
-// only, code sessions only, image-capable models only, magic bytes decide the type, 3.75 MiB decoded,
-// daemon-picked names created atomically and never over anything — and the daemon never writes
-// through an agent-planted symlink (the session temp dir is a sandbox WRITABLE root).
+// Code-mode image input (2026-09-29; raw image paths 2026-10-10): `session.stageImage` — a composer image
+// with no file of its own staged AS IT IS into the session's own temp directory
+// (`sessionTmpDir(sessionId)/images/image_<k>.<ext>`). Local clients only, code sessions only,
+// image-capable models only, magic bytes decide the type (png/jpeg/gif/webp/heic/tiff/bmp), as many
+// bytes as one request line can carry and no pixel limit, daemon-picked names created atomically and
+// never over anything — and the daemon never writes through an agent-planted symlink (the session temp
+// dir is a sandbox WRITABLE root).
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,7 +12,7 @@ import { join } from "node:path";
 import {
   ConnWriter, ERR, IMAGE_DATA_INVALID, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE, IMAGE_STAGE_FAILED, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED, LineDecoder, METHODS, PROTOCOL_VERSION,
-  STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, encodeLine, type WritableSocket,
+  IMAGE_FILE_EXTENSIONS, NDJSON_MAX_LINE_BYTES, STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_LINE_HEADROOM_BYTES, STAGE_IMAGE_MAX_BYTES, STAGE_IMAGE_MEDIA_TYPES, encodeLine, type WritableSocket,
 } from "@yanlinglabs/winter-protocol";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
@@ -76,6 +78,9 @@ const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x
 const GIF = new Uint8Array([...Buffer.from("GIF89a"), 1, 0, 1, 0]);
 const WEBP = new Uint8Array([...Buffer.from("RIFF"), 4, 0, 0, 0, ...Buffer.from("WEBPVP8 ")]);
 const BMP = new Uint8Array([...Buffer.from("BM"), 0, 0, 0, 0, 0, 0]);
+const TIFF = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0]);
+const TIFF_BE = new Uint8Array([0x4d, 0x4d, 0x00, 0x2a, 0, 0, 0, 8]);
+const HEIC = new Uint8Array([0, 0, 0, 24, ...Buffer.from("ftypheic"), 0, 0, 0, 0]);
 const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64");
 
 describe("session.stageImage (code-mode image input)", () => {
@@ -123,6 +128,20 @@ describe("session.stageImage (code-mode image input)", () => {
     c.close();
   });
 
+  // The prompt's one static line tells the model a staged copy "sits inside a `winter-session-…/images/` folder" — so every
+  // staged path, whatever the type, must really have that shape.
+  test("every staged path has the shape the prompt line names: …/winter-session-<id>/images/image_<k>.<ext>", async () => {
+    const { store, c } = await boot();
+    const sid = store.createSession("global", { model: IMAGE_TAG });
+    for (const [mediaType, bytes] of [["image/png", PNG], ["image/jpeg", JPEG], ["image/heic", HEIC], ["image/tiff", TIFF]] as const) {
+      const res = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType, dataBase64: b64(bytes) });
+      expect(res.result.path).toMatch(/\/winter-session-[A-Za-z0-9_-]+\/images\/image_\d+\.(png|jpg|gif|webp|heic|tiff|bmp)$/);
+      // …and the extension is one the Read tool opens as an image (it dispatches on the extension alone).
+      expect(IMAGE_FILE_EXTENSIONS as readonly string[]).toContain(`.${res.result.path.split(".").pop()}`);
+    }
+    c.close();
+  });
+
   test("names climb past every existing file and never overwrite one", async () => {
     const { store, c } = await boot();
     const sid = store.createSession("global", { model: IMAGE_TAG });
@@ -140,22 +159,32 @@ describe("session.stageImage (code-mode image input)", () => {
     c.close();
   });
 
-  test("the MAGIC BYTES decide: all four types stage; a mismatch and an unknown type refuse typed", async () => {
+  test("the MAGIC BYTES decide: all seven types stage under their own extension; a mismatch and an unknown type refuse typed", async () => {
     const { store, c } = await boot();
     const sid = store.createSession("global", { model: IMAGE_TAG });
-    for (const [mediaType, bytes, ext] of [["image/png", PNG, "png"], ["image/jpeg", JPEG, "jpg"], ["image/gif", GIF, "gif"], ["image/webp", WEBP, "webp"]] as const) {
+    const types = [
+      ["image/png", PNG, "png"], ["image/jpeg", JPEG, "jpg"], ["image/gif", GIF, "gif"], ["image/webp", WEBP, "webp"],
+      ["image/heic", HEIC, "heic"], ["image/tiff", TIFF, "tiff"], ["image/bmp", BMP, "bmp"],
+    ] as const;
+    expect(types.map((t) => t[0])).toEqual([...STAGE_IMAGE_MEDIA_TYPES]);
+    for (const [mediaType, bytes, ext] of types) {
       const res = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType, dataBase64: b64(bytes) });
+      expect(res.error).toBeUndefined();
       expect(res.result.path.endsWith(`.${ext}`)).toBe(true);
+      expect(Buffer.from(readFileSync(res.result.path)).equals(Buffer.from(bytes))).toBe(true);
     }
+    // The big-endian TIFF is a TIFF too.
+    expect(sniffImageMediaType(TIFF_BE)).toBe("image/tiff");
+    // A declared type the bytes disagree with, and bytes that are no image at all.
     const mismatch = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(JPEG) });
     expect(mismatch.error.code).toBe(ERR.INVALID_PARAMS);
     expect(mismatch.error.data).toEqual({ code: IMAGE_TYPE_MISMATCH });
-    const bmp = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(BMP) });
-    expect(bmp.error.data).toEqual({ code: IMAGE_TYPE_UNSUPPORTED });
-    // A declared type outside the four is refused at the params door.
-    const tiff = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/tiff", dataBase64: b64(PNG) });
-    expect(tiff.error.code).toBe(ERR.INVALID_PARAMS);
-    expect(readdirSync(imagesDirOf(sid)).length).toBe(4);
+    const text = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(new TextEncoder().encode("hello, not an image")) });
+    expect(text.error.data).toEqual({ code: IMAGE_TYPE_UNSUPPORTED });
+    // A declared type outside the seven is refused at the params door.
+    const svg = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/svg+xml", dataBase64: b64(PNG) });
+    expect(svg.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(readdirSync(imagesDirOf(sid)).length).toBe(types.length);
     c.close();
   });
 
@@ -173,19 +202,27 @@ describe("session.stageImage (code-mode image input)", () => {
     c.close();
   });
 
-  test("the cap: exactly 3.75 MiB stages over the REAL socket (it fits the 8 MiB line cap); anything more refuses image_too_large", async () => {
+  test("the cap is what one request line can carry: a max-size image stages over the REAL socket, UNCHANGED; anything more refuses image_too_large", async () => {
     const { store, c } = await boot();
     const sid = store.createSession("global", { model: IMAGE_TAG });
-    expect(STAGE_IMAGE_MAX_BYTES).toBe(3_932_160); // the runtime Read tool's READ_IMAGE_MAX_BYTES
+    // Derived from the 8 MiB line cap with explicit headroom, not from the runtime Read tool's
+    // (smaller) per-image limit — Read shrinks and re-encodes a bigger source itself.
+    expect(STAGE_IMAGE_B64_MAX_LENGTH).toBe(NDJSON_MAX_LINE_BYTES - STAGE_IMAGE_LINE_HEADROOM_BYTES);
+    expect(STAGE_IMAGE_MAX_BYTES).toBe((STAGE_IMAGE_B64_MAX_LENGTH / 4) * 3);
+    expect(STAGE_IMAGE_MAX_BYTES).toBeGreaterThan(5 * 1024 * 1024);
     const max = new Uint8Array(STAGE_IMAGE_MAX_BYTES);
     max.set(PNG);
     const maxB64 = b64(max);
     expect(maxB64.length).toBe(STAGE_IMAGE_B64_MAX_LENGTH);
+    const frame = encodeLine({ jsonrpc: "2.0", id: 1, method: METHODS.sessionStageImage, params: { sessionId: sid, mediaType: "image/png", dataBase64: maxB64 } });
+    expect(frame.length).toBeLessThan(NDJSON_MAX_LINE_BYTES - 128 * 1024); // real headroom under the line cap
     const ok = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: maxB64 });
     expect(ok.error).toBeUndefined();
     expect(lstatSync(ok.result.path).size).toBe(STAGE_IMAGE_MAX_BYTES);
-    // One byte over, and far over: the same typed refusal and message, decided from the length.
-    for (const size of [STAGE_IMAGE_MAX_BYTES + 1, 5 * 1024 * 1024]) {
+    expect(new Uint8Array(readFileSync(ok.result.path))).toEqual(max); // byte for byte: nothing downscaled or re-encoded
+    // One byte over, and well over (still inside the line cap, which would otherwise end the
+    // connection): the same typed refusal and message, decided from the length.
+    for (const size of [STAGE_IMAGE_MAX_BYTES + 1, STAGE_IMAGE_MAX_BYTES + 120_000]) {
       const over = new Uint8Array(size);
       over.set(PNG);
       const res = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(over) });
@@ -193,31 +230,46 @@ describe("session.stageImage (code-mode image input)", () => {
       expect(res.error.data).toEqual({ code: IMAGE_TOO_LARGE });
       expect(res.error.message).toBe(IMAGE_TOO_LARGE_MESSAGE);
     }
-    expect(IMAGE_TOO_LARGE_MESSAGE).toBe("Images must be 3.75 MB or smaller");
-    // A base64 string just inside the length bound can still decode past the cap only by padding
-    // tricks, which strict decoding refuses; the decoded check stays as the belt.
+    expect(IMAGE_TOO_LARGE_MESSAGE).toBe("The image is too large to attach");
     expect(readdirSync(imagesDirOf(sid))).toEqual(["image_1.png"]);
     c.close();
-  });
+  }, 30_000);
 
-  test("more than 8000 px on either edge refuses image_too_large, read from the header alone", async () => {
+  test("no pixel limit: a header declaring a huge canvas stages untouched (the runtime's Read tool shrinks it)", async () => {
     const { store, c } = await boot();
     const sid = store.createSession("global", { model: IMAGE_TAG });
-    // A header claiming 8001×10 — tiny on the wire, so only the dimension check can refuse it.
     const header = (w: number, h: number) => {
       const png = makePng(4, 4);
       const view = new DataView(png.buffer, png.byteOffset);
       view.setUint32(16, w); view.setUint32(20, h);
       return png;
     };
-    for (const [w, h] of [[8001, 10], [10, 8001]] as const) {
-      const res = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(header(w, h)) });
-      expect(res.error.data).toEqual({ code: IMAGE_TOO_LARGE });
-      expect(res.error.message).toBe(IMAGE_TOO_LARGE_MESSAGE);
+    for (const [w, h] of [[8001, 10], [10, 20000], [40000, 40000]] as const) {
+      const bytes = header(w, h);
+      const res = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(bytes) });
+      expect(res.error).toBeUndefined();
+      expect(Buffer.from(readFileSync(res.result.path)).equals(Buffer.from(bytes))).toBe(true);
     }
-    const edge = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(header(8000, 8000)) });
-    expect(edge.error).toBeUndefined();
     c.close();
+  });
+
+  test("sniffImageMediaType is the runtime's own sniffer: seven types by magic bytes, HEIC by its ftyp brand, nothing by name", () => {
+    expect(sniffImageMediaType(PNG)).toBe("image/png");
+    expect(sniffImageMediaType(JPEG)).toBe("image/jpeg");
+    expect(sniffImageMediaType(GIF)).toBe("image/gif");
+    expect(sniffImageMediaType(WEBP)).toBe("image/webp");
+    expect(sniffImageMediaType(BMP)).toBe("image/bmp");
+    expect(sniffImageMediaType(TIFF)).toBe("image/tiff");
+    expect(sniffImageMediaType(TIFF_BE)).toBe("image/tiff");
+    for (const brand of ["heic", "heix", "hevc", "hevx", "heim", "heis", "mif1", "msf1"]) {
+      expect({ brand, t: sniffImageMediaType(new Uint8Array([0, 0, 0, 24, ...Buffer.from(`ftyp${brand}`), 0, 0, 0, 0])) }).toEqual({ brand, t: "image/heic" });
+    }
+    // An MP4/QuickTime container shares the `ftyp` box but not the brand; a short header is nothing.
+    expect(sniffImageMediaType(new Uint8Array([0, 0, 0, 24, ...Buffer.from("ftypmp42"), 0, 0, 0, 0]))).toBeUndefined();
+    expect(sniffImageMediaType(new Uint8Array([0, 0, 0, 24, ...Buffer.from("ftyphei")]))).toBeUndefined();
+    expect(sniffImageMediaType(new Uint8Array([0x89, 0x50, 0x4e]))).toBeUndefined();
+    expect(sniffImageMediaType(new Uint8Array(0))).toBeUndefined();
+    expect(sniffImageMediaType(new TextEncoder().encode("<svg xmlns='http://www.w3.org/2000/svg'/>"))).toBeUndefined();
   });
 
   test("imageDimensions reads PNG, JPEG, GIF and WebP headers without decoding", () => {

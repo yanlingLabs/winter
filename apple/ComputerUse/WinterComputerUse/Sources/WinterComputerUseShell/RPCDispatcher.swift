@@ -29,7 +29,8 @@ public final class RPCDispatcher: @unchecked Sendable {
 
     /// `liveTest`: the helper is a live-test instance (`HelperIdentity.liveTest` — a dev helper serving a
     /// `winter-cu-live-` temp home, which accepts only the live suite's test identities). Only then does it answer the
-    /// TEST-ONLY `test.activate` the suite uses to put its own "user's app" in front (`activator`).
+    /// TEST-ONLY `test.activate` the suite uses to put its own "user's app" in front (`activator`), and `test.automation`
+    /// (whether an app may already be scripted, never asking).
     public init(core: CoreService, coordinator: HelperCoordinator, viewHub: ViewHub, inFlight: InFlightRegistry,
                 liveTest: Bool = false, activator: (@Sendable (Int32) async -> TestActivateResult)? = nil,
                 capturer: TestCapturing? = nil) {
@@ -40,9 +41,20 @@ public final class RPCDispatcher: @unchecked Sendable {
         buildRoutes()
         if liveTest {
             let activate = activator ?? { pid in await MainActor.run { TestActivator.activate(pid: pid) } }
-            routes["test.activate"] = { params, _ in
+            routes["test.activate"] = { [core] params, _ in
                 let p = try RPCDispatcher.decode(TestActivateParams.self, params)
+                if p.asUser == true { core.testUserInput(pid: p.pid, switching: true) }
                 return AnyEncodable(await activate(p.pid))
+            }
+            routes["test.userInput"] = { [core] params, _ in
+                let p = try RPCDispatcher.decode(TestUserInputParams.self, params)
+                core.testUserInput(pid: p.pid, switching: false)
+                return AnyEncodable([String: Bool]())
+            }
+            // May this helper already script an app (never asking)? The suite runs an AppleScript-backed scenario only
+            // on `granted`, so a test never raises macOS's Automation question.
+            routes["test.automation"] = { params, _ in
+                AnyEncodable(CUAutomationProbe.status(try RPCDispatcher.decode(TestAutomationParams.self, params)))
             }
             // The freshness measurement's captures (TestCapture.swift): a still through the helper's own off-Space
             // path, or the latest frame of a desktop-independent test stream.
@@ -115,14 +127,24 @@ public final class RPCDispatcher: @unchecked Sendable {
         engine("target.waitFor") { try await $0.targetWaitFor($1 as TargetWaitForParams) }
         engine("target.applescript") { try await $0.targetAppleScript($1 as TargetAppleScriptParams) }
         engine("target.scriptingDictionary") { try await $0.targetScriptingDictionary($1 as TargetScriptingDictionaryParams) }
+        engine("target.scriptingCommands") { try await $0.targetScriptingCommands($1 as TargetScriptingCommandsParams) }
         engine("screen.screenshot") { try await $0.screenScreenshot($1 as ScreenScreenshotParams) }
         engine("screen.appAt") { try await $0.screenAppAt($1 as ScreenAppAtParams) }
+        engine("visit.close") { try await $0.visitClose($1 as VisitCloseParams) }
 
         routes["script.active"] = { [core, coordinator] params, _ in
             let p = try RPCDispatcher.decode(ScriptActiveParams.self, params)
             await coordinator.setScriptActive(sessionId: p.sessionId, active: p.active)
             core.scriptActivity(sessionId: p.sessionId, active: p.active)
             return AnyEncodable(EmptyResult())
+        }
+        // The desktop-switch prompt (a long request: it answers when the user clicks, or `expired`); `cancel
+        // {callId}` — the prompt's own id — closes it.
+        routes["prompt.desktopVisit"] = { [coordinator] params, _ in
+            let p = try RPCDispatcher.decode(PromptDesktopVisitParams.self, params)
+            try p.validate()
+            let answer = try await coordinator.askDesktopVisit(p)
+            return AnyEncodable(PromptDesktopVisitResult(answer: answer.rawValue))
         }
         routes["turn.ended"] = { [core, coordinator] params, _ in
             let p = try RPCDispatcher.decode(TurnEndedParams.self, params)
@@ -176,6 +198,47 @@ public final class RPCDispatcher: @unchecked Sendable {
         guard let id = params?["sessionId"]?.stringValue, !id.isEmpty else { throw RPCError.invalidParams("params.sessionId is required") }
         return id
     }
+}
+
+/// `prompt.desktopVisit` — the shell's own method (the desktop-switch prompt is drawn by the presentation layer).
+/// `callId` equals `promptId`: it is what the daemon's `cancel` names.
+public struct PromptDesktopVisitParams: Codable, Equatable, Sendable {
+    public var promptId: String
+    public var callId: String
+    public var sessionId: String
+    public var app: String
+    public var bundleId: String
+    public var reason: String
+    /// The fallback countdown when there is no `expiresAt`.
+    public var timeoutMs: Int?
+    /// The session card's own deadline (epoch ms): the panel's countdown runs to it.
+    public var expiresAt: Int?
+
+    public init(promptId: String, callId: String, sessionId: String, app: String, bundleId: String, reason: String,
+                timeoutMs: Int? = nil, expiresAt: Int? = nil) {
+        self.promptId = promptId
+        self.callId = callId
+        self.sessionId = sessionId
+        self.app = app
+        self.bundleId = bundleId
+        self.reason = reason
+        self.timeoutMs = timeoutMs
+        self.expiresAt = expiresAt
+    }
+
+    func validate() throws {
+        guard !promptId.isEmpty else { throw RPCError.invalidParams("params.promptId is required") }
+        guard callId == promptId else { throw RPCError.invalidParams("params.callId must equal params.promptId") }
+        guard !sessionId.isEmpty else { throw RPCError.invalidParams("params.sessionId is required") }
+        guard expiresAt != nil || (timeoutMs ?? 0) > 0 else {
+            throw RPCError.invalidParams("params.expiresAt or a positive params.timeoutMs is required")
+        }
+    }
+}
+
+/// `{answer: "switch" | "refuse" | "expired"}`.
+public struct PromptDesktopVisitResult: Codable, Equatable, Sendable {
+    public var answer: String
 }
 
 /// `script.active` — the shell's own method (the Esc tap's arming), so its params live here.

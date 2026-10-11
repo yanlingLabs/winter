@@ -247,13 +247,37 @@ final class WinterClientTests: XCTestCase {
 
     func testRequestTimesOut() async throws {
         let t = ScriptedTransport()
-        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "c", requestTimeout: .milliseconds(80))
+        // The timeout passes when the test says so — never because the machine was slow to answer the hello.
+        let timeouts = ManualTimeout()
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "c", sleep: timeouts.sleeper)
         async let connected: Void = client.connect()
         let hello = try await waitForSent(t, count: 1)[0]
         t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"ok":true}}"#)
         try await connected
-        do { _ = try await client.request("session.list", params: nil); XCTFail("expected timeout") }
-        catch let e as RpcError { XCTAssertTrue(e.message.contains("timed out")) }
+        async let listed = client.request("session.list", params: nil)
+        _ = try await waitForSent(t, count: 2) // the request is on the wire, and nobody will answer it
+        timeouts.elapse()
+        do { _ = try await listed; XCTFail("expected timeout") }
+        catch let e as RpcError { XCTAssertEqual(e.code, -2); XCTAssertTrue(e.message.contains("timed out")) }
+    }
+
+    /// The other half of the clock: with the timeout clock never released, a slow daemon is just a slow daemon — an
+    /// answer that arrives long after a short real timeout would have fired still resolves the request (and a hello
+    /// answered late connected). Only `elapse()` times a request out.
+    func testNoRequestTimesOutUntilTheTimeoutClockSaysSo() async throws {
+        let t = ScriptedTransport()
+        let timeouts = ManualTimeout()
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "c", requestTimeout: .milliseconds(20), sleep: timeouts.sleeper)
+        async let connected: Void = client.connect()
+        let hello = try await waitForSent(t, count: 1)[0]
+        try await Task.sleep(nanoseconds: 100_000_000) // five times the timeout, in real time
+        t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"ok":true}}"#)
+        try await connected
+        async let listed = client.request("session.list", params: nil)
+        let sent = try await waitForSent(t, count: 2)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(sent[1])["id"] as! Int),"result":{"ok":true}}"#)
+        _ = try await listed
     }
 
     /// AMENDMENT 4 regression: a send() failure (not a timeout, not a server error response) must

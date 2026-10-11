@@ -175,6 +175,13 @@ export interface EmbeddedSessionHostDeps {
   workerEntry?: string;
   workflowWorkerCommand?: () => EmbeddedWorkflowWorkerCommand;
   killGraceMs?: number;
+  /**
+   * Test seam over `EMBEDDED_TERMINATE_WAIT_MS`: how long `shutdown()` waits for a `terminate()`d straggler to
+   * close. Production keeps the constant (the supervisor's 5 s arithmetic above); an e2e that must see the
+   * Worker's last write land before the stores close on a starved machine widens it, because past this wait
+   * `stop()` goes on to close `runtime-state.db` and the straggler's iteration tail would find it closed.
+   */
+  terminateWaitMs?: number;
   /** Test seam over the SDK's `spawnEmbeddedWorker` (WS-24: a Worker whose orphans a test controls). */
   spawnWorker?: (options: SpawnEmbeddedWorkerOptions) => EmbeddedWorkerProcess;
   /** Test seam over `killProcessGroup` (WS-24). */
@@ -332,7 +339,7 @@ export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): E
         log(`${stragglers.length} embedded session(s) did not end within ${budgetMs} ms of shutdown — terminating`);
         for (const p of stragglers) p.terminate();
         // `terminate()` closes a Worker in milliseconds (measured ~50 ms even mid-spin); bounded anyway.
-        await Promise.race([all, sleep(EMBEDDED_TERMINATE_WAIT_MS)]);
+        await Promise.race([all, sleep(deps.terminateWaitMs ?? EMBEDDED_TERMINATE_WAIT_MS)]);
       })().catch(() => {});
       return shuttingDown;
     },

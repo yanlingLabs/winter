@@ -23,6 +23,17 @@ struct AXTreeReader {
         kAXPlaceholderValueAttribute, "AXDOMIdentifier",
     ]
 
+    /// A check box's or radio button's `AXValue` as checked (true), unchecked (false), or unknown (nil): only 1/0 (and
+    /// true/false) say so — a mixed box (2) or a value that is not a state (a web radio's own `value`, a label) claims
+    /// nothing (queue item 1, round 11: two web radios both read "(checked)"). Pure.
+    static func checkedState(_ v: String) -> Bool? {
+        switch v.trimmingCharacters(in: .whitespaces).lowercased() {
+        case "1", "true": return true
+        case "0", "false": return false
+        default: return nil
+        }
+    }
+
     /// Roles whose `AXValue` the state shows (or turns into checked/unchecked).
     static let valueRoles: Set<String> = [
         "AXTextField", "AXTextArea", "AXStaticText", "AXComboBox", "AXSlider", "AXCheckBox", "AXRadioButton",
@@ -73,7 +84,7 @@ struct AXTreeReader {
                 value = AX.attribute(e, kAXValueAttribute).flatMap(AX.stringValue)
             }
             if Self.checkRoles.contains(role) || subrole.map(Self.checkRoles.contains) == true {
-                if let v = value { states.insert(v == "0" ? .unchecked : .checked) }
+                if let v = value, let checked = Self.checkedState(v) { states.insert(checked ? .checked : .unchecked) }
                 value = nil
             } else if role == "AXDisclosureTriangle" {
                 if let v = value { states.insert(v == "0" ? .collapsed : .expanded) }
@@ -88,11 +99,9 @@ struct AXTreeReader {
             if attrs[kAXEnabledAttribute].flatMap(AX.boolValue) == false { states.insert(.disabled) }
             if attrs[kAXFocusedAttribute].flatMap(AX.boolValue) == true { states.insert(.focused) }
             if attrs[kAXSelectedAttribute].flatMap(AX.boolValue) == true { states.insert(.selected) }
-            if let d = attrs["AXDisclosing"].flatMap(AX.boolValue) {
-                states.insert(d ? .expanded : .collapsed)
-            } else if attrs[kAXExpandedAttribute].flatMap(AX.boolValue) == true {
-                states.insert(.expanded)
-            }
+            states.formUnion(Self.disclosureState(role: role, subrole: subrole,
+                                                  disclosing: attrs["AXDisclosing"].flatMap(AX.boolValue),
+                                                  expanded: attrs[kAXExpandedAttribute].flatMap(AX.boolValue)))
             var frame: CGRect?
             if let p = attrs[kAXPositionAttribute].flatMap(AX.pointValue), let s = attrs[kAXSizeAttribute].flatMap(AX.sizeValue) {
                 frame = CGRect(origin: p, size: s)
@@ -129,6 +138,16 @@ struct AXTreeReader {
         var out: [CUNode] = []
         for r in roots { if let n = node(r, depth: 0) { out.append(n) } }
         return Result(roots: out, nodeCount: maxNodes - budget, truncated: truncated)
+    }
+
+    /// The collapsed/expanded state an element reports, read only where it means one. WebKit answers
+    /// `AXDisclosing` = false for EVERY element of a page (live, macOS 26: the scroll area, the web area, headings,
+    /// static text, fields, groups — all "(collapsed)"), so a `false` says something only on an OUTLINE ROW (AppKit's
+    /// outline rows, a web tree's `treeitem`s), the one kind of element that discloses. A disclosure triangle reads
+    /// its value instead (in `read`). Anything that reports itself disclosing or expanded is `.expanded`. Pure.
+    static func disclosureState(role: String, subrole: String?, disclosing: Bool?, expanded: Bool?) -> CUStates {
+        if role == "AXRow", subrole == "AXOutlineRow", let d = disclosing { return d ? .expanded : .collapsed }
+        return disclosing == true || expanded == true ? .expanded : []
     }
 
     /// An unnamed wrapper with one child and nothing of its own to say is replaced by that child.

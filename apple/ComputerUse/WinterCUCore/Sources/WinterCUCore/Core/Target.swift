@@ -108,9 +108,17 @@ final class CUTarget: @unchecked Sendable {
     var webArea: AXUIElement?
     var webAreaWindowTitle: String?
     var noWebAreaUntil: Double?
+    /// Floor F's dialog scan: the app's window-server windows when it last ran, and its answer — scanned again only when
+    /// they change (the dialog is a window of its own). Pid-queue only.
+    var remoteDebuggingScan: (windows: Set<UInt32>, shown: Bool)?
 
     /// The focus read after the last act, and when: the next act's "before". Pid-queue only.
     var focusAfterLastAct: (atMs: Double, focus: CUCore.WindowFocus)?
+
+    /// The bound window's focus read INSIDE this act's focus blips (`CUCore.noteBlipFocus`), while the window held
+    /// the key focus: where the keys went (the first blip, before its first key) and where they left it (the last,
+    /// after its keys were taken). Pid-queue only.
+    var blipFocus: (act: Int, start: CUCore.WindowFocus?, end: CUCore.WindowFocus?)?
 
     /// When this target last had a window-targeted click posted to place the focus or make its window key:
     /// the app may handle it after the act's next accessibility write (a late click moves the caret).
@@ -129,6 +137,14 @@ final class CUTarget: @unchecked Sendable {
         return before
     }
 
+    /// The region and budget of the last off-screen or live shot of the window: a desktop visit's return takes the
+    /// window's next baseline picture the same way, so the digests compare.
+    private var _lastStill: (region: CGRect?, budget: CUImageBudget)?
+    var lastStill: (region: CGRect?, budget: CUImageBudget)? {
+        get { lock.lock(); defer { lock.unlock() }; return _lastStill }
+        set { lock.lock(); _lastStill = newValue; lock.unlock() }
+    }
+
     /// Actions an app listed for an element but refused (`AXOpen` on Finder's icons), by role: hidden from
     /// state when `action()` has no equivalent to fall back on. Pid-queue only.
     private(set) var refusedActions: [String: Set<String>] = [:]
@@ -139,6 +155,8 @@ final class CUTarget: @unchecked Sendable {
     private var _consentedForeground = false
     private var _viewNotes: [String] = []
 
+    private var _actStart: (front: pid_t?, space: UInt64?, at: TimeInterval)?
+
     /// Starts an act: its number, and no foreground consent used yet.
     func beginAct() -> Int {
         lock.lock(); defer { lock.unlock() }
@@ -147,6 +165,12 @@ final class CUTarget: @unchecked Sendable {
         return _actSeq
     }
     var actSeq: Int { lock.lock(); defer { lock.unlock() }; return _actSeq }
+    /// Where the user was, and when, as the current act began (a key sent with no focus blip, the app in front, is
+    /// judged against it).
+    var actStart: (front: pid_t?, space: UInt64?, at: TimeInterval)? {
+        get { lock.lock(); defer { lock.unlock() }; return _actStart }
+        set { lock.lock(); _actStart = newValue; lock.unlock() }
+    }
     /// The act brought the app forward on the consented foreground rung (the user agreed to that).
     var consentedForeground: Bool {
         get { lock.lock(); defer { lock.unlock() }; return _consentedForeground }

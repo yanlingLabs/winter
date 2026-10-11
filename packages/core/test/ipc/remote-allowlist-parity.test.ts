@@ -39,14 +39,16 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 // R-10b-12 — credentials are addable and manageable from the iPhone as well as the Mac and the CLI).
 // These are the ONLY provider-family verbs on the list; `provider.configure`/`login`/`loginCode`/
 // `logout`/`status` all stay off it, and a negative pin at the bottom of this describe covers that.
+// ComputerV2 Phase 1b grew it 24→25: `session.mirror` (the phone watches the live mirror of the session it is
+// attached to — the daemon only gates it; the frames ride the Gateway's own wire kind, never this socket).
 
 describe("remote allowlist parity (SP2a gate G7)", () => {
-  // The canonical twenty-four (SP1 §6 + SP3 T4b approval.list + SP3.4 session.create +
+  // The canonical twenty-five (SP1 §6 + SP3 T4b approval.list + SP3.4 session.create +
   // session-history session.history + Chat Slice D session.setModel + Chat Slice D tasks 2/3's
   // five sync verbs + provider-correctness T4's session.setEffort + session-activity-hygiene T3's
-  // session.setActivity + working-directories T3's session.setDirs + WS-19's three credential verbs)
-  // — the exact method STRINGS the Swift Gateway mirrors.
-  const TWENTY_FOUR = [
+  // session.setActivity + working-directories T3's session.setDirs + WS-19's three credential verbs
+  // + ComputerV2 Phase 1b's session.mirror) — the exact method STRINGS the Swift Gateway mirrors.
+  const TWENTY_FIVE = [
     METHODS.hello,
     METHODS.sessionList,
     METHODS.sessionAttach,
@@ -71,17 +73,18 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
     METHODS.credentialList,
     METHODS.credentialSet,
     METHODS.credentialRemove,
+    METHODS.sessionMirror,
   ];
 
-  test("REMOTE_ALLOWED_METHODS is EXACTLY the twenty-four names", () => {
-    expect(REMOTE_ALLOWED_METHODS.size).toBe(24);
-    for (const m of TWENTY_FOUR) {
+  test("REMOTE_ALLOWED_METHODS is EXACTLY the twenty-five names", () => {
+    expect(REMOTE_ALLOWED_METHODS.size).toBe(25);
+    for (const m of TWENTY_FIVE) {
       expect(REMOTE_ALLOWED_METHODS.has(m)).toBe(true);
     }
-    expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual([...TWENTY_FOUR].sort());
+    expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual([...TWENTY_FIVE].sort());
   });
 
-  test("the twenty-four string VALUES match the Swift Gateway.remoteAllowedMethods literals", () => {
+  test("the twenty-five string VALUES match the Swift Gateway.remoteAllowedMethods literals", () => {
     expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual(
       [
         "protocol.hello",
@@ -108,6 +111,7 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
         "credential.list",
         "credential.set",
         "credential.remove",
+        "session.mirror",
       ].sort(),
     );
   });
@@ -119,7 +123,7 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
   // absent METHODS key is `undefined`, and `undefined` is not in the set either — so it is a PIN
   // against a future regression (someone later adding it here without updating the Swift mirror or
   // its own parity test), not a RED driver for this task's TDD cycle. The mirrored lists
-  // themselves (TWENTY_FOUR above, and its Swift twin) are DELIBERATELY untouched by this line.
+  // themselves (TWENTY_FIVE above, and its Swift twin) are DELIBERATELY untouched by this line.
   test("panel.readDiff (diff-tabs Task 7) is NOT in REMOTE_ALLOWED_METHODS", () => {
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.panelReadDiff)).toBe(false);
   });

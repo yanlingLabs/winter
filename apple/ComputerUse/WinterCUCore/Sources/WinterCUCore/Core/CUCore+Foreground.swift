@@ -2,7 +2,7 @@ import ApplicationServices
 import Foundation
 
 /// `target.foreground` (the script's `app.requestForeground(reason)`, after the user's card): the app comes to the
-/// front and stays there until the session's script ends — then the front goes back to the app that had it, if the
+/// front — on the user's own desktop only — and stays there until the session's script ends — then the front goes back to the app that had it, if the
 /// held app still has it (a switch the user made meanwhile is left alone). Acts meanwhile run with the app in
 /// front, so they land the way they do for a person; the user-view guard and the Focus Guardian leave it alone.
 extension CUCore {
@@ -11,6 +11,8 @@ extension CUCore {
         var pid: pid_t
         var appName: String
         var previous: pid_t?
+        /// Where the user was when the hold began (the give-back's place when the guardian is not running).
+        var previousView: CUGuardedView?
         var token = UUID()
     }
 
@@ -19,40 +21,58 @@ extension CUCore {
 
     public func targetForeground(_ p: TargetForegroundParams) async throws -> TargetForegroundResult {
         let t = try target(p.targetId)
-        try ensureAlive(t)
-        return try await queues.run(t.pid) { [self] in
-            // A window on another desktop: bringing it forward takes the user there. Only on the user's own say (a
-            // card they answered — `moveDesktop`), never by itself.
-            if p.moveDesktop != true, isOffThisDesktop(t) {
-                CULog.act.notice("foreground in \(t.appName, privacy: .public): its window is on another desktop — not brought forward without the user's say")
-                return TargetForegroundResult(front: false, detail: "\(t.appName)'s window is on another desktop, and bringing it forward would take the user there — not done without the user's say (this session asks no card); ask the user to show the window, or keep to what works in the background")
-            }
-            let previous = sys.frontmostPid()
-            let first = holdLock.withLock { () -> Bool in
-                if heldForeground[t.id] != nil { return false }
-                heldForeground[t.id] = HeldForeground(sessionId: t.sessionId, pid: t.pid, appName: t.appName,
-                                                      previous: previous == t.pid ? nil : previous)
-                return true
-            }
-            guardianLock.withLock { guardianCore.exempt(t.pid, until: clock.nowSeconds() + Self.holdForegroundMaxSeconds) }
-            if sys.frontmostPid() != t.pid {
-                noteSyntheticActivation()
-                _ = sys.activate(pid: t.pid)
-                if let w = try? windowElement(t) { try? ax.perform(w, kAXRaiseAction) }
-            }
-            var front = false
-            for _ in 0..<50 {
-                if sys.frontmostPid() == t.pid { front = true; break }
-                usleep(20_000)
-            }
-            CULog.act.notice("foreground in \(t.appName, privacy: .public): \(front ? "held in front" : "could not be brought forward", privacy: .public)\(first ? "" : " (already held)", privacy: .public)")
-            // Never held past the longest script, even if its end is never heard.
-            if first, let token = holdLock.withLock({ heldForeground[t.id]?.token }) {
-                holdReleaseSchedule(Self.holdForegroundMaxSeconds) { [weak self] in self?.releaseHeld(targetId: t.id, token: token) }
-            }
-            return TargetForegroundResult(front: front, detail: front ? nil
-                : "macOS did not bring \(t.appName) to the front (it may be busy, or on a desktop it can't leave) — nothing was done in front")
+        let token = cancels.begin(p.callId)
+        defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
+        return try await queues.run(t.pid) { [self] in holdForegroundNow(t) }
+    }
+
+    /// The hold itself, on the target's queue (synchronous: the model-based test runs it inside its own events).
+    func holdForegroundNow(_ t: CUTarget) -> TargetForegroundResult {
+        // A window on another desktop: holding it in front would keep the user there until the script ends — never
+        // (user ruling 2026-10-10; `moveDesktop` is ignored since 1.7.0). What needs the window on screen asks for
+        // a brief visit by itself, and the user is brought back right after.
+        if isOffThisDesktop(t) {
+            CULog.act.notice("foreground in \(t.appName, privacy: .public): its window is on another desktop — not held in front there")
+            return TargetForegroundResult(front: false, detail: Self.foregroundElsewhere(t.appName))
         }
+        judgeBeforeTaking("the held foreground's start")
+        let previous = sys.frontmostPid()
+        let first = holdLock.withLock { () -> Bool in
+            if heldForeground[t.id] != nil { return false }
+            heldForeground[t.id] = HeldForeground(sessionId: t.sessionId, pid: t.pid, appName: t.appName,
+                                                  previous: previous == t.pid ? nil : previous,
+                                                  previousView: previous == t.pid ? nil : CUGuardedView(app: previous, space: sys.activeSpace()))
+            return true
+        }
+        let at = clock.nowSeconds()
+        guardianLock.withLock { guardianCore.exempt(t.pid, until: at + Self.holdForegroundMaxSeconds, now: at) }
+        if sys.frontmostPid() != t.pid {
+            noteGuardianCause(t.pid, raise: true)
+            _ = sys.activate(pid: t.pid)
+            // A background process's activation can be refused (cooperative activation); the app made frontmost over
+            // accessibility is not — as a restore does (found by the model-based test: the refused activation left the user's
+            // own ⌘-Tab into the app, a moment later, to be taken for the consented one and given back).
+            try? ax.set(ax.application(t.pid), kAXFrontmostAttribute, kCFBooleanTrue)
+            if let w = try? windowElement(t) { try? ax.perform(w, kAXRaiseAction) }
+        }
+        var front = false
+        for _ in 0..<50 {
+            if sys.frontmostPid() == t.pid { front = true; break }
+            clock.pause(ms: 20)
+        }
+        CULog.act.notice("foreground in \(t.appName, privacy: .public): \(front ? "held in front" : "could not be brought forward", privacy: .public)\(first ? "" : " (already held)", privacy: .public)")
+        // Never held past the longest script, even if its end is never heard.
+        if first, let token = holdLock.withLock({ heldForeground[t.id]?.token }) {
+            holdReleaseSchedule(Self.holdForegroundMaxSeconds) { [weak self] in self?.releaseHeld(targetId: t.id, token: token) }
+        }
+        return TargetForegroundResult(front: front, detail: front ? nil
+            : "macOS did not bring \(t.appName) to the front (it may be busy, or on a desktop it can't leave) — nothing was done in front")
+    }
+
+    /// Why `requestForeground` does nothing for a window on another desktop, and what to do instead. Pure.
+    static func foregroundElsewhere(_ app: String) -> String {
+        "\(app)'s window is on another desktop, and requestForeground holds an app in front only on the user's own desktop (it would keep the user there) — an action that needs the window on screen asks the user for a brief visit by itself and brings them back right after, and screenshot({ live: true, reason }) gets what is on screen there now"
     }
 
     /// Whether `t` is held in front for its session's script.
@@ -70,11 +90,22 @@ extension CUCore {
         giveBack(h)
     }
 
+    /// The hold is over: the front goes back to the user's place AS IT IS NOW — the guardian's (the place before the
+    /// hold, unless they moved meanwhile), else the app captured at the hold's start — only while the held app still has
+    /// it (a move of theirs, into the held app included, is left alone), retried the way a restore is (a refused
+    /// activation left them in the held app). Off the caller (it may wait up to the restore's deadline). Review of round 8:
+    /// it activated the pid captured at the start, over a move of the user's.
     private func giveBack(_ h: HeldForeground) {
-        guardianLock.withLock { guardianCore.endExempt(h.pid) }
-        if sys.frontmostPid() == h.pid, let prev = h.previous, sys.appRunning(prev) {
-            _ = sys.activate(pid: prev)
-            CULog.act.notice("foreground in \(h.appName, privacy: .public): the front given back")
+        let endedAt = clock.nowSeconds(); guardianLock.withLock { guardianCore.endExempt(h.pid, now: endedAt) }
+        let back = { [weak self] in
+            guard let self, self.sys.frontmostPid() == h.pid else { return }
+            let place = self.guardianPlace() ?? h.previousView
+            guard let user = place?.app, user != h.pid, self.sys.appRunning(user) else { return }
+            let ended = self.restoreUserView(CUUserView(space: place?.space, front: user), user: user)
+            CULog.act.notice("foreground in \(h.appName, privacy: .public): the front given back — \(ended.front == user ? "ok" : "not yet", privacy: .public)")
+        }
+        if let schedule = guardianRestoreDispatch { schedule(back) } else if guardianRestoreSync { back() } else {
+            DispatchQueue.global(qos: .userInitiated).async(execute: back)
         }
     }
 

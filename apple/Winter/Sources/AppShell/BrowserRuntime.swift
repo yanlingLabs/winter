@@ -285,6 +285,59 @@ final class BrowserRuntime {
         self.scheduler = scheduler
     }
 
+    // MARK: - ComputerV2 Phase 2: the browser link's holds
+
+    /// **The tabs the browser link holds** (`BrowserLinkHost`), fed to `plan(held:)` — rule H. Like
+    /// everything else this object reports to the engine it is bookkeeping, not a decision: the hold
+    /// is the daemon's word, recorded here because this is the object whose state every plan reads.
+    private(set) var holds: [String: BrowserHold] = [:]
+
+    /// Tabs the link closed (`tab.close`) and when, fed to `plan(closing:)` — rule C. Pruned by the
+    /// planner once a tab is neither live nor listed, or after `closingGrace`.
+    private(set) var closing: [String: Date] = [:]
+
+    /// How long a closed tab is kept out of every create while the daemon's `panel_tab_closed` makes
+    /// its way to the fold. A bound, not a wait: an entry normally goes the moment the fold drops the
+    /// tab. It only matters if that event never comes, and then it keeps a tab the user may still
+    /// see in the strip from being blank forever.
+    static let closingGrace: TimeInterval = 30
+
+    /// "Plan again now." Set by `BrowserSignalsCoordinator.init` beside `host` and
+    /// `onLingerDeadline`; `nil` until a shell exists — when the browser link plans with the headless
+    /// planner instead (`BrowserHeadlessPlanner`).
+    var replanHook: (() -> Void)?
+
+    /// A browser this runtime stopped — called from `stop`, for every stop, after the browser is gone.
+    /// The browser link reads it to learn a HELD tab went away by a route it did not take.
+    var onBrowserStopped: ((String) -> Void)?
+
+    func hold(tabId: String, sessionId: String, url: String?) {
+        holds[tabId] = BrowserHold(sessionId: sessionId, url: url)
+        closing[tabId] = nil
+    }
+
+    @discardableResult
+    func releaseHold(tabId: String) -> BrowserHold? {
+        holds.removeValue(forKey: tabId)
+    }
+
+    func markClosing(tabId: String) {
+        holds[tabId] = nil
+        closing[tabId] = scheduler.now()
+    }
+
+    /// Drop every closing entry whose tab is neither live nor in `listed`, or that has waited longer
+    /// than `closingGrace`. Called by the planner after each `apply`.
+    func pruneClosing(listed: Set<String>, now: Date) {
+        closing = closing.filter { tabId, since in
+            (containers[tabId] != nil || listed.contains(tabId))
+                && now.timeIntervalSince(since) < Self.closingGrace
+        }
+    }
+
+    /// Why the browser engine is unavailable, when it is — the reason the placeholder shows.
+    var engineFailureReason: String? { driver.failureReason() }
+
     // MARK: - What `BrowserSignalsCoordinator` feeds back into `plan`
 
     var liveTabIds: Set<String> { Set(containers.keys) }
@@ -614,13 +667,20 @@ final class BrowserRuntime {
             guard let state else { return }
             model?.apply(state)
         }
-        driver.setNavigationObserver(container) { [weak model] committedURL, committedTitle in
+        // **The host is bound again at every fire** (ComputerV2 Phase 2). A browser the browser link
+        // creates with no shell yet (no window ever opened) is wired with no host, and a parked
+        // browser nobody renders never has its model rebound — so without this its navigations and
+        // popups would go nowhere for its whole life, even after a shell appears. `bind` is the
+        // idempotent per-render call and leaves the captured session alone (`sessionId: nil`).
+        driver.setNavigationObserver(container) { [weak model, weak self] committedURL, committedTitle in
+            if let host = self?.host { model?.bind(host: host, sessionId: nil) }
             model?.reportCommittedNavigation(url: committedURL ?? "", title: committedTitle ?? "")
         }
         // Three producers come down this one channel — `window.open`, ⌘/middle/shift-click, and the
         // context menu's "Open Link in New Tab" (`WinterCEFSetPopupObserver`). CEF cancels the popup
         // regardless; this is what turns the cancelled one into a real panel tab.
-        driver.setPopupObserver(container) { [weak model] popupURL in
+        driver.setPopupObserver(container) { [weak model, weak self] popupURL in
+            if let host = self?.host { model?.bind(host: host, sessionId: nil) }
             model?.openPopupAsTab(url: popupURL ?? "")
         }
         // The page's icon, for the tab pill. Presentation only — the model decides whether it
@@ -723,6 +783,7 @@ final class BrowserRuntime {
         // stops that browser". A stale viewport would tell the next plan the panel is showing
         // something that no longer exists, and no attach would ever be emitted.
         if viewportTabId == tabId { viewportTabId = nil }
+        onBrowserStopped?(tabId)
 
         // The MODEL deliberately survives: the tab still exists, and its chrome must keep showing
         // the address it was last on. `PanelWebTabModel.container` is weak, so the verbs go quiet on

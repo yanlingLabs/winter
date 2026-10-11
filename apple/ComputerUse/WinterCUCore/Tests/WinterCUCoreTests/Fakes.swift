@@ -146,7 +146,15 @@ final class FakeFocusEnforcer: CUFocusEnforcing, @unchecked Sendable {
     func enforce(windowID: UInt32) -> Bool { enforced.append(windowID); return result }
     /// The activations posted whatever the target was believed to be (a menu command's validation).
     private(set) var forced: [UInt32] = []
-    func forceActivation(windowID: UInt32) -> Bool { forced.append(windowID); return true }
+    func forceActivation(windowID: UInt32) -> Bool {
+        forced.append(windowID); FocusSPI.order.append("activate \(windowID)"); onForce?(); return true
+    }
+    /// The synthetic deactivations posted (another window of the app was key).
+    private(set) var deactivated = 0
+    func deactivate() -> Bool { deactivated += 1; FocusSPI.order.append("deactivate"); onDeactivate?(); return true }
+    /// Hooks: the fake world changes as an app might react (the user bringing it forward meanwhile).
+    var onForce: (() -> Void)?
+    var onDeactivate: (() -> Void)?
     func teardown() { tornDown += 1 }
 }
 
@@ -224,17 +232,53 @@ final class FakeSystem: CUSystemBackend {
     func activeSpace() -> UInt64? { space }
     /// Runs on every activation (after `front` is set): a test moves the Space back as macOS would.
     var onActivate: ((pid_t) -> Void)?
-    func activate(pid: pid_t) -> Bool { activated.append(pid); front = pid; onActivate?(pid); return true }
+    /// Apps whose activation macOS refuses (a background caller's, under cooperative activation): recorded, no effect.
+    var activationRefused: Set<pid_t> = []
+    func activate(pid: pid_t) -> Bool {
+        activated.append(pid)
+        guard !activationRefused.contains(pid) else { return false }
+        front = pid; onActivate?(pid); return true
+    }
+    /// Windows brought forward (a desktop visit, there and back), in order — with whether an element was raised and
+    /// made main.
+    private(set) var frontedWindows: [(pid: pid_t, windowID: UInt32, raised: Bool, main: Bool)] = []
+    /// Whether the call works; on success the app is front and `onFrontWindow` runs (a test moves the Space, as macOS
+    /// would — for a raised element, or for the app alone).
+    var frontWindowWorks = true
+    var onFrontWindow: ((pid_t, UInt32, Bool) -> Void)?
+    func bringForward(pid: pid_t, windowID: UInt32, window: AXUIElement?, makeMain: Bool) -> Bool {
+        frontedWindows.append((pid, windowID, window != nil, window != nil && makeMain))
+        guard frontWindowWorks else { return false }
+        front = pid
+        onFrontWindow?(pid, windowID, window != nil)
+        return true
+    }
+    /// Desktop & Dock's "switch to a Space with open windows for the application" (nil = unreadable).
+    var followsActivation: Bool? = true
+    func spacesFollowActivation() -> Bool? { followsActivation }
     var stageManager = false
     func stageManagerEnabled() -> Bool { stageManager }
     /// Windows on no Space at all (closed but still listed); others answer `onSpace` (nil = unknown).
     var noSpaceWindows: Set<UInt32> = []
     var onSpace: Bool? = nil
-    func windowOnAnySpace(_ id: UInt32) -> Bool? { noSpaceWindows.contains(id) ? false : onSpace }
+    /// When set, answers `windowOnAnySpace` instead (a test plays a window's Space over successive readings).
+    var onSpaceReading: ((UInt32) -> Bool?)?
+    func windowOnAnySpace(_ id: UInt32) -> Bool? {
+        if let r = onSpaceReading { return r(id) }
+        return noSpaceWindows.contains(id) ? false : onSpace
+    }
+    /// The Spaces each window is on (unset: unknown), and each display's current Space (unset: unknown).
+    var spacesOfWindow: [UInt32: Set<UInt64>] = [:]
+    func windowSpaces(_ id: UInt32) -> Set<UInt64>? { spacesOfWindow[id] }
+    var displays: [String: UInt64]?
+    func displaySpaces() -> [String: UInt64]? { displays }
     /// Content processes (Safari's WebContent), each with the app it serves.
     var contentProcesses: [pid_t: pid_t] = [:]
     func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { contentProcesses[pid] == appPid }
     func cursorLocation() -> CGPoint? { cursor }
+    /// How long ago each process started (a launch's).
+    var ages: [pid_t: TimeInterval] = [:]
+    func processAge(pid: pid_t) -> TimeInterval? { ages[pid] }
     func warpCursor(to p: CGPoint) { warpedTo.append(p) }
 
     static func window(_ id: UInt32, pid: pid_t, _ frame: CGRect, owner: String = "App", layer: Int = 0) -> CUWindowServerWindow {

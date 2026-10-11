@@ -1172,4 +1172,49 @@ final class BrowserSignalsTests: XCTestCase {
         XCTAssertTrue(control.cef.log.contains("c1 create url=https://example.com"),
                       "log was \(control.cef.log)")
     }
+
+    // MARK: - ComputerV2 Phase 2: the browser link's holds reach the coordinator's plan
+
+    /// The coordinator takes over the link's re-plans (`replanHook`), and its plan keeps a held tab of a
+    /// session it has never folded — the daemon driving a session no window shows — then lets the belt
+    /// have it the moment the hold is released.
+    func testTheCoordinatorPlansAHeldTabOfASessionItNeverFolded() async {
+        let w = makeWorld()
+        XCTAssertNotNil(w.runtime.replanHook, "the coordinator answers the link's re-plans")
+
+        w.runtime.hold(tabId: "h1", sessionId: "s-unseen", url: "https://held.example/")
+        w.runtime.replanHook?()
+        XCTAssertTrue(w.runtime.isLive(tabId: "h1"))
+        XCTAssertTrue(w.cef.log.contains("c1 create url=https://held.example/"), "\(w.cef.log)")
+
+        // Every later plan — a fold, a poll, a visibility flip — leaves it alone.
+        _ = await openOneWebTab(w)
+        w.coordinator.replan()
+        XCTAssertTrue(w.runtime.isLive(tabId: "h1"))
+        XCTAssertFalse(w.cef.log.contains("c1 close"))
+
+        w.runtime.releaseHold(tabId: "h1")
+        w.coordinator.replan()
+        XCTAssertFalse(w.runtime.isLive(tabId: "h1"), "released, in no folded list: the belt's")
+        XCTAssertTrue(w.runtime.isLive(tabId: "t1"), "the shell's own tab is untouched")
+    }
+
+    /// The link closes the SHOWN tab of the displayed session. Until the daemon's `panel_tab_closed`
+    /// is folded the fold still lists it — and the shown session would re-create it at once (rule
+    /// 8/8b). Rule C keeps it closed, and the entry goes when the fold catches up.
+    func testATabTheLinkClosedIsNotRecreatedBeforeItsCloseIsFolded() async {
+        let w = makeWorld()
+        let t = await openOneWebTab(w)
+        XCTAssertTrue(w.runtime.isLive(tabId: "t1"))
+
+        w.runtime.markClosing(tabId: "t1")
+        w.coordinator.replan()
+        XCTAssertFalse(w.runtime.isLive(tabId: "t1"))
+        w.coordinator.replan()
+        XCTAssertFalse(w.runtime.isLive(tabId: "t1"), "still listed, still closed")
+        XCTAssertEqual(w.cef.log.filter { $0.hasSuffix("create url=https://example.com") }.count, 1)
+
+        t.feed(closed("s1", "t1", seq: 3))
+        await waitUntil("the close folded", { w.runtime.closing.isEmpty })
+    }
 }

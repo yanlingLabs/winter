@@ -204,6 +204,67 @@ export function checkSignedHelper(flavor: HelperFlavor, teamId: string, version:
   return failures;
 }
 
+// ── winter-browser-host (Winter for Chrome's native host), nested in the helper's Contents/MacOS ─────────────────────
+
+/**
+ * The host's codesign identifier per helper flavor. It is nested code with its OWN identity — the daemon checks the
+ * host's process against `identifier "<this>" + Winter's team` — so every signing site signs it, with its stated
+ * requirement and no entitlements, BEFORE it signs the helper (never `--deep`, which would re-sign it as the helper).
+ */
+export const BROWSER_HOST = {
+  dist: { identifier: "com.winter.browserhost" },
+  dev: { identifier: "com.winter.browserhost.dev" },
+  test: { identifier: "com.winter.browserhost.test" },
+} as const;
+export const BROWSER_HOST_EXECUTABLE = "winter-browser-host";
+/** Every string a host test hook can be found by: a dev or release host binary must contain none of them. */
+export const BROWSER_HOST_TEST_HOOK_MARKERS = [HELPER_TEST_HOOK_MARKER, "WINTER_BROWSER_HOST_HOME"] as const;
+
+/** `<helper>.app/Contents/MacOS/winter-browser-host`. */
+export function browserHostExecutable(appPath: string): string {
+  return join(appPath, "Contents", "MacOS", BROWSER_HOST_EXECUTABLE);
+}
+
+/** `codesign` for the host inside a dev or test helper (hardened runtime, the stable identifier, the stated requirement,
+ *  no entitlements, no secure timestamp — a local build). Release signs it in embed-computer-helper.sh, with one. */
+export function browserHostSignArgs(i: { identityHash: string; flavor: HelperFlavor; teamId: string; path: string }): string[] {
+  const id = BROWSER_HOST[i.flavor].identifier;
+  return ["--force", "--sign", i.identityHash, "--identifier", id, "--options", "runtime", "--timestamp=none",
+    `-r=designated => ${helperRequirement(id, i.teamId)}`, i.path];
+}
+
+export interface SignedHostFacts {
+  /** stderr of `codesign -dvv <host>`. */
+  codesignDvv: string;
+  /** stdout+stderr of `codesign -d -r- <host>`. */
+  codesignDr: string;
+  /** stdout of `codesign -d --entitlements - --xml <host>` ("" when none). */
+  entitlementsXml: string;
+  /** The host executable's bytes. */
+  executable: Uint8Array;
+}
+
+/** Everything a signed host must be, as failure lines (empty = good): the flavor's identifier, Winter's team, the
+ *  hardened runtime, EXACTLY the stated requirement, no entitlements at all, and test hooks only in the test flavor. */
+export function checkSignedBrowserHost(flavor: HelperFlavor, teamId: string, facts: SignedHostFacts): string[] {
+  const id = BROWSER_HOST[flavor].identifier;
+  const failures: string[] = [];
+  const signed = signedFacts(facts.codesignDvv);
+  if (signed.identifier !== id) failures.push(`winter-browser-host's codesign identifier is ${signed.identifier ?? "none"}, expected ${id}`);
+  if (signed.teamId !== teamId) failures.push(`winter-browser-host's TeamIdentifier is ${signed.teamId ?? "not set"}, expected ${teamId}`);
+  if (!signed.runtime) failures.push("winter-browser-host is not signed with the hardened runtime (--options runtime)");
+  const recorded = /^designated => (.+)$/m.exec(facts.codesignDr)?.[1]?.trim();
+  const stated = helperRequirement(id, teamId);
+  if (recorded !== stated) failures.push(`winter-browser-host's designated requirement is ${recorded ?? "none"}, expected the stated ${stated}`);
+  const keys = [...facts.entitlementsXml.matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1]);
+  if (keys.length > 0) failures.push(`winter-browser-host carries entitlements (${keys.join(", ")}); it must carry none`);
+  const bytes = Buffer.from(facts.executable);
+  const hooks = BROWSER_HOST_TEST_HOOK_MARKERS.filter((m) => bytes.includes(m));
+  if (flavor === "test" && hooks.length === 0) failures.push(`the test host has no test hooks compiled in (${HELPER_TEST_BUILD_CONDITION} did not reach its build)`);
+  if (flavor !== "test" && hooks.length > 0) failures.push(`the ${flavor} winter-browser-host contains test hooks (${hooks.join(", ")}) — they compile only under ${HELPER_TEST_BUILD_CONDITION}`);
+  return failures;
+}
+
 /** The pids in `ps -axo pid=,command=` output whose command runs `executable`. */
 export function pidsRunning(psOutput: string, executable: string): number[] {
   const pids: number[] = [];

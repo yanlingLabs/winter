@@ -21,7 +21,7 @@
  *     fire in the same order for however many questions the array holds, and `onAnswer` fires
  *     exactly once, at the very end — never per-question. */
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { PendingCard } from "./state";
 import { formatOptionLines, isOtherChoice, parseQuestionAnswer } from "../questions";
@@ -115,7 +115,50 @@ function additionalOptions(options: ApprovalCardPending["options"]): NonNullable
   return options?.filter((o) => o.id !== "allow_once" && o.id !== "deny") ?? [];
 }
 
+/** ComputerV2's desktop-switch prompt (2026-10-10): the seconds left before a default-ALLOW card allows, from its
+ *  `expiresAt` (epoch ms) — never negative. Pure, for the unit tests. */
+export function secondsLeft(expiresAt: number, now: number): number {
+  return Math.max(0, Math.ceil((expiresAt - now) / 1000));
+}
+
+/** The countdown line of a default-allow card: "no answer in 42 s: it switches". */
+export function defaultAllowLine(expiresAt: number, now: number): string {
+  const left = secondsLeft(expiresAt, now);
+  return left > 0 ? `no answer in ${left} s: it switches` : "no answer: switching";
+}
+
+/** A card that DEFAULT-ALLOWS at its deadline (`onTimeout: "allow"` — ComputerV2's desktop switch): `[y]` switches
+ *  now, anything else refuses (the fail-safe answer — only silence allows), and a live countdown says what silence
+ *  does. Answers carry no optionId (a plain approve IS the switch). */
+function DefaultAllowCard({ pending, onApprove }: { pending: ApprovalCardPending & { expiresAt: number }; onApprove: PendingCardsProps["onApprove"] }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const [buffer, setBuffer] = useBufferedInput((line) => {
+    onApprove(pending.callId, line.trim().toLowerCase() === "y");
+    setBuffer("");
+  });
+  return (
+    <Box flexDirection="column">
+      <Text color={theme.permission}>
+        {pending.toolName}: <Text dimColor>{pending.summary}</Text>
+      </Text>
+      <Text dimColor>{defaultAllowLine(pending.expiresAt, now)}</Text>
+      <Text>[y] switch now  [n] don't switch {buffer}</Text>
+    </Box>
+  );
+}
+
 function ApprovalCard({ pending, onApprove }: { pending: ApprovalCardPending; onApprove: PendingCardsProps["onApprove"] }) {
+  if (pending.onTimeout === "allow" && pending.expiresAt !== undefined) {
+    return <DefaultAllowCard pending={{ ...pending, expiresAt: pending.expiresAt }} onApprove={onApprove} />;
+  }
+  return <ConfirmCard pending={pending} onApprove={onApprove} />;
+}
+
+function ConfirmCard({ pending, onApprove }: { pending: ApprovalCardPending; onApprove: PendingCardsProps["onApprove"] }) {
   const extraOptions = additionalOptions(pending.options);
 
   const [buffer, setBuffer] = useBufferedInput((line) => {

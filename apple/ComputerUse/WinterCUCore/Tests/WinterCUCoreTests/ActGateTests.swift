@@ -377,17 +377,21 @@ final class ActGateTests: XCTestCase {
         await expect("needs_foreground") { try await self.act(.click(CUClickAction(point: [50, 60], shotId: s))) }
     }
 
-    func testAWindowOnAnotherDesktopIsNotBroughtForwardWithoutTheUsersSay() async throws {
+    /// User ruling 2026-10-10: an app is never HELD in front on another desktop (that would keep the user there
+    /// until the script ends) — not even with `moveDesktop`, which is ignored since 1.7.0.
+    func testAWindowOnAnotherDesktopIsNeverHeldInFrontEvenWithMoveDesktop() async throws {
         world(bundle: "org.blenderfoundation.blender")
         sys.running = [pid, 1]
         sys.windows[77]?.onScreen = false
         ax.put(ax.application(pid), [kAXWindowsAttribute: [AXUIElement]()])  // not in this desktop's AX list
-        let r = try await core.targetForeground(TargetForegroundParams(targetId: "t1"))
-        XCTAssertFalse(r.front)
-        XCTAssertTrue(r.detail?.contains("would take the user there — not done without the user's say") ?? false, r.detail ?? "")
+        for moveDesktop in [nil, false, true] as [Bool?] {
+            let r = try await core.targetForeground(TargetForegroundParams(targetId: "t1", moveDesktop: moveDesktop))
+            XCTAssertFalse(r.front)
+            XCTAssertTrue(r.detail?.contains("holds an app in front only on the user's own desktop") ?? false, r.detail ?? "")
+            XCTAssertTrue(r.detail?.contains("screenshot({ live: true, reason })") ?? false, r.detail ?? "")
+        }
         XCTAssertTrue(sys.activated.isEmpty, "the user stays on their desktop")
-        let asked = try await core.targetForeground(TargetForegroundParams(targetId: "t1", moveDesktop: true))
-        XCTAssertTrue(asked.front, "the user answered a card for it")
+        XCTAssertFalse(core.holdsForeground(target))
     }
 
     func testAHoldWhoseScriptEndIsNeverHeardIsReleasedAtItsLimit() async throws {

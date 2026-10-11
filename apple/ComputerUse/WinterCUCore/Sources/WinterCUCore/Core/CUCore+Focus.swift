@@ -5,9 +5,14 @@ import Foundation
 /// Where keyboard input goes in the BOUND window. An app answers `AXFocusedUIElement` for its KEY window only
 /// (live: a background Google Docs window read as "focus unknown", or Safari's address bar after a reload), so:
 /// the app's answer when it lies in the bound window (that is where its keys go — the address bar after ⌘R
-/// included); else, when the bound window is NOT its app's key window, the element WebKit marks `AXFocused`
-/// inside the window's web areas (it keeps the DOM focus even when the window is not key), found by a bounded
-/// walk, or the window's own `AXFocusedUIElement`. An app that reports no focus for its key window: unknown.
+/// included); else, when the bound window is NOT key (its app's key window is another one, or the app holds none
+/// at all — the window says so itself), the element WebKit marks `AXFocused` inside the window's web areas (it keeps
+/// the DOM focus either way), found by a bounded walk, or the window's own `AXFocusedUIElement`. An app that reports
+/// no focus for a window that is (or may be) its key window: the window's own answer, else unknown. While a focus blip holds the window key the app
+/// answers for it, so the focus the keys found and the one they left are read then too (`noteBlipFocus`): a native
+/// window that is not key answers no focused element of its own (measured on a probe app of ours, 2026-10-11 — the
+/// app named the field of its key window, another one), and a web view's app answers none once the blip has handed
+/// the key focus back.
 extension CUCore {
     enum FocusSource: String { case app = "the app", webArea = "the window's web content", window = "the window" }
 
@@ -31,7 +36,7 @@ extension CUCore {
             if let a = appFocus, inBoundWindow(a, t, win) != false {
                 f.element = a
                 f.source = .app
-            } else if appFocus == nil, boundWindowIsKeyInApp(t) != false {
+            } else if appFocus == nil, boundWindowIsKeyInApp(t) != false, ax.bool(win, kAXFocusedAttribute) != false {
                 // The app reports no focus for the window that is (or may be) its key window: the window's own
                 // answer if it gives one, else unknown — an element still marked focused in its content would be a
                 // guess, and the floors decide on unknowns.
@@ -40,6 +45,11 @@ extension CUCore {
                     f.source = .window
                 }
             } else if let w = focusedInWebAreas(of: win), inBoundWindow(w, t, win) != false {
+                // Also when the app reports no focus while the window says it is NOT key — the app holds no key window
+                // at all (a focus blip's hand-back, a background click on web content), though its `AXFocusedWindow`
+                // still names this window: the page keeps its DOM focus (measured on the fixture's Docs page,
+                // 2026-10-11 — after the click on Find, then Tab, Tab, ⇧Tab, every read named the field the page's own
+                // log showed focused: Find, Replace with, Close, Replace with).
                 // The page's own focus (the DOM focus WebKit marks): where the keys go once the window holds the
                 // key focus (the focus blip) — not where the system routes them now.
                 f.element = w

@@ -189,11 +189,11 @@ final class PendingCardsTests: XCTestCase {
 
     func testApprovalReviewerReasonDefaultsNilAndIsPreservedWhenSet() {
         let withoutReason = PendingInteraction.approval(callId: "a1", toolName: "bash", summary: "rm x")
-        guard case .approval(_, _, _, let reviewerReason, _, _) = withoutReason else { return XCTFail("expected .approval") }
+        guard case .approval(_, _, _, let reviewerReason, _, _, _) = withoutReason else { return XCTFail("expected .approval") }
         XCTAssertNil(reviewerReason)
 
         let withReason = PendingInteraction.approval(callId: "a1", toolName: "bash", summary: "rm x", reviewerReason: "reviewer says no")
-        guard case .approval(_, _, _, let reviewerReason2, _, _) = withReason else { return XCTFail("expected .approval") }
+        guard case .approval(_, _, _, let reviewerReason2, _, _, _) = withReason else { return XCTFail("expected .approval") }
         XCTAssertEqual(reviewerReason2, "reviewer says no")
     }
 
@@ -201,11 +201,11 @@ final class PendingCardsTests: XCTestCase {
 
     func testApprovalAndQuestionChildSessionIdDefaultsNilAndIsPreservedWhenSet() {
         let nativeApproval = PendingInteraction.approval(callId: "a1", toolName: "bash", summary: "rm x")
-        guard case .approval(_, _, _, _, let childId, _) = nativeApproval else { return XCTFail("expected .approval") }
+        guard case .approval(_, _, _, _, let childId, _, _) = nativeApproval else { return XCTFail("expected .approval") }
         XCTAssertNil(childId)
 
         let relayedApproval = PendingInteraction.approval(callId: "a1", toolName: "bash", summary: "rm x", childSessionId: "child_1")
-        guard case .approval(_, _, _, _, let childId2, _) = relayedApproval else { return XCTFail("expected .approval") }
+        guard case .approval(_, _, _, _, let childId2, _, _) = relayedApproval else { return XCTFail("expected .approval") }
         XCTAssertEqual(childId2, "child_1")
 
         let qs = questions(#"[{"question":"Which db?","header":"DB","options":[{"label":"A","description":null}],"multiSelect":false}]"#)
@@ -561,4 +561,28 @@ final class PendingCardsTests: XCTestCase {
             "PendingPlanBody must hold no view-local @State for its feedback — same externally-owned " +
             "draft requirement as PendingQuestionBody")
     }
+
+    // MARK: - ComputerV2's desktop switch (2026-10-10): a card that default-ALLOWS
+
+    /// "Switch now" / "Don't switch" are the card's primary buttons; the `switch` option is never a quiet extra.
+    func testDesktopSwitchCardWearsSwitchNowAndDontSwitch() {
+        let options = self.options(#"[{"id":"switch","label":"Switch now"}]"#)
+        XCTAssertEqual(approvalPrimaryChoice(options), ApprovalPrimaryChoice(approveLabel: "Switch now", denyLabel: "Don't switch"))
+        XCTAssertEqual(approvalAdditionalOptions(options), [])
+        // Every other card is unchanged.
+        XCTAssertEqual(approvalPrimaryChoice(nil), ApprovalPrimaryChoice(approveLabel: "Approve", denyLabel: "Deny"))
+    }
+
+    /// The countdown: whole seconds rounded up, "Switching…" at the deadline; it redraws only until then.
+    func testDefaultAllowCountdown() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(defaultAllowCountdownText(defaultAllowAt: 1_042_500, now: now), "Switching in 43 s unless you choose Don't switch")
+        XCTAssertEqual(defaultAllowCountdownText(defaultAllowAt: 1_001_000, now: now), "Switching in 1 s unless you choose Don't switch")
+        XCTAssertEqual(defaultAllowCountdownText(defaultAllowAt: 1_000_000, now: now), "Switching…")
+        let redraws = defaultAllowRedraws(1_003_500, now: now)
+        XCTAssertEqual(redraws.map { $0.timeIntervalSince1970 }, [1_000.5, 1_001.5, 1_002.5, 1_003.5])
+        XCTAssertEqual(defaultAllowRedraws(1_003_000, now: now).map { $0.timeIntervalSince1970 }, [1_001, 1_002, 1_003])
+        XCTAssertEqual(defaultAllowRedraws(999_000, now: now), [])
+    }
+
 }

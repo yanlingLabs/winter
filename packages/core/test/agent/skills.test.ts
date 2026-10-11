@@ -6,6 +6,7 @@ import { SkillStore } from "../../src/agent/skills";
 import { TrustStore } from "../../src/agent/trust";
 import { storeHomeFor } from "../../src/agent/paths";
 import { setRunHomeSupportForTests } from "../../src/runtime-sdk/run-home-support";
+import { seedBuiltinSkills } from "../../src/migration/builtin-skills";
 
 function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "winter-sk-"))); }
 function writeSkill(root: string, dir: string, name: string, desc: string, body: string) {
@@ -209,6 +210,34 @@ describe("SkillStore", () => {
       const m = s.list({ cwd: null }).find((x) => x.name === "writing-skills");
       expect(m?.source).toBe("builtin");
       expect(s.load("writing-skills", { cwd: null })!.body.length).toBeGreaterThan(0);
+    });
+
+    test("the shipped computer-use skill (worked recipes for ComputerV2) is discovered with source builtin", () => {
+      const { home, trust } = setup();
+      const s = new SkillStore({ winterHome: home, trust });
+      const m = s.list({ cwd: null }).find((x) => x.name === "computer-use");
+      expect(m).toMatchObject({ name: "computer-use", source: "builtin" });
+      expect(m!.description).toContain("ComputerV2");
+      const loaded = s.load("computer-use", { cwd: null })!;
+      expect(loaded.body.length).toBeGreaterThan(1000);
+      expect(loaded.body).toContain("## 8. Catching errors");
+    });
+
+    test("once seeded, the user-tier copy of computer-use is the ONE listing, and the one a session loads; the builtin listing still is not", () => {
+      const { home, trust } = setup();
+      const s = new SkillStore({ winterHome: home, trust });
+      const before = s.list({ cwd: null }).find((x) => x.name === "computer-use")!;
+      expect(before.source).toBe("builtin");
+      expect(s.sessionAvailability(before).loadsInSessions).toBe(false); // the builtin listing is staged into no run folder
+
+      expect(seedBuiltinSkills(home).skills["computer-use"]).toBe("seeded");
+      const listed = s.list({ cwd: null }).filter((x) => x.name === "computer-use");
+      expect(listed).toHaveLength(1); // the copy shadows the builtin listing: no duplicate row
+      expect(listed[0]!.source).toBe("user");
+      expect(listed[0]!.path).toBe(join(storeHomeFor(home), "skills", "computer-use", "SKILL.md"));
+      expect(s.sessionAvailability(listed[0]!)).toEqual({ loadsInSessions: true });
+      expect(s.load("computer-use", { cwd: null })!.body.length).toBeGreaterThan(1000); // loads from the copy
+      expect(readFileSync(listed[0]!.path, "utf8")).toBe(readFileSync(before.path, "utf8")); // the same text as the builtin file
     });
 
     test("a user-root skill of the same name SHADOWS the builtin in list precedence", () => {

@@ -61,6 +61,12 @@ const fixtures: Record<string, unknown> = {
   // carrying it, mirroring task_with_graph_fields/question_with_preview's with/without pattern.
   "approval_requested_with_reviewer_reason": { ...base, threadId: "main", type: "approval_requested", callId: "call_31", toolName: "bash", summary: "run rm -rf /tmp/scratch", issuedAt: 1781270000000, expiresAt: 1781270300000, reviewerReason: "recursive delete outside the session cwd" },
   "approval_resolved": { ...base, threadId: "main", type: "approval_resolved", callId: "call_2", approved: true, by: "orb" },
+  // ComputerV2's desktop-switch prompt (2026-10-10): `onTimeout` is additive/optional on the
+  // EXISTING approval_requested shape — a dedicated fixture so Swift round-trips a card that
+  // default-ALLOWS at its expiry (with its `switch` option), and its timeout-allow resolution
+  // (`approved: true, by: "timeout"` — the user gave no answer).
+  "approval_requested_with_on_timeout": { ...base, threadId: "main", type: "approval_requested", callId: "cu_0a1b2c3d4e5f", toolName: "ComputerV2", summary: "Switch to Safari's desktop for a moment? Safari (com.apple.Safari): to see what the page shows now", issuedAt: 1781270000000, expiresAt: 1781270060000, options: [{ id: "switch", label: "Switch now" }], onTimeout: "allow" },
+  "approval_resolved_timeout_allow": { ...base, threadId: "main", type: "approval_resolved", callId: "cu_0a1b2c3d4e5f", approved: true, by: "timeout" },
   "turn_completed": { ...base, threadId: "main", type: "turn_completed", stopReason: "end_turn", inputTokens: 12, outputTokens: 3 },
   // followups T3 (ChatEngine as a second turn_completed producer): contextTokens is additive/
   // optional on the EXISTING turn_completed shape — a dedicated fixture (distinct from

@@ -80,6 +80,17 @@ protocol CUSystemBackend: AnyObject {
     func activeSpace() -> UInt64?
     /// Activates an app. Only the consented foreground rung and the restores of the user's own app call it.
     func activate(pid: pid_t) -> Bool
+    /// Brings `pid`'s window forward the way macOS follows to its desktop (measured on macOS 26.6, 2026-10-10): the
+    /// window's element raised — made its app's main window first when `makeMain` — then the app made frontmost over
+    /// accessibility (`AXFrontmost`). With no element, the app alone: macOS then goes to a desktop with its windows
+    /// only when it has none on the user's. (Bringing a window forward by its id — `_SLPSSetFrontProcessWithOptions`
+    /// with the key-window records — never switched desktops there, and the records reach the window as a mouse
+    /// down and up.) Only a desktop visit — there and back — calls it. `windowID` names the window for the log.
+    func bringForward(pid: pid_t, windowID: UInt32, window: AXUIElement?, makeMain: Bool) -> Bool
+    /// Whether macOS follows an app coming forward to a desktop with its windows (System Settings › Desktop & Dock ›
+    /// "When switching to an application, switch to a Space with open windows for the application": `com.apple.dock`
+    /// `workspaces-auto-swoosh`, absent = on). Nil when it can't be read.
+    func spacesFollowActivation() -> Bool?
     /// `pid` is a content process serving part of `appPid`'s UI — Safari's WebContent, an XPC service — not a
     /// regular app of its own (nor this helper): key events for what it shows go to it.
     func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool
@@ -87,11 +98,63 @@ protocol CUSystemBackend: AnyObject {
     func stageManagerEnabled() -> Bool
     /// Whether the window is on any Space (false for a closed window the server still lists); nil = unknown.
     func windowOnAnySpace(_ id: UInt32) -> Bool?
+    /// The Spaces a window is on; nil = unknown.
+    func windowSpaces(_ id: UInt32) -> Set<UInt64>?
+    /// Each display's current Space, by display identifier; nil = unknown.
+    func displaySpaces() -> [String: UInt64]?
     func cursorLocation() -> CGPoint?
     func warpCursor(to: CGPoint)
+    /// How long ago `pid`'s process started (seconds); nil when it can't be read. Read only while the agent has a
+    /// launch pending (an app started after it is the agent's).
+    func processAge(pid: pid_t) -> TimeInterval?
+    /// Whether `pid` is a regular app (one with a Dock icon, whose windows a click activates) — not an agent, a
+    /// background app or a system UI server (Notification Center, the menu extras, Picture in Picture). Nil = unknown.
+    func isRegularApp(_ pid: pid_t) -> Bool?
+    /// The running app with this bundle id (Finder, for a click on the empty desktop), if any.
+    func runningPid(bundleId: String) -> pid_t?
+    /// The running app whose Dock tile is under `point` (the Dock, `dockPid`, read over accessibility: the tile's
+    /// `AXURL` is the app's bundle), if any — so a Dock click is input for THAT app.
+    func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t?
+}
+
+extension CUSystemBackend {
+    func processAge(pid: pid_t) -> TimeInterval? { nil }
+    func isRegularApp(_ pid: pid_t) -> Bool? { nil }
+    func runningPid(bundleId: String) -> pid_t? { nil }
+    func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? { nil }
 }
 
 final class CULiveSystem: CUSystemBackend {
+    func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? {
+        let dock = AXUIElementCreateApplication(dockPid)
+        AXUIElementSetMessagingTimeout(dock, 0.1)  // the session tap's thread: never held up by a busy Dock
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(dock, Float(point.x), Float(point.y), &hit) == .success, let item = hit else { return nil }
+        AXUIElementSetMessagingTimeout(item, 0.1)
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(item, "AXURL" as CFString, &raw) == .success, let v = raw else { return nil }
+        let url: URL? = CFGetTypeID(v) == CFURLGetTypeID() ? (v as! URL) : (v as? String).flatMap(URL.init(string:))
+        guard let bundle = url?.standardizedFileURL.resolvingSymlinksInPath() else { return nil }
+        return NSWorkspace.shared.runningApplications.first {
+            !$0.isTerminated && $0.bundleURL?.standardizedFileURL.resolvingSymlinksInPath() == bundle
+        }?.processIdentifier
+    }
+
+    func isRegularApp(_ pid: pid_t) -> Bool? {
+        NSRunningApplication(processIdentifier: pid).map { $0.activationPolicy == .regular }
+    }
+    func runningPid(bundleId: String) -> pid_t? {
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first { !$0.isTerminated }?.processIdentifier
+    }
+    func processAge(pid: pid_t) -> TimeInterval? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        let start = info.kp_proc.p_starttime
+        let started = Double(start.tv_sec) + Double(start.tv_usec) / 1_000_000
+        return max(0, Date().timeIntervalSince1970 - started)
+    }
     func appRunning(_ pid: pid_t) -> Bool {
         guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
         return !app.isTerminated
@@ -110,6 +173,8 @@ final class CULiveSystem: CUSystemBackend {
     func windowStack() -> [CUWindowServerWindow] { CUWindowServer.windows(onScreenOnly: true, includeOtherLayers: true) }
     func moveWindowToActiveSpace(_ id: UInt32) -> Bool { CUSkyLight.system.moveWindowToActiveSpace(windowID: id) }
     func windowOnAnySpace(_ id: UInt32) -> Bool? { CUSkyLight.system.isOnAnySpace(windowID: id) }
+    func windowSpaces(_ id: UInt32) -> Set<UInt64>? { CUSkyLight.system.spacesOf(windowID: id) }
+    func displaySpaces() -> [String: UInt64]? { CUSkyLight.system.currentSpacesByDisplay() }
     func frontmostPid() -> pid_t? {
         // The window server's front process changes the moment an app activates; NSWorkspace hears of it later,
         // on the main run loop — too late for the check right after an act.
@@ -119,6 +184,17 @@ final class CULiveSystem: CUSystemBackend {
     func activate(pid: pid_t) -> Bool {
         guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
         return DispatchQueue.main.sync { app.activate() }
+    }
+    func bringForward(pid: pid_t, windowID: UInt32, window: AXUIElement?, makeMain: Bool) -> Bool {
+        if let window {
+            if makeMain { try? AX.set(window, kAXMainAttribute, kCFBooleanTrue) }
+            try? AX.perform(window, kAXRaiseAction)
+        }
+        return (try? AX.set(AX.app(pid), kAXFrontmostAttribute, kCFBooleanTrue)) != nil
+    }
+    func spacesFollowActivation() -> Bool? {
+        guard let v = CFPreferencesCopyAppValue("workspaces-auto-swoosh" as CFString, "com.apple.dock" as CFString) else { return true }
+        return (v as? NSNumber)?.boolValue
     }
     func stageManagerEnabled() -> Bool {
         UserDefaults(suiteName: "com.apple.WindowManager")?.bool(forKey: "GloballyEnabled") ?? false

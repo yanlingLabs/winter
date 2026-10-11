@@ -2,3 +2,4 @@ packages:
   - "packages/*"
   - "spikes/*"
   - "examples/*"
+  - "extensions/*"

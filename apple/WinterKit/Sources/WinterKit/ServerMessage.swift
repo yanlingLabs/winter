@@ -76,6 +76,11 @@ public enum ServerMessage: Sendable {
     /// A well-formed "event" notification whose params failed SessionEvent decoding — a newer
     /// daemon's event type. Never a crash, never silently dropped (spec §4.2 forward-compat).
     case unknownEvent(raw: String)
+    /// A JSON-RPC notification (no `id`) whose method is anything but `"event"` — e.g. the browser
+    /// link's `browserLink.command`. Never a `SessionEvent` and never on the event stream: it reaches
+    /// only a caller that asked for its method (`WinterClient.notifications(method:)`). `params` is
+    /// `.null` when the line carried none.
+    case notification(method: String, params: JSONValue)
     case unrecognized(raw: String)
 }
 
@@ -107,6 +112,9 @@ public func parseServerLine(_ line: String) -> ServerMessage {
             return .event(event)
         }
         return .unknownEvent(raw: line)
+    }
+    if let method = inbound.method, method != "event" {
+        return .notification(method: method, params: inbound.params ?? .null)
     }
     return .unrecognized(raw: line)
 }

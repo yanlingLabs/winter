@@ -268,8 +268,9 @@ func questionAllowsNotes(_ q: SessionEvent.Question) -> Bool { !questionIsSimpli
 /// that card type today) — do not delete it or let it regress to an empty string.
 func cardTitle(_ ask: InteractionRecord.Ask) -> String {
     switch ask {
-    case .approval(let toolName, _, _, _):
-        return "Approval needed — \(toolName)"
+    case .approval(let toolName, _, _, _, let defaultAllowAt):
+        // A default-allow card is not asking for an approval to go ahead: it goes ahead unless refused.
+        return defaultAllowAt == nil ? "Approval needed — \(toolName)" : "Heads up — \(toolName)"
     case .question(let questions):
         // A header-less card (Slice B1's simplified `AskQuestion`) must not render an EMPTY title
         // bar — fall back to the question text itself, same signal `questionIsSimplified` reads.
@@ -312,8 +313,37 @@ func showsCardTitleRow(_ ask: InteractionRecord.Ask) -> Bool {
 /// are (the primary row, no `optionId` — byte-identical to before). Pure and exported so
 /// `PendingCardsTests` can drive the rule directly, since `PendingApprovalBody` is a private view.
 func approvalAdditionalOptions(_ options: [SessionEvent.ApprovalOption]?) -> [SessionEvent.ApprovalOption] {
-    (options ?? []).filter { $0.id != "allow_once" && $0.id != approvalOnceOptionId && $0.id != "deny" }
+    (options ?? []).filter { $0.id != "allow_once" && $0.id != approvalOnceOptionId && $0.id != approvalSwitchOptionId && $0.id != "deny" }
 }
+
+/// PURE: the countdown line of a card that default-ALLOWS at `defaultAllowAt` (epoch ms) — ComputerV2's desktop
+/// switch. Whole seconds, rounded up, never negative.
+func defaultAllowCountdownText(defaultAllowAt: Int, now: Date) -> String {
+    let remainingMs = Double(defaultAllowAt) - now.timeIntervalSince1970 * 1000
+    let seconds = max(0, Int((remainingMs / 1000).rounded(.up)))
+    return seconds > 0 ? "Switching in \(seconds) s unless you choose Don't switch" : "Switching…"
+}
+
+/// PURE: the moments a default-allow card's countdown redraws — each time its whole-seconds figure changes, up to
+/// and including the deadline. Nothing after it: a frozen card schedules nothing.
+func defaultAllowRedraws(_ defaultAllowAt: Int, now: Date = Date()) -> [Date] {
+    let deadline = Date(timeIntervalSince1970: Double(defaultAllowAt) / 1000)
+    let remaining = deadline.timeIntervalSince(now)
+    guard remaining > 0 else { return [] }
+    // The figure changes at `deadline - n` for whole n; the first such moment strictly after now.
+    var n = Int(remaining.rounded(.down))
+    if Double(n) == remaining { n -= 1 }
+    var dates: [Date] = []
+    while n >= 0, dates.count < 600 {
+        dates.append(deadline.addingTimeInterval(-Double(n)))
+        n -= 1
+    }
+    return dates
+}
+
+/// The id of ComputerV2's desktop-switch card's one option (2026-10-10): "Switch now" — the card's PRIMARY
+/// button, beside "Don't switch" (a plain deny). Never a quiet extra.
+let approvalSwitchOptionId = "switch"
 
 /// The id of the per-app ComputerV2 card's "allow this one call" option (the card offers `once`,
 /// `session` and `always`; a deny is the plain `approved: false`). It is the primary button of the card,
@@ -333,6 +363,10 @@ struct ApprovalPrimaryChoice: Equatable {
 
 /// PURE: the primary buttons' words for a card carrying `options`.
 func approvalPrimaryChoice(_ options: [SessionEvent.ApprovalOption]?) -> ApprovalPrimaryChoice {
+    // ComputerV2's desktop switch: "Switch now" / "Don't switch" (the ruling's words). What they send is unchanged.
+    if let switchNow = (options ?? []).first(where: { $0.id == approvalSwitchOptionId }) {
+        return ApprovalPrimaryChoice(approveLabel: switchNow.label.isEmpty ? "Switch now" : switchNow.label, denyLabel: "Don't switch")
+    }
     guard let once = (options ?? []).first(where: { $0.id == approvalOnceOptionId }) else {
         return ApprovalPrimaryChoice(approveLabel: "Approve", denyLabel: "Deny")
     }
@@ -457,6 +491,8 @@ struct InteractionOutcomeLabel: Equatable {
 func outcomeLabel(_ outcome: InteractionRecord.Outcome) -> InteractionOutcomeLabel {
     switch outcome {
     case .approval(let approved, let by):
+        // A default-allow card (ComputerV2's desktop switch) that ran out: allowed, but by NOBODY — never "Approved".
+        if approved, by == "timeout" { return .init(symbol: "clock.badge.checkmark", text: "Allowed — no answer in time", isAffirmative: false) }
         if approved { return .init(symbol: "checkmark.seal.fill", text: "Approved", isAffirmative: true) }
         if by == "timeout" { return .init(symbol: "clock.badge.xmark", text: "Denied — timed out", isAffirmative: false) }
         return .init(symbol: "nosign", text: "Denied", isAffirmative: false)
@@ -497,6 +533,10 @@ func showsInteractionErrorLine(_ record: InteractionRecord, hasError: Bool) -> B
     hasError && interactionIsPending(record)
 }
 
+/// The `by` of a desktop-switch card answered on Winter Computer Use's on-screen prompt (the daemon's
+/// `DESKTOP_PROMPT_BY`), not by a client.
+let desktopPromptBy = "desktop-prompt"
+
 /// The provenance line under a frozen card — iOS's "answered by …" footer. `nil` when there is
 /// nobody to name (an ask that simply ended), so the card shows no dangling attribution.
 ///
@@ -518,7 +558,12 @@ func interactionProvenance(_ outcome: InteractionRecord.Outcome) -> String? {
         by = value
     case .ended: return nil
     }
-    if by == "timeout" { return "no answer before the deadline — resolved by timeout" }
+    if by == "timeout" {
+        if case .approval(true, _) = outcome { return "no answer before the deadline — it went ahead" }
+        return "no answer before the deadline — resolved by timeout"
+    }
+    // ComputerV2's desktop switch: answered on the helper's own prompt on the user's screen.
+    if by == desktopPromptBy { return "answered on the on-screen prompt" }
     return "answered by \(by)"
 }
 
@@ -610,8 +655,8 @@ struct TranscriptInteractionCard: View {
     @ViewBuilder
     private var pendingBody: some View {
         switch record.ask {
-        case .approval(_, let summary, let reviewerReason, let options):
-            PendingApprovalBody(callId: record.callId, summary: summary, reviewerReason: reviewerReason, childSessionId: record.childSessionId, options: options, isInFlight: isInFlight, onApproval: wiring.onApproval, draft: wiring.draftBinding(record.callId))
+        case .approval(_, let summary, let reviewerReason, let options, let defaultAllowAt):
+            PendingApprovalBody(callId: record.callId, summary: summary, reviewerReason: reviewerReason, childSessionId: record.childSessionId, options: options, defaultAllowAt: defaultAllowAt, isInFlight: isInFlight, onApproval: wiring.onApproval, draft: wiring.draftBinding(record.callId))
         case .question(let questions):
             PendingQuestionBody(callId: record.callId, questions: questions, childSessionId: record.childSessionId, isInFlight: isInFlight, onQuestion: wiring.onQuestion, onClose: nil, draft: wiring.draftBinding(record.callId))
         case .plan(let plan):
@@ -624,7 +669,7 @@ struct TranscriptInteractionCard: View {
     @ViewBuilder
     private func resolvedBody(_ outcome: InteractionRecord.Outcome) -> some View {
         switch record.ask {
-        case .approval(_, let summary, let reviewerReason, _):
+        case .approval(_, let summary, let reviewerReason, _, _):
             ResolvedApprovalBody(summary: summary, reviewerReason: reviewerReason, outcome: outcome)
         case .question(let questions):
             ResolvedQuestionBody(questions: questions, outcome: outcome)
@@ -1068,6 +1113,9 @@ private struct PendingApprovalBody: View {
     /// primary Approve/Deny buttons and would just duplicate them. `nil`, or an array holding only
     /// those two, renders this card byte-identical to before this task.
     let options: [SessionEvent.ApprovalOption]?
+    /// ComputerV2's desktop switch (2026-10-10): the epoch-ms deadline at which this card ALLOWS when nobody
+    /// answers (`onTimeout: "allow"`), shown as a countdown; `nil` for every card that fails closed.
+    var defaultAllowAt: Int? = nil
     let isInFlight: Bool
     let onApproval: (String, Bool, String?, String?) -> Void  // callId, approved, optionId, childSessionId
     /// The "Show more" disclosure — externally owned, NOT view-local `@State`. See
@@ -1114,6 +1162,17 @@ private struct PendingApprovalBody: View {
                 Text("⚠ reviewer: \(capReviewerReason(reviewerReason))")
                     .font(Typography.caption(.medium))
                     .foregroundStyle(.secondary)
+            }
+
+            // ComputerV2's desktop switch: what silence does, counting down — redrawn once a second only until the
+            // deadline (an explicit schedule, never a timer left running on a frozen card).
+            if let defaultAllowAt, !isInFlight {
+                TimelineView(.explicit(defaultAllowRedraws(defaultAllowAt))) { context in
+                    Text(defaultAllowCountdownText(defaultAllowAt: defaultAllowAt, now: context.date))
+                        .font(Typography.caption(.medium))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
             }
 
             if isInFlight {

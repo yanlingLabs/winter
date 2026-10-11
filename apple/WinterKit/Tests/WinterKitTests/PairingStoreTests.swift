@@ -6,9 +6,11 @@ import XCTest
 final class PairingStoreTests: XCTestCase {
 
     private func tempFileURL() -> URL {
-        FileManager.default.temporaryDirectory
+        let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("winter-pairing-store-tests-\(UUID().uuidString)", isDirectory: true)
             .appendingPathComponent("paired-devices.json")
+        removeAtTeardown(url.deletingLastPathComponent())
+        return url
     }
 
     @discardableResult

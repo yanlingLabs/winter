@@ -237,12 +237,15 @@ final class OffDesktopActTests: XCTestCase {
     func testWithThePrivatePathOffAnOffscreenWindowGetsNoEvents() async throws {
         world()
         let s = shot()
-        let e = await expect("window_elsewhere") {
+        // Nothing can reach it from here: a desktop visit could (with the user's say), so that is what it asks for.
+        let e = await expect("needs_desktop_visit") {
             try await self.core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
                                                            action: .click(CUClickAction(point: [500, 400], shotId: s)),
                                                            access: .full, allowForeground: false, privatePath: false))
         }
         XCTAssertTrue(e?.message.contains("the click can't be sent there with the private event path off") ?? false, e?.message ?? "")
+        XCTAssertEqual(e?.data?["why"], .string("act"))
+        XCTAssertTrue(sys.activated.isEmpty, "nobody was moved")
         // A scroll still works: Page Down to the app, no wheel.
         _ = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c2",
                                                     action: .scroll(CUScrollAction(point: [400, 300], shotId: s, direction: .down)),
@@ -313,6 +316,7 @@ final class OffDesktopActTests: XCTestCase {
         XCTAssertFalse(ax.written.contains { $0.hasSuffix(":\(kAXFocusedAttribute)") }, "no AXFocused write on web content")
     }
 
+    /// Nothing is typed; on another desktop the desktop visit is offered (round 11 — live, the refusal offered none).
     func testAWebFieldOnAnotherSpaceThatTheClickDoesNotFocusIsRefused() async throws {
         world()
         let comment = fakeElement(95_021)
@@ -321,11 +325,29 @@ final class OffDesktopActTests: XCTestCase {
         ax.focus(pid: pid, on: field)  // and it stays there
         do {
             try await act(.type(CUTypeAction(text: "line one", into: ref(comment))))
-            XCTFail("expected focus_not_placed")
+            XCTFail("expected needs_desktop_visit")
         } catch let e as CUError {
-            XCTAssertEqual(e.data?["reason"], .string("focus_not_placed"))
+            XCTAssertEqual(e.code, "needs_desktop_visit")
+            XCTAssertTrue(e.message.contains("couldn't put the keyboard focus"), e.message)
         }
         XCTAssertTrue(poster.keyDowns.isEmpty, "nothing typed into Search")
+    }
+
+    /// A web button on another desktop whose accessibility press changed nothing: the desktop visit is offered (round 11 —
+    /// live, the Web Store's controls ignored the press and no visit was offered), never a silent no-op.
+    func testANoEffectWebPressOnAnotherDesktopOffersTheVisit() async throws {
+        world()
+        let go = fakeElement(95_031)
+        ax.add(go, role: kAXButtonRole, title: "Continue", frame: CGRect(x: 120, y: 400, width: 120, height: 30),
+               extra: [kAXParentAttribute: webArea])
+        ax.setActions(go, [kAXPressAction])
+        do {
+            let r = try await act(.click(CUClickAction(ref: ref(go))))
+            XCTFail("expected needs_desktop_visit: \(r.rung) \(r.detail ?? "-")")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "needs_desktop_visit")
+            XCTAssertTrue(e.message.contains("had no effect accessibility can see from here"), e.message)
+        }
     }
 
     func testSetValueOnAScrollBarSetsANumberInZeroToOne() async throws {
@@ -354,6 +376,112 @@ final class OffDesktopActTests: XCTestCase {
             XCTAssertEqual(e.code, "target_lost", e.message)
             XCTAssertEqual(e.data?["reason"], .string("window_closed"), "Safari still runs: only its window closed")
         }
+    }
+
+    // MARK: a window in a full-screen transition reads as on no Space for a moment (the live gate, 2026-10-10)
+
+    /// A capture-only target (its cached "window" is the application element), its window re-entering full screen:
+    /// off screen, on NO Space and not in the app's list for a few readings, then on its new Space.
+    private func transitionWorld(readingsOnNoSpace: Int?) -> NSLock {
+        world()
+        target.accessible = false
+        core.registerForTesting(target, windowElement: ax.application(pid))
+        core.windowGoneSettleMs = 800
+        let lock = NSLock()
+        var reads = 0
+        sys.onSpaceReading = { _ in
+            lock.withLock {
+                reads += 1
+                guard let n = readingsOnNoSpace else { return false }  // on no Space for good: closed
+                return reads > n
+            }
+        }
+        return lock
+    }
+
+    func testAWindowOnNoSpaceForAMomentIsKept() async throws {
+        _ = transitionWorld(readingsOnNoSpace: 3)
+        await core.checkWindows(pid: pid)  // the transition's destroyed-element notification
+        XCTAssertNotNil(try? core.target("t1"), "a full-screen transition is not a closed window")
+        let gone1 = try await core.windowGone(target)
+        XCTAssertFalse(gone1, "on its Space again")
+    }
+
+    func testAWindowOnNoSpaceForGoodIsLostAfterTheSettle() async throws {
+        _ = transitionWorld(readingsOnNoSpace: nil)
+        let t0 = Date()
+        await core.checkWindows(pid: pid)
+        XCTAssertNil(try? core.target("t1"), "closed but still allocated: lost")
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(t0), 0.75, "only after the window was watched for the settle")
+        // A window that leaves the server's listing during the watch is gone at once.
+        _ = transitionWorld(readingsOnNoSpace: nil)
+        sys.onSpaceReading = { [unowned self] _ in sys.windows[77] = nil; return false }
+        let t1 = Date()
+        let gone2 = try await core.windowGone(target)
+        XCTAssertTrue(gone2)
+        XCTAssertLessThan(Date().timeIntervalSince(t1), 0.6)
+    }
+
+    /// Review of round 2 (LOW): the watch held a Swift-concurrency thread for up to 1.5 s, before the call's cancel was
+    /// registered, so Esc/cancel waited it out. It now suspends under the call's cancel.
+    func testTheTransitionWatchEndsOnTheCallsCancel() async throws {
+        _ = transitionWorld(readingsOnNoSpace: nil)
+        core.windowGoneSettleMs = 5_000
+        let t0 = Date()
+        Task {
+            try await Task.sleep(nanoseconds: 150_000_000)
+            _ = try await core.cancel(CancelParams(callId: "c"))
+        }
+        let e = await expect("cancelled") { try await self.act(.key(CUKeyAction(combo: "escape"))) }
+        XCTAssertNotNil(e)
+        XCTAssertLessThan(Date().timeIntervalSince(t0), 1.0, "stopped by the cancel, not after the watch")
+        XCTAssertNotNil(try? core.target("t1"), "nothing decided: the target is kept")
+    }
+
+    /// Review of round 3 (LOW): the cancel was registered AFTER the watch in screenshot, waitFor and AppleScript, and
+    /// find, foreground and the scripting dictionary/commands had none. Every call that can wait in it now stops on its
+    /// cancel (a cancel that came first, too: it is remembered).
+    func testEveryCallThatWatchesATransitionStopsOnItsCancel() async throws {
+        let calls: [(String, () async throws -> Void)] = [
+            ("screenshot", { _ = try await self.core.targetScreenshot(TargetScreenshotParams(targetId: "t1", budget: CUImageBudget(maxLongEdge: 400, quality: 0.8), callId: "c")) }),
+            ("waitFor", { _ = try await self.core.targetWaitFor(TargetWaitForParams(targetId: "t1", cond: CUWaitCondition(text: "x"), timeoutMs: 100, callId: "c")) }),
+            ("find", { _ = try await self.core.targetFind(TargetFindParams(targetId: "t1", query: .fields(role: nil, name: "x", text: nil), callId: "c")) }),
+            ("applescript", { _ = try await self.core.targetAppleScript(TargetAppleScriptParams(targetId: "t1", source: "get name", callId: "c")) }),
+            ("foreground", { _ = try await self.core.targetForeground(TargetForegroundParams(targetId: "t1", callId: "c")) }),
+            ("scriptingDictionary", { _ = try await self.core.targetScriptingDictionary(TargetScriptingDictionaryParams(targetId: "t1", callId: "c")) }),
+            ("scriptingCommands", { _ = try await self.core.targetScriptingCommands(TargetScriptingCommandsParams(targetId: "t1", callId: "c")) }),
+        ]
+        for (name, call) in calls {
+            _ = transitionWorld(readingsOnNoSpace: nil)
+            core.windowGoneSettleMs = 5_000
+            let t0 = Date()
+            Task {
+                try await Task.sleep(nanoseconds: 150_000_000)
+                _ = try await core.cancel(CancelParams(callId: "c"))
+            }
+            do {
+                try await call()
+                XCTFail("\(name): not stopped")
+            } catch let e as CUError {
+                XCTAssertEqual(e.code, "cancelled", "\(name): \(e.message)")
+            }
+            XCTAssertLessThan(Date().timeIntervalSince(t0), 1.0, "\(name): stopped by the cancel, not after the watch")
+            XCTAssertNotNil(try? core.target("t1"), "\(name): nothing decided")
+        }
+    }
+
+    /// Each check may watch for the whole settle: overlapping requests for one pid run ONE watch, then at most one more.
+    func testWindowChecksForOnePidAreCoalesced() async throws {
+        let lock = transitionWorld(readingsOnNoSpace: nil)
+        var readings = 0
+        sys.onSpaceReading = { _ in lock.withLock { readings += 1 }; return false }
+        core.windowGoneSettleMs = 400
+        await withTaskGroup(of: Void.self) { g in
+            for _ in 0..<6 { g.addTask { [core] in await core!.checkWindows(pid: self.pid) } }
+        }
+        XCTAssertNil(try? core.target("t1"), "lost after the watch")
+        let n = lock.withLock { readings }
+        XCTAssertLessThan(n, 12, "one watch of ~6 readings (\(n)), not six overlapping ones")
     }
 
     // MARK: Why a target is lost (`data.reason`, and the `targetLost` notification's)
@@ -403,12 +531,14 @@ final class OffDesktopActTests: XCTestCase {
         XCTAssertEqual(CUTargetLostReason.allCases.map(\.rawValue), ["app_quit", "window_closed", "helper_restart", "unknown"])
     }
 
-    func testAWindowOnAnotherSpaceIsNotTakenForClosed() {
+    func testAWindowOnAnotherSpaceIsNotTakenForClosed() async throws {
         world()
         sys.onSpace = true  // on another Space: on a Space
-        XCTAssertFalse(core.windowGone(target))
+        let gone3 = try await core.windowGone(target)
+        XCTAssertFalse(gone3)
         sys.onSpace = nil   // unknown: never guessed closed
-        XCTAssertFalse(core.windowGone(target))
+        let gone4 = try await core.windowGone(target)
+        XCTAssertFalse(gone4)
     }
 
     func testADragElsewhereIsWindowTargetedEvents() async throws {

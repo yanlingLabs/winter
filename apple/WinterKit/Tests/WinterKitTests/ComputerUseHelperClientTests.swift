@@ -6,11 +6,13 @@ import XCTest
 /// A scripted transport stands in for the helper's socket; nothing here touches the real one.
 final class ComputerUseHelperClientTests: XCTestCase {
     private func client(_ transport: ScriptedTransport, socketExists: Bool = true,
-                        timeout: Duration = .seconds(2)) -> LiveComputerUseHelperClient {
+                        timeout: Duration = .seconds(2),
+                        sleep: (@Sendable (Duration) async throws -> Void)? = nil) -> LiveComputerUseHelperClient {
         LiveComputerUseHelperClient(home: "/tmp/winter-test-home",
                                     socketExists: { _ in socketExists },
                                     makeTransport: { _ in transport },
-                                    requestTimeout: timeout)
+                                    requestTimeout: timeout,
+                                    sleep: sleep)
     }
 
     /// Connects and answers the hello. Returns once the client is ready for calls.
@@ -186,14 +188,40 @@ final class ComputerUseHelperClientTests: XCTestCase {
 
     func testARequestTheHelperNeverAnswersTimesOut() async throws {
         let t = ScriptedTransport()
-        let c = client(t, timeout: .milliseconds(80))
+        // The timeout passes when the test says so — never because the machine was slow to answer the hello.
+        let timeouts = ManualTimeout()
+        let c = client(t, sleep: timeouts.sleeper)
         try await connect(c, t)
+        XCTAssertEqual(timeouts.sleeping, 0, "the hello was answered: its timeout was cancelled, not left running")
+        async let subscribed = c.subscribe(sessionId: "s", frames: true)
+        _ = try await waitForSent(t, count: 2) // the request is on the wire, and nobody will answer it
+        timeouts.elapse()
         do {
-            _ = try await c.subscribe(sessionId: "s", frames: true)
+            _ = try await subscribed
             XCTFail("must time out")
         } catch let error as HelperClientError {
             if case .rpc(let code, _) = error { XCTAssertEqual(code, -2) } else { XCTFail("\(error)") }
         }
+    }
+
+    /// The other half of the clock: with the timeout clock never released, a slow helper is just a slow helper — the
+    /// answer that arrives long after a short real timeout would have fired still resolves the call (and the hello
+    /// that was answered late connected). Only `elapse()` times a request out.
+    func testNoRequestTimesOutUntilTheTimeoutClockSaysSo() async throws {
+        let t = ScriptedTransport()
+        let timeouts = ManualTimeout()
+        let c = client(t, timeout: .milliseconds(20), sleep: timeouts.sleeper)
+        async let connected: Void = c.connect()
+        let hello = try await waitForSent(t, count: 1)[0]
+        try await Task.sleep(nanoseconds: 100_000_000) // five times the timeout, in real time
+        t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"protocol":1,"helperVersion":"0.1.0","pid":4242}}"#)
+        try await connected
+        async let subscribed = c.subscribe(sessionId: "s", frames: true)
+        _ = try await waitForSent(t, count: 2)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        _ = try await answer(t, sentIndex: 1, result: #"{"targets":[]}"#)
+        let targets = try await subscribed
+        XCTAssertEqual(targets, [])
     }
 
     // MARK: - Notifications

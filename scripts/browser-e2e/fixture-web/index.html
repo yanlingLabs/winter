@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture Shop</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; }
+  #big { margin-top: 1200px; }
+  iframe { width: 420px; height: 140px; border: 2px solid #888; display: block; margin: 8px 0; }
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: none; }
+  .overlay.on { display: block; }
+</style></head>
+<body>
+<header><nav><a href="/page2.html">Next page</a> <a href="https://elsewhere.example/">Elsewhere</a></nav></header>
+<main>
+  <h1>Your cart</h1>
+  <p>Order token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop and nothing else.</p>
+  <label>Coupon <input id="coupon" type="text" value=""></label>
+  <label>Password <input id="pw" type="password" value="hunter2"></label>
+  <label><input id="gift" type="checkbox"> Gift wrap</label>
+  <select id="size" aria-label="Size"><option>Small</option><option>Large</option></select>
+  <button id="apply" onclick="document.getElementById('status').textContent = 'Applied ' + document.getElementById('coupon').value">Apply</button>
+  <p id="status">Nothing applied</p>
+  <button id="more" onclick="setTimeout(() => { const p = document.createElement('p'); p.id = 'later'; p.textContent = 'Delayed content arrived'; document.querySelector('main').appendChild(p); }, 400)">Load more</button>
+  <button id="ask" onclick="document.getElementById('answer').textContent = confirm('Leave this page?') ? 'confirmed' : 'cancelled'">Confirm something</button>
+  <button id="name" onclick="document.getElementById('answer').textContent = 'hello ' + prompt('Your name?', 'nobody')">Ask my name</button>
+  <button id="hov" onmouseenter="document.getElementById('tip').textContent = 'tooltip shown'">Hover me</button>
+  <p id="tip">no tooltip</p>
+  <p id="answer">no answer yet</p>
+  <label>Receipt <input id="file" type="file" onchange="document.getElementById('picked').textContent = 'picked ' + this.files[0].name"></label>
+  <p id="picked">nothing picked</p>
+  <ul aria-label="Recommendations"><li>Socks</li><li>Hat</li><li>Scarf</li></ul>
+  <fancy-box></fancy-box>
+  <closed-box></closed-box>
+  <iframe id="same" title="Same origin" src="/frame.html"></iframe>
+  <iframe id="oop" title="Payment" src="OOP_ORIGIN/oop.html"></iframe>
+  <button id="big" onclick="this.textContent = 'Big pressed'">Far below</button>
+</main>
+<div class="overlay" id="overlay" role="dialog" aria-label="Cookies"></div>
+<script>
+customElements.define("fancy-box", class extends HTMLElement {
+  constructor() { super(); const r = this.attachShadow({ mode: "open" }); r.innerHTML = '<button id="sb">Shadow button</button><span id="sl">shadow idle</span>'; r.getElementById("sb").onclick = () => { r.getElementById("sl").textContent = "shadow pressed"; }; }
+});
+customElements.define("closed-box", class extends HTMLElement {
+  constructor() { super(); const r = this.attachShadow({ mode: "closed" }); r.innerHTML = '<button>Closed shadow button</button>'; }
+});
+</script>
+</body>
+</html>

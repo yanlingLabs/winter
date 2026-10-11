@@ -61,6 +61,10 @@ public final class RemoteHost {
         /// Defaulted to the dist literal so every construction site that predates this field
         /// (production's own former behavior, every existing test) compiles and behaves unchanged.
         public var keychainService: String
+        /// ComputerV2 Phase 1b: Winter.app's own computer-use mirror, which the Gateway relays to a phone that asks
+        /// (`session.mirror`). `nil` (every construction site that predates the phone mirror) answers every watch
+        /// `mirror: false` — the phone simply shows none.
+        public var mirrorSource: RemoteMirrorSource?
 
         public init(
             storeDir: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".winter/remote", isDirectory: true),
@@ -69,7 +73,8 @@ public final class RemoteHost {
             relayConfig: SignedRelayConfig,
             relayURLs: [String],
             relayProbe: @escaping @Sendable (String) async -> Bool = RemoteHost.defaultRelayProbe,
-            keychainService: String = "com.winter.core"
+            keychainService: String = "com.winter.core",
+            mirrorSource: RemoteMirrorSource? = nil
         ) {
             self.storeDir = storeDir
             self.socketPath = socketPath
@@ -78,6 +83,7 @@ public final class RemoteHost {
             self.relayURLs = relayURLs
             self.relayProbe = relayProbe
             self.keychainService = keychainService
+            self.mirrorSource = mirrorSource
         }
     }
 
@@ -377,7 +383,8 @@ public final class RemoteHost {
         daemonFactory = { WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: token, clientName: "iphone-gateway") }
         #endif
 
-        let gateway = Gateway(listener: router, daemonFactory: daemonFactory, hostID: macID, directory: store)
+        let gateway = Gateway(listener: router, daemonFactory: daemonFactory, hostID: macID, directory: store,
+                              mirrorSource: config.mirrorSource)
 
         self.listener = boundListener
         self.router = router

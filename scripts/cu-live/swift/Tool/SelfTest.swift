@@ -38,6 +38,8 @@ func runToolSelfTest() -> Int32 {
     check(usageError([]) != nil, "no command rejected")
     check(usageError(["frobnicate"]) != nil, "unknown command rejected")
     check(usageError(["front", "extra"]) != nil, "front with arguments rejected")
+    check(parse(["session"]) == .session, "session")
+    check(usageError(["session", "extra"]) != nil, "session with arguments rejected")
 
     check(parse(["image-stats", "/tmp/shot.png"]) == .imageStats(path: "/tmp/shot.png"), "image-stats <file>")
     check(usageError(["image-stats"]) != nil, "image-stats needs a file")
@@ -119,6 +121,20 @@ func runToolSelfTest() -> Int32 {
         check(false, "fresh-decode: locate")
     }
     check(FreshDecode.line(file: "\"y.png\"", pixels: [UInt8](repeating: 255, count: 16), width: 2, height: 2, layout: FreshLayout(sentinel: .init(x: 8, y: 8, size: 48), regions: [])).contains("no sentinel"), "fresh-decode: no sentinel")
+    // The session query: locked only when the (undocumented) key is set; no dictionary or no console key = not on the console.
+    check(SessionState.parse([SessionState.onConsoleKey: 1]) == .init(locked: false, onConsole: true), "session: unlocked on the console")
+    check(SessionState.parse([SessionState.onConsoleKey: 1, SessionState.lockedKey: 1]) == .init(locked: true, onConsole: true), "session: locked on the console")
+    check(SessionState.parse([SessionState.onConsoleKey: true, SessionState.lockedKey: false]) == .init(locked: false, onConsole: true), "session: Bool values read too")
+    check(SessionState.parse([SessionState.onConsoleKey: 0]) == .init(locked: false, onConsole: false), "session: another user's console")
+    check(SessionState.parse([:]) == .init(locked: false, onConsole: false), "session: no console key is not the console")
+    check(SessionState.parse(nil) == .init(locked: false, onConsole: false), "session: no GUI session is not the console")
+    check(SessionState.Reading(locked: true, onConsole: false).json == "{\"locked\":true,\"onConsole\":false}", "session: the line")
+    check(SessionState.read().json.hasPrefix("{\"locked\":"), "session: the live query answers a line")
+    var withSession = Sample(t: 4, front: nil, frontPid: nil, space: nil, hidIdleMs: nil)
+    withSession.session = .init(locked: true, onConsole: true)
+    check(withSession.json == "{\"t\":4,\"front\":null,\"frontPid\":null,\"space\":null,\"hidIdleMs\":null,\"locked\":true,\"onConsole\":true}", "a monitor sample with the session state")
+    tapped.session = .init(locked: false, onConsole: true)
+    check(tapped.json.hasSuffix(",\"hwKeys\":true,\"locked\":false,\"onConsole\":true}"), "the session state follows the hardware fields")
     pointed.spaceType = 4
     check(pointed.json.hasSuffix(",\"mouse\":[10,-3],\"spaceType\":4}"), "a front sample with the Space's type")
 

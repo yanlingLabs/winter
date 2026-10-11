@@ -26,7 +26,7 @@ final class DispatcherTests: XCTestCase {
 
     func testTheDispatcherAnswersExactlyTheHelperRPCMethodsBesidesHello() async {
         let rig = await Rig()
-        let expected = Set(engineSamples.map(\.method) + ["script.active", "view.subscribe", "view.unsubscribe"])
+        let expected = Set(engineSamples.map(\.method) + ["script.active", "view.subscribe", "view.unsubscribe", "prompt.desktopVisit"])
         XCTAssertEqual(Set(rig.dispatcher.methods), expected)
     }
 
@@ -47,6 +47,19 @@ final class DispatcherTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(TestActivateResult.self, from: JSONEncoder().encode(result)), TestActivateResult(frontmostSet: true, raised: true, frontmost: true))
         let pids = await asked.pids
         XCTAssertEqual(pids, [42])
+    }
+
+    func testTestAutomationExistsOnlyOnALiveTestInstanceAndNeverAsks() async throws {
+        let rig = await Rig()
+        XCTAssertFalse(rig.dispatcher.methods.contains("test.automation"))
+        let live = await MainActor.run { RPCDispatcher(core: rig.core, coordinator: rig.coordinator, viewHub: rig.viewHub, inFlight: rig.inFlight, liveTest: true) }
+        XCTAssertTrue(live.methods.contains("test.automation"))
+        // No such app running: answered without asking anything.
+        let none = try await live.handle(method: "test.automation", params: .object(["bundleId": .string("dev.cu-live.no-such-app")]))
+        XCTAssertEqual(try JSONDecoder().decode(TestAutomationResult.self, from: JSONEncoder().encode(none)).status, "not_running")
+        XCTAssertEqual(CUAutomationProbe.word(OSStatus(noErr)).status, "granted")
+        XCTAssertEqual(CUAutomationProbe.word(OSStatus(-1744)).status, "would_ask")
+        XCTAssertEqual(CUAutomationProbe.word(OSStatus(-1743)).status, "denied")
     }
 
     func testTheFreshnessCapturesExistOnlyOnALiveTestInstanceWithACapturer() async throws {

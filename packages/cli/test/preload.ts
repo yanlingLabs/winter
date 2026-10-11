@@ -1,3 +1,6 @@
+// FIRST import, on purpose — see packages/core/test/per-process-tmp.ts: one fresh temp root for this test
+// process, `TMPDIR` pointed at it, the whole tree removed at exit.
+import "../../core/test/per-process-tmp";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

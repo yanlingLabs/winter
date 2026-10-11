@@ -63,8 +63,10 @@ final class IrohRelayE2ETests: XCTestCase {
     }
 
     private func tempStoreDir() -> URL {
-        FileManager.default.temporaryDirectory
+        let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("winter-relay-e2e-tests-\(UUID().uuidString)", isDirectory: true)
+        removeAtTeardown(dir)
+        return dir
     }
 
     private final class ListenerBox: @unchecked Sendable {
@@ -101,7 +103,7 @@ final class IrohRelayE2ETests: XCTestCase {
                 return listener
             },
             makeDaemonFactory: {
-                WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway")
+                WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway", requestTimeout: RealDaemon.requestTimeout)
             }
         )
         _ = try await host.openPairingWindow()

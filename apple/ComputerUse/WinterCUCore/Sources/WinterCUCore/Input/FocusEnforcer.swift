@@ -82,6 +82,12 @@ public enum CUFocusEvents {
                      flags: windowID != 0 ? NSEvent.ModifierFlags(rawValue: UInt(windowFlags)) : [])
     }
 
+    /// The app-deactivated notification (type 13 / subtype 2): the app resigns active and its key window resigns
+    /// key — what lets the make-key records name ANOTHER of its windows next.
+    public static func appDeactivated() -> CGEvent? {
+        notification(type: .appKitDefined, subtype: 2, windowID: 0, flags: [])
+    }
+
     /// The key-focus-returned CPS notification (type 21 / subtype 0x8000). `NSEvent` has no type 21, so it is
     /// built as a raw CGEvent-shaped NSEvent through `appKitDefined` and retyped; nil when unavailable.
     public static func keyFocusReturnedEvent() -> CGEvent? {
@@ -248,11 +254,15 @@ public protocol CUFocusEnforcing: AnyObject {
     /// the user): before a selection-dependent menu command is validated, since the app re-validates its
     /// menu on the activation it handles. Returns whether it posted.
     func forceActivation(windowID: UInt32) -> Bool
+    /// Posts the synthetic DEactivation (the target resigns active, and its key window resigns key) — before the
+    /// make-key records name another of its windows. Only when it is not front for the user. Whether it posted.
+    func deactivate() -> Bool
     func teardown()
 }
 
 public extension CUFocusEnforcing {
     func forceActivation(windowID: UInt32) -> Bool { enforce(windowID: windowID) }
+    func deactivate() -> Bool { false }
 }
 
 /// The live enforcer: synthetic activation posted to the target under an `SLSDisableUpdate` bracket, with
@@ -288,7 +298,7 @@ public final class CULiveFocusEnforcer: CUFocusEnforcing {
     public func enforce(windowID: UInt32) -> Bool {
         lock.lock(); defer { lock.unlock() }
         // Already front for the user: nothing to fake (and nothing to restore).
-        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+        if frontPid() == pid {
             state = CUSyntheticFocusState(believesActive: true, believesFocus: true, isReallyActive: true)
             return false
         }
@@ -303,12 +313,30 @@ public final class CULiveFocusEnforcer: CUFocusEnforcing {
 
     public func forceActivation(windowID: UInt32) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+        if frontPid() == pid {
             state = CUSyntheticFocusState(believesActive: true, believesFocus: true, isReallyActive: true)
             return false
         }
         state = CUSyntheticFocusState(believesActive: false, believesFocus: false, isReallyActive: false)
         postActivation(windowID: windowID, activate: true, focus: true)
+        return true
+    }
+
+    /// The front process as the window server has it now (NSWorkspace hears of a change later, on the main run loop).
+    private func frontPid() -> pid_t? {
+        skyLight.frontProcessPid() ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
+
+    public func deactivate() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        // Front for the user: it is really active — never told otherwise.
+        if frontPid() == pid { return false }
+        guard let e = CUFocusEvents.appDeactivated() else { return false }
+        let cid = skyLight.disableUpdate()
+        defer { if let cid { skyLight.reenableUpdate(cid) } }
+        e.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid))
+        post(e, pid)
+        state = CUSyntheticFocusState(believesActive: false, believesFocus: false, isReallyActive: false)
         return true
     }
 

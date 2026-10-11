@@ -62,6 +62,12 @@ export function computerV2ToolDefs(session: Pick<CapabilitySession, "sessionId" 
   return [def as unknown as ToolDefinition];
 }
 
+/** The runtime's wait for one `ComputerV2` call: Claude Code's MCP tool default (~27.8 h), never the runtime's 120 s.
+ *  A script may run up to 300 s, and the per-app, foreground and desktop-visit cards it raises wait for the user
+ *  INSIDE the call (not counted against the script's timeout). The daemon bounds the script itself, and an
+ *  interrupt still cancels the call through its signal. */
+export const COMPUTER_V2_CALL_TIMEOUT_MS = 100_000_000;
+
 export function computerV2Capability(session: CapabilitySession, deps: ComputerV2CapabilityDeps): McpSdkServerConfigWithInstance {
-  return capabilityServer({ key: "computer_v2", defs: computerV2ToolDefs(session, deps) }, session);
+  return capabilityServer({ key: "computer_v2", defs: computerV2ToolDefs(session, deps), callTimeoutMs: COMPUTER_V2_CALL_TIMEOUT_MS }, session);
 }

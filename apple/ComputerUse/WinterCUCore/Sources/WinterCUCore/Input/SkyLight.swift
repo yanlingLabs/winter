@@ -33,6 +33,7 @@ public struct CUSkyLight: @unchecked Sendable {
     typealias GetKeyFocus = @convention(c) (UnsafeMutableRawPointer) -> Int32
     typealias ReleaseKeyFocus = @convention(c) (Int32) -> Int32
     typealias ProcessPID = @convention(c) (UnsafeRawPointer, UnsafeMutablePointer<pid_t>) -> Int32
+    typealias CopyManagedDisplaySpaces = @convention(c) (UInt32) -> Unmanaged<CFArray>?
 
     var postToPidFn: PostToPid?
     var setIntFieldFn: SetIntField?
@@ -56,6 +57,7 @@ public struct CUSkyLight: @unchecked Sendable {
     var getKeyFocusFn: GetKeyFocus?
     var releaseKeyFocusFn: ReleaseKeyFocus?
     var processPIDFn: ProcessPID?
+    var copyManagedDisplaySpacesFn: CopyManagedDisplaySpaces?
 
     /// `SLEventPostToPid` resolved: rung 3 is possible.
     public var isAvailable: Bool { postToPidFn != nil }
@@ -103,6 +105,8 @@ public struct CUSkyLight: @unchecked Sendable {
         s.getKeyFocusFn = fn("CPSGetKeyFocusProcess", GetKeyFocus.self)
         s.releaseKeyFocusFn = fn("CPSReleaseKeyFocusWithID", ReleaseKeyFocus.self)
         s.processPIDFn = fn("GetProcessPID", ProcessPID.self)
+        s.copyManagedDisplaySpacesFn = fn("SLSCopyManagedDisplaySpaces", CopyManagedDisplaySpaces.self)
+            ?? fn("CGSCopyManagedDisplaySpaces", CopyManagedDisplaySpaces.self)
         return s
     }
 
@@ -207,6 +211,57 @@ public struct CUSkyLight: @unchecked Sendable {
         return a == 0 && b == 0
     }
 
+    /// Where the make-key records say the "click" is, in global points AND in window points: far outside every screen
+    /// and every window, so no view is hit — and FINITE. yabai fills these 16 bytes with 0xFF (NaN), but an app that
+    /// converts an event's `locationInWindow` to `Int` in a `sendEvent` override or an event monitor traps on NaN
+    /// (Swift's `Int(Double.nan)`): measured on 2026-10-10, a probe app doing that crashed on the 0xFF records and
+    /// took these unharmed, with the same key-window switch (and no view mouseDown).
+    static let makeKeyLocation = CGPoint(x: -32_000, y: -32_000)
+
+    /// yabai's make-key-window records: a synthesized left mouse down and up (event types 1 and 2) for the window,
+    /// with the command modifier (0x10 at 0x3A — flags 0x100000; a ⌘-click is the one that leaves a background
+    /// window where it is), at `makeKeyLocation` (doubles: the record's location at 0x10, its window location at
+    /// 0x20). The app makes the window its key window — what a click on it does, without the click.
+    static func makeKeyRecords(windowID: UInt32) -> [[UInt8]] {
+        [UInt8(0x01), UInt8(0x02)].map { type in
+            var buf = [UInt8](repeating: 0, count: 0xF8)
+            buf[0x04] = 0xF8
+            buf[0x08] = type
+            buf[0x3A] = 0x10
+            func put(_ v: CGFloat, at offset: Int) {
+                withUnsafeBytes(of: Double(v).bitPattern.littleEndian) { bytes in
+                    for (i, b) in bytes.enumerated() { buf[offset + i] = b }
+                }
+            }
+            for base in [0x10, 0x20] {
+                put(makeKeyLocation.x, at: base)
+                put(makeKeyLocation.y, at: base + 8)
+            }
+            withUnsafeBytes(of: windowID.littleEndian) { bytes in
+                for (i, b) in bytes.enumerated() { buf[0x3C + i] = b }
+            }
+            return buf
+        }
+    }
+
+    /// Makes `windowID` its app's KEY window (AppKit's own, not the system's key focus): the make-key records,
+    /// posted to the app alone. Live (2026-10-10, a WebKit host app in the background): the app takes it only
+    /// while it believes it is active and holds no key window — the focus record or the synthetic activation
+    /// first, and the app deactivated before when ANOTHER of its windows is key. Nothing is raised, nothing
+    /// activates, the user's key focus stays where it is (all measured). False when a symbol is missing.
+    @discardableResult
+    func makeKeyWindow(pid: pid_t, windowID: UInt32) -> Bool {
+        guard let postEventRecordToFn, let getProcessForPIDFn else { return false }
+        var target = [UInt8](repeating: 0, count: 8)
+        guard target.withUnsafeMutableBytes({ getProcessForPIDFn(pid, $0.baseAddress!) }) == 0 else { return false }
+        var ok = true
+        for record in Self.makeKeyRecords(windowID: windowID) {
+            let r = target.withUnsafeBytes { psn in record.withUnsafeBufferPointer { postEventRecordToFn(psn.baseAddress!, $0.baseAddress!) } }
+            ok = ok && r == 0
+        }
+        return ok
+    }
+
     /// Undoes `focusWithoutRaise`: the target window loses key focus and the user's previous key window
     /// (`previousWindowID` of `previousPid`) gets it back, so their typing goes where it went before.
     @discardableResult
@@ -252,6 +307,27 @@ public struct CUSkyLight: @unchecked Sendable {
               let arr = copySpacesFn(cid, 0x7, [NSNumber(value: id)] as CFArray)?.takeRetainedValue() as? [NSNumber]
         else { return [] }
         return arr.map(\.uint64Value).filter { $0 != 0 }
+    }
+
+    /// The Spaces a window is on; nil when it can't be read.
+    public func spacesOf(windowID id: UInt32) -> Set<UInt64>? {
+        guard let mainConnectionFn, copySpacesFn != nil else { return nil }
+        return Set(spaces(ofWindow: id, connection: mainConnectionFn()))
+    }
+
+    /// Each display's CURRENT Space, by display identifier (`SLSCopyManagedDisplaySpaces`: "Display Identifier" →
+    /// "Current Space"'s id); nil when it can't be read. One display, one entry; "Displays have separate Spaces" off,
+    /// one entry for all.
+    public func currentSpacesByDisplay() -> [String: UInt64]? {
+        guard let mainConnectionFn, let copyManagedDisplaySpacesFn,
+              let arr = copyManagedDisplaySpacesFn(mainConnectionFn())?.takeRetainedValue() as? [[String: Any]] else { return nil }
+        var out: [String: UInt64] = [:]
+        for d in arr {
+            guard let display = d["Display Identifier"] as? String, let current = d["Current Space"] as? [String: Any] else { continue }
+            let id = (current["id64"] as? NSNumber) ?? (current["ManagedSpaceID"] as? NSNumber)
+            if let id { out[display] = id.uint64Value }
+        }
+        return out.isEmpty ? nil : out
     }
 
     /// Whether a window is on any Space at all (an ordered-out — closed but still allocated — window is on

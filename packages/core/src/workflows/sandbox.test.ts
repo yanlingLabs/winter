@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, realpathSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -41,14 +41,19 @@ describe("buildWorkflowSeatbeltProfile", () => {
   });
 
   test("canonicalizes the self-exec literal (macOS symlink resolution, e.g. /tmp -> /private/tmp)", () => {
-    const rawDir = mkdtempSync(join(tmpdir(), "winter-wf-sb-"));
-    const resolvedDir = realpathSync(rawDir);
+    // Its OWN symlink, so the raw and the resolved spellings differ wherever this runs -- the system temp dir is a
+    // symlink only on a stock macOS ($TMPDIR under /var), and a temp dir that is already real (a CI image, a TMPDIR
+    // under /private/tmp) made the "raw form must not appear" check below fail for a reason unrelated to the code.
+    const resolvedDir = realpathSync(mkdtempSync(join(tmpdir(), "winter-wf-sb-")));
+    const rawDir = `${resolvedDir}-link`;
+    symlinkSync(resolvedDir, rawDir);
     const rawSelf = join(rawDir, "fake-bun");
     writeFileSync(rawSelf, "");
     const resolvedSelf = join(resolvedDir, "fake-bun");
+    expect(rawSelf).not.toBe(resolvedSelf);
     const p = buildWorkflowSeatbeltProfile(rawSelf);
     expect(p).toContain(`(allow process-exec (literal "${resolvedSelf}"))`);
-    expect(p).not.toContain(`(literal "${rawSelf}")`); // the raw (un-resolved) form must NOT appear, unless it happens to equal the resolved form
+    expect(p).not.toContain(`(literal "${rawSelf}")`); // the raw (un-resolved) form must NOT appear
   });
 
   test("paths with quotes/backslashes are escaped in the profile (SBPL string literal safety)", () => {

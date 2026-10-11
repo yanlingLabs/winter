@@ -29,12 +29,18 @@ export interface PendingApproval {
   // for grant/worktree/reviewer-escalation waits (Task 5 passes no options for those) and for any
   // plain-tool wait where nothing rule-worthy applies.
   options?: ApprovalOption[];
+  /** ComputerV2's desktop-switch prompt (2026-10-10): `"allow"` when the deadline ALLOWS instead of
+   *  failing closed (`ApprovalRequestedEvent.onTimeout`). Absent everywhere else. */
+  onTimeout?: "allow";
 }
 
 /** Optional metadata threaded from the emit site (engine.ts/daemon.ts) so a pending approval is
  *  listable + carries its deadline. Omitted by callers that don't need listing (direct unit tests);
- *  the broker then falls back to `Date.now()`/`+timeoutMs` and empty tool/summary strings. */
-export interface WaitMeta { toolName: string; summary: string; issuedAt: number; expiresAt: number; options?: ApprovalOption[] }
+ *  the broker then falls back to `Date.now()`/`+timeoutMs` and empty tool/summary strings.
+ *  `onTimeout: "allow"` makes the deadline resolve `{approved: true, by: "timeout"}` — the ONE card
+ *  that default-allows (ComputerV2's desktop-switch prompt, user ruling 2026-10-10); every other wait
+ *  stays fail-closed. */
+export interface WaitMeta { toolName: string; summary: string; issuedAt: number; expiresAt: number; options?: ApprovalOption[]; onTimeout?: "allow" }
 
 interface PendingEntry {
   sessionId: string;
@@ -46,6 +52,7 @@ interface PendingEntry {
   issuedAt: number;
   expiresAt: number;
   options?: ApprovalOption[];
+  onTimeout?: "allow";
 }
 
 /** In-flight approval requests, keyed by sessionId+callId. First response wins (spec §4.10).
@@ -64,9 +71,11 @@ export class ApprovalBroker {
   wait(sessionId: string, callId: string, timeoutMs: number, meta?: WaitMeta): Promise<ApprovalOutcome> {
     return new Promise((resolve) => {
       const k = this.key(sessionId, callId);
+      const allowAtDeadline = meta?.onTimeout === "allow";
       const timer = setTimeout(() => {
         this.pending.delete(k);
-        resolve({ approved: false, by: "timeout" }); // fail-closed: no answer means no
+        // fail-closed: no answer means no — except a card that says its deadline allows.
+        resolve({ approved: allowAtDeadline, by: "timeout" });
       }, timeoutMs);
       const issuedAt = meta?.issuedAt ?? Date.now();
       this.pending.set(k, {
@@ -76,6 +85,7 @@ export class ApprovalBroker {
         issuedAt,
         expiresAt: meta?.expiresAt ?? issuedAt + timeoutMs,
         options: meta?.options,
+        ...(allowAtDeadline ? { onTimeout: "allow" as const } : {}),
       });
     });
   }
@@ -97,7 +107,7 @@ export class ApprovalBroker {
     const out: PendingApproval[] = [];
     for (const e of this.pending.values()) {
       if (e.sessionId !== sessionId) continue;
-      out.push({ callId: e.callId, toolName: e.toolName, summary: e.summary, issuedAt: e.issuedAt, expiresAt: e.expiresAt, options: e.options });
+      out.push({ callId: e.callId, toolName: e.toolName, summary: e.summary, issuedAt: e.issuedAt, expiresAt: e.expiresAt, options: e.options, ...(e.onTimeout === undefined ? {} : { onTimeout: e.onTimeout }) });
     }
     return out;
   }
@@ -112,7 +122,7 @@ export class ApprovalBroker {
   pendingMeta(sessionId: string, callId: string): PendingApproval | undefined {
     const e = this.pending.get(this.key(sessionId, callId));
     if (!e) return undefined;
-    return { callId: e.callId, toolName: e.toolName, summary: e.summary, issuedAt: e.issuedAt, expiresAt: e.expiresAt, options: e.options };
+    return { callId: e.callId, toolName: e.toolName, summary: e.summary, issuedAt: e.issuedAt, expiresAt: e.expiresAt, options: e.options, ...(e.onTimeout === undefined ? {} : { onTimeout: e.onTimeout }) };
   }
 }
 

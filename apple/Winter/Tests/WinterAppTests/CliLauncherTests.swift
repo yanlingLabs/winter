@@ -56,6 +56,7 @@ final class CliLauncherTests: XCTestCase {
 
     func testEnsureWrapperWritesOnceAndRewritesOnDrift() throws {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tmp) }
         let launcher = CliLauncher(installPathOverride: tmp.appendingPathComponent("bin/winter-dev"))
         launcher.repoRoot = "/repo/a"
         let p1 = try launcher.ensureWrapper()

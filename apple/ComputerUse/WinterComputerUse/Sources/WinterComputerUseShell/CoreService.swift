@@ -23,11 +23,15 @@ public protocol CoreService: AnyObject {
     func targetWaitFor(_ params: TargetWaitForParams) async throws -> TargetWaitForResult
     func targetAppleScript(_ params: TargetAppleScriptParams) async throws -> TargetAppleScriptResult
     func targetScriptingDictionary(_ params: TargetScriptingDictionaryParams) async throws -> TargetScriptingDictionaryResult
+    /// `target.scriptingCommands` (1.8.0): the bound app's dictionary commands, structured.
+    func targetScriptingCommands(_ params: TargetScriptingCommandsParams) async throws -> TargetScriptingCommandsResult
     func screenScreenshot(_ params: ScreenScreenshotParams) async throws -> ScreenScreenshotResult
     func screenAppAt(_ params: ScreenAppAtParams) async throws -> ScreenAppAtResult
     func cancel(_ params: CancelParams) async throws -> CancelResult
     func turnEnded(_ params: TurnEndedParams) async throws -> TurnEndedResult
     func sessionEnded(_ params: SessionEndedParams) async throws -> SessionEndedResult
+    /// `visit.close`: the session's open desktop visit closed, and its closed visits' reports, each once.
+    func visitClose(_ params: VisitCloseParams) async throws -> VisitCloseResult
     /// A session's script started or ended (`script.active`): the engine's Focus Guardian runs only meanwhile.
     func scriptActivity(sessionId: String, active: Bool)
 }
@@ -37,3 +41,11 @@ public extension CoreService {
 }
 
 extension CUCore: CoreService {}
+
+extension CoreService {
+    /// TEST-ONLY (a live-test instance): the facts a person's switch to, or work in, `pid` would leave (see
+    /// `CUCore.testUserInput`). A fake core records nothing.
+    public func testUserInput(pid: Int32, switching: Bool) {
+        (self as? CUCore)?.testUserInput(pid: pid, switching: switching)
+    }
+}

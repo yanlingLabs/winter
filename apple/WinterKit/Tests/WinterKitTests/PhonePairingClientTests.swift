@@ -15,8 +15,10 @@ import IrohLib
 final class PhonePairingClientTests: XCTestCase {
 
     private func tempStoreDir() -> URL {
-        FileManager.default.temporaryDirectory
+        let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("winter-phone-pairing-tests-\(UUID().uuidString)", isDirectory: true)
+        removeAtTeardown(dir)
+        return dir
     }
 
     private func makeRelayConfig() -> SignedRelayConfig {

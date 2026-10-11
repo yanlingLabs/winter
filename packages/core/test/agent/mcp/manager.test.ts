@@ -16,6 +16,16 @@ const writeProjectMcp = (root: string, body: string): void => {
 };
 
 const FIXTURE = join(import.meta.dir, "fake-mcp-server.ts");
+/**
+ * The harness timeout of a test that probes a REAL stdio server (`bun run …`). The probe is bounded by its OWN
+ * budget (`WINTER_MCP_START_TIMEOUT_MS`, 10 s): it answers "connected" or "failed" within it. Bun's 5 s default
+ * is shorter than that budget, so on a loaded machine (process start-up is the one latency that stretches without
+ * bound -- a full-suite run under stress cut "bad-command" at 5003 ms) the harness killed a probe that was still
+ * inside its documented bound, with no message about what it was waiting for. This is the failure bound only: a
+ * test that passes returns when its probe does. The spawn cannot be faked here -- the dedup of a repeated tool
+ * name that these tests assert lives in the SDK's client, which the `connect` seam would bypass.
+ */
+const SPAWN_TEST_MS = 30_000;
 const isMac = process.platform === "darwin";
 function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "mcp-mgr-"))); }
 const trustNone = (): TrustStore => new TrustStore(join(realDir(), "trust.json"));
@@ -38,7 +48,7 @@ describe.if(isMac)("McpManager (a status probe)", () => {
     expect(mgr.list()).toEqual([{ name: "fake", status: "connected", toolNames: ["echo"], source: "user" }]);
     expect(existsSync(pidFile)).toBe(true); // it really ran…
     expect(await stillRunning(Number(readFileSync(pidFile, "utf8")))).toBe(false); // …and the probe closed it
-  });
+  }, SPAWN_TEST_MS);
 
   test("a wrapper-launched server (an npx-style grandchild) is ended with its whole process group", async () => {
     const pidFile = join(realDir(), "pid");
@@ -47,7 +57,7 @@ describe.if(isMac)("McpManager (a status probe)", () => {
     await mgr.startAll({ wrapped: { command: "sh", args: ["-c", `bun run '${FIXTURE}'; true`], env: { WINTER_FAKE_PID_FILE: pidFile } } });
     expect(mgr.list().find((s) => s.name === "wrapped")?.status).toBe("connected");
     expect(await stillRunning(Number(readFileSync(pidFile, "utf8")))).toBe(false);
-  });
+  }, SPAWN_TEST_MS);
 
   test("a server that never answers the handshake is a failed probe within the start timeout, and is killed", async () => {
     const pidFile = join(realDir(), "pid");
@@ -63,14 +73,14 @@ describe.if(isMac)("McpManager (a status probe)", () => {
     } finally {
       if (prev === undefined) delete process.env.WINTER_MCP_START_TIMEOUT_MS; else process.env.WINTER_MCP_START_TIMEOUT_MS = prev;
     }
-  });
+  }, SPAWN_TEST_MS);
 
   test("a bad-command server is reported failed; a good one still connects (one bad ≠ dead)", async () => {
     const mgr = new McpManager({ trust: trustNone() });
     await mgr.startAll({ good: { command: "bun", args: ["run", FIXTURE] }, bad: { command: "this-command-does-not-exist-xyz" } });
     expect(mgr.list().find((s) => s.name === "bad")!.status).toBe("failed");
     expect(mgr.list().find((s) => s.name === "good")!.status).toBe("connected");
-  });
+  }, SPAWN_TEST_MS);
 
   test("a server that completes the handshake but hangs on tools/list is a failed probe within the ONE budget (WS-25 fix round 1, I2)", async () => {
     const pidFile = join(realDir(), "pid");
@@ -86,7 +96,7 @@ describe.if(isMac)("McpManager (a status probe)", () => {
     } finally {
       if (prev === undefined) delete process.env.WINTER_MCP_START_TIMEOUT_MS; else process.env.WINTER_MCP_START_TIMEOUT_MS = prev;
     }
-  });
+  }, SPAWN_TEST_MS);
 
   test("a server whose tool list repeats a name still probes connected — the probe registers nothing to collide (WS-24)", async () => {
     const mgr = new McpManager({ trust: trustNone() });
@@ -94,7 +104,7 @@ describe.if(isMac)("McpManager (a status probe)", () => {
     // WS-25: the probe speaks through the runtime's own MCP client, which keeps the FIRST of a repeated
     // tool name (the listing a session's child sees) — so the status line reports what a session gets.
     expect(mgr.list().find((s) => s.name === "dup")).toMatchObject({ status: "connected", toolNames: ["echo"] });
-  });
+  }, SPAWN_TEST_MS);
 });
 
 function projDir(withServer = true, env?: Record<string, string>): string {
@@ -114,7 +124,7 @@ describe.if(isMac)("McpManager.ensureProject", () => {
     trust.trust(dir);
     await mgr.ensureProject(dir);
     expect(mgr.list(dir)).toEqual([{ name: "proj", status: "connected", toolNames: ["echo"], source: "project" }]);
-  });
+  }, SPAWN_TEST_MS);
 
   test("TRUSTED project → probed connected, and not left running", async () => {
     const pidFile = join(realDir(), "pid");
@@ -124,7 +134,7 @@ describe.if(isMac)("McpManager.ensureProject", () => {
     await mgr.ensureProject(dir);
     expect(mgr.list(dir).find((s) => s.name === "proj")).toMatchObject({ status: "connected", toolNames: ["echo"], source: "project" });
     expect(await stillRunning(Number(readFileSync(pidFile, "utf8")))).toBe(false);
-  });
+  }, SPAWN_TEST_MS);
 
   test("malformed .winter/mcp.json → skip, no throw; idempotent 2nd call", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-bad-")));
@@ -134,7 +144,7 @@ describe.if(isMac)("McpManager.ensureProject", () => {
     await expect(mgr.ensureProject(dir)).resolves.toBeUndefined();
     await mgr.ensureProject(dir); // idempotent
     expect(mgr.list(dir)).toEqual([]);
-  });
+  }, SPAWN_TEST_MS);
 
   // PARITY FIX (controller-directed): `doEnsureProject` used to validate the WHOLE `mcpServers` map
   // in one `.parse()` call (stdio-only) — a single http/sse (or otherwise malformed) entry anywhere
@@ -161,7 +171,7 @@ describe.if(isMac)("McpManager.ensureProject", () => {
     expect(logs.filter((m) => m.includes("httpOne")).length).toBe(1);
     expect(logs.filter((m) => m.includes("sseOne")).length).toBe(1);
     expect(logs.filter((m) => m.includes("broken")).length).toBe(1);
-  });
+  }, SPAWN_TEST_MS);
 
   test("the SAME mixed file, untrusted, still probes nothing at all — the trust gate is unchanged by the per-entry fix", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-mixed-untrusted-")));
@@ -175,7 +185,7 @@ describe.if(isMac)("McpManager.ensureProject", () => {
     const mgr = new McpManager({ trust: trustNone() }); // never trusted
     await mgr.ensureProject(dir);
     expect(mgr.list(dir)).toEqual([]);
-  });
+  }, SPAWN_TEST_MS);
 
   test("concurrent ensureProject for the same dir shares one in-flight run (no double probe)", async () => {
     const dir = projDir();
@@ -186,7 +196,7 @@ describe.if(isMac)("McpManager.ensureProject", () => {
     expect(p2).toBe(p1); // second call JOINS the first (in-flight guard)
     await Promise.all([p1, p2]);
     expect(mgr.list(dir).filter((s) => s.name === "proj").length).toBe(1);
-  });
+  }, SPAWN_TEST_MS);
 
   // MEDIUM (fix wave, pre-merge review, finding 3): `ensureProject` is called merely to RENDER
   // `mcp.list {cwd}` (`ipc/server.ts`'s `mcpList` handler) — it must never spawn a disabled server.
@@ -199,7 +209,7 @@ describe.if(isMac)("McpManager.ensureProject", () => {
     expect(existsSync(pidFile)).toBe(false); // never spawned
     // Still reported, so mcp.list's own settings overlay has a row to rewrite to "disabled".
     expect(mgr.list(dir).find((s) => s.name === "proj")?.status).not.toBe("connected");
-  });
+  }, SPAWN_TEST_MS);
 
   test("mcp.disabled on an http/sse project entry changes nothing — never probed either way (no placeholder row)", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-disabled-http-")));
@@ -214,7 +224,7 @@ describe.if(isMac)("McpManager.ensureProject", () => {
     expect(mgr.list(dir).find((s) => s.name === "httpEnabled")).toBeUndefined();
     expect(logs.filter((m) => m.includes("httpDisabled")).length).toBe(1);
     expect(logs.filter((m) => m.includes("httpEnabled")).length).toBe(1);
-  });
+  }, SPAWN_TEST_MS);
 
   test("a name NOT in settings.mcp.disabled still probes normally (the filter is name-specific)", async () => {
     const dir = projDir();
@@ -222,7 +232,7 @@ describe.if(isMac)("McpManager.ensureProject", () => {
     const mgr = new McpManager({ trust, disabled: () => new Set(["some-other-server"]) });
     await mgr.ensureProject(dir);
     expect(mgr.list(dir).find((s) => s.name === "proj")?.status).toBe("connected");
-  });
+  }, SPAWN_TEST_MS);
 });
 
 describe.if(isMac)("McpManager.stopServer / startOneUserServer (mcp.disable / mcp.enable)", () => {
@@ -231,7 +241,7 @@ describe.if(isMac)("McpManager.stopServer / startOneUserServer (mcp.disable / mc
     await mgr.startAll({ fake: { command: "bun", args: ["run", FIXTURE] } });
     mgr.stopServer("fake");
     expect(mgr.list().find((s) => s.name === "fake")).toBeUndefined();
-  });
+  }, SPAWN_TEST_MS);
 
   test("stopServer drops a PROJECT-tier server's recorded row", async () => {
     const dir = projDir();
@@ -240,12 +250,12 @@ describe.if(isMac)("McpManager.stopServer / startOneUserServer (mcp.disable / mc
     await mgr.ensureProject(dir);
     mgr.stopServer("proj");
     expect(mgr.list(dir).find((s) => s.name === "proj")).toBeUndefined();
-  });
+  }, SPAWN_TEST_MS);
 
   test("a name with no record anywhere is a no-op — never throws", () => {
     const mgr = new McpManager({ trust: trustNone() });
     expect(() => mgr.stopServer("never-existed")).not.toThrow();
-  });
+  }, SPAWN_TEST_MS);
 
   test("startOneUserServer re-probes: an already-known server stays connected, a dropped one comes back", async () => {
     const mgr = new McpManager({ trust: trustNone() });
@@ -256,7 +266,7 @@ describe.if(isMac)("McpManager.stopServer / startOneUserServer (mcp.disable / mc
     mgr.stopServer("fake");
     await mgr.startOneUserServer("fake", cfg);
     expect(mgr.list()).toEqual([{ name: "fake", status: "connected", toolNames: ["echo"], source: "user" }]);
-  });
+  }, SPAWN_TEST_MS);
 });
 
 describe.if(isMac)("McpManager.list(cwd) + stopAll", () => {
@@ -270,5 +280,5 @@ describe.if(isMac)("McpManager.list(cwd) + stopAll", () => {
     expect(mgr.list(dir).find((s) => s.name === "proj")).toMatchObject({ status: "connected", source: "project" });
     mgr.stopAll();
     expect(mgr.list(dir)).toEqual([]);
-  });
+  }, SPAWN_TEST_MS);
 });

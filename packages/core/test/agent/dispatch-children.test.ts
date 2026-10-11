@@ -287,6 +287,24 @@ describe("child_update progression and the relay", () => {
     expect(t.childUpdates().map((e) => e.status)).toEqual(["running", "awaiting_approval", "running", "awaiting_input", "running"]);
   });
 
+  test("a child's desktop-switch card (ComputerV2, default-ALLOW) is relayed whole — its countdown and its timeout-allow resolution", async () => {
+    const t = setup();
+    const child = await t.spawnOne();
+    t.hub.append(child, {
+      type: "approval_requested", sessionId: child, threadId: "main", callId: "cu_0a1b2c3d4e5f", toolName: "ComputerV2",
+      summary: "Switch to Notes's desktop for a moment? …", issuedAt: 1_000, expiresAt: 61_000,
+      options: [{ id: "switch", label: "Switch now" }], onTimeout: "allow",
+    });
+    t.hub.append(child, { type: "approval_resolved", sessionId: child, threadId: "main", callId: "cu_0a1b2c3d4e5f", approved: true, by: "timeout" });
+    const copies = t.dispatchLog().filter((e) => e.type === "approval_requested" || e.type === "approval_resolved");
+    expect(copies[0]).toMatchObject({ childSessionId: child, onTimeout: "allow", expiresAt: 61_000, options: [{ id: "switch", label: "Switch now" }] });
+    expect(copies[1]).toMatchObject({ childSessionId: child, approved: true, by: "timeout" });
+    expect(t.childUpdates().map((e) => e.status)).toEqual(["running", "awaiting_approval", "running"]);
+    // Nobody watching: the notification says it goes ahead on silence — never "needs your approval" (8c).
+    const notes = t.dispatchLog().filter((e) => e.type === "notification_requested").map((e) => (e as { message: string }).message);
+    expect(notes).toEqual(["switching in 1 min unless you refuse"]);
+  });
+
   test("a card raised on a SUBAGENT thread inside the child is mirrored on the coordinator's MAIN thread (the Mac shows only main-thread cards)", async () => {
     const t = setup();
     const child = await t.spawnOne();

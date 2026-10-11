@@ -44,7 +44,12 @@ class TestClient {
   request(method: string, params?: unknown): Promise<{ result?: unknown; error?: { code: number; message: string; data?: unknown } }> {
     const id = this.nextId++;
     this.writer.enqueue(encodeLine({ jsonrpc: "2.0", id, method, params }));
-    return new Promise((resolve) => this.pending.set(id, resolve));
+    // Bounded like every other wait in this file: a reply that never comes fails NAMING the method, instead of
+    // leaving the test to the harness's mute per-test timeout.
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`timed out after ${WAIT_BOUND_MS} ms waiting for the reply to ${method}`)); }, WAIT_BOUND_MS);
+      this.pending.set(id, (msg) => { clearTimeout(timer); resolve(msg); });
+    });
   }
   async call<T>(method: string, params?: unknown): Promise<T> {
     const r = await this.request(method, params);
@@ -54,7 +59,7 @@ class TestClient {
   async hello(token: string, clientName: string): Promise<void> {
     await this.call(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token, clientName });
   }
-  async waitFor(pred: (e: SessionEvent) => boolean, ms = 20_000): Promise<SessionEvent> {
+  async waitFor(pred: (e: SessionEvent) => boolean, ms = 60_000): Promise<SessionEvent> {
     const t0 = Date.now();
     for (;;) {
       const hit = this.events.find(pred);
@@ -66,6 +71,13 @@ class TestClient {
   close(): void { try { this.socket.end(); } catch { /* already closed */ } }
 }
 
+/** The FAILURE bound of every condition wait in this file (an event arriving, a Worker ending, a driver going
+ *  resumable): each returns the moment its condition holds, so this only decides how long a box too loaded to ever
+ *  get there is waited for -- not how long a healthy run takes (about a second a test). */
+const WAIT_BOUND_MS = 60_000;
+/** The harness timeout of an e2e test: above the several waits one test makes in a row (each bounded by the above),
+ *  or bun's per-test clock would end a slow-but-progressing run that its own waits are still entitled to. */
+const E2E_TEST_MS = 180_000;
 const TURN = ["user_message", "turn_started", "assistant_message", "turn_completed"];
 const turnKinds = (log: SessionEvent[]): string[] => log.map((e) => e.type).filter((t) => TURN.includes(t));
 
@@ -77,7 +89,10 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
   const missingBinary = (): string => join(home, "no-such-winter-binary");
 
   const bootDaemon = async (): Promise<void> => {
-    daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "test-secrets")), agentProvider: null });
+    // `terminateWaitMs`: production gives a `terminate()`d straggler 250 ms to close before `stop()` closes the stores;
+    // on a starved box that is shorter than the thread's teardown, and its generation-end write would land on a closed
+    // db (the next boot parks the session). The e2e asserts what happens when the Worker DOES close in time.
+    daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "test-secrets")), agentProvider: null, embeddedHost: { terminateWaitMs: WAIT_BOUND_MS } });
     if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
     rt = daemon.runtimeState;
     client = await TestClient.connect(daemon.socketPath);
@@ -98,6 +113,13 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
     const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "chat", model: `winter-test/${model}` });
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
     return sessionId;
+  }
+  /** Sends `text` and returns once the turn is RUNNING (its `turn_started` reached the client) -- not once some
+   *  number of milliseconds has passed, which a loaded machine's Worker start can outlast. */
+  async function sendAndStart(sid: string, text: string): Promise<void> {
+    const evCount = client.events.length;
+    await client.call(METHODS.sessionSend, { sessionId: sid, text });
+    await client.waitFor((e) => client.events.indexOf(e) >= evCount && e.type === "turn_started" && e.sessionId === sid);
   }
   async function sendAndSettle(sid: string, text: string): Promise<void> {
     const evCount = client.events.length;
@@ -128,8 +150,7 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
     const sid = await createChat("echo");
     const backend = backendOf(sid);
     expect(daemon!.embedded.live()).toContain(backend);
-    await sendAndSettle(sid, "hello");
-    await Bun.sleep(50);
+    await sendAndSettle(sid, "hello"); // the client saw turn_completed, which is appended before it is broadcast
     expect(turnKinds(daemon!.sessions.read(sid))).toEqual(["user_message", "turn_started", "assistant_message", "turn_completed"]);
     const driver = daemon!.winter.get(sid)!;
     expect(driver.state).toBe("live");
@@ -140,7 +161,7 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
     // The chat surface is the same one a spawned child advertised: WebFetch, never Bash.
     expect(driver.init?.tools).toContain("WebFetch");
     expect(driver.init?.tools).not.toContain("Bash");
-  }, 30_000);
+  }, E2E_TEST_MS);
 
   test("a CODE session on the same daemon still resolves the binary ladder — and refuses the missing one typed", async () => {
     const r = await client.request(METHODS.sessionCreate, { scope: "e2e", mode: "code", cwd: home, model: "winter-test/echo" });
@@ -153,7 +174,7 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
     expect(refusal).toBeDefined();
     expect((refusal!.data as { code?: string }).code).toBe("winter_executable_unavailable");
     expect(refusal!.message).toContain(missingBinary());
-  }, 30_000);
+  }, E2E_TEST_MS);
 
   test("a DISPATCH session runs embedded too", async () => {
     const { sessionId: sid } = await client.call<{ sessionId: string; created: boolean }>(METHODS.sessionDispatch, {});
@@ -179,7 +200,7 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
     expect(lastResult).toBeDefined();
     expect(JSON.stringify(lastResult)).toContain("winter-t8-lanec");
     expect(shellLog.filter((e) => e.type === "agent_error")).toEqual([]);
-  }, 30_000);
+  }, E2E_TEST_MS);
 
   test("end() ends the Worker; the next send starts a NEW Worker that resumes the SAME backend session", async () => {
     const sid = await createChat("echo");
@@ -189,7 +210,7 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
     const firstInit = driver.init?.sessionId;
     await driver.end();
     expect(driver.state).toBe("resumable");
-    expect(await workerGoneWithin(daemon!.embedded, backend, 3000)).toBe(true);
+    expect(await workerGoneWithin(daemon!.embedded, backend, WAIT_BOUND_MS)).toBe(true);
     await sendAndSettle(sid, "two");
     expect(driver.state).toBe("live");
     expect(driver.resumed).toBe(true);
@@ -198,23 +219,21 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
     expect(workerLive(sid)).toBe(true);
     expect(rt.records.generations(sid).map((g) => g.endReason ?? "open")).toEqual(["ended", "open"]);
     expect(turnKinds(daemon!.sessions.read(sid))).toEqual([...TURN, ...TURN]);
-  }, 40_000);
+  }, E2E_TEST_MS);
 
   test("an interrupt ends a hanging turn and the SAME Worker stays live for the next send", async () => {
     const sid = await createChat("hang");
     const driver = daemon!.winter.get(sid)!;
-    await client.call(METHODS.sessionSend, { sessionId: sid, text: "hang please" });
-    await Bun.sleep(300);
+    await sendAndStart(sid, "hang please");
     expect(await client.call<{ ok: boolean; wasRunning: boolean }>(METHODS.sessionInterrupt, { sessionId: sid })).toEqual({ ok: true, wasRunning: true });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid);
-    await Bun.sleep(50);
     expect(daemon!.sessions.read(sid).find((e) => e.type === "turn_completed")).toMatchObject({ stopReason: "aborted" });
     expect(daemon!.sessions.read(sid).filter((e) => e.type === "agent_error")).toEqual([]);
     expect(driver.state).toBe("live");
     expect(driver.generation).toBe(1);
     expect(workerLive(sid)).toBe(true);
     await driver.end();
-  }, 30_000);
+  }, E2E_TEST_MS);
 
   test("two concurrent chat sessions: two Workers live at once, both turns complete, each in its own log", async () => {
     // A harness client is attached to one session at a time, so each session gets its own client.
@@ -236,13 +255,12 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
       expect(turnKinds(log)).toEqual(TURN);
       expect(log.filter((e) => e.type === "user_message").map((e) => (e as { text: string }).text)).toEqual([text]);
     }
-  }, 30_000);
+  }, E2E_TEST_MS);
 
   test("stop() with a HANGING embedded turn ends every Worker inside the shutdown budget; a restarted daemon resumes the session", async () => {
     const sid = await createChat("hang");
     const backend = backendOf(sid);
-    await client.call(METHODS.sessionSend, { sessionId: sid, text: "hang please" });
-    await Bun.sleep(300);
+    await sendAndStart(sid, "hang please");
     const host = daemon!.embedded;
     expect(host.live()).toContain(backend);
     client.close();
@@ -251,6 +269,10 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
     daemon = undefined;
     await stopping;
     expect(Date.now() - t0).toBeLessThan(5000);
+    // `shutdown()` is bounded (EMBEDDED_TERMINATE_WAIT_MS = 250 ms to let a `terminate()`d straggler close, then it
+    // returns either way), so on a starved box the Worker may still be a few ms from closed when `stop()` returns.
+    // What must hold is that it DOES close (nothing leaks), so wait on that condition rather than on the instant.
+    expect(await workerGoneWithin(host, backend, WAIT_BOUND_MS)).toBe(true);
     expect(host.live()).toEqual([]);
     // The record's generation was closed while runtime-state.db was still open (the Worker ended first).
     await bootDaemon();
@@ -260,7 +282,7 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
     await sendAndSettle(sid, "after restart");
     expect(daemon!.winter.get(sid)?.init?.sessionId).toBe(backend);
     expect(daemon!.embedded.live()).toContain(backend);
-  }, 60_000);
+  }, E2E_TEST_MS);
 
   test("WS-21 × WS-23: once every Worker has ended, every per-run folder was judged safe and disposed — none quarantined", async () => {
     // The router reports a Winter run home `safe` when the iteration ends; a Worker-run session must
@@ -272,7 +294,7 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
     const runs = join(home, "cache", "runs");
     expect(existsSync(runs) ? readdirSync(runs) : []).toEqual([]);
     expect(existsSync(join(home, "cache", "quarantine"))).toBe(false);
-  }, 30_000);
+  }, E2E_TEST_MS);
 });
 
 // WS-23 review round 1 (I-2, M-3): two failure shapes, each on its own daemon so a fixture Worker entry
@@ -293,7 +315,12 @@ describe("embedded sessions under failure — a real daemon", () => {
   }
   async function teardown(ctx: { home: string; daemon: RunningDaemon; client: TestClient }): Promise<void> {
     ctx.client.close();
-    await ctx.daemon.stop();
+    // `stop()` is bounded by the product's own budgets (seconds); one that is not fails naming itself.
+    let stopTimer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      ctx.daemon.stop(),
+      new Promise<never>((_, reject) => { stopTimer = setTimeout(() => reject(new Error(`daemon.stop() did not return within ${WAIT_BOUND_MS} ms`)), WAIT_BOUND_MS); }),
+    ]).finally(() => clearTimeout(stopTimer));
     rmSync(ctx.home, { recursive: true, force: true });
   }
 
@@ -307,7 +334,7 @@ describe("embedded sessions under failure — a real daemon", () => {
       const { sessionId: sid } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "chat", model: "winter-test/reflect" });
       await client.call(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 });
       await client.call(METHODS.sessionSend, { sessionId: sid, text: "x".repeat(1_200_000) });
-      await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid, 30_000);
+      await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid, WAIT_BOUND_MS);
       const log = daemon.sessions.read(sid);
       expect(log.filter((e) => e.type === "agent_error")).toEqual([]);
       const reply = log.find((e) => e.type === "assistant_message") as { text?: string } | undefined;
@@ -315,7 +342,7 @@ describe("embedded sessions under failure — a real daemon", () => {
     } finally {
       await teardown(ctx);
     }
-  }, 60_000);
+  }, E2E_TEST_MS);
 
   test("I-2: the wrapper throws mid-turn with the engine still alive; the resume KILLS it and never runs a second engine beside it", async () => {
     const events: Array<{ backendSessionId: string; event: "start" | "exited"; worker: number }> = [];
@@ -326,10 +353,10 @@ describe("embedded sessions under failure — a real daemon", () => {
       await client.call(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 });
       await client.call(METHODS.sessionSend, { sessionId: sid, text: "hang please" });
       // The wrapper refuses the non-frame line: the iteration ends typed, the driver goes resumable…
-      await client.waitFor((e) => e.type === "agent_error" && e.sessionId === sid, 30_000);
+      await client.waitFor((e) => e.type === "agent_error" && e.sessionId === sid, WAIT_BOUND_MS);
       const driver = daemon.winter.get(sid)!;
       const t0 = Date.now();
-      while (driver.state === "live" && Date.now() - t0 < 5000) await Bun.sleep(20);
+      while (driver.state === "live" && Date.now() - t0 < WAIT_BOUND_MS) await Bun.sleep(20);
       expect(driver.state).toBe("resumable");
       // …while its engine is STILL running (a hang turn never ends on its own).
       const backend = ctx.rt.records.get(sid)!.backendSessionId!;
@@ -339,7 +366,7 @@ describe("embedded sessions under failure — a real daemon", () => {
       await client.call(METHODS.sessionSetModel, { sessionId: sid, model: "winter-test/echo" });
       const evCount = client.events.length;
       await client.call(METHODS.sessionSend, { sessionId: sid, text: "again" });
-      await client.waitFor((e) => client.events.indexOf(e) >= evCount && e.type === "turn_completed" && e.sessionId === sid, 30_000);
+      await client.waitFor((e) => client.events.indexOf(e) >= evCount && e.type === "turn_completed" && e.sessionId === sid, WAIT_BOUND_MS);
       const mine = events.filter((e) => e.backendSessionId === backend);
       // start(1) … exited(1) strictly before start(2): never two engines on one transcript.
       expect(mine.map((e) => `${e.event}:${e.worker}`).slice(0, 3)).toEqual(["start:1", "exited:1", "start:2"]);
@@ -351,7 +378,7 @@ describe("embedded sessions under failure — a real daemon", () => {
     } finally {
       await teardown(ctx);
     }
-  }, 60_000);
+  }, E2E_TEST_MS);
 
   test("M-3: a Worker that crashes MID-TURN ends the session typed (agent_error), the daemon survives, and the session is resumable", async () => {
     const ctx = await bootWith({ workerEntry: join(import.meta.dir, "..", "fixtures", "embedded-crash-worker.ts") });
@@ -360,11 +387,11 @@ describe("embedded sessions under failure — a real daemon", () => {
       const { sessionId: sid } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "chat", model: "winter-test/hang" });
       await client.call(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 });
       await client.call(METHODS.sessionSend, { sessionId: sid, text: "hang please" });
-      const err = await client.waitFor((e) => e.type === "agent_error" && e.sessionId === sid, 30_000);
+      const err = await client.waitFor((e) => e.type === "agent_error" && e.sessionId === sid, WAIT_BOUND_MS);
       expect(typeof (err as { code?: unknown }).code).toBe("string");
       const driver = daemon.winter.get(sid)!;
       const t0 = Date.now();
-      while (driver.state === "live" && Date.now() - t0 < 5000) await Bun.sleep(20);
+      while (driver.state === "live" && Date.now() - t0 < WAIT_BOUND_MS) await Bun.sleep(20);
       expect(driver.state).toBe("resumable");
       expect(daemon.embedded.live()).toEqual([]);
       // The daemon is alive and answering.
@@ -372,5 +399,5 @@ describe("embedded sessions under failure — a real daemon", () => {
     } finally {
       await teardown(ctx);
     }
-  }, 60_000);
+  }, E2E_TEST_MS);
 });

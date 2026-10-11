@@ -66,6 +66,32 @@ final class ComputerUseClientTests: XCTestCase {
                        ComputerUseHelperProtocolMismatch(helperProtocol: 2, helperVersion: "2.0.0", winterProtocol: 1, message: message))
     }
 
+    /// ComputerV2 Phase 2: the optional `browsers` list — present from a daemon that has it, `nil` from one
+    /// that predates it, and `nil` (never a failed status) when its rows are of a shape this build cannot read.
+    func testStatusDecodesTheBrowsersList() async throws {
+        let (client, t) = try await connected()
+        let live = LiveComputerUseClient(client: client)
+        let base = #""enabled":true,"legacyComputer":false,"mirror":true,"privateEventPath":true,"helper":{"installed":true,"running":false}"#
+        let result = "{" + base + #","browsers":[{"id":"winter","name":"Winter (built-in)","connected":true},"#
+            + #"{"id":"chrome","name":"Google Chrome","connected":false,"reason":"Winter for Chrome is not installed in Google Chrome — ask the user"}]}"#
+        let (_, status) = try await roundTrip(t, sentIndex: 1, result: result) { try await live.status() }
+        XCTAssertEqual(status.browsers, [
+            ComputerUseBrowserStatus(id: "winter", name: "Winter (built-in)", connected: true),
+            ComputerUseBrowserStatus(id: "chrome", name: "Google Chrome", connected: false,
+                                     reason: "Winter for Chrome is not installed in Google Chrome — ask the user"),
+        ])
+
+        let (_, older) = try await roundTrip(t, sentIndex: 2, result: "{" + base + "}") { try await live.status() }
+        XCTAssertNil(older.browsers)
+        let (_, odd) = try await roundTrip(t, sentIndex: 3, result: "{" + base + #","browsers":[{"id":3}]}"#) {
+            try await live.status()
+        }
+        XCTAssertNil(odd.browsers)
+        XCTAssertTrue(odd.enabled, "an unreadable browsers list never fails the status")
+        // A settings patch shown in flight keeps the list.
+        XCTAssertEqual(status.applying(ComputerUseSettingsPatch(mirror: false)).browsers, status.browsers)
+    }
+
     func testStatusThrowsOnAMalformedResult() async throws {
         let (client, t) = try await connected()
         let live = LiveComputerUseClient(client: client)

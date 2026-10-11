@@ -60,9 +60,11 @@ final class PairingManagerTests: XCTestCase {
     }
 
     private func tempStoreURL() -> URL {
-        FileManager.default.temporaryDirectory
+        let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("winter-pairing-manager-tests-\(UUID().uuidString)", isDirectory: true)
             .appendingPathComponent("paired-devices.json")
+        removeAtTeardown(url.deletingLastPathComponent())
+        return url
     }
 
     // MARK: - Happy path
@@ -379,6 +381,7 @@ final class PairingManagerTests: XCTestCase {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("winter-pairing-manager-ro-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        removeAtTeardown(dir) // `removeAtTeardown` makes it writable again first
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path) }
         let store = PairingStore(fileURL: dir.appendingPathComponent("paired-devices.json"))

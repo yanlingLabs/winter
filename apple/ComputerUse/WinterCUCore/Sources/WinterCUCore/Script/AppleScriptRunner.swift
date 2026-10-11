@@ -15,16 +15,19 @@ enum CUAppleScriptRunner {
         let boundPid: pid_t
         let boundName: String
         let deadline: Date
+        /// This run's own refusals (`"clas/id"` → why): the bound app's JavaScript doors.
+        let alsoRefused: [String: String]
         var original: OSASendUPP?
         var originalRefCon: UnsafeMutableRawPointer?
         private let lock = NSLock()
         private var _refused: String?
         var refused: String? { lock.withLock { _refused } }
         func refuse(_ why: String) { lock.withLock { if _refused == nil { _refused = why } } }
-        init(boundPid: pid_t, boundName: String, deadline: Date) {
+        init(boundPid: pid_t, boundName: String, deadline: Date, alsoRefused: [String: String] = [:]) {
             self.boundPid = boundPid
             self.boundName = boundName
             self.deadline = deadline
+            self.alsoRefused = alsoRefused
         }
     }
 
@@ -71,7 +74,8 @@ enum CUAppleScriptRunner {
         _ = AEGetAttributePtr(event, AEKeyword(keyEventClassAttr), DescType(typeType), &type, &cls, MemoryLayout<AEEventClass>.size, &size)
         _ = AEGetAttributePtr(event, AEKeyword(keyEventIDAttr), DescType(typeType), &type, &id, MemoryLayout<AEEventID>.size, &size)
         let verdict = CUAppleScriptPolicy.verdict(eventClass: fourCC(cls), eventID: fourCC(id), targetPid: targetPid(of: event),
-                                                  ownPid: state.ownPid, boundPid: state.boundPid, boundName: state.boundName)
+                                                  ownPid: state.ownPid, boundPid: state.boundPid, boundName: state.boundName,
+                                                  alsoRefused: state.alsoRefused)
         guard verdict == .allow else {
             if case .refuse(let why) = verdict { state.refuse(why) }
             return OSErr(errAEEventNotPermitted)
@@ -87,13 +91,14 @@ enum CUAppleScriptRunner {
     }
 
     /// Runs `source` against `bound` (pid `boundPid`); the display value of its result (nil for none).
-    static func run(_ source: String, bound: CUAppleScriptPolicy.BoundApp, boundPid: pid_t, timeoutMs: Int) throws -> String? {
+    static func run(_ source: String, bound: CUAppleScriptPolicy.BoundApp, boundPid: pid_t, timeoutMs: Int,
+                    alsoRefused: [String: String] = [:]) throws -> String? {
         final class Box: @unchecked Sendable { var result: Result<String?, Error> = .success(nil) }
         let box = Box()
         let done = DispatchSemaphore(value: 0)
         let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000)
         let thread = Thread {
-            box.result = Result { try execute(source, bound: bound, boundPid: boundPid, deadline: deadline) }
+            box.result = Result { try execute(source, bound: bound, boundPid: boundPid, deadline: deadline, alsoRefused: alsoRefused) }
             done.signal()
         }
         thread.stackSize = 8 << 20
@@ -106,11 +111,12 @@ enum CUAppleScriptRunner {
         return try box.result.get()
     }
 
-    private static func execute(_ source: String, bound: CUAppleScriptPolicy.BoundApp, boundPid: pid_t, deadline: Date) throws -> String? {
+    private static func execute(_ source: String, bound: CUAppleScriptPolicy.BoundApp, boundPid: pid_t, deadline: Date,
+                                alsoRefused: [String: String]) throws -> String? {
         guard let language = OSALanguage(forName: "AppleScript") else { throw CUError.unsupported("AppleScript is not available on this Mac") }
         let instance = OSALanguageInstance(language: language)
         let component = instance.componentInstance
-        let state = HookState(boundPid: boundPid, boundName: bound.name, deadline: deadline)
+        let state = HookState(boundPid: boundPid, boundName: bound.name, deadline: deadline, alsoRefused: alsoRefused)
         var original: OSASendUPP?
         var originalRefCon: UnsafeMutableRawPointer?
         _ = OSAGetSendProc(component, &original, &originalRefCon)

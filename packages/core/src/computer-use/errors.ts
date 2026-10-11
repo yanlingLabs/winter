@@ -19,6 +19,8 @@ export const AUTOMATION_ERROR_KINDS = [
   "HelperUnavailable",
   "PermissionMissing",
   "Cancelled",
+  /** A browser can't be reached (Phase 2): Winter.app for the built-in browser, Winter for Chrome for the user's. */
+  "BrowserUnavailable",
 ] as const;
 
 export type AutomationErrorKind = (typeof AUTOMATION_ERROR_KINDS)[number];

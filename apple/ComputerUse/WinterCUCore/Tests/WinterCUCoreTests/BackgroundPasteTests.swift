@@ -25,7 +25,7 @@ final class BackgroundPasteTests: XCTestCase {
     var installer: FakeKeyTapInstaller!
 
     override func setUp() {
-        FocusSPI.calls = []
+        FocusSPI.reset()
         FocusSPI.frontPid = 1
         FocusSPI.onFocus = nil
     }
@@ -41,9 +41,10 @@ final class BackgroundPasteTests: XCTestCase {
         ax.add(window, role: kAXWindowRole, title: "Doc", frame: CGRect(x: 0, y: 0, width: 900, height: 700),
                extra: [kAXChildrenAttribute: [web]])
         ax.windowIDs[AXIdentity(element: window)] = 77
-        ax.add(web, role: "AXWebArea", frame: CGRect(x: 0, y: 40, width: 900, height: 660), extra: [kAXChildrenAttribute: [doc]])
+        ax.add(web, role: "AXWebArea", frame: CGRect(x: 0, y: 40, width: 900, height: 660),
+               extra: [kAXChildrenAttribute: [doc], kAXWindowAttribute: window])
         ax.add(doc, role: kAXTextAreaRole, title: "Document", frame: CGRect(x: 40, y: 80, width: 800, height: 500),
-               extra: [kAXValueAttribute: "\u{200B}\u{200B}", kAXParentAttribute: web])
+               extra: [kAXValueAttribute: "\u{200B}\u{200B}", kAXParentAttribute: web, kAXWindowAttribute: window])
         if focused { ax.focus(pid: pid, on: doc) }
         ax.put(ax.application(1), [kAXFocusedWindowAttribute: userWindow])
         ax.windowIDs[AXIdentity(element: userWindow)] = 31
@@ -192,6 +193,15 @@ final class BackgroundPasteTests: XCTestCase {
         XCTAssertTrue(r.detail?.hasPrefix("as a paste (more than 200 characters go as a paste; this field can't be read back)") ?? false, r.detail ?? "")
         XCTAssertTrue(r.detail?.contains("unconfirmed") ?? false, r.detail ?? "")
         XCTAssertFalse(r.detail?.contains("reads them back") ?? true, "never claims a read-back it can't do")
+    }
+
+    /// Review of round 4 (LOW): a long text with a Tab went as a paste — its tabs pasted as characters, while the
+    /// protocol said a Tab moves the focus. Said truthfully in the result.
+    func testALongTextWithTabsPastedSaysItsTabsWentInAsCharacters() async throws {
+        world()
+        let r = try await type(String(repeating: "cell\t", count: 50))  // 250 characters, one line
+        XCTAssertTrue(r.detail?.hasPrefix("as a paste (") ?? false, r.detail ?? "")
+        XCTAssertTrue(r.detail?.contains("its tabs went in as characters, moving no focus") ?? false, r.detail ?? "")
     }
 
     /// Another window of the app is its key window, with a File › Open Location… (⌘L) item.

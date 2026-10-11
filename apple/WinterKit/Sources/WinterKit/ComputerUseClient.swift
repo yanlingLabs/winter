@@ -93,6 +93,24 @@ public struct ComputerUseHelperStatus: Codable, Equatable, Sendable {
     }
 }
 
+/// One row of `computerUse.status`' `browsers` list — a browser ComputerV2 can drive: Winter's built-in
+/// browser (`"winter"`, connected while Winter.app's browser link is up) and every Chromium-family browser
+/// that is installed or has Winter for Chrome connected. `reason` says why one is not connected, in one
+/// sentence meant for the user.
+public struct ComputerUseBrowserStatus: Codable, Equatable, Sendable {
+    public let id: String
+    public let name: String
+    public let connected: Bool
+    public let reason: String?
+
+    public init(id: String, name: String, connected: Bool, reason: String? = nil) {
+        self.id = id
+        self.name = name
+        self.connected = connected
+        self.reason = reason
+    }
+}
+
 public struct ComputerUseStatus: Codable, Equatable, Sendable {
     public let enabled: Bool
     public let legacyComputer: Bool
@@ -102,15 +120,21 @@ public struct ComputerUseStatus: Codable, Equatable, Sendable {
     /// only in the apps the exceptions list names (off). A daemon that predates the key reads as on.
     public let allowAllApps: Bool
     public let helper: ComputerUseHelperStatus
+    /// The browsers ComputerV2 can drive (see `ComputerUseBrowserStatus`). `nil` from a daemon that
+    /// predates browsers — and from one whose list this build cannot read, which is never a reason to
+    /// fail the whole status the page is built from.
+    public let browsers: [ComputerUseBrowserStatus]?
 
     public init(enabled: Bool, legacyComputer: Bool, mirror: Bool, privateEventPath: Bool,
-                allowAllApps: Bool = true, helper: ComputerUseHelperStatus) {
+                allowAllApps: Bool = true, helper: ComputerUseHelperStatus,
+                browsers: [ComputerUseBrowserStatus]? = nil) {
         self.enabled = enabled
         self.legacyComputer = legacyComputer
         self.mirror = mirror
         self.privateEventPath = privateEventPath
         self.allowAllApps = allowAllApps
         self.helper = helper
+        self.browsers = browsers
     }
 
     public init(from decoder: Decoder) throws {
@@ -121,13 +145,14 @@ public struct ComputerUseStatus: Codable, Equatable, Sendable {
         privateEventPath = try c.decode(Bool.self, forKey: .privateEventPath)
         allowAllApps = try c.decodeIfPresent(Bool.self, forKey: .allowAllApps) ?? true
         helper = try c.decode(ComputerUseHelperStatus.self, forKey: .helper)
+        browsers = (try? c.decodeIfPresent([ComputerUseBrowserStatus].self, forKey: .browsers)) ?? nil
     }
 
     /// PURE: this status with `patch`'s keys replaced — what the page shows while a write is in flight.
     public func applying(_ patch: ComputerUseSettingsPatch) -> ComputerUseStatus {
         ComputerUseStatus(enabled: patch.enabled ?? enabled, legacyComputer: legacyComputer,
                           mirror: patch.mirror ?? mirror, privateEventPath: patch.privateEventPath ?? privateEventPath,
-                          allowAllApps: patch.allowAllApps ?? allowAllApps, helper: helper)
+                          allowAllApps: patch.allowAllApps ?? allowAllApps, helper: helper, browsers: browsers)
     }
 }
 

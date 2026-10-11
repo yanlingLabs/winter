@@ -78,6 +78,23 @@ struct BrowserTabState: Equatable {
     var title: String? = nil
 }
 
+/// ComputerV2 Phase 2 — one tab the BROWSER LINK holds for automation (`tab.ensure`, `BrowserLinkHost`).
+///
+/// A hold is the daemon saying "a script is driving this tab": its browser must exist, and nothing in
+/// this engine may stop it — not the belt, not a linger, not the memory budget, not a window close and
+/// not an archive. The hold ends only by the link's own word (`tab.release`, `tab.close`) or by the
+/// link going away; from then on the tab is an ordinary tab and every rule below applies to it again.
+///
+/// It carries its own session and URL because a held tab need not be in ANY folded list: the daemon
+/// can drive a session this app has never shown (no window open at all), and for such a tab the hold
+/// is the only description of it there is.
+struct BrowserHold: Equatable {
+    var sessionId: String
+    /// What `tab.ensure` asked to load — used only when the hold has to CREATE the browser. A live
+    /// browser is never navigated by a hold.
+    var url: String?
+}
+
 /// What the executor must do. Six cases, no more: anything an executor could infer, it must not.
 enum BrowserAction: Equatable {
     /// Ensure a live browser for this tab (Task 3 seeds it from daemon state before creating).
@@ -172,6 +189,12 @@ struct BrowserLifecycleEngine {
     ///     any rule here changing. **Empty is a legitimate value** and means "no measurement": every
     ///     byte comparison is then trivially satisfied and `maxLiveBackstop` is the only bound left.
     ///     Deliberately NOT defaulted, so a new caller has to decide rather than silently get `[:]`.
+    ///   - held: ComputerV2 Phase 2 — the tabs the browser link holds (`BrowserHold`). A held tab is
+    ///     created if it has no browser, and is never stopped by anything this engine decides (rule
+    ///     H). Undefaulted for the same reason as `memoryBytesByTab`.
+    ///   - closing: tabs the browser link CLOSED (`tab.close`) whose `panel_tab_closed` may not have
+    ///     reached the fold yet. Stopped if live and never created, so a shown tab the daemon is
+    ///     closing does not get a fresh browser in the beat before its close is folded (rule C).
     ///   - now: the caller's clock reading. The engine never takes its own.
     static func plan(sessions: [String: BrowserSignals],
                      tabs: [String: [BrowserTabState]],
@@ -180,11 +203,20 @@ struct BrowserLifecycleEngine {
                      pendingStops: [String: Date],
                      lruOrder: [String],
                      memoryBytesByTab: [String: UInt64],
+                     held: [String: BrowserHold],
+                     closing: Set<String>,
                      now: Date) -> [BrowserAction] {
 
         // Every session this pass knows about, in a fixed order. Sorting here is what makes rule 10
         // (determinism) hold: all three of the inputs it unions are unordered dictionaries/sets.
         let sessionIds = Set(sessions.keys).union(tabs.keys).union(pendingStops.keys).sorted()
+
+        // ── Rule H: the browser link's holds (ComputerV2 Phase 2). ──────────────────────────────
+        // A held tab is a tab a script is driving RIGHT NOW, possibly in a session no window has
+        // ever shown — so it counts as known whether or not any fold lists it, and every stop below
+        // (the belt, the per-session stops, the cap) passes it by. Closing beats holding: the link
+        // drops its hold before it closes, so both at once is incoherent input, decided the safe way.
+        let heldIds = Set(held.keys).subtracting(closing)
 
         // ── Rule 1: the §8 belt. ────────────────────────────────────────────────────────────────
         // "The daemon's state is the truth; a browser without a tab is definitionally a leak."
@@ -192,11 +224,25 @@ struct BrowserLifecycleEngine {
         // in this engine (working sessions, the viewport) can save an orphan. This is the
         // structural kill for the audio-after-close bug — the browser of a closed tab has no tab
         // list to appear in, so it cannot be missed by any code path that reaches this function.
+        //
+        // The one exception is rule H's: a held tab is the daemon's own statement that the tab
+        // exists, which is exactly the evidence the belt asks for.
         let ownedTabIds = Set(tabs.values.joined().map(\.tabId))
         var stopping = Set<String>()
         var beltStops: [BrowserAction] = []
-        for tabId in live.subtracting(ownedTabIds).sorted() {
+        for tabId in live.subtracting(ownedTabIds).subtracting(heldIds).sorted() {
             beltStops.append(.stop(tabId: tabId))
+            stopping.insert(tabId)
+        }
+
+        // ── Rule C: what the link closed. ───────────────────────────────────────────────────────
+        // `tab.close` is the daemon closing the tab; its `panel_tab_closed` reaches the fold a beat
+        // later. Until then the fold still lists the tab, and a shown session would have rule 8/8b
+        // create it again (a page reloaded only to be belted a moment later). So: stopped now, and
+        // excluded from every create and from the viewport below.
+        var closeStops: [BrowserAction] = []
+        for tabId in live.intersection(closing).subtracting(stopping).sorted() {
+            closeStops.append(.stop(tabId: tabId))
             stopping.insert(tabId)
         }
 
@@ -253,11 +299,24 @@ struct BrowserLifecycleEngine {
             // every time (rule 10), so the lowest sessionId wins and the other gets no viewport.
             if shownHere, viewportSession == nil { viewportSession = sessionId }
         }
-        let desiredViewport = viewportSession.flatMap { tabs[$0]?.first(where: \.isShown)?.tabId }
+        let desiredViewport = viewportSession
+            .flatMap { tabs[$0]?.first(where: \.isShown)?.tabId }
+            .flatMap { closing.contains($0) ? nil : $0 }
+
+        // ── Rule H's creates: a held tab with no browser gets one, first. ───────────────────────
+        // In sorted order (rule 10). The hold's own URL wins over the fold's — it is what the daemon
+        // asked for in this very `tab.ensure` — and the fold's is the fallback for a hold that named
+        // none. Rule 8 and 8b below skip anything already created here.
+        var urlByTab: [String: String?] = [:]
+        for state in tabs.values.joined() { urlByTab[state.tabId] = state.url }
+        var creates: [BrowserAction] = []
+        for tabId in heldIds.sorted() where !live.contains(tabId) {
+            creates.append(.create(tabId: tabId, url: held[tabId]?.url ?? (urlByTab[tabId] ?? nil)))
+        }
+        let heldCreates = Set(creates.compactMap(\.createdTabId))
 
         // ── Rules 2, 3, 4, 5, 6, 8: per-session stops, creates and the linger. ───────────────────
         var sessionStops: [BrowserAction] = []
-        var creates: [BrowserAction] = []
         var cancels: [BrowserAction] = []
         var schedules: [BrowserAction] = []
         for sessionId in sessionIds {
@@ -265,8 +324,12 @@ struct BrowserLifecycleEngine {
             let hasPendingStop = pendingStops[sessionId] != nil
             // Tabs the belt has not already claimed. (`stopping` cannot contain one of this
             // session's tabs at this point — the belt only stops tabIds absent from every list —
-            // but the filter states the invariant instead of relying on it.)
-            let liveTabs = sessionTabs.filter { live.contains($0.tabId) && !stopping.contains($0.tabId) }
+            // but the filter states the invariant instead of relying on it.) A HELD tab is not a
+            // stop candidate at all (rule H): it is left out here, so a session whose only live tabs
+            // are held neither stops them nor arms a linger for them.
+            let liveTabs = sessionTabs.filter {
+                live.contains($0.tabId) && !stopping.contains($0.tabId) && !heldIds.contains($0.tabId)
+            }
 
             switch disposition[sessionId]! {
             case .stopNow:
@@ -285,7 +348,8 @@ struct BrowserLifecycleEngine {
                 // This is now the rule for every held session EXCEPT the shown one, which rule 8b
                 // below serves instead (live-gate fix C). Waking, working and
                 // attached-elsewhere sessions keep lazy restore exactly as before.
-                for tab in sessionTabs where tab.isShown && !live.contains(tab.tabId) {
+                for tab in sessionTabs where tab.isShown && !live.contains(tab.tabId)
+                    && !heldCreates.contains(tab.tabId) && !closing.contains(tab.tabId) {
                     creates.append(.create(tabId: tab.tabId, url: tab.url))
                 }
                 // Any signal returning cancels the linger.
@@ -353,7 +417,7 @@ struct BrowserLifecycleEngine {
             var projectedBytes = measuredBytes(of: survivors, memoryBytesByTab: memoryBytesByTab)
                 + UInt64(pending.count) * estimate
             for tab in tabs[shownSession] ?? []
-            where !live.contains(tab.tabId) && !pending.contains(tab.tabId) {
+            where !live.contains(tab.tabId) && !pending.contains(tab.tabId) && !closing.contains(tab.tabId) {
                 guard projectedCount < maxLiveBackstop else { break }
                 guard projectedBytes + estimate <= memoryBudgetBytes else { break }
                 creates.append(.create(tabId: tab.tabId, url: tab.url))
@@ -373,6 +437,7 @@ struct BrowserLifecycleEngine {
                                     tabs: tabs,
                                     disposition: disposition,
                                     desiredViewport: desiredViewport,
+                                    held: heldIds,
                                     memoryBytesByTab: memoryBytesByTab,
                                     estimate: estimate)
 
@@ -389,11 +454,11 @@ struct BrowserLifecycleEngine {
         //   • detach precedes every stop — stopping a browser whose container is still mounted in
         //     the panel's host view destroys a live subview of a visible window;
         //   • create precedes attach — there is no container to mount before the browser exists.
-        // The rest is ordered for readability and determinism: belt stops, then per-session stops
-        // (sessionId order, then fold order), then cap evictions (LRU order), then creates — rule
-        // 8's, in sessionId order then fold order, followed by rule 8b's for the shown session, in
-        // fold order — then the bookkeeping.
-        return detach + beltStops + sessionStops + capStops + creates + attach + cancels + schedules
+        // The rest is ordered for readability and determinism: belt stops, then the link's closes
+        // (sorted), then per-session stops (sessionId order, then fold order), then cap evictions
+        // (LRU order), then creates — rule H's (sorted), then rule 8's, in sessionId order then fold
+        // order, followed by rule 8b's for the shown session, in fold order — then the bookkeeping.
+        return detach + beltStops + closeStops + sessionStops + capStops + creates + attach + cancels + schedules
     }
 
     /// Rule 7. Over BUDGET (or over the count backstop), stop least-recently-used tabs — but never
@@ -460,6 +525,7 @@ struct BrowserLifecycleEngine {
                                      tabs: [String: [BrowserTabState]],
                                      disposition: [String: Disposition],
                                      desiredViewport: String?,
+                                     held: Set<String>,
                                      memoryBytesByTab: [String: UInt64],
                                      estimate: UInt64) -> [BrowserAction] {
         // A create counts against BOTH bounds in the plan that emits it, or the cap is always one
@@ -471,7 +537,9 @@ struct BrowserLifecycleEngine {
             + UInt64(created.count) * estimate
         guard countOver > 0 || projectedBytes > memoryBudgetBytes else { return [] }
 
-        var protected = Set<String>()
+        // Rule H: a held tab is never evicted — a script is driving it. It still COUNTS against the
+        // budget and the backstop (it is a real renderer), so holds push other tabs out first.
+        var protected = held
         if let desiredViewport { protected.insert(desiredViewport) }
         for sessionId in sessionIds {
             let sessionTabs = tabs[sessionId] ?? []

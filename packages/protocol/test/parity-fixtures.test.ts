@@ -69,14 +69,14 @@ describe("cross-language parity fixtures (Chat Slice D, Task 4): regeneration fr
   // fixtures; editor-product Task 2: 67 → 68, one more panel-kind fixture; office-agent-tools T1:
   // 68 → 69, one more panel_command shape — the first OFFICE verb; Winter Phase 10a O5: 69 → 71,
   // 2026-09-17 retry progress: 71 → 72 (`provider_retry`),
-  // provider_login_progress + provider_login_finished; WS-23 hooks: 72 → 73, `hook_notice`; WS-23 reasoning-state: 73 → 74, `continuity_warning`; WS-27 elicitation: 74 → 76, `elicitation_requested` + `elicitation_resolved`; code-mode image input: 76 → 77, `user_message_with_images`; site icons: 77 → 78, `tool_result_with_site_icons`; the thinking pill: 78 → 80, `thinking_block` + `thinking_delta`; the reviewing pill: 80 → 82, `tool_review_progress` + `tool_review_progress_ended`). THIS assertion tracks the count
+  // provider_login_progress + provider_login_finished; WS-23 hooks: 72 → 73, `hook_notice`; WS-23 reasoning-state: 73 → 74, `continuity_warning`; WS-27 elicitation: 74 → 76, `elicitation_requested` + `elicitation_resolved`; code-mode image input: 76 → 77, `user_message_with_images`; site icons: 77 → 78, `tool_result_with_site_icons`; the thinking pill: 78 → 80, `thinking_block` + `thinking_delta`; the reviewing pill: 80 → 82, `tool_review_progress` + `tool_review_progress_ended`; ComputerV2's desktop switch: 82 → 84, `approval_requested_with_on_timeout` + `approval_resolved_timeout_allow`). THIS assertion tracks the count
   // on disk, so it moves in this task's own commit; the Swift LITERAL in RoundTripTests.swift is a
   // separate, later edit — the same two-commit split diff-tabs Task 4 established, and `swift test`
   // is expected red between the two commits by design.
-  test("did not leak into the Swift-synced fixture bundle, which now has exactly 82 files", () => {
+  test("did not leak into the Swift-synced fixture bundle, which now has exactly 84 files", () => {
     const swiftFixDir = join(import.meta.dir, "..", "..", "..", "apple", "WinterProtocol", "Tests", "WinterProtocolTests", "Fixtures");
     const swiftFiles = readdirSync(swiftFixDir).filter((f) => f.endsWith(".json"));
-    expect(swiftFiles.length).toBe(82);
+    expect(swiftFiles.length).toBe(84);
     expect(swiftFiles).not.toContain("dangerous-domains.json");
     expect(swiftFiles).not.toContain("cleaner-vectors.json");
   });

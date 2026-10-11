@@ -1,5 +1,6 @@
 import { chmodSync, realpathSync, statSync } from "node:fs";
 import { ComputerUseControlError, type ComputerUseControl } from "../computer-use/wiring";
+import { BrowserLinkRpcError, type BrowserLink } from "../computer-use/browser/cef-link/rpc";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
@@ -7,13 +8,13 @@ import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
   HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE,
   ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams,
-  SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
+  DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
   SessionHistoryParams,
   ApprovalListParams,
   SessionAddDirParams, SessionSetCwdParams, TrustDirParams,
   BgListParams, BgPeekParams, BgKillParams, BgKillAllParams,
-  SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams, McpEnableParams, McpDisableParams,
+  SessionSteerParams, SessionInterruptParams, SessionMirrorParams, SessionCompactParams, SkillsListParams, McpListParams, McpEnableParams, McpDisableParams,
   McpAddParams, McpRemoveParams, McpRenameParams, McpGetParams,
   McpLoginParams, McpLoginStatusParams, McpLogoutParams, McpSetClientSecretParams, McpClientSecretIssuerParams,
   McpToolsParams, McpSetToolPermissionParams,
@@ -126,7 +127,7 @@ import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
 import { catalogRoleProblemsFor } from "../providers/catalog-role-problems";
-import { DEFAULT_PROVIDER, pinsFor, addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, setConnectorToolPermission, connectorPermissionTable, stdioMcpServersFor, computerUseEnabledFrom, computerUseLegacyComputerFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
+import { DEFAULT_PROVIDER, pinsFor, addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, setConnectorToolPermission, connectorPermissionTable, stdioMcpServersFor, computerUseEnabledFrom, computerUseLegacyComputerFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, computerUseMirrorFrom, type McpServerSettingsEntry } from "../settings";
 import { addMcpServerInScope, mcpServerInScope, McpRenameRefusal, removeMcpServerForgettingPermissions, renameMcpServerCarryingSettings, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
 import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../runtime-sdk/run-home-input";
@@ -381,6 +382,11 @@ export interface IpcServerOptions {
    * LOCAL-ONLY `computerUse.*` RPCs. Absent (a bare test server): those methods answer INTERNAL.
    */
   computerUse?: ComputerUseControl;
+  /** ComputerV2 Phase 2: Winter.app's browser link (`browserLink.*`, harness role only — `computer-use/browser/cef-link/`).
+   *  Absent (a bare test server): those methods answer INTERNAL. */
+  browserLink?: BrowserLink;
+  /** A session was archived (`session.setActivity`): the browser engine closes its remaining agent tabs. */
+  onSessionArchived?: (sessionId: string) => void;
   /** `session.interrupt` is about to stop a running turn on a client's behalf — the user's stop
    *  (`DispatchChildren.noteStop`, so a Dispatch child's report says who stopped it). */
   onUserInterrupt?: (sessionId: string) => void;
@@ -781,6 +787,11 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   METHODS.credentialList,
   METHODS.credentialSet,
   METHODS.credentialRemove,
+  // ComputerV2 Phase 1b (the phone mirror): the phone asks to watch the live mirror of the session it is
+  // attached to. The daemon only GATES it (assertRemoteMayUseSession + the attachment + the user's mirror
+  // setting); Winter.app's Gateway special-cases it like `session.attach` and relays the frames it already
+  // shows on its own wire kind — never through this socket, the session log, history or the event stream.
+  METHODS.sessionMirror,
 ]);
 
 /** The session `mode`s a remote (iPhone) client may target at all — every other mode is Mac-local
@@ -1176,10 +1187,31 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    * Code-mode image input: `session.send`/`session.steer`'s `images`, checked BEFORE anything is
    * resumed or appended — every refusal leaves the log as it was. Answers the refs to store
    * (`undefined` = no images; an empty array is none). A caller other than a local client refuses:
-   * only a local client can stage (`session.stageImage` is harness-only), so a remote `images` is
-   * never one it staged. A non-code session refuses `image_session_not_code`; every entry is then
-   * held to `validateImageRefs` (the file is one this session staged, `n` unique and in `text`).
+   * only a local client can stage (`session.stageImage` is harness-only) or name a file on this Mac,
+   * so a remote `images` is never one it could have meant. A non-code session refuses
+   * `image_session_not_code`; every entry is then held to `validateImageRefs` (a file this session
+   * staged, or the user's own image file that the Read tool may itself read; `n` unique and in `text`).
    */
+  /**
+   * The model-capability BACKSTOP for code-mode images: the session's CURRENT model, by the same
+   * precedence `assertEffortSelectable` resolves it (its own override, else the daemon's live
+   * default) — for a model switched after the client attached the image. No catalog row at all
+   * refuses too: there is no evidence the model reads an image. Run by `session.stageImage` and by
+   * `session.send`/`session.steer` carrying `images` (a dragged file is never staged, so the send is
+   * the only door its image passes through).
+   */
+  function assertModelAcceptsImages(meta: { model?: string | null | undefined }): void {
+    const model = meta.model ?? opts.liveModel?.() ?? "";
+    // No model at all (the `unstated/unstated` sentinel, or none and no live default) is its own
+    // answer — "this model doesn't support images" would name a model that does not exist.
+    if (model === "" || model === UNSTATED_TAG) {
+      throw new RpcFailure(ERR.INVALID_PARAMS, IMAGE_SESSION_NO_MODEL_MESSAGE, { code: IMAGE_SESSION_NO_MODEL });
+    }
+    if (!imagesAcceptedBy(rowForTag(model))) {
+      throw new RpcFailure(ERR.INVALID_PARAMS, IMAGE_INPUT_UNSUPPORTED_MESSAGE, { code: IMAGE_INPUT_UNSUPPORTED });
+    }
+  }
+
   function checkedImageRefs(sessionId: string, text: string, images: readonly UserMessageImageRef[] | undefined, role: string | undefined): UserMessageImageRef[] | undefined {
     if (images === undefined || images.length === 0) return undefined;
     if (role !== "harness") throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be sent by a local client", { code: IMAGE_REFERENCE_INVALID });
@@ -1188,10 +1220,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     if ((meta.mode ?? "code") !== "code") {
       throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be added to code sessions", { code: IMAGE_SESSION_NOT_CODE });
     }
+    assertModelAcceptsImages(meta);
     try {
-      return validateImageRefs(sessionId, text, images);
+      return validateImageRefs(sessionId, text, images, { winterHome: opts.winterHome });
     } catch (err) {
-      if (err instanceof StageImageRefusal) throw new RpcFailure(err.internal ? ERR.INTERNAL : ERR.INVALID_PARAMS, err.message, { code: err.code });
+      if (err instanceof StageImageRefusal) throw new RpcFailure(err.internal ? ERR.INTERNAL : ERR.INVALID_PARAMS, err.message, { code: err.code, ...(err.n === undefined ? {} : { n: err.n }) });
       throw new RpcFailure(ERR.INTERNAL, "could not check the message's images", { code: IMAGE_REFERENCE_INVALID });
     }
   }
@@ -1486,7 +1519,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     store: opts.store,
     isRunning: (sessionId) => opts.engine?.isRunning(sessionId) ?? false,
     derive: deriveActivity,
-    emit: (sessionId, activity) => hub.emitActivity(sessionId, activity),
+    emit: (sessionId, activity) => {
+      hub.emitActivity(sessionId, activity);
+      if (activity === "archived") { try { opts.onSessionArchived?.(sessionId); } catch { /* best effort: the tabs close at the session's next turn end */ } }
+    },
   };
 
   /** working-directories T3: the deps `session.setDirs` hands to the shared write half (T2's
@@ -1905,6 +1941,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (socket.data.helloTimer) clearTimeout(socket.data.helloTimer);
         if (socket.data.hubClient) hub.detach(socket.data.hubClient);
         harnessConns.delete(socket.data);
+        // ComputerV2 Phase 2: the connection that carried Winter.app's browser link is gone — the built-in browser
+        // reads "Winter isn't running" until the app attaches again (every command in flight fails `disconnected`).
+        opts.browserLink?.connectionClosed(socket.data);
         // Chat Slice D task 2: an in-flight chunked sync.push dies with its connection — the
         // partial bytes are dropped, never carried over to whatever reconnects next (a resumed
         // push must start over, which is exactly what makes the apply atomic).
@@ -2017,7 +2056,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       if (socket.data.helloTimer) { clearTimeout(socket.data.helloTimer); socket.data.helloTimer = null; }
       socket.data.decoder = new LineDecoder(); // authed: default 8 MiB line cap
       if (p.role === "harness") harnessConns.add(socket.data);
-      return { ok: true, serverVersion: opts.serverVersion, protocolVersion: PROTOCOL_VERSION };
+      // `features`: what this daemon can do that a client must know BEFORE it relies on it (an older daemon
+      // omits the field, and the client then falls back).
+      return { ok: true, serverVersion: opts.serverVersion, protocolVersion: PROTOCOL_VERSION, features: [DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS] };
     }
 
     if (socket.data.authedRole === null) throw new RpcFailure(ERR.UNAUTHORIZED, "hello required first");
@@ -2374,6 +2415,31 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         }
         if (!opts.engine) return { ok: true, wasRunning: false };
         return { ok: true, ...opts.engine.interrupt(p.sessionId) };
+      }
+      case METHODS.sessionMirror: {
+        // ComputerV2 Phase 1b: the GATE for the phone mirror. Frames never come here — the Gateway relays Winter.app's
+        // own mirror of the session (its helper view subscription, which the watch holds open with pictures) — so
+        // this answers only "may this caller watch this session's mirror, and is the mirror on at all". The phone
+        // renews its watch through here every 10 s, so turning the setting off ends a running watch at the next
+        // renewal. `watch: false` is never refused: stopping must always work.
+        const p = parseParams(SessionMirrorParams, params);
+        if (!p.watch) return { ok: true, mirror: false };
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        try { opts.store.meta(p.sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
+        // Only the session this connection is attached to — the phone's Gateway connection follows its attach,
+        // so a mirror can never be watched for a session the phone is not looking at.
+        if (!socket.data.hubClient || hub.attachedSession(socket.data.hubClient) !== p.sessionId) {
+          throw new RpcFailure(ERR.NOT_FOUND, "attach to the session first");
+        }
+        // Chat has no computer use: answered off at once, so a chat screen never makes Winter.app open anything.
+        if ((opts.store.meta(p.sessionId).mode ?? "code") === "chat") return { ok: true, mirror: false };
+        // Fail CLOSED (review decision): settings that cannot be read are no consent to stream the screen.
+        const settings = liveSettingsFor(opts);
+        if (settings === undefined) {
+          console.error(`session.mirror for ${p.sessionId}: the settings could not be read — the phone mirror stays off`);
+          return { ok: true, mirror: false };
+        }
+        return { ok: true, mirror: computerUseEnabledFrom(settings) && computerUseMirrorFrom(settings) };
       }
       case METHODS.sessionCompact: {
         const p = parseParams(SessionCompactParams, params);
@@ -3395,11 +3461,30 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw err;
         }
       }
+      // -----------------------------------------------------------------------------------------
+      // ComputerV2 Phase 2: Winter.app's BROWSER LINK. Harness role only — outside every allowlist, and the explicit
+      // check keeps it so if one ever widens. The connection never attaches to a session; nothing here is an event.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.browserLinkAttach:
+      case METHODS.browserLinkResult:
+      case METHODS.browserLinkEvents:
+      case METHODS.browserLinkTabGone: {
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, `${method} is available to Winter's app only`);
+        const link = opts.browserLink;
+        if (link === undefined) throw new RpcFailure(ERR.INTERNAL, `${method} is not available on this server`);
+        try {
+          return link.handle(socket.data, (message) => socket.data.writer.enqueue(encodeLine(message)), method, params);
+        } catch (err) {
+          if (err instanceof BrowserLinkRpcError) throw new RpcFailure(ERR.INVALID_PARAMS, err.message, { code: err.code, ...err.data });
+          throw err;
+        }
+      }
       case METHODS.sessionStageImage: {
-        // Code-mode image input (2026-09-29): stage a composer image into the session's temp
-        // directory and answer its path — the client names it beside its `[Image #n]` placeholder
-        // in `session.send`/`session.steer`'s `images` (the model is given the path; the stored
-        // message keeps the placeholder). LOCAL clients only: already outside
+        // Code-mode image input (2026-09-29): stage a composer image that has no file of its own
+        // (clipboard data), AS IT IS, into the session's temp directory and answer its path — the
+        // client names it beside its `[Image #n]` placeholder in `session.send`/`session.steer`'s
+        // `images` (the model is given the path; the stored message keeps the placeholder). A dragged
+        // or picked file is never staged: its own path goes in `images`. LOCAL clients only: already outside
         // `REMOTE_ALLOWED_METHODS` and the plugin list, and the explicit check keeps it so if either
         // list ever widens (`elicitation.url`'s precedent). The bytes are never logged — nothing in
         // this arm, `parseParams` or `stageSessionImage` echoes a received value.
@@ -3411,19 +3496,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if ((meta.mode ?? "code") !== "code") {
           throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be added to code sessions", { code: IMAGE_SESSION_NOT_CODE });
         }
-        // The session's CURRENT model, by the same precedence `assertEffortSelectable` resolves it
-        // (its own override, else the daemon's live default) — the backstop for a model switched
-        // after the client attached the image. No catalog row at all refuses too: there is no
-        // evidence the model reads an image.
-        const model = meta.model ?? opts.liveModel?.() ?? "";
-        // No model at all (the `unstated/unstated` sentinel, or none and no live default) is its own
-        // answer — "this model doesn't support images" would name a model that does not exist.
-        if (model === "" || model === UNSTATED_TAG) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, IMAGE_SESSION_NO_MODEL_MESSAGE, { code: IMAGE_SESSION_NO_MODEL });
-        }
-        if (!imagesAcceptedBy(rowForTag(model))) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, IMAGE_INPUT_UNSUPPORTED_MESSAGE, { code: IMAGE_INPUT_UNSUPPORTED });
-        }
+        // The backstop on the session's CURRENT model (see `assertModelAcceptsImages`).
+        assertModelAcceptsImages(meta);
         try {
           // `imagesOnSend`: this daemon takes `images` on `session.send`/`session.steer`, so the
           // client keeps `[Image #n]` in the text and names the paths beside it.

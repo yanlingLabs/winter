@@ -438,6 +438,7 @@ func runFixtureSelfTest() -> Int32 {
     c.equal(FreshCode.bits(0xFFFF).map { $0 ? 1 : 0 }, Array(repeating: 1, count: 16) + [0], "fresh: all ones, even parity")
     c.equal(FreshCode.bits(0b1010_0000_0000_0001).count, 17, "fresh: 17 cells")
     c.check(CommandDecoder.supported(role: "main").isSuperset(of: ["freshStart", "freshOffspace", "freshStop"]), "fresh: its commands")
+    c.check(CommandDecoder.supported(role: "main").contains("userFocus"), "hands-off: the user's click into a field")
 
     if c.failures.isEmpty {
         print("SELFTEST OK \(c.passed) checks")

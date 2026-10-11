@@ -20,11 +20,11 @@ import { AUTOMATION_ERROR_KINDS, AutomationFailure, isAutomationFailure } from "
 import { isAppPath, isBundleIdShaped, isDocumentTarget, systemAppResolver, type AppResolver } from "./app-resolve";
 import type { HelperClient } from "./helper-client";
 import { FOREGROUND_LOCK_KEY, LOCK_WAIT_MS, TargetLocks } from "./locks";
-import { ACT_PRIMITIVES, newRunGrants, type AppRef, type ComputerPolicy, type RunGrants } from "./policy";
+import { ACT_PRIMITIVES, cardName, cardReason, desktopVisitActReason, newRunGrants, type AppRef, type ComputerPolicy, type DesktopVisitOutcome, type RunGrants } from "./policy";
 import { typingEstimateMs, typingFit } from "./typing-estimate";
 import {
   HelperRpcError, HelperUnavailableError, WINTER_OWN_BUNDLE_IDS,
-  type ActAction, type ActResult, type AppAtResult, type AppleScriptResult, type AppsListResult, type FindResult, type HelperNotification,
+  type ActAction, type ActResult, type AppAtResult, type AppleScriptResult, type AppsListResult, type DesktopVisitClosed, type FindResult, type HelperNotification,
   type ScreenWindowsResult, type ScreenshotResult, type ScriptingDictionaryResult, type SnapshotResult, type TargetBindResult, type TargetUseWindowResult, type TargetWindowsResult,
   type WaitForResult, type WaitIdleResult,
 } from "./protocol";
@@ -32,7 +32,11 @@ import type { RecentApps } from "./recent-apps";
 import { ResultBuilder, type ResultContent, type ScriptError } from "./result";
 import type { AutomationTelemetry, PrimitiveMetric } from "./telemetry";
 import { AutomationWorker, AutomationWorkerUnavailable, type AutomationWorkerOptions, type CallMessage } from "./worker-host";
-import { APP_PRIMITIVES, GLOBAL_PRIMITIVES, type AppHandle, type ImageHandle } from "./worker/bridge";
+import { APP_PRIMITIVES, BROWSER_PRIMITIVES, EXTRA_PRIMITIVES, GLOBAL_PRIMITIVES, TAB_PRIMITIVES, type AppHandle, type ImageHandle } from "./worker/bridge";
+import type { AdapterRunScope, AppAdapters } from "./adapters";
+import { AdapterDelivery } from "./adapters/delivery";
+import type { BrowserEngine } from "./browser/engine";
+import type { TabRunScope } from "./browser/tab-scope";
 
 export const SCRIPT_TIMEOUT_DEFAULT_MS = 30_000;
 export const SCRIPT_TIMEOUT_MIN_MS = 1_000;
@@ -53,6 +57,13 @@ const IMAGES_KEPT = 16;
 export const BUSY_RETRY_MS = 200;
 
 export interface ScriptInput { code: string; timeoutMs?: number; reset?: boolean; title?: string }
+/** The longest `reason` a live screenshot may give (it is shown to the user on the desktop-switch prompt). */
+export const LIVE_REASON_MAX = 200;
+/** How long a primitive's part of an open desktop visit may take, before its own typing estimate (`visitMaxMs`): the
+ *  helper's guardian keeps the visit as the agent's own at least this long while the primitive is in flight. */
+export const VISIT_BASE_MAX_MS = 10_000;
+/** The end-of-run `visit.close` (it returns the user, verified, retried once): bounded. */
+export const VISIT_CLOSE_TIMEOUT_MS = 8_000;
 export interface ScriptCall {
   sessionId: string;
   /** The session's model tag (the screenshot budget). */
@@ -79,6 +90,8 @@ export interface ComputerV2ServiceDeps {
   startWorker?(): Promise<AutomationWorker>;
   /** Interrupt a session's running turn, as `session.interrupt` does (the helper's Esc). */
   interrupt?(sessionId: string): void;
+  /** Phase 2: the browser engine (browser tabs as targets, the `browsers` global). Absent: `BrowserUnavailable`. */
+  browsers?: BrowserEngine;
   /** Resolves a path or an unlisted bundle id to a bundle id WITHOUT launching (`app-resolve.ts`). */
   appResolver?: AppResolver;
   idleMs?: number;
@@ -90,9 +103,13 @@ export interface ComputerV2ServiceDeps {
    * The production daemon never sets it; the bytes otherwise never leave the daemon.
    */
   screenshotSink?(shot: { sessionId: string; primitive: string; mime: string; base64: string }): void;
+  /** App adapters (Phase 2): extras, dictionary wrappers and guides, delivered at bind (`adapters/`). */
+  adapters?: AppAdapters;
 }
 
-interface TargetInfo { targetId: string; bundleId: string; name: string; pid: number; lost?: string }
+/** `windowId`: the bound window (its window-server id), from the bind and every `useWindow` — what an app adapter's
+ *  extras address, never the app's front window. */
+interface TargetInfo { targetId: string; bundleId: string; name: string; pid: number; lost?: string; appPath?: string; appVersion?: string; windowId?: number }
 interface StoredImage { data: string; mime: string; width: number; height: number }
 
 interface SessionState {
@@ -111,6 +128,9 @@ interface SessionState {
   /** The runtime has read screen content since its last reset or restart: EVERY call's text is fenced until
    *  then — a value read in one call and printed in a later one stays data (the controller's ruling, review I1). */
   tainted: boolean;
+  /** The helper reported a desktop visit of this session closing (`desktopVisited`): the next run's end claims its
+   *  report with `visit.close`, even if that run makes no visit itself (one that closed after its run ended). */
+  visitHint: boolean;
 }
 
 /** A timer that stops counting while a card waits for a human. */
@@ -165,12 +185,39 @@ interface RunCtx {
   /** Targets the user let come to the front for the rest of this run (`requestForeground`): their acts take
    *  the foreground with no second card. */
   foreground: Set<string>;
+  /** THE DESKTOP SWITCH (the ruling, 2026-10-10): per app (bundle id + pid), the user's answer to moving them to
+   *  its desktop for a moment, for the rest of this run — `true`: every later primitive that needs it may visit with
+   *  no second prompt (each visit still returns them at once); `false`: they refused, so no re-prompt either. */
+  visits: Map<string, boolean>;
+  /** A desktop-switch prompt already on screen per app (concurrent primitives of one script share it). */
+  visitPrompts: Map<string, Promise<DesktopVisitOutcome>>;
+  /**
+   * THE OPEN VISIT (user ruling 2026-10-10, 5d): the run sent a primitive with `desktopVisit: true`, so a visit may be
+   * OPEN in the helper — it stays open across the primitives that need it and closes a moment after the last one (or
+   * at the script's end). At the run's end the daemon closes it (`visit.close`) and says every visit made, in one
+   * line each. `visitApp` is the app of the latest such request (for a "may still be there" notice).
+   */
+  visitTouched: boolean;
+  visitApp?: string;
+  /** Requests carrying `desktopVisit: true` in flight: the visit's foreground lock is never released under one. */
+  visitRequestsInFlight: number;
+  /** This run holds the screen's foreground lock for an open visit (released when the helper reports the visit
+   *  closed with no such request in flight, or at the run's end). */
+  visitLock: boolean;
+  /** A primitive answered `inVisit` and the helper has not reported that visit closed since: a visit is OPEN. */
+  visitOpen: boolean;
+  /** The helper went away while a visit may have been open: said once, loudly. */
+  visitStrandedNoticed: boolean;
+  /** Visits whose reports this run claimed (`visit.close`) — the audit line's count. */
+  visitsClaimed: number;
   /** The last primitive the script called ("type in Safari"), for a timeout's words. */
   lastPrimitive?: string;
   sessionId: string;
   runId: string;
   callId: string;
   call: ScriptCall;
+  /** The script's own title (the model's words for the step) — an act's desktop-switch prompt quotes it. */
+  title?: string;
   state: SessionState;
   worker: AutomationWorker;
   builder: ResultBuilder;
@@ -196,9 +243,21 @@ interface RunCtx {
   /** The failure sentences the daemon sent this call — a script error carrying one verbatim is the daemon's own
    *  words and is shown outside the DATA-ONLY fence. */
   daemonSentences: Set<string>;
+  /** Phase 2, for the audit line: the sites (hosts only) and browser backends this run touched. */
+  sites?: Set<string>;
+  browsers?: Set<string>;
+  /** Phase 2: browser-tab primitives still running (the run's tab locks wait for them at its end). */
+  tabWork?: Set<Promise<unknown>>;
 }
 
 const isRef = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
+/** A closed visit's report as `visit.close` hands it over — checked, never assumed. */
+const isClosedVisit = (v: unknown): v is DesktopVisitClosed =>
+  v !== null && typeof v === "object" && typeof (v as { ms?: unknown }).ms === "number" && typeof (v as { returned?: unknown }).returned === "boolean"
+  && typeof (v as { targetId?: unknown }).targetId === "string" && typeof (v as { app?: unknown }).app === "string"
+  && typeof (v as { visitId?: unknown }).visitId === "string" && typeof (v as { actions?: unknown }).actions === "number";
+/** A desktop-switch answer's scope within a run: the app, by bundle id AND pid (a relaunched app asks again). */
+const visitKey = (t: { bundleId: string; pid: number }): string => `${t.bundleId}:${t.pid}`;
 const isPoint = (v: unknown): v is [number, number] => Array.isArray(v) && v.length === 2 && v.every((n) => typeof n === "number" && Number.isFinite(n));
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 const bad = (message: string): Error => Object.assign(new TypeError(message), { name: "TypeError" });
@@ -210,6 +269,9 @@ export class ComputerV2Service {
   private readonly sessions = new Map<string, SessionState>();
   readonly locks: TargetLocks;
   readonly diffBases: DiffBases;
+  /** Which apps' "web pages don't react to hover" line this session's model has seen (once per session per app; again
+   *  after a compaction, a reset, a worker restart — the adapter delivery's rule). */
+  readonly hoverNotes = new AdapterDelivery();
   private stopped = false;
 
   constructor(private readonly deps: ComputerV2ServiceDeps) {
@@ -223,7 +285,7 @@ export class ComputerV2Service {
   private stateFor(sessionId: string): SessionState {
     let s = this.sessions.get(sessionId);
     if (s === undefined) {
-      s = { hadWorker: false, chain: Promise.resolve(), targets: new Map(), images: new Map(), lastTargetShot: new Map(), pending: 0, tainted: false };
+      s = { hadWorker: false, chain: Promise.resolve(), targets: new Map(), images: new Map(), lastTargetShot: new Map(), pending: 0, tainted: false, visitHint: false };
       this.sessions.set(sessionId, s);
     }
     return s;
@@ -293,9 +355,11 @@ export class ComputerV2Service {
     const grants = newRunGrants(sessionId, (waiting) => (waiting ? timer.pause() : timer.resume()));
     const ctx: RunCtx = {
       sessionId, runId, callId: `cv2_${randomBytes(6).toString("hex")}`, call, state, worker, builder, grants,
+      ...(typeof input.title === "string" && input.title.trim().length > 0 ? { title: input.title } : {}),
       abort: new AbortController(), timer, locks: new Map(), acted: new Set(), chains: new Map(), primitives: new Map(),
       apps: new Set(), timedOut: false, ended: false, bound: new Set(), daemonSentences: new Set(), textInFlight: new Set(),
-      focusLines: new Map(), extensions: [], foreground: new Set(),
+      focusLines: new Map(), extensions: [], foreground: new Set(), visits: new Map(), visitPrompts: new Map(),
+      visitTouched: false, visitRequestsInFlight: 0, visitLock: false, visitOpen: false, visitStrandedNoticed: false, visitsClaimed: 0,
     };
     ctxRef.ctx = ctx;
     state.active = ctx;
@@ -340,10 +404,20 @@ export class ComputerV2Service {
       builder.text(ctx.focusLines.size === 1 ? `focus: ${line}` : `focus in ${app}: ${line}`, { screen: true });
     }
     if (ctx.killTimer !== undefined) clearTimeout(ctx.killTimer);
+    // THE OPEN VISIT closes with the script at the latest (5d (b)): the user returned and every visit of this run said
+    // — BEFORE the locks go (the screen's foreground lock covers the whole visit).
+    if (ctx.visitTouched || state.visitHint) await this.closeVisits(ctx, state);
     // ENDED first, then abort, then drain: a primitive still in flight (one the script never awaited) sees
     // `ended` after its next await and can neither take a lock nor keep one (review C1).
     ctx.ended = true;
     ctx.abort.abort();
+    // A browser tab's input in flight (a long type, a drag) stops at its next event once aborted: the tab lock is
+    // held until it has — another session must never interleave input with it (bounded).
+    if (ctx.tabWork !== undefined && ctx.tabWork.size > 0) {
+      let wait: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([Promise.allSettled([...ctx.tabWork]), new Promise<void>((r) => { wait = setTimeout(r, TAB_WORK_AFTER_END_MS); })]);
+      if (wait !== undefined) clearTimeout(wait);
+    }
     for (const releaseLock of ctx.locks.values()) releaseLock();
     ctx.locks.clear();
     // "Allow once" covers THIS call: a target bound on it is released now (the controller's ruling, review I3).
@@ -354,6 +428,7 @@ export class ComputerV2Service {
       this.diffBases.clearTarget(sessionId, targetId);
       this.deps.helper.tell("target.release", { targetId });
     }
+    this.deps.browsers?.runEnded(ctx.sessionId, ctx.runId);
     if (ctx.scriptActiveGen !== undefined) this.deps.helper.tell("script.active", { sessionId, active: false });
     if (state.active === ctx) state.active = undefined;
 
@@ -377,7 +452,8 @@ export class ComputerV2Service {
     }
     this.deps.audit?.({
       kind: "automation", sessionId, apps: [...ctx.apps], primitives: Object.fromEntries(ctx.primitives),
-      durationMs: this.now() - started, outcome: outcomeWord,
+      durationMs: this.now() - started, outcome: outcomeWord, ...(ctx.visitsClaimed > 0 ? { desktopVisits: ctx.visitsClaimed } : {}),
+      ...(ctx.sites === undefined ? {} : { sites: [...ctx.sites] }), ...(ctx.browsers === undefined ? {} : { browsers: [...ctx.browsers] }),
     });
     return builder.build(error === undefined ? {} : { error });
   }
@@ -437,22 +513,27 @@ export class ComputerV2Service {
     const args = (msg.args ?? {}) as Record<string, unknown>;
     ctx.primitives.set(msg.primitive, (ctx.primitives.get(msg.primitive) ?? 0) + 1);
     if (msg.primitive !== "timeLeft") {
-      const on = msg.target === undefined ? undefined : ctx.state.targets.get(msg.target)?.name;
+      const on = msg.target === undefined ? undefined : ctx.state.targets.get(msg.target)?.name ?? this.deps.browsers?.label(ctx.sessionId, msg.target);
       ctx.lastPrimitive = `${msg.primitive}()${on === undefined ? "" : ` in ${on}`}`;
     }
     switch (msg.primitive) {
       case "timeLeft": return Math.max(0, Math.floor(ctx.timer.left()));
+      case "browsers.list": case "browsers.open": case "browsers.tabs": case "browsers.tab":
+        if (this.deps.browsers === undefined) throw new AutomationFailure("BrowserUnavailable", "browsers are not available in this daemon");
+        return await this.trackTabWork(ctx, this.deps.browsers.global(this.tabScope(ctx, metric), msg.primitive, args));
       case "apps.list": return await this.appsList(ctx, args, metric);
       case "apps.open": {
         const target = str(args.app)?.trim();
         if (!target) throw bad("apps.open() takes an app name or bundle id, or a file path or URL to open");
         const opener = str((args as Record<string, unknown>).with)?.trim();
         // A file path or URL (or an explicit opener) opens a document; a name or an .app bundle binds the app.
+        // `{ emit: false }`: bound without printing its state (queue item 4 — a bind always printed the whole window).
+        const quiet = (args as Record<string, unknown>).emit === false;
         if (opener !== undefined || isDocumentTarget(target)) {
-          return await this.openDocument(ctx, target, opener, metric);
+          return await this.openDocument(ctx, target, opener, metric, quiet);
         }
         const window = typeof args.window === "string" || typeof args.window === "number" ? args.window : undefined;
-        return await this.bind(ctx, { app: target, ...(window === undefined ? {} : { window }) }, metric);
+        return await this.bind(ctx, { app: target, ...(window === undefined ? {} : { window }), quiet }, metric);
       }
       case "screen.screenshot": return await this.screenScreenshot(ctx, args, metric);
       case "screen.windows": return await this.screenWindows(ctx, args, metric);
@@ -468,6 +549,9 @@ export class ComputerV2Service {
   }
 
   private async targetPrimitive(ctx: RunCtx, targetId: string, primitive: string, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<unknown> {
+    if (this.deps.browsers?.owns(ctx.sessionId, targetId) === true) return await this.trackTabWork(ctx, this.deps.browsers.primitive(this.tabScope(ctx, metric), targetId, primitive, args));
+    // A browser tab's own primitive never reaches the helper for an app target (the worker is untrusted).
+    if (TAB_ONLY_PRIMITIVES.has(primitive)) throw bad(`${primitive}() belongs to a browser tab — this target is an app`);
     this.live(ctx);
     const t = this.target(ctx, targetId);
     const app: AppRef = { bundleId: t.bundleId, name: t.name };
@@ -478,7 +562,11 @@ export class ComputerV2Service {
     }
     this.live(ctx);
     await this.ensureLock(ctx, t);
+    await this.deps.adapters?.beforePrimitive(this.adapterScope(ctx, metric), t);
     switch (primitive) {
+      case "extra": case "dict": case "help":
+        if (this.deps.adapters === undefined) throw bad("this daemon has no app extras");
+        return await this.deps.adapters.primitive(this.adapterScope(ctx, metric), t, primitive, args);
       case "state": return await this.state(ctx, t, args, metric);
       case "find": return await this.find(ctx, t, args, metric);
       case "screenshot": return await this.targetScreenshot(ctx, t, args, metric);
@@ -492,10 +580,13 @@ export class ComputerV2Service {
         const w = args.window;
         if (typeof w !== "string" && typeof w !== "number") throw bad("useWindow() takes a window title or id");
         const res = await this.helperCall<TargetUseWindowResult>(ctx, "target.useWindow", { targetId, window: w }, metric);
+        // The bound window is now this one (app adapters address it); unknown when the helper did not say.
+        if (typeof res?.window?.id === "number" && res.window.id > 0) t.windowId = res.window.id; else delete t.windowId;
         this.diffBases.clearTarget(ctx.sessionId, targetId); // a different window: the next state() is full
         ctx.state.lastTargetShot.delete(targetId);
         const detail = helperDetail(res?.detail);
         if (detail !== undefined) ctx.builder.daemonLine(detail);
+        if (res?.webContent === true) this.hoverNote(ctx, t);
         return undefined;
       }
       case "waitFor": return await this.waitFor(ctx, t, args, metric);
@@ -503,7 +594,7 @@ export class ComputerV2Service {
       case "scriptingDictionary": {
         const search = args.search;
         if (search !== undefined && typeof search !== "string") throw bad("scriptingDictionary() takes { search?: string }");
-        const res = await this.helperCall<ScriptingDictionaryResult>(ctx, "target.scriptingDictionary", { targetId, ...(search === undefined ? {} : { search }) }, metric);
+        const res = await this.helperCall<ScriptingDictionaryResult>(ctx, "target.scriptingDictionary", { targetId, callId: ctx.callId, ...(search === undefined ? {} : { search }) }, metric);
         // The dictionary is the app's own text: data, inside the fence.
         ctx.builder.markScreenRead();
         if (args.emit !== false) ctx.builder.text(res.scriptable ? res.text ?? "" : `${t.name} is not scriptable (it has no scripting dictionary)`, { screen: true });
@@ -627,7 +718,7 @@ export class ComputerV2Service {
 
   /** Opens a file path or URL with an app, never activating it (NSWorkspace.open activates:false). The opener
    *  gets its per-app card and the save-path floors apply to the paths; the opened document's window is bound. */
-  private async openDocument(ctx: RunCtx, target: string, opener: string | undefined, metric: PrimitiveMetric): Promise<AppHandle> {
+  private async openDocument(ctx: RunCtx, target: string, opener: string | undefined, metric: PrimitiveMetric, quiet = false): Promise<AppHandle> {
     const settings = this.deps.settings();
     const urls = [target];
     // Who will open it — for the per-app card — resolved without opening anything.
@@ -644,12 +735,12 @@ export class ComputerV2Service {
     this.live(ctx);
     ctx.builder.daemonLine(`opened ${target.split("/").pop()} in ${res.app.name} (in the background)`);
     // Bind the opener's document window; the per-app grant from the card above means bind does not re-ask.
-    return await this.bind(ctx, { app: res.app.bundleId, known: app,
+    return await this.bind(ctx, { app: res.app.bundleId, known: app, quiet,
       ...(res.windowID === undefined ? {} : { window: res.windowID }) }, metric);
   }
 
   /** `apps.open` / `screen.appAt`: policy BEFORE the helper launches anything, bind, lock, print the full state. */
-  private async bind(ctx: RunCtx, req: { app: string; window?: string | number; known?: AppRef }, metric: PrimitiveMetric): Promise<AppHandle> {
+  private async bind(ctx: RunCtx, req: { app: string; window?: string | number; known?: AppRef; quiet?: boolean }, metric: PrimitiveMetric): Promise<AppHandle> {
     const known: AppRef & { path?: string } = req.known ?? await this.identifyApp(ctx, req.app, metric);
     await this.deps.policy.authorize(ctx.grants, known, { kind: "bind" }, ctx.abort.signal);
     this.live(ctx);
@@ -661,7 +752,13 @@ export class ComputerV2Service {
       privatePath: computerUsePrivateEventPathFrom(settings),
     }, metric, undefined, { afterEnd: true });
     const app: AppRef = { bundleId: res.app.bundleId, name: res.app.name };
-    const info: TargetInfo = { targetId: res.targetId, bundleId: app.bundleId, name: app.name, pid: res.app.pid };
+    // helper 1.8.0 says where the running app is and its version; an app bound by path is that path.
+    const appPath = typeof res.app.path === "string" && res.app.path.length > 0 ? res.app.path : known.path;
+    const info: TargetInfo = {
+      targetId: res.targetId, bundleId: app.bundleId, name: app.name, pid: res.app.pid,
+      ...(typeof res.window?.id === "number" && res.window.id > 0 ? { windowId: res.window.id } : {}),
+      ...(appPath === undefined ? {} : { appPath }), ...(typeof res.app.version === "string" && res.app.version.length > 0 ? { appVersion: res.app.version } : {}),
+    };
     try {
       // Bound after the script ended (the helper answered inside the cancel grace) — release it at once.
       this.live(ctx);
@@ -680,11 +777,22 @@ export class ComputerV2Service {
     }
     ctx.apps.add(app.name);
     this.deps.recentApps?.note(app.bundleId, app.name);
+    // `{ emit: false }`: bound, nothing of the window read or printed (no screen read, no diff base) — what the bind had
+    // to do and Winter's own adapter block still say themselves.
+    if (req.quiet === true) {
+      const detail = helperDetail(res.detail);
+      if (detail !== undefined) ctx.builder.daemonLine(detail);
+      if (res.webContent === true) this.hoverNote(ctx, info);
+      const adapted = await this.deps.adapters?.onBind(this.adapterScope(ctx, metric), info);
+      return { targetId: info.targetId, name: app.name, bundleId: app.bundleId, ...adapted?.handle };
+    }
     // The same window bound again (the helper hands back the same target): what changed since its last printed
     // state, not the whole tree once more (live: re-binding in every script cost ~13 KB a call).
+    // A first bind prints the ORDINARY state (viewport first, folded to its line cap), never `full`: a full state is
+    // everything the read saw, which for a big window outgrows the result's own cap — it is the model's to ask for.
     const base = this.diffBases.get(ctx.sessionId, info.targetId);
     const snap = await this.helperCall<SnapshotResult>(ctx, "target.snapshot", {
-      targetId: info.targetId, ...(base === undefined ? { full: true } : { since: base }), settle: { maxMs: SETTLE_CAP_MS }, callId: ctx.callId,
+      targetId: info.targetId, ...(base === undefined ? {} : { since: base }), settle: { maxMs: SETTLE_CAP_MS }, callId: ctx.callId,
     }, metric);
     this.live(ctx);
     metric.settleMs = snap.waitedMs;
@@ -693,12 +801,23 @@ export class ComputerV2Service {
     // outside the fence — the helper's fixed wording, not screen text.
     const detail = helperDetail(res.detail);
     if (detail !== undefined) ctx.builder.daemonLine(detail);
+    if (res.webContent === true) this.hoverNote(ctx, info);
     if (base !== undefined && snap.isDiff === true) {
       ctx.builder.daemonLine(`${app.name} was already bound to this window — the same handle; what changed since its last state follows (keep the handle in a top-level const: it lasts between calls)`);
     }
+    const adapted = await this.deps.adapters?.onBind(this.adapterScope(ctx, metric), info);
     ctx.builder.text(snap.text, { screen: true });
     this.diffBases.set(ctx.sessionId, info.targetId, snap.snapshotId);
-    return { targetId: info.targetId, name: app.name, bundleId: app.bundleId };
+    return { targetId: info.targetId, name: app.name, bundleId: app.bundleId, ...adapted?.handle };
+  }
+
+  /** A known limitation, said once per session per app (helper 1.9.8): web pages (WebKit and Chromium alike) take no
+   *  hover from a pointer that is not the real one while the app is in the background — never in the tool description,
+   *  which stays fixed per incarnation. */
+  private hoverNote(ctx: RunCtx, t: { bundleId: string; name: string }): void {
+    if (this.hoverNotes.has(ctx.sessionId, t.bundleId)) return;
+    ctx.builder.daemonLine(`${t.name}'s web pages don't react to hover from Winter's pointer while it is in the background — click instead, or app.requestForeground(reason) for a real hover`);
+    this.hoverNotes.mark(ctx.sessionId, t.bundleId);
   }
 
   private async state(ctx: RunCtx, t: TargetInfo, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<string> {
@@ -729,7 +848,7 @@ export class ComputerV2Service {
       query = Object.fromEntries(["role", "name", "text"].filter((k) => typeof o[k] === "string").map((k) => [k, o[k] as string]));
       if (Object.keys(query).length === 0) throw bad("find() takes text, or { role, name, text }");
     } else throw bad("find() takes text, or { role, name, text }");
-    const res = await this.helperCall<FindResult>(ctx, "target.find", { targetId: t.targetId, query }, metric);
+    const res = await this.helperCall<FindResult>(ctx, "target.find", { targetId: t.targetId, query, callId: ctx.callId }, metric);
     ctx.builder.markScreenRead();
     // The page changed since the last state(), or the read was cut short: the helper's fixed words, said even
     // with emit:false (a model reading only the value would miss it).
@@ -745,15 +864,19 @@ export class ComputerV2Service {
     if (!ctx.call.vision) throw new AutomationFailure("NotAllowed", NO_VISION);
   }
 
-  /** One screenshot, at the budget for this session's model, re-taken at a lower quality while over 3 MiB. */
-  private async shoot(ctx: RunCtx, method: string, params: Record<string, unknown>, metric: PrimitiveMetric): Promise<ScreenshotResult & { bytes: number }> {
+  /** One screenshot, at the budget for this session's model: the helper re-encodes the one capture under the byte cap
+   *  (`maxBytes`), and a result still over it is re-taken at a lower quality — never one taken in a desktop visit
+   *  (`inVisit`): one primitive, one capture there. `extra` adds params per attempt (a live shot's `desktopVisit`). */
+  private async shoot(ctx: RunCtx, method: string, params: Record<string, unknown>, metric: PrimitiveMetric,
+    extra?: () => Record<string, unknown>): Promise<ScreenshotResult & { bytes: number }> {
     const maxDim = computerUseScreenshotMaxDimFrom(this.deps.settings());
     let quality: number = SCREENSHOT_QUALITY;
     for (;;) {
-      const res = await this.helperCall<ScreenshotResult>(ctx, method, { ...params, budget: screenshotBudgetFor(ctx.call.model, maxDim, quality) }, metric);
+      const res = await this.helperCall<ScreenshotResult>(ctx, method, { ...params, ...(extra?.() ?? {}), budget: { ...screenshotBudgetFor(ctx.call.model, maxDim, quality), maxBytes: SCREENSHOT_BYTE_CAP } }, metric);
+      if (res.inVisit === true) metric.inVisit = true;
       const bytes = Math.floor((res.imageBase64.length * 3) / 4);
       const next = nextScreenshotQuality(quality);
-      if (bytes <= SCREENSHOT_BYTE_CAP || next === undefined) {
+      if (bytes <= SCREENSHOT_BYTE_CAP || next === undefined || res.inVisit === true) {
         metric.imageBytes = bytes;
         if (this.deps.screenshotSink !== undefined) {
           try { this.deps.screenshotSink({ sessionId: ctx.sessionId, primitive: method, mime: res.mime ?? "image/jpeg", base64: res.imageBase64 }); } catch { /* a test sink never fails a shot */ }
@@ -775,8 +898,20 @@ export class ComputerV2Service {
   private async targetScreenshot(ctx: RunCtx, t: TargetInfo, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<ImageHandle> {
     this.requireVision(ctx);
     const region = Array.isArray(args.region) && args.region.length === 4 && args.region.every((n) => typeof n === "number") ? args.region : undefined;
+    // `live: true` (the desktop-switch ruling): what is on screen NOW. Its reason is shown to the user when the shot
+    // needs their desktop, so it is required — and sanitized to one short line before anyone sees it.
+    if (args.live !== undefined && typeof args.live !== "boolean") throw bad("screenshot({ live }) takes true or false");
+    const live = args.live === true;
+    let reason: string | undefined;
+    if (live) {
+      if (typeof args.reason !== "string" || cardReason(args.reason).length === 0) {
+        throw bad("screenshot({ live: true }) takes a reason — what you need to see on screen now; the user is shown it if the picture needs their desktop");
+      }
+      reason = cardReason(args.reason.slice(0, 4 * LIVE_REASON_MAX));
+    }
     const settle = args.settle !== false && ctx.acted.has(t.targetId) ? { maxMs: SETTLE_CAP_MS } : undefined;
-    const res = await this.shoot(ctx, "target.screenshot", { targetId: t.targetId, callId: ctx.callId, ...(region === undefined ? {} : { region }), ...(settle === undefined ? {} : { settle }) }, metric);
+    const params = { targetId: t.targetId, callId: ctx.callId, ...(region === undefined ? {} : { region }), ...(settle === undefined ? {} : { settle }), ...(live ? { live: true } : {}) };
+    const res = live ? await this.liveShot(ctx, t, params, reason!, metric) : await this.shoot(ctx, "target.screenshot", params, metric);
     ctx.state.lastTargetShot.set(t.targetId, res.shotId);
     const handle = this.keepImage(ctx, res);
     // What the image is when it is not an ordinary capture ("captured …'s window on another desktop …") — said
@@ -943,10 +1078,9 @@ export class ComputerV2Service {
       if (ctx.ended || ctx.cancelled !== undefined) { release(); this.live(ctx); }
       ctx.locks.set(FOREGROUND_LOCK_KEY, release);
     }
-    // A window on another desktop is brought forward (taking the user there) only on a card the user answered —
-    // never under `bypass`, which asks none: the helper says so instead.
-    const moveDesktop = this.deps.policy.foregroundAsksTheUser(ctx.grants);
-    const res = await this.helperCall<{ front: boolean; detail?: string }>(ctx, "target.foreground", { targetId: t.targetId, moveDesktop }, metric);
+    // On the user's own desktop only (the desktop-switch ruling): the helper never holds a window on another
+    // desktop in front — it says so, and points at the scoped visit (an act asks by itself; a live screenshot).
+    const res = await this.helperCall<{ front: boolean; detail?: string }>(ctx, "target.foreground", { targetId: t.targetId, callId: ctx.callId }, metric);
     if (!res.front) {
       const said = helperDetail(res.detail);
       ctx.builder.daemonLine(said ?? `${t.name} could not be brought to the front`);
@@ -968,28 +1102,74 @@ export class ComputerV2Service {
     // A type or paste long enough to outlast the run's time left gets the run extended (or is refused up front)
     // — never killed halfway with the field part-filled.
     const actTimeout = action.kind === "type" || action.kind === "paste" ? this.fitTyping(ctx, action.kind, action.text) : undefined;
-    let res: ActResult;
+    const app: AppRef = { bundleId: t.bundleId, name: t.name };
+    const key = visitKey(t);
+    // The longest this primitive's part of an open visit may take (the helper's guardian keeps the visit the agent's
+    // own that long while it is in flight): the base, plus a long type/paste's own estimate.
+    const visitMaxMs = VISIT_BASE_MAX_MS + (action.kind === "type" || action.kind === "paste" ? typingEstimateMs(action.kind, action.text) : 0);
+    // Held in front for this run (`requestForeground`): the foreground needs no second asking. A DESKTOP-VISIT
+    // allowance never stands in for it (the review's blocker 1): the helper takes the front INSIDE a visit by itself,
+    // and on the user's own desktop the rung-4 card and the attended check keep their own rules.
+    let allowForeground = ctx.foreground.has(t.targetId);
+    let releaseForeground: (() => void) | undefined;
+    let res: ActResult | undefined;
     try {
-      // Held in front for this run (`requestForeground`): the foreground needs no second asking.
-      res = await this.helperCall<ActResult>(ctx, "target.act", { ...params, allowForeground: ctx.foreground.has(t.targetId) }, metric, actTimeout);
-    } catch (err) {
-      if (!(err instanceof HelperRpcError) || err.code !== "needs_foreground") throw err;
-      const app: AppRef = { bundleId: t.bundleId, name: t.name };
-      if (!(await this.deps.policy.allowForeground(ctx.grants, app, ctx.abort.signal))) {
-        throw new AutomationFailure("NeedsForeground", primitive === "menu"
-          // A menu command the app keeps disabled while it is in the background (Finder's Move to Trash).
-          ? `${t.name} only enables that menu command while it is in front, and Winter may not bring it forward now — ask the user to choose it, or to allow foreground use`
-          : `${t.name} only accepts this ${primitive} in the foreground, and Winter may not take the pointer now — try an element ref or another action, or ask the user`);
+      for (let attempt = 0; res === undefined; attempt++) {
+        // The user allowed a desktop visit for this app in this run: the helper still tries the background first and
+        // visits only when it must, leaving the visit OPEN for the next primitive that needs it — under the screen's
+        // one foreground lock, held for the whole open visit.
+        const visit = ctx.visits.get(key) === true;
+        if (visit) await this.ensureVisitLock(ctx, t);
+        if (visit) ctx.visitRequestsInFlight++;
+        try {
+          res = await this.helperCall<ActResult>(ctx, "target.act", { ...params, allowForeground, ...(visit ? { desktopVisit: true, visitMaxMs } : {}) }, metric, actTimeout);
+        } catch (err) {
+          if (visit && err instanceof HelperUnavailableError) this.noteVisitStranded(ctx, t.name);
+          // A primitive that FAILED inside the open visit leaves it open (`data.inVisit`): the lock stays with it.
+          if (err instanceof HelperRpcError && err.data.inVisit === true) { ctx.visitOpen = true; metric.inVisit = true; }
+          if (!(err instanceof HelperRpcError) || attempt >= 2) throw err;
+          if (err.code === "needs_desktop_visit" && !visit) {
+            // No way to do it without moving the user to the window's desktop: ask (every policy), then visit.
+            const outcome = await this.desktopVisitAllowed(ctx, t, desktopVisitActReason(app, primitive, ctx.title), metric);
+            if (!outcome.allowed) throw desktopVisitDenied(t.name, outcome);
+            continue;
+          }
+          if (err.code === "needs_foreground" && !allowForeground) {
+            if (!(await this.deps.policy.allowForeground(ctx.grants, app, ctx.abort.signal))) {
+              throw new AutomationFailure("NeedsForeground", primitive === "menu"
+                // A menu command the app keeps disabled while it is in the background (Finder's Move to Trash).
+                ? `${t.name} only enables that menu command while it is in front, and Winter may not bring it forward now — ask the user to choose it, or to allow foreground use`
+                : `${t.name} only accepts this ${primitive} in the foreground, and Winter may not take the pointer now — try an element ref or another action, or ask the user`);
+            }
+            this.live(ctx);
+            if (releaseForeground === undefined) releaseForeground = await this.takeForeground(ctx);
+            allowForeground = true;
+            continue;
+          }
+          throw err;
+        } finally {
+          if (visit) {
+            ctx.visitRequestsInFlight--;
+            if (res?.inVisit === true) ctx.visitOpen = true;
+            this.maybeReleaseVisitLock(ctx);
+          }
+        }
       }
-      const release = await this.locks.acquire(FOREGROUND_LOCK_KEY, { runId: ctx.runId, sessionId: ctx.sessionId }, {
-        waitMs: Math.min(LOCK_WAIT_MS, Math.max(500, ctx.timer.left() - 500)), signal: ctx.abort.signal, label: "The screen's foreground",
-      });
-      try {
-        res = await this.helperCall<ActResult>(ctx, "target.act", { ...params, allowForeground: true }, metric, actTimeout);
-      } finally { release(); }
-    }
+    } finally { releaseForeground?.(); }
     ctx.acted.add(t.targetId);
     metric.rung = res.rung;
+    if (res.inVisit === true) metric.inVisit = true;
+    // What the Focus Guardian did or saw since the last act (helper 1.9.8) — the user put back after an app took their
+    // front, an app the agent's action brought forward sent back, a system dialog left for the user — and the apps that
+    // came forward, counted. The notes name apps by THEIR chosen names, so they go inside the DATA-ONLY fence (review of
+    // round 9, LOW #9).
+    for (const note of Array.isArray(res.guardian) ? res.guardian : []) {
+      const line = helperDetail(note, 400);
+      if (line !== undefined) ctx.builder.text(line, { screen: true });
+    }
+    if (Array.isArray(res.viewMovedBy) && res.viewMovedBy.length > 0) {
+      metric.viewMovedBy = res.viewMovedBy.slice(0, 8).map((n) => String(n).slice(0, 80));
+    }
     // What the act did, in the helper's words: for keyboard input, FIRST where it went (so the model never has
     // to guess), then the helper's detail (an unconfirmed paste, an editor that hides its text, a view put back).
     // Element names come from the screen: inside the fence.
@@ -1003,6 +1183,149 @@ export class ComputerV2Service {
     const focus = focusLine(res);
     if (focus !== undefined) ctx.focusLines.set(t.targetId, { app: t.name, line: focus });
     return undefined;
+  }
+
+  /** The screen's one foreground lock for this primitive (rung 4, a desktop visit, a whole-screen shot) — a no-op
+   *  when the run already holds it for the rest of the script (`requestForeground`). */
+  private async takeForeground(ctx: RunCtx): Promise<() => void> {
+    if (ctx.locks.has(FOREGROUND_LOCK_KEY)) return () => {};
+    const release = await this.locks.acquire(FOREGROUND_LOCK_KEY, { runId: ctx.runId, sessionId: ctx.sessionId }, {
+      waitMs: Math.min(LOCK_WAIT_MS, Math.max(500, ctx.timer.left() - 500)), signal: ctx.abort.signal, label: "The screen's foreground",
+    });
+    if (ctx.ended || ctx.cancelled !== undefined) { release(); this.live(ctx); }
+    return release;
+  }
+
+  /**
+   * THE DESKTOP SWITCH (the ruling, 2026-10-10): may this primitive move the user to `t`'s desktop for a moment?
+   * Asked once per app (bundle id + pid) per run — every policy, the session's card and the helper's on-screen panel,
+   * no answer within a minute allows — and the answer kept for the rest of the run: an allowance needs no second
+   * prompt. A PERSON's refusal holds beyond the run, until the user's next message (5a): no prompt meanwhile.
+   * Concurrent primitives of one script share the prompt on screen.
+   */
+  private async desktopVisitAllowed(ctx: RunCtx, t: TargetInfo, reason: string, metric: PrimitiveMetric): Promise<DesktopVisitOutcome> {
+    const key = visitKey(t);
+    if (this.deps.policy.desktopRefused(ctx.sessionId, t.bundleId)) {
+      metric.visitAnswer = "held-refusal";
+      return { allowed: false, answer: "refuse", via: "none" };
+    }
+    const known = ctx.visits.get(key);
+    if (known !== undefined) {
+      metric.visitAnswer = known ? "run-allowance" : "run-refusal";
+      return { allowed: known, answer: known ? "allow" : "refuse", via: "none" };
+    }
+    let prompt = ctx.visitPrompts.get(key);
+    if (prompt === undefined) {
+      prompt = this.deps.policy.askDesktopVisit(ctx.grants, { bundleId: t.bundleId, name: t.name }, reason, ctx.abort.signal)
+        .finally(() => ctx.visitPrompts.delete(key));
+      ctx.visitPrompts.set(key, prompt);
+    }
+    const outcome = await prompt;
+    metric.visitAnswer = outcome.answer;
+    metric.visitVia = outcome.via;
+    if (outcome.answer !== "aborted" && outcome.answer !== "unavailable") ctx.visits.set(key, outcome.allowed);
+    this.live(ctx);
+    return outcome;
+  }
+
+  /** A `live: true` window shot: the helper takes it from here when it can (on screen, a still it proved live, or the
+   *  window already on screen in an open visit); when only the window's desktop has it, the user is asked, and the shot
+   *  is retaken with the visit allowed. */
+  private async liveShot(ctx: RunCtx, t: TargetInfo, params: Record<string, unknown>, reason: string, metric: PrimitiveMetric): Promise<ScreenshotResult & { bytes: number }> {
+    const key = visitKey(t);
+    const visitParams = (): Record<string, unknown> => (ctx.visits.get(key) === true ? { desktopVisit: true, visitMaxMs: VISIT_BASE_MAX_MS } : {});
+    const attempt = async (): Promise<ScreenshotResult & { bytes: number }> => {
+      const visit = ctx.visits.get(key) === true;
+      if (visit) { await this.ensureVisitLock(ctx, t); ctx.visitRequestsInFlight++; }
+      let shot: (ScreenshotResult & { bytes: number }) | undefined;
+      try {
+        shot = await this.shoot(ctx, "target.screenshot", params, metric, visitParams);
+        return shot;
+      } catch (err) {
+        if (visit && err instanceof HelperUnavailableError) this.noteVisitStranded(ctx, t.name);
+        if (err instanceof HelperRpcError && err.data.inVisit === true) { ctx.visitOpen = true; metric.inVisit = true; }
+        throw err;
+      } finally {
+        if (visit) {
+          ctx.visitRequestsInFlight--;
+          if (shot?.inVisit === true) ctx.visitOpen = true;
+          this.maybeReleaseVisitLock(ctx);
+        }
+      }
+    };
+    try {
+      return await attempt();
+    } catch (err) {
+      if (!(err instanceof HelperRpcError) || err.code !== "needs_desktop_visit" || ctx.visits.get(key) === true) throw err;
+    }
+    const outcome = await this.desktopVisitAllowed(ctx, t, reason, metric);
+    if (!outcome.allowed) throw desktopVisitDenied(t.name, outcome);
+    return await attempt();
+  }
+
+  /** The screen's foreground lock for an OPEN visit (5d): taken before the first request that may open one and held
+   *  until the helper reports the visit closed (with no such request in flight) or the run ends — another session's
+   *  visit, rung 4 or whole-screen shot waits, bounded, as for any foreground use. */
+  private async ensureVisitLock(ctx: RunCtx, t: TargetInfo): Promise<void> {
+    ctx.visitTouched = true;
+    ctx.visitApp = t.name;
+    if (ctx.locks.has(FOREGROUND_LOCK_KEY)) return;
+    const release = await this.locks.acquire(FOREGROUND_LOCK_KEY, { runId: ctx.runId, sessionId: ctx.sessionId }, {
+      waitMs: Math.min(LOCK_WAIT_MS, Math.max(500, ctx.timer.left() - 500)), signal: ctx.abort.signal, label: "The screen's foreground",
+    });
+    if (ctx.ended || ctx.cancelled !== undefined) { release(); this.live(ctx); }
+    if (ctx.locks.has(FOREGROUND_LOCK_KEY)) { release(); return; }
+    ctx.locks.set(FOREGROUND_LOCK_KEY, release);
+    ctx.visitLock = true;
+  }
+
+  /** The screen's foreground lock taken for a visit goes as soon as no visit is open and none may be opening: no
+   *  request carrying `desktopVisit` in flight, and the run does not hold the front itself (`requestForeground`). */
+  private maybeReleaseVisitLock(ctx: RunCtx): void {
+    if (!ctx.visitLock || ctx.visitOpen || ctx.visitRequestsInFlight > 0 || ctx.foreground.size > 0) return;
+    ctx.locks.get(FOREGROUND_LOCK_KEY)?.();
+    ctx.locks.delete(FOREGROUND_LOCK_KEY);
+    ctx.visitLock = false;
+  }
+
+  /**
+   * The run's end (5d (b)): close the session's open visit — the user returned, verified — and say EVERY visit this
+   * session made that is not yet said, one line each: "moved the user to Safari's desktop for 2.4 s (5 actions) and
+   * back", or, when they could not be brought back, a loud notice at the top. The helper hands each report over once.
+   * Never launches the helper: a helper that is gone took any open visit with it (said loudly, below).
+   */
+  private async closeVisits(ctx: RunCtx, state: SessionState): Promise<void> {
+    state.visitHint = false;
+    if (!this.deps.helper.connected) {
+      if (ctx.visitTouched) this.noteVisitStranded(ctx, ctx.visitApp ?? "the app");
+      return;
+    }
+    let res: { visits?: unknown };
+    try {
+      res = await this.deps.helper.request<{ visits?: unknown }>("visit.close", { sessionId: ctx.sessionId }, { timeoutMs: VISIT_CLOSE_TIMEOUT_MS });
+    } catch (err) {
+      if (ctx.visitTouched) this.noteVisitStranded(ctx, ctx.visitApp ?? "the app");
+      this.log(`computer-use: visit.close for ${ctx.sessionId} failed (${err instanceof Error ? err.message : "error"})`);
+      return;
+    }
+    for (const v of Array.isArray(res?.visits) ? res.visits : []) {
+      if (!isClosedVisit(v)) continue;
+      ctx.visitsClaimed++;
+      const name = ctx.state.targets.get(v.targetId)?.name ?? cardName(v.app);
+      const said = visitLine(name, v);
+      if (said.line !== undefined) ctx.builder.daemonLine(said.line);
+      if (said.notice !== undefined) ctx.builder.notice(said.notice);
+      this.log(`computer-use: ${v.returned === true || v.userMoved === true ? "" : "WARNING "}desktop visit ${v.visitId} to ${name} for ${ctx.sessionId}: ${Math.round(v.ms)} ms, ${v.actions} action(s), ${v.userMoved === true ? "the user took over" : v.returned === true ? "returned" : "the user was NOT returned"}`);
+    }
+  }
+
+  /** The helper went away while a visit may have been open: the user may still be on that desktop. Said once per run,
+   *  loudly, and logged. */
+  private noteVisitStranded(ctx: RunCtx, app: string): void {
+    if (ctx.visitStrandedNoticed) return;
+    ctx.visitStrandedNoticed = true;
+    ctx.builder.notice(`Winter Computer Use stopped while the user may have been on ${app}'s desktop — the user may still be on ${app}'s desktop. Tell them now, and check before acting there again.`);
+    this.log(`computer-use: WARNING the helper went away during a desktop visit to ${app} for ${ctx.sessionId} — the user may still be on its desktop`);
   }
 
   private async screenScreenshot(ctx: RunCtx, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<ImageHandle> {
@@ -1063,6 +1386,79 @@ export class ComputerV2Service {
     return await this.bind(ctx, { app: at.bundleId, window: at.windowId, known: { bundleId: at.bundleId, name: at.app } }, metric);
   }
 
+  /**
+   * What the app adapters get for one primitive (`adapters/`): this run's helper door (call id, busy retry, `live()`),
+   * its grants, its own AppleScript and document doors, and its result builder — nothing a script could not already
+   * reach, so the floors, the access classes and the helper's checks apply to every extra by construction.
+   */
+  private adapterScope(ctx: RunCtx, metric: PrimitiveMetric): AdapterRunScope {
+    return {
+      sessionId: ctx.sessionId, callId: ctx.callId, signal: ctx.abort.signal, primitive: metric.primitive, metric,
+      privatePath: computerUsePrivateEventPathFrom(this.deps.settings()),
+      helperVersion: () => this.deps.helper.version,
+      helper: <T,>(method: string, params: Record<string, unknown>, timeoutMs?: number) => this.helperCall<T>(ctx, method, params, metric, timeoutMs),
+      authorize: (app, purpose) => this.deps.policy.authorize(ctx.grants, app, purpose, ctx.abort.signal),
+      applescript: async (t, source, o) => await this.applescript(ctx, this.target(ctx, t.targetId), {
+        source, emit: false, ...(o?.timeoutMs === undefined ? {} : { timeoutMs: o.timeoutMs }),
+      }, metric) as { result: string | null },
+      openDocument: (target, opener) => this.openDocument(ctx, target, opener, metric),
+      builder: {
+        text: (text, o) => ctx.builder.text(text, o),
+        daemonLine: (text) => ctx.builder.daemonLine(text),
+        guide: (text) => ctx.builder.guide(text),
+        notice: (text) => ctx.builder.notice(text),
+        markScreenRead: () => ctx.builder.markScreenRead(),
+      },
+      clampWait: (ms) => this.clampWait(ctx, ms),
+      acted: (targetId) => { ctx.acted.add(targetId); },
+      log: (line) => this.log(line),
+    };
+  }
+
+  /** Run `work` as one of this run's tab primitives still in flight until it settles. */
+  private async trackTabWork<T>(ctx: RunCtx, work: Promise<T>): Promise<T> {
+    const set = (ctx.tabWork ??= new Set());
+    set.add(work);
+    try { return await work; } finally { set.delete(work); }
+  }
+
+  /** What the browser engine gets for one primitive of this run (`browser/tab-scope.ts`). */
+  private tabScope(ctx: RunCtx, metric: PrimitiveMetric): TabRunScope {
+    return {
+      sessionId: ctx.sessionId, runId: ctx.runId, callId: ctx.callId, vision: ctx.call.vision,
+      ...(ctx.call.model === undefined ? {} : { model: ctx.call.model }),
+      signal: ctx.abort.signal,
+      live: () => this.live(ctx),
+      timeLeft: () => Math.max(0, Math.floor(ctx.timer.left())),
+      clampWait: (ms) => this.clampWait(ctx, ms),
+      lock: async (key, label) => {
+        if (ctx.locks.has(key)) return;
+        this.live(ctx);
+        const waitMs = Math.min(LOCK_WAIT_MS, Math.max(500, ctx.timer.left() - 500));
+        const release = await this.locks.acquire(key, { runId: ctx.runId, sessionId: ctx.sessionId }, { waitMs, signal: ctx.abort.signal, label });
+        if (ctx.ended || ctx.cancelled !== undefined) { release(); this.live(ctx); }
+        if (ctx.locks.has(key)) { release(); return; }
+        ctx.locks.set(key, release);
+      },
+      lockRun: (key) => this.locks.holder(key)?.runId,
+      authorize: (app, purpose) => this.deps.policy.authorize(ctx.grants, app, purpose, ctx.abort.signal),
+      sessionPolicy: () => this.deps.policy.sessionFacts(ctx.sessionId).policy,
+      sessionFacts: () => this.deps.policy.sessionFacts(ctx.sessionId),
+      siteCard: (summary) => this.deps.policy.siteCard(ctx.grants, summary, ctx.abort.signal),
+      persistentlyAllowed: (bundleId) => this.deps.policy.persistentlyAllowed(ctx.sessionId, bundleId),
+      granted: (bundleId) => this.deps.policy.persistentlyAllowed(ctx.sessionId, bundleId) || ctx.grants.once.has(bundleId),
+      builder: ctx.builder,
+      keepImage: (img) => this.keepImage(ctx, { ...img, shotId: "" } as ScreenshotResult),
+      lastTargetShot: ctx.state.lastTargetShot,
+      acted: ctx.acted,
+      diffBases: this.diffBases,
+      metric,
+      noteSite: (host) => { (ctx.sites ??= new Set()).add(host); },
+      noteBrowser: (id) => { (ctx.browsers ??= new Set()).add(id); },
+      trusted: (sentence) => { ctx.daemonSentences.add(sentence); },
+    };
+  }
+
   // ── errors ─────────────────────────────────────────────────────────────────────────────────────
 
   /**
@@ -1109,6 +1505,8 @@ export class ComputerV2Service {
           return { kind: "NoWindow", message: `${prefix}${said}${next}`, untrusted: true };
         }
         case "needs_foreground": return { kind: "NeedsForeground", message: `${name} needs the foreground for that — try an element ref, or ask the user` };
+        // The desktop switch: one that escaped the ladder (asked again after the user allowed it) — never a bare Error.
+        case "needs_desktop_visit": return { kind: "NeedsForeground", message: `${name}'s window is on another desktop and this needs it on screen, which Winter could not arrange — keep to what works from here, or ask the user to bring the window to this desktop` };
         case "not_allowed": return { kind: "NotAllowed", message: typeof data.reason === "string" ? `not allowed: ${data.reason}` : `not allowed in ${name}` };
         case "refused": {
           // The helper's own sentence is KEPT — it says what it actually saw (the live gate: VS Code's "can't tell
@@ -1165,12 +1563,15 @@ export class ComputerV2Service {
    *  is every value the old runtime read from the screen, so the session's fence taint goes with them. */
   private forgetBindings(sessionId: string, state: SessionState): void {
     for (const t of state.targets.values()) if (t.lost === undefined) this.deps.helper.tell("target.release", { targetId: t.targetId });
+    this.deps.browsers?.forgetBindings(sessionId);
     state.targets.clear();
     state.images.clear();
     state.lastTargetShot.clear();
     state.lastScreenShot = undefined;
     state.tainted = false;
     this.diffBases.clearSession(sessionId);
+    this.deps.adapters?.clearSession(sessionId);
+    this.hoverNotes.clearSession(sessionId);
   }
 
   private resetSession(sessionId: string, state: SessionState): void {
@@ -1201,19 +1602,32 @@ export class ComputerV2Service {
    */
   endSession(sessionId: string, reason: "deleted" | "idle" | "stop" = "deleted"): void {
     if (reason !== "idle") this.deps.policy.clearSession(sessionId);
+    this.deps.browsers?.sessionEnded(sessionId, reason);
     const state = this.sessions.get(sessionId);
     if (state === undefined) return;
     if (state.active !== undefined) this.cancel(state.active, "the session ended");
     if (state.idleTimer !== undefined) clearTimeout(state.idleTimer);
     state.worker?.kill();
     this.diffBases.clearSession(sessionId);
+    this.deps.adapters?.clearSession(sessionId);
+    this.hoverNotes.clearSession(sessionId);
     this.deps.helper.tell("session.ended", { sessionId });
     this.sessions.delete(sessionId);
   }
 
   /** A main-thread turn ended: the helper fades that session's mirrors. */
   turnEnded(sessionId: string): void {
+    this.deps.browsers?.turnEnded(sessionId);
     if (this.sessions.has(sessionId)) this.deps.helper.tell("turn.ended", { sessionId });
+  }
+
+  /** Stop one session's script and its turn, as the helper's Esc does — the browser engine's door for the
+   *  extension's in-page Stop button. Only a session running a script NOW. */
+  stopScript(sessionId: string, reason: string): void {
+    const active = this.sessions.get(sessionId)?.active;
+    if (active === undefined) return;
+    this.cancel(active, reason);
+    try { this.deps.interrupt?.(sessionId); } catch { /* best effort */ }
   }
 
   /** The helper's notifications (spine §2.2). */
@@ -1240,11 +1654,38 @@ export class ComputerV2Service {
         return;
       case "permissionsChanged":
         return; // the client keeps the latest; `computerUse.status` reads it
+      case "desktopVisited": {
+        // ONE metrics entry per desktop visit (5d) — however it ended, a cancelled request's included (its answer was
+        // the helper's `cancelled`, before the visit's report existed). The result's line comes from `visit.close`.
+        const p = n.params;
+        if (p === undefined || typeof p.sessionId !== "string" || typeof p.ms !== "number") return;
+        this.deps.telemetry?.primitive({
+          ts: this.now(), sessionId: p.sessionId, callId: typeof p.callId === "string" ? p.callId : "", primitive: "desktop.visit", ms: Math.round(p.ms), helperMs: 0,
+          visit: { actions: typeof p.actions === "number" ? p.actions : 0, ms: Math.round(p.ms), returned: p.returned === true && p.userMoved !== true, ...(p.userMoved === true ? { userMoved: true } : {}) },
+          ...(p.why === "act" || p.why === "live" ? { visitWhy: p.why } : {}),
+        });
+        const state = this.sessions.get(p.sessionId);
+        if (state === undefined) return;
+        state.visitHint = true;
+        // The visit is closed: the run that held the screen's foreground lock for it lets it go (unless a request that
+        // may open the next one is in flight, or the run holds the front itself).
+        const ctx = state.active;
+        if (ctx !== undefined) {
+          ctx.visitOpen = false;
+          this.maybeReleaseVisitLock(ctx);
+        }
+        return;
+      }
     }
   }
 
-  /** The helper connection closed: every target it held is gone (`TargetLost` on next use). */
+  /** The helper connection closed: every target it held is gone (`TargetLost` on next use) — and a run that may have
+   *  had a desktop visit open says loudly that the user may still be on that desktop. */
   helperDisconnected(): void {
+    for (const state of this.sessions.values()) {
+      const ctx = state.active;
+      if (ctx !== undefined && !ctx.ended && ctx.visitTouched) this.noteVisitStranded(ctx, ctx.visitApp ?? "the app");
+    }
     for (const [sessionId, state] of this.sessions) {
       for (const t of state.targets.values()) t.lost = "helper_restart";
       this.diffBases.clearSession(sessionId);
@@ -1255,6 +1696,7 @@ export class ComputerV2Service {
   stop(): void {
     this.stopped = true;
     for (const sessionId of [...this.sessions.keys()]) this.endSession(sessionId, "stop");
+    this.deps.browsers?.stop();
   }
 
   /** Tests and diagnostics: the session's live worker pid. */
@@ -1266,7 +1708,11 @@ function failure(name: string, message: string): ScriptResult {
 }
 
 /** The functions a script may call — anything else from the worker is refused unrecorded (review I6). */
-const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES]);
+const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES, ...EXTRA_PRIMITIVES, ...TAB_PRIMITIVES, ...BROWSER_PRIMITIVES]);
+/** A browser tab's primitives no app has (refused on an app target before the helper sees them). */
+const TAB_ONLY_PRIMITIVES: ReadonlySet<string> = new Set<string>(TAB_PRIMITIVES.filter((p) => !(APP_PRIMITIVES as readonly string[]).includes(p)));
+/** How long a run's end waits for its tab input to stop before letting the tab locks go. */
+const TAB_WORK_AFTER_END_MS = 2_000;
 
 /** The error names a result (and the audit line) may carry: the ten kinds and JavaScript's own. */
 const KNOWN_ERROR_NAMES: ReadonlySet<string> = new Set<string>([
@@ -1405,11 +1851,38 @@ function refusedWords(reason: string, name: string): string {
     case "focus_not_placed": return `couldn't put the keyboard focus in that field of ${name}, so nothing was typed — use setValue(ref, text) if it takes a value, or click it first and retry`;
     case "focus_not_editable": return `the focus in ${name} is not a text field, so nothing was typed — click the field or pass { into }`;
     case "focus_moved": return `the focus left the field partway in ${name}, so the rest was not typed — check state(), then type the rest with { into }`;
+    case "app_in_front": return `${name} came to the front while the action was being prepared — the user may be using it now, so nothing was sent; check state(), and try again if it is still wanted`;
+    case "user_working": return `the user is working in ${name} right now — wait and retry, or ask them (reading it with state(), find() or screenshot() still works)`;
     case "wrong_field_shape": return `the text does not fit the field that has the focus in ${name} (several lines, or a long text, for a one-line field or the browser's own) — pass { into } for the field you mean`;
     case "auth_dialog": return "that is a system authentication dialog — ask the user to handle it";
     case "privacy_pane": return "System Settings' Privacy & Security panes are off limits — ask the user to change them";
     case "winter_itself": return "Winter never controls itself";
     case "save_path": return "that save location is protected (shell startup files, ~/.ssh, LaunchAgents) — choose another";
+    case "remote_debugging": return "Winter never turns on or approves remote debugging in a browser — it would give any app on this Mac full control of the browser and its sign-ins. Ask the user to do it if they really want it.";
     default: return `${name} refused that action${reason ? ` (${reason})` : ""}`;
   }
+}
+
+/** The failure of a primitive the user did not let visit its window's desktop — a person's refusal (held until their
+ *  next message), or a prompt that could not be shown (never worded as a refusal). */
+function desktopVisitDenied(app: string, outcome: DesktopVisitOutcome): AutomationFailure {
+  if (outcome.answer === "unavailable") {
+    return new AutomationFailure("NeedsForeground", `the desktop-switch prompt could not be shown, so ${app}'s window was not visited — try again in a moment; if it keeps failing, ask the user to bring the window to this desktop`);
+  }
+  return new AutomationFailure("NeedsForeground", `the user refused to be moved to ${app}'s desktop — ask them in your reply if it is needed`);
+}
+
+/** "420 ms", "2.4 s". */
+function visitDuration(ms: number): string {
+  const n = Math.max(0, Math.round(ms));
+  return n < 1_000 ? `${n} ms` : `${(n / 1_000).toFixed(1)} s`;
+}
+
+/** The result's words for one closed desktop visit: a daemon line ("moved the user to Safari's desktop for 2.4 s
+ *  (5 actions) and back"), or — when the user could not be brought back — a loud notice. */
+export function visitLine(app: string, v: { ms: number; actions: number; returned: boolean; userMoved?: boolean }): { line?: string; notice?: string } {
+  const what = `${app}'s desktop for ${visitDuration(v.ms)} (${v.actions} action${v.actions === 1 ? "" : "s"})`;
+  if (v.userMoved === true) return { line: `moved the user to ${what}; they took over during it, so Winter left them where they went` };
+  if (v.returned) return { line: `moved the user to ${what} and back` };
+  return { notice: `Winter moved the user to ${app}'s desktop and could NOT bring them back to their own. Tell the user now, and do nothing more in ${app} until they are back on their desktop.` };
 }

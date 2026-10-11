@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 82, "expected 82 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 84, "expected 84 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 
@@ -260,6 +260,35 @@ final class RoundTripTests: XCTestCase {
         let withoutData = try Data(contentsOf: withoutURL)
         guard case .approvalRequested(let without) = try JSONDecoder().decode(SessionEvent.self, from: withoutData) else { return XCTFail() }
         XCTAssertNil(without.options)
+    }
+
+    /// ComputerV2's desktop-switch prompt (2026-10-10): `approval_requested.onTimeout` is
+    /// additive/optional — CONTENT, not only the count (a mirror that forgot the field would drop it on
+    /// decode and still round-trip equal). The timeout-allow resolution decodes as approved by "timeout".
+    func testApprovalRequestedOnTimeoutOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "approval_requested_with_on_timeout", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing approval_requested_with_on_timeout.json fixture")
+        }
+        guard case .approvalRequested(let with) = try JSONDecoder().decode(SessionEvent.self, from: try Data(contentsOf: withURL)) else { return XCTFail() }
+        XCTAssertEqual(with.onTimeout, "allow")
+        XCTAssertEqual(with.options?.first?.id, "switch")
+        XCTAssertEqual(with.expiresAt, 1781270060000)
+        let reencoded = try JSONEncoder().encode(SessionEvent.approvalRequested(with))
+        guard case .approvalRequested(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(redecoded.onTimeout, "allow")
+
+        guard let withoutURL = Bundle.module.url(forResource: "approval_requested", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing approval_requested.json fixture")
+        }
+        guard case .approvalRequested(let without) = try JSONDecoder().decode(SessionEvent.self, from: try Data(contentsOf: withoutURL)) else { return XCTFail() }
+        XCTAssertNil(without.onTimeout)
+
+        guard let resolvedURL = Bundle.module.url(forResource: "approval_resolved_timeout_allow", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing approval_resolved_timeout_allow.json fixture")
+        }
+        guard case .approvalResolved(let resolved) = try JSONDecoder().decode(SessionEvent.self, from: try Data(contentsOf: resolvedURL)) else { return XCTFail() }
+        XCTAssertTrue(resolved.approved)
+        XCTAssertEqual(resolved.by, "timeout")
     }
 
     /// B2 Task 2: `panel_command.args` is additive/optional, and the fixture-count tripwire above

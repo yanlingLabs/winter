@@ -14,13 +14,15 @@
 // Every screenshot the helper returns is also written to `<home>/cu-live-shots/` (the test seam
 // `ComputerUseInjection.screenshotSink`) so the runner can judge its pixels.
 //
-// On start it prints ONE JSON line `{"ready":true,"socket":…,"pid":…}`; SIGTERM/SIGINT stop it cleanly.
+// On start it prints ONE JSON line `{"ready":true,"socket":…,"pid":…}`; SIGTERM/SIGINT stop it cleanly, and so does
+// its stdin closing (the runner holds the pipe, so a runner that dies — a SIGKILL included — takes it along).
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { AUTOMATION_WORKER_ARG, FileSecretStore, isDefaultWinterHome, runAutomationWorker, startDaemon } from "../../packages/core/src/index";
 import { HELPER_PROTOCOL } from "../../packages/core/src/computer-use/protocol";
 import { runFreshSampler, type FreshSamplerParams } from "./fresh-sampler";
+import { FIXTURE_ADAPTER } from "./adapters";
 
 if (process.argv[2] === AUTOMATION_WORKER_ARG) {
   runAutomationWorker();
@@ -115,6 +117,8 @@ if (import.meta.main) {
     home: home!,
     secrets: new FileSecretStore(join(home!, "test-secrets")),
     computerUse: {
+      // The adapters group's TEST adapter for the fixture app (AX-backed extras) — this daemon only.
+      adapters: [FIXTURE_ADAPTER],
       screenshotSink: (shot) => {
         const ext = shot.mime === "image/png" ? "png" : "jpg";
         writeFileSync(join(shots, `${Date.now()}-${String(++shotN).padStart(4, "0")}-${shot.primitive.replace(/[^a-z.]/gi, "")}.${ext}`), Buffer.from(shot.base64, "base64"));
@@ -130,4 +134,10 @@ if (import.meta.main) {
   };
   process.on("SIGTERM", () => { void stop(); });
   process.on("SIGINT", () => { void stop(); });
+  // The runner keeps our stdin open and closes it to stop us (as it does the monitor's), and the pipe closes when the
+  // runner dies in ANY way — a SIGKILL included — so a runner that could not clean up never leaves this daemon behind.
+  void (async () => {
+    try { for await (const _chunk of Bun.stdin.stream()) { /* nothing is ever sent */ } } catch { /* a closed pipe is the answer */ }
+    void stop();
+  })();
 }

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- The live suite's fixture dictionary: the Standard Suite, plus ONE command of every parameter kind ComputerV2's
+     generated `app.dict.*` wrappers marshal (text, integer, boolean, an enumeration, a list of text), so the adapters
+     group can run a dictionary command end to end and read in the fixture's own log what arrived. -->
+<dictionary title="Winter CU Fixture Terminology" xmlns:xi="http://www.w3.org/2001/XInclude">
+  <xi:include href="file:///System/Library/ScriptingDefinitions/CocoaStandard.sdef" xpointer="xpointer(/dictionary/suite)"/>
+  <suite name="Winter CU Fixture Suite" code="WCUF" description="What the live suite's fixture answers.">
+    <enumeration name="fixture tone" code="WCUt">
+      <enumerator name="plain" code="WCpl" description="Logged as plain."/>
+      <enumerator name="loud" code="WClo" description="Logged as loud."/>
+    </enumeration>
+    <command name="mark fixture" code="WCUFmark" description="Writes a mark to the fixture's log and returns it.">
+      <cocoa class="WCUMarkCommand"/>
+      <direct-parameter type="text" description="The mark's text."/>
+      <parameter name="repeats" code="WCrp" type="integer" optional="yes" description="How many times.">
+        <cocoa key="repeats"/>
+      </parameter>
+      <parameter name="flagged" code="WCfl" type="boolean" optional="yes" description="Whether the mark is flagged.">
+        <cocoa key="flagged"/>
+      </parameter>
+      <parameter name="tone" code="WCto" type="fixture tone" optional="yes" description="How it is logged.">
+        <cocoa key="tone"/>
+      </parameter>
+      <parameter name="tags" code="WCtg" optional="yes" description="Tags for the mark.">
+        <type type="text" list="yes"/>
+        <cocoa key="tags"/>
+      </parameter>
+      <result type="text" description="What was marked."/>
+    </command>
+  </suite>
+</dictionary>

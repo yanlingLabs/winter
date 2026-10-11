@@ -88,13 +88,19 @@ final class RemoteAccessCoordinator {
             hostLabel: Host.current().localizedName ?? "Mac",
             relayConfig: relay.relayConfig,
             relayURLs: relay.relayURLs,
-            keychainService: AppProfile.keychainService
+            keychainService: AppProfile.keychainService,
+            mirrorSource: mirrorSource
         ))
     }()
 
+    /// ComputerV2 Phase 1b: Winter.app's computer-use mirror, relayed to a paired phone that asks (`session.mirror`).
+    private let mirrorSource: RemoteMirrorSource?
+
     /// The only production initializer — `host` above resolves lazily to the real, verified-relay-
     /// config-backed `RemoteHost` the first time anything touches it.
-    init() {}
+    init(mirrorSource: RemoteMirrorSource? = nil) {
+        self.mirrorSource = mirrorSource
+    }
 
     #if DEBUG
     /// Test-only seam (autostart follow-up): injects an already-constructed `RemoteHost` directly,
@@ -106,6 +112,7 @@ final class RemoteAccessCoordinator {
     /// so `startRemoteAccessIfPaired()` can be proven without ever touching a real iroh listener or
     /// the Keychain (CLAUDE.md: tests must never touch live Keychain/network).
     init(host: RemoteHost) {
+        self.mirrorSource = nil
         self.host = host
     }
     #endif

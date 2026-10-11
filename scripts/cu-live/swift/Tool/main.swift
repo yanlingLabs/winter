@@ -41,6 +41,10 @@ case .success(.freshDecode(let layoutPath, let files)):
     }
     for file in files { Out.line(FreshDecode.decode(path: file, layout: layout)) }
     exit(0)
+case .success(.session):
+    // Pure CoreGraphics session query: no window server connection of our own, no NSApplication.
+    Out.line(SessionState.read().json)
+    exit(0)
 case .success(.front):
     MainActor.assumeIsolated { Monitor.front() }
 case .success(.monitor(let intervalMs)):

@@ -56,6 +56,9 @@ public final class CUCore: @unchecked Sendable {
     private var observers: [NSObjectProtocol] = []
     private var logged = Set<String>()
     private var lastDestroyCheck: [pid_t: Double] = [:]
+    /// Window checks in flight per pid (`checkWindows`): one at a time; a notification during it asks for one more.
+    private var windowChecksRunning = Set<pid_t>()
+    private var windowChecksAgain = Set<pid_t>()
 
     /// `events` is held weakly (the shell owns both).
     public convenience init(events: (any CUCoreEvents)?) {
@@ -102,6 +105,14 @@ public final class CUCore: @unchecked Sendable {
             holdReleaseSchedule = { _, _ in }  // no real timer from a unit test: a test that wants it captures it
             keyTapInstaller = CUNoKeyTapInstaller()  // no real tap from a unit test: no blip unless a test fakes one
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
+            visitArriveMs = 0
+            visitLateSwitchMs = 0
+            keySwitchGapMs = 0
+            keyInAppSettleMs = 0
+            visitFreshMaxMs = 0
+            visitFreshStableMs = 0
+            visitNoProbeWaitMs = 0
+            windowGoneSettleMs = 0  // one reading decides, as before: a test that wants the watch sets it
         }
     }
 
@@ -184,8 +195,18 @@ public final class CUCore: @unchecked Sendable {
         }
         let r = try resolveOpen(strings, app: app)
         try refuseFloorApp(bundleId: r.bundle.bundleIdentifier, pid: 0, name: r.bundle.bundleIdentifier ?? r.appURL.lastPathComponent)
+        // The open is the agent's from BEFORE it (review of round 9, HIGH #2): it may launch the opener, whose first
+        // activation must never read as the user's own launch — and a running opener is touched before it can come forward.
+        let launch = beginGuardianLaunch()
+        CUCore.$bindLaunchToken.withValue(launch) { noteGuardianLaunchBundle(r.bundle.bundleIdentifier) }
+        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: r.bundle.bundleIdentifier ?? "").first {
+            noteGuardianCause(running.processIdentifier, raise: true)
+        }
+        var openedPid: pid_t?
+        defer { endGuardianLaunch(launch, pid: openedPid) }
         let opened = try await CUDocumentOpen.open(r.urls, withApp: r.appURL)
-        noteGuardianOpened(opened.processIdentifier)
+        openedPid = opened.processIdentifier
+        noteGuardianCause(opened.processIdentifier, raise: true)  // an open can bring its window forward
         return opened.localizedName ?? CUApps.displayName(r.bundle, fallback: r.appURL.deletingPathExtension().lastPathComponent)
     }
 
@@ -202,8 +223,15 @@ public final class CUCore: @unchecked Sendable {
         let before: Set<UInt32> = runningOpener.map { r in
             Set(CUBindWait.realWindows(sys.windows(pid: r.processIdentifier)).map(\.id))
         } ?? []
+        // The agent's from BEFORE the open (review of round 9, HIGH #2): a launch it makes, a running opener touched.
+        let launch = beginGuardianLaunch()
+        CUCore.$bindLaunchToken.withValue(launch) { noteGuardianLaunchBundle(b.bundleIdentifier) }
+        if let r = runningOpener { noteGuardianCause(r.processIdentifier, raise: true) }
+        var openedPid: pid_t?
+        defer { endGuardianLaunch(launch, pid: openedPid) }
         let app = try await CUDocumentOpen.open(urls, withApp: appURL)
-        noteGuardianOpened(app.processIdentifier)  // it may come forward late: a possible thief for the guard
+        openedPid = app.processIdentifier
+        noteGuardianCause(app.processIdentifier, raise: true)  // it may come forward late: a possible thief for the guard
         // A real window of the opener not seen before the open: the document's. Polled briefly (it is async).
         let windowID: UInt32? = await {
             let deadline = clock.nowMs() + windowWaitMs
@@ -215,7 +243,7 @@ public final class CUCore: @unchecked Sendable {
             // None new (the app showed the doc in an existing window, or none has appeared): the frontmost.
             return CUBindWait.realWindows(sys.windows(pid: app.processIdentifier)).map(\.id).first
         }()
-        noteGuardianOpened(app.processIdentifier)  // its window is up: it may activate now (a cause again)
+        noteGuardianAfterglow(app.processIdentifier, raise: true)  // its window is up: it may still activate now
         let bound = CUBoundApp(name: app.localizedName ?? b.bundleIdentifier ?? appURL.lastPathComponent,
                                bundleId: app.bundleIdentifier ?? "", pid: app.processIdentifier)
         return OpenDocumentsResult(app: bound, windowID: windowID)
@@ -243,6 +271,7 @@ public final class CUCore: @unchecked Sendable {
         case .running(let r): app = r
         case .installed(let url, let bundleId, let name):
             try core.refuseFloorApp(bundleId: bundleId, pid: 0, name: name)
+            core.noteGuardianLaunchBundle(bundleId)
             app = try await CUApps.launchInBackground(url)
             launched = true
         }
@@ -253,17 +282,23 @@ public final class CUCore: @unchecked Sendable {
 
     public func targetBind(_ p: TargetBindParams) async throws -> TargetBindResult {
         try requireAccessibility()
-        // Launching, reopening or asking for a new window can bring the app forward: checked like an act.
+        // Launching, reopening or asking for a new window can bring the app forward: checked like an act, by the one
+        // rule from the bind's start. An app this bind launches is the agent's from before the launch (its process
+        // starts after it) — review of round 7: the launch was never a cause, so a launched app that activated itself
+        // during the bind was "an app the agent never touched", the user's.
         let before = userView()
+        let startedAt = clock.nowSeconds()
+        let launch = beginGuardianLaunch()
         var named: (app: String, pid: pid_t)?
+        defer { endGuardianLaunch(launch, pid: named?.pid) }
         do {
-            var r = try await bind(p) { named = ($0, $1) }
-            if let named, let note = viewNoteAfterBind(before, app: named.app, pid: named.pid, route: "bind") {
+            var r = try await CUCore.$bindLaunchToken.withValue(launch) { try await bind(p) { named = ($0, $1) } }
+            if let named, let note = viewNoteAfterBind(before, app: named.app, pid: named.pid, route: "bind", since: startedAt) {
                 r.detail = [r.detail, note].compactMap { $0 }.joined(separator: "; ")
             }
             return r
         } catch {
-            if let named { _ = viewNoteAfterBind(before, app: named.app, pid: named.pid, route: "a failed bind") }
+            if let named { _ = viewNoteAfterBind(before, app: named.app, pid: named.pid, route: "a failed bind", since: startedAt) }
             throw error
         }
     }
@@ -273,6 +308,9 @@ public final class CUCore: @unchecked Sendable {
         let launched = app.launched
         let appName = app.name ?? app.bundleIdentifier ?? p.app
         named(appName, app.pid)
+        // The window wait (a launch's, a reopen's) can bring it forward at any time: touched throughout.
+        beginGuardianSpan(app.pid)
+        defer { endGuardianSpan(app.pid) }
         try refuseFloorApp(bundleId: app.bundleIdentifier, pid: app.pid, name: appName, processName: app.executableName)
         let pid = app.pid
         let chromium = app.isChromium
@@ -280,10 +318,13 @@ public final class CUCore: @unchecked Sendable {
         // with no re-resolution, no new window and no move. Only a lost target is resolved again.
         if !launched, let existing = reusableTarget(sessionId: p.sessionId, pid: pid, selector: p.window) {
             CULog.bind.notice("bind \(appName, privacy: .public): reused \(existing.id, privacy: .public) (window \(existing.windowID, privacy: .public))")
+            let facts = Self.bundleFacts(app.running)
+            let web = try await queues.run(pid) { [self] in hasWebContent(existing) }
             return TargetBindResult(targetId: existing.id,
-                                    app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid),
+                                    app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid, path: facts.path, version: facts.version),
                                     window: CUWindowInfo(id: existing.windowID, title: existing.windowTitle,
-                                                         frame: cuFrame(sys.window(id: existing.windowID)?.frame ?? .zero)))
+                                                         frame: cuFrame(sys.window(id: existing.windowID)?.frame ?? .zero)),
+                                    webContent: web ? true : nil)
         }
         monitor.watch(pid: pid)
 
@@ -340,20 +381,61 @@ public final class CUCore: @unchecked Sendable {
         target.knownWindows = Set(CUBindWait.realWindows(serverNow).map(\.id)).union([chosen.id])
         emit { $0.targetBound(sessionId: p.sessionId, pid: pid, windowID: chosen.id, appName: appName, mirror: p.mirror) }
         noteGuardianPrivatePath(privatePath)
-        noteGuardianActed(pid)
+        noteGuardianAfterglow(pid, raise: true)
         // Said up front: what working a window on another desktop costs, and the way out.
         let offDesktop = sys.window(id: chosen.id)?.onScreen == false && !outcome.captureOnly
         let costs = offDesktop ? Self.offDesktopCosts(appName) : nil
+        let facts = Self.bundleFacts(app.running)
+        let web = try await queues.run(pid) { [self] in hasWebContent(target) }
         return TargetBindResult(targetId: target.id,
-                                app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid),
+                                app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid, path: facts.path, version: facts.version),
                                 window: CUWindowInfo(id: chosen.id, title: chosen.title, frame: cuFrame(chosen.frame)),
                                 detail: [found.reopened ? "opened the app's default window" : nil, outcome.detail, costs]
-                                    .compactMap { $0 }.joined(separator: "; ").nonEmptyOrNil)
+                                    .compactMap { $0 }.joined(separator: "; ").nonEmptyOrNil,
+                                webContent: web ? true : nil)
+    }
+
+    /// The bound window holds web content: an `AXWebArea` (found by the page reader's bounded walk). A background web page
+    /// takes no hover from a pointer that is not the real one — WebKit (measured 2026-10-10) and Chromium alike (run111,
+    /// 2026-10-11: a background Chrome page got the private path's moves, but neither a mouseenter nor a :hover, on either
+    /// route). On the target's queue.
+    ///
+    /// WebKit builds a web view's accessibility tree lazily, on the first request (measured, run115: the first walk of a
+    /// fresh WKWebView window saw its host group empty, the web area 20–30 ms later): when the first walk finds none but
+    /// an empty group, it looks again a few times (≤ ~160 ms).
+    func hasWebContent(_ t: CUTarget) -> Bool {
+        guard t.accessible, let win = try? windowElement(t) else { return false }
+        for attempt in 0..<9 {
+            if attempt > 0 { clock.pause(ms: 20) }
+            let (found, emptyGroup) = webAreaWalk(win)
+            if found { return true }
+            if !emptyGroup { return false }
+        }
+        return false
+    }
+
+    /// One bounded breadth-first walk: whether a web area is there, and whether an empty group is (a web view whose tree
+    /// is not built yet).
+    private func webAreaWalk(_ win: AXUIElement, maxNodes: Int = 600, maxMs: Double = 80) -> (found: Bool, emptyGroup: Bool) {
+        let deadline = clock.nowMs() + maxMs
+        var queue = [win]
+        var next = 0
+        var emptyGroup = false
+        while next < queue.count, next < maxNodes, clock.nowMs() < deadline {
+            let n = queue[next]
+            next += 1
+            let role = ax.string(n, kAXRoleAttribute)
+            if role == "AXWebArea" { return (true, emptyGroup) }
+            let kids = ax.elements(n, kAXChildrenAttribute)
+            if kids.isEmpty, role == kAXGroupRole { emptyGroup = true }
+            queue.append(contentsOf: kids)
+        }
+        return (false, emptyGroup)
     }
 
     /// What working a window on another desktop costs (said at bind). Pure.
     static func offDesktopCosts(_ app: String) -> String {
-        "\(app)'s window is not on this desktop, so it is worked in the background: a click is sent but can't be seen landing, keys reach it through a brief focus switch, and it may not redraw (a screenshot can be older than what was done) — if what you do there does not land, app.requestForeground(reason) asks the user to let \(app) come to the front for the rest of the script"
+        "\(app)'s window is not on this desktop, so it is worked in the background: a click is sent but can't be seen landing, keys reach it through a brief focus switch, and it may not redraw (each screenshot says how fresh it is) — screenshot({ live: true, reason }) gets what is on screen now, and an action that can't land from here asks the user to let Winter take them to its desktop for a moment (and back)"
     }
 
     /// The live effects behind `CUWindowResolver` (run on the pid queue).
@@ -372,7 +454,7 @@ public final class CUCore: @unchecked Sendable {
                 let deadline = clock.nowMs() + windowWaitMs
                 while clock.nowMs() < deadline {
                     if let w = probe() { return w }
-                    usleep(50_000)
+                    clock.pause(ms: 50)
                 }
                 return probe()
             },
@@ -471,23 +553,93 @@ public final class CUCore: @unchecked Sendable {
     var holdReleaseSchedule: (TimeInterval, @escaping @Sendable () -> Void) -> Void = { seconds, work in
         DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: work)
     }
+    // Desktop visits (CUCore+Visit): the user agreed to be taken to a window's desktop for ONE primitive and
+    // brought back right after. One at a time, helper-wide.
+    let visitGate = CUVisitGate()
+    let visitLock = NSLock()
+    /// The ONE open visit (helper-wide), the closed visits each session has not claimed yet (`visit.close`), and
+    /// the visit ids' counter. Guarded by `visitLock`.
+    var openVisit: CUOpenVisit?
+    var closedVisits: [String: [CUVisitReport]] = [:]
+    var visitSeq = 0
+    /// An open visit closes this long after the last primitive that ran in it finished, with none started since.
+    static let visitCloseGraceMs: Double = 1000
+    /// The guardian's safety cap on an open visit with nothing running in it (one running extends it to at least its
+    /// own `visitMaxMs`).
+    static let visitIdleCapMs: Double = 60_000
+    var visitGraceMs: Double = CUCore.visitCloseGraceMs
+    var visitCapMs: Double = CUCore.visitIdleCapMs
+    /// Schedules a visit's grace close or cap; tests may run their own.
+    var visitSchedule: (Double, @escaping @Sendable () -> Void) -> DispatchWorkItem = { ms, work in
+        let item = DispatchWorkItem(block: work)
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + ms / 1000, execute: item)
+        return item
+    }
+    /// How long a visit waits for the window to come on screen, how long at most for a fresh frame, how long an
+    /// unchanged picture must stay so to count as painted, how often it is sampled, and how long it waits when no
+    /// frame can be sampled. 0 in test cores (one look each, no waiting).
+    var visitArriveMs: Double = 1500
+    /// After a visit that never arrived, how long a late switch (the target answering its AX calls late) is watched for.
+    var visitLateSwitchMs: Double = 1200
+    /// A late switch counts as the user's when input of theirs that can switch apps or desktops (`lastSwitchInputAt`)
+    /// came at most this long before it was seen (a ⌘-Tab's switch lands a few hundred ms after the keys).
+    static let lateSwitchInputWindow: TimeInterval = 1.0
+    /// How long a window read as closed while the server still lists it is watched before it counts as gone
+    /// (`windowGone`): a full-screen transition reads like that for a moment.
+    var windowGoneSettleMs: Double = 1500
+    /// The pause between the synthetic deactivation and the make-key records (`releaseOtherKeyWindow`); 0 in
+    /// test cores.
+    var keySwitchGapMs: Double = 30
+    /// How long the make-key step waits for the app to show the key window an activation brings back (0 in tests).
+    var keyInAppSettleMs: Double = 60
+    /// The make-key step for Chromium-based apps: off until measured (see `makeKeyApplies`).
+    var makeKeyChromium = false
+    /// Apps a blip's hand-back left with no key window (`noteStranded`).
+    let strandLock = NSLock()
+    var strandedPids = Set<pid_t>()
+    /// The most elements a hover's "did anything appear" walk counts; past it the walk proves nothing (nil).
+    var hoverFingerprintMaxNodes = 4000
+    var visitFreshMaxMs: Double = 1000
+    var visitFreshStableMs: Double = 300
+    var visitFrameIntervalMs: Double = 50
+    var visitNoProbeWaitMs: Double = 250
+    /// A digest of the window's picture now (the fresh-frame wait); replaceable by tests.
+    var visitFrameDigestOverride: ((CUTarget) -> Int?)?
     var guardianRefs = 0
     var guardianObservers: [NSObjectProtocol] = []
     var pendingGuardianNotes: [String] = []
-    var lastSyntheticActivationAt: Double = -1
+    /// The apps that came forward after the agent's action with no input of the user's since the last act (for the act's
+    /// result: a metric).
+    var pendingViewMovedBy: [String] = []
+    /// When the last activation notification was handled (a later one of an app seen in front since is no new change).
+    var lastActivationHeardAt: TimeInterval = -.infinity
+    /// The window numbers of the helper's own panels that take clicks (the desktop-switch prompt), as the presentation
+    /// says; nil: by level (`ownWindowTakesClicks`).
+    var ownClickableWindows: (() -> Set<UInt32>)?
+    /// Every note the guardian leaves for the next result, as it is left (the model-based test).
+    var guardianNoted: ((String) -> Void)?
+    /// Whether a bound app is a web browser, as a test says (live: its Info.plist declares http/https).
+    var isWebBrowserOverride: ((CUTarget) -> Bool)?
+    /// The bind whose launch a resolver is naming (`noteGuardianLaunchBundle`).
+    @TaskLocal static var bindLaunchToken: Int?
     /// Sessions with a script running, the latest private-path setting seen, and the pending end of the tail.
     var guardianScripts: Set<String> = []
     var guardianPrivatePath = false
     var guardianTailWork: DispatchWorkItem?
-    /// When each app was last given a cause to come forward by the agent — an act on it, a focus blip ending, a
-    /// document opened or the app launched — and when anything was: a change counts as the agent's only within
-    /// `guardianCausalWindow` after its cause.
-    var guardianCauses: [pid_t: TimeInterval] = [:]
-    var guardianLastCause: TimeInterval = -1
     /// The global monitor that sees the user's trackpad gestures (swipes between Spaces, Mission Control).
     var guardianGestureMonitor: Any?
     /// The last hardware-origin input event (any type, trackpad gestures included) the listen-only tap saw.
     var lastHardwareInputAt: TimeInterval = -1
+    /// The same, for a hardware ACTION only (a click, a key, a scroll, a gesture — never a pointer move).
+    var lastHardwareActionAt: TimeInterval = -1
+    /// When switch-capable input was last seen (for the log and tests).
+    var lastSwitchInputAt: TimeInterval { guardianLock.withLock { guardianCore.input.lastAt } }
+    /// Whether that input can be seen at all (the session tap runs: it alone sees modifiers and clicks); a test sets it.
+    var switchInputObservableOverride: Bool?
+    /// Secure Event Input, as a test sets it (live: `IsSecureEventInputEnabled`).
+    var secureInputOverride: Bool?
+    /// Every verdict of the one rule, with the path that asked (the model-based test's I5 check).
+    var moveJudged: ((String, CUUserView, CUMoveOwner) -> Void)?
     /// Schedules the end of the guard's tail; tests run it by hand.
     var guardianTailSchedule: (TimeInterval, @escaping () -> Void) -> DispatchWorkItem? = { seconds, work in
         let item = DispatchWorkItem(block: work)
@@ -505,6 +657,16 @@ public final class CUCore: @unchecked Sendable {
     var guardianLiveTapEnabled = true
     /// Whether the guardian's restore runs inline (tests, synchronous) rather than dispatched off-main.
     var guardianRestoreSync = false
+    /// Where the guardian's restore is dispatched, when a test runs it on its own schedule (the model-based test: off
+    /// the observer, as live, but in simulated time). Nil: `guardianRestoreSync` decides.
+    var guardianRestoreDispatch: ((@escaping () -> Void) -> Void)?
+    /// Closes a visit the one rule found the user left by themselves (`noteVisitUserMove`); a test may close it on its own
+    /// schedule (the model-based test, in simulated time). Nil: an async close.
+    var visitCloseDispatch: ((CUOpenVisit, VisitCloseReason) -> Void)?
+    /// Schedules the act's late check (300 ms on); a test may run it on its own clock.
+    var lateCheckSchedule: (Double, @escaping () -> Void) -> Void = { ms, work in
+        DispatchQueue.global().asyncAfter(deadline: .now() + ms / 1000, execute: work)
+    }
     /// How long a press the app answered with an error is watched for its effect (a new window, a value, the
     /// focus). 0 in test cores (one read).
     var pressSettleMs: Double = 500
@@ -526,6 +688,7 @@ public final class CUCore: @unchecked Sendable {
     var restoreRetryMs: Double = 120
     /// Seconds since the last physical user input, injectable for tests.
     var secondsSinceUserInputOverride: (() -> TimeInterval)?
+    var secondsSinceUserClickOverride: (() -> TimeInterval)?
     /// The window server's key-focus pid, injectable for tests (the swallowed-click retry).
     var keyFocusPidOverride: (() -> pid_t?)?
 
@@ -595,6 +758,8 @@ public final class CUCore: @unchecked Sendable {
 
     /// The window's tree for the off-desktop hit test; replaceable by tests (the live reader walks real AX).
     var treeReadOverride: ((CUTarget) -> [CUNode])?
+    /// The whole window's tree for `state()` (`observe`), replaceable by tests: the live reader walks real AX.
+    var stateReadOverride: ((CUTarget) -> [CUNode])?
 
     /// How long a moved window or an opened document's window may take to appear (shortened by tests).
     var windowWaitMs: Double = 3000
@@ -627,14 +792,18 @@ public final class CUCore: @unchecked Sendable {
         try requireAccessibility()
         let t = try target(p.targetId)
         let before = userView()
+        let startedAt = clock.nowSeconds()
         let outcome: CUWindowResolver.Outcome
+        beginGuardianSpan(t.pid)
         do {
             outcome = try await resolveUseWindow(p, t)
         } catch {
-            _ = viewNoteAfterBind(before, app: t.appName, pid: t.pid, route: "a failed useWindow")
+            endGuardianSpan(t.pid)
+            _ = viewNoteAfterBind(before, app: t.appName, pid: t.pid, route: "a failed useWindow", since: startedAt)
             throw error
         }
-        let note = viewNoteAfterBind(before, app: t.appName, pid: t.pid, route: "useWindow")
+        endGuardianSpan(t.pid)
+        let note = viewNoteAfterBind(before, app: t.appName, pid: t.pid, route: "useWindow", since: startedAt)
         var r = try await switchWindow(t, outcome)
         if let note { r.detail = [r.detail, note].compactMap { $0 }.joined(separator: "; ") }
         return r
@@ -667,8 +836,9 @@ public final class CUCore: @unchecked Sendable {
             emit { $0.targetReleased(sessionId: t.sessionId, pid: t.pid, windowID: old) }
             emit { $0.targetBound(sessionId: t.sessionId, pid: t.pid, windowID: chosen.id, appName: t.appName, mirror: t.mirror) }
         }
+        let web = try await queues.run(t.pid) { [self] in hasWebContent(t) }
         return TargetUseWindowResult(window: CUWindowInfo(id: chosen.id, title: chosen.title, frame: cuFrame(chosen.frame)),
-                                     detail: outcome.detail)
+                                     detail: outcome.detail, webContent: web ? true : nil)
     }
 
     public func targetWindows(_ p: TargetWindowsParams) async throws -> TargetWindowsResult {
@@ -696,11 +866,17 @@ public final class CUCore: @unchecked Sendable {
     // MARK: - observation
 
     public func targetSnapshot(_ p: TargetSnapshotParams) async throws -> TargetSnapshotResult {
+        // A window on the session's visited desktop is read there, keeping the visit open.
+        let t = try target(p.targetId)
+        return try await inOpenVisit(t, callId: p.callId) { try await targetSnapshotBody(p) }.0
+    }
+
+    private func targetSnapshotBody(_ p: TargetSnapshotParams) async throws -> TargetSnapshotResult {
         try requireAccessibility()
         let t = try target(p.targetId)
-        try ensureAlive(t)
         let token = cancels.begin(p.callId)
         defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         var note: CUSettleNote?
         var settled = true
         var waited = 0
@@ -748,18 +924,26 @@ public final class CUCore: @unchecked Sendable {
             let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note,
                                        caret: obs.caret, focusText: obs.focusText, page: page,
                                        stateNumber: Int(sid.components(separatedBy: ".s").last ?? ""), unread: obs.unread)
-            let snap = CUSnapshot(id: sid, scope: within, header: header, roots: obs.roots, formatter: formatter)
-            // A whole-window, non-full state folds what is out of view first; `within` and `full` don't.
-            var text = formatter.full(header: header, roots: obs.roots, viewportFirst: within == nil && p.full != true)
+            // A whole-window, non-full state folds what is out of view first; `within` and `full` don't. A `full`
+            // state is everything the read saw, up to the formatter's hard cap (its last line says when it was cut).
+            // What the print shows is kept with the snapshot: a later diff surfaces what it had folded.
+            let printed = formatter.printed(header: header, roots: obs.roots, viewportFirst: within == nil && p.full != true,
+                                            whole: p.full == true)
+            var snap = CUSnapshot(id: sid, scope: within, header: header, roots: obs.roots, formatter: formatter, shown: printed.shown)
+            var text = printed.text
             var isDiff = false
             var ratio = 1.0
             if let since = p.since, p.full != true, gone == nil, let old = t.snapshot(since), old.scope == within {
-                let d = CUStateDiff.compute(old: old, new: snap)
+                let d = CUStateDiff.compute(old: old, new: snap, shownNow: printed.shown)
                 ratio = d.changedRatio
                 if ratio <= 0.5 {
                     isDiff = true
-                    text = d.render(header: header, new: snap, includeWindowTitle: old.header.windowTitle != obs.title,
-                                    formatter: formatter)
+                    let r = d.rendered(header: header, new: snap, includeWindowTitle: old.header.windowTitle != obs.title,
+                                       formatter: formatter, seen: old.shown)
+                    text = r.text
+                    snap.shown = r.shown
+                } else {
+                    snap.shown = d.shownAfterPrint(old: old, new: snap, printed: printed.shown)
                 }
             }
             // A menu command or a click may open a window the target is not bound to (Finder's Go › Downloads
@@ -800,9 +984,17 @@ public final class CUCore: @unchecked Sendable {
     }
 
     public func targetFind(_ p: TargetFindParams) async throws -> TargetFindResult {
+        // A window on the session's visited desktop is read there, keeping the visit open.
+        let t = try target(p.targetId)
+        return try await inOpenVisit(t, callId: nil) { try await targetFindBody(p) }.0
+    }
+
+    private func targetFindBody(_ p: TargetFindParams) async throws -> TargetFindResult {
         try requireAccessibility()
         let t = try target(p.targetId)
-        try ensureAlive(t)
+        let token = cancels.begin(p.callId)
+        defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         guard t.accessible else { return TargetFindResult(elements: []) }  // capture-only: no AX tree to search
         let formatter = self.formatter
         return try await queues.run(t.pid) { [self] in
@@ -868,7 +1060,19 @@ public final class CUCore: @unchecked Sendable {
 
     public func targetScreenshot(_ p: TargetScreenshotParams) async throws -> TargetScreenshotResult {
         let t = try target(p.targetId)
-        try ensureAlive(t)
+        // The call's cancel first: a window watched through a transition (`ensureAlive`) is waited for under it.
+        let token = cancels.begin(p.callId)
+        defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
+        // A window on the session's visited desktop is captured there, keeping the visit open (a live shot of it is an
+        // on-screen capture).
+        let ran = try await inOpenVisit(t, callId: p.callId, maxMs: p.visitMaxMs) { try await screenshot(p, t) }
+        var r = ran.0
+        if ran.1 { r.inVisit = true }
+        return r
+    }
+
+    private func screenshot(_ p: TargetScreenshotParams, _ t: CUTarget) async throws -> TargetScreenshotResult {
         let region = try cuRect(p.region)
         let token = cancels.begin(p.callId)
         defer { cancels.end(p.callId) }
@@ -889,6 +1093,51 @@ public final class CUCore: @unchecked Sendable {
         var detail: String?
         var taken: CUCapturedImage?
         var privateTried = false
+        // LIVE (the model needs what is on screen now) of a window on ANOTHER DESKTOP: the window server's picture
+        // first, kept when it is known live; else a brief visit to its desktop, only with the user's say.
+        // An off-screen or live shot's region and budget: a visit's return takes the window's next baseline picture
+        // the same way (`refreshOffScreenBaseline`).
+        if p.live == true || sys.window(id: t.windowID)?.onScreen == false { t.lastStill = (region, p.budget) }
+        let offDesktop = { [self] () async throws -> Bool in
+            guard sys.window(id: t.windowID)?.onScreen == false else { return false }
+            return try await queues.run(t.pid) { [self] in isOffThisDesktop(t) }
+        }
+        if p.live == true, try await offDesktop() {
+            if t.privatePath, let shot = try await offScreenShot(t, region, p.budget) {
+                privateTried = true
+                let note = try await offScreenNote(t, shot)
+                if note.hasPrefix("live:") {
+                    CULog.act.notice("live screenshot of \(t.appName, privacy: .public): the window server's picture is live — no visit")
+                    return try await screenshotResult(t, shot, settled: settled, waited: waited, detail: note)
+                }
+            }
+            // It needs its window's desktop: never asked for (nor answered) while the session sits on another one —
+            // closed first, and the window may be where the user is now (then the ordinary capture below).
+            let closed = await closeVisit(of: t.sessionId, reason: .otherDesktop)
+            let stillElsewhere = try await offDesktop()
+            if !closed || stillElsewhere {
+                guard p.desktopVisit == true else {
+                    CULog.act.notice("live screenshot of \(t.appName, privacy: .public): its picture there is not known live — needs the user's say for a desktop visit")
+                    throw CUError.needsDesktopVisit(t.appName, why: .live)
+                }
+                try token.check()
+                let v = try await openDesktopVisit(t, why: .live, privatePath: t.privatePath, sessionId: t.sessionId,
+                                                   callId: p.callId, maxMs: p.visitMaxMs)
+                let id = beginVisitActivity(v, t, callId: p.callId, maxMs: p.visitMaxMs)
+                defer { endVisitActivity(v, id) }
+                do {
+                    try token.check()
+                    let img = try await captureWindow(t.windowID, region, p.budget)
+                    var r = try await screenshotResult(t, img, settled: settled, waited: waited,
+                                                       detail: "captured \(t.appName)'s window on its own desktop, just now (live)")
+                    r.inVisit = true
+                    return r
+                } catch {
+                    throw Self.markedInVisit(error)
+                }
+            }
+            privateTried = false
+        }
         // Not on screen (another Space, full screen elsewhere, minimized, hidden): ScreenCaptureKit refuses such
         // a window or returns nothing, so the private path goes straight to the window server's own image of it
         // (off screen → the SkyLight capture). Nothing is moved, raised or focused.
@@ -921,6 +1170,12 @@ public final class CUCore: @unchecked Sendable {
                 detail = try await offScreenNote(t, shot)
             }
         }
+        return try await screenshotResult(t, img, settled: settled, waited: waited, detail: detail)
+    }
+
+    /// A window picture registered as the target's latest shot (a click's point maps onto it), as the result.
+    func screenshotResult(_ t: CUTarget, _ img: CUCapturedImage, settled: Bool, waited: Int, detail: String?) async throws
+        -> TargetScreenshotResult {
         let shot = try await queues.run(t.pid) {
             t.registerShot(anchor: .window(windowID: t.windowID, regionOrigin: img.pointsRect.origin),
                            imageWidth: img.width, imageHeight: img.height, points: img.pointsRect.size)
@@ -952,6 +1207,11 @@ public final class CUCore: @unchecked Sendable {
     /// drawing there), cropped to `region` and fitted to the budget like a ScreenCaptureKit capture. Nil when
     /// there is none, or it is blank (a window macOS has not drawn).
     func offScreenShot(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget) async throws -> CUCapturedImage? {
+        try offScreenStill(t, region, budget)
+    }
+
+    /// `offScreenShot`, synchronously (a visit's return takes one on the pid queue).
+    func offScreenStill(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget) throws -> CUCapturedImage? {
         guard let frame = sys.window(id: t.windowID)?.frame else { throw CUError.targetLost("the window is gone", reason: lostReason(t)) }
         let area = try CUCapturer.windowArea(region: region, windowSize: frame.size)
         guard let image = try privateWindowImage(t.windowID, globalRect: area.offsetBy(dx: frame.minX, dy: frame.minY)) else {
@@ -1017,10 +1277,16 @@ public final class CUCore: @unchecked Sendable {
     // MARK: - waits
 
     public func targetWaitIdle(_ p: TargetWaitIdleParams) async throws -> TargetWaitIdleResult {
+        // A window on the session's visited desktop is read there, keeping the visit open.
         let t = try target(p.targetId)
-        try ensureAlive(t)
+        return try await inOpenVisit(t, callId: p.callId) { try await targetWaitIdleBody(p) }.0
+    }
+
+    private func targetWaitIdleBody(_ p: TargetWaitIdleParams) async throws -> TargetWaitIdleResult {
+        let t = try target(p.targetId)
         let token = cancels.begin(p.callId)
         defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         monitor.watch(pid: t.pid)
         cursor(t, "waitBegin")
         defer { cursor(t, "waitEnd") }
@@ -1030,15 +1296,21 @@ public final class CUCore: @unchecked Sendable {
     }
 
     public func targetWaitFor(_ p: TargetWaitForParams) async throws -> TargetWaitForResult {
+        // A window on the session's visited desktop is read there, keeping the visit open.
+        let t = try target(p.targetId)
+        return try await inOpenVisit(t, callId: p.callId) { try await targetWaitForBody(p) }.0
+    }
+
+    private func targetWaitForBody(_ p: TargetWaitForParams) async throws -> TargetWaitForResult {
         try requireAccessibility()
         let t = try target(p.targetId)
-        try ensureAlive(t)
+        let token = cancels.begin(p.callId)
+        defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         let c = p.cond
         guard c.text != nil || c.ref != nil || c.gone != nil || c.title != nil else {
             throw CUError.invalidParams("waitFor needs text, ref, gone or title")
         }
-        let token = cancels.begin(p.callId)
-        defer { cancels.end(p.callId) }
         cursor(t, "waitBegin", text: Self.waitLabel(c))
         defer { cursor(t, "waitEnd") }
         let start = clock.nowMs()
@@ -1166,6 +1438,8 @@ public final class CUCore: @unchecked Sendable {
 
     public func cancel(_ p: CancelParams) async throws -> CancelResult {
         cancels.cancel(p.callId)
+        // A request that ran in the open visit was cancelled: the visit closes (the user returned).
+        cancelVisit(callId: p.callId)
         return CancelResult()
     }
 
@@ -1176,6 +1450,7 @@ public final class CUCore: @unchecked Sendable {
 
     public func sessionEnded(_ p: SessionEndedParams) async throws -> SessionEndedResult {
         flushPendingRestore()
+        await endSessionVisits(p.sessionId)
         let ids: [String] = {
             lock.lock(); defer { lock.unlock() }
             return targets.values.filter { $0.sessionId == p.sessionId }.map(\.id)
@@ -1242,6 +1517,7 @@ public final class CUCore: @unchecked Sendable {
 
     /// The pids of all bound targets (for the Focus Guardian's CPS tap).
     func boundTargetPids() -> Set<pid_t> { lock.withLock { Set(targets.values.map(\.pid)) } }
+    func boundTargets() -> [CUTarget] { lock.withLock { Array(targets.values) } }
 
     private func remove(_ id: String) -> CUTarget? {
         lock.lock()
@@ -1267,13 +1543,15 @@ public final class CUCore: @unchecked Sendable {
         }
     }
 
-    /// The target's app and window still exist; otherwise it is dropped, `targetLost` fires and this throws.
-    func ensureAlive(_ t: CUTarget) throws {
+    /// The target's app and window still exist; otherwise it is dropped, `targetLost` fires and this throws. A window
+    /// watched through a transition (`windowGone`) is waited for without holding a thread, and the wait ends on the
+    /// call's cancel (`token`, Esc) or the task's.
+    func ensureAlive(_ t: CUTarget, token: CUCancellation.Token? = nil) async throws {
         if !sys.appRunning(t.pid) {
             lose(t, reason: .appQuit)
             throw CUError.targetLost("\(t.appName) quit — bind it again", reason: .appQuit)
         }
-        if windowGone(t) {
+        if try await windowGone(t, token: token) {
             lose(t, reason: .windowClosed)
             throw CUError.targetLost("the \(t.appName) window was closed — bind again or pick another window", reason: .windowClosed)
         }
@@ -1283,9 +1561,32 @@ public final class CUCore: @unchecked Sendable {
     /// One lookup can miss a window that is changing Space (a live run lost Safari's target while the user
     /// switched desktops, and the rebind found the very same window). A CLOSED window the app keeps allocated
     /// stays in the server's listing, off screen: it counts as gone when it is on no Space at all and the app
-    /// doesn't list it (a minimized window or a hidden app's is listed; one on another Space is on a Space).
-    func windowGone(_ t: CUTarget) -> Bool {
-        guard let w = liveServerWindow(t) else { return true }
+    /// doesn't list it (a minimized window or a hidden app's is listed; one on another Space is on a Space) — and
+    /// still reads so for `windowGoneSettleMs`: a window in the middle of a full-screen transition reads exactly
+    /// like that for a moment (the live gate, 2026-10-10: a capture-only target, its window re-entering full screen,
+    /// was declared closed on one such reading and the very same window was bound again two seconds later).
+    /// The watch suspends (the clock's sleep), never blocking a Swift-concurrency thread, and stops on a cancel.
+    func windowGone(_ t: CUTarget, token: CUCancellation.Token? = nil) async throws -> Bool {
+        guard let w = try await liveServerWindow(t, token: token) else { return true }
+        guard unreachableNow(t, w) else { return false }
+        let deadline = clock.nowMs() + windowGoneSettleMs
+        while clock.nowMs() < deadline {
+            try await clock.sleep(ms: min(100, windowGoneSettleMs))
+            try token?.check()
+            try Task.checkCancellation()
+            // Gone from the server's listing meanwhile: closed for good.
+            guard let now = sys.window(id: t.windowID) ?? sys.windows(pid: t.pid).first(where: { $0.id == t.windowID }) else { return true }
+            if !unreachableNow(t, now) {
+                CULog.bind.notice("\(t.appName, privacy: .public)'s window \(t.windowID, privacy: .public) read as on no Space for a moment (a full-screen or Space transition) — kept")
+                return false
+            }
+        }
+        return true
+    }
+
+    /// One reading: the server lists the window off screen and on NO Space, no element answers for its id, and the
+    /// app does not list it.
+    func unreachableNow(_ t: CUTarget, _ w: CUWindowServerWindow) -> Bool {
         guard !w.onScreen, sys.windowOnAnySpace(w.id) == false else { return false }
         // A window whose element still answers for its id is reachable, whatever its Space reads (live: Chrome's
         // window, right after going full screen, read as on no Space and was taken for closed).
@@ -1294,12 +1595,27 @@ public final class CUCore: @unchecked Sendable {
         return !CUAXWindows.list(pid: t.pid, ax: ax, server: sys.windows(pid: t.pid)).contains { $0.id == w.id }
     }
 
-    /// The bound window's window-server record, looked up the same patient way.
+    /// The bound window's window-server record, looked up the same patient way (on a pid queue: a blocking pause).
     func liveServerWindow(_ t: CUTarget) -> CUWindowServerWindow? {
         let id = t.windowID
         for attempt in 0..<2 {
             if let w = sys.window(id: id) ?? sys.windows(pid: t.pid).first(where: { $0.id == id }) { return w }
-            if attempt == 0 { usleep(150_000) }
+            if attempt == 0 { clock.pause(ms: 150) }
+        }
+        return nil
+    }
+
+    /// The same, from an async caller (`windowGone`): the pause suspends — never holding a Swift-concurrency thread —
+    /// and ends on the call's cancel (`token`) or the task's.
+    func liveServerWindow(_ t: CUTarget, token: CUCancellation.Token?) async throws -> CUWindowServerWindow? {
+        let id = t.windowID
+        for attempt in 0..<2 {
+            if let w = sys.window(id: id) ?? sys.windows(pid: t.pid).first(where: { $0.id == id }) { return w }
+            if attempt == 0 {
+                try await clock.sleep(ms: 150)
+                try token?.check()
+                try Task.checkCancellation()
+            }
         }
         return nil
     }
@@ -1318,21 +1634,43 @@ public final class CUCore: @unchecked Sendable {
 
     func lose(_ t: CUTarget, reason: CUTargetLostReason) {
         guard remove(t.id) != nil else { return }
+        // The app's "stranded" mark goes with it when it quit or nothing of it stays bound (a pid can be reused).
+        if reason == .appQuit || !boundTargetPids().contains(t.pid) { noteStranded(t.pid, false) }
         emit { $0.targetLost(targetId: t.id, reason: reason.rawValue) }
         emit { $0.targetReleased(sessionId: t.sessionId, pid: t.pid, windowID: t.windowID) }
     }
 
-    /// Called for every destroyed-element notification, so it is debounced to one window-list check per
-    /// pid per 250 ms.
-    private func windowMaybeClosed(pid: pid_t) {
+    /// Called for every destroyed-element notification, so it is debounced to one window-list check per pid per
+    /// 250 ms, run off the notification's thread as a task (`checkWindows`).
+    func windowMaybeClosed(pid: pid_t) {
         let now = clock.nowMs()
-        lock.lock()
-        if let last = lastDestroyCheck[pid], now - last < 250 { lock.unlock(); return }
-        lastDestroyCheck[pid] = now
-        let affected = targets.values.filter { $0.pid == pid }
-        lock.unlock()
-        for t in affected where windowGone(t) {
-            lose(t, reason: .windowClosed)
+        let go = lock.withLock { () -> Bool in
+            if let last = lastDestroyCheck[pid], now - last < 250 { return false }
+            lastDestroyCheck[pid] = now
+            return true
+        }
+        guard go else { return }
+        Task.detached(priority: .utility) { [weak self] in await self?.checkWindows(pid: pid) }
+    }
+
+    /// One check of `pid`'s bound windows at a time (each may watch a window for `windowGoneSettleMs`): a request while
+    /// one runs is coalesced into ONE more run after it, never a second overlapping watch.
+    func checkWindows(pid: pid_t) async {
+        let first = lock.withLock { () -> Bool in
+            if windowChecksRunning.contains(pid) { windowChecksAgain.insert(pid); return false }
+            windowChecksRunning.insert(pid)
+            return true
+        }
+        guard first else { return }
+        while true {
+            let affected = lock.withLock { targets.values.filter { $0.pid == pid } }
+            for t in affected where (try? await windowGone(t)) == true { lose(t, reason: .windowClosed) }
+            let again = lock.withLock { () -> Bool in
+                if windowChecksAgain.remove(pid) != nil { return true }
+                windowChecksRunning.remove(pid)
+                return false
+            }
+            if !again { return }
         }
     }
 
@@ -1495,6 +1833,11 @@ public final class CUCore: @unchecked Sendable {
     func observe(_ t: CUTarget, within: Int?, maxNodes: Int = AXTreeReader.defaultMaxNodes) throws -> Observation {
         CUUserInputGuard.waitForQuiet()
         let win = try windowElement(t)
+        if within == nil, let read = stateReadOverride {
+            let roots = read(t)
+            guard !roots.isEmpty else { throw CUError.busy("\(t.appName) did not answer — it may be busy; retry") }
+            return Observation(roots: roots, focusedRef: nil, title: ax.string(win, kAXTitleAttribute) ?? t.windowTitle)
+        }
         let app = AX.app(t.pid)
         var rootElements: [AXUIElement]
         if let within {
@@ -1607,10 +1950,18 @@ public final class CUCore: @unchecked Sendable {
         observers.append(ws.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: nil) {
             [weak self] note in
             guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self.noteStranded(app.processIdentifier, false)  // a pid that died takes its mark with it
             self.lock.lock()
             let affected = self.targets.values.filter { $0.pid == app.processIdentifier }
             self.lock.unlock()
             for t in affected { self.lose(t, reason: .appQuit) }
+        })
+        // Always on (never only while the guardian runs): an app activated by anyone gets its key window back, so its
+        // "stranded" mark goes (`appActivated`). A notification only — no tap, no timer, nothing at idle.
+        observers.append(ws.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil) {
+            [weak self] note in
+            guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self.appActivated(pid: app.processIdentifier)
         })
         observers.append(DistributedNotificationCenter.default().addObserver(
             forName: NSNotification.Name("com.apple.Carbon.TISNotifySelectedKeyboardInputSourceChanged"), object: nil,

@@ -1,5 +1,9 @@
 const NL = 0x0a;
 
+/** The longest NDJSON line a daemon connection accepts (`LineDecoder`'s default). Anything a client
+ *  sends in ONE request — a staged image's base64 included — must fit under it, envelope and all. */
+export const NDJSON_MAX_LINE_BYTES = 8 * 1024 * 1024;
+
 export function encodeLine(msg: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(msg) + "\n");
 }
@@ -19,7 +23,7 @@ export class LineDecoder {
   private len = 0;
   private readonly decoder = new TextDecoder();
   private static readonly SHRINK_ABOVE = 64 * 1024;
-  constructor(private readonly maxLine = 8 * 1024 * 1024) {}
+  constructor(private readonly maxLine = NDJSON_MAX_LINE_BYTES) {}
 
   /** Appends a COPY of `bytes` (the caller may reuse its chunk buffer once `push` returns). */
   private append(bytes: Uint8Array): void {

@@ -186,6 +186,82 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(staged, StagedImage(path: "/t/image_1.png", imagesOnSend: false))
     }
 
+    /// Review finding (2026-10-10): `JSONEncoder` escapes every `/` as `\/`, and base64 of 0xFF bytes is nothing BUT
+    /// slashes — a 5.76 MB white TIFF encoded to a 15.36 MB line, which the daemon answers by ENDING the connection
+    /// (its NDJSON line cap is 8 MiB). The request encoder writes slashes bare, so the line is the base64 plus a few
+    /// hundred bytes of envelope, and a strict-JSON reader still gets the same string back.
+    func testSlashHeavyImageDataStaysUnderTheDaemonsLineCap() async throws {
+        let (client, t) = try await connected()
+        let white = Data(repeating: 0xFF, count: 5_760_000)
+        let base64 = white.base64EncodedString()
+        XCTAssertEqual(Set(base64), ["/"], "all slashes — the worst case for escaping")
+        async let staged: StagedImage = client.stageImage(sessionId: "s_1", mediaType: "image/tiff", data: white)
+        let sent = try await waitForSent(t, count: 2, timeout: 20)
+        guard sent.count >= 2 else { _ = try? await staged; return XCTFail("the stage request never went out (refused as too large to send?)") }
+        let line = sent[1]
+        XCTAssertFalse(line.contains("\\/"), "no escaped slash on the wire")
+        XCTAssertGreaterThan(line.utf8.count, base64.utf8.count)
+        XCTAssertLessThan(line.utf8.count, base64.utf8.count + 1_000, "base64 plus a small envelope — not 2x")
+        XCTAssertLessThan(line.utf8.count + 1, WinterClient.maxRequestLineBytes)
+        // What the daemon's JSON parser reads back is the very same string.
+        XCTAssertEqual((decodeLine(line)["params"] as? [String: Any])?["dataBase64"] as? String, base64)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(line)["id"] as! Int),"result":{"path":"/t/image_1.tiff","imagesOnSend":true}}"#)
+        _ = try await staged
+    }
+
+    /// The stage cap is budgeted CLIENT-side too: an image the daemon would refuse `image_too_large` is refused
+    /// before a single byte is sent, and any request whose ENCODED line would pass the daemon's line cap throws
+    /// instead of being sent (the daemon would drop the connection and every other request on it).
+    func testAnOversizeRequestIsRefusedBeforeItIsSent() async throws {
+        let (client, t) = try await connected()
+        // The largest staged image the daemon takes: 6,094,848 bytes = 8,126,464 base64 characters.
+        XCTAssertEqual(WinterClient.stageImageMaxBase64Length, 8_126_464)
+        do {
+            _ = try await client.stageImage(sessionId: "s_1", mediaType: "image/png", data: Data(count: 6_094_849))
+            XCTFail("one byte over the stage cap must throw")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.data?["code"]?.stringValue, "image_too_large")
+            XCTAssertEqual(error.message, "The image is too large to attach")
+        }
+        do {
+            _ = try await client.send(sessionId: "s_1", text: String(repeating: "x", count: WinterClient.maxRequestLineBytes))
+            XCTFail("a request line past the daemon's cap must throw")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.code, -6)
+            XCTAssertTrue(error.message.hasPrefix("request too large to send: session.send"))
+        }
+        XCTAssertEqual(t.sent.count, 1, "only the hello went out")
+        // The exact stage-cap image fits: the line (envelope included) is under the cap with the daemon's headroom to spare.
+        let max = Data(repeating: 0xFF, count: 6_094_848)
+        async let staged: StagedImage = client.stageImage(sessionId: "s_1", mediaType: "image/png", data: max)
+        let sent = try await waitForSent(t, count: 2, timeout: 20)
+        guard sent.count >= 2 else { _ = try? await staged; return XCTFail("the max-size stage request never went out") }
+        XCTAssertLessThan(sent[1].utf8.count + 1, WinterClient.maxRequestLineBytes - 128 * 1024)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(sent[1])["id"] as! Int),"result":{"path":"/t/image_1.png","imagesOnSend":true}}"#)
+        _ = try await staged
+    }
+
+    /// Review finding (version skew): a FILE attachment stages nothing, so the client must learn BEFORE sending whether
+    /// the daemon takes an original path in `images`. The hello answer announces it; one without `features` (an
+    /// older daemon) reads as unsupported, and a reconnect re-reads it.
+    func testHelloFeaturesTellTheClientWhetherOriginalImagePathsAreTaken() async throws {
+        let (older, _) = try await connected() // hello answered {"ok":true} — no features
+        let olderSupports = await older.supportsOriginalImagePaths
+        XCTAssertFalse(olderSupports)
+
+        let t = ScriptedTransport()
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "wrap-test")
+        async let c: Void = client.connect()
+        let hello = try await waitForSent(t, count: 1)[0]
+        t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"ok":true,"serverVersion":"x","protocolVersion":0,"features":["something-else","image-original-paths"]}}"#)
+        try await c
+        let supports = await client.supportsOriginalImagePaths
+        let features = await client.daemonFeatures
+        XCTAssertTrue(supports)
+        XCTAssertEqual(features, ["something-else", "image-original-paths"])
+        XCTAssertEqual(WinterClient.featureImageOriginalPaths, "image-original-paths")
+    }
+
     /// Code-mode image input: `send`/`steer` put `images` beside the placeholder text as `[{n, path}]`,
     /// and omit the key entirely when there are none (an older daemon never sees it).
     func testSendAndSteerCarryImagesOnlyWhenPresent() async throws {

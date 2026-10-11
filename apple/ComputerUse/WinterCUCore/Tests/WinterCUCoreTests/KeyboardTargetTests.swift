@@ -624,20 +624,20 @@ final class KeyboardTargetTests: XCTestCase {
         return plain
     }
 
-    func testAnAlreadyFocusedFieldIsLeftAlone() {
+    func testAnAlreadyFocusedFieldIsLeftAlone() throws {
         let f = nativeField()
         ax.focus(pid: pid, on: f)
         ax.onSet = { _ in XCTFail("no focus write when already focused") }
         ax.onPerform = { _ in XCTFail("no press when already focused") }
-        XCTAssertTrue(core.focusField(f, target))
+        XCTAssertTrue(try core.focusField(f, target))
         XCTAssertFalse(ax.written.contains { $0.hasSuffix(":\(kAXFocusedAttribute)") })
     }
 
-    func testANativeFieldUsesPressFirstThenTheGuardedWriteRememberedPerApp() {
+    func testANativeFieldUsesPressFirstThenTheGuardedWriteRememberedPerApp() throws {
         let f = nativeField()  // no press actions → press route fails → the guarded write
         ax.onSet = { [unowned self] what in if what.hasSuffix(":\(kAXFocusedAttribute)") { sys.front = pid } }
         sys.windows[77]?.onScreen = false  // no on-screen click either
-        _ = core.focusField(f, target)  // the write may place it (the field reads focused) — but it activated the app
+        _ = try core.focusField(f, target)  // the write may place it (the field reads focused) — but it activated the app
         XCTAssertEqual(sys.activated, [1], "the user's app put back at once")
         XCTAssertTrue(target.takeViewNotes().contains { $0.contains("Native activated itself — the user's app was put back") })
         XCTAssertTrue(core.appActivatesOnFocusWrite(target), "remembered")
@@ -647,16 +647,16 @@ final class KeyboardTargetTests: XCTestCase {
         ax.put(window, [kAXChildrenAttribute: [f2]])
         ax.focus(pid: pid, on: nil)
         ax.onSet = { _ in XCTFail("no AXFocused write for a remembered app") }
-        _ = core.focusField(f2, target)
+        _ = try core.focusField(f2, target)
     }
 
-    func testAWebFieldIsPressedNotWritten() {
+    func testAWebFieldIsPressedNotWritten() throws {
         safari(fieldOwner: pid)
         ax.focus(pid: pid, on: nil)
         ax.setActions(field, [kAXPressAction])
         ax.onPerform = { [unowned self] what in if what == "\(token(field)):AXPress" { ax.focus(pid: pid, on: field) } }
         ax.onSet = { _ in XCTFail("no AXFocused write on a web field") }
-        XCTAssertTrue(core.focusField(field, target))
+        XCTAssertTrue(try core.focusField(field, target))
         XCTAssertTrue(ax.performed.contains("\(token(field)):AXPress"))
         XCTAssertTrue(sys.activated.isEmpty, "pressing does not activate")
     }
@@ -670,7 +670,7 @@ final class KeyboardTargetTests: XCTestCase {
         return search
     }
 
-    func testAWebFieldThatCannotBePressedIsNotWritten() {
+    func testAWebFieldThatCannotBePressedIsNotWritten() throws {
         safari(fieldOwner: pid)
         ax.focus(pid: pid, on: nil)   // not focused, no press actions
         sys.windows[77]?.onScreen = false  // and no click: the private path is off for this target
@@ -678,7 +678,7 @@ final class KeyboardTargetTests: XCTestCase {
                           isChromium: false, mirror: false, windowID: 77, windowTitle: "Docs", privatePath: false)
         core.registerForTesting(target, windowElement: window)
         ax.onSet = { _ in XCTFail("the write is forbidden for a web field") }
-        XCTAssertFalse(core.focusField(field, target))
+        XCTAssertFalse(try core.focusField(field, target))
     }
 
     func testTypingIntoAFieldWhoseFocusStaysElsewhereIsRefusedAndTypesNothing() async throws {

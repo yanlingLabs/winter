@@ -1,8 +1,9 @@
 // Code-mode image input: the ONE place a `user_message` becomes the text the MODEL is given.
 //
 // A code session's composer keeps `[Image #n]` placeholders in the message text (the user's bubble
-// shows them) and names each placeholder's staged file in `user_message.images`. Only the model sees
-// the paths: every door that feeds a user message to a runtime child — the live send/steer push, the
+// shows them) and names each placeholder's file in `user_message.images` — a copy the daemon staged in
+// the session's temp folder, or the user's own original image file (raw image paths, 2026-10-10). Only
+// the model sees the paths: every door that feeds a user message to a runtime child — the live send/steer push, the
 // held queue, the resume replay of unconsumed messages, a legacy-session import — goes through
 // `modelTextOf`. Display and metadata readers (titles, the cleaner, the dreamer, history, the remote
 // stream, the session list's first message, the CLI's `-p` echo) read `text` as is.

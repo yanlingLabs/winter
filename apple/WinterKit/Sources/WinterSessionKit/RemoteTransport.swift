@@ -27,6 +27,19 @@ public protocol RemoteConn: Sendable {
     var peerID: String { get }
     func send(_ frame: Data) async
     func close()
+
+    /// ComputerV2 Phase 1b: frames that arrived on the connection's SIDE channel — a second, lower-priority stream
+    /// the Mac opens for the phone mirror, so its pictures never sit ahead of the session stream's events and rpc
+    /// replies. Same framing as `inbound`. Default: none (a connection without a side channel).
+    var sideInbound: AsyncStream<Data> { get }
+    /// Writes one frame on the side channel (opened on first use, at a lower priority than the session stream).
+    /// Returns `false` when this connection has no side channel — the caller then uses `send`. Default: `false`.
+    func sendSide(_ frame: Data) async -> Bool
+}
+
+public extension RemoteConn {
+    var sideInbound: AsyncStream<Data> { AsyncStream { $0.finish() } }
+    func sendSide(_ frame: Data) async -> Bool { false }
 }
 
 /// Test/dev-harness-only listener — connections are pushed in explicitly via
@@ -78,17 +91,62 @@ public final class ScriptedRemoteConn: RemoteConn, @unchecked Sendable {
         /// that window deterministically exercises the switchover path.
         var gateFrom: Int?
         var parked: [CheckedContinuation<Void, Never>] = []
+        /// The side channel (`sendSide`): every frame written to it, and — while `sideStalled` — every frame written
+        /// but not yet DELIVERED (QUIC accepts the bytes into its buffer and returns; a stalled reader takes nothing).
+        var sideWritten: [Data] = []
+        var sideDelivered: [Data] = []
+        var sideStalled = false
     }
     private let state = OSAllocatedUnfairLock(initialState: State())
 
     public let peerID: String
+    public let sideInbound: AsyncStream<Data>
+    private let sideInboundCont: AsyncStream<Data>.Continuation
+    /// Whether this double offers a side channel at all (`sendSide` returns `false` without one).
+    public let hasSideChannel: Bool
 
-    public init(peerID: String = "peer-stub") {
+    public init(peerID: String = "peer-stub", hasSideChannel: Bool = true) {
         self.peerID = peerID
+        self.hasSideChannel = hasSideChannel
         var c: AsyncStream<Data>.Continuation!
         inbound = AsyncStream { c = $0 }
         inboundCont = c
+        var sc: AsyncStream<Data>.Continuation!
+        sideInbound = AsyncStream { sc = $0 }
+        sideInboundCont = sc
     }
+
+    // MARK: - Side channel (ComputerV2 Phase 1b)
+
+    /// Every frame written to the side channel, delivered or not.
+    public var sideWritten: [Data] { state.withLock { $0.sideWritten } }
+    /// The side-channel frames the far end has actually read.
+    public var sideDelivered: [Data] { state.withLock { $0.sideDelivered } }
+
+    /// Models a reader that stopped reading (a slow link, a suspended phone): side writes still RETURN at once — as
+    /// a QUIC write does once its bytes are buffered — but nothing is delivered until `resumeSideReader()`.
+    public func stallSideReader() { state.withLock { $0.sideStalled = true } }
+
+    /// Delivers everything written meanwhile, and everything after.
+    public func resumeSideReader() {
+        state.withLock { s in
+            s.sideStalled = false
+            s.sideDelivered = s.sideWritten
+        }
+    }
+
+    public func sendSide(_ frame: Data) async -> Bool {
+        guard hasSideChannel else { return false }
+        return state.withLock { s -> Bool in
+            guard !s.closed else { return true }
+            s.sideWritten.append(frame)
+            if !s.sideStalled { s.sideDelivered.append(frame) }
+            return true
+        }
+    }
+
+    /// Test → client direction: a frame arriving on the side channel.
+    public func enqueueSideInbound(_ data: Data) { sideInboundCont.yield(data) }
 
     /// Every frame actually delivered to the "phone" (post fault-injection) — what a real phone
     /// would have received, in order.
@@ -180,6 +238,9 @@ public final class ScriptedRemoteConn: RemoteConn, @unchecked Sendable {
             s.closed = true
             return true
         }
-        if didClose { inboundCont.finish() }
+        if didClose {
+            inboundCont.finish()
+            sideInboundCont.finish()
+        }
     }
 }

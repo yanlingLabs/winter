@@ -45,6 +45,31 @@ jobs:
         working-directory: packages/${{ matrix.package }}
         run: bun test ${{ matrix.args }}
 
+  # Winter for Chrome (extensions/winter-for-chrome): the MV3 extension's typecheck and its unit tests (the CDP guard,
+  # the controller over a fake browser, the native port, the manifest and the build — which renders the icons with the
+  # workspace's resvg and fails on any call that would move the user's view). It is not a pnpm/bun package anything
+  # imports, so it has its own job.
+  test-extension:
+    name: test · winter-for-chrome
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: extensions/winter-for-chrome
+        run: ../../node_modules/.bin/tsc --noEmit -p .
+
+      - name: Test
+        working-directory: extensions/winter-for-chrome
+        run: bun test
+
   # P9a-8: the `winter-binary` job (P8b-2: build winter from the pinned-tag SDK checkout, upload
   # as an artifact, every consumer downloads it) is DELETED — winter's ONLY source is the installed
   # npm platform package (`@yanlinglabs/winter-agent-sdk-darwin-arm64`, an optional dependency of
@@ -244,7 +269,7 @@ jobs:
   # variant's exhaustive switch). The WinterKit socket-test flake class is KNOWN (real Unix-socket
   # I/O against a real spawned process on a shared CI runner) — retried once rather than chased.
   swift:
-    name: swift (WinterProtocol + WinterKit + WinterChatKit)
+    name: swift (WinterProtocol + WinterKit + WinterChatKit + WinterBrowserHost)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -290,6 +315,13 @@ jobs:
       # WinterKit's flake class.
       - name: WinterChatKit — swift test
         working-directory: apple/WinterChatKit
+        run: swift test
+
+      # Winter for Chrome's native host (apple/ComputerUse/WinterBrowserHost): framing, the relay, the daemon check
+      # (fakes plus the real Security.framework decision against this process), identity. Imports nothing outside the
+      # system, so it needs nothing above.
+      - name: WinterBrowserHost — swift test
+        working-directory: apple/ComputerUse/WinterBrowserHost
         run: swift test
 
   # Winter Phase 8d (P8d-5): the compiled-binary proofs, on the macOS runner, after the pinned

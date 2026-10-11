@@ -22,6 +22,16 @@
  *     and — on a second test helper whose app requirement bun does not meet — a false client:"app" refused and
  *     closed. Finally the idle quit: once no script runs and nothing is bound it exits on its own — with the
  *     daemon's connection still open (that connection is not work) — closing it and removing its socket.
+ *  4. winter-browser-host, nested in both bundles: in step 1 and 3's checks its own signature (com.winter.browserhost.dev
+ *     / .test, Winter's team, hardened runtime, EXACTLY its stated requirement, no entitlements, test hooks only in the
+ *     test flavor). Then the test host, run from inside the test helper the way Chrome runs it (argv[1] = the caller's
+ *     origin, native messaging on stdin/stdout), against a temp home: a caller that is not Winter for Chrome → exit 1 and
+ *     nothing written; no daemon → `host.status unavailable`; this bun as a fake daemon on `<home>/run/browser.sock` →
+ *     `host.hello` with the pinned fields, the host's pid checked against the host's stated requirement exactly as the
+ *     daemon checks it (Security.framework by pid, and codesign), then the relay both ways; and a host told to expect a
+ *     daemon this bun is not → `host.status unverified` with not one byte sent.
+ *
+ *   bun run verify:computer-helper [--dev-helper <path>]   (default: dist/dev/Winter Computer Use Dev.app)
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
@@ -31,7 +41,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WINTER_TEAM_ID } from "../packages/core/src/auth/app-token-acl";
 import { HELPER_PROTOCOL } from "../packages/core/src/computer-use/protocol";
-import { HELPER, HELPER_SOCKET_NAME, helperExecutable, helperRequirement, LSREGISTER, readHelperVersion } from "./computer-helper-lib";
+import { EXTENSION_IDS } from "../packages/core/src/computer-use/browser/extension/extension-ids";
+import { BROWSER_HOST_PROTOCOL, EXTENSION_PROTOCOL } from "../packages/core/src/computer-use/browser/extension/protocol";
+import { processSatisfiesRequirement } from "../packages/core/src/computer-use/helper-verify";
+import { BROWSER_HOST, browserHostExecutable, HELPER, HELPER_SOCKET_NAME, helperExecutable, helperRequirement, LSREGISTER, readHelperVersion } from "./computer-helper-lib";
 import { buildHelper, DEV_HELPER_APP, inspectHelper, run, signHelper, signingIdentity } from "./dev-helper";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -155,27 +168,171 @@ async function stop(launched: Launched): Promise<void> {
   if (done === "late") launched.child.kill("SIGKILL");
 }
 
+/** Chrome native messaging on a child's pipes: 4-byte little-endian length + JSON. */
+class NativePipe {
+  private buffer = Buffer.alloc(0);
+  readonly messages: Record<string, any>[] = [];
+  constructor(private readonly child: ChildProcess) {
+    child.stdout?.on("data", (chunk: Buffer) => {
+      this.buffer = Buffer.concat([this.buffer, chunk]);
+      while (this.buffer.length >= 4) {
+        const n = this.buffer.readUInt32LE(0);
+        if (this.buffer.length < 4 + n) break;
+        this.messages.push(JSON.parse(this.buffer.subarray(4, 4 + n).toString("utf8")));
+        this.buffer = this.buffer.subarray(4 + n);
+      }
+    });
+  }
+  send(message: Record<string, unknown>): void {
+    const body = Buffer.from(JSON.stringify({ jsonrpc: "2.0", ...message }));
+    const head = Buffer.alloc(4);
+    head.writeUInt32LE(body.length, 0);
+    this.child.stdin?.write(Buffer.concat([head, body]));
+  }
+  async next(match: (m: Record<string, any>) => boolean, ms = 8000): Promise<Record<string, any> | undefined> {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      const i = this.messages.findIndex(match);
+      if (i >= 0) return this.messages.splice(i, 1)[0];
+      await sleep(50);
+    }
+    return undefined;
+  }
+}
+
+/** A fake daemon (this bun) on `<home>/run/browser.sock`: records every byte, answers host.hello, relays. */
+async function fakeBrowserDaemon(socketPath: string) {
+  const state = { bytes: 0, lines: [] as Record<string, any>[], sockets: [] as { write(s: string): number; end(): void }[] };
+  let buffer = "";
+  const server = Bun.listen({
+    unix: socketPath,
+    socket: {
+      open(sock) { state.sockets.push(sock as unknown as { write(s: string): number; end(): void }); },
+      data(_sock, chunk) {
+        state.bytes += chunk.length;
+        buffer += new TextDecoder().decode(chunk);
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          state.lines.push(JSON.parse(buffer.slice(0, nl)));
+          buffer = buffer.slice(nl + 1);
+        }
+      },
+    },
+  });
+  return {
+    state,
+    write: (message: Record<string, unknown>) => state.sockets.at(-1)?.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`),
+    async line(match: (m: Record<string, any>) => boolean, ms = 8000): Promise<Record<string, any> | undefined> {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        const i = state.lines.findIndex(match);
+        if (i >= 0) return state.lines.splice(i, 1)[0];
+        await sleep(50);
+      }
+      return undefined;
+    },
+    stop: () => server.stop(true),
+  };
+}
+
+/** Step 4: the test host inside the test helper, the way Chrome runs it. */
+async function verifyBrowserHost(testApp: string, fakeDaemon: string, homes: string[], version: string): Promise<void> {
+  console.error("verify:computer-helper: 4. winter-browser-host (test flavor), run the way Chrome runs it");
+  const exe = browserHostExecutable(testApp);
+  const origin = `chrome-extension://${EXTENSION_IDS.dev[0]}/`;
+  const home = tempHome();
+  homes.push(home);
+  mkdirSync(join(home, "run"), { recursive: true, mode: 0o700 });
+  const clean = { ...process.env };
+  for (const k of Object.keys(clean)) if (k.startsWith("WINTER_")) delete clean[k];
+  const env = (requirement: string) => ({ ...clean, WINTER_BROWSER_HOST_HOME: home, WINTER_CU_TEST_DAEMON_REQUIREMENT: requirement });
+
+  const refused = spawnSync(exe, ["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"], { env: env(fakeDaemon), input: "", timeout: 10_000 });
+  check(refused.status === 1 && (refused.stdout?.length ?? 0) === 0, "a caller that is not Winter for Chrome → exit 1, nothing written to it", `exit ${refused.status}; ${refused.stderr?.toString().trim()}`);
+
+  const socketPath = join(home, "run", "browser.sock");
+  const spawnHost = (requirement: string) => {
+    const child = spawn(exe, [origin], { env: env(requirement), stdio: ["pipe", "pipe", "pipe"] });
+    const stderr: string[] = [];
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (d: string) => stderr.push(...d.split("\n").filter(Boolean)));
+    return { child, stderr, pipe: new NativePipe(child) };
+  };
+
+  const host = spawnHost(fakeDaemon);
+  try {
+    const status = (daemon: string) => (m: Record<string, any>) => m.method === "host.status" && m.params?.daemon === daemon;
+    check(await host.pipe.next(status("unavailable")) !== undefined, "no daemon → host.status {daemon: \"unavailable\"}", host.stderr.slice(-3).join(" | "));
+    const daemon = await fakeBrowserDaemon(socketPath);
+    try {
+      const hello = await daemon.line((m) => m.method === "host.hello", 8000);
+      const p = hello?.params ?? {};
+      check(hello?.id === "h1" && p.protocol === BROWSER_HOST_PROTOCOL && p.client === "browser-host" && p.origin === origin && p.hostPid === host.child.pid
+        && p.hostVersion === version && p.browserPid === process.pid && typeof p.browserBundleId === "string",
+        "the daemon appears within the retry: host.hello {protocol, client, hostVersion, hostPid, origin, browserBundleId, browserPid} first", JSON.stringify(hello));
+      const hostDr = helperRequirement(BROWSER_HOST.test.identifier, WINTER_TEAM_ID);
+      check(processSatisfiesRequirement(Number(p.hostPid), hostDr), "the daemon's own check: the pid host.hello names satisfies the host's stated requirement (Security.framework by pid)");
+      check(run("codesign", ["--verify", `-R=${hostDr}`, String(p.hostPid)]).status === 0, "…and codesign agrees on the running process");
+      check(!processSatisfiesRequirement(Number(p.hostPid), helperRequirement(HELPER.test.identifier, WINTER_TEAM_ID)), "…and the check discriminates: the host is not the helper");
+      daemon.write({ id: "h1", result: { protocol: BROWSER_HOST_PROTOCOL, daemonVersion: "verify" } });
+      check(await host.pipe.next(status("connected")) !== undefined, "host.hello answered → host.status {daemon: \"connected\"} to the extension");
+      host.pipe.send({ id: "e1", method: "hello", params: { protocol: EXTENSION_PROTOCOL, extensionVersion: "1.0.0", instanceId: "00000000-0000-4000-8000-000000000001" } });
+      const relayed = await daemon.line((m) => m.id === "e1");
+      check(relayed?.method === "hello" && relayed?.params?.instanceId === "00000000-0000-4000-8000-000000000001", "the relay: an extension message reaches the daemon unchanged", JSON.stringify(relayed));
+      daemon.write({ id: "d1", method: "tabs.list", params: {} });
+      const back = await host.pipe.next((m) => m.id === "d1");
+      check(back?.method === "tabs.list", "…and a daemon request reaches the extension as one native message", JSON.stringify(back));
+    } finally {
+      daemon.stop();
+    }
+  } finally {
+    host.child.kill("SIGTERM");
+  }
+
+  // A daemon this bun is not: the host checks the socket's process before writing anything.
+  rmSync(socketPath, { force: true });
+  const daemon = await fakeBrowserDaemon(socketPath);
+  const strict = spawnHost("never");
+  try {
+    check(await strict.pipe.next((m) => m.method === "host.status" && m.params?.daemon === "unverified") !== undefined,
+      "a process on the socket that is not the daemon → host.status {daemon: \"unverified\"}", strict.stderr.slice(-3).join(" | "));
+    await sleep(300);
+    check(daemon.state.bytes === 0, "…and it was sent not one byte");
+  } finally {
+    strict.child.kill("SIGTERM");
+    daemon.stop();
+  }
+  // Chrome closing the port ends the host.
+  const ending = spawnHost(fakeDaemon);
+  ending.child.stdin?.end();
+  const code = await Promise.race([new Promise<number | null>((r) => ending.child.once("exit", (c) => r(c))), sleep(5000).then(() => "late" as const)]);
+  check(code === 0, "stdin closed (Chrome closed the port) → the host exits 0", String(code));
+  if (code === "late") ending.child.kill("SIGKILL");
+}
+
 async function main(): Promise<void> {
   if (process.platform !== "darwin") throw new Error("the helper is macOS-only");
+  const devFlag = process.argv.indexOf("--dev-helper");
+  const devHelperApp = devFlag >= 0 && process.argv[devFlag + 1] !== undefined ? process.argv[devFlag + 1]! : DEV_HELPER_APP;
   // The helper's OWN version (apple/ComputerUse/VERSION), not Winter's.
   const version = readHelperVersion();
   const homes: string[] = [];
   const launched: Launched[] = [];
   try {
     // ── 1. the dev helper as built by `bun run dev:helper` ────────────────────────────────────────────
-    console.error(`verify:computer-helper: 1. the dev helper (${DEV_HELPER_APP})`);
-    if (!existsSync(DEV_HELPER_APP)) {
+    console.error(`verify:computer-helper: 1. the dev helper (${devHelperApp})`);
+    if (!existsSync(devHelperApp)) {
       check(false, "the dev helper exists", "run `bun run dev:helper` first");
     } else {
-      const failures = inspectHelper(DEV_HELPER_APP, "dev");
-      check(failures.length === 0, `signed for TCC: team ${WINTER_TEAM_ID}, ${HELPER.dev.identifier}, hardened runtime, the stated designated requirement, the Apple Events entitlement only, LSUIElement, version ${version}, no test hooks`, failures.join("; "));
+      const failures = inspectHelper(devHelperApp, "dev");
+      check(failures.length === 0, `signed for TCC: team ${WINTER_TEAM_ID}, ${HELPER.dev.identifier}, hardened runtime, the stated designated requirement, the Apple Events entitlement only, LSUIElement, version ${version}, no test hooks; winter-browser-host inside as ${BROWSER_HOST.dev.identifier}, its stated requirement, no entitlements, no test hooks`, failures.join("; "));
 
       // ── 2. that binary refuses a peer that is not the dev daemon ──────────────────────────────────────
       console.error("verify:computer-helper: 2. the dev binary's real peer check, on a temp home");
       const home = tempHome();
       homes.push(home);
       const socketPath = join(home, "run", HELPER_SOCKET_NAME);
-      const dev = launch(helperExecutable(DEV_HELPER_APP, "dev"), { WINTER_CU_HOME: home });
+      const dev = launch(helperExecutable(devHelperApp, "dev"), { WINTER_CU_HOME: home });
       launched.push(dev);
       if (check(await waitFor(() => existsSync(socketPath), 10_000), "it listens on <home>/run/computer-use.sock (WINTER_CU_HOME honoured by a dev build)", dev.stderr.slice(-5).join(" | "))) {
         check(mode(socketPath) === 0o600, "the socket is 0600", `mode ${mode(socketPath)?.toString(8)}`);
@@ -206,6 +363,8 @@ async function main(): Promise<void> {
     const fakeDaemon = bunDr ?? "always";
     if (bunDr === undefined) console.error(`verify:computer-helper: ${process.execPath} has no designated requirement (unsigned bun?) — the test helper accepts any peer (\`always\`)`);
     else console.error(`verify:computer-helper: fake daemon identity = this bun's designated requirement: ${bunDr}`);
+
+    await verifyBrowserHost(testApp, fakeDaemon, homes, version);
 
     const home = tempHome();
     homes.push(home);
@@ -313,6 +472,9 @@ async function main(): Promise<void> {
     for (const h of homes) rmSync(h, { recursive: true, force: true });
     // Running an app's binary registers it with LaunchServices; the test flavor must leave no record behind.
     run(LSREGISTER, ["-u", join(VERIFY_DIR, `${HELPER.test.name}.app`)]);
+    // Running the dev binary registered it too: a dev helper verified elsewhere (--dev-helper) must not stay a second
+    // registered com.winter.computeruse.dev.
+    if (devHelperApp !== DEV_HELPER_APP) run(LSREGISTER, ["-u", devHelperApp]);
     rmSync(VERIFY_DIR, { recursive: true, force: true });
   }
 }
