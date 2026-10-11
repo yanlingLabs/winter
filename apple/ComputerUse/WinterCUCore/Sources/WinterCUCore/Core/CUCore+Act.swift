@@ -75,7 +75,7 @@ extension CUCore {
                 throw error
             }
         }
-        noteGuardianActed(t.pid)  // an activation in the next seconds may be this act's doing
+        noteGuardianAfterglow(t.pid)  // an activation in the next seconds may be this act's doing
         CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): \(Self.routeName(outcome.rung), privacy: .public)\(outcome.detail.map { " — " + $0 } ?? "", privacy: .public)")
         let notes = takeGuardianNotes()
         let detail = (notes + [outcome.detail].compactMap { $0 }).isEmpty ? nil
@@ -691,7 +691,7 @@ extension CUCore {
         let deadline = clock.nowMs() + 300
         repeat {
             if let moved = ElementInfo(e, ax).center, window.contains(moved) { return moved }
-            usleep(30_000)
+            clock.pause(ms: 30)
         } while clock.nowMs() < deadline
         return nil
     }
@@ -1092,7 +1092,7 @@ extension CUCore {
                 return Received(word: "verified", words: "verified (the field holds it)")
             }
             if clock.nowMs() >= deadline { break }
-            usleep(30_000)
+            clock.pause(ms: 30)
         } while true
         // The longest leading part that arrived, counted in the characters that were sent (binary search over its
         // length; a part that is only whitespace counts as there).
@@ -1160,7 +1160,7 @@ extension CUCore {
                 if now != before, now.contains(text) { return .landed }
             }
             if clock.nowMs() >= deadline { break }
-            usleep(25_000)
+            clock.pause(ms: 25)
         } while true
         return readAny ? .missing : .unreadable
     }
@@ -1255,7 +1255,7 @@ extension CUCore {
     /// if the app still activates, the guard's note says it had to be undone.
     func enforceFocus(_ p: TargetActParams, _ t: CUTarget) {
         guard let enforcer = focusEnforcer(for: t, privatePath: p.privatePath) else { return }
-        noteSyntheticActivation()  // the guardian must not read the activation this posts as the user's
+        noteSyntheticActivation(t.pid)  // the guardian must not read the activation this posts as the user's
         // Advisory now that focus no longer uses the AXFocused write: if the guard still logs a fault on this
         // act the synthetic activation did not help, and we can drop it; if the enforcer ran and no fault
         // follows, it was unneeded or it held. The guard is authoritative either way.
@@ -1324,7 +1324,7 @@ extension CUCore {
         guard let range, ax.isSettable(e, kAXSelectedTextRangeAttribute),
               let r = AX.makeRange(location: range.location, length: range.length) else { return true }
         let deadline = clock.nowMs() + selectionHoldMs
-        while clock.nowMs() < deadline, let now = selectionRange(e), now == range { usleep(20_000) }
+        while clock.nowMs() < deadline, let now = selectionRange(e), now == range { clock.pause(ms: 20) }
         try? ax.set(e, kAXSelectedTextRangeAttribute, r)
         holdSelection(e, range, t, what: "menu")
         return true
@@ -1348,7 +1348,7 @@ extension CUCore {
         let deadline = clock.nowMs() + selectionHoldMs
         var resets = 0
         while clock.nowMs() < deadline {
-            usleep(30_000)
+            clock.pause(ms: 30)
             guard let now = selectionRange(e), now != want else { continue }
             guard resets < 2 else { break }
             resets += 1
@@ -1381,7 +1381,7 @@ extension CUCore {
             CULog.act.notice("menu in \(t.appName, privacy: .public): no synthetic activation (the private path is off)")
             return
         }
-        noteSyntheticActivation()  // the guardian must not read the activation this posts as the user's
+        noteSyntheticActivation(t.pid)  // the guardian must not read the activation this posts as the user's
         let posted = enforcer.forceActivation(windowID: t.windowID)
         CULog.act.notice("menu in \(t.appName, privacy: .public): \(posted ? "posted the synthetic activation before validating (whatever the app was believed to be)" : "no synthetic activation: the app is in front", privacy: .public)")
     }
@@ -1404,7 +1404,7 @@ extension CUCore {
                     CULog.act.notice("menu in \(t.appName, privacy: .public): “\(title, privacy: .public)” still disabled after \(reads, privacy: .public) reads (\(Int(self.clock.nowMs() - start), privacy: .public) ms)")
                     throw e
                 }
-                usleep(40_000)
+                clock.pause(ms: 40)
             }
         }
     }
@@ -1587,7 +1587,7 @@ extension CUCore {
         repeat {
             if isFocused(e, t) { return true }
             if clock.nowMs() >= deadline { return false }
-            usleep(30_000)
+            clock.pause(ms: 30)
         } while true
     }
 
@@ -1595,7 +1595,7 @@ extension CUCore {
     /// activation (only with the private path, like the rest of the enforcer).
     func postSyntheticActivation(_ t: CUTarget, privatePath: Bool) {
         guard let enforcer = focusEnforcer(for: t, privatePath: privatePath) else { return }
-        noteSyntheticActivation()  // the guardian must not read the activation this posts as the user's
+        noteSyntheticActivation(t.pid)  // the guardian must not read the activation this posts as the user's
         _ = enforcer.enforce(windowID: t.windowID)
     }
 
@@ -1661,7 +1661,7 @@ extension CUCore {
         let ax = self.ax, clock = self.clock
         let evidence = CUEditEvidence(readValue: { e.flatMap { ax.string($0, kAXValueAttribute) } },
                                       nowMs: { clock.nowMs() },
-                                      sleepMs: { usleep(useconds_t($0 * 1000)) })
+                                      sleepMs: { clock.pause(ms: $0) })
         return evidence.wait(before: before, expect: expect, capMs: capMs)
     }
 
@@ -1812,7 +1812,7 @@ extension CUCore {
         repeat {
             if let now = pageSignature(t), !Self.isSamePage(before, now) { return true }
             if clock.nowMs() >= deadline { return false }
-            usleep(100_000)
+            clock.pause(ms: 100)
         } while true
     }
 
@@ -2038,7 +2038,7 @@ extension CUCore {
                         return ActOutcome(rung: .accessibility, detail: "the \(command.rawValue) was done through \(t.appName)'s Edit › \(item.title) and the field changed")
                     }
                     if clock.nowMs() >= deadline { break }
-                    usleep(30_000)
+                    clock.pause(ms: 30)
                 } while true
             }
             CULog.act.notice("key in \(t.appName, privacy: .public): \(command.rawValue, privacy: .public) took no effect in the background — asking for the foreground")
@@ -2122,13 +2122,13 @@ extension CUCore {
         let bound = blipKeySettleMs + blipReadMs + blipPasteHoldMs + 150
         guard let blip = try beginBlip(p, t, why: "“\(item.title)”", boundMs: max(Self.blipDeadlineMs, bound)) else { return nil }
         defer { blip.end() }
-        if blipKeySettleMs > 0 { usleep(useconds_t(blipKeySettleMs * 1000)) }
+        if blipKeySettleMs > 0 { clock.pause(ms: blipKeySettleMs) }
         activateForMenu(p, t)
         var how: String
         let until = clock.nowMs() + blipReadMs
         var enabled = ax.bool(item.element, kAXEnabledAttribute) == true
         while !enabled, clock.nowMs() < until, !blip.isEnded {
-            usleep(20_000)
+            clock.pause(ms: 20)
             enabled = ax.bool(item.element, kAXEnabledAttribute) == true
         }
         if enabled {
@@ -2154,7 +2154,7 @@ extension CUCore {
                 throw CUError.uncertain("macOS began switching desktops during the paste into \(t.appName), so it was stopped (the user's desktop is being put back); the paste may have landed — check state() before pasting again")
             }
             if clock.nowMs() >= hold || blip.isEnded { break }
-            usleep(15_000)
+            clock.pause(ms: 15)
         } while true
 
         return how
@@ -2340,7 +2340,7 @@ extension CUCore {
                 if probes.map({ ax.frame($0) }) != before {
                     return ActOutcome(rung: wheel.rung, detail: "\(subject): the scroll was sent to that window as wheel events, and its content moved")
                 }
-                usleep(30_000)
+                clock.pause(ms: 30)
             }
             CULog.act.notice("scroll in \(t.appName, privacy: .public) (off screen): the wheel moved nothing — Page keys")
         }
@@ -2659,7 +2659,7 @@ extension CUCore {
         let deadline = clock.nowMs() + pressSettleMs
         var after = pressEvidence(e, t)
         while after == before, clock.nowMs() < deadline {
-            usleep(50_000)
+            clock.pause(ms: 50)
             after = pressEvidence(e, t)
         }
         guard after != before else {
@@ -2715,7 +2715,7 @@ extension CUCore {
         repeat {
             if webPressEvidence(e, t) != before { return true }
             if clock.nowMs() >= deadline { return false }
-            usleep(50_000)
+            clock.pause(ms: 50)
         } while true
     }
 
@@ -3096,7 +3096,7 @@ extension CUCore {
         var front = false
         for _ in 0..<50 {
             if sys.frontmostPid() == t.pid { front = true; break }
-            usleep(20_000)
+            clock.pause(ms: 20)
         }
         defer {
             if let c = cursor { sys.warpCursor(to: c) }

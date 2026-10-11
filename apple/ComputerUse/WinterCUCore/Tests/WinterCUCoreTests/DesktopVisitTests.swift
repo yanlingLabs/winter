@@ -630,9 +630,10 @@ final class DesktopVisitTests: XCTestCase {
                 show(1)
                 let first = lock.withLock { () -> Bool in defer { returned = true }; return !returned }
                 if first {
-                    // 200 ms after being brought back the user ⌘-Tabs (⌘ held: input that can switch apps).
+                    // 200 ms after being brought back the user ⌘-Tabs (⌘ held and released: the switcher's).
                     DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { [unowned self] in
                         core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: .maskCommand, now: core.clock.nowSeconds())
+                        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: [], now: core.clock.nowSeconds())
                         sys.front = dest
                     }
                 }
@@ -667,70 +668,67 @@ final class DesktopVisitTests: XCTestCase {
         XCTAssertEqual(userView, usersPlace, "undone")
     }
 
-    /// Review of round 4 (LOW): a chord the tap SEES (⌘S, ⌃C) went to an app and switched nothing — the switcher's own
-    /// (⌘-Tab) shows only as the modifier's press and release; a ⌘ held over a second before the Tab counted nothing; a
-    /// chord from before the watch counted. A ⌘/⌃ hold counts (while it lasts, and its release) unless a chord was seen
-    /// in it; a gesture counts; nothing before the watch began.
+    /// What counts as input that can switch (`CUSwitchInput`): a chord the tap SEES (⌘S, ⌃C) went to an app and switched
+    /// nothing — the switcher's own (⌘-Tab) shows only as the modifier's press and release, which counts AT the release
+    /// (the switcher acts then); a ⌃ hold counts while it lasts (the desktop switcher acts during it); a chord seen in the
+    /// hold makes it no switch; a swipe counts, the generic gesture type (any touch, scrolls included) does not; nothing
+    /// from before `from`, nothing at or before the agent's cause on the app, and each instant explains one change only.
     func testOnlyInputThatCanSwitchCountsAsTheUsersMove() {
         var s = CUSwitchInput()
         // ⌘-Tab: ⌘ down, the Tab swallowed by the switcher, ⌘ up 1.5 s later.
         s.event(type: .flagsChanged, flags: .maskCommand, now: 10)
-        XCTAssertTrue(s.seen(from: 9, seenAt: 11, window: 1), "a chord-less hold going on")
+        XCTAssertFalse(s.explains(from: 9, after: 0, now: 11), "a ⌘ hold going on switches nothing yet")
         s.event(type: .flagsChanged, flags: [], now: 11.5)
-        XCTAssertTrue(s.seen(from: 9, seenAt: 11.8, window: 1), "its release, however long ⌘ was held")
-        XCTAssertFalse(s.seen(from: 9, seenAt: 13, window: 1), "only within the window before the change")
-        XCTAssertFalse(s.seen(from: 12, seenAt: 12.2, window: 1), "never from before the watch began")
+        XCTAssertTrue(s.explains(from: 9, after: 0, now: 11.8), "its release, however long ⌘ was held")
+        XCTAssertFalse(s.explains(from: 12, after: 0, now: 12.2), "never from before `from`")
+        XCTAssertFalse(s.explains(from: 9, after: 11.6, now: 11.8), "never at or before the agent's cause on the app")
+        s.consume(through: 11.8)
+        XCTAssertFalse(s.explains(from: 9, after: 0, now: 11.9), "used up by the change it explained")
         // ⌘S: the chord is seen — an app got it, nothing switched.
         var e = CUSwitchInput()
         e.event(type: .flagsChanged, flags: .maskCommand, now: 20)
         e.event(type: .keyDown, flags: .maskCommand, now: 20.1)
-        XCTAssertFalse(e.seen(from: 19, seenAt: 20.2, window: 1), "a seen chord is no switch")
         e.event(type: .flagsChanged, flags: [], now: 20.3)
-        XCTAssertFalse(e.seen(from: 19, seenAt: 20.4, window: 1), "nor its release")
-        // Typing, a capital, a scroll: nothing. A swipe: yes.
+        XCTAssertFalse(e.explains(from: 19, after: 0, now: 20.4), "a seen chord is no switch")
+        // Under Secure Event Input the tap sees no keys: a hold can't be told from a shortcut.
+        var sec = CUSwitchInput()
+        sec.event(type: .flagsChanged, flags: .maskCommand, secure: true, now: 25)
+        sec.event(type: .flagsChanged, flags: [], secure: true, now: 25.2)
+        XCTAssertFalse(sec.explains(from: 24, after: 0, now: 25.3))
+        // Typing, a capital, a scroll, the generic gesture: nothing. A swipe: yes.
         var g = CUSwitchInput()
         g.event(type: .keyDown, flags: [], now: 30)
         g.event(type: .flagsChanged, flags: .maskShift, now: 30.1)
         g.event(type: .scrollWheel, flags: [], now: 30.2)
-        XCTAssertFalse(g.seen(from: 29, seenAt: 30.3, window: 1))
+        g.event(type: CGEventType(rawValue: 29)!, flags: [], now: 30.25)
+        XCTAssertFalse(g.explains(from: 29, after: 0, now: 30.3))
         g.event(type: CGEventType(rawValue: 31)!, flags: [], now: 30.4)
-        XCTAssertTrue(g.seen(from: 29, seenAt: 30.5, window: 1), "a swipe between desktops")
-        // A hold whose release was never seen is not trusted for ever.
+        XCTAssertTrue(g.explains(from: 29, after: 0, now: 30.5), "a swipe between desktops")
+        // A ⌃ hold counts while it lasts — from when it began, never one begun before the cause — and not for ever.
         var h = CUSwitchInput()
         h.event(type: .flagsChanged, flags: .maskControl, now: 40)
-        XCTAssertFalse(h.seen(from: 39, seenAt: 40 + CUSwitchInput.holdMax + 1, window: 1))
+        XCTAssertTrue(h.explains(from: 39, after: 39.5, now: 40.3))
+        XCTAssertTrue(h.explains(from: 39, after: 39.5, now: 40.6), "every desktop it passes while held")
+        XCTAssertFalse(h.explains(from: 39, after: 40.1, now: 40.3), "a hold begun before the agent's cause")
+        XCTAssertFalse(h.explains(from: 39, after: 0, now: 40 + CUSwitchInput.holdMax + 1))
         // Review of round 6 (LOW): a hold with only MOUSE input in it (⌘-click, ⌃-click, ⌘-drag, ⌃-scroll) is a chord.
         for type in [CGEventType.leftMouseDown, .rightMouseDown, .leftMouseDragged, .scrollWheel] {
             var m = CUSwitchInput()
             m.event(type: .flagsChanged, flags: .maskControl, now: 50)
             m.event(type: type, flags: .maskControl, now: 50.1)
+            XCTAssertFalse(m.explains(from: 49, after: 0, now: 50.15), "\(type.rawValue): a chord, no switch while held")
             m.event(type: .flagsChanged, flags: [], now: 50.2)
-            XCTAssertFalse(m.seen(from: 49, seenAt: 50.3, window: 1), "\(type.rawValue): a chord, no switch")
+            XCTAssertFalse(m.explains(from: 49, after: 0, now: 50.3), "\(type.rawValue): a chord, no switch")
         }
-        // A hold counts only from when it began.
-        var b = CUSwitchInput()
-        b.event(type: .flagsChanged, flags: .maskCommand, now: 60)
-        XCTAssertFalse(b.seen(from: 60.5, seenAt: 60.6, window: 1), "a hold from before the watch")
-        XCTAssertTrue(b.seen(from: 59.5, seenAt: 60.6, window: 1))
         // ⌘S, then ⌘-Tab in the same hold: the Tab the tap sees is a switch.
         var c = CUSwitchInput()
         c.event(type: .flagsChanged, flags: .maskCommand, now: 70)
         c.event(type: .keyDown, flags: .maskCommand, keycode: 1, now: 70.1)    // ⌘S
         c.event(type: .keyDown, flags: .maskCommand, keycode: 48, now: 70.3)   // ⌘-Tab
-        XCTAssertTrue(c.seen(from: 69, seenAt: 70.4, window: 1), "the switch after a chord in one hold")
+        XCTAssertTrue(c.explains(from: 69, after: 0, now: 70.4), "the switch after a chord in one hold")
         var d = CUSwitchInput()
         d.event(type: .keyDown, flags: .maskControl, keycode: 124, now: 80)    // ⌃→: the next desktop
-        XCTAssertTrue(d.seen(from: 79, seenAt: 80.2, window: 1))
-    }
-
-    func testOnlyTheTargetsOwnLateSwitchIsUndone() {
-        let before = CUUserView(space: 1, front: 1)
-        XCTAssertTrue(CUCore.lateSwitchCouldBeTheTarget(CUUserView(space: 2, front: pid), before: before, targetPid: pid,
-                                                        targetWindowOnScreen: true))
-        XCTAssertTrue(CUCore.lateSwitchCouldBeTheTarget(CUUserView(space: 2, front: 1), before: before, targetPid: pid,
-                                                        targetWindowOnScreen: true), "its window's desktop shown")
-        XCTAssertFalse(CUCore.lateSwitchCouldBeTheTarget(CUUserView(space: 1, front: 4242), before: before, targetPid: pid,
-                                                         targetWindowOnScreen: false), "another app: not the target's switch")
+        XCTAssertTrue(d.explains(from: 79, after: 0, now: 80.2))
     }
 
     /// Review of round 2 (LOW): a recorded window of the user's that closed, or a newer one they opened during the
@@ -916,9 +914,14 @@ final class DesktopVisitTests: XCTestCase {
         for withWindow in [true, false] {
             world()
             sys.displays = ["main": 1, "side": 10]
+            var returns = 0
             sys.onFrontWindow = { [unowned self] p, wid, _ in
                 if p == pid, wid == 77 { show(2); sys.displays = ["main": 2, "side": 10] }  // the visit: the main display
-                if p == user { show(1); sys.displays = ["main": 1, "side": 11] }        // back — but the side display moved
+                if p == user {
+                    show(1)
+                    returns += 1
+                    if returns == 1 { sys.displays = ["main": 1, "side": 11] }  // back — but the side display moved
+                }
             }
             let side = fakeElement(96_104)
             if withWindow {
@@ -927,8 +930,10 @@ final class DesktopVisitTests: XCTestCase {
                 sys.windows[504] = FakeSystem.window(504, pid: user, CGRect(x: 2000, y: 0, width: 400, height: 300))
                 sys.spacesOfWindow[504] = [10]
                 ax.put(ax.application(user), [kAXWindowsAttribute: [userWindow, side]])
+                // Raising the side display's window brings that display back — and makes its desktop the ACTIVE one (its
+                // window is key now): review of round 7, the check right after the raise read "not back" there.
                 ax.onPerform = { [unowned self] what in
-                    if what == "96104:AXRaise" { sys.displays = ["main": 1, "side": 10] }
+                    if what == "96104:AXRaise" { sys.displays = ["main": 1, "side": 10]; sys.space = 10 }
                 }
             }
             _ = try await click(visit: true)
@@ -937,6 +942,7 @@ final class DesktopVisitTests: XCTestCase {
             if withWindow {
                 XCTAssertTrue(r.returned, "the side display brought back by its own window: \(r.detail ?? "")")
                 XCTAssertEqual(sys.displays?["side"], 10)
+                XCTAssertEqual(userView, usersPlace, "then their own desktop and window in front again")
             } else {
                 XCTAssertFalse(r.returned)
                 XCTAssertTrue(r.detail?.contains("other display stayed on") ?? false, r.detail ?? "")
@@ -1007,9 +1013,10 @@ final class DesktopVisitTests: XCTestCase {
         defer { core.stopGuardian() }
         poster.onPost = { [unowned self] e in
             guard e.type == .leftMouseUp else { return }
+            // The target's own window brings another desktop forward while the user only moves the pointer: the visit's.
             core.noteHardwareInput(now: core.clock.nowSeconds() + 0.01, move: true)
             sys.space = 3
-            sys.front = 555
+            sys.front = pid
             core.onSpaceChange()
         }
         _ = try await click(visit: true)
@@ -1024,10 +1031,12 @@ final class DesktopVisitTests: XCTestCase {
         world()
         XCTAssertTrue(core.startGuardian(privatePath: true))
         defer { core.stopGuardian() }
+        core.switchInputObservableOverride = true
         poster.onPost = { [unowned self] e in
             guard e.type == .leftMouseUp else { return }
-            // The user swipes to a third desktop and is in another app there.
-            core.noteHardwareInput(now: core.clock.nowSeconds() + 0.01)
+            // The user swipes to a third desktop and is in another app there (the target's window is not shown there).
+            core.noteTapEvent(type: CGEventType(rawValue: 31)!, sourcePid: 0, userData: 0, now: core.clock.nowSeconds())
+            sys.windows[77]?.onScreen = false
             sys.space = 3
             sys.front = 555
             core.onSpaceChange()

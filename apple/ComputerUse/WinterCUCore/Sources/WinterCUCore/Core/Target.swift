@@ -152,6 +152,8 @@ final class CUTarget: @unchecked Sendable {
     private var _consentedForeground = false
     private var _viewNotes: [String] = []
 
+    private var _actStart: (front: pid_t?, space: UInt64?, at: TimeInterval)?
+
     /// Starts an act: its number, and no foreground consent used yet.
     func beginAct() -> Int {
         lock.lock(); defer { lock.unlock() }
@@ -160,6 +162,12 @@ final class CUTarget: @unchecked Sendable {
         return _actSeq
     }
     var actSeq: Int { lock.lock(); defer { lock.unlock() }; return _actSeq }
+    /// Where the user was, and when, as the current act began (a key sent with no focus blip, the app in front, is
+    /// judged against it).
+    var actStart: (front: pid_t?, space: UInt64?, at: TimeInterval)? {
+        get { lock.lock(); defer { lock.unlock() }; return _actStart }
+        set { lock.lock(); _actStart = newValue; lock.unlock() }
+    }
     /// The act brought the app forward on the consented foreground rung (the user agreed to that).
     var consentedForeground: Bool {
         get { lock.lock(); defer { lock.unlock() }; return _consentedForeground }

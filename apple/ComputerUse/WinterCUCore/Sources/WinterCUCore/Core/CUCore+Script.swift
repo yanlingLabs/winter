@@ -87,17 +87,23 @@ extension CUCore {
         default:
             break
         }
+        // A run (up to minutes, plus macOS's consent question) may bring the app forward at any time: touched while it
+        // runs, and judged by the one rule from its start (review of round 7: its after-check restored from a pid
+        // captured before it, whatever the user had done meanwhile).
         let before = userView()
+        let startedAt = clock.nowSeconds()
         let result: String?
+        beginGuardianSpan(t.pid)
         do {
+            defer { endGuardianSpan(t.pid) }
             result = try runAppleScript(p.source, t, timeoutMs: timeout)
         } catch let e as CUError {
-            _ = viewNoteAfterBind(before, app: t.appName, pid: t.pid, route: "a failed applescript")
+            _ = viewNoteAfterBind(before, app: t.appName, pid: t.pid, route: "a failed applescript", since: startedAt)
             CULog.act.notice("applescript in \(t.appName, privacy: .public) failed: \(e.code, privacy: .public)")
             if e.code == "not_allowed" { throw CUError(code: "refused", message: e.message, data: ["reason": .string("applescript")]) }
             throw e
         }
-        if let note = viewNoteAfterBind(before, app: t.appName, pid: t.pid, route: "applescript") { notes.append(note) }
+        if let note = viewNoteAfterBind(before, app: t.appName, pid: t.pid, route: "applescript", since: startedAt) { notes.append(note) }
         t.lastActionMs = clock.nowMs()
         CULog.act.notice("applescript in \(t.appName, privacy: .public): ran (\(p.source.utf8.count, privacy: .public) bytes)")
         let capped = result.map { $0.utf8.count > Self.appleScriptMaxResult ? String($0.prefix(Self.appleScriptMaxResult)) + "… (cut)" : $0 }

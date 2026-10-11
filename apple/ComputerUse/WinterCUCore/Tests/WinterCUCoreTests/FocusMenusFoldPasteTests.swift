@@ -783,7 +783,7 @@ final class FocusMenusFoldPasteTests: XCTestCase {
                           isChromium: false, mirror: false, windowID: 77, windowTitle: "Downloads")
         core.registerForTesting(t3, windowElement: window)
         core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: [], now: core.clock.nowSeconds())  // ⌘ released earlier
-        core.guardianLock.withLock { core.switchInput = CUSwitchInput() }
+        core.guardianLock.withLock { core.guardianCore.input = CUSwitchInput() }
         XCTAssertEqual(core.keyForClick(t3, privatePath: true, clickWindow: 77), .activatedItself)
     }
 
@@ -979,7 +979,7 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         // Back in their own app later: the next blip runs as ever.
         sys.front = 1
         core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: [], now: core.clock.nowSeconds() - 5)
-        core.guardianLock.withLock { core.switchInput = CUSwitchInput() }
+        core.guardianLock.withLock { core.guardianCore.input = CUSwitchInput() }
         enforcer.onDeactivate = nil
         FocusSPI.reset()
         try await act(.type(CUTypeAction(text: "b")))
@@ -1091,6 +1091,171 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         _ = try? await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
         XCTAssertEqual(removedByTimer, 1, "the tap came off at the bound")
         XCTAssertEqual(installer.removed, installer.installed.count, "and never twice")
+    }
+
+    // MARK: round 8 — the review of round 7, and what the model-based test found
+
+    /// Item 1 (HIGH): a synthetic mark on the TARGET made the user's plain click into Mail mid-burst a theft — the burst
+    /// threw "came to the front by itself", handed the key focus back to the app they left and pulled them out of Mail.
+    /// Causes are per app: Mail, which the agent never touched, coming forward is theirs (I1) — no input needed.
+    func testAPlainSwitchToAnAppTheAgentNeverTouchedMidBurstIsTheUsers() async throws {
+        finder(focusedField: true)
+        let mail: pid_t = 7777
+        sys.running.insert(mail)
+        core.switchInputObservableOverride = true
+        let keyFocus = trackKeyFocus()
+        core.startGuardian(privatePath: true)
+        defer { core.stopGuardian() }
+        var keys = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            keys += 1
+            if keys == 2 { sys.front = mail; sys.onActivate?(mail) }  // a plain click into Mail: no ⌘, no gesture
+        }
+        let handBacksBefore = FocusSPI.calls.filter { $0.hasPrefix("focus pid 1 ") }.count
+        do {
+            try await act(.type(CUTypeAction(text: "abcdef")))
+            XCTFail("typed on")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("app_in_front"), e.message)
+        }
+        XCTAssertEqual(poster.keyDowns.count, 2)
+        XCTAssertTrue(sys.activated.filter { $0 != mail }.isEmpty, "never pulled out of Mail")
+        XCTAssertEqual(FocusSPI.calls.filter { $0.hasPrefix("focus pid 1 ") }.count, handBacksBefore, "the key focus never handed back to the app they left")
+        XCTAssertEqual(keyFocus(), mail)
+        core.onActivation(pid: mail)
+        XCTAssertTrue(sys.activated.filter { $0 != mail }.isEmpty, "the armed guardian leaves them there")
+        XCTAssertEqual(core.guardianPlace()?.app, mail)
+    }
+
+    /// Item 2 (HIGH): the reroute passed the user's keys through whenever the TARGET was in front — into a target that
+    /// took the front by itself, until the next check. Each key now goes to their place by the one rule (I3).
+    func testTheRerouteNeverPassesTheUsersKeysIntoATargetThatTookTheFrontByItself() async throws {
+        finder(focusedField: true)
+        core.switchInputObservableOverride = true
+        core.startGuardian(privatePath: true)
+        defer { core.stopGuardian() }
+        var passed: CGEvent??
+        var keys = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            keys += 1
+            guard keys == 1, let tap = installer.handler else { return }
+            sys.front = pid  // Finder activates itself — nobody's input
+            passed = tap(keyEvent(stamped: false))  // the user's key, typed right then, reaches the target's tap
+        }
+        _ = try? await act(.type(CUTypeAction(text: "abc")))
+        XCTAssertNotNil(passed)
+        XCTAssertNil(passed ?? nil, "not passed into the target")
+        XCTAssertEqual(posted, [1], "posted to the app they are in")
+        // Their own ⌘-Tab into the target: then a key of theirs is theirs to keep there.
+        finder(focusedField: true)
+        core.switchInputObservableOverride = true
+        core.startGuardian(privatePath: true)
+        var through: CGEvent??
+        keys = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            keys += 1
+            guard keys == 1, let tap = installer.handler else { return }
+            usersSwitch()
+            sys.front = pid
+            through = tap(keyEvent(stamped: false))
+        }
+        _ = try? await act(.type(CUTypeAction(text: "abc")))
+        XCTAssertNotNil(through ?? nil, "passed through to the target they switched into")
+        XCTAssertTrue(posted.isEmpty)
+        core.stopGuardian()
+    }
+
+    /// The model-based test: the user ⌘-Tabbed out of the target into their app, a blip began before the guardian heard
+    /// of it, and their key passed through into the target (the guardian's place still named it). With nothing moved
+    /// since the blip began, their key goes to the app they are in.
+    func testAKeyOfTheirsGoesToTheAppTheyAreInBeforeTheGuardianHearsOfTheirMove() async throws {
+        finder(focusedField: true)
+        core.switchInputObservableOverride = true
+        sys.front = pid
+        core.startGuardian(privatePath: true)  // their place: the target, where they were working
+        defer { core.stopGuardian() }
+        sys.front = 1  // their ⌘-Tab back to their own app, not heard of yet
+        var landed: CGEvent??
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown, landed == nil, let tap = installer.handler else { return }
+            landed = tap(keyEvent(stamped: false))
+        }
+        try await act(.type(CUTypeAction(text: "ab")))
+        XCTAssertNotNil(landed)
+        XCTAssertNil(landed ?? nil, "not passed into the target")
+        XCTAssertEqual(posted, [1], "to the app they are in")
+    }
+
+    /// Item 9 (LOW): a blip its 1.5 s bound had ended skipped both checks — the target coming to the front then took the
+    /// next keys with no blip. An ended blip counts as none: the check between bursts applies.
+    func testABlipEndedByItsBoundStillHasTheTargetsComingForwardJudged() async throws {
+        finder(focusedField: true)
+        core.switchInputObservableOverride = true
+        core.blipBurstMs = 60_000  // one long burst: only the bound ends the blip
+        var keys = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            keys += 1
+            guard keys == 2 else { return }
+            scheduled.last?.work()  // the bound arrives
+            sys.front = pid         // and Finder activates itself after it
+        }
+        do {
+            try await act(.type(CUTypeAction(text: "abcdef")))
+            XCTFail("typed on")
+        } catch let e as CUError {
+            XCTAssertTrue(e.message.contains("came to the front by itself"), e.message)
+        }
+        XCTAssertEqual(poster.keyDowns.count, 2, "nothing typed into the app now in front")
+    }
+
+    /// The model-based test: the user clicked into the target as an act began, before its first key — every key went in
+    /// front of them, with no blip. The first key now judges a target that came to the front since the act began.
+    func testTheTargetComingForwardBeforeTheFirstKeyIsJudged() async throws {
+        finder(focusedField: true)
+        core.switchInputObservableOverride = true
+        let enforcer = FakeFocusEnforcer()
+        core.focusEnforcerFactory = { _ in enforcer }
+        var once = false
+        ax.onRead = { [unowned self] name in
+            // As the act reads where the field is, the user ⌘-Tabs into Finder.
+            guard !once, name.hasSuffix(":\(kAXFocusedUIElementAttribute)"), target.actStart != nil else { return }
+            once = true
+            usersSwitch()
+            sys.front = pid
+        }
+        do {
+            try await act(.type(CUTypeAction(text: "abc")))
+            XCTFail("typed")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("app_in_front"), e.message)
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty, "no key typed in front of them")
+        XCTAssertTrue(sys.activated.isEmpty)
+    }
+
+    /// The model-based test: the user moved while the blip was ending (during its waits) — the second hand-back went to
+    /// the app they had just left. Whose move it was is asked again there.
+    func testTheUserMovingWhileABlipEndsGetsNothingHandedBack() async throws {
+        finder(focusedField: true)
+        let mail: pid_t = 7777
+        sys.running.insert(mail)
+        core.switchInputObservableOverride = true
+        _ = trackKeyFocus(loseFirstHandBack: true)  // the first hand-back is lost: the blip waits, then hands back again
+        var moved = false
+        let onFocus = FocusSPI.onFocus
+        FocusSPI.onFocus = { [unowned self] in
+            onFocus?()
+            guard !moved, FocusSPI.calls.last?.hasPrefix("focus pid 1 ") == true else { return }
+            moved = true
+            sys.front = mail  // they go to Mail while the blip waits for their app to take the keys back
+        }
+        try await act(.type(CUTypeAction(text: "a")))
+        XCTAssertEqual(FocusSPI.calls.filter { $0.hasPrefix("focus pid 1 ") }.count, 1, "no second hand-back to the app they left: \(FocusSPI.calls)")
+        XCTAssertTrue(sys.activated.isEmpty, "nothing restored over them")
     }
 
     func testAKeyRepeatedIsOneBurst() async throws {

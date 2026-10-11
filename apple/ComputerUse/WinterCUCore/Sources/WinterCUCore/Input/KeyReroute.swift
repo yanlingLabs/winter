@@ -27,18 +27,20 @@ final class CUKeyReroute {
     private var _rerouted = 0
     private var _passed = 0
 
-    /// True while the user's keys reaching the target are THEIRS to keep there — the target is their front app (they
-    /// switched into it): passed through, never posted to the app they left.
-    private let passThrough: () -> Bool
+    /// Where a key of the user's that reached the target goes (I3): the user's place by the one rule, asked for each key
+    /// (`CUCore.keyPlace`). The target itself — they moved into it — passes the key through; any other app gets it
+    /// posted. Never merely "the target is in front" (review of round 7: a target that took the front by itself got the
+    /// user's keys until the next check).
+    private let destination: () -> pid_t
     private var _passedThrough = 0
 
     init(target: pid_t, victim: pid_t, installer: CUKeyTapInstalling, post: @escaping (CGEvent, pid_t) -> Void,
-         passThrough: @escaping () -> Bool = { false }) {
+         destination: (() -> pid_t)? = nil) {
         self.target = target
         self.victim = victim
         self.installer = installer
         self.post = post
-        self.passThrough = passThrough
+        self.destination = destination ?? { victim }
     }
 
     /// Installs the tap; false when it could not be made (the blip then does not run).
@@ -50,18 +52,19 @@ final class CUKeyReroute {
         return true
     }
 
-    /// What the tap does with one key event: the helper's own passes; anything else (the user's) is posted to
-    /// the user's app and dropped from the target.
+    /// What the tap does with one key event: the helper's own passes; the user's goes to their place — through, when
+    /// that is the target; else posted there and dropped from the target.
     func handle(_ event: CGEvent) -> CGEvent? {
         if CUEventStamp.isOurs(event.getIntegerValueField(.eventSourceUserData)) {
             lock.withLock { _passed += 1 }
             return event
         }
-        if passThrough() {
+        let to = destination()
+        if to == target {
             lock.withLock { _passedThrough += 1 }
             return event
         }
-        if let copy = event.copy() { post(copy, victim) }
+        if let copy = event.copy() { post(copy, to) }
         lock.withLock { _rerouted += 1 }
         return nil
     }

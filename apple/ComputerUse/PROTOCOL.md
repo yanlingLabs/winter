@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.9.6` (the contents of [`VERSION`](VERSION))
+Helper version: `1.9.7` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
@@ -455,8 +455,8 @@ never back and forth between their view and the window's, never held there to th
   window is brought forward once more halfway), then waits for a painted frame (about 1 s at most). A window that
   never comes on screen: the user is brought back and the request fails `unsupported` ("macOS did not show <App>'s
   desktop — nothing was done there") with `data.visit` (the closed visit's report); a switch that comes after that (the
-  app answering late) is watched for about 1.2 s and undone — unless the one rule (§4.12, switch input counted from
-  the watch's start) says it is the user's: then left alone and adopted as their place. The return raises the user's recorded window, a newer one of theirs, or — when theirs closed — another of their windows
+  app answering late) is watched for about 1.2 s and undone — unless the one rule (§4.12; the visit's mode ended, its
+  target still touched) says it is the user's: then left alone and adopted as their place. The return raises the user's recorded window, a newer one of theirs, or — when theirs closed — another of their windows
   that was on their desktop; "theirs" is a window that was on their desktop when the visit began, or one on the Space
   they were on (its Space membership; when that can't be read, shown there once they are back and not shown while the
   visited one is) and not minimized — never the target's window, nor an alert or window the visit's act opened there;
@@ -482,14 +482,11 @@ never back and forth between their view and the window's, never held there to th
   deadline, then VERIFIED (Space and front app as recorded); not back → one more attempt; still not back →
   `returned: false`, a `detail`, and a fault log. No event ever reaches the user's window (a key-window record
   arrives as a mouse down and up). The user
-  moved by themselves ONLY when the guardian saw an activation or a Space change during the visit that a hardware
-  ACTION after the visit began (and after the agent's own latest cause) backed — a click, a key, a scroll, a gesture
-  from no process and not the helper's own; never a pointer move alone, never the HID idle state (it counts the
-  helper's own events), never the events the window server itself puts on the session when an app activates or the
-  desktop changes (mouse entered/exited, AppKit-defined, the gesture begin/end markers) — and they are now neither on
-  the window's desktop nor back where they were: then the visit
-  closes at once and they are left there (`userMoved: true`), their new place adopted. A visit that never arrived
-  always brings them back.
+  moved by themselves ONLY when the one rule (§4.12) finds a change during the visit theirs — switch-capable input of
+  theirs or a click into a window, after the visit began (never the click on "Switch now", never typing, scrolling or
+  a pointer move, never the HID idle state) — and they are now neither on the window's desktop nor back where they
+  were: then the visit closes at once and they are left there (`userMoved: true`), their new place adopted. Their input
+  in the visited app itself is no move away. A visit that never arrived always brings them back.
 - **Reports.** Each closed visit — `{visitId, targetId, app, why, actions, ms, returned, userMoved?, detail?}`:
   `visitId` helper-unique (`v<N>`), `why` what opened it (`act` | `live`), `actions` how many primitives ran in it,
   `ms` how long the user was away — is kept for its session until `visit.close` returns it (each exactly once; at most
@@ -526,25 +523,70 @@ second request for an open `promptId` is `invalid_params`.
 
 ### 4.12 Whose move it is (the one rule)
 
-Every place that sees the user's front app or desktop change while the agent acts — the Focus Guardian's activation
-and desktop observers, a focus blip's make-key step, each of its keys and its end, a background click's preparation,
-the act's after-check, a desktop visit's late-switch watch — asks ONE rule, on the guardian, whose move it was; a path
-that finds it the user's tells the guardian, which then follows them there and claims the activation it brings, so
-nothing restores over it later. In order:
+**The contract.** While the agent acts, these hold — the model-based test (`GuardianModelTests`: the real engine in
+simulated time over a simulated world, seeded random interleavings of the user's actions and the agent's and the apps',
+checked after every event against who really made each change) asserts each of them:
 
-1. A desktop visit in progress: its own (neither undone nor adopted) — except its own late-switch watch.
-2. The user claimed the app: a physical click into its window, or a move a path already judged theirs — theirs.
-3. Input of theirs that can SWITCH apps or desktops just before it (from when the change could have begun, at most
-   1 s back) — theirs, even right after one of the helper's synthetic events. Switch input is: a ⌘ or ⌃ held and
-   released, or still held, with no chord seen in the hold (the switcher swallows ⌘-Tab; a chord an app gets — ⌘S, a
-   ⌘-click, a ⌃-scroll — switches nothing); a switching chord the tap sees (⌘-Tab, ⌘-`, ⌃-arrows); a trackpad gesture;
-   a click on the Dock or a target's window. Typing, scrolling and moving the pointer are not. Under Secure Event Input
-   the tap sees no keys, so any hold counts (the side that never fights the user).
-4. The consented foreground for that app — allowed.
-5. Nothing the agent did could have caused it (no act, blip, open or launch on that app within 1.5 s, no synthetic
-   event within 0.6 s) — theirs.
-6. No input source (the session tap not running): a physical click of theirs just before it — theirs.
-7. Otherwise the agent's, or the target's own — undone.
+- **I1.** Only a change that brought forward an app the agent TOUCHED can ever be undone. Touched, per pid: the agent
+  acted on it, sent it a synthetic event, raised it or made its window main, opened a document in it, is launching it
+  (a process of that bundle started after the launch began), or runs an operation on it (an AppleScript, a bind's window
+  wait, `useWindow`) — within 1.5 s of that, or while it runs. An app the agent never touched coming forward is always
+  the user's. Bringing the user back to their own place never touches their app, and what the agent does to an app
+  while it is in front counts only once it has left the front. The one exception: during a desktop visit the agent acts
+  in front, on the user's screen — what it brings up there (a link its click opened in another app) is the visit's
+  unless the user's own input after the visit began says otherwise.
+- **I2.** Once a change is the user's — by I1, by switch-capable input of theirs AFTER the agent's last cause on that
+  app, or by a click of theirs into a window — nothing undoes it, and every restore goes to the user's place AS IT IS
+  WHEN IT RUNS (a restore's retry included: another app coming forward while it waits is judged first, and their move
+  ends it).
+- **I3.** A key the user types while a focus blip's reroute is on reaches their place by this rule: into the target
+  only when they moved there themselves, never into a target that took the front without being judged their move,
+  never into an app they left; and the key focus is never handed back to an app they left.
+- **I4.** A touched app that comes forward with no switch-capable input of the user's since the agent's last cause on
+  it is undone, and a typing act into it stops (at most the key already in flight).
+- **I5.** Every path that can see the user's front app or desktop change — the guardian's activation and desktop
+  observers, a focus blip's make-key step, each of its keys, its end and its waits, the reroute, a background click's
+  preparation, the act's after-check and late check, a bind, `useWindow`, an AppleScript, making the bound window main,
+  a restore's retries, a desktop visit's late-switch watch — asks this one rule with the time its own operation began,
+  and nothing else. One state gets one verdict until new input of the user's or a new cause of the agent's arrives; a
+  state judged again counts only input from before it was first seen.
+
+**The rule**, in order, for the front app and desktop as they are now:
+
+0. They are the user's place (the guardian's view; the caller's starting view when it does not run): nothing moved.
+1. The app that came forward was not touched — and, for a desktop change with their own app still in front, no
+   touched app with a cause that raises has a window shown there: the user's (I1). Not during a visit.
+2. A click of theirs into its window (a claim): the user's. Used up by that change, gone once they move elsewhere.
+3. A desktop change that follows their own move into that app, with no cause of the agent's on it since: the user's.
+4. Switch-capable input of theirs after the agent's last cause on that app: the user's. Each input explains one change
+   only — the one it was the evidence for. Switch input: ⌘ held and released with no chord seen in the hold (an app
+   switch — the switcher swallows the Tab); ⌃ held with no chord (a desktop switch, while held and at its release); a
+   seen ⌘-Tab or ⌘-` (an app switch) or ⌃-arrow (a desktop switch); a trackpad swipe, magnify, rotate or smart
+   magnify (a desktop switch — never the generic gesture event, type 29, which comes with any touch on the trackpad,
+   two-finger scrolls included); a click on the Dock (an app switch); a click on another app's window or on another
+   display's desktop (for THAT app only). An app switch explains a change of the front app, a desktop switch a change
+   of desktop. Typing, scrolling and moving the pointer never count; nor do a chord an app got (⌘S, ⌘-click, ⌃-scroll)
+   or any ⌘/⌃ hold under Secure Event Input (the tap sees no keys then, so a hold can't be told from a shortcut). Input
+   counts from a second back while the guardian runs (it judges every change as it comes), else from the caller's own
+   start and at least a second back.
+5. No session tap: a physical click of theirs within 0.4 s, after the agent's last cause: the user's.
+6. A desktop visit in progress: the visit's — neither undone nor adopted.
+7. The consented foreground for that app: allowed.
+8. Otherwise the agent's (or the app's own): undone, the user put back at their place.
+
+A click of theirs on a window of another app (not a ⌘-click, which works a window in the background) makes that app and
+its desktop their place at once, before its activation arrives — a theft landing in between is put back there. An
+activation of an app the agent never touched, heard of only after something else came forward, was their place before
+that — a theft after it is put back there (never over a newer state already judged).
+
+**What can't be attributed, by design** (counted by the model-based test, never asserted): the guardian hears of an
+activation only when told, with no time on it, so a change that lands just before the user's own switch input and is
+heard of after it is taken as theirs (their own switch lands right after anyway); a cause of the agent's on an app
+between the user's input and that app's change makes the change the agent's; a self-activation at the very edge of the
+1.5 s causal window; a ⌘-Tab or ⌃-arrow under Secure Event Input into a touched app is undone. Unmeasured (they need a
+key-event tap in a probe, which asks for Input Monitoring): whether ordinary two-finger scrolls send type-29 gesture
+events (the rule assumes they do) and whether a session tap still sees ⌘/⌃ changes under Secure Event Input (the rule
+assumes it may not).
 
 ## 5. Errors
 
@@ -771,3 +813,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.9.4 | No wire change — the live gate's fourth round: an app a blip's hand-back left with no key window is remembered until it is really activated (by anyone — seen by an always-on activation observer, no tap, no timer), its last target is lost or its pid dies; 1.9.3 forgot it when the guardian stopped, 3 s after a script, so the next script's first background click read the stale "key" answer, sent no make-key records and only made the window key (a page's own menu never opened). |
 | 1 | 1.9.5 | No wire change — the review of round 4: a refused focus blip ends the ordinary way (the key focus handed back — naming no window when the user's can't be read — waited for, handed back again, the reroute removed only then, the guardian's restore), and what needs no focus record is refused before it; the user bringing the target forward during a blip or a focus click is their move (`app_in_front`, nothing undone or retired, never pulled back out), the app activating ITSELF on the focus record is undone and nothing is typed (`focus_not_placed`), and a refused focus click stops the typing; a focus with no window of its own counts when the app's focused window is the bound one; an attached list after a blip's hand-back no longer refuses the next burst; a visit's return never anchors on a window shown on the visited desktop; the late-switch watch counts a ⌘/⌃ hold with no chord seen, from the watch's start, the input source read at each change; a long or multi-line `type` with tabs says they went in as characters; `focusNow` takes the blip's answer only when nothing is readable after the act; off-screen additions no longer tip a diff into the full print. |
 | 1 | 1.9.6 | No wire change — one rule decides whose move a change of the user's front app or desktop is (§4.12), asked by every path that used to decide on its own (the guardian, a blip's step, each key and its end, a click's preparation, the after-check, a visit's watch), each path that finds it the user's telling the guardian. So: a switch the user makes during a typing burst stops the typing with nothing handed back or restored, their keys in the target they switched into stay there; typing in their own app no longer makes a target's self-activation theirs; their ⌘-Tab right after a synthetic event is theirs; the hand-back with no readable window of theirs names none (the app takes back its own key window); a ⌘/⌃ hold with a mouse chord is no switch, a seen ⌘-Tab is one, a hold counts only from when it began; with no input source a late switch of the target is undone; a visit's return checks Space membership and each display's Space. |
+| 1 | 1.9.7 | No wire change — the one rule's contract (§4.12: invariants I1–I5, checked after every event by a model-based test of the real engine in simulated time) and the code made to satisfy it: the rule owns every fact it reads — the agent's causes PER APP (a synthetic mark on the target never makes another app's change the agent's: an app the agent never touched coming forward is always the user's), causes that raise, operations still running (an AppleScript, a bind's window wait, `useWindow`) and pending launches; switch input as instants that explain one change only, only after the agent's last cause on that app, of a kind that fits (an app switch, a desktop switch, a click for its own app), never the generic gesture event, no ⌘/⌃ hold under Secure Event Input; a click's claim used up and gone once the user moves; one verdict per state until new facts. Every restore goes to the user's place as it is when it runs (a retry never lands over a move of theirs); the reroute sends each user key to their place by the rule; bind, `useWindow`, AppleScript and making the bound window main are judged from their start; a click on another app's window makes it their place at once; a late-heard activation of an untouched app is their place; an act's or an operation's end, and what is done to an app while it is in front, never outrank the user's input; a blip ended by its bound is no blip; the target coming forward before an act's first key stops it; the blip's end asks again while it waits; during a visit what the agent brings up is the visit's; the other display's return is followed by the ordinary return. |

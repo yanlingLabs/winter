@@ -32,7 +32,7 @@ extension CUCore {
         var now = userView()
         var waited = 0.0
         while now == before, waited < settleMs {
-            usleep(20_000)
+            clock.pause(ms: 20)
             waited += 20
             now = userView()
         }
@@ -49,6 +49,7 @@ extension CUCore {
         if holdsForeground(t) || isVisiting(t) { t.consentedForeground = true }
         let before = userView()
         let startedAt = clock.nowSeconds()
+        t.actStart = (before.front, before.space, startedAt)
         let route = { (o: ActOutcome?) in "\(Self.actionName(p.action)) (\(o.map { Self.routeName($0.rung) } ?? "failed"))" }
         let outcome: ActOutcome
         do {
@@ -72,8 +73,9 @@ extension CUCore {
         guard !t.consentedForeground else { return }
         let after = view(after: before, settleMs: userViewSettleMs)
         if after != before {
-            // The user's own move during the act (the one decision): left alone, the guardian told.
-            if isUsersMove(after, since: since) {
+            // The user's own move during the act (the one rule, from the act's start — uncapped: a long act's after-check
+            // still sees switch input from its beginning): left alone.
+            if isUsersMove(after, since: since, from: before, path: "\(route): the after-check") {
                 CULog.act.notice("\(route, privacy: .public) in \(t.appName, privacy: .public): the user moved during it — left there")
                 return
             }
@@ -91,7 +93,7 @@ extension CUCore {
         guard t.actSeq == seq, !t.consentedForeground else { return }
         let now = userView()
         guard now.front == t.pid, before.front != t.pid else { return }
-        if isUsersMove(now, since: since) { return }
+        if isUsersMove(now, since: since, from: before, path: "\(route): the late check") { return }
         t.addViewNote("after the previous action, " + viewMoved(before, now, t, route: route, late: true))
     }
 
@@ -112,11 +114,14 @@ extension CUCore {
             : targetFront ? "\(app) activated itself"
             : spaceMoved ? "macOS switched desktops during the action"
             : "the frontmost app changed during the action"
-        // Undone only when it is the target's doing: it took the front, or the desktop moved under this act.
-        guard let user = before.front, user != pid, targetFront || (spaceMoved && !late) else { return what }
-        let back = restoreUserView(before, user: user)
-        if back == before { return what + " — the user's \(spaceMoved ? "desktop and app were" : "app was") put back" }
-        if spaceMoved, back.space != before.space {
+        // Undone only when it is the target's doing: it took the front, or the desktop moved under this act. Put back to
+        // the user's place AS IT IS NOW (I2) — the guardian's, else where the act began.
+        guard let first = before.front, first != pid, targetFront || (spaceMoved && !late) else { return what }
+        let place = guardianPlace().map { CUUserView(space: $0.space, front: $0.app) } ?? before
+        guard let user = place.front, user != pid else { return what }
+        let back = restoreUserView(place, user: user)
+        if back == place { return what + " — the user's \(spaceMoved ? "desktop and app were" : "app was") put back" }
+        if spaceMoved, back.space != place.space {
             return what + (back.front == user ? " — the user's app was put back in front, but macOS stayed on the other desktop (switching back needs the user)"
                                               : " — neither the user's app nor their desktop could be put back")
         }
@@ -147,9 +152,16 @@ extension CUCore {
         var attempts = 1
         var now = userView()
         let deadline = lastActivate + restoreDeadlineMs
+        let startedAt = clock.nowSeconds()
+        let placeAtStart = guardianPlace()
         while now != before, clock.nowMs() < deadline {
-            usleep(30_000)
+            clock.pause(ms: 30)
             now = userView()
+            // I2 — while it waits, the restore is never retried over the user: another app in front now is judged by the
+            // one rule (their move ends the restore), and their place having moved on meanwhile ends it too (the model-
+            // based test: a retry 22 ms after a Dock click of theirs pulled them back out of the app they chose).
+            if guardianPlace() != placeAtStart { break }
+            if let f = now.front, f != user, isUsersMove(now, since: startedAt, from: before, path: "a restore, before trying again") { break }
             if now.front != user, clock.nowMs() - lastActivate >= restoreRetryMs, clock.nowMs() < deadline {
                 _ = sys.activate(pid: user)
                 try? ax.set(ax.application(user), kAXFrontmostAttribute, kCFBooleanTrue)
@@ -164,11 +176,16 @@ extension CUCore {
         return now
     }
 
-    /// A bind or `useWindow` (which may launch the app or move its window here) checked
-    /// like an act: what moved the user's view is put back where it is the app's doing, and said.
-    func viewNoteAfterBind(_ before: CUUserView, app: String, pid: pid_t, route: String) -> String? {
+    /// A bind, `useWindow` or AppleScript (which may launch the app, reopen it, move its window here or run for
+    /// minutes) checked like an act: a change of the user's view is judged by the one rule from the operation's start
+    /// (`since`) — theirs is left alone; the app's own is put back to the user's place as it is NOW, and said.
+    func viewNoteAfterBind(_ before: CUUserView, app: String, pid: pid_t, route: String, since: TimeInterval) -> String? {
         let after = view(after: before, settleMs: userViewSettleMs)
         guard after != before else { return nil }
+        if isUsersMove(after, since: since, from: before, path: "\(route): the after-check") {
+            CULog.act.notice("\(route, privacy: .public) in \(app, privacy: .public): the user moved during it — left there")
+            return nil
+        }
         return viewMoved(before, after, app: app, pid: pid, route: route, late: false)
     }
 
@@ -266,16 +283,19 @@ extension CUCore {
         // app has taken the activation, the bound window is made its key window — only when it is not (`makeKeyInApp`).
         var made = MakeKeyOutcome.notApplicable
         let stepStart = clock.nowSeconds()
-        // Whose move a change during the step is: the one decision (`classifyMove`), never the step's own guess.
-        let usersMove = { [self] (now: CUUserView) -> Bool in isUsersMove(now, since: stepStart) }
+        let startView = userView()
+        // Whose move a change during the step is: the one rule, never the step's own guess.
+        let usersMove = { [self] (now: CUUserView) -> Bool in
+            isUsersMove(now, since: stepStart, from: startView, path: "the focus blip's make-key step")
+        }
         let step = backgroundStep(.focusRecords, t, run: { [self] in
             // The focus record is a synthetic event too: an activation right after it is not the user's by itself
             // (review of round 6: only the other-key-window step marked one).
-            noteSyntheticActivation()
+            noteSyntheticActivation(tp)
             guard sky.focusWithoutRaise(pid: tp, windowID: tw) else { return false }
             made = makeKeyInApp(t) { [self] in
                 // After the deactivation the app is told it is active again (the blip keeps it so), to the app alone.
-                noteSyntheticActivation()
+                noteSyntheticActivation(tp)
                 _ = focusEnforcer(for: t, privatePath: true)?.forceActivation(windowID: tw)
             }
             return true
@@ -292,7 +312,7 @@ extension CUCore {
         // The front moved during the step after its settle (or the user's move it already judged): judged again, by the
         // same rule — the user's: no hand-back; the app's own: the blip ends the ordinary way, which puts them back.
         if let front = sys.frontmostPid(), front != user {
-            if isUsersMove(userView(), since: stepStart) {
+            if isUsersMove(userView(), since: stepStart, from: startView, path: "the focus blip's make-key step, after it") {
                 CULog.act.notice("\(t.appName, privacy: .public): nothing sent in the focus blip — the user moved (front \(front, privacy: .public))")
                 return .userTookTheApp(usersMoveRefusal(t, front: front, typed: false))
             }
@@ -524,7 +544,7 @@ extension CUCore {
         var decision = keyInApp(t)
         let deadline = clock.nowMs() + keyInAppSettleMs
         while decision == .noKeyWindow, clock.nowMs() < deadline {
-            usleep(10_000)
+            clock.pause(ms: 10)
             decision = keyInApp(t)
         }
         if stranded, decision == .key { decision = .noKeyWindow }
@@ -574,8 +594,8 @@ extension CUCore {
     /// and up, none in twelve).
     func releaseOtherKeyWindow(_ t: CUTarget) {
         guard let enforcer = focusEnforcer(for: t, privatePath: true) else { return }
-        noteSyntheticActivation()  // the guardian must not read it as the user's
-        if enforcer.deactivate(), keySwitchGapMs > 0 { usleep(useconds_t(keySwitchGapMs * 1000)) }
+        noteSyntheticActivation(t.pid)  // the guardian must not read it as the user's
+        if enforcer.deactivate(), keySwitchGapMs > 0 { clock.pause(ms: keySwitchGapMs) }
     }
 
     /// Before a window-targeted click in the background: the synthetic activation, then the bound window made its
@@ -595,10 +615,11 @@ extension CUCore {
             return .notApplied
         }
         let prepStart = clock.nowSeconds()
-        noteSyntheticActivation()
+        let startView = userView()
+        noteSyntheticActivation(t.pid)
         _ = enforcer.forceActivation(windowID: t.windowID)
         let made = makeKeyInApp(t) { [self] in
-            noteSyntheticActivation()
+            noteSyntheticActivation(t.pid)
             _ = enforcer.forceActivation(windowID: t.windowID)
         }
         CULog.act.notice("click in \(t.appName, privacy: .public): window \(t.windowID, privacy: .public) — \(made.words, privacy: .public)")
@@ -606,7 +627,7 @@ extension CUCore {
         // Whose move it was decides (review of round 6: the synthetic marks just posted made the guardian take a ⌘-Tab of
         // the user's for a theft and pull them back out): the user's → told to the guardian, the click not sent; the
         // app's own → not sent, and the guardian puts the user back.
-        return isUsersMove(userView(), since: prepStart) ? .appInFront : .activatedItself
+        return isUsersMove(userView(), since: prepStart, from: startView, path: "a background click's preparation") ? .appInFront : .activatedItself
     }
 
     /// The click not sent because the app activated itself while it was being prepared.
@@ -630,6 +651,11 @@ extension CUCore {
     func makeBoundWindowMain(_ t: CUTarget) {
         // Capture-only: the cached "window" is the application element — never written.
         guard t.accessible, let w = try? windowElement(t), ax.bool(w, kAXMainAttribute) != true else { return }
-        _ = backgroundStep(.axMain, t, run: { (try? ax.set(w, kAXMainAttribute, kCFBooleanTrue)) != nil }, undo: {})
+        let start = clock.nowSeconds()
+        let startView = userView()
+        noteGuardianCause(t.pid, raise: true)  // a main-window write can bring the window's desktop forward
+        // A change meanwhile is judged by the one rule (review of round 7: it was always the step's).
+        _ = backgroundStep(.axMain, t, run: { (try? ax.set(w, kAXMainAttribute, kCFBooleanTrue)) != nil }, undo: {},
+                           usersOwn: { [self] in isUsersMove($0, since: start, from: startView, path: "making the bound window main") })
     }
 }

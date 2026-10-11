@@ -39,14 +39,14 @@ extension CUCore {
             }
             guardianLock.withLock { guardianCore.exempt(t.pid, until: clock.nowSeconds() + Self.holdForegroundMaxSeconds) }
             if sys.frontmostPid() != t.pid {
-                noteSyntheticActivation()
+                noteGuardianCause(t.pid, raise: true)
                 _ = sys.activate(pid: t.pid)
                 if let w = try? windowElement(t) { try? ax.perform(w, kAXRaiseAction) }
             }
             var front = false
             for _ in 0..<50 {
                 if sys.frontmostPid() == t.pid { front = true; break }
-                usleep(20_000)
+                clock.pause(ms: 20)
             }
             CULog.act.notice("foreground in \(t.appName, privacy: .public): \(front ? "held in front" : "could not be brought forward", privacy: .public)\(first ? "" : " (already held)", privacy: .public)")
             // Never held past the longest script, even if its end is never heard.

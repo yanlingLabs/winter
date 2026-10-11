@@ -91,7 +91,7 @@ extension CUCore {
         repeat {
             if done() { return true }
             if clock.nowMs() >= deadline { return false }
-            usleep(30_000)
+            clock.pause(ms: 30)
         } while true
     }
 

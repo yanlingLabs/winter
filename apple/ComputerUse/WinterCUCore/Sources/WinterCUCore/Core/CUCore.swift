@@ -196,7 +196,7 @@ public final class CUCore: @unchecked Sendable {
         let r = try resolveOpen(strings, app: app)
         try refuseFloorApp(bundleId: r.bundle.bundleIdentifier, pid: 0, name: r.bundle.bundleIdentifier ?? r.appURL.lastPathComponent)
         let opened = try await CUDocumentOpen.open(r.urls, withApp: r.appURL)
-        noteGuardianOpened(opened.processIdentifier)
+        noteGuardianCause(opened.processIdentifier, raise: true)  // an open can bring its window forward
         return opened.localizedName ?? CUApps.displayName(r.bundle, fallback: r.appURL.deletingPathExtension().lastPathComponent)
     }
 
@@ -214,7 +214,7 @@ public final class CUCore: @unchecked Sendable {
             Set(CUBindWait.realWindows(sys.windows(pid: r.processIdentifier)).map(\.id))
         } ?? []
         let app = try await CUDocumentOpen.open(urls, withApp: appURL)
-        noteGuardianOpened(app.processIdentifier)  // it may come forward late: a possible thief for the guard
+        noteGuardianCause(app.processIdentifier, raise: true)  // it may come forward late: a possible thief for the guard
         // A real window of the opener not seen before the open: the document's. Polled briefly (it is async).
         let windowID: UInt32? = await {
             let deadline = clock.nowMs() + windowWaitMs
@@ -226,7 +226,7 @@ public final class CUCore: @unchecked Sendable {
             // None new (the app showed the doc in an existing window, or none has appeared): the frontmost.
             return CUBindWait.realWindows(sys.windows(pid: app.processIdentifier)).map(\.id).first
         }()
-        noteGuardianOpened(app.processIdentifier)  // its window is up: it may activate now (a cause again)
+        noteGuardianAfterglow(app.processIdentifier, raise: true)  // its window is up: it may still activate now
         let bound = CUBoundApp(name: app.localizedName ?? b.bundleIdentifier ?? appURL.lastPathComponent,
                                bundleId: app.bundleIdentifier ?? "", pid: app.processIdentifier)
         return OpenDocumentsResult(app: bound, windowID: windowID)
@@ -254,6 +254,7 @@ public final class CUCore: @unchecked Sendable {
         case .running(let r): app = r
         case .installed(let url, let bundleId, let name):
             try core.refuseFloorApp(bundleId: bundleId, pid: 0, name: name)
+            core.noteGuardianLaunchBundle(bundleId)
             app = try await CUApps.launchInBackground(url)
             launched = true
         }
@@ -264,17 +265,23 @@ public final class CUCore: @unchecked Sendable {
 
     public func targetBind(_ p: TargetBindParams) async throws -> TargetBindResult {
         try requireAccessibility()
-        // Launching, reopening or asking for a new window can bring the app forward: checked like an act.
+        // Launching, reopening or asking for a new window can bring the app forward: checked like an act, by the one
+        // rule from the bind's start. An app this bind launches is the agent's from before the launch (its process
+        // starts after it) — review of round 7: the launch was never a cause, so a launched app that activated itself
+        // during the bind was "an app the agent never touched", the user's.
         let before = userView()
+        let startedAt = clock.nowSeconds()
+        let launch = beginGuardianLaunch()
         var named: (app: String, pid: pid_t)?
+        defer { endGuardianLaunch(launch, pid: named?.pid) }
         do {
             var r = try await bind(p) { named = ($0, $1) }
-            if let named, let note = viewNoteAfterBind(before, app: named.app, pid: named.pid, route: "bind") {
+            if let named, let note = viewNoteAfterBind(before, app: named.app, pid: named.pid, route: "bind", since: startedAt) {
                 r.detail = [r.detail, note].compactMap { $0 }.joined(separator: "; ")
             }
             return r
         } catch {
-            if let named { _ = viewNoteAfterBind(before, app: named.app, pid: named.pid, route: "a failed bind") }
+            if let named { _ = viewNoteAfterBind(before, app: named.app, pid: named.pid, route: "a failed bind", since: startedAt) }
             throw error
         }
     }
@@ -284,6 +291,9 @@ public final class CUCore: @unchecked Sendable {
         let launched = app.launched
         let appName = app.name ?? app.bundleIdentifier ?? p.app
         named(appName, app.pid)
+        // The window wait (a launch's, a reopen's) can bring it forward at any time: touched throughout.
+        beginGuardianSpan(app.pid)
+        defer { endGuardianSpan(app.pid) }
         try refuseFloorApp(bundleId: app.bundleIdentifier, pid: app.pid, name: appName, processName: app.executableName)
         let pid = app.pid
         let chromium = app.isChromium
@@ -352,7 +362,7 @@ public final class CUCore: @unchecked Sendable {
         target.knownWindows = Set(CUBindWait.realWindows(serverNow).map(\.id)).union([chosen.id])
         emit { $0.targetBound(sessionId: p.sessionId, pid: pid, windowID: chosen.id, appName: appName, mirror: p.mirror) }
         noteGuardianPrivatePath(privatePath)
-        noteGuardianActed(pid)
+        noteGuardianAfterglow(pid, raise: true)
         // Said up front: what working a window on another desktop costs, and the way out.
         let offDesktop = sys.window(id: chosen.id)?.onScreen == false && !outcome.captureOnly
         let costs = offDesktop ? Self.offDesktopCosts(appName) : nil
@@ -385,7 +395,7 @@ public final class CUCore: @unchecked Sendable {
                 let deadline = clock.nowMs() + windowWaitMs
                 while clock.nowMs() < deadline {
                     if let w = probe() { return w }
-                    usleep(50_000)
+                    clock.pause(ms: 50)
                 }
                 return probe()
             },
@@ -539,30 +549,24 @@ public final class CUCore: @unchecked Sendable {
     var guardianRefs = 0
     var guardianObservers: [NSObjectProtocol] = []
     var pendingGuardianNotes: [String] = []
-    var lastSyntheticActivationAt: Double = -1
     /// Sessions with a script running, the latest private-path setting seen, and the pending end of the tail.
     var guardianScripts: Set<String> = []
     var guardianPrivatePath = false
     var guardianTailWork: DispatchWorkItem?
-    /// When each app was last given a cause to come forward by the agent — an act on it, a focus blip ending, a
-    /// document opened or the app launched — and when anything was: a change counts as the agent's only within
-    /// `guardianCausalWindow` after its cause.
-    var guardianCauses: [pid_t: TimeInterval] = [:]
-    var guardianLastCause: TimeInterval = -1
     /// The global monitor that sees the user's trackpad gestures (swipes between Spaces, Mission Control).
     var guardianGestureMonitor: Any?
     /// The last hardware-origin input event (any type, trackpad gestures included) the listen-only tap saw.
     var lastHardwareInputAt: TimeInterval = -1
-    /// The same, for a hardware ACTION only (a click, a key, a scroll, a gesture — never a pointer move): what a
-    /// desktop visit counts as the user acting during it.
+    /// The same, for a hardware ACTION only (a click, a key, a scroll, a gesture — never a pointer move).
     var lastHardwareActionAt: TimeInterval = -1
-    /// Hardware input that can SWITCH apps or desktops (`CUSwitchInput`): what a never-arrived visit's late-switch watch
-    /// counts as the user moving. Guarded by `guardianLock`.
-    var switchInput = CUSwitchInput()
     /// When switch-capable input was last seen (for the log and tests).
-    var lastSwitchInputAt: TimeInterval { guardianLock.withLock { switchInput.lastAt } }
+    var lastSwitchInputAt: TimeInterval { guardianLock.withLock { guardianCore.input.lastAt } }
     /// Whether that input can be seen at all (the session tap runs: it alone sees modifiers and clicks); a test sets it.
     var switchInputObservableOverride: Bool?
+    /// Secure Event Input, as a test sets it (live: `IsSecureEventInputEnabled`).
+    var secureInputOverride: Bool?
+    /// Every verdict of the one rule, with the path that asked (the model-based test's I5 check).
+    var moveJudged: ((String, CUUserView, CUMoveOwner) -> Void)?
     /// Schedules the end of the guard's tail; tests run it by hand.
     var guardianTailSchedule: (TimeInterval, @escaping () -> Void) -> DispatchWorkItem? = { seconds, work in
         let item = DispatchWorkItem(block: work)
@@ -705,14 +709,18 @@ public final class CUCore: @unchecked Sendable {
         try requireAccessibility()
         let t = try target(p.targetId)
         let before = userView()
+        let startedAt = clock.nowSeconds()
         let outcome: CUWindowResolver.Outcome
+        beginGuardianSpan(t.pid)
         do {
             outcome = try await resolveUseWindow(p, t)
         } catch {
-            _ = viewNoteAfterBind(before, app: t.appName, pid: t.pid, route: "a failed useWindow")
+            endGuardianSpan(t.pid)
+            _ = viewNoteAfterBind(before, app: t.appName, pid: t.pid, route: "a failed useWindow", since: startedAt)
             throw error
         }
-        let note = viewNoteAfterBind(before, app: t.appName, pid: t.pid, route: "useWindow")
+        endGuardianSpan(t.pid)
+        let note = viewNoteAfterBind(before, app: t.appName, pid: t.pid, route: "useWindow", since: startedAt)
         var r = try await switchWindow(t, outcome)
         if let note { r.detail = [r.detail, note].compactMap { $0 }.joined(separator: "; ") }
         return r
@@ -1507,7 +1515,7 @@ public final class CUCore: @unchecked Sendable {
         let id = t.windowID
         for attempt in 0..<2 {
             if let w = sys.window(id: id) ?? sys.windows(pid: t.pid).first(where: { $0.id == id }) { return w }
-            if attempt == 0 { usleep(150_000) }
+            if attempt == 0 { clock.pause(ms: 150) }
         }
         return nil
     }

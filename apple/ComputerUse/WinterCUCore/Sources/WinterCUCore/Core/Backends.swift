@@ -104,9 +104,25 @@ protocol CUSystemBackend: AnyObject {
     func displaySpaces() -> [String: UInt64]?
     func cursorLocation() -> CGPoint?
     func warpCursor(to: CGPoint)
+    /// How long ago `pid`'s process started (seconds); nil when it can't be read. Read only while the agent has a
+    /// launch pending (an app started after it is the agent's).
+    func processAge(pid: pid_t) -> TimeInterval?
+}
+
+extension CUSystemBackend {
+    func processAge(pid: pid_t) -> TimeInterval? { nil }
 }
 
 final class CULiveSystem: CUSystemBackend {
+    func processAge(pid: pid_t) -> TimeInterval? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        let start = info.kp_proc.p_starttime
+        let started = Double(start.tv_sec) + Double(start.tv_usec) / 1_000_000
+        return max(0, Date().timeIntervalSince1970 - started)
+    }
     func appRunning(_ pid: pid_t) -> Bool {
         guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
         return !app.isTerminated
