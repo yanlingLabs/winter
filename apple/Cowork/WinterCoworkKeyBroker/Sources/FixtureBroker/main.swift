@@ -24,34 +24,41 @@ do {
     try require(try vault.fixtureDomainSeparation([first,second]))
     for _ in 0..<160 { let fd=open("/dev/null",O_RDONLY|O_CLOEXEC);try require(fd>=0);extras.append(fd) }
     let launcher=FixtureWorkerLauncher(image:worker,vault:vault)
-    func request(_ mode: String, record: SealedRecord) throws -> (OneShotAdmission,Data,Int32) {
+    func request(_ mode: String, record: SealedRecord) throws -> (OneShotAdmission,[Data],Int32) {
         let (host,peer)=try fixturePipe(channel:true),(reportReader,reportWriter)=try fixturePipe()
         let child=try OwnedChild(image:client,mode:mode,input:peer,output:reportWriter)
         peer.close();reportWriter.close()
         let admission=OneShotAdmission(record:record,launchedPID:child.pid)
         try host.packet(JSONEncoder().encode(admission.bootstrap()));try child.resume()
-        let bytes=try host.receivePacket();var peerPID:Int32=0;try require(kb_peer_pid(host.value,&peerPID)==0)
-        try child.wait();try require(try reportReader.eofBytes().isEmpty);host.close()
-        return (admission,bytes,peerPID)
+        let bytes=try host.receivePacket();var frames=[bytes];if mode=="replay" { frames.append(try host.receivePacket()) };var peerPID:Int32=0;try require(kb_peer_pid(host.value,&peerPID)==0)
+        try client.validateExecuted(child.pid)
+        try host.packet(Data([1]));try child.wait();try require(try reportReader.eofBytes().isEmpty);host.close()
+        return (admission,frames,peerPID)
     }
     var receipts:[WorkerReceipt]=[]
     for record in [first,second] {
-        let (admission,bytes,pid)=try request("authorized",record:record)
-        let admitted=try admission.consume(bytes,kernelPeerPID:pid,vault:vault)
+        let (admission,frames,pid)=try request("authorized",record:record)
+        let admitted=try admission.consume(frames[0],kernelPeerPID:pid,vault:vault)
         receipts.append(try launcher.launch(admitted,deniedFixturePath:denied.path))
-        do { _=try admission.consume(bytes,kernelPeerPID:pid,vault:vault);throw BrokerFailure.processFailure } catch BrokerFailure.replay {}
+        do { _=try admission.consume(frames[0],kernelPeerPID:pid,vault:vault);throw BrokerFailure.processFailure } catch BrokerFailure.replay {}
     }
+    let (replayAdmission,replayFrames,replayPID)=try request("replay",record:first)
+    try require(replayFrames.count==2)
+    let replayRecord=try replayAdmission.consume(replayFrames[0],kernelPeerPID:replayPID,vault:vault)
+    _=try launcher.launch(replayRecord,deniedFixturePath:denied.path)
     let deliveries=launcher.keyDeliveries
-    for mode in ["cross-workspace","forged-pid","forged-executable","wrong-token"] {
-        let (admission,bytes,pid)=try request(mode,record:first)
-        do { _=try admission.consume(bytes,kernelPeerPID:pid,vault:vault);throw BrokerFailure.processFailure }
+    do { _=try replayAdmission.consume(replayFrames[1],kernelPeerPID:replayPID,vault:vault);throw BrokerFailure.processFailure } catch BrokerFailure.replay {}
+
+    for mode in ["cross-workspace","cross-home","cross-volume","cross-creation","cross-version","forged-pid","forged-executable","wrong-token","derive","decrypt"] {
+        let (admission,frames,pid)=try request(mode,record:first)
+        do { _=try admission.consume(frames[0],kernelPeerPID:pid,vault:vault);throw BrokerFailure.processFailure }
         catch BrokerFailure.unauthorizedChannel {} catch BrokerFailure.forbiddenField {}
     }
     // Independently launched same fixture code has no inherited capability.
     let (dummyRead,dummyWrite)=try fixturePipe(),(outRead,outWrite)=try fixturePipe()
     let outsider=try OwnedChild(image:client,mode:"authorized",input:dummyRead,output:outWrite)
     dummyRead.close();dummyWrite.close();outWrite.close();try outsider.resume()
-    do { try outsider.wait();throw BrokerFailure.unauthorizedChannel } catch BrokerFailure.processFailure {}
+    try require(try outsider.waitStatus()==71)
     _=try outRead.eofBytes()
     // Deterministically replace the worker AFTER path verification. Its actual
     // spawned CodeDirectory differs, and no key may be sent to the wrong image.
@@ -66,6 +73,6 @@ do {
     } catch BrokerFailure.imageMismatch {}
     try require(swapLauncher.keyDeliveries==0 && launcher.keyDeliveries==deliveries)
     // A worker's possession proof for A cannot prove possession of B's key.
-    try require(receipts[0].proof != receipts[1].proof)
-    try emitFixtureJSON(["nativeKeyBrokerFixture":true,"twoRealWorkers":true,"sealedIdentity":true,"perWorkspaceKeyRouting":true,"inheritedOneShotAdmission":true,"crossWorkspaceDenied":true,"clientPIDAndExecutableDenied":true,"replayDenied":true,"independentClientDenied":true,"swappedExecutedImageDenied":true,"extra160FDsExcluded":true,"actualSandboxDenials":true,"daemonReceivesNoKeys":true,"actualKeychain":false,"realVM":false,"productionReady":false])
+    try require(!(try vault.proofMatches(receipts[0].proof,record:second,challenge:receipts[0].challenge)))
+    try emitFixtureJSON(["nativeKeyBrokerFixture":true,"twoWorkspaceWorkers":true,"sealedIdentity":true,"perWorkspaceKeyRouting":true,"inheritedOneShotAdmission":true,"crossWorkspaceDenied":true,"crossHomeVolumeCreationVersionDenied":true,"clientPIDAndExecutableDenied":true,"replayDenied":true,"replayRealPacketsDenied":true,"genericDeriveDecryptDenied":true,"sameChallengeCrossKeyProofDenied":true,"independentClientDenied":true,"swappedExecutedImageDenied":true,"extra160FDsExcluded":true,"actualSandboxDenials":true,"daemonReceivesNoKeys":true,"actualKeychain":false,"realVM":false,"productionReady":false])
 } catch { try? emitFixtureJSON(["nativeKeyBrokerFixture":false]);exit(72) }

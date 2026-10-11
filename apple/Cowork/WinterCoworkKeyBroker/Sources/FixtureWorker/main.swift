@@ -20,6 +20,6 @@ do {
     let key=SymmetricKey(data:frame.suffix(32))
     wipe(&frame)
     let proof=Data(HMAC<SHA256>.authenticationCode(for:bootstrap.challenge,using:key))
-    let receipt=WorkerReceipt(proof:proof,sandbox:true,bootstrapClosed:fcntl(3,F_GETFD) == -1,extraFDs:Int(kb_extra_fds()),fileDenied:kb_file_denied(bootstrap.deniedFixturePath)==1,networkDenied:kb_network_denied()==1,execDenied:kb_exec_denied()==1,securityServiceDenied:kb_security_service_denied()==1)
+    let receipt=WorkerReceipt(challenge:bootstrap.challenge,proof:proof,sandbox:true,bootstrapClosed:fcntl(3,F_GETFD) == -1,extraFDs:Int(kb_extra_fds()),fileDenied:kb_file_denied(bootstrap.deniedFixturePath)==1,networkDenied:kb_network_denied()==1,execDenied:kb_exec_denied()==1,securityServiceDenied:kb_security_service_denied()==1)
     try emitFixtureJSON(receipt)
 } catch { exit(70) }

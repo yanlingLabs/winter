@@ -11,5 +11,6 @@ let package = Package(name: "WinterCoworkKeyBroker", platforms: [.macOS("26.0")]
     .target(name: "KeyBrokerCore", dependencies: ["KeyBrokerNative"]),
     .executableTarget(name: "FixtureWorker", dependencies: ["KeyBrokerCore"]),
     .executableTarget(name: "FixtureClient", dependencies: ["KeyBrokerCore"]),
-    .executableTarget(name: "FixtureBroker", dependencies: ["KeyBrokerCore"])
+    .executableTarget(name: "FixtureBroker", dependencies: ["KeyBrokerCore"]),
+    .testTarget(name: "KeyBrokerTests", dependencies: ["KeyBrokerCore"])
 ])

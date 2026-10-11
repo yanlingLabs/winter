@@ -72,7 +72,8 @@ public final class OwnedChild {
         catch { _=kill(pid,SIGKILL);_=kb_wait_owned(pid,2000);reaped=true;throw error }
     }
     public func resume() throws { guard !reaped,kb_resume(pid)==0 else { throw BrokerFailure.processFailure } }
-    public func wait() throws { guard !reaped else { return };let status=kb_wait_owned(pid,2000);reaped=true;guard status==0 else { throw BrokerFailure.processFailure } }
+    public func waitStatus() throws -> Int32 { guard !reaped else { throw BrokerFailure.processFailure };let status=kb_wait_owned(pid,2000);reaped=true;guard status>=0 else { throw BrokerFailure.processFailure };return status }
+    public func wait() throws { guard try waitStatus()==0 else { throw BrokerFailure.processFailure } }
     deinit { if !reaped { _=kill(pid,SIGKILL);_=kb_wait_owned(pid,2000) } }
 }
 public struct WorkerBootstrap: Codable {
@@ -81,6 +82,7 @@ public struct WorkerBootstrap: Codable {
     public let deniedFixturePath: String
 }
 public struct WorkerReceipt: Codable {
+    public let challenge: Data
     public let proof: Data
     public let sandbox: Bool
     public let bootstrapClosed: Bool
@@ -89,7 +91,7 @@ public struct WorkerReceipt: Codable {
     public let networkDenied: Bool
     public let execDenied: Bool
     public let securityServiceDenied: Bool
-    public init(proof: Data, sandbox: Bool, bootstrapClosed: Bool, extraFDs: Int, fileDenied: Bool, networkDenied: Bool, execDenied: Bool, securityServiceDenied: Bool) { self.proof=proof;self.sandbox=sandbox;self.bootstrapClosed=bootstrapClosed;self.extraFDs=extraFDs;self.fileDenied=fileDenied;self.networkDenied=networkDenied;self.execDenied=execDenied;self.securityServiceDenied=securityServiceDenied }
+    public init(challenge: Data, proof: Data, sandbox: Bool, bootstrapClosed: Bool, extraFDs: Int, fileDenied: Bool, networkDenied: Bool, execDenied: Bool, securityServiceDenied: Bool) { self.challenge=challenge;self.proof=proof;self.sandbox=sandbox;self.bootstrapClosed=bootstrapClosed;self.extraFDs=extraFDs;self.fileDenied=fileDenied;self.networkDenied=networkDenied;self.execDenied=execDenied;self.securityServiceDenied=securityServiceDenied }
 }
 public struct WorkerReady: Codable { public let sandbox: Bool;public let bootstrapFD: Int;public init(sandbox: Bool, bootstrapFD: Int) { self.sandbox=sandbox;self.bootstrapFD=bootstrapFD } }
 public func emitFixtureJSON<T:Encodable>(_ value: T) throws { let data=try JSONEncoder().encode(value);try OwnedFD(dup(STDOUT_FILENO)).write(data+Data([10])) }
@@ -117,7 +119,7 @@ public final class FixtureWorkerLauncher {
         var length=UInt32(header.count).bigEndian
         try writer.write(withUnsafeBytes(of:&length){Data($0)}+header+key);keyDeliveries+=1;writer.close()
         let receipt=try JSONDecoder().decode(WorkerReceipt.self,from:reportReader.line());try child.wait()
-        guard try vault.proofMatches(receipt.proof,record:record,challenge:bootstrap.challenge),receipt.sandbox,receipt.bootstrapClosed,receipt.extraFDs==0,receipt.fileDenied,receipt.networkDenied,receipt.execDenied,receipt.securityServiceDenied else { throw BrokerFailure.processFailure }
+        guard receipt.challenge==bootstrap.challenge,try vault.proofMatches(receipt.proof,record:record,challenge:bootstrap.challenge),receipt.sandbox,receipt.bootstrapClosed,receipt.extraFDs==0,receipt.fileDenied,receipt.networkDenied,receipt.execDenied,receipt.securityServiceDenied else { throw BrokerFailure.processFailure }
         return receipt
     }
 }

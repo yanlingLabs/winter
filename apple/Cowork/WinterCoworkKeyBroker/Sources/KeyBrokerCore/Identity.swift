@@ -73,6 +73,8 @@ public struct LaunchRequest: Codable, Sendable {
     public init(nonce: Data, identity: VolumeIdentity) { self.nonce=nonce;self.identity=identity }
     public static func decode(_ data: Data) throws -> LaunchRequest {
         guard data.count<=4096,let object=try JSONSerialization.jsonObject(with:data) as? [String:Any],Set(object.keys)==["nonce","identity"] else { throw BrokerFailure.forbiddenField }
+        let identityFields:Set<String>=["homeId","homePath","homeDevice","homeInode","workspaceId","volumeId","creationId","keyVersion","formatVersion","purpose"]
+        guard let identity=object["identity"] as? [String:Any],Set(identity.keys)==identityFields else { throw BrokerFailure.forbiddenField }
         let request=try JSONDecoder().decode(LaunchRequest.self,from:data)
         guard request.nonce.count==32 else { throw BrokerFailure.unauthorizedChannel };try request.identity.validate();return request
     }
