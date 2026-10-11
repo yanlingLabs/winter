@@ -243,9 +243,12 @@ public struct TargetSnapshotResult: Codable, Sendable, Equatable {
 public struct TargetFindParams: Codable, Sendable, Equatable {
     public var targetId: String
     public var query: CUFindQuery
-    public init(targetId: String, query: CUFindQuery) {
+    /// Optional extension (see `TargetSnapshotParams.callId`): a cancel reaches a window watched through a transition.
+    public var callId: String?
+    public init(targetId: String, query: CUFindQuery, callId: String? = nil) {
         self.targetId = targetId
         self.query = query
+        self.callId = callId
     }
 }
 public struct CUElementSummary: Codable, Sendable, Equatable {
@@ -411,7 +414,11 @@ public struct TargetForegroundParams: Codable, Sendable, Equatable {
     /// Accepted and IGNORED since helper 1.7.0: a window on another desktop is never held in front (that would
     /// keep the user there); an act that needs it on screen asks for a brief visit instead (`desktopVisit`).
     public var moveDesktop: Bool?
-    public init(targetId: String, moveDesktop: Bool? = nil) { self.targetId = targetId; self.moveDesktop = moveDesktop }
+    /// Optional extension (see `TargetSnapshotParams.callId`).
+    public var callId: String?
+    public init(targetId: String, moveDesktop: Bool? = nil, callId: String? = nil) {
+        self.targetId = targetId; self.moveDesktop = moveDesktop; self.callId = callId
+    }
 }
 public struct TargetForegroundResult: Codable, Sendable, Equatable {
     /// The app is in front now.
@@ -646,9 +653,12 @@ public struct TargetAppleScriptResult: Codable, Sendable, Equatable {
 public struct TargetScriptingDictionaryParams: Codable, Sendable, Equatable {
     public var targetId: String
     public var search: String?
-    public init(targetId: String, search: String? = nil) {
+    /// Optional extension (see `TargetSnapshotParams.callId`).
+    public var callId: String?
+    public init(targetId: String, search: String? = nil, callId: String? = nil) {
         self.targetId = targetId
         self.search = search
+        self.callId = callId
     }
 }
 
@@ -668,9 +678,12 @@ public struct TargetScriptingDictionaryResult: Codable, Sendable, Equatable {
 public struct TargetScriptingCommandsParams: Codable, Sendable, Equatable {
     public var targetId: String
     public var search: String?
-    public init(targetId: String, search: String? = nil) {
+    /// Optional extension (see `TargetSnapshotParams.callId`).
+    public var callId: String?
+    public init(targetId: String, search: String? = nil, callId: String? = nil) {
         self.targetId = targetId
         self.search = search
+        self.callId = callId
     }
 }
 

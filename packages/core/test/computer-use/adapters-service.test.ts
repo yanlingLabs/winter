@@ -141,7 +141,7 @@ describe("adapters: what a bind prints", () => {
     expect(text(r).indexOf("Finder extras —")).toBeLessThan(fenceStart(r));
     expect(fenced(r)).toContain('Finder — window "Finder window"');
     expect(fenced(r)).toContain('["reveal","selection","trash","openWith"] ["reveal","empty","make"]');
-    expect(w.fake.calls("target.scriptingCommands")).toEqual([{ targetId: "t1" }]);
+    expect(w.fake.calls("target.scriptingCommands")).toEqual([{ targetId: "t1", callId: expect.any(String) }]);
   }, 30_000);
 
   macOnly("a later bind prints one line; a compaction, a reset and a worker restart each bring the block back once", async () => {

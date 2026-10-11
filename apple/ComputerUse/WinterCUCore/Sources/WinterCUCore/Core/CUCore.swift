@@ -898,7 +898,9 @@ public final class CUCore: @unchecked Sendable {
     private func targetFindBody(_ p: TargetFindParams) async throws -> TargetFindResult {
         try requireAccessibility()
         let t = try target(p.targetId)
-        try await ensureAlive(t)
+        let token = cancels.begin(p.callId)
+        defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         guard t.accessible else { return TargetFindResult(elements: []) }  // capture-only: no AX tree to search
         let formatter = self.formatter
         return try await queues.run(t.pid) { [self] in
@@ -964,7 +966,10 @@ public final class CUCore: @unchecked Sendable {
 
     public func targetScreenshot(_ p: TargetScreenshotParams) async throws -> TargetScreenshotResult {
         let t = try target(p.targetId)
-        try await ensureAlive(t)
+        // The call's cancel first: a window watched through a transition (`ensureAlive`) is waited for under it.
+        let token = cancels.begin(p.callId)
+        defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         // A window on the session's visited desktop is captured there, keeping the visit open (a live shot of it is an
         // on-screen capture).
         let ran = try await inOpenVisit(t, callId: p.callId, maxMs: p.visitMaxMs) { try await screenshot(p, t) }
@@ -1205,13 +1210,13 @@ public final class CUCore: @unchecked Sendable {
     private func targetWaitForBody(_ p: TargetWaitForParams) async throws -> TargetWaitForResult {
         try requireAccessibility()
         let t = try target(p.targetId)
-        try await ensureAlive(t)
+        let token = cancels.begin(p.callId)
+        defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         let c = p.cond
         guard c.text != nil || c.ref != nil || c.gone != nil || c.title != nil else {
             throw CUError.invalidParams("waitFor needs text, ref, gone or title")
         }
-        let token = cancels.begin(p.callId)
-        defer { cancels.end(p.callId) }
         cursor(t, "waitBegin", text: Self.waitLabel(c))
         defer { cursor(t, "waitEnd") }
         let start = clock.nowMs()
@@ -1467,7 +1472,7 @@ public final class CUCore: @unchecked Sendable {
     /// was declared closed on one such reading and the very same window was bound again two seconds later).
     /// The watch suspends (the clock's sleep), never blocking a Swift-concurrency thread, and stops on a cancel.
     func windowGone(_ t: CUTarget, token: CUCancellation.Token? = nil) async throws -> Bool {
-        guard let w = liveServerWindow(t) else { return true }
+        guard let w = try await liveServerWindow(t, token: token) else { return true }
         guard unreachableNow(t, w) else { return false }
         let deadline = clock.nowMs() + windowGoneSettleMs
         while clock.nowMs() < deadline {
@@ -1495,12 +1500,27 @@ public final class CUCore: @unchecked Sendable {
         return !CUAXWindows.list(pid: t.pid, ax: ax, server: sys.windows(pid: t.pid)).contains { $0.id == w.id }
     }
 
-    /// The bound window's window-server record, looked up the same patient way.
+    /// The bound window's window-server record, looked up the same patient way (on a pid queue: a blocking pause).
     func liveServerWindow(_ t: CUTarget) -> CUWindowServerWindow? {
         let id = t.windowID
         for attempt in 0..<2 {
             if let w = sys.window(id: id) ?? sys.windows(pid: t.pid).first(where: { $0.id == id }) { return w }
             if attempt == 0 { usleep(150_000) }
+        }
+        return nil
+    }
+
+    /// The same, from an async caller (`windowGone`): the pause suspends — never holding a Swift-concurrency thread —
+    /// and ends on the call's cancel (`token`) or the task's.
+    func liveServerWindow(_ t: CUTarget, token: CUCancellation.Token?) async throws -> CUWindowServerWindow? {
+        let id = t.windowID
+        for attempt in 0..<2 {
+            if let w = sys.window(id: id) ?? sys.windows(pid: t.pid).first(where: { $0.id == id }) { return w }
+            if attempt == 0 {
+                try await clock.sleep(ms: 150)
+                try token?.check()
+                try Task.checkCancellation()
+            }
         }
         return nil
     }

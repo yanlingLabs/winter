@@ -587,7 +587,7 @@ export class ComputerV2Service {
       case "scriptingDictionary": {
         const search = args.search;
         if (search !== undefined && typeof search !== "string") throw bad("scriptingDictionary() takes { search?: string }");
-        const res = await this.helperCall<ScriptingDictionaryResult>(ctx, "target.scriptingDictionary", { targetId, ...(search === undefined ? {} : { search }) }, metric);
+        const res = await this.helperCall<ScriptingDictionaryResult>(ctx, "target.scriptingDictionary", { targetId, callId: ctx.callId, ...(search === undefined ? {} : { search }) }, metric);
         // The dictionary is the app's own text: data, inside the fence.
         ctx.builder.markScreenRead();
         if (args.emit !== false) ctx.builder.text(res.scriptable ? res.text ?? "" : `${t.name} is not scriptable (it has no scripting dictionary)`, { screen: true });
@@ -822,7 +822,7 @@ export class ComputerV2Service {
       query = Object.fromEntries(["role", "name", "text"].filter((k) => typeof o[k] === "string").map((k) => [k, o[k] as string]));
       if (Object.keys(query).length === 0) throw bad("find() takes text, or { role, name, text }");
     } else throw bad("find() takes text, or { role, name, text }");
-    const res = await this.helperCall<FindResult>(ctx, "target.find", { targetId: t.targetId, query }, metric);
+    const res = await this.helperCall<FindResult>(ctx, "target.find", { targetId: t.targetId, query, callId: ctx.callId }, metric);
     ctx.builder.markScreenRead();
     // The page changed since the last state(), or the read was cut short: the helper's fixed words, said even
     // with emit:false (a model reading only the value would miss it).
@@ -1054,7 +1054,7 @@ export class ComputerV2Service {
     }
     // On the user's own desktop only (the desktop-switch ruling): the helper never holds a window on another
     // desktop in front — it says so, and points at the scoped visit (an act asks by itself; a live screenshot).
-    const res = await this.helperCall<{ front: boolean; detail?: string }>(ctx, "target.foreground", { targetId: t.targetId }, metric);
+    const res = await this.helperCall<{ front: boolean; detail?: string }>(ctx, "target.foreground", { targetId: t.targetId, callId: ctx.callId }, metric);
     if (!res.front) {
       const said = helperDetail(res.detail);
       ctx.builder.daemonLine(said ?? `${t.name} could not be brought to the front`);

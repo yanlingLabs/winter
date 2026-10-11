@@ -206,7 +206,7 @@ export class AppAdapters {
     }
     let res: ScriptingCommandsResult;
     try {
-      res = await scope.helper<ScriptingCommandsResult>("target.scriptingCommands", { targetId: t.targetId }, SCRIPTING_COMMANDS_TIMEOUT_MS);
+      res = await scope.helper<ScriptingCommandsResult>("target.scriptingCommands", { targetId: t.targetId, callId: scope.callId }, SCRIPTING_COMMANDS_TIMEOUT_MS);
     } catch (err) {
       // Only a cancellation stops the bind; anything else (a busy app, a lost window) just means no list this time.
       if ((isAutomationFailure(err) && err.kind === "Cancelled") || (err instanceof HelperRpcError && err.code === "cancelled")) throw err;
@@ -353,7 +353,7 @@ export class AppAdapters {
         return t.windowId;
       },
       applescript: async (source, o) => appleScriptText((await scope.applescript(t, source, o)).result),
-      find: async (query) => (await scope.helper<FindResult>("target.find", { targetId: t.targetId, query })).elements,
+      find: async (query) => (await scope.helper<FindResult>("target.find", { targetId: t.targetId, query, callId })).elements,
       snapshot: async (o) => (await scope.helper<SnapshotResult>("target.snapshot", {
         targetId: t.targetId, callId, full: true, ...(o?.within === undefined ? {} : { within: o.within }),
       })).text,

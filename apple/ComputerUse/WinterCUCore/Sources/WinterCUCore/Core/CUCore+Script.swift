@@ -51,7 +51,9 @@ extension CUCore {
 
     public func targetAppleScript(_ p: TargetAppleScriptParams) async throws -> TargetAppleScriptResult {
         let t = try target(p.targetId)
-        try await ensureAlive(t)
+        let token = cancels.begin(p.callId)
+        defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         guard (p.language ?? "applescript").lowercased() == "applescript" else {
             throw CUError(code: "refused",
                           message: "JavaScript for Automation isn't run: its Objective-C bridge runs Cocoa inside Winter's helper, where no Apple Event check can see it — write the script in AppleScript",
@@ -60,8 +62,6 @@ extension CUCore {
         guard !p.source.isEmpty, p.source.utf8.count <= Self.appleScriptMaxSource else {
             throw CUError.invalidParams("applescript() takes a script of 1 to \(Self.appleScriptMaxSource) bytes")
         }
-        let token = cancels.begin(p.callId)
-        defer { cancels.end(p.callId) }
         try token.check()
         do {
             try CUAppleScriptPolicy.checkSource(p.source, bound: boundApp(t))
@@ -106,7 +106,9 @@ extension CUCore {
 
     public func targetScriptingDictionary(_ p: TargetScriptingDictionaryParams) async throws -> TargetScriptingDictionaryResult {
         let t = try target(p.targetId)
-        try await ensureAlive(t)
+        let token = cancels.begin(p.callId)
+        defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         let model: CUScriptingDictionary.Model?
         if let o = scriptingDictionaryOverride { model = o(t) } else {
             model = NSRunningApplication(processIdentifier: t.pid)?.bundleURL.flatMap { CUScriptingDictionary.model(appURL: $0) }
@@ -121,7 +123,9 @@ extension CUCore {
     /// must be asked for it) is left unread — reading it would send it an Apple Event, and this runs at every bind.
     public func targetScriptingCommands(_ p: TargetScriptingCommandsParams) async throws -> TargetScriptingCommandsResult {
         let t = try target(p.targetId)
-        try await ensureAlive(t)
+        let token = cancels.begin(p.callId)
+        defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         let url = NSRunningApplication(processIdentifier: t.pid)?.bundleURL
         let bundleVersion = url.flatMap { Bundle(url: $0)?.infoDictionary?["CFBundleVersion"] as? String }
         let model: CUScriptingDictionary.Model?
