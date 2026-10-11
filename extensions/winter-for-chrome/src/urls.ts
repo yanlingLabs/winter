@@ -1,4 +1,5 @@
 // Winter for Chrome — which pages it never attaches to, and which URLs it opens.
+import { PRODUCT_NAME } from "./product";
 
 /** Pages Winter never drives: the browser's own, extensions' and DevTools' pages, and local or opaque documents —
  *  `file:` (the user's disk), `data:`, `blob:` and `filesystem:` (content with no site of its own). */
@@ -19,7 +20,7 @@ const STORE_PAGES: { host: string; path?: string }[] = [
 export function attachRefusal(url: string | undefined, ownId: string): string | undefined {
   if (url === undefined || url === "") return undefined; // a tab still loading its first page
   if (url === "about:blank") return undefined;
-  if (url.startsWith(`chrome-extension://${ownId}/`)) return "Winter does not control Winter for Chrome's own pages";
+  if (url.startsWith(`chrome-extension://${ownId}/`)) return `Winter does not control ${PRODUCT_NAME}'s own pages`;
   const lower = url.toLowerCase();
   const scheme = BROWSER_SCHEMES.find((s) => lower.startsWith(s));
   if (scheme !== undefined) {

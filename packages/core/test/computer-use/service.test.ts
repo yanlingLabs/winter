@@ -170,6 +170,22 @@ describe("ComputerV2: binding, state and the diff base", () => {
     expect(w.fake.calls("target.act")[0]).toMatchObject({ action: { kind: "click", ref: 14 }, access: "full", allowForeground: false, privatePath: true, sessionId: "s1" });
   }, 30_000);
 
+  macOnly("a link the helper hands back is opened through the daemon's door: the opener's card, in the background, not bound", async () => {
+    const w = world({ policy: "ask", answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb", "session") });
+    w.fake.handlers["target.act"] = () => ({ rung: 1, linkOpen: "https://news.example.org/a" });
+    w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.apple.Safari", name: "Safari", path: "/Applications/Safari.app" });
+    w.fake.handlers["apps.openDocument"] = () => ({ app: { name: "Safari", bundleId: "com.apple.Safari", pid: 77 }, windowID: 5 });
+    await w.run("const notes = await apps.open('Notes')");
+    const r = await w.run("await notes.click(14)");
+    expect(r.isError).toBe(false);
+    expect(w.fake.calls("target.act")[0]).toMatchObject({ linkOpensViaDaemon: true });
+    expect(w.fake.calls("apps.defaultOpener")[0]).toMatchObject({ urls: ["https://news.example.org/a"] });
+    expect(w.fake.calls("apps.openDocument")[0]).toMatchObject({ urls: ["https://news.example.org/a"] });
+    expect(cards(w.events).map((c) => c.summary)).toContain("Allow Winter to use Safari (com.apple.Safari)?");
+    expect(w.fake.calls("target.bind").length).toBe(1);  // Notes only: the opener is not bound
+    expect(text(r)).toContain("opened in Safari in the background — not bound");
+  }, 30_000);
+
   macOnly("reset: a fresh runtime, the bindings and bases are gone, and the model is told", async () => {
     const w = world();
     await w.run("const notes = await apps.open('Notes')\nconst keep = 1");

@@ -158,7 +158,10 @@ extension CUCore {
             // (Their place having moved since the blip began — a move of theirs heard late — it is there.)
             let startWasPlace: Bool = { guard let o = startOwner else { return true }; if case .theirPlace = o { return true }; return o.isUsers }()
             let placeMoved = startWasPlace && (guardianPlace().map { $0.app != nil && $0.app != user } ?? false)
-            let place = startWasTheirs && !(startUnexplained && nowView.front != user) && !placeMoved
+            // Begun inside a desktop visit that has closed since (another session's, its return under way): the user is
+            // going back to their place — the key focus goes there, never to the visited app (seeds 1011, 1038, 1055).
+            let visitClosed: Bool = { if case .visit? = startOwner { return visitLock.withLock { openVisit == nil } }; return false }()
+            let place = startWasTheirs && !(startUnexplained && nowView.front != user) && !placeMoved && !visitClosed
                 ? CUGuardedView(app: user, space: space) : (guardianPlace() ?? CUGuardedView(app: user, space: space))
             let home = place.app ?? user
             if home == user { undo() }  // the user's key window handed back (the record names their window)

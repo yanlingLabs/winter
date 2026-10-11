@@ -215,6 +215,9 @@ export interface ActResult {
   guardian?: string[];
   /** helper 1.9.8: the apps that came forward after the agent's action with no input of the user's (a metric). */
   viewMovedBy?: string[];
+  /** helper 1.11.0, asked for with `linkOpensViaDaemon`: the act was on a link in an app that is not a web browser — not
+   *  pressed, and this URL is the daemon's to open in the background through its own door (the opener's access + card). */
+  linkOpen?: string;
 }
 /** `target.applescript`: the script's result as AppleScript displays it (null: none). */
 export interface AppleScriptResult { result: string | null; detail?: string }
