@@ -1763,13 +1763,16 @@ extension CUCore {
     /// still goes). Not while the app is held in front for the script (its window is the one meant to be used), nor when
     /// the bound window is the key one (the user is looking at it — a click there moves nothing). With no accessibility
     /// (a capture-only bind), the app's topmost window on screen stands for its key window.
-    func coveredWindowRefusal(_ t: CUTarget, allowForeground: Bool) -> CUError? {
+    func coveredWindowRefusal(_ t: CUTarget, allowForeground: Bool, menu: Bool = false) -> CUError? {
         guard !allowForeground, sys.frontmostPid() == t.pid else { return nil }
         let topmost = { [self] in sys.windowStack().first { $0.pid == t.pid && $0.layer == 0 && $0.alpha > 0 }.map { $0.id == t.windowID } }
         let isKey: Bool? = (t.accessible ? boundWindowIsKeyInApp(t) : nil) ?? topmost()
         guard isKey != true else { return nil }
         CULog.act.notice("click in \(t.appName, privacy: .public): the app is in front with another of its windows key — no pointer event")
-        return CUError.refused(.appInFront, "\(t.appName) is in front with another of its windows active — a click on the bound window would bring it over the user's window and take their keys, so nothing was sent; an accessibility press (action()), setValue or a menu command still works, or wait until the user leaves \(t.appName)")
+        if menu {
+            return CUError.refused(.appInFront, "\(t.appName) is in front with another of its windows active — a menu command would act on the window the user is in (or bring the bound one over it), so nothing was done; an accessibility press (action()) or setValue on the bound window still works, or wait until the user leaves \(t.appName)")
+        }
+        return CUError.refused(.appInFront, "\(t.appName) is in front with another of its windows active — a click on the bound window would bring it over the user's window and take their keys, so nothing was sent; an accessibility press (action()) or setValue still works, or wait until the user leaves \(t.appName)")
     }
 
     /// Whether the bound window is its app's key (focused) window, as the app tells accessibility; nil when it
@@ -2164,6 +2167,8 @@ extension CUCore {
             let intoPanel = g.explicit.map { inSheetOrPanel($0, t) } ?? false
             if intoPanel { CULog.act.notice("key in \(t.appName, privacy: .public): aimed into a sheet or panel — keys, never its menu bar") }
             if !editing, !intoPanel, t.accessible, let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
+                // (The app in front with the user's window key: its menu command would act there — review of round 12, M4.)
+                if let refusal = coveredWindowRefusal(t, allowForeground: p.allowForeground, menu: true) { throw refusal }
                 if CUPasteMenu.isPasteTitle(item.title) { try requirePasteSafe(p, t, g) }
                 // Another of the app's windows is its key window (the user's, perhaps): the menu action would go
                 // there (live: Open Location acted on another window). Pressed only with the bound window key.
@@ -3305,6 +3310,9 @@ extension CUCore {
                 return ActOutcome(rung: .foreground, detail: "\(t.appName) was brought forward for the command, and the front given back after")
             }
         }
+        // In front with another of its windows key (the user's): aiming would make the bound window main or key over theirs,
+        // and the command would act on THEIR window — refused before anything is written (review of round 12, MEDIUM #4).
+        if let refusal = coveredWindowRefusal(t, allowForeground: p.allowForeground, menu: true) { throw refusal }
         aimMenuCommands(at: t)
         // The menu bar validates commands against the app's KEY window (live: the fixture's web window stayed
         // key after typing there), and in the background re-validates a command only in the focus blip; and the

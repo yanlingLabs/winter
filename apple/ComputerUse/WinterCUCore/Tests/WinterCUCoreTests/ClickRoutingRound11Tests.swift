@@ -239,4 +239,23 @@ final class ClickRoutingRound11Tests: XCTestCase {
         XCTAssertTrue(opened.isEmpty, "the helper opened nothing")
         XCTAssertTrue(ax.performed.isEmpty, "nothing pressed")
     }
+
+    /// Review of round 12, MEDIUM #4: with the bound app in front and another of its windows key, a menu command is
+    /// refused BEFORE anything is aimed or written (it would act on the user's window).
+    func testAMenuCommandInAFrontAppWithTheUsersWindowKeyIsRefusedBeforeAiming() async throws {
+        world()
+        sys.front = pid
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [other, bound], kAXFocusedWindowAttribute: other])
+        do {
+            _ = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+                                                         action: .menu(CUMenuAction(path: ["File", "Close"])), access: .full,
+                                                         allowForeground: false, privatePath: true))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("app_in_front"), e.message)
+            XCTAssertTrue(e.message.contains("a menu command would act on the window the user is in"), e.message)
+        }
+        XCTAssertTrue(ax.written.isEmpty, "nothing aimed or written: \(ax.written)")
+        XCTAssertTrue(ax.performed.isEmpty)
+    }
 }
