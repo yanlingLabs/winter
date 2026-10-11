@@ -847,6 +847,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// captured before that call would still be `nil`). `summonAppWindow`'s own no-appModel guard
     /// (never reachable once `boot()` has run — the same posture every other summon door already
     /// carries) is the only way `appWindow` stays `nil` after this call.
+    /// ComputerV2 Phase 3 — **the sign-in handoff** (the browser link's `tab.present`): the app window shows the
+    /// session with its browser tab selected and the panel open, and Winter comes forward — the one place the built-in
+    /// browser's automation brings anything to the front, and only after the user's OK on Winter's card. The panel's
+    /// reveal hook is registered when the shell's root view first appears, so on the app's first summon it is set one
+    /// main-queue turn later: the tab is shown then.
+    func presentBrowserTab(sessionId: String, tabId: String) {
+        summonAppWindow(navigatingTo: .session(sessionId))
+        guard let host = appWindow?.host else { return }
+        if host.onRevealPanel != nil {
+            host.showWebTab(tabId, sessionId: sessionId)
+        } else {
+            DispatchQueue.main.async { [weak host] in host?.showWebTab(tabId, sessionId: sessionId) }
+        }
+    }
+
     func openOutputFileFromPanel(sessionId: String, path: String) {
         summonAppWindow(navigatingTo: .session(sessionId))
         appWindow?.host?.showOutputFile(URL(fileURLWithPath: path))
@@ -1748,6 +1763,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 mb?.refresh()
             }
             browserLink = BrowserLink.start(home: AppProfile.winterHome, keychainService: AppProfile.keychainService)
+            browserLink?.host.onPresent = { [weak self] sessionId, tabId in self?.presentBrowserTab(sessionId: sessionId, tabId: tabId) }
         }
         // The menu's state line and login-item checkbox are refreshed when the menu is OPENED (`MenuBarController`
         // observes `NSMenu.didBeginTrackingNotification`), not on a clock: nobody reads them while it is closed, and

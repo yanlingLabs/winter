@@ -6,15 +6,15 @@
 // the only one that sees which execution contexts are the "winter" world). This side refuses a method or an event
 // outside `cdp-allowlist.ts` before anything is sent, and drops an event it did not subscribe to — defense in depth,
 // never the guard of record.
-import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_NETWORK_EVENT_PARAMS } from "../cdp-allowlist";
+import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS } from "../cdp-allowlist";
+import { cdpEventParams } from "../cdp-reduce";
 import {
-  TransportError, type BackendId, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportErrorCode, type TransportTab,
+  TransportError, type BackendId, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportDownload, type TransportErrorCode, type TransportTab,
 } from "../transport";
 import { DAEMON_TO_HOST_MAX_LINE, type ExtensionMethod } from "./protocol";
 
 const ALLOWED_METHODS = new Set(CDP_ALLOWED_METHODS);
 const ALLOWED_EVENTS = new Set(CDP_ALLOWED_EVENTS);
-const NETWORK_PARAMS = new Set(CDP_NETWORK_EVENT_PARAMS);
 const TRANSPORT_CODES = new Set<TransportErrorCode>(["disconnected", "tab_gone", "attach_refused", "not_allowed", "cdp_error", "timeout", "protocol_mismatch"]);
 
 /** Per-request ceilings (ms). `cdp.send`'s two mirror the built-in browser's link (15 s, a screenshot 20 s). */
@@ -31,6 +31,8 @@ export const DEFAULT_EXTENSION_TIMEOUTS: ExtensionTimeouts = { command: 10_000, 
 
 export interface ExtensionTransportOptions {
   family: BrowserFamily;
+  /** Phase 3: the features the extension's hello named (`EXTENSION_FEATURES`). */
+  features?: readonly string[];
   /** Writes one JSON-RPC object to the host. False when the connection can no longer carry it. */
   write(message: Record<string, unknown>): boolean;
   timeouts?: Partial<ExtensionTimeouts>;
@@ -60,10 +62,59 @@ export class ExtensionTransport implements CdpTransport {
   private readonly eventListeners = new Set<(e: CdpEvent) => void>();
   private readonly goneListeners = new Set<(tabKey: string, reason: GoneReason) => void>();
   private readonly stopListeners = new Set<(tabKey: string) => void>();
+  private readonly doneListeners = new Set<(tabKey: string, done: boolean) => void>();
+  private readonly downloadListeners = new Set<(tabKey: string, d: TransportDownload) => void>();
+  /** Phase 3: what this extension build said it can do. */
+  readonly features: ReadonlySet<string>;
+
+  // Phase 3's optional members: defined only when the extension named their feature at hello.
+  present?: CdpTransport["present"];
+  onUserDone?: CdpTransport["onUserDone"];
+  setMuted?: CdpTransport["setMuted"];
+  updateGroup?: CdpTransport["updateGroup"];
+  listWindows?: CdpTransport["listWindows"];
+  history?: CdpTransport["history"];
+  bookmarks?: CdpTransport["bookmarks"];
+  armDownloads?: CdpTransport["armDownloads"];
+  onDownload?: CdpTransport["onDownload"];
+  releaseDownload?: CdpTransport["releaseDownload"];
 
   constructor(private readonly opts: ExtensionTransportOptions) {
     this.family = opts.family;
     this.timeouts = { ...DEFAULT_EXTENSION_TIMEOUTS, ...(opts.timeouts ?? {}) };
+    const f = new Set(opts.features ?? []);
+    this.features = f;
+    const t = this.timeouts;
+    if (f.has("present")) this.present = async (tabKey) => { await this.request("tabs.present", { tabKey }, t.command); };
+    if (f.has("userDone")) this.onUserDone = (l) => { this.doneListeners.add(l); return () => { this.doneListeners.delete(l); }; };
+    if (f.has("mute")) this.setMuted = async (tabKey, muted) => { await this.request("tabs.mute", { tabKey, muted }, t.command); };
+    if (f.has("group")) this.updateGroup = async (o) => { await this.request("group.update", { ...o }, t.command); };
+    if (f.has("windows")) {
+      this.listWindows = async () => {
+        const r = await this.request("windows.list", {}, t.command);
+        if (!isRecord(r) || !Array.isArray(r.windows)) throw malformed("windows.list");
+        return r.windows.filter(isRecord).map((w) => ({ id: Number(w.id), focused: w.focused === true, tabs: Number(w.tabs) || 0 })).filter((w) => Number.isFinite(w.id));
+      };
+    }
+    if (f.has("history")) {
+      this.history = async (q) => {
+        const r = await this.request("history.search", { ...q }, t.command);
+        if (!isRecord(r) || !Array.isArray(r.items)) throw malformed("history.search");
+        return r.items.filter(isRecord).filter((i) => typeof i.url === "string").map((i) => ({ url: String(i.url), title: typeof i.title === "string" ? i.title : "", lastVisitTime: Number(i.lastVisitTime) || 0 }));
+      };
+    }
+    if (f.has("bookmarks")) {
+      this.bookmarks = async (q) => {
+        const r = await this.request("bookmarks.search", { ...q }, t.command);
+        if (!isRecord(r) || !Array.isArray(r.items)) throw malformed("bookmarks.search");
+        return r.items.filter(isRecord).filter((i) => typeof i.url === "string").map((i) => ({ url: String(i.url), title: typeof i.title === "string" ? i.title : "", folder: typeof i.folder === "string" ? i.folder : "" }));
+      };
+    }
+    if (f.has("downloads")) {
+      this.armDownloads = async (tabKey, o) => { await this.request("downloads.arm", o === null ? { tabKey, subdir: null } : { tabKey, subdir: o.subdir, until: o.until, maxBytes: o.maxBytes }, t.command); };
+      this.onDownload = (l) => { this.downloadListeners.add(l); return () => { this.downloadListeners.delete(l); }; };
+      this.releaseDownload = async (id) => { await this.request("downloads.release", { id }, t.command); };
+    }
   }
 
   /** The id the registry assigned (`chrome`, `chrome#2`, …), set once registered. */
@@ -86,8 +137,8 @@ export class ExtensionTransport implements CdpTransport {
     this.subscriptions.delete(tabKey);
   }
 
-  async keepTab(tabKey: string): Promise<void> {
-    await this.request("tabs.keep", { tabKey }, this.timeouts.command);
+  async keepTab(tabKey: string, opts?: { group?: string }): Promise<void> {
+    await this.request("tabs.keep", { tabKey, ...(opts?.group === undefined || !this.features.has("keepGroup") ? {} : { group: opts.group }) }, this.timeouts.command);
   }
 
   async listTabs(_opts?: { sessionId?: string }): Promise<TransportTab[]> {
@@ -182,7 +233,7 @@ export class ExtensionTransport implements CdpTransport {
         const event: CdpEvent = {
           tabKey,
           method,
-          params: method.startsWith("Network.") ? Object.fromEntries(Object.entries(raw).filter(([k]) => NETWORK_PARAMS.has(k))) : raw,
+          params: cdpEventParams(method, raw),
           ...(typeof params.cdpSessionId === "string" ? { cdpSessionId: params.cdpSessionId } : {}),
         };
         for (const l of this.eventListeners) this.safely(() => l(event));
@@ -212,6 +263,14 @@ export class ExtensionTransport implements CdpTransport {
       case "stop.pressed":
         for (const l of this.stopListeners) this.safely(() => l(tabKey));
         return true;
+      case "user.done":
+        for (const l of this.doneListeners) this.safely(() => l(tabKey, params.done === true));
+        return true;
+      case "download": {
+        const d = parseDownload(params.download);
+        if (d !== undefined) for (const l of this.downloadListeners) this.safely(() => l(tabKey, d));
+        return true;
+      }
       default:
         return true;
     }
@@ -265,10 +324,26 @@ export class ExtensionTransport implements CdpTransport {
 
 function parseTab(raw: unknown): TransportTab | undefined {
   if (!isRecord(raw)) return undefined;
-  const { tabKey, url, title, active, agent, sessionId } = raw;
+  const { tabKey, url, title, active, agent, sessionId, lastAccessed, group, windowId } = raw;
   if (typeof tabKey !== "string" || typeof url !== "string" || typeof title !== "string" || typeof active !== "boolean" || typeof agent !== "boolean") return undefined;
   if (sessionId !== undefined && typeof sessionId !== "string") return undefined;
-  return { tabKey, url, title, active, agent, ...(sessionId === undefined ? {} : { sessionId }) };
+  return {
+    tabKey, url, title, active, agent, ...(sessionId === undefined ? {} : { sessionId }),
+    ...(typeof lastAccessed === "number" && Number.isFinite(lastAccessed) ? { lastAccessed } : {}),
+    ...(typeof group === "string" && group.length > 0 ? { group } : {}),
+    ...(typeof windowId === "number" && Number.isFinite(windowId) ? { windowId } : {}),
+  };
+}
+
+const DOWNLOAD_STATES = new Set(["started", "progress", "done", "failed", "refused"]);
+function parseDownload(raw: unknown): TransportDownload | undefined {
+  if (!isRecord(raw) || typeof raw.id !== "string" || typeof raw.state !== "string" || !DOWNLOAD_STATES.has(raw.state) || typeof raw.name !== "string") return undefined;
+  return {
+    id: raw.id, state: raw.state as TransportDownload["state"], name: raw.name, bytes: typeof raw.bytes === "number" ? raw.bytes : 0,
+    ...(typeof raw.url === "string" ? { url: raw.url } : {}), ...(typeof raw.path === "string" ? { path: raw.path } : {}),
+    ...(typeof raw.totalBytes === "number" ? { totalBytes: raw.totalBytes } : {}), ...(typeof raw.mime === "string" ? { mime: raw.mime } : {}),
+    ...(typeof raw.error === "string" ? { error: raw.error } : {}),
+  };
 }
 
 function errorFrom(error: Record<string, unknown>): TransportError {

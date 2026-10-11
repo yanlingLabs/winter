@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { build, devKey, FORBIDDEN_IN_BUNDLE } from "../scripts/build";
+import { ALLOWED_EXACT_CALLS, build, devKey, FORBIDDEN_IN_BUNDLE, forbiddenHits } from "../scripts/build";
 import { extensionManifest, FLAVORS, HOST_NAME, MINIMUM_CHROME_VERSION, PRODUCT_NAMES } from "../src/manifest";
 import { drawOverlay, OVERLAY_TAG } from "../src/overlay";
 
@@ -12,16 +12,17 @@ const idFromKey = (key: string): string =>
   [...createHash("sha256").update(Buffer.from(key, "base64")).digest("hex").slice(0, 32)].map((c) => String.fromCharCode(97 + Number.parseInt(c, 16))).join("");
 
 describe("the manifest", () => {
-  test("exactly the spine's permissions, all sites, no content scripts, never in private windows", () => {
+  test("exactly the spine's permissions (and the optional ones), all sites, no content scripts, never in private windows", () => {
     for (const flavor of FLAVORS) {
       const m = extensionManifest(flavor, devKey());
       expect(m.manifest_version).toBe(3);
       expect(m.permissions).toEqual(["debugger", "tabs", "tabGroups", "nativeMessaging", "scripting", "storage"]);
       expect(m.host_permissions).toEqual(["<all_urls>"]);
       expect(m.content_scripts).toBeUndefined();
-      expect(m.optional_permissions).toBeUndefined();
+      // 1.1.0: the optional permissions, asked for in the popup only (an update from 1.0.0 carries no new warning).
+      expect(m.optional_permissions).toEqual(["history", "bookmarks", "downloads"]);
       expect(m.incognito).toBe("not_allowed");
-      expect(m.version).toBe("1.0.0");
+      expect(m.version).toBe("1.1.0");
       expect(m.minimum_chrome_version).toBe(MINIMUM_CHROME_VERSION);
     }
     expect(MINIMUM_CHROME_VERSION).toBe("125");
@@ -59,7 +60,12 @@ describe("the build", () => {
         expect(bundle).toContain(JSON.stringify(host));
         for (const file of ["background.js", "popup.js"]) {
           const text = readFileSync(join(dir, file), "utf8");
-          for (const f of FORBIDDEN_IN_BUNDLE) expect({ file, why: f.why, hit: f.pattern.test(text) }).toEqual({ file, why: f.why, hit: false });
+          expect({ file, hits: forbiddenHits(text).map((f) => f.why) }).toEqual({ file, hits: [] });
+        }
+        // Each allowed exact call is in the service worker once (never stale), and not in the popup.
+        for (const a of ALLOWED_EXACT_CALLS) {
+          expect({ call: a.text, count: bundle.split(a.text).length - 1 }).toEqual({ call: a.text, count: 1 });
+          expect(readFileSync(join(dir, "popup.js"), "utf8")).not.toContain(a.text);
         }
         // The allowlist is the daemon's own, bundled from source.
         expect(bundle).toContain("Emulation.setFocusEmulationEnabled");
@@ -110,14 +116,19 @@ describe("the build", () => {
     expect(forbidden.some((f) => f.pattern.test("chrome.tabs.update(1, { active: true })"))).toBe(true);
     expect(forbidden.some((f) => f.pattern.test("chrome.windows.update(2, { focused: true })"))).toBe(true);
     expect(forbidden.some((f) => f.pattern.test("x.executeScript({ world: \"MAIN\" })"))).toBe(true);
+    // An allowed exact call is allowed only as spelled: anything more around it still fails.
+    expect(forbiddenHits("chrome.tabs.update(tabId, { muted })")).toEqual([]);
+    expect(forbiddenHits("chrome.tabs.update(tabId, { muted, active: true })").length).toBeGreaterThan(0);
+    expect(forbiddenHits("chrome.tabs.update(tabId, { muted }); chrome.tabs.update(1, {})").length).toBeGreaterThan(0);
     expect(readFileSync(join(import.meta.dir, "..", "scripts", "build.ts"), "utf8")).toContain('for (const file of ["background.js", "popup.js"])');
   });
 
-  test("the sources never call what would move the user's view or read a site's data", () => {
+  test("the sources never call what would move the user's view or read a site's data — the allowed exact calls only in background.ts", () => {
     const dir = join(import.meta.dir, "..", "src");
     for (const file of readdirSync(dir).filter((f) => f.endsWith(".ts"))) {
       const code = readFileSync(join(dir, file), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-      for (const f of FORBIDDEN_IN_BUNDLE) expect({ file, why: f.why, hit: f.pattern.test(code) }).toEqual({ file, why: f.why, hit: false });
+      expect({ file, hits: forbiddenHits(code).map((f) => f.why) }).toEqual({ file, hits: [] });
+      for (const a of ALLOWED_EXACT_CALLS) expect({ file, call: a.text, count: code.split(a.text).length - 1 }).toEqual({ file, call: a.text, count: file === "background.ts" ? 1 : 0 });
     }
   });
 

@@ -14,28 +14,51 @@
 // `browsers.tab` is a bind; reads are observes; acts are acts. One grant covers the browser as an app and its tabs.
 // The dangerous-domain floor and the secure-field floor apply to both backends.
 import { randomBytes } from "node:crypto";
+import { constants, copyFileSync, lstatSync, realpathSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { nextScreenshotQuality, screenshotBudgetFor, SCREENSHOT_BYTE_CAP, SCREENSHOT_QUALITY } from "../budget";
 import { AutomationFailure } from "../errors";
-import type { AppRef } from "../policy";
+import { cardReason, type AppRef } from "../policy";
 import type { TabHandle } from "../worker/bridge";
-import { familyInfo, familyOfBackendId } from "./families";
+import { browserForBundleId, familyInfo, familyOfBackendId } from "./families";
 import { shouldCloseAgentTab } from "./lifecycle";
 import type { BrowserBackendRegistry } from "./registry";
-import { BLOCKED_TAB_PRIMITIVES, ensureSiteAllowed, listedHost, SiteApprovals, type SiteFloorDeps } from "./site-policy";
+import { BLOCKED_TAB_PRIMITIVES, blockedTabMembers, ensureSiteAllowed, listedHost, SiteApprovals, type SiteFloorDeps } from "./site-policy";
 import type { TabRunScope } from "./tab-scope";
 import { redactText, redactUrl } from "./page-runtime/redact";
-import { pickerSentence, shownUrl, TabDriver, transportFailure } from "./tab-driver";
-import type { BackendId, BrowserFamily, CdpTransport, TransportTab } from "./transport";
+import { cssSelectorRefusal } from "./page-runtime/rules";
+import { pickerSentence, shownUrl, TabDriver, transportFailure, transportHasCdp3, USER_TAB_FULL_PAGE } from "./tab-driver";
+import { TransportError, type BackendId, type BrowserFamily, type CdpTransport, type TransportTab } from "./transport";
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
+import { BODY_DEFAULT_CHARS, BODY_MAX_CHARS, isTextMime, redactBody } from "./body-redact";
+import { bytesLabel, CONSOLE_LEVELS, consoleLine, requestLine } from "./devtools";
+import { clearStagedDownloads, DOWNLOAD_MAX_BYTES, DOWNLOADS_PER_RUN, newStagingDir, placeDownload, planDownload, type DownloadPlan, type DownloadRoots } from "./download-paths";
+import {
+  decodeDataUrl, DOWNLOAD_START_DEFAULT_MS, DOWNLOAD_TOTAL_MAX_MS, FetchCapture, NativeCapture, nativeArmFailure, waitForCapture, type CapturedFile,
+} from "./downloads";
 
 /** `state()`/`screenshot()` settle for at most this long after an act in the same call (Phase 1's cap). */
 const SETTLE_CAP_MS = 1_500;
+const HTML_DEFAULT_CHARS = 100_000;
+const HTML_MAX_CHARS = 500_000;
+const ASSET_KINDS = ["image", "media", "font", "stylesheet", "script"] as const;
+/** Chrome's tab-group colors. */
+const GROUP_COLORS: readonly string[] = ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"];
 const WAIT_FOR_DEFAULT_MS = 10_000;
 const NO_VISION = "this model can't see images — use state()";
 const FOCUS_NOT_EDITABLE = "the focus is not a text field, so nothing was typed — click the field or pass { into }";
 
 /** What a tab primitive is, for the per-app policy (everything not here acts). */
-const OBSERVE_PRIMITIVES: ReadonlySet<string> = new Set(["state", "find", "screenshot", "waitFor", "waitForIdle", "url", "title", "text"]);
+const OBSERVE_PRIMITIVES: ReadonlySet<string> = new Set(["state", "find", "screenshot", "waitFor", "waitForIdle", "url", "title", "text",
+  // Phase 3's readers, and the hand-off (the user acts there, not Winter; it has its own card)
+  "console", "network", "networkBody", "inspect", "html", "assets", "dialog", "waitForUser"]);
+/** waitForUser(): 5 minutes by default, at most 30 (the script's clock is paused while the user works). */
+const HANDOFF_DEFAULT_MS = 5 * 60_000;
+const HANDOFF_MAX_MS = 30 * 60_000;
+/** The hand-off's two cards (the Mac words their buttons by these ids: "Show me the tab" / "Not now", then
+ *  "Done" / "Stop waiting"). A plain approve of the first card is "show"; of the second, "done". */
+export const HANDOFF_ASK_OPTIONS = [{ id: "handoff_show", label: "Show me the tab" }, { id: "handoff_done", label: "I've done it" }] as const;
+export const HANDOFF_WAIT_OPTIONS = [{ id: "handoff_done", label: "Done" }] as const;
 
 export interface BrowserEngineDeps {
   registry: BrowserBackendRegistry;
@@ -51,6 +74,9 @@ export interface BrowserEngineDeps {
   /** Uploads: the Winter home, and the session's temp directory and read-deny list. */
   home: string;
   uploadRoots?(sessionId: string, cwd: string | null | undefined): { tmpDir?: string; denyRead: readonly string[] };
+  /** Downloads: the session's temp directory AS SPELLED (`sessionTmpDirPath`), and the sandbox's deny-write and
+   *  deny-read lists for the session. */
+  downloadRoots?(sessionId: string, cwd: string | null | undefined): { tmpDir: string; denyWrite: readonly string[]; denyRead: readonly string[] };
   /** `computerUse.screenshotMaxDim` (read live). */
   screenshotMaxDim?(): number | undefined;
   /** Is an app with this bundle id installed (a LaunchServices lookup, never a launch)? */
@@ -89,6 +115,8 @@ interface SessionBrowsers {
 interface AgentTab { backend: BackendId; tabKey: string; kept: boolean; handoff: boolean }
 
 export interface BrowserListRow { id: string; name: string; isDefault: boolean; connected: boolean; reason?: string }
+/** One `browsers.tabs()` row. */
+type TabRow = { id: string; browser: string; url: string; title: string; active: boolean; yours: boolean; lastUsed?: string; group?: string };
 
 /** At most this many tabs held (a live built-in browser, an attached debugger) per session and in all; past it the
  *  least recently used is let go (still open: its next use takes it again). */
@@ -146,13 +174,19 @@ export class BrowserEngine {
   private readonly hooked = new Map<CdpTransport, { backend: BackendId; off: Array<() => void> }>();
   private readonly approvals = new SiteApprovals();
   private readonly declined = new Map<string, Set<string>>();
+  /** download() calls per run (session + run id), for the per-run cap. */
+  private readonly downloadsByRun = new Map<string, number>();
+  /** waitForUser(): the hand-off card waiting on a tab (backend|tabKey), answerable from the browser's own Done. */
+  private readonly handoffAnswers = new Map<string, (approved: boolean, by: string, optionId?: string) => void>();
   private installedCache?: { at: number; ids: Set<string> };
   private unwatch?: () => void;
   private stopped = false;
 
   constructor(private readonly deps: BrowserEngineDeps) {
-    // Files an earlier daemon run staged for uploads go (the daemon is starting: no session can be using them).
+    // Files an earlier daemon run staged for uploads or downloads go (the daemon is starting: no session can be using
+    // them).
     clearStagedUploads(deps.home);
+    clearStagedDownloads(deps.home);
     this.unwatch = deps.registry.onChange(() => this.hookTransports());
     this.hookTransports();
   }
@@ -185,6 +219,10 @@ export class BrowserEngine {
         case "browsers.open": return await this.open(scope, args);
         case "browsers.tabs": return await this.tabs(scope, args);
         case "browsers.tab": return await this.bindCall(scope, args);
+        case "browsers.windows": return await this.windowsCall(scope, args);
+        case "browsers.history": return await this.libraryCall(scope, args, "history");
+        case "browsers.bookmarks": return await this.libraryCall(scope, args, "bookmarks");
+        case "browsers.group": return await this.groupCall(scope, args);
         default: throw bad(`unknown primitive ${primitive}`);
       }
     } finally {
@@ -233,6 +271,7 @@ export class BrowserEngine {
   /** A run ended: its "once" site approvals go, and a user browser bound on an "Allow once" answer is released. */
   runEnded(sessionId: string, runId: string): void {
     this.approvals.runEnded(sessionId, runId);
+    this.downloadsByRun.delete(`${sessionId}\u0000${runId}`);
     this.declined.delete(`${sessionId}\u0000${runId}`);
     const s = this.sessions.get(sessionId);
     if (s === undefined) return;
@@ -304,6 +343,7 @@ export class BrowserEngine {
   /** The session's computer-use runtime ended: idled out, the session deleted, or the daemon stopping. */
   sessionEnded(sessionId: string, reason: "deleted" | "idle" | "stop"): void {
     clearStagedUploads(this.deps.home, sessionId);
+    clearStagedDownloads(this.deps.home, sessionId);
     const s = this.sessions.get(sessionId);
     if (s !== undefined) {
       for (const b of s.bindings.values()) if (b.lost === undefined) void this.drivers.get(tabKeyOf(b.backend, b.tabKey))?.release(sessionId);
@@ -367,8 +407,11 @@ export class BrowserEngine {
     for (const fam of ["chrome", "edge", "brave", "vivaldi", "opera", "arc", "chromium"] as const) {
       const info = familyInfo(fam)!;
       if ([...rows.values()].some((r) => familyOfBackendId(r.id) === fam)) continue;
-      if (!info.bundleIds.some((b) => installed.has(b))) continue;
-      rows.set(fam, { id: fam, name: info.name, isDefault: false, connected: false, reason: `Winter for Chrome is not installed in ${info.name} — ask the user` });
+      // Named by the channel that is installed (the main one first): a Mac with only Chrome Beta lists "Google Chrome Beta".
+      const channel = info.bundleIds.find((b) => installed.has(b));
+      if (channel === undefined) continue;
+      const name = browserForBundleId(channel)?.name ?? info.name;
+      rows.set(fam, { id: fam, name, isDefault: false, connected: false, reason: `Winter for Chrome is not installed in ${name} — ask the user` });
     }
     const order = ["winter", "chrome", "edge", "brave", "vivaldi", "opera", "arc", "chromium"];
     return [...rows.values()].sort((a, b) => order.indexOf(familyOfBackendId(a.id) ?? "") - order.indexOf(familyOfBackendId(b.id) ?? "") || a.id.localeCompare(b.id));
@@ -386,6 +429,14 @@ export class BrowserEngine {
         transport.onEvent((e) => this.drivers.get(tabKeyOf(id, e.tabKey))?.onEvent(e)),
         transport.onTabGone((tabKey, reason) => this.tabGone(id, tabKey, reason)),
         transport.onStop((tabKey) => this.stopPressed(id, tabKey)),
+        // The hand-off's Done / Stop waiting in the browser itself (Winter for Chrome's toolbar popup).
+        ...(transport.onUserDone === undefined ? [] : [transport.onUserDone((tabKey, done) => {
+          this.handoffAnswers.get(tabKeyOf(id, tabKey))?.(done, "browser", done ? "handoff_done" : undefined);
+        })]),
+        // A download the built-in browser refused while nothing was armed: the next state says so.
+        ...(transport.onDownload === undefined ? [] : [transport.onDownload((tabKey, d) => {
+          if (d.state === "refused") this.drivers.get(tabKeyOf(id, tabKey))?.noteUncaughtDownload(d.name);
+        })]),
       ];
       this.hooked.set(transport, { backend: id, off });
       if (this.familyOf(id) !== "winter" && transport.connected) void this.reconcileOrphans(id, transport);
@@ -430,6 +481,8 @@ export class BrowserEngine {
   private tabGone(backend: BackendId, tabKey: string, reason: string): void {
     const key = tabKeyOf(backend, tabKey);
     const d = this.drivers.get(key);
+    // A tab handed to the user and closed (or crashed) while Winter waited: the wait is over.
+    if (reason !== "stopped") this.handoffAnswers.get(key)?.(false, "tab-gone");
     if (reason === "stopped") { d?.onGone("stopped"); return; }
     d?.onGone(reason);
     // A "closed" may be a navigation that gave the tab a new key, said by the command's own answer just after: what it
@@ -704,7 +757,7 @@ export class BrowserEngine {
   }
 
   /** `yours`: an agent tab this session still owns — a kept one is the user's (it follows the user-tab rule). */
-  private async tabRows(scope: TabRunScope, backend: BackendId): Promise<Array<{ id: string; browser: string; url: string; title: string; active: boolean; yours: boolean }>> {
+  private async tabRows(scope: TabRunScope, backend: BackendId): Promise<TabRow[]> {
     const s = this.session(scope.sessionId);
     if (this.familyOf(backend) === "winter") {
       const fold = this.deps.winterTabs(scope.sessionId);
@@ -721,7 +774,10 @@ export class BrowserEngine {
     if (bundleId !== undefined) await scope.authorize(this.appRef(backend, bundleId), { kind: "bind" });
     let tabs: TransportTab[];
     try { tabs = await transport.listTabs(); } catch (err) { throw transportFailure(err, this.browserName(backend)); }
-    return tabs.map((t) => ({ id: `${backend}:${t.tabKey}`, browser: backend, url: t.url, title: t.title, active: t.active, yours: s.agentTabs.get(tabKeyOf(backend, t.tabKey))?.kept === false }));
+    return tabs.map((t) => ({
+      id: `${backend}:${t.tabKey}`, browser: backend, url: t.url, title: t.title, active: t.active, yours: s.agentTabs.get(tabKeyOf(backend, t.tabKey))?.kept === false,
+      ...(t.lastAccessed === undefined ? {} : { lastUsed: new Date(t.lastAccessed).toISOString() }), ...(t.group === undefined ? {} : { group: t.group }),
+    }));
   }
 
   /**
@@ -744,10 +800,10 @@ export class BrowserEngine {
   private async tabs(scope: TabRunScope, args: Record<string, unknown>): Promise<unknown> {
     const chosen = args.browser === undefined ? this.defaultBackends(scope) : { ids: [this.backendFor(args.browser)], leftOut: [] as string[] };
     const leftOut = [...chosen.leftOut];
-    const rows: Array<{ id: string; browser: string; url: string; title: string; active: boolean; yours: boolean }> = [];
+    const rows: TabRow[] = [];
     for (const b of chosen.ids) {
       // What the model reads: credentials in a URL, and token-looking text in a title, redacted.
-      try { rows.push(...(await this.tabRows(scope, b)).map((r) => ({ ...r, url: redactUrl(r.url), title: redactText(r.title) }))); } catch (err) {
+      try { rows.push(...(await this.tabRows(scope, b)).map((r) => ({ ...r, url: redactUrl(r.url), title: redactText(r.title), ...(r.group === undefined ? {} : { group: redactText(r.group) }) }))); } catch (err) {
         if (args.browser !== undefined || !skippable(err)) throw err;
         leftOut.push(`${this.browserName(b)} (${b}) — ${err instanceof AutomationFailure && err.kind === "NotAllowed" ? "not allowed" : "can't be reached"}`);
       }
@@ -758,7 +814,7 @@ export class BrowserEngine {
     }
     scope.builder.markScreenRead();
     if (args.emit !== false) {
-      scope.builder.text(rows.length === 0 ? "(no tabs)" : rows.map((r) => `${r.id} — ${JSON.stringify(r.title.slice(0, 120))} ${r.url.slice(0, 200)}${r.active ? " (active)" : ""}${r.yours ? " (yours)" : ""}`).join("\n"), { screen: true });
+      scope.builder.text(rows.length === 0 ? "(no tabs)" : rows.map((r) => `${r.id} — ${JSON.stringify(r.title.slice(0, 120))} ${r.url.slice(0, 200)}${r.active ? " (active)" : ""}${r.yours ? " (yours)" : ""}${r.group === undefined ? "" : ` · group ${JSON.stringify(redactText(r.group).slice(0, 60))}`}`).join("\n"), { screen: true });
     }
     return rows;
   }
@@ -781,6 +837,18 @@ export class BrowserEngine {
           : `no tab ${t.slice(0, 80)} is open — browsers.tabs() lists them`);
       }
       url = hit.url;
+    } else if (t !== null && typeof t === "object" && (t as { active?: unknown }).active === true) {
+      // The tab the user has in front in a user's browser (named, or the one allowed and connected).
+      const chosen = args.browser === undefined ? this.defaultBackends(scope).ids.filter((id) => this.familyOf(id) !== "winter") : [this.backendFor(args.browser)];
+      if (chosen.length === 0) throw bad("browsers.tab({ active: true }) needs a user's browser: name it with { browser } (browsers.list() shows them)");
+      if (chosen.length > 1) throw bad(`several browsers are connected — name one with { browser }: ${chosen.join(", ")}`);
+      backend = chosen[0]!;
+      if (this.familyOf(backend) === "winter") throw bad("browsers.tab({ active: true }) is for a user's browser — bind a built-in tab by its id from browsers.tabs()");
+      const rows = await this.tabRows(scope, backend);
+      const front = rows.filter((r) => r.active).sort((a, b) => (b.lastUsed ?? "").localeCompare(a.lastUsed ?? ""))[0];
+      if (front === undefined) throw new AutomationFailure("TargetLost", `no tab is in front in ${this.browserName(backend)}`);
+      tabKey = front.id.slice(backend.length + 1);
+      url = front.url;
     } else if (t !== null && typeof t === "object" && typeof (t as { url?: unknown }).url === "string") {
       const want = stripFragment((t as { url: string }).url.trim());
       const chosen = args.browser === undefined ? this.defaultBackends(scope) : { ids: [this.backendFor(args.browser)], leftOut: [] as string[] };
@@ -850,7 +918,7 @@ export class BrowserEngine {
     if (match === null) return;
     const runKey = `${scope.sessionId}\u0000${scope.runId}`;
     const blocked = (): AutomationFailure => new AutomationFailure("NotAllowed",
-      `this tab is on ${match.host}, which is on the dangerous-domains list and was not approved — only back(), close(), url() and title() work on it until it navigates away`);
+      `this tab is on ${match.host}, which is on the dangerous-domains list and was not approved — only ${blockedTabMembers()} work on it until it navigates away`);
     if (this.declined.get(runKey)?.has(match.host) === true) throw blocked();
     try {
       await ensureSiteAllowed(scope, this.approvals, this.deps.site ?? {}, url, this.browserName(b.backend), cwd);
@@ -899,7 +967,7 @@ export class BrowserEngine {
   private async run(scope: TabRunScope, b: Binding, driver: TabDriver, primitive: string, args: Record<string, unknown>): Promise<unknown> {
     const sid = scope.sessionId;
     // An open page dialog: answering it is the only act; reading the dialog itself still works.
-    if (driver.dialog !== undefined && !OBSERVE_PRIMITIVES.has(primitive) && primitive !== "close" && primitive !== "keep") {
+    if (driver.dialog !== undefined && !OBSERVE_PRIMITIVES.has(primitive) && primitive !== "close" && primitive !== "keep" && primitive !== "answerDialog") {
       const ref = primitive === "click" || primitive === "setValue" ? (primitive === "click" ? args.target : args.ref) : undefined;
       if (!(isRef(ref) && driver.isDialogRef(ref))) throw new AutomationFailure("TargetBusy", driver.dialogBusySentence());
     }
@@ -924,9 +992,16 @@ export class BrowserEngine {
         if (typeof q === "string" && q.length > 0) query = { text: q };
         else if (q !== null && typeof q === "object" && !Array.isArray(q)) {
           const o = q as Record<string, unknown>;
-          query = Object.fromEntries(["role", "name", "text"].filter((k) => typeof o[k] === "string").map((k) => [k, o[k] as string]));
-          if (Object.keys(query).length === 0) throw bad("find() takes text, or { role, name, text }");
-        } else throw bad("find() takes text, or { role, name, text }");
+          query = Object.fromEntries(["role", "name", "text", "label", "placeholder", "testId", "css"].filter((k) => typeof o[k] === "string" && (o[k] as string).length > 0).map((k) => [k, o[k] as string]));
+          if (Object.keys(query).length === 0) throw bad("find() takes text, or { role, name, text, label, placeholder, testId, css }");
+          if (typeof o.css === "string") {
+            // A tokenised safe subset only: a value test on an attribute would read hidden or secret values through the
+            // match count (`page-runtime/rules.ts`, `cssSelectorRefusal`).
+            const why = cssSelectorRefusal(o.css);
+            if (why !== undefined) throw new AutomationFailure("NotAllowed", `find({ css }): ${why}`);
+          }
+          if (o.exact === true) (query as Record<string, unknown>).exact = true;
+        } else throw bad("find() takes text, or { role, name, text, label, placeholder, testId, css }");
         const found = await driver.find(query);
         scope.builder.markScreenRead();
         if (args.emit !== false) {
@@ -951,7 +1026,19 @@ export class BrowserEngine {
         return undefined;
       }
       case "setValue": {
-        if (!isRef(args.ref) || typeof args.value !== "string") throw bad("setValue() takes an element ref and a string");
+        if (isRef(args.ref) && typeof args.value === "boolean") {
+          // A check box, radio or switch: pressed as a person would, only when its state differs.
+          const st = await driver.checkState(args.ref);
+          if (!st.checkable) throw bad(`setValue(ref, true | false) is for a check box, radio or switch — [${args.ref}] is not one`);
+          if (st.checked !== args.value) {
+            const at = await this.pointOf(scope, b, driver, args.ref, "setValue()", true);
+            scope.live();
+            await driver.click(at, {});
+          }
+          scope.acted.add(b.targetId);
+          return undefined;
+        }
+        if (!isRef(args.ref) || typeof args.value !== "string") throw bad("setValue() takes an element ref and a string (true or false for a check box)");
         if (driver.dialog !== undefined && args.ref === driver.dialog.promptRef) {
           driver.dialog.promptText = args.value;
           return undefined;
@@ -1041,7 +1128,15 @@ export class BrowserEngine {
         else if (typeof o.gone === "string") cond.goneText = o.gone;
         if (typeof o.title === "string") cond.title = o.title;
         if (typeof o.url === "string") cond.url = o.url;
-        if (Object.keys(cond).length === 0) throw bad("waitFor() needs one of text, ref, gone, title or url");
+        if (o.load !== undefined) {
+          if (o.load !== "domcontentloaded" && o.load !== "load") throw bad("waitFor()'s load is \"domcontentloaded\" or \"load\"");
+          if (Object.keys(cond).length === 0) {
+            const timeout = scope.clampWait(typeof args.timeoutMs === "number" ? args.timeoutMs : WAIT_FOR_DEFAULT_MS);
+            return await driver.waitForLoad(o.load, timeout, scope.signal);
+          }
+          throw bad("waitFor({ load }) waits for the page's load alone — wait for the rest in a second waitFor()");
+        }
+        if (Object.keys(cond).length === 0) throw bad("waitFor() needs one of text, ref, gone, title, url or load");
         const timeout = scope.clampWait(typeof args.timeoutMs === "number" ? args.timeoutMs : WAIT_FOR_DEFAULT_MS);
         try {
           return await driver.waitFor(cond, timeout, scope.signal);
@@ -1080,11 +1175,52 @@ export class BrowserEngine {
         return driver.shownTitle;
       }
       case "text": {
-        const text = await driver.text(args.markdown === true);
+        if (args.within !== undefined && !isRef(args.within)) throw bad("text()'s within takes an element ref");
+        const text = isRef(args.within) ? await driver.textWithin(args.within, args.markdown === true) : await driver.text(args.markdown === true);
         scope.builder.markScreenRead();
         if (args.emit !== false) scope.builder.text(text.length === 0 ? "(the page has no readable text)" : text, { screen: true });
         return text;
       }
+      case "inspect": return await this.inspectCall(scope, b, driver, args);
+      case "html": {
+        if (args.within !== undefined && !isRef(args.within)) throw bad("html()'s within takes an element ref");
+        const maxChars = typeof args.maxChars === "number" && Number.isFinite(args.maxChars) && args.maxChars > 0 ? Math.min(HTML_MAX_CHARS, Math.floor(args.maxChars)) : HTML_DEFAULT_CHARS;
+        const r = await driver.html(isRef(args.within) ? args.within : undefined, maxChars);
+        scope.builder.markScreenRead();
+        const out = r.cut ? `${r.html}\n<!-- cut at ${maxChars} characters — html({ within: ref }) reads one part, { maxChars } up to ${HTML_MAX_CHARS} -->` : r.html;
+        if (args.emit !== false) scope.builder.text(out, { screen: true });
+        return out;
+      }
+      case "assets": {
+        const kinds = args.kinds === undefined ? [...ASSET_KINDS] : stringList(args.kinds, "assets()'s kinds");
+        const unknown = kinds.filter((k) => !(ASSET_KINDS as readonly string[]).includes(k));
+        if (unknown.length > 0) throw bad(`assets()'s kinds are ${ASSET_KINDS.join(", ")} (not ${unknown.join(", ")})`);
+        const max = typeof args.limit === "number" && args.limit > 0 ? Math.min(1_000, Math.floor(args.limit)) : 200;
+        const list = await driver.assets(kinds, max);
+        scope.builder.markScreenRead();
+        if (args.emit !== false) scope.builder.text(list.length === 0 ? "(no assets of those kinds)" : list.map((a) => `${a.kind} ${a.url}`).join("\n"), { screen: true });
+        return list;
+      }
+      case "dialog": {
+        const d = driver.dialog;
+        if (d === undefined) return null;
+        scope.builder.markScreenRead();
+        return { type: d.type, message: redactText(d.message), ...(d.type === "prompt" ? { defaultValue: redactText(d.promptText ?? "") } : {}) };
+      }
+      case "answerDialog": {
+        const d = driver.dialog;
+        if (d === undefined) throw new Error("no page dialog is open — dialog() says when one is");
+        if (typeof args.accept !== "boolean") throw bad("answerDialog() takes true (OK) or false (Cancel), and a prompt's text");
+        if (typeof args.text === "string" && d.type === "prompt") d.promptText = args.text;
+        await driver.answerDialog(args.accept ? d.okRef : d.cancelRef ?? d.okRef);
+        scope.acted.add(b.targetId);
+        return undefined;
+      }
+      case "console": this.requireCdp3(driver, "console()"); return this.consoleCall(scope, driver, args);
+      case "network": this.requireCdp3(driver, "network()"); return this.networkCall(scope, driver, args);
+      case "networkBody": this.requireCdp3(driver, "networkBody()"); return await this.networkBodyCall(scope, driver, args);
+      case "download": return await this.downloadCall(scope, b, driver, args);
+      case "waitForUser": return await this.waitForUserCall(scope, b, driver, args);
       case "upload": {
         if (!isRef(args.ref)) throw bad("upload() takes a file input's ref and a path or an array of paths");
         const cwd = (() => { try { return this.deps.sessionInfo(sid).cwd; } catch { return undefined; } })();
@@ -1101,10 +1237,50 @@ export class BrowserEngine {
       case "keep": {
         if (b.kind !== "agent") return undefined; // a tab the user already owns
         const a = this.session(sid).agentTabs.get(tabKeyOf(b.backend, b.tabKey));
+        const group = typeof args.group === "string" && args.group.trim().length > 0 ? args.group.trim().slice(0, 80) : undefined;
+        if (args.group !== undefined && group === undefined) throw bad("keep()'s group is a name");
+        // The tab is the user's from now on: an emulated screen size goes first.
+        await driver.setViewport(null).catch(() => undefined);
         if (this.familyOf(b.backend) !== "winter") {
-          try { await driver.transport.keepTab(b.tabKey); } catch (err) { throw transportFailure(err, this.browserName(b.backend)); }
+          try { await driver.transport.keepTab(b.tabKey, group === undefined ? undefined : { group }); } catch (err) { throw transportFailure(err, this.browserName(b.backend)); }
+          if (group !== undefined && !(driver.transport as { features?: ReadonlySet<string> }).features?.has("keepGroup")) {
+            scope.builder.daemonLine("kept — but this Winter for Chrome is too old to put it in a group; the user can update it");
+          }
+        } else if (group !== undefined) {
+          scope.builder.daemonLine("kept — Winter's built-in browser has no tab groups, so the group name was not used");
         }
         if (a !== undefined) { a.kept = true; a.handoff = false; }
+        return undefined;
+      }
+      case "viewport": {
+        this.requireOwnTab(sid, b, "viewport()");
+        this.requireCdp3(driver, "viewport()");
+        const size = args.size;
+        if (size === null) { await driver.setViewport(null); scope.acted.add(b.targetId); return undefined; }
+        if (size === null || typeof size !== "object" || Array.isArray(size)) throw bad("viewport() takes { width, height, mobile?, scale? } or null");
+        const o = size as Record<string, unknown>;
+        const w = o.width, h = o.height;
+        if (typeof w !== "number" || typeof h !== "number" || !Number.isInteger(w) || !Number.isInteger(h) || w < 200 || w > 3840 || h < 200 || h > 2160) {
+          throw bad("viewport()'s width is a whole number 200–3840 and its height 200–2160 (CSS px)");
+        }
+        const scale = o.scale === undefined ? undefined : o.scale;
+        if (scale !== undefined && (typeof scale !== "number" || !Number.isFinite(scale) || scale < 1 || scale > 3)) throw bad("viewport()'s scale is 1–3");
+        await driver.setViewport({ width: w, height: h, mobile: o.mobile === true, ...(scale === undefined ? {} : { scale: scale as number }) });
+        scope.acted.add(b.targetId);
+        scope.diffBases.clearTarget(sid, b.targetId);
+        return undefined;
+      }
+      case "mute": {
+        this.requireOwnTab(sid, b, "mute()");
+        const on = args.on === undefined ? true : args.on;
+        if (typeof on !== "boolean") throw bad("mute() takes true (the default) or false");
+        const t = driver.transport;
+        if (t.setMuted === undefined) {
+          throw this.familyOf(b.backend) === "winter"
+            ? new Error("Winter's built-in browser can't mute a tab yet — update Winter")
+            : new AutomationFailure("BrowserUnavailable", `this Winter for Chrome is too old for mute() — ask the user to update Winter for Chrome`);
+        }
+        try { await t.setMuted(b.tabKey, on); } catch (err) { throw transportFailure(err, this.browserName(b.backend)); }
         return undefined;
       }
       case "handoff": {
@@ -1136,6 +1312,604 @@ export class BrowserEngine {
     }
   }
 
+  // ── Phase 3: the developer readers ─────────────────────────────────────────────────────────────
+
+  private async inspectCall(scope: TabRunScope, b: Binding, driver: TabDriver, args: Record<string, unknown>): Promise<unknown> {
+    let got: Awaited<ReturnType<TabDriver["inspect"]>> | undefined;
+    if (isRef(args.target)) got = await driver.inspect(args.target);
+    else if (isPoint(args.target)) {
+      this.requireVision(scope);
+      const at = driver.pointForShot(scope.lastTargetShot.get(b.targetId), args.target[0], args.target[1]);
+      got = await driver.inspectAt(at.x, at.y);
+      if (got === undefined) throw new Error("nothing is at that point");
+    } else throw bad(`inspect() takes an element ref${scope.vision ? " or a [x, y] point" : ""}`);
+    const i = got.info;
+    const out = {
+      ref: got.ref, tag: i.tag, role: i.role, ...(i.name === undefined ? {} : { name: i.name }), ...(i.text === undefined ? {} : { text: i.text }),
+      ...(i.value === undefined ? {} : { value: i.value }), attributes: i.attributes, box: i.box, visible: i.visible, enabled: i.enabled,
+      ...(i.states === undefined ? {} : { states: i.states }), ...(got.frame === undefined ? {} : { frame: got.frame }),
+    };
+    scope.builder.markScreenRead();
+    if (args.emit !== false) {
+      const attrs = Object.entries(i.attributes).map(([k, v]) => `${k}="${v}"`).join(" ");
+      scope.builder.text([
+        `[${got.ref}] <${i.tag}> ${i.role}${i.name === undefined ? "" : ` "${i.name}"`}${i.states === undefined ? "" : ` (${i.states.join(", ")})`}`,
+        `box ${i.box.join(", ")} · ${i.visible ? "visible" : "not visible"} · ${i.enabled ? "enabled" : "disabled"}${got.frame === undefined ? "" : ` · in a frame of ${got.frame}`}`,
+        ...(attrs.length === 0 ? [] : [`attributes: ${attrs}`]),
+        ...(i.value === undefined ? [] : [`value: ${i.value}`]),
+        ...(i.text === undefined ? [] : [`text: ${i.text}`]),
+      ].join("\n"), { screen: true });
+    }
+    return out;
+  }
+
+  /** A Winter for Chrome built before Phase 3 has none of its CDP (its hello names no `cdp3`). */
+  private requireCdp3(driver: TabDriver, what: string): void {
+    if (!transportHasCdp3(driver.transport)) {
+      throw new AutomationFailure("BrowserUnavailable", `the Winter for Chrome in ${driver.browserName} is too old for ${what} — ask the user to update it`);
+    }
+  }
+
+  /** viewport()/mute(): only a tab Winter opened and still owns (never the user's page). */
+  private requireOwnTab(sessionId: string, b: Binding, what: string): void {
+    if (b.kind !== "agent" || this.session(sessionId).agentTabs.get(tabKeyOf(b.backend, b.tabKey))?.kept === true) {
+      throw new AutomationFailure("NotAllowed", `${what} works on a tab you opened with browsers.open() and still own — this one is the user's`);
+    }
+  }
+
+  /** The user's browser a `{ browser }`-less call means: the one connected and allowed in this session. */
+  private oneUserBrowser(scope: TabRunScope, named: unknown, what: string): BackendId {
+    if (named !== undefined) {
+      const id = this.backendFor(named);
+      if (this.familyOf(id) === "winter") throw new Error(`Winter's built-in browser has no ${what} — name a user's browser (browsers.list())`);
+      return id;
+    }
+    const ids = this.defaultBackends(scope).ids.filter((id) => this.familyOf(id) !== "winter");
+    if (ids.length === 1) return ids[0]!;
+    throw bad(ids.length === 0 ? `name the user's browser with { browser } (browsers.list() shows them) — none is allowed in this session yet` : `several browsers are connected — name one with { browser }: ${ids.join(", ")}`);
+  }
+
+  private async windowsCall(scope: TabRunScope, args: Record<string, unknown>): Promise<unknown> {
+    const ids = args.browser !== undefined ? [this.oneUserBrowser(scope, args.browser, "windows")] : this.defaultBackends(scope).ids.filter((id) => this.familyOf(id) !== "winter");
+    const rows: Array<{ browser: string; id: number; focused: boolean; tabs: number }> = [];
+    for (const id of ids) {
+      const t = this.deps.registry.get(id);
+      if (t === undefined || !t.connected) throw this.unavailable(id);
+      if (t.listWindows === undefined) throw new AutomationFailure("BrowserUnavailable", `the Winter for Chrome in ${this.browserName(id)} is too old for browsers.windows() — ask the user to update it`);
+      const bundleId = this.bundleIdOf(id);
+      if (bundleId !== undefined) await scope.authorize(this.appRef(id, bundleId), { kind: "bind" });
+      try { for (const w of await t.listWindows()) rows.push({ browser: id, ...w }); } catch (err) { throw transportFailure(err, this.browserName(id)); }
+      scope.live();
+    }
+    if (args.emit !== false) scope.builder.text(rows.length === 0 ? "(no windows)" : rows.map((w) => `${w.browser} window ${w.id} — ${w.tabs} tab${w.tabs === 1 ? "" : "s"}${w.focused ? " (in front)" : ""}`).join("\n"));
+    return rows;
+  }
+
+  /**
+   * `browsers.history()` / `browsers.bookmarks()`: a read-only search of the user's browser, to find a page they mean.
+   * `{ browser }`, else every connected user's browser this session already allowed (the others named in a line).
+   * Checked as a BIND of the browser (its per-app card), and Winter for Chrome's optional permission (refused
+   * `NotAllowed` until the user switches it on in the extension's menu). URLs and titles redacted; printed fenced.
+   */
+  private async libraryCall(scope: TabRunScope, args: Record<string, unknown>, what: "history" | "bookmarks"): Promise<unknown> {
+    const label = `${what}()`;
+    if (args.browser !== undefined && this.familyOf(this.backendFor(args.browser)) === "winter") {
+      throw new Error("Winter's built-in browser keeps no history or bookmarks Winter can read");
+    }
+    const facts = scope.sessionFacts();
+    if (facts.mode === "chat" || facts.policy === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
+    const chosen = args.browser === undefined ? this.defaultBackends(scope) : { ids: [this.backendFor(args.browser)], leftOut: [] as string[] };
+    const ids = chosen.ids.filter((id) => this.familyOf(id) !== "winter");
+    if (ids.length === 0) {
+      throw bad(`browsers.${label} searches a user's browser — name it with { browser } (browsers.list() shows them)${chosen.leftOut.length > 0 ? `; not allowed in this session yet: ${chosen.leftOut.join("; ")}` : ""}`);
+    }
+    const limit = args.limit === undefined ? 25 : args.limit;
+    if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 200) throw bad(`browsers.${label}'s limit is a whole number 1–200`);
+    const query = args.query === undefined ? "" : args.query;
+    if (typeof query !== "string") throw bad(`browsers.${label}'s query is text`);
+    const when = (v: unknown, key: string): number | undefined => {
+      if (v === undefined) return undefined;
+      const ms = typeof v === "string" ? Date.parse(v) : Number.NaN;
+      if (!Number.isFinite(ms)) throw bad(`browsers.history()'s ${key} is a date ("2026-10-01" or an ISO time)`);
+      return ms;
+    };
+    const from = what === "history" ? when(args.from, "from") : undefined;
+    const to = what === "history" ? when(args.to, "to") : undefined;
+    const leftOut = [...chosen.leftOut];
+    const rows: Array<{ browser: string; url: string; title: string; visited?: string; folder?: string }> = [];
+    for (const id of ids) {
+      const name = this.browserName(id);
+      const t = this.deps.registry.get(id);
+      if (t === undefined || !t.connected) {
+        if (args.browser !== undefined) throw this.unavailable(id);
+        leftOut.push(`${name} (${id}) — can't be reached`);
+        continue;
+      }
+      const fn = what === "history" ? t.history : t.bookmarks;
+      if (fn === undefined) {
+        const e = new AutomationFailure("BrowserUnavailable", `the Winter for Chrome in ${name} is too old for ${label} — ask the user to update it`);
+        if (args.browser !== undefined) throw e;
+        leftOut.push(`${name} (${id}) — its Winter for Chrome is too old`);
+        continue;
+      }
+      const bundleId = this.bundleIdOf(id);
+      if (bundleId !== undefined) await scope.authorize(this.appRef(id, bundleId), { kind: "bind" });
+      scope.live();
+      scope.noteBrowser(id);
+      try {
+        if (what === "history") {
+          const found = await t.history!({ text: query.slice(0, 500), maxResults: limit, startTime: from ?? this.now() - 90 * 24 * 3_600_000, ...(to === undefined ? {} : { endTime: to }) });
+          for (const i of found) rows.push({ browser: id, url: redactUrl(i.url), title: redactText(i.title), visited: new Date(i.lastVisitTime).toISOString() });
+        } else {
+          const found = await t.bookmarks!({ ...(query.trim() === "" ? {} : { text: query.slice(0, 500) }), maxResults: limit });
+          for (const i of found) rows.push({ browser: id, url: redactUrl(i.url), title: redactText(i.title), folder: redactText(i.folder) });
+        }
+      } catch (err) {
+        if (err instanceof TransportError && err.code === "not_allowed") throw new AutomationFailure("NotAllowed", err.message);
+        throw transportFailure(err, name);
+      }
+      scope.live();
+    }
+    const out = rows.slice(0, limit);
+    if (leftOut.length > 0) scope.builder.daemonLine(`left out: ${leftOut.join("; ")}`);
+    scope.builder.markScreenRead();
+    if (args.emit !== false) {
+      scope.builder.text(out.length === 0 ? `(nothing in the ${what === "history" ? "history" : "bookmarks"} matches)` : out.map((r) =>
+        `${JSON.stringify(r.title.slice(0, 120))} ${r.url.slice(0, 200)}${r.visited === undefined ? "" : ` · ${r.visited}`}${r.folder === undefined || r.folder === "" ? "" : ` · ${JSON.stringify(r.folder.slice(0, 80))}`}${ids.length > 1 ? ` · ${r.browser}` : ""}`).join("\n"), { screen: true });
+    }
+    return out;
+  }
+
+  private async groupCall(scope: TabRunScope, args: Record<string, unknown>): Promise<undefined> {
+    const id = this.oneUserBrowser(scope, args.browser, "tab groups");
+    const t = this.deps.registry.get(id);
+    if (t === undefined || !t.connected) throw this.unavailable(id);
+    if (t.updateGroup === undefined) throw new AutomationFailure("BrowserUnavailable", `the Winter for Chrome in ${this.browserName(id)} is too old for browsers.group() — ask the user to update it`);
+    const facts = scope.sessionFacts();
+    if (facts.mode === "chat" || facts.policy === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
+    const bundleId = this.bundleIdOf(id);
+    if (bundleId !== undefined) await scope.authorize(this.appRef(id, bundleId), { kind: "act", primitive: "browsers.group" });
+    const o: { sessionId: string; title?: string; color?: string; collapsed?: boolean } = { sessionId: scope.sessionId };
+    if (args.title !== undefined) { if (typeof args.title !== "string" || args.title.trim().length === 0) throw bad("browsers.group()'s title is a name"); o.title = args.title.trim().slice(0, 60); }
+    if (args.color !== undefined) {
+      if (typeof args.color !== "string" || !GROUP_COLORS.includes(args.color)) throw bad(`browsers.group()'s color is one of ${GROUP_COLORS.join(", ")}`);
+      o.color = args.color;
+    }
+    if (args.collapsed !== undefined) { if (typeof args.collapsed !== "boolean") throw bad("browsers.group()'s collapsed is true or false"); o.collapsed = args.collapsed; }
+    if (o.title === undefined && o.color === undefined && o.collapsed === undefined) throw bad("browsers.group() takes a title, color or collapsed");
+    try { await t.updateGroup(o); } catch (err) { throw transportFailure(err, this.browserName(id)); }
+    return undefined;
+  }
+
+  private consoleCall(scope: TabRunScope, driver: TabDriver, args: Record<string, unknown>): unknown {
+    const levels = args.levels === undefined ? undefined : stringList(args.levels, "console()'s levels");
+    if (levels !== undefined) {
+      const unknown = levels.filter((l) => !(CONSOLE_LEVELS as readonly string[]).includes(l === "warn" ? "warning" : l));
+      if (unknown.length > 0) throw bad(`console()'s levels are ${CONSOLE_LEVELS.join(", ")} (not ${unknown.join(", ")})`);
+    }
+    const read = driver.devtools.console({
+      ...(levels === undefined ? {} : { levels }), ...(typeof args.filter === "string" && args.filter.length > 0 ? { filter: args.filter } : {}),
+      ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
+    });
+    if (args.clear === true) driver.devtools.clearConsole();
+    scope.builder.markScreenRead();
+    if (args.emit !== false) {
+      const counts = Object.entries(read.counts).map(([l, n]) => `${n} ${l}${n === 1 ? "" : l === "debug" || l === "info" || l === "log" ? "" : "s"}`).join(", ");
+      const head = `console of ${this.labelOf(driver)}: ${counts.length === 0 ? "nothing logged" : counts}${read.total > read.entries.length ? ` (showing the last ${read.entries.length} of ${read.total})` : ""}`;
+      scope.builder.text([head, ...read.entries.map(consoleLine)].join("\n"), { screen: true });
+    }
+    return read.entries;
+  }
+
+  private networkCall(scope: TabRunScope, driver: TabDriver, args: Record<string, unknown>): unknown {
+    const types = args.types === undefined ? undefined : stringList(args.types, "network()'s types");
+    const read = driver.devtools.network({
+      ...(types === undefined ? {} : { types }), ...(typeof args.filter === "string" && args.filter.length > 0 ? { filter: args.filter } : {}),
+      ...(args.failed === true ? { failed: true } : {}), ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
+    });
+    if (args.clear === true) driver.devtools.clearNetwork();
+    scope.builder.markScreenRead();
+    if (args.emit !== false) {
+      const head = `network of ${this.labelOf(driver)}: ${read.total === 0 ? "no requests seen (only those made while Winter worked in the tab)" : `${read.total} request${read.total === 1 ? "" : "s"}`}${read.total > read.entries.length ? ` (showing the last ${read.entries.length})` : ""}`;
+      scope.builder.text([head, ...read.entries.map(requestLine)].join("\n"), { screen: true });
+    }
+    return read.entries;
+  }
+
+  // ── waitForUser() — the sign-in hand-off ──────────────────────────────────────────────────────
+
+  /**
+   * `waitForUser(reason, { timeoutMs })`: a page needs the user (a sign-in, a 2-step code, a CAPTCHA). Winter asks on a
+   * card under every policy but `dont-ask` (which never asks: refused, and the model tells the user in its reply).
+   * The tab is let go BEFORE the card — by every session that holds it, a full detach (`TabDriver.handOff`) — so
+   * nothing of Winter's reads it while the user works there, whichever answer they give, and the built-in browser's
+   * native prompts (passkeys, permission prompts) can show. "Show me the tab" brings it forward: the built-in browser
+   * shows the session's window with that tab; a user's browser activates the tab and focuses its window (the one place
+   * Winter for Chrome does). A second card waits for "Done" (the browser's own toolbar offers it too). Done (or "I've
+   * done it" on the first card): the tab is taken again and its whole state printed — `{ done: true }`; what the page
+   * logged meanwhile stays out of `console()`. Declined, "Stop waiting" or no answer: `{ done: false }`, the tab left
+   * with the user. The tab closed meanwhile is `TargetLost`.
+   */
+  private async waitForUserCall(scope: TabRunScope, b: Binding, driver: TabDriver, args: Record<string, unknown>): Promise<{ done: boolean }> {
+    const sid = scope.sessionId;
+    const reason = typeof args.reason === "string" ? cardReason(args.reason) : "";
+    if (reason === "") throw bad("waitForUser() takes a reason — what the user needs to do there (\"sign in\", \"enter the code\")");
+    const timeout = args.timeoutMs === undefined ? HANDOFF_DEFAULT_MS : args.timeoutMs;
+    if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) throw bad("waitForUser()'s timeoutMs is a positive number of ms");
+    const total = Math.min(timeout, HANDOFF_MAX_MS);
+    let host = "this page";
+    try { const h = new URL(driver.url).hostname; if (h.length > 0) host = h; } catch { /* not a URL with a host */ }
+    if (scope.sessionPolicy() === "dont-ask") {
+      throw new AutomationFailure("NotAllowed", `this session never asks — tell the user in your reply what they need to do on ${host}`);
+    }
+    // Showing the tab to the user dismisses a page dialog that holds it (the built-in browser clears it with the hold):
+    // the dialog is answered first, by the model, knowing what it says.
+    if (driver.dialog !== undefined) {
+      throw new AutomationFailure("TargetBusy", `a page dialog is open (${driver.dialog.type}) — read it with dialog() and answer it with answerDialog() first: handing the tab to the user would dismiss it`);
+    }
+    if (scope.userCard === undefined) throw new Error("this Winter can't hand a tab to the user");
+    const winter = this.familyOf(b.backend) === "winter";
+    const name = this.browserName(b.backend);
+    const transport = driver.transport;
+    if (transport.present === undefined) {
+      throw winter
+        ? new Error("Winter's built-in browser can't show a tab to the user until Winter is updated")
+        : new AutomationFailure("BrowserUnavailable", `the Winter for Chrome in ${name} is too old for waitForUser() — ask the user to update it`);
+    }
+    scope.noteHandoff?.();
+    const t0 = this.now();
+    // Let the tab go first, for every session: whatever the user does in it from here is theirs alone.
+    await driver.handOff();
+    const ask = await scope.userCard(`${name} — ${host}: ${reason}. Winter waits while you do it.`, HANDOFF_ASK_OPTIONS, total);
+    scope.live();
+    if (!ask.approved) {
+      scope.builder.daemonLine(`the user did not take over (${ask.by === "timeout" ? "no answer" : "declined"})`);
+      return { done: false };
+    }
+    if (ask.optionId !== "handoff_done") {
+      const key = tabKeyOf(b.backend, b.tabKey);
+      try { await transport.present(b.tabKey, { sessionId: sid }); } catch (err) { throw transportFailure(err, name); }
+      scope.builder.daemonLine(winter ? `showed the tab to the user in Winter's window` : `brought the tab forward in ${name} for the user`);
+      const left = Math.max(1_000, total - (this.now() - t0));
+      let wait: { approved: boolean; optionId?: string; by?: string };
+      try {
+        wait = await scope.userCard(`Waiting for you on ${host} in ${name} — press Done when you have finished.`, HANDOFF_WAIT_OPTIONS, left,
+          (answer) => { this.handoffAnswers.set(key, answer); });
+      } finally {
+        this.handoffAnswers.delete(key);
+        // The browser's own waiting mark goes (Winter for Chrome's badge and pill).
+        if (!winter) transport.overlay(b.tabKey, { active: false });
+      }
+      scope.live();
+      if (wait.by === "tab-gone") throw new AutomationFailure("TargetLost", "the tab was closed while Winter waited for the user");
+      if (!wait.approved) {
+        scope.builder.daemonLine(`the user ${wait.by === "timeout" ? "did not finish in time" : "stopped the wait"} — the tab stays with them`);
+        return { done: false };
+      }
+    }
+    // Done: the tab is taken again — a fresh look (every earlier ref is stale).
+    await driver.ensureAttached(sid);
+    scope.live();
+    scope.builder.daemonLine(`the user finished on ${host}`);
+    await this.printState(scope, b.targetId, driver, { full: true, settle: true });
+    return { done: true };
+  }
+
+  // ── download() ─────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * `download(ref | { url }, { to?, timeoutMs? })`: the file a link or button gives, saved into the session's temp
+   * folder (or `to`) — never through the user's Downloads folder for an ordinary file. The routes:
+   *  - a `data:` link: decoded here, no browser;
+   *  - an http(s) link or media (or `{ url }`): the built-in browser downloads it in that tab (its cookies), a user's
+   *    browser loads it in a temporary background tab of the session's group under Fetch interception;
+   *  - a `blob:` link (a file the page makes itself) or a button: the tab is armed and the ref clicked — the built-in
+   *    browser's own handler catches anything; a user's browser catches http(s) over Fetch, and a page-made file only
+   *    through Winter for Chrome's optional downloads permission.
+   */
+  private async downloadCall(scope: TabRunScope, b: Binding, driver: TabDriver, args: Record<string, unknown>): Promise<{ path: string; name: string; bytes: number; mime: string }> {
+    const sid = scope.sessionId;
+    const cwd = this.cwdOf(sid);
+    const r = this.deps.downloadRoots?.(sid, cwd);
+    if (r === undefined) throw new Error("downloads are not available in this Winter");
+    const roots: DownloadRoots = { cwd, tmpDir: r.tmpDir, home: this.deps.home, denyWrite: r.denyWrite };
+    // A destination that can't be used fails before anything is fetched.
+    planDownload(args.to, "download", roots);
+    const runKey = `${sid}\u0000${scope.runId}`;
+    const count = this.downloadsByRun.get(runKey) ?? 0;
+    if (count >= DOWNLOADS_PER_RUN) throw new AutomationFailure("NotAllowed", `at most ${DOWNLOADS_PER_RUN} downloads per script — run another script for more`);
+    const timeout = args.timeoutMs === undefined ? DOWNLOAD_START_DEFAULT_MS : args.timeoutMs;
+    if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) throw bad("download()'s timeoutMs is a positive number of ms");
+    const startMs = scope.clampWait(Math.min(timeout, DOWNLOAD_TOTAL_MAX_MS));
+    const totalMs = scope.clampWait(DOWNLOAD_TOTAL_MAX_MS);
+    const winter = this.familyOf(b.backend) === "winter";
+
+    const t = args.target;
+    let ref: number | undefined;
+    let url: string | undefined;
+    let linkName: string | undefined;
+    if (isRef(t)) {
+      ref = t;
+      const link = await driver.linkOf(t);
+      scope.live();
+      if (link.kind !== "other") url = link.url;
+      if (link.kind === "link" && link.download !== undefined && link.download !== "") linkName = link.download;
+    } else if (t !== null && typeof t === "object" && !Array.isArray(t) && typeof (t as { url?: unknown }).url === "string") {
+      url = (t as { url: string }).url.trim();
+    } else {
+      throw bad("download() takes an element ref or { url }");
+    }
+    this.downloadsByRun.set(runKey, count + 1);
+
+    const staging = newStagingDir(this.deps.home, sid);
+    // The dangerous-domain floor, on every address a file comes through (its redirects and its own), not just the first.
+    const floor = async (u: string): Promise<void> => {
+      if (!/^https?:/i.test(u)) return;
+      await ensureSiteAllowed(scope, this.approvals, this.deps.site ?? {}, u, this.browserName(b.backend), cwd);
+      scope.live();
+      noteSiteOf(scope, u);
+    };
+    let captured: CapturedFile;
+    let fromBrowserFolder: { path: string; subdir: string; id?: string; transport: CdpTransport; armedAt: number } | undefined;
+    if (url !== undefined && /^data:/i.test(url)) {
+      const { bytes, mime } = decodeDataUrl(url, DOWNLOAD_MAX_BYTES);
+      const stagedPath = join(staging, "file");
+      writeFileSync(stagedPath, bytes, { mode: 0o600, flag: "wx" });
+      captured = { stagedPath, bytes: bytes.length, mime, name: linkName ?? `download${extFor(mime)}` };
+    } else if (url !== undefined && /^blob:/i.test(url)) {
+      if (ref === undefined) throw new AutomationFailure("NotAllowed", "a blob: address only works inside its page — pass the link's ref instead");
+      const out = await this.captureByClick(scope, b, driver, ref, { staging, startMs, totalMs, fetch: false, floor });
+      captured = out.file;
+      fromBrowserFolder = out.browserFolder;
+    } else if (url !== undefined) {
+      const checked = checkTabUrl(url, "download()");
+      if (checked === "about:blank") throw bad("download() needs the address of a file");
+      await ensureSiteAllowed(scope, this.approvals, this.deps.site ?? {}, checked, this.browserName(b.backend), cwd);
+      scope.live();
+      noteSiteOf(scope, checked);
+      captured = winter
+        ? await this.captureNativeUrl(scope, b, driver, checked, { staging, startMs, totalMs })
+        : await this.captureUrlRoute(scope, b, checked, { staging, startMs, totalMs, floor });
+    } else {
+      const out = await this.captureByClick(scope, b, driver, ref!, { staging, startMs, totalMs, fetch: !winter, floor });
+      captured = out.file;
+      fromBrowserFolder = out.browserFolder;
+    }
+    scope.live();
+    // A browser's own download names its final address only once it is done: held to the floor before it is placed.
+    if (captured.url !== undefined) {
+      try { await floor(captured.url); } catch (err) {
+        this.discardCaptured(staging, fromBrowserFolder);
+        throw err;
+      }
+    }
+
+    // Into place: the name the server (or the browser) suggested, under the rules of `download-paths.ts`.
+    const plan: DownloadPlan = planDownload(args.to, captured.name, roots);
+    let source = captured.stagedPath;
+    let afterPlaced: (() => void) | undefined;
+    if (fromBrowserFolder !== undefined) ({ source, afterPlaced } = this.takeFromBrowserFolder(fromBrowserFolder, captured, staging, r.denyRead));
+    else if (winter && captured.reportedPath !== undefined) this.requireInStaging(captured.reportedPath, staging);
+    const placed = placeDownload(source, plan, { expectedBytes: captured.bytes, tmpDir: r.tmpDir });
+    afterPlaced?.();
+    if (fromBrowserFolder?.id !== undefined) void fromBrowserFolder.transport.releaseDownload?.(fromBrowserFolder.id).catch(() => undefined);
+    scope.metric.download = { bytes: placed.bytes };
+    scope.noteDownload?.();
+    scope.builder.markScreenRead();
+    scope.builder.text(`downloaded "${redactText(placed.name)}" (${bytesLabel(placed.bytes)}, ${captured.mime}) → ${placed.path}`, { screen: true });
+    return { path: placed.path, name: placed.name, bytes: placed.bytes, mime: captured.mime };
+  }
+
+  /** Arm the tab, click the ref, take whichever capture catches first. */
+  private async captureByClick(
+    scope: TabRunScope, b: Binding, driver: TabDriver, ref: number,
+    o: { staging: string; startMs: number; totalMs: number; fetch: boolean; floor: (url: string) => Promise<void> },
+  ): Promise<{ file: CapturedFile; browserFolder?: { path: string; subdir: string; id?: string; transport: CdpTransport; armedAt: number } }> {
+    const winter = this.familyOf(b.backend) === "winter";
+    const name = this.browserName(b.backend);
+    const transport = driver.transport;
+    if (o.fetch) this.requireCdp3(driver, "download()");
+    const fetch = o.fetch ? new FetchCapture(driver, { anyResponse: false, stagingDir: o.staging, maxBytes: DOWNLOAD_MAX_BYTES, now: () => this.now(), checkUrl: o.floor }) : undefined;
+    const subdir = winter ? "" : `Winter/${randomBytes(6).toString("hex")}`;
+    let native: NativeCapture | undefined;
+    if (transport.armDownloads !== undefined && transport.onDownload !== undefined) {
+      native = new NativeCapture(transport, b.tabKey, { dir: winter ? o.staging : "", subdir, until: this.now() + o.totalMs, maxBytes: DOWNLOAD_MAX_BYTES, now: () => this.now() });
+    } else if (winter) {
+      throw new Error("Winter's built-in browser can't save downloads until Winter is updated");
+    }
+    let nativeRefusal: Error | undefined;
+    const armedAt = this.now();
+    try {
+      if (fetch !== undefined) await fetch.arm();
+      if (native !== undefined) {
+        try { await native.arm(); } catch (err) {
+          nativeRefusal = winter ? transportFailure(err, name) : nativeArmFailure(err, name);
+          native = undefined;
+          if (fetch === undefined) throw nativeRefusal;
+        }
+      } else if (fetch === undefined) {
+        throw new AutomationFailure("NotAllowed", `this file is made by the page itself — to save it from ${name}, ask the user to allow downloads in Winter for Chrome's menu (its toolbar button)`);
+      }
+      const at = await this.pointOf(scope, b, driver, ref, "download()", true);
+      scope.live();
+      await driver.click(at, {});
+      scope.acted.add(b.targetId);
+      const captures = [fetch, native].filter((c): c is FetchCapture | NativeCapture => c !== undefined);
+      const any = firstOf(captures);
+      const file = await waitForCapture(any, {
+        startMs: o.startMs, totalMs: o.totalMs, signal: scope.signal, now: () => this.now(),
+        nothing: () => {
+          const pageMade = fetch?.sighting.pageDownload;
+          if (pageMade !== undefined) {
+            const saved = `${name} saved "${redactText(pageMade)}" in its own Downloads folder`;
+            if (nativeRefusal !== undefined) return `${nativeRefusal.message} (${saved})`;
+            if (!winter && transport.armDownloads === undefined) {
+              return `that file is made by the page itself — to save it from ${name}, ask the user to update Winter for Chrome and allow downloads in its menu (its toolbar button) (${saved})`;
+            }
+            return `the page started a download of "${redactText(pageMade)}" that Winter could not catch`;
+          }
+          if ((fetch?.sighting.pages ?? 0) > 0) return "the click opened a page instead of a download — read the page (state()) and download from its link";
+          return `nothing started a download within ${Math.round(o.startMs / 1000)} s of the click`;
+        },
+      });
+      if (file.nativeId !== undefined && !winter) return { file, browserFolder: { path: file.reportedPath ?? file.stagedPath, subdir, id: file.nativeId, transport, armedAt } };
+      return { file };
+    } finally {
+      await fetch?.disarm();
+      await native?.disarm();
+    }
+  }
+
+  /** The built-in browser: arm the tab and have it download `url` itself (its cookies), with no navigation. */
+  private async captureNativeUrl(scope: TabRunScope, b: Binding, driver: TabDriver, url: string, o: { staging: string; startMs: number; totalMs: number }): Promise<CapturedFile> {
+    const transport = driver.transport;
+    if (transport.armDownloads === undefined || transport.startDownload === undefined || transport.onDownload === undefined) {
+      throw new Error("Winter's built-in browser can't save downloads until Winter is updated");
+    }
+    const native = new NativeCapture(transport, b.tabKey, { dir: o.staging, subdir: "", until: this.now() + o.totalMs, maxBytes: DOWNLOAD_MAX_BYTES, now: () => this.now() });
+    try {
+      try { await native.arm(); } catch (err) { throw transportFailure(err, this.browserName(b.backend)); }
+      try { await transport.startDownload(b.tabKey, url); } catch (err) { throw transportFailure(err, this.browserName(b.backend)); }
+      return await waitForCapture(native, {
+        startMs: o.startMs, totalMs: o.totalMs, signal: scope.signal, now: () => this.now(),
+        nothing: () => `the download of ${redactUrl(url).slice(0, 200)} did not start within ${Math.round(o.startMs / 1000)} s`,
+      });
+    } finally {
+      await native.disarm();
+    }
+  }
+
+  /**
+   * A user's browser: the file at `url` loaded in a TEMPORARY background tab of the session's group, under Fetch
+   * interception (any final 2xx is the file), then the tab closed. The bound tab itself is never navigated (a "leave
+   * this page?" there could cost it its page).
+   */
+  private async captureUrlRoute(scope: TabRunScope, b: Binding, url: string, o: { staging: string; startMs: number; totalMs: number; floor: (url: string) => Promise<void> }): Promise<CapturedFile> {
+    const sid = scope.sessionId;
+    const name = this.browserName(b.backend);
+    const transport = this.deps.registry.get(b.backend);
+    if (transport === undefined || !transport.connected) throw this.unavailable(b.backend);
+    if (!transportHasCdp3(transport)) throw new AutomationFailure("BrowserUnavailable", `the Winter for Chrome in ${name} is too old for download() — ask the user to update it`);
+    let title: string | undefined;
+    try { title = this.deps.sessionInfo(sid).title; } catch { title = undefined; }
+    let tab: TransportTab;
+    try { tab = await transport.createTab({ sessionId: sid, url: "about:blank", ...(title === undefined ? {} : { sessionTitle: title }) }); } catch (err) { throw transportFailure(err, name); }
+    const s = this.session(sid);
+    const key = tabKeyOf(b.backend, tab.tabKey);
+    const agent: AgentTab = { backend: b.backend, tabKey: tab.tabKey, kept: false, handoff: false };
+    s.agentTabs.set(key, agent);
+    const temp = this.driverFor(b.backend, tab.tabKey);
+    let fetch: FetchCapture | undefined;
+    try {
+      await temp.ensureAttached(sid);
+      scope.live();
+      fetch = new FetchCapture(temp, { anyResponse: true, stagingDir: o.staging, maxBytes: DOWNLOAD_MAX_BYTES, now: () => this.now(), checkUrl: o.floor });
+      await fetch.arm();
+      const f = fetch;
+      void temp.send<{ errorText?: unknown }>("Page.navigate", { url }).then((res) => {
+        if (typeof res.errorText === "string" && res.errorText.length > 0) f.fail(new Error(`${name} could not load ${redactUrl(url).slice(0, 200)} (${res.errorText})`));
+      }, (err: unknown) => f.fail(err instanceof Error ? err : new Error(String(err))));
+      return await waitForCapture(fetch, {
+        startMs: o.startMs, totalMs: o.totalMs, signal: scope.signal, now: () => this.now(),
+        nothing: () => `${redactUrl(url).slice(0, 200)} did not answer within ${Math.round(o.startMs / 1000)} s`,
+      });
+    } finally {
+      await fetch?.disarm();
+      if (s.agentTabs.get(key) === agent) this.closeAgentTab(sid, s, key, agent, "closed");
+    }
+  }
+
+  /** A captured file that will not be placed (the floor refused its address): the staged copy goes, and a file the
+   *  browser saved into Winter's own subfolder of its downloads folder goes with its item in the browser's list. */
+  private discardCaptured(staging: string, fromBrowserFolder: { path: string; subdir: string; id?: string; transport: CdpTransport } | undefined): void {
+    try { rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
+    if (fromBrowserFolder === undefined) return;
+    try {
+      const st = lstatSync(fromBrowserFolder.path);
+      if (st.isFile() && dirname(fromBrowserFolder.path).endsWith(`/${fromBrowserFolder.subdir}`)) {
+        unlinkSync(fromBrowserFolder.path);
+        try { rmdirSync(dirname(fromBrowserFolder.path)); } catch { /* not empty, or gone */ }
+      }
+    } catch { /* gone already */ }
+    if (fromBrowserFolder.id !== undefined) void fromBrowserFolder.transport.releaseDownload?.(fromBrowserFolder.id).catch(() => undefined);
+  }
+
+  /** The built-in browser saved into the staging directory: the file it reported must be there. */
+  private requireInStaging(path: string, staging: string): void {
+    let realPath: string | undefined;
+    try { realPath = realpathSync(path); } catch { realPath = undefined; }
+    const root = realpathSync(staging);
+    if (realPath === undefined || !realPath.startsWith(`${root}/`)) throw new Error("the browser saved the download somewhere Winter did not expect — nothing was saved");
+  }
+
+  /**
+   * The extension's downloads route: the browser saved the file in its own downloads folder, under `Winter/<random>/`
+   * (or wherever the user chose in its save dialog). It is accepted only as a regular file of the reported size, not
+   * a link, outside Winter's home and the sandbox's read-deny list. Under our subfolder it is MOVED (and the subfolder
+   * removed); elsewhere — the user's choice — it is copied and theirs left alone.
+   */
+  private takeFromBrowserFolder(f: { path: string; subdir: string; armedAt: number }, captured: CapturedFile, staging: string, denyRead: readonly string[]): { source: string; afterPlaced?: () => void } {
+    const path = f.path;
+    let st;
+    try { st = lstatSync(path); } catch { throw new Error("the browser's downloaded file is gone"); }
+    if (st.isSymbolicLink() || !st.isFile()) throw new Error("the browser's downloaded file is not a regular file — nothing was saved");
+    if (st.size !== captured.bytes) throw new Error(`the browser's downloaded file is not the size it reported (${st.size} of ${captured.bytes} bytes)`);
+    // Written by this download: modified after the arm (a little slack for the file system's clock).
+    if (st.mtimeMs + 2_000 < f.armedAt) throw new Error("the browser reported a file older than the download — nothing was saved");
+    const home = [this.deps.home, (() => { try { return realpathSync(this.deps.home); } catch { return this.deps.home; } })()];
+    const realPath = realpathSync(path);
+    const under = (p: string, root: string): boolean => p === root || p.startsWith(root.endsWith("/") ? root : `${root}/`);
+    if (home.some((h) => under(realPath, h)) || denyRead.some((d) => under(realPath, d))) throw new Error("the browser saved the download somewhere Winter may not read — nothing was saved");
+    const ours = dirname(realPath).endsWith(`/${f.subdir}`);
+    if (ours) {
+      // A move: placeDownload removes it once copied; the subfolder (and `Winter/` when empty) goes after.
+      return {
+        source: realPath,
+        afterPlaced: () => {
+          try { rmdirSync(dirname(realPath)); } catch { /* not empty, or gone */ }
+          try { rmdirSync(dirname(dirname(realPath))); } catch { /* the user's other Winter downloads, or gone */ }
+        },
+      };
+    }
+    const copy = join(staging, "file");
+    copyFileSync(realPath, copy, constants.COPYFILE_EXCL);
+    return { source: copy };
+  }
+
+  private async networkBodyCall(scope: TabRunScope, driver: TabDriver, args: Record<string, unknown>): Promise<string> {
+    if (typeof args.id !== "string" || args.id.length === 0) throw bad("networkBody() takes a request's id from network() (\"r12\")");
+    const req = driver.devtools.request(args.id);
+    if (req === undefined) throw new Error(`no request ${args.id.slice(0, 20)} in this tab's network log — network() lists them`);
+    if (!req.done) throw new Error(`${req.id} has not finished loading — wait for it (waitForIdle()) and read it again`);
+    if (req.failed !== undefined) throw new Error(`${req.id} failed (${req.failed}) — it has no body`);
+    const maxChars = typeof args.maxChars === "number" && Number.isFinite(args.maxChars) && args.maxChars > 0 ? Math.min(BODY_MAX_CHARS, Math.floor(args.maxChars)) : BODY_DEFAULT_CHARS;
+    let body: { body: string; base64Encoded: boolean; truncated: boolean };
+    try {
+      body = await driver.responseBody(req.session, req.requestId);
+    } catch (err) {
+      if (err instanceof AutomationFailure) throw err;
+      throw new Error(`the browser no longer keeps that response's body (it was larger than 1 MB, the page moved on, or the tab was let go) — reload and read it sooner`);
+    }
+    scope.live();
+    scope.builder.markScreenRead();
+    let out: string;
+    if (!isTextMime(req.mime) && (body.base64Encoded || req.mime !== undefined)) {
+      const bytes = body.base64Encoded ? Math.floor((body.body.length * 3) / 4) : body.body.length;
+      out = `(binary, ${bytesLabel(bytes)}${req.mime === undefined ? "" : `, ${req.mime}`}) — save it with download({ url })`;
+    } else {
+      const raw = body.base64Encoded ? Buffer.from(body.body, "base64").toString("utf8") : body.body;
+      const r = redactBody(raw, req.mime, maxChars);
+      out = r.text + (r.cut || body.truncated ? `\n… (cut — ${body.truncated ? "the browser hands over at most 1 MB" : `pass { maxChars } up to ${BODY_MAX_CHARS}`})` : "");
+    }
+    if (args.emit !== false) scope.builder.text(out, { screen: true });
+    return out;
+  }
+
+  private labelOf(driver: TabDriver): string {
+    const t = driver.shownTitle.replace(/\s+/g, " ").trim();
+    return t.length > 0 ? `Tab "${t.slice(0, 60)}"` : `Tab ${driver.backend}:${driver.tabKey}`;
+  }
+
   private async navigate(scope: TabRunScope, b: Binding, driver: TabDriver, go: () => Promise<boolean>): Promise<undefined> {
     driver.agentNavigating = b.kind === "agent";
     let loaded: boolean;
@@ -1150,8 +1924,19 @@ export class BrowserEngine {
   private async screenshot(scope: TabRunScope, b: Binding, driver: TabDriver, args: Record<string, unknown>): Promise<unknown> {
     this.requireVision(scope);
     const r = args.region;
-    const region = Array.isArray(r) && r.length === 4 && r.every((n) => typeof n === "number" && Number.isFinite(n))
+    let region = Array.isArray(r) && r.length === 4 && r.every((n) => typeof n === "number" && Number.isFinite(n))
       ? { x: r[0] as number, y: r[1] as number, width: r[2] as number, height: r[3] as number } : undefined;
+    const fullPage = args.fullPage === true;
+    // A picture never moves the USER's own tab (one Winter did not open, or handed over with keep()): no full-page
+    // relayout, and an element shot only where it already is.
+    const usersTab = this.usersTab(scope.sessionId, b);
+    if (fullPage && usersTab) throw new AutomationFailure("NotAllowed", USER_TAB_FULL_PAGE);
+    if (args.within !== undefined) {
+      if (!isRef(args.within)) throw bad("screenshot()'s within takes an element ref");
+      if (fullPage) throw bad("screenshot() takes within or fullPage, not both");
+      region = await driver.rectForRef(args.within, { scroll: !usersTab });
+      scope.live();
+    }
     const settle = this.settleFor(scope, b, args);
     if (settle !== undefined) {
       const w = await driver.waitForIdle(150, settle.maxMs, scope.signal);
@@ -1163,7 +1948,7 @@ export class BrowserEngine {
     let quality: number = SCREENSHOT_QUALITY;
     let shot: Awaited<ReturnType<TabDriver["screenshot"]>>;
     for (;;) {
-      shot = await driver.screenshot(screenshotBudgetFor(scope.model, maxDim, quality), region, quality);
+      shot = await driver.screenshot(screenshotBudgetFor(scope.model, maxDim, quality), fullPage ? undefined : region, quality, { fullPage });
       const bytes = Math.floor((shot.imageBase64.length * 3) / 4);
       const next = nextScreenshotQuality(quality);
       if (bytes <= SCREENSHOT_BYTE_CAP || next === undefined) { scope.metric.imageBytes = bytes; break; }
@@ -1173,7 +1958,9 @@ export class BrowserEngine {
     scope.lastTargetShot.set(b.targetId, shot.shotId);
     const handle = scope.keepImage({ imageBase64: shot.imageBase64, mime: "image/jpeg", width: shot.width, height: shot.height });
     if (args.emit !== false) {
-      scope.builder.daemonLine(`clicks take this image's pixel coordinates: ${shot.width}×${shot.height} (viewport ${Math.round(shot.css.width)}×${Math.round(shot.css.height)} CSS px)`);
+      scope.builder.daemonLine(fullPage
+        ? `the whole page, ${shot.width}×${shot.height} (${Math.round(shot.css.width)}×${Math.round(shot.css.height)} CSS px) — for looking; clicks take an ordinary screenshot's coordinates`
+        : `clicks take this image's pixel coordinates: ${shot.width}×${shot.height} (viewport ${Math.round(shot.css.width)}×${Math.round(shot.css.height)} CSS px)`);
       scope.builder.image(shot.imageBase64, "image/jpeg");
     } else {
       scope.builder.markScreenRead();
@@ -1183,6 +1970,41 @@ export class BrowserEngine {
 }
 
 /** The audit's site: a URL's host only (never its path or query). */
+/** A file extension for a decoded `data:` file's type (the common ones; else none). */
+function extFor(mime: string): string {
+  const map: Record<string, string> = {
+    "text/plain": ".txt", "text/csv": ".csv", "text/html": ".html", "application/json": ".json", "application/pdf": ".pdf",
+    "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp", "image/svg+xml": ".svg", "application/zip": ".zip",
+  };
+  return map[mime] ?? "";
+}
+
+/** The first capture to catch a file wins; the wait fails only when every capture failed (with the first's error). Its
+ *  progress is that of the capture(s) that STARTED — one still waiting never makes a running one look stalled. */
+function firstOf(captures: Array<FetchCapture | NativeCapture>): { file: Promise<CapturedFile>; readonly started: boolean; fail(e: Error): void; progressAt(): number; held(): boolean } {
+  const file = new Promise<CapturedFile>((resolve, reject) => {
+    let failed = 0;
+    let first: unknown;
+    for (const c of captures) {
+      c.file.then(resolve, (err: unknown) => {
+        failed++;
+        first ??= err;
+        // A refusal (the floor, the size cap) is the answer at once: the other capture has nothing more to add.
+        if (err instanceof AutomationFailure && err.kind === "NotAllowed") { for (const o of captures) if (o !== c) o.fail(err); reject(err); return; }
+        if (failed === captures.length) reject(first);
+      });
+    }
+  });
+  file.catch(() => undefined);
+  return {
+    file,
+    get started() { return captures.some((c) => c.started); },
+    fail: (e) => { for (const c of captures) c.fail(e); },
+    progressAt: () => Math.max(0, ...captures.filter((c) => c.started).map((c) => c.progressAt())),
+    held: () => captures.some((c) => c.held()),
+  };
+}
+
 function noteSiteOf(scope: TabRunScope, url: string): void {
   try {
     const host = new URL(url).hostname;
@@ -1193,6 +2015,13 @@ function noteSiteOf(scope: TabRunScope, url: string): void {
 /** With no `{ browser }` named, a browser that can't be reached or that the user does not allow is skipped. */
 function skippable(err: unknown): boolean {
   return err instanceof AutomationFailure && (err.kind === "BrowserUnavailable" || err.kind === "NotAllowed");
+}
+
+/** A list of strings (or one string) from the model. */
+function stringList(v: unknown, what: string): string[] {
+  if (typeof v === "string") return [v];
+  if (Array.isArray(v) && v.every((x) => typeof x === "string")) return v as string[];
+  throw bad(`${what} take a list of strings`);
 }
 
 function stripFragment(url: string): string {

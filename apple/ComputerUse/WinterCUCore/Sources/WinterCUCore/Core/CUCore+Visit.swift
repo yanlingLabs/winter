@@ -565,10 +565,12 @@ extension CUCore {
             back = returnOnce(s, user: user) == s.before && userWindowBack(s) && displaysBack(s)
             if !back, movedMeanwhile() {
                 let at = clock.nowSeconds()
+                // Where the rule placed them (their move it judged), never whatever is in front now — that can be a theft
+                // or the visit's own late landing (review of round 9, MEDIUM #6).
                 let here = userView()
                 guardianLock.withLock {
                     guardianCore.endVisit(now: at)
-                    guardianCore.adoptUserView(CUGuardedView(app: here.front, space: here.space), now: at)
+                    if !guardianCore.active { guardianCore.adoptUserView(CUGuardedView(app: here.front, space: here.space), now: at) }
                 }
                 let ms = Int(clock.nowMs() - s.startedMs)
                 CULog.act.notice("visit \(v.id, privacy: .public) to \(s.appName, privacy: .public)'s desktop (\(reason.rawValue, privacy: .public)): the user moved while being brought back — left there (\(ms, privacy: .public) ms)")
@@ -782,7 +784,10 @@ extension CUCore {
     /// The helper errors a visit could get past, when the window is on another desktop: the foreground it needs,
     /// a window it can't reach from here, or the foreground rung finding it elsewhere.
     static func visitCouldHelp(_ e: CUError) -> Bool {
-        ["needs_foreground", "window_elsewhere", "needs_desktop_visit"].contains(e.code)
+        if ["needs_foreground", "window_elsewhere", "needs_desktop_visit"].contains(e.code) { return true }
+        // Typing whose field could not be given the focus from another desktop (nothing was typed): on screen, a click
+        // places it (live, round 11: refused with no visit offered).
+        return e.code == "refused" && e.data?["reason"] == .string(CUFloorReason.focusNotPlaced.rawValue)
     }
 
     /// The act needs its window's desktop (with the user's say, or without it).

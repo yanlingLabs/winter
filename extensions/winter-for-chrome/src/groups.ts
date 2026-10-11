@@ -90,6 +90,14 @@ export class AgentBook {
     await this.save();
   }
 
+  /** `browsers.group({ title })`: the session's group was renamed. */
+  async retitle(groupId: number, title: string): Promise<void> {
+    const g = this.groups.get(groupId);
+    if (g === undefined || g.title === title) return;
+    g.title = title;
+    await this.save();
+  }
+
   /** The tab is no longer Winter's: closed, or handed to the user. */
   async dropTab(tabId: number): Promise<void> {
     if (this.tabs.delete(tabId)) await this.save();

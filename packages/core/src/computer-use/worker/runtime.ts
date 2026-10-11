@@ -220,7 +220,19 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     reload() { return call("reload", tid(this), {}).then(nothing); }
     text(o?: unknown) { return call("text", tid(this), opts(o)); }
     upload(ref: unknown, paths: unknown) { return call("upload", tid(this), { ref, paths }).then(nothing); }
-    keep() { return call("keep", tid(this), {}).then(nothing); }
+    console(o?: unknown) { return call("console", tid(this), opts(o)); }
+    network(o?: unknown) { return call("network", tid(this), opts(o)); }
+    networkBody(id: unknown, o?: unknown) { return call("networkBody", tid(this), { id, ...opts(o) }); }
+    inspect(t: unknown, o?: unknown) { return call("inspect", tid(this), { target: t, ...opts(o) }); }
+    html(o?: unknown) { return call("html", tid(this), opts(o)); }
+    assets(o?: unknown) { return call("assets", tid(this), opts(o)); }
+    dialog() { return call("dialog", tid(this), {}); }
+    answerDialog(accept: unknown, text?: unknown) { return call("answerDialog", tid(this), { accept, ...(text === undefined ? {} : { text }) }).then(nothing); }
+    keep(o?: unknown) { return call("keep", tid(this), opts(o)).then(nothing); }
+    viewport(size: unknown) { return call("viewport", tid(this), { size: size === undefined ? null : size }).then(nothing); }
+    mute(on?: unknown) { return call("mute", tid(this), on === undefined ? {} : { on }).then(nothing); }
+    download(t: unknown, o?: unknown) { return call("download", tid(this), { target: t, ...opts(o) }); }
+    waitForUser(reason: unknown, o?: unknown) { return call("waitForUser", tid(this), { reason, ...opts(o) }); }
     handoff() { return call("handoff", tid(this), {}).then(nothing); }
     close() { return call("close", tid(this), {}).then(nothing); }
     toString(): string { return `[Tab ${(this as unknown as { id: string }).id}]`; }
@@ -236,6 +248,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       const extra: Record<string, unknown> = {};
       if (typeof t.app === "string") extra.with = t.app;
       if (t.window !== undefined) extra.window = t.window;
+      if (t.emit === false) extra.emit = false;
       return call("apps.open", undefined, { app, ...extra }).then(toApp);
     },
   });
@@ -244,6 +257,10 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     open: (url: unknown, o?: unknown) => call("browsers.open", undefined, { url, ...opts(o) }).then(toTab),
     tabs: (o?: unknown) => call("browsers.tabs", undefined, opts(o)),
     tab: (t: unknown, o?: unknown) => call("browsers.tab", undefined, { tab: t, ...opts(o) }).then(toTab),
+    windows: (o?: unknown) => call("browsers.windows", undefined, opts(o)),
+    group: (o?: unknown) => call("browsers.group", undefined, opts(o)).then(nothing),
+    history: (o?: unknown) => call("browsers.history", undefined, opts(o)),
+    bookmarks: (o?: unknown) => call("browsers.bookmarks", undefined, opts(o)),
   });
   const screen = Object.freeze({
     screenshot: (o?: unknown) => call("screen.screenshot", undefined, opts(o)).then(toImage),

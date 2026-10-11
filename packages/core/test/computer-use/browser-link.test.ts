@@ -22,7 +22,7 @@ import { SessionStore } from "../../src/sessions/store";
 import { loadSettings, type Settings } from "../../src/settings";
 import { FakeHelper } from "./fake-helper";
 
-const LINK_METHODS = [METHODS.browserLinkAttach, METHODS.browserLinkResult, METHODS.browserLinkEvents, METHODS.browserLinkTabGone];
+const LINK_METHODS = [METHODS.browserLinkAttach, METHODS.browserLinkResult, METHODS.browserLinkEvents, METHODS.browserLinkTabGone, METHODS.browserLinkDownload];
 
 interface Note { method: string; params: { linkId: string; cmdId: string; op: string; params: Record<string, unknown>; reason?: string } }
 
@@ -40,12 +40,16 @@ describe("the browser link (daemon side)", () => {
     const link = new BrowserLink({ registry });
     const a = app(link);
     let err: unknown;
-    try { a.call(METHODS.browserLinkAttach, { protocol: 2, appVersion: "9.9.9", pid: 1 }); } catch (e) { err = e; }
+    try { a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL + 1, appVersion: "9.9.9", pid: 1 }); } catch (e) { err = e; }
     expect(err).toBeInstanceOf(BrowserLinkRpcError);
     expect((err as BrowserLinkRpcError).data).toMatchObject({ code: "protocol_mismatch", expected: BROWSER_LINK_PROTOCOL });
     expect(registry.list()).toEqual([{ id: "winter", family: "winter", name: "Winter (built-in)", connected: false, reason: "Winter's app is newer than its daemon — ask the user to update Winter" }]);
-    const res = a.call(METHODS.browserLinkAttach, { protocol: 1, appVersion: "0.124.0", pid: 42 });
-    expect(res).toMatchObject({ protocol: 1 });
+    // An app from before Phase 3 (protocol 1) is told to update too.
+    let older: unknown;
+    try { a.call(METHODS.browserLinkAttach, { protocol: 1, appVersion: "0.124.0", pid: 41 }); } catch (e) { older = e; }
+    expect((older as BrowserLinkRpcError).data).toMatchObject({ code: "protocol_mismatch", expected: 2 });
+    const res = a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "0.124.0", pid: 42 });
+    expect(res).toMatchObject({ protocol: 2 });
     expect(String(res.linkId)).toMatch(/^bl_[0-9a-f]{12}$/);
     expect(registry.list()).toEqual([{ id: "winter", family: "winter", name: "Winter (built-in)", connected: true }]);
     expect(link.connected).toBe(true);
@@ -55,7 +59,7 @@ describe("the browser link (daemon side)", () => {
     const registry = new BrowserBackendRegistry();
     const link = new BrowserLink({ registry });
     const a = app(link);
-    const { linkId } = a.call(METHODS.browserLinkAttach, { protocol: 1, appVersion: "x", pid: 1 }) as { linkId: string };
+    const { linkId } = a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "x", pid: 1 }) as { linkId: string };
     const t = registry.get("winter")!;
     const p = t.send("tab-1", "Page.getLayoutMetrics", {});
     const note = a.last();
@@ -74,7 +78,7 @@ describe("the browser link (daemon side)", () => {
     const registry = new BrowserBackendRegistry();
     const link = new BrowserLink({ registry });
     const a = app(link);
-    const { linkId } = a.call(METHODS.browserLinkAttach, { protocol: 1, appVersion: "x", pid: 1 }) as { linkId: string };
+    const { linkId } = a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "x", pid: 1 }) as { linkId: string };
     const t = registry.get("winter")!;
     const p = t.send("tab-1", "Runtime.evaluate", { expression: "1", contextId: 1 });
     a.call(METHODS.browserLinkResult, { linkId, cmdId: a.last().params.cmdId, ok: false, error: { code: "cdp_error", message: "boom", data: { cdpCode: -32000, cdpMessage: "Cannot find context" } } });
@@ -82,9 +86,9 @@ describe("the browser link (daemon side)", () => {
     expect(e).toBeInstanceOf(TransportError);
     expect(e).toMatchObject({ code: "cdp_error", data: { cdpMessage: "Cannot find context" } });
     const before = a.notes.length;
-    const refused = await t.send("tab-1", "Network.getResponseBody", {}).then(() => undefined, (x: unknown) => x);
+    const refused = await t.send("tab-1", "Network.getCookies", {}).then(() => undefined, (x: unknown) => x);
     expect(refused).toMatchObject({ code: "not_allowed" });
-    const ev = await t.subscribe("tab-1", ["Network.responseReceived"]).then(() => undefined, (x: unknown) => x);
+    const ev = await t.subscribe("tab-1", ["Network.responseReceivedExtraInfo"]).then(() => undefined, (x: unknown) => x);
     expect(ev).toMatchObject({ code: "not_allowed" });
     expect(a.notes.length).toBe(before);
   });
@@ -93,7 +97,7 @@ describe("the browser link (daemon side)", () => {
     const registry = new BrowserBackendRegistry();
     const link = new BrowserLink({ registry });
     const a = app(link);
-    const { linkId } = a.call(METHODS.browserLinkAttach, { protocol: 1, appVersion: "x", pid: 1 }) as { linkId: string };
+    const { linkId } = a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "x", pid: 1 }) as { linkId: string };
     const t = registry.get("winter")!;
     const CEILING = "Winter's built-in browser already holds 24 tabs for automation — release one first";
     for (const start of [() => t.attach("tab-25", { sessionId: "s1" }), () => t.createTab({ sessionId: "s1", url: "https://a.example/", tabKey: "tab-26" })]) {
@@ -114,7 +118,7 @@ describe("the browser link (daemon side)", () => {
     const registry = new BrowserBackendRegistry();
     const link = new BrowserLink({ registry, timeouts: { send: 30 } });
     const a = app(link);
-    a.call(METHODS.browserLinkAttach, { protocol: 1, appVersion: "x", pid: 1 });
+    a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "x", pid: 1 });
     const t = registry.get("winter")!;
     const big = await t.send("tab-1", "Runtime.evaluate", { expression: "x".repeat(1_100_000), contextId: 1 }).then(() => undefined, (x: unknown) => x);
     expect(big).toMatchObject({ code: "not_allowed" });
@@ -126,7 +130,7 @@ describe("the browser link (daemon side)", () => {
     const registry = new BrowserBackendRegistry();
     const link = new BrowserLink({ registry });
     const a = app(link);
-    const { linkId } = a.call(METHODS.browserLinkAttach, { protocol: 1, appVersion: "x", pid: 1 }) as { linkId: string };
+    const { linkId } = a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "x", pid: 1 }) as { linkId: string };
     const t = registry.get("winter")!;
     const seen: CdpEvent[] = [];
     const gone: string[] = [];
@@ -134,7 +138,7 @@ describe("the browser link (daemon side)", () => {
     t.onTabGone((k, r) => gone.push(`${k}:${r}`));
     a.call(METHODS.browserLinkEvents, { linkId, events: [
       { tabId: "tab-1", method: "Page.frameNavigated", params: { frame: { id: "f" } } },
-      { tabId: "tab-1", method: "Network.responseReceived", params: { response: { headers: {} } } },
+      { tabId: "tab-1", method: "Network.responseReceivedExtraInfo", params: { headers: { "set-cookie": "x" } } },
       { tabId: "tab-1", method: "Runtime.executionContextCreated", params: { context: { id: 3, name: "winter" } }, cdpSessionId: "child" },
     ] });
     expect(seen.map((e) => [e.method, e.cdpSessionId])).toEqual([["Page.frameNavigated", undefined], ["Runtime.executionContextCreated", "child"]]);
@@ -150,11 +154,11 @@ describe("the browser link (daemon side)", () => {
     const link = new BrowserLink({ registry });
     const a = app(link, { name: "first" });
     const b = app(link, { name: "second" });
-    const first = a.call(METHODS.browserLinkAttach, { protocol: 1, appVersion: "x", pid: 1 }) as { linkId: string };
+    const first = a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "x", pid: 1 }) as { linkId: string };
     const oldTransport = registry.get("winter")!;
     const pending = oldTransport.send("tab-1", "Page.enable", {}).then(() => undefined, (x: unknown) => x);
     const cmd = a.last().params.cmdId;
-    b.call(METHODS.browserLinkAttach, { protocol: 1, appVersion: "x", pid: 2 });
+    b.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "x", pid: 2 });
     expect(a.last()).toEqual({ jsonrpc: "2.0", method: "browserLink.detached", params: { linkId: first.linkId, reason: "replaced" } } as unknown as Note);
     expect(await pending).toMatchObject({ code: "disconnected" });
     expect(registry.get("winter")).not.toBe(oldTransport);
@@ -166,7 +170,7 @@ describe("the browser link (daemon side)", () => {
     const registry = new BrowserBackendRegistry();
     const link = new BrowserLink({ registry });
     const a = app(link);
-    a.call(METHODS.browserLinkAttach, { protocol: 1, appVersion: "x", pid: 1 });
+    a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "x", pid: 1 });
     const pending = registry.get("winter")!.send("tab-1", "Page.enable", {}).then(() => undefined, (x: unknown) => x);
     link.connectionClosed({});
     expect(link.connected).toBe(true);
@@ -175,11 +179,33 @@ describe("the browser link (daemon side)", () => {
     expect(registry.list()).toEqual([{ id: "winter", family: "winter", name: "Winter (built-in)", connected: false, reason: "Winter isn't running" }]);
   });
 
+  test("protocol 2: present, mute, the download arm and a started download are their ops; download reports reach the engine", async () => {
+    const registry = new BrowserBackendRegistry();
+    const link = new BrowserLink({ registry });
+    const a = app(link);
+    const { linkId } = a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "x", pid: 1 }) as { linkId: string };
+    const t = registry.get("winter")!;
+    const settle = (): void => { a.call(METHODS.browserLinkResult, { linkId, cmdId: a.last().params.cmdId, ok: true, result: {} }); };
+    const ops: Array<[Promise<void>, string, Record<string, unknown>]> = [];
+    const p1 = t.present!("w1", { sessionId: "s1" }); ops.push([p1, "tab.present", { sessionId: "s1", tabId: "w1" }]); expect(a.last().params).toMatchObject({ op: "tab.present", params: { sessionId: "s1", tabId: "w1" } }); settle(); await p1;
+    const p2 = t.setMuted!("w1", true); expect(a.last().params).toMatchObject({ op: "tab.mute", params: { tabId: "w1", muted: true } }); settle(); await p2;
+    const p3 = t.armDownloads!("w1", { dir: "/h/cache/downloads/s1/abc", subdir: "", until: 5, maxBytes: 10 });
+    expect(a.last().params).toMatchObject({ op: "tab.downloads", params: { tabId: "w1", dir: "/h/cache/downloads/s1/abc", until: 5, maxBytes: 10 } }); settle(); await p3;
+    const p4 = t.armDownloads!("w1", null); expect(a.last().params).toMatchObject({ op: "tab.downloads", params: { tabId: "w1", dir: null } }); settle(); await p4;
+    const p5 = t.startDownload!("w1", "https://x/a.csv"); expect(a.last().params).toMatchObject({ op: "tab.download", params: { tabId: "w1", url: "https://x/a.csv" } }); settle(); await p5;
+    const seen: Array<[string, unknown]> = [];
+    t.onDownload!((tabKey, d) => seen.push([tabKey, d]));
+    a.call(METHODS.browserLinkDownload, { linkId, tabId: "w1", download: { id: "cef-1", state: "done", name: "a.csv", bytes: 4, path: "/h/cache/downloads/s1/abc/a.csv", mime: "text/csv" } });
+    a.call(METHODS.browserLinkDownload, { linkId: "bl_other", tabId: "w1", download: { id: "cef-2", state: "done", name: "b", bytes: 1 } });
+    expect(seen).toEqual([["w1", { id: "cef-1", state: "done", name: "a.csv", bytes: 4, path: "/h/cache/downloads/s1/abc/a.csv", mime: "text/csv" }]]);
+    expect(() => a.call(METHODS.browserLinkDownload, { linkId, tabId: "w1", download: { id: "x", state: "exploded", name: "b", bytes: 1 } })).toThrow(BrowserLinkRpcError);
+  });
+
   test("tab ops: tab.ensure carries the panel tab's URL; listing, releasing and closing are their ops", async () => {
     const registry = new BrowserBackendRegistry();
     const link = new BrowserLink({ registry, tabUrl: (sid, tab) => (sid === "s1" && tab === "w1" ? "https://example.com/" : undefined) });
     const a = app(link);
-    const { linkId } = a.call(METHODS.browserLinkAttach, { protocol: 1, appVersion: "x", pid: 1 }) as { linkId: string };
+    const { linkId } = a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "x", pid: 1 }) as { linkId: string };
     const t = registry.get("winter")!;
     const answer = (result: unknown): void => { a.call(METHODS.browserLinkResult, { linkId, cmdId: a.last().params.cmdId, ok: true, result }); };
     const att = t.attach("w1", { sessionId: "s1" });
@@ -281,8 +307,8 @@ describe("browserLink.* through the IPC server", () => {
     expect(before.result.browsers).toEqual([{ id: "winter", name: "Winter (built-in)", connected: false, reason: "Winter isn't running" }]);
     const appConn = await TestClient.connect(socketPath);
     expect((await appConn.hello(tokens.harness, "browser-link")).error).toBeUndefined();
-    const att = await appConn.request(METHODS.browserLinkAttach, { protocol: 1, appVersion: "0.124.0", pid: 7 });
-    expect(att.result.protocol).toBe(1);
+    const att = await appConn.request(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "0.124.0", pid: 7 });
+    expect(att.result.protocol).toBe(BROWSER_LINK_PROTOCOL);
     const linkId = att.result.linkId as string;
     const t = runtime.backends.get("winter")!;
     const sent = t.send("w1", "Page.enable", {});
@@ -303,14 +329,14 @@ describe("browserLink.* through the IPC server", () => {
     const { socketPath, tokens } = await boot();
     const phone = await TestClient.connect(socketPath);
     await phone.hello(tokens.remote, "iphone-gateway", "remote");
-    const r = await phone.request(METHODS.browserLinkAttach, { protocol: 1, appVersion: "x", pid: 1 });
+    const r = await phone.request(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "x", pid: 1 });
     expect(r.error).toBeDefined();
     phone.close();
     const mac = await TestClient.connect(socketPath);
     await mac.hello(tokens.harness, "browser-link");
     const mismatch = await mac.request(METHODS.browserLinkAttach, { protocol: 99, appVersion: "x", pid: 1 });
     expect(mismatch.error.code).toBe(ERR.INVALID_PARAMS);
-    expect(mismatch.error.data).toMatchObject({ code: "protocol_mismatch", expected: 1 });
+    expect(mismatch.error.data).toMatchObject({ code: "protocol_mismatch", expected: BROWSER_LINK_PROTOCOL });
     const garbage = await mac.request(METHODS.browserLinkResult, { nope: true });
     expect(garbage.error.data).toMatchObject({ code: "invalid_params" });
     mac.close();

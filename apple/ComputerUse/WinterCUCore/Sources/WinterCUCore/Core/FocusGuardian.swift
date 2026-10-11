@@ -118,10 +118,17 @@ public struct CUMoveQuery: Equatable, Sendable {
     /// The front app is system UI — a permission or authentication dialog's process (UserNotificationCenter,
     /// CoreServicesUIAgent, SecurityAgent), or an app that is not a regular one: never undone as an indirect effect.
     public var appIsSystemUI: Bool
+    /// Secure Event Input is on: the session tap can't see the user's keys, so their input can't be ruled out (round 10:
+    /// an untouched app is never sent back then).
+    public var secureInput: Bool
+    /// A change heard only after something else came forward (`adoptPast`): when its desktop is not known (the app has
+    /// windows on several), no desktop switch can be shown to have made it.
+    var pastChange = false
 
     public init(app: pid_t?, space: UInt64?, since: TimeInterval? = nil, from: CUGuardedView? = nil,
                 appStartedAt: TimeInterval? = nil, appBundle: String? = nil, inputObservable: Bool = true, clickAt: TimeInterval? = nil,
-                shown: [pid_t] = [], hardwareAt: TimeInterval? = nil, appIsSystemUI: Bool = false) {
+                shown: [pid_t] = [], hardwareAt: TimeInterval? = nil, appIsSystemUI: Bool = false, secureInput: Bool = false) {
+        self.secureInput = secureInput
         self.app = app
         self.space = space
         self.since = since
@@ -170,15 +177,17 @@ public struct CUFocusGuardianCore: Sendable {
     /// When the user last moved to `view` themselves.
     public private(set) var viewAt: TimeInterval = -.infinity
     public private(set) var active = false
-    /// The one exemption: the consented foreground, for one app, until a deadline — and the user's place before it came
-    /// forward (its end gives the front back there, unless the user moved meanwhile).
-    private var exemptApp: pid_t?
-    private var exemptUntil: TimeInterval = 0
-    private var exemptPrevious: CUGuardedView?
-    /// When the consented foreground's own activation was issued: its landing (within `restoreLateWindow`) is the
-    /// consent's — never taken for a switch of the user's that a moment later brings them elsewhere (found by the model-based
-    /// test: the held app's landing took the user's Dock click, and the Dock's own activation was undone).
-    private var exemptIssuedAt: TimeInterval = -.infinity
+    /// The consented foreground, ONE EXEMPTION PER APP (review of round 9, MEDIUM #3: a hold and another session's rung 4
+    /// shared one slot): until a deadline; when its own activation was issued (its landing within `restoreLateWindow` is
+    /// the consent's — never taken for a switch of the user's a moment later); and the user's place before it came forward
+    /// (its end gives the front back there, unless the user moved meanwhile).
+    private struct Exemption { var until: TimeInterval; var issuedAt: TimeInterval; var previous: CUGuardedView? }
+    private var exemptions: [pid_t: Exemption] = [:]
+    private func exemption(_ app: pid_t?, now: TimeInterval) -> Exemption? {
+        app.flatMap { exemptions[$0] }.flatMap { now < $0.until ? $0 : nil }
+    }
+    /// A move of the user's: no consent's end gives the front back to a place from before it.
+    private mutating func forgetExemptPrevious() { for k in exemptions.keys { exemptions[k]?.previous = nil } }
     /// When each app was last judged in front: a late activation notification of one seen since the last notification is
     /// a change already judged.
     private var seenFront: [pid_t: TimeInterval] = [:]
@@ -240,6 +249,8 @@ public struct CUFocusGuardianCore: Sendable {
     /// Apps launched since the guard began that the agent did not launch, until their first activation: that one is the
     /// user's (their own slow launch — never undone as an indirect effect).
     private var othersLaunches: [pid_t: TimeInterval] = [:]
+    /// Apps judged in front at least once while guarding (a launch's FIRST activation is told apart by it).
+    private var everFront: Set<pid_t> = []
     /// How long a launch's first activation is waited for.
     static let launchFirstWindow: TimeInterval = 60
     /// The user's input that can switch apps or desktops (fed by the session tap, the gesture monitor and the clicks).
@@ -278,12 +289,15 @@ public struct CUFocusGuardianCore: Sendable {
     public mutating func end() {
         active = false
         thefts.removeAll()
-        exemptApp = nil
-        exemptPrevious = nil
+        exemptions.removeAll()
         claim = nil
         judged = nil
         lastSeen = nil
         restoredAt.removeAll()
+        // The user's work in an app is known only while guarding (review of round 10, MEDIUM #4: it survived a stop, and a
+        // later guard refused acts on an app the user had long left).
+        userWorkingApp = nil
+        pendingWork = nil
         if visitApp != nil { endVisit() }
     }
 
@@ -368,8 +382,10 @@ public struct CUFocusGuardianCore: Sendable {
 
     public mutating func endLaunch(_ token: Int, pid: pid_t?, now: TimeInterval) {
         launches[token] = nil
-        if let pid { noteAfterglow(pid, raise: true, now: now) }
+        if let pid { noteAfterglow(pid, raise: true, now: now); agentLaunched.insert(pid) }
     }
+    /// The processes the agent's own launches (binds, opens) produced: never "the user's own launch".
+    private var agentLaunched: Set<pid_t> = []
 
     public var launchPending: Bool { launches.values.contains { $0.bundle != nil } }
 
@@ -444,13 +460,73 @@ public struct CUFocusGuardianCore: Sendable {
 
     /// An app was launched (NSWorkspace) — not by the agent when it is not touched by a launch of the agent's: its first
     /// activation is the user's.
-    public mutating func appLaunched(_ pid: pid_t, startedAt: TimeInterval? = nil, bundle: String? = nil, now: TimeInterval) {
+    public mutating func appLaunched(_ pid: pid_t, startedAt: TimeInterval? = nil, bundle: String? = nil, now: TimeInterval,
+                                     inputObservable: Bool = true, secureInput: Bool = false) {
         guard !isTouched(pid, startedAt: startedAt, bundle: bundle, now: now) else { return }
         othersLaunches = othersLaunches.filter { now - $0.value <= Self.launchFirstWindow }
         othersLaunches[pid] = now
+        // Judged at its process START, while the facts from then are at hand (review of round 10, HIGH #1): a launch the
+        // agent's own action caused — a link it pressed opening a browser that was not running — is no launch of the user's.
+        let start = min(startedAt ?? now, now)
+        coldLaunches = coldLaunches.filter { now - $0.value.start <= Self.launchFirstWindow }
+        coldLaunches[pid] = (start, inputObservable && !secureInput && clearlyAt(start, hardwareAt: nil))
+    }
+    /// The untouched launches heard of, by process: its start, and whether it was clearly the agent's then.
+    private var coldLaunches: [pid_t: (start: TimeInterval, clearly: Bool)] = [:]
+
+    /// An untouched app's process start was clearly the agent's (the start is returned): no key or click of the user's in
+    /// the `quietBeforeUndo` before it, and an action of the agent's that can open apps within the causal window before it
+    /// (or a launch of the agent's begun by then). Judged when the launch was heard of; else, for an app started within
+    /// the facts kept, from them. Only an app's FIRST activation (never seen in front).
+    func agentsColdLaunch(_ q: CUMoveQuery, upTo: TimeInterval) -> TimeInterval? {
+        // (The agent's own launches — a bind's — are judged by the ordinary rules: touched while it runs.)
+        guard q.inputObservable, !q.secureInput, let a = q.app, !everFront.contains(a), !agentLaunched.contains(a) else { return nil }
+        if let c = coldLaunches[a] { return c.clearly ? c.start : nil }
+        guard let s = q.appStartedAt, s <= upTo, upTo - s <= Self.keepFacts - Self.quietBeforeUndo,
+              clearlyAt(s, hardwareAt: q.hardwareAt.flatMap { $0 <= s ? $0 : nil }) else { return nil }
+        return s
     }
 
     /// The user's hardware action (a key, a click, a scroll, a gesture — never a pointer move), as the session tap saw it.
+    /// The agent's last action that can open or bring forward ANOTHER app (a press or click, Return or Space, a menu
+    /// command, an open, an AppleScript, a launch — never a read, typing plain text, a scroll or a hover): round 10's
+    /// "clearly the agent's" needs one within the causal window.
+    public private(set) var lastOpenerCause: TimeInterval = -.infinity
+    public mutating func noteOpenerCause(now: TimeInterval) {
+        lastOpenerCause = max(lastOpenerCause, now)
+        openerTimes.append(now)
+        openerTimes.removeAll { now - $0 > Self.launchFirstWindow }
+    }
+    /// Every opener act, in time order: a state re-judged later counts only those from before it was first seen (review
+    /// of round 10, MEDIUM #8 — the last one alone, read as of now, let an act from after it count).
+    private var openerTimes: [TimeInterval] = []
+    /// No input of the user's within this before an untouched app came forward (round 10, the user's ruling: ~2 s;
+    /// a little more, since their own open — Spotlight, a launcher, a link — lands up to 2 s after their last key).
+    static let quietBeforeUndo: TimeInterval = 2.5
+
+    /// Round 10 (the user's ruling): an untouched app's coming forward is CLEARLY the agent's — no key or click of theirs
+    /// in the last `quietBeforeUndo` (whatever the agent did in between), the agent did something that can open apps
+    /// within the causal window, and Secure Event Input is not hiding their keys.
+    func clearlyTheAgents(upTo: TimeInterval, q: CUMoveQuery) -> Bool {
+        guard q.inputObservable, !q.secureInput else { return false }
+        if clearlyAt(upTo, hardwareAt: q.hardwareAt) { return true }
+        // An app the agent's action cold-launched, coming forward for the first time with no key or click of the user's
+        // since its process started (review of round 10, HIGH #1: a launch outlasts the causal window).
+        guard let s = agentsColdLaunch(q, upTo: upTo) else { return false }
+        if hardwareTimes.contains(where: { $0 > s && $0 <= upTo }) { return false }
+        if let h = q.hardwareAt, h > s, h <= upTo { return false }
+        return true
+    }
+
+    /// No key or click of the user's in the `quietBeforeUndo` up to `t`, and an opener act of the agent's within the
+    /// causal window up to `t` or a launch of the agent's begun by `t` and still pending — the facts from before `t` only.
+    func clearlyAt(_ t: TimeInterval, hardwareAt: TimeInterval?) -> Bool {
+        if hardwareTimes.contains(where: { $0 <= t && t - $0 <= Self.quietBeforeUndo }) { return false }
+        if let h = hardwareAt, h <= t, t - h <= Self.quietBeforeUndo { return false }
+        if openerTimes.contains(where: { $0 <= t && t - $0 <= Self.causalWindow }) { return true }
+        return launches.values.contains { $0.since <= t }
+    }
+
     public mutating func noteHardwareAction(now: TimeInterval) {
         hardwareTimes.append(now)
         hardwareTimes.removeAll { now - $0 > Self.keepFacts }
@@ -502,7 +578,7 @@ public struct CUFocusGuardianCore: Sendable {
         view = CUGuardedView(app: app, space: space ?? view.space)
         viewAt = now
         thefts[app] = nil
-        exemptPrevious = nil
+        forgetExemptPrevious()
         judged = nil
     }
 
@@ -548,6 +624,8 @@ public struct CUFocusGuardianCore: Sendable {
         }
         let previous = lastSeen ?? place
         let current = CUGuardedView(app: q.app, space: q.space)
+        promoteWork(front: q.app, now: now)
+        if let w = userWorkingApp, q.app != w { userWorkingApp = nil }  // they left the app they were working in
         if lastSeen != current { lastSeenSince = now }
         lastSeen = current
         if let a = q.app { seenFront[a] = now }
@@ -609,9 +687,9 @@ public struct CUFocusGuardianCore: Sendable {
             viewAt = now
             if let a = q.app { thefts[a] = nil }
             claim = nil
-            exemptPrevious = nil
+            forgetExemptPrevious()
         case .consented:
-            if exemptPrevious == nil, view.app != q.app { exemptPrevious = view }
+            if let a = q.app, exemptions[a] != nil, exemptions[a]?.previous == nil, view.app != a { exemptions[a]?.previous = view }
             view = CUGuardedView(app: q.app ?? view.app, space: q.space ?? view.space)
         case .agent:
             if let a = q.app {
@@ -631,6 +709,7 @@ public struct CUFocusGuardianCore: Sendable {
             break
         }
         if let a = q.app, owner.isUsers || owner.undoes { othersLaunches[a] = nil }  // its first activation, judged
+        if let a = q.app { everFront.insert(a) }
         return owner
     }
 
@@ -654,23 +733,43 @@ public struct CUFocusGuardianCore: Sendable {
         var from = active ? now - Self.switchWindow : min(q.since ?? now, now - Self.switchWindow)
         if visit { from = max(from, visitStartedAt) }
         // The first activation of an app the user launched (not the agent): theirs — during a visit too (they moved).
-        if !front, let a = app, let l = othersLaunches[a], now - l <= Self.launchFirstWindow {
+        // Never a system dialog started on demand (review of round 10, MEDIUM #2: SecurityAgent, CoreServicesUIAgent and
+        // UserNotificationCenter start when asked for — theirs to answer, left, never adopted as the user's place), and
+        // never a launch that was clearly the agent's at its process start (HIGH #1).
+        let launchIsTheirs = !front && !q.appIsSystemUI && agentsColdLaunch(q, upTo: upTo) == nil
+        if launchIsTheirs, let a = app, let l = othersLaunches[a], now - l <= Self.launchFirstWindow {
             return (.user("the first activation of an app the user launched"), nil)
+        }
+        // The same when the launch notice was never heard: an app started within the window, never seen in front, not the
+        // agent's launch (review of round 9, MEDIUM #5).
+        if launchIsTheirs, let a = app, !everFront.contains(a), !agentLaunched.contains(a), let s = q.appStartedAt,
+           now - s <= Self.launchFirstWindow, now >= s {
+            return (.user("the first activation of an app started a moment ago, not by the agent"), nil)
         }
         // I1 — an app the agent never touched (during a visit, what it brings up is the visit's: below).
         if !front && shown.isEmpty, !visit {
+            // (A past change heard late, its desktop unknown: a desktop switch can't be shown to have made it — it is
+            // the switch of what came after, found by the model-based test: seed 418, a swipe adopted the app that came
+            // forward on its own 5 ms before the swipe's own landing, and the landing was then undone.)
+            let desktopKnown = q.space != nil || !q.pastChange
             if let i = input.explanation(from: from, after: -.infinity, raiseAfter: -.infinity, now: upTo,
-                                         app: appMoved, desktop: desktopMoved, front: app, targetedFirst: false) {
+                                         app: appMoved, desktop: desktopMoved && desktopKnown, front: app, targetedFirst: false) {
                 return (.user("their input that switches apps or desktops, to an app the agent never touched"), .instant(i, keep: true))
             }
-            // Its INDIRECT effect (a link it clicked opening in another app, a file it opened, a system agent's dialog):
-            // the agent was active and the tap saw no input of theirs since its last cause — neither undone nor adopted.
-            if q.inputObservable, agentActive(now: now, at: upTo), !theirInputSinceTheAgent(upTo: upTo, hardwareAt: q.hardwareAt) {
-                // A system dialog (permission, authentication): theirs to answer — left in front, said.
+            // Its INDIRECT effect, sent back ONLY when clearly the agent's (round 10, the user's ruling): no key or click
+            // of theirs in the last 2.5 s, an action of the agent's that can open apps just before, no Secure Event Input.
+            // A system dialog (permission, authentication) is theirs to answer even then — left in front, said.
+            if clearlyTheAgents(upTo: upTo, q: q) {
                 if q.appIsSystemUI {
                     return (.unexplained("a system dialog came up after the agent's action, with no input of the user's since"), nil)
                 }
-                return (.indirect("an app the agent never touched came forward right after its action, with no input of the user's since"), nil)
+                return (.indirect("an app the agent never touched came forward right after its action, with no input of the user's for a while"), nil)
+            }
+            // Ambiguous — the agent was active, but their input (or input the tap can't see) could have done it: left in
+            // front, never adopted as their place (only their switch input does that), said.
+            if agentActive(now: now, at: upTo) {
+                return (.unexplained(q.appIsSystemUI ? "a system dialog came up after the agent's action"
+                                                     : "an app the agent never touched came forward around its action, and the user may have done it"), nil)
             }
             // Their input made it: the latest that could (of any kind — a Dock click on the app already in front switches
             // its desktop) is used up, never left to explain the agent's indirect effect a moment later (found by the
@@ -694,17 +793,20 @@ public struct CUFocusGuardianCore: Sendable {
         // A restore's late landing (an app touched only by our restore of it) is never a switch's SECOND explanation: the
         // input that took them elsewhere was used by that move.
         // Nor the consented foreground's own landing.
-        let onlyLate = (late > -.infinity && !isTouchedByTheAgent(app, q: q, now: now)) || (app != nil && app == exemptApp && now < exemptUntil)
+        let onlyLate = (late > -.infinity && !isTouchedByTheAgent(app, q: q, now: now)) || exemption(app, now: now) != nil
         if let i = input.explanation(from: from, after: cause, raiseAfter: raiseCause, now: upTo,
                                      app: appMoved, desktop: desktopMoved, front: app, seconds: !onlyLate) {
             // On the visited desktop, their input in the visited app is no move away: the visit's end decides.
             if visit, let a = app, a == visitApp { return (.visit, nil) }
-            return (.user("their input that switches apps or desktops (⌘-Tab, ⌃-arrows, a swipe, the Dock, a click on another app's window), after the agent's last action that could raise it"), .instant(i, keep: false))
+            // (The app the consented foreground is bringing forward: their input may have been for another app landing
+            // right after — it stays a short second explanation, as for an untouched app; found by the model-based test.)
+            let consentApp = exemption(app, now: now) != nil
+            return (.user("their input that switches apps or desktops (⌘-Tab, ⌃-arrows, a swipe, the Dock, a click on another app's window), after the agent's last action that could raise it"), .instant(i, keep: consentApp))
         }
         // The consented foreground's own landing: the consent's — unless a switch of theirs AFTER it was issued explains
         // it (above: their ⌘-Tab into the app being held is theirs, and its end gives nothing back — found by the
         // model-based test).
-        if let a = app, a == exemptApp, now < exemptUntil, now - exemptIssuedAt <= Self.restoreLateWindow {
+        if let e = exemption(app, now: now), now - e.issuedAt <= Self.restoreLateWindow {
             return (.consented, nil)
         }
         if !q.inputObservable, let c = q.clickAt, now - c <= Self.userInputWindow, c > cause, c <= upTo, !visit || c >= visitStartedAt {
@@ -712,7 +814,7 @@ public struct CUFocusGuardianCore: Sendable {
             return (.user("a click of theirs just before it (no input source tells more)"), nil)
         }
         if visit { return (.visit, nil) }
-        if let a = app, a == exemptApp, now < exemptUntil { return (.consented, nil) }
+        if exemption(app, now: now) != nil { return (.consented, nil) }
         return (.agent(q.inputObservable
             ? "the agent touched it, and no input of the user's that switches apps or desktops came after"
             : "the agent touched it, and no input source tells more"), nil)
@@ -749,22 +851,21 @@ public struct CUFocusGuardianCore: Sendable {
     /// The consented foreground takes the front (for one action, or held for a script): its activation is allowed until
     /// `until`.
     public mutating func exempt(_ app: pid_t, until: TimeInterval, now: TimeInterval? = nil) {
-        if let now { exemptIssuedAt = now }
-        // A longer exemption of the same app (an app held in front for a script) is never cut short.
-        if exemptApp == app, exemptUntil > until { return }
-        if exemptApp != app { exemptPrevious = nil }
-        exemptApp = app
-        exemptUntil = until
+        var e = exemptions[app] ?? Exemption(until: 0, issuedAt: -.infinity, previous: nil)
+        if let now { e.issuedAt = now }
+        // A longer exemption of the same app (an app held in front for a script) is never cut short; another app's
+        // exemption is its own (never cleared here).
+        e.until = max(e.until, until)
+        exemptions[app] = e
     }
 
     /// Ends `app`'s exemption now (its hold or its action ended): the user's place is the one before it again — unless
     /// they moved meanwhile (their move is their place). Judged afresh from now on.
-    public mutating func endExempt(_ app: pid_t) {
-        guard exemptApp == app else { return }
-        exemptApp = nil
-        exemptUntil = 0
-        if let prev = exemptPrevious, view.app == app { view = prev }
-        exemptPrevious = nil
+    public mutating func endExempt(_ app: pid_t, now: TimeInterval? = nil) {
+        guard let e = exemptions.removeValue(forKey: app) else { return }
+        // (The place moves now: a restore of ours toward the held app that lands after this is a late landing, undone —
+        // found by the model-based test.)
+        if let prev = e.previous, view.app == app { view = prev; if let now { viewAt = now } }
         judged = nil
     }
 
@@ -841,7 +942,8 @@ public struct CUFocusGuardianCore: Sendable {
             // moved, and the visit's end brings them back THERE (found by the model-based test: their ⌘-Tab during the
             // visit's way there, heard after the visit arrived, and the end took them to where the visit began).
             guard app != visitApp else { return nil }
-            let q = CUMoveQuery(app: app, space: space, inputObservable: inputObservable, hardwareAt: hardwareAt)
+            var q = CUMoveQuery(app: app, space: space, inputObservable: inputObservable, hardwareAt: hardwareAt)
+            q.pastChange = true
             let (owner, use) = decide(q, place: view, before: lastSeen ?? view, upTo: now, now: now)
             guard case .user = owner, case .instant(let at, _)? = use else { return nil }
             input.use(at, heardAt: now)
@@ -863,7 +965,8 @@ public struct CUFocusGuardianCore: Sendable {
         // change is judged: the model-based test, the user's own launch coming forward 3 ms before a restore's landing.)
         let liveRestored = live.app.flatMap { restoredAt[$0] }.map { now - $0 <= Self.restoreLateWindow } ?? false
         if !clicked, !liveRestored, live.app == view.app, live.space == nil || view.space == nil || live.space == view.space { return nil }
-        let q = CUMoveQuery(app: app, space: space, inputObservable: inputObservable, hardwareAt: hardwareAt)
+        var q = CUMoveQuery(app: app, space: space, inputObservable: inputObservable, hardwareAt: hardwareAt)
+            q.pastChange = true
         let (owner, use) = decide(q, place: view, before: lastSeen ?? view, upTo: now, now: now)
         switch owner {
         case .user:
@@ -879,14 +982,14 @@ public struct CUFocusGuardianCore: Sendable {
             viewAt = now
             thefts[app] = nil
             claim = nil
-            exemptPrevious = nil
+            forgetExemptPrevious()
             judged = nil  // what is in front now is judged afresh, as a change from this app
             return owner
         case .consented:
             // The consented foreground's own landing, heard only after something else came forward over it: the held app
             // is where a theft after it is put back (its end gives the place back — found by the model-based test: a late
             // landing over rung 4's app was "put back" to the place from before the consent).
-            if exemptPrevious == nil, view.app != app { exemptPrevious = view }
+            if exemptions[app] != nil, exemptions[app]?.previous == nil, view.app != app { exemptions[app]?.previous = view }
             view = CUGuardedView(app: app, space: space ?? view.space)
             lastSeen = CUGuardedView(app: app, space: space)
             lastSeenSince = now
@@ -904,7 +1007,41 @@ public struct CUFocusGuardianCore: Sendable {
     /// by the model-based test: the target, left for a visit's return and brought back by the user's click, was judged
     /// on the facts from before the click).
     public mutating func activationHeard(_ pid: pid_t, now: TimeInterval) {
-        if lastSeen?.app != pid { lastSeenSince = now }
+        // (The verdict kept for that state goes too: it is judged afresh, on the facts up to now — the model-based test:
+        // the user's Dock click back into the app in front, after another app came and went unseen, was not counted.)
+        if lastSeen?.app != pid { lastSeenSince = now; if judged.map({ !$0.owner.isUsers }) ?? false { judged = nil } }
+    }
+
+    // MARK: the user working in an app (round 10)
+
+    /// The app the user is WORKING in: they clicked, typed or scrolled in its window while it was in front (switching there
+    /// to look is not working in it). The agent is hands-off it until it leaves the front (user ruling, round 10).
+    public private(set) var userWorkingApp: pid_t?
+    /// A click of theirs into a window of an app NOT in front: working in it once its own activation lands (within
+    /// `workClickWindow` — the claim's own window: a slow app's activation lands up to 1.5 s after the click, review of
+    /// round 10, MEDIUM #5) — a drag out of a background window activates nothing and is no work in it.
+    private var pendingWork: (app: pid_t, until: TimeInterval)?
+    static let workClickWindow: TimeInterval = causalWindow
+
+    /// Their click, key or scroll in `app`'s window (the caller attributes it), with `front` in front.
+    public mutating func userInteracted(_ app: pid_t, front: pid_t?, now: TimeInterval) {
+        if front == app { userWorkingApp = app; pendingWork = nil } else { pendingWork = (app, now + Self.workClickWindow) }
+    }
+
+    /// Whether the user is working in `app`, with `front` in front now: once it is no longer in front, never again until
+    /// they interact with it anew.
+    public mutating func userIsWorking(in app: pid_t, front: pid_t?, now: TimeInterval) -> Bool {
+        promoteWork(front: front, now: now)
+        guard let w = userWorkingApp else { return false }
+        guard front == w else { userWorkingApp = nil; return false }
+        return w == app
+    }
+
+    /// The clicked app came forward in time: they are working in it.
+    private mutating func promoteWork(front: pid_t?, now: TimeInterval) {
+        guard let p = pendingWork else { return }
+        if now > p.until { pendingWork = nil; return }
+        if front == p.app { userWorkingApp = p.app; pendingWork = nil }
     }
 
     /// The user is somewhere of their own now (they moved during a visit): that is where later restores return them.
@@ -1059,7 +1196,9 @@ struct CUSwitchInput {
                      app: Bool = true, desktop: Bool = true, front: pid_t? = nil, seconds useSeconds: Bool = true,
                      targetedFirst: Bool = true) -> TimeInterval? {
         let ok = { (at: TimeInterval, kind: Kind, target: pid_t?) -> Bool in
-            at >= from && at <= now && Self.fits(kind, app: app, desktop: desktop) && (target == nil || target == front)
+            // (A click on THAT app's window or Dock tile explains its change, whatever moved — the front app or its desktop.)
+            at >= from && at <= now && (Self.fits(kind, app: app, desktop: desktop) || (target != nil && target == front))
+                && (target == nil || target == front)
                 && at > raiseAfter && (at > cause || now - at <= CUFocusGuardianCore.switchLandWindow)
         }
         // An instant for this very app (a click on its window) before any other: the oldest untargeted one may be the

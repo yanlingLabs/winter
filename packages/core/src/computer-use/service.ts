@@ -246,6 +246,10 @@ interface RunCtx {
   /** Phase 2, for the audit line: the sites (hosts only) and browser backends this run touched. */
   sites?: Set<string>;
   browsers?: Set<string>;
+  /** download() files saved this run (a count, for the audit line). */
+  downloads?: number;
+  /** waitForUser() hand-offs asked for this run (a count, for the audit line). */
+  handoffs?: number;
   /** Phase 2: browser-tab primitives still running (the run's tab locks wait for them at its end). */
   tabWork?: Set<Promise<unknown>>;
 }
@@ -454,6 +458,7 @@ export class ComputerV2Service {
       kind: "automation", sessionId, apps: [...ctx.apps], primitives: Object.fromEntries(ctx.primitives),
       durationMs: this.now() - started, outcome: outcomeWord, ...(ctx.visitsClaimed > 0 ? { desktopVisits: ctx.visitsClaimed } : {}),
       ...(ctx.sites === undefined ? {} : { sites: [...ctx.sites] }), ...(ctx.browsers === undefined ? {} : { browsers: [...ctx.browsers] }),
+      ...(ctx.downloads === undefined ? {} : { downloads: ctx.downloads }), ...(ctx.handoffs === undefined ? {} : { handoffs: ctx.handoffs }),
     });
     return builder.build(error === undefined ? {} : { error });
   }
@@ -527,11 +532,13 @@ export class ComputerV2Service {
         if (!target) throw bad("apps.open() takes an app name or bundle id, or a file path or URL to open");
         const opener = str((args as Record<string, unknown>).with)?.trim();
         // A file path or URL (or an explicit opener) opens a document; a name or an .app bundle binds the app.
+        // `{ emit: false }`: bound without printing its state (queue item 4 — a bind always printed the whole window).
+        const quiet = (args as Record<string, unknown>).emit === false;
         if (opener !== undefined || isDocumentTarget(target)) {
-          return await this.openDocument(ctx, target, opener, metric);
+          return await this.openDocument(ctx, target, opener, metric, quiet);
         }
         const window = typeof args.window === "string" || typeof args.window === "number" ? args.window : undefined;
-        return await this.bind(ctx, { app: target, ...(window === undefined ? {} : { window }) }, metric);
+        return await this.bind(ctx, { app: target, ...(window === undefined ? {} : { window }), quiet }, metric);
       }
       case "screen.screenshot": return await this.screenScreenshot(ctx, args, metric);
       case "screen.windows": return await this.screenWindows(ctx, args, metric);
@@ -716,7 +723,7 @@ export class ComputerV2Service {
 
   /** Opens a file path or URL with an app, never activating it (NSWorkspace.open activates:false). The opener
    *  gets its per-app card and the save-path floors apply to the paths; the opened document's window is bound. */
-  private async openDocument(ctx: RunCtx, target: string, opener: string | undefined, metric: PrimitiveMetric): Promise<AppHandle> {
+  private async openDocument(ctx: RunCtx, target: string, opener: string | undefined, metric: PrimitiveMetric, quiet = false): Promise<AppHandle> {
     const settings = this.deps.settings();
     const urls = [target];
     // Who will open it — for the per-app card — resolved without opening anything.
@@ -733,12 +740,12 @@ export class ComputerV2Service {
     this.live(ctx);
     ctx.builder.daemonLine(`opened ${target.split("/").pop()} in ${res.app.name} (in the background)`);
     // Bind the opener's document window; the per-app grant from the card above means bind does not re-ask.
-    return await this.bind(ctx, { app: res.app.bundleId, known: app,
+    return await this.bind(ctx, { app: res.app.bundleId, known: app, quiet,
       ...(res.windowID === undefined ? {} : { window: res.windowID }) }, metric);
   }
 
   /** `apps.open` / `screen.appAt`: policy BEFORE the helper launches anything, bind, lock, print the full state. */
-  private async bind(ctx: RunCtx, req: { app: string; window?: string | number; known?: AppRef }, metric: PrimitiveMetric): Promise<AppHandle> {
+  private async bind(ctx: RunCtx, req: { app: string; window?: string | number; known?: AppRef; quiet?: boolean }, metric: PrimitiveMetric): Promise<AppHandle> {
     const known: AppRef & { path?: string } = req.known ?? await this.identifyApp(ctx, req.app, metric);
     await this.deps.policy.authorize(ctx.grants, known, { kind: "bind" }, ctx.abort.signal);
     this.live(ctx);
@@ -775,6 +782,15 @@ export class ComputerV2Service {
     }
     ctx.apps.add(app.name);
     this.deps.recentApps?.note(app.bundleId, app.name);
+    // `{ emit: false }`: bound, nothing of the window read or printed (no screen read, no diff base) — what the bind had
+    // to do and Winter's own adapter block still say themselves.
+    if (req.quiet === true) {
+      const detail = helperDetail(res.detail);
+      if (detail !== undefined) ctx.builder.daemonLine(detail);
+      if (res.webContent === true) this.hoverNote(ctx, info);
+      const adapted = await this.deps.adapters?.onBind(this.adapterScope(ctx, metric), info);
+      return { targetId: info.targetId, name: app.name, bundleId: app.bundleId, ...adapted?.handle };
+    }
     // The same window bound again (the helper hands back the same target): what changed since its last printed
     // state, not the whole tree once more (live: re-binding in every script cost ~13 KB a call).
     // A first bind prints the ORDINARY state (viewport first, folded to its line cap), never `full`: a full state is
@@ -834,6 +850,8 @@ export class ComputerV2Service {
     if (typeof q === "string" && q.length > 0) query = q;
     else if (q !== null && typeof q === "object" && !Array.isArray(q)) {
       const o = q as Record<string, unknown>;
+      const tabOnly = ["label", "placeholder", "testId", "css"].filter((k) => o[k] !== undefined);
+      if (tabOnly.length > 0) throw bad(`find()'s ${tabOnly.join(", ")} ${tabOnly.length === 1 ? "is" : "are"} for browser tabs — an app takes { role, name, text }`);
       query = Object.fromEntries(["role", "name", "text"].filter((k) => typeof o[k] === "string").map((k) => [k, o[k] as string]));
       if (Object.keys(query).length === 0) throw bad("find() takes text, or { role, name, text }");
     } else throw bad("find() takes text, or { role, name, text }");
@@ -1149,11 +1167,12 @@ export class ComputerV2Service {
     metric.rung = res.rung;
     if (res.inVisit === true) metric.inVisit = true;
     // What the Focus Guardian did or saw since the last act (helper 1.9.8) — the user put back after an app took their
-    // front, an app the agent's action brought forward sent back, a system dialog left for the user: daemon lines, never
-    // inside the act's own (fenced) line — and the apps that came forward, counted.
+    // front, an app the agent's action brought forward sent back, a system dialog left for the user — and the apps that
+    // came forward, counted. The notes name apps by THEIR chosen names, so they go inside the DATA-ONLY fence (review of
+    // round 9, LOW #9).
     for (const note of Array.isArray(res.guardian) ? res.guardian : []) {
       const line = helperDetail(note, 400);
-      if (line !== undefined) ctx.builder.daemonLine(line);
+      if (line !== undefined) ctx.builder.text(line, { screen: true });
     }
     if (Array.isArray(res.viewMovedBy) && res.viewMovedBy.length > 0) {
       metric.viewMovedBy = res.viewMovedBy.slice(0, 8).map((n) => String(n).slice(0, 80));
@@ -1433,6 +1452,8 @@ export class ComputerV2Service {
       sessionPolicy: () => this.deps.policy.sessionFacts(ctx.sessionId).policy,
       sessionFacts: () => this.deps.policy.sessionFacts(ctx.sessionId),
       siteCard: (summary) => this.deps.policy.siteCard(ctx.grants, summary, ctx.abort.signal),
+      userCard: (summary, options, timeoutMs, onIssued) => this.deps.policy.userCard(ctx.grants, summary, options, timeoutMs, ctx.abort.signal, onIssued),
+      noteHandoff: () => { ctx.handoffs = (ctx.handoffs ?? 0) + 1; },
       persistentlyAllowed: (bundleId) => this.deps.policy.persistentlyAllowed(ctx.sessionId, bundleId),
       granted: (bundleId) => this.deps.policy.persistentlyAllowed(ctx.sessionId, bundleId) || ctx.grants.once.has(bundleId),
       builder: ctx.builder,
@@ -1443,6 +1464,7 @@ export class ComputerV2Service {
       metric,
       noteSite: (host) => { (ctx.sites ??= new Set()).add(host); },
       noteBrowser: (id) => { (ctx.browsers ??= new Set()).add(id); },
+      noteDownload: () => { ctx.downloads = (ctx.downloads ?? 0) + 1; },
       trusted: (sentence) => { ctx.daemonSentences.add(sentence); },
     };
   }
@@ -1840,11 +1862,13 @@ function refusedWords(reason: string, name: string): string {
     case "focus_not_editable": return `the focus in ${name} is not a text field, so nothing was typed — click the field or pass { into }`;
     case "focus_moved": return `the focus left the field partway in ${name}, so the rest was not typed — check state(), then type the rest with { into }`;
     case "app_in_front": return `${name} came to the front while the action was being prepared — the user may be using it now, so nothing was sent; check state(), and try again if it is still wanted`;
+    case "user_working": return `the user is working in ${name} right now — wait and retry, or ask them (reading it with state(), find() or screenshot() still works)`;
     case "wrong_field_shape": return `the text does not fit the field that has the focus in ${name} (several lines, or a long text, for a one-line field or the browser's own) — pass { into } for the field you mean`;
     case "auth_dialog": return "that is a system authentication dialog — ask the user to handle it";
     case "privacy_pane": return "System Settings' Privacy & Security panes are off limits — ask the user to change them";
     case "winter_itself": return "Winter never controls itself";
     case "save_path": return "that save location is protected (shell startup files, ~/.ssh, LaunchAgents) — choose another";
+    case "remote_debugging": return "Winter never turns on or approves remote debugging in a browser — it would give any app on this Mac full control of the browser and its sign-ins. Ask the user to do it if they really want it.";
     default: return `${name} refused that action${reason ? ` (${reason})` : ""}`;
   }
 }

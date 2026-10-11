@@ -52,7 +52,16 @@ export interface ExtensionHelloParams {
   extensionVersion: string;
   /** A UUID the extension keeps in `chrome.storage.local`: one per browser profile, stable across service-worker restarts. */
   instanceId: string;
+  /** Phase 3 (additive, same protocol): what this build can do beyond Phase 2's requests — the daemon offers a member
+   *  only when its feature is named (an older extension's members answer "update Winter for Chrome"). */
+  features?: string[];
 }
+
+/** Phase 3's extension features (`hello.features`). `cdp3`: its bundled CDP allowlist is Phase 3's (console, network
+ *  details, response bodies, Fetch, IO, Emulation) — without it the engine subscribes to Phase 2's events only and the
+ *  members that need the rest answer "update Winter for Chrome". */
+export const EXTENSION_FEATURES = ["cdp3", "present", "userDone", "mute", "group", "keepGroup", "windows", "history", "bookmarks", "downloads", "tabFacts"] as const;
+export type ExtensionFeature = (typeof EXTENSION_FEATURES)[number];
 
 export interface ExtensionHelloResult {
   protocol: number;
@@ -65,11 +74,13 @@ export type HostDaemonState = "connected" | "unavailable" | "unverified" | "refu
 /** Daemon → extension requests (spine §6.4). */
 export const EXTENSION_METHODS = [
   "tabs.list", "tabs.create", "tabs.close", "tabs.keep", "debugger.attach", "debugger.detach", "cdp.send", "cdp.subscribe", "overlay", "ping",
+  // Phase 3 (each behind its feature)
+  "tabs.present", "tabs.mute", "group.update", "windows.list", "history.search", "bookmarks.search", "downloads.arm", "downloads.release",
 ] as const;
 export type ExtensionMethod = (typeof EXTENSION_METHODS)[number];
 
 /** Extension → daemon notifications (spine §6.4). */
-export const EXTENSION_NOTIFICATIONS = ["cdp.event", "tab.gone", "stop.pressed", "debugger.detached"] as const;
+export const EXTENSION_NOTIFICATIONS = ["cdp.event", "tab.gone", "stop.pressed", "debugger.detached", "user.done", "download"] as const;
 
 /** `debugger.detached`'s reasons: Chrome's two (`chrome.debugger.onDetach`) plus the extension's own idle detach. */
 export type DebuggerDetachReason = "canceled_by_user" | "target_closed" | "idle";

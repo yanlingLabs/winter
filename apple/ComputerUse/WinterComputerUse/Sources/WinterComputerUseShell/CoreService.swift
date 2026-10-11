@@ -41,3 +41,11 @@ public extension CoreService {
 }
 
 extension CUCore: CoreService {}
+
+extension CoreService {
+    /// TEST-ONLY (a live-test instance): the facts a person's switch to, or work in, `pid` would leave (see
+    /// `CUCore.testUserInput`). A fake core records nothing.
+    public func testUserInput(pid: Int32, switching: Bool) {
+        (self as? CUCore)?.testUserInput(pid: pid, switching: switching)
+    }
+}

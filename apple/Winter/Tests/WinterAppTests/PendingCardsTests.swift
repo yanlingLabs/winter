@@ -573,6 +573,20 @@ final class PendingCardsTests: XCTestCase {
         XCTAssertEqual(approvalPrimaryChoice(nil), ApprovalPrimaryChoice(approveLabel: "Approve", denyLabel: "Deny"))
     }
 
+    // MARK: - ComputerV2's sign-in hand-off (Phase 3, waitForUser)
+
+    /// The first card: "Show me the tab" / "Not now", with "I've done it" on the quiet row; the waiting card: "Done" /
+    /// "Stop waiting", nothing on the quiet row.
+    func testTheHandoffCardsWearTheirOwnWords() {
+        let ask = self.options(#"[{"id":"handoff_show","label":"Show me the tab"},{"id":"handoff_done","label":"I've done it"}]"#)
+        XCTAssertEqual(approvalPrimaryChoice(ask), ApprovalPrimaryChoice(approveLabel: "Show me the tab", denyLabel: "Not now"))
+        XCTAssertEqual(approvalAdditionalOptions(ask).map(\.id), ["handoff_done"])
+        XCTAssertEqual(approvalAdditionalOptions(ask).map(\.label), ["I've done it"])
+        let wait = self.options(#"[{"id":"handoff_done","label":"Done"}]"#)
+        XCTAssertEqual(approvalPrimaryChoice(wait), ApprovalPrimaryChoice(approveLabel: "Done", denyLabel: "Stop waiting"))
+        XCTAssertEqual(approvalAdditionalOptions(wait), [])
+    }
+
     /// The countdown: whole seconds rounded up, "Switching…" at the deadline; it redraws only until then.
     func testDefaultAllowCountdown() {
         let now = Date(timeIntervalSince1970: 1_000)

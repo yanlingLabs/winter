@@ -259,7 +259,7 @@ describe("M3: a released tab is left as it was found", () => {
     // The fake records a command only while the tab is attached: each of these reached the tab before the detach.
     const after = h.chrome.sent.slice(n).map((s) => `${s.method}${s.params.enabled === false || s.params.autoAttach === false ? " off" : ""}`);
     expect(after).toEqual([
-      "Page.setInterceptFileChooserDialog off", "Emulation.setFocusEmulationEnabled off", "Target.setAutoAttach off",
+      "Page.setInterceptFileChooserDialog off", "Emulation.setFocusEmulationEnabled off", "Log.disable", "Target.setAutoAttach off",
       "Network.disable", "Runtime.disable", "Page.disable",
     ]);
     expect(h.chrome.tabs.get("5")!.attached).toBe(false);
@@ -509,11 +509,11 @@ describe("L9: a bare host gets a scheme", () => {
   });
 });
 
-describe("L10: network events need no buffers", () => {
-  test("Network.enable asks the browser to keep no bodies", async () => {
+describe("L10 (Phase 3): the browser keeps capped response bodies, never a request body", () => {
+  test("Network.enable asks for the capped buffers (networkBody) and no post data", async () => {
     const h = harness();
     await h.engine.global(h.run().scope, "browsers.open", { url: "https://a.example/" });
-    expect(h.winter.sent.find((s) => s.method === "Network.enable")!.params).toEqual({ maxTotalBufferSize: 0, maxResourceBufferSize: 0, maxPostDataSize: 0 });
+    expect(h.winter.sent.find((s) => s.method === "Network.enable")!.params).toEqual({ maxTotalBufferSize: 8_388_608, maxResourceBufferSize: 1_048_576, maxPostDataSize: 0 });
   });
 });
 

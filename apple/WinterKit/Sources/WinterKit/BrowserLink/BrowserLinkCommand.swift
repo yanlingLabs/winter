@@ -18,6 +18,24 @@ public struct BrowserLinkCommand: Sendable, Equatable {
         case cdpSend(tabId: String, method: String, params: JSONValue, cdpSessionId: String?)
         case cdpSubscribe(tabId: String, events: [String])
         case overlay(tabId: String, active: Bool, cursor: JSONValue?)
+        /// Phase 3: show `sessionId`'s window with panel tab `tabId` selected, and activate Winter.
+        case tabPresent(sessionId: String, tabId: String)
+        case tabMute(tabId: String, muted: Bool)
+        /// Phase 3: arm the tab's download handler (`arm`), or disarm it (`nil`).
+        case tabDownloads(tabId: String, arm: DownloadArm?)
+        case tabDownload(tabId: String, url: String)
+    }
+
+    /// Where an armed tab's downloads go, until when (ms since the epoch), and how large one may be.
+    public struct DownloadArm: Sendable, Equatable {
+        public let dir: String
+        public let until: Double
+        public let maxBytes: Int64
+        public init(dir: String, until: Double, maxBytes: Int64) {
+            self.dir = dir
+            self.until = until
+            self.maxBytes = maxBytes
+        }
     }
 
     public init(linkId: String, cmdId: String, op: Op) {
@@ -49,6 +67,10 @@ public struct BrowserLinkCommand: Sendable, Equatable {
         func string(_ key: String) -> String? {
             guard let value = p[key]?.stringValue, !value.isEmpty else { return nil }
             return value
+        }
+        func number(_ key: String) -> Double? {
+            guard case .number(let n)? = p[key], n.isFinite else { return nil }
+            return n
         }
         func done(_ op: Op) -> Result<BrowserLinkCommand, Unreadable> {
             .success(BrowserLinkCommand(linkId: linkId, cmdId: cmdId, op: op))
@@ -85,6 +107,25 @@ public struct BrowserLinkCommand: Sendable, Equatable {
         case BrowserLinkProtocol.Op.overlay:
             guard let tabId = string("tabId") else { return unreadable("overlay needs tabId") }
             return done(.overlay(tabId: tabId, active: p["active"]?.boolValue ?? false, cursor: p["cursor"]))
+        case BrowserLinkProtocol.Op.tabPresent:
+            guard let sessionId = string("sessionId"), let tabId = string("tabId") else {
+                return unreadable("tab.present needs sessionId and tabId")
+            }
+            return done(.tabPresent(sessionId: sessionId, tabId: tabId))
+        case BrowserLinkProtocol.Op.tabMute:
+            guard let tabId = string("tabId"), let muted = p["muted"]?.boolValue else { return unreadable("tab.mute needs tabId and muted") }
+            return done(.tabMute(tabId: tabId, muted: muted))
+        case BrowserLinkProtocol.Op.tabDownloads:
+            guard let tabId = string("tabId") else { return unreadable("tab.downloads needs tabId") }
+            if case .null? = p["dir"] { return done(.tabDownloads(tabId: tabId, arm: nil)) }
+            guard let dir = string("dir"), let until = number("until"), let maxBytes = number("maxBytes"), maxBytes > 0,
+                  maxBytes < 9.0e15 else {
+                return unreadable("tab.downloads needs dir, until and maxBytes (or dir: null)")
+            }
+            return done(.tabDownloads(tabId: tabId, arm: DownloadArm(dir: dir, until: until, maxBytes: Int64(maxBytes))))
+        case BrowserLinkProtocol.Op.tabDownload:
+            guard let tabId = string("tabId"), let url = string("url") else { return unreadable("tab.download needs tabId and url") }
+            return done(.tabDownload(tabId: tabId, url: url))
         default:
             return unreadable("unknown op \(op)")
         }

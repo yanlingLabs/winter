@@ -3448,6 +3448,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
               control.setSettings({
                 ...(p.enabled === undefined ? {} : { enabled: p.enabled }), ...(p.allowAllApps === undefined ? {} : { allowAllApps: p.allowAllApps }),
                 ...(p.mirror === undefined ? {} : { mirror: p.mirror }), ...(p.privateEventPath === undefined ? {} : { privateEventPath: p.privateEventPath }),
+                ...(p.headlessEnabled === undefined ? {} : { headlessEnabled: p.headlessEnabled }), ...(p.webmcp === undefined ? {} : { webmcp: p.webmcp }),
               });
               return { ok: true };
             }
@@ -3468,7 +3469,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.browserLinkAttach:
       case METHODS.browserLinkResult:
       case METHODS.browserLinkEvents:
-      case METHODS.browserLinkTabGone: {
+      case METHODS.browserLinkTabGone:
+      case METHODS.browserLinkDownload: {
         if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, `${method} is available to Winter's app only`);
         const link = opts.browserLink;
         if (link === undefined) throw new RpcFailure(ERR.INTERNAL, `${method} is not available on this server`);

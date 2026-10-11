@@ -8,7 +8,7 @@ import { WINTER_TEAM_ID } from "../../../src/auth/app-token-acl";
 import { BROWSER_HOST_IDENTIFIER, EXTENSION_IDS, extensionIdFromKey, NATIVE_HOST_NAME } from "../../../src/computer-use/browser/extension/extension-ids";
 import { BROWSER_FAMILIES } from "../../../src/computer-use/browser/families";
 import { NATIVE_MESSAGING_BROWSER_DIRS } from "../../../src/computer-use/browser/extension/manifest";
-import { BROWSER_HOST_PROTOCOL, EXTENSION_PROTOCOL } from "../../../src/computer-use/browser/extension/protocol";
+import { BROWSER_HOST_PROTOCOL, EXTENSION_FEATURES, EXTENSION_PROTOCOL } from "../../../src/computer-use/browser/extension/protocol";
 
 const REPO = join(import.meta.dir, "..", "..", "..", "..", "..");
 const read = (...p: string[]) => readFileSync(join(REPO, ...p), "utf8");
@@ -35,6 +35,14 @@ describe("the protocol numbers", () => {
     const ext = await import(join(REPO, ...EXT, "src", "protocol.ts")) as { BROWSER_HOST_PROTOCOL: number; EXTENSION_PROTOCOL: number };
     expect({ spec: specHost, swift: swiftInt(swift, "browserHost"), extension: ext.BROWSER_HOST_PROTOCOL }).toEqual({ spec: BROWSER_HOST_PROTOCOL, swift: BROWSER_HOST_PROTOCOL, extension: BROWSER_HOST_PROTOCOL });
     expect({ spec: specExt, swift: swiftInt(swift, "extensionProtocol"), extension: ext.EXTENSION_PROTOCOL }).toEqual({ spec: EXTENSION_PROTOCOL, swift: EXTENSION_PROTOCOL, extension: EXTENSION_PROTOCOL });
+  });
+});
+
+describe("the extension's features", () => {
+  test("every feature the extension names at hello is one the daemon knows", async () => {
+    const ext = await import(join(REPO, ...EXT, "src", "protocol.ts")) as { EXTENSION_FEATURES: readonly string[] };
+    expect(ext.EXTENSION_FEATURES.filter((f) => !(EXTENSION_FEATURES as readonly string[]).includes(f))).toEqual([]);
+    expect(new Set(ext.EXTENSION_FEATURES).size).toBe(ext.EXTENSION_FEATURES.length);
   });
 });
 

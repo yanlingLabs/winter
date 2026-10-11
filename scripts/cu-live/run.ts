@@ -389,7 +389,8 @@ function desktopSwitchRig(tool: string, plan: NonNullable<Scenario["desktopSwitc
     card(e, respond) {
       const c = e as SessionEvent & { toolName?: string; summary?: string; onTimeout?: string; expiresAt?: number; issuedAt?: number };
       observation.cards.push({ toolName: c.toolName, summary: c.summary, onTimeout: c.onTimeout, expiresAt: c.expiresAt, issuedAt: c.issuedAt });
-      pending.push((async () => {
+      // Awaited only by `done()`, after the turn: handled now so a failure meanwhile cannot kill the runner (done() still throws).
+      const answered = (async () => {
         const half = Math.floor(plan.afterMs / 2);
         await sleep(half);
         const during = [...onScreen()].filter((id) => !before.has(id));
@@ -399,7 +400,9 @@ function desktopSwitchRig(tool: string, plan: NonNullable<Scenario["desktopSwitc
         await sleep(1_000);
         const after = onScreen();
         observation.panelGone = during.length > 0 && during.every((id) => !after.has(id));
-      })());
+      })();
+      answered.catch(() => undefined);
+      pending.push(answered);
     },
     done: async () => { await Promise.all(pending); },
   };
@@ -824,7 +827,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     const status = helperCall(built, socket, home, "status", {});
     log(`helper instance pid ${helperPid}: ${JSON.stringify((status.result as { permissions?: unknown } | undefined)?.permissions ?? status)}`);
     /** Put `pid` in front and wait for the monitor to see it (and, when given, the Space). */
-    const bringToFront = async (pid: number, what: string, space?: number | null): Promise<string> => {
+    const bringToFront = async (pid: number, what: string, space?: number | null, asUser = false): Promise<string> => {
       const routes: string[] = [];
       const ok = (): boolean => {
         const last = monitor!.items.at(-1);
@@ -834,7 +837,9 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         stopCheck();
         if (ok()) break;
         if (route === "helper test.activate") {
-          const r = helperCall(built, socket, home, "test.activate", { pid });
+          // `asUser`: the activation stands for the user's own switch — the helper first records the facts their input
+          // would leave (round 10), so the guardian does not take it for the agent's indirect effect.
+          const r = helperCall(built, socket, home, "test.activate", asUser ? { pid, asUser: true } : { pid });
           routes.push(`${route}: ${r.error !== undefined ? JSON.stringify(r.error).slice(0, 80) : JSON.stringify(r.result)}`);
         } else {
           const asn = sh("lsappinfo", ["find", `pid=${pid}`]).stdout.match(/ASN:[^\s"]+/)?.[0];
@@ -983,11 +988,31 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           finderPid = pidsOf("/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder")[0];
           if (finderPid === undefined) throw new Error("Finder is not running");
           switchedAt = Date.now();
-          await bringToFront(finderPid, "Finder (the user's switch)");
+          await bringToFront(finderPid, "Finder (the user's switch)", undefined, true);
         })();
-        const rig = s.desktopSwitch === undefined ? undefined : desktopSwitchRig(built.tool, s.desktopSwitch);
+        // The user WORKING in the fixture mid-run (`userWorksAfterMs`, round 10): they switch to it, click into its Name
+        // field (the helper records the facts that input would leave) — the agent must be hands-off it from then on.
+        let workedAt: number | undefined;
+        const userWorks = s.userWorksAfterMs === undefined ? undefined : (async () => {
+          await sleep(s.userWorksAfterMs!);
+          const pid = f.mainPid!;
+          await bringToFront(pid, "the fixture (the user's switch)", undefined, true);
+          const r = helperCall(built, socket, home, "test.userInput", { pid });
+          if (r.error !== undefined) throw new Error(`test.userInput failed: ${JSON.stringify(r.error).slice(0, 120)}`);
+          // (The fixture's answer is read: a focus that did not take is the row's failure, said — round 11, the live row
+          // reported only that Name never got the focus.)
+          const ack = await postCommand(built.tool, f, "main", "userFocus", { id: "name" });
+          if (ack.ev === "cmd.error") throw new Error(`the user's click into Name did not take: ${JSON.stringify(ack).slice(0, 200)}`);
+          workedAt = Date.now();
+        })();
+        // Both run beside the turn and are awaited only after it: a handler NOW, or a failure during the turn is an
+        // unhandled rejection that kills the runner before its cleanup (round 11's live run). The awaits below still throw.
+        userSwitch?.catch(() => undefined);
+        userWorks?.catch(() => undefined);
+        const rig =s.desktopSwitch === undefined ? undefined : desktopSwitchRig(built.tool, s.desktopSwitch);
         const turn = await runTurn(where.client, where.sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer, rig);
         await userSwitch;
+        await userWorks;
         await rig?.done();
         // A prompt during the action stops the run here, before this row is judged (its failure would be the prompt's).
         abortIfPrompt();
@@ -1013,9 +1038,13 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         const leaked = events.filter((e) => e.role === "user" && (e.ev === "user.key" || e.ev === "user.mouse") && e.t >= since && e.t <= t1);
         checks.push(check("the real pointer stayed put and your app got no keys or clicks (no rung-4 fallback)", moved.length === 0 && leaked.length === 0,
           [moved.length > 0 ? `pointer moved at +${moved.map((t) => t - since).join(", +")} ms` : "", leaked.length > 0 ? `your app got ${leaked.map((e) => e.ev).join(", ")}` : ""].filter(Boolean).join("; ")));
+        // The user moved (to Finder, or into the fixture to work in it): their move is held — never "your app is frontmost
+        // again" (round 11: the hands-off row failed that check for the user's own move).
         const focus = s.userSwitchAfterMs !== undefined
           ? { checks: [userSwitchHeld(monitor!.items, switchedAt, finderPid, t1 + WATCH_AFTER_MS)], longestAwayMs: 0 }
-          : focusChecks(monitor!.items, since, t1 + WATCH_AFTER_MS, baseline!, s.allowExcursionMs, s.maxExcursions);
+          : s.userWorksAfterMs !== undefined
+            ? { checks: [userSwitchHeld(monitor!.items, workedAt, f.mainPid, t1 + WATCH_AFTER_MS)], longestAwayMs: 0 }
+            : focusChecks(monitor!.items, since, t1 + WATCH_AFTER_MS, baseline!, s.allowExcursionMs, s.maxExcursions);
         checks.push(...focus.checks);
         // Whether the deliberate self-activation REALLY took (macOS 14+ may refuse it) — else the scenario proves less.
         const steals = events.filter((e) => e.role === "main" && e.ev === "activated" && e.t >= since);
@@ -1499,6 +1528,14 @@ async function main(): Promise<void> {
     log,
     onHardExit: killOwned,
   });
+  // A stray rejection or exception would end the process with NOTHING cleaned up — the user left on another desktop,
+  // the fixtures open (round 11's live run). It stops the run instead, through the very path a signal takes.
+  const strayError = (what: string) => (err: unknown): void => {
+    log(`${what}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)} — stopping the run and cleaning up`);
+    if (stop?.requested === undefined) process.kill(process.pid, "SIGTERM");
+  };
+  process.on("unhandledRejection", strayError("an unhandled rejection"));
+  process.on("uncaughtException", strayError("an uncaught exception"));
   let built: Built;
   try {
     built = buildAll(log);

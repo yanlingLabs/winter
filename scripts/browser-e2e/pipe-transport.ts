@@ -8,7 +8,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
-import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_NETWORK_EVENT_PARAMS, CDP_WORLD_NAME } from "../../packages/core/src/computer-use/browser/cdp-allowlist";
+import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_WORLD_NAME } from "../../packages/core/src/computer-use/browser/cdp-allowlist";
+import { cdpEventParams } from "../../packages/core/src/computer-use/browser/cdp-reduce";
 import { TransportError, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportTab } from "../../packages/core/src/computer-use/browser/transport";
 
 interface Pending { resolve(v: unknown): void; reject(e: Error): void; timer: ReturnType<typeof setTimeout> }
@@ -39,7 +40,15 @@ export class PipeTransport implements CdpTransport {
   private nextTab = 1;
   private profile = "";
 
+  /** As Winter for Chrome says in its hello (Phase 3: `cdp3`); undefined for the built-in browser's stand-in. */
+  features?: Set<string>;
+
   constructor(readonly backend: string, family: BrowserFamily) { this.family = family; }
+
+  /** TEST ONLY, browser level: where a download the engine did NOT catch lands (never the user's Downloads folder). */
+  async setDownloadDir(dir: string): Promise<void> {
+    await this.raw("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: dir });
+  }
 
   async launch(chrome: string, extraArgs: string[] = []): Promise<void> {
     this.profile = mkdtempSync(join(tmpdir(), "winter-browser-e2e-profile-"));
@@ -139,8 +148,7 @@ export class PipeTransport implements CdpTransport {
     }
     if (method === "Inspector.targetCrashed") for (const l of [...this.goneListeners]) l(tab.tabKey, "crashed");
     if (!tab.events.has(method) || !CDP_ALLOWED_EVENTS.includes(method)) return;
-    let p = params;
-    if (method.startsWith("Network.")) p = Object.fromEntries(Object.entries(params).filter(([k]) => CDP_NETWORK_EVENT_PARAMS.includes(k)));
+    const p = cdpEventParams(method, params);
     for (const l of [...this.listeners]) l({ tabKey: tab.tabKey, method, params: p, ...(child === undefined ? {} : { cdpSessionId: child }) });
   }
 

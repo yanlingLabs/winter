@@ -30,6 +30,9 @@ enum SimKind {
     /// The app's main window becomes `window` (it opened or raised one there): its next activation goes there.
     case mainWindow(pid_t, UInt32)
     case selfActivate(pid_t)
+    /// Round 10: the user opens a RUNNING app with no switch input (Spotlight, a launcher, a link, `open`): a key, then
+    /// it comes forward this many ms later.
+    case userOpens(pid_t, Double)
     /// The user launches an app themselves (Spotlight: the keys, then Return); it comes forward `after` ms later.
     case userLaunch(Double)
     case banner(pid_t)
@@ -82,6 +85,7 @@ enum SimKind {
         case .secureEntry(let on): return "Terminal's Secure Keyboard Entry \(on ? "on" : "off")"
         case .mainWindow(let a, let id): return "\(n(a))'s main window becomes \(id)"
         case .selfActivate(let a): return "\(n(a)) activates itself"
+        case .userOpens(let a, let ms): return "the user opens \(n(a)) (Spotlight, a launcher, a link — no switch input), it comes forward \(Int(ms)) ms later"
         case .userLaunch(let ms): return "the user launches an app (Spotlight), which comes forward \(Int(ms)) ms later"
         case .banner(let a): return "a notification banner about \(n(a)) appears"
         case .prompt(let on): return "the helper's prompt panel \(on ? "shows" : "hides")"
@@ -142,9 +146,12 @@ struct SimPlan {
             case 37..<45: k = .typing(1 + r.int(6))
             case 45..<47: k = .scroll
             case 47..<48: k = .secureEntry(r.chance(0.6))
-            case 48..<57:
+            case 48..<55:
                 let who: [pid_t] = [SimPid.target, SimPid.target, SimPid.target, SimPid.target, SimPid.third, SimPid.safari, SimPid.preview, SimPid.user]
                 k = .selfActivate(who[r.int(who.count)])
+            case 55..<57:
+                let who: [pid_t] = [SimPid.third, SimPid.safari, SimPid.preview, SimPid.user]
+                k = .userOpens(who[r.int(who.count)], r.double(100, 2_000))
             case 57..<58: k = r.chance(0.5) ? .banner(r.chance(0.6) ? SimPid.target : SimPid.third) : .userLaunch(r.double(300, 3_000))
             case 58..<59: k = .prompt(r.chance(0.5))
             case 59..<62:
@@ -193,6 +200,7 @@ final class SimRun {
     let opener = fakeElement(97_031)
     var launchSeq: pid_t = 800
     var userLaunchSeq: pid_t = 0
+    var coldSeq: pid_t = 0
     var openVisit: CUOpenVisit?
 
     var trace: [String] { world.trace }
@@ -595,6 +603,22 @@ final class SimRun {
                 let cause = w.selfCause(a, newPlace: n)
                 w.change(to: n, cause: cause, why: "\(SimPid.name(a)) activates itself")
             }
+        case .userOpens(let a, let ms):
+            // A key of theirs (Return in Spotlight or a launcher; the tap sees it unless Secure Event Input is on), no
+            // switch input — the app comes forward later. The contract: never sent back with input of theirs that recent;
+            // adopted only when their switch input explains it, else left in front.
+            w.log("the user opens \(SimPid.name(a)) (no switch input)")
+            w.key(.keyDown, keycode: 36); w.key(.keyUp, keycode: 36)
+            w.schedule(after: ms, "\(SimPid.name(a)) comes forward (the user opened it)") {
+                w.lock.withLock {
+                    guard w.running.contains(a), a != w.front else { return }
+                    let n = w.landingPlace(a)
+                    guard n.app != w.front || n.space != w.space else { return }
+                    let cause = w.untouched(a) ? w.untouchedCause(a, indirect: false, why: "the user opened it", newPlace: n)
+                                               : w.selfCause(a, newPlace: n)
+                    w.change(to: n, cause: cause, why: "\(SimPid.name(a)) comes forward — the user opened it")
+                }
+            }
         case .banner(let a):
             w.lock.withLock { w.wins[701]?.shown = true; w.bannerSubject = a }
             w.log("a notification banner about \(SimPid.name(a)) appears")
@@ -638,6 +662,8 @@ final class SimRun {
             return (h, d, SimSwitch(at: t, app: true, desktop: elsewhere, target: h.pid, claim: true, dest: h.pid), nil)
         }
         w.hardware(observable: true)
+        // A click into an agent target's ordinary window (not a ⌘-click): they are working in it (round 10).
+        if let h = hit, h.layer == 0, h.pid != SimPid.own, !flags.contains(.maskCommand) { w.userInteracted(h.pid) }
         w.log("the user \(flags.contains(.maskCommand) ? "⌘-" : "")\(drag ? "drags from" : "clicks") (\(Int(p.x)), \(Int(p.y))) — \(hit.map { "\(SimPid.name($0.pid))'s window \($0.id)" } ?? "the desktop")")
         core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, flags: flags, now: clock.nowSeconds())
         let i = sw.map { w.addSwitch($0) }
@@ -710,13 +736,52 @@ final class SimRun {
         }
     }
 
+    /// The agent's action starts an app that was not running (a link opening the default browser): its process starts
+    /// `startAfter` ms later (NSWorkspace's notice 30 ms after, unless missed), and it comes forward `forwardAfter` ms after
+    /// its start — the world records whether the start was clearly the agent's (round 11, HIGH #1).
+    func coldLaunch(startAfter: Double, forwardAfter: Double, noticed: Bool) {
+        let w = world
+        w.schedule(after: startAfter, "an app the agent's action opened starts") { [unowned self] in
+            let pid = w.lock.withLock { () -> pid_t in
+                self.coldSeq += 1
+                let pid = 970 + self.coldSeq
+                let wid = UInt32(9_700 + Int(pid))
+                w.running.insert(pid)
+                w.bundles[pid] = "sim.cold.\(pid)"
+                w.startedAt[pid] = w.now
+                w.wins[wid] = SimWin(id: wid, pid: pid, frame: CGRect(x: 320, y: 620, width: 300, height: 200), space: w.space1)
+                w.mainWin[pid] = wid
+                w.zOrder.append(pid)
+                w.agentColdLaunches[pid] = (w.now, w.clearlyNow())
+                return pid
+            }
+            w.log("\(SimPid.name(pid)) starts (the agent's action opened it; clearly the agent's: \(w.lock.withLock { w.agentColdLaunches[pid].map { "\($0.clearly)" } ?? "?" }))")
+            if noticed { w.schedule(after: 30, "NSWorkspace: \(SimPid.name(pid)) launched") { [unowned self] in self.core.onAppLaunched(pid: pid) } }
+            w.schedule(after: forwardAfter, "\(SimPid.name(pid)) comes forward (the agent's action opened it)") {
+                w.lock.withLock {
+                    guard w.running.contains(pid), pid != w.front else { return }
+                    let n = w.landingPlace(pid)
+                    guard n.app != w.front || n.space != w.space else { return }
+                    w.change(to: n, cause: w.untouchedCause(pid, indirect: true, why: "what the agent's click opened, freshly launched", newPlace: n),
+                             why: "\(SimPid.name(pid)) comes forward — the agent's click launched it")
+                    w.indirectSince[pid] = w.now
+                }
+            }
+        }
+    }
+
     /// An app the agent never touched comes forward because of what the agent did (a link it clicked, a file its
     /// AppleScript opened, a dialog its action raised).
     func indirect(_ pid: pid_t, after ms: Double, why: String) {
         let w = world
         w.schedule(after: ms, "\(SimPid.name(pid)) comes forward (\(why))") {
             w.lock.withLock {
-                if pid == SimPid.coreServices { w.wins[761]?.shown = true; w.wins[761]?.space = w.space1 }
+                // CoreServicesUIAgent starts on demand: a dialog not on screen is a fresh process (review of round 10,
+                // MEDIUM #2 — never "the user's own launch").
+                if pid == SimPid.coreServices {
+                    if w.wins[761]?.shown != true { w.startedAt[pid] = w.now }
+                    w.wins[761]?.shown = true; w.wins[761]?.space = w.space1
+                }
                 let n = w.landingPlace(pid)
                 guard n.app != w.front || n.space != w.space else { return }
                 var cause = w.untouchedCause(pid, indirect: true, why: why, newPlace: n)
@@ -849,29 +914,60 @@ final class SimRun {
                 w.actEpisode = w.episode
                 w.actStartFront = w.front
             }
-            w.agentBegins(tpid)
-            defer { w.agentEnds(tpid) }
+            // I6 (round 10): an act on the app the user is working in is refused at once; any other act is not refused for it.
+            // A refused act is no operation on the app and no opener act (round 11 — the review of round 10, LOW #9).
+            let working = w.userWorks(in: tpid)
+            if !working { w.agentBegins(tpid) }
+            defer { if !working { w.agentEnds(tpid) } }
+            let opener = CUCore.actCanOpenApps(action) && !working
+            if opener { w.lock.withLock { w.lastOpenerAt = w.now } }
+            defer { if opener { w.lock.withLock { w.lastOpenerAt = w.now } } }
             do {
                 _ = try await core.targetAct(TargetActParams(targetId: "tsim", sessionId: "s", callId: id, action: action, access: .full,
                                                              allowForeground: false, privatePath: true))
-            } catch { w.log("the act: \((error as? CUError)?.message ?? "\(error)")") }
+                if working { w.lock.withLock { w.fail("I6: the agent acted on T while the user was working in it (they clicked or typed in it, and it is still in front)") } }
+            } catch {
+                let e = error as? CUError
+                w.log("the act: \(e?.message ?? "\(error)")")
+                let refusedForWork = e?.code == "refused" && e?.data?["reason"] == .string("user_working")
+                if refusedForWork, !working {
+                    w.lock.withLock { w.fail("I6: the act was refused as \"the user is working in it\", but they are not (only switched there, or left it)") }
+                } else if refusedForWork {
+                    w.lock.withLock { w.stats.handsOff += 1 }
+                }
+            }
         }
         switch step.kind {
         case .agentType(let n):
             await act(.type(CUTypeAction(text: String(repeating: "x", count: n))), "c\(step.seed)")
         case .agentClick(let what, let ms):
-            if what == .opener { indirect(SimPid.safari, after: ms ?? r.double(150, 900), why: "the button the agent clicked in T opened it") }
+            // (An act refused because the user works in T opens nothing.)
+            if what == .opener, !w.userWorks(in: tpid) {
+                // (Its own generator, so the seeds' other draws stay as they were.) Sometimes the app it opens was not
+                // running: the agent's action cold-launches it (round 11, HIGH #1).
+                var c = SimRNG(step.seed ^ 0xC01D_1A57)
+                if c.chance(0.3) {
+                    coldLaunch(startAfter: c.double(30, 600), forwardAfter: c.double(200, 3_500), noticed: c.chance(0.8))
+                } else {
+                    indirect(SimPid.safari, after: ms ?? r.double(150, 900), why: "the button the agent clicked in T opened it")
+                }
+            }
             let el = what == .link ? link : what == .opener ? opener : field
             let ref = target.refs.ref(for: AXIdentity(element: el))
             await act(.click(CUClickAction(ref: ref)), "c\(step.seed)")
         case .agentAppleScript(let seconds, let opens, let ms, let dialog):
             w.lock.withLock { w.scriptMs = seconds * 1000 }
-            if opens {
+            if opens, !w.userWorks(in: tpid) {  // (a script refused because the user works in T opens nothing)
                 let app = (dialog ?? !r.chance(0.7)) ? SimPid.coreServices : SimPid.preview
                 indirect(app, after: ms ?? r.double(200, min(1_000, seconds * 1000)), why: "what the agent's AppleScript opened")
             }
-            w.agentBegins(tpid, raise: true)
-            defer { w.agentEnds(tpid) }
+            // (Refused at once while the user works in T: no operation on the app, no opener act — as the engine.)
+            let working = w.userWorks(in: tpid)
+            if !working {
+                w.agentBegins(tpid, raise: true)
+                w.lock.withLock { w.lastOpenerAt = w.now }
+            }
+            defer { if !working { w.agentEnds(tpid); w.lock.withLock { w.lastOpenerAt = w.now } } }
             do {
                 _ = try await core.targetAppleScript(TargetAppleScriptParams(targetId: "tsim", source: "tell application \"Finder\" to get name"))
             } catch { w.log("the script: \((error as? CUError)?.message ?? "\(error)")") }
@@ -881,6 +977,7 @@ final class SimRun {
             let wid = UInt32(8000 + pid)
             let bundle = "sim.launched.\(pid)"
             w.agentBegins(pid, raise: true)
+            w.lock.withLock { w.lastOpenerAt = w.now }  // a launch can open apps (the engine notes its start and end)
             w.lock.withLock {
                 w.running.insert(pid)
                 w.bundles[pid] = bundle
@@ -910,7 +1007,7 @@ final class SimRun {
             do {
                 _ = try await core.targetBind(TargetBindParams(sessionId: "s", app: bundle, mirror: false))
             } catch { w.log("the bind: \((error as? CUError)?.message ?? "\(error)")") }
-            w.agentEnds(pid)
+            w.agentEnds(pid); w.lock.withLock { w.lastOpenerAt = w.now }
         case .agentBusy(let n, let gap):
             for k in 0..<n {
                 if w.violation != nil { break }

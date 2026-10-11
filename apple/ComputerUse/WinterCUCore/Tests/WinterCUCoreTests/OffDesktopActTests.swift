@@ -316,6 +316,7 @@ final class OffDesktopActTests: XCTestCase {
         XCTAssertFalse(ax.written.contains { $0.hasSuffix(":\(kAXFocusedAttribute)") }, "no AXFocused write on web content")
     }
 
+    /// Nothing is typed; on another desktop the desktop visit is offered (round 11 — live, the refusal offered none).
     func testAWebFieldOnAnotherSpaceThatTheClickDoesNotFocusIsRefused() async throws {
         world()
         let comment = fakeElement(95_021)
@@ -324,11 +325,29 @@ final class OffDesktopActTests: XCTestCase {
         ax.focus(pid: pid, on: field)  // and it stays there
         do {
             try await act(.type(CUTypeAction(text: "line one", into: ref(comment))))
-            XCTFail("expected focus_not_placed")
+            XCTFail("expected needs_desktop_visit")
         } catch let e as CUError {
-            XCTAssertEqual(e.data?["reason"], .string("focus_not_placed"))
+            XCTAssertEqual(e.code, "needs_desktop_visit")
+            XCTAssertTrue(e.message.contains("couldn't put the keyboard focus"), e.message)
         }
         XCTAssertTrue(poster.keyDowns.isEmpty, "nothing typed into Search")
+    }
+
+    /// A web button on another desktop whose accessibility press changed nothing: the desktop visit is offered (round 11 —
+    /// live, the Web Store's controls ignored the press and no visit was offered), never a silent no-op.
+    func testANoEffectWebPressOnAnotherDesktopOffersTheVisit() async throws {
+        world()
+        let go = fakeElement(95_031)
+        ax.add(go, role: kAXButtonRole, title: "Continue", frame: CGRect(x: 120, y: 400, width: 120, height: 30),
+               extra: [kAXParentAttribute: webArea])
+        ax.setActions(go, [kAXPressAction])
+        do {
+            let r = try await act(.click(CUClickAction(ref: ref(go))))
+            XCTFail("expected needs_desktop_visit: \(r.rung) \(r.detail ?? "-")")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "needs_desktop_visit")
+            XCTAssertTrue(e.message.contains("had no effect accessibility can see from here"), e.message)
+        }
     }
 
     func testSetValueOnAScrollBarSetsANumberInZeroToOne() async throws {

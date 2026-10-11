@@ -70,11 +70,21 @@ final class BrowserLinkHost: BrowserLinkHandler {
     /// The link that is up, as last announced.
     private(set) var linkId: String?
 
+    /// Phase 3: the only folder an armed download may be saved under — `<home>/cache/downloads` (the daemon stages
+    /// each capture in a fresh folder below it). `nil`: downloads are refused.
+    private let downloadsRoot: String?
+    /// Phase 3: show `sessionId`'s window with panel tab `tabId` selected, and activate Winter — the sign-in handoff,
+    /// after the user's OK on Winter's card. Set by `AppDelegate` (it owns the windows). `nil`: refused.
+    var onPresent: ((_ sessionId: String, _ tabId: String) -> Void)?
+    /// When each download last reported progress (one report per `downloadProgressInterval`).
+    private var lastProgress: [String: Date] = [:]
+
     init(runtime: BrowserRuntime, driver: BrowserLinkCEFDriver = .production, clock: Clock = .production,
-         replan: (() -> Void)? = nil) {
+         replan: (() -> Void)? = nil, downloadsRoot: String? = nil) {
         self.runtime = runtime
         self.driver = driver
         self.clock = clock
+        self.downloadsRoot = downloadsRoot
         self.replan = replan ?? { [unowned runtime] in BrowserHeadlessPlanner.replan(runtime) }
         runtime.onBrowserStopped = { [weak self] tabId in self?.browserStopped(tabId) }
     }
@@ -128,7 +138,108 @@ final class BrowserLinkHost: BrowserLinkHandler {
             // Best effort by contract, and a no-op here: the built-in browser's tabs are parked, with no
             // view anyone is looking at to draw an agent cursor over.
             reply(.empty)
+        case .tabPresent(let sessionId, let tabId):
+            present(sessionId: sessionId, tabId: tabId, reply: reply)
+        case .tabMute(let tabId, let muted):
+            guard let container = runtime.container(forTabId: tabId) else {
+                reply(.failure(code: .notLive, message: "this tab has no live browser"))
+                return
+            }
+            driver.setAudioMuted(container, muted)
+            reply(.empty)
+        case .tabDownloads(let tabId, let arm):
+            armDownloads(tabId: tabId, arm: arm, reply: reply)
+        case .tabDownload(let tabId, let url):
+            guard gates[tabId] != nil, let container = runtime.container(forTabId: tabId) else {
+                reply(.failure(code: .notLive, message: "the tab is not held — tab.ensure it first"))
+                return
+            }
+            guard let parsed = URL(string: url), let scheme = parsed.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+                reply(.failure(code: .notAllowed, message: "tab.download takes an http(s) URL"))
+                return
+            }
+            reply(driver.startDownload(container, url) ? .empty
+                  : .failure(code: .notLive, message: "this tab has no live browser"))
         }
+    }
+
+    // MARK: - Phase 3: present, downloads
+
+    /// The sign-in handoff: the session's window shows this tab and Winter comes forward — only ever after the user's
+    /// OK on Winter's card (the engine asks first). The tab's native UI is the user's again at once: dialogs,
+    /// permission prompts, its keys and focus. (The engine has already let the hold go — before its first card, so
+    /// passkey and permission prompts can show while the user decides — and a later `tab.ensure` takes it back,
+    /// suppression included. An unheld tab left unseen past the lifecycle's linger may have been stopped by then:
+    /// showing it here loads it again.)
+    private func present(sessionId: String, tabId: String, reply: BrowserLinkReplier) {
+        guard let onPresent else {
+            reply(.failure(code: .notAllowed, message: "Winter can't show the tab right now"))
+            return
+        }
+        if let container = runtime.container(forTabId: tabId) {
+            driver.setNativeUI(container, BrowserNativeUIPolicy.flags(held: false))
+        }
+        onPresent(sessionId, tabId)
+        reply(.empty)
+    }
+
+    /// Arm (or disarm) a held tab's download handler. The folder must be inside `<home>/cache/downloads/` and exist.
+    private func armDownloads(tabId: String, arm: BrowserLinkCommand.DownloadArm?, reply: BrowserLinkReplier) {
+        guard let container = runtime.container(forTabId: tabId) else {
+            reply(.failure(code: .notLive, message: "this tab has no live browser"))
+            return
+        }
+        guard let arm else {
+            driver.setDownloadArm(container, nil, 0, 0)
+            reply(.empty)
+            return
+        }
+        guard gates[tabId] != nil else {
+            reply(.failure(code: .notLive, message: "the tab is not held — tab.ensure it first"))
+            return
+        }
+        guard let root = downloadsRoot, let resolved = Self.resolvedInside(arm.dir, root: root) else {
+            reply(.failure(code: .notAllowed, message: "Winter saves a download only into its own downloads folder"))
+            return
+        }
+        // Armed with the very path that was checked (standardised, links resolved) — never the raw one again.
+        driver.setDownloadArm(container, resolved, arm.until, arm.maxBytes)
+        reply(.empty)
+    }
+
+    /// `path` standardised with its links resolved, when that is an existing directory strictly inside `root` (resolved
+    /// the same way); nil otherwise.
+    static func resolvedInside(_ path: String, root: String) -> String? {
+        let resolved = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+        let base = URL(fileURLWithPath: root).standardizedFileURL.resolvingSymlinksInPath().path
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: resolved, isDirectory: &isDir), isDir.boolValue else { return nil }
+        return resolved.hasPrefix(base.hasSuffix("/") ? base : base + "/") ? resolved : nil
+    }
+
+    /// One download report from the tab's handler, on to the daemon (progress thinned out).
+    private func downloadReport(tabId: String, info: [AnyHashable: Any]) {
+        guard let id = info["id"] as? String, let state = info["state"] as? String,
+              BrowserLinkProtocol.DownloadState(rawValue: state) != nil else { return }
+        if state == BrowserLinkProtocol.DownloadState.progress.rawValue {
+            let now = clock.now()
+            let interval = Double(BrowserLinkProtocol.downloadProgressInterval.components.seconds)
+                + Double(BrowserLinkProtocol.downloadProgressInterval.components.attoseconds) / 1e18
+            if let last = lastProgress[id], now.timeIntervalSince(last) < interval { return }
+            lastProgress[id] = now
+        } else if state != BrowserLinkProtocol.DownloadState.started.rawValue {
+            lastProgress[id] = nil
+        }
+        var out: [String: JSONValue] = [
+            "id": .string(id), "state": .string(state),
+            "name": .string((info["name"] as? String) ?? "download"),
+            "bytes": .number((info["bytes"] as? NSNumber)?.doubleValue ?? 0),
+        ]
+        for key in ["url", "path", "mime", "error"] {
+            if let v = info[key] as? String { out[key] = .string(v) }
+        }
+        if let total = info["totalBytes"] as? NSNumber { out["totalBytes"] = .number(total.doubleValue) }
+        output?.download(tabId: tabId, download: .object(out))
     }
 
     // MARK: - tab.ensure
@@ -163,6 +274,7 @@ final class BrowserLinkHost: BrowserLinkHandler {
             self?.event(tabId: tabId, method: method, params: params, cdpSessionId: session)
         }
         driver.setCrashObserver(container) { [weak self] in self?.rendererCrashed(tabId) }
+        driver.setDownloadObserver(container) { [weak self] info in self?.downloadReport(tabId: tabId, info: info) }
     }
 
     /// CEF creates a browser asynchronously (one main-queue hop, then CEF's own queue), so a held tab's
@@ -220,6 +332,8 @@ final class BrowserLinkHost: BrowserLinkHandler {
         guard let container = runtime.container(forTabId: tabId) else { return }
         driver.setEventObserver(container, nil)
         driver.setCrashObserver(container, nil)
+        driver.setDownloadObserver(container, nil)
+        driver.setDownloadArm(container, nil, 0, 0)
         // Clearing the flags also dismisses a dialog the tab is still holding (`WinterCEF.h`).
         driver.setNativeUI(container, BrowserNativeUIPolicy.flags(held: false))
     }
@@ -322,6 +436,14 @@ final class BrowserLinkHost: BrowserLinkHandler {
                 }
                 let result = Self.decode(payload) ?? .object([:])
                 gates[tabId]?.noteResult(method: method, params: params, cdpSessionId: cdpSessionId, result: result)
+                reply(.ok(.object(["result": result])))
+            } else if method == "Network.getResponseBody" {
+                // A response body leaves cut (`CDPTabGate.filterResult`); decoded only up to the result bound.
+                guard BrowserLinkProtocol.resultFits(bytes: payload.utf8.count) else {
+                    reply(BrowserLinkProtocol.resultTooLarge(bytes: payload.utf8.count))
+                    return
+                }
+                let result = CDPTabGate.filterResult(method: method, result: Self.decode(payload) ?? .object([:]))
                 reply(.ok(.object(["result": result])))
             } else {
                 reply(.okRaw(key: "result", json: payload))

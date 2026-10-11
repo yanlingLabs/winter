@@ -108,6 +108,9 @@ final class CUTarget: @unchecked Sendable {
     var webArea: AXUIElement?
     var webAreaWindowTitle: String?
     var noWebAreaUntil: Double?
+    /// Floor F's dialog scan: the app's window-server windows when it last ran, and its answer — scanned again only when
+    /// they change (the dialog is a window of its own). Pid-queue only.
+    var remoteDebuggingScan: (windows: Set<UInt32>, shown: Bool)?
 
     /// The focus read after the last act, and when: the next act's "before". Pid-queue only.
     var focusAfterLastAct: (atMs: Double, focus: CUCore.WindowFocus)?

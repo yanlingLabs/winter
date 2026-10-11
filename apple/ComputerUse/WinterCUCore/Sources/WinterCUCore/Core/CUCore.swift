@@ -195,7 +195,17 @@ public final class CUCore: @unchecked Sendable {
         }
         let r = try resolveOpen(strings, app: app)
         try refuseFloorApp(bundleId: r.bundle.bundleIdentifier, pid: 0, name: r.bundle.bundleIdentifier ?? r.appURL.lastPathComponent)
+        // The open is the agent's from BEFORE it (review of round 9, HIGH #2): it may launch the opener, whose first
+        // activation must never read as the user's own launch — and a running opener is touched before it can come forward.
+        let launch = beginGuardianLaunch()
+        CUCore.$bindLaunchToken.withValue(launch) { noteGuardianLaunchBundle(r.bundle.bundleIdentifier) }
+        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: r.bundle.bundleIdentifier ?? "").first {
+            noteGuardianCause(running.processIdentifier, raise: true)
+        }
+        var openedPid: pid_t?
+        defer { endGuardianLaunch(launch, pid: openedPid) }
         let opened = try await CUDocumentOpen.open(r.urls, withApp: r.appURL)
+        openedPid = opened.processIdentifier
         noteGuardianCause(opened.processIdentifier, raise: true)  // an open can bring its window forward
         return opened.localizedName ?? CUApps.displayName(r.bundle, fallback: r.appURL.deletingPathExtension().lastPathComponent)
     }
@@ -213,7 +223,14 @@ public final class CUCore: @unchecked Sendable {
         let before: Set<UInt32> = runningOpener.map { r in
             Set(CUBindWait.realWindows(sys.windows(pid: r.processIdentifier)).map(\.id))
         } ?? []
+        // The agent's from BEFORE the open (review of round 9, HIGH #2): a launch it makes, a running opener touched.
+        let launch = beginGuardianLaunch()
+        CUCore.$bindLaunchToken.withValue(launch) { noteGuardianLaunchBundle(b.bundleIdentifier) }
+        if let r = runningOpener { noteGuardianCause(r.processIdentifier, raise: true) }
+        var openedPid: pid_t?
+        defer { endGuardianLaunch(launch, pid: openedPid) }
         let app = try await CUDocumentOpen.open(urls, withApp: appURL)
+        openedPid = app.processIdentifier
         noteGuardianCause(app.processIdentifier, raise: true)  // it may come forward late: a possible thief for the guard
         // A real window of the opener not seen before the open: the document's. Polled briefly (it is async).
         let windowID: UInt32? = await {

@@ -40,7 +40,7 @@ export function formatArgsHead(argsJson: string): string {
 /** ComputerV2 (2026-10-08): the tool row's host name (`runtime-sdk/tool-names.ts`'s `ComputerV2` pair). */
 export const COMPUTER_V2_HOST_NAME = "computer_v2";
 
-const COMPUTER_V2_VERBS = /\.(state|find|screenshot|click|setValue|type|paste|key|scroll|drag|select|action|menu|waitForIdle|waitFor|windows|useWindow|appAt|hover|goto|back|forward|reload|text|upload)\s*\(/g;
+const COMPUTER_V2_VERBS = /\.(state|find|screenshot|click|setValue|type|paste|key|scroll|drag|select|action|menu|waitForIdle|waitForUser|waitFor|windows|useWindow|appAt|hover|goto|back|forward|reload|text|upload|console|networkBody|network|inspect|html|assets|download|viewport|answerDialog)\s*\(/g;
 const APPS_OPEN = /apps\s*\.\s*open\s*\(\s*(["'`])((?:(?!\1)[^\\\n])+)\1/g;
 /** `browsers.open("https://example.com/…")`: the site it opens, shown as its host. */
 const BROWSERS_OPEN = /browsers\s*\.\s*open\s*\(\s*(["'`])((?:(?!\1)[^\\\n]){1,300})\1/g;

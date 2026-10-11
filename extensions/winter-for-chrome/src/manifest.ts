@@ -11,11 +11,16 @@
 // debuggee, for out-of-process iframes) since Chrome 125, and an open native-messaging port keeping an MV3 service
 // worker alive since Chrome 105.
 
-export const EXTENSION_VERSION = "1.0.0";
+export const EXTENSION_VERSION = "1.1.0";
 export const MINIMUM_CHROME_VERSION = "125";
 
-/** Exactly these (spine §6.5); a test pins the list. No `cookies`, no `history`, no `downloads`, no content scripts. */
+/** Exactly these (spine §6.5); a test pins the list. No `cookies`, no content scripts. */
 export const PERMISSIONS = ["debugger", "tabs", "tabGroups", "nativeMessaging", "scripting", "storage"] as const;
+/** 1.1.0: asked for only from the toolbar popup, on the user's own click, and given back there — never at install, so
+ *  an update from 1.0.0 carries no new warning (a new REQUIRED permission with one would disable the extension for
+ *  every user until they re-approved it). History and bookmarks are searched read-only; `downloads` saves a file a
+ *  page makes itself. A test pins the list. */
+export const OPTIONAL_PERMISSIONS = ["history", "bookmarks", "downloads"] as const;
 export const HOST_PERMISSIONS = ["<all_urls>"] as const;
 
 export type Flavor = "dev" | "store" | "edge";
@@ -38,6 +43,7 @@ export function extensionManifest(flavor: Flavor, devKey?: string): Record<strin
     version: EXTENSION_VERSION,
     minimum_chrome_version: MINIMUM_CHROME_VERSION,
     permissions: [...PERMISSIONS],
+    optional_permissions: [...OPTIONAL_PERMISSIONS],
     host_permissions: [...HOST_PERMISSIONS],
     // Never in private windows: it cannot be enabled there.
     incognito: "not_allowed",
