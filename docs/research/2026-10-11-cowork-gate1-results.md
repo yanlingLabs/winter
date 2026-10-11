@@ -144,6 +144,11 @@ fresh-fixture run above removes that ambiguity:
   protected sentinel bytes and modes. This demonstrates host-side enforcement
   for the tested append operations in this configuration, not every filesystem
   operation or a complete security audit.
+- VZ reported EACCES rather than EROFS for those host-side denials. A production
+  file helper should explain a denied write to a known read-only export as
+  "read-only", retaining the raw errno for diagnostics. EACCES alone must not
+  trigger that mapping: ordinary permission or revoked-access failures on a
+  writable source need their own explanation.
 - `/run/virtiofs` was absent even in the container supervisor's namespace. That
   is now a layout observation, not a tool-isolation assertion. Removing that
   assertion from each view leaves 77 + 77 + 85 = 239 confinement checks; all
@@ -156,6 +161,10 @@ fresh-fixture run above removes that ambiguity:
 The native lifecycle documentation also records that `termination_uncertain`
 retains the closed device-operation gate: stats/balloon stay refused. This is
 not a claim that the adapter implements a complete recovery gate for all execs.
+
+Independent review of `9bfc7968` accepted these fixes with no further findings
+for this bounded prototype. [PR #13](https://github.com/yanlingLabs/winter/pull/13)
+remains draft; this review does not pass gate 1 or validate production integration.
 
 ## Validation and remaining scope
 

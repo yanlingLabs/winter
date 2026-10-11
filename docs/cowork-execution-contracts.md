@@ -16,6 +16,8 @@ The initial Linux confinement design uses distinct identities, mount/PID isolati
 
 Protect the directory skeleton and ancestors as well as file contents: `/workspace/.winter` cannot be renamed/replaced by tools. Memory and scratch are separately writable subtrees; SDK stores/configuration and the shared instruction alias are protected. The supervisor creates mountpoints and aliases during source preparation; general tool writes are not needed for that setup. Shared workspace WINTER.md is exposed read-only to tools. A content-bound approved write goes through the host instruction owner and refreshes context; direct user editing does not require agent approval. Never temporarily make the enclosing directory writable. Existing repository WINTER.md editing semantics remain ordinary.
 
+File-helper errors use the admitted mount/export policy as well as errno: VZ can return EACCES for a host-read-only share. Explain a denied write to a known read-only source as "read-only" while retaining the raw error for diagnostics. Do not reinterpret every EACCES as read-only; writable-source permission and access-revocation failures remain distinct.
+
 Sanitize inherited descriptors, `/proc` visibility, Unix sockets, launch environment and dynamic library/module lookup. Trusted executables must not be resolved through tool-writable PATH, NODE_PATH, package overlays, bunfig, dotenv or repository configuration. Host-source admission must exclude Winter's own authority/credential/control storage, including overlapping roots and aliases; refuse grants whose required exclusions cannot be enforced. Test symlink/hard-link aliases, rename attacks and inherited handles, not only nominal paths.
 
 ## Host storage authority, fences and migration
