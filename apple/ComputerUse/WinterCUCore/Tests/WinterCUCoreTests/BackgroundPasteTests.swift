@@ -245,6 +245,30 @@ final class BackgroundPasteTests: XCTestCase {
         _ = open
     }
 
+    /// Round 13 (dogfood): a click on a file row in an open panel (a sheet) selects it over accessibility — a click into a
+    /// background sheet only made it key, and Open stayed disabled.
+    func testAClickOnARowInASheetSelectsItOverAccessibility() async throws {
+        world()
+        let sheet = fakeElement(97_040), outline = fakeElement(97_041), row = fakeElement(97_042), cell = fakeElement(97_043)
+        ax.put(window, [kAXChildrenAttribute: ax.elements(window, kAXChildrenAttribute) + [sheet]])
+        ax.add(sheet, role: kAXSheetRole, frame: CGRect(x: 100, y: 40, width: 600, height: 400),
+               extra: [kAXParentAttribute: window, kAXChildrenAttribute: [outline]])
+        ax.add(outline, role: kAXOutlineRole, frame: CGRect(x: 120, y: 80, width: 560, height: 300),
+               extra: [kAXParentAttribute: sheet, kAXChildrenAttribute: [row]])
+        ax.add(row, role: kAXRowRole, frame: CGRect(x: 120, y: 80, width: 560, height: 20),
+               extra: [kAXParentAttribute: outline, kAXChildrenAttribute: [cell], kAXSelectedAttribute: false])
+        ax.makeSettable(row, kAXSelectedAttribute)
+        ax.add(cell, role: kAXCellRole, title: "extension.zip", frame: CGRect(x: 120, y: 80, width: 300, height: 20),
+               extra: [kAXParentAttribute: row])
+        target.refs.beginGeneration()
+        let r = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+                                                         action: .click(CUClickAction(ref: target.refs.ref(for: AXIdentity(element: cell)))),
+                                                         access: .full, allowForeground: false, privatePath: true))
+        XCTAssertEqual(r.detail, "the row was selected over accessibility (a sheet or panel of the app)")
+        XCTAssertEqual(ax.bool(row, kAXSelectedAttribute), true)
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "no click")
+    }
+
     func testAMenuShortcutWhileAnotherWindowIsKeyIsPressedOnlyWithTheBoundWindowKey() async throws {
         world()
         let open = anotherWindowKey()

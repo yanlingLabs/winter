@@ -549,6 +549,13 @@ extension CUCore {
             }
             t.noteTargeted(e, at: clock.nowMs())
             announceTarget(t, info, pressing: button == .left)
+            // A row (or an item of a list) in a sheet or panel — an open panel's file list: selected over accessibility
+            // (dogfood, round 13: a click on a file row in Chrome's open panel reported success, the row was not
+            // selected and Open stayed disabled — the panel is AppKit, a click into a background sheet only makes it key).
+            if button == .left, count == 1, flags.isEmpty, inSheetOrPanel(e, t), let selected = selectInPanel(e, t) {
+                cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
+                return ActOutcome(rung: .accessibility, detail: selected)
+            }
             var announced = false
             let webPress = button == .left && count == 1 && flags.isEmpty && isWebContent(e)
             // An app whose web content ignored accessibility presses twice: its web buttons are clicked.
@@ -2188,6 +2195,34 @@ extension CUCore {
         }
         return .events(code: code, flags: chord.modifiers.cgFlags,
                        decision: try CUInputLadder.decideEvents(context(p, t, pointer: false)))
+    }
+
+    /// Selects `e`'s row (it, or the row it is in) or list item over accessibility, verified; nil when it is neither or
+    /// can't be selected that way (then it is clicked as before).
+    func selectInPanel(_ e: AXUIElement, _ t: CUTarget) -> String? {
+        var row: AXUIElement? = nil
+        var cur: AXUIElement? = e
+        for _ in 0..<3 {
+            guard let c = cur else { break }
+            if ax.string(c, kAXRoleAttribute) == kAXRowRole { row = c; break }
+            cur = ax.element(c, kAXParentAttribute)
+        }
+        if let row, ax.isSettable(row, kAXSelectedAttribute) {
+            guard (try? ax.set(row, kAXSelectedAttribute, kCFBooleanTrue)) != nil else { return nil }
+            clock.pause(ms: min(pressSettleMs, 150))
+            guard ax.bool(row, kAXSelectedAttribute) == true else { return nil }
+            CULog.act.notice("click in \(t.appName, privacy: .public): a row in a sheet or panel — selected over accessibility")
+            return "the row was selected over accessibility (a sheet or panel of the app)"
+        }
+        if let list = ax.element(e, kAXParentAttribute), [kAXListRole, "AXCollection"].contains(ax.string(list, kAXRoleAttribute) ?? ""),
+           ax.isSettable(list, kAXSelectedChildrenAttribute) {
+            guard (try? ax.set(list, kAXSelectedChildrenAttribute, [e] as CFArray)) != nil else { return nil }
+            clock.pause(ms: min(pressSettleMs, 150))
+            guard ax.elements(list, kAXSelectedChildrenAttribute).contains(where: { CFEqual($0, e) }) else { return nil }
+            CULog.act.notice("click in \(t.appName, privacy: .public): an item in a sheet's or panel's list — selected over accessibility")
+            return "the item was selected over accessibility (a sheet or panel of the app)"
+        }
+        return nil
     }
 
     /// `e` lies in a sheet, a panel or a dialog — not in the bound window's own content (its ancestors reach an `AXSheet`,
