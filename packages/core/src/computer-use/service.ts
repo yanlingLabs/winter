@@ -13,7 +13,7 @@
 // rejects `Cancelled` (and the helper is told to stop that work by call id), every later primitive throws, and a
 // script that has not settled 1 s later loses its worker (the SDK's cancel bound is 5 s).
 import { randomBytes } from "node:crypto";
-import { computerUsePrivateEventPathFrom, computerUseMirrorFrom, computerUseScreenshotMaxDimFrom, type Settings } from "../settings";
+import { computerUsePrivateEventPathFrom, computerUseMirrorFrom, computerUseScreenshotMaxDimFrom, computerUseWebMcpFrom, type Settings } from "../settings";
 import { nextScreenshotQuality, screenshotBudgetFor, SCREENSHOT_BYTE_CAP, SCREENSHOT_QUALITY } from "./budget";
 import { DiffBases } from "./diff-base";
 import { AUTOMATION_ERROR_KINDS, AutomationFailure, isAutomationFailure } from "./errors";
@@ -253,6 +253,8 @@ interface RunCtx {
   downloads?: number;
   /** waitForUser() hand-offs asked for this run (a count, for the audit line). */
   handoffs?: number;
+  /** Phase 4: site tools (WebMCP) called this run (a count, for the audit line — never a name). */
+  siteTools?: number;
   /** Phase 2: browser-tab primitives still running (the run's tab locks wait for them at its end). */
   tabWork?: Set<Promise<unknown>>;
   /** Phase 4, for the audit line: the saved scripts this run saved and ran (names only). */
@@ -498,6 +500,7 @@ export class ComputerV2Service {
       durationMs: this.now() - started, outcome: outcomeWord, ...(ctx.visitsClaimed > 0 ? { desktopVisits: ctx.visitsClaimed } : {}),
       ...(ctx.sites === undefined ? {} : { sites: [...ctx.sites] }), ...(ctx.browsers === undefined ? {} : { browsers: [...ctx.browsers] }),
       ...(ctx.downloads === undefined ? {} : { downloads: ctx.downloads }), ...(ctx.handoffs === undefined ? {} : { handoffs: ctx.handoffs }),
+      ...(ctx.siteTools === undefined ? {} : { siteTools: ctx.siteTools }),
       // Saved scripts: their NAMES only — never a source or an argument.
       ...(ctx.scriptsSaved === undefined && ctx.scriptsRan === undefined ? {} : {
         scripts: { ...(ctx.scriptsSaved === undefined ? {} : { saved: [...ctx.scriptsSaved] }), ...(ctx.scriptsRan === undefined ? {} : { ran: [...ctx.scriptsRan] }) },
@@ -1562,6 +1565,8 @@ export class ComputerV2Service {
       noteSite: (host) => { (ctx.sites ??= new Set()).add(host); },
       noteBrowser: (id) => { (ctx.browsers ??= new Set()).add(id); },
       noteDownload: () => { ctx.downloads = (ctx.downloads ?? 0) + 1; },
+      webMcp: () => computerUseWebMcpFrom(this.deps.settings()),
+      noteSiteTool: () => { ctx.siteTools = (ctx.siteTools ?? 0) + 1; },
       trusted: (sentence) => { ctx.daemonSentences.add(sentence); },
     };
   }

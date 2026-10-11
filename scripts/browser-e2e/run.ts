@@ -93,14 +93,15 @@ let listedDomains: string[] = [];
 
 // ── the engine over the pipe ─────────────────────────────────────────────────────────────────────
 const transport = new PipeTransport("winter", "winter");
-await transport.launch(chrome);
+// WebMCP (Phase 4): Winter's own browsers always run with it on; here both test browsers do.
+await transport.launch(chrome, ["--enable-features=WebMCP"]);
 const registry = new BrowserBackendRegistry();
 registry.register(transport, { family: "winter", name: "Chromium (test)", instanceKey: "winter" });
 // Phase 3: a second Chromium playing a USER's browser (Winter for Chrome's backend: Fetch interception for downloads).
 // A download Winter does not catch lands in a temp folder, never the user's Downloads folder.
 const userBrowser = new PipeTransport("chrome", "chrome");
 userBrowser.features = new Set(["cdp3"]);
-await userBrowser.launch(chrome);
+await userBrowser.launch(chrome, ["--enable-features=WebMCP"]);
 const browserDownloads = mkdtempSync(join(tmpdir(), "winter-browser-e2e-downloads-"));
 await userBrowser.setDownloadDir(browserDownloads);
 registry.register(userBrowser, { family: "chrome", name: "Chrome for Testing", bundleId: "com.google.chrome.for.testing", instanceKey: "chrome-e2e" });
@@ -519,6 +520,66 @@ await check("screenshot({ fullPage }) and viewport(): the whole page, and an emu
   await R("waitFor", { cond: { text: "width 1200" }, timeoutMs: 3_000 });
 });
 run3.end();
+
+// ── Phase 4: WebMCP — the page's own tools, read and called from the page runtime's winter world ───────────────
+const run4 = scope("r4");
+let wtab!: TabHandle;
+const W = (primitive: string, args: Record<string, unknown> = {}) => engine.primitive(run4.s, wtab.targetId, primitive, args);
+
+await check("WebMCP: the state names the page's own tools (not the iframe's); tools() describes them", async () => {
+  wtab = await engine.global(run4.s, "browsers.open", { url: `${BASE}/webmcp.html` }) as TabHandle;
+  const s = await W("state", { full: true, emit: false }) as string;
+  // (Chrome lists them by name.)
+  expect(s.includes("site tools (WebMCP): add_to_cart, failing_tool, search_products, slow_tool — tab.tools() describes them") && !s.includes("frame_tool"), "the state's line", s.slice(0, 600));
+  const tools = await W("tools", { emit: false }) as Array<{ name: string; readOnly: boolean; consequential: boolean; inputSchema?: unknown }>;
+  expect(tools.map((t) => t.name).join(",") === "add_to_cart,failing_tool,search_products,slow_tool", "the four tools", JSON.stringify(tools));
+  const search = tools.find((t) => t.name === "search_products")!;
+  const cart = tools.find((t) => t.name === "add_to_cart")!;
+  // (consequentialHint is reported from Chrome 155 on; 153 has readOnlyHint only.)
+  expect(search.readOnly && !search.consequential && !cart.readOnly && JSON.stringify(search.inputSchema).includes("\"q\""), "their annotations and schema", JSON.stringify([search, cart]));
+});
+
+await check("WebMCP: callTool runs the page's tool from the winter world and returns its answer; the page sees it", async () => {
+  const found = await W("callTool", { name: "search_products", input: { q: "green" } }) as { results: string[] };
+  expect(JSON.stringify(found) === JSON.stringify({ results: ["green tea"] }), "the search's answer", JSON.stringify(found));
+  const added = await W("callTool", { name: "add_to_cart", input: { name: "green tea" } }) as { added: string; cart: number };
+  expect(added.added === "green tea" && added.cart === 1, "the cart's answer", JSON.stringify(added));
+  const text = await W("text", { emit: false }) as string;
+  expect(text.includes("cart: 1"), "the page itself changed", text.slice(0, 300));
+  await failsWith(W("callTool", { name: "frame_tool" }), "Error");
+});
+
+await check("WebMCP: a failing tool reports the browser's failure; a tool that never answers is stopped at its timeout, and the page sees the abort", async () => {
+  const e = await failsWith(W("callTool", { name: "failing_tool" }), "Error");
+  expect(e.message === "the site's tool failed — what it said is printed above", "the error", e.message);
+  const t0 = Date.now();
+  await failsWith(W("callTool", { name: "slow_tool", timeoutMs: 500 }), "WaitTimeout");
+  expect(Date.now() - t0 < 4_000, "stopped within the grace", String(Date.now() - t0));
+  // The fixture's own `toolcancel` listener writes "cancelled" when the browser tells the page its tool was cancelled
+  // (a browser with no such event — Chrome 153 — says "no cancel event" instead, and only the timeout is checked).
+  const page = await W("text", { emit: false }) as string;
+  if (!page.includes("no cancel event")) await W("waitFor", { cond: { text: "cancelled" }, timeoutMs: 3_000 });
+});
+
+await check("WebMCP: plan refuses a call (an act) but still lists", async () => {
+  facts.policy = "plan";
+  try {
+    await failsWith(W("callTool", { name: "search_products", input: { q: "x" } }), "NotAllowed");
+    expect((await W("tools", { emit: false }) as unknown[]).length === 4, "listing still works");
+  } finally {
+    facts.policy = "bypass";
+  }
+});
+
+await check("WebMCP in a user's browser (its per-app policy): listed and called the same way", async () => {
+  const utab = await engine.global(run4.s, "browsers.open", { url: `${BASE}/webmcp.html`, browser: "chrome" }) as TabHandle;
+  const U = (primitive: string, args: Record<string, unknown> = {}) => engine.primitive(run4.s, utab.targetId, primitive, args);
+  const s = await U("state", { full: true, emit: false }) as string;
+  expect(s.includes("site tools (WebMCP): add_to_cart, failing_tool, search_products, slow_tool"), "the line", s.slice(0, 400));
+  const found = await U("callTool", { name: "search_products", input: { q: "black" } }) as { results: string[] };
+  expect(found.results[0] === "black tea", "the answer", JSON.stringify(found));
+});
+run4.end();
 
 // ── Phase 3: download() in a user's browser (Fetch interception) ─────────────────────────────────────
 const run2 = scope("r2");

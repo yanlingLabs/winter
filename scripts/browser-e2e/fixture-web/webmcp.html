@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Site tools</title></head>
+<body>
+<h1>Tea shop</h1>
+<p id="cart">cart: 0</p>
+<p id="log">idle</p>
+<!-- An iframe's own tool: never the page's (the engine keeps only the top frame's window and origin). -->
+<iframe title="Widget" srcdoc="<script>if (document.modelContext) document.modelContext.registerTool({ name: 'frame_tool', description: 'an iframe tool', execute: async () => 'frame' });</script>"></iframe>
+<script>
+  // WebMCP (Phase 4): the page's own agent tools, registered when the browser offers the API.
+  const mc = document.modelContext;
+  let cart = 0;
+  if (mc) {
+    mc.registerTool({
+      name: "search_products", title: "Search", description: "Search the tea shop's products by name",
+      inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] }, annotations: { readOnlyHint: true },
+      execute: async (input) => ({ results: ["green tea", "black tea"].filter((n) => n.includes(String(input.q))) }),
+    });
+    mc.registerTool({
+      name: "add_to_cart", description: "Add a product to the cart",
+      inputSchema: { type: "object", properties: { name: { type: "string" } } }, annotations: { consequentialHint: true },
+      execute: async (input) => { cart++; document.getElementById("cart").textContent = "cart: " + cart; return { added: input.name, cart }; },
+    });
+    mc.registerTool({ name: "slow_tool", description: "Never answers by itself", execute: () => new Promise(() => {}) });
+    mc.registerTool({ name: "failing_tool", description: "Always fails", execute: async () => { throw new Error("out of stock"); } });
+    // The browser tells the page a tool was cancelled (Chrome 155+; 153 has no such event — the page says which).
+    if ("ontoolcancel" in mc) mc.addEventListener("toolcancel", () => { document.getElementById("log").textContent = "cancelled"; });
+    else document.getElementById("log").textContent = "no cancel event";
+  }
+  document.title = mc ? "Site tools" : "Site tools (no WebMCP)";
+</script>
+</body></html>
