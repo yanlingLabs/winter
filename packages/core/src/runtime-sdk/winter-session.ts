@@ -100,7 +100,7 @@ import type { NewSessionEvent, SessionEvent, UserMessageImageRef } from "@yanlin
 import { modelTextOf } from "../sessions/model-text";
 import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, type ProjectedBatch, type Projector, type ProtocolSdkMessage } from "../projector";
 import { PROJECTOR_PASSTHROUGH_CLIENT } from "../projector/index";
-import { asInitFrame, asResultFrame } from "../projector/conversation";
+import { asAssistantFrame, asInitFrame, asResultFrame } from "../projector/conversation";
 import { ALLOWED_TRANSITIONS, type RuntimeSessionState } from "../runtime-state/records";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import type { attachWinterSession, WinterSessionAttachHandle, WinterSessionAttachment } from "./messaging";
@@ -1079,7 +1079,7 @@ class WinterSessionImpl implements WinterSession {
           });
           options = hostCode.options;
           const current = hostCode;
-          options.hooks = { ...options.hooks, PreToolUse: [...(options.hooks?.PreToolUse ?? []), {
+          if (current.protectedStorage) options.hooks = { ...options.hooks, PreToolUse: [...(options.hooks?.PreToolUse ?? []), {
             matcher: "Bash|Monitor|Workflow|Agent|Task", failClosed: true,
             hooks: [async (input, _toolUseId, context) => { await current.completeHook(input, context.signal); return {}; }],
           }] };
@@ -1207,7 +1207,7 @@ class WinterSessionImpl implements WinterSession {
           }
           throw err;
         }
-        this.emit(batch);
+        this.emit(batch, msg);
         if (asResultFrame(msg) !== undefined) this.onResult(inc);
         else {
           const folded = hostInputFoldedCount(msg);
@@ -1413,11 +1413,21 @@ class WinterSessionImpl implements WinterSession {
     }).seq;
   }
 
-  private emit(batch: ProjectedBatch): void {
+  private emit(batch: ProjectedBatch, message?: ProtocolSdkMessage): void {
+    const assistant = message === undefined ? undefined : asAssistantFrame(message);
+    const runtimeNames = new Map<string, string>();
+    for (const block of assistant?.message.content ?? []) {
+      if (block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") runtimeNames.set(block.id, block.name);
+    }
+    const incarnation = this.inc;
+    let hostRejected = false;
     for (const e of batch.persist) {
-      this.inc?.hostCode?.observe(e);
+      // Admission cannot erase the projected evidence, including the rest of this same batch.
       this.safeAppend(e);
       this.relayChild(e);
+      if (!hostRejected) {
+        try { incarnation?.hostCode?.observe(e, e.type === "tool_call" ? runtimeNames.get(e.callId) : undefined); } catch { hostRejected = true; }
+      }
     }
     for (const e of batch.broadcast) {
       try { this.deps.broadcast(e); } catch (err) { this.log(`broadcast failed for ${this.sessionId}: ${err instanceof Error ? err.name : "unknown"}`); }
@@ -1426,6 +1436,15 @@ class WinterSessionImpl implements WinterSession {
       // child streaming a long answer with no tool call past the window was killed as "stalled";
       // the engine's window was reset by every provider frame. Deltas feed it now.
       this.relayChild(e);
+    }
+    if (hostRejected && incarnation !== undefined) {
+      this.safeAppend({ type: "agent_error", sessionId: this.sessionId, threadId: MAIN_THREAD,
+        code: "host_execution_refused", message: "Host Code admission refused the projected call; its event batch was retained" });
+      // Close authority immediately; process teardown runs after every event in this batch is kept.
+      incarnation.hostCode?.dispose();
+      queueMicrotask(() => {
+        if (this.inc === incarnation) void this.end().catch(() => this.log("host Code teardown failed"));
+      });
     }
   }
 

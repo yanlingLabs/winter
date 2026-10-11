@@ -98,6 +98,12 @@ function fixture({
       applied.push(options);
       return { ...options, command: "floor-exec" };
     },
+    // Fixture adapter contract. Production consumes the SDK-owned selector, tested by the
+    // explicit real-SDK ordering/limits fixture rather than duplicating constants in Core.
+    executionLimits: (name, input) => ({
+      timeoutMs: name === "Workflow" ? 0 : name === "Monitor" ? input.persistent === true ? 2147483647 : Number(input.timeout_ms) : Math.min(typeof input.timeout === "number" && Number.isFinite(input.timeout) && input.timeout > 0 ? input.timeout : 120000, 600000),
+      maxStreamedBytes: 5 * 1024 ** 3,
+    }),
     buildPwdCaptureScript: (command, path) => `host-wrapper:${command}:${path}`,
     buildRunInputs: (input) => input,
   };
@@ -833,7 +839,8 @@ test("completed call IDs cannot be reused while old authorization is awaiting", 
   );
   permission.resolve(true);
   await expect(pending).rejects.toThrow("stale-generation");
-  expect(f.abort.signal.aborted).toBe(true);
+  // Authority closes immediately, while the session owns asynchronous process teardown after logging.
+  expect(f.abort.signal.aborted).toBe(false);
   g.dispose();
   f.exited.resolve(0);
 });
@@ -945,5 +952,55 @@ test("matching cwd outside initial roots does not bypass a current host denial",
   f.spawnGeneration(g); f.call(g);
   g.noteHook({ tool_name: "Bash", tool_use_id: "call", session_id: "backend", cwd: temp });
   await expect(f.resolve(g, { cwd: temp })).rejects.toThrow("current-permission-denied");
+  g.dispose(); f.exited.resolve(0);
+});
+
+test("unprotected Code ignores broker observation limits and adds no hook authority", async () => {
+  const f = fixture({ active: false, withBinding: false }), g = f.enroll();
+  expect(g.protectedStorage).toBe(false); expect(g.options.hooks).toBeUndefined();
+  const oversized = JSON.stringify({ prompt: "x".repeat(262145) });
+  for (let i = 0; i < 17000; i++) g.observe({ type: "tool_call", sessionId: "logical", callId: "same-call", threadId: "main", name: "Agent", argsJson: i === 0 ? oversized : "[]" } as NewSessionEvent);
+  expect(f.abort.signal.aborted).toBe(false); g.dispose(); f.abort.abort();
+  expect(() => g.noteHook({})).not.toThrow();
+  await expect(g.completeHook({}, f.abort.signal)).resolves.toBeUndefined();
+});
+test("host hook transformedInput replaces the whole original input and object order is structural", async () => {
+  const f = fixture(); let authorized: Record<string, unknown> | undefined;
+  f.binding.authorize = async call => { authorized = call.input; return true; };
+  f.binding.buildHookContext = () => ({});
+  f.options.hooks = { PreToolUse: [{ matcher: "Bash", failClosed: true, hooks: [async () => ({})] }] };
+  f.adapter.buildHookEntries = () => [{ id: "transform" }];
+  f.adapter.createHookStage = input => ({ async preToolUse() {
+    const invoker = input.invoker as { invoke(request: { hookId: string; input: unknown }): Promise<unknown> };
+    await invoker.invoke({ hookId: "transform", input: { dangerouslyDisableSandbox: true, timeout: 600000, command: "old" } });
+    return { decision: "allow", transformedInput: { command: "safe" } };
+  } });
+  const g = f.enroll(); f.spawnGeneration(g);
+  f.call(g, "main", "Bash", { command: "old", timeout: 600000, dangerouslyDisableSandbox: true });
+  await g.options.hooks!.PreToolUse![0]!.hooks[0]!({ hook_event_name: "PreToolUse", session_id: "backend", tool_use_id: "call", tool_name: "Bash", tool_input: { timeout: 600000, command: "old", dangerouslyDisableSandbox: true }, cwd: source } as never, "call", { signal: f.abort.signal });
+  const result = await f.resolve(g, { command: "safe" });
+  expect(authorized).toEqual({ command: "safe" }); expect(result.commandOptions.dangerouslyDisableSandbox).toBeUndefined(); expect(result.commandOptions.timeoutMs).toBe(120000);
+  g.dispose(); f.exited.resolve(0);
+});
+test("host prompt input equality accepts reordered object keys", async () => {
+  const f = fixture(); f.options.canUseTool = async (_name, input) => ({ behavior: "allow", updatedInput: input });
+  const g = f.enroll(); f.spawnGeneration(g); f.call(g, "main", "Bash", { command: "cat note", timeout: 1000 });
+  expect((await g.options.canUseTool!("Bash", { timeout: 1000, command: "cat note" }, { toolUseID: "call", signal: f.abort.signal, suggestions: [] } as never))?.behavior).toBe("allow");
+  await expect(f.resolve(g, { timeoutMs: 1000 })).resolves.toBeDefined(); g.dispose(); f.exited.resolve(0);
+});
+test("execution limits come from the trusted SDK selector including finite fractional timeouts", async () => {
+  const f = fixture(); f.adapter.executionLimits = () => ({ timeoutMs: 777.25, maxStreamedBytes: 4096 });
+  const g = f.enroll(); f.spawnGeneration(g); f.call(g);
+  const result = await f.resolve(g, { timeoutMs: 777.25, maxStreamedBytes: 4096 });
+  expect(result.commandOptions.timeoutMs).toBe(777.25); expect(result.commandOptions.maxStreamedBytes).toBe(4096); g.dispose(); f.exited.resolve(0);
+});
+
+test("projected host tool names preserve the raw SDK identity rather than guessing an inverse", async () => {
+  const f = fixture(), g = f.enroll(); f.spawnGeneration(g);
+  g.observe({type:"tool_call",sessionId:"logical",callId:"call",threadId:"main",name:"bash",argsJson:JSON.stringify({command:"cat note"})} as NewSessionEvent, "Bash");
+  g.noteHook({tool_name:"Bash",tool_use_id:"call",session_id:"backend",cwd:source});
+  await expect(f.resolve(g)).resolves.toBeDefined();
+  g.observe({type:"tool_call",sessionId:"logical",callId:"custom",threadId:"main",name:"bash",argsJson:JSON.stringify({command:"cat note"})} as NewSessionEvent);
+  expect(() => g.noteHook({tool_name:"Bash",tool_use_id:"custom",session_id:"backend",cwd:source})).toThrow("hook-call-not-authenticated");
   g.dispose(); f.exited.resolve(0);
 });

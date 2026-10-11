@@ -1,3 +1,4 @@
+import { canonicalHostJson as canonical } from "./host-code-json";
 import * as runtime from "@yanlinglabs/winter-agent-runtime";
 import type {
   Options,
@@ -178,15 +179,6 @@ export function installedHostCodePolicyAdapter():
     settingsSeed:
       api.buildSettingsRuleSeed as HostCodePolicyAdapter["settingsSeed"],
   };
-}
-function canonical(value: unknown): string {
-  if (value === null || typeof value !== "object")
-    return JSON.stringify(value) ?? "null";
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  return `{${Object.entries(value)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`)
-    .join(",")}}`;
 }
 /** One authority per prepared query. Every permission decision uses the SDK's actual evaluator;
  * no runtime-supplied approval/configuration, duplicate prompts or Core rule parser is involved. */

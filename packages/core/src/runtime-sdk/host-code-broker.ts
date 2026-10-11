@@ -1,3 +1,5 @@
+import { hostToolNameFor } from "./tool-names";
+import { canonicalHostJson } from "./host-code-json";
 import * as sdk from "@yanlinglabs/winter-agent-sdk";
 import * as runtime from "@yanlinglabs/winter-agent-runtime";
 import type {
@@ -146,6 +148,7 @@ export interface HostCodeSdkAdapter {
       },
     ): Promise<HostCodeContext>;
   }): HostCodeRegistration;
+  executionLimits(name: string, input: Record<string, unknown>): { timeoutMs: number; maxStreamedBytes: number };
   buildPwdCaptureScript(command: string, path: string): string;
   buildRunInputs(input: Record<string, unknown>): Record<string, unknown>;
   buildHookEntries?(config: unknown): Array<{ id: string }>;
@@ -165,7 +168,9 @@ export function installedHostCodeAdapter(): HostCodeSdkAdapter | undefined {
     typeof client.applyMandatoryFloorToSpawnOptions !== "function" ||
     typeof server.createHostCodeProcessRegistration !== "function" ||
     typeof server.buildPwdCaptureScript !== "function" ||
-    typeof server.buildHostSandboxRunInputs !== "function"
+    typeof server.buildHostSandboxRunInputs !== "function" ||
+    server.HOST_CODE_EXECUTION_LIMITS_VERSION !== 1 ||
+    typeof server.hostCodeExecutionLimitsFor !== "function"
   )
     return undefined;
   return {
@@ -174,6 +179,7 @@ export function installedHostCodeAdapter(): HostCodeSdkAdapter | undefined {
       client.applyMandatoryFloorToSpawnOptions as HostCodeSdkAdapter["applyFloor"],
     register:
       server.createHostCodeProcessRegistration as HostCodeSdkAdapter["register"],
+    executionLimits: server.hostCodeExecutionLimitsFor as HostCodeSdkAdapter["executionLimits"],
     buildPwdCaptureScript:
       server.buildPwdCaptureScript as HostCodeSdkAdapter["buildPwdCaptureScript"],
     buildRunInputs:
@@ -287,8 +293,9 @@ function sameInputCommand(
 
 export interface HostCodeGeneration {
   options: Options;
+  readonly protectedStorage: boolean;
   generationId: string;
-  observe(event: NewSessionEvent): void;
+  observe(event: NewSessionEvent, runtimeToolName?: string): void;
   noteHook(input: unknown): void;
   /** Runs only after the existing host pre-hooks completed; absence of permission is no grant. */
   completeHook(input: unknown, signal: AbortSignal): Promise<void>;
@@ -444,11 +451,13 @@ export class HostCodeExecutionService {
       return ancestors;
     };
     let closed = false,
+      invalidated = false,
       canonicalEnv: Record<string, string> | undefined,
       registration: HostCodeRegistration | undefined;
     const requireCurrent = () => {
       if (
         closed ||
+        invalidated ||
         input.abort.signal.aborted ||
         !input.isCurrent() ||
         this.refreshing
@@ -641,22 +650,10 @@ export class HostCodeExecutionService {
             winterHome: canonicalEnv.WINTER_HOME,
             storeHome: canonicalEnv.WINTER_STORE_HOME,
           });
-          const timeout =
-            call.name === "Monitor"
-              ? effectiveCall.input.persistent === true
-                ? 2147483647
-                : Number(effectiveCall.input.timeout_ms)
-              : Math.min(
-                  typeof effectiveCall.input.timeout === "number" &&
-                    effectiveCall.input.timeout > 0
-                    ? effectiveCall.input.timeout
-                    : 120000,
-                  600000,
-                );
-          const admittedTimeout = request.kind === "workflow" ? 0 : timeout;
-          const admittedOutput = 5 * 1024 ** 3; // Existing SDK stream-kill limit; derived here, never selected by runtime JSON.
+          const limits = this.adapter!.executionLimits(call.name, effectiveCall.input);
+          const admittedTimeout = limits.timeoutMs, admittedOutput = limits.maxStreamedBytes;
           if (
-            !Number.isSafeInteger(request.timeoutMs) ||
+            !Number.isFinite(request.timeoutMs) ||
             request.timeoutMs !== admittedTimeout ||
             request.maxStreamedBytes !== admittedOutput
           )
@@ -818,8 +815,8 @@ export class HostCodeExecutionService {
           !call ||
           !hook ||
           call.name !== toolName ||
-          JSON.stringify(hook.effectiveInput ?? call.input) !==
-            JSON.stringify(toolInput)
+          canonicalHostJson(hook.effectiveInput ?? call.input) !==
+            canonicalHostJson(toolInput)
         )
           throw new HostCodeUnavailable("prompt-call-not-observed");
         const revision = binding!.policyRevision(),
@@ -883,61 +880,64 @@ export class HostCodeExecutionService {
     const generation: HostCodeGeneration = {
       options,
       generationId: id,
-      observe: (event) => {
-        if (closed) return;
-        if (event.sessionId !== input.sessionId)
-          throw new HostCodeUnavailable("foreign-projected-session");
-        if (event.type === "thread_started") threads.add(event.threadId);
-        else if (event.type === "thread_completed") {
-          threads.delete(event.threadId);
-          lineage.delete(event.threadId);
-          for (const [callId, call] of calls)
-            if (call.threadId === event.threadId) {
-              calls.delete(callId);
-              hooks.delete(callId);
-              admittedCalls.delete(callId);
-              binding?.forgetCall?.(callId);
-            }
-        } else if (
-          event.type === "tool_call" &&
-          ["Bash", "Monitor", "Workflow", "Agent", "Task"].includes(event.name)
-        ) {
-          if (
-            usedCallIds.has(event.callId) ||
-            usedCallIds.size >= 16384 ||
-            calls.size >= 512 ||
-            lineage.size >= 512 ||
-            event.argsJson.length > 262144
+      protectedStorage: required,
+      observe: (event, runtimeToolName) => {
+        if (!required || closed) return;
+        try {
+          if (event.sessionId !== input.sessionId)
+            throw new HostCodeUnavailable("foreign-projected-session");
+          if (event.type === "thread_started") threads.add(event.threadId);
+          else if (event.type === "thread_completed") {
+            threads.delete(event.threadId);
+            lineage.delete(event.threadId);
+            for (const [callId, call] of calls)
+              if (call.threadId === event.threadId) {
+                calls.delete(callId);
+                hooks.delete(callId);
+                admittedCalls.delete(callId);
+                binding?.forgetCall?.(callId);
+              }
+          } else if (
+            event.type === "tool_call" &&
+            ["Bash", "Monitor", "Workflow", "Agent", "Task"].includes(runtimeToolName ?? event.name)
           ) {
-            generation.dispose();
-            input.abort.abort();
-            throw new HostCodeUnavailable("ambiguous-or-unbounded-tool-calls");
+            const name = runtimeToolName ?? event.name;
+            if (runtimeToolName !== undefined && (hostToolNameFor(name) ?? name) !== event.name) throw new HostCodeUnavailable("projected-tool-name-mismatch");
+            if (
+              usedCallIds.has(event.callId) ||
+              usedCallIds.size >= 16384 ||
+              calls.size >= 512 ||
+              lineage.size >= 512 ||
+              event.argsJson.length > 262144
+            ) {
+              throw new HostCodeUnavailable("ambiguous-or-unbounded-tool-calls");
+            }
+            let data: unknown;
+            try {
+              data = JSON.parse(event.argsJson);
+            } catch {
+              throw new HostCodeUnavailable("tool-call-input-invalid");
+            }
+            if (!data || typeof data !== "object" || Array.isArray(data))
+              throw new HostCodeUnavailable("tool-call-input-invalid");
+            usedCallIds.add(event.callId);
+            calls.set(event.callId, {
+              callId: event.callId,
+              threadId: event.threadId,
+              name,
+              input: data as Record<string, unknown>,
+            });
+          } else if (event.type === "tool_result") {
+            calls.delete(event.callId);
+            hooks.delete(event.callId);
+            admittedCalls.delete(event.callId);
+            binding?.forgetCall?.(event.callId);
           }
-          let data: unknown;
-          try {
-            data = JSON.parse(event.argsJson);
-          } catch {
-            throw new HostCodeUnavailable("tool-call-input-invalid");
-          }
-          if (!data || typeof data !== "object" || Array.isArray(data))
-            throw new HostCodeUnavailable("tool-call-input-invalid");
-          usedCallIds.add(event.callId);
-          calls.set(event.callId, {
-            callId: event.callId,
-            threadId: event.threadId,
-            name: event.name,
-            input: data as Record<string, unknown>,
-          });
-        } else if (event.type === "tool_result") {
-          calls.delete(event.callId);
-          hooks.delete(event.callId);
-          admittedCalls.delete(event.callId);
-          binding?.forgetCall?.(event.callId);
-        }
+        } catch (error) { invalidated = true; throw error; }
       },
       noteHook: (value) => {
-        requireCurrent();
         if (!required) return;
+        requireCurrent();
         const pre = value as {
           session_id?: unknown;
           tool_use_id?: unknown;
@@ -1034,8 +1034,8 @@ export class HostCodeExecutionService {
               const existing = hook.responses.get(hookId);
               if (existing) {
                 if (
-                  JSON.stringify(existing.input) !==
-                  JSON.stringify(pre.tool_input)
+                  canonicalHostJson(existing.input) !==
+                  canonicalHostJson(pre.tool_input)
                 )
                   throw new HostCodeUnavailable("host-pre-hook-input-changed");
                 return existing.promise;
@@ -1104,8 +1104,8 @@ export class HostCodeExecutionService {
                 throw new HostCodeUnavailable("host-pre-hooks-pending");
               }
               if (
-                JSON.stringify(record.input) !==
-                JSON.stringify(request.input ?? call.input)
+                canonicalHostJson(record.input) !==
+                canonicalHostJson(request.input ?? call.input)
               ) {
                 invalid = true;
                 throw new HostCodeUnavailable(
@@ -1134,10 +1134,7 @@ export class HostCodeExecutionService {
         )
           throw new HostCodeUnavailable("host-pre-hook-context-changed");
         hook.decision = decision;
-        hook.effectiveInput = {
-          ...call.input,
-          ...(decision.transformedInput ?? {}),
-        };
+        hook.effectiveInput = structuredClone(decision.transformedInput ?? call.input);
         hook.completed = true;
       };
     }
