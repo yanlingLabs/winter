@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
+#include <net/if.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -13,12 +14,15 @@
 
 #define MAX_SOCKETS 256
 #define MAX_POLLS (MAX_SOCKETS + 2)
-typedef struct { int fd; wc_network_address peer; int protocol; bool dns; } flow;
+#define MAX_UDP_PEERS 16
+typedef struct { wc_network_address address; bool dns; uint64_t sent_ns; uint32_t bound_ifindex; } udp_peer;
+typedef struct { int fd; wc_network_address peer; int protocol; bool dns; uint32_t bound_ifindex; udp_peer udp[MAX_UDP_PEERS]; size_t udp_count; } flow;
 typedef struct { SlirpTimerId id; void *opaque; int64_t expires_ms; bool used; } timer;
 struct wc_network_endpoint {
     pthread_t thread; pthread_mutex_t lock; pthread_cond_t changed;
     int guest_fd, engine_fd, control[2]; bool stopped, replacing, replacement_done, replacement_inflight;
-    wc_network_policy policy, replacement;
+    wc_network_policy policy, replacement, effective_policy;
+    wc_host_route_snapshot routes;
     wc_network_stats stats;
     Slirp *slirp;
     flow flows[MAX_SOCKETS]; size_t flow_count;
@@ -42,40 +46,81 @@ static void host_snapshot(wc_network_policy *policy) {
     struct ifaddrs *all=NULL;
     if(getifaddrs(&all)!=0) { policy->public_internet=false; return; }
     for(struct ifaddrs *i=all;i && policy->host_network_count<WC_NETWORK_MAX_PREFIXES;i=i->ifa_next) {
-        if(!i->ifa_addr || !i->ifa_netmask) continue;
+        if(!i->ifa_addr) continue;
         wc_network_address a,mask;
-        if(!address_from_sockaddr(i->ifa_addr,&a) || !address_from_sockaddr(i->ifa_netmask,&mask)) continue;
-        wc_network_prefix p={.address=a,.prefix_length=0}; bool zero=false;
-        for(int b=0;b<(a.family==4?4:16);b++) for(int bit=7;bit>=0;bit--) { bool one=mask.bytes[b]&(1<<bit); if(one && !zero) p.prefix_length++; else if(!one) zero=true; }
-        if(p.prefix_length) policy->host_networks[policy->host_network_count++]=p;
+        if(!address_from_sockaddr(i->ifa_addr,&a)) continue;
+        policy->host_networks[policy->host_network_count++]=(wc_network_prefix){.address=a,.prefix_length=a.family==4?32:128};
+        if(policy->host_network_count==WC_NETWORK_MAX_PREFIXES) break;
+        if(!i->ifa_netmask || !address_from_sockaddr(i->ifa_netmask,&mask) || mask.family!=a.family) { policy->public_internet=false; continue; }
+        wc_network_prefix p={.address=a,.prefix_length=0}; bool zero=false,invalid=false;
+        for(int b=0;b<(a.family==4?4:16);b++) for(int bit=7;bit>=0;bit--) { bool one=mask.bytes[b]&(1<<bit); if(one && zero) invalid=true; else if(one) p.prefix_length++; else zero=true; }
+        if(invalid || !p.prefix_length) policy->public_internet=false;
+        else policy->host_networks[policy->host_network_count++]=p;
+        if(policy->host_network_count==WC_NETWORK_MAX_PREFIXES) break;
+        if((i->ifa_flags&IFF_POINTOPOINT) && i->ifa_dstaddr && address_from_sockaddr(i->ifa_dstaddr,&a)) policy->host_networks[policy->host_network_count++]=(wc_network_prefix){.address=a,.prefix_length=a.family==4?32:128};
     }
     freeifaddrs(all);
     // Overflow is conservative rather than silently omitting a host/LAN fence.
     if(policy->host_network_count==WC_NETWORK_MAX_PREFIXES) policy->public_internet=false;
 }
-static bool current_allowed(wc_network_endpoint *ctx,const wc_network_address *peer,int protocol,bool dns) {
-    wc_network_policy policy=ctx->policy; host_snapshot(&policy);
-    return wc_network_destination_allowed(&policy,peer,(uint8_t)protocol,dns,now_ns());
+static bool merge_route_fences(wc_network_policy *policy,const wc_host_route_snapshot *routes) {
+    if(!routes->inventory_complete) { policy->public_internet=false;return false; }
+    for(size_t i=0;i<routes->deny_prefix_count;i++) {
+        const wc_network_prefix *p=&routes->deny_prefixes[i];bool duplicate=false;
+        for(size_t j=0;j<policy->host_network_count;j++) {
+            const wc_network_prefix *old=&policy->host_networks[j];
+            if(old->address.family==p->address.family && old->prefix_length==p->prefix_length && !memcmp(old->address.bytes,p->address.bytes,p->address.family==4?4:16)) {duplicate=true;break;}
+        }
+        if(duplicate)continue;
+        if(policy->host_network_count==WC_NETWORK_MAX_PREFIXES) { policy->public_internet=false;return false; }
+        policy->host_networks[policy->host_network_count++]=*p;
+    }
+    return true;
+}
+bool wc_network_bind_interface(int fd,uint8_t family,uint32_t ifindex) {
+    if(family==4)return setsockopt(fd,IPPROTO_IP,IP_BOUND_IF,&ifindex,sizeof(ifindex))==0;
+    if(family==6)return setsockopt(fd,IPPROTO_IPV6,IPV6_BOUND_IF,&ifindex,sizeof(ifindex))==0;
+    return false;
+}
+static bool admission_interface(wc_network_endpoint *ctx,const wc_network_address *peer,int protocol,bool dns,uint32_t *interface) {
+    return wc_network_admit_routed_destination(&ctx->effective_policy,&ctx->routes,peer,(uint8_t)protocol,dns,now_ns(),interface);
+}
+static bool current_matches(wc_network_endpoint *ctx,const wc_network_address *peer,int protocol,bool dns,uint32_t bound) {
+    uint32_t current=0;return admission_interface(ctx,peer,protocol,dns,&current) && current==bound;
 }
 static bool destination(int fd,int protocol,const struct sockaddr *sa,size_t length,bool dns,void *opaque) {
-    (void)length; wc_network_endpoint *ctx=opaque; wc_network_address peer;
-    if(!address_from_sockaddr(sa,&peer) || !current_allowed(ctx,&peer,protocol,dns)) { stat_add(ctx,&ctx->stats.denied); return false; }
+    (void)length; wc_network_endpoint *ctx=opaque; wc_network_address peer;uint32_t interface=0;
+    if(!address_from_sockaddr(sa,&peer) || !admission_interface(ctx,&peer,protocol,dns,&interface)) { stat_add(ctx,&ctx->stats.denied); return false; }
     stat_add(ctx,&ctx->stats.outbound_attempts);
     if(ctx->policy.synthetic_no_outbound) return false; // Test transport, never a production fallback.
     flow *f=find_flow(ctx,fd);
     if(!f) return false;
-    f->peer=peer; f->protocol=protocol; f->dns=dns; return true;
+    // One upstream UDP socket has one kernel interface binding. Preserve existing peers;
+    // a cross-interface tuple must use a distinct guest socket instead of silently rebinding.
+    if(protocol==17 && f->udp_count && f->udp[0].bound_ifindex!=interface) {stat_add(ctx,&ctx->stats.denied);return false;}
+    if(!wc_network_bind_interface(fd,peer.family,interface)) {stat_add(ctx,&ctx->stats.denied);return false;}
+    if(protocol==17) {
+        size_t at=0;for(;at<f->udp_count;at++) if(address_equal(&f->udp[at].address,&peer)) break;
+        if(at==MAX_UDP_PEERS) { stat_add(ctx,&ctx->stats.denied); return false; }
+        f->udp[at]=(udp_peer){.address=peer,.dns=dns,.sent_ns=now_ns(),.bound_ifindex=interface};if(at==f->udp_count) f->udp_count++;
+    }
+    f->peer=peer; f->protocol=protocol; f->dns=dns; f->bound_ifindex=interface;return true;
 }
 static bool inbound(int fd,int protocol,const struct sockaddr *sa,size_t length,void *opaque) {
     (void)length; wc_network_endpoint *ctx=opaque; wc_network_address peer; flow *f=find_flow(ctx,fd);
-    bool allowed=f && address_from_sockaddr(sa,&peer) && protocol==f->protocol && address_equal(&peer,&f->peer) && current_allowed(ctx,&peer,protocol,f->dns);
+    bool allowed=false;
+    if(f && address_from_sockaddr(sa,&peer) && protocol==f->protocol) {
+        if(protocol==17) {
+            for(size_t i=0;i<f->udp_count;i++) if(address_equal(&peer,&f->udp[i].address) && current_matches(ctx,&peer,protocol,f->udp[i].dns,f->udp[i].bound_ifindex)) { allowed=true;break; }
+        } else allowed=address_equal(&peer,&f->peer) && current_matches(ctx,&peer,protocol,f->dns,f->bound_ifindex);
+    }
     if(!allowed) stat_add(ctx,&ctx->stats.inbound_peer_denied); return allowed;
 }
 static bool peer_current(int fd,void *opaque) {
     wc_network_endpoint *ctx=opaque; flow *f=find_flow(ctx,fd); if(!f || !f->peer.family) return false;
-    struct sockaddr_storage actual; socklen_t size=sizeof(actual); wc_network_address peer;
-    if(getpeername(fd,(struct sockaddr *)&actual,&size)!=0 || !address_from_sockaddr((void *)&actual,&peer) || !address_equal(&peer,&f->peer)) return false;
-    return current_allowed(ctx,&peer,f->protocol,f->dns);
+    // This is our immutable admitted connected tuple. getpeername may fail after RST,
+    // which must reach upstream recv/close handling instead of turning into a poll spin.
+    return current_matches(ctx,&f->peer,f->protocol,f->dns,f->bound_ifindex);
 }
 static bool capacity(void *opaque) { return ((wc_network_endpoint *)opaque)->flow_count<MAX_SOCKETS; }
 static bool dns(int family,struct sockaddr *sa,size_t length,void *opaque) {
@@ -139,12 +184,26 @@ static void *worker(void *opaque) {
         if(replace) { ctx->policy=ctx->replacement; ctx->replacing=false; }
         pthread_mutex_unlock(&ctx->lock);
         if(stop) break;
+        ctx->effective_policy=ctx->policy; host_snapshot(&ctx->effective_policy);
+        wc_host_routes_read(&ctx->routes);merge_route_fences(&ctx->effective_policy,&ctx->routes);
+        stat_add(ctx,&ctx->stats.poll_turns);
         if(replace) {
             reset_stack(ctx); pthread_mutex_lock(&ctx->lock); ctx->stats.revision=ctx->policy.revision; ctx->stats.policy_replacements++; if(!ctx->slirp) ctx->stopped=true; ctx->replacement_done=true; pthread_cond_broadcast(&ctx->changed); pthread_mutex_unlock(&ctx->lock);
         }
         if(!ctx->slirp) break;
-        bool expired=false; for(size_t i=0;i<ctx->flow_count;i++) if(ctx->flows[i].peer.family && !current_allowed(ctx,&ctx->flows[i].peer,ctx->flows[i].protocol,ctx->flows[i].dns)) { expired=true; break; }
-        if(expired) reset_stack(ctx);
+        // Prune only affected tuples. An expired grant must not reset unrelated connections.
+        for(size_t i=0;i<ctx->flow_count;) {
+            flow *f=&ctx->flows[i];bool expired=false;
+            if(f->protocol==17 && f->peer.family) {
+                for(size_t n=0;n<f->udp_count;) {
+                    if(now_ns()-f->udp[n].sent_ns>120ULL*1000000000 || !current_matches(ctx,&f->udp[n].address,17,f->udp[n].dns,f->udp[n].bound_ifindex)) f->udp[n]=f->udp[--f->udp_count];
+                    else n++;
+                }
+                expired=f->udp_count==0;
+            } else expired=f->peer.family && !current_matches(ctx,&f->peer,f->protocol,f->dns,f->bound_ifindex);
+            if(expired) { int fd=f->fd;slirp_winter_close_socket(ctx->slirp,fd);if(i<ctx->flow_count && ctx->flows[i].fd==fd)i++; }
+            else i++;
+        }
         if(!ctx->slirp) break;
         uint32_t timeout=100; ctx->poll_count=2; ctx->polls[0]=(struct pollfd){.fd=ctx->engine_fd,.events=POLLIN}; ctx->polls[1]=(struct pollfd){.fd=ctx->control[0],.events=POLLIN};
         slirp_pollfds_fill_socket(ctx->slirp,&timeout,add_poll,ctx);
@@ -157,8 +216,7 @@ static void *worker(void *opaque) {
             stat_add(ctx,&ctx->stats.packets_in);
             uint64_t tick=now_ns(); tokens += (double)(tick-token_time)*1024.0/1000000000.0; if(tokens>64) tokens=64; token_time=tick;
             if(tokens<1) {stat_add(ctx,&ctx->stats.dropped); continue;} tokens-=1;
-            wc_network_policy p=ctx->policy; host_snapshot(&p);
-            int admitted=wc_network_classify_frame(&p,frame,(size_t)length,now_ns());
+            int admitted=wc_network_classify_frame(&ctx->effective_policy,frame,(size_t)length,now_ns());
             if(admitted==1) slirp_input(ctx->slirp,frame,(int)length); else stat_add(ctx,admitted==0?&ctx->stats.denied:&ctx->stats.unsupported);
         }
         slirp_pollfds_poll(ctx->slirp,ready<0,revents,ctx);
@@ -173,8 +231,8 @@ wc_network_endpoint *wc_network_create(const wc_network_policy *policy) {
     pthread_mutex_init(&ctx->lock,NULL); pthread_cond_init(&ctx->changed,NULL); ctx->policy=*policy; ctx->stats.revision=policy->revision;
     int pair[2]; if(socketpair(AF_UNIX,SOCK_DGRAM,0,pair)!=0) goto failed; ctx->guest_fd=pair[0]; ctx->engine_fd=pair[1];
     if(pipe(ctx->control)!=0) goto failed;
-    int snd=128*1024,rcv=512*1024;
-    for(int i=0;i<2;i++) { fcntl(pair[i],F_SETFL,O_NONBLOCK); fcntl(pair[i],F_SETFD,FD_CLOEXEC); if(setsockopt(pair[i],SOL_SOCKET,SO_SNDBUF,&snd,sizeof(snd)) || setsockopt(pair[i],SOL_SOCKET,SO_RCVBUF,&rcv,sizeof(rcv))) goto failed; }
+    int snd=128*1024,rcv=512*1024,no_sigpipe=1;
+    for(int i=0;i<2;i++) { fcntl(pair[i],F_SETFL,O_NONBLOCK); fcntl(pair[i],F_SETFD,FD_CLOEXEC); if(setsockopt(pair[i],SOL_SOCKET,SO_SNDBUF,&snd,sizeof(snd)) || setsockopt(pair[i],SOL_SOCKET,SO_RCVBUF,&rcv,sizeof(rcv)) || setsockopt(pair[i],SOL_SOCKET,SO_NOSIGPIPE,&no_sigpipe,sizeof(no_sigpipe))) goto failed; }
     for(int i=0;i<2;i++) { fcntl(ctx->control[i],F_SETFL,O_NONBLOCK); fcntl(ctx->control[i],F_SETFD,FD_CLOEXEC); }
     ctx->slirp=new_stack(ctx); if(!ctx->slirp || pthread_create(&ctx->thread,NULL,worker,ctx)!=0) goto failed;
     return ctx;
@@ -188,7 +246,7 @@ int wc_network_replace_policy(wc_network_endpoint *ctx,const wc_network_policy *
     if(ctx->stopped || ctx->replacement_inflight || ctx->stats.revision!=expected || policy->revision<=expected) { pthread_mutex_unlock(&ctx->lock); return EBUSY; }
     ctx->replacement=*policy; ctx->replacing=true; ctx->replacement_inflight=true; ctx->replacement_done=false; wake(ctx);
     while(!ctx->replacement_done && !ctx->stopped) pthread_cond_wait(&ctx->changed,&ctx->lock);
-    bool stopped=ctx->stopped; ctx->replacement_inflight=false; pthread_mutex_unlock(&ctx->lock); return stopped?ECANCELED:0;
+    bool stopped=ctx->stopped; ctx->replacement_inflight=false; pthread_cond_broadcast(&ctx->changed); pthread_mutex_unlock(&ctx->lock); return stopped?ECANCELED:0;
 }
 void wc_network_read_stats(wc_network_endpoint *ctx,wc_network_stats *out) { if(!ctx || !out) return; pthread_mutex_lock(&ctx->lock); *out=ctx->stats; pthread_mutex_unlock(&ctx->lock); }
-void wc_network_destroy(wc_network_endpoint *ctx) { if(!ctx) return; pthread_mutex_lock(&ctx->lock); ctx->stopped=true; wake(ctx); pthread_cond_broadcast(&ctx->changed); pthread_mutex_unlock(&ctx->lock); pthread_join(ctx->thread,NULL); close(ctx->guest_fd); close(ctx->engine_fd); close(ctx->control[0]); close(ctx->control[1]); pthread_mutex_destroy(&ctx->lock); pthread_cond_destroy(&ctx->changed); free(ctx); }
+void wc_network_destroy(wc_network_endpoint *ctx) { if(!ctx) return; pthread_mutex_lock(&ctx->lock); ctx->stopped=true; wake(ctx); pthread_cond_broadcast(&ctx->changed); while(ctx->replacement_inflight)pthread_cond_wait(&ctx->changed,&ctx->lock); pthread_mutex_unlock(&ctx->lock); pthread_join(ctx->thread,NULL); close(ctx->guest_fd); close(ctx->engine_fd); close(ctx->control[0]); close(ctx->control[1]); pthread_mutex_destroy(&ctx->lock); pthread_cond_destroy(&ctx->changed); free(ctx); }

@@ -57,6 +57,7 @@ static bool public_unicast(wc_network_address address) {
             (b[0] == 198 && b[1] == 51 && b[2] == 100) || (b[0] == 203 && b[1] == 0 && b[2] == 113));
     }
     if (address.family != 6 || (address.bytes[0] & 0xe0) != 0x20) return false;
+    if (address.bytes[0] == 0x20 && address.bytes[1] == 0x02) return false; // 6to4 can encode a non-public IPv4 destination.
     // Documentation and Teredo transition addresses are not ordinary public peers.
     return !(address.bytes[0] == 0x20 && address.bytes[1] == 0x01 &&
         ((address.bytes[2] == 0x0d && address.bytes[3] == 0xb8) ||
@@ -68,7 +69,7 @@ static bool hard_invalid(wc_network_address address) {
     if (address.family != 6 || address.bytes[0] == 255) return true;
     uint8_t sum = 0; for (int i = 0; i < 16; i++) sum |= address.bytes[i]; return sum == 0;
 }
-bool wc_network_destination_allowed(const wc_network_policy *policy, const wc_network_address *destination, uint8_t protocol, bool configured_dns, uint64_t now_ns) {
+bool wc_network_explicit_destination_allowed(const wc_network_policy *policy, const wc_network_address *destination, uint8_t protocol, bool configured_dns, uint64_t now_ns) {
     if (!policy || !destination || (protocol != 6 && protocol != 17) || destination->port == 0 || hard_invalid(*destination)) return false;
     const wc_network_address *resolver = destination->family == 4 ? &policy->resolver4 : &policy->resolver6;
     if (configured_dns && policy->public_internet && policy->system_dns_exception &&
@@ -78,12 +79,29 @@ bool wc_network_destination_allowed(const wc_network_policy *policy, const wc_ne
         if (grant->protocol == protocol && grant->destination.port == destination->port && same_ip(grant->destination, *destination) &&
             (!grant->expires_monotonic_ns || now_ns < grant->expires_monotonic_ns)) return true;
     }
+    return false;
+}
+bool wc_network_destination_allowed(const wc_network_policy *policy, const wc_network_address *destination, uint8_t protocol, bool configured_dns, uint64_t now_ns) {
+    if (!policy || !destination || (protocol != 6 && protocol != 17) || destination->port == 0 || hard_invalid(*destination)) return false;
+    if (wc_network_explicit_destination_allowed(policy,destination,protocol,configured_dns,now_ns)) return true;
     wc_network_address normalized = canonical(*destination);
     if (!policy->public_internet || !public_unicast(normalized)) return false;
     for (size_t i = 0; i < policy->host_network_count && i < WC_NETWORK_MAX_PREFIXES; i++) {
-        if (prefix(&normalized, &policy->host_networks[i])) return false;
+        wc_network_prefix network=policy->host_networks[i];
+        wc_network_address base=canonical(network.address);
+        if(base.family!=network.address.family) { network.address=base;network.prefix_length=network.prefix_length>=96?network.prefix_length-96:0; }
+        if (prefix(&normalized, &network)) return false;
     }
     return true;
+}
+bool wc_network_admit_routed_destination(const wc_network_policy *policy,const wc_host_route_snapshot *routes,const wc_network_address *destination,uint8_t protocol,bool configured_dns,uint64_t now_ns,uint32_t *ifindex) {
+    if(!ifindex)return false;*ifindex=0;
+    if(wc_network_explicit_destination_allowed(policy,destination,protocol,configured_dns,now_ns))return true;
+    if(!wc_network_destination_allowed(policy,destination,protocol,configured_dns,now_ns) || !routes || !routes->inventory_complete || routes->deny_prefix_count>WC_NETWORK_MAX_PREFIXES)return false;
+    wc_network_address normalized=canonical(*destination);
+    for(size_t i=0;i<routes->deny_prefix_count;i++)if(prefix(&normalized,&routes->deny_prefixes[i]))return false;
+    *ifindex=normalized.family==4?routes->default_ipv4_ifindex:routes->default_ipv6_ifindex;
+    return *ifindex!=0;
 }
 static uint16_t u16(const uint8_t *bytes) { return ((uint16_t)bytes[0] << 8) | bytes[1]; }
 static bool virtual_dns(wc_network_address address) {

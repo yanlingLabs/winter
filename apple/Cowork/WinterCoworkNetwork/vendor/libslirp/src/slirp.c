@@ -24,6 +24,17 @@
  */
 #include "slirp.h"
 
+void slirp_winter_close_socket(Slirp *slirp, slirp_os_socket fd)
+{
+    struct socket *so;
+    for (so = slirp->tcb.so_next; so != &slirp->tcb; so = so->so_next) {
+        if (so->s == fd) { tcp_drop(sototcpcb(so), EACCES); return; }
+    }
+    for (so = slirp->udb.so_next; so != &slirp->udb; so = so->so_next) {
+        if (so->s == fd) { udp_detach(so); return; }
+    }
+}
+
 #ifndef g_warning_once
 #define g_warning_once g_warning
 #endif

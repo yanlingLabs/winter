@@ -48,7 +48,7 @@ public struct NetworkEndpointError: Error, LocalizedError, Sendable {
     public var errorDescription: String? { message }
 }
 public struct NetworkEndpointStatistics: Sendable {
-    public let revision: UInt64, packetsIn: UInt64, packetsOut: UInt64, denied: UInt64, unsupported: UInt64, dropped: UInt64, outboundAttempts: UInt64, activeSockets: UInt64, inboundPeerDenied: UInt64
+    public let revision: UInt64, packetsIn: UInt64, packetsOut: UInt64, denied: UInt64, unsupported: UInt64, dropped: UInt64, outboundAttempts: UInt64, activeSockets: UInt64, inboundPeerDenied: UInt64, pollTurns: UInt64
 }
 
 public struct NetworkEndpointScope: Sendable {
@@ -100,7 +100,7 @@ public final class CoworkNetworkEndpoint: @unchecked Sendable {
         }
     }
     public func statistics() throws -> NetworkEndpointStatistics {
-        try withHandle { handle in var s=wc_network_stats(); wc_network_read_stats(handle,&s); return .init(revision:s.revision,packetsIn:s.packets_in,packetsOut:s.packets_out,denied:s.denied,unsupported:s.unsupported,dropped:s.dropped,outboundAttempts:s.outbound_attempts,activeSockets:s.active_sockets,inboundPeerDenied:s.inbound_peer_denied) }
+        try withHandle { handle in var s=wc_network_stats(); wc_network_read_stats(handle,&s); return .init(revision:s.revision,packetsIn:s.packets_in,packetsOut:s.packets_out,denied:s.denied,unsupported:s.unsupported,dropped:s.dropped,outboundAttempts:s.outbound_attempts,activeSockets:s.active_sockets,inboundPeerDenied:s.inbound_peer_denied,pollTurns:s.poll_turns) }
     }
     public func shutdown() async {
         await withCheckedContinuation { (continuation:CheckedContinuation<Void,Never>) in queue.async {self.lock.lock(); let h=self.handle; self.handle=nil; self.lock.unlock(); if let h {wc_network_destroy(h)}; continuation.resume()} }

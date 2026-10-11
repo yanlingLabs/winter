@@ -2,7 +2,10 @@
 
 Implemented native component, not an integrated or passed VM gate. All packet,
 userspace TCP/UDP stack, and host socket work stays on a dedicated pthread inside
-the caller process. No helper process, VZ NAT attachment, bridge, host port
+the caller process. Production placement is unresolved: putting a C packet
+parser in the credential daemon expands its attack surface. This component
+must remain unavailable until the reviewed process/connection-broker boundary
+is implemented. No helper process, VZ NAT attachment, bridge, host port
 forward, guest exec service, or global firewall change is exposed.
 
 ## Interface and ownership
@@ -25,6 +28,8 @@ JSON or read the authority DB. Never construct it from a guest request.
 - `shutdown()` joins only the owned worker and closes only owned descriptors.
   Close the VM device before destroying its endpoint; shutdown is not proof the
   VM stopped. The host controller retains its independent uncertain-stop fence.
+  C callers must exclude new calls and concurrent statistics/FD borrows before
+  destroying the endpoint; destroy drains an already admitted policy replacement.
 
 Static guest settings: MAC `02:77:69:00:00:01`, IPv4 `10.0.2.15/24`, gateway
 `10.0.2.2`, DNS `10.0.2.3`; IPv6 `fd00:77::15/64`, gateway `fd00:77::2`, DNS
@@ -52,11 +57,26 @@ The UDP query parser rejects non-query/opcode traffic, but this is a fixed DNS
 service exception, not a full DNS application firewall. Host integration must
 watch system DNS changes and replace the resolver policy before resuming work;
 automatic resolver-change observation is not implemented yet. A failed host
-interface snapshot conservatively disables public destinations.
+interface or route snapshot conservatively disables public destinations. Host
+interface and routing inventories are captured once per native poll turn.
+Public connections require an unambiguous default interface and are bound with
+`IP_BOUND_IF`/`IPV6_BOUND_IF`; nondefault public routes (including VPN/static
+routes) require a grant. Exact grants and the configured DNS exception use the
+host's ordinary route selection. A grant is authority for its exact destination.
 
-UDP responses must match the exact flow peer and current policy. TCP read/send
-checks the connected peer and current policy. Expired/revoked peers or changed
-host/LAN interface snapshots destroy the old stack. No unsolicited listener or
+This does not detect a router's public WAN address or upstream NAT hairpinning.
+Known external-address policy or controlled egress is still needed before
+claiming complete denial of host/LAN access. Route binding alone is insufficient.
+
+UDP responses must match one of at most 16 admitted exact peers per socket and
+current policy; a peer expires after 120 seconds without an outbound send.
+Expiry closes only a flow with no remaining peers; a denied or expired peer
+cannot discard another admitted peer's response. A UDP socket cannot mix route
+interface bindings; a different binding requires a distinct guest socket.
+TCP read/send checks its recorded admitted tuple and current policy. A reset
+still drains/closes the socket; failure of `getpeername` does not leave a busy
+polling socket behind. Policy replacement resets all flows, while periodic
+revalidation closes only affected sockets. No unsolicited listener or
 forwarding API is reachable through the wrapper. Internet ping/raw sockets are
 explicitly disabled in the vendored paths as defense in depth.
 
@@ -80,8 +100,10 @@ are mandatory. Missing hooks deny. Review and maintain the patch on upgrades.
 Build currently uses existing local GLib2.90.0 via pkg-config, and transitively
 libintl1.0 and PCRE2 10.49; no global installation was performed. These are
 runtime dependencies, not optional developer-only dependencies. Current output
-still links Homebrew absolute paths, so it is **not a distributable production
-artifact**. Production availability must remain blocked until the exact native
+still links Homebrew absolute paths. The separate `../packaging` recipe has
+built and relocated GLib/libintl/PCRE2 from pinned sources; the reviewed network
+product still needs its final package and relocated smoke. Production
+availability must remain blocked until the exact native
 closure is packaged with relative load paths, verified provenance and notices,
 corresponding GLib/libintl source/build material and LGPL replacement/relinking
 rights. GLib and libintl use LGPL2.1-or-later; PCRE2 uses BSD3 plus its retained
@@ -99,17 +121,23 @@ swift build --package-path apple/Cowork/WinterCoworkNetwork --jobs 4
 swift test --package-path apple/Cowork/WinterCoworkNetwork --jobs 4
 ```
 
-13 Swift Testing tests passed on 2026-10-11: public/private/mapped IPv6 and LAN
+33 Swift Testing tests passed on 2026-10-11: public/private/mapped IPv6 and LAN
 policy, tuple/expiry grants, configured DNS exception, gateway final tuple,
 malformed/raw/fragment denial, policy ACK/stale revision, real libslirp TCP
 connect and UDP send to scoped ephemeral loopback listeners, unsolicited UDP
-peer rejection, flow closure on revocation, direct private IPv6 denial, and a
+peer rejection, multi-peer UDP replies and selective expiry, TCP payload in
+both directions and RST cleanup, flow closure on revocation, direct private
+IPv6 denial, and a
 full supplied-prefix inventory failing closed instead of skipping observed host
 interfaces. The latter regression came from independent security review and
 exercises final translated-tuple policy without performing a public send.
+Route tests cover Darwin sockaddr alignment/short masks, malformed and bounded
+inventories, generated versus static routes, ambiguous/missing defaults,
+mapped-prefix normalization, final routed admission and kernel interface-bind
+options. The read-only live snapshot test logs counts and readiness only.
 Tests use disposable local socket fixtures; no VM, real public connection,
 provider credential, global service or host pressure is involved. This does not
-prove DNS end-to-end, TCP payload transfer, guest DHCP/IPv6 negotiation, VZ
+prove DNS end-to-end, guest DHCP/IPv6 negotiation, VZ
 integration, persistent policy crash recovery, or production security readiness.
 
 ## Next integration requirements

@@ -15,7 +15,11 @@ Local changes (must be independently reviewed on every upgrade):
   current connected peer; UDP receive requires exact admitted source peer.
   Gateway translation excludes broadcast and all other IPv6 virtual-prefix
   addresses. No implicit get_dns6_addr fallback remains in outbound translation.
+  A denied TCP read closes the affected flow instead of repeatedly polling it.
 - slirp.c: actual TCP payload send requires current connected-peer callback.
+  `slirp_winter_close_socket` is a host-only bounded-wrapper helper for closing
+  an affected flow after peer/route expiry; it is not exposed to guest traffic.
+  Its declaration is added to libslirp.h.
 - tcp_subr.c / udp.c: outbound socket allocation requires capacity callback.
 - ip_icmp.c / ip6_icmp.c: host raw/ping socket send helpers return EPERM before
   socket creation. Ingress also rejects Internet ICMP; guest-local NDP remains.

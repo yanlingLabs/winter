@@ -416,6 +416,10 @@ void slirp_set_debug(unsigned int flags);
 SLIRP_EXPORT
 void slirp_reset_debug(unsigned int flags);
 
+/* Winter host policy: close one owned flow without resetting unrelated guests' flows. */
+SLIRP_EXPORT
+void slirp_winter_close_socket(Slirp *slirp, slirp_os_socket fd);
+
 #if defined(_WIN32)
 /* Windows utility functions: */
 

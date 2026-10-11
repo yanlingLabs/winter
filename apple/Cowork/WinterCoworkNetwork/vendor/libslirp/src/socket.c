@@ -176,7 +176,13 @@ size_t sopreprbuf(struct socket *so, struct iovec *iov, int *np)
  */
 int soread(struct socket *so)
 {
-    if (!so->slirp->cb->winter_peer_current || !so->slirp->cb->winter_peer_current(so->s, so->slirp->opaque)) { errno = EPERM; return -1; }
+    if (!so->slirp->cb->winter_peer_current || !so->slirp->cb->winter_peer_current(so->s, so->slirp->opaque)) {
+        /* A denied flow must leave the poll set, just like a recv failure below. */
+        sofcantrcvmore(so);
+        tcp_drop(sototcpcb(so), EPERM);
+        errno = EPERM;
+        return -1;
+    }
     int n, nn;
     size_t buf_len;
     struct sbuf *sb = &so->so_snd;
