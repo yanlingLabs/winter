@@ -209,4 +209,24 @@ final class GuardianRound11Tests: XCTestCase {
         XCTAssertTrue(theft.undoes, "\(theft)")
         XCTAssertEqual(g.view.app, 700, "restored to what was in front just before")
     }
+
+    /// Round 10's LOW #10: under Secure Event Input the tap sees no key — when the bound app in front holds it itself, the
+    /// user is taken to be working in it; held by another app, nothing changes.
+    func testSecureInputHeldByTheFrontBoundAppIsWork() throws {
+        let sys = FakeSystem()
+        sys.running = [1, 500]; sys.front = 500; sys.space = 100
+        sys.windows[77] = FakeSystem.window(77, pid: 500, CGRect(x: 500, y: 0, width: 400, height: 300))
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        let t = CUTarget(id: "t1", sessionId: "s", pid: 500, bundleId: "com.example.app", appName: "App",
+                         isChromium: false, mirror: false, windowID: 77, windowTitle: "")
+        core.registerForTesting(t, windowElement: nil)
+        core.secureInputOverride = true
+        core.secureInputOwnerOverride = 1
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "another app holds it")
+        core.secureInputOwnerOverride = 500
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(t))
+        sys.front = 1
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "not in front")
+    }
 }

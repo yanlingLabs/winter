@@ -639,6 +639,8 @@ public final class CUCore: @unchecked Sendable {
     var switchInputObservableOverride: Bool?
     /// Secure Event Input, as a test sets it (live: `IsSecureEventInputEnabled`).
     var secureInputOverride: Bool?
+    /// The process holding Secure Event Input, as a test sets it (live: the session's `kCGSSessionSecureInputPID`).
+    var secureInputOwnerOverride: pid_t?
     /// Every verdict of the one rule, with the path that asked (the model-based test's I5 check).
     var moveJudged: ((String, CUUserView, CUMoveOwner) -> Void)?
     /// Schedules the end of the guard's tail; tests run it by hand.
