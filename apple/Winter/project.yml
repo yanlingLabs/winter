@@ -1132,8 +1132,9 @@ targets:
   # wire vocabulary, the command parser, the CDP allowlist and the per-tab gate — are compiled in directly, so the helper
   # enforces the very same Swift copy of the allowlist and world rules Winter.app does.
   #
-  # Identity: com.winter.headless (Release), com.winter.headless.dev (only `bun run dev:headless` gives it, on its own
-  # command line), com.winter.headless.xcode-debug for a plain Xcode Debug build. Hardened runtime, NO entitlements, a
+  # Identity: com.winter.headless (Release), com.winter.headless.dev (only `bun run dev:headless` gives it, through
+  # WINTER_HEADLESS_DEBUG_BUNDLE_ID on its own command line — a setting only this target reads, so the CEF helper targets
+  # it builds keep their own identifiers), com.winter.headless.xcode-debug for a plain Xcode Debug build. Hardened runtime, NO entitlements, a
   # stated designated requirement at every signing site (scripts/embed-headless-helper.sh, dev:headless). With
   # WINTER_HEADLESS_SELF_CONTAINED=YES (dev:headless passes it) the build copies the CEF framework and the five helper
   # bundles into its OWN Contents/Frameworks, so the dev helper runs outside Winter.app.
@@ -1231,6 +1232,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.winter.headless
         WINTER_HEADLESS_APP_NAME: Winter Headless
         WINTER_HEADLESS_SELF_CONTAINED: "NO"
+        WINTER_HEADLESS_DEBUG_BUNDLE_ID: com.winter.headless.xcode-debug
         CODE_SIGN_IDENTITY: "Apple Development"
         DEVELOPMENT_TEAM: 37N77U9RSZ
         CODE_SIGN_STYLE: Manual
@@ -1246,7 +1248,7 @@ targets:
         CLANG_CXX_LANGUAGE_STANDARD: gnu++20
       configs:
         Debug:
-          PRODUCT_BUNDLE_IDENTIFIER: com.winter.headless.xcode-debug
+          PRODUCT_BUNDLE_IDENTIFIER: $(WINTER_HEADLESS_DEBUG_BUNDLE_ID)
           WINTER_HEADLESS_APP_NAME: Winter Headless Dev
         Release:
           # The helper's privacy set: the release identity scan reads every byte of it too.

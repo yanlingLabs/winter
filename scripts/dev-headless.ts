@@ -26,7 +26,7 @@ import { WINTER_TEAM_ID } from "../packages/core/src/auth/app-token-acl";
 import { LSREGISTER, pidsRunning } from "./computer-helper-lib";
 import { resolveDevSigningIdentity } from "./dev-daemon-lib";
 import {
-  builtHeadlessPath, checkSignedHeadless, HEADLESS, headlessBuildArgs, headlessExecutable, headlessRequirement, headlessSignArgs,
+  builtHeadlessPath, checkSignedHeadless, HEADLESS, HEADLESS_NESTED_HELPERS, headlessBuildArgs, headlessExecutable, headlessRequirement, headlessSignArgs, signedFacts,
 } from "./headless-helper-lib";
 import { readCanonical } from "./version-lib";
 
@@ -98,6 +98,12 @@ export function inspectHeadless(appPath: string, flavor: "dist" | "dev"): string
     entitlementsXml: run("codesign", ["-d", "--entitlements", "-", "--xml", appPath]).stdout,
     infoPlist: plist.status === 0 ? (JSON.parse(plist.stdout) as Record<string, unknown>) : {},
     hasFrameworks: existsSync(join(appPath, "Contents", "Frameworks")),
+    ...(existsSync(join(appPath, "Contents", "Frameworks")) ? {
+      nestedIdentifiers: Object.fromEntries(HEADLESS_NESTED_HELPERS.map((name) => {
+        const nested = join(appPath, "Contents", "Frameworks", `${name}.app`);
+        return [name, existsSync(nested) ? signedFacts(run("codesign", ["-dvv", nested]).stderr).identifier : undefined];
+      })),
+    } : {}),
   });
   const strict = run("codesign", ["--verify", "--deep", "--strict", `-R=${headlessRequirement(HEADLESS[flavor].identifier, WINTER_TEAM_ID)}`, appPath]);
   if (strict.status !== 0) failures.push(`codesign --verify --deep --strict against the stated requirement failed: ${strict.stderr.trim()}`);

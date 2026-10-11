@@ -5,10 +5,10 @@
 // the real artifact).
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkSignedHeadless, HEADLESS, HEADLESS_EMBED_RELATIVE, headlessRequirement, headlessSignArgs, signedFacts } from "./headless-helper-lib";
+import { checkSignedHeadless, HEADLESS, HEADLESS_EMBED_RELATIVE, HEADLESS_NESTED_HELPERS, headlessBuildArgs, headlessRequirement, headlessSignArgs, signedFacts } from "./headless-helper-lib";
 
 const SCRIPT = join(import.meta.dir, "embed-headless-helper.sh");
 const temps: string[] = [];
@@ -125,6 +125,26 @@ describe("headless-helper-lib", () => {
       .toEqual(["not signed with the hardened runtime (--options runtime)"]);
     expect(checkSignedHeadless("dist", "TEAM", "1.2.3", { ...good, codesignDr: "designated => identifier \"com.winter.headless\" and certificate leaf = H\"abc\"" })[0])
       .toMatch(/^designated requirement is identifier/);
+  });
+
+  test("a self-contained build's nested helpers keep their own identifiers (never the helper's)", () => {
+    const own = Object.fromEntries(HEADLESS_NESTED_HELPERS.map((n, i) => [n, `com.winter.app.cefhelper${i === 0 ? "" : `.${i}`}`]));
+    const dev = { ...good, codesignDvv: good.codesignDvv.replace("com.winter.headless", "com.winter.headless.dev"), codesignDr: `designated => ${headlessRequirement("com.winter.headless.dev", "TEAM")}`,
+      infoPlist: { ...good.infoPlist, CFBundleIdentifier: "com.winter.headless.dev", CFBundleName: "Winter Headless Dev" }, hasFrameworks: true };
+    expect(checkSignedHeadless("dev", "TEAM", "1.2.3", { ...dev, nestedIdentifiers: own })).toEqual([]);
+    expect(checkSignedHeadless("dev", "TEAM", "1.2.3", { ...dev, nestedIdentifiers: { ...own, "Winter Helper (GPU)": "com.winter.headless.dev" } }))
+      .toEqual(["the nested Winter Helper (GPU).app carries the helper's own identifier com.winter.headless.dev — the build renamed every target (a command-line PRODUCT_BUNDLE_IDENTIFIER)"]);
+    expect(checkSignedHeadless("dev", "TEAM", "1.2.3", { ...dev, nestedIdentifiers: { ...own, "Winter Helper": undefined } }))
+      .toEqual(["the nested Winter Helper.app is missing or unsigned"]);
+  });
+
+  test("the dev build names its identity through the helper's own setting, never a build-wide PRODUCT_BUNDLE_IDENTIFIER", () => {
+    const args = headlessBuildArgs({ derivedDataPath: "/dd" });
+    expect(args).toContain("WINTER_HEADLESS_DEBUG_BUNDLE_ID=com.winter.headless.dev");
+    expect(args.some((a) => a.startsWith("PRODUCT_BUNDLE_IDENTIFIER="))).toBe(false);
+    const yml = readFileSync(join(import.meta.dir, "..", "apple", "Winter", "project.yml"), "utf8");
+    expect(yml).toContain("          PRODUCT_BUNDLE_IDENTIFIER: $(WINTER_HEADLESS_DEBUG_BUNDLE_ID)\n");
+    expect(yml).toContain("        WINTER_HEADLESS_DEBUG_BUNDLE_ID: com.winter.headless.xcode-debug\n");
   });
 
   test("the dev helper must be self-contained", () => {
