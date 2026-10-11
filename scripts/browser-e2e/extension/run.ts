@@ -213,11 +213,83 @@ function serve(dir: string, onRequest: (path: string) => void) {
       const path = new URL(req.url).pathname;
       onRequest(path);
       if (path === "/ping") return new Response("pong");
+      // Phase 3: a file a page offers (an attachment, with a cookie that must never leave the browser).
+      if (path === "/files/report.csv") return new Response("a,b\n1,2\n", { headers: { "content-type": "text/csv", "content-disposition": 'attachment; filename="report.csv"', "set-cookie": "session=secret-cookie-value" } });
       const file = join(dir, path.replace(/^\/+/, "") || "page.html");
       if (!file.startsWith(dir) || !existsSync(file)) return new Response("not found", { status: 404 });
       return new Response(readFileSync(file), { headers: { "content-type": "text/html; charset=utf-8" } });
     },
   });
+}
+
+// ── Phase 3 (Winter for Chrome 1.1.0) ─────────────────────────────────────────────────────────────────────────────────
+
+async function phase3(p3: CdpTransport, base: string, profile: string): Promise<void> {
+  const features = (p3 as { features?: ReadonlySet<string> }).features ?? new Set<string>();
+  const want = ["cdp3", "present", "userDone", "mute", "group", "keepGroup", "windows", "history", "bookmarks", "downloads", "tabFacts"];
+  check(want.every((f) => features.has(f)), "1.1.0's hello names its features (cdp3, present, …) and the daemon offers their members", [...features]);
+  const dl = await p3.createTab({ sessionId: "s_p3", sessionTitle: "Phase 3", url: `${base}/page.html` });
+  await sleep(800);
+  await p3.attach(dl.tabKey, { sessionId: "s_p3" });
+  const events: CdpEvent[] = [];
+  p3.onEvent((e) => { if (e.tabKey === dl.tabKey) events.push(e); });
+  await p3.subscribe(dl.tabKey, ["Fetch.requestPaused", "Page.loadEventFired", "Network.requestWillBeSent", "Network.responseReceived"]);
+  // The guard's Fetch / IO rules, against the real browser.
+  check(await code(p3.send(dl.tabKey, "Fetch.enable", { patterns: [{ urlPattern: "*", requestStage: "Request" }] })) === "not_allowed", "Fetch.enable at the Request stage is refused (the Response stage only)");
+  check(await code(p3.send(dl.tabKey, "IO.read", { handle: "1", size: 10 })) === "not_allowed", "IO.read of a stream the extension did not hand out is refused");
+  await p3.send(dl.tabKey, "Network.enable", { maxResourceBufferSize: 1_048_576, maxTotalBufferSize: 8_388_608, maxPostDataSize: 0 });
+  await p3.send(dl.tabKey, "Fetch.enable", { patterns: [{ urlPattern: "*", requestStage: "Response", resourceType: "Document" }] });
+  const navigated = p3.send<{ errorText?: string }>(dl.tabKey, "Page.navigate", { url: `${base}/files/report.csv` }).catch((e: unknown) => e);
+  const paused = await waitFor(() => events.find((e) => e.method === "Fetch.requestPaused"), 10_000);
+  if (check(paused !== undefined, "download(): an attachment pauses at the Response stage (Fetch, through chrome.debugger)", events.map((e) => e.method))) {
+    const headers = ((paused!.params.responseHeaders as Array<{ name: string }> | undefined) ?? []).map((h) => h.name.toLowerCase()).sort();
+    check(JSON.stringify(headers) === JSON.stringify(["content-disposition", "content-length", "content-type"]) && !JSON.stringify(paused!.params).includes("secret-cookie-value"),
+      "…its event reduced: only the allowed response headers, never the cookie", paused!.params);
+    const requestId = String(paused!.params.requestId);
+    check(await code(p3.send(dl.tabKey, "Fetch.continueRequest", { requestId, url: "http://example.invalid/" })) === "not_allowed", "…Fetch.continueRequest with anything but its requestId is refused");
+    const stream = await p3.send<{ stream: string }>(dl.tabKey, "Fetch.takeResponseBodyAsStream", { requestId });
+    check(await code(p3.send(dl.tabKey, "Fetch.takeResponseBodyAsStream", { requestId })) === "not_allowed", "…a paused response's body is taken once");
+    let body = "";
+    for (let i = 0; i < 20; i++) {
+      const r = await p3.send<{ data: string; base64Encoded?: boolean; eof: boolean }>(dl.tabKey, "IO.read", { handle: stream.stream, size: 65_536 });
+      body += r.base64Encoded === true ? Buffer.from(r.data, "base64").toString("utf8") : r.data;
+      if (r.eof) break;
+    }
+    await p3.send(dl.tabKey, "IO.close", { handle: stream.stream });
+    check(body === "a,b\n1,2\n", "…its bytes read through takeResponseBodyAsStream + IO.read", body);
+    check(await code(p3.send(dl.tabKey, "Fetch.failRequest", { requestId, errorReason: "Failed" })) === "not_allowed", "…Fetch.failRequest with any reason but Aborted is refused");
+    await p3.send(dl.tabKey, "Fetch.failRequest", { requestId, errorReason: "Aborted" });
+    const nav = await navigated;
+    check(typeof (nav as { errorText?: unknown }).errorText === "string", "…and the navigation answers an error: the page stayed, the browser saved nothing", nav);
+  }
+  await p3.send(dl.tabKey, "Fetch.disable");
+  // network(): a request's URL and status arrive (reduced).
+  await p3.send(dl.tabKey, "Page.navigate", { url: `${base}/frame.html` });
+  const response = await waitFor(() => events.find((e) => e.method === "Network.responseReceived" && String((e.params.response as { url?: string } | undefined)?.url ?? "").endsWith("/frame.html")), 10_000);
+  check(response !== undefined && (response.params.response as { status?: number }).status === 200 && JSON.stringify(cdpEventParams(response.method, response.params)) === JSON.stringify(response.params),
+    "network(): Network.responseReceived carries the URL and status, reduced", response?.params);
+  // The tab's own: mute, the session's group, the windows; history without its permission.
+  const cdp = await BrowserCdp.connect(profile);
+  try {
+    await p3.setMuted!(dl.tabKey, true);
+    check(await cdp.inWorker<boolean>(`chrome.tabs.get(${dl.tabKey}).then((t) => t.mutedInfo.muted)`) === true, "mute(): the agent tab is muted");
+    await p3.updateGroup!({ sessionId: "s_p3", title: "Renamed" });
+    check(((await cdp.inWorker<string[]>("chrome.tabGroups.query({}).then((gs) => gs.map((g) => g.title))")) ?? []).includes("Winter · Renamed"), "group.update: the session's group renamed, its \"Winter · \" kept");
+    const wins = await p3.listWindows!();
+    check(wins.length >= 1 && wins.some((w) => w.tabs >= 2), "windows.list: the browser's windows with their tab counts", wins);
+    const history = await p3.history!({ text: "", maxResults: 5 }).then(() => "ok", (e: { code?: string; data?: Record<string, unknown> }) => `${e.code}:${String(e.data?.permission)}`);
+    check(history === "not_allowed:history", "history.search without the optional permission: not_allowed, naming it", history);
+    const before = (await p3.listTabs()).filter((x) => x.active).map((x) => x.tabKey);
+    check(!before.includes(dl.tabKey), "before the hand-off the agent tab is in the background", before);
+    // The hand-off: brought forward (the one view-moving call), then marked waiting until Winter says otherwise.
+    await p3.present!(dl.tabKey, { sessionId: "s_p3" });
+    const front = (await p3.listTabs()).filter((x) => x.active).map((x) => x.tabKey);
+    check(front.includes(dl.tabKey), "present: the hand-off's tab is brought forward", front);
+    p3.overlay(dl.tabKey, { active: false });
+  } finally {
+    cdp.close();
+  }
+  await p3.closeTab(dl.tabKey);
 }
 
 // ── the run ───────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -568,6 +640,9 @@ async function main(): Promise<void> {
       check(user?.active === true && left.filter((x) => x.active).length === 1, "the user's tab was the active one from start to end — nothing came forward", { now: left.map((x) => [x.url, x.active]), trail: activeTrail });
     }
     check(gone.length === 0 || gone.every((g) => !g.startsWith(`${userTab!.tabKey}:`)), "no tab of the user's was reported gone", gone);
+
+    // ── Phase 3 through the real extension (1.1.0) — last, since the hand-off brings a tab forward ──
+    if (again !== undefined) await phase3(again, base, profile);
   } finally {
     if (chrome !== undefined && chrome.exitCode === null) {
       chrome.kill("SIGTERM");
