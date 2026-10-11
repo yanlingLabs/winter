@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ApprovalPolicy } from "@yanlinglabs/winter-protocol";
 import type { RuntimeStateDb } from "../runtime-state/db";
-import { CoworkError, type CapabilityCeiling, type ConversationBinding, type GuestEpoch, type MutationContext, type MutationReceipt, type PublicationPolicy, type SourceSelection, type Workspace, type WorkspacePolicy, type WorkspaceSource } from "./types";
+import { CoworkError, isTerminalOperationStatus, type OperationStatus, type CapabilityCeiling, type ConversationBinding, type GuestEpoch, type MutationContext, type MutationReceipt, type PublicationPolicy, type SourceSelection, type Workspace, type WorkspacePolicy, type WorkspaceSource } from "./types";
 
 type Row = Record<string, any>;
 const POLICIES = new Set(["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"]);
@@ -77,6 +77,15 @@ export class CoworkRepository {
     this.run("INSERT INTO cowork_outbox(change_id,workspace_id,operation_id,revision,kind,payload_json,created_at) VALUES(?,?,?,?,?,?,?)", changeId, workspaceId, operationId, current.configRevision, kind, canonical(payload), this.now());
     this.run("INSERT INTO cowork_outbox_deliveries(change_id,session_id,state) SELECT ?,session_id,'pending' FROM cowork_conversations WHERE workspace_id=? AND state!='deleted'", changeId, workspaceId);
   }
+  operation(workspaceId: string, operationId: string): { operationId: string; status: OperationStatus; terminal: boolean; receipt: MutationReceipt<unknown> } {
+    const row = this.one("SELECT status,result_json FROM cowork_operations WHERE workspace_id=? AND operation_id=?", id(workspaceId), id(operationId));
+    if (!row) throw new CoworkError("not_found");
+    return { operationId, status: row.status, terminal: isTerminalOperationStatus(row.status), receipt: JSON.parse(row.result_json) };
+  }
+  private concludeOperation(workspaceId: string, operationId: string, status: "applied" | "superseded", supersededBy?: string): void {
+    const changed = this.run("UPDATE cowork_operations SET status=?,updated_at=? WHERE workspace_id=? AND operation_id=? AND status='pending'", status, this.now(), workspaceId, operationId);
+    if (changed.changes) this.publish(workspaceId, operationId, "workspace_operation_changed", { operationId, status, terminal: true, ...(supersededBy ? { supersededBy } : {}) });
+  }
   private mutate<T>(context: MutationContext, method: string, scope: string, input: unknown, body: () => { workspaceId: string; value: T; kind: string; payload?: unknown; changedSources?: string[] }): MutationReceipt<T> {
     id(context.principalId); id(context.requestId);
     const requestDigest = digest({ input, expectedRevision: context.expectedRevision ?? null });
@@ -97,7 +106,7 @@ export class CoworkRepository {
       this.run("INSERT INTO cowork_operations VALUES(?,?,?,?,?,?,?,?,?,?,?)", operationId, context.principalId, method, scope, context.requestId, requestDigest, current.workspaceId, "pending", canonical(receipt), at, at);
       for (const sourceId of result.changedSources ?? []) {
         const previousOperation = this.one("SELECT operation_id FROM cowork_sources WHERE workspace_id=? AND source_id=?", current.workspaceId, sourceId)?.operation_id;
-        if (previousOperation) this.run("UPDATE cowork_operations SET status='superseded',updated_at=? WHERE operation_id=? AND status='pending'", at, previousOperation);
+        if (previousOperation) this.concludeOperation(current.workspaceId, previousOperation, "superseded", operationId);
         this.run("UPDATE cowork_sources SET operation_id=? WHERE workspace_id=? AND source_id=?", operationId, current.workspaceId, sourceId);
       }
       this.publish(current.workspaceId, operationId, result.kind, result.payload ?? {});
@@ -194,7 +203,7 @@ export class CoworkRepository {
       if (!operationId) throw new CoworkError("recovery_required");
       this.run("UPDATE cowork_sources SET state=?,ack_revision=revision,ack_incarnation_id=?,restart_required=0,reason=NULL,updated_at=? WHERE source_id=?", state, epoch.incarnationId, this.now(), sourceId);
       this.publish(epoch.workspaceId, operationId, "workspace_sources_changed", { sourceId, sourceRevision: revision, state, incarnationId: epoch.incarnationId });
-      if (!this.one("SELECT 1 FROM cowork_sources WHERE operation_id=? AND state NOT IN ('ready','detached') LIMIT 1", operationId)) this.run("UPDATE cowork_operations SET status='applied',updated_at=? WHERE operation_id=? AND status='pending'", this.now(), operationId);
+      if (!this.one("SELECT 1 FROM cowork_sources WHERE operation_id=? AND state NOT IN ('ready','detached') LIMIT 1", operationId)) this.concludeOperation(epoch.workspaceId, operationId, "applied");
     }, { mode: "immediate" });
   }
   /** Membership predicate only; publication still requires current ready source/write authority. */

@@ -31,6 +31,15 @@ Bind `homeId` in that external ledger to the registered canonical home location,
 
 Mutating methods carry a stable `requestId` and applicable expected revision. Scope idempotency to the authenticated principal, method and workspace, and bind the normalized request digest; reusing an ID with different sources, targets, authority or export arguments returns conflict rather than a prior unrelated success. Check canonical identity, role and current grants before preparing effects. Stale revisions return a typed conflict with current safe revision; retrying the same request returns its recorded operation, not a duplicate clone, push, revoke or export. Persist desired state and an operation/outbox entry transactionally, then perform guest/network work and acknowledge effective state separately. A DB commit does not imply a live mount, completed revocation or successful clone.
 
+Superseding a pending operation commits a terminal `superseded` status and an
+ordered `workspace_operation_changed` notification for the original operation ID,
+including its replacement ID, in the same transaction. A multi-source operation
+stays terminal even if its unaffected sources finish later. Retried mutation
+receipts remain immutable; current status is separately queryable. Source access
+labels distinguish local checkout edits from remote publication authority: a
+read-write checkout with a read-only GitHub credential is presented as local edits
+only until the publication broker authorizes its action.
+
 A standalone workspace atomically reserves/mints its sole owning conversation ID during creation; `session.create` may bind only that reservation, and additional conversation bindings are rejected. Project conversations instead bind to the Project workspace through membership. Creating a workspace selects at least one initial source in the same admission operation; it may be preparing but cannot run dependent tasks until ready. Source removal checks the minimum-source/replacement invariant in one transaction. Security revocation can make the last retained source unavailable. Immediately close new admission and revoke affected host broker authority on narrowing. Pending/effective transition state records draining old tool handles, installing narrower execution views and confirming share removal; it never permits old broker authority to remain usable while cleanup waits. Current source/GitHub-only publication predicates include preparing/unavailable/removing sources as specified in the main document.
 
 The creation-only rule applies specifically to default approval policy. Publication-policy changes apply to existing conversations too: the broker enforces a narrower policy immediately, and generated publication guidance refreshes at the next safe turn/steer boundary or before a resumed turn. Broadening still requires current authority and never retroactively executes a blocked push. Emit the changed policy revision to every affected conversation.
@@ -99,6 +108,7 @@ Extend `SessionEvent` deliberately using the existing `{seq, sessionId, ts}` env
 | Extended `session_created` | Durable Cowork mode, workspace/project/location identity and initial policy revision | Preserve safe live/replay stream-control visibility; keep excluded from HISTORY_EVENT_TYPES as today; missing canonical binding blocks resume |
 | `workspace_sources_changed` | Durable source IDs, membership/readiness/reasons, revision and `restartRequired`; no host roots | Include safe control history and live paired stream for affected conversations |
 | `workspace_policy_changed` | Durable requested/effective policy/ceiling/publication revision and pending transition | Include safe history/live; no approval secrets |
+| `workspace_operation_changed` | Durable operation ID, pending/applied/blocked/failed/superseded status, terminal flag and optional replacement ID | Include safe control history/live for affected conversations; workspace watches also receive it without requiring a conversation |
 | `workspace_instructions_changed` | Durable provenance/revision/digest/refresh state, not full guidance text | Include safe history/live; content via bounded read |
 | `session_location_changed` | Durable source/location/relative cwd and revision | Include safe history/live |
 | `cowork_recovery_required` | Durable reason, workspace/incarnation and operation IDs; no arbitrary raw error | Include safe history/live |

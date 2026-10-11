@@ -164,9 +164,9 @@ test("source readiness commits a durable notification and duplicate acknowledgme
   const epoch = store.refreshEpoch(made.workspaceId, initial.incarnationId, initial.leaseEpoch);
   const before = store.pendingChanges("session-a").length;
   store.acknowledgeSource(epoch, added.value.sourceId, 1, "ready");
-  expect(store.pendingChanges("session-a")).toHaveLength(before + 1);
+  expect(store.pendingChanges("session-a")).toHaveLength(before + 2);
   store.acknowledgeSource(epoch, added.value.sourceId, 1, "ready");
-  expect(store.pendingChanges("session-a")).toHaveLength(before + 1);
+  expect(store.pendingChanges("session-a")).toHaveLength(before + 2);
   expect(db.db.query("SELECT status FROM cowork_operations WHERE operation_id=?").get(added.operationId)).toEqual({ status: "applied" });
 });
 
@@ -221,4 +221,20 @@ test("empty v8 rollback to v7 preserves run-home metadata and refuses populated 
   const reopened = open(home); create(reopened.store);
   expect(() => downgradeCoworkRuntimeStateToV7(home)).toThrow("Cowork authority");
   expect(reopened.store.list()).toHaveLength(1);
+});
+
+test("multi-source supersession emits one durable terminal receipt and later source readiness cannot revive it", () => {
+  const { store, home, db } = open(), made = create(store, [folder, repo]);
+  const epoch = store.beginIncarnation(made.workspaceId, "first", 1);
+  const replaced = store.removeSource(context("revoke", 1), made.workspaceId, made.value.sources[0]!.sourceId, true);
+  const current = store.refreshEpoch(made.workspaceId, epoch.incarnationId, epoch.leaseEpoch);
+  store.acknowledgeSource(current, made.value.sources[1]!.sourceId, 1, "ready");
+  store.acknowledgeSource(current, made.value.sources[1]!.sourceId, 1, "ready");
+  const reopened = open(home).store;
+  expect(reopened.operation(made.workspaceId, made.operationId)).toMatchObject({ status: "superseded", terminal: true, receipt: made });
+  const changes = db.db.query<{payload_json: string}, [string]>("SELECT payload_json FROM cowork_outbox WHERE operation_id=? AND kind='workspace_operation_changed'").all(made.operationId);
+  expect(changes).toHaveLength(1);
+  expect(JSON.parse(changes[0]!.payload_json)).toEqual({ operationId: made.operationId, status: "superseded", terminal: true, supersededBy: replaced.operationId });
+  expect(reopened.operation(made.workspaceId, replaced.operationId)).toMatchObject({ status: "pending", terminal: false });
+  code(() => reopened.operation("other-workspace", made.operationId), "not_found");
 });

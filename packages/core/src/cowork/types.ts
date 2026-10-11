@@ -31,6 +31,9 @@ export interface ConversationBinding {
 }
 export interface MutationContext { principalId: string; requestId: string; expectedRevision?: number }
 export interface MutationReceipt<T> { operationId: string; workspaceId: string; revision: number; value: T }
+export type OperationStatus = "pending" | "applied" | "blocked" | "failed" | "superseded";
+/** Superseded receipts never become applied later, including multi-source creation receipts. */
+export const isTerminalOperationStatus = (status: OperationStatus): boolean => ["applied", "failed", "superseded"].includes(status);
 export interface GuestEpoch { workspaceId: string; incarnationId: string; leaseEpoch: number; configRevision: number; grantRevision: number }
 export type CoworkErrorCode = "not_found" | "revision_conflict" | "request_conflict" | "last_source_required" | "source_unavailable" | "authority_denied" | "invalid_request" | "recovery_required" | "stale_acknowledgment";
 export class CoworkError extends Error {

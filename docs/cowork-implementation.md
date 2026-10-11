@@ -36,6 +36,8 @@ Source/policy changes require the trusted controller to refresh its epoch before
 issuing a new effect; old callbacks remain fenced. Empty schema 8 stores have an
 explicit v7 rollback that preserves SDK layout (`winter migrate --cowork-schema
 --rollback`); populated Cowork authority refuses rollback without data loss.
+The release that first ships schema 8 must name this rollback command and its
+populated-data refusal in its release notes; no release is being prepared yet.
 Tests use injected temporary homes, grants, credentials and coordination. Real-VM
 experiments remain opt-in, disposable and sequential; none touches the live
 Winter installation or deliberately creates host memory pressure.
