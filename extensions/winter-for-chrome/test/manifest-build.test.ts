@@ -12,16 +12,17 @@ const idFromKey = (key: string): string =>
   [...createHash("sha256").update(Buffer.from(key, "base64")).digest("hex").slice(0, 32)].map((c) => String.fromCharCode(97 + Number.parseInt(c, 16))).join("");
 
 describe("the manifest", () => {
-  test("exactly the spine's permissions, all sites, no content scripts, never in private windows", () => {
+  test("exactly the spine's permissions (and the optional ones), all sites, no content scripts, never in private windows", () => {
     for (const flavor of ["dev", "store"] as const) {
       const m = extensionManifest(flavor, devKey());
       expect(m.manifest_version).toBe(3);
       expect(m.permissions).toEqual(["debugger", "tabs", "tabGroups", "nativeMessaging", "scripting", "storage"]);
       expect(m.host_permissions).toEqual(["<all_urls>"]);
       expect(m.content_scripts).toBeUndefined();
-      expect(m.optional_permissions).toBeUndefined();
+      // 1.1.0: the optional permissions, asked for in the popup only (an update from 1.0.0 carries no new warning).
+      expect(m.optional_permissions).toEqual(["history", "bookmarks", "downloads"]);
       expect(m.incognito).toBe("not_allowed");
-      expect(m.version).toBe("1.0.0");
+      expect(m.version).toBe("1.1.0");
       expect(m.minimum_chrome_version).toBe(MINIMUM_CHROME_VERSION);
     }
     expect(MINIMUM_CHROME_VERSION).toBe("125");

@@ -8,6 +8,12 @@
     h1 { margin: 0 0 6px; font-size: 14px; }
     p { margin: 0 0 6px; }
     #backend { color: #5b6476; font-size: 12px; }
+    #waiting { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(127, 127, 127, 0.25); }
+    button { font: inherit; padding: 4px 12px; }
+    #permissions { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(127, 127, 127, 0.25); }
+    #permissions label { display: block; margin: 3px 0; }
+    #permissions label.needed { font-weight: 600; color: #b3541e; }
+    .small { font-size: 12px; color: #5b6476; }
     body[data-state="connected"] h1::before { content: "● "; color: #2f9e5b; }
     body:not([data-state="connected"]) h1::before { content: "● "; color: #d9822b; }
     @media (prefers-color-scheme: dark) { body { background: #1e2129; color: #e7eaf0; } #backend { color: #9aa3b5; } }
@@ -17,6 +23,16 @@
   <h1>Winter for Chrome</h1>
   <p id="status">Connecting to Winter…</p>
   <p id="backend"></p>
+  <div id="permissions">
+    <p class="small">Allow Winter to also:</p>
+    <label><input type="checkbox" data-permission="history"> find pages in your history</label>
+    <label><input type="checkbox" data-permission="bookmarks"> find pages in your bookmarks</label>
+    <label><input type="checkbox" data-permission="downloads"> save files a page makes</label>
+  </div>
+  <div id="waiting" hidden>
+    <p><strong>Winter is waiting for you on this tab.</strong> Finish what it asked, then press Done.</p>
+    <button id="done" type="button">Done</button> <button id="stop" type="button">Stop waiting</button>
+  </div>
   <script type="module" src="popup.js"></script>
 </body>
 </html>

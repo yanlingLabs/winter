@@ -2,8 +2,9 @@
 // browser's events, turned into each other.
 //
 // The rules it keeps whatever it is asked:
-//  - It never moves the user's view: tabs open with `active: false`, in the session's Winter group; nothing here can
-//    activate a tab or focus a window (the `ChromeApi` it is given has no such call). A Winter group is never folded
+//  - It never moves the user's view: tabs open with `active: false`, in the session's Winter group; nothing here
+//    activates a tab or focuses a window — except `tabs.present`, the sign-in hand-off, which Winter sends only after
+//    the user's OK on its card (`ChromeApi.tabs.bringForward`, called from there alone). A Winter group is never folded
 //    while the user has one of its tabs in front (the browser would switch them to another tab).
 //  - It never reads a site's cookies or storage, and runs page code only in the "winter" world (the guard).
 //  - The debugger is attached only while the daemon has the tab bound — and is detached after 5 minutes without a
@@ -26,8 +27,9 @@
 import type { ChromeApi, ChromeTab, Clock, DebuggerTarget, GroupColor } from "./chrome-api";
 import { GROUP_COLORS, realClock } from "./chrome-api";
 import { AgentBook, groupTitle } from "./groups";
+import { Library, LibraryRefusal, type OptionalPermission } from "./library";
 import { isAllowedEvent, strippedParams, TabGuard } from "./guard";
-import { drawOverlay } from "./overlay";
+import { drawOverlay, WAITING_LABEL } from "./overlay";
 import type { ErrorCode, WireTab } from "./protocol";
 import { attachRefusal, openable } from "./urls";
 
@@ -80,6 +82,10 @@ export interface ControllerOptions {
   notify(method: string, params: Record<string, unknown>): void;
   /** How many tabs are being driven now (the toolbar button turns into Stop while it is more than 0). */
   onDriven?(count: number): void;
+  /** How many tabs Winter handed to the user and waits on (the toolbar's "!" and the popup's Done). */
+  onWaiting?(count: number): void;
+  /** The optional permissions Winter asked for and lacks (the toolbar's "!" and the popup's switches). */
+  onNeeds?(needs: OptionalPermission[]): void;
   clock?: Clock;
   idleDetachMs?: number;
   closeTimeoutMs?: number;
@@ -108,11 +114,27 @@ export class ExtensionController {
   private readonly settleWaiters = new Map<number, () => void>();
   /** A navigation waiting for the browser to report the debugger session a discard ended (`debugger.onDetach`). */
   private readonly detachWaiters = new Map<number, () => void>();
+  /** Tabs handed to the user (`tabs.present`) that Winter waits on: until Done, Stop waiting, Winter taking the tab
+   *  again, Winter's own word (an `overlay` off), or the tab closing. */
+  private readonly waiting = new Set<number>();
+  /** History, bookmarks and page-made downloads — under the user's optional permissions. */
+  private readonly library: Library;
 
   constructor(private readonly chrome: ChromeApi, private readonly opts: ControllerOptions) {
     this.book = new AgentBook(chrome);
     this.clock = opts.clock ?? realClock;
     this.idleMs = opts.idleDetachMs ?? IDLE_DETACH_MS;
+    this.library = new Library(chrome, {
+      notify: (method, params) => this.opts.notify(method, params),
+      ...(opts.onNeeds === undefined ? {} : { onNeeds: opts.onNeeds }),
+      clock: this.clock,
+      ...(opts.log === undefined ? {} : { log: opts.log }),
+    });
+  }
+
+  /** The optional permissions Winter asked for and the user has not granted (the popup's question). */
+  neededPermissions(): OptionalPermission[] {
+    return this.library.needed();
   }
 
   /** `runtime.onStartup` / `runtime.onInstalled` told why the worker started (background.ts forwards them). */
@@ -134,6 +156,7 @@ export class ExtensionController {
     this.chrome.tabs.onActivated.addListener((info) => this.onActivated(info));
     this.chrome.tabGroups.onRemoved.addListener((group) => { void this.book.dropGroup(group.id); });
     this.chrome.action.onClicked.addListener(() => this.stopDriven());
+    this.library.start();
 
     // storage.session holds the "alive" mark for this browser session AND this version of the extension. Present: the
     // worker merely restarted. Absent: the browser started, or the extension was installed or updated — onStartup /
@@ -196,13 +219,33 @@ export class ExtensionController {
       case "cdp.send": return { result: await this.send(this.tabId(params), params) };
       case "cdp.subscribe": this.subscribe(this.tabId(params), params.events); return {};
       case "overlay": await this.overlay(this.tabId(params), params); return {};
+      case "tabs.present": await this.present(this.tabId(params)); return {};
+      case "history.search": return await this.libraryCall(() => this.library.history(params));
+      case "bookmarks.search": return await this.libraryCall(() => this.library.bookmarks(params));
+      case "downloads.arm": {
+        const tabId = this.tabId(params);
+        const tab = await this.getTab(tabId);
+        await this.libraryCall(() => this.library.arm(tabId, tab.url ?? tab.pendingUrl, params));
+        return {};
+      }
+      case "downloads.release": await this.library.release(params.id); return {};
       default: throw new UnknownMethod(method);
     }
   }
 
-  /** The link to Winter dropped: nothing is bound any more, so every debugger detaches and every overlay goes. */
+  /** The link to Winter dropped: nothing is bound any more, so every debugger detaches and every overlay goes, and no
+   *  download is waited for. */
   async releaseAll(): Promise<void> {
+    this.library.disarmAll();
     for (const tabId of [...this.attached.keys()]) await this.detach(tabId);
+  }
+
+  /** A library refusal as the daemon reads it (`not_allowed` with `data.permission`). */
+  private async libraryCall<T>(fn: () => Promise<T>): Promise<T> {
+    try { return await fn(); } catch (err) {
+      if (err instanceof LibraryRefusal) throw new ExtensionError(err.code, err.message, err.data);
+      throw err;
+    }
   }
 
   /** The toolbar button was clicked while Winter was driving: Stop, for every driven tab. */
@@ -458,6 +501,8 @@ export class ExtensionController {
 
   private async attach(tabId: number): Promise<{ viewport: [number, number]; dpr: number }> {
     const tab = await this.getTab(tabId);
+    // Winter taking the tab again ends a wait on it (the user is done, as far as Winter is concerned).
+    this.endWait(tabId);
     const refusal = attachRefusal(tab.url ?? tab.pendingUrl, this.chrome.runtimeId);
     if (refusal !== undefined) throw new ExtensionError("attach_refused", refusal);
     if (!this.attached.has(tabId)) {
@@ -702,9 +747,51 @@ export class ExtensionController {
     this.touch(tabId);
   }
 
+  // ── the sign-in hand-off ─────────────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * `tabs.present`: the tab comes forward in its window and the window is focused — the ONE place Winter for Chrome
+   * moves the user's view, sent by Winter only after the user chose "Show me the tab" on its card. The tab is marked
+   * waiting: the waiting pill (no glow, no cursor), a "!" on the toolbar button, and Done / Stop waiting in its popup.
+   */
+  private async present(tabId: number): Promise<void> {
+    const tab = await this.getTab(tabId);
+    try { await this.chrome.tabs.bringForward(tabId, tab.windowId); } catch { throw new ExtensionError("tab_gone", "the tab is closed"); }
+    this.waiting.add(tabId);
+    this.waitingChanged();
+    // The pill is on exactly while the tab is waited on.
+    await this.paintOverlay(tabId, { active: this.waiting.has(tabId), waiting: true, label: WAITING_LABEL });
+  }
+
+  /** The tabs Winter waits on (the popup's question). */
+  waitingTabs(): number[] {
+    return [...this.waiting];
+  }
+
+  /** The popup's Done / Stop waiting for a waiting tab: Winter is told (`user.done`). False when the tab was not one. */
+  userDone(tabId: number, done: boolean): boolean {
+    if (!this.endWait(tabId)) return false;
+    this.opts.notify("user.done", { tabKey: String(tabId), done });
+    return true;
+  }
+
+  /** The wait on `tabId` is over (by any route): the pill and the mark go. */
+  private endWait(tabId: number): boolean {
+    if (!this.waiting.delete(tabId)) return false;
+    this.waitingChanged();
+    void this.paintOverlay(tabId, { active: false });
+    return true;
+  }
+
+  private waitingChanged(): void {
+    this.opts.onWaiting?.(this.waiting.size);
+  }
+
   // ── the overlay ──────────────────────────────────────────────────────────────────────────────────────────────────
 
   private async overlay(tabId: number, params: Record<string, unknown>): Promise<void> {
+    // Winter's word that it no longer waits on a tab it handed to the user ("Stop waiting" on its card, no answer).
+    if (params.active !== true && this.waiting.has(tabId)) this.endWait(tabId);
     const a = this.attached.get(tabId);
     if (a === undefined) return; // best effort: only a driven tab gets one
     const active = params.active === true;
@@ -716,7 +803,7 @@ export class ExtensionController {
     if (changed) this.drivenChanged();
   }
 
-  private async paintOverlay(tabId: number, args: { active: boolean; cursor?: { x: number; y: number; kind: string } }): Promise<void> {
+  private async paintOverlay(tabId: number, args: { active: boolean; cursor?: { x: number; y: number; kind: string }; waiting?: boolean; label?: string }): Promise<void> {
     try {
       await this.chrome.scripting.executeScript({ target: { tabId }, world: "ISOLATED", func: drawOverlay as (arg: never) => void, args: [args] });
     } catch { /* best effort: a page that forbids scripts (a store page, a PDF viewer) simply shows none */ }
@@ -792,6 +879,8 @@ export class ExtensionController {
     }
     void this.book.dropTab(tabId);
     this.mayPrompt.delete(tabId);
+    if (this.waiting.delete(tabId)) this.waitingChanged();
+    this.library.disarm(tabId);
     this.settleWaiters.get(tabId)?.();
     this.removedWaiters.get(tabId)?.();
     this.removedWaiters.delete(tabId);

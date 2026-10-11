@@ -1,0 +1,260 @@
+// Winter for Chrome — what it reads or saves under the user's OPTIONAL permissions (each switched on in the toolbar
+// popup, never at install): `history` and `bookmarks` (read-only searches, for Winter to find a page the user means)
+// and `downloads` (a file a page makes itself, which no debugger can catch, saved where Winter can take it).
+//
+// Each permission's API exists only while it is granted, so every door here first asks the browser whether it is;
+// without it the request is refused `not_allowed` with `data.permission`, the toolbar shows a "!" and the popup offers
+// the switch. Nothing here writes to history or bookmarks, opens a downloaded file, or touches a download Winter did
+// not ask for: a download is Winter's only when an armed tab's page made it after the arm (its origin, or the page it
+// came from, is the tab's), and every other download is left exactly as the browser would have it.
+import type { ChromeApi, ChromeDownloadItem, Clock } from "./chrome-api";
+
+export type OptionalPermission = "history" | "bookmarks" | "downloads";
+export const OPTIONAL_PERMISSIONS: readonly OptionalPermission[] = ["history", "bookmarks", "downloads"];
+
+/** A refusal the controller answers with (`ExtensionError` there). */
+export class LibraryRefusal extends Error {
+  constructor(readonly code: "not_allowed" | "tab_gone", message: string, readonly data: Record<string, unknown> = {}) {
+    super(message);
+  }
+}
+
+const NEEDS_SENTENCE: Record<OptionalPermission, string> = {
+  history: "Winter for Chrome may not search this browser's history — ask the user to allow it in Winter for Chrome's menu (its toolbar button)",
+  bookmarks: "Winter for Chrome may not search this browser's bookmarks — ask the user to allow it in Winter for Chrome's menu (its toolbar button)",
+  downloads: "Winter for Chrome may not save files a page makes — ask the user to allow downloads in Winter for Chrome's menu (its toolbar button)",
+};
+
+const clampInt = (v: unknown, min: number, max: number, dflt: number): number =>
+  (typeof v === "number" && Number.isFinite(v) ? Math.max(min, Math.min(max, Math.floor(v))) : dflt);
+/** Pages a search may name: web pages only (never `javascript:` or `data:`). */
+const webUrl = (u: unknown): u is string => typeof u === "string" && /^https?:\/\//i.test(u) && u.length <= 8_192;
+
+function originOf(url: string | undefined): string | undefined {
+  if (url === undefined || url === "") return undefined;
+  try {
+    // A `blob:https://site/uuid` URL's origin is the page's that made it.
+    const u = new URL(url.startsWith("blob:") ? url.slice(5) : url);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.origin : undefined;
+  } catch { return undefined; }
+}
+
+const baseName = (path: string): string => path.split(/[\\/]/).filter((s) => s !== "").at(-1) ?? "download";
+/** A suggested file name as one path segment (the browser adds Winter's folder in front). */
+function safeSegment(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  const n = baseName(name).replace(/[\u0000-\u001f\u007f/\\:]/g, "").replace(/^\.+/, "").trim();
+  return n === "" ? "download" : n.slice(0, 200);
+}
+
+interface Arm { tabId: number; subdir: string; until: number; maxBytes: number; origin?: string; armedAt: number; downloadId?: number; timer?: unknown }
+
+export interface LibraryOptions {
+  notify(method: string, params: Record<string, unknown>): void;
+  /** The permissions Winter needed and lacked changed (the toolbar's "!" and the popup's highlighted switch). */
+  onNeeds?(needs: OptionalPermission[]): void;
+  clock: Clock;
+  now?(): number;
+  log?(line: string): void;
+}
+
+export class Library {
+  private readonly arms = new Map<number, Arm>();
+  private readonly needs = new Set<OptionalPermission>();
+  private listening = false;
+
+  constructor(private readonly chrome: ChromeApi, private readonly opts: LibraryOptions) {}
+
+  private now(): number { return (this.opts.now ?? Date.now)(); }
+
+  /** Listen for a permission switched on (the downloads listeners need its API) or off. Call once at start. */
+  start(): void {
+    this.chrome.permissions.onAdded.addListener((p) => {
+      for (const name of p.permissions ?? []) if (this.needs.delete(name as OptionalPermission)) this.opts.onNeeds?.([...this.needs]);
+      if ((p.permissions ?? []).includes("downloads")) this.listen();
+    });
+    this.chrome.permissions.onRemoved.addListener((p) => {
+      if ((p.permissions ?? []).includes("downloads")) for (const tabId of [...this.arms.keys()]) this.disarm(tabId);
+    });
+    void this.granted("downloads").then((ok) => { if (ok) this.listen(); });
+  }
+
+  /** The permissions Winter asked for and the user has not granted (the popup highlights them). */
+  needed(): OptionalPermission[] { return [...this.needs]; }
+
+  private async granted(p: OptionalPermission): Promise<boolean> {
+    try { return await this.chrome.permissions.contains({ permissions: [p] }); } catch { return false; }
+  }
+
+  private async require(p: OptionalPermission): Promise<void> {
+    if (await this.granted(p)) return;
+    if (!this.needs.has(p)) { this.needs.add(p); this.opts.onNeeds?.([...this.needs]); }
+    throw new LibraryRefusal("not_allowed", NEEDS_SENTENCE[p], { permission: p });
+  }
+
+  // ── history and bookmarks (read only) ───────────────────────────────────────────────────────────────────────────
+
+  async history(params: Record<string, unknown>): Promise<{ items: Array<{ url: string; title: string; lastVisitTime: number }> }> {
+    await this.require("history");
+    const api = this.chrome.optional().history;
+    if (api === undefined) throw new LibraryRefusal("not_allowed", NEEDS_SENTENCE.history, { permission: "history" });
+    const text = typeof params.text === "string" ? params.text.slice(0, 500) : "";
+    const maxResults = clampInt(params.maxResults, 1, 200, 25);
+    const q: { text: string; maxResults: number; startTime?: number; endTime?: number } = { text, maxResults };
+    if (typeof params.startTime === "number" && Number.isFinite(params.startTime)) q.startTime = params.startTime;
+    if (typeof params.endTime === "number" && Number.isFinite(params.endTime)) q.endTime = params.endTime;
+    const found = await api.search(q);
+    return {
+      items: found.filter((i) => webUrl(i.url)).slice(0, maxResults)
+        .map((i) => ({ url: i.url!, title: (i.title ?? "").slice(0, 500), lastVisitTime: Math.round(i.lastVisitTime ?? 0) })),
+    };
+  }
+
+  async bookmarks(params: Record<string, unknown>): Promise<{ items: Array<{ url: string; title: string; folder: string }> }> {
+    await this.require("bookmarks");
+    const api = this.chrome.optional().bookmarks;
+    if (api === undefined) throw new LibraryRefusal("not_allowed", NEEDS_SENTENCE.bookmarks, { permission: "bookmarks" });
+    const maxResults = clampInt(params.maxResults, 1, 200, 25);
+    const text = typeof params.text === "string" ? params.text.trim().slice(0, 500) : "";
+    const nodes = text === "" ? await api.getRecent(maxResults) : await api.search(text);
+    const folders = new Map<string, string>();
+    const folderPath = async (id: string | undefined, depth = 0): Promise<string> => {
+      if (id === undefined || depth > 32) return "";
+      const known = folders.get(id);
+      if (known !== undefined) return known;
+      let node;
+      try { node = (await api.get(id))[0]; } catch { node = undefined; }
+      if (node === undefined) return "";
+      const parent = await folderPath(node.parentId, depth + 1);
+      const path = node.title === undefined || node.title === "" ? parent : parent === "" ? node.title : `${parent}/${node.title}`;
+      folders.set(id, path);
+      return path;
+    };
+    const out: Array<{ url: string; title: string; folder: string }> = [];
+    for (const n of nodes) {
+      if (!webUrl(n.url)) continue; // folders, javascript: and data: bookmarks are left out
+      out.push({ url: n.url, title: (n.title ?? "").slice(0, 500), folder: (await folderPath(n.parentId)).slice(0, 500) });
+      if (out.length >= maxResults) break;
+    }
+    return { items: out };
+  }
+
+  // ── downloads (a file the page makes itself) ────────────────────────────────────────────────────────────────────
+
+  /** `downloads.arm {tabKey, subdir, until, maxBytes}` (or `subdir: null` to disarm). */
+  async arm(tabId: number, tabUrl: string | undefined, params: Record<string, unknown>): Promise<void> {
+    if (params.subdir === null) { this.disarm(tabId); return; }
+    const subdir = params.subdir;
+    if (typeof subdir !== "string" || !/^Winter\/[0-9a-f]{6,32}$/.test(subdir)) throw new LibraryRefusal("not_allowed", "downloads.arm needs Winter's own subfolder");
+    await this.require("downloads");
+    this.listen();
+    this.disarm(tabId);
+    const until = clampInt(params.until, 0, Number.MAX_SAFE_INTEGER, this.now() + 60_000);
+    const maxBytes = clampInt(params.maxBytes, 1, 2 ** 40, 200 * 1024 * 1024);
+    const origin = originOf(tabUrl);
+    const arm: Arm = { tabId, subdir, until, maxBytes, armedAt: this.now(), ...(origin === undefined ? {} : { origin }) };
+    arm.timer = this.opts.clock.setTimeout(() => this.expire(arm), Math.max(0, until - this.now()));
+    this.arms.set(tabId, arm);
+  }
+
+  /** `downloads.release {id}`: the file was taken — the item leaves the browser's downloads list. */
+  async release(id: unknown): Promise<void> {
+    const n = typeof id === "string" && /^\d{1,12}$/.test(id) ? Number(id) : Number.NaN;
+    const api = this.chrome.optional().downloads;
+    if (!Number.isSafeInteger(n) || api === undefined) return;
+    try { await api.erase({ id: n }); } catch { /* already gone */ }
+  }
+
+  /** The tab went away, or the link to Winter dropped: its arm goes. */
+  disarm(tabId: number): void {
+    const a = this.arms.get(tabId);
+    if (a === undefined) return;
+    this.arms.delete(tabId);
+    if (a.timer !== undefined) this.opts.clock.clearTimeout(a.timer);
+  }
+
+  disarmAll(): void { for (const tabId of [...this.arms.keys()]) this.disarm(tabId); }
+
+  private expire(a: Arm): void {
+    if (this.arms.get(a.tabId) !== a) return;
+    if (a.downloadId !== undefined) {
+      const api = this.chrome.optional().downloads;
+      void api?.cancel(a.downloadId).catch(() => undefined);
+      this.tell(a, { id: String(a.downloadId), state: "failed", name: "download", bytes: 0, error: "timed out" });
+    }
+    this.disarm(a.tabId);
+  }
+
+  private listen(): void {
+    if (this.listening) return;
+    const api = this.chrome.optional().downloads;
+    if (api === undefined) return;
+    this.listening = true;
+    api.onCreated.addListener((item) => { this.attribute(item); });
+    api.onDeterminingFilename.addListener((item, suggest) => {
+      const a = this.attribute(item);
+      // Every download gets an answer at once; only Winter's own goes into its subfolder.
+      if (a === undefined) { suggest(); return; }
+      suggest({ filename: `${a.subdir}/${safeSegment(item.filename)}`, conflictAction: "uniquify" });
+    });
+    api.onChanged.addListener((delta) => { void this.changed(delta); });
+  }
+
+  /** Is this download an armed tab's? The first one created after the arm, from that tab's site. */
+  private attribute(item: ChromeDownloadItem): Arm | undefined {
+    for (const a of this.arms.values()) if (a.downloadId === item.id) return a;
+    const started = Date.parse(item.startTime ?? "");
+    for (const a of this.arms.values()) {
+      if (a.downloadId !== undefined) continue;
+      if (Number.isFinite(started) && started + 2_000 < a.armedAt) continue;
+      const from = [originOf(item.url), originOf(item.finalUrl), originOf(item.referrer)];
+      if (a.origin === undefined || !from.includes(a.origin)) continue;
+      a.downloadId = item.id;
+      if (item.totalBytes > a.maxBytes) {
+        void this.chrome.optional().downloads?.cancel(item.id).catch(() => undefined);
+        this.tell(a, { id: String(item.id), state: "failed", name: safeSegment(item.filename), bytes: 0, error: "too large" });
+        this.disarm(a.tabId);
+        return undefined;
+      }
+      this.tell(a, {
+        id: String(item.id), state: "started", name: safeSegment(item.filename), bytes: 0,
+        ...(item.totalBytes > 0 ? { totalBytes: item.totalBytes } : {}), ...(typeof item.mime === "string" ? { mime: item.mime } : {}),
+      });
+      return a;
+    }
+    return undefined;
+  }
+
+  private async changed(delta: { id: number; state?: { current?: string }; error?: { current?: string }; totalBytes?: { current?: number } }): Promise<void> {
+    const a = [...this.arms.values()].find((x) => x.downloadId === delta.id);
+    if (a === undefined) return;
+    const api = this.chrome.optional().downloads;
+    if (api === undefined) return;
+    const total = delta.totalBytes?.current;
+    if (typeof total === "number" && total > a.maxBytes) {
+      void api.cancel(delta.id).catch(() => undefined);
+      this.tell(a, { id: String(delta.id), state: "failed", name: "download", bytes: 0, error: "too large" });
+      this.disarm(a.tabId);
+      return;
+    }
+    const state = delta.state?.current;
+    if (state !== "complete" && state !== "interrupted") return;
+    let item: ChromeDownloadItem | undefined;
+    try { item = (await api.search({ id: delta.id }))[0]; } catch { item = undefined; }
+    if (item === undefined) return;
+    if (state === "interrupted") {
+      this.tell(a, { id: String(item.id), state: "failed", name: safeSegment(item.filename), bytes: item.bytesReceived, error: (delta.error?.current ?? item.error ?? "interrupted").slice(0, 200) });
+    } else {
+      this.tell(a, {
+        id: String(item.id), state: "done", name: baseName(item.filename), bytes: item.fileSize > 0 ? item.fileSize : item.bytesReceived, path: item.filename,
+        ...(typeof item.mime === "string" ? { mime: item.mime } : {}),
+      });
+    }
+    this.disarm(a.tabId);
+  }
+
+  private tell(a: Arm, download: Record<string, unknown>): void {
+    this.opts.notify("download", { tabKey: String(a.tabId), download });
+  }
+}
+

@@ -32,6 +32,8 @@ export const STOP_BADGE = "STOP";
 export class StatusBoard {
   private current: ExtensionStatus = { state: "connecting" };
   private driven = 0;
+  private waiting = 0;
+  private needs = 0;
 
   constructor(private readonly chrome: ChromeApi) {}
 
@@ -55,6 +57,20 @@ export class StatusBoard {
     this.render();
   }
 
+  /** How many tabs Winter handed to the user and waits on (a blue "!" badge; the popup offers Done). */
+  setWaiting(count: number): void {
+    if (count === this.waiting) return;
+    this.waiting = count;
+    this.render();
+  }
+
+  /** How many optional permissions Winter asked for and lacks (a "!" until the user decides in the popup). */
+  setNeeds(count: number): void {
+    if (count === this.needs) return;
+    this.needs = count;
+    this.render();
+  }
+
   private render(): void {
     // Best effort throughout: the action may not be ready while the worker starts.
     if (this.driven > 0) {
@@ -66,8 +82,16 @@ export class StatusBoard {
     }
     const ok = this.current.state === "connected";
     void this.chrome.action.setPopup({ popup: "popup.html" }).catch(() => undefined);
-    void this.chrome.action.setBadgeText({ text: ok || this.current.state === "connecting" ? "" : "!" }).catch(() => undefined);
+    if (this.waiting > 0) {
+      void this.chrome.action.setBadgeText({ text: "!" }).catch(() => undefined);
+      void this.chrome.action.setBadgeBackgroundColor({ color: "#3b6fd8" }).catch(() => undefined);
+      void this.chrome.action.setTitle({ title: "Winter is waiting for you — open this menu when you're done" }).catch(() => undefined);
+      return;
+    }
+    void this.chrome.action.setBadgeText({ text: (ok || this.current.state === "connecting") && this.needs === 0 ? "" : "!" }).catch(() => undefined);
     void this.chrome.action.setBadgeBackgroundColor({ color: "#d9822b" }).catch(() => undefined);
-    void this.chrome.action.setTitle({ title: `Winter for Chrome — ${statusSentence(this.current)}` }).catch(() => undefined);
+    void this.chrome.action.setTitle({ title: this.needs > 0 && ok
+      ? "Winter for Chrome — Winter asked for something this browser hasn't allowed yet: open this menu"
+      : `Winter for Chrome — ${statusSentence(this.current)}` }).catch(() => undefined);
   }
 }

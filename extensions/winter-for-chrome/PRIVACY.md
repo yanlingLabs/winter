@@ -1,6 +1,6 @@
 # Winter for Chrome / Winter for Edge — Privacy Policy
 
-Effective 11 October 2026 · Publisher: yanlingLabs
+Effective 11 October 2026 (version 1.1.0) · Publisher: yanlingLabs
 
 Winter for Chrome is a browser extension for Google Chrome and other Chromium-based browsers; on Microsoft Edge
 Add-ons it is published as Winter for Edge, the same extension under another name. It lets **Winter**, an assistant app
@@ -27,15 +27,37 @@ something in your browser. Depending on the task, it may:
   and screenshots of the tab — so Winter can see what is on the page.
 - **Act on those pages** — clicks, typing, scrolling, choosing files you asked Winter to upload, and answering the
   page's pop-up dialogs — as Winter's task requires.
-- **Watch page loading** — while Winter works in a tab, the extension notes when the page's network requests start and
-  finish (only an internal request number, a time and the kind of resource; never their addresses, headers, cookies or
-  contents), so Winter knows when the page has finished loading.
+- **Watch page loading and the page's own messages** — while Winter works in a tab, the extension passes on the page's
+  network requests (each one's address, method, status, type and timing — never its headers, cookies or the data sent
+  with it) and the messages the page writes to its developer console, so Winter knows when the page has finished
+  loading and can help you debug a page you are building. The page addresses and message text are cleaned of anything
+  that looks like a password, token or key before Winter reads them.
+- **Read one response on request** — when Winter asks for the content of one of those network responses (for
+  example, to check a page's data while debugging), the browser hands over that response as it received it; Winter
+  removes anything that looks like a secret before reading it. The data a page sends is never read.
+- **Save a file you asked for** — when you ask Winter to download a file, the extension lets Winter catch it as the
+  browser receives it and saves it into the folder Winter works in on your Mac, instead of your Downloads folder.
 
 To do this it uses the browser's debugging interface (`chrome.debugger`), attached only to a tab Winter is working in and
 detached when Winter is done with it, after five minutes without use, or as soon as the connection to Winter drops.
 The browser shows its own notice while it is attached. The extension refuses to work on the browser's own pages,
 extension store pages, local files (`file:`), and `data:`, `blob:` and `filesystem:` documents. Winter does not type into
 fields for passwords, one-time codes or payment cards, and their values are never passed to it.
+
+## Optional permissions (only if you switch them on)
+
+Three things are off until you switch them on in the extension's toolbar menu, and can be switched off there again at
+any time:
+
+- **Find pages in your history** — the extension searches your browsing history (read only) when Winter needs to find
+  a page you visited, and passes the matching pages' addresses, titles and visit times to Winter. It never adds to,
+  changes or deletes your history.
+- **Find pages in your bookmarks** — the same for your bookmarks (their addresses, titles and folders), read only.
+- **Save files a page makes** — some pages create a file themselves (an export), which the method above cannot catch.
+  With this switched on, such a file — only when Winter asked for it, in a tab it is working in — is saved by the
+  browser into a "Winter" folder inside your Downloads folder, handed to Winter on your Mac, and moved from there into
+  the folder Winter works in; the entry is then removed from the browser's downloads list. Other downloads are never
+  touched. macOS may ask you once whether Winter may access your Downloads folder.
 
 ## Where it goes
 
@@ -52,7 +74,9 @@ The extension keeps a few small records in the browser's extension storage on yo
   record is cleared when the browser restarts);
 - which tabs it is currently attached to, so it can detach from them cleanly (cleared when the browser quits).
 
-It stores no page content, no addresses and no history. Removing the extension deletes these records.
+It stores no page content, no addresses and no history. Removing the extension deletes these records. (A file you
+asked Winter to download passes through your Downloads folder only when "Save files a page makes" is on, and is moved
+out of it at once.)
 
 ## What Winter, the app, does with it
 
@@ -70,7 +94,10 @@ not receive your conversations or page content. Winter keeps its session history
 - It does not read cookies, saved passwords, or a site's local storage.
 - It does not run code in a page's own context; the little code it uses to read pages and draw Winter's on-page
   indicator runs in an isolated context of its own.
-- It does not switch your active tab or bring a window to the front.
+- It does not switch your active tab or bring a window to the front — with one exception you choose: when a page needs
+  you (a sign-in, a code, a CAPTCHA), Winter asks you first in its own window, and only if you choose "Show me the tab"
+  does the extension bring that tab to the front for you. While Winter waits, the toolbar menu offers Done and Stop
+  waiting.
 - It does not close your tabs. It closes only the tabs Winter itself opened, when Winter's task ends, unless you keep
   them.
 

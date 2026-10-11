@@ -1,7 +1,7 @@
 // An in-memory browser behind the `ChromeApi` the extension is written against: windows, tabs (one active per window),
 // groups, the debugger, scripting, storage and a native port — every call recorded, so a test can prove what the
 // extension did and, as importantly, what it never did.
-import type { ChromeApi, ChromePort, ChromeTab, ChromeTabGroup, ChromeWindow, Clock, DebuggerTarget, GroupColor, MessageSender } from "../src/chrome-api";
+import type { ChromeApi, ChromeDownloadItem, ChromeOptionalApis, ChromePort, ChromeTab, ChromeTabGroup, ChromeWindow, Clock, DebuggerTarget, GroupColor, MessageSender } from "../src/chrome-api";
 
 type Listener<F> = { listeners: F[]; addListener(l: F): void };
 function event<F>(): Listener<F> {
@@ -225,6 +225,13 @@ export class FakeChrome implements ChromeApi {
       this.record("tabs.setMuted", tabId, muted);
       this.tabOr(tabId).mutedInfo = { muted };
     },
+    bringForward: async (tabId: number, windowId: number) => {
+      this.record("tabs.bringForward", tabId, windowId);
+      const tab = this.tabOr(tabId);
+      for (const t of this.tabs_.values()) if (t.windowId === tab.windowId) t.active = t.id === tabId;
+      this.lastFocused = windowId;
+      for (const l of this.tabsOnActivated.listeners) l({ tabId, windowId: tab.windowId });
+    },
     onRemoved: this.tabsOnRemoved,
     onActivated: this.tabsOnActivated,
   };
@@ -368,6 +375,81 @@ export class FakeChrome implements ChromeApi {
 
   randomUUID(): string { this.uuid += 1; return `00000000-0000-4000-8000-${String(this.uuid).padStart(12, "0")}`; }
 
+  // ── the optional permissions (history, bookmarks, downloads) ────────────────────────────────────────────────────
+
+  /** The optional permissions the user has granted. */
+  readonly granted = new Set<string>();
+  readonly permissionsOnAdded = event<(p: { permissions?: string[] }) => void>();
+  readonly permissionsOnRemoved = event<(p: { permissions?: string[] }) => void>();
+  permissions = {
+    contains: async (p: { permissions: string[] }) => p.permissions.every((x) => this.granted.has(x)),
+    onAdded: this.permissionsOnAdded,
+    onRemoved: this.permissionsOnRemoved,
+  };
+  /** The user switches a permission on in the popup. */
+  grant(p: string): void {
+    this.granted.add(p);
+    for (const l of this.permissionsOnAdded.listeners) l({ permissions: [p] });
+  }
+  historyItems: Array<{ url?: string; title?: string; lastVisitTime?: number }> = [];
+  historyQueries: unknown[] = [];
+  bookmarkNodes: Array<{ id: string; url?: string; title?: string; parentId?: string }> = [];
+  downloadItems = new Map<number, ChromeDownloadItem>();
+  readonly downloadsOnCreated = event<(item: ChromeDownloadItem) => void>();
+  readonly downloadsOnDeterminingFilename = event<(item: ChromeDownloadItem, suggest: (s?: { filename: string; conflictAction: "uniquify" }) => void) => boolean | undefined | void>();
+  readonly downloadsOnChanged = event<(delta: { id: number; state?: { current?: string }; error?: { current?: string }; totalBytes?: { current?: number } }) => void>();
+  /** What each download was told to be named (undefined: left as the browser would have it). */
+  readonly suggested = new Map<number, string | undefined>();
+  readonly erased: number[] = [];
+  readonly cancelled: number[] = [];
+  private nextDownload = 1;
+
+  optional(): ChromeOptionalApis {
+    return {
+      ...(this.granted.has("history") ? { history: { search: async (q: { text: string; maxResults: number }) => { this.historyQueries.push(q); return this.historyItems.map((i) => ({ ...i })); } } } : {}),
+      ...(this.granted.has("bookmarks") ? {
+        bookmarks: {
+          search: async (q: string) => this.bookmarkNodes.filter((n) => (n.title ?? "").toLowerCase().includes(q.toLowerCase()) || (n.url ?? "").includes(q)),
+          getRecent: async (n: number) => this.bookmarkNodes.filter((x) => x.url !== undefined).slice(0, n),
+          get: async (id: string) => this.bookmarkNodes.filter((n) => n.id === id),
+        },
+      } : {}),
+      ...(this.granted.has("downloads") ? {
+        downloads: {
+          search: async (q: { id: number }) => { const d = this.downloadItems.get(q.id); return d === undefined ? [] : [{ ...d }]; },
+          erase: async (q: { id: number }) => { this.erased.push(q.id); return [q.id]; },
+          cancel: async (id: number) => { this.cancelled.push(id); },
+          onCreated: this.downloadsOnCreated,
+          onDeterminingFilename: this.downloadsOnDeterminingFilename,
+          onChanged: this.downloadsOnChanged,
+        },
+      } : {}),
+    };
+  }
+
+  /** A page starts a download (the browser's own): created, named (the listeners' suggestion), saved under
+   *  `downloadsDir`, completed. Returns its id. */
+  async pageDownload(o: { url: string; referrer?: string; name: string; bytes: number; downloadsDir: string; mime?: string; startTime?: number }): Promise<number> {
+    const id = this.nextDownload++;
+    const item: ChromeDownloadItem = {
+      id, url: o.url, ...(o.referrer === undefined ? {} : { referrer: o.referrer }), filename: `${o.downloadsDir}/${o.name}`,
+      ...(o.mime === undefined ? {} : { mime: o.mime }), startTime: new Date(o.startTime ?? Date.now()).toISOString(), state: "in_progress",
+      totalBytes: o.bytes, fileSize: 0, bytesReceived: 0,
+    };
+    this.downloadItems.set(id, item);
+    for (const l of this.downloadsOnCreated.listeners) l({ ...item });
+    let name: string | undefined;
+    for (const l of this.downloadsOnDeterminingFilename.listeners) l({ ...item }, (sug) => { name = sug?.filename; });
+    this.suggested.set(id, name);
+    item.filename = `${o.downloadsDir}/${name ?? o.name}`;
+    item.state = "complete";
+    item.fileSize = o.bytes;
+    item.bytesReceived = o.bytes;
+    for (const l of this.downloadsOnChanged.listeners) l({ id, state: { current: "complete" } });
+    await flush();
+    return id;
+  }
+
   // ── browser-side events ──────────────────────────────────────────────────────────────────────────────────────────
 
   emitCdp(tabId: number, method: string, params: Record<string, unknown> = {}, sessionId?: string): void {
@@ -421,9 +503,9 @@ export class FakeChrome implements ChromeApi {
     }
   }
 
-  /** Calls whose name says they could move the user's view. The ChromeApi has none; this proves none were made. */
+  /** Calls whose name says they could move the user's view — the hand-off's `tabs.bringForward` included. */
   viewMovingCalls(): string[] {
-    return this.calls.filter((c) => /update$|highlight|focus|windows\.create/.test(c.api) && c.api !== "tabGroups.update").map((c) => c.api)
+    return this.calls.filter((c) => /update$|highlight|focus|bringForward|windows\.create/.test(c.api) && c.api !== "tabGroups.update").map((c) => c.api)
       .concat(this.calls.filter((c) => c.api === "tabs.create" && (c.args[0] as { active?: boolean }).active !== false).map(() => "tabs.create active"));
   }
 }

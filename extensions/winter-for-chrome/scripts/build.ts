@@ -50,6 +50,9 @@ export const FORBIDDEN_IN_BUNDLE: { pattern: RegExp; why: string }[] = [
  */
 export const ALLOWED_EXACT_CALLS: { text: string; why: string }[] = [
   { text: "chrome.tabs.update(tabId, { muted })", why: "tabs.setMuted: a tab's sound only (mute())" },
+  // The sign-in hand-off's one door (`tabs.bringForward`, reached only from `tabs.present`).
+  { text: "chrome.tabs.update(tabId, { active: true })", why: "tabs.bringForward: the hand-off's tab, on the user's OK" },
+  { text: "chrome.windows.update(windowId, { focused: true })", why: "tabs.bringForward: the hand-off's window, on the user's OK" },
 ];
 
 /** What of FORBIDDEN_IN_BUNDLE a bundle's (or source's) text contains, once the allowed exact calls are taken out. */

@@ -337,6 +337,47 @@ describe("Phase 3: tab facts, keep({ group }), mute, the session's group, window
   });
 });
 
+describe("Phase 3: the sign-in hand-off (tabs.present, the wait, Done)", () => {
+  test("present brings the tab forward and focuses its window — the one view-moving call — and marks it waiting", async () => {
+    let waitingCount = -1;
+    const ctl = new ExtensionController(chrome, { notify: (method, params) => notes.push({ method, params }), onWaiting: (n) => { waitingCount = n; }, clock, launchHintMs: 1000 });
+    ctl.noteLaunch("install");
+    await ctl.start();
+    chrome.addWindow({ id: 2, incognito: false });
+    const tab = chrome.addTab({ windowId: 2, url: "https://accounts.example.com/login", title: "Sign in" });
+    chrome.lastFocused = 1;
+    await ctl.handle("tabs.present", { tabKey: String(tab.id) });
+    expect(chrome.activeTabs()[2]).toBe(tab.id);
+    expect(chrome.lastFocused).toBe(2);
+    expect(chrome.viewMovingCalls()).toEqual(["tabs.bringForward"]);
+    expect(ctl.waitingTabs()).toEqual([tab.id!]);
+    expect(waitingCount).toBe(1);
+    const painted = chrome.calls.filter((c) => c.api === "scripting.executeScript").at(-1)!.args[0] as { args: [{ active: boolean; waiting?: boolean; label?: string }] };
+    expect(painted.args[0]).toMatchObject({ active: true, waiting: true });
+    // Done from the popup: Winter is told, the mark goes.
+    expect(ctl.userDone(tab.id!, true)).toBe(true);
+    expect(notes.at(-1)).toEqual({ method: "user.done", params: { tabKey: String(tab.id), done: true } });
+    expect(ctl.waitingTabs()).toEqual([]);
+    expect(waitingCount).toBe(0);
+    expect(ctl.userDone(tab.id!, true)).toBe(false); // not waiting any more: nothing sent
+    expect(notes.filter((n) => n.method === "user.done")).toHaveLength(1);
+    expect(await code(ctl.handle("tabs.present", { tabKey: "999" }))).toBe("tab_gone");
+  });
+
+  test("the wait also ends when Winter takes the tab again, says so (overlay off), or the tab closes", async () => {
+    const t1 = chrome.addTab({ windowId: 1, url: "https://a.example/" });
+    const t2 = chrome.addTab({ windowId: 1, url: "https://b.example/" });
+    const t3 = chrome.addTab({ windowId: 1, url: "https://c.example/" });
+    for (const t of [t1, t2, t3]) await c.handle("tabs.present", { tabKey: String(t.id) });
+    expect(c.waitingTabs().sort()).toEqual([t1.id!, t2.id!, t3.id!].sort());
+    await c.handle("debugger.attach", { tabKey: String(t1.id) });
+    await c.handle("overlay", { tabKey: String(t2.id), active: false });
+    await chrome.closeTab(t3.id!);
+    expect(c.waitingTabs()).toEqual([]);
+    expect(notes.filter((n) => n.method === "user.done")).toEqual([]);
+  });
+});
+
 describe("debugger.attach / detach", () => {
   test("attaches, turns on focus emulation, and answers the CSS viewport and the DPR", async () => {
     const r = await c.handle("debugger.attach", { tabKey: "101" });

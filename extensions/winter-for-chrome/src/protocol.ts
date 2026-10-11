@@ -9,7 +9,7 @@ export const EXTENSION_PROTOCOL = 1;
 
 /** What this build can do beyond protocol 1's first requests (`hello.features`; the daemon's EXTENSION_FEATURES lists
  *  every name it knows, and offers a Phase 3 member only when its feature is named here). */
-export const EXTENSION_FEATURES = ["cdp3", "mute", "group", "keepGroup", "windows", "tabFacts"] as const;
+export const EXTENSION_FEATURES = ["cdp3", "present", "userDone", "mute", "group", "keepGroup", "windows", "history", "bookmarks", "downloads", "tabFacts"] as const;
 
 /** The error codes this side answers with (`error.data.code`) — the daemon's TransportErrorCode set. */
 export type ErrorCode = "disconnected" | "tab_gone" | "attach_refused" | "not_allowed" | "cdp_error" | "timeout";
