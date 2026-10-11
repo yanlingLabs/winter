@@ -1,0 +1,399 @@
+{
+  "schema": 1,
+  "scope": "offline compiled-Bun/Swift embedding and disposable guest fixtures",
+  "gate1Passed": false,
+  "productionCoworkImplemented": false,
+  "inputs": {
+    "containerizationRevision": "bc994b88df46207fad7775b0eabc51947e315881",
+    "initImage": "ghcr.io/apple/containerization/vminit@sha256:4c1836052eafcbc944c403fb23ded06562962d2402c9dcc651495a32300614df",
+    "rootImage": "docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8",
+    "kernelArchive": {
+      "url": "https://github.com/kata-containers/kata-containers/releases/download/3.17.0/kata-static-3.17.0-arm64.tar.xz",
+      "sha256": "647c7612e6edf789d5e14698c48c99d8bac15ad139ffaa1c8bb7d229f748d181",
+      "member": "./opt/kata/share/kata-containers/vmlinux-6.12.28-153",
+      "provenance": "Release URL named by the pinned Containerization Makefile; archive checksum measured from that upstream download, not an upstream signature claim."
+    },
+    "payloadDigests": {
+      "run.sh": "f87921c4851083c92515e8451737e80e48d022aa7ae914882d341917d24a9a2c",
+      "tool-smoke.sh": "f00075dcaf54fc905c194c8f7daf24fd42c0bf40cfc1f00cc274ba2f658f9bbf",
+      "run-direct.sh": "452f061c1fae64a207ff3d3dc3f6d39dff3b0f29d9d87bf8e5195d4d700c8a25",
+      "tool-direct.sh": "3fbacc51753af3b6cc15d485ab7bf8be2855ab06c40fc6129e2d0a4191337ef9",
+      "confine": "74efd702aa01fcbc5916b9184309d0c58e8f9955121e59ae67916534ef9e486b",
+      "memprobe": "ed4a4d3d4baa0b5f594cd516afdba52f4ba75dceed22743e46336fc19f7240d6"
+    }
+  },
+  "phases": [
+    {
+      "phase": "prepare",
+      "status": "passed-selected-checks",
+      "startedAt": "2026-10-11T10:12:28.682Z",
+      "completedAt": "2026-10-11T10:12:44.985Z",
+      "maxHeartbeatDelayMs": 2.387875000000008,
+      "network": "public host provisioning"
+    },
+    {
+      "phase": "smoke",
+      "status": "passed-selected-checks",
+      "startedAt": "2026-10-11T10:12:45.005Z",
+      "completedAt": "2026-10-11T10:12:46.103Z",
+      "guestReadyMs": 317.65854099999996,
+      "maxHeartbeatDelayMs": 2.2102500000000305,
+      "network": "no guest NIC",
+      "stop": {
+        "stopped": true,
+        "vzStoppedObserved": true,
+        "flushSucceeded": true
+      },
+      "confinementViews": [
+        {
+          "kind": "summary",
+          "policy": "auto",
+          "uid": 10001,
+          "checks": 44,
+          "failures": 0,
+          "status": "pass"
+        },
+        {
+          "kind": "summary",
+          "policy": "auto",
+          "uid": 10002,
+          "checks": 44,
+          "failures": 0,
+          "status": "pass"
+        },
+        {
+          "kind": "summary",
+          "policy": "plan",
+          "uid": 10001,
+          "checks": 52,
+          "failures": 0,
+          "status": "pass"
+        },
+        {
+          "kind": "summary",
+          "id": "guest_suite",
+          "status": "pass",
+          "exitCode": 0
+        }
+      ]
+    },
+    {
+      "phase": "resume",
+      "status": "passed-selected-checks",
+      "startedAt": "2026-10-11T10:12:46.123Z",
+      "completedAt": "2026-10-11T10:12:46.731Z",
+      "guestReadyMs": 338.50237500000003,
+      "maxHeartbeatDelayMs": 2.2873329999999896,
+      "network": "no guest NIC",
+      "stop": {
+        "stopped": true,
+        "vzStoppedObserved": true,
+        "flushSucceeded": true
+      },
+      "coldIdentityChangedAndContentVerified": true
+    },
+    {
+      "phase": "direct",
+      "status": "passed-selected-checks",
+      "startedAt": "2026-10-11T10:12:46.748Z",
+      "completedAt": "2026-10-11T10:12:47.785Z",
+      "guestReadyMs": 317.74641599999995,
+      "maxHeartbeatDelayMs": 2.0187910000000784,
+      "network": "no guest NIC",
+      "stop": {
+        "stopped": true,
+        "vzStoppedObserved": true,
+        "flushSucceeded": true
+      },
+      "strictSourceMetadataUnchanged": true
+    },
+    {
+      "phase": "memory",
+      "status": "passed-selected-checks",
+      "startedAt": "2026-10-11T10:12:47.803Z",
+      "completedAt": "2026-10-11T10:13:03.428Z",
+      "guestReadyMs": 314.24375,
+      "maxHeartbeatDelayMs": 4.3697920000013255,
+      "network": "no guest NIC",
+      "stop": {
+        "stopped": true,
+        "vzStoppedObserved": true,
+        "flushSucceeded": true
+      },
+      "memory": {
+        "beforeFootprintMB": 508,
+        "afterFootprintMB": [
+          509,
+          509,
+          509,
+          509
+        ],
+        "backingFootprintDecreaseObserved": false,
+        "thresholdMB": 16,
+        "reclaimVerified": false,
+        "reason": "Compare sustained owned footprint, guest compliance, compaction and host compression/swap; this metric alone is not full gate-1 proof."
+      },
+      "guestMemorySamples": [
+        {
+          "label": "baseline",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     975820 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3400 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 0",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "allocated",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     580464 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:        396964 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 0",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "freed-without-balloon",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     943872 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3732 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 0",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-0",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     158416 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3740 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-1",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     162236 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3740 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-2",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     166248 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3740 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-3",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     172312 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3732 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "reallocated-after-deflation",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     918524 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3800 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 196608",
+            "balloon_deflate 196608"
+          ]
+        }
+      ]
+    },
+    {
+      "phase": "memory-compact",
+      "status": "passed-selected-checks",
+      "startedAt": "2026-10-11T10:13:03.448Z",
+      "completedAt": "2026-10-11T10:13:19.218Z",
+      "guestReadyMs": 329.065875,
+      "maxHeartbeatDelayMs": 3.1828749999995125,
+      "network": "no guest NIC",
+      "stop": {
+        "stopped": true,
+        "vzStoppedObserved": true,
+        "flushSucceeded": true
+      },
+      "memory": {
+        "beforeFootprintMB": 506,
+        "afterFootprintMB": [
+          507,
+          507,
+          507,
+          507
+        ],
+        "backingFootprintDecreaseObserved": false,
+        "thresholdMB": 16,
+        "reclaimVerified": false,
+        "reason": "Compare sustained owned footprint, guest compliance, compaction and host compression/swap; this metric alone is not full gate-1 proof."
+      },
+      "guestMemorySamples": [
+        {
+          "label": "baseline",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     981944 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3468 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 0",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "allocated",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     580080 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:        396936 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 0",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "freed-without-balloon",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     972868 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3716 kB",
+            "compact_migrate_scanned 0",
+            "compact_free_scanned 0",
+            "balloon_inflate 0",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "compacted-before-balloon",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     971604 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3752 kB",
+            "compact_migrate_scanned 4096",
+            "compact_free_scanned 9847",
+            "balloon_inflate 0",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-0",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     181540 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3724 kB",
+            "compact_migrate_scanned 4096",
+            "compact_free_scanned 9847",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-1",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     181540 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3724 kB",
+            "compact_migrate_scanned 4096",
+            "compact_free_scanned 9847",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-2",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     181540 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3784 kB",
+            "compact_migrate_scanned 4096",
+            "compact_free_scanned 9847",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "balloon-3",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     181092 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3728 kB",
+            "compact_migrate_scanned 4096",
+            "compact_free_scanned 9847",
+            "balloon_inflate 196608",
+            "balloon_deflate 0"
+          ]
+        },
+        {
+          "label": "reallocated-after-deflation",
+          "counters": [
+            "MemTotal:        1016168 kB",
+            "MemAvailable:     910984 kB",
+            "SwapFree:              0 kB",
+            "AnonPages:          3652 kB",
+            "compact_migrate_scanned 4096",
+            "compact_free_scanned 9847",
+            "balloon_inflate 196608",
+            "balloon_deflate 196608"
+          ]
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Guest boot readiness excludes image provisioning, library loading and a real Winter agent runtime.",
+    "Tool identities exercised sequentially; no concurrent Project conversation or multiple-VM claim.",
+    "Host-backed owner-only source fixture; mixed ownership, ACLs, TCC and revocation untested.",
+    "No guest NIC is not a validated outbound network enforcement boundary.",
+    "Balloon guest compliance and host footprint are distinct; tested memory return was not demonstrated.",
+    "Other host applications/VMs and compression/swap were present; not a controlled system-wide memory benchmark.",
+    "Ad-hoc C ABI/FFI probe is not production Node-API/signing/daemon integration."
+  ]
+}

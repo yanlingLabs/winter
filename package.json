@@ -25,6 +25,7 @@
     "verify:runtimes": "bun run scripts/verify-runtimes-compiled.ts",
     "verify:embedded": "bun run scripts/verify-embedded-compiled.ts",
     "verify:computer-helper": "bun run scripts/verify-computer-helper.ts",
+    "verify:cowork-vm": "bun run spikes/cowork-vm/run.ts",
     "typecheck:core": "tsc --noEmit -p packages/core",
     "typecheck:page-runtime": "tsc --noEmit -p packages/core/src/computer-use/browser/page-runtime",
     "typecheck:protocol": "tsc --noEmit -p packages/protocol",

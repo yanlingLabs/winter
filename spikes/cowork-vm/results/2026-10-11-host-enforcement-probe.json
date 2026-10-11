@@ -1,0 +1,334 @@
+{
+  "schema": 1,
+  "scope": "offline compiled-Bun/Swift embedding and disposable guest fixtures",
+  "gate1Passed": false,
+  "productionCoworkImplemented": false,
+  "executedPhases": [
+    "prepare",
+    "smoke",
+    "resume",
+    "direct"
+  ],
+  "measurementConditions": {
+    "nativeBuild": "Swift debug",
+    "hostCache": "warm",
+    "guestExecution": "one VM at a time, sequential tool views"
+  },
+  "inputs": {
+    "containerizationRevision": "bc994b88df46207fad7775b0eabc51947e315881",
+    "initImage": "ghcr.io/apple/containerization/vminit@sha256:4c1836052eafcbc944c403fb23ded06562962d2402c9dcc651495a32300614df",
+    "rootImage": "docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8",
+    "kernelArchive": {
+      "url": "https://github.com/kata-containers/kata-containers/releases/download/3.17.0/kata-static-3.17.0-arm64.tar.xz",
+      "sha256": "647c7612e6edf789d5e14698c48c99d8bac15ad139ffaa1c8bb7d229f748d181",
+      "member": "./opt/kata/share/kata-containers/vmlinux-6.12.28-153",
+      "provenance": "Release URL named by the pinned Containerization Makefile; archive checksum measured from that upstream download, not an upstream signature claim."
+    },
+    "payloadDigests": {
+      "run.sh": "35e25c37721d21cdfc7b7e37b6afe02674d201422c679269436b50c33fa820b7",
+      "tool-smoke.sh": "7e18b9d5f2ddaddf8a96dd21a1de7e7649dccb0e3b4bdf3b3d9a47d53984dce5",
+      "run-direct.sh": "bdad971045a66edb8ab10ae0c7064e367685161e78ceadfa3f4b3fa6c05c3dda",
+      "tool-direct.sh": "d0c5ecd3f56ef67a1f37a8ec136bf96acdcd454050d98e153f6b121d8400b929",
+      "denials.sh": "a49db0ceaf3bead4f6fc047a6643f06211fe89a760a1c919b30ebc895a015a63",
+      "confine": "b7aa00185e891ada1520caeb906b960fc26f4c51a97c001011c5d08507bd61a6",
+      "memprobe": "ed4a4d3d4baa0b5f594cd516afdba52f4ba75dceed22743e46336fc19f7240d6"
+    }
+  },
+  "phases": [
+    {
+      "phase": "prepare",
+      "status": "passed-selected-checks",
+      "startedAt": "2026-10-11T10:44:56.396Z",
+      "completedAt": "2026-10-11T10:45:13.161Z",
+      "maxHeartbeatDelayMs": 1.2697090000000344,
+      "network": "public host provisioning"
+    },
+    {
+      "phase": "smoke",
+      "status": "passed-selected-checks",
+      "startedAt": "2026-10-11T10:45:13.183Z",
+      "completedAt": "2026-10-11T10:45:14.870Z",
+      "guestReadyMs": 332.035292,
+      "maxHeartbeatDelayMs": 1.0164160000000209,
+      "network": "no guest NIC",
+      "stop": {
+        "stopped": true,
+        "vzStoppedObserved": true,
+        "flushSucceeded": true
+      },
+      "confinementViews": [
+        {
+          "kind": "summary",
+          "policy": "auto",
+          "uid": 10001,
+          "checks": 77,
+          "failures": 0,
+          "status": "pass"
+        },
+        {
+          "kind": "summary",
+          "policy": "auto",
+          "uid": 10002,
+          "checks": 77,
+          "failures": 0,
+          "status": "pass"
+        },
+        {
+          "kind": "summary",
+          "policy": "plan",
+          "uid": 10001,
+          "checks": 85,
+          "failures": 0,
+          "status": "pass"
+        },
+        {
+          "kind": "summary",
+          "id": "guest_suite",
+          "status": "pass",
+          "exitCode": 0
+        }
+      ],
+      "hostReadOnlyEvidence": [
+        {
+          "kind": "observation",
+          "id": "supervisor_raw_virtiofs",
+          "path": "/run/virtiofs",
+          "present": false,
+          "required": false,
+          "detail": "supervisor_namespace_observation_not_tool_enforcement"
+        },
+        {
+          "kind": "check",
+          "id": "host_ro_supervisor_guest_rw_view",
+          "status": "pass",
+          "detail": "guest_writable_virtiofs_view_required_for_vz_boundary_attribution",
+          "guestMount": {
+            "path": "/workspace/host-ro",
+            "method": "remount_bind",
+            "filesystem": "virtiofs",
+            "mountOptions": [
+              "rw",
+              "relatime"
+            ],
+            "superblockOptions": [
+              "rw"
+            ],
+            "guestWritableMountVerified": true,
+            "mountInfo": "53 44 0:26 /3b64b879f495b61c84eddf157891ba99dc48 /workspace/host-ro rw,relatime - virtiofs virtiofs rw",
+            "remountExitCode": 0,
+            "failureClass": "NONE",
+            "failureDiagnostic": ""
+          }
+        },
+        {
+          "kind": "check",
+          "id": "host_rw_supervisor_guest_rw_view",
+          "status": "pass",
+          "detail": "guest_writable_virtiofs_view_required_for_vz_boundary_attribution",
+          "guestMount": {
+            "path": "/workspace/host-rw",
+            "method": "remount_bind",
+            "filesystem": "virtiofs",
+            "mountOptions": [
+              "rw",
+              "relatime"
+            ],
+            "superblockOptions": [
+              "rw"
+            ],
+            "guestWritableMountVerified": true,
+            "mountInfo": "54 44 0:26 /79e3a817b3238b3fe21be0ed0ad2e02f6b6c /workspace/host-rw rw,relatime - virtiofs virtiofs rw",
+            "remountExitCode": 0,
+            "failureClass": "NONE",
+            "failureDiagnostic": ""
+          }
+        },
+        {
+          "kind": "check",
+          "id": "host_rw_supervisor_instructions_writable",
+          "status": "pass",
+          "detail": "append_succeeded_and_sentinel_restored",
+          "exitCode": 0
+        },
+        {
+          "kind": "check",
+          "id": "host_ro_supervisor_instructions_denied",
+          "status": "pass",
+          "boundary": "vz_host_readonly",
+          "denial": {
+            "exitCode": 1,
+            "failureClass": "EACCES",
+            "expectedFailureClasses": [
+              "EACCES",
+              "EROFS",
+              "EPERM"
+            ],
+            "positiveControlPassed": true,
+            "positiveControlExitCode": 0
+          }
+        },
+        {
+          "kind": "check",
+          "id": "host_rw_supervisor_memory_writable",
+          "status": "pass",
+          "detail": "append_succeeded_and_sentinel_restored",
+          "exitCode": 0
+        },
+        {
+          "kind": "check",
+          "id": "host_ro_supervisor_memory_denied",
+          "status": "pass",
+          "boundary": "vz_host_readonly",
+          "denial": {
+            "exitCode": 1,
+            "failureClass": "EACCES",
+            "expectedFailureClasses": [
+              "EACCES",
+              "EROFS",
+              "EPERM"
+            ],
+            "positiveControlPassed": true,
+            "positiveControlExitCode": 0
+          }
+        }
+      ],
+      "hostProtectedFilesUnchanged": true,
+      "denialClasses": {
+        "EROFS": 104,
+        "EACCES": 2,
+        "EPERM": 0,
+        "ENOENT": 9,
+        "EXDEV": 3,
+        "EBUSY": 0
+      },
+      "builtSharePolicy": [
+        {
+          "guestPath": "/workspace/source",
+          "readOnly": false
+        },
+        {
+          "guestPath": "/opt/cowork-fixture",
+          "readOnly": true
+        },
+        {
+          "guestPath": "/workspace/host-ro",
+          "readOnly": true
+        },
+        {
+          "guestPath": "/workspace/host-rw",
+          "readOnly": false
+        }
+      ]
+    },
+    {
+      "phase": "resume",
+      "status": "passed-selected-checks",
+      "startedAt": "2026-10-11T10:45:14.889Z",
+      "completedAt": "2026-10-11T10:45:15.481Z",
+      "guestReadyMs": 298.877542,
+      "maxHeartbeatDelayMs": 1.1938749999999914,
+      "network": "no guest NIC",
+      "stop": {
+        "stopped": true,
+        "vzStoppedObserved": true,
+        "flushSucceeded": true
+      },
+      "builtSharePolicy": [
+        {
+          "guestPath": "/workspace/source",
+          "readOnly": false
+        },
+        {
+          "guestPath": "/opt/cowork-fixture",
+          "readOnly": true
+        },
+        {
+          "guestPath": "/workspace/host-ro",
+          "readOnly": true
+        },
+        {
+          "guestPath": "/workspace/host-rw",
+          "readOnly": false
+        }
+      ],
+      "coldIdentityChangedAndContentVerified": true
+    },
+    {
+      "phase": "direct",
+      "status": "passed-selected-checks",
+      "startedAt": "2026-10-11T10:45:15.500Z",
+      "completedAt": "2026-10-11T10:45:16.605Z",
+      "guestReadyMs": 326.419083,
+      "maxHeartbeatDelayMs": 1.1409999999999911,
+      "network": "no guest NIC",
+      "stop": {
+        "stopped": true,
+        "vzStoppedObserved": true,
+        "flushSucceeded": true
+      },
+      "directViews": [
+        {
+          "kind": "summary",
+          "id": "direct_tool_view",
+          "policy": "auto",
+          "uid": 10001,
+          "checks": 21,
+          "failures": 0,
+          "status": "pass"
+        },
+        {
+          "kind": "summary",
+          "id": "direct_tool_view",
+          "policy": "auto",
+          "uid": 10002,
+          "checks": 21,
+          "failures": 0,
+          "status": "pass"
+        },
+        {
+          "kind": "summary",
+          "id": "direct_tool_view",
+          "policy": "plan",
+          "uid": 10001,
+          "checks": 22,
+          "failures": 0,
+          "status": "pass"
+        },
+        {
+          "kind": "summary",
+          "id": "direct_strict_source",
+          "status": "pass",
+          "exitCode": 0
+        }
+      ],
+      "builtSharePolicy": [
+        {
+          "guestPath": "/workspace/source",
+          "readOnly": false
+        },
+        {
+          "guestPath": "/opt/cowork-fixture",
+          "readOnly": true
+        },
+        {
+          "guestPath": "/workspace/host-ro",
+          "readOnly": true
+        },
+        {
+          "guestPath": "/workspace/host-rw",
+          "readOnly": false
+        }
+      ],
+      "strictSourceMetadataUnchanged": true
+    }
+  ],
+  "limitations": [
+    "Guest boot readiness excludes image provisioning, library loading and a real Winter agent runtime.",
+    "Tool identities exercised sequentially; no concurrent Project conversation or multiple-VM claim.",
+    "Host-backed owner-only source fixture; mixed ownership, ACLs, TCC and revocation untested.",
+    "No guest NIC is not a validated outbound network enforcement boundary.",
+    "Memory phases were not rerun; prior memory evidence remains separate.",
+    "Other host applications/VMs and compression/swap were present; not a controlled system-wide memory benchmark.",
+    "Ad-hoc C ABI/FFI probe is not production Node-API/signing/daemon integration."
+  ]
+}
