@@ -16,59 +16,94 @@ final class FocusGuardianTests: XCTestCase {
 
     func testAUserSwitchIsRespectedAndBecomesTheNewUserView() {
         var g = started()
-        let v = g.handle(CUActivation(app: 42, space: 200, hadRecentUserInput: true), now: 1)
+        let v = g.handle(CUActivation(app: 42, space: 200, switchInput: true), now: 1)
         XCTAssertEqual(v, .userSwitch)
         XCTAssertEqual(g.view, CUGuardedView(app: 42, space: 200), "the user's own switch updates the tracked view")
         // A later theft now restores to 42/200, the user's new app and desktop.
-        let t = g.handle(CUActivation(app: 99, space: 300, hadRecentUserInput: false), now: 2)
+        let t = g.handle(CUActivation(app: 99, space: 300, switchInput: false), now: 2)
         XCTAssertEqual(t, .theft(restore: CUGuardedView(app: 42, space: 200), thief: 99, repeatOffender: false))
     }
 
     func testAnActivationWithNoRecentInputIsTheftWhateverTheApp() {
         var g = started()
-        // Our own synthetic activation is never the user, even if input looks recent.
-        let synthetic = g.handle(CUActivation(app: 7, hadRecentUserInput: true, fromSyntheticEvent: true), now: 1)
+        // Our own synthetic activation is never the user's by itself — typing in their own app is no switch.
+        let synthetic = g.handle(CUActivation(app: 7, switchInput: false, fromSyntheticEvent: true), now: 1)
         XCTAssertEqual(synthetic, .theft(restore: CUGuardedView(app: 1, space: 100), thief: 7, repeatOffender: false))
-        let t = g.handle(CUActivation(app: 8, hadRecentUserInput: false), now: 2)
+        let t = g.handle(CUActivation(app: 8, switchInput: false), now: 2)
         if case .theft(let r, let thief, _) = t { XCTAssertEqual(r.app, 1); XCTAssertEqual(thief, 8) } else { XCTFail() }
+    }
+
+    /// Review of round 6 (MEDIUM): right after one of the helper's synthetic events (a click's preparation, a blip's
+    /// deactivation), a ⌘-Tab of the user's into the target was still taken for a theft and undone. Switch input is
+    /// ABOVE the synthetic mark in the one decision.
+    func testSwitchInputWinsOverTheSyntheticMark() {
+        var g = started()
+        XCTAssertEqual(g.handle(CUActivation(app: 7, space: 100, switchInput: true, fromSyntheticEvent: true), now: 1), .userSwitch)
+        XCTAssertEqual(g.view.app, 7)
+    }
+
+    /// The one decision, in its order: visit, claim, switch input, the consented foreground, "nothing the agent did",
+    /// a click when no input source runs, else the agent's.
+    func testWhoseMoveDecidesInItsOrder() {
+        var g = started()
+        func f(_ app: pid_t, switchInput: Bool = false, caused: Bool = true, observable: Bool = true, click: Bool = false,
+               ignoreVisit: Bool = false) -> CUMoveFacts {
+            CUMoveFacts(app: app, space: 100, switchInput: switchInput, agentCaused: caused, inputObservable: observable,
+                        clickRecent: click, ignoreVisit: ignoreVisit)
+        }
+        XCTAssertEqual(g.whoseMove(f(9), now: 1), .agent("no input of the user's that switches apps or desktops"), "typing or nothing: the agent's")
+        XCTAssertTrue(g.whoseMove(f(9, switchInput: true), now: 1).isUsers, "their ⌘-Tab")
+        XCTAssertTrue(g.whoseMove(f(9, caused: false), now: 1).isUsers, "nothing the agent did could have caused it")
+        XCTAssertTrue(g.whoseMove(f(9, observable: false, click: true), now: 1).isUsers, "no tap: a click of theirs")
+        XCTAssertFalse(g.whoseMove(f(9, observable: false), now: 1).isUsers, "no tap, no click: the agent's")
+        g.exempt(9, until: 5)
+        XCTAssertEqual(g.whoseMove(f(9), now: 1), .consented)
+        g.userMoved(app: 9, space: 100, now: 2)
+        XCTAssertTrue(g.whoseMove(f(9), now: 2.5).isUsers, "a move a path judged theirs is claimed")
+        XCTAssertEqual(g.view, CUGuardedView(app: 9, space: 100), "and the guardian follows them there")
+        XCTAssertEqual(g.handle(CUActivation(app: 9, space: 100, switchInput: false, fromSyntheticEvent: true), now: 2.6), .userSwitch,
+                       "its late activation notification is never restored over")
+        g.beginVisit(app: 5, now: 3)
+        XCTAssertEqual(g.whoseMove(f(5), now: 3.1), .visit)
+        XCTAssertEqual(g.whoseMove(f(5, ignoreVisit: true), now: 3.1), .agent("no input of the user's that switches apps or desktops"))
     }
 
     func testTheConsentedForegroundRungIsTheOnlyExemption() {
         var g = started()
         g.exempt(55, until: 10)
-        XCTAssertEqual(g.handle(CUActivation(app: 55, hadRecentUserInput: false), now: 5), .userSwitch, "exempt within the deadline")
+        XCTAssertEqual(g.handle(CUActivation(app: 55, switchInput: false), now: 5), .userSwitch, "exempt within the deadline")
         g = started()
         g.exempt(55, until: 10)
-        XCTAssertEqual(g.handle(CUActivation(app: 55, hadRecentUserInput: false), now: 11).isTheft, true, "past the deadline it is theft")
+        XCTAssertEqual(g.handle(CUActivation(app: 55, switchInput: false), now: 11).isTheft, true, "past the deadline it is theft")
         g = started()
         g.exempt(55, until: 10)
-        XCTAssertEqual(g.handle(CUActivation(app: 66, hadRecentUserInput: false), now: 5).isTheft, true, "a different app is not exempt")
+        XCTAssertEqual(g.handle(CUActivation(app: 66, switchInput: false), now: 5).isTheft, true, "a different app is not exempt")
     }
 
     func testRepeatOffenderIsFlaggedAfterThreeInTenSeconds() {
         var g = started()
-        XCTAssertEqual(g.handle(CUActivation(app: 9, hadRecentUserInput: false), now: 0).repeatFlag, false)
-        XCTAssertEqual(g.handle(CUActivation(app: 9, hadRecentUserInput: false), now: 2).repeatFlag, false)
-        XCTAssertEqual(g.handle(CUActivation(app: 9, hadRecentUserInput: false), now: 4).repeatFlag, true, "third within 10 s")
+        XCTAssertEqual(g.handle(CUActivation(app: 9, switchInput: false), now: 0).repeatFlag, false)
+        XCTAssertEqual(g.handle(CUActivation(app: 9, switchInput: false), now: 2).repeatFlag, false)
+        XCTAssertEqual(g.handle(CUActivation(app: 9, switchInput: false), now: 4).repeatFlag, true, "third within 10 s")
         // Outside the window the count resets.
         var h = started()
-        _ = h.handle(CUActivation(app: 9, hadRecentUserInput: false), now: 0)
-        _ = h.handle(CUActivation(app: 9, hadRecentUserInput: false), now: 2)
-        XCTAssertEqual(h.handle(CUActivation(app: 9, hadRecentUserInput: false), now: 13).repeatFlag, false, "the first aged out")
+        _ = h.handle(CUActivation(app: 9, switchInput: false), now: 0)
+        _ = h.handle(CUActivation(app: 9, switchInput: false), now: 2)
+        XCTAssertEqual(h.handle(CUActivation(app: 9, switchInput: false), now: 13).repeatFlag, false, "the first aged out")
     }
 
     func testTheSameAppStaysIgnoredAndAnIdleGuardianDoesNothing() {
         var g = started(app: 1, space: 100)
-        XCTAssertEqual(g.handle(CUActivation(app: 1, space: 100, hadRecentUserInput: false), now: 1), .ignore)
+        XCTAssertEqual(g.handle(CUActivation(app: 1, space: 100, switchInput: false), now: 1), .ignore)
         var idle = CUFocusGuardianCore()
-        XCTAssertEqual(idle.handle(CUActivation(app: 9, hadRecentUserInput: false), now: 1), .ignore)
+        XCTAssertEqual(idle.handle(CUActivation(app: 9, switchInput: false), now: 1), .ignore)
     }
 
     func testASpaceChangeWithoutInputIsRestoredAndWithInputIsTheUsers() {
         var g = started(space: 100)
-        XCTAssertEqual(g.handleSpaceChange(to: 200, hadRecentUserInput: false, now: 1), CUGuardedView(app: 1, space: 100))
+        XCTAssertEqual(g.handleSpaceChange(to: 200, switchInput: false, now: 1), CUGuardedView(app: 1, space: 100))
         var h = started(space: 100)
-        XCTAssertNil(h.handleSpaceChange(to: 200, hadRecentUserInput: true, now: 1))
+        XCTAssertNil(h.handleSpaceChange(to: 200, switchInput: true, now: 1))
         XCTAssertEqual(h.view.space, 200, "the user's own space change is adopted")
     }
 
@@ -153,24 +188,44 @@ final class FocusGuardianTests: XCTestCase {
     func testTheUsersRealInputStillMakesItTheirs() {
         let (core, sys, clock) = delayedStealWorld()
         defer { core.stopGuardian() }
+        core.switchInputObservableOverride = true
         core.noteGuardianActed(500)
         clock.advance(ms: 1_000)
-        // A real click (no source process) a moment before the activation: the user's.
-        core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: clock.nowSeconds())
+        // A real ⌘-Tab (no source process; the switcher swallows the Tab — only ⌘'s press and release show) a moment
+        // before the activation: the user's.
+        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: .maskCommand, now: clock.nowSeconds())
+        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: [], now: clock.nowSeconds() + 0.1)
         clock.advance(ms: 200)
         sys.front = 500
         core.onActivation(pid: 500)
         XCTAssertTrue(sys.activated.isEmpty, "the user's own switch is respected")
-        // The helper's own stamped click, or another process's event, is never the user's.
+        // The helper's own stamped events, or another process's, are never the user's.
         let (core2, sys2, clock2) = delayedStealWorld()
         defer { core2.stopGuardian() }
+        core2.switchInputObservableOverride = true
         core2.noteGuardianActed(500)
         clock2.advance(ms: 900)
-        core2.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: CUEventStamp.value, now: clock2.nowSeconds())
-        core2.noteTapEvent(type: .leftMouseDown, sourcePid: 4242, userData: 0, now: clock2.nowSeconds())
+        core2.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: CUEventStamp.value, flags: .maskCommand, now: clock2.nowSeconds())
+        core2.noteTapEvent(type: .flagsChanged, sourcePid: 4242, userData: 0, flags: .maskCommand, now: clock2.nowSeconds())
         sys2.front = 500
         core2.onActivation(pid: 500)
         XCTAssertEqual(sys2.activated.last, 1)
+    }
+
+    /// Review of round 6 (HIGH, a regression): ordinary TYPING in the user's own app made a target's self-activation
+    /// "the user's switch" — adopted as their place, their next keys going into it. Typing is no switch: undone.
+    func testTypingInTheirOwnAppNeverMakesATheftTheirs() {
+        let (core, sys, clock) = delayedStealWorld()
+        defer { core.stopGuardian() }
+        core.switchInputObservableOverride = true
+        core.secondsSinceUserInputOverride = { 0.05 }  // the user typing all along
+        core.noteGuardianActed(500)
+        clock.advance(ms: 300)
+        for i in 0..<5 { core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: Int64(i), now: clock.nowSeconds()) }
+        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: .maskShift, now: clock.nowSeconds())  // a capital
+        sys.front = 500
+        core.onActivation(pid: 500)
+        XCTAssertEqual(sys.activated.last, 1, "the target that activated itself is undone")
     }
 
     func testTheCausalWindowStillBoundsWhatIsTheAgents() {
@@ -216,10 +271,10 @@ final class FocusGuardianTests: XCTestCase {
         var g = CUFocusGuardianCore()
         g.begin(view: CUGuardedView(app: 1, space: 100))
         // Terminal (pid 77) comes forward with no input on record: still the user's — the agent never touched it.
-        XCTAssertEqual(g.handle(CUActivation(app: 77, space: 200, hadRecentUserInput: false, suspect: false), now: 10), .userSwitch)
+        XCTAssertEqual(g.handle(CUActivation(app: 77, space: 200, switchInput: false, suspect: false), now: 10), .userSwitch)
         XCTAssertEqual(g.view, CUGuardedView(app: 77, space: 200), "it is the user's app and Space now")
         // A touched app taking the front after that is put back to Terminal, never to the old app.
-        guard case .theft(let restore, _, _) = g.handle(CUActivation(app: 500, space: 200, hadRecentUserInput: false), now: 11)
+        guard case .theft(let restore, _, _) = g.handle(CUActivation(app: 500, space: 200, switchInput: false), now: 11)
         else { return XCTFail("expected a theft") }
         XCTAssertEqual(restore.app, 77)
     }
@@ -374,9 +429,9 @@ final class FocusGuardianTests: XCTestCase {
         g.userClicked(app: 500, space: 100, now: 10)
         XCTAssertEqual(g.view, CUGuardedView(app: 500, space: 100), "the user's app is the clicked one at once")
         // The app activates a second later — past the 0.4 s input window, with no recent input reported.
-        XCTAssertEqual(g.handle(CUActivation(app: 500, space: 100, hadRecentUserInput: false), now: 11), .userSwitch)
+        XCTAssertEqual(g.handle(CUActivation(app: 500, space: 100, switchInput: false), now: 11), .userSwitch)
         // After the claim, another app's activation is a theft that restores the CLICKED app, not the old one.
-        guard case .theft(let restore, _, _) = g.handle(CUActivation(app: 7, hadRecentUserInput: false), now: 11.2)
+        guard case .theft(let restore, _, _) = g.handle(CUActivation(app: 7, switchInput: false), now: 11.2)
         else { return XCTFail("expected a theft") }
         XCTAssertEqual(restore.app, 500)
     }
@@ -386,12 +441,12 @@ final class FocusGuardianTests: XCTestCase {
         g.begin(view: CUGuardedView(app: 1, space: 100))
         g.userClicked(app: 500, space: 100, now: 10)
         g.end(); g.begin(view: CUGuardedView(app: 1, space: 100))  // a fresh guard: no claim
-        XCTAssertNotEqual(g.handle(CUActivation(app: 500, hadRecentUserInput: false), now: 10.5), .userSwitch)
+        XCTAssertNotEqual(g.handle(CUActivation(app: 500, switchInput: false), now: 10.5), .userSwitch)
         var h = CUFocusGuardianCore()
         h.begin(view: CUGuardedView(app: 1, space: 100))
         h.userClicked(app: 500, space: 100, now: 10)
-        _ = h.handle(CUActivation(app: 1, hadRecentUserInput: true), now: 10.2)  // the user went back to their app
-        guard case .theft = h.handle(CUActivation(app: 500, hadRecentUserInput: false), now: 10 + CUFocusGuardianCore.clickClaimWindow + 0.1)
+        _ = h.handle(CUActivation(app: 1, switchInput: true), now: 10.2)  // the user went back to their app
+        guard case .theft = h.handle(CUActivation(app: 500, switchInput: false), now: 10 + CUFocusGuardianCore.clickClaimWindow + 0.1)
         else { return XCTFail("a click long ago claims nothing") }
     }
 

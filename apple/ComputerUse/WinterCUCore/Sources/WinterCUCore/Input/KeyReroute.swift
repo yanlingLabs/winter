@@ -27,11 +27,18 @@ final class CUKeyReroute {
     private var _rerouted = 0
     private var _passed = 0
 
-    init(target: pid_t, victim: pid_t, installer: CUKeyTapInstalling, post: @escaping (CGEvent, pid_t) -> Void) {
+    /// True while the user's keys reaching the target are THEIRS to keep there — the target is their front app (they
+    /// switched into it): passed through, never posted to the app they left.
+    private let passThrough: () -> Bool
+    private var _passedThrough = 0
+
+    init(target: pid_t, victim: pid_t, installer: CUKeyTapInstalling, post: @escaping (CGEvent, pid_t) -> Void,
+         passThrough: @escaping () -> Bool = { false }) {
         self.target = target
         self.victim = victim
         self.installer = installer
         self.post = post
+        self.passThrough = passThrough
     }
 
     /// Installs the tap; false when it could not be made (the blip then does not run).
@@ -48,6 +55,10 @@ final class CUKeyReroute {
     func handle(_ event: CGEvent) -> CGEvent? {
         if CUEventStamp.isOurs(event.getIntegerValueField(.eventSourceUserData)) {
             lock.withLock { _passed += 1 }
+            return event
+        }
+        if passThrough() {
+            lock.withLock { _passedThrough += 1 }
             return event
         }
         if let copy = event.copy() { post(copy, victim) }
@@ -70,6 +81,7 @@ final class CUKeyReroute {
     var isInstalled: Bool { lock.withLock { remove != nil } }
     var rerouted: Int { lock.withLock { _rerouted } }
     var passed: Int { lock.withLock { _passed } }
+    var passedThrough: Int { lock.withLock { _passedThrough } }
 }
 
 /// No tap (test cores): the blip never runs.

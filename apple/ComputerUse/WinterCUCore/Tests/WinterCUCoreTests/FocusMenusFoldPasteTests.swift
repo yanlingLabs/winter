@@ -141,6 +141,14 @@ final class FocusMenusFoldPasteTests: XCTestCase {
 
     private func token(_ e: AXUIElement) -> String { var p: pid_t = 0; AXUIElementGetPid(e, &p); return "\(p)" }
 
+    /// The user's ⌘-Tab, as the session tap sees it: ⌘ down and up (the switcher swallows the Tab).
+    private func usersSwitch() {
+        core.switchInputObservableOverride = true
+        let now = core.clock.nowSeconds()
+        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: .maskCommand, now: now)
+        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: [], now: now)
+    }
+
     @discardableResult
     private func act(_ a: CUAction, privatePath: Bool = true, foreground: Bool = false) async throws -> TargetActResult {
         try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c", action: a, access: .full,
@@ -749,14 +757,14 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         ax.focus(pid: pid, on: other)
         ax.put(window, [kAXFocusedUIElementAttribute: field])
         let enforcer = FakeFocusEnforcer()
-        enforcer.onDeactivate = { [unowned self] in sys.front = pid }  // the user clicks the app while it resigns
+        enforcer.onDeactivate = { [unowned self] in usersSwitch(); sys.front = pid }  // the user ⌘-Tabs into the app while it resigns
         core.focusEnforcerFactory = { _ in enforcer }
         XCTAssertEqual(core.keyForClick(target, privatePath: true, clickWindow: 77), .appInFront)
         XCTAssertTrue(FocusSPI.makeKey.isEmpty, "the app came to the front: no records into the user's own app")
         sys.front = 1
         FocusSPI.reset()
         let quick = FakeFocusEnforcer()
-        quick.onForce = { [unowned self] in sys.front = pid }  // forward before the decision is even taken
+        quick.onForce = { [unowned self] in usersSwitch(); sys.front = pid }  // forward before the decision is even taken
         core.focusEnforcerFactory = { _ in quick }
         core.noteStranded(pid, true)
         let t2 = CUTarget(id: "t2", sessionId: "s", pid: pid, bundleId: "com.apple.finder", appName: "Finder",
@@ -765,6 +773,18 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         XCTAssertEqual(core.keyForClick(t2, privatePath: true, clickWindow: 77), .appInFront, "forward before the decision: no click")
         XCTAssertTrue(FocusSPI.makeKey.isEmpty)
         XCTAssertEqual(quick.deactivated, 0)
+        // With no input of the user's that switches, the same front change is the app's own doing (the one decision).
+        sys.front = 1
+        core.switchInputObservableOverride = true
+        let selfish = FakeFocusEnforcer()
+        selfish.onForce = { [unowned self] in sys.front = pid }
+        core.focusEnforcerFactory = { _ in selfish }
+        let t3 = CUTarget(id: "t3", sessionId: "s", pid: pid, bundleId: "com.apple.finder", appName: "Finder",
+                          isChromium: false, mirror: false, windowID: 77, windowTitle: "Downloads")
+        core.registerForTesting(t3, windowElement: window)
+        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: [], now: core.clock.nowSeconds())  // ⌘ released earlier
+        core.guardianLock.withLock { core.switchInput = CUSwitchInput() }
+        XCTAssertEqual(core.keyForClick(t3, privatePath: true, clickWindow: 77), .activatedItself)
     }
 
     /// Review of round 3 (LOW): the make-key step saw the app come to the front, and the click went out anyway — into
@@ -777,8 +797,10 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         ax.focus(pid: pid, on: other)
         ax.put(window, [kAXFocusedUIElementAttribute: field])
         let enforcer = FakeFocusEnforcer()
-        enforcer.onDeactivate = { [unowned self] in sys.front = pid }  // the user clicks the app while it resigns
+        enforcer.onDeactivate = { [unowned self] in usersSwitch(); sys.front = pid }  // the user ⌘-Tabs into the app while it resigns
         core.focusEnforcerFactory = { _ in enforcer }
+        core.startGuardian(privatePath: true)  // ARMED: its activation notification must not pull them back (review of round 6)
+        defer { core.stopGuardian() }
         do {
             try await act(.click(CUClickAction(ref: target.refs.ref(for: AXIdentity(element: field)), button: .right)))
             XCTFail("clicked")
@@ -788,6 +810,90 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         }
         XCTAssertFalse(poster.entries.contains { $0.type == .rightMouseDown || $0.type == .leftMouseDown }, "no click posted")
         XCTAssertTrue(sys.activated.isEmpty, "the user is not pulled back out of the app they brought forward (review of round 4)")
+        core.onActivation(pid: pid)  // the activation's notification, a moment later, right after our synthetic events
+        XCTAssertTrue(sys.activated.isEmpty, "the armed guardian never restores over the move the act judged theirs")
+    }
+
+    // MARK: round 7 — one decision for whose move it is
+
+    /// Review of round 6 (HIGH): a switch the user makes DURING a typing burst (a blip lives up to 1.5 s) was still
+    /// undone — their keys posted to the app they left until the burst ended, then that app re-activated over them.
+    /// Every key now asks: theirs → no reroute after it (their keys stay in the target they switched into), no hand-back,
+    /// no restore, `app_in_front`.
+    func testTheUserSwitchingDuringATypingBurstIsLeftThere() async throws {
+        for dest in ["the target", "a third app"] {
+            finder(focusedField: true)
+            let third: pid_t = 7777
+            sys.running.insert(third)
+            let destPid = dest == "the target" ? pid : third
+            var keys = 0
+            var passedThrough: CGEvent?
+            var handBackBefore = 0
+            poster.onPost = { [unowned self] e in
+                guard e.type == .keyDown else { return }
+                keys += 1
+                if keys == 2 {
+                    handBackBefore = FocusSPI.calls.filter { $0.hasPrefix("focus pid 1 ") }.count
+                    usersSwitch()
+                    sys.front = destPid
+                    // Their own key reaching the target's tap now: theirs to keep when the target is their front app.
+                    if dest == "the target", let tap = installer.handler { passedThrough = tap(keyEvent(stamped: false)) }
+                }
+            }
+            core.startGuardian(privatePath: true)
+            do {
+                try await act(.type(CUTypeAction(text: "abcdef")))
+                XCTFail("\(dest): typed on")
+            } catch let e as CUError {
+                XCTAssertEqual(e.data?["reason"], .string("app_in_front"), "\(dest): \(e.message)")
+            }
+            XCTAssertEqual(poster.keyDowns.count, 2, "\(dest): nothing more sent after the switch")
+            XCTAssertEqual(FocusSPI.calls.filter { $0.hasPrefix("focus pid 1 ") }.count, handBackBefore, "\(dest): no hand-back to the app they left")
+            XCTAssertTrue(sys.activated.isEmpty, "\(dest): no restore over them")
+            XCTAssertEqual(installer.removed, installer.installed.count, "\(dest): the reroute removed")
+            if dest == "the target" {
+                XCTAssertNotNil(passedThrough, "their key passed through to the target they are in")
+                XCTAssertTrue(posted.isEmpty, "never posted to the app they left")
+            }
+            core.onActivation(pid: destPid)
+            XCTAssertTrue(sys.activated.isEmpty, "\(dest): the armed guardian leaves them there")
+            core.stopGuardian()
+            FocusSPI.reset()
+        }
+    }
+
+    /// The target activating ITSELF mid-burst (no switch of the user's): the blip ends the ordinary way, the user is put
+    /// back, and nothing more is typed.
+    func testTheTargetActivatingItselfMidBurstStopsTheTypingAndPutsTheUserBack() async throws {
+        finder(focusedField: true)
+        core.switchInputObservableOverride = true
+        var keys = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            keys += 1
+            if keys == 2 { sys.front = pid }
+        }
+        do {
+            try await act(.type(CUTypeAction(text: "abcdef")))
+            XCTFail("typed on")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["uncertain"], .bool(true), e.message)
+            XCTAssertTrue(e.message.contains("came to the front by itself"), e.message)
+        }
+        XCTAssertEqual(poster.keyDowns.count, 2)
+        XCTAssertEqual(sys.activated.last, 1, "the user's app put back")
+    }
+
+    /// Review of round 6 (MEDIUM): the hand-back's window-server fallback named the user's app's frontmost layer-0
+    /// window — not the one that was key (a Finder window behind other apps, over the desktop's selection). With no
+    /// window accessibility names, the record names none and the app takes back its own key window.
+    func testTheHandBackNamesNoWindowWhenTheUsersFocusedWindowIsUnreadable() async throws {
+        finder(focusedField: true)
+        ax.drop(ax.application(1), kAXFocusedWindowAttribute)
+        sys.stack.insert(FakeSystem.window(33, pid: 1, CGRect(x: 0, y: 0, width: 300, height: 200)), at: 0)  // a window of theirs, not key
+        try await act(.type(CUTypeAction(text: "a")))
+        XCTAssertTrue(FocusSPI.calls.contains("focus pid 1 window 0"), "\(FocusSPI.calls)")
+        XCTAssertFalse(FocusSPI.calls.contains("focus pid 1 window 33"), "never the frontmost window the server lists")
     }
 
     // MARK: round 6 — the reviewer's findings on round 4
@@ -853,15 +959,18 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         ax.focus(pid: pid, on: other)
         ax.put(window, [kAXFocusedUIElementAttribute: field])
         let enforcer = FakeFocusEnforcer()
-        enforcer.onDeactivate = { [unowned self] in sys.front = pid }  // the user ⌘-Tabs into the app meanwhile
+        enforcer.onDeactivate = { [unowned self] in usersSwitch(); sys.front = pid }  // the user ⌘-Tabs into the app meanwhile
         core.focusEnforcerFactory = { _ in enforcer }
-        core.secondsSinceUserInputOverride = { 0.1 }                    // their keys
+        core.startGuardian(privatePath: true)  // ARMED
+        defer { core.stopGuardian() }
         do {
             try await act(.type(CUTypeAction(text: "a")))
             XCTFail("typed")
         } catch let e as CUError {
             XCTAssertEqual(e.data?["reason"], .string("app_in_front"))
         }
+        core.onActivation(pid: pid)
+        XCTAssertTrue(sys.activated.isEmpty, "the armed guardian leaves them there too")
         XCTAssertTrue(poster.keyDowns.isEmpty)
         XCTAssertTrue(sys.activated.isEmpty, "not pulled back out of the app they chose")
         XCTAssertFalse(core.isRetired(.focusRecords), "the focus records stay in use")
@@ -869,7 +978,8 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         XCTAssertEqual(installer.removed, installer.installed.count)
         // Back in their own app later: the next blip runs as ever.
         sys.front = 1
-        core.secondsSinceUserInputOverride = { 5 }
+        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: [], now: core.clock.nowSeconds() - 5)
+        core.guardianLock.withLock { core.switchInput = CUSwitchInput() }
         enforcer.onDeactivate = nil
         FocusSPI.reset()
         try await act(.type(CUTypeAction(text: "b")))
@@ -886,7 +996,12 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         let enforcer = FakeFocusEnforcer()
         enforcer.onDeactivate = { [unowned self] in sys.front = pid }  // the app activates itself — nobody's input
         core.focusEnforcerFactory = { _ in enforcer }
-        core.secondsSinceUserInputOverride = { 5 }
+        // Review of round 6 (HIGH): the user TYPING in their own app all along is no switch — round 6 took it for one.
+        core.switchInputObservableOverride = true
+        core.secondsSinceUserInputOverride = { 0.05 }
+        core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: 0, now: core.clock.nowSeconds())
+        core.startGuardian(privatePath: true)  // ARMED
+        defer { core.stopGuardian() }
         do {
             try await act(.type(CUTypeAction(text: "a")))
             XCTFail("typed")
@@ -913,7 +1028,7 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         ax.add(otherField, role: kAXTextFieldRole, extra: [kAXWindowAttribute: other])
         ax.focus(pid: pid, on: otherField)
         let enforcer = FakeFocusEnforcer()
-        enforcer.onDeactivate = { [unowned self] in sys.front = pid }  // the user clicks into the app meanwhile
+        enforcer.onDeactivate = { [unowned self] in usersSwitch(); sys.front = pid }  // the user ⌘-Tabs into the app meanwhile
         core.focusEnforcerFactory = { _ in enforcer }
         do {
             try await act(.type(CUTypeAction(text: "abc", into: target.refs.ref(for: AXIdentity(element: field)))))

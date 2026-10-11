@@ -48,6 +48,7 @@ extension CUCore {
         // front is no view moved.
         if holdsForeground(t) || isVisiting(t) { t.consentedForeground = true }
         let before = userView()
+        let startedAt = clock.nowSeconds()
         let route = { (o: ActOutcome?) in "\(Self.actionName(p.action)) (\(o.map { Self.routeName($0.rung) } ?? "failed"))" }
         let outcome: ActOutcome
         do {
@@ -58,33 +59,39 @@ extension CUCore {
             // they chose (review of round 4).
             if Self.isAppInFront(error) { throw error }
             // The error is the result; what moved is said with the next one.
-            checkAfterAct(before, t, seq: seq, route: route(nil))
+            checkAfterAct(before, t, seq: seq, route: route(nil), since: startedAt)
             throw error
         }
-        checkAfterAct(before, t, seq: seq, route: route(outcome))
+        checkAfterAct(before, t, seq: seq, route: route(outcome), since: startedAt)
         let notes = t.takeViewNotes()
         guard !notes.isEmpty else { return outcome }
         return ActOutcome(rung: outcome.rung, detail: ([outcome.detail].compactMap { $0 } + notes).joined(separator: "; "))
     }
 
-    private func checkAfterAct(_ before: CUUserView, _ t: CUTarget, seq: Int, route: String) {
+    private func checkAfterAct(_ before: CUUserView, _ t: CUTarget, seq: Int, route: String, since: TimeInterval) {
         guard !t.consentedForeground else { return }
         let after = view(after: before, settleMs: userViewSettleMs)
         if after != before {
+            // The user's own move during the act (the one decision): left alone, the guardian told.
+            if isUsersMove(after, since: since) {
+                CULog.act.notice("\(route, privacy: .public) in \(t.appName, privacy: .public): the user moved during it — left there")
+                return
+            }
             t.addViewNote(viewMoved(before, after, t, route: route, late: false))
         } else if userViewLateCheck {
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                self?.lateCheck(before, t, seq: seq, route: route)
+                self?.lateCheck(before, t, seq: seq, route: route, since: since)
             }
         }
     }
 
     /// 300 ms on: only the target having taken the front is undone this late (anything else may be the user's
-    /// own doing by now), and only while no newer act has started.
-    func lateCheck(_ before: CUUserView, _ t: CUTarget, seq: Int, route: String) {
+    /// own doing by now), and only while no newer act has started — and never the user's own move.
+    func lateCheck(_ before: CUUserView, _ t: CUTarget, seq: Int, route: String, since: TimeInterval? = nil) {
         guard t.actSeq == seq, !t.consentedForeground else { return }
         let now = userView()
         guard now.front == t.pid, before.front != t.pid else { return }
+        if isUsersMove(now, since: since) { return }
         t.addViewNote("after the previous action, " + viewMoved(before, now, t, route: route, late: true))
     }
 
@@ -202,14 +209,6 @@ extension CUCore {
         return .undone
     }
 
-    /// The user's own click, key or modifier within the guardian's window — the HID state (the helper's posted events
-    /// never count there: measured on 2026-10-11, a key and a click it posted left "seconds since the last key/click"
-    /// at over an hour) or the session tap's hardware actions (never a pointer move: moving the mouse activates nothing).
-    func userActedRecently(now: TimeInterval) -> Bool {
-        if secondsSinceUserInput < CUFocusGuardianCore.userInputWindow { return true }
-        let last = guardianLock.withLock { lastHardwareActionAt }
-        return last >= 0 && now - last <= Self.guardianHardwareWindow
-    }
 
     /// How a focus blip's start went (`keyWithoutRaise`).
     enum BlipStart {
@@ -246,8 +245,11 @@ extension CUCore {
         if makeKeyApplies(t), case .unknown(let why) = transientUI(t) {
             return .refusedBeforeAnything(CUError.refused(.focusNotPlaced, "where \(t.appName)'s keys would go can't be told (\(why)), so nothing was typed — try again, or click the field first"))
         }
+        // The hand-back names the user's window accessibility names — else NONE, and the app takes back its own key
+        // window (measured 2026-10-11 on probe apps of ours: a window-0 record gave each its key window back — the one
+        // that had been key, not the frontmost one the window server lists, which round 6 named and which made the wrong
+        // window key: review of round 6, a Finder window behind other apps over the desktop's selection).
         let userWindow = ax.element(ax.application(user), kAXFocusedWindowAttribute).flatMap { ax.windowID($0) }
-            ?? sys.windowStack().first(where: { $0.pid == user && $0.layer == 0 })?.id
         let sky = skyLight
         let (tp, tw) = (t.pid, t.windowID)
         let undo = { [self] in
@@ -263,8 +265,13 @@ extension CUCore {
         // paste of a run read Edit › Paste disabled and took no ⌘V; keys for the Docs window went nowhere). Once the
         // app has taken the activation, the bound window is made its key window — only when it is not (`makeKeyInApp`).
         var made = MakeKeyOutcome.notApplicable
-        let usersMove = { [self] (now: CUUserView) -> Bool in now.front == tp && userActedRecently(now: clock.nowSeconds()) }
+        let stepStart = clock.nowSeconds()
+        // Whose move a change during the step is: the one decision (`classifyMove`), never the step's own guess.
+        let usersMove = { [self] (now: CUUserView) -> Bool in isUsersMove(now, since: stepStart) }
         let step = backgroundStep(.focusRecords, t, run: { [self] in
+            // The focus record is a synthetic event too: an activation right after it is not the user's by itself
+            // (review of round 6: only the other-key-window step marked one).
+            noteSyntheticActivation()
             guard sky.focusWithoutRaise(pid: tp, windowID: tw) else { return false }
             made = makeKeyInApp(t) { [self] in
                 // After the deactivation the app is told it is active again (the blip keeps it so), to the app alone.
@@ -277,21 +284,39 @@ extension CUCore {
         case .notRun:
             return .unavailable
         case .undone:
-            return .undone(CUError.refused(.focusNotPlaced, "\(t.appName) activated itself when its window was being made key; the user's app was put back and nothing was typed — check state(), and try again"))
+            return .undone(activatedItselfRefusal(t))
         case .ran:
             break
         }
         CULog.act.notice("\(t.appName, privacy: .public): window \(tw, privacy: .public) made key without raising (\(made.words, privacy: .public))")
-        if sys.frontmostPid() == tp {
-            let e = CUError.refused(.appInFront, "\(t.appName) came to the front while its window was being made key — the user may be using it now, so nothing was typed; check state(), and try again if it is still wanted")
-            CULog.act.notice("\(t.appName, privacy: .public): nothing sent in the focus blip — it came to the front")
-            return .userTookTheApp(e)
+        // The front moved during the step after its settle (or the user's move it already judged): judged again, by the
+        // same rule — the user's: no hand-back; the app's own: the blip ends the ordinary way, which puts them back.
+        if let front = sys.frontmostPid(), front != user {
+            if isUsersMove(userView(), since: stepStart) {
+                CULog.act.notice("\(t.appName, privacy: .public): nothing sent in the focus blip — the user moved (front \(front, privacy: .public))")
+                return .userTookTheApp(usersMoveRefusal(t, front: front, typed: false))
+            }
+            return .refused(undo: undo, activatedItselfRefusal(t))
         }
         if let refusal = keysRefusal(made, t) {
             CULog.act.notice("\(t.appName, privacy: .public): nothing sent in the focus blip — \(refusal.message, privacy: .public)")
             return .refused(undo: undo, refusal)
         }
         return .keyed(undo: undo)
+    }
+
+    /// The user moved — into the target app, or to another app — while keys were about to go (or going) to it.
+    func usersMoveRefusal(_ t: CUTarget, front: pid_t, typed: Bool) -> CUError {
+        let stop = typed ? "the typing was stopped" : "nothing was typed"
+        let msg = front == t.pid
+            ? "\(t.appName) came to the front — the user brought it forward (their switch: ⌘-Tab, a click, the Dock), so \(stop); check state(), and try again if it is still wanted"
+            : "the user switched to another app while keys were going to \(t.appName), so \(stop) — they were left where they went; check state(), and try again if it is still wanted"
+        return CUError.refused(.appInFront, msg)
+    }
+
+    /// The target activated itself (no switch of the user's behind it): undone, the user's app put back.
+    func activatedItselfRefusal(_ t: CUTarget) -> CUError {
+        CUError.refused(.focusNotPlaced, "\(t.appName) activated itself when its window was being made key; the user's app was put back and nothing was typed — check state(), and try again")
     }
 
     /// Whether keys may go out after the make-key step: yes when it did not apply, the window was key already, or the
@@ -562,12 +587,14 @@ extension CUCore {
     /// path off, the click elsewhere, no enforcer); a caller that posted the synthetic activation alone before still
     /// does. `.appInFront`: the app came to the front meanwhile (review of round 3: the click went out anyway, into what
     /// was now the user's front app) — the caller sends no click (`clickRefusal`).
-    enum ClickPrep: Equatable { case notApplied, prepared, appInFront }
+    /// `.activatedItself`: it came to the front by its own doing (the one decision, `classifyMove`) — not sent either.
+    enum ClickPrep: Equatable { case notApplied, prepared, appInFront, activatedItself }
 
     func keyForClick(_ t: CUTarget, privatePath: Bool, clickWindow: UInt32) -> ClickPrep {
         guard privatePath, clickWindow == t.windowID, makeKeyApplies(t), let enforcer = focusEnforcer(for: t, privatePath: true) else {
             return .notApplied
         }
+        let prepStart = clock.nowSeconds()
         noteSyntheticActivation()
         _ = enforcer.forceActivation(windowID: t.windowID)
         let made = makeKeyInApp(t) { [self] in
@@ -575,7 +602,16 @@ extension CUCore {
             _ = enforcer.forceActivation(windowID: t.windowID)
         }
         CULog.act.notice("click in \(t.appName, privacy: .public): window \(t.windowID, privacy: .public) — \(made.words, privacy: .public)")
-        return made == .appInFront ? .appInFront : .prepared
+        guard made == .appInFront || sys.frontmostPid() == t.pid else { return .prepared }
+        // Whose move it was decides (review of round 6: the synthetic marks just posted made the guardian take a ⌘-Tab of
+        // the user's for a theft and pull them back out): the user's → told to the guardian, the click not sent; the
+        // app's own → not sent, and the guardian puts the user back.
+        return isUsersMove(userView(), since: prepStart) ? .appInFront : .activatedItself
+    }
+
+    /// The click not sent because the app activated itself while it was being prepared.
+    func clickActivatedItselfRefusal(_ t: CUTarget) -> CUError {
+        CUError.refused(.focusNotPlaced, "\(t.appName) activated itself while the click was being prepared; the user's app is put back and the click was not sent — check state(), and try again")
     }
 
     /// An `app_in_front` refusal.
