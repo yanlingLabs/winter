@@ -14,7 +14,9 @@ accounts, receive raw grants, or launch a VM. The production daemon currently
 refuses provisioning with `unsupported_topology`.
 
 Commands use the existing local harness client/connection path. Argument
-validation and help happen before connection. Every mutation requires both
+validation and help happen before connection. Values can use `--flag=value`; for example `--title=--draft` preserves a title
+that starts with two dashes. Human output escapes directional/invisible controls;
+JSON output preserves the original typed values. Every mutation requires both
 `--revision N` and `--request-id ID`; there is no automatic refresh/retry.
 Repeat the original arguments, revision and request ID for an exact retry.
 Use a new request ID for a new change. The daemon continues to enforce current
@@ -60,7 +62,7 @@ before connecting or autolaunching anything.
 cd packages/cli
 bun test test/cowork-cli.test.ts test/main.test.ts test/cli-verb-gates.test.ts \
   test/memory-cli.test.ts test/credentials-cli.test.ts test/cli-autolaunch.test.ts
-# 115 tests, 1872 assertions passed.
+# 117 tests, 1904 assertions passed.
 
 # From repository root
 bun run typecheck:cli

@@ -22,19 +22,24 @@ POLICY: plan|dont-ask|ask|accept-edits|auto|bypass.`;
 export interface CoworkCliRoute { method: CoworkMethod; params: CoworkParams<CoworkMethod>; json: boolean }
 export type CoworkCliResult = CoworkResult<CoworkMethod>;
 type Flags = Record<string, string | true>;
-const visible = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+const visible = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200e\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
 
 /** Strict pre-connection parsing: no paths/grants, silently ignored options or invented defaults. */
 export function parseCoworkArgs(surface: "workspace" | "project", args: string[]): CoworkCliRoute | { help: true } {
   if (args.length === 1 && ["--help", "-h", "help"].includes(args[0]!)) return { help: true };
   const flags: Flags = {}, positions: string[] = [];
   for (let index = 0; index < args.length; index++) {
-    const word = args[index]!;
-    if (!word.startsWith("--")) { positions.push(word); continue; }
+    const argument = args[index]!;
+    if (!argument.startsWith("--")) { positions.push(argument); continue; }
+    const equals = argument.indexOf("="), word = equals < 0 ? argument : argument.slice(0, equals);
+    const inline = equals < 0 ? undefined : argument.slice(equals + 1);
     if (Object.hasOwn(flags, word)) throw new Error(`Duplicate option ${word}`);
-    if (word === "--json") { flags[word] = true; continue; }
-    const value = args[++index];
-    if (value === undefined || value.startsWith("--")) throw new Error(`Missing value for ${word}`);
+    if (word === "--json") {
+      if (inline !== undefined) throw new Error("--json does not accept a value");
+      flags[word] = true; continue;
+    }
+    const value = inline ?? args[++index];
+    if (value === undefined || (inline === undefined && value.startsWith("--"))) throw new Error(`Missing value for ${word}`);
     flags[word] = value;
   }
   const [verb = "list", sub, id, extra] = positions;
@@ -92,7 +97,7 @@ export async function runCoworkRoute(client: Pick<WinterClient, "cowork">, route
 
 function policyLines(policy: CoworkWorkspacePolicy) {
   return [`Default policy: ${policy.defaultPolicy}`, `Publication policy: ${policy.publication}`, `Network ceiling: ${policy.ceiling.network}`,
-    `Tool classes: ${JSON.stringify(policy.ceiling.toolClasses)}`, `Host services: ${JSON.stringify(policy.ceiling.hostServices)}`, `Connectors: ${JSON.stringify(policy.ceiling.connectors)}`];
+    `Tool classes: ${visible(JSON.stringify(policy.ceiling.toolClasses))}`, `Host services: ${visible(JSON.stringify(policy.ceiling.hostServices))}`, `Connectors: ${visible(JSON.stringify(policy.ceiling.connectors))}`];
 }
 function workspaceLines(value: CoworkWorkspace): string[] {
   const lines = [`${value.workspaceId} · ${value.ownership} ${value.ownerId} · ${visible(value.title)}`, `State: ${value.state}; power: ${value.power}; configuration revision: ${value.configRevision}`, `Automatic publication default: ${value.automaticPublication ? "enabled" : "disabled"}`];

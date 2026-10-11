@@ -52,6 +52,13 @@ describe("Cowork CLI pre-connection parser", () => {
     expect(() => route("project", ["source", "list", "project-fixture"])).toThrow();
     expect(() => route("workspace", ["policy", "set-ceiling", "workspace-fixture", "--ceiling-json", '{"toolClasses":[]}', ...mutate])).toThrow();
   });
+  test("inline flag values preserve option-shaped titles and reject ambiguous duplicates", () => {
+    expect(route("workspace", ["update", "workspace-fixture", "--title=--draft", "--revision=3", "--request-id=request-fixture"]).params)
+      .toEqual({ workspaceId: "workspace-fixture", title: "--draft", expectedRevision: 3, requestId: "request-fixture" });
+    expect(() => route("workspace", ["list", "--limit=2", "--limit", "3"])).toThrow("Duplicate option --limit");
+    expect(() => route("workspace", ["list", "--json=true"])).toThrow("--json does not accept a value");
+    expect(() => route("workspace", ["update", "workspace-fixture", "--title=", ...mutate])).toThrow("Invalid arguments");
+  });
   test("opaque source selections and complete ceilings cannot accept raw authority fields", () => {
     const added = route("workspace", ["source", "add-repository", "workspace-fixture", "--selection-id", "repo-choice", ...mutate]);
     expect(added.params).toEqual({ workspaceId: "workspace-fixture", requestId: "request-fixture", expectedRevision: 3, selectionId: "repo-choice" });
@@ -73,6 +80,18 @@ describe("Cowork CLI result and retry/refusal output", () => {
     expect(asJson.detailState).toBe("summary"); expect(asJson.policy).toBeUndefined(); expect(asJson).toEqual(summary);
     const unsafe = COWORK_RPC["workspace.get"].result.parse({ ...summary, title: "Fixture\u001b[2J" });
     expect(formatCoworkResult(parsed, unsafe).join("\n")).toContain("Fixture\\u001b[2J"); expect(formatCoworkResult(parsed, unsafe).join("\n")).not.toContain("\u001b");
+  });
+  test("human output makes bidi and invisible controls visible without changing JSON values", () => {
+    const parsed = route("workspace", ["get", "workspace-fixture"]);
+    const controls = "\u061c\u180e\u200e\u200f\u202e\u2060\u2066\u2069\ufeff";
+    const unsafe = COWORK_RPC["workspace.get"].result.parse({ ...full, title: `Title${controls}`, policy: { ...policy, ceiling: { ...ceiling, toolClasses: [`read${controls}`] } } });
+    const lines = formatCoworkResult(parsed, unsafe).join("\n");
+    for (const control of controls) {
+      expect(lines).not.toContain(control);
+      expect(lines).toContain(`\\u${control.charCodeAt(0).toString(16).padStart(4, "0")}`);
+      expect(coworkErrorMessage(new Error(`refused${control}`))).not.toContain(control);
+    }
+    expect(JSON.parse(formatCoworkResult({ ...parsed, json: true }, unsafe)[0]!)).toEqual(unsafe);
   });
   test("paged source/policy results retain continuation cursors and operation summaries remain explicit", () => {
     const sources = formatCoworkResult(route("workspace", ["source", "list", "workspace-fixture"]), { sources: [], nextCursor: "opaque-cursor" });
