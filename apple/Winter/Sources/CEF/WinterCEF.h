@@ -854,16 +854,6 @@ BOOL WinterCEFHeadlessReady(void);
 /// nobody can see or answer this browser's UI. Its pop-ups are refused (no pop-up observer is ever set).
 void WinterCEFCreateWindowlessBrowser(NSView *key, const char *url, const char *sessionId);
 
-/// `WinterCEFSendCDP` for a HEADLESS browser — the same contract (the completion always fires once, on the main
-/// thread; an empty `cdpSessionId` is the tab's own session), but the call is registered BEFORE it is sent. A method
-/// the browser process answers by itself (`Page.handleJavaScriptDialog`, for one) can answer INSIDE the send, and a
-/// registration made after it would miss that answer and leave the call waiting for its timeout.
-void WinterCEFHeadlessSendCDP(NSView *key,
-                              const char *method,
-                              const char *paramsJSON,
-                              const char *cdpSessionId,
-                              WinterCEFCDPStatusCompletion completion);
-
 /// Forget `sessionId`'s request context: its cookies are deleted and the context released. The caller closes
 /// the session's browsers first (`WinterCEFCloseBrowser`); a browser still open keeps its context alive until
 /// it closes. A creation still waiting for the context is dropped. Unknown sessions are a no-op.

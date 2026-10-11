@@ -131,6 +131,9 @@ const headlessPool = HEADLESS ? new HeadlessPool({
  *  the helper answers in the browser's own words and the engine retries in a fresh one, as it would the browser's. */
 const headlessSent: string[] = [];
 const headlessRefused: string[] = [];
+/** Sends the helper never answered in time (reported, not failed: a child session that went away mid-send is answered
+ *  by the door's detach, so one here is worth a look). */
+const headlessTimeouts: string[] = [];
 if (headlessPool !== undefined) {
   const send = headlessPool.send.bind(headlessPool);
   headlessPool.send = (async (tabKey: string, method: string, params?: Record<string, unknown>, opts?: { cdpSessionId?: string; timeoutMs?: number }) => {
@@ -139,6 +142,7 @@ if (headlessPool !== undefined) {
       return await send(tabKey, method, params, opts);
     } catch (err) {
       if (err instanceof TransportError && err.code === "not_allowed" && !err.message.startsWith("Cannot find context with specified id")) headlessRefused.push(`${method}: ${err.message}`);
+      if (err instanceof TransportError && err.code === "timeout") headlessTimeouts.push(`${method}${opts?.cdpSessionId === undefined ? "" : " (child session)"}`);
       throw err;
     }
   }) as typeof headlessPool.send;
@@ -713,6 +717,7 @@ run2.end();
 if (HEADLESS) await check("the engine never sent a method outside the allowlist, and Winter Headless refused nothing", async () => {
   expect(headlessSent.length > 0 && headlessSent.every((m) => CDP_ALLOWED_METHODS.includes(m)), "all methods allowlisted");
   expect(headlessRefused.length === 0, "nothing refused", headlessRefused.join("\n"));
+  console.log(`  (${headlessSent.length} sends to Winter Headless, ${headlessTimeouts.length} unanswered in time${headlessTimeouts.length === 0 ? "" : `: ${headlessTimeouts.join(", ")}`})`);
 });
 if (!HEADLESS) await check("the engine never sent a method outside the allowlist, and the transport refused nothing", async () => {
   expect(transport.sent.every((m) => CDP_ALLOWED_METHODS.includes(m)), "all methods allowlisted");

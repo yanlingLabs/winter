@@ -7,8 +7,9 @@ extension HeadlessCEFDriver {
         create: { key, url, sessionId in WinterCEFCreateWindowlessBrowser(key, url, sessionId) },
         browserIdentifier: { Int(WinterCEFBrowserIdentifierForParent($0)) },
         sendCDP: { key, method, params, session, completion in
-            // An empty session is the tab's own. Registered before it is sent (`WinterCEFHeadlessSendCDP`).
-            WinterCEFHeadlessSendCDP(key, method, params, session ?? "") { status, payload in
+            // Winter.app's own door (one for both apps): an empty session is the tab's own; the call is registered
+            // before it is sent, and a child session's result is settled from the raw stream.
+            WinterCEFSendCDP(key, method, params, session ?? "") { status, payload in
                 completion(HeadlessCEFDriver.status(status), payload ?? "{}")
             }
         },

@@ -4927,63 +4927,15 @@ class WinterHeadlessRenderHandler : public CefRenderHandler {
   DISALLOW_COPY_AND_ASSIGN(WinterHeadlessRenderHandler);
 };
 
-/// The RESULT of a DevTools method sent to a flattened child session (an out-of-process iframe), settled here.
-///
-/// CEF's own parser takes a method result only in the shape `{"id":…,"result":…}`; Chromium writes a child session's
-/// as `{"id":…,"result":…,"sessionId":"…"}`, which CEF logs as "Failed to parse message" and drops — so the call it
-/// answers would wait for its timeout. This second observer, registered on HEADLESS browsers only, reads that one
-/// shape itself and settles the pending call; everything else it leaves to CEF and the browser's own observer
-/// (`WinterCDPObserver`), unchanged.
-class WinterHeadlessChildResultObserver : public CefDevToolsMessageObserver {
- public:
-  bool OnDevToolsMessage(CefRefPtr<CefBrowser> browser, const void *message, size_t message_size) override {
-    CEF_REQUIRE_UI_THREAD();
-    if (!browser || message == nullptr || message_size < 8 || memcmp(message, "{\"id\":", 6) != 0) {
-      return false;
-    }
-    NSData *data = [NSData dataWithBytes:message length:message_size];
-    id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    if (![parsed isKindOfClass:[NSDictionary class]]) {
-      return false;
-    }
-    NSDictionary *dict = parsed;
-    NSNumber *messageId = dict[@"id"];
-    if (![dict[@"sessionId"] isKindOfClass:[NSString class]] || ![messageId isKindOfClass:[NSNumber class]]) {
-      return false;  // the tab's own result: CEF parses it
-    }
-    id error = dict[@"error"];
-    id result = dict[@"result"];
-    const BOOL ok = error == nil;
-    id body = ok ? (result ?: @{}) : error;
-    if (![body isKindOfClass:[NSDictionary class]]) {
-      body = ok ? @{} : @{@"code" : @(-32603), @"message" : @"the DevTools method failed"};
-    }
-    NSData *encoded = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
-    NSString *payload = encoded != nil ? [[NSString alloc] initWithData:encoded encoding:NSUTF8StringEncoding] : nil;
-    SettlePendingCDP(browser->GetIdentifier(), messageId.intValue, ok, payload ?: @"{}");
-    return true;
-  }
-
- private:
-  IMPLEMENT_REFCOUNTING(WinterHeadlessChildResultObserver);
-};
-
-/// Heap-allocated and never destroyed: a registration a close left behind must not be released by a static destructor
-/// running after `CefShutdown`.
-std::map<int, CefRefPtr<CefRegistration>> &HeadlessChildResultRegistrations() {
-  static auto *registrations = new std::map<int, CefRefPtr<CefRegistration>>();
-  return *registrations;
-}
-
-/// `WinterClient` with exactly three differences, all forced by having no window:
+/// `WinterClient` with exactly two differences, both forced by having no window:
 ///  * a render handler (a windowless browser cannot exist without one);
-///  * a second DevTools observer for child-session results (`WinterHeadlessChildResultObserver`);
 ///  * `DoClose` answers `false`. Winter.app's `true` means "the host completes the close by releasing the
 ///    host view" — and a windowless browser has none, so CEF's own reading of `false` for it ("If no OS
 ///    window exists … returning false will cause the browser object to be destroyed immediately") is the only
 ///    close that ever completes. With `true`, `CloseBrowser(true)` would be cancelled and the browser leak.
-/// Everything else — the native-UI handlers, the DevTools observer, pop-ups refused while no pop-up observer
-/// is set, the crash observer — is the base class's, unchanged.
+/// Everything else — the native-UI handlers, the CDP door and its DevTools observer (`WinterCEFSendCDP`,
+/// `WinterCDPObserver`: one door for both apps), pop-ups refused while no pop-up observer is set, the crash
+/// observer — is the base class's, unchanged.
 class WinterHeadlessClient : public WinterClient {
  public:
   WinterHeadlessClient(WinterCEFBrowserCreation *creation,
@@ -4992,21 +4944,6 @@ class WinterHeadlessClient : public WinterClient {
       : WinterClient(creation, bridge), render_(render) {}
 
   CefRefPtr<CefRenderHandler> GetRenderHandler() override { return render_; }
-
-  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
-    WinterClient::OnAfterCreated(browser);
-    if (browser && browser->GetHost()) {
-      HeadlessChildResultRegistrations()[browser->GetIdentifier()] =
-          browser->GetHost()->AddDevToolsMessageObserver(new WinterHeadlessChildResultObserver());
-    }
-  }
-
-  void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
-    if (browser) {
-      HeadlessChildResultRegistrations().erase(browser->GetIdentifier());
-    }
-    WinterClient::OnBeforeClose(browser);
-  }
 
   bool DoClose(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
@@ -5227,71 +5164,6 @@ void WinterCEFCreateWindowlessBrowser(NSView *key, const char *url, const char *
   request.key = key;
   request.url = [NSString stringWithUTF8String:target.c_str()] ?: @"";
   [record.pending addObject:request];
-}
-
-void WinterCEFHeadlessSendCDP(NSView *key,
-                              const char *method,
-                              const char *paramsJSON,
-                              const char *cdpSessionId,
-                              WinterCEFCDPStatusCompletion completion) {
-  if (completion == nil) {
-    return;
-  }
-  WinterCEFCDPStatusCompletion answer = [completion copy];
-  if (method == nullptr || *method == '\0') {
-    answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"no DevTools method was named"));
-    return;
-  }
-  if (!g_headless || !g_initialized || g_shutting_down) {
-    answer(WinterCEFCDPStatusNotLive, CDPReasonJSON(@"the browser engine is not running"));
-    return;
-  }
-  auto browser = BrowserForParent(key);
-  if (!browser || !browser->GetHost()) {
-    answer(WinterCEFCDPStatusNotLive, CDPReasonJSON(@"this tab has no live browser"));
-    return;
-  }
-  id params = @{};
-  if (paramsJSON != nullptr && *paramsJSON != '\0') {
-    NSData *data = [NSData dataWithBytes:paramsJSON length:strlen(paramsJSON)];
-    params = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    if (![params isKindOfClass:[NSDictionary class]]) {
-      answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the DevTools params were not a JSON object"));
-      return;
-    }
-  }
-  const int browserId = browser->GetIdentifier();
-  const int messageId = SuggestedCDPMessageId(browserId);
-  NSMutableDictionary *message = [@{
-    @"id" : @(messageId),
-    @"method" : [NSString stringWithUTF8String:method] ?: @"",
-    @"params" : params,
-  } mutableCopy];
-  if (cdpSessionId != nullptr && *cdpSessionId != '\0') {
-    message[@"sessionId"] = [NSString stringWithUTF8String:cdpSessionId] ?: @"";
-  }
-  NSData *encoded = [NSJSONSerialization dataWithJSONObject:message options:0 error:nil];
-  if (encoded == nil) {
-    answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the DevTools message could not be encoded"));
-    return;
-  }
-  NoteCDPMessageId(browserId, messageId);
-  // Registered FIRST: the answer may arrive before `SendDevToolsMessage` returns.
-  RememberPendingCDP(browserId, messageId, ^(BOOL ok, NSString *payload) {
-    if (ok) {
-      answer(WinterCEFCDPStatusOK, payload ?: @"{}");
-    } else {
-      answer(PayloadIsProtocolError(payload) ? WinterCEFCDPStatusProtocolError : WinterCEFCDPStatusGone,
-             payload ?: CDPReasonJSON(@"the DevTools method failed without a reason"));
-    }
-  });
-  if (!browser->GetHost()->SendDevToolsMessage(encoded.bytes, encoded.length)) {
-    NSMutableDictionary<NSNumber *, WinterCEFCDPCompletion> *byMessage = g_pending_cdp[@(browserId)];
-    if (byMessage[@(messageId)] != nil) {
-      [byMessage removeObjectForKey:@(messageId)];
-      answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the browser refused to submit the DevTools message"));
-    }
-  }
 }
 
 void WinterCEFHeadlessDisposeContext(const char *sessionId) {
