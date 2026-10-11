@@ -1005,14 +1005,32 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           if (ack.ev === "cmd.error") throw new Error(`the user's click into Name did not take: ${JSON.stringify(ack).slice(0, 200)}`);
           workedAt = Date.now();
         })();
+        // The user LEAVES the fixture for their own app (`userLeavesAfterMs`, round 12), or only LOOKS at it
+        // (`userLooksAfterMs`): a switch as the user, with no input into the fixture.
+        let leftAt: number | undefined;
+        const userLeaves = s.userLeavesAfterMs === undefined ? undefined : (async () => {
+          await sleep(s.userLeavesAfterMs!);
+          leftAt = Date.now();
+          await bringToFront(f.userPid!, "the user's app (they leave the fixture)", undefined, true);
+        })();
+        let lookedAt: number | undefined;
+        const userLooks = s.userLooksAfterMs === undefined ? undefined : (async () => {
+          await sleep(s.userLooksAfterMs!);
+          lookedAt = Date.now();
+          await bringToFront(f.mainPid!, "the fixture (the user only looks)", undefined, true);
+        })();
         // Both run beside the turn and are awaited only after it: a handler NOW, or a failure during the turn is an
         // unhandled rejection that kills the runner before its cleanup (round 11's live run). The awaits below still throw.
         userSwitch?.catch(() => undefined);
         userWorks?.catch(() => undefined);
+        userLeaves?.catch(() => undefined);
+        userLooks?.catch(() => undefined);
         const rig =s.desktopSwitch === undefined ? undefined : desktopSwitchRig(built.tool, s.desktopSwitch);
         const turn = await runTurn(where.client, where.sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer, rig);
         await userSwitch;
         await userWorks;
+        await userLeaves;
+        await userLooks;
         await rig?.done();
         // A prompt during the action stops the run here, before this row is judged (its failure would be the prompt's).
         abortIfPrompt();
@@ -1042,6 +1060,10 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         // again" (round 11: the hands-off row failed that check for the user's own move).
         const focus = s.userSwitchAfterMs !== undefined
           ? { checks: [userSwitchHeld(monitor!.items, switchedAt, finderPid, t1 + WATCH_AFTER_MS)], longestAwayMs: 0 }
+          : s.userLeavesAfterMs !== undefined
+            ? { checks: [userSwitchHeld(monitor!.items, leftAt, f.userPid, t1 + WATCH_AFTER_MS)], longestAwayMs: 0 }
+          : s.userLooksAfterMs !== undefined
+            ? { checks: [userSwitchHeld(monitor!.items, lookedAt, f.mainPid, t1 + WATCH_AFTER_MS)], longestAwayMs: 0 }
           : s.userWorksAfterMs !== undefined
             ? { checks: [userSwitchHeld(monitor!.items, workedAt, f.mainPid, t1 + WATCH_AFTER_MS)], longestAwayMs: 0 }
             : focusChecks(monitor!.items, since, t1 + WATCH_AFTER_MS, baseline!, s.allowExcursionMs, s.maxExcursions);

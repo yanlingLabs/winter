@@ -9,6 +9,7 @@
 // (`Page.downloadWillBegin`, after the arm) and the browser's item has that very URL — a download the user starts from
 // another tab of the same site never matches — and every other download is left exactly as the browser would have it.
 import type { ChromeApi, ChromeDownloadItem, ChromeDownloads, Clock } from "./chrome-api";
+import { PRODUCT_NAME } from "./product";
 
 export type OptionalPermission = "history" | "bookmarks" | "downloads";
 export const OPTIONAL_PERMISSIONS: readonly OptionalPermission[] = ["history", "bookmarks", "downloads"];
@@ -21,9 +22,9 @@ export class LibraryRefusal extends Error {
 }
 
 const NEEDS_SENTENCE: Record<OptionalPermission, string> = {
-  history: "Winter for Chrome may not search this browser's history — ask the user to allow it in Winter for Chrome's menu (its toolbar button)",
-  bookmarks: "Winter for Chrome may not search this browser's bookmarks — ask the user to allow it in Winter for Chrome's menu (its toolbar button)",
-  downloads: "Winter for Chrome may not save files a page makes — ask the user to allow downloads in Winter for Chrome's menu (its toolbar button)",
+  history: `${PRODUCT_NAME} may not search this browser's history — ask the user to allow it in ${PRODUCT_NAME}'s menu (its toolbar button)`,
+  bookmarks: `${PRODUCT_NAME} may not search this browser's bookmarks — ask the user to allow it in ${PRODUCT_NAME}'s menu (its toolbar button)`,
+  downloads: `${PRODUCT_NAME} may not save files a page makes — ask the user to allow downloads in ${PRODUCT_NAME}'s menu (its toolbar button)`,
 };
 
 const clampInt = (v: unknown, min: number, max: number, dflt: number): number =>
@@ -95,7 +96,7 @@ export class Library {
     });
     this.chrome.permissions.onRemoved.addListener((p) => {
       if (!(p.permissions ?? []).includes("downloads")) return;
-      for (const tabId of [...this.arms.keys()]) this.disarm(tabId, "the user switched downloads off in Winter for Chrome");
+      for (const tabId of [...this.arms.keys()]) this.disarm(tabId, `the user switched downloads off in ${PRODUCT_NAME}`);
       // Granted again later, the browser hands out a NEW downloads API: its events must be listened to afresh.
       this.listening = false;
     });

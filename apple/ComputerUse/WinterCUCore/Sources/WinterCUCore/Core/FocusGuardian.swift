@@ -294,9 +294,9 @@ public struct CUFocusGuardianCore: Sendable {
         judged = nil
         lastSeen = nil
         restoredAt.removeAll()
-        // The user's work in an app is known only while guarding (review of round 10, MEDIUM #4: it survived a stop, and a
-        // later guard refused acts on an app the user had long left).
-        userWorkingApp = nil
+        // The user's work in an app OUTLASTS the guard (review of round 11, MEDIUM #6: cleared here, a user still typing in
+        // the app had the next script's first act let through after a pause); what ends it between scripts is another
+        // app activating (`otherAppActivated`, from the always-on activation observer) or the app leaving the front.
         pendingWork = nil
         if visitApp != nil { endVisit() }
     }
@@ -469,7 +469,10 @@ public struct CUFocusGuardianCore: Sendable {
         // agent's own action caused — a link it pressed opening a browser that was not running — is no launch of the user's.
         let start = min(startedAt ?? now, now)
         coldLaunches = coldLaunches.filter { now - $0.value.start <= Self.launchFirstWindow }
-        coldLaunches[pid] = (start, inputObservable && !secureInput && clearlyAt(start, hardwareAt: nil))
+        // (Only while the facts from the start are still kept: a notice heard later judges nothing clearly — review of
+        // round 11, LOW #10.)
+        let judgeable = now - start <= Self.keepFacts - Self.quietBeforeUndo
+        coldLaunches[pid] = (start, judgeable && inputObservable && !secureInput && clearlyAt(start, hardwareAt: nil))
     }
     /// The untouched launches heard of, by process: its start, and whether it was clearly the agent's then.
     private var coldLaunches: [pid_t: (start: TimeInterval, clearly: Bool)] = [:]
@@ -1035,6 +1038,12 @@ public struct CUFocusGuardianCore: Sendable {
         guard let w = userWorkingApp else { return false }
         guard front == w else { userWorkingApp = nil; return false }
         return w == app
+    }
+
+    /// An app activated (heard by the always-on observer, guarding or not): the user's work in any OTHER app is over.
+    public mutating func otherAppActivated(_ pid: pid_t) {
+        if let w = userWorkingApp, w != pid { userWorkingApp = nil }
+        if let p = pendingWork, p.app != pid { pendingWork = nil }
     }
 
     /// The clicked app came forward in time: they are working in it.

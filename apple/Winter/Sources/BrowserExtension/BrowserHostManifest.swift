@@ -8,8 +8,8 @@ import Foundation
 //
 // The rules (the same as `bun run dev:helper`'s TS writer for the dev manifest, whose text it matches byte for byte):
 // written atomically, only when the content differs, only into a browser whose support directory already exists (Winter
-// never creates a browser's directory), and nothing is ever deleted. While the store ids do not exist yet it writes
-// nothing at all: a manifest no extension may use would only be noise. The Debug app writes nothing (the dev manifest is
+// never creates a browser's directory), and nothing is ever deleted. With no extension ids it writes nothing at all (a
+// manifest no extension may use would only be noise). The Debug app writes nothing (the dev manifest is
 // `dev:helper`'s). And only an INSTALLED Winter writes: one running from `/Applications` or `~/Applications`, never a
 // copy launched from a disk image, a download folder, a build directory or an App Translocation mount — every browser
 // would otherwise be pointed at a host that is gone once that copy is.
@@ -19,10 +19,13 @@ enum BrowserHostManifest {
     /// The dist native-messaging host name (the extension's `connectNative` name; the dev one is `com.winter.browser.dev`).
     static let hostName = "com.winter.browser"
 
-    /// The store builds' extension ids — the Chrome Web Store and Edge Add-ons listings, publisher yanlingLabs. Assigned at
-    /// the first upload; until then none. Kept equal to the daemon's (`extension-ids.ts`) and the host's
-    /// (`ExtensionIds.swift`) dist lists by a repo test.
-    static let storeExtensionIds: [String] = []
+    /// The store builds' extension ids — the Chrome Web Store's "Winter for Chrome" and Edge Add-ons' "Winter for Edge",
+    /// publisher yanlingLabs, each assigned by its store at the first upload. Kept equal to the daemon's
+    /// (`extension-ids.ts`) and the host's (`ExtensionIds.swift`) dist lists by a repo test.
+    static let storeExtensionIds: [String] = [
+        "bapmmpefcbjabfdfeehimdhldpjaoemd", // Edge Add-ons: Winter for Edge
+        "flfkppajaamjgfmdljlklfdffkdcmicc", // Chrome Web Store: Winter for Chrome
+    ]
 
     /// Each browser's directory under `~/Library/Application Support/` (the manifest goes in its `NativeMessagingHosts/`).
     /// Kept equal to the TS writer's list by a repo test.

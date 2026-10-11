@@ -55,10 +55,15 @@ extension CUCore {
         // The act is an operation on the app: touched while it runs (I1: "while an operation on it runs"), for the causal
         // window after it — however it ends. A cause that can't raise a window: the user's switch input just before it
         // still outranks it (#8).
-        // (Checked first: a refused act opens no span and records no cause — review of round 10, LOW #9.)
+        // (Checked first: a refused act opens no span and records no cause — review of round 10, LOW #9 — the floors
+        // included: review of round 11, LOW #9. They are checked again in the act itself.)
         do {
             try Self.checkAccess(p.action, access: p.access, appName: t.appName)
             try refuseWhileUserWorks(t)
+            try await queues.run(t.pid) { [self] in
+                try floorCheckPrivacy(t)
+                try floorCheckRemoteDebugging(p, t)
+            }
         } catch {
             cursor(t, "refused")
             logAct(p, t, failed: error)
@@ -75,6 +80,13 @@ extension CUCore {
         let acted = try await actWithVisits(p, t, token)
         var outcome = acted.0
         let inVisit = acted.1
+        // A link the daemon opens itself (its own door: the opener's access and consent).
+        var linkOpen: String?
+        if p.linkOpensViaDaemon == true, outcome.openLinkHost != nil, let paths = outcome.pendingOpen, paths.count == 1 {
+            linkOpen = paths[0]
+            outcome.pendingOpen = nil
+            CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): a link — handed to the daemon to open")
+        }
         if let paths = outcome.pendingOpen {
             // The queue is released: open now, bounded, and say what happened.
             do {
@@ -93,7 +105,7 @@ extension CUCore {
                                inputUnknown: outcome.inputUnknown ? true : nil, focusNow: outcome.focusNow,
                                focusLost: outcome.focusLost ? true : nil, pageNow: outcome.pageNow, inVisit: inVisit ? true : nil,
                                guardian: report.notes.isEmpty ? nil : report.notes,
-                               viewMovedBy: report.viewMovedBy.isEmpty ? nil : report.viewMovedBy)
+                               viewMovedBy: report.viewMovedBy.isEmpty ? nil : report.viewMovedBy, linkOpen: linkOpen)
     }
 
     /// The act, with desktop visits (CUCore+Visit): inside the session's open visit when its window is on the
@@ -516,6 +528,19 @@ extension CUCore {
                 return try pendingBackgroundOpen([url.absoluteString], what: nil, linkHost: url.host ?? url.absoluteString)
             }
             try pasteMenuGuard(e, info, p, t)
+            // Its press from another desktop showed no effect and the visit was offered: never pressed again — still
+            // from there, the visit is asked for again; on its desktop now (the visit), clicked where it is, once.
+            if button == .left, count == 1, flags.isEmpty, let mark = t.unconfirmedPress, mark.element == AXIdentity(element: e),
+               clock.nowMs() - mark.atMs < Self.unconfirmedPressMs {
+                if isOffThisDesktop(t) {
+                    throw CUError.needsDesktopVisit(t.appName, why: .act, "[\(ref)]'s press from here had no visible effect, and it is not pressed again — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
+                }
+                t.unconfirmedPress = nil
+                announceTarget(t, info, pressing: true)
+                cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
+                CULog.act.notice("click in \(t.appName, privacy: .public): its press from another desktop was unconfirmed — clicked where it is, not pressed again")
+                return try clickWebElement(e, info, ref: ref, p, t, token, pressIgnored: true, why: "the accessibility press from the other desktop had no visible effect")
+            }
             t.noteTargeted(e, at: clock.nowMs())
             announceTarget(t, info, pressing: button == .left)
             var announced = false
@@ -588,6 +613,9 @@ extension CUCore {
         }
         guard let px = try cuPoint(a.point) else { throw CUError.invalidParams("click needs a ref or a point") }
         let pt = try screenPoint(for: t, shotId: a.shotId, pixel: px)
+        // (Only a plain left click is judged: a right, other or modified click's effect — a menu, a selection — may be
+        // anywhere.)
+        guard button == .left, flags.isEmpty else { return try pointerClick(p, t, at: pt, button: button, count: count, flags: flags, token) }
         return try pointClickVerified(t, at: pt) {
             try pointerClick(p, t, at: pt, button: button, count: count, flags: flags, token)
         }
@@ -600,18 +628,24 @@ extension CUCore {
         guard offScreenSubject(t) == nil, let window = sys.window(id: t.windowID)?.frame else { return try click() }
         let crop = CGRect(x: pt.x - 120, y: pt.y - 80, width: 240, height: 160).intersection(window)
         guard !crop.isNull, !crop.isEmpty, let before = pressShot(crop, t) else { return try click() }
-        let windowsBefore = Set(sys.windows(pid: t.pid).map(\.id))
+        let windowsBefore = appWindowsOnScreen(t)
         let o = try click()
         guard o.rung != .foreground else { return o }
         let deadline = clock.nowMs() + webPressWatchMs
         repeat {
-            if Set(sys.windows(pid: t.pid).map(\.id)) != windowsBefore { return o }
+            if appWindowsOnScreen(t) != windowsBefore { return o }
             if let after = pressShot(crop, t), CUImageTools.differs(before, after) { return o }
             if clock.nowMs() >= deadline { break }
             clock.pause(ms: 150)
         } while true
         CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect at the point")
         return o.noting("the click at that point had no visible effect (nothing changed there, and no window opened) — check with state() or a screenshot before clicking again")
+    }
+
+    /// The app's windows on screen, EVERY layer (review of round 11, MEDIUM #7: a menu or popover opens at a higher one,
+    /// and the normal-level list said "no window opened" when one had).
+    func appWindowsOnScreen(_ t: CUTarget) -> Set<UInt32> {
+        Set(sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 }.map(\.id)).union(sys.windows(pid: t.pid).filter { $0.layer == 0 }.map(\.id))
     }
 
     /// `announced`: the cursor already showed this press (an AX attempt that fell back to events). `element`:
@@ -625,6 +659,7 @@ extension CUCore {
                                       announced: announced, element: element, axTried: axTried, subject: subject)
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
+        if d.rung != .foreground, let refusal = coveredWindowRefusal(t, allowForeground: p.allowForeground) { throw refusal }
         let synth = self.synth(p)
         let windowFor = self.windowFor(t)
         let event = announced ? nil : CursorEvent(kind: "press", point: pt, count: count, button: button.rawValue)
@@ -688,6 +723,11 @@ extension CUCore {
         if !announced { cursor(t, "press", at: pt, count: count, button: button.rawValue) }
         try token.check()
         if let target {
+            // Its press from here already showed no effect (the visit was offered): not pressed again.
+            if let mark = t.unconfirmedPress, mark.element == AXIdentity(element: target), clock.nowMs() - mark.atMs < Self.unconfirmedPressMs,
+               isOffThisDesktop(t) {
+                throw CUError.needsDesktopVisit(t.appName, why: .act, "its press from here had no visible effect, and it is not pressed again — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
+            }
             let tries: [AXUIElement]
             let action: String?
             switch route {
@@ -702,35 +742,6 @@ extension CUCore {
                     do {
                         try ax.perform(el, action)
                         CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): AX \(action, privacy: .public)")
-                        if let webBefore, !webPressChanged(el, t, since: webBefore) {
-                            // Web content that acts on a real mouse press (Google Docs' widgets) ignores the
-                            // accessibility press. Off screen its pixels may be stale, so the window-targeted click
-                            // below only for an app LEARNED to ignore presses (a click there once had an effect
-                            // accessibility saw), and never where a repeat could do harm.
-                            let info = ElementInfo(el, ax)
-                            if Self.mayActUnseen(info.labels) {
-                                return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.unseenPressNote(Self.elementLabel(nil, info)))")
-                            }
-                            // On ANOTHER desktop, a press that changed nothing on a control a repeat can't undo: a desktop
-                            // visit would click it where it is (live, round 11: the Web Store's controls ignored the press
-                            // from another Space and the visit was never offered).
-                            if !prefersWebClicks(t), !statefulWithoutReadableState(el, info), isOffThisDesktop(t) {
-                                CULog.act.notice("click in \(t.appName, privacy: .public) (another desktop): no visible effect — a desktop visit would click it")
-                                throw CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(Self.elementLabel(nil, info)) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
-                            }
-                            if !prefersWebClicks(t) || statefulWithoutReadableState(el, info) {
-                                CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): no visible effect — not clicked as well")
-                                return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.noEffectNote(Self.elementLabel(nil, info)))")
-                            }
-                            CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): the accessibility press changed nothing — clicking instead")
-                            return try webClickVerified(el, t, pressIgnored: true, why: "the accessibility press did nothing", label: Self.elementLabel(nil, info)) {
-                                try eventsElsewhere(p, t, token, cursor: nil, what: "the click", subject: subject) { synth, route in
-                                    try synth.click(pid: t.pid, windowFor: { _ in t.windowID }, at: pt, button: button, count: count, flags: flags, route: route)
-                                }
-                            }
-                        }
-                        return ActOutcome(rung: .accessibility,
-                                          detail: "\(subject), so the element was sent \(CURoleWords.actionWords(action)) over accessibility")
                     } catch let error where Self.pressMayHaveActed(error) != nil {
                         // Not the next ancestor, not events: the press may have acted.
                         let note = try judgeErroredPress(el, t, before: before, code: Self.pressMayHaveActed(error)!,
@@ -741,6 +752,40 @@ extension CUCore {
                     } catch {
                         continue  // refused: the next, then the events below
                     }
+                    // The press went out. What follows is checked OUTSIDE the press's own catch (review of round 11, HIGH
+                    // #1): a desktop visit to offer, or a failure of the verified click, is never taken for the element
+                    // refusing the press — that pressed the ancestors and clicked a window nobody sees.
+                    if let webBefore, !webPressChanged(el, t, since: webBefore) {
+                        // Web content that acts on a real mouse press (Google Docs' widgets) ignores the
+                        // accessibility press. Off screen its pixels may be stale, so the window-targeted click
+                        // below only for an app LEARNED to ignore presses (a click there once had an effect
+                        // accessibility saw), and never where a repeat could do harm.
+                        let info = ElementInfo(el, ax)
+                        if Self.mayActUnseen(info.labels) {
+                            return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.unseenPressNote(Self.elementLabel(nil, info)))")
+                        }
+                        // On ANOTHER desktop, a press that changed nothing on a control a repeat can't undo: a desktop
+                        // visit would click it where it is (live, round 11: the Web Store's controls ignored the press
+                        // from another Space and the visit was never offered).
+                        if !prefersWebClicks(t), !statefulWithoutReadableState(el, info), isOffThisDesktop(t) {
+                            if let why = noVisitForUnconfirmedPress(el, info, t) {
+                                return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.noEffectNote(Self.elementLabel(nil, info))) (\(why))")
+                            }
+                            throw offerVisitAfterPress(el, info, t)
+                        }
+                        if !prefersWebClicks(t) || statefulWithoutReadableState(el, info) {
+                            CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): no visible effect — not clicked as well")
+                            return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.noEffectNote(Self.elementLabel(nil, info)))")
+                        }
+                        CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): the accessibility press changed nothing — clicking instead")
+                        return try webClickVerified(el, t, pressIgnored: true, why: "the accessibility press did nothing", label: Self.elementLabel(nil, info)) {
+                            try eventsElsewhere(p, t, token, cursor: nil, what: "the click", subject: subject) { synth, route in
+                                try synth.click(pid: t.pid, windowFor: { _ in t.windowID }, at: pt, button: button, count: count, flags: flags, route: route)
+                            }
+                        }
+                    }
+                    return ActOutcome(rung: .accessibility,
+                                      detail: "\(subject), so the element was sent \(CURoleWords.actionWords(action)) over accessibility")
                 }
             }
         }
@@ -874,31 +919,48 @@ extension CUCore {
     func windowFor(_ t: CUTarget) -> (CGPoint) -> UInt32 {
         let bound = t.windowID
         let mine = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 }
-        // (Accessibility is asked only when the app has another window at the normal level on screen — most acts: none.)
-        let others = mine.contains { $0.layer == 0 && $0.id != bound } ? otherDocumentWindows(t) : []
-        let stack = mine.filter { !others.contains($0.id) }
-        return { point in stack.first { $0.frame.contains(point) }?.id ?? bound }
+        guard mine.contains(where: { $0.id != bound }) else { return { _ in bound } }
+        let documents = documentWindows(t, mine: mine)
+        // By z-order (review of round 11, MEDIUM #4): another document window never takes the click, and anything else
+        // drawn over the point — a menu, a popover, a sheet, a page's popup, a floating panel — takes it only when the
+        // first document window below it is the bound one: it belongs to the bound window, not to the user's.
+        var takers: [CUWindowServerWindow] = []
+        for (i, w) in mine.enumerated() {
+            if w.id == bound { takers.append(w); continue }
+            if documents.contains(w.id) { continue }
+            if mine[(i + 1)...].first(where: { documents.contains($0.id) })?.id == bound { takers.append(w) }
+        }
+        return { point in takers.first { $0.frame.contains(point) }?.id ?? bound }
     }
 
     /// The app's OTHER document windows: a point of the bound window that one of them covers still goes to the bound
     /// window (the event names it), never to the window on top — that is another window of the app, often the one
     /// the user works in (live, round 11: a Chrome window behind another took every click on the Web Store page into
-    /// the user's front Chrome window; the page saw none, focus was never placed). What is drawn over the bound
-    /// window as part of it — a menu, a popover, a sheet, a page's popup, a floating panel — still takes the click
-    /// at its point. An AX standard window of the app; with no accessibility (a capture-only bind), a window at the
-    /// normal level that does not lie within the bound one (a sheet does).
+    /// the user's front Chrome window; the page saw none, focus was never placed).
     func otherDocumentWindows(_ t: CUTarget) -> Set<UInt32> {
+        documentWindows(t, mine: sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 }).subtracting([t.windowID])
+    }
+
+    /// The bound window and the app's other document windows on screen. Accessibility is asked only when another window
+    /// of the app is at the normal level (most acts: none): its standard windows. With no accessibility (a capture-only
+    /// bind) or an empty answer (a timeout, an app that lists none), a normal-level window that does not lie within the
+    /// bound one (a sheet does).
+    func documentWindows(_ t: CUTarget, mine: [CUWindowServerWindow]) -> Set<UInt32> {
         let bound = t.windowID
+        var docs: Set<UInt32> = [bound]
+        guard mine.contains(where: { $0.layer == 0 && $0.id != bound }) else { return docs }
         if t.accessible {
-            var ids = Set<UInt32>()
-            for w in ax.elements(ax.application(t.pid), kAXWindowsAttribute)
-            where ax.string(w, kAXSubroleAttribute) == kAXStandardWindowSubrole {
-                if let id = ax.windowID(w), id != bound { ids.insert(id) }
+            let windows = ax.elements(ax.application(t.pid), kAXWindowsAttribute)
+            if !windows.isEmpty {
+                for w in windows where ax.string(w, kAXSubroleAttribute) == kAXStandardWindowSubrole {
+                    if let id = ax.windowID(w) { docs.insert(id) }
+                }
+                return docs
             }
-            return ids
         }
-        guard let frame = sys.window(id: bound)?.frame else { return [] }
-        return Set(sys.windows(pid: t.pid).filter { $0.layer == 0 && $0.id != bound && !frame.contains($0.frame) }.map(\.id))
+        let frame = sys.window(id: bound)?.frame
+        for w in mine where w.layer == 0 && w.id != bound && !(frame?.contains(w.frame) ?? false) { docs.insert(w.id) }
+        return docs
     }
 
     // MARK: text
@@ -1376,7 +1438,9 @@ extension CUCore {
             for _ in 0..<60 {
                 guard let c = cur else { break }
                 if ax.string(c, kAXRoleAttribute) == "AXWebArea" {
-                    if let page = url(ax.attribute(c, "AXURL")), page.host?.lowercased() == link.host?.lowercased() { return nil }
+                    // (By registrable domain: `files.slack.com` from `app.slack.com` is the same site.)
+                    if let page = url(ax.attribute(c, "AXURL")), page.host != nil,
+                       Self.registrableDomain(page.host) == Self.registrableDomain(link.host) { return nil }
                     break
                 }
                 cur = ax.element(c, kAXParentAttribute)
@@ -1388,9 +1452,21 @@ extension CUCore {
     /// Whether the bound app is a web browser (it declares http/https): its links are its own business.
     func isWebBrowser(_ t: CUTarget) -> Bool {
         if let o = isWebBrowserOverride { return o(t) }
-        // An Electron or CEF app navigates in its own window (review of round 9, MEDIUM #4): never rerouted.
-        if t.isChromium { return true }
+        // A browser declares http/https. An Electron or CEF app does not, so its links to ANOTHER site are rerouted too
+        // (review of round 10, MEDIUM #7: they opened the default browser in front); its own navigation (the same site)
+        // stays in it — `linkURL`'s same-site check.
         return CUApps.isWebBrowser(bundleURL: NSRunningApplication(processIdentifier: t.pid)?.bundleURL)
+    }
+
+    /// The registrable part of a host — its last two labels, or three under a common second-level suffix (`co.uk`,
+    /// `com.au`, …): `files.slack.com` and `app.slack.com` are one site. Pure; an approximation of the public-suffix list.
+    static func registrableDomain(_ host: String?) -> String? {
+        guard let h = host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")), !h.isEmpty else { return nil }
+        let labels = h.split(separator: ".").map(String.init)
+        guard labels.count > 2 else { return h }
+        let secondLevel: Set<String> = ["co", "com", "org", "net", "gov", "ac", "edu", "or", "ne", "go"]
+        let n = labels[labels.count - 1].count == 2 && secondLevel.contains(labels[labels.count - 2]) ? 3 : 2
+        return labels.suffix(n).joined(separator: ".")
     }
 
     /// Opens `paths` in the background, waiting at most `openTimeoutMs` (NSWorkspace's open can't be
@@ -1653,6 +1729,7 @@ extension CUCore {
         let elsewhere = !onScreen && t.privatePath && skyLight.canSetWindowLocation
         guard onScreen || elsewhere else { return false }
         let route: CURoute = elsewhere && t.isChromium && skyLight.isAvailable ? .skyLight : .publicPid
+        if onScreen, let refusal = coveredWindowRefusal(t, allowForeground: holdsForeground(t)) { throw refusal }
         var s = synth
         s.windowSPI = t.privatePath
         let windowFor = self.windowFor(t)
@@ -1665,6 +1742,21 @@ extension CUCore {
         try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()
         return true
+    }
+
+    /// The bound app is in FRONT with another of its windows key (review of round 11, MEDIUM #3): a window-targeted click
+    /// on the bound window — covered or not — would be taken by the front app as the user's own, raise it over the window
+    /// they work in and take its keys, so no pointer event is sent (an accessibility press, a value or a menu command
+    /// still goes). Not while the app is held in front for the script (its window is the one meant to be used), nor when
+    /// the bound window is the key one (the user is looking at it — a click there moves nothing). With no accessibility
+    /// (a capture-only bind), the app's topmost window on screen stands for its key window.
+    func coveredWindowRefusal(_ t: CUTarget, allowForeground: Bool) -> CUError? {
+        guard !allowForeground, sys.frontmostPid() == t.pid else { return nil }
+        let topmost = { [self] in sys.windowStack().first { $0.pid == t.pid && $0.layer == 0 && $0.alpha > 0 }.map { $0.id == t.windowID } }
+        let isKey: Bool? = (t.accessible ? boundWindowIsKeyInApp(t) : nil) ?? topmost()
+        guard isKey != true else { return nil }
+        CULog.act.notice("click in \(t.appName, privacy: .public): the app is in front with another of its windows key — no pointer event")
+        return CUError.refused(.appInFront, "\(t.appName) is in front with another of its windows active — a click on the bound window would bring it over the user's window and take their keys, so nothing was sent; an accessibility press (action()), setValue or a menu command still works, or wait until the user leaves \(t.appName)")
     }
 
     /// Whether the bound window is its app's key (focused) window, as the app tells accessibility; nil when it
@@ -1807,6 +1899,7 @@ extension CUCore {
         var s = synth
         s.windowSPI = t.privatePath
         let windowFor = self.windowFor(t)
+        if onScreen, let refusal = coveredWindowRefusal(t, allowForeground: holdsForeground(t)) { throw refusal }
         // Key IN ITS APP (the app's focused window): in the background the system-wide key focus is the user's
         // app, always, so it can't tell whether the click only made the window key.
         let wasKey = boundWindowIsKeyInApp(t)
@@ -2689,6 +2782,7 @@ extension CUCore {
             }
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
+        if d.rung != .foreground, let refusal = coveredWindowRefusal(t, allowForeground: p.allowForeground) { throw refusal }
         if let fromInfo { announceTarget(t, fromInfo, pressing: false) }
         let synth = self.synth(p)
         let windowFor = self.windowFor(t)
@@ -2760,6 +2854,13 @@ extension CUCore {
             return try pendingBackgroundOpen([path], what: nil)
         }
         try requireEnabled(info, ref: a.ref, t)
+        // Pressing a link in an app that is not a web browser opens the default browser IN FRONT: its URL is opened in the
+        // background instead, as for a click (review of round 10, MEDIUM #7: action(ref, "press") went around that).
+        if CUMenuWalker.normalize(a.name) == "press" || a.name == kAXPressAction, let url = linkURL(e, info), !isWebBrowser(t) {
+            announceTarget(t, info, pressing: true)
+            CULog.act.notice("action in \(t.appName, privacy: .public): [\(a.ref, privacy: .public)] is a link (\(url.scheme ?? "?", privacy: .public)) — opened in the background, not pressed")
+            return try pendingBackgroundOpen([url.absoluteString], what: nil, linkHost: url.host ?? url.absoluteString)
+        }
         guard let name = CURoleWords.resolveAction(a.name, among: info.actions) else {
             let have = info.actions.map(CURoleWords.actionWords).joined(separator: ", ")
             throw CUError.invalidParams("[\(a.ref)] has no action “\(a.name)” — it has: \(have.isEmpty ? "none" : have)")
@@ -2876,7 +2977,7 @@ extension CUCore {
         let parent = ax.element(e, kAXParentAttribute)
         let grand = parent.flatMap { ax.element($0, kAXParentAttribute) }
         let near = [parent, grand].compactMap { $0 }.flatMap { ax.elements($0, kAXChildrenAttribute) }.map { AXIdentity(element: $0) }
-        return WebPressEvidence(windows: Set(sys.windows(pid: t.pid).filter { $0.layer == 0 }.map(\.id)),
+        return WebPressEvidence(windows: appWindowsOnScreen(t),
                                 focused: ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute).map { AXIdentity(element: $0) },
                                 alive: ax.isAlive(e), value: ax.string(e, kAXValueAttribute),
                                 selected: ax.bool(e, kAXSelectedAttribute), expanded: ax.bool(e, kAXExpandedAttribute),
@@ -2937,8 +3038,10 @@ extension CUCore {
         }
         // On ANOTHER desktop: a desktop visit would click it where it is (round 11 — live, never offered).
         if isOffThisDesktop(t) {
-            CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect, and the window is on another desktop — a desktop visit would click it")
-            throw CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(label) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
+            if let why = noVisitForUnconfirmedPress(e, info, t) {
+                return ActOutcome(rung: .accessibility, detail: "\(Self.noEffectNote(label)) (\(why))")
+            }
+            throw offerVisitAfterPress(e, info, t)
         }
         if offScreenSubject(t) != nil {
             CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect, and the window is not on screen — not clicked as well")
@@ -2954,6 +3057,35 @@ extension CUCore {
         }
         CULog.act.notice("click in \(t.appName, privacy: .public): the accessibility press on web content changed nothing, not even pixels — a window-targeted click instead")
         return try clickWebElement(e, info, ref: ref, p, t, token, pressIgnored: true, why: "the accessibility press did nothing")
+    }
+
+    /// How long an unconfirmed press keeps its element from being pressed again.
+    static let unconfirmedPressMs: Double = 180_000
+
+    /// The desktop visit offered after a press from another desktop showed no effect (the element marked: never
+    /// pressed again).
+    func offerVisitAfterPress(_ e: AXUIElement, _ info: ElementInfo, _ t: CUTarget) -> CUError {
+        t.unconfirmedPress = (AXIdentity(element: e), clock.nowMs())
+        CULog.act.notice("click in \(t.appName, privacy: .public) (another desktop): no visible effect — a desktop visit would click it")
+        return CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(Self.elementLabel(nil, info)) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
+    }
+
+    /// Why a press that showed no effect from another desktop is NOT worth moving the user for (review of round 11,
+    /// MEDIUM #5): the element is already in its pressed state (a selected tab or radio, a checked box, the focused
+    /// field), or it is a command whose effect is not on the page (copy, refresh). Nil: the visit may be offered.
+    func noVisitForUnconfirmedPress(_ e: AXUIElement, _ info: ElementInfo, _ t: CUTarget) -> String? {
+        if ax.bool(e, kAXSelectedAttribute) == true { return "it is already selected" }
+        let role = info.role ?? ""
+        if ["AXRadioButton", "AXCheckBox", "AXTab"].contains(role) || info.subrole == "AXTabButton",
+           let v = ax.string(e, kAXValueAttribute), AXTreeReader.checkedState(v) == true {
+            return "it is already selected"
+        }
+        if focusRelation(e, t) == .onIt { return "it already has the focus" }
+        let words = info.labels.compactMap { $0 }.joined(separator: " ").lowercased()
+        if words.range(of: #"\b(copy|copied|refresh|reload)\b"#, options: .regularExpression) != nil {
+            return "a command whose effect does not show on the page"
+        }
+        return nil
     }
 
     static func noEffectNote(_ label: String) -> String {

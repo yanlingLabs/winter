@@ -110,6 +110,12 @@ export interface Scenario {
    * user), records their click into it (`test.userInput`) and focuses its Name field — the agent must be hands-off it.
    */
   userWorksAfterMs?: number;
+  /** With `userWorksAfterMs`: this many ms into the action the user LEAVES the fixture for their own app (as the user) —
+   *  the agent may act on it again (round 12). The focus check becomes "their move back held". */
+  userLeavesAfterMs?: number;
+  /** The user only LOOKS at the fixture (round 12): this many ms in, the runner switches to it as the user with no input
+   *  — just looking blocks nothing. The focus check becomes "their switch held". */
+  userLooksAfterMs?: number;
   /** The script prelude (default PRELUDE; the generic app checks bring their own, which includes it). */
   prelude?: string;
   /**
@@ -782,6 +788,48 @@ report({ typed, refused, other });`,
         check("acts after the user started working were refused (typed, retryable)", Number(fact(ctx, "refused")) >= 1 && fact(ctx, "other") === "", JSON.stringify(ctx.facts)),
         check("the user's focus (Name) was never taken back to Email", named >= 0 && !backToEmail, JSON.stringify(focuses.slice(-6)))];
     },
+  },
+  {
+    // Round 12 (the hands-off row's gaps): the user works in the app, then LEAVES it — the agent's acts on it are refused
+    // while they work, and go through again once they have left.
+    name: "guardian: the user works in the app, then leaves — the agent acts on it again", group: "guardian",
+    before: [{ role: "main", cmd: "reset" }],
+    userWorksAfterMs: 1_500,
+    userLeavesAfterMs: 4_200,
+    code: `
+const form = await win("Fixture Form");
+const email = await pick(form, "Email", "text field");
+let seq = "", other = "";
+for (let i = 0; i < 10; i++) {
+  try { await form.type("a", { into: email.ref }); seq += "T"; }
+  catch (e) { if (e.name === "Refused" && /working in/.test(e.message)) seq += "R"; else other = e.name + ": " + e.message; }
+  await sleep(600);
+}
+report({ seq, other });`,
+    allowExcursionMs: 60_000,
+    verify: (ctx) => [ok(ctx),
+      check("refused while they worked in it, typed again after they left", /^T*R+T+$/.test(String(fact(ctx, "seq"))), JSON.stringify(ctx.facts)),
+      check("nothing else went wrong", fact(ctx, "other") === "", JSON.stringify(ctx.facts))],
+  },
+  {
+    // Round 12: the user only LOOKS at the app (switches to it, no click, no key) — that blocks nothing.
+    name: "guardian: the user just looking at the app blocks nothing", group: "guardian",
+    before: [{ role: "main", cmd: "reset" }],
+    userLooksAfterMs: 1_200,
+    code: `
+const form = await win("Fixture Form");
+const email = await pick(form, "Email", "text field");
+let typed = 0, refused = 0, other = "";
+for (let i = 0; i < 6; i++) {
+  try { await form.type("a", { into: email.ref }); typed++; }
+  catch (e) { if (e.name === "Refused" && /working in/.test(e.message)) refused++; else other = e.name + ": " + e.message; }
+  await sleep(500);
+}
+report({ typed, refused, other });`,
+    allowExcursionMs: 60_000,
+    verify: (ctx) => [ok(ctx),
+      check("no act was refused as the user's work", Number(fact(ctx, "refused")) === 0 && fact(ctx, "other") === "", JSON.stringify(ctx.facts)),
+      check("every act went through", Number(fact(ctx, "typed")) === 6, JSON.stringify(ctx.facts))],
   },
   // ── the focus guardian ─────────────────────────────────────────────────────────────────────────────────────
   {
