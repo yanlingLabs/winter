@@ -356,16 +356,21 @@ typedef NS_ENUM(int, WinterCEFCDPStatus) {
 typedef void (^WinterCEFCDPStatusCompletion)(WinterCEFCDPStatus status, NSString *payloadJSON);
 
 /// **Run one DevTools method for the browser link** — on the tab's own session, or, with
-/// `cdpSessionId`, on a flattened child target's (an out-of-process iframe), which
-/// `ExecuteDevToolsMethod` cannot address: that case is sent raw with `SendDevToolsMessage`.
+/// `cdpSessionId`, on a flattened child target's (an out-of-process iframe). Both are sent raw with
+/// `SendDevToolsMessage` (`paramsJSON` placed in the message as given, once checked to be one object).
 ///
 /// Same registry and the same always-answers contract as `WinterCEFExecuteCDP` (the completion fires
 /// exactly once, error never silence), and the same producer posture: **this validates nothing** —
 /// the allowlist and the world rules are the link's (`CDPTabGate`), applied before this is reached.
 ///
-/// Every message id on a browser — this door's, both of its paths', and `WinterCEFExecuteCDP`'s — is
-/// drawn from ONE per-browser counter, so a raw message can never reuse an id CEF assigned (or the
-/// reverse) and settle the wrong call.
+/// **Registered BEFORE it is sent.** A method the browser process answers by itself
+/// (`Page.handleJavaScriptDialog`, for one) answers inside the send, and a registration made after it
+/// would miss that answer and leave the call waiting for its timeout. And a child session's RESULT,
+/// which CEF's own parser drops, is settled by the raw observer (`ChildSessionResultOf`).
+///
+/// Every message id on a browser — this door's and `WinterCEFExecuteCDP`'s — is drawn from ONE
+/// per-browser counter, so a raw message can never reuse an id CEF assigned (or the reverse) and
+/// settle the wrong call.
 void WinterCEFSendCDP(NSView *parent,
                      const char *method,
                      const char *paramsJSON,
@@ -485,6 +490,19 @@ NSString *WinterCEFAutomationDecisionsForFlags(uint32_t flags);
 /// raw observer makes on every message before it parses one (results and the tab's own events go to
 /// the structured callbacks). `message` is the message's JSON text. No CEF anywhere.
 NSString *WinterCEFChildSessionOfDevToolsMessage(NSString *message);
+
+/// **Test seam.** A raw DevTools message read as a flattened child session's RESULT — `"<id> ok <result>"` or
+/// `"<id> error <error>"` — or `nil` for anything else (the tab's own results and every event). No CEF anywhere.
+NSString *WinterCEFChildSessionResultOfDevToolsMessage(NSString *message);
+
+/// **Test seam.** The raw message `WinterCEFSendCDP` sends for these arguments, or `nil` when it refuses them
+/// (params that are not one JSON object). No CEF anywhere.
+NSString *WinterCEFRawDevToolsMessageWithNoCEFAnywhere(int messageId, const char *method, const char *paramsJSON,
+                                                      const char *cdpSessionId);
+
+/// **Test seam.** The door's register-then-send step, driven three ways with no CEF — an answer that arrives
+/// INSIDE the send, a refused send, an ordinary send answered later — as `;`-joined rows. Leaves no state.
+NSString *WinterCEFRegisterThenSendTranscriptWithNoCEFAnywhere(void);
 
 /// **Test seam.** The printing switch's decision, run with no CEF over the four cases a build can present
 /// — the preference not registered, registered but not settable, set but refused, set — as

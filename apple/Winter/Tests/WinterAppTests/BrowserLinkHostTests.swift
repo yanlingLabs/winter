@@ -642,7 +642,8 @@ final class BrowserLinkCEFSeamTests: XCTestCase {
         XCTAssertEqual(WinterCEFChildSessionOfDevToolsMessage(
             #"{"method":"Runtime.executionContextCreated","params":{"context":{"id":3}},"sessionId":"AB12CD"}"#),
             #"AB12CD Runtime.executionContextCreated {"context":{"id":3}}"#)
-        // A child's RESULT settles by id like any other; the tab's own event goes to the structured callback.
+        // A child's RESULT is not an event (`ChildSessionResultOf` settles it); the tab's own event goes to the
+        // structured callback.
         XCTAssertNil(WinterCEFChildSessionOfDevToolsMessage(#"{"id":12,"result":{},"sessionId":"AB12CD"}"#))
         XCTAssertNil(WinterCEFChildSessionOfDevToolsMessage(#"{"method":"Page.loadEventFired","params":{"timestamp":1}}"#))
         // A sessionId nested in the tab's own event's params is not a child's message.
@@ -652,6 +653,47 @@ final class BrowserLinkCEFSeamTests: XCTestCase {
             #"{"method":"Target.attachedToTarget","params":{"targetInfo":{},"sessionId":"AB12CD"}}"#))
         XCTAssertNil(WinterCEFChildSessionOfDevToolsMessage(#"not json "sessionId":"x"}"#))
         XCTAssertNil(WinterCEFChildSessionOfDevToolsMessage(""))
+    }
+
+    /// CEF's own parser drops a flattened child session's result (`{"id":…,"result":…,"sessionId":"…"}`), so the
+    /// raw observer settles it by its id — success and error alike. The tab's own results and every event are left
+    /// to the structured callbacks.
+    func testAChildSessionsResultIsSettledFromTheRawStream() {
+        XCTAssertEqual(WinterCEFChildSessionResultOfDevToolsMessage(#"{"id":12,"result":{"executionContextId":2},"sessionId":"AB12CD"}"#),
+                       #"12 ok {"executionContextId":2}"#)
+        XCTAssertEqual(WinterCEFChildSessionResultOfDevToolsMessage(#"{"id":13,"result":{},"sessionId":"AB12CD"}"#), "13 ok {}")
+        let error = WinterCEFChildSessionResultOfDevToolsMessage(#"{"id":14,"error":{"code":-32000,"message":"No frame"},"sessionId":"AB12CD"}"#)
+        XCTAssertTrue(error?.hasPrefix("14 error ") == true, String(describing: error))
+        XCTAssertTrue(error?.contains("-32000") == true)
+        // The tab's own result (no trailing session) is CEF's to parse.
+        XCTAssertNil(WinterCEFChildSessionResultOfDevToolsMessage(#"{"id":12,"result":{}}"#))
+        // A result whose own body carries a sessionId, as Target.attachToTarget's does, is the tab's own.
+        XCTAssertNil(WinterCEFChildSessionResultOfDevToolsMessage(#"{"id":12,"result":{"sessionId":"AB12CD"}}"#))
+        // An event is not a result.
+        XCTAssertNil(WinterCEFChildSessionResultOfDevToolsMessage(#"{"method":"Page.loadEventFired","params":{},"sessionId":"AB12CD"}"#))
+        XCTAssertNil(WinterCEFChildSessionResultOfDevToolsMessage(""))
+    }
+
+    /// The door registers a call BEFORE it sends it: a method the browser process answers by itself
+    /// (`Page.handleJavaScriptDialog`) answers inside the send, and that answer must not be lost. A refused send is
+    /// taken back unanswered (the door answers the refusal itself).
+    func testTheDoorRegistersBeforeItSends() {
+        XCTAssertEqual(WinterCEFRegisterThenSendTranscriptWithNoCEFAnywhere(),
+                       #"answered ok=1 {};sent=1;sent=0 pending=0;sent=1;answered ok=0 {"code":-32000,"message":"x"}"#)
+    }
+
+    /// One raw message for both sessions: the params placed as given (never re-encoded), a child's session last.
+    func testTheDoorsRawMessageCarriesTheParamsAsGiven() {
+        XCTAssertEqual(WinterCEFRawDevToolsMessageWithNoCEFAnywhere(7, "Runtime.evaluate", #"{"expression":"1.0","contextId":3}"#, nil),
+                       #"{"id":7,"method":"Runtime.evaluate","params":{"expression":"1.0","contextId":3}}"#)
+        XCTAssertEqual(WinterCEFRawDevToolsMessageWithNoCEFAnywhere(8, "Page.enable", nil, "AB12CD"),
+                       #"{"id":8,"method":"Page.enable","params":{},"sessionId":"AB12CD"}"#)
+        XCTAssertEqual(WinterCEFRawDevToolsMessageWithNoCEFAnywhere(9, "Page.enable", "", ""),
+                       #"{"id":9,"method":"Page.enable","params":{}}"#)
+        // Anything but one JSON object is refused before it could be sent.
+        XCTAssertNil(WinterCEFRawDevToolsMessageWithNoCEFAnywhere(10, "Page.enable", "[1]", nil))
+        XCTAssertNil(WinterCEFRawDevToolsMessageWithNoCEFAnywhere(10, "Page.enable", #"{"a":1} , "id": 5"#, nil))
+        XCTAssertNil(WinterCEFRawDevToolsMessageWithNoCEFAnywhere(10, "Page.enable", "{", nil))
     }
 
     /// A page can call `window.print()` with no input from anyone, and no CEF handler stops the macOS
