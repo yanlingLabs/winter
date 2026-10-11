@@ -72,6 +72,11 @@ public actor NativeController {
     private let cleanupBudgetMilliseconds: UInt32
     private var cleanupDeadline: Task<Void, Never>?
     private var openingOwners: [UInt64: String] = [:]
+    private var backendFailure: BackendLifecycleEvent?
+    private struct InputTicket: Sendable { let previous: ExecutionCompletion?; let completion: ExecutionCompletion }
+    private var inputTails: [UInt64: ExecutionCompletion] = [:]
+    private var inputTickets: [UInt64: InputTicket] = [:]
+    private var inputDrainWaiters: [CheckedContinuation<Void, Never>] = []
     private var starting = false
     private var startOperationId: UInt64?
     private var startWaiters: [CheckedContinuation<Void, Never>] = []
@@ -112,6 +117,15 @@ public actor NativeController {
                 }
                 openingProcesses += 1; openingOwners[entry.id] = task
                 executionCompletions[entry.id] = ExecutionCompletion()
+            case .input, .closeInput:
+                guard let text = request.ownerOperationId, let owner = UInt64(text),
+                      let task = openingOwners[owner] ?? processes[owner]?.0, task == request.taskId else {
+                    throw NativeFailure("task_ownership_denied", "Input requires the live operation's authenticated task")
+                }
+                // Admission is ordered; Tasks/actors executing the writes are not.
+                let receipt = ExecutionCompletion()
+                inputTickets[entry.id] = InputTicket(previous: inputTails[owner], completion: receipt)
+                inputTails[owner] = receipt
             case .stop, .shutdown: admissionClosed = true; if finishedStop == nil { power = .stopping }
             default: break
             }
@@ -192,6 +206,7 @@ public actor NativeController {
             terminal(id, .completed, result: ["protocolVersion": "1", "power": power.rawValue, "network": "disabled-until-host-endpoint", "controllerTopology": "in-process", "productionLaunch": "gated", "eventChannel": "bounded-native-FD", "containerizationRevision": NativeCompiledGraph.identity.containerizationRevision, "containerizationPatchSha256": NativeCompiledGraph.identity.patchSha256 ?? "none", "pid": String(ProcessInfo.processInfo.processIdentifier)])
         case .start:
             defer { starting = false; let waiters = startWaiters; startWaiters.removeAll(); waiters.forEach { $0.resume() } }
+            await backend.observeLifecycle { [weak self] event in await self?.backendChanged(event) }
             try await backend.start()
             if admissionClosed { throw NativeFailure("start_interrupted", "Start completed after shutdown admission closed") }
             power = .running; terminal(id, .completed)
@@ -201,13 +216,13 @@ public actor NativeController {
             do { process = try await backend.process(taskId: task, arguments: args) }
             catch { openingOwners.removeValue(forKey: id); processOpened(id); throw error }
             processes[id] = (task, process); openingOwners.removeValue(forKey: id); processOpened(id)
-            defer { processes.removeValue(forKey: id); if processes.isEmpty { let waiters = executionWaiters; executionWaiters.removeAll(); waiters.forEach { $0.resume() } } }
+            defer { inputTails.removeValue(forKey: id); processes.removeValue(forKey: id); if processes.isEmpty { let waiters = executionWaiters; executionWaiters.removeAll(); waiters.forEach { $0.resume() } } }
             if admissionClosed || cancelled.contains(id) { try await process.cancel(); throw CancellationError() }
             try events.emit(id, kind: .processRegistered)
             let channel = events
             let exit = try await process.run { kind, data in
-                for start in stride(from: 0, to: data.count, by: 16 * 1024) {
-                    try channel.emit(id, kind: kind, bytes: Array(data[start..<min(data.count, start + 16 * 1024)]))
+                for start in stride(from: data.startIndex, to: data.endIndex, by: 16 * 1024) {
+                    try channel.emit(id, kind: kind, bytes: Array(data[start..<min(data.endIndex, start + 16 * 1024)]))
                 }
             }
             terminal(id, cancelled.contains(id) ? .cancelled : .completed, exitCode: exit, result: await process.completionMetadata())
@@ -236,6 +251,8 @@ public actor NativeController {
                      code: status == .uncertain ? "process_cleanup_uncertain" : nil,
                      result: ["cleanupConfirmed": String(status != .uncertain)])
         case .input:
+            await awaitInputTurn(id)
+            defer { finishInputTurn(id) }
             let (_, process) = try await target(request)
             guard let encoded = request.inputBase64, encoded.utf8.count <= 24 * 1024,
                   let data = Data(base64Encoded: encoded), data.count <= 16 * 1024 else {
@@ -243,10 +260,12 @@ public actor NativeController {
             }
             try await process.writeInput(data); terminal(id, .completed, result: ["acceptedBytes": String(data.count)])
         case .closeInput:
+            await awaitInputTurn(id)
+            defer { finishInputTurn(id) }
             let (_, process) = try await target(request); try await process.closeInput(); terminal(id, .completed)
         case .stats:
             if power == .uncertain || power == .closed || power == .stopping {
-                terminal(id, .completed, result: ["power": power.rawValue, "admissionClosed": String(admissionClosed)]); return
+                terminal(id, .completed, result: ["power": power.rawValue, "admissionClosed": String(admissionClosed), "backendFailure": backendFailure?.rawValue ?? "none"]); return
             }
             try deviceGate.begin(); defer { deviceGate.finish() }
             terminal(id, .completed, result: try await backend.stats())
@@ -268,6 +287,20 @@ public actor NativeController {
             ensureStop()
         }
     }
+    private func awaitInputTurn(_ id: UInt64) async {
+        if let previous = inputTickets[id]?.previous { _ = await previous.wait() }
+    }
+    private func finishInputTurn(_ id: UInt64) {
+        if let ticket = inputTickets.removeValue(forKey: id) { Task { await ticket.completion.finish(.completed) } }
+        if inputTickets.isEmpty { let waiters = inputDrainWaiters; inputDrainWaiters.removeAll(); waiters.forEach { $0.resume() } }
+    }
+    private func backendChanged(_ event: BackendLifecycleEvent) {
+        guard !(finishedStop?.terminationConfirmed == true && finishedStop?.flushConfirmed == true) else { return }
+        backendFailure = event; admissionClosed = true
+        ensureStop()
+        power = .uncertain // Stopped/crashed hardware cannot invent clean guest flush.
+        updateLifetime()
+    }
     private func processOpened(_ id: UInt64) {
         registrationWaiters.removeValue(forKey: id)?.forEach { $0.resume() }
         openingProcesses -= 1
@@ -287,6 +320,7 @@ public actor NativeController {
             for (_, entry) in live { group.addTask { try? await entry.1.cancel() } }
         }
         if !processes.isEmpty { await withCheckedContinuation { executionWaiters.append($0) } }
+        if !inputTickets.isEmpty { await withCheckedContinuation { inputDrainWaiters.append($0) } }
         do {
             let result = try await backend.stop()
             finishedStop = result
@@ -334,5 +368,5 @@ public actor NativeController {
         finishedStop = proof; power = .closed
     }
     public func state() -> NativePowerState { power }
-    private func updateLifetime() { lifetime.update(power == .closed && processes.isEmpty && openingProcesses == 0 && !starting && !forceStopInFlight && (!stopStarted || stopDrainFinished)) }
+    private func updateLifetime() { lifetime.update(power == .closed && inputTickets.isEmpty && processes.isEmpty && openingProcesses == 0 && !starting && !forceStopInFlight && (!stopStarted || stopDrainFinished)) }
 }

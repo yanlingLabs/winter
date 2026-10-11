@@ -312,12 +312,12 @@ final class ControllerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let protected = root.appendingPathComponent("winter-home")
         try FileManager.default.createDirectory(at: protected, withIntermediateDirectories: true)
-        XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: "/", guestPath: "/workspace/source", readOnly: true)], backing: []))
-        XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: root.path, guestPath: "/workspace/source", readOnly: true)], backing: [], protectedHostRoots: [protected.path]))
+        XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: "/", guestPath: "/workspace/source", readOnly: true)], backing: [], userHomeRoot: nil))
+        XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: root.path, guestPath: "/workspace/source", readOnly: true)], backing: [], protectedHostRoots: [protected.path], userHomeRoot: nil))
         for guest in ["/", "/workspace/source/../.winter", "/workspace//source", "/opt/runtime", "/workspace/source/"] {
-            XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: root.path, guestPath: guest, readOnly: true)], backing: []))
+            XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: root.path, guestPath: guest, readOnly: true)], backing: [], userHomeRoot: nil))
         }
-        XCTAssertNoThrow(try SharePolicy.validate([.init(sourcePath: root.path, guestPath: "/workspace/source", readOnly: true)], backing: []))
+        XCTAssertNoThrow(try SharePolicy.validate([.init(sourcePath: root.path, guestPath: "/workspace/source", readOnly: true)], backing: [], userHomeRoot: nil))
     }
     func testTypedProbeFailureSurvivesNativeTerminalMapping() async throws {
         let controller = try NativeController(scope: scope, backend: ValidationFailureBackend())
@@ -350,12 +350,12 @@ final class ControllerTests: XCTestCase {
         var info = stat(); XCTAssertEqual(lstat(memory.path, &info), 0)
         let record = HostManagedShareRecord(path: memory.path, role: .memory, device: UInt64(bitPattern: Int64(info.st_dev)), inode: info.st_ino)
         let share = HostSharePolicy(sourcePath: memory.path, guestPath: "/workspace/.winter/memory", readOnly: false, managedRole: .memory)
-        XCTAssertNoThrow(try SharePolicy.validate([share], backing: [], protectedHostRoots: [home.path], managedShares: [record]))
-        XCTAssertThrowsError(try SharePolicy.validate([share], backing: [], protectedHostRoots: [home.path]))
-        XCTAssertThrowsError(try SharePolicy.validate([share], backing: [], protectedHostRoots: [home.path], managedShares: [.init(path: memory.path, role: .memory, device: record.device, inode: 0)]))
-        XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: home.path, guestPath: "/workspace/.winter/memory", readOnly: false, managedRole: .memory)], backing: [], protectedHostRoots: [home.path], managedShares: [.init(path: home.path, role: .memory, device: record.device, inode: record.inode)]))
-        XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: memory.path, guestPath: "/workspace/outputs", readOnly: false, managedRole: .memory)], backing: [], protectedHostRoots: [home.path], managedShares: [record]))
-        XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: memory.path, guestPath: "/run/winter/shared-instructions", readOnly: false, managedRole: .instructions)], backing: [], protectedHostRoots: [home.path], managedShares: [.init(path: memory.path, role: .instructions, device: record.device, inode: record.inode)]))
+        XCTAssertNoThrow(try SharePolicy.validate([share], backing: [], protectedHostRoots: [home.path], managedShares: [record], userHomeRoot: nil))
+        XCTAssertThrowsError(try SharePolicy.validate([share], backing: [], protectedHostRoots: [home.path], userHomeRoot: nil))
+        XCTAssertThrowsError(try SharePolicy.validate([share], backing: [], protectedHostRoots: [home.path], managedShares: [.init(path: memory.path, role: .memory, device: record.device, inode: 0)], userHomeRoot: nil))
+        XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: home.path, guestPath: "/workspace/.winter/memory", readOnly: false, managedRole: .memory)], backing: [], protectedHostRoots: [home.path], managedShares: [.init(path: home.path, role: .memory, device: record.device, inode: record.inode)], userHomeRoot: nil))
+        XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: memory.path, guestPath: "/workspace/outputs", readOnly: false, managedRole: .memory)], backing: [], protectedHostRoots: [home.path], managedShares: [record], userHomeRoot: nil))
+        XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: memory.path, guestPath: "/run/winter/shared-instructions", readOnly: false, managedRole: .instructions)], backing: [], protectedHostRoots: [home.path], managedShares: [.init(path: memory.path, role: .instructions, device: record.device, inode: record.inode)], userHomeRoot: nil))
     }
 
     func testOutputProofRunsBeforeDeleteAndFailureKeepsTypedCode() async throws {
@@ -371,7 +371,7 @@ final class ControllerTests: XCTestCase {
             XCTAssertFalse(failure.cleanupUncertain)
         }
         let calls = await process.calls
-        XCTAssertEqual(calls, ["start", "wait", "output-proof", "kill", "wait", "delete"])
+        XCTAssertEqual(calls, ["start", "wait", "output-proof", "delete"])
     }
 
     func testRealPreconstructionRefusalDoesNotRetainPhantomVM() async throws {
@@ -519,6 +519,132 @@ final class ControllerTests: XCTestCase {
         }
         XCTAssertEqual(cancellations.value, 1)
     }
+    func testOutputChunksRespectNonzeroDataSliceIndices() async throws {
+        let controller = try NativeController(scope: scope, backend: SlicedOutputBackend())
+        try await start(controller)
+        let exec = controller.submit(try json("exec", fields: ["taskId": "owner", "arguments": ["fixture"]]))
+        let rows = try await events(controller, terminalIDs: [exec])
+        let bytes = rows.filter { $0.kind == .stdout }.compactMap { $0.dataBase64 }.compactMap { Data(base64Encoded: $0) }
+        XCTAssertEqual(bytes, [Data([1, 2, 3])])
+        XCTAssertEqual(rows.last?.terminalStatus, .completed)
+    }
+    func testProtectedHomeFirmlinkAliasIdentityFence() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("winter-firmlink-review-" + UUID().uuidString).resolvingSymlinksInPath()
+        let home = root.appendingPathComponent("home"), child = home.appendingPathComponent("private-child")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let alias = "/System/Volumes/Data" + home.path
+        var original = stat(), alternate = stat()
+        XCTAssertEqual(lstat(home.path, &original), 0)
+        guard lstat(alias, &alternate) == 0, original.st_dev == alternate.st_dev, original.st_ino == alternate.st_ino else {
+            throw XCTSkip("Fixture filesystem does not provide the APFS Data firmlink alias")
+        }
+        XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: root.path, guestPath: "/workspace/source", readOnly: true)], backing: [], protectedHostRoots: [alias], userHomeRoot: nil))
+        XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: child.path, guestPath: "/workspace/source", readOnly: true)], backing: [], protectedHostRoots: [alias], userHomeRoot: nil))
+    }
+    func testDefaultOutputQuotaAccepts512KiBBurstAndIsolatesParallelOwner() throws {
+        let channel = try NativeEventChannel(scope: scope)
+        let first = try XCTUnwrap(channel.reserve()), second = try XCTUnwrap(channel.reserve())
+        let chunk = [UInt8](repeating: 1, count: 16 * 1024)
+        for _ in 0..<32 { try channel.emit(first, kind: .stdout, bytes: chunk) }
+        XCTAssertEqual(channel.counts().outputBytes, 512 * 1024)
+        XCTAssertThrowsError(try channel.emit(first, kind: .stdout, bytes: [1]))
+        for _ in 0..<32 { try channel.emit(second, kind: .stderr, bytes: chunk) }
+        XCTAssertEqual(channel.counts().outputBytes, 1024 * 1024)
+        XCTAssertNotNil(channel.pollJSON())
+        XCTAssertNoThrow(try channel.emit(first, kind: .stdout, bytes: chunk))
+    }
+    func testDefaultOutputGlobalByteAndEventLimitsStillApply() throws {
+        let bytes = try NativeEventChannel(scope: scope)
+        let chunk = [UInt8](repeating: 1, count: 16 * 1024)
+        for _ in 0..<8 {
+            let owner = try XCTUnwrap(bytes.reserve())
+            for _ in 0..<32 { try bytes.emit(owner, kind: .stdout, bytes: chunk) }
+        }
+        let extra = try XCTUnwrap(bytes.reserve())
+        XCTAssertThrowsError(try bytes.emit(extra, kind: .stdout, bytes: [1]))
+        XCTAssertEqual(bytes.counts().outputBytes, 4 * 1024 * 1024)
+        XCTAssertNoThrow(try bytes.emit(extra, kind: .terminal, status: .failed))
+        let rows = try NativeEventChannel(scope: scope)
+        for _ in 0..<8 {
+            let owner = try XCTUnwrap(rows.reserve())
+            for _ in 0..<512 { try rows.emit(owner, kind: .stdout, bytes: [1]) }
+            XCTAssertThrowsError(try rows.emit(owner, kind: .stdout, bytes: [1]))
+        }
+        XCTAssertThrowsError(try rows.emit(try XCTUnwrap(rows.reserve()), kind: .stdout, bytes: [1]))
+    }
+    func testInputAndCloseFollowAdmissionOrderWhileFirstWriteSuspends() async throws {
+        let backend = OrderedInputBackend(), controller = try NativeController(scope: scope, backend: backend)
+        try await start(controller)
+        let exec = controller.submit(try json("exec", fields: ["taskId": "owner", "arguments": ["fixture"]]))
+        let first = controller.submit(try json("input", fields: ["taskId": "owner", "ownerOperationId": String(exec), "inputBase64": Data("first".utf8).base64EncodedString()]))
+        let second = controller.submit(try json("input", fields: ["taskId": "owner", "ownerOperationId": String(exec), "inputBase64": Data("second".utf8).base64EncodedString()]))
+        let close = controller.submit(try json("closeInput", fields: ["taskId": "owner", "ownerOperationId": String(exec)]))
+        await backend.processValue.entered.wait()
+        var closeAccepted = false
+        for _ in 0..<10000 {
+            if let text = controller.events.pollJSON() {
+                let row = try JSONDecoder().decode(NativeEvent.self, from: Data(text.utf8))
+                if row.operationId == String(close) && row.kind == .accepted { closeAccepted = true; break }
+            }
+            await Task.yield()
+        }
+        XCTAssertTrue(closeAccepted)
+        let before = await backend.processValue.calls; XCTAssertEqual(before, ["write-first-enter"])
+        await backend.processValue.release.open()
+        let rows = try await events(controller, terminalIDs: [first, second, close, exec])
+        XCTAssertTrue(rows.filter { $0.kind == .terminal }.allSatisfy { $0.terminalStatus == .completed })
+        let calls = await backend.processValue.calls
+        XCTAssertEqual(calls, ["write-first-enter", "write-first-done", "write-second-enter", "write-second-done", "close"])
+    }
+    func testUnexpectedBackendStopsCloseAdmissionAndRetainDrainOwnership() async throws {
+        for cause in [BackendLifecycleEvent.guestStopped, .stoppedWithError, .networkDisconnected] {
+            let backend = ObservedStopBackend(), controller = try NativeController(scope: scope, backend: backend)
+            try await start(controller)
+            await backend.crash(cause)
+            let state = await controller.state(); XCTAssertEqual(state, .uncertain)
+            XCTAssertFalse(controller.lifetime.canRelease())
+            let exec = controller.submit(try json("exec", fields: ["taskId": "later", "arguments": ["fixture"]]))
+            let stats = controller.submit(try json("stats"))
+            let rows = try await events(controller, terminalIDs: [exec, stats])
+            XCTAssertEqual(rows.first { $0.operationId == String(exec) && $0.kind == .terminal }?.code, "controller_draining")
+            XCTAssertEqual(rows.first { $0.operationId == String(stats) && $0.kind == .terminal }?.result?["backendFailure"], cause.rawValue)
+            await backend.release.open()
+            let stop = controller.submit(try json("stop")); _ = try await events(controller, terminalIDs: [stop])
+            XCTAssertFalse(controller.lifetime.canRelease())
+        }
+    }
+    func testLateBackendObservationCannotUndoConfirmedCleanStop() async throws {
+        let backend = ObservedStopBackend(clean: true), controller = try NativeController(scope: scope, backend: backend)
+        try await start(controller); await backend.release.open()
+        let stop = controller.submit(try json("stop")); _ = try await events(controller, terminalIDs: [stop])
+        await backend.crash(.stoppedWithError)
+        let state = await controller.state(); XCTAssertEqual(state, .closed)
+        XCTAssertTrue(controller.lifetime.canRelease())
+    }
+    func testProtectedHomeCaseAliasIdentityAndManagedException() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("winter-identity-review-" + UUID().uuidString).resolvingSymlinksInPath()
+        let home = root.appendingPathComponent("FixtureHome"), child = home.appendingPathComponent("shared/memory")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let alias = root.appendingPathComponent("fixturehome")
+        var original = stat(), alternate = stat()
+        XCTAssertEqual(lstat(home.path, &original), 0)
+        guard lstat(alias.path, &alternate) == 0, original.st_dev == alternate.st_dev, original.st_ino == alternate.st_ino else {
+            throw XCTSkip("Fixture filesystem does not provide case aliases")
+        }
+        XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: home.path, guestPath: "/workspace/source", readOnly: true)], backing: [], protectedHostRoots: [alias.path], userHomeRoot: nil))
+        XCTAssertThrowsError(try SharePolicy.validate([.init(sourcePath: root.path, guestPath: "/workspace/source", readOnly: true)], backing: [], userHomeRoot: alias.path))
+        let share = HostSharePolicy(sourcePath: child.path, guestPath: "/workspace/.winter/memory", readOnly: false, managedRole: .memory)
+        XCTAssertThrowsError(try SharePolicy.validate([share], backing: [], protectedHostRoots: [alias.path], userHomeRoot: nil))
+        var info = stat(); XCTAssertEqual(lstat(child.path, &info), 0)
+        let record = HostManagedShareRecord(path: child.path, role: .memory, device: UInt64(bitPattern: Int64(info.st_dev)), inode: info.st_ino)
+        XCTAssertNoThrow(try SharePolicy.validate([share], backing: [], protectedHostRoots: [alias.path], managedShares: [record], userHomeRoot: nil))
+        let authenticated = HostProtectedRootRecord(path: alias.path, device: UInt64(bitPattern: Int64(original.st_dev)), inode: original.st_ino)
+        XCTAssertNoThrow(try SharePolicy.validate([share], backing: [], protectedHostRoots: [alias.path], managedShares: [record], userHomeRoot: nil, protectedRootRecords: [authenticated]))
+        XCTAssertThrowsError(try SharePolicy.validate([share], backing: [], protectedHostRoots: [alias.path], managedShares: [record], userHomeRoot: nil, protectedRootRecords: [.init(path: alias.path, device: authenticated.device, inode: 0)]))
+    }
+
 }
 
 private final class LockedCounter: @unchecked Sendable {
@@ -681,4 +807,58 @@ private actor BarrierAbortAdmission: HostLaunchAdmission {
     func abortUnstartedReservation(_ descriptor: HostLaunchDescriptor) async throws { aborts += 1; await entered.open(); await release.wait() }
     func retainUncertainOwnership(_ descriptor: HostLaunchDescriptor, reason: String) async {}
     func confirmStopped(_ descriptor: HostLaunchDescriptor) async throws {}
+}
+
+private actor OrderedInputProcess: NativeGuestProcess {
+    let entered = TestLatch(), release = TestLatch(), closed = TestLatch()
+    private(set) var calls: [String] = []
+    func run(output: @escaping @Sendable (NativeEventKind, Data) throws -> Void) async throws -> Int32 { await closed.wait(); return 0 }
+    func writeInput(_ data: Data) async throws {
+        let text = String(decoding: data, as: UTF8.self)
+        calls.append("write-" + text + "-enter")
+        if text == "first" { await entered.open(); await release.wait() }
+        calls.append("write-" + text + "-done")
+    }
+    func closeInput() async throws { calls.append("close"); await closed.open() }
+    func cancel() async throws { await release.open(); await closed.open() }
+}
+private actor OrderedInputBackend: NativeWorkspaceBackend {
+    let processValue = OrderedInputProcess()
+    func start() async throws {}
+    func process(taskId: String, arguments: [String]) async throws -> any NativeGuestProcess { processValue }
+    func stats() async throws -> [String: String] { [:] }
+    func setMemoryAllowance(_ bytes: UInt64) async throws -> [String: String] { [:] }
+    func stop() async throws -> BackendStopResult { .init(terminationConfirmed: true, flushConfirmed: true) }
+}
+private actor ObservedStopBackend: NativeWorkspaceBackend {
+    let release = TestLatch()
+    private let clean: Bool
+    private var observer: (@Sendable (BackendLifecycleEvent) async -> Void)?
+    init(clean: Bool = false) { self.clean = clean }
+    func observeLifecycle(_ observer: @escaping @Sendable (BackendLifecycleEvent) async -> Void) async { self.observer = observer }
+    func crash(_ event: BackendLifecycleEvent) async { await observer?(event) }
+    func start() async throws {}
+    func process(taskId: String, arguments: [String]) async throws -> any NativeGuestProcess { throw NativeFailure("fixture", "not expected") }
+    func stats() async throws -> [String: String] { [:] }
+    func setMemoryAllowance(_ bytes: UInt64) async throws -> [String: String] { [:] }
+    func stop() async throws -> BackendStopResult { await release.wait(); return .init(terminationConfirmed: true, flushConfirmed: clean) }
+    func forceStop() async throws -> BackendStopResult { .init(terminationConfirmed: true, flushConfirmed: false) }
+}
+
+private struct SlicedOutputProcess: NativeGuestProcess {
+    func run(output: @escaping @Sendable (NativeEventKind, Data) throws -> Void) async throws -> Int32 {
+        let bytes = Data([0, 1, 2, 3])[1...]
+        assert(bytes.startIndex != 0)
+        try output(.stdout, bytes); return 0
+    }
+    func writeInput(_ data: Data) async throws {}
+    func closeInput() async throws {}
+    func cancel() async throws {}
+}
+private struct SlicedOutputBackend: NativeWorkspaceBackend {
+    func start() async throws {}
+    func process(taskId: String, arguments: [String]) async throws -> any NativeGuestProcess { SlicedOutputProcess() }
+    func stats() async throws -> [String: String] { [:] }
+    func setMemoryAllowance(_ bytes: UInt64) async throws -> [String: String] { [:] }
+    func stop() async throws -> BackendStopResult { .init(terminationConfirmed: true, flushConfirmed: true) }
 }

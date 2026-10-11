@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, existsSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, existsSync, rmSync, readFileSync, openSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createNativeHostOutputTransportFactory } from "./output-transport";
@@ -11,6 +11,7 @@ const build = process.env.WINTER_COWORK_NATIVE_TEST_BUILD ?? readFileSync(join(i
 const create = createNativeHostOutputTransportFactory(join(build,"winter-cowork-native.node"));
 const fixture = mkdtempSync(join(tmpdir(),"winter-native-output-"));
 const children: ReturnType<typeof Bun.spawn>[] = [];
+const fixtureFds: number[] = [];
 const transports: Awaited<ReturnType<typeof create>>[] = [];
 try {
   const pressure = await create(); transports.push(pressure);
@@ -50,17 +51,21 @@ try {
   const eofChild=Bun.spawn(["/bin/sh","-c","printf early; exec 1>&-; sleep 0.2; printf late >&2"],{stdin:"ignore",stdout:eof.stdoutFd,stderr:eof.stderrFd});children.push(eofChild);eof.closeWriters();
   let eofResolved=false,late="";const bothEOF=eof.start(()=>{firstEOF()},chunk=>{late+=chunk.toString()}).then(()=>{eofResolved=true});
   await stdoutDone;assert.equal(eofResolved,false,"stdout alone must not finish transport");await bothEOF;await eofChild.exited;assert.equal(late,"late");eof.dispose();
-  const inherited=await create();transports.push(inherited);let descriptorReport="";
+  for(let i=0;i<140;i++)fixtureFds.push(openSync("/dev/null","r"));
+  const inherited=await create(); assert(inherited.stdoutFd>127 && inherited.stderrFd>127);transports.push(inherited);let descriptorReport="";
   const fdChild=Bun.spawn(["/usr/bin/python3","-c",`import os,fcntl,json; found=[]
-for fd in range(3,128):
+for name in os.listdir("/dev/fd"):
+ fd=int(name)
+ if fd<3: continue
  try: fcntl.fcntl(fd,fcntl.F_GETFD);found.append(fd)
  except OSError: pass
 print(json.dumps(found))`],{stdin:"ignore",stdout:inherited.stdoutFd,stderr:inherited.stderrFd});children.push(fdChild);inherited.closeWriters();
   await inherited.start(chunk=>{descriptorReport+=chunk.toString()},()=>{});assert.equal(await fdChild.exited,0);assert.deepEqual(JSON.parse(descriptorReport),[]);inherited.dispose();
   const inspect=await create();transports.push(inspect);const active=inspect.statistics().sharedReaders;assert.equal(active,1);inspect.dispose();
-  console.log(JSON.stringify({nativeOutputTransport:true,pressureBytes:total,pauseStopsNativeReads:true,exactStdoutStderr:true,maxChunkBytes:maxChunk,sharedReadiness:true,concurrentStreams:12,callbackFailureVisible:true,noChunksAfterDispose:true,pauseInsideCallback:true,bothEOFRequired:true,extraInheritedDescriptors:false,realVM:false}));
+  console.log(JSON.stringify({nativeOutputTransport:true,pressureBytes:total,pauseStopsNativeReads:true,exactStdoutStderr:true,maxChunkBytes:maxChunk,sharedReadiness:true,concurrentStreams:12,callbackFailureVisible:true,noChunksAfterDispose:true,pauseInsideCallback:true,bothEOFRequired:true,extraInheritedDescriptors:false,descriptorEnumeration:"/dev/fd",highFixtureDescriptors:140,realVM:false}));
 } finally {
   for(const child of children)if(child.exitCode===null){try{child.kill()}catch{};await child.exited}
   for(const transport of transports)transport.dispose();
+  for(const fd of fixtureFds)closeSync(fd);
   rmSync(fixture,{recursive:true,force:true});
 }

@@ -162,7 +162,10 @@ public protocol NativeGuestProcess: Sendable {
 extension NativeGuestProcess {
     public func completionMetadata() async -> [String: String] { ["outputCompletion": "unproven"] }
 }
+public enum BackendLifecycleEvent: String, Sendable { case guestStopped, stoppedWithError, networkDisconnected }
 public protocol NativeWorkspaceBackend: Sendable {
+    /// Installed before start; observation is not flush/recovery authority.
+    func observeLifecycle(_ observer: @escaping @Sendable (BackendLifecycleEvent) async -> Void) async
     func start() async throws
     func process(taskId: String, arguments: [String]) async throws -> any NativeGuestProcess
     func stats() async throws -> [String: String]
@@ -172,6 +175,7 @@ public protocol NativeWorkspaceBackend: Sendable {
     func forceStop() async throws -> BackendStopResult
 }
 extension NativeWorkspaceBackend {
+    public func observeLifecycle(_ observer: @escaping @Sendable (BackendLifecycleEvent) async -> Void) async {}
     public func forceStop() async throws -> BackendStopResult {
         throw NativeFailure("force_stop_unavailable", "Backend has no independently owned host force-stop implementation")
     }

@@ -18,15 +18,47 @@ private struct PolicyExtension: VZInstanceExtension {
         config.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
     }
 }
+/// VZ's delegate is weak. The manager retains this queue-bound forwarding
+/// observer and preserves every callback of any existing delegate.
+private final class WorkspaceVZObserver: NSObject, VZVirtualMachineDelegate, @unchecked Sendable {
+    let previous: (any VZVirtualMachineDelegate)?
+    let observed: @Sendable (BackendLifecycleEvent) -> Void
+    init(previous: (any VZVirtualMachineDelegate)?, observed: @escaping @Sendable (BackendLifecycleEvent) -> Void) {
+        self.previous = previous; self.observed = observed
+    }
+    func guestDidStop(_ virtualMachine: VZVirtualMachine) {
+        observed(.guestStopped); previous?.guestDidStop?(virtualMachine)
+    }
+    func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: any Error) {
+        observed(.stoppedWithError); previous?.virtualMachine?(virtualMachine, didStopWithError: error)
+    }
+    func virtualMachine(_ virtualMachine: VZVirtualMachine, networkDevice: VZNetworkDevice, attachmentWasDisconnectedWithError error: any Error) {
+        observed(.networkDisconnected)
+        previous?.virtualMachine?(virtualMachine, networkDevice: networkDevice, attachmentWasDisconnectedWithError: error)
+    }
+}
 private final class WorkspaceVZManager: VirtualMachineManager, @unchecked Sendable {
     let descriptor: HostLaunchDescriptor
     let policies: [HostSharePolicy]
     private let lock = NSLock()
     private var vm: VZVirtualMachineInstance?
     private var attempted = false
+    private var expectedStop = false
+    private var unexpectedStop = false
+    private var observer: WorkspaceVZObserver?
+    private let lifecycle: @Sendable (BackendLifecycleEvent) -> Void
+    func markExpectedStop() { lock.lock(); expectedStop = true; lock.unlock() }
+    func stoppedUnexpectedly() -> Bool { lock.lock(); defer { lock.unlock() }; return unexpectedStop }
+    private func observe(_ event: BackendLifecycleEvent) {
+        lock.lock()
+        let unexpected = event != .guestStopped || !expectedStop
+        if unexpected { unexpectedStop = true }
+        lock.unlock()
+        if unexpected { lifecycle(event) }
+    }
     func creationAttempted() -> Bool { lock.lock(); defer { lock.unlock() }; return attempted }
     private func markAttempted() { lock.lock(); attempted = true; lock.unlock() }
-    init(_ descriptor: HostLaunchDescriptor, policies: [HostSharePolicy]) { self.descriptor = descriptor; self.policies = policies }
+    init(_ descriptor: HostLaunchDescriptor, policies: [HostSharePolicy], lifecycle: @escaping @Sendable (BackendLifecycleEvent) -> Void) { self.descriptor = descriptor; self.policies = policies; self.lifecycle = lifecycle }
     func instance() -> VZVirtualMachineInstance? { lock.lock(); defer { lock.unlock() }; return vm }
     private func remember(_ vm: VZVirtualMachineInstance) { lock.lock(); self.vm = vm; lock.unlock() }
     func create(config: some VMCreationConfig) async throws -> any VirtualMachineInstance {
@@ -39,7 +71,16 @@ private final class WorkspaceVZManager: VirtualMachineManager, @unchecked Sendab
             settings.mountsByID = input.mountsByID; settings.interfaces = []
             settings.extensions = [PolicyExtension(policies: policies, didConstruct: { [weak self] in self?.markAttempted() })]
         }
-        remember(vm); return vm
+        remember(vm)
+        await withCheckedContinuation { continuation in
+            vm.vmQueue.async {
+                let observer = WorkspaceVZObserver(previous: vm.vzVirtualMachine.delegate) { [weak self] event in self?.observe(event) }
+                self.lock.lock(); self.observer = observer; self.lock.unlock()
+                vm.vzVirtualMachine.delegate = observer
+                continuation.resume()
+            }
+        }
+        return vm
     }
 }
 
@@ -59,6 +100,16 @@ public actor VZWorkspaceBackend: NativeWorkspaceBackend {
     private var forceRequested = false
     private var confirmedStop: BackendStopResult?
     private var cleanConfirmation: Task<BackendStopResult, Never>?
+    private var lifecycleObserver: (@Sendable (BackendLifecycleEvent) async -> Void)?
+    public func observeLifecycle(_ observer: @escaping @Sendable (BackendLifecycleEvent) async -> Void) async { lifecycleObserver = observer }
+    private func observedLifecycle(_ event: BackendLifecycleEvent) async {
+        guard confirmedStop == nil else { return }
+        // Observation proves neither flush nor host effects. Close controller
+        // admission immediately, then ask the host to retain durable ownership.
+        await lifecycleObserver?(event)
+        guard confirmedStop == nil, cleanConfirmation == nil else { return }
+        await admission.retainUncertainOwnership(descriptor, reason: "VZ lifecycle stopped unexpectedly: " + event.rawValue)
+    }
     public init(descriptor: HostLaunchDescriptor, admission: any HostLaunchAdmission = FeatureBlockedAdmission()) {
         self.descriptor = descriptor; self.admission = admission
         self.reservation = UnstartedReservation(descriptor: descriptor, admission: admission)
@@ -116,8 +167,9 @@ public actor VZWorkspaceBackend: NativeWorkspaceBackend {
                 }
             }
             let managedShares = descriptor.managedSharedDirectories.map { HostManagedShareRecord(path: $0.path, role: $0.role, device: $0.identity.device, inode: $0.identity.inode) }
-            try SharePolicy.validate(policies, backing: [descriptor.kernel, descriptor.initfs, descriptor.rootfs].map { URL(fileURLWithPath: $0.path) }, protectedHostRoots: ([descriptor.currentHostHome] + descriptor.protectedHomes).map(\.path), managedShares: managedShares)
-            let manager = WorkspaceVZManager(descriptor, policies: policies)
+            let protectedRecords = ([descriptor.currentHostHome] + descriptor.protectedHomes).map { HostProtectedRootRecord(path: $0.path, device: $0.identity.device, inode: $0.identity.inode) }
+            try SharePolicy.validate(policies, backing: [descriptor.kernel, descriptor.initfs, descriptor.rootfs].map { URL(fileURLWithPath: $0.path) }, protectedHostRoots: ([descriptor.currentHostHome] + descriptor.protectedHomes).map(\.path), managedShares: managedShares, protectedRootRecords: protectedRecords)
+            let manager = WorkspaceVZManager(descriptor, policies: policies) { [weak self] event in Task { await self?.observedLifecycle(event) } }
             var config = LinuxContainer.Configuration()
             config.cpus = descriptor.virtualCPUs; config.memoryInBytes = descriptor.memoryCeilingBytes
             config.mounts.append(contentsOf: policies.map(\.mount)); config.interfaces = []
@@ -148,7 +200,9 @@ public actor VZWorkspaceBackend: NativeWorkspaceBackend {
         }
     }
     public func process(taskId: String, arguments: [String]) async throws -> any NativeGuestProcess {
+        guard manager?.stoppedUnexpectedly() != true else { throw NativeFailure("guest_stopped_unexpectedly", "VZ lifecycle closed trusted process admission") }
         try await admission.authorizeProcess(descriptor, taskId: taskId, arguments: arguments)
+        guard manager?.stoppedUnexpectedly() != true else { throw NativeFailure("guest_stopped_unexpectedly", "VZ lifecycle closed trusted process admission during host authorization") }
         guard let container else { throw NativeFailure("guest_unavailable", "No admitted guest") }
         let id = UUID().uuidString
         let process = VZGuestProcess(container: container, processId: id, arguments: arguments) { confirmed in await self.processFinished(id, confirmed: confirmed) }
@@ -182,6 +236,7 @@ public actor VZWorkspaceBackend: NativeWorkspaceBackend {
         if let confirmedStop { return confirmedStop }
         if let cleanConfirmation { return await cleanConfirmation.value }
         if forceRequested || launchInFlight { return try await forceStop() }
+        manager?.markExpectedStop()
         let live = Array(processes.values)
         await withTaskGroup(of: Void.self) { group in for process in live { group.addTask { try? await process.cancel() } } }
         if manager?.creationAttempted() != true {
@@ -197,7 +252,7 @@ public actor VZWorkspaceBackend: NativeWorkspaceBackend {
         }
         // A successful host framework stop still cannot release a dirty disk.
         let result: BackendStopResult
-        if flush && !forceRequested {
+        if flush && !forceRequested && manager?.stoppedUnexpectedly() != true {
             let descriptor = self.descriptor, admission = self.admission
             let proof = Task { await CleanStopAuthority.confirm(descriptor, admission: admission, terminationConfirmed: true, flushConfirmed: true) }
             cleanConfirmation = proof
@@ -219,6 +274,7 @@ public actor VZWorkspaceBackend: NativeWorkspaceBackend {
         if let confirmedStop { return confirmedStop }
         if let cleanConfirmation { return await cleanConfirmation.value }
         forceRequested = true
+        manager?.markExpectedStop()
         do { return try await forceHardwareAndDrainLaunch() }
         catch {
             await admission.retainUncertainOwnership(descriptor, reason: "Host force-stop or unstarted reservation cleanup could not be confirmed")

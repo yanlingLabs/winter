@@ -154,11 +154,20 @@ Real cancellation sends TERM, escalates to KILL after2s if still running, and
 acknowledges only after the owning run finishes wait/delete. A pending-construction
 cancellation also waits for the target terminal and propagates cleanup uncertainty. Its caller's stop
 budget can expire while this cleanup remains owned; that expiry is not an ACK.
+Cancellation after the target terminal is owned/removed is refused with
+task_ownership_denied; a late request is not treated as a successful no-op.
 
-Each operation has its own reserved output quota (default32KiB/32 events with128
-ordinary slots), so a flood cancels only its owner rather than consuming another
-operation's capacity. Terminal slots remain separate. Guest stdin ACK means a
-bounded chunk was queued, not that a guest application consumed it.
+Each operation has a bounded burst quota (default512KiB/512 events with128
+ordinary slots). Eight burst lanes share a hard4MiB/4096-output-event global
+limit. One flood cannot consume another operation's burst, but eight unpolled
+full lanes can exhaust the global limit; overflow fails visibly and cancels its
+owner. This is bounded failure handling, not an unlimited output buffer or a
+blocking VZ/NIO callback. Terminal reservations remain separate. Guest stdin ACK
+means a bounded chunk was queued, not that the application consumed it. Input
+and closeInput receive per-process predecessor tickets at ordered admission,
+so a suspended write cannot be overtaken by EOF or a later write. Graceful EOF
+finishes the stream and drains acknowledged chunks. Stop owns input-operation
+drain as well as exec completion.
 
 Shares reject host root, host-home ancestors, overlap with explicitly protected
 Winter homes, duplicate/overlapping sources, and noncanonical guest mount paths.
@@ -170,6 +179,24 @@ Only declared fixed production/fixture guest mount roots or a bounded
 survive terminal mapping. Launch errors before VZ construction are explicitly
 classified never-created; post-construction uncertainty keeps ownership. The
 VZInstanceExtension.didCreate hook records the actual construction boundary.
+At pinned bc994b88, VZVirtualMachineInstance.swift lines133–143 build mounts and
+throwing config.toVZ BEFORE the nonthrowing VZVirtualMachine initializer; only
+after that initializer returns are didCreate extensions invoked. A configuration
+error before that boundary therefore has no constructed VM to retain. This
+source inspection and fake rollback tests do not prove a real constructor run.
+
+Directory ancestry compares dev/inode in both directions for lexical and
+physical backing spellings. Metadata-only O_EVTONLY/CLOEXEC handles pin each
+inspected identity; F_GETPATH_NOFIRMLINK supplies the physical spelling. Both
+walks must reach root and match the pinned endpoint, or validation fails closed.
+Including protected-home physical ancestors prevents a Data-volume-root share
+from escaping a lexical /Users fence. Different APFS firmlink/case spellings cannot bypass
+home, backing or overlapping-share fences. The real backend supplies authenticated
+protectedRootRecords and revalidates them during policy checks. Metadata failure
+closes admission. OS user-home identity ancestry is inspected as metadata only;
+fixture tests inject disposable boundaries and never inspect live Winter homes.
+Exact managed-role exceptions remain restricted to their verified authority
+record and immutable guest destination/read-only policy.
 
 The Node event reader now has its own wake pipe, so cleanup wakes the blocking
 poll immediately rather than joining a one-second timeout on JavaScript's
@@ -182,7 +209,10 @@ timeout and does not expose verified stdout/stderr EOF. Default builds retain it
 and real launch refuses that profile. The verified-eof build profile applies a
 hash-pinned local source patch and awaits independent EOF/error evidence before
 deleting a process; only successful proof returns outputCompletion=verified-eof.
-A failure stays typed output_completion_unproven. See dependency-patches/README.md
+A failure stays typed output_completion_unproven. The upstream wait may use its
+3s IO timeout before the patched30s proof deadline, so failed EOF proof can take
+about33s after exit. Once wait has reaped the process, EOF-proof/delete failures
+retry delete without killing or waiting for a second exit receipt. See dependency-patches/README.md
 for exact preparation, pins, packaging and no-VM tests. This API compiled and
 passed synthetic state tests; real guest transport remains unvalidated. Fake
 backend metadata is explicitly verified-fake. No real VZ launch was used.
@@ -230,11 +260,19 @@ idempotent across crash/retry. Constructed VMs can never use this no-VM abort.
 FeatureBlockedAdmission acquires no reservation and provides a safe no-op abort.
 A failed guest flush never invokes confirmStopped or clears the real VM owner.
 
-37 default-profile native tests pass, including the root's registered-cancel
+45 tests execute in both default and verified-eof profiles, with44 passing and
+1 APFS Data-firmlink fixture skipped because this host does not expose that alias.
+The real case-alias identity/managed-role test passes. Tests include the root's registered-cancel
 completion and drain-before-stdin-EOF regressions; new barrier-driven tests prove
 independent escalation while cancel/run are stuck, cleanup with saturated receipt
 capacity, reservation acquisition/abort/retry/coalescing, constructed-state abort
-refusal and prevention of release without flush. These test fake host proof and
+refusal and prevention of release without flush, unexpected backend stop observation,
+ordered suspended stdin writes,512KiB bursts, global output bounds and nonzero
+Data-slice indices. A retained VZ delegate observer forwards existing guest-stop,
+error-stop and network-disconnection callbacks on the VM queue. Unexpected
+observation closes controller admission, clears running state and starts owned
+drain; it cannot grant clean flush/recovery authority. Late observations cannot
+undo confirmed clean stop. These test fake host proof and
 compile the VZ path; they do not prove real guest cancellation, VZ backing-service
 termination, dirty-disk recovery, active RAM return or production integration.
 
@@ -260,7 +298,10 @@ TSFN queues are bounded and terminal storage is reserved at construction. Native
 pending bytes are therefore at most128KiB per transport. The SDK/consumer must
 also bound any bytes it retains after the callback returns. pause stops native
 reads, including before start and from inside a callback; resume wakes readiness.
-Read errors, callback exceptions and disposal reject start. Successful start
+Read errors, callback exceptions and disposal reject start. A failed terminal
+TSFN enqueue also rejects any pending promise during live-JS finalization;
+environment teardown may discard promises only when no valid JS environment
+remains. Successful start
 completion requires BOTH actual EOFs and delivery of all queued chunks.
 
 closeWriters/dispose are idempotent. dispose closes only owned descriptors,
@@ -280,7 +321,14 @@ Ordinary and compiled Bun fixture checks emitted nonempty JSON receipts proving
 exact10MiB transfer, actual paused-pipe producer backpressure, pause-before-start
 and pause-inside-callback,12 concurrent stdout/stderr transports, both EOFs,
 visible callback failures, no chunks after disposal and no extra inherited
-parent descriptors. The factory also passed strict standalone TypeScript checks.
+parent descriptors after140 parent fixture FDs were opened (transport writers
+above127; the child enumerated actual /dev/fd and tested open handles). This
+checks inheritance in those fixture children, not every possible native child
+launcher. A compile-only WINTER_OUTPUT_FIXTURE_TERMINAL_FAILURE addon proves
+terminal enqueue failure rejects start and releases readers. It has no exported
+production fault toggle; build.sh/package builds omit that define. Run it with
+/bin/sh node-api/test-output-terminal-failure.sh. The factory and smokes also
+passed strict standalone TypeScript checks.
 Existing VM addon/client fake smokes continue to pass. No daemon/provider/VM or
 live home/Keychain/global service is involved. This adds the packaged capability;
 real host-broker injection/integration and independent security review remain

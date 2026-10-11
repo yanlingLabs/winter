@@ -56,7 +56,12 @@ public final class NativeEventChannel: @unchecked Sendable {
         let size = bytes?.count ?? 0
         let output = kind == .stdout || kind == .stderr
         if output && size == 0 { return }
-        guard size <= 16 * 1024, !output || (operationBytes[id, default: 0] + size <= max(1, outputLimit / operationLimit) && operationEvents[id, default: 0] < max(1, 4096 / operationLimit)),
+        // Eight fair burst lanes give the default configuration 512 KiB per
+        // operation, without multiplying the global 4 MiB/4096-event bounds.
+        let lanes = min(8, max(1, operationLimit))
+        guard size <= 16 * 1024, !output || (outputBytes + size <= outputLimit && outputEvents < 4096 &&
+                operationBytes[id, default: 0] + size <= max(1, outputLimit / lanes) &&
+                operationEvents[id, default: 0] < max(1, 4096 / lanes)),
               (message?.utf8.count ?? 0) <= 2048,
               result?.count ?? 0 <= 128,
               result?.reduce(0, { $0 + $1.key.utf8.count + $1.value.utf8.count }) ?? 0 <= 64 * 1024 else {

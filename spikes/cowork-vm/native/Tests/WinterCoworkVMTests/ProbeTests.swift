@@ -138,7 +138,7 @@ final class ProbeTests: XCTestCase {
         do { _ = try await ProcessLifecycle.run(process, timeout: 30); XCTFail("delete must fail") }
         catch let failure as ProcessRunFailure { XCTAssertTrue(failure.cleanupUncertain) }
         let calls = await process.calls
-        XCTAssertEqual(calls, ["start", "wait:30", "delete", "kill", "wait:5", "delete"])
+        XCTAssertEqual(calls, ["start", "wait:30", "delete", "delete"])
     }
 
     func testQueueBackpressureKeepsUnconsumedCompletions() {
@@ -197,8 +197,8 @@ final class ProbeTests: XCTestCase {
         try FileManager.default.createDirectory(at: rw, withIntermediateDirectories: false)
         let expected = [HostSharePolicy(sourcePath: ro.path, guestPath: "/workspace/host-ro", readOnly: true),
                         HostSharePolicy(sourcePath: rw.path, guestPath: "/workspace/host-rw", readOnly: false)]
-        try SharePolicy.validate(expected, backing: [])
-        XCTAssertThrowsError(try SharePolicy.validate([expected[0], HostSharePolicy(sourcePath: ro.path, guestPath: "/other", readOnly: false)], backing: []))
+        try SharePolicy.validate(expected, backing: [], userHomeRoot: nil)
+        XCTAssertThrowsError(try SharePolicy.validate([expected[0], HostSharePolicy(sourcePath: ro.path, guestPath: "/other", readOnly: false)], backing: [], userHomeRoot: nil))
         let config = VZVirtualMachineConfiguration()
         let device = VZVirtioFileSystemDeviceConfiguration(tag: "virtiofs")
         config.directorySharingDevices = [device]

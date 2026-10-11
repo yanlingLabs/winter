@@ -24,19 +24,25 @@ public enum ProcessLifecycle {
     /// start, wait and delete in the same cleanup boundary. A kill failure
     /// alone does not imply uncertainty when wait+delete establish cleanup.
     public static func run(_ process: some ProbeProcess, timeout: Int64, afterWait: @Sendable () async throws -> Void = {}) async throws -> ExitStatus {
+        var reaped = false
         do {
             try await process.start()
             let exit = try await process.wait(timeoutInSeconds: timeout)
+            reaped = true
             try await afterWait()
             try await process.delete()
             return exit
         } catch {
             let original = error.localizedDescription
             var errors: [String] = []
-            var reaped = false, deleted = false
-            do { try await process.kill(.kill) } catch { errors.append("kill: " + error.localizedDescription) }
-            do { _ = try await process.wait(timeoutInSeconds: 5); reaped = true }
-            catch { errors.append("wait: " + error.localizedDescription) }
+            var deleted = false
+            // wait may consume the sole guest exit receipt. EOF proof/delete
+            // failures cannot kill or wait a process already conclusively reaped.
+            if !reaped {
+                do { try await process.kill(.kill) } catch { errors.append("kill: " + error.localizedDescription) }
+                do { _ = try await process.wait(timeoutInSeconds: 5); reaped = true }
+                catch { errors.append("wait: " + error.localizedDescription) }
+            }
             do { try await process.delete(); deleted = true }
             catch { errors.append("delete: " + error.localizedDescription) }
             throw ProcessRunFailure(original: original, originalCode: (error as? ProbeFailure)?.code, cleanupFailures: errors, cleanupUncertain: !reaped || !deleted)

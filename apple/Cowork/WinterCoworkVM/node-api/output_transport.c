@@ -74,6 +74,9 @@ static void output_reject_disposed(output_context *ctx) {
 static void output_tsfn_finalized(napi_env env,void *data,void *hint) {
   (void)hint; output_context *ctx=data;
   if (env) {
+    // A failed terminal enqueue aborts the TSFN without a call_js receipt.
+    // Finalization is the last live-JS owner and must settle its promise.
+    output_reject_disposed(ctx);
     for (int i=0;i<2;i++) if (ctx->sinks[i]) { napi_delete_reference(env,ctx->sinks[i]); ctx->sinks[i]=NULL; }
     if (ctx->self) { napi_delete_reference(env,ctx->self); ctx->self=NULL; }
   }
@@ -114,6 +117,10 @@ static void output_call_js(napi_env env,napi_value callback,void *data,void *eve
   else if(finish)output_release_tsfn(ctx,napi_tsfn_release);
 }
 static bool output_enqueue(output_context *ctx,int stream,const uint8_t *bytes,size_t length,int error) {
+  // Compile-time fixture only: the production artifact has no fault switch.
+#ifdef WINTER_OUTPUT_FIXTURE_TERMINAL_FAILURE
+  if (stream<0) return false;
+#endif
   output_event *event=stream<0?ctx->terminal_event:malloc(sizeof(*event)+length);
   if (!event) return false;
   event->stream=stream;event->error=error;event->length=length;if(length)memcpy(event->bytes,bytes,length);
