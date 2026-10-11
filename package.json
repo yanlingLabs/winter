@@ -23,6 +23,7 @@
     "verify:runtimes": "bun run scripts/verify-runtimes-compiled.ts",
     "verify:embedded": "bun run scripts/verify-embedded-compiled.ts",
     "verify:computer-helper": "bun run scripts/verify-computer-helper.ts",
+    "verify:cowork-vm": "bun run spikes/cowork-vm/run.ts",
     "typecheck:core": "tsc --noEmit -p packages/core",
     "typecheck:protocol": "tsc --noEmit -p packages/protocol",
     "typecheck:cli": "tsc --noEmit -p packages/cli",

@@ -1,0 +1,17 @@
+{
+  "containerizationRevision": "bc994b88df46207fad7775b0eabc51947e315881",
+  "initImage": "ghcr.io/apple/containerization/vminit@sha256:4c1836052eafcbc944c403fb23ded06562962d2402c9dcc651495a32300614df",
+  "rootImage": "docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8",
+  "kernelArchive": {
+    "url": "https://github.com/kata-containers/kata-containers/releases/download/3.17.0/kata-static-3.17.0-arm64.tar.xz",
+    "sha256": "647c7612e6edf789d5e14698c48c99d8bac15ad139ffaa1c8bb7d229f748d181",
+    "member": "./opt/kata/share/kata-containers/vmlinux-6.12.28-153",
+    "provenance": "Release URL named by the pinned Containerization Makefile; archive checksum measured from that upstream download, not an upstream signature claim."
+  },
+  "zig": {
+    "url": "https://ziglang.org/download/0.14.1/zig-aarch64-macos-0.14.1.tar.xz",
+    "sha256": "39f3dc5e79c22088ce878edc821dedb4ca5a1cd9f5ef915e9b3cc3053e8faefa",
+    "directory": "zig-aarch64-macos-0.14.1",
+    "provenance": "Checksum from https://ziglang.org/download/index.json for 0.14.1 aarch64-macos."
+  }
+}
