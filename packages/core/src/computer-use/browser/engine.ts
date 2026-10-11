@@ -26,6 +26,7 @@ import type { BrowserBackendRegistry } from "./registry";
 import { BLOCKED_TAB_PRIMITIVES, ensureSiteAllowed, listedHost, SiteApprovals, type SiteFloorDeps } from "./site-policy";
 import type { TabRunScope } from "./tab-scope";
 import { redactText, redactUrl } from "./page-runtime/redact";
+import { cssSelectorRefusal } from "./page-runtime/rules";
 import { pickerSentence, shownUrl, TabDriver, transportFailure, transportHasCdp3 } from "./tab-driver";
 import { TransportError, type BackendId, type BrowserFamily, type CdpTransport, type TransportTab } from "./transport";
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
@@ -993,7 +994,12 @@ export class BrowserEngine {
           const o = q as Record<string, unknown>;
           query = Object.fromEntries(["role", "name", "text", "label", "placeholder", "testId", "css"].filter((k) => typeof o[k] === "string" && (o[k] as string).length > 0).map((k) => [k, o[k] as string]));
           if (Object.keys(query).length === 0) throw bad("find() takes text, or { role, name, text, label, placeholder, testId, css }");
-          if (typeof o.css === "string" && o.css.length > 500) throw bad("find()'s css selector is at most 500 characters");
+          if (typeof o.css === "string") {
+            // A tokenised safe subset only: a value test on an attribute would read hidden or secret values through the
+            // match count (`page-runtime/rules.ts`, `cssSelectorRefusal`).
+            const why = cssSelectorRefusal(o.css);
+            if (why !== undefined) throw new AutomationFailure("NotAllowed", `find({ css }): ${why}`);
+          }
           if (o.exact === true) (query as Record<string, unknown>).exact = true;
         } else throw bad("find() takes text, or { role, name, text, label, placeholder, testId, css }");
         const found = await driver.find(query);

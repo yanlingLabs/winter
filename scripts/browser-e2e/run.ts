@@ -452,6 +452,10 @@ await check("find()'s DOM keys reach real elements: testId, label, placeholder, 
   expect((await one({ label: "Email" }))[0]?.role === "text field", "label → the email field", JSON.stringify(await one({ label: "Email" })));
   expect((await one({ placeholder: "Search products" })).length === 1, "placeholder");
   expect((await one({ css: "a.price" })).length === 1, "css");
+  expect((await one({ css: "input[type=password]" })).length === 1, "css: an equality test on a descriptive attribute");
+  // A value test would read the password through the match count: refused before the page sees it.
+  await failsWith(R("find", { query: { css: 'input[type=password][value^="hu"]' }, emit: false }), "NotAllowed");
+  await failsWith(R("find", { query: { css: "input[value^=hu]" }, emit: false }), "NotAllowed");
 });
 
 await check("inspect(ref | point), html(), text({ within }), assets()", async () => {

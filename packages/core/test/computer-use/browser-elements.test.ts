@@ -94,7 +94,26 @@ describe("find()'s DOM keys", () => {
     await p("find", { query: { testId: "prices", css: "a.price", exact: true }, emit: false });
     const call = h.winter.sent.filter((x) => x.method === "Runtime.callFunctionOn").map((x) => (x.params.arguments as Array<{ value: unknown }>)).find((a) => a[0]!.value === "find")!;
     expect(call[1]!.value).toEqual({ testId: "prices", css: "a.price", exact: true });
-    await expect(p("find", { query: { css: "a".repeat(501) } })).rejects.toThrow(/at most 500 characters/);
+    await expect(p("find", { query: { css: "a".repeat(501) } })).rejects.toThrow(/longer than 500 characters/);
+  });
+
+  test("css runs only the safe subset: a value test (a password mirrored into value=, a hidden input, a meta token) is refused before the page sees it", async () => {
+    const { h, p } = await opened();
+    const before = h.winter.sent.filter((x) => x.method === "Runtime.callFunctionOn").length;
+    for (const css of [
+      'input[type=password][value^="hu"]', "input[type=password][value^=hu]", "input[type=hidden][value*=a]",
+      "body:has(meta[name=csrf-token][content^=a])", ":is(input[value$=z])", "a[href*=token]", "[data-secret~=x]", "[lang|=en]",
+      "input:placeholder-shown", "p::before", "a\\5b value\\5d", "svg|a",
+    ]) {
+      const e = await failure(p("find", { query: { css }, emit: false }));
+      expect({ css, kind: (e as AutomationFailure).kind }).toEqual({ css, kind: "NotAllowed" });
+      expect(e.message).toMatch(/^find\(\{ css \}\): /);
+    }
+    expect(h.winter.sent.filter((x) => x.method === "Runtime.callFunctionOn").length).toBe(before);
+    // The safe subset still works: tags, #id, .class, presence, equality on descriptive attributes, structure.
+    for (const css of ["input[type=password]", "a.price", "#main > ul li:nth-child(2n+1)", "form:has(> input[required])", "[data-testid=buy]", "[role=tab][aria-selected=true]", "input[value]"]) {
+      await p("find", { query: { css }, emit: false });
+    }
   });
 });
 

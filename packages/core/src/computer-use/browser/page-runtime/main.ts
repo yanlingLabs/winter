@@ -13,7 +13,7 @@ import type {
   RtCheck, RtClassify, RtCondition, RtFindQuery, RtFound, RtHit, RtId, RtInspect, RtLink, RtNode, RtPoint, RtSnapshot,
 } from "./protocol";
 import { looksSecret, REDACTED, redactText } from "./redact";
-import { classifyTarget, isPaymentHost, isSecureField, isTextEntry as isTextEntryFacts, nativePicker, pickerValueHint, TEXT_INPUT_TYPES, type ElementFacts } from "./rules";
+import { classifyTarget, cssSelectorRefusal, isPaymentHost, isSecureField, isTextEntry as isTextEntryFacts, nativePicker, pickerValueHint, TEXT_INPUT_TYPES, type ElementFacts } from "./rules";
 
 type Any = Record<string, unknown>;
 
@@ -519,6 +519,11 @@ type Any = Record<string, unknown>;
   /** Phase 3's DOM search: css, testId, placeholder or label — then role, name and text narrow it, as for state(). */
   const findDom = (q: RtFindQuery): RtFound[] => {
     const exact = q.exact === true;
+    // The engine refuses a selector outside the safe subset; checked here again (a value test reads hidden values).
+    if (q.css !== undefined) {
+      const why = cssSelectorRefusal(q.css);
+      if (why !== undefined) throw new Error(`css: ${why}`);
+    }
     let selector = q.css ?? (q.testId !== undefined ? TEST_ID : q.placeholder !== undefined ? "[placeholder]" : FIELD);
     if (q.css !== undefined && (q.testId !== undefined || q.placeholder !== undefined)) selector = q.css;
     let candidates: Element[];

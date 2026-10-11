@@ -61,7 +61,7 @@ export function computerV2Description(input: ComputerV2DescriptionInput): string
     "",
     "interface Target {                       // what apps and browser tabs share",
     "  state(o?: Quiet & { full?: boolean; within?: Ref; settle?: boolean }): Promise<string>;",
-    "  find(q: string | { role?: string; name?: string; text?: string; label?: string; placeholder?: string; testId?: string; css?: string; exact?: boolean }, o?: Quiet): Promise<Element[]>;   // label, placeholder, testId, css: tabs only",
+    "  find(q: string | { role?: string; name?: string; text?: string; label?: string; placeholder?: string; testId?: string; css?: string; exact?: boolean }, o?: Quiet): Promise<Element[]>;   // label, placeholder, testId, css: tabs only; css: tags, #id, .class, [attr], [type=…]/[role=…], structure — no other value tests",
     ...(v ? ["  screenshot(o?: Quiet & { region?: [x: number, y: number, w: number, h: number] }): Promise<Image>;"] : []),
     `  click(t: ${target}, o?: { button?: "left" | "right" | "middle"; count?: 1 | 2 | 3; modifiers?: string[] }): Promise<void>;`,
     "  setValue(ref: Ref, value: string): Promise<void>;",
