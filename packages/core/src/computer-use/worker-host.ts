@@ -155,8 +155,16 @@ export class AutomationWorker {
     });
   }
 
+  /** One answer to the worker. An answer too large for one bridge line (`BRIDGE_MAX_LINE` — the worker would drop it
+   *  and the script's call would never settle) is sent as a typed error naming its size instead. */
   reply(id: number, outcome: { ok: true; value?: unknown } | { ok: false; error: { kind: string; message: string } }): void {
-    this.send({ op: "reply", id, ...outcome } as HostToWorker);
+    if (!this.alive) return;
+    let line = JSON.stringify({ op: "reply", id, ...outcome });
+    if (line.length > BRIDGE_MAX_LINE) {
+      const mb = (line.length / (1024 * 1024)).toFixed(1);
+      line = JSON.stringify({ op: "reply", id, ok: false, error: { kind: "Error", message: `that answer is too large to hand to the script (${mb} MB as text) — ask for less at once` } });
+    }
+    try { this.child.stdin?.write(`${line}\n`); } catch { /* reported through "close" */ }
   }
 
   cancel(runId: string, reason?: string): void {
