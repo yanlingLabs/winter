@@ -103,8 +103,8 @@ export class CoworkWorkspaceService {
     this.authority.requireSelection(principal, selected);
     return selected;
   }
-  private context(principal: CoworkPrincipal, method: CoworkMethod, request: { requestId: string; expectedRevision?: number }, allowOversizedRecovery = false): MutationContext {
-    return { principalId: principal.id, method, requestId: request.requestId, expectedRevision: request.expectedRevision,
+  private context(principal: CoworkPrincipal, method: CoworkMethod, request: { requestId: string; expectedRevision?: number }, allowOversizedRecovery = false, admitMutation?: MutationContext["admitMutation"]): MutationContext {
+    return { principalId: principal.id, method, requestId: request.requestId, expectedRevision: request.expectedRevision, admitMutation,
       validateReceipt: receipt => {
         // Check the fully projected response before COMMIT, so an oversized answer cannot leave
         // a successful mutation whose caller received only an error. No external effect here.
@@ -227,13 +227,16 @@ export class CoworkWorkspaceService {
         assertRemoteMayUseWorkspace(this.records, this.authority, principal, workspaceId, "admin");
         const current = this.records.policy(workspaceId).ceiling;
         const narrowsCeiling = "ceiling" in p && JSON.stringify(intersectCeilings(p.ceiling, current)) === JSON.stringify(intersectCeilings(p.ceiling, p.ceiling));
-        if ("ceiling" in p && !narrowsCeiling) {
-          const allowed = this.host.creationCeiling(principal);
-          if (!allowed || JSON.stringify(intersectCeilings(p.ceiling, allowed)) !== JSON.stringify(intersectCeilings(p.ceiling, p.ceiling))) throw new CoworkError("authority_denied");
-        }
         const change = "defaultPolicy" in p ? { defaultPolicy: p.defaultPolicy } : "ceiling" in p ? { ceiling: p.ceiling } : { publication: p.publication };
         const narrowsPublication = "publication" in p && p.publication === "manual";
-        const receipt = this.records.updatePolicy(this.context(principal, method, p, narrowsCeiling || narrowsPublication), workspaceId, change);
+        const receipt = this.records.updatePolicy(this.context(principal, method, p, narrowsCeiling || narrowsPublication, () => {
+          // Only a new effect needs expansion admission. An exact recorded request may now
+          // look like widening after later narrowing, but replay never reapplies its policy.
+          if ("ceiling" in p && !narrowsCeiling) {
+            const allowed = this.host.creationCeiling(principal);
+            if (!allowed || JSON.stringify(intersectCeilings(p.ceiling, allowed)) !== JSON.stringify(intersectCeilings(p.ceiling, p.ceiling))) throw new CoworkError("authority_denied");
+          }
+        }), workspaceId, change);
         return projectPolicyReceipt(receipt);
       }
       case "workspace.operation.get": {

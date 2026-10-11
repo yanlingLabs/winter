@@ -116,6 +116,7 @@ export class CoworkRepository {
         const narrowing = method === "workspace.source.revoke";
         if (current.state !== "retained" && !(narrowing && current.state !== "deleted")) throw new CoworkError("authority_denied");
       }
+      context.admitMutation?.();
       const result = body(), current = this.get(result.workspaceId), operationId = this.mint("operation"), at = this.now();
       const receipt: MutationReceipt<T> = { operationId, workspaceId: current.workspaceId, revision: current.configRevision, value: result.value };
       context.validateReceipt?.(receipt);

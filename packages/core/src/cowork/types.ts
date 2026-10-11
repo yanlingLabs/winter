@@ -29,7 +29,15 @@ export interface ConversationBinding {
   sessionId: string; workspaceId: string; projectId: string | null; sourceId: string; relativeCwd: string;
   policy: ApprovalPolicy; restrictions: CapabilityCeiling; revision: number; state: "active" | "archived" | "deleted"; createdAt: string;
 }
-export interface MutationContext { /** Host-derived RPC name for principal/method idempotency scope. */ method?: string; /** Pure host response validation inside the mutation transaction; never RPC data. */ validateReceipt?: (receipt: MutationReceipt<unknown>) => void; principalId: string; requestId: string; expectedRevision?: number }
+export interface MutationContext {
+  /** Host-derived RPC name for principal/method idempotency scope. */ method?: string;
+  /** Pure host effect admission after content-bound replay and revision checks, before writes.
+   * Never RPC data; current caller/workspace authorization must precede repository access. */
+  admitMutation?: () => void;
+  /** Pure host response validation inside the mutation transaction; never RPC data. */
+  validateReceipt?: (receipt: MutationReceipt<unknown>) => void;
+  principalId: string; requestId: string; expectedRevision?: number;
+}
 export interface MutationReceipt<T> { operationId: string; workspaceId: string; revision: number; value: T }
 export type OperationStatus = "pending" | "applied" | "blocked" | "failed" | "superseded";
 /** Superseded receipts never become applied later, including multi-source creation receipts. */

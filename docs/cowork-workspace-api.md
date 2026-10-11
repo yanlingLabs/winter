@@ -34,6 +34,13 @@ if the workspace has subsequently changed. Operation status is queried
 separately. No RPC accepts caller-supplied principal identities, grants or
 capability ceilings at creation.
 
+Policy expansion admission runs only for a new effect, after the repository's
+principal/method/workspace-scoped, content-bound receipt lookup and revision
+checks. An exact retry returns its original receipt even if later narrowing
+makes its old arguments look like widening. Current caller/workspace authority
+is still checked before lookup; changed arguments conflict and a new widening
+request must pass current host admission.
+
 `CoworkHostPorts` is an in-process host injection, never a settings/RPC payload.
 It resolves the principal, current grant records, opaque selection and creation
 ceiling, and enforces the provisioning gate. The production default recognizes
@@ -118,7 +125,7 @@ cd packages/core
 bun test test/ipc/cowork-workspace-api.test.ts test/cowork/repository.test.ts \
   test/ipc/remote-allowlist-parity.test.ts test/ipc/remote-role.test.ts \
   test/ipc/remote-chat-gate.test.ts
-# 72 tests, 694 assertions passed; actual Unix socket, daemon stop/restart and canonical DB.
+# 73 tests, 719 assertions passed; actual Unix socket, daemon stop/restart and canonical DB.
 
 # From repository root
 bun run typecheck:core

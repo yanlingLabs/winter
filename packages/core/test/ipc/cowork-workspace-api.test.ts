@@ -312,6 +312,37 @@ describe("Cowork workspace API through a real isolated daemon and Unix RPC", () 
     const widenedPublication = await fixture.local.request("workspace.setPublicationPolicy", { workspaceId, requestId: "publication-on", expectedRevision: 3, publication: "github-only-feature-branches" });
     expect(widenedPublication.error.data.code).toBe("response_too_large");
     expect(fixture.records.get(workspaceId).configRevision).toBe(3); expect(fixture.records.policy(workspaceId).ceiling.network).toBe("none"); expect(fixture.records.policy(workspaceId).publication).toBe("manual");
+    fixture.ports.creationCeiling = () => ceiling;
+    const furtherNarrowed = await fixture.local.request("workspace.setCapabilityCeiling", { workspaceId, requestId: "one-capability-off", expectedRevision: 3, ceiling: { ...before, toolClasses: before.toolClasses.slice(1), network: "none" } });
+    expect(furtherNarrowed.error).toBeUndefined(); expect(furtherNarrowed.result.value.policySummary.capabilityCounts.toolClasses).toBe(255);
+    const beforeReplay = fixture.records.policy(workspaceId);
+    expect((await fixture.local.request("workspace.setCapabilityCeiling", request)).result).toEqual(network.result);
+    expect(fixture.records.policy(workspaceId)).toEqual(beforeReplay); expect(fixture.records.get(workspaceId).configRevision).toBe(4);
+  });
+  test("sequential legacy ceiling narrowing replays its original exact receipt before expansion admission", async () => {
+    const fixture = await boot();
+    const legacy = { toolClasses: ["read", "legacy"], hostServices: [], connectors: [], network: "internet" as const };
+    const made = fixture.records.create({ principalId: "migration-fixture", requestId: "legacy-replay" }, { ownership: "project", title: "Legacy", sources: [repo], ceiling: legacy }), workspaceId = made.workspaceId;
+    let admissions = 0;
+    fixture.ports.creationCeiling = () => { admissions++; return { toolClasses: ["read"], hostServices: [], connectors: [], network: "none" }; };
+    const requestA = { workspaceId, requestId: "network-off", expectedRevision: 1, ceiling: { ...legacy, network: "none" } };
+    const a = await fixture.local.request("workspace.setCapabilityCeiling", requestA);
+    expect(a.error).toBeUndefined(); expect(a.result.value.detailState).toBe("complete");
+    const b = await fixture.local.request("workspace.setCapabilityCeiling", { workspaceId, requestId: "legacy-off", expectedRevision: 2, ceiling: { toolClasses: ["read"], hostServices: [], connectors: [], network: "none" } });
+    expect(b.error).toBeUndefined(); expect(admissions).toBe(0);
+    const before = fixture.records.get(workspaceId), policy = fixture.records.policy(workspaceId);
+    const operations = fixture.records.rs.db.query("SELECT count(*) AS n FROM cowork_operations").get(), outbox = fixture.records.rs.db.query("SELECT count(*) AS n FROM cowork_outbox").get();
+    const replay = await fixture.local.request("workspace.setCapabilityCeiling", requestA);
+    expect(replay.error).toBeUndefined(); expect(replay.result).toEqual(a.result); expect(admissions).toBe(0);
+    expect(fixture.records.get(workspaceId)).toEqual(before); expect(fixture.records.policy(workspaceId)).toEqual(policy);
+    expect(fixture.records.rs.db.query("SELECT count(*) AS n FROM cowork_operations").get()).toEqual(operations); expect(fixture.records.rs.db.query("SELECT count(*) AS n FROM cowork_outbox").get()).toEqual(outbox);
+    const conflict = await fixture.local.request("workspace.setCapabilityCeiling", { ...requestA, expectedRevision: 3 });
+    expect(conflict.error.data.code).toBe("request_conflict"); expect(admissions).toBe(0);
+    const newEffect = await fixture.local.request("workspace.setCapabilityCeiling", { ...requestA, requestId: "new-effect", expectedRevision: 3 });
+    expect(newEffect.error.data.code).toBe("authority_denied"); expect(admissions).toBe(1);
+    expect(fixture.records.get(workspaceId)).toEqual(before); expect(fixture.records.policy(workspaceId)).toEqual(policy);
+    fixture.ports.principal = () => ({ kind: "runtime", id: "guest-fixture", workspaceId, sessionId: "guest-session" });
+    expect((await fixture.local.request("workspace.setCapabilityCeiling", requestA)).error.data.code).toBe("authority_denied");
   });
   test("legacy maximum-width source details page by serialized bytes and every source remains recoverable", async () => {
     const fixture = await boot(); let nextId = 0;
