@@ -16,9 +16,9 @@ import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
 import { isHumanTurnOrigin, runningTurnOrigin } from "../sessions/turn-origins";
 import {
-  computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseEnabledFrom, computerUseLegacyComputerFrom, computerUseMirrorFrom,
-  computerUsePrivateEventPathFrom, computerUseScreenshotMaxDimFrom, loadSettings, saveSettings, setComputerUseApp, setComputerUseFlags,
-  type ComputerUseAccess, type Settings,
+  computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseEnabledFrom, computerUseHeadlessEnabledFrom, computerUseLegacyComputerFrom,
+  computerUseMirrorFrom, computerUsePrivateEventPathFrom, computerUseScreenshotMaxDimFrom, computerUseWebMcpFrom, loadSettings, saveSettings,
+  setComputerUseApp, setComputerUseFlags, type ComputerUseAccess, type ComputerUseFlagsPatch, type Settings,
 } from "../settings";
 import { AppAdapters, type AppAdapter } from "./adapters";
 import { installedBrowser, systemAppResolver } from "./app-resolve";
@@ -81,6 +81,10 @@ export interface ComputerUseStatus {
   legacyComputer: boolean;
   mirror: boolean;
   privateEventPath: boolean;
+  /** Phase 4: `computerUse.headless.enabled` (default true). */
+  headlessEnabled: boolean;
+  /** Phase 4: `computerUse.webmcp` (default true). */
+  webmcp: boolean;
   helper: { installed: boolean; running: boolean; version?: string; permissions?: HelperPermissions };
   /** Phase 2: the browsers ComputerV2 can drive (the built-in one, and every user's browser connected or installed). */
   browsers?: Array<{ id: string; name: string; connected: boolean; reason?: string }>;
@@ -105,7 +109,7 @@ export interface ComputerUseControl {
   requestPermission(kind: "accessibility" | "screenRecording"): Promise<void>;
   appsList(): ComputerUseAppRow[];
   appsSet(p: { bundleId: string; name?: string; access?: ComputerUseAccess | null; grant?: "always" | null }): void;
-  setSettings(p: { enabled?: boolean; mirror?: boolean; privateEventPath?: boolean; allowAllApps?: boolean }): void;
+  setSettings(p: ComputerUseFlagsPatch): void;
 }
 
 export interface ComputerUseRuntime {
@@ -292,6 +296,8 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
         legacyComputer: computerUseLegacyComputerFrom(s),
         mirror: computerUseMirrorFrom(s),
         privateEventPath: computerUsePrivateEventPathFrom(s),
+        headlessEnabled: computerUseHeadlessEnabledFrom(s),
+        webmcp: computerUseWebMcpFrom(s),
         helper: helperStatus,
         browsers: browsers.listRows().map((r) => ({ id: r.id, name: r.name, connected: r.connected, ...(r.reason === undefined ? {} : { reason: r.reason }) })),
       };

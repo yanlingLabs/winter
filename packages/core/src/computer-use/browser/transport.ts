@@ -1,22 +1,26 @@
 // ComputerV2 Phase 2 — the ONE interface between the browser engine and a browser backend. The engine speaks
-// CDP through it and nothing else; the built-in browser (Winter.app over the browser link) and the user's browsers (the
-// Winter for Chrome extension over winter-browser-host) each implement it. Change it only through the controller.
+// CDP through it and nothing else; the built-in browser (Winter.app over the browser link), Winter's headless browser
+// (private, windowless engines the daemon runs over pipes) and the user's browsers (the Winter for Chrome extension
+// over winter-browser-host) each implement it. Change it only through the controller.
 
 /** A browser family as the model names it: `browsers.list()` ids, `{ browser }` options, tab id prefixes. */
-export type BrowserFamily = "winter" | "chrome" | "edge" | "brave" | "vivaldi" | "opera" | "arc" | "chromium";
+export type BrowserFamily = "winter" | "headless" | "chrome" | "edge" | "brave" | "vivaldi" | "opera" | "arc" | "chromium";
 
 /** One connected backend: the family's id for the first instance, `"<family>#<n>"` for further ones. */
 export type BackendId = string;
 
 export interface TransportTab {
-  /** The backend's own tab id as a string: a panel tab id (winter) or a chrome.tabs id (extension). */
+  /** The backend's own tab id as a string: a panel tab id (winter), an engine-prefixed id (headless: "w-…" for Winter's
+   *  own engine, "chrome-…" and so on for an installed one) or a chrome.tabs id (extension). */
   tabKey: string;
   url: string;
   title: string;
   active: boolean;
-  /** Opened by Winter's automation — winter: minted by `browsers.open` in this daemon run; extension: in a Winter group. */
+  /** Opened by Winter's automation — winter: minted by `browsers.open` in this daemon run; headless: every tab (the
+   *  browser is Winter's own); extension: in a Winter group. */
   agent: boolean;
-  /** The Winter session it belongs to — winter: the panel tab's session; extension: the Winter group's session. */
+  /** The Winter session it belongs to — winter: the panel tab's session; headless: the session whose browser context
+   *  holds it; extension: the Winter group's session. */
   sessionId?: string;
   /** Phase 3 (extension): when the user last had the tab in front (epoch ms), its tab group's title, its window. */
   lastAccessed?: number;
@@ -57,6 +61,7 @@ export type TransportErrorCode =
   | "not_allowed"         // a method or event outside cdp-allowlist.ts, or a world rule broken — refused before sending
   | "cdp_error"           // the browser answered an error: data.cdpCode, data.cdpMessage
   | "timeout"
+  | "capacity"            // the backend's own tab or memory budget is spent (headless) — close tabs first; not retryable at once
   | "protocol_mismatch";  // the far side speaks another protocol: data.side ("app" | "extension"), data.expected
 
 export class TransportError extends Error {
@@ -72,14 +77,17 @@ export interface CdpTransport {
   /** False once the far side is gone; every call then rejects `disconnected`. */
   readonly connected: boolean;
   /** Open a tab without activating anything the user is looking at outside Winter (extension: `active: false`, in the
-   *  session's Winter group; winter: the daemon has already minted the panel tab, so this makes its browser live). */
-  createTab(opts: { sessionId: string; sessionTitle?: string; url: string; tabKey?: string }): Promise<TransportTab>;
+   *  session's Winter group; winter: the daemon has already minted the panel tab, so this makes its browser live;
+   *  headless: a windowless or background page in the session's own private context, on `engine` — "winter" (the
+   *  default: Winter's own CEF helper) or an installed browser's family id; every other backend ignores `engine`). */
+  createTab(opts: { sessionId: string; sessionTitle?: string; url: string; tabKey?: string; engine?: string }): Promise<TransportTab>;
   closeTab(tabKey: string): Promise<void>;
   /** extension: take it out of the Winter group (it stays as the user's tab) — into the user's own group named `group`
-   *  in its window when given (Phase 3); winter: nothing. */
+   *  in its window when given (Phase 3); winter, headless: nothing. */
   keepTab(tabKey: string, opts?: { group?: string }): Promise<void>;
   listTabs(opts?: { sessionId?: string }): Promise<TransportTab[]>;
-  /** Make the tab drivable — winter: its browser live and held; extension: the debugger attached. Idempotent. */
+  /** Make the tab drivable — winter: its browser live and held; headless: a flattened CDP session on its page target;
+   *  extension: the debugger attached. Idempotent. */
   attach(tabKey: string, opts: { sessionId: string }): Promise<{ viewport: [w: number, h: number]; dpr: number }>;
   /** Drop the hold / detach the debugger. Idempotent; never closes the tab. */
   detach(tabKey: string): Promise<void>;
@@ -90,7 +98,7 @@ export interface CdpTransport {
   onTabGone(listener: (tabKey: string, reason: "closed" | "crashed" | "stopped" | "detached_by_user") => void): () => void;
   /** The agent cursor / glow in the tab. Best effort: never throws, never awaited by the engine. */
   overlay(tabKey: string, o: { active: boolean; cursor?: { x: number; y: number; kind: "move" | "press" | "type" | "scroll" } }): void;
-  /** extension: the user pressed the in-page Stop button. winter: never fires. */
+  /** extension: the user pressed the in-page Stop button. winter, headless: never fires. */
   onStop(listener: (tabKey: string) => void): () => void;
 
   // ── Phase 3: optional members. A backend without one does not offer that capability (the engine says so typed). ──
@@ -137,8 +145,8 @@ export interface BrowserBackendInfo {
 
 /** The backends the engine can use. B's link and D's host server register transports; the engine reads. */
 export interface BackendRegistry {
-  /** `instanceKey` (the extension's instanceId; "winter" for the link) keeps the id stable: the same key always gets
-   *  the same BackendId back for the daemon's lifetime, replacing a stale entry — never a new `#n`. */
+  /** `instanceKey` (the extension's instanceId; "winter" for the link; "headless" for the pool) keeps the id stable:
+   *  the same key always gets the same BackendId back for the daemon's lifetime, replacing a stale entry — never a new `#n`. */
   register(transport: CdpTransport, info: { family: BrowserFamily; name: string; bundleId?: string; instanceKey: string }): { id: BackendId; unregister(): void };
   /** A known-but-unconnected family (installed, not connected; or refused at hello), shown by browsers.list(). */
   noteUnavailable(info: { family: BrowserFamily; name: string; bundleId?: string; reason: string }): void;

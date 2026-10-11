@@ -9,7 +9,8 @@ export interface FamilyInfo {
   /** What a person calls the family: "Google Chrome". */
   name: string;
   /** The app's bundle ids, the main channel first (the one a grant and the per-app card name). Beta/Dev/Canary and
-   *  Chrome for Testing are the same family. Empty for `winter` (Winter's own browser is no app the policy governs). */
+   *  Chrome for Testing are the same family. Empty for `winter` and `headless` (Winter's own browsers are no app the
+   *  policy governs). */
   bundleIds: readonly string[];
 }
 
@@ -38,11 +39,11 @@ const CHANNELS: ReadonlyArray<{ bundleId: string; family: BrowserFamily; name: s
 ];
 
 const FAMILY_NAMES: Readonly<Record<BrowserFamily, string>> = {
-  winter: "Winter (built-in)", chrome: "Google Chrome", edge: "Microsoft Edge", brave: "Brave", vivaldi: "Vivaldi",
+  winter: "Winter (built-in)", headless: "Winter (headless)", chrome: "Google Chrome", edge: "Microsoft Edge", brave: "Brave", vivaldi: "Vivaldi",
   opera: "Opera", arc: "Arc", chromium: "Chromium",
 };
 
-const ORDER: readonly BrowserFamily[] = ["winter", "chrome", "edge", "brave", "vivaldi", "opera", "arc", "chromium"];
+const ORDER: readonly BrowserFamily[] = ["winter", "headless", "chrome", "edge", "brave", "vivaldi", "opera", "arc", "chromium"];
 
 export const BROWSER_FAMILIES: readonly FamilyInfo[] = ORDER.map((family) => ({
   family, name: FAMILY_NAMES[family], bundleIds: CHANNELS.filter((c) => c.family === family).map((c) => c.bundleId),
