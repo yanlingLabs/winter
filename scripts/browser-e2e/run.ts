@@ -8,7 +8,7 @@
 // two local origins (so the payment iframe is an out-of-process iframe). The browser is `$WINTER_TEST_CHROME`, or a
 // Chrome for Testing build already on this Mac (Playwright's cache) — nothing is installed, the profile is a fresh temp
 // directory, `--use-mock-keychain` keeps it off the login Keychain, and nothing is downloaded.
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { CDP_ALLOWED_METHODS } from "../../packages/core/src/computer-use/browser/cdp-allowlist";
@@ -65,25 +65,47 @@ if (chrome === undefined) {
 const FIXTURE = join(import.meta.dir, "fixture-web");
 const serve = (port: number, rewrite: (s: string) => string) => Bun.serve({
   port, hostname: "127.0.0.1",
-  fetch(req) {
+  fetch(req): Response {
     const path = new URL(req.url).pathname.replace(/^\/$/, "/index.html");
+    // Phase 3's downloads: an attachment, and a PDF a browser would show (no disposition).
+    if (path === "/files/prices.csv") return new Response("item,price\ntea,3\n", { headers: { "content-type": "text/csv", "content-disposition": 'attachment; filename="prices.csv"' } });
+    if (path === "/files/doc.pdf") return new Response("%PDF-1.4\n%fake\n", { headers: { "content-type": "application/pdf" } });
+    // A download that comes through two redirects, the middle one on the other origin (the floor holds every hop).
+    if (path === "/files/hop") return Response.redirect(`${OOP_ORIGIN}/files/hop2`, 302);
+    if (path === "/files/hop2") return Response.redirect(`${BASE}/files/prices.csv`, 302);
+    // Phase 3's readers: an API answer with a secret in it, a stylesheet and an image.
+    if (path === "/api/items") return Response.json({ items: [{ name: "tea" }, { name: "cake" }], token: "tok_live_should_never_show", owner: "shop" });
+    if (path === "/static/site.css") return new Response("h1 { color: navy; }", { headers: { "content-type": "text/css" } });
+    if (path === "/static/logo.png") return new Response(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"), { headers: { "content-type": "image/png" } });
     const file = join(FIXTURE, path.replace(/\.\./g, ""));
     if (!existsSync(file)) return new Response("not found", { status: 404 });
     return new Response(rewrite(readFileSync(file, "utf8")), { headers: { "content-type": "text/html; charset=utf-8" } });
   },
 });
 const oop = serve(0, (s) => s);
-const OOP_ORIGIN = `http://127.0.0.1:${oop.port}`;
+const OOP_ORIGIN: string = `http://127.0.0.1:${oop.port}`;
 const main = serve(0, (s) => s.replaceAll("OOP_ORIGIN", OOP_ORIGIN.replace("127.0.0.1", "127.0.0.1")));
 // The main pages are served as localhost, the payment frame as 127.0.0.1: two sites.
-const BASE = `http://localhost:${main.port}`;
+const BASE: string = `http://localhost:${main.port}`;
+
+/** The dangerous-domain list's additions (one scenario lists the other origin's host for a moment). */
+let listedDomains: string[] = [];
 
 // ── the engine over the pipe ─────────────────────────────────────────────────────────────────────
 const transport = new PipeTransport("winter", "winter");
 await transport.launch(chrome);
 const registry = new BrowserBackendRegistry();
 registry.register(transport, { family: "winter", name: "Chromium (test)", instanceKey: "winter" });
+// Phase 3: a second Chromium playing a USER's browser (Winter for Chrome's backend: Fetch interception for downloads).
+// A download Winter does not catch lands in a temp folder, never the user's Downloads folder.
+const userBrowser = new PipeTransport("chrome", "chrome");
+userBrowser.features = new Set(["cdp3"]);
+await userBrowser.launch(chrome);
+const browserDownloads = mkdtempSync(join(tmpdir(), "winter-browser-e2e-downloads-"));
+await userBrowser.setDownloadDir(browserDownloads);
+registry.register(userBrowser, { family: "chrome", name: "Chrome for Testing", bundleId: "com.google.chrome.for.testing", instanceKey: "chrome-e2e" });
 const cwd = mkdtempSync(join(tmpdir(), "winter-browser-e2e-cwd-"));
+const sessionTmp = join(mkdtempSync(join(tmpdir(), "winter-browser-e2e-tmp-")), "winter-session-e2e");
 writeFileSync(join(cwd, "receipt.txt"), "a receipt");
 let tabSeq = 0;
 const engine = new BrowserEngine({
@@ -91,9 +113,10 @@ const engine = new BrowserEngine({
   mintWinterTab: () => `tab${++tabSeq}`,
   winterTabs: () => ({ tabs: [] }),
   sessionInfo: () => ({ cwd, title: "e2e" }),
-  site: { dangerousDomainsAdded: () => [], savedAllowRules: () => [] },
+  site: { dangerousDomainsAdded: () => listedDomains, savedAllowRules: () => [] },
   home: mkdtempSync(join(tmpdir(), "winter-browser-e2e-home-")),
   uploadRoots: () => ({ denyRead: [] }),
+  downloadRoots: () => ({ tmpDir: sessionTmp, denyWrite: [], denyRead: [] }),
 });
 const locks = new TargetLocks();
 const diffBases = new DiffBases();
@@ -402,14 +425,183 @@ await check("with nothing editable focused, a key carrying a command keeps its d
   await P("waitFor", { cond: { text: "key Backspace" }, timeoutMs: 3_000 });
 });
 
+// ── Phase 3: the readers and the element members, in the page runtime against a real page ────────────
+const run3 = scope("r3");
+let rtab!: TabHandle;
+const R = (primitive: string, args: Record<string, unknown> = {}) => engine.primitive(run3.s, rtab.targetId, primitive, args);
+
+await check("console(): the page's console calls and its uncaught exception, as text", async () => {
+  rtab = await engine.global(run3.s, "browsers.open", { url: `${BASE}/readers.html` }) as TabHandle;
+  await R("waitFor", { cond: { load: "load" }, timeoutMs: 5_000 });
+  await new Promise((r) => setTimeout(r, 300));
+  const entries = await R("console", { emit: false }) as Array<{ level: string; text: string }>;
+  const lines = entries.map((e) => `${e.level} ${e.text}`);
+  expect(lines.some((l) => l.startsWith("log ready")), "the log line", lines.join("\n"));
+  expect(lines.some((l) => l === "error failed to load widget"), "the error line", lines.join("\n"));
+  expect(lines.some((l) => l.startsWith("error") && l.includes("boom from the page")), "the uncaught exception", lines.join("\n"));
+});
+
+await check("network() and networkBody(id): the API call with its status; its JSON body with the secret redacted", async () => {
+  // What Winter saw since it bound the tab: the first load's requests came before; a reload is seen whole.
+  await R("reload");
+  await R("waitFor", { cond: { load: "load" }, timeoutMs: 5_000 });
+  await new Promise((r) => setTimeout(r, 300));
+  const api = await R("network", { filter: "/api/items", emit: false }) as Array<{ id: string; url: string; status?: number; mime?: string }>;
+  expect(api.length === 1 && api[0]!.status === 200, "the request and its status", JSON.stringify(api));
+  const body = await R("networkBody", { id: api[0]!.id, emit: false }) as string;
+  expect(body.includes('"owner": "shop"') && body.includes("<redacted>") && !body.includes("tok_live_should_never_show"), "the body, its token redacted", body);
+});
+
+await check("find()'s DOM keys reach real elements: testId, label, placeholder, css", async () => {
+  const one = async (q: Record<string, unknown>) => (await R("find", { query: q, emit: false }) as Array<{ ref: number; role: string }>);
+  expect((await one({ testId: "buy" })).length === 1, "testId");
+  expect((await one({ label: "Email" }))[0]?.role === "text field", "label → the email field", JSON.stringify(await one({ label: "Email" })));
+  expect((await one({ placeholder: "Search products" })).length === 1, "placeholder");
+  expect((await one({ css: "a.price" })).length === 1, "css");
+  expect((await one({ css: "input[type=password]" })).length === 1, "css: an equality test on a descriptive attribute");
+  // A value test would read the password through the match count: refused before the page sees it.
+  await failsWith(R("find", { query: { css: 'input[type=password][value^="hu"]' }, emit: false }), "NotAllowed");
+  await failsWith(R("find", { query: { css: "input[value^=hu]" }, emit: false }), "NotAllowed");
+});
+
+await check("inspect(ref | point), html(), text({ within }), assets()", async () => {
+  const link = (await R("find", { query: { testId: "buy" }, emit: false }) as Array<{ ref: number }>)[0]!.ref;
+  const info = await R("inspect", { target: link, emit: false }) as { tag: string; attributes: Record<string, string>; box: number[]; visible: boolean };
+  expect(info.tag === "a" && info.attributes["data-testid"] === "buy" && info.visible && info.box[2]! > 0, "the link's facts", JSON.stringify(info));
+  const shot = await R("screenshot", { emit: false }) as { width: number; height: number };
+  // The image's pixels per CSS px (the viewport is 1200 CSS px wide here; its height is the window's).
+  const scale = shot.width / 1200;
+  const at = await R("inspect", { target: [Math.round((info.box[0]! + info.box[2]! / 2) * scale), Math.round((info.box[1]! + info.box[3]! / 2) * scale)], emit: false }) as { tag: string };
+  expect(at.tag === "a", "a point inspects the element there", JSON.stringify({ at, box: info.box, shot }));
+  const html = await R("html", { emit: false }) as string;
+  expect(html.includes('data-testid="buy"') && !html.includes("script-secret-value") && !html.includes("hunter2"), "the markup, scripts and field values left out", html.slice(0, 600));
+  const title = (await R("find", { query: { role: "heading" }, emit: false }) as Array<{ ref: number }>)[0]!.ref;
+  expect(await R("text", { within: title, emit: false }) === "Price list", "text({ within }) reads one element");
+  const assets = await R("assets", { emit: false }) as Array<{ kind: string; url: string }>;
+  expect(assets.some((a) => a.kind === "stylesheet" && a.url.endsWith("/static/site.css")) && assets.some((a) => a.kind === "image" && a.url.endsWith("/static/logo.png")), "assets: the stylesheet and the image", JSON.stringify(assets));
+  expect(!JSON.stringify(assets).includes("sigsecret77"), "assets: a signed URL's signature redacted", JSON.stringify(assets));
+});
+
+await check("URL-valued attributes and markdown links print with their credentials redacted (html, inspect, text({ markdown }))", async () => {
+  const secrets = ["resetsecret42", "datasecret9", "sigsecret77"];
+  const html = await R("html", { emit: false }) as string;
+  expect(secrets.every((x) => !html.includes(x)) && html.includes("/reset?token=<redacted>&amp;lang=en") && html.includes("api_key=<redacted>") && html.includes("sig=<redacted> 1x"), "html()", html.slice(0, 1_200));
+  const reset = (await R("find", { query: { css: "#reset" }, emit: false }) as Array<{ ref: number }>)[0]!.ref;
+  const info = await R("inspect", { target: reset, emit: false }) as { attributes: Record<string, string> };
+  expect(info.attributes.href === "/reset?token=<redacted>&lang=en" && info.attributes["data-url"] === "https://api.example.com/x?api_key=<redacted>", "inspect()", JSON.stringify(info.attributes));
+  const md = await R("text", { markdown: true, emit: false }) as string;
+  expect(md.includes("[Reset your password](") && md.includes("/reset?token=<redacted>&lang=en)") && secrets.every((x) => !md.includes(x)), "text({ markdown })", md);
+  const para = await R("text", { within: reset, markdown: true, emit: false }) as string;
+  expect(!para.includes("resetsecret42"), "text({ within, markdown })", para);
+});
+
+await check("setValue(check box, true) presses it once; dialog() and answerDialog(false)", async () => {
+  const news = (await R("find", { query: { label: "Newsletter" }, emit: false }) as Array<{ ref: number }>)[0]!.ref;
+  await R("setValue", { ref: news, value: true });
+  await R("setValue", { ref: news, value: true });
+  const st = await R("state", { full: true, emit: false }) as string;
+  expect(/check box "Newsletter" \([^)]*\bchecked\)/.test(st), "checked, once", st);
+  const del = (await R("find", { query: { role: "button", name: "Delete" }, emit: false }) as Array<{ ref: number }>)[0]!.ref;
+  await R("click", { target: del });
+  const d = await R("dialog") as { type: string; message: string } | null;
+  expect(d?.type === "confirm" && d.message === "Delete it?", "the open dialog as a value", JSON.stringify(d));
+  await R("answerDialog", { accept: false });
+  await R("waitFor", { cond: { text: "kept" }, timeoutMs: 3_000 });
+});
+
+await check("screenshot({ fullPage }) and viewport(): the whole page, and an emulated phone width the page sees", async () => {
+  const whole = await R("screenshot", { fullPage: true, emit: false }) as { width: number; height: number };
+  const view = await R("screenshot", { emit: false }) as { width: number; height: number };
+  expect(whole.height / whole.width > view.height / view.width * 2, "the full page is much taller than the viewport", JSON.stringify({ whole, view }));
+  await R("viewport", { size: { width: 390, height: 844, mobile: true } });
+  await R("waitFor", { cond: { text: "width 390" }, timeoutMs: 3_000 });
+  await R("viewport", { size: null });
+  await R("waitFor", { cond: { text: "width 1200" }, timeoutMs: 3_000 });
+});
+run3.end();
+
+// ── Phase 3: download() in a user's browser (Fetch interception) ─────────────────────────────────────
+const run2 = scope("r2");
+let dtab!: TabHandle;
+const D = (primitive: string, args: Record<string, unknown> = {}) => engine.primitive(run2.s, dtab.targetId, primitive, args);
+const browserFolder = (): string[] => readdirSync(browserDownloads).filter((f) => !f.endsWith(".crdownload"));
+
+await check("download(link) in a user's browser: a temporary tab under Fetch interception, the file in the session folder, nothing in the browser's folder", async () => {
+  dtab = await engine.global(run2.s, "browsers.open", { url: `${BASE}/downloads.html`, browser: "chrome" }) as TabHandle;
+  const s = await D("state", { full: true, emit: false }) as string;
+  const tabsBefore = (await userBrowser.listTabs()).length;
+  const got = await D("download", { target: refOf(s, /link "Price list"/) }) as { path: string; name: string; bytes: number; mime: string };
+  expect(got.name === "prices.csv" && got.mime === "text/csv" && got.bytes === 17, "the file's facts", JSON.stringify(got));
+  expect(readFileSync(got.path, "utf8") === "item,price\ntea,3\n", "the file's bytes", readFileSync(got.path, "utf8"));
+  expect(got.path.startsWith(sessionTmp) || got.path.includes("winter-session-e2e"), "in the session's temp folder", got.path);
+  expect((await userBrowser.listTabs()).length === tabsBefore, "the temporary tab closed");
+  await new Promise((r) => setTimeout(r, 500));
+  expect(browserFolder().length === 0, "the browser saved nothing", browserFolder().join(", "));
+});
+
+await check("download({ url }) through two redirects: a listed MIDDLE hop is refused before a byte is read; unlisted, the redirected file is saved", async () => {
+  listedDomains = ["127.0.0.1"];
+  try {
+    await failsWith(D("download", { target: { url: `${BASE}/files/hop` } }), "NotAllowed");
+  } finally {
+    listedDomains = [];
+  }
+  await new Promise((r) => setTimeout(r, 300));
+  expect(browserFolder().length === 0, "the browser saved nothing", browserFolder().join(", "));
+  const got = await D("download", { target: { url: `${BASE}/files/hop` } }) as { name: string; bytes: number };
+  // (the earlier link's prices.csv is already in the folder: this one is "prices (2).csv")
+  expect(/^prices( \(\d+\))?\.csv$/.test(got.name) && got.bytes === 17, "the redirected file", JSON.stringify(got));
+});
+
+await check("download(button) in the bound tab: armed, clicked, caught — the page stays", async () => {
+  const s = await D("state", { full: true, emit: false }) as string;
+  const got = await D("download", { target: refOf(s, /button "Export"/), to: "exports/" }) as { path: string; name: string };
+  expect(got.path === join(realpathSync(cwd), "exports", "prices.csv"), "into the working directory", got.path);
+  expect((await D("url", {}) as string).endsWith("/downloads.html"), "the page stayed");
+  await new Promise((r) => setTimeout(r, 500));
+  expect(browserFolder().length === 0, "the browser saved nothing", browserFolder().join(", "));
+});
+
+await check("download(link to a PDF): the browser would show it — Winter saves it", async () => {
+  const s = await D("state", { full: true, emit: false }) as string;
+  const got = await D("download", { target: refOf(s, /link "Read the PDF"/) }) as { name: string; mime: string };
+  expect(got.name === "doc.pdf" && got.mime === "application/pdf", "the PDF's facts", JSON.stringify(got));
+});
+
+await check("download(data: link): decoded by Winter, named by its download attribute", async () => {
+  const s = await D("state", { full: true, emit: false }) as string;
+  const got = await D("download", { target: refOf(s, /link "Inline note"/) }) as { path: string; name: string };
+  expect(got.name === "note.txt" && readFileSync(got.path, "utf8") === "hello data", "the decoded file", JSON.stringify(got));
+});
+
+await check("a page-made (blob:) file without the downloads permission: CDP never sees it, Page.downloadWillBegin does — the sentence says to allow downloads", async () => {
+  dtab = await engine.global(run2.s, "browsers.open", { url: `${BASE}/downloads.html`, browser: "chrome" }) as TabHandle;
+  const s = await D("state", { full: true, emit: false }) as string;
+  const e = await failsWith(D("download", { target: refOf(s, /button "Make file"/), timeoutMs: 3_000 }), "WaitTimeout");
+  expect(e.message.includes("that file is made by the page itself") && e.message.includes('saved "made.txt"'), "the sentence", e.message);
+  expect(browserFolder().includes("made.txt"), "the browser saved its own copy (in the test's folder)", browserFolder().join(", "));
+});
+
+await check("an unarmed click that downloads: Page.downloadWillBegin still fires, and the next state says the browser saved it", async () => {
+  const s = await D("state", { full: true, emit: false }) as string;
+  await D("click", { target: refOf(s, /button "Export"/) });
+  await new Promise((r) => setTimeout(r, 1_000));
+  const after = await D("state", { full: true, emit: false }) as string;
+  expect(after.includes('the page started a download of "prices.csv"') && after.includes("saved it in its own Downloads folder"), "the note", after);
+});
+run2.end();
+
 await check("the engine never sent a method outside the allowlist, and the transport refused nothing", async () => {
   expect(transport.sent.every((m) => CDP_ALLOWED_METHODS.includes(m)), "all methods allowlisted");
   expect(transport.refused.length === 0, "nothing refused", transport.refused.join("\n"));
+  expect(userBrowser.sent.every((m) => CDP_ALLOWED_METHODS.includes(m)), "all methods allowlisted (the user's browser)");
+  expect(userBrowser.refused.length === 0, "nothing refused (the user's browser)", userBrowser.refused.join("\n"));
 });
 
 run1.end();
 engine.stop();
 await transport.close();
+await userBrowser.close();
 oop.stop(true);
 main.stop(true);
 console.log(`\n${passed} passed, ${failures.length} failed`);

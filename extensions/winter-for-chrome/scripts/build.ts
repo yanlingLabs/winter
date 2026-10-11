@@ -43,6 +43,25 @@ export const FORBIDDEN_IN_BUNDLE: { pattern: RegExp; why: string }[] = [
   { pattern: /localStorage|sessionStorage|indexedDB/, why: "a site's storage" },
 ];
 
+/**
+ * The view-touching calls the extension DOES make, each spelled exactly so and only in `background.ts` (the binding
+ * file), each the one body of a narrow `ChromeApi` member: removed from the text before the scan, so any other spelling
+ * of the same call still fails it. A test pins that each appears once in each bundle and nowhere else in the sources.
+ */
+export const ALLOWED_EXACT_CALLS: { text: string; why: string }[] = [
+  { text: "chrome.tabs.update(tabId, { muted })", why: "tabs.setMuted: a tab's sound only (mute())" },
+  // The sign-in hand-off's one door (`tabs.bringForward`, reached only from `tabs.present`).
+  { text: "chrome.tabs.update(tabId, { active: true })", why: "tabs.bringForward: the hand-off's tab, on the user's OK" },
+  { text: "chrome.windows.update(windowId, { focused: true })", why: "tabs.bringForward: the hand-off's window, on the user's OK" },
+];
+
+/** What of FORBIDDEN_IN_BUNDLE a bundle's (or source's) text contains, once the allowed exact calls are taken out. */
+export function forbiddenHits(text: string): { pattern: RegExp; why: string }[] {
+  let rest = text;
+  for (const a of ALLOWED_EXACT_CALLS) rest = rest.split(a.text).join("");
+  return FORBIDDEN_IN_BUNDLE.filter((f) => f.pattern.test(rest));
+}
+
 async function buildFlavor(flavor: Flavor, outRoot: string): Promise<string> {
   const out = join(outRoot, flavor);
   rmSync(out, { recursive: true, force: true });
@@ -59,7 +78,7 @@ async function buildFlavor(flavor: Flavor, outRoot: string): Promise<string> {
   if (!built.success) throw new Error(`bundling failed:\n${built.logs.map((l) => String(l)).join("\n")}`);
   for (const file of ["background.js", "popup.js"]) {
     const bundle = readFileSync(join(out, file), "utf8");
-    const hits = FORBIDDEN_IN_BUNDLE.filter((f) => f.pattern.test(bundle));
+    const hits = forbiddenHits(bundle);
     if (hits.length > 0) throw new Error(`the ${flavor} ${file} contains what Winter for Chrome must never do: ${hits.map((h) => h.why).join("; ")}`);
   }
   cpSync(join(ROOT, "src", "popup.html"), join(out, "popup.html"));

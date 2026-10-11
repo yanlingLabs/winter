@@ -4,13 +4,14 @@
 // notifications on it and the app answers each with `browserLink.result`, streams the subscribed events in batches
 // and reports tabs that went away. It never attaches to a session, and nothing on it is a `SessionEvent`.
 //
+// Protocol 2 (Phase 3) adds the app's `browserLink.download` (one download a tab's own handler saved, or refused).
 // HARNESS ROLE ONLY (the IPC server checks it before calling here), never in the remote or plugin allowlists. A second
 // attach replaces the first: the older connection is told `browserLink.detached { reason: "replaced" }` and the daemon
 // stops using it. When the link's connection closes, every command in flight fails `disconnected` and the built-in
 // browser reads "Winter isn't running".
 import { randomBytes } from "node:crypto";
 import {
-  BrowserLinkAttachParams, BrowserLinkEventsParams, BrowserLinkResultParams, BrowserLinkTabGoneParams, METHODS,
+  BrowserLinkAttachParams, BrowserLinkDownloadParams, BrowserLinkEventsParams, BrowserLinkResultParams, BrowserLinkTabGoneParams, METHODS,
 } from "@yanlinglabs/winter-protocol";
 import type { BrowserBackendRegistry } from "../registry";
 import { BROWSER_LINK_PROTOCOL, CefTransport, type CefTransportOptions, type LinkPeer } from "./cef-transport";
@@ -61,6 +62,17 @@ export class BrowserLink {
       case METHODS.browserLinkTabGone: {
         const p = parse(BrowserLinkTabGoneParams, params);
         this.linkFor(conn, p.linkId)?.transport.tabGone(p.tabId, p.reason);
+        return {};
+      }
+      case METHODS.browserLinkDownload: {
+        const p = parse(BrowserLinkDownloadParams, params);
+        const d = p.download;
+        this.linkFor(conn, p.linkId)?.transport.downloadReported(p.tabId, {
+          id: d.id, state: d.state, name: d.name, bytes: d.bytes,
+          ...(d.url === undefined ? {} : { url: d.url }), ...(d.path === undefined ? {} : { path: d.path }),
+          ...(d.totalBytes === undefined ? {} : { totalBytes: d.totalBytes }), ...(d.mime === undefined ? {} : { mime: d.mime }),
+          ...(d.error === undefined ? {} : { error: d.error }),
+        });
         return {};
       }
       default:

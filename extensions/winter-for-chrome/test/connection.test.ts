@@ -3,7 +3,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { HostConnection } from "../src/connection";
 import { ExtensionController } from "../src/controller";
-import { EXTENSION_PROTOCOL } from "../src/protocol";
+import { EXTENSION_FEATURES, EXTENSION_PROTOCOL } from "../src/protocol";
 import { StatusBoard } from "../src/status";
 import { FakeChrome, flush, ManualClock, type FakePort } from "./fake-chrome";
 
@@ -17,7 +17,7 @@ beforeEach(async () => {
   chrome = new FakeChrome();
   clock = new ManualClock();
   status = new StatusBoard(chrome);
-  controller = new ExtensionController(chrome, { notify: (m, p) => conn.notify(m, p), onDriven: (n) => status.setDriven(n), clock });
+  controller = new ExtensionController(chrome, { notify: (m, p) => conn.notify(m, p), onDriven: (n) => status.setDriven(n), onWaiting: (n) => status.setWaiting(n), clock });
   controller.noteLaunch("install");
   await controller.start();
   conn = new HostConnection(chrome, controller, status, { hostName: "com.winter.browser.dev", clock });
@@ -43,6 +43,7 @@ describe("hello", () => {
     expect(hello).toMatchObject({ jsonrpc: "2.0", method: "hello", params: { protocol: EXTENSION_PROTOCOL, extensionVersion: "1.0.0" } });
     expect(hello.id).toMatch(/^e\d+$/);
     expect(hello.params.instanceId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(hello.params.features).toEqual([...EXTENSION_FEATURES]);
     await port().deliver({ id: hello.id, result: { protocol: EXTENSION_PROTOCOL, backend: { id: "chrome", name: "Google Chrome" } } });
     expect(status.get()).toEqual({ state: "connected", backend: { id: "chrome", name: "Google Chrome" } });
     expect(chrome.calls.filter((c) => c.api === "action.setBadgeText").at(-1)?.args).toEqual([{ text: "" }]);
@@ -142,6 +143,45 @@ describe("the toolbar button", () => {
     await p.deliver({ id: "d3", method: "overlay", params: { tabKey: "101", active: false } });
     expect(popups().at(-1)).toBe("popup.html");
     expect(badges().at(-1)).toBe("");
+  });
+
+  test("while Winter waits on a handed-over tab, the button stays the popup even as another tab is driven: a click stops nothing; the popup's Stop does", async () => {
+    const p = await connected();
+    const popups = () => chrome.calls.filter((c) => c.api === "action.setPopup").map((c) => (c.args[0] as { popup: string }).popup);
+    const badges = () => chrome.calls.filter((c) => c.api === "action.setBadgeText").map((c) => (c.args[0] as { text: string }).text);
+    await p.deliver({ id: "d1", method: "debugger.attach", params: { tabKey: "101" } });
+    await p.deliver({ id: "d2", method: "overlay", params: { tabKey: "101", active: true } });
+    expect(popups().at(-1)).toBe("");
+    await p.deliver({ id: "d3", method: "tabs.present", params: { tabKey: "100" } });
+    expect(popups().at(-1)).toBe("popup.html");
+    expect(badges().at(-1)).toBe("!");
+    expect(String((chrome.calls.filter((c) => c.api === "action.setTitle").at(-1)?.args[0] as { title: string }).title)).toContain("Stop Winter is there too");
+    const before = p.sent.length;
+    chrome.clickAction(); // the popup opens: the other task is not stopped
+    expect(p.sent.slice(before).filter((m) => (m as { method?: string }).method === "stop.pressed")).toEqual([]);
+    expect(status.drivenTabs()).toBe(1);
+    // The popup's own Stop (its message to the worker) stops the driven tab.
+    expect(controller.stopDriven()).toBe(true);
+    expect(p.sent.at(-1)).toEqual({ jsonrpc: "2.0", method: "stop.pressed", params: { tabKey: "101" } });
+    // The wait over, the button is Stop again while the other tab is driven.
+    expect(controller.userDone(100, true)).toBe(true);
+    expect(popups().at(-1)).toBe("");
+    expect(badges().at(-1)).toBe("STOP");
+  });
+
+  test("the link dropping ends every wait: the waiting pill and the toolbar's \"!\" go", async () => {
+    const p = await connected();
+    await p.deliver({ id: "d1", method: "tabs.present", params: { tabKey: "100" } });
+    expect(controller.waitingTabs()).toEqual([100]);
+    expect(chrome.calls.filter((c) => c.api === "action.setBadgeText").at(-1)?.args).toEqual([{ text: "!" }]);
+    p.drop();
+    await flush();
+    expect(controller.waitingTabs()).toEqual([]);
+    const painted = chrome.calls.filter((c) => c.api === "scripting.executeScript").at(-1)!.args[0] as { target: { tabId: number }; args: [{ active: boolean; waiting?: boolean }] };
+    expect(painted.target.tabId).toBe(100);
+    expect(painted.args[0]).toEqual({ active: false });
+    // Winter isn't reachable: the "!" now says that, not that Winter waits.
+    expect(String((chrome.calls.filter((c) => c.api === "action.setTitle").at(-1)?.args[0] as { title: string }).title)).not.toContain("waiting for you");
   });
 });
 

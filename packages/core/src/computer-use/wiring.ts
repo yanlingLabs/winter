@@ -7,7 +7,7 @@
 // settings watcher swaps the holder (the `connector-source.ts` `noteWritten` pattern) — the very next call sees it.
 import { PanelOpenTabParams, type NewSessionEvent, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { ApprovalBroker } from "../agent/approvals";
-import { sessionTmpDir } from "../agent/session-tmp";
+import { sessionTmpDir, sessionTmpDirPath } from "../agent/session-tmp";
 import { mintPanelTab } from "../panel/open-tab";
 import { foldPanelTabs } from "../panel/store";
 import { sandboxConfigFor } from "../runtime-sdk/mode-options";
@@ -21,7 +21,7 @@ import {
   type ComputerUseAccess, type Settings,
 } from "../settings";
 import { AppAdapters, type AppAdapter } from "./adapters";
-import { systemAppResolver } from "./app-resolve";
+import { installedBrowser, systemAppResolver } from "./app-resolve";
 import { BrowserLink } from "./browser/cef-link/rpc";
 import { BrowserEngine } from "./browser/engine";
 import { BrowserBackendRegistry } from "./browser/registry";
@@ -254,8 +254,14 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     },
     home: deps.home,
     uploadRoots: (sessionId, cwd) => ({ tmpDir: sessionTmpDir(sessionId), denyRead: sandboxConfigFor(deps.home, cwd).filesystem?.denyRead ?? [] }),
+    downloadRoots: (sessionId, cwd) => {
+      const sandbox = sandboxConfigFor(deps.home, cwd).filesystem;
+      return { tmpDir: sessionTmpDirPath(sessionId), denyWrite: sandbox?.denyWrite ?? [], denyRead: sandbox?.denyRead ?? [] };
+    },
     screenshotMaxDim: () => computerUseScreenshotMaxDimFrom(settings()),
-    installed: deps.inject?.browserInstalled ?? ((bundleId) => systemAppResolver.fromBundleId(bundleId) !== undefined),
+    // A real install only: a copy in the Trash, a cache (Playwright's Chrome for Testing), a translocated or temp copy
+    // does not make a browser "installed" for browsers.list().
+    installed: deps.inject?.browserInstalled ?? ((bundleId) => installedBrowser(bundleId)),
     persistentlyAllowed: (sessionId, bundleId) => policy.persistentlyAllowed(sessionId, bundleId),
     stopScript: (sessionId, reason) => service?.stopScript(sessionId, reason),
     ...(deps.turnRunning === undefined ? {} : { turnRunning: deps.turnRunning }),

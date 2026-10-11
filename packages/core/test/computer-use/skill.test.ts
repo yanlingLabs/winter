@@ -9,7 +9,8 @@
 //     runtime does not have), on the happy path and on the branches that escalate;
 //   - the recovery the errors section promises (StaleRef → `state({full:true})`, Uncertain → look first) is
 //     what the script really does;
-//   - no browser API is documented before it exists.
+//   - the browser recipes (Phase 3: tabs, console/network, download, the sign-in hand-off, history) use only the
+//     `Tab` and `browsers` members the description declares, and run like the rest.
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,7 +19,7 @@ import { SkillStore } from "../../src/agent/skills";
 import { TrustStore } from "../../src/agent/trust";
 import { computerV2Description } from "../../src/computer-use/description";
 import { AUTOMATION_ERROR_KINDS } from "../../src/computer-use/errors";
-import { APP_PRIMITIVES, GLOBAL_PRIMITIVES, type WorkerToHost } from "../../src/computer-use/worker/bridge";
+import { APP_PRIMITIVES, BROWSER_PRIMITIVES, GLOBAL_PRIMITIVES, TAB_PRIMITIVES, type WorkerToHost } from "../../src/computer-use/worker/bridge";
 import { createAutomationRuntime, type AutomationRuntime } from "../../src/computer-use/worker/runtime";
 
 const SKILL_FILE = join(import.meta.dir, "..", "..", "skills", "computer-use", "SKILL.md");
@@ -44,14 +45,22 @@ function declaredMembers(description: string, header: RegExp, end: string): Map<
   expect(start).toBeGreaterThanOrEqual(0);
   const out = new Map<string, string>();
   for (let i = start + 1; i < lines.length && lines[i] !== end; i++) {
-    const m = /^ {2}(\w+)\(/.exec(lines[i]!);
-    if (m) out.set(m[1]!, lines[i]!.split("//")[0]!);
+    // A line may declare several members (`back(): …; forward(): …; reload(): …`): each is its own signature.
+    const code = lines[i]!.split("//")[0]!;
+    if (!/^ {2}\w+\(/.test(code)) continue;
+    for (const part of code.split(/;\s*(?=\w+\()/)) {
+      const m = /^\s*(\w+)\(/.exec(part);
+      if (m) out.set(m[1]!, part);
+    }
   }
   return out;
 }
 // An app's members: what every target shares (`interface Target`) and what an app adds (`interface App extends Target`).
 const appMethods = new Map([...declaredMembers(full, /^interface Target \{/, "}"), ...declaredMembers(full, /^interface App extends Target \{/, "}")]);
 const appsMembers = declaredMembers(full, /^declare const apps: \{/, "};");
+// A tab's members: what every target shares and what a tab adds (`interface Tab extends Target`); and `browsers`.
+const tabMethods = new Map([...declaredMembers(full, /^interface Target \{/, "}"), ...declaredMembers(full, /^interface Tab extends Target \{/, "}")]);
+const browsersMembers = declaredMembers(full, /^declare const browsers: \{/, "};");
 const screenMembers = declaredMembers(full, /^declare const screen: \{/, "};");
 const GLOBALS = new Set(["print", "show", "sleep", "timeLeft"]);
 const VISION_ONLY = new Set(["screenshot", "show", "appAt"]);
@@ -138,6 +147,13 @@ function appVars(code: string): Set<string> {
   return vars;
 }
 
+/** The variables a block binds to a browser tab (`browsers.open`, `browsers.tab`). */
+function tabVars(code: string): Set<string> {
+  const vars = new Set<string>();
+  for (const m of mask(code).matchAll(/\b(?:const|let|var)\s+(\w+)\s*=\s*await\s+browsers\.(?:open|tab)\(/g)) vars.add(m[1]!);
+  return vars;
+}
+
 // ── the skill as a skill ───────────────────────────────────────────────────────────────────────────
 describe("the computer-use skill file", () => {
   test("parses as a skill: name, one-line description, a body that fits the loader's cap, in a tight size", () => {
@@ -160,12 +176,12 @@ describe("the computer-use skill file", () => {
     for (const label of ["freshness unknown", "live", "stale since", "likely current", "capture only"]) expect(body).toContain(label);
   });
 
-  test("no browser API is documented before it exists: the browser section is a stub marked Phase 2", () => {
-    expect(body).not.toMatch(/\bbrowsers\b/);
-    expect(body).not.toMatch(/\bTab\b/);
-    const browser = sections.find((s) => /^Browsers/.test(s.title))!;
-    expect(browser.title).toContain("added with Phase 2");
-    expect(browser.blocks).toEqual([]);
+  test("the browser recipes: a tab, console and network debugging, a download, the sign-in hand-off, history", () => {
+    for (const m of ["browsers.open", "console(", "network(", "networkBody(", "download(", "waitForUser(", "browsers.history("]) expect(body).toContain(m);
+    // The hand-off recipe says never to handle a password, and what to do when the user does not take over.
+    const handoff = sections.find((s) => s.text.includes("waitForUser("))!;
+    expect(handoff.text).toContain("Never type, read or ask for a password yourself");
+    expect(handoff.text).toContain("r.done");
   });
 });
 
@@ -183,6 +199,14 @@ describe("the skill uses only what the tool description declares", () => {
           const members = c.recv === "apps" ? appsMembers : screenMembers;
           const sig = members.get(c.name);
           if (sig === undefined) problems.push(`${c.recv}.${c.name} is not declared (${c.at})`);
+          else for (const k of c.keys) if (!optionKeys(sig).has(k)) problems.push(`${c.recv}.${c.name}: option "${k}" is not in its signature (${c.at})`);
+        } else if (c.recv === "browsers") {
+          const sig = browsersMembers.get(c.name);
+          if (sig === undefined) problems.push(`browsers.${c.name} is not declared (${c.at})`);
+          else for (const k of c.keys) if (!optionKeys(sig).has(k)) problems.push(`browsers.${c.name}: option "${k}" is not in its signature (${c.at})`);
+        } else if (c.recv !== undefined && tabVars(block).has(c.recv)) {
+          const sig = tabMethods.get(c.name);
+          if (sig === undefined) problems.push(`${c.recv}.${c.name} is not a Tab method (${c.at})`);
           else for (const k of c.keys) if (!optionKeys(sig).has(k)) problems.push(`${c.recv}.${c.name}: option "${k}" is not in its signature (${c.at})`);
         } else if (c.recv !== undefined && isBound(c.recv, vars)) {
           const sig = appMethods.get(c.name);
@@ -206,8 +230,9 @@ describe("the skill uses only what the tool description declares", () => {
         const [, recv, name] = m;
         if (recv === "apps") { if (!appsMembers.has(name!)) problems.push(`apps.${name}`); }
         else if (recv === "screen") { if (!screenMembers.has(name!)) problems.push(`screen.${name}`); }
-        else if (recv === undefined || recv === "app" || recv === "safari" || recv === "notes") {
-          if (!appMethods.has(name!) && !GLOBALS.has(name!) && name !== "refOf") problems.push(`${recv ? recv + "." : ""}${name}`);
+        else if (recv === "browsers") { if (!browsersMembers.has(name!)) problems.push(`browsers.${name}`); }
+        else if (recv === undefined || recv === "app" || recv === "safari" || recv === "notes" || recv === "tab") {
+          if (!appMethods.has(name!) && !tabMethods.has(name!) && !GLOBALS.has(name!) && name !== "refOf") problems.push(`${recv ? recv + "." : ""}${name}`);
         }
       }
     }
@@ -238,12 +263,12 @@ describe("the skill uses only what the tool description declares", () => {
   });
 
   test("the primitives the examples reach are all ones the worker bridge defines", () => {
-    const known = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES]);
+    const known = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES, ...TAB_PRIMITIVES, ...BROWSER_PRIMITIVES]);
     for (const block of allBlocks) {
-      const vars = appVars(block);
+      const vars = new Set([...appVars(block), ...tabVars(block)]);
       for (const c of callsIn(block)) {
         if (c.recv !== undefined && vars.has(c.recv)) expect([c.name, known.has(c.name)]).toEqual([c.name, true]);
-        if (c.recv === "apps" || c.recv === "screen") expect([c.name, known.has(`${c.recv}.${c.name}`)]).toEqual([c.name, true]);
+        if (c.recv === "apps" || c.recv === "screen" || c.recv === "browsers") expect([c.name, known.has(`${c.recv}.${c.name}`)]).toEqual([c.name, true]);
       }
     }
   });
@@ -295,6 +320,13 @@ function mac(mode: "happy" | "escalate" | "refused", seen: Call_[]): (m: Call_) 
     const a = m.args ?? {};
     switch (m.primitive) {
       case "apps.open": return { ok: true, value: { targetId: `t:${text(a.app)}`, name: String(a.app).split("/").pop()!, bundleId: "com.example.app" } };
+      case "browsers.open": case "browsers.tab": return { ok: true, value: { kind: "tab", targetId: `bt:${text(a.url ?? a.tab)}`, id: "winter:w1", browser: "winter" } };
+      case "browsers.history": return { ok: true, value: mode === "happy" ? [{ browser: "chrome", url: "https://flights.example/booking", title: "Booking", visited: "2026-10-10T00:00:00.000Z" }] : [] };
+      case "console": return { ok: true, value: [{ level: "error", text: "TypeError: x is undefined", at: "2026-10-11T10:00:00.000Z" }] };
+      case "network": return { ok: true, value: mode === "happy" ? [{ id: "r1", method: "GET", url: "http://localhost:3000/api/items", type: "Fetch", status: 500 }] : [] };
+      case "networkBody": return { ok: true, value: "{\"error\":\"boom\"}" };
+      case "download": return { ok: true, value: { path: "/tmp/winter-session-s/downloads/report.csv", name: "report.csv", bytes: 12, mime: "text/csv" } };
+      case "waitForUser": return { ok: true, value: { done: mode === "happy" } };
       case "screen.appAt": return { ok: true, value: { targetId: "t:at", name: "Under", bundleId: "com.example.under" } };
       case "apps.list": return { ok: true, value: [{ name: "Notes", bundleId: "com.apple.Notes", running: true }] };
       case "screen.windows": return { ok: true, value: [{ app: "Safari", title: "Docs", frame: [0, 0, 1, 1], onScreen: false }] };
@@ -339,7 +371,7 @@ describe("every example runs on the real automation runtime", () => {
       expect(failures).toEqual([]);
       expect(seen.length).toBeGreaterThan(40);
       // What the scripts asked for is only what the bridge knows.
-      const known = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES]);
+      const known = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES, ...TAB_PRIMITIVES, ...BROWSER_PRIMITIVES]);
       expect([...new Set(seen.map((c) => c.primitive))].filter((p) => !known.has(p))).toEqual([]);
     });
   }

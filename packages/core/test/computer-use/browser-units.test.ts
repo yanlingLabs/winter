@@ -356,7 +356,7 @@ describe("the tool description", () => {
     expect(full).toContain("interface Tab extends Target {");
     expect(full).toContain("declare const browsers: {");
     expect(full).toContain("  handoff(): Promise<void>;   // keep this tab (yours, still in Winter's group) for your next turn only — call it again each turn you still need it");
-    expect(full).toContain("// hand this tab to the user: it leaves Winter's group and Winter never closes it");
+    expect(full).toContain("// hand this tab to the user: it leaves Winter's group (into their own group named `group`, if given) and Winter never closes it");
     expect(full).toContain("Tabs you open in the user's own browser close when your turn ends unless you call keep() (give it to the user) or handoff() (keep it for your next turn).");
     expect(full).toContain("`BrowserUnavailable`");
     expect(full).toContain("the built-in browser needs no approval");
@@ -364,6 +364,9 @@ describe("the tool description", () => {
   test("without vision: no Image, Point, screenshot, show or appAt — and points read as refs", () => {
     for (const s of ["type Image", "type Point", "screenshot(", "declare function show", "appAt("]) expect(blind.includes(s)).toBe(false);
     expect(blind).toContain("click(t: Ref, o?:");
+  });
+  test("networkBody's redaction is stated as display hygiene, not a security boundary (review MEDIUM 7)", () => {
+    expect(full).toContain("networkBody(id: string, o?: Quiet & { maxChars?: number }): Promise<string>;   // one response's text body; secret-looking values masked for display (best-effort, not a security boundary)");
   });
   test("it never names the old Browser tool, nor varies with the browsers connected", () => {
     expect(/`Browser`|Browser tool/.test(full)).toBe(false);

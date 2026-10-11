@@ -28,6 +28,14 @@ struct BrowserLinkCEFDriver {
     var resolveHeldDialog: (PanelCEFContainerView, WinterCEFHeldDialogAction, String?) -> Bool
     /// Reload the tab — the restart of a crashed renderer.
     var reload: (PanelCEFContainerView) -> Void
+    /// Phase 3: arm the tab's download handler (`dir`, until ms since the epoch, max bytes), or disarm it (`nil`).
+    var setDownloadArm: (PanelCEFContainerView, String?, Double, Int64) -> Void = { _, _, _, _ in }
+    /// Phase 3: the tab's download reports (`WinterCEFSetDownloadObserver`); `nil` stops them.
+    var setDownloadObserver: (PanelCEFContainerView, (([AnyHashable: Any]) -> Void)?) -> Void = { _, _ in }
+    /// Phase 3: download a URL in the tab's browser; whether it had one.
+    var startDownload: (PanelCEFContainerView, String) -> Bool = { _, _ in false }
+    /// Phase 3: the tab's sound.
+    var setAudioMuted: (PanelCEFContainerView, Bool) -> Void = { _, _ in }
 
     static let production = BrowserLinkCEFDriver(
         browserIdentifier: { Int(WinterCEFBrowserIdentifierForParent($0)) },
@@ -49,7 +57,13 @@ struct BrowserLinkCEFDriver {
         resolveHeldDialog: { container, action, prompt in
             WinterCEFResolveHeldDialog(container, action, prompt ?? "")
         },
-        reload: { WinterCEFReload($0) })
+        reload: { WinterCEFReload($0) },
+        setDownloadArm: { container, dir, until, maxBytes in WinterCEFSetDownloadArm(container, dir, until, maxBytes) },
+        setDownloadObserver: { container, observer in
+            WinterCEFSetDownloadObserver(container, observer.map { observe in { info in observe(info ?? [:]) } })
+        },
+        startDownload: { container, url in WinterCEFStartDownload(container, url) },
+        setAudioMuted: { container, muted in WinterCEFSetAudioMuted(container, muted) })
 }
 
 /// ComputerV2 Phase 2 — **which native UI a tab may show**, as the flags `WinterCEF.mm`'s handlers read.

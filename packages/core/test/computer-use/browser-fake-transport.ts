@@ -2,9 +2,12 @@
 // what every real transport enforces (`cdp-allowlist.ts`: the methods, the events, and the world rules — code runs
 // only in an isolated world named "winter" whose context it SAW created), and plays the page runtime's ops
 // (`page-runtime/protocol.ts`) from the scripted page, so the engine is exercised exactly as it would drive Chromium.
-import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS } from "../../src/computer-use/browser/cdp-allowlist";
+import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_IO_READ_MAX, CDP_NETWORK_BUFFER_MAX, CDP_RESPONSE_BODY_MAX_CHARS } from "../../src/computer-use/browser/cdp-allowlist";
+import { cdpEventParams } from "../../src/computer-use/browser/cdp-reduce";
 import type { RtClassify, RtHit, RtNode, RtPoint } from "../../src/computer-use/browser/page-runtime/protocol";
-import { TransportError, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportTab } from "../../src/computer-use/browser/transport";
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { TransportError, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportDownload, type TransportTab } from "../../src/computer-use/browser/transport";
 
 export interface FakeFrame {
   frameId: string;
@@ -37,6 +40,25 @@ export interface FakePage {
   pickers?: Record<number, string>;
   /** Text leaves (top frame): id → the field the text labels, or null — `setValue`/`fileInput` answer `reason: "text"`. */
   textLeaves?: Record<number, number | null>;
+  /** Phase 3: what a link or media element points at (`linkOf`); the page's markup (`html`) and assets. */
+  links?: Record<number, { kind: "link"; url: string; download?: string } | { kind: "media"; url: string }>;
+  html?: string;
+  assets?: Array<{ kind: string; url: string }>;
+  /** Phase 3: element attributes for `inspect`. */
+  attributes?: Record<number, Record<string, string>>;
+  /** Phase 3: a click anywhere asks the server for this URL as a download (a button that makes the page download). */
+  clickDownload?: string;
+  /** Phase 3: a click anywhere makes the page save a file it made itself (a `blob:` download) with this name. */
+  clickBlob?: { name: string; body: string };
+}
+
+/** Phase 3: what the fake "server" answers for a URL (a download, or a page). */
+export interface FakeFile {
+  body: string; headers?: Record<string, string>; status?: number;
+  /** The request is redirected (302) by its own address, then by each of `redirectThrough`, and answered at `redirectTo`. */
+  redirectTo?: string; redirectThrough?: string[];
+  /** The frame whose request it is (a click's download; "top" by default). */
+  frame?: string;
 }
 
 interface Ctx { frameId: string; session?: string; winter: boolean; doc: number }
@@ -58,6 +80,10 @@ export class FakeTab {
   /** Winter for Chrome's discard before a top-level navigation (PROTOCOL.md §5.3): the stand-in document's events come
    *  first — on the SAME session — then the command runs as asked. */
   navigateByDiscard = false;
+  /** Phase 3: response bodies the browser keeps (by request id), and the buffers `Network.enable` asked for. */
+  readonly bodies = new Map<string, { body: string; base64Encoded: boolean }>();
+  emulated?: { width: number; height: number; mobile: boolean; scale: number };
+  networkBuffers = { resource: 0, total: 0 };
   /** The fallbacks of §5.3 for a browser that behaves otherwise: "new-session" — the discard ended the debugging
    *  session (an `Inspector.detached`, the command run in a session the engine does not follow, answered `cdp_error`
    *  with `navigated: true`); "new-key" — the tab came back under a new key (`tab.gone` for the old one, then
@@ -71,10 +97,20 @@ export class FakeTab {
   historyIndex = -1;
   closed = false;
   kept = false;
+  /** Phase 3: the group keep({ group }) named, the user's front tab, when last in front, its group's title, muted. */
+  keptGroup?: string;
+  active = false;
+  lastAccessed?: number;
+  group?: string;
+  muted?: boolean;
   /** The page has a beforeunload handler: a navigation asks first (the navigation waits for the answer). */
   beforeUnload = false;
   pendingNav?: string;
   holders = new Set<string>();
+  /** Phase 3: CDP sessions with Fetch interception on, the requests paused, the body streams handed out. */
+  readonly fetchOn = new Set<string>();
+  readonly paused = new Map<string, { session: string; url: string; body: Buffer; taken: boolean; settle(how: "continue" | "fail"): void }>();
+  readonly streams = new Map<string, { session: string; data: Buffer; off: number }>();
   constructor(readonly tabKey: string, public page: FakePage, readonly sessionId?: string, readonly agent = false) {
     this.history.push(page.url);
     this.historyIndex = 0;
@@ -107,7 +143,135 @@ export class FakeCdpTransport implements CdpTransport {
   /** Called with every command the fake accepts, before it is answered. */
   onSend?: (method: string, params: Record<string, unknown>, session?: string) => void;
 
-  constructor(readonly backend: string, readonly family: BrowserFamily) {}
+  /** Phase 3's optional members — a user's browser (Winter for Chrome 1.1) has them; the built-in fake starts without
+   *  (a test adds or deletes them to play another build). */
+  features?: Set<string>;
+  setMuted?: CdpTransport["setMuted"];
+  updateGroup?: CdpTransport["updateGroup"];
+  listWindows?: CdpTransport["listWindows"];
+  history?: CdpTransport["history"];
+  bookmarks?: CdpTransport["bookmarks"];
+  /** The user's history and bookmarks (a user's browser), and which optional permissions they granted. */
+  historyItems: Array<{ url: string; title: string; lastVisitTime: number }> = [];
+  bookmarkItems: Array<{ url: string; title: string; folder: string }> = [];
+  readonly granted = new Set<string>(["history", "bookmarks"]);
+  readonly libraryQueries: unknown[] = [];
+  readonly groupUpdates: Array<{ sessionId: string; title?: string; color?: string; collapsed?: boolean }> = [];
+  /** Phase 3 downloads: what the server answers by URL; the native handler's arms; where a user's browser saves. */
+  files: Record<string, FakeFile> = {};
+  readonly downloadArms = new Map<string, { dir: string; subdir: string; until: number; maxBytes: number }>();
+  readonly released: string[] = [];
+  /** A user's browser's own downloads folder (the extension's downloads route). */
+  browserDownloadsDir?: string;
+  /** The extension's optional downloads permission (false: an arm is refused not_allowed). */
+  downloadsPermission = true;
+  /** A misbehaving browser: it reports a file that was there before the download (an hour old). */
+  backdateDownloads = false;
+  private readonly downloadListeners = new Set<(tabKey: string, d: TransportDownload) => void>();
+  private nextReq = 1;
+  private nextDl = 1;
+  armDownloads?: CdpTransport["armDownloads"];
+  startDownload?: CdpTransport["startDownload"];
+  onDownload?: CdpTransport["onDownload"];
+  releaseDownload?: CdpTransport["releaseDownload"];
+
+  /** Give this fake the native download members (the built-in browser's link 2; Winter for Chrome's downloads). */
+  withNativeDownloads(): this {
+    this.armDownloads = async (tabKey, o) => {
+      this.tab(tabKey);
+      if (o === null) { this.downloadArms.delete(tabKey); return; }
+      if (this.family !== "winter" && !this.downloadsPermission) throw new TransportError("not_allowed", "Winter for Chrome may not save downloads (the user has not allowed it)", { permission: "downloads" });
+      this.downloadArms.set(tabKey, { ...o });
+    };
+    if (this.family === "winter") this.startDownload = async (tabKey, url) => { this.nativeDownload(tabKey, url, this.files[url]); };
+    this.onDownload = (l) => { this.downloadListeners.add(l); return () => { this.downloadListeners.delete(l); }; };
+    this.releaseDownload = async (id) => { this.released.push(id); };
+    this.features?.add("downloads");
+    return this;
+  }
+
+  private tellDownload(tabKey: string, d: TransportDownload): void { for (const l of [...this.downloadListeners]) l(tabKey, d); }
+
+  /** The browser's own download handler: saves into the arm's folder (or refuses, unarmed — the built-in browser). */
+  private nativeDownload(tabKey: string, url: string, file: FakeFile | undefined, name?: string): void {
+    const arm = this.downloadArms.get(tabKey);
+    const id = `dl${this.nextDl++}`;
+    const fileName = name ?? url.split("/").at(-1) ?? "download";
+    if (arm === undefined) {
+      if (this.family === "winter") setTimeout(() => this.tellDownload(tabKey, { id, state: "refused", name: fileName, bytes: 0 }), 0);
+      return;
+    }
+    setTimeout(() => {
+      if (file === undefined || (file.status ?? 200) >= 400) { this.tellDownload(tabKey, { id, state: "failed", name: fileName, bytes: 0, error: "SERVER_BAD_CONTENT" }); return; }
+      const body = Buffer.from(file.body);
+      this.tellDownload(tabKey, { id, state: "started", name: fileName, bytes: 0, totalBytes: body.length });
+      const dir = this.family === "winter" ? arm.dir : join(this.browserDownloadsDir ?? arm.dir, arm.subdir);
+      mkdirSync(dir, { recursive: true });
+      const path = join(dir, fileName);
+      writeFileSync(path, body);
+      if (this.backdateDownloads) { const old = new Date(Date.now() - 3_600_000); utimesSync(path, old, old); }
+      this.tellDownload(tabKey, { id, state: "done", name: fileName, bytes: body.length, path, mime: file.headers?.["content-type"] ?? "application/octet-stream", ...(/^https?:/.test(url) ? { url: file.redirectTo ?? url } : {}) });
+    }, 0);
+  }
+
+  /** Pause a response under Fetch interception, as Chromium does; resolves when the engine continues or fails it. */
+  private pauseResponse(t: FakeTab, url: string, file: FakeFile, resourceType: "Document" | "Other"): Promise<"continue" | "fail"> {
+    const job = `interception-job-${this.nextReq++}`;
+    let k = 0;
+    const frameId = file.frame ?? "top";
+    // Redirects pause too (a 3xx at the Response stage) — each hop under its OWN request id, as Chromium does.
+    const hops = file.redirectTo === undefined ? [] : [url, ...(file.redirectThrough ?? [])];
+    return new Promise((resolve) => {
+      const step = (): void => {
+        const requestId = `${job}.${k++}`;
+        const hop = hops.shift();
+        if (hop !== undefined) {
+          t.paused.set(requestId, { session: "", url: hop, body: Buffer.alloc(0), taken: false, settle: (how) => { t.paused.delete(requestId); if (how === "fail") resolve("fail"); else step(); } });
+          queueMicrotask(() => this.emit(t, "Fetch.requestPaused", { requestId, frameId, resourceType, request: { url: hop, method: "GET" }, responseStatusCode: 302, responseHeaders: [] }));
+          return;
+        }
+        const at = file.redirectTo ?? url;
+        t.paused.set(requestId, { session: "", url: at, body: Buffer.from(file.body), taken: false, settle: (how) => { t.paused.delete(requestId); resolve(how); } });
+        const headers = Object.entries(file.headers ?? { "content-type": "text/html" }).map(([name, value]) => ({ name, value }));
+        headers.push({ name: "Set-Cookie", value: "secret=1" });
+        queueMicrotask(() => this.emit(t, "Fetch.requestPaused", { requestId, frameId, resourceType, request: { url: at, method: "GET", headers: { Cookie: "x" } }, responseStatusCode: file.status ?? 200, responseHeaders: headers }));
+      };
+      step();
+    });
+  }
+  windows: Array<{ id: number; focused: boolean; tabs: number }> = [{ id: 1, focused: true, tabs: 2 }];
+
+  /** Phase 3's hand-off: the tabs shown to the user (`present`), and the browser's own Done (`onUserDone`). */
+  readonly presented: string[] = [];
+  present?: CdpTransport["present"];
+  onUserDone?: CdpTransport["onUserDone"];
+  private readonly doneListeners = new Set<(tabKey: string, done: boolean) => void>();
+
+  constructor(readonly backend: string, readonly family: BrowserFamily) {
+    // Both the built-in browser's link (protocol 2) and Winter for Chrome 1.1 can present a tab and mute one.
+    this.present = async (tabKey, o) => { this.tab(tabKey); this.presented.push(`${tabKey}@${o.sessionId}`); };
+    this.setMuted = async (tabKey, muted) => { this.tab(tabKey).muted = muted; };
+    if (family !== "winter") {
+      this.features = new Set(["cdp3", "present", "userDone", "mute", "group", "keepGroup", "windows", "tabFacts"]);
+      this.onUserDone = (l) => { this.doneListeners.add(l); return () => { this.doneListeners.delete(l); }; };
+      this.updateGroup = async (o) => { this.groupUpdates.push({ ...o }); };
+      this.listWindows = async () => this.windows.map((w) => ({ ...w }));
+      const refuse = (p: string): never => { throw new TransportError("not_allowed", `Winter for Chrome may not search this browser's ${p} — ask the user to allow it in Winter for Chrome's menu (its toolbar button)`, { permission: p }); };
+      this.history = async (q) => {
+        if (!this.granted.has("history")) refuse("history");
+        this.libraryQueries.push({ history: q });
+        return this.historyItems.filter((i) => q.text === "" || i.title.includes(q.text) || i.url.includes(q.text)).slice(0, q.maxResults).map((i) => ({ ...i }));
+      };
+      this.bookmarks = async (q) => {
+        if (!this.granted.has("bookmarks")) refuse("bookmarks");
+        this.libraryQueries.push({ bookmarks: q });
+        return this.bookmarkItems.filter((i) => q.text === undefined || i.title.includes(q.text)).slice(0, q.maxResults).map((i) => ({ ...i }));
+      };
+    }
+  }
+
+  /** Test door: the user presses Done (or Stop waiting) in the browser's own toolbar popup. */
+  pressDone(tabKey: string, done: boolean): void { for (const l of [...this.doneListeners]) l(tabKey, done); }
 
   page(url: string): FakePage {
     const p = this.pages[url];
@@ -133,10 +297,17 @@ export class FakeCdpTransport implements CdpTransport {
     return { tabKey: t.tabKey, url: t.page.url, title: t.page.title, active: false, agent: true, sessionId: opts.sessionId };
   }
   async closeTab(tabKey: string): Promise<void> { this.tab(tabKey).closed = true; }
-  async keepTab(tabKey: string): Promise<void> { this.tab(tabKey).kept = true; }
+  async keepTab(tabKey: string, opts?: { group?: string }): Promise<void> {
+    const t = this.tab(tabKey);
+    t.kept = true;
+    if (opts?.group !== undefined) t.keptGroup = opts.group;
+  }
   async listTabs(): Promise<TransportTab[]> {
     if (!this.connected) throw new TransportError("disconnected", "gone");
-    return [...this.tabs.values()].filter((t) => !t.closed).map((t) => ({ tabKey: t.tabKey, url: t.page.url, title: t.page.title, active: false, agent: t.agent, ...(t.sessionId === undefined ? {} : { sessionId: t.sessionId }) }));
+    return [...this.tabs.values()].filter((t) => !t.closed).map((t) => ({
+      tabKey: t.tabKey, url: t.page.url, title: t.page.title, active: t.active, agent: t.agent, ...(t.sessionId === undefined ? {} : { sessionId: t.sessionId }),
+      ...(t.lastAccessed === undefined ? {} : { lastAccessed: t.lastAccessed }), ...(t.group === undefined ? {} : { group: t.group }),
+    }));
   }
   async attach(tabKey: string, opts: { sessionId: string }): Promise<{ viewport: [number, number]; dpr: number }> {
     const t = this.tab(tabKey);
@@ -231,7 +402,18 @@ export class FakeCdpTransport implements CdpTransport {
 
   emit(tab: FakeTab, method: string, params: Record<string, unknown>, session?: string): void {
     if (!tab.subscribed.includes(method)) return;
-    for (const l of [...this.events]) l({ tabKey: tab.tabKey, method, params, ...(session === undefined ? {} : { cdpSessionId: session }) });
+    // What every real transport does: the event leaves reduced (`cdp-reduce.ts`).
+    const reduced = cdpEventParams(method, params);
+    for (const l of [...this.events]) l({ tabKey: tab.tabKey, method, params: reduced, ...(session === undefined ? {} : { cdpSessionId: session }) });
+  }
+
+  /** Test door: the page logs, throws, or makes a request (with an optional body kept by the browser). */
+  pageEvent(tabKey: string, method: string, params: Record<string, unknown>, session?: string): void {
+    this.emit(this.tab(tabKey), method, params, session);
+  }
+  /** Test door: a response body the browser keeps for `requestId` (`Network.getResponseBody`). */
+  keepBody(tabKey: string, requestId: string, body: string, base64Encoded = false): void {
+    this.tab(tabKey).bodies.set(requestId, { body, base64Encoded });
   }
 
   /** The page navigates by itself (a link the page followed): a new document. */
@@ -332,7 +514,20 @@ export class FakeCdpTransport implements CdpTransport {
     switch (method) {
       case "Runtime.enable": t.runtimeOn.add(session ?? ""); return r({});
       case "Runtime.disable": t.runtimeOn.delete(session ?? ""); return r({});
-      case "Page.enable": case "Network.enable": case "Page.setLifecycleEventsEnabled":
+      case "Network.enable":
+        // Phase 3's rule: request bodies never kept, response buffers capped.
+        if (params.maxPostDataSize !== 0) throw new TransportError("not_allowed", "Network.enable keeps no post data (maxPostDataSize: 0 is required)");
+        for (const k of ["maxResourceBufferSize", "maxTotalBufferSize"]) if (typeof params[k] !== "number") throw new TransportError("not_allowed", `Network.enable needs ${k}`);
+        if (typeof params.maxResourceBufferSize === "number" && params.maxResourceBufferSize > CDP_NETWORK_BUFFER_MAX.resource) throw new TransportError("not_allowed", "buffer");
+        if (typeof params.maxTotalBufferSize === "number" && params.maxTotalBufferSize > CDP_NETWORK_BUFFER_MAX.total) throw new TransportError("not_allowed", "buffer");
+        t.networkBuffers = { resource: Number(params.maxResourceBufferSize ?? 0), total: Number(params.maxTotalBufferSize ?? 0) };
+        return r({});
+      case "Network.getResponseBody": {
+        const b = t.bodies.get(String(params.requestId));
+        if (b === undefined || t.networkBuffers.resource === 0) throw new TransportError("cdp_error", "No resource with given identifier found", { cdpCode: -32000, cdpMessage: "No resource with given identifier found" });
+        return r(b.body.length > CDP_RESPONSE_BODY_MAX_CHARS ? { body: b.body.slice(0, CDP_RESPONSE_BODY_MAX_CHARS), base64Encoded: b.base64Encoded, truncated: true } : { ...b });
+      }
+      case "Page.enable": case "Page.setLifecycleEventsEnabled": case "Log.enable": case "Log.disable":
       case "Page.setInterceptFileChooserDialog": case "Emulation.setFocusEmulationEnabled": case "Runtime.releaseObject":
       case "Page.disable": case "Network.disable":
         return r({});
@@ -406,7 +601,59 @@ export class FakeCdpTransport implements CdpTransport {
         }
         return r({ result: { type: "object", value: this.op(t, frameId, op, arg) } });
       }
-      case "Input.dispatchMouseEvent": return r({});
+      case "Input.dispatchMouseEvent": {
+        if (params.type === "mouseReleased" && session === undefined) {
+          const page = t.page;
+          if (page.clickBlob !== undefined) {
+            // A file the page makes itself: CDP never sees it (no Fetch pause); the browser's handler does.
+            this.emit(t, "Page.downloadWillBegin", { frameId: "top", guid: "g1", url: "blob:https://x/1", suggestedFilename: page.clickBlob.name });
+            this.nativeDownload(tabKey, "blob:https://x/1", { body: page.clickBlob.body }, page.clickBlob.name);
+          } else if (page.clickDownload !== undefined) {
+            const url = page.clickDownload;
+            const file = this.files[url];
+            if (t.fetchOn.has("") && file !== undefined) void this.pauseResponse(t, url, file, "Document");
+            else if (this.family === "winter") this.nativeDownload(tabKey, url, file);
+            else this.emit(t, "Page.downloadWillBegin", { frameId: "top", guid: "g2", url, suggestedFilename: url.split("/").at(-1) ?? "download" });
+          }
+        }
+        return r({});
+      }
+      case "Fetch.enable": {
+        if (params.handleAuthRequests === true) throw new TransportError("not_allowed", "Fetch.enable: no auth handling");
+        const patterns = Array.isArray(params.patterns) ? params.patterns as Array<Record<string, unknown>> : [];
+        if (patterns.length === 0 || patterns.some((p) => p.requestStage !== "Response")) throw new TransportError("not_allowed", "Fetch.enable: the Response stage only");
+        t.fetchOn.add(session ?? "");
+        return r({});
+      }
+      case "Fetch.disable": {
+        t.fetchOn.delete(session ?? "");
+        for (const [, p] of [...t.paused]) if (p.session === (session ?? "")) p.settle("continue");
+        return r({});
+      }
+      case "Fetch.continueRequest": case "Fetch.failRequest": {
+        const extra = Object.keys(params).filter((k) => k !== "requestId" && !(method === "Fetch.failRequest" && k === "errorReason"));
+        if (extra.length > 0 || (method === "Fetch.failRequest" && params.errorReason !== "Aborted")) throw new TransportError("not_allowed", `${method}: requestId only`);
+        const p = t.paused.get(String(params.requestId));
+        if (p === undefined) throw new TransportError("cdp_error", "Invalid InterceptionId.", { cdpCode: -32602, cdpMessage: "Invalid InterceptionId." });
+        p.settle(method === "Fetch.failRequest" ? "fail" : "continue");
+        return r({});
+      }
+      case "Fetch.takeResponseBodyAsStream": {
+        const p = t.paused.get(String(params.requestId));
+        if (p === undefined || p.session !== (session ?? "") || p.taken) throw new TransportError("not_allowed", "Fetch.takeResponseBodyAsStream: not a request paused at the Response stage here");
+        p.taken = true;
+        const stream = `stream-${this.nextReq++}`;
+        t.streams.set(stream, { session: session ?? "", data: p.body, off: 0 });
+        return r({ stream });
+      }
+      case "IO.read": {
+        const st = t.streams.get(String(params.handle));
+        if (st === undefined || st.session !== (session ?? "") || params.offset !== undefined || typeof params.size !== "number" || params.size < 1 || params.size > CDP_IO_READ_MAX) throw new TransportError("not_allowed", "IO.read: only our own stream, no offset, at most 1 MiB");
+        const chunk = st.data.subarray(st.off, st.off + Math.min(Number(params.size ?? CDP_IO_READ_MAX), 64 * 1024));
+        st.off += chunk.length;
+        return r({ data: chunk.toString("base64"), base64Encoded: true, eof: st.off >= st.data.length });
+      }
+      case "IO.close": t.streams.delete(String(params.handle)); return r({});
       case "Input.dispatchKeyEvent": {
         if (params.type === "keyDown" && typeof params.text === "string" && t.focused !== undefined) t.values.set(t.focused, (t.values.get(t.focused) ?? "") + params.text);
         return r({});
@@ -420,6 +667,11 @@ export class FakeCdpTransport implements CdpTransport {
         if (String(params.url) !== "about:blank" && !/^https?:/i.test(String(params.url))) throw new TransportError("not_allowed", "Page.navigate: only http(s) and about:blank");
         if (this.failNextNavigate !== undefined) { const e = this.failNextNavigate; delete this.failNextNavigate; return r({ frameId: "top", errorText: e }); }
         const url = String(params.url);
+        if (t.fetchOn.has("") && url !== "about:blank") {
+          // Every Document response pauses at the Response stage; the engine continues a page and takes a download.
+          const how = await this.pauseResponse(t, url, this.files[url] ?? { body: "<html></html>", headers: { "content-type": "text/html" } }, "Document");
+          if (how === "fail") return r({ frameId: "top", loaderId: `L${t.doc}`, errorText: "net::ERR_ABORTED" });
+        }
         t.history = t.history.slice(0, t.historyIndex + 1);
         t.history.push(url);
         t.historyIndex = t.history.length - 1;
@@ -456,7 +708,14 @@ export class FakeCdpTransport implements CdpTransport {
         }
         return r({});
       case "Page.getLayoutMetrics":
-        return r({ cssVisualViewport: { pageX: 0, pageY: 300, clientWidth: 1200, clientHeight: 800, offsetX: 0, offsetY: 0, scale: 1, zoom: 1 } });
+        return r({ cssVisualViewport: { pageX: 0, pageY: 300, clientWidth: t.emulated?.width ?? 1200, clientHeight: t.emulated?.height ?? 800, offsetX: 0, offsetY: 0, scale: 1, zoom: 1 }, cssContentSize: { x: 0, y: 0, width: 1200, height: 4000 } });
+      case "Emulation.setDeviceMetricsOverride": {
+        const extra = Object.keys(params).filter((k) => !["width", "height", "deviceScaleFactor", "mobile"].includes(k));
+        if (extra.length > 0) throw new TransportError("not_allowed", "Emulation: a screen size only");
+        t.emulated = { width: Number(params.width), height: Number(params.height), mobile: params.mobile === true, scale: Number(params.deviceScaleFactor ?? 0) };
+        return r({});
+      }
+      case "Emulation.clearDeviceMetricsOverride": delete t.emulated; return r({});
       case "Page.captureScreenshot": {
         const clip = params.clip as { width: number; height: number; scale: number };
         return r({ data: fakeJpeg(Math.round(clip.width * clip.scale * 2), Math.round(clip.height * clip.scale * 2)) });
@@ -470,7 +729,11 @@ export class FakeCdpTransport implements CdpTransport {
     }
   }
 
+  /** Every page-runtime call, in order (what a test asks of the page: a point brought into view, an inspect, …). */
+  readonly ops: Array<{ tabKey: string; frameId: string; op: string; arg: Record<string, any> | null }> = [];
+
   private op(t: FakeTab, frameId: string, op: string, arg: Record<string, any> | null): unknown {
+    this.ops.push({ tabKey: t.tabKey, frameId, op, arg });
     const f = this.frameOf(t, frameId);
     const key = (id: unknown): string => `${frameId}:${String(id)}`;
     const all = (): RtNode[] => { const out: RtNode[] = []; const v = (n: RtNode): void => { out.push(n); for (const c of n.children ?? []) v(c); }; for (const n of f.nodes) v(n); return out; };
@@ -494,7 +757,10 @@ export class FakeCdpTransport implements CdpTransport {
         const q = String(arg?.text ?? arg?.name ?? "").toLowerCase();
         return all().filter((n) => (n.name ?? "").toLowerCase().includes(q)).map((n) => ({ id: n.id, role: n.role, ...(n.name === undefined ? {} : { name: n.name }) }));
       }
-      case "text": return t.page.text ?? all().map((n) => n.name ?? "").join("\n");
+      case "text": {
+        if (arg?.within !== undefined) { const n = node(arg.within); if (n === undefined) throw new TransportError("cdp_error", "exception", { cdpMessage: `stale:${arg.within}` }); return n.name ?? ""; }
+        return t.page.text ?? all().map((n) => n.name ?? "").join("\n");
+      }
       case "frameOffset": return { x: 100, y: 200 };
       case "point": {
         const n = node(arg?.id);
@@ -562,6 +828,42 @@ export class FakeCdpTransport implements CdpTransport {
         return { met, seen: `title "${t.page.title}" · ${text.slice(0, 100)}` };
       }
       case "alive": return (arg?.ids ?? []).filter((id: number) => node(id) !== undefined);
+      // ── Phase 3 ──
+      case "inspect": {
+        let n: RtNode | undefined;
+        if (arg?.id !== undefined) {
+          n = node(arg.id);
+          if (n === undefined) throw new TransportError("cdp_error", "exception", { cdpMessage: `stale:${arg.id}` });
+        } else {
+          n = all().find((x) => Math.abs(10 * x.id - Number(arg?.x)) < 1 && Math.abs(5 * x.id - Number(arg?.y)) < 1);
+          if (n === undefined) return null;
+          if (n.frame === true) return { frame: n.id };
+        }
+        const states = n.states;
+        return {
+          id: n.id, tag: n.role === "link" ? "a" : n.role === "button" ? "button" : "div", role: n.role, ...(n.name === undefined ? {} : { name: n.name }),
+          ...(n.value === undefined ? {} : { value: f.secure.includes(n.id) ? "<redacted>" : n.value }),
+          attributes: (frameId === "top" ? t.page.attributes?.[n.id] : undefined) ?? {}, box: [10 * n.id - 5, 5 * n.id - 2, 10, 4],
+          visible: t.page.hidden?.includes(n.id) !== true, enabled: !(states ?? []).includes("disabled"), ...(states === undefined ? {} : { states }),
+        };
+      }
+      case "html": {
+        const full = arg?.id === undefined ? (t.page.html ?? `<html><body>${all().map((n) => n.name ?? "").join("")}</body></html>`) : `<div id="${String(arg.id)}">${node(arg.id)?.name ?? ""}</div>`;
+        const max = Number(arg?.maxChars ?? 100_000);
+        return { html: full.slice(0, max), cut: full.length > max };
+      }
+      case "assets": return (frameId === "top" ? t.page.assets ?? [] : []).filter((a) => (arg?.kinds as string[] | undefined)?.includes(a.kind) !== false);
+      case "linkOf": {
+        if (node(arg?.id) === undefined) throw new TransportError("cdp_error", "exception", { cdpMessage: `stale:${arg?.id}` });
+        return (frameId === "top" ? t.page.links?.[Number(arg?.id)] : undefined) ?? { kind: "other" };
+      }
+      case "checkState": {
+        const n = node(arg?.id);
+        if (n === undefined) throw new TransportError("cdp_error", "exception", { cdpMessage: `stale:${arg?.id}` });
+        const st = n.states ?? [];
+        if (!st.includes("checked") && !st.includes("unchecked")) return { checkable: false };
+        return { checkable: true, checked: t.values.get(key(n.id)) === undefined ? st.includes("checked") : t.values.get(key(n.id)) === "checked" };
+      }
       default: throw new Error(`fake runtime: unknown op ${op}`);
     }
   }

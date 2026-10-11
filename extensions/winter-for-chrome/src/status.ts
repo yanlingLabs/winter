@@ -1,7 +1,9 @@
 // Winter for Chrome — what the toolbar button says and does. Idle: whether Winter can use this browser (a "!" badge
 // whenever it cannot; the popup and the tooltip say why). While Winter is driving any tab: the button IS Stop — a red
 // "STOP" badge, no popup, and a click stops Winter in every driven tab (the controller's `stopDriven`). Stop lives here,
-// in the browser's own toolbar, because nothing a page shows can be trusted to be Winter's.
+// in the browser's own toolbar, because nothing a page shows can be trusted to be Winter's. While Winter WAITS on a tab
+// it handed to the user (a sign-in), the button stays the popup — its Done for that tab first, and Stop as a button
+// there when Winter is also driving other tabs — so the user's click never stops another task instead of answering.
 import type { ChromeApi } from "./chrome-api";
 
 export type ExtensionStatus =
@@ -32,6 +34,8 @@ export const STOP_BADGE = "STOP";
 export class StatusBoard {
   private current: ExtensionStatus = { state: "connecting" };
   private driven = 0;
+  private waiting = 0;
+  private needs = 0;
 
   constructor(private readonly chrome: ChromeApi) {}
 
@@ -55,9 +59,23 @@ export class StatusBoard {
     this.render();
   }
 
+  /** How many tabs Winter handed to the user and waits on (a blue "!" badge; the popup offers Done). */
+  setWaiting(count: number): void {
+    if (count === this.waiting) return;
+    this.waiting = count;
+    this.render();
+  }
+
+  /** How many optional permissions Winter asked for and lacks (a "!" until the user decides in the popup). */
+  setNeeds(count: number): void {
+    if (count === this.needs) return;
+    this.needs = count;
+    this.render();
+  }
+
   private render(): void {
     // Best effort throughout: the action may not be ready while the worker starts.
-    if (this.driven > 0) {
+    if (this.driven > 0 && this.waiting === 0) {
       void this.chrome.action.setPopup({ popup: "" }).catch(() => undefined);
       void this.chrome.action.setBadgeText({ text: STOP_BADGE }).catch(() => undefined);
       void this.chrome.action.setBadgeBackgroundColor({ color: "#c62828" }).catch(() => undefined);
@@ -66,8 +84,18 @@ export class StatusBoard {
     }
     const ok = this.current.state === "connected";
     void this.chrome.action.setPopup({ popup: "popup.html" }).catch(() => undefined);
-    void this.chrome.action.setBadgeText({ text: ok || this.current.state === "connecting" ? "" : "!" }).catch(() => undefined);
+    if (this.waiting > 0) {
+      void this.chrome.action.setBadgeText({ text: "!" }).catch(() => undefined);
+      void this.chrome.action.setBadgeBackgroundColor({ color: "#3b6fd8" }).catch(() => undefined);
+      void this.chrome.action.setTitle({ title: this.driven > 0
+        ? "Winter is waiting for you — open this menu when you're done (Stop Winter is there too)"
+        : "Winter is waiting for you — open this menu when you're done" }).catch(() => undefined);
+      return;
+    }
+    void this.chrome.action.setBadgeText({ text: (ok || this.current.state === "connecting") && this.needs === 0 ? "" : "!" }).catch(() => undefined);
     void this.chrome.action.setBadgeBackgroundColor({ color: "#d9822b" }).catch(() => undefined);
-    void this.chrome.action.setTitle({ title: `Winter for Chrome — ${statusSentence(this.current)}` }).catch(() => undefined);
+    void this.chrome.action.setTitle({ title: this.needs > 0 && ok
+      ? "Winter for Chrome — Winter asked for something this browser hasn't allowed yet: open this menu"
+      : `Winter for Chrome — ${statusSentence(this.current)}` }).catch(() => undefined);
   }
 }

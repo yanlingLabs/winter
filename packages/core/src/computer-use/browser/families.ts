@@ -25,8 +25,14 @@ const CHANNELS: ReadonlyArray<{ bundleId: string; family: BrowserFamily; name: s
   { bundleId: "com.microsoft.edgemac.Dev", family: "edge", name: "Microsoft Edge Dev" },
   { bundleId: "com.microsoft.edgemac.Canary", family: "edge", name: "Microsoft Edge Canary" },
   { bundleId: "com.brave.Browser", family: "brave", name: "Brave" },
+  { bundleId: "com.brave.Browser.beta", family: "brave", name: "Brave Beta" },
+  { bundleId: "com.brave.Browser.nightly", family: "brave", name: "Brave Nightly" },
   { bundleId: "com.vivaldi.Vivaldi", family: "vivaldi", name: "Vivaldi" },
+  { bundleId: "com.vivaldi.Vivaldi.snapshot", family: "vivaldi", name: "Vivaldi Snapshot" },
   { bundleId: "com.operasoftware.Opera", family: "opera", name: "Opera" },
+  { bundleId: "com.operasoftware.OperaGX", family: "opera", name: "Opera GX" },
+  { bundleId: "com.operasoftware.OperaNext", family: "opera", name: "Opera Beta" },
+  { bundleId: "com.operasoftware.OperaDeveloper", family: "opera", name: "Opera Developer" },
   { bundleId: "company.thebrowser.Browser", family: "arc", name: "Arc" },
   { bundleId: "org.chromium.Chromium", family: "chromium", name: "Chromium" },
 ];
@@ -53,6 +59,14 @@ export function familyName(family: string): string | undefined { return BY_FAMIL
 /** A browser app by its bundle id (case-insensitive): its family, its channel's own name and the id as listed. */
 export function browserForBundleId(bundleId: string): { bundleId: string; family: BrowserFamily; name: string } | undefined {
   return BY_BUNDLE.get(bundleId.toLowerCase());
+}
+
+/**
+ * Is an app at this path a real install of a browser (for `browsers.list()`)? A copy in the Trash, in a cache (Playwright
+ * keeps Chrome for Testing in `~/Library/Caches/`), a translocated copy, or one under the per-user temp folder is not.
+ */
+export function isRealInstallPath(path: string): boolean {
+  return !/\/\.Trash\/|\/Library\/Caches\/|\/AppTranslocation\/|^\/private\/var\/folders\/|^\/var\/folders\//.test(path);
 }
 
 /** The family a browser app belongs to, by its bundle id (case-insensitive) — undefined for anything else. */

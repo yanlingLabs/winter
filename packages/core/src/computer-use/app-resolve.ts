@@ -12,6 +12,7 @@ import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { applicationPathsForBundleId } from "../auth/keychain-ffi";
+import { isRealInstallPath } from "./browser/families";
 
 export interface ResolvedApp { bundleId: string; name: string; path?: string }
 
@@ -56,6 +57,20 @@ function readPlist(plistPath: string): Record<string, unknown> | undefined {
     const parsed = JSON.parse(r.stdout) as unknown;
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
   } catch { return undefined; }
+}
+
+/** Is a browser app with this bundle id really installed — a copy that is not in the Trash, a cache, a translocated or a
+ *  temp folder (`isRealInstallPath`)? A LaunchServices lookup, never a launch. */
+export function installedBrowser(bundleId: string): boolean {
+  if (!isBundleIdShaped(bundleId)) return false;
+  let paths: string[];
+  try { paths = applicationPathsForBundleId(bundleId); } catch { return false; }
+  for (const p of paths) {
+    if (!isRealInstallPath(p)) continue;
+    const hit = systemAppResolver.fromPath(p);
+    if (hit !== undefined && hit.bundleId.toLowerCase() === bundleId.toLowerCase()) return true;
+  }
+  return false;
 }
 
 export const systemAppResolver: AppResolver = {

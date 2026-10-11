@@ -1,7 +1,9 @@
 // Winter for Chrome — exactly the `chrome.*` surface the extension uses, as an interface: `background.ts` binds the
 // real `chrome`, and the tests bind a fake. Anything not listed here the extension never calls — in particular nothing
-// that activates a tab or focuses a window (`tabs.update`, `tabs.highlight`, `windows.update`, `windows.create`), and
-// nothing that reads cookies or storage of a site.
+// that activates a tab or focuses a window (`tabs.highlight`, `windows.create`, and `tabs.update`/`windows.update` only
+// through the narrow members below: `tabs.setMuted` changes nothing but a tab's sound, and `tabs.bringForward` is the
+// sign-in hand-off's ONE door, reached only from `tabs.present` — which Winter sends only after the user's OK on its
+// card), and nothing that reads cookies or storage of a site.
 
 export interface ChromeTab {
   id?: number;
@@ -16,18 +18,28 @@ export interface ChromeTab {
   /** Its page was unloaded to save memory (`tabs.discard`); it loads again when shown or navigated. */
   discarded?: boolean;
   incognito: boolean;
+  /** When the tab was last active, ms since the epoch (Chrome 121+). */
+  lastAccessed?: number;
+  mutedInfo?: { muted: boolean };
 }
 
 export interface ChromeWindow {
   id?: number;
   incognito: boolean;
   type?: string;
+  focused?: boolean;
 }
+
+/** Chrome's tab-group colors. */
+export const GROUP_COLORS = ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"] as const;
+export type GroupColor = (typeof GROUP_COLORS)[number];
 
 export interface ChromeTabGroup {
   id: number;
   windowId: number;
   title?: string;
+  color?: GroupColor;
+  collapsed?: boolean;
 }
 
 /** `chrome.debugger`'s Debuggee / DebuggerSession (a `sessionId` addresses a flattened child target, Chrome 125+). */
@@ -57,6 +69,47 @@ export interface MessageSender {
   tab?: ChromeTab;
 }
 
+/** `chrome.downloads.DownloadItem`, as far as Winter for Chrome reads it. */
+export interface ChromeDownloadItem {
+  id: number;
+  url: string;
+  finalUrl?: string;
+  referrer?: string;
+  /** The absolute path the file is (or will be) saved at. */
+  filename: string;
+  mime?: string;
+  /** ISO 8601. */
+  startTime?: string;
+  state?: "in_progress" | "interrupted" | "complete";
+  totalBytes: number;
+  fileSize: number;
+  bytesReceived: number;
+  error?: string;
+}
+
+/** `chrome.downloads`, while the optional `downloads` permission is granted. */
+export interface ChromeDownloads {
+  search(q: { id: number }): Promise<ChromeDownloadItem[]>;
+  /** Removes the item from the browser's downloads list (never the file). */
+  erase(q: { id: number }): Promise<number[]>;
+  cancel(id: number): Promise<void>;
+  onCreated: ChromeEvent<(item: ChromeDownloadItem) => void>;
+  onDeterminingFilename: ChromeEvent<(item: ChromeDownloadItem, suggest: (s?: { filename: string; conflictAction: "uniquify" }) => void) => boolean | undefined | void>;
+  onChanged: ChromeEvent<(delta: { id: number; state?: { current?: string }; error?: { current?: string }; totalBytes?: { current?: number } }) => void>;
+}
+
+/** The optional permissions' APIs, each present only while the user has granted it — read-only for history and
+ *  bookmarks (no member here could add, change or remove one). */
+export interface ChromeOptionalApis {
+  history?: { search(q: { text: string; maxResults: number; startTime?: number; endTime?: number }): Promise<Array<{ url?: string; title?: string; lastVisitTime?: number }>> };
+  bookmarks?: {
+    search(query: string): Promise<Array<{ id: string; url?: string; title?: string; parentId?: string }>>;
+    getRecent(n: number): Promise<Array<{ id: string; url?: string; title?: string; parentId?: string }>>;
+    get(id: string): Promise<Array<{ id: string; url?: string; title?: string; parentId?: string }>>;
+  };
+  downloads?: ChromeDownloads;
+}
+
 export interface ChromeApi {
   readonly runtimeId: string;
   readonly extensionVersion: string;
@@ -71,13 +124,20 @@ export interface ChromeApi {
     discard(tabId: number): Promise<ChromeTab | undefined>;
     group(p: { tabIds: number[]; groupId?: number; createProperties?: { windowId: number } }): Promise<number>;
     ungroup(tabIds: number[]): Promise<void>;
+    /** `tabs.update(tabId, { muted })` — nothing else of the tab changes. */
+    setMuted(tabId: number, muted: boolean): Promise<void>;
+    /** The hand-off: the tab becomes its window's active one and the window is focused — `tabs.update(tabId, { active:
+     *  true })` + `windows.update(windowId, { focused: true })`. ONLY `tabs.present` calls it. */
+    bringForward(tabId: number, windowId: number): Promise<void>;
     onRemoved: ChromeEvent<(tabId: number) => void>;
     /** The user (never Winter) made a tab the active one of its window. */
     onActivated: ChromeEvent<(info: { tabId: number; windowId: number }) => void>;
   };
   tabGroups: {
     get(groupId: number): Promise<ChromeTabGroup>;
-    update(groupId: number, p: { title: string; color: "blue" }): Promise<unknown>;
+    update(groupId: number, p: { title?: string; color?: GroupColor; collapsed?: boolean }): Promise<unknown>;
+    /** The groups of the browser's windows (private windows' included: the caller filters by window). */
+    query(q: Record<string, never>): Promise<ChromeTabGroup[]>;
     onRemoved: ChromeEvent<(group: { id: number }) => void>;
   };
   windows: {
@@ -113,6 +173,15 @@ export interface ChromeApi {
     connectNative(application: string): ChromePort;
     onMessage: ChromeEvent<(message: unknown, sender: MessageSender, sendResponse: (response: unknown) => void) => boolean | undefined>;
   };
+  /** `chrome.permissions`: whether an optional permission is granted, and when one is switched on or off (the popup
+   *  asks for them — a permission request needs the user's own click there). */
+  permissions: {
+    contains(p: { permissions: string[] }): Promise<boolean>;
+    onAdded: ChromeEvent<(p: { permissions?: string[] }) => void>;
+    onRemoved: ChromeEvent<(p: { permissions?: string[] }) => void>;
+  };
+  /** The optional permissions' APIs as they are NOW (each appears when granted). */
+  optional(): ChromeOptionalApis;
   randomUUID(): string;
 }
 

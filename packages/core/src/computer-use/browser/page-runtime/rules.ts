@@ -104,3 +104,126 @@ export function classifyTarget(f: ElementFacts | null | undefined, o: { inPaymen
   if (picker !== undefined) return { kind: "picker", what: picker };
   return { kind: "ok", editable: isTextEntry(f) };
 }
+
+// ── find({ css }): the selectors a script may run (Phase 3 review, HIGH 1) ─────────────────────────────────────────
+//
+// An attribute selector that TESTS a value (`[value^="hu"]`, `meta[content^="a"]`) matches the RAW DOM, so a loop over
+// `find({ css })`'s match count would read a password a framework mirrors into `value`, or a hidden CSRF token, one
+// character at a time — past the secure-field floor and the hidden() filter. So `find({ css })` takes only a tokenised
+// SAFE SUBSET: tag names and `*`, `#id`, `.class`, `[attr]` PRESENCE (no operator, no value), the combinators (space,
+// `>`, `+`, `~`) and `,`, and a few pseudo-classes — structural ones, the element states state() already shows, and
+// `:not()`/`:is()`/`:where()`/`:has()` over the same subset. No quotes, no backslash escapes, no namespaces, no
+// pseudo-elements; anything else is refused with the reason.
+
+const CSS_PLAIN_PSEUDOS: ReadonlySet<string> = new Set([
+  "first-child", "last-child", "only-child", "first-of-type", "last-of-type", "only-of-type", "empty", "root",
+  "enabled", "disabled", "checked", "required", "optional", "read-only", "read-write", "link", "any-link", "focus", "focus-within",
+]);
+const CSS_NTH_PSEUDOS: ReadonlySet<string> = new Set(["nth-child", "nth-last-child", "nth-of-type", "nth-last-of-type"]);
+const CSS_NESTING_PSEUDOS: ReadonlySet<string> = new Set(["not", "is", "where", "has"]);
+/** Attributes whose value may be tested for EQUALITY with a plain word (`input[type=password]`, `[role=tab]`): they
+ *  describe an element, never carry what a user typed or a secret. Never `value`, `content`, `href`, `src`… */
+const CSS_EQUALITY_ATTRS: ReadonlySet<string> = new Set([
+  "type", "role", "name", "for", "rel", "lang", "dir", "tabindex", "autocomplete", "inputmode",
+  "data-testid", "data-test-id", "data-test", "data-cy",
+]);
+
+/** Why `selector` may not run in `find({ css })`, or undefined when it is in the safe subset. */
+export function cssSelectorRefusal(selector: string): string | undefined {
+  if (selector.length === 0) return "it is empty";
+  if (selector.length > 500) return "it is longer than 500 characters";
+  let i = 0;
+  const s = selector;
+  const ident = (): string | undefined => {
+    const m = /^-?[A-Za-z_\u00a0-\uffff][-A-Za-z0-9_\u00a0-\uffff]*/.exec(s.slice(i));
+    if (m === null) return undefined;
+    i += m[0].length;
+    return m[0];
+  };
+  const ws = (): boolean => { const start = i; while (i < s.length && /\s/.test(s[i]!)) i++; return i > start; };
+  // A compound selector: [tag | *] then any of #id .class [attr] :pseudo.
+  const compound = (depth: number): string | undefined => {
+    let any = false;
+    if (s[i] === "*") { i++; any = true; } else if (ident() !== undefined) any = true;
+    for (;;) {
+      const c = s[i];
+      if (c === "#" || c === ".") {
+        i++;
+        if (ident() === undefined) return `a ${c === "#" ? "#id" : ".class"} must be a plain name (no escapes)`;
+        any = true;
+      } else if (c === "[") {
+        i++;
+        ws();
+        const attr = ident()?.toLowerCase();
+        if (attr === undefined) return "an attribute selector must name a plain attribute";
+        ws();
+        if (s[i] === "=" && (CSS_EQUALITY_ATTRS.has(attr) || attr.startsWith("aria-"))) {
+          i++;
+          ws();
+          if (ident() === undefined) return `[${attr}=…] compares with a plain word (no quotes)`;
+          ws();
+        }
+        if (s[i] !== "]") {
+          return "an attribute selector may only test that an attribute is PRESENT ([name]), or compare type, role, name, aria-* or a test id with a plain word ([type=password]) — a value test could read hidden or secret values";
+        }
+        i++;
+        any = true;
+      } else if (c === ":") {
+        i++;
+        if (s[i] === ":") return "pseudo-elements (::name) are not selectors of elements";
+        const name = ident()?.toLowerCase();
+        if (name === undefined) return "a pseudo-class must be a plain name";
+        if (CSS_PLAIN_PSEUDOS.has(name)) { any = true; continue; }
+        if (s[i] !== "(") return `:${name} is not allowed (structure and the states state() shows only)`;
+        i++;
+        if (CSS_NTH_PSEUDOS.has(name)) {
+          const m = /^\s*(odd|even|[+-]?\d*n(\s*[+-]\s*\d+)?|[+-]?\d+)\s*\)/i.exec(s.slice(i));
+          if (m === null) return `:${name}() takes an+b, odd or even`;
+          i += m[0].length;
+          any = true;
+          continue;
+        }
+        if (!CSS_NESTING_PSEUDOS.has(name)) return `:${name}() is not allowed`;
+        if (depth > 4) return "selectors are nested too deeply";
+        ws();
+        const inner = list(depth + 1, name === "has");
+        if (inner !== undefined) return inner;
+        ws();
+        if (s[i] !== ")") return `:${name}( is not closed`;
+        i++;
+        any = true;
+      } else break;
+    }
+    return any ? undefined : `unexpected "${s[i] ?? "end"}" — only tags, #id, .class, [attr], combinators and structural pseudo-classes are allowed`;
+  };
+  // A complex selector: compounds joined by combinators (a relative one, inside :has(), may start with one).
+  const complex = (depth: number, relative: boolean): string | undefined => {
+    ws();
+    if (relative && (s[i] === ">" || s[i] === "+" || s[i] === "~")) { i++; ws(); }
+    let r = compound(depth);
+    if (r !== undefined) return r;
+    for (;;) {
+      const hadWs = ws();
+      const c = s[i];
+      if (c === ">" || c === "+" || c === "~") { i++; ws(); } else if (!hadWs || c === undefined || c === "," || c === ")") break;
+      r = compound(depth);
+      if (r !== undefined) return r;
+    }
+    return undefined;
+  };
+  const list = (depth: number, relative: boolean): string | undefined => {
+    for (;;) {
+      const r = complex(depth, relative);
+      if (r !== undefined) return r;
+      ws();
+      if (s[i] !== ",") return undefined;
+      i++;
+    }
+  };
+  if (/["'\\|]/.test(s)) return "quotes, backslash escapes and namespaces are not allowed";
+  const r = list(0, false);
+  if (r !== undefined) return r;
+  ws();
+  if (i < s.length) return `unexpected "${s[i]}" — only tags, #id, .class, [attr], combinators and structural pseudo-classes are allowed`;
+  return undefined;
+}
