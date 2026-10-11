@@ -43,6 +43,7 @@ private actor FakeGuestProcess: NativeGuestProcess {
         }
         return 0
     }
+    func completionMetadata() async -> [String: String] { ["outputCompletion": "verified-fake"] }
     func writeInput(_ data: Data) async throws {
         guard !inputClosed, !cancelled, input.count + data.count <= 64 * 1024 else { throw NativeFailure("input_backpressure", "Fake stdin is closed or full") }
         input.append(contentsOf: data)

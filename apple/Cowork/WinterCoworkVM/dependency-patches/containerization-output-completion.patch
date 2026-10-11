@@ -1,0 +1,153 @@
+--- a/Sources/Containerization/LinuxProcess.swift
++++ b/Sources/Containerization/LinuxProcess.swift
+@@ -92,6 +92,7 @@
+         state.withLock { $0.pid }
+     }
+ 
++    private let outputCompletion = ProcessOutputCompletion()
+     private let state: Mutex<State>
+     private let ioSetup: Stdio
+     private let agent: any VirtualMachineAgent
+@@ -217,22 +218,27 @@
+         // the process has started, to avoid a deadlock where closeStdin is
+         // called before the process is consuming from the pipe.
+ 
++        outputCompletion.configure(streams: Set([self.ioSetup.stdout == nil ? nil : "stdout", self.ioSetup.stderr == nil ? nil : "stderr"].compactMap { $0 }))
+         var configuredStreams = 0
+         let (stream, cc) = AsyncStream<Void>.makeStream()
+         if let stdout = self.ioSetup.stdout {
+             configuredStreams += 1
+             handles[1]?.readabilityHandler = { handle in
++                self.outputCompletion.beginCallback()
++                defer { self.outputCompletion.finishCallback() }
+                 do {
+                     let data = handle.availableData
+                     if data.isEmpty {
+                         // This block is called when the producer (the guest) closes
+                         // the fd it is writing into.
+                         handles[1]?.readabilityHandler = nil
++                        self.outputCompletion.eof("stdout")
+                         cc.yield()
+                         return
+                     }
+                     try stdout.writer.write(data)
+                 } catch {
++                    self.outputCompletion.fail("stdout writer failed")
+                     self.logger?.error("failed to write to stdout: \(error)")
+                 }
+             }
+@@ -241,15 +247,19 @@
+         if let stderr = self.ioSetup.stderr {
+             configuredStreams += 1
+             handles[2]?.readabilityHandler = { handle in
++                self.outputCompletion.beginCallback()
++                defer { self.outputCompletion.finishCallback() }
+                 do {
+                     let data = handle.availableData
+                     if data.isEmpty {
+                         handles[2]?.readabilityHandler = nil
++                        self.outputCompletion.eof("stderr")
+                         cc.yield()
+                         return
+                     }
+                     try stderr.writer.write(data)
+                 } catch {
++                    self.outputCompletion.fail("stderr writer failed")
+                     self.logger?.error("failed to write to stderr: \(error)")
+                 }
+             }
+@@ -480,6 +490,13 @@
+         }
+     }
+ 
++    /// Observe actual stdout/stderr EOF separately from process exit. Call
++    /// before delete(); forced descriptor cleanup never establishes EOF.
++    /// Existing wait() behavior remains compatible, including its legacy limit.
++    public func waitForOutputCompletion(timeoutInSeconds: UInt32 = 30) async throws {
++        try await outputCompletion.wait(timeoutInSeconds: timeoutInSeconds)
++    }
++
+     /// Wait until the standard output and standard error streams for the process have concluded.
+     private func waitIoComplete() async {
+         let ioTracker = self.state.withLock { $0.ioTracker }
+--- /dev/null
++++ b/Sources/Containerization/ProcessOutputCompletion.swift
+@@ -0,0 +1,34 @@
++// Copyright Winter contributors. Licensed under Apache-2.0.
++import ContainerizationError
++import Foundation
++import Synchronization
++
++/// Independent of the destructive legacy IoTracker stream. This stores only
++/// EOF/error evidence and callback counts, never unbounded output bytes.
++final class ProcessOutputCompletion: Sendable {
++    private struct State {
++        var expected: Set<String>?
++        var eof: Set<String> = []
++        var activeCallbacks = 0
++        var failure: String?
++    }
++    private let state = Mutex(State())
++    func configure(streams: Set<String>) { state.withLock { $0.expected = streams } }
++    func beginCallback() { state.withLock { $0.activeCallbacks += 1 } }
++    func finishCallback() { state.withLock { $0.activeCallbacks -= 1 } }
++    func eof(_ stream: String) { state.withLock { $0.eof.insert(stream) } }
++    func fail(_ message: String) { state.withLock { if $0.failure == nil { $0.failure = message } } }
++    func wait(timeoutInSeconds: UInt32) async throws {
++        let clock = ContinuousClock()
++        let deadline = clock.now.advanced(by: .seconds(Int(timeoutInSeconds)))
++        while true {
++            try Task.checkCancellation()
++            let snapshot = state.withLock { ($0.expected, $0.eof, $0.activeCallbacks, $0.failure) }
++            if let failure = snapshot.3 { throw ContainerizationError(.internalError, message: failure) }
++            guard let expected = snapshot.0 else { throw ContainerizationError(.invalidArgument, message: "process output is not configured") }
++            if expected == snapshot.1 && snapshot.2 == 0 { return }
++            guard clock.now < deadline else { throw ContainerizationError(.timeout, message: "stdout/stderr EOF completion was not observed") }
++            try await Task.sleep(for: .milliseconds(25))
++        }
++    }
++}
+--- /dev/null
++++ b/Tests/ContainerizationTests/ProcessOutputCompletionTests.swift
+@@ -0,0 +1,41 @@
++// Copyright Winter contributors. Licensed under Apache-2.0.
++import ContainerizationError
++import Testing
++@testable import Containerization
++
++struct ProcessOutputCompletionTests {
++    @Test func bothStreamsRequireActualEOF() async throws {
++        let value = ProcessOutputCompletion(); value.configure(streams: ["stdout", "stderr"])
++        value.eof("stdout")
++        await #expect(throws: ContainerizationError.self) { try await value.wait(timeoutInSeconds: 0) }
++        value.eof("stderr"); try await value.wait(timeoutInSeconds: 0)
++    }
++    @Test func pendingWriterCallbackPreventsCompletion() async throws {
++        let value = ProcessOutputCompletion(); value.configure(streams: ["stdout"])
++        value.beginCallback(); value.eof("stdout")
++        await #expect(throws: ContainerizationError.self) { try await value.wait(timeoutInSeconds: 0) }
++        value.finishCallback(); try await value.wait(timeoutInSeconds: 0)
++    }
++    @Test func writerErrorCannotBeHiddenByEOF() async throws {
++        let value = ProcessOutputCompletion(); value.configure(streams: ["stdout"])
++        value.fail("bounded writer failed"); value.eof("stdout")
++        await #expect(throws: ContainerizationError.self) { try await value.wait(timeoutInSeconds: 0) }
++    }
++    @Test func unconfiguredIsNotOutputSuccess() async throws {
++        await #expect(throws: ContainerizationError.self) { try await ProcessOutputCompletion().wait(timeoutInSeconds: 0) }
++    }
++    @Test func noConfiguredOutputCompletes() async throws {
++        let value = ProcessOutputCompletion(); value.configure(streams: [])
++        try await value.wait(timeoutInSeconds: 0)
++    }
++    @Test func duplicateEOFDoesNotCompleteOtherStream() async throws {
++        let value = ProcessOutputCompletion(); value.configure(streams: ["stdout", "stderr"])
++        value.eof("stdout"); value.eof("stdout")
++        await #expect(throws: ContainerizationError.self) { try await value.wait(timeoutInSeconds: 0) }
++    }
++    @Test func cancellationIsVisible() async throws {
++        let value = ProcessOutputCompletion(); value.configure(streams: ["stdout"])
++        let task = Task { try await value.wait(timeoutInSeconds: 30) }; task.cancel()
++        await #expect(throws: CancellationError.self) { try await task.value }
++    }
++}

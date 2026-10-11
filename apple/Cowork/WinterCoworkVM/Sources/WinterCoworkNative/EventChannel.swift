@@ -15,6 +15,8 @@ public final class NativeEventChannel: @unchecked Sendable {
     private var queue: [(NativeEvent, Int)] = []
     private var outputBytes = 0
     private var outputEvents = 0
+    private var operationBytes: [UInt64: Int] = [:]
+    private var operationEvents: [UInt64: Int] = [:]
     private let scope: NativeScope
     private let readFD: Int32
     private let writeFD: Int32
@@ -54,7 +56,7 @@ public final class NativeEventChannel: @unchecked Sendable {
         let size = bytes?.count ?? 0
         let output = kind == .stdout || kind == .stderr
         if output && size == 0 { return }
-        guard size <= 16 * 1024, outputBytes + size <= outputLimit, !output || outputEvents < 4096,
+        guard size <= 16 * 1024, !output || (operationBytes[id, default: 0] + size <= max(1, outputLimit / operationLimit) && operationEvents[id, default: 0] < max(1, 4096 / operationLimit)),
               (message?.utf8.count ?? 0) <= 2048,
               result?.count ?? 0 <= 128,
               result?.reduce(0, { $0 + $1.key.utf8.count + $1.value.utf8.count }) ?? 0 <= 64 * 1024 else {
@@ -66,7 +68,7 @@ public final class NativeEventChannel: @unchecked Sendable {
                                 terminalStatus: status, code: code, message: message,
                                 dataBase64: bytes.map { Data($0).base64EncodedString() }, exitCode: exitCode, result: result)
         queue.append((event, size)); outputBytes += size
-        if output { outputEvents += 1 }
+        if output { outputEvents += 1; operationBytes[id, default: 0] += size; operationEvents[id, default: 0] += 1 }
         var wake: UInt8 = 1
         _ = Darwin.write(writeFD, &wake, 1) // EAGAIN means a wakeup is already pending.
     }
@@ -76,8 +78,8 @@ public final class NativeEventChannel: @unchecked Sendable {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         guard let data = try? encoder.encode(event), let pointer = allocate(String(decoding: data, as: UTF8.self)) else { return nil }
         queue.removeFirst(); outputBytes -= size
-        if event.kind == .stdout || event.kind == .stderr { outputEvents -= 1 }
-        if event.kind == .terminal, let id = UInt64(event.operationId) { owners.remove(id); controlOwners.remove(id); shutdownOwners.remove(id); terminal.remove(id) }
+        if event.kind == .stdout || event.kind == .stderr, let id = UInt64(event.operationId) { outputEvents -= 1; operationBytes[id, default: 0] -= size; operationEvents[id, default: 0] -= 1 }
+        if event.kind == .terminal, let id = UInt64(event.operationId) { owners.remove(id); controlOwners.remove(id); shutdownOwners.remove(id); terminal.remove(id); operationBytes.removeValue(forKey: id); operationEvents.removeValue(forKey: id) }
         if queue.isEmpty {
             var buffer = [UInt8](repeating: 0, count: 512)
             while Darwin.read(readFD, &buffer, buffer.count) > 0 {}

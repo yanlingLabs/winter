@@ -8,6 +8,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 typedef struct {
   void *library;
@@ -26,13 +28,15 @@ typedef struct {
   native_api api;
   void *native;
   pthread_t thread;
+  int wake[2];
   napi_threadsafe_function callback;
   napi_ref self;
   bool polling;
   atomic_bool closing;
-  bool finalized;
+  atomic_uint owners;
   bool thread_finalized;
   bool close_requested;
+  bool cleanup_requested;
   bool js_released;
   bool thread_started;
   atomic_uint pending_callbacks;
@@ -89,21 +93,26 @@ static void call_js(napi_env env, napi_value callback, void *data, void *event_d
   ctx->api.string_free(json);
   atomic_fetch_sub(&ctx->pending_callbacks, 1);
 }
+static void close_wake(controller *ctx) { for (int i=0; i<2; i++) if (ctx->wake[i]>=0) { close(ctx->wake[i]); ctx->wake[i]=-1; } }
+static void release_context(controller *ctx) { if (atomic_fetch_sub(&ctx->owners, 1) == 1) { close_wake(ctx); free(ctx); } }
+static void wake_reader(controller *ctx) { char value=1; if (ctx->wake[1]>=0) (void)write(ctx->wake[1], &value, 1); }
 static void thread_finalized(napi_env env, void *data, void *hint) {
   (void)hint;
   controller *ctx = data;
   if (ctx->thread_started) pthread_join(ctx->thread, NULL);
+  close_wake(ctx);
   ctx->thread_finalized = true;
   if (ctx->close_requested && ctx->native && ctx->api.release(ctx->native) == 1) ctx->native = NULL;
   if (ctx->self && env) { napi_delete_reference(env, ctx->self); ctx->self = NULL; }
-  if (ctx->finalized) free(ctx);
+  release_context(ctx);
 }
 static void *event_thread(void *data) {
   controller *ctx = data;
-  struct pollfd fd = {ctx->api.event_fd(ctx->native), POLLIN, 0};
+  struct pollfd fds[2] = {{ctx->api.event_fd(ctx->native), POLLIN, 0}, {ctx->wake[0], POLLIN, 0}};
   while (!atomic_load(&ctx->closing)) {
-    int ready = poll(&fd, 1, 1000);
-    if (ready <= 0 || !(fd.revents & POLLIN)) continue;
+    int ready = poll(fds, 2, -1);
+    if (atomic_load(&ctx->closing)) break;
+    if (ready <= 0 || !(fds[0].revents & POLLIN)) continue;
     for (int i = 0; i < 256 && !atomic_load(&ctx->closing); i++) {
       atomic_store(&ctx->reading, true);
       char *json = ctx->api.poll(ctx->native);
@@ -126,14 +135,22 @@ static napi_value subscribe(napi_env env, napi_callback_info info) {
   napi_valuetype type;
   if (count != 1 || napi_typeof(env, args[0], &type) != napi_ok || type != napi_function) return fail(env, "invalid_callback", "subscribe accepts one event callback");
   if (ctx->api.event_fd(ctx->native) < 0) return fail(env, "event_channel_unavailable", "Native wakeup FD is unavailable");
+  if (pipe(ctx->wake) != 0) return fail(env, "event_channel_unavailable", "Cannot create owned event reader wakeup");
+  for (int i=0; i<2; i++) { fcntl(ctx->wake[i], F_SETFL, O_NONBLOCK); fcntl(ctx->wake[i], F_SETFD, FD_CLOEXEC); }
   napi_create_string_utf8(env, "Winter Cowork native events", NAPI_AUTO_LENGTH, &name);
   if (napi_create_threadsafe_function(env, args[0], NULL, name, 64, 2, ctx, thread_finalized, ctx, call_js, &ctx->callback) != napi_ok)
-    return fail(env, "event_channel_unavailable", "Node-API thread-safe event delivery is unavailable");
+    { close_wake(ctx); return fail(env, "event_channel_unavailable", "Node-API thread-safe event delivery is unavailable"); }
+  atomic_fetch_add(&ctx->owners, 1); // TSFN owns context until all callbacks drain.
   napi_get_cb_info(env, info, NULL, NULL, &self, NULL);
-  napi_create_reference(env, self, 1, &ctx->self);
   ctx->polling = true;
+  if (napi_create_reference(env, self, 1, &ctx->self) != napi_ok) {
+    atomic_store(&ctx->closing, true); ctx->js_released = true;
+    napi_release_threadsafe_function(ctx->callback, napi_tsfn_abort);
+    napi_release_threadsafe_function(ctx->callback, napi_tsfn_release);
+    return fail(env, "event_channel_unavailable", "Cannot retain subscribed controller");
+  }
   if (pthread_create(&ctx->thread, NULL, event_thread, ctx) != 0) {
-    atomic_store(&ctx->closing, true);
+    atomic_store(&ctx->closing, true); ctx->js_released = true;
     napi_release_threadsafe_function(ctx->callback, napi_tsfn_abort);
     napi_release_threadsafe_function(ctx->callback, napi_tsfn_release);
     return fail(env, "event_channel_unavailable", "Native event thread cannot start");
@@ -144,8 +161,10 @@ static napi_value subscribe(napi_env env, napi_callback_info info) {
 }
 static void cleanup(void *data) {
   controller *ctx = data;
-  bool already_closing = atomic_exchange(&ctx->closing, true);
-  if (!already_closing && !ctx->close_requested && ctx->native) {
+  atomic_store(&ctx->closing, true);
+  wake_reader(ctx);
+  if (!ctx->cleanup_requested && !ctx->close_requested && ctx->native) {
+    ctx->cleanup_requested = true;
     ctx->api.shutdown(ctx->native, 30000);
     // Fail closed: unresolved controllers stay native-owned. No dlclose occurs.
   }
@@ -170,8 +189,8 @@ static void finalize(napi_env env, void *data, void *hint) {
   (void)hint;
   controller *ctx = data;
   napi_remove_env_cleanup_hook(env, cleanup, ctx);
-  cleanup(ctx); ctx->finalized = true;
-  if (!ctx->polling || ctx->thread_finalized) free(ctx);
+  cleanup(ctx);
+  release_context(ctx); // JS wrapper owner; TSFN owner may still be active.
 }
 static napi_value open_controller(napi_env env, napi_callback_info info) {
   napi_value args[2], result; size_t count = 2, path_size = 0, options_size = 0;
@@ -181,6 +200,8 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
   if (!path || path[0] != '/' || !options) { free(path); free(options); return fail(env, "invalid_registration", "Absolute library path and bounded host registration JSON required"); }
   controller *ctx = calloc(1, sizeof(controller));
   if (!ctx) { free(path); free(options); return fail(env, "allocation_failed", "Cannot allocate controller adapter"); }
+  atomic_init(&ctx->owners, 1);
+  ctx->wake[0]=ctx->wake[1]=-1;
   atomic_init(&ctx->closing, false); atomic_init(&ctx->pending_callbacks, 0); atomic_init(&ctx->reading, false);
   ctx->env = env; ctx->api.library = dlopen(path, RTLD_NOW | RTLD_LOCAL); free(path);
   if (!ctx->api.library) { free(options); free(ctx); return fail(env, "native_load_failed", "Cannot load native controller library"); }

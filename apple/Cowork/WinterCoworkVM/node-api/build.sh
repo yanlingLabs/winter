@@ -4,6 +4,9 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 package=$(CDPATH= cd -- "$here/.." && pwd)
 include=${WINTER_NODE_API_HEADERS:-/opt/homebrew/opt/node/include/node}
 [ -f "$include/node_api.h" ] || { printf '%s\n' 'Set WINTER_NODE_API_HEADERS to existing headers; no global install is performed.' >&2; exit 1; }
+if [ "${WINTER_COWORK_NATIVE_PROFILE:-upstream}" = verified-eof ]; then
+  python3 "$package/dependency-patches/prepare-containerization.py" --verify-only --offline
+fi
 swift build --package-path "$package" --jobs 4
 mkdir -p "$here/out"
 build_root=$(mktemp -d "$here/out/build-XXXXXX")

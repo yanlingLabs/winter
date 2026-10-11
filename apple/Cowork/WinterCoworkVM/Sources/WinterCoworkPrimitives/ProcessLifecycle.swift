@@ -11,6 +11,7 @@ extension LinuxProcess: ProbeProcess {}
 
 public struct ProcessRunFailure: Error, LocalizedError, Sendable {
     public let original: String
+    public let originalCode: String?
     public let cleanupFailures: [String]
     public let cleanupUncertain: Bool
     public var errorDescription: String? {
@@ -22,10 +23,11 @@ public enum ProcessLifecycle {
     /// Start failures can occur after guest creation or stdio setup. Include
     /// start, wait and delete in the same cleanup boundary. A kill failure
     /// alone does not imply uncertainty when wait+delete establish cleanup.
-    public static func run(_ process: some ProbeProcess, timeout: Int64) async throws -> ExitStatus {
+    public static func run(_ process: some ProbeProcess, timeout: Int64, afterWait: @Sendable () async throws -> Void = {}) async throws -> ExitStatus {
         do {
             try await process.start()
             let exit = try await process.wait(timeoutInSeconds: timeout)
+            try await afterWait()
             try await process.delete()
             return exit
         } catch {
@@ -37,7 +39,7 @@ public enum ProcessLifecycle {
             catch { errors.append("wait: " + error.localizedDescription) }
             do { try await process.delete(); deleted = true }
             catch { errors.append("delete: " + error.localizedDescription) }
-            throw ProcessRunFailure(original: original, cleanupFailures: errors, cleanupUncertain: !reaped || !deleted)
+            throw ProcessRunFailure(original: original, originalCode: (error as? ProbeFailure)?.code, cleanupFailures: errors, cleanupUncertain: !reaped || !deleted)
         }
     }
 }

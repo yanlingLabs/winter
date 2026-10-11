@@ -125,7 +125,7 @@ signing. The concrete VZ path has compiled, not launched in this package.
 An independent review found and corrected cancellation masking cleanup
 uncertainty, execution saturation denying shutdown, unrelated request failures
 poisoning pending start, and repeated output failures spawning unlimited cleanup
-tasks. The 15 native tests now include regressions for each. Current grant revision
+tasks. The 37 native tests now include those regressions and the later review fixes below. Current grant revision
 is still part of this groundwork's immutable scope; production integration must
 separate transport incarnation identity from per-operation current authority so
 live source changes do not poison existing processes or retain obsolete grants.
@@ -141,3 +141,99 @@ and authenticated stream; root task/delegation checks; every production tool
 compartment; host network endpoint; signed folder grants/revocation; suspend,
 crash and shutdown ownership proof; actual memory return; SDK durability; and
 the protocol/UI/scheduler acceptance gates. Production spawn stays blocked.
+
+## PR review lifecycle and isolation corrections
+
+Native admission is consumed in submission order; exec ownership/opening state
+is registered before asynchronous backend work can start. Waiting for input
+registration does not serialize the lifetime of independent execs. Stop closes
+admission, cancels live processes concurrently (at most128 admitted execs), drains
+opening and exec completion, then calls backend.stop. Confirmed termination is
+monotonic: no late process error can restore uncertain power or disk ownership.
+Real cancellation sends TERM, escalates to KILL after2s if still running, and
+acknowledges only after the owning run finishes wait/delete. A pending-construction
+cancellation also waits for the target terminal and propagates cleanup uncertainty. Its caller's stop
+budget can expire while this cleanup remains owned; that expiry is not an ACK.
+
+Each operation has its own reserved output quota (default32KiB/32 events with128
+ordinary slots), so a flood cancels only its owner rather than consuming another
+operation's capacity. Terminal slots remain separate. Guest stdin ACK means a
+bounded chunk was queued, not that a guest application consumed it.
+
+Shares reject host root, host-home ancestors, overlap with explicitly protected
+Winter homes, duplicate/overlapping sources, and noncanonical guest mount paths.
+The real host descriptor now requires currentHostHome(path/homeId/dev/inode)
+and protectedHomes; host admission must supply the complete supported Winter
+home inventory. Native checks validate their identities before constructing VZ.
+Only declared fixed production/fixture guest mount roots or a bounded
+/workspace/sources/<source-id> destination are accepted. ProbeFailure codes
+survive terminal mapping. Launch errors before VZ construction are explicitly
+classified never-created; post-construction uncertainty keeps ownership. The
+VZInstanceExtension.didCreate hook records the actual construction boundary.
+
+The Node event reader now has its own wake pipe, so cleanup wakes the blocking
+poll immediately rather than joining a one-second timeout on JavaScript's
+thread. TSFN thread-start failure records both reference releases and cannot
+repeat the JavaScript release during finalization. Callbacks keep context alive
+until TSFN finalization joins the reader. Error messages are UTF8-byte bounded.
+
+Pinned upstream Containerization LinuxProcess.waitIoComplete catches its own3s
+timeout and does not expose verified stdout/stderr EOF. Default builds retain it
+and real launch refuses that profile. The verified-eof build profile applies a
+hash-pinned local source patch and awaits independent EOF/error evidence before
+deleting a process; only successful proof returns outputCompletion=verified-eof.
+A failure stays typed output_completion_unproven. See dependency-patches/README.md
+for exact preparation, pins, packaging and no-VM tests. This API compiled and
+passed synthetic state tests; real guest transport remains unvalidated. Fake
+backend metadata is explicitly verified-fake. No real VZ launch was used.
+
+An explicit host-owned managedSharedDirectories record permits only an exact
+sourceId/path/role/dev/inode directory for instructions, memory or outputs under
+a protected Winter home. The share must independently declare its same role,
+canonical guest destination and expected read-only policy. A directory label
+alone is insufficient; roots/ancestors, wrong identities and broad home
+exemptions remain refused. Tests cover accepted exact memory records and each
+refusal. Host admission must authenticate those records from protected authority.
+Launch descriptors also pin NativeCompiledGraph.identity; packaged native bytes
+and signature verification remain the host's responsibility.
+
+Native release also requires confirmed flush. Observed termination with unknown
+flush reports uncertain and keeps the controller owned for recovery. Host durable
+ownership and journal/flush disposition remain separate admission responsibilities.
+
+## Independent escalation and reservation rollback
+
+The normal stop drain still owns every start, device operation, process run and
+cancellation receipt. A caller deadline now also starts a separately owned
+backend.forceStop task, which can execute while guest TERM/wait is hung. Cleanup
+without a reserved stop receipt has its own default30s deadline (short injectable
+host budgets support no-VM tests). Timeout produces one uncertain receipt, never
+abandons the normal drain, and never authorizes disk reattachment. Native release
+requires both tasks to settle plus termination, flush/recovery and effect proof.
+
+The VZ implementation invokes the public VZVirtualMachine.stop completion API on
+its vmQueue directly; it bypasses guest-agent/container/NIO shutdown waits. This
+is a destructive hardware stop, not a guest flush. It watches pending startup so
+an initially stopped object cannot become a later running VM after a deadline.
+Forced termination reports flushConfirmed=false, retains host ownership and
+requires separate dirty-disk/recovery proof. No real VZ force-stop was run here.
+An already-clean stopped VM's in-flight host confirmation remains owned and is
+shared with escalation; it cannot be replaced by a late uncertainty write.
+
+Successful host authorize transfers a reservation. If validation fails before
+the actual didCreate boundary, abortUnstartedReservation must acknowledge release
+before the launch is classified release-safe. This callback is distinct from
+confirmStopped (backing termination plus clean flush/recovery and external-effect
+proof). Abort failures retain uncertainty; stop retries abort only. Concurrent
+abort calls coalesce into one owned callback; implementations must remain
+idempotent across crash/retry. Constructed VMs can never use this no-VM abort.
+FeatureBlockedAdmission acquires no reservation and provides a safe no-op abort.
+A failed guest flush never invokes confirmStopped or clears the real VM owner.
+
+37 default-profile native tests pass, including the root's registered-cancel
+completion and drain-before-stdin-EOF regressions; new barrier-driven tests prove
+independent escalation while cancel/run are stuck, cleanup with saturated receipt
+capacity, reservation acquisition/abort/retry/coalescing, constructed-state abort
+refusal and prevention of release without flush. These test fake host proof and
+compile the VZ path; they do not prove real guest cancellation, VZ backing-service
+termination, dirty-disk recovery, active RAM return or production integration.

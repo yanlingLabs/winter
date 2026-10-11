@@ -9,6 +9,8 @@ import WinterCoworkPrimitives
 
 private struct PolicyExtension: VZInstanceExtension {
     let policies: [HostSharePolicy]
+    let didConstruct: @Sendable () -> Void
+    func didCreate(_ instance: VZVirtualMachineInstance) throws { didConstruct() }
     func configureVZ(_ config: inout VZVirtualMachineConfiguration, allocator: any AddressAllocator<Character>,
                      storageDeviceCount: Int, mountsByID: [String: [Containerization.Mount]]) throws {
         guard config.networkDevices.isEmpty else { throw NativeFailure("network_not_admitted", "No NIC may bypass the future host-owned endpoint") }
@@ -21,6 +23,9 @@ private final class WorkspaceVZManager: VirtualMachineManager, @unchecked Sendab
     let policies: [HostSharePolicy]
     private let lock = NSLock()
     private var vm: VZVirtualMachineInstance?
+    private var attempted = false
+    func creationAttempted() -> Bool { lock.lock(); defer { lock.unlock() }; return attempted }
+    private func markAttempted() { lock.lock(); attempted = true; lock.unlock() }
     init(_ descriptor: HostLaunchDescriptor, policies: [HostSharePolicy]) { self.descriptor = descriptor; self.policies = policies }
     func instance() -> VZVirtualMachineInstance? { lock.lock(); defer { lock.unlock() }; return vm }
     private func remember(_ vm: VZVirtualMachineInstance) { lock.lock(); self.vm = vm; lock.unlock() }
@@ -32,7 +37,7 @@ private final class WorkspaceVZManager: VirtualMachineManager, @unchecked Sendab
             settings.kernel = Kernel(path: URL(fileURLWithPath: descriptor.kernel.path), platform: .linuxArm)
             settings.initialFilesystem = .block(format: "ext4", source: descriptor.initfs.path, destination: "/", options: ["ro"])
             settings.mountsByID = input.mountsByID; settings.interfaces = []
-            settings.extensions = [PolicyExtension(policies: policies)]
+            settings.extensions = [PolicyExtension(policies: policies, didConstruct: { [weak self] in self?.markAttempted() })]
         }
         remember(vm); return vm
     }
@@ -49,8 +54,14 @@ public actor VZWorkspaceBackend: NativeWorkspaceBackend {
     private var manager: WorkspaceVZManager?
     private var processes: [String: VZGuestProcess] = [:]
     private var launchAttempted = false
+    private var launchInFlight = false
+    private let reservation: UnstartedReservation
+    private var forceRequested = false
+    private var confirmedStop: BackendStopResult?
+    private var cleanConfirmation: Task<BackendStopResult, Never>?
     public init(descriptor: HostLaunchDescriptor, admission: any HostLaunchAdmission = FeatureBlockedAdmission()) {
         self.descriptor = descriptor; self.admission = admission
+        self.reservation = UnstartedReservation(descriptor: descriptor, admission: admission)
     }
     private func identity(_ path: String, expected: HostFileIdentity, directory: Bool) throws {
         let canonical = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
@@ -71,11 +82,15 @@ public actor VZWorkspaceBackend: NativeWorkspaceBackend {
     }
     public func start() async throws {
         guard !launchAttempted else { throw NativeFailure("incarnation_used", "Real backend launch may not be replayed") }
-        launchAttempted = true
+        launchAttempted = true; launchInFlight = true
+        defer { launchInFlight = false }
         // This callback must use canonical host authority and shared ownership;
         // it is never fulfilled by a guest JSON field or mutable manifest.
-        try await admission.authorize(descriptor)
         do {
+            try await reservation.acquire()
+            guard !forceRequested else { throw NativeFailure("start_interrupted", "Host stop deadline closed launch before VM construction") }
+            guard NativeCompiledGraph.identity.patchSha256 != nil else { throw NativeFailure("cowork_output_gate_blocked", "Real production launch requires the verified output-completion build profile") }
+            guard descriptor.compiledGraph == NativeCompiledGraph.identity else { throw NativeFailure("native_graph_mismatch", "Host descriptor does not match the compiled source/patch graph") }
             guard descriptor.scope.protocolVersion == 1, descriptor.virtualCPUs >= 1,
                   descriptor.scope.incarnationId.range(of: "^[A-Za-z0-9_-]{1,40}$", options: .regularExpression) != nil,
                   descriptor.virtualCPUs <= ProcessInfo.processInfo.activeProcessorCount,
@@ -87,11 +102,21 @@ public actor VZWorkspaceBackend: NativeWorkspaceBackend {
                   descriptor.supervisorArguments.reduce(0, { $0 + $1.utf8.count }) <= 32 * 1024 else { throw NativeFailure("invalid_launch_descriptor", "Validated resources and immutable supervisor arguments required") }
             let root = URL(fileURLWithPath: descriptor.ownedStorageRoot).resolvingSymlinksInPath().standardizedFileURL.path
             guard root == descriptor.ownedStorageRoot, descriptor.rootfs.path.hasPrefix(root + "/") else { throw NativeFailure("storage_scope_mismatch", "Writable rootfs must belong to authenticated owned storage") }
+            guard descriptor.currentHostHome.homeId == descriptor.homeId, !descriptor.protectedHomes.isEmpty else { throw NativeFailure("home_identity_required", "Current and protected Winter homes require authenticated identity") }
+            for home in [descriptor.currentHostHome] + descriptor.protectedHomes { try identity(home.path, expected: home.identity, directory: true) }
+            let backingIdentities = [descriptor.kernel, descriptor.initfs, descriptor.rootfs].map { "\($0.identity.device):\($0.identity.inode)" }
+            guard Set(backingIdentities).count == 3 else { throw NativeFailure("backing_alias_refused", "Kernel, initfs and writable rootfs require distinct identities") }
             try artifact(descriptor.kernel); try artifact(descriptor.initfs)
             try identity(descriptor.rootfs.path, expected: descriptor.rootfs.identity, directory: false)
-            let policies = descriptor.shares.map { HostSharePolicy(sourcePath: $0.path, guestPath: $0.guestPath, readOnly: $0.readOnly) }
-            for share in descriptor.shares { try identity(share.path, expected: share.identity, directory: true) }
-            try SharePolicy.validate(policies, backing: [descriptor.kernel, descriptor.initfs, descriptor.rootfs].map { URL(fileURLWithPath: $0.path) })
+            let policies = descriptor.shares.map { HostSharePolicy(sourcePath: $0.path, guestPath: $0.guestPath, readOnly: $0.readOnly, managedRole: $0.managedRole) }
+            for share in descriptor.shares {
+                try identity(share.path, expected: share.identity, directory: true)
+                if let role = share.managedRole {
+                    guard descriptor.managedSharedDirectories.filter({ $0.sourceId == share.sourceId && $0.path == share.path && $0.identity == share.identity && $0.role == role }).count == 1 else { throw NativeFailure("managed_share_not_authorized", "Managed share must match a separate exact host authority record") }
+                }
+            }
+            let managedShares = descriptor.managedSharedDirectories.map { HostManagedShareRecord(path: $0.path, role: $0.role, device: $0.identity.device, inode: $0.identity.inode) }
+            try SharePolicy.validate(policies, backing: [descriptor.kernel, descriptor.initfs, descriptor.rootfs].map { URL(fileURLWithPath: $0.path) }, protectedHostRoots: ([descriptor.currentHostHome] + descriptor.protectedHomes).map(\.path), managedShares: managedShares)
             let manager = WorkspaceVZManager(descriptor, policies: policies)
             var config = LinuxContainer.Configuration()
             config.cpus = descriptor.virtualCPUs; config.memoryInBytes = descriptor.memoryCeilingBytes
@@ -103,10 +128,23 @@ public actor VZWorkspaceBackend: NativeWorkspaceBackend {
                 rootfs: .block(format: "ext4", source: descriptor.rootfs.path, destination: "/"), vmm: manager,
                 vm: VMResources(cpus: descriptor.virtualCPUs, memoryInBytes: descriptor.memoryCeilingBytes), configuration: config)
             self.manager = manager; self.container = container
-            try await container.create(); try await container.start()
+            try await container.create()
+            guard !forceRequested else { throw NativeFailure("start_interrupted", "Host force-stop interrupted guest construction") }
+            try await container.start()
+            guard !forceRequested else { throw NativeFailure("start_interrupted", "Host force-stop interrupted guest start") }
         } catch {
-            await admission.retainUncertainOwnership(descriptor, reason: "Native launch failed after host admission")
-            throw error
+            if manager?.creationAttempted() == true {
+                await admission.retainUncertainOwnership(descriptor, reason: "Native launch failed after VZ construction attempt")
+                throw error
+            }
+            do { try await abortReservationIfNeeded() }
+            catch {
+                await admission.retainUncertainOwnership(descriptor, reason: "Unstarted host reservation abort could not be confirmed")
+                throw NativeFailure("reservation_abort_uncertain", "VM was never constructed but host reservation release remains unproved")
+            }
+            if let failure = error as? NativeFailure { throw NativeFailure(failure.code, failure.message, launchNeverCreated: true) }
+            if let failure = error as? ProbeFailure { throw NativeFailure(failure.code, failure.message, launchNeverCreated: true) }
+            throw NativeFailure("launch_validation_failed", "Launch validation failed before any VZ construction attempt", launchNeverCreated: true)
         }
     }
     public func process(taskId: String, arguments: [String]) async throws -> any NativeGuestProcess {
@@ -119,7 +157,7 @@ public actor VZWorkspaceBackend: NativeWorkspaceBackend {
     }
     private func processFinished(_ id: String, confirmed: Bool) async {
         if confirmed { processes.removeValue(forKey: id) }
-        else { await admission.retainUncertainOwnership(descriptor, reason: "Native guest process cleanup is uncertain") }
+        else if manager != nil { await admission.retainUncertainOwnership(descriptor, reason: "Native guest process cleanup is uncertain") }
     }
     public func stats() async throws -> [String: String] { try await deviceSnapshot(target: nil) }
     public func setMemoryAllowance(_ bytes: UInt64) async throws -> [String: String] {
@@ -137,27 +175,95 @@ public actor VZWorkspaceBackend: NativeWorkspaceBackend {
             }
         }
     }
+    private func abortReservationIfNeeded() async throws {
+        try await reservation.abort(didConstruct: manager?.creationAttempted() == true)
+    }
     public func stop() async throws -> BackendStopResult {
+        if let confirmedStop { return confirmedStop }
+        if let cleanConfirmation { return await cleanConfirmation.value }
+        if forceRequested || launchInFlight { return try await forceStop() }
         let live = Array(processes.values)
-        for process in live { try? await process.cancel() }
+        await withTaskGroup(of: Void.self) { group in for process in live { group.addTask { try? await process.cancel() } } }
+        if manager?.creationAttempted() != true {
+            try await abortReservationIfNeeded()
+            let result = BackendStopResult(terminationConfirmed: true, flushConfirmed: true)
+            confirmedStop = result; return result
+        }
         var flush = true
         if let container { do { try await container.stop() } catch { flush = false } }
         guard let vm = manager?.instance(), vm.state == .stopped else {
             await admission.retainUncertainOwnership(descriptor, reason: "Native VZ termination not observed")
             return BackendStopResult(terminationConfirmed: false, flushConfirmed: false)
         }
-        // A VZ stopped object alone never releases the durable disk owner.
-        do { try await admission.confirmStopped(descriptor) }
-        catch {
-            await admission.retainUncertainOwnership(descriptor, reason: "Host backing termination/ownership proof incomplete")
-            return BackendStopResult(terminationConfirmed: false, flushConfirmed: flush)
+        // A successful host framework stop still cannot release a dirty disk.
+        let result: BackendStopResult
+        if flush && !forceRequested {
+            let descriptor = self.descriptor, admission = self.admission
+            let proof = Task { await CleanStopAuthority.confirm(descriptor, admission: admission, terminationConfirmed: true, flushConfirmed: true) }
+            cleanConfirmation = proof
+            result = await proof.value
+            // Keep this proof owned through actor reentrancy; an escalation
+            // observing already-clean stopped hardware must await it rather
+            // than re-retaining a reservation that this callback released.
+            cleanConfirmation = nil
+        } else {
+            result = await CleanStopAuthority.confirm(descriptor, admission: admission, terminationConfirmed: true, flushConfirmed: false)
         }
-        processes.removeAll(); self.container = nil; self.manager = nil
-        return BackendStopResult(terminationConfirmed: true, flushConfirmed: flush)
+        if result.terminationConfirmed && result.flushConfirmed {
+            processes.removeAll(); self.container = nil; self.manager = nil
+            confirmedStop = result
+        }
+        return result
+    }
+    public func forceStop() async throws -> BackendStopResult {
+        if let confirmedStop { return confirmedStop }
+        if let cleanConfirmation { return await cleanConfirmation.value }
+        forceRequested = true
+        do { return try await forceHardwareAndDrainLaunch() }
+        catch {
+            await admission.retainUncertainOwnership(descriptor, reason: "Host force-stop or unstarted reservation cleanup could not be confirmed")
+            throw error
+        }
+    }
+    private func forceHardwareAndDrainLaunch() async throws -> BackendStopResult {
+        // Independently watch startup too: an initially stopped VZ object is
+        // not proof while LinuxContainer.create may still enqueue vm.start.
+        while true {
+            if let vm = manager?.instance() {
+                let stopped = try await stopHardware(vm)
+                if stopped && !launchInFlight {
+                    await admission.retainUncertainOwnership(descriptor, reason: "Host forced VZ off; flush/recovery and backing effects remain unproved")
+                    return BackendStopResult(terminationConfirmed: true, flushConfirmed: false)
+                }
+            } else if !launchInFlight {
+                try await abortReservationIfNeeded()
+                return BackendStopResult(terminationConfirmed: true, flushConfirmed: true)
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+    }
+    private func stopHardware(_ instance: VZVirtualMachineInstance) async throws -> Bool {
+        try await withCheckedThrowingContinuation { continuation in
+            instance.vmQueue.async {
+                let vm = instance.vzVirtualMachine
+                if vm.state == .stopped { continuation.resume(returning: true); return }
+                guard vm.canStop else {
+                    if vm.state == .starting || vm.state == .stopping { continuation.resume(returning: false) }
+                    else { continuation.resume(throwing: NativeFailure("force_stop_unavailable", "VZ did not admit host force-stop in its current state")) }
+                    return
+                }
+                // This is the public VZ immediate stop API, deliberately not
+                // LinuxContainer.stop or VZInstance.stop's guest/NIO waits.
+                vm.stop { error in
+                    if error != nil { continuation.resume(throwing: NativeFailure("force_stop_uncertain", "VZ host force-stop completion failed")) }
+                    else { continuation.resume(returning: vm.state == .stopped) }
+                }
+            }
+        }
     }
 }
 
-private final class BoundedInput: ReaderStream, @unchecked Sendable {
+final class BoundedInput: ReaderStream, @unchecked Sendable {
     private let streamValue: AsyncStream<Data>
     private let continuation: AsyncStream<Data>.Continuation
     init() { let pair = AsyncStream<Data>.makeStream(bufferingPolicy: .bufferingOldest(4)); streamValue = pair.stream; continuation = pair.continuation }
@@ -203,12 +309,17 @@ private actor VZGuestProcess: NativeGuestProcess {
     private var process: LinuxProcess?
     private var cancelled = false
     private var opening = false
+    private var runActive = false
+    private var completionWaiters: [CheckedContinuation<Void, Never>] = []
+    private var escalation: Task<Void, Never>?
     private let finished: @Sendable (Bool) async -> Void
     init(container: LinuxContainer, processId: String, arguments: [String], finished: @escaping @Sendable (Bool) async -> Void) {
         self.container = container; self.processId = processId; self.arguments = arguments; self.finished = finished
     }
     func run(output: @escaping @Sendable (NativeEventKind, Data) throws -> Void) async throws -> Int32 {
         guard !cancelled else { await finished(true); throw CancellationError() }
+        runActive = true
+        defer { runActive = false; escalation?.cancel(); escalation = nil; let waiters = completionWaiters; completionWaiters.removeAll(); waiters.forEach { $0.resume() } }
         let failure = OutputFailure()
         let cancel: @Sendable () -> Void = { Task { try? await self.cancel() } }
         opening = true
@@ -232,7 +343,11 @@ private actor VZGuestProcess: NativeGuestProcess {
             throw CancellationError()
         }
         do {
+            #if WINTER_COWORK_VERIFIED_EOF
+            let exit = try await ProcessLifecycle.run(process, timeout: 86_400, afterWait: { do { try await process.waitForOutputCompletion(timeoutInSeconds: 30) } catch { throw ProbeFailure(code: "output_completion_unproven", message: "Guest stdout/stderr EOF or successful output writes were not confirmed") } })
+            #else
             let exit = try await ProcessLifecycle.run(process, timeout: 86_400)
+            #endif
             input.close(); self.process = nil; await finished(true)
             if let error = failure.current() { throw error }
             return exit.exitCode
@@ -245,11 +360,29 @@ private actor VZGuestProcess: NativeGuestProcess {
             throw error
         }
     }
+    func completionMetadata() async -> [String: String] {
+        #if WINTER_COWORK_VERIFIED_EOF
+        ["outputCompletion": "verified-eof", "outputPatchSha256": NativeCompiledGraph.identity.patchSha256 ?? ""]
+        #else
+        ["outputCompletion": "unproven", "outputLimitation": "Pinned LinuxProcess.wait suppresses a three-second stdio completion timeout"]
+        #endif
+    }
     func writeInput(_ data: Data) async throws { try input.write(data) }
-    func closeInput() async throws { input.close(); if let process { try await process.closeStdin() } }
+    // LinuxProcess's input relay drains this stream before closing guest stdin.
+    // closeStdin() here would cancel that relay and discard acknowledged chunks.
+    func closeInput() async throws { input.close() }
     func cancel() async throws {
         cancelled = true; input.close()
-        if let process { try? await process.kill(.term); _ = try? await process.wait(timeoutInSeconds: 2); try? await process.kill(.kill) }
-        else if !opening { await finished(true) }
+        if let process { try? await process.kill(.term) }
+        if runActive {
+            if escalation == nil {
+                escalation = Task {
+                    do { try await Task.sleep(for: .seconds(2)); if let process = self.process, self.runActive { try? await process.kill(.kill) } } catch {}
+                }
+            }
+            // The owner run performs wait+delete. A second LinuxProcess.wait
+            // would race its single stdio tracker. ACK only after that cleanup.
+            await withCheckedContinuation { completionWaiters.append($0) }
+        } else if !opening { await finished(true) }
     }
 }
