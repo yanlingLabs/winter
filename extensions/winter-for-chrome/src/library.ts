@@ -5,8 +5,9 @@
 // Each permission's API exists only while it is granted, so every door here first asks the browser whether it is;
 // without it the request is refused `not_allowed` with `data.permission`, the toolbar shows a "!" and the popup offers
 // the switch. Nothing here writes to history or bookmarks, opens a downloaded file, or touches a download Winter did
-// not ask for: a download is Winter's only when an armed tab's page made it after the arm (its origin, or the page it
-// came from, is the tab's), and every other download is left exactly as the browser would have it.
+// not ask for: a download is Winter's only when the ARMED TAB'S OWN debugger sessions said it began
+// (`Page.downloadWillBegin`, after the arm) and the browser's item has that very URL — a download the user starts from
+// another tab of the same site never matches — and every other download is left exactly as the browser would have it.
 import type { ChromeApi, ChromeDownloadItem, Clock } from "./chrome-api";
 
 export type OptionalPermission = "history" | "bookmarks" | "downloads";
@@ -49,11 +50,18 @@ function safeSegment(name: string): string {
 
 interface Arm {
   tabId: number; subdir: string; until: number; maxBytes: number; origin?: string; armedAt: number; downloadId?: number; timer?: unknown;
+  /** The URLs the armed tab's own pages said they began downloading after the arm (`Page.downloadWillBegin`). */
+  urls: Set<string>;
   /** The progress poll while the download runs (`chrome.downloads.onChanged` carries no byte counts). */
   poll?: unknown; lastBytes?: number;
 }
 /** How often a running download's bytes are read for Winter (a slow file is alive while they grow). */
 export const DOWNLOAD_PROGRESS_POLL_MS = 2_000;
+/** How long a candidate download waits for the armed tab's `Page.downloadWillBegin` before it is left alone. */
+export const HOLD_FOR_WILL_BEGIN_MS = 3_000;
+
+type Suggest = (s?: { filename: string; conflictAction: "uniquify" }) => void;
+interface Held { item: ChromeDownloadItem; suggest?: Suggest; timer: unknown }
 
 export interface LibraryOptions {
   notify(method: string, params: Record<string, unknown>): void;
@@ -161,7 +169,7 @@ export class Library {
     const until = clampInt(params.until, 0, Number.MAX_SAFE_INTEGER, this.now() + 60_000);
     const maxBytes = clampInt(params.maxBytes, 1, 2 ** 40, 200 * 1024 * 1024);
     const origin = originOf(tabUrl);
-    const arm: Arm = { tabId, subdir, until, maxBytes, armedAt: this.now(), ...(origin === undefined ? {} : { origin }) };
+    const arm: Arm = { tabId, subdir, until, maxBytes, armedAt: this.now(), urls: new Set(), ...(origin === undefined ? {} : { origin }) };
     arm.timer = this.opts.clock.setTimeout(() => this.expire(arm), Math.max(0, until - this.now()));
     this.arms.set(tabId, arm);
   }
@@ -221,30 +229,75 @@ export class Library {
     this.disarm(a.tabId);
   }
 
+  /** Downloads created after an arm, from the armed tab's site, that no `Page.downloadWillBegin` has matched YET: held
+   *  for HOLD_FOR_WILL_BEGIN_MS (their name decided then), in case the tab's word comes after the browser's item. */
+  private readonly pending = new Map<number, Held>();
+
+  /** The armed tab's own debugger session (or one of its frames') said a download began (`Page.downloadWillBegin`). */
+  noteWillBegin(tabId: number, url: string): void {
+    const a = this.arms.get(tabId);
+    if (a === undefined || a.downloadId !== undefined || url.length === 0 || url.length > 8_192) return;
+    a.urls.add(url);
+    // The browser's item may have come first: one held for its name is decided now.
+    for (const [id, p] of [...this.pending]) {
+      if (p.item.url !== url && p.item.finalUrl !== url) continue;
+      const hit = this.attribute(p.item);
+      if (hit === undefined) continue;
+      this.pending.delete(id);
+      this.opts.clock.clearTimeout(p.timer);
+      p.suggest?.({ filename: `${hit.subdir}/${safeSegment(p.item.filename)}`, conflictAction: "uniquify" });
+      p.suggest = undefined;
+    }
+  }
+
   private listen(): void {
     if (this.listening) return;
     const api = this.chrome.optional().downloads;
     if (api === undefined) return;
     this.listening = true;
-    api.onCreated.addListener((item) => { this.attribute(item); });
+    api.onCreated.addListener((item) => { if (this.attribute(item) === undefined) this.hold(item); });
     api.onDeterminingFilename.addListener((item, suggest) => {
       const a = this.attribute(item);
-      // Every download gets an answer at once; only Winter's own goes into its subfolder.
-      if (a === undefined) { suggest(); return; }
-      suggest({ filename: `${a.subdir}/${safeSegment(item.filename)}`, conflictAction: "uniquify" });
+      if (a !== undefined) { suggest({ filename: `${a.subdir}/${safeSegment(item.filename)}`, conflictAction: "uniquify" }); return; }
+      const p = this.pending.get(item.id) ?? this.hold(item);
+      // Every other download gets its answer at once, as the browser would have it.
+      if (p === undefined) { suggest(); return; }
+      p.suggest = suggest;
+      return true; // answered when the tab's word comes, or as the browser would at the hold's end
     });
     api.onChanged.addListener((delta) => { void this.changed(delta); });
   }
 
-  /** Is this download an armed tab's? The first one created after the arm, from that tab's site. */
+  /** Hold a download that might still be the armed tab's (created after an arm, from its site). */
+  private hold(item: ChromeDownloadItem): Held | undefined {
+    const existing = this.pending.get(item.id);
+    if (existing !== undefined) return existing;
+    const started = Date.parse(item.startTime ?? "");
+    const from = [originOf(item.url), originOf(item.finalUrl), originOf(item.referrer)];
+    const candidate = [...this.arms.values()].some((a) => a.downloadId === undefined && a.origin !== undefined && from.includes(a.origin)
+      && (!Number.isFinite(started) || started >= a.armedAt));
+    if (!candidate) return undefined;
+    const p: Held = {
+      item,
+      timer: this.opts.clock.setTimeout(() => {
+        if (this.pending.get(item.id) !== p) return;
+        this.pending.delete(item.id);
+        p.suggest?.();
+      }, HOLD_FOR_WILL_BEGIN_MS),
+    };
+    this.pending.set(item.id, p);
+    return p;
+  }
+
+  /** Is this download an armed tab's? Only one whose URL the armed tab's own pages said they began downloading after
+   *  the arm (`noteWillBegin`), created after the arm — no slack. */
   private attribute(item: ChromeDownloadItem): Arm | undefined {
     for (const a of this.arms.values()) if (a.downloadId === item.id) return a;
     const started = Date.parse(item.startTime ?? "");
     for (const a of this.arms.values()) {
       if (a.downloadId !== undefined) continue;
-      if (Number.isFinite(started) && started + 2_000 < a.armedAt) continue;
-      const from = [originOf(item.url), originOf(item.finalUrl), originOf(item.referrer)];
-      if (a.origin === undefined || !from.includes(a.origin)) continue;
+      if (Number.isFinite(started) && started < a.armedAt) continue;
+      if (!a.urls.has(item.url) && !(item.finalUrl !== undefined && a.urls.has(item.finalUrl))) continue;
       a.downloadId = item.id;
       if (item.totalBytes > a.maxBytes) {
         void this.chrome.optional().downloads?.cancel(item.id).catch(() => undefined);

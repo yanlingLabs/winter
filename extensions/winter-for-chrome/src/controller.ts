@@ -824,6 +824,8 @@ export class ExtensionController {
       return;
     }
     a.guard.observeEvent(method, params, source.sessionId);
+    // A download the tab's own page began (any of its frames' sessions): what the downloads arm attributes by.
+    if (method === "Page.downloadWillBegin" && typeof params?.url === "string") this.library.noteWillBegin(tabId, params.url);
     if (source.sessionId === undefined) {
       if (method === "Page.loadEventFired") this.settleWaiters.get(tabId)?.();
       // A new document in the tab: no gesture yet, so leaving it cannot ask (a page restored from the back/forward

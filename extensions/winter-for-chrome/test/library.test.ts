@@ -70,6 +70,8 @@ describe("history and bookmarks", () => {
 describe("downloads (a file the page makes itself)", () => {
   async function armedTab(): Promise<number> {
     const tab = await c.handle("tabs.create", { url: "https://shop.example.com/make", sessionId: "s_1", sessionTitle: "t" }) as { tab: { tabKey: string } };
+    // Attached, as Winter is while it waits for a download: the tab's Page.downloadWillBegin reaches the extension.
+    await c.handle("debugger.attach", { tabKey: tab.tab.tabKey });
     return Number(tab.tab.tabKey);
   }
 
@@ -86,7 +88,7 @@ describe("downloads (a file the page makes itself)", () => {
     chrome.grant("downloads");
     const tabId = await armedTab();
     await c.handle("downloads.arm", { tabKey: String(tabId), subdir: "Winter/abc123", until: Date.now() + 60_000, maxBytes: 1000 });
-    const id = await chrome.pageDownload({ url: "blob:https://shop.example.com/7f1c", name: "made.txt", bytes: 5, downloadsDir: "/Users/u/Downloads", mime: "text/plain" });
+    const id = await chrome.pageDownload({ url: "blob:https://shop.example.com/7f1c", name: "made.txt", bytes: 5, downloadsDir: "/Users/u/Downloads", mime: "text/plain", fromTab: tabId });
     expect(chrome.suggested.get(id)).toBe("Winter/abc123/made.txt");
     const reports = notes.filter((n) => n.method === "download").map((n) => n.params);
     expect(reports).toEqual([
@@ -107,17 +109,32 @@ describe("downloads (a file the page makes itself)", () => {
     expect(chrome.suggested.get(other)).toBeUndefined();
     const old = await chrome.pageDownload({ url: "blob:https://shop.example.com/1", name: "old.txt", bytes: 1, downloadsDir: "/d", startTime: Date.now() - 60_000 });
     expect(chrome.suggested.get(old)).toBeUndefined();
-    const big = await chrome.pageDownload({ url: "blob:https://shop.example.com/2", name: "big.bin", bytes: 50, downloadsDir: "/d" });
+    const big = await chrome.pageDownload({ url: "blob:https://shop.example.com/2", name: "big.bin", bytes: 50, downloadsDir: "/d", fromTab: tabId });
     expect(chrome.cancelled).toEqual([big]);
     expect(notes.filter((n) => n.method === "download").map((n) => (n.params.download as { state: string }).state)).toEqual(["failed"]);
     expect(chrome.suggested.get(big)).toBeUndefined();
+  });
+
+  test("only the ARMED TAB's own download: the user's download from another tab of the same site is never taken", async () => {
+    chrome.grant("downloads");
+    const tabId = await armedTab();
+    const userTab = chrome.addTab({ windowId: 1, url: "https://shop.example.com/docs", title: "Docs" });
+    await c.handle("downloads.arm", { tabKey: String(tabId), subdir: "Winter/abc123", until: Date.now() + 60_000, maxBytes: 1_000 });
+    // The user's own PDF from the same site, in their own tab (no downloadWillBegin from the armed tab): left alone.
+    const theirs = await chrome.pageDownload({ url: "https://shop.example.com/report.pdf", referrer: "https://shop.example.com/docs", name: "report.pdf", bytes: 5, downloadsDir: "/d", holdMs: () => clock.advance(3_000) });
+    expect(chrome.suggested.get(theirs)).toBeUndefined();
+    expect(notes.filter((n) => n.method === "download")).toEqual([]);
+    void userTab;
+    // The armed tab's own, its word coming AFTER the browser's item: held, then taken.
+    const ours = await chrome.pageDownload({ url: "blob:https://shop.example.com/abc", name: "export.csv", bytes: 5, downloadsDir: "/d", fromTab: tabId, willBegin: "after" });
+    expect(chrome.suggested.get(ours)).toBe("Winter/abc123/export.csv");
   });
 
   test("a running download's bytes are reported as progress while they grow (onChanged carries none)", async () => {
     chrome.grant("downloads");
     const tabId = await armedTab();
     await c.handle("downloads.arm", { tabKey: String(tabId), subdir: "Winter/abc123", until: Date.now() + 600_000, maxBytes: 1_000_000 });
-    const id = await chrome.pageDownload({ url: "blob:https://shop.example.com/slow", name: "slow.bin", bytes: 900_000, downloadsDir: "/d", complete: false });
+    const id = await chrome.pageDownload({ url: "blob:https://shop.example.com/slow", name: "slow.bin", bytes: 900_000, downloadsDir: "/d", complete: false, fromTab: tabId });
     chrome.downloadProgress(id, 100_000);
     await clock.advance(2_000);
     chrome.downloadProgress(id, 400_000);
@@ -139,7 +156,7 @@ describe("downloads (a file the page makes itself)", () => {
       .toEqual({ code: "not_allowed", data: { permission: "downloads" } });
     chrome.grant("downloads");
     await c.handle("downloads.arm", { tabKey: String(tabId), subdir: "Winter/def456", until: Date.now() + 60_000, maxBytes: 100 });
-    const id = await chrome.pageDownload({ url: "blob:https://shop.example.com/9", name: "again.txt", bytes: 3, downloadsDir: "/d" });
+    const id = await chrome.pageDownload({ url: "blob:https://shop.example.com/9", name: "again.txt", bytes: 3, downloadsDir: "/d", fromTab: tabId });
     expect(chrome.suggested.get(id)).toBe("Winter/def456/again.txt");
   });
 
@@ -148,12 +165,12 @@ describe("downloads (a file the page makes itself)", () => {
     const tabId = await armedTab();
     await c.handle("downloads.arm", { tabKey: String(tabId), subdir: "Winter/abc123", until: Date.now() + 1_000, maxBytes: 10 });
     await clock.advance(1_001);
-    const late = await chrome.pageDownload({ url: "blob:https://shop.example.com/3", name: "late.txt", bytes: 1, downloadsDir: "/d" });
+    const late = await chrome.pageDownload({ url: "blob:https://shop.example.com/3", name: "late.txt", bytes: 1, downloadsDir: "/d", fromTab: tabId });
     expect(chrome.suggested.get(late)).toBeUndefined();
     await c.handle("downloads.arm", { tabKey: String(tabId), subdir: "Winter/abc123", until: Date.now() + 60_000, maxBytes: 10 });
     await c.releaseAll();
     await flush();
-    const after = await chrome.pageDownload({ url: "blob:https://shop.example.com/4", name: "after.txt", bytes: 1, downloadsDir: "/d" });
+    const after = await chrome.pageDownload({ url: "blob:https://shop.example.com/4", name: "after.txt", bytes: 1, downloadsDir: "/d", fromTab: tabId });
     expect(chrome.suggested.get(after)).toBeUndefined();
   });
 });

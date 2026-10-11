@@ -442,17 +442,31 @@ export class FakeChrome implements ChromeApi {
 
   /** A page starts a download (the browser's own): created, named (the listeners' suggestion), saved under
    *  `downloadsDir`, completed. Returns its id. */
-  async pageDownload(o: { url: string; referrer?: string; name: string; bytes: number; downloadsDir: string; mime?: string; startTime?: number; complete?: boolean }): Promise<number> {
+  /**
+   * A page starts a download (the browser's own): created, named (the listeners' suggestion — at once, or later when a
+   * listener answers asynchronously), saved under `downloadsDir`, completed. With `fromTab`, the tab's debugger session
+   * says `Page.downloadWillBegin` for it — `willBegin` "before" (the default) or "after" the browser's item. Returns its id.
+   */
+  async pageDownload(o: {
+    url: string; referrer?: string; name: string; bytes: number; downloadsDir: string; mime?: string; startTime?: number; complete?: boolean;
+    fromTab?: number; willBegin?: "before" | "after"; holdMs?: () => Promise<void>;
+  }): Promise<number> {
     const id = this.nextDownload++;
     const item: ChromeDownloadItem = {
       id, url: o.url, ...(o.referrer === undefined ? {} : { referrer: o.referrer }), filename: `${o.downloadsDir}/${o.name}`,
       ...(o.mime === undefined ? {} : { mime: o.mime }), startTime: new Date(o.startTime ?? Date.now()).toISOString(), state: "in_progress",
       totalBytes: o.bytes, fileSize: 0, bytesReceived: 0,
     };
+    const willBegin = (): void => { if (o.fromTab !== undefined) this.emitCdp(o.fromTab, "Page.downloadWillBegin", { frameId: "F", guid: `g${id}`, url: o.url, suggestedFilename: o.name }); };
+    if ((o.willBegin ?? "before") === "before") willBegin();
     this.downloadItems.set(id, item);
     for (const l of this.downloadsOnCreated.listeners) l({ ...item });
     let name: string | undefined;
-    for (const l of this.downloadsOnDeterminingFilename.listeners) l({ ...item }, (sug) => { name = sug?.filename; });
+    let answered = false;
+    for (const l of this.downloadsOnDeterminingFilename.listeners) l({ ...item }, (sug) => { answered = true; name = sug?.filename; });
+    if (o.willBegin === "after") willBegin();
+    await flush();
+    if (!answered && o.holdMs !== undefined) await o.holdMs();
     this.suggested.set(id, name);
     item.filename = `${o.downloadsDir}/${name ?? o.name}`;
     if (o.complete === false) { await flush(); return id; }
