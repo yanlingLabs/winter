@@ -157,6 +157,7 @@ extension CUCore {
     func noteVisitUserMove() {
         // Only once the visit has arrived (its own switch there is not the user's doing).
         guard let v = visitLock.withLock({ openVisit.flatMap { $0.arrived != nil && !$0.closing ? $0 : nil } }) else { return }
+        if let close = visitCloseDispatch { close(v, .userMoved); return }
         Task { [weak self] in _ = await self?.closeVisit(v, reason: .userMoved) }
     }
 

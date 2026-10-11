@@ -3077,7 +3077,7 @@ extension CUCore {
 
     /// Rung 4: bring the app forward, act with the real pointer, then put the pointer and the user's app back.
     /// Every press, drag step and release is hit-tested by the caller's check.
-    private func inForeground<T>(_ t: CUTarget, _ body: () throws -> T) throws -> T {
+    func inForeground<T>(_ t: CUTarget, _ body: () throws -> T) throws -> T {
         // Bringing an app forward whose window is on ANOTHER desktop takes the user there: never without their
         // say for a desktop visit (user ruling 2026-10-10) — not with `allowForeground`, not for a held app.
         // Inside a visit the window is on screen already.

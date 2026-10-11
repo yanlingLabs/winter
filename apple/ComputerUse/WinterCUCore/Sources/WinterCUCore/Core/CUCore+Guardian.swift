@@ -415,7 +415,9 @@ extension CUCore {
 
     /// Runs a restore inline in tests (synchronous), else off the main queue so the observer never blocks.
     private func dispatchRestore(thief: pid_t, repeatOffender: Bool, cause: String) {
-        if guardianRestoreSync {
+        if let schedule = guardianRestoreDispatch {
+            schedule { [weak self] in self?.guardianRestore(thief: thief, repeatOffender: repeatOffender, cause: cause) }
+        } else if guardianRestoreSync {
             guardianRestore(thief: thief, repeatOffender: repeatOffender, cause: cause)
         } else {
             DispatchQueue.global(qos: .userInitiated).async { [self] in

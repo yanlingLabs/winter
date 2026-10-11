@@ -584,6 +584,16 @@ public final class CUCore: @unchecked Sendable {
     var guardianLiveTapEnabled = true
     /// Whether the guardian's restore runs inline (tests, synchronous) rather than dispatched off-main.
     var guardianRestoreSync = false
+    /// Where the guardian's restore is dispatched, when a test runs it on its own schedule (the model-based test: off
+    /// the observer, as live, but in simulated time). Nil: `guardianRestoreSync` decides.
+    var guardianRestoreDispatch: ((@escaping () -> Void) -> Void)?
+    /// Closes a visit the one rule found the user left by themselves (`noteVisitUserMove`); a test may close it on its own
+    /// schedule (the model-based test, in simulated time). Nil: an async close.
+    var visitCloseDispatch: ((CUOpenVisit, VisitCloseReason) -> Void)?
+    /// Schedules the act's late check (300 ms on); a test may run it on its own clock.
+    var lateCheckSchedule: (Double, @escaping () -> Void) -> Void = { ms, work in
+        DispatchQueue.global().asyncAfter(deadline: .now() + ms / 1000, execute: work)
+    }
     /// How long a press the app answered with an error is watched for its effect (a new window, a value, the
     /// focus). 0 in test cores (one read).
     var pressSettleMs: Double = 500

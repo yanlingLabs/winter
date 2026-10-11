@@ -81,7 +81,7 @@ extension CUCore {
             }
             t.addViewNote(viewMoved(before, after, t, route: route, late: false))
         } else if userViewLateCheck {
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            lateCheckSchedule(300) { [weak self] in
                 self?.lateCheck(before, t, seq: seq, route: route, since: since)
             }
         }
