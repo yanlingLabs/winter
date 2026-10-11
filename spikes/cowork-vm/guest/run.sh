@@ -36,11 +36,48 @@ pidns=$(readlink /proc/self/ns/pid)
 mountns=$(readlink /proc/self/ns/mnt)
 status=0
 . "$here/denials.sh"
+json_string() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+option_array() {
+    printf '%s' "$1" | awk -F, 'BEGIN {printf "["} NF && length($0) {for(i=1;i<=NF;i++) printf "%s\"%s\"", i==1?"":",",$i} END {printf "]"}'
+}
+guest_writable_view() {
+    share=$1; target=/workspace/$share
+    remount_code=0
+    mount -o remount,bind,rw "$target" >"$control/$share-remount-out" 2>"$control/$share-remount-error" || remount_code=$?
+    info=$(awk -v target="$target" '$5==target {line=$0} END {print line}' /proc/self/mountinfo)
+    mount_options=$(printf '%s\n' "$info" | awk '{print $6}')
+    filesystem=$(printf '%s\n' "$info" | awk '{for(i=7;i<=NF;i++) if($i=="-") {print $(i+1); exit}}')
+    super_options=$(printf '%s\n' "$info" | awk '{for(i=7;i<=NF;i++) if($i=="-") {print $(i+3); exit}}')
+    verified=false
+    if [ "$remount_code" = 0 ] && [ "$filesystem" = virtiofs ]; then
+        case ",$mount_options," in *,rw,*) case ",$mount_options," in *,ro,*) :;; *)
+            case ",$super_options," in *,rw,*) case ",$super_options," in *,ro,*) :;; *) verified=true;; esac;; esac
+        esac;; esac
+    fi
+    failure=NONE
+    [ "$remount_code" = 0 ] || failure=$(failure_class "$control/$share-remount-error")
+    diagnostic=$(head -c 1024 "$control/$share-remount-error" | tr '\n\r\t' '   ')
+    result=unsupported; [ "$verified" != true ] || result=pass
+    case "$share" in host-ro) record=host_ro_supervisor_guest_rw_view;; host-rw) record=host_rw_supervisor_guest_rw_view;; esac
+    printf '{"kind":"check","id":"%s","status":"%s","detail":"guest_writable_virtiofs_view_required_for_vz_boundary_attribution","guestMount":{"path":"%s","method":"remount_bind","filesystem":%s,"mountOptions":%s,"superblockOptions":%s,"guestWritableMountVerified":%s,"mountInfo":%s,"remountExitCode":%s,"failureClass":"%s","failureDiagnostic":%s}}\n' "$record" "$result" "$target" "$(json_string "$filesystem")" "$(option_array "$mount_options")" "$(option_array "$super_options")" "$verified" "$(json_string "$info")" "$remount_code" "$failure" "$(json_string "$diagnostic")"
+    [ "$verified" = true ]
+}
+raw_present=false
+if [ -e /run/virtiofs ] || [ -L /run/virtiofs ]; then raw_present=true; fi
+printf '{"kind":"observation","id":"supervisor_raw_virtiofs","path":"/run/virtiofs","present":%s,"required":false,"detail":"supervisor_namespace_observation_not_tool_enforcement"}\n' "$raw_present"
+host_views_ready=true
+guest_writable_view host-ro || { host_views_ready=false; status=77; }
+guest_writable_view host-rw || { host_views_ready=false; status=77; }
 for kind in instructions memory; do
     case "$kind" in instructions) suffix=instructions/WINTER.md; sentinel=host-shared-instruction;; memory) suffix=memory/seed.txt; sentinel=host-shared-memory;; esac
     rofile=/workspace/host-ro/$suffix
     rwfile=/workspace/host-rw/$suffix
     [ "$(cat "$rofile")" = "$sentinel" ] && [ "$(cat "$rwfile")" = "$sentinel" ] || unsupported shared_sentinel_missing_or_invalid
+    if [ "$host_views_ready" != true ]; then
+        printf '{"kind":"check","id":"host_rw_supervisor_%s_writable","status":"unsupported","detail":"guest_writable_mount_not_established"}\n' "$kind"
+        printf '{"kind":"check","id":"host_ro_supervisor_%s_denied","status":"unsupported","boundary":"unproven","detail":"guest_writable_mount_not_established_no_vz_hostro_claim"}\n' "$kind"
+        continue
+    fi
     positive_code=0
     sh -c 'printf probe >> "$1"' sh "$rwfile" 2>"$control/host-rw-error" || positive_code=$?
     if [ "$positive_code" = 0 ]; then
@@ -56,7 +93,8 @@ for kind in instructions memory; do
     [ "$positive_code" != 0 ] || positive_passed=true
     if [ "$positive_passed" = true ] && [ "$actual_code" != 0 ]; then case "$actual_class" in EACCES|EROFS|EPERM) result=pass;; esac; fi
     [ "$result" != fail ] || status=1
-    printf '{"kind":"check","id":"host_ro_supervisor_%s_denied","status":"%s","denial":{"exitCode":%s,"failureClass":"%s","expectedFailureClasses":["EACCES","EROFS","EPERM"],"positiveControlPassed":%s,"positiveControlExitCode":%s}}\n' "$kind" "$result" "$actual_code" "$actual_class" "$positive_passed" "$positive_code"
+    boundary=unproven; [ "$result" != pass ] || boundary=vz_host_readonly
+    printf '{"kind":"check","id":"host_ro_supervisor_%s_denied","status":"%s","boundary":"%s","denial":{"exitCode":%s,"failureClass":"%s","expectedFailureClasses":["EACCES","EROFS","EPERM"],"positiveControlPassed":%s,"positiveControlExitCode":%s}}\n' "$kind" "$result" "$boundary" "$actual_code" "$actual_class" "$positive_passed" "$positive_code"
 done
 run_view() {
     policy=$1; uid=$2

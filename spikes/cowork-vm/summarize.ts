@@ -4,9 +4,9 @@ import { memoryObservation } from "./evidence";
 
 const fixture = process.argv[2], output = process.argv[3];
 if (!fixture || !output) throw new Error("usage: bun summarize.ts <fixture> <summary.json>");
-const phases = ["prepare", "smoke", "resume", "direct", "memory", "memory-compact"];
-const reports = phases.map(phase => JSON.parse(readFileSync(join(fixture, `${phase}-report.json`), "utf8")));
 const config = JSON.parse(readFileSync(join(fixture, "config.json"), "utf8"));
+const phases: string[] = config.probePhases ?? ["prepare", "smoke", "resume", "direct", "memory", "memory-compact"];
+const reports = phases.map(phase => JSON.parse(readFileSync(join(fixture, `${phase}-report.json`), "utf8")));
 function categoryExcerpt(sample: any) {
   const footprint = String(sample.categories?.footprintCategories ?? "").split("\n");
   const vmmap = String(sample.categories?.vmmapSummary ?? "").split("\n");
@@ -23,6 +23,7 @@ const summary = {
   scope: "offline compiled-Bun/Swift embedding and disposable guest fixtures",
   gate1Passed: false,
   productionCoworkImplemented: false,
+  executedPhases: phases,
   measurementConditions: { nativeBuild: "Swift debug", hostCache: "warm", guestExecution: "one VM at a time, sequential tool views" },
   inputs: { containerizationRevision: config.containerizationRevision, initImage: config.initImage, rootImage: config.rootImage, kernelArchive: config.kernelArchive, payloadDigests: config.payloadDigests },
   phases: reports.map(report => {
@@ -34,6 +35,8 @@ const summary = {
       network: report.phase === "prepare" ? "public host provisioning" : "no guest NIC",
       stop: report.stop === undefined ? undefined : { stopped: report.stop.stopped, vzStoppedObserved: report.stop.vzStoppedObserved, flushSucceeded: report.stop.flushSucceeded },
       confinementViews: report.confinementRecords?.filter((row: any) => row.kind === "summary"),
+      hostReadOnlyEvidence: report.confinementRecords?.filter((row: any) => row.guestMount || row.boundary === "vz_host_readonly" || /^host_rw_supervisor_(instructions|memory)_writable$/.test(row.id) || row.id === "supervisor_raw_virtiofs"),
+      hostProtectedFilesUnchanged: report.phase === "smoke" ? report.checks.some((row: any) => row.name === "host-backed-protected-state") : undefined,
       directViews: report.directRecords?.filter((row: any) => row.kind === "summary"),
       denialClasses: report.confinementRecords ? Object.fromEntries(["EROFS", "EACCES", "EPERM", "ENOENT", "EXDEV", "EBUSY"].map(failureClass => [failureClass, report.confinementRecords.filter((row: any) => row.denial?.failureClass === failureClass).length])) : undefined,
       builtSharePolicy: report.checks.find((row: any) => row.name === "guest-ready")?.detail?.shares?.map(({ guestPath, readOnly }: any) => ({ guestPath, readOnly })),
@@ -50,7 +53,7 @@ const summary = {
     "Tool identities exercised sequentially; no concurrent Project conversation or multiple-VM claim.",
     "Host-backed owner-only source fixture; mixed ownership, ACLs, TCC and revocation untested.",
     "No guest NIC is not a validated outbound network enforcement boundary.",
-    "Balloon guest compliance and host footprint are distinct; tested memory return was not demonstrated.",
+    phases.includes("memory") ? "Balloon guest compliance and host footprint are distinct; tested memory return was not demonstrated." : "Memory phases were not rerun; prior memory evidence remains separate.",
     "Other host applications/VMs and compression/swap were present; not a controlled system-wide memory benchmark.",
     "Ad-hoc C ABI/FFI probe is not production Node-API/signing/daemon integration.",
   ],

@@ -28,11 +28,12 @@ guest or demonstrate SDK conversation/subagent restoration.
   Only newly created temporary fixture folders/disks were attached. No live
   Winter home, app/daemon, Keychain or real user source folder was used.
 
-The [reviewed-run JSON evidence](../../spikes/cowork-vm/results/2026-10-11-reviewed-offline-probe.json)
-is derived from the actual per-phase reports, which remain in the local fixture
+The [full reviewed-run JSON evidence](../../spikes/cowork-vm/results/2026-10-11-reviewed-offline-probe.json)
+and later [targeted host-enforcement evidence](../../spikes/cowork-vm/results/2026-10-11-host-enforcement-probe.json)
+are derived from the actual per-phase reports, which remain in the local fixture
 named by the runner. No large VM images or build outputs are checked in.
 
-## Observed behavior
+## Full reviewed-run observations
 
 | Check | Observation | Limit |
 | --- | --- | --- |
@@ -58,7 +59,7 @@ The workload touched 384 MiB of anonymous guest pages, freed them while its proc
 stayed alive, requested a balloon target, then deflated and successfully allocated
 again. Both plain and compact-before-balloon conditions ran successfully.
 
-In the final plain condition, the candidate owning Apple service's physical
+In the full reviewed-run plain condition, the candidate owning Apple service's physical
 footprint was about 121 MB initially, 493 MB after allocation and 493 MB after
 free; it stayed at about 494 MB throughout four balloon samples. In the compact
 condition, footprint was 508 MB after free and about 508–509 MB while inflated
@@ -105,8 +106,11 @@ run supersedes those checks:
 - Both suites require named checks, complete counts and trusted post-checks.
   The new checks demonstrated 130 classified shell denials with successful
   positive controls, including supervisor checks, plus 12 measured syscall denials.
-- Intentionally host-writable files are protected once by the VZ RO export and
-  separately by a tool RO bind over a proven writable export. The same separate
+- Intentionally host-writable files were tested through guest RO binds over a
+  configured VZ RO export and a configured writable export. This run did not
+  remove Containerization's own guest RO bind, so it did not independently test
+  VZ's host-side RO enforcement; the configured flag alone does not establish it.
+  The same separate
   host-memory file is writable in auto and denied in plan. Host sentinel bytes
   and modes were independently checked after the guest views ran.
 - The actual built VZ directory-sharing graph is verified against the four
@@ -122,6 +126,36 @@ EXDEV wording; the second caught a validator ID shared by a positive auto write
 and a plan denial. Neither was counted as a pass. The final fresh pipeline
 passed, every guest reported a flushed stop, its controller/backing candidates
 were absent afterward, and no fixture ownership claim remained.
+
+## Host-side read-only enforcement follow-up
+
+A second review identified that Containerization supplies its own guest read-only
+bind over a configured VZ RO export. The earlier supervisor denial therefore
+established guest enforcement, not independent VZ enforcement. The targeted
+fresh-fixture run above removes that ambiguity:
+
+- The trusted supervisor successfully ran the same bind-remount-to-rw sequence
+  on `/workspace/host-ro` and `/workspace/host-rw`. Each raw mountinfo record
+  identifies virtiofs, per-mount `rw,relatime` and superblock `rw`. The host
+  validator independently parses those records and refuses missing or RO layers.
+- After that, append attempts to both guidance and memory files on the VZ RO
+  export failed with EACCES. Matching writes on the VZ RW export succeeded and
+  restored the exact original bytes. Independent Mac checks found unchanged
+  protected sentinel bytes and modes. This demonstrates host-side enforcement
+  for the tested append operations in this configuration, not every filesystem
+  operation or a complete security audit.
+- `/run/virtiofs` was absent even in the container supervisor's namespace. That
+  is now a layout observation, not a tool-isolation assertion. Removing that
+  assertion from each view leaves 77 + 77 + 85 = 239 confinement checks; all
+  passed, together with 64 direct-view checks and supervisor/host checks.
+- The scoped run also verified cold-file persistence and graceful flush/stop.
+  Its three prepared boots took approximately 299–333 ms, with the same debug,
+  warm-cache and sequential limitations. Recorded processes were absent and
+  fixture claims released afterward. Memory phases were not repeated.
+
+The native lifecycle documentation also records that `termination_uncertain`
+retains the closed device-operation gate: stats/balloon stay refused. This is
+not a claim that the adapter implements a complete recovery gate for all execs.
 
 ## Validation and remaining scope
 

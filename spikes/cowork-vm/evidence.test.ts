@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { validateConfinement, validateDirect, validateDenial, memoryObservation } from "./evidence";
+import { validateConfinement, validateDirect, validateDenial, validateGuestWritableMount, memoryObservation } from "./evidence";
 
 const rows = (await Bun.file(new URL("./testdata/confinement.ndjson", import.meta.url)).text()).trim().split("\n").map(line => JSON.parse(line));
 const result = (records: unknown[]) => ({ exitCode: 0, stdout: records.map(row => JSON.stringify(row)).join("\n"), stderr: "", stdoutTruncated: false, stderrTruncated: false });
@@ -71,4 +71,28 @@ test("direct suite distinguishes auto positive writes from plan denials", async 
   expect(() => validateDirect(result(missing))).toThrow();
   const wrongReason = directRows.map(row => row.id === "plan_create" ? { ...row, denial: { ...row.denial, failureClass: "ENOENT" } } : row);
   expect(() => validateDirect(result(wrongReason))).toThrow();
+});
+
+test("host RO attribution requires raw mountinfo to show both guest layers writable", () => {
+  const path = "/workspace/host-ro";
+  const guestMount = { path, method: "remount_bind", remountExitCode: 0, filesystem: "virtiofs", guestWritableMountVerified: true, mountOptions: ["rw", "relatime"], superblockOptions: ["rw"], mountInfo: `12 3 0:9 /fixture ${path} rw,relatime - virtiofs virtiofs rw` };
+  const row = { status: "pass", guestMount };
+  expect(() => validateGuestWritableMount(row, path)).not.toThrow();
+  for (const mountInfo of [
+    `12 3 0:9 /fixture ${path} ro,relatime - virtiofs virtiofs rw`,
+    `12 3 0:9 /fixture ${path} rw,relatime - virtiofs virtiofs ro`,
+    `12 3 0:9 /fixture /another-source rw,relatime - virtiofs virtiofs rw`,
+    `12 3 0:9 /fixture ${path} rw,relatime - ext4 /dev/vda rw`,
+    "",
+  ]) expect(() => validateGuestWritableMount({ ...row, guestMount: { ...guestMount, mountInfo } }, path)).toThrow();
+  expect(() => validateGuestWritableMount({ ...row, guestMount: { ...guestMount, remountExitCode: 1 } }, path)).toThrow();
+  expect(() => validateGuestWritableMount({ ...row, guestMount: { ...guestMount, mountOptions: ["ro"] } }, path)).toThrow();
+});
+
+test("confinement cannot attribute a host denial without both writable-view prerequisites", () => {
+  for (const id of ["host_ro_supervisor_guest_rw_view", "host_rw_supervisor_guest_rw_view"]) {
+    expect(() => validateConfinement(result(rows.filter(row => row.id !== id)))).toThrow();
+    const guestReadOnly = rows.map(row => row.id !== id ? row : { ...row, guestMount: { ...row.guestMount, mountInfo: row.guestMount.mountInfo.replace(" rw,", " ro,") } });
+    expect(() => validateConfinement(result(guestReadOnly))).toThrow();
+  }
 });

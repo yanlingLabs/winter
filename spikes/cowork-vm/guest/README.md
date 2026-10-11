@@ -121,11 +121,24 @@ or EPERM. The host independently enforces the per-ID class inventories.
 Additional host shares at supervisor-only `/workspace/host-ro` and
 `/workspace/host-rw` expose guidance and memory sentinels. Tools receive only
 narrowed read-only binds under `/workspace/.winter/host-{ro,rw}`; the raw supervisor
-paths and `/run/virtiofs` are omitted. Guidance/memory reads and direct, computed,
-symlink, unlink, rename, chmod and create denials test VZ-read-only shares and
-read-only binds of writable shares. The trusted driver first proves the original
+share paths are omitted. Guidance/memory reads and direct, computed,
+symlink, unlink, rename, chmod and create denials test guest read-only binds over
+configured RO and RW exports. The trusted driver separately proves the original
 RW sentinels writable by append/restore and confirms RO rejection using the same
-operation shape. A separate `host-rw/writable-memory/seed.txt` is writable under
+operation shape only after removing the supervisor's guest bind-RO flag on both
+shares. `host_ro_supervisor_guest_rw_view` and `host_rw_supervisor_guest_rw_view`
+require successful `mount -o remount,bind,rw`, a matched `/proc/self/mountinfo`
+line whose filesystem is `virtiofs`, and `rw` without `ro` in both mount and
+superblock option sets. Records include the actual mountinfo line, parsed options,
+remount exit code and bounded failure diagnostic/class; the host independently
+parses the raw line. Failure to establish either writable guest view is
+unsupported/unproven and suppresses any VZ host-read-only pass. The tool view is
+separately rebound read-only regardless of this privileged supervisor operation.
+No fresh-mount fallback is guessed: one would require validating the actual
+virtiofs tag/root and making the remounted share available only to this trusted
+fixture supervisor. `/run/virtiofs` presence is recorded once in the supervisor
+namespace as an observation, not a tool-confinement assertion.
+A separate `host-rw/writable-memory/seed.txt` is writable under
 auto and read-only under plan. Native/harness provisioning must stage all three
 subtrees, preserve exact newline-terminated sentinels, and verify host bytes.
 Capability checks include effective, permitted, inheritable, ambient and bounding

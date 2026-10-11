@@ -16,6 +16,9 @@ swift test --package-path spikes/cowork-vm/native --jobs 4
 
 # Explicit real-VM opt-in, using only freshly created temporary fixture files.
 bun run spikes/cowork-vm/run.ts --run-vm
+
+# Same fresh-fixture safety; confinement/share, cold persistence and direct checks only.
+bun run spikes/cowork-vm/run.ts --run-vm --confinement-only
 ```
 
 Requires Apple Silicon, macOS 26, Xcode/Swift 6.2+ and Bun. The first build fetches
@@ -49,9 +52,11 @@ Denied writes record a recognized failure class and a successful positive contro
 using the same command shape against writable scratch. Missing commands, syntax
 errors and missing target files do not establish a read-only boundary. Both the
 general and direct-share suites validate named checks and summary counts. Separate
-host-backed guidance/memory fixtures exercise a host-read-only export and a
-writable export narrowed read-only inside each tool view; the built VZ share
-configuration is checked before startup. Guest UID/GID permissions do not provide
+host-backed guidance/memory fixtures exercise guest RO binds over configured
+host-read-only and writable exports; the built VZ share configuration is checked
+before startup. A separate trusted-supervisor check must remove guest bind RO
+and prove both mountinfo option sets writable before attributing a denial to
+VZ host-side enforcement. Guest UID/GID permissions do not provide
 per-conversation access isolation on these host shares.
 
 A separate owner-only source fixture keeps normal host modes (directory 0755,
@@ -93,7 +98,8 @@ still reuses the fixture disk across phases under that same orchestrator.
 
 Use `bun run spikes/cowork-vm/summarize.ts <fixture> <summary.json>` to produce a
 shareable summary without host paths, unrelated process details or process IDs.
-The checked-in [reviewed summary](results/2026-10-11-reviewed-offline-probe.json) and
+The checked-in [full-run summary](results/2026-10-11-reviewed-offline-probe.json),
+[targeted host-enforcement summary](results/2026-10-11-host-enforcement-probe.json) and
 [measurement record](../../docs/research/2026-10-11-cowork-gate1-results.md) separate
 observed success from the unresolved gate requirements.
 

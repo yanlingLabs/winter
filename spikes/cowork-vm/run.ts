@@ -5,8 +5,9 @@ import pins from "./pins.json";
 import { acquireOrchestrator } from "./claims";
 import { build, checked, out, root, sha256 } from "./build";
 
-if (process.argv.slice(2).some(arg => arg !== "--run-vm")) throw new Error("Only --run-vm is supported; old fixtures are retained for inspection, never restaged.");
+if (process.argv.slice(2).some(arg => !["--run-vm", "--confinement-only"].includes(arg))) throw new Error("Only --run-vm and --confinement-only are supported; old fixtures are retained for inspection, never restaged.");
 if (!process.argv.includes("--run-vm")) throw new Error("Explicit opt-in required: bun run spikes/cowork-vm/run.ts --run-vm");
+const probePhases = process.argv.includes("--confinement-only") ? ["prepare", "smoke", "resume", "direct"] : ["prepare", "smoke", "resume", "direct", "memory", "memory-compact"];
 const artifacts = await build();
 const space = statfsSync(tmpdir());
 if (space.bavail * space.bsize < 8 * 1024 ** 3) throw new Error("less than 8 GiB available for disposable probe");
@@ -55,7 +56,7 @@ try {
     copyFileSync(from, join(fixture, "payload", name)); chmodSync(join(fixture, "payload", name), 0o555);
     payloadDigests[name] = await sha256(join(fixture, "payload", name));
   }
-  writeFileSync(join(fixture, "config.json"), JSON.stringify({ ...pins, payloadDigests, createdAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+  writeFileSync(join(fixture, "config.json"), JSON.stringify({ ...pins, probePhases, payloadDigests, createdAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
   writeFileSync(join(out, "latest-fixture.txt"), fixture + "\n");
   console.log(`Disposable fixture: ${fixture}`);
   const env = {
@@ -63,7 +64,7 @@ try {
     WINTER_COWORK_PROBE_CLAIM: orchestration.token, WINTER_HOME: join(fixture, "home"), WINTER_COWORK_VM_TESTS: "1", WINTER_LOGIN_SHELL_PATH: "off",
   };
   // Deliberately separate processes: smoke->resume proves more than an in-memory restart.
-  for (const phase of ["prepare", "smoke", "resume", "direct", "memory", "memory-compact"]) {
+  for (const phase of probePhases) {
     launched = true;
     await checked(artifacts.binary, ["--library", artifacts.library, "--fixture", fixture, "--phase", phase], { env });
   }

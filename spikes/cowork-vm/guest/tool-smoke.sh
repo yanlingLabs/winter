@@ -84,7 +84,6 @@ for backing in host-ro host-rw; do
 done
 check raw_host_ro_hidden test ! -e /workspace/host-ro
 check raw_host_rw_hidden test ! -e /workspace/host-rw
-check raw_virtiofs_hidden test ! -e /run/virtiofs
 check host_rw_writable_memory_read grep -q 'host-writable-memory\|tool-host-memory' /workspace/.winter/host-rw/writable-memory/seed.txt
 if [ "$policy" = auto ]; then
     check host_rw_writable_memory_write sh -c 'printf tool-host-memory > "$1"' sh /workspace/.winter/host-rw/writable-memory/seed.txt

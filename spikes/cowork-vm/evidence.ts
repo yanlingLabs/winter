@@ -1,7 +1,7 @@
 // Required security properties, independent of the fixture's claimed check count.
 const COMMON = ["identity", "group_identity", "nonroot", "pid_namespace", "mount_namespace", "no_new_privs", "zero_effective_caps", "zero_permitted_caps", "zero_inheritable_caps", "zero_ambient_caps", "zero_bounding_caps", "syscall_filter_installed", "control_view_hidden", "sdk_view_hidden", "supervisor_executable_hidden", "supervisor_process_hidden", "sanitized_environment", "inherited_fd_closed", "instructions_direct", "instructions_indirect", "instructions_chmod", "instructions_unlink", "instruction_parent_rename", "workspace_parent_rename", "control_direct", "sdk_metadata_direct", "instructions_symlink", "instructions_hardlink", "control_symlink", "instructions_replace", "instruction_alias_create", "root_write", "syscall_vsock", "syscall_mount", "syscall_ptrace", "syscall_unshare"];
 const AUTO = ["source_write", "memory_write", "source_instruction_alias", "repository_instruction_write"];
-const HOST_SHARED = ["raw_host_ro_hidden", "raw_host_rw_hidden", "raw_virtiofs_hidden", "host_rw_writable_memory_read", ...["host-ro", "host-rw"].flatMap(backing => ["instructions_read", "memory_read", "instructions_write", "instructions_indirect", "instructions_unlink", "instructions_chmod", "instructions_symlink_setup", "instructions_symlink", "instructions_parent_rename", "memory_write", "memory_rename", "memory_chmod", "memory_create"].map(id => `${backing}_${id}`))];
+const HOST_SHARED = ["raw_host_ro_hidden", "raw_host_rw_hidden", "host_rw_writable_memory_read", ...["host-ro", "host-rw"].flatMap(backing => ["instructions_read", "memory_read", "instructions_write", "instructions_indirect", "instructions_unlink", "instructions_chmod", "instructions_symlink_setup", "instructions_symlink", "instructions_parent_rename", "memory_write", "memory_rename", "memory_chmod", "memory_create"].map(id => `${backing}_${id}`))];
 const PLAN = ["source_read", "source_direct", "source_indirect", "source_symlink", "source_rename", "source_unlink", "source_create", "source_parent_rename", "source_chmod", "memory_direct", "memory_rename", "source_scratch_alias"];
 
 const DENIAL_IDS = new Set([
@@ -55,6 +55,20 @@ function requireView(lines: any[], policy: string, uid: number, ids: string[], s
   if (checks.some(row => row.status !== "pass") || present.size !== checks.length) throw new Error("invalid or duplicated check evidence");
   if (summaries.length !== 1 || summaries[0].status !== "pass" || summaries[0].failures !== 0 || !(summaries[0].checks > 0) || summaries[0].checks !== checks.length) throw new Error(`missing successful ${policy}/${uid} tool summary`);
 }
+/** A configured VZ RO flag or a guest RO bind is not evidence of host enforcement. */
+export function validateGuestWritableMount(row: any, path: string) {
+  const mount = row.guestMount;
+  const fields = typeof mount?.mountInfo === "string" ? mount.mountInfo.trim().split(/\s+/) : [];
+  const separator = fields.indexOf("-");
+  const mountOptions = fields[5]?.split(",") ?? [];
+  const superblockOptions = separator >= 6 ? fields[separator + 3]?.split(",") ?? [] : [];
+  if (row.status !== "pass" || mount?.path !== path || mount?.method !== "remount_bind" || mount?.remountExitCode !== 0 ||
+      mount?.guestWritableMountVerified !== true || mount?.filesystem !== "virtiofs" || fields[4] !== path ||
+      separator < 6 || fields[separator + 1] !== "virtiofs" ||
+      !mountOptions.includes("rw") || mountOptions.includes("ro") || !superblockOptions.includes("rw") || superblockOptions.includes("ro") ||
+      JSON.stringify(mount.mountOptions) !== JSON.stringify(mountOptions) || JSON.stringify(mount.superblockOptions) !== JSON.stringify(superblockOptions))
+    throw new Error(`guest writable mount not demonstrated: ${path}`);
+}
 export function validateConfinement(result: Record<string, unknown>) {
   const lines = records(result);
   requireSuite(lines, "guest_suite");
@@ -71,7 +85,15 @@ export function validateConfinement(result: Record<string, unknown>) {
   for (const kind of ["instructions", "memory"]) {
     requireCheck(lines, `host_rw_supervisor_${kind}_writable`);
     requireCheck(lines, `host_ro_supervisor_${kind}_denied`);
+    if (lines.find(row => row.id === `host_ro_supervisor_${kind}_denied`)?.boundary !== "vz_host_readonly") throw new Error("host RO enforcement attribution missing");
   }
+  for (const [prefix, path] of [["host_ro", "/workspace/host-ro"], ["host_rw", "/workspace/host-rw"]]) {
+    const id = `${prefix}_supervisor_guest_rw_view`;
+    requireCheck(lines, id);
+    validateGuestWritableMount(lines.find(row => row.id === id), path!);
+  }
+  const rawLayout = lines.filter(row => row.kind === "observation" && row.id === "supervisor_raw_virtiofs");
+  if (rawLayout.length !== 1 || rawLayout[0].path !== "/run/virtiofs" || typeof rawLayout[0].present !== "boolean" || rawLayout[0].required !== false) throw new Error("missing supervisor layout observation");
   for (const uid of [10001, 10002]) requireCheck(lines, "direct_share_write", { uid });
   return lines;
 }

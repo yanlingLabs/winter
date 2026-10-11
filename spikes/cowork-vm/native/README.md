@@ -137,6 +137,9 @@ Stop closes device-operation admission and drains already queued stats/balloon
 work before shutdown. New stats/balloon calls during stop refuse. Only that
 narrow device queue is drained: a long exec never holds a global perform lock,
 so other exec/stat/balloon requests retain concurrency.
+After `termination_uncertain`, the retained guest keeps that device-operation
+gate closed: stats and balloon calls refuse rather than reopening admission.
+Its disk lease remains retained pending established termination/recovery.
 
 Production integration still needs a Node-API-versus-FFI decision, a wakeup/event
 channel, bounded create/stop/cancel semantics, task-scoped process cancellation

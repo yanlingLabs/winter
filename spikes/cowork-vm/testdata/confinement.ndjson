@@ -1,8 +1,11 @@
 {"kind":"observation","id":"host_source_identity_mapping","status":"unproven","detail":"disposable_host_prepared_world_writable_source_dac_only"}
+{"kind":"observation","id":"supervisor_raw_virtiofs","path":"/run/virtiofs","present":false,"required":false,"detail":"supervisor_namespace_observation_not_tool_enforcement"}
+{"kind":"check","id":"host_ro_supervisor_guest_rw_view","status":"pass","detail":"guest_writable_virtiofs_view_required_for_vz_boundary_attribution","guestMount":{"path":"/workspace/host-ro","method":"remount_bind","filesystem":"virtiofs","mountOptions":["rw","relatime"],"superblockOptions":["rw"],"guestWritableMountVerified":true,"mountInfo":"53 44 0:26 /3b64b879f495b61c84eddf157891ba99dc48 /workspace/host-ro rw,relatime - virtiofs virtiofs rw","remountExitCode":0,"failureClass":"NONE","failureDiagnostic":""}}
+{"kind":"check","id":"host_rw_supervisor_guest_rw_view","status":"pass","detail":"guest_writable_virtiofs_view_required_for_vz_boundary_attribution","guestMount":{"path":"/workspace/host-rw","method":"remount_bind","filesystem":"virtiofs","mountOptions":["rw","relatime"],"superblockOptions":["rw"],"guestWritableMountVerified":true,"mountInfo":"54 44 0:26 /79e3a817b3238b3fe21be0ed0ad2e02f6b6c /workspace/host-rw rw,relatime - virtiofs virtiofs rw","remountExitCode":0,"failureClass":"NONE","failureDiagnostic":""}}
 {"kind":"check","id":"host_rw_supervisor_instructions_writable","status":"pass","detail":"append_succeeded_and_sentinel_restored","exitCode":0}
-{"kind":"check","id":"host_ro_supervisor_instructions_denied","status":"pass","denial":{"exitCode":1,"failureClass":"EROFS","expectedFailureClasses":["EACCES","EROFS","EPERM"],"positiveControlPassed":true,"positiveControlExitCode":0}}
+{"kind":"check","id":"host_ro_supervisor_instructions_denied","status":"pass","boundary":"vz_host_readonly","denial":{"exitCode":1,"failureClass":"EACCES","expectedFailureClasses":["EACCES","EROFS","EPERM"],"positiveControlPassed":true,"positiveControlExitCode":0}}
 {"kind":"check","id":"host_rw_supervisor_memory_writable","status":"pass","detail":"append_succeeded_and_sentinel_restored","exitCode":0}
-{"kind":"check","id":"host_ro_supervisor_memory_denied","status":"pass","denial":{"exitCode":1,"failureClass":"EROFS","expectedFailureClasses":["EACCES","EROFS","EPERM"],"positiveControlPassed":true,"positiveControlExitCode":0}}
+{"kind":"check","id":"host_ro_supervisor_memory_denied","status":"pass","boundary":"vz_host_readonly","denial":{"exitCode":1,"failureClass":"EACCES","expectedFailureClasses":["EACCES","EROFS","EPERM"],"positiveControlPassed":true,"positiveControlExitCode":0}}
 {"kind":"check","policy":"auto","uid":10001,"id":"identity","status":"pass","detail":"observed"}
 {"kind":"check","policy":"auto","uid":10001,"id":"group_identity","status":"pass","detail":"observed"}
 {"kind":"check","policy":"auto","uid":10001,"id":"nonroot","status":"pass","detail":"observed"}
@@ -77,7 +80,6 @@
 {"kind":"check","policy":"auto","uid":10001,"id":"host-rw_memory_create","status":"pass","detail":"classified_denial_with_matching_positive_control","denial":{"exitCode":1,"failureClass":"EROFS","expectedFailureClasses":["EACCES","EROFS","EPERM"],"positiveControlPassed":true,"positiveControlExitCode":0}}
 {"kind":"check","policy":"auto","uid":10001,"id":"raw_host_ro_hidden","status":"pass","detail":"observed"}
 {"kind":"check","policy":"auto","uid":10001,"id":"raw_host_rw_hidden","status":"pass","detail":"observed"}
-{"kind":"check","policy":"auto","uid":10001,"id":"raw_virtiofs_hidden","status":"pass","detail":"observed"}
 {"kind":"check","policy":"auto","uid":10001,"id":"host_rw_writable_memory_read","status":"pass","detail":"observed"}
 {"kind":"check","policy":"auto","uid":10001,"id":"host_rw_writable_memory_write","status":"pass","detail":"observed"}
 {"kind":"observation","id":"syscall_landlock","policy":"auto","uid":10001,"result":-1,"errno":38}
@@ -87,7 +89,7 @@
 {"kind":"check","policy":"auto","uid":10001,"id":"source_symlink_setup","status":"pass","detail":"observed"}
 {"kind":"check","policy":"auto","uid":10001,"id":"source_instruction_alias","status":"pass","detail":"classified_denial_with_matching_positive_control","denial":{"exitCode":1,"failureClass":"EROFS","expectedFailureClasses":["EACCES","EROFS","EPERM"],"positiveControlPassed":true,"positiveControlExitCode":0}}
 {"kind":"check","policy":"auto","uid":10001,"id":"repository_instruction_write","status":"pass","detail":"observed"}
-{"kind":"summary","policy":"auto","uid":10001,"checks":78,"failures":0,"status":"pass"}
+{"kind":"summary","policy":"auto","uid":10001,"checks":77,"failures":0,"status":"pass"}
 {"kind":"check","policy":"auto","uid":10002,"id":"identity","status":"pass","detail":"observed"}
 {"kind":"check","policy":"auto","uid":10002,"id":"group_identity","status":"pass","detail":"observed"}
 {"kind":"check","policy":"auto","uid":10002,"id":"nonroot","status":"pass","detail":"observed"}
@@ -162,7 +164,6 @@
 {"kind":"check","policy":"auto","uid":10002,"id":"host-rw_memory_create","status":"pass","detail":"classified_denial_with_matching_positive_control","denial":{"exitCode":1,"failureClass":"EROFS","expectedFailureClasses":["EACCES","EROFS","EPERM"],"positiveControlPassed":true,"positiveControlExitCode":0}}
 {"kind":"check","policy":"auto","uid":10002,"id":"raw_host_ro_hidden","status":"pass","detail":"observed"}
 {"kind":"check","policy":"auto","uid":10002,"id":"raw_host_rw_hidden","status":"pass","detail":"observed"}
-{"kind":"check","policy":"auto","uid":10002,"id":"raw_virtiofs_hidden","status":"pass","detail":"observed"}
 {"kind":"check","policy":"auto","uid":10002,"id":"host_rw_writable_memory_read","status":"pass","detail":"observed"}
 {"kind":"check","policy":"auto","uid":10002,"id":"host_rw_writable_memory_write","status":"pass","detail":"observed"}
 {"kind":"observation","id":"syscall_landlock","policy":"auto","uid":10002,"result":-1,"errno":38}
@@ -172,7 +173,7 @@
 {"kind":"check","policy":"auto","uid":10002,"id":"source_symlink_setup","status":"pass","detail":"observed"}
 {"kind":"check","policy":"auto","uid":10002,"id":"source_instruction_alias","status":"pass","detail":"classified_denial_with_matching_positive_control","denial":{"exitCode":1,"failureClass":"EROFS","expectedFailureClasses":["EACCES","EROFS","EPERM"],"positiveControlPassed":true,"positiveControlExitCode":0}}
 {"kind":"check","policy":"auto","uid":10002,"id":"repository_instruction_write","status":"pass","detail":"observed"}
-{"kind":"summary","policy":"auto","uid":10002,"checks":78,"failures":0,"status":"pass"}
+{"kind":"summary","policy":"auto","uid":10002,"checks":77,"failures":0,"status":"pass"}
 {"kind":"check","policy":"plan","uid":10001,"id":"identity","status":"pass","detail":"observed"}
 {"kind":"check","policy":"plan","uid":10001,"id":"group_identity","status":"pass","detail":"observed"}
 {"kind":"check","policy":"plan","uid":10001,"id":"nonroot","status":"pass","detail":"observed"}
@@ -247,7 +248,6 @@
 {"kind":"check","policy":"plan","uid":10001,"id":"host-rw_memory_create","status":"pass","detail":"classified_denial_with_matching_positive_control","denial":{"exitCode":1,"failureClass":"EROFS","expectedFailureClasses":["EACCES","EROFS","EPERM"],"positiveControlPassed":true,"positiveControlExitCode":0}}
 {"kind":"check","policy":"plan","uid":10001,"id":"raw_host_ro_hidden","status":"pass","detail":"observed"}
 {"kind":"check","policy":"plan","uid":10001,"id":"raw_host_rw_hidden","status":"pass","detail":"observed"}
-{"kind":"check","policy":"plan","uid":10001,"id":"raw_virtiofs_hidden","status":"pass","detail":"observed"}
 {"kind":"check","policy":"plan","uid":10001,"id":"host_rw_writable_memory_read","status":"pass","detail":"observed"}
 {"kind":"check","policy":"plan","uid":10001,"id":"host_rw_writable_memory_plan_write","status":"pass","detail":"classified_denial_with_matching_positive_control","denial":{"exitCode":1,"failureClass":"EROFS","expectedFailureClasses":["EACCES","EROFS","EPERM"],"positiveControlPassed":true,"positiveControlExitCode":0}}
 {"kind":"observation","id":"syscall_landlock","policy":"plan","uid":10001,"result":-1,"errno":38}
@@ -265,7 +265,7 @@
 {"kind":"check","policy":"plan","uid":10001,"id":"memory_rename","status":"pass","detail":"classified_denial_with_matching_positive_control","denial":{"exitCode":1,"failureClass":"EROFS","expectedFailureClasses":["EBUSY","EACCES","EROFS","EPERM"],"positiveControlPassed":true,"positiveControlExitCode":0}}
 {"kind":"check","policy":"plan","uid":10001,"id":"plan_source_alias_setup","status":"pass","detail":"observed"}
 {"kind":"check","policy":"plan","uid":10001,"id":"source_scratch_alias","status":"pass","detail":"classified_denial_with_matching_positive_control","denial":{"exitCode":1,"failureClass":"EROFS","expectedFailureClasses":["EACCES","EROFS","EPERM"],"positiveControlPassed":true,"positiveControlExitCode":0}}
-{"kind":"summary","policy":"plan","uid":10001,"checks":86,"failures":0,"status":"pass"}
+{"kind":"summary","policy":"plan","uid":10001,"checks":85,"failures":0,"status":"pass"}
 {"kind":"check","id":"trusted_integrity","status":"pass","detail":"verified_after_tool_exit"}
 {"kind":"check","id":"host-ro_trusted_shared_integrity","status":"pass","detail":"host_must_verify_independently"}
 {"kind":"check","id":"host-rw_trusted_shared_integrity","status":"pass","detail":"host_must_verify_independently"}
