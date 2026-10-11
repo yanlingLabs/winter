@@ -60,4 +60,20 @@ final class GuardianRound10Tests: XCTestCase {
         sys.front = 1
         XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "they left it")
     }
+    /// Review of round 9, MEDIUM #4: only a LINK is rerouted to a background open — never an image's src or a web area's
+    /// own URL — and never a link to the same site as the page it is on (the app's own navigation).
+    func testOnlyALinkToAnotherSiteIsRerouted() {
+        let ax = FakeAX()
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: ax, sys: FakeSystem(),
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        let area = fakeElement(91_001), other = fakeElement(91_002), same = fakeElement(91_003), image = fakeElement(91_004)
+        ax.add(area, role: "AXWebArea", extra: ["AXURL": URL(string: "https://mail.example.com/inbox")! as CFURL])
+        for (e, role, url) in [(other, "AXLink", "https://news.example.org/a"), (same, "AXLink", "https://mail.example.com/inbox#msg"),
+                               (image, "AXImage", "https://cdn.example.org/x.png")] {
+            ax.add(e, role: role, extra: ["AXURL": URL(string: url)! as CFURL, kAXParentAttribute: area])
+        }
+        XCTAssertEqual(core.linkURL(other, ElementInfo(other, ax))?.host, "news.example.org")
+        XCTAssertNil(core.linkURL(same, ElementInfo(same, ax)), "the same site: the app's own navigation")
+        XCTAssertNil(core.linkURL(image, ElementInfo(image, ax)), "an image's src is no link")
+    }
 }

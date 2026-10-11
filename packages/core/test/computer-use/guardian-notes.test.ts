@@ -61,9 +61,11 @@ const text = (r: ScriptResult): string => r.content.map((c) => (c.type === "text
 /** The text OUTSIDE every screen-data fence. */
 const unfenced = (r: ScriptResult): string => text(r).replace(/<screen-data id="[0-9a-f]+">[\s\S]*?<\/screen-data id="[0-9a-f]+">/g, "");
 const count = (hay: string, needle: string): number => hay.split(needle).length - 1;
+/** The text INSIDE the screen-data fences. */
+const fenced = (r: ScriptResult): string => [...text(r).matchAll(/<screen-data id="[0-9a-f]+">([\s\S]*?)<\/screen-data id="[0-9a-f]+">/g)].map((m) => m[1]).join("\n");
 
 describe("ComputerV2: the Focus Guardian's notes on an act's result (helper 1.9.8)", () => {
-  macOnly("each note is a daemon line outside the fence, and the apps that came forward are counted in the metric", async () => {
+  macOnly("each note is a line inside the fence (it names apps by their own names), and the apps that came forward are counted in the metric", async () => {
     const w = world();
     let acts = 0;
     w.fake.handlers["target.act"] = () => {
@@ -74,8 +76,8 @@ describe("ComputerV2: the Focus Guardian's notes on an act's result (helper 1.9.
     };
     const r = await w.run("const notes = await apps.open('Notes')\nprint(await notes.state())\nawait notes.click(14)\nawait notes.click(14)");
     expect(r.isError).toBeFalsy();
-    const outside = unfenced(r);
-    expect(count(outside, "Mail came forward after your action and was sent back")).toBe(1);
+    expect(count(fenced(r), "Mail came forward after your action and was sent back")).toBe(1);
+    expect(count(unfenced(r), "Mail came forward after your action")).toBe(0);
     const metrics = readFileSync(join(w.home, "logs", "automation-metrics.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
     const clicks = metrics.filter((m) => m.primitive === "click");
     expect(clicks.length).toBe(2);
@@ -87,9 +89,9 @@ describe("ComputerV2: the Focus Guardian's notes on an act's result (helper 1.9.
     const w = world();
     w.fake.handlers["target.act"] = () => ({ rung: 1, guardian: [`X${"y".repeat(2000)}\nsecond line`], viewMovedBy: Array.from({ length: 20 }, (_, i) => `App${i}`) });
     const r = await w.run("const notes = await apps.open('Notes')\nawait notes.click(14)");
-    const outside = unfenced(r);
-    expect(outside.includes("second line")).toBe(false);
-    expect(outside.includes("y".repeat(500))).toBe(false);
+    const all = text(r);
+    expect(all.includes("second line")).toBe(false);
+    expect(all.includes("y".repeat(500))).toBe(false);
     const metrics = readFileSync(join(w.home, "logs", "automation-metrics.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
     expect((metrics.find((m) => m.primitive === "click")!.viewMovedBy as string[]).length).toBe(8);
   });

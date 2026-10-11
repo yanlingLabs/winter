@@ -1265,20 +1265,36 @@ extension CUCore {
     /// The URL a link element opens — http, https or mailto only — when the element is a link (`AXLink`) or carries an
     /// `AXURL`. Nil otherwise (it is pressed as before).
     func linkURL(_ e: AXUIElement, _ info: ElementInfo) -> URL? {
-        let raw = ax.attribute(e, "AXURL")
-        guard info.role == "AXLink" || raw != nil else { return nil }
-        let url: URL? = {
+        // A LINK only (review of round 9, MEDIUM #4): an image's src, a web area's own URL are no link to follow.
+        guard info.role == "AXLink" else { return nil }
+        func url(_ raw: CFTypeRef?) -> URL? {
             guard let raw else { return nil }
             if CFGetTypeID(raw) == CFURLGetTypeID() { return (raw as! CFURL) as URL }
             return (raw as? String).flatMap { URL(string: $0) }
-        }()
-        guard let url, let scheme = url.scheme?.lowercased(), ["http", "https", "mailto"].contains(scheme) else { return nil }
-        return url
+        }
+        guard let link = url(ax.attribute(e, "AXURL")), let scheme = link.scheme?.lowercased(), ["http", "https", "mailto"].contains(scheme) else {
+            return nil
+        }
+        // A link to the same site as the page it is on (in-page `#` links included) stays in the app: its own navigation.
+        if scheme != "mailto" {
+            var cur: AXUIElement? = ax.element(e, kAXParentAttribute)
+            for _ in 0..<60 {
+                guard let c = cur else { break }
+                if ax.string(c, kAXRoleAttribute) == "AXWebArea" {
+                    if let page = url(ax.attribute(c, "AXURL")), page.host?.lowercased() == link.host?.lowercased() { return nil }
+                    break
+                }
+                cur = ax.element(c, kAXParentAttribute)
+            }
+        }
+        return link
     }
 
     /// Whether the bound app is a web browser (it declares http/https): its links are its own business.
     func isWebBrowser(_ t: CUTarget) -> Bool {
         if let o = isWebBrowserOverride { return o(t) }
+        // An Electron or CEF app navigates in its own window (review of round 9, MEDIUM #4): never rerouted.
+        if t.isChromium { return true }
         return CUApps.isWebBrowser(bundleURL: NSRunningApplication(processIdentifier: t.pid)?.bundleURL)
     }
 

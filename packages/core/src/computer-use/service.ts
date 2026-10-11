@@ -1149,11 +1149,12 @@ export class ComputerV2Service {
     metric.rung = res.rung;
     if (res.inVisit === true) metric.inVisit = true;
     // What the Focus Guardian did or saw since the last act (helper 1.9.8) — the user put back after an app took their
-    // front, an app the agent's action brought forward sent back, a system dialog left for the user: daemon lines, never
-    // inside the act's own (fenced) line — and the apps that came forward, counted.
+    // front, an app the agent's action brought forward sent back, a system dialog left for the user — and the apps that
+    // came forward, counted. The notes name apps by THEIR chosen names, so they go inside the DATA-ONLY fence (review of
+    // round 9, LOW #9).
     for (const note of Array.isArray(res.guardian) ? res.guardian : []) {
       const line = helperDetail(note, 400);
-      if (line !== undefined) ctx.builder.daemonLine(line);
+      if (line !== undefined) ctx.builder.text(line, { screen: true });
     }
     if (Array.isArray(res.viewMovedBy) && res.viewMovedBy.length > 0) {
       metric.viewMovedBy = res.viewMovedBy.slice(0, 8).map((n) => String(n).slice(0, 80));

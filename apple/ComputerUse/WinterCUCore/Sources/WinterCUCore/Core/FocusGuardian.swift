@@ -730,7 +730,10 @@ public struct CUFocusGuardianCore: Sendable {
                                      app: appMoved, desktop: desktopMoved, front: app, seconds: !onlyLate) {
             // On the visited desktop, their input in the visited app is no move away: the visit's end decides.
             if visit, let a = app, a == visitApp { return (.visit, nil) }
-            return (.user("their input that switches apps or desktops (⌘-Tab, ⌃-arrows, a swipe, the Dock, a click on another app's window), after the agent's last action that could raise it"), .instant(i, keep: false))
+            // (The app the consented foreground is bringing forward: their input may have been for another app landing
+            // right after — it stays a short second explanation, as for an untouched app; found by the model-based test.)
+            let consentApp = app != nil && app == exemptApp && now < exemptUntil
+            return (.user("their input that switches apps or desktops (⌘-Tab, ⌃-arrows, a swipe, the Dock, a click on another app's window), after the agent's last action that could raise it"), .instant(i, keep: consentApp))
         }
         // The consented foreground's own landing: the consent's — unless a switch of theirs AFTER it was issued explains
         // it (above: their ⌘-Tab into the app being held is theirs, and its end gives nothing back — found by the
@@ -937,7 +940,9 @@ public struct CUFocusGuardianCore: Sendable {
     /// by the model-based test: the target, left for a visit's return and brought back by the user's click, was judged
     /// on the facts from before the click).
     public mutating func activationHeard(_ pid: pid_t, now: TimeInterval) {
-        if lastSeen?.app != pid { lastSeenSince = now }
+        // (The verdict kept for that state goes too: it is judged afresh, on the facts up to now — the model-based test:
+        // the user's Dock click back into the app in front, after another app came and went unseen, was not counted.)
+        if lastSeen?.app != pid { lastSeenSince = now; if judged.map({ !$0.owner.isUsers }) ?? false { judged = nil } }
     }
 
     // MARK: the user working in an app (round 10)

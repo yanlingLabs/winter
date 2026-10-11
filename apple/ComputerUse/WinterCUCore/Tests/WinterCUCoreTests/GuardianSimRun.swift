@@ -30,6 +30,9 @@ enum SimKind {
     /// The app's main window becomes `window` (it opened or raised one there): its next activation goes there.
     case mainWindow(pid_t, UInt32)
     case selfActivate(pid_t)
+    /// Round 10: the user opens a RUNNING app with no switch input (Spotlight, a launcher, a link, `open`): a key, then
+    /// it comes forward this many ms later.
+    case userOpens(pid_t, Double)
     /// The user launches an app themselves (Spotlight: the keys, then Return); it comes forward `after` ms later.
     case userLaunch(Double)
     case banner(pid_t)
@@ -82,6 +85,7 @@ enum SimKind {
         case .secureEntry(let on): return "Terminal's Secure Keyboard Entry \(on ? "on" : "off")"
         case .mainWindow(let a, let id): return "\(n(a))'s main window becomes \(id)"
         case .selfActivate(let a): return "\(n(a)) activates itself"
+        case .userOpens(let a, let ms): return "the user opens \(n(a)) (Spotlight, a launcher, a link — no switch input), it comes forward \(Int(ms)) ms later"
         case .userLaunch(let ms): return "the user launches an app (Spotlight), which comes forward \(Int(ms)) ms later"
         case .banner(let a): return "a notification banner about \(n(a)) appears"
         case .prompt(let on): return "the helper's prompt panel \(on ? "shows" : "hides")"
@@ -142,9 +146,12 @@ struct SimPlan {
             case 37..<45: k = .typing(1 + r.int(6))
             case 45..<47: k = .scroll
             case 47..<48: k = .secureEntry(r.chance(0.6))
-            case 48..<57:
+            case 48..<55:
                 let who: [pid_t] = [SimPid.target, SimPid.target, SimPid.target, SimPid.target, SimPid.third, SimPid.safari, SimPid.preview, SimPid.user]
                 k = .selfActivate(who[r.int(who.count)])
+            case 55..<57:
+                let who: [pid_t] = [SimPid.third, SimPid.safari, SimPid.preview, SimPid.user]
+                k = .userOpens(who[r.int(who.count)], r.double(100, 2_000))
             case 57..<58: k = r.chance(0.5) ? .banner(r.chance(0.6) ? SimPid.target : SimPid.third) : .userLaunch(r.double(300, 3_000))
             case 58..<59: k = .prompt(r.chance(0.5))
             case 59..<62:
@@ -594,6 +601,22 @@ final class SimRun {
                 guard n.app != w.front || n.space != w.space else { return }
                 let cause = w.selfCause(a, newPlace: n)
                 w.change(to: n, cause: cause, why: "\(SimPid.name(a)) activates itself")
+            }
+        case .userOpens(let a, let ms):
+            // A key of theirs (Return in Spotlight or a launcher; the tap sees it unless Secure Event Input is on), no
+            // switch input — the app comes forward later. The contract: never sent back with input of theirs that recent;
+            // adopted only when their switch input explains it, else left in front.
+            w.log("the user opens \(SimPid.name(a)) (no switch input)")
+            w.key(.keyDown, keycode: 36); w.key(.keyUp, keycode: 36)
+            w.schedule(after: ms, "\(SimPid.name(a)) comes forward (the user opened it)") {
+                w.lock.withLock {
+                    guard w.running.contains(a), a != w.front else { return }
+                    let n = w.landingPlace(a)
+                    guard n.app != w.front || n.space != w.space else { return }
+                    let cause = w.untouched(a) ? w.untouchedCause(a, indirect: false, why: "the user opened it", newPlace: n)
+                                               : w.selfCause(a, newPlace: n)
+                    w.change(to: n, cause: cause, why: "\(SimPid.name(a)) comes forward — the user opened it")
+                }
             }
         case .banner(let a):
             w.lock.withLock { w.wins[701]?.shown = true; w.bannerSubject = a }

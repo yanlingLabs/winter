@@ -690,7 +690,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         // of the user's since the visit began explains it.
         if visiting {
             let left = SimCause.untouched(pid, .leftAlone, indirect: indirect, why + " (during a desktop visit)")
-            if let s = competingSwitch(for: pid, app: n.app != front, desktop: n.space != space), s.at >= visitStartedAt {
+            if let s = competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop), s.at >= visitStartedAt {
                 return .either([left, adopt], "a switch input of the user's during a desktop visit")
             }
             return left
@@ -723,18 +723,30 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             nextWiden = (.hardware, left, "input of the user's arrived before the engine heard of an untouched app's coming forward")
         }
         if case .untouched(_, .adopt, _, _) = base { return base }
-        if competingSwitch(for: pid, app: n.app != front, desktop: n.space != space) != nil {
+        if competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop) != nil {
             return .either([base, adopt], "a switch input of the user's it may have been")
         }
         return base
     }
+
+    /// What a change to `n` moved, as the engine judges it — from the last state it HEARD of (a change it has not heard
+    /// of yet is folded into this one: the model-based test).
+    func movedSinceHeard(_ n: SPlace) -> (app: Bool, desktop: Bool) {
+        let prior = unheard.filter { now <= $0.until }.map(\.from)
+        return (n.app != front || prior.contains { $0.app != n.app }, n.space != space || prior.contains { $0.space != n.space })
+    }
+
+    /// The agent has not touched `pid` (the world's own record).
+    func untouched(_ pid: pid_t) -> Bool { touched(pid) == .no && restoreIssuedAt[pid].map { now - $0 >= 950 } ?? true }
 
     /// An app coming forward by itself now.
     func selfCause(_ pid: pid_t, newPlace n: SPlace) -> SimCause {
         let base: SimCause
         switch touched(pid) {
         case .no:
-            if let r = restoreIssuedAt[pid], now - r < 2_500 {
+            // (The contract's restore-late window: 0.8 s after the restore's last attempt, plus the hearing — review of
+            // round 9, LOW: it was 2.5 s here.)
+            if let r = restoreIssuedAt[pid], now - r < 950 {
                 return .either([untouchedCause(pid, indirect: false, why: "on its own", newPlace: n), .agentDirect(pid, "a restore of the engine's toward it")],
                                "it was being restored a moment ago")
             }
@@ -745,7 +757,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         case .yes:
             base = .agentDirect(pid, "the agent touched it")
         }
-        if let s = competingSwitch(for: pid, app: n.app != front, desktop: n.space != space) {
+        if let s = competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop) {
             let why = s.secureFlags == true ? "a modifier tap under Secure Event Input, a moment before"
                 : s.dest == nil || s.dest == front ? "a switch input of the user's that changed nothing, a moment before"
                 : "a switch input of the user's not landed yet"
