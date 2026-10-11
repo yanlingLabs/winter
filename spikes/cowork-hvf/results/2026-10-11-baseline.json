@@ -1,0 +1,68 @@
+{
+  "fixture": "spikes/cowork-hvf/out/fixture-w1axukjg",
+  "exitCode": 0,
+  "timedOut": false,
+  "sandboxPassed": true,
+  "linuxBoot": {
+    "kind": "linux_boot",
+    "release": "6.18.35",
+    "machine": "aarch64",
+    "bootId": "13ccf652-04ca-4f68-9190-d8e4f09b0c02",
+    "hostElapsedSeconds": 0.683
+  },
+  "boundedBaselinePassed": true,
+  "deviceInventoryPassed": true,
+  "freePageReportingNegotiated": true,
+  "memory": [
+    {
+      "cycle": 1,
+      "touchedFootprintBytes": 432309184,
+      "postFreeFootprintBytes": 432407488
+    },
+    {
+      "cycle": 2,
+      "touchedFootprintBytes": 684196992,
+      "postFreeFootprintBytes": 684196992
+    },
+    {
+      "cycle": 3,
+      "touchedFootprintBytes": 701727872,
+      "postFreeFootprintBytes": 701727872
+    }
+  ],
+  "activeReturnVerified": false,
+  "productionReady": false,
+  "pins": {
+    "libkrun": {
+      "url": "https://github.com/containers/libkrun.git",
+      "tag": "v1.19.6",
+      "revision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+      "lockSha256": "a73d2ee0e4f2d2b63c7b4a00d2639076e4f7884a40cec495d5d82eed14dcd873",
+      "features": [],
+      "defaultFeatures": false
+    },
+    "rust": {
+      "version": "1.90.0",
+      "url": "https://static.rust-lang.org/dist/rust-1.90.0-aarch64-apple-darwin.tar.xz",
+      "sha256": "9772d20d5cd736079a0ee84d00e6697cf2084f0fc4621b011e24e6f2d08d2d7f"
+    },
+    "kernel": {
+      "cachedPath": "../cowork-vm/out/assets/vmlinux-apple-6.18.35",
+      "sha256": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d",
+      "version": "6.18.35-197-debug",
+      "format": "RAW",
+      "provenance": "Existing cowork-vm/pins.json Apple-recommended Kata archive; verify cached member before copying."
+    },
+    "zig": {
+      "cachedPath": "../cowork-vm/out/tools/zig-aarch64-macos-0.14.1/zig",
+      "version": "0.14.1",
+      "archiveSha256": "39f3dc5e79c22088ce878edc821dedb4ca5a1cd9f5ef915e9b3cc3053e8faefa"
+    }
+  },
+  "artifactDigests": {
+    "cowork-hvf-worker": "e618a4eb76ddd62a6cb29853581f031e615c868edef8441df425302656e6de95",
+    "libkrun.1.dylib": "bdb5547f74fc7cb5d318c6fab1e80018407719a285d5c69a254c65607c07d296",
+    "kernel": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d",
+    "initramfs.cpio": "e81b2e9c4db545500cb61fa633acbff1bb5f8b75c9e56202d11cc0b008d39b54"
+  }
+}

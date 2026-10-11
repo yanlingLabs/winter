@@ -1,0 +1,96 @@
+{"kind": "sandbox", "hostReadDenied": true, "networkOutboundDenied": true, "writesDenied": true, "hostElapsedSeconds": 0.579}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 4899272, "residentBytes": 9306112, "hostElapsedSeconds": 0.579}
+{"kind": "worker", "pid": 46953, "vcpus": 2, "ramMiB": 768, "networkDevices": 0, "vsock": false, "hostShares": 0, "hostElapsedSeconds": 0.579}
+{"kind": "linux_boot", "release": "6.18.35", "machine": "aarch64", "bootId": "13ccf652-04ca-4f68-9190-d8e4f09b0c02", "hostElapsedSeconds": 0.683}
+{"kind": "virtio_device", "name": "virtio1", "device": "0x0004", "features": "00000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "hostElapsedSeconds": 0.683}
+{"kind": "virtio_device", "name": "virtio2", "device": "0x0003", "features": "11000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "hostElapsedSeconds": 0.683}
+{"kind": "virtio_device", "name": "virtio0", "device": "0x0005", "features": "01010100000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "hostElapsedSeconds": 0.683}
+{"kind": "guest_heartbeat", "tick": 1, "hostElapsedSeconds": 0.683}
+{"kind": "guest_touched", "cycle": 1, "bytes": 268435456, "liveBytes": 33554432, "hostElapsedSeconds": 0.779}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 432292800, "residentBytes": 439386112, "hostElapsedSeconds": 1.589}
+{"kind": "guest_heartbeat", "tick": 2, "hostElapsedSeconds": 1.694}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 432292800, "residentBytes": 439386112, "hostElapsedSeconds": 2.597}
+{"kind": "guest_heartbeat", "tick": 3, "hostElapsedSeconds": 2.695}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 432309184, "residentBytes": 439402496, "hostElapsedSeconds": 3.606}
+{"kind": "guest_heartbeat", "tick": 4, "hostElapsedSeconds": 3.703}
+{"kind": "guest_freed", "cycle": 1, "bytes": 268435456, "hostElapsedSeconds": 3.788}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 432407488, "residentBytes": 439500800, "hostElapsedSeconds": 4.617}
+{"kind": "guest_heartbeat", "tick": 5, "hostElapsedSeconds": 4.711}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 432407488, "residentBytes": 439500800, "hostElapsedSeconds": 5.617}
+{"kind": "guest_heartbeat", "tick": 6, "hostElapsedSeconds": 5.722}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 432407488, "residentBytes": 439500800, "hostElapsedSeconds": 6.618}
+{"kind": "guest_heartbeat", "tick": 7, "hostElapsedSeconds": 6.723}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 432407488, "residentBytes": 439500800, "hostElapsedSeconds": 7.628}
+{"kind": "guest_heartbeat", "tick": 8, "hostElapsedSeconds": 7.73}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 432407488, "residentBytes": 439500800, "hostElapsedSeconds": 8.636}
+{"kind": "guest_heartbeat", "tick": 9, "hostElapsedSeconds": 8.732}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 432407488, "residentBytes": 439500800, "hostElapsedSeconds": 9.646}
+{"kind": "guest_heartbeat", "tick": 10, "hostElapsedSeconds": 9.742}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 432407488, "residentBytes": 439500800, "hostElapsedSeconds": 10.656}
+{"kind": "guest_heartbeat", "tick": 11, "hostElapsedSeconds": 10.75}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 432407488, "residentBytes": 439500800, "hostElapsedSeconds": 11.66}
+{"kind": "guest_heartbeat", "tick": 12, "hostElapsedSeconds": 11.76}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 432407488, "residentBytes": 439500800, "hostElapsedSeconds": 12.67}
+{"kind": "guest_heartbeat", "tick": 13, "hostElapsedSeconds": 12.77}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 432407488, "residentBytes": 439500800, "hostElapsedSeconds": 13.673}
+{"kind": "guest_heartbeat", "tick": 14, "hostElapsedSeconds": 13.78}
+{"kind": "guest_integrity", "cycle": 1, "retained": true, "progress": true, "hostElapsedSeconds": 13.792}
+{"kind": "guest_touched", "cycle": 2, "bytes": 268435456, "liveBytes": 33554432, "hostElapsedSeconds": 13.865}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 684196992, "residentBytes": 691159040, "hostElapsedSeconds": 14.675}
+{"kind": "guest_heartbeat", "tick": 15, "hostElapsedSeconds": 14.783}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 684196992, "residentBytes": 691159040, "hostElapsedSeconds": 15.683}
+{"kind": "guest_heartbeat", "tick": 16, "hostElapsedSeconds": 15.789}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 684196992, "residentBytes": 691159040, "hostElapsedSeconds": 16.687}
+{"kind": "guest_heartbeat", "tick": 17, "hostElapsedSeconds": 16.799}
+{"kind": "guest_freed", "cycle": 2, "bytes": 268435456, "hostElapsedSeconds": 16.873}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 684196992, "residentBytes": 691159040, "hostElapsedSeconds": 17.697}
+{"kind": "guest_heartbeat", "tick": 18, "hostElapsedSeconds": 17.807}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 684196992, "residentBytes": 691159040, "hostElapsedSeconds": 18.704}
+{"kind": "guest_heartbeat", "tick": 19, "hostElapsedSeconds": 18.815}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 684196992, "residentBytes": 691159040, "hostElapsedSeconds": 19.715}
+{"kind": "guest_heartbeat", "tick": 20, "hostElapsedSeconds": 19.825}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 684196992, "residentBytes": 691159040, "hostElapsedSeconds": 20.718}
+{"kind": "guest_heartbeat", "tick": 21, "hostElapsedSeconds": 20.835}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 684196992, "residentBytes": 691159040, "hostElapsedSeconds": 21.727}
+{"kind": "guest_heartbeat", "tick": 22, "hostElapsedSeconds": 21.846}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 684196992, "residentBytes": 691159040, "hostElapsedSeconds": 22.733}
+{"kind": "guest_heartbeat", "tick": 23, "hostElapsedSeconds": 22.848}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 684196992, "residentBytes": 691159040, "hostElapsedSeconds": 23.743}
+{"kind": "guest_heartbeat", "tick": 24, "hostElapsedSeconds": 23.85}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 684196992, "residentBytes": 691159040, "hostElapsedSeconds": 24.753}
+{"kind": "guest_heartbeat", "tick": 25, "hostElapsedSeconds": 24.85}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 684196992, "residentBytes": 691159040, "hostElapsedSeconds": 25.763}
+{"kind": "guest_heartbeat", "tick": 26, "hostElapsedSeconds": 25.857}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 684196992, "residentBytes": 691159040, "hostElapsedSeconds": 26.77}
+{"kind": "guest_heartbeat", "tick": 27, "hostElapsedSeconds": 26.868}
+{"kind": "guest_integrity", "cycle": 2, "retained": true, "progress": true, "hostElapsedSeconds": 26.877}
+{"kind": "guest_touched", "cycle": 3, "bytes": 268435456, "liveBytes": 33554432, "hostElapsedSeconds": 26.933}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 701727872, "residentBytes": 708689920, "hostElapsedSeconds": 27.78}
+{"kind": "guest_heartbeat", "tick": 28, "hostElapsedSeconds": 27.878}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 701727872, "residentBytes": 708689920, "hostElapsedSeconds": 28.789}
+{"kind": "guest_heartbeat", "tick": 29, "hostElapsedSeconds": 28.881}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 701727872, "residentBytes": 708689920, "hostElapsedSeconds": 29.794}
+{"kind": "guest_heartbeat", "tick": 30, "hostElapsedSeconds": 29.889}
+{"kind": "guest_freed", "cycle": 3, "bytes": 268435456, "hostElapsedSeconds": 29.944}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 701727872, "residentBytes": 708689920, "hostElapsedSeconds": 30.801}
+{"kind": "guest_heartbeat", "tick": 31, "hostElapsedSeconds": 30.895}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 701727872, "residentBytes": 708689920, "hostElapsedSeconds": 31.803}
+{"kind": "guest_heartbeat", "tick": 32, "hostElapsedSeconds": 31.902}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 701727872, "residentBytes": 708689920, "hostElapsedSeconds": 32.809}
+{"kind": "guest_heartbeat", "tick": 33, "hostElapsedSeconds": 32.91}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 701727872, "residentBytes": 708689920, "hostElapsedSeconds": 33.819}
+{"kind": "guest_heartbeat", "tick": 34, "hostElapsedSeconds": 33.92}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 701727872, "residentBytes": 708689920, "hostElapsedSeconds": 34.829}
+{"kind": "guest_heartbeat", "tick": 35, "hostElapsedSeconds": 34.925}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 701727872, "residentBytes": 708689920, "hostElapsedSeconds": 35.83}
+{"kind": "guest_heartbeat", "tick": 36, "hostElapsedSeconds": 35.932}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 701727872, "residentBytes": 708689920, "hostElapsedSeconds": 36.834}
+{"kind": "guest_heartbeat", "tick": 37, "hostElapsedSeconds": 36.934}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 701727872, "residentBytes": 708689920, "hostElapsedSeconds": 37.844}
+{"kind": "guest_heartbeat", "tick": 38, "hostElapsedSeconds": 37.943}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 701727872, "residentBytes": 708689920, "hostElapsedSeconds": 38.846}
+{"kind": "guest_heartbeat", "tick": 39, "hostElapsedSeconds": 38.947}
+{"kind": "host_memory", "pid": 46953, "footprintBytes": 701727872, "residentBytes": 708689920, "hostElapsedSeconds": 39.846}
+{"kind": "guest_heartbeat", "tick": 40, "hostElapsedSeconds": 39.953}
+{"kind": "guest_integrity", "cycle": 3, "retained": true, "progress": true, "hostElapsedSeconds": 39.954}
+{"kind": "guest_complete", "cycles": 3, "activeReturnVerified": false, "hostElapsedSeconds": 39.954}
