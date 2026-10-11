@@ -15,7 +15,7 @@ import type { WinterProfile } from "../../../profile";
 export const EXTENSION_IDS: Readonly<Record<WinterProfile, readonly string[]>> = {
   dist: [
     "bapmmpefcbjabfdfeehimdhldpjaoemd", // Edge Add-ons: Winter for Edge
-    // Chrome Web Store: Winter for Chrome (its id goes here once the store assigns it, and in the two Swift lists)
+    "flfkppajaamjgfmdljlklfdffkdcmicc", // Chrome Web Store: Winter for Chrome
   ],
   dev: ["jikdcokcpbacalfeipkognejnlnobbbf"],
 };

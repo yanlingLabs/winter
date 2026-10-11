@@ -33,8 +33,8 @@ until they agree; keep the lines' exact format.
 **The extension-id allowlist** is defined once per language and kept equal by the parity test: the daemon's
 `extension-ids.ts`, the host's `ExtensionIds.swift`, Winter.app's manifest writer
 (`apple/Winter/Sources/BrowserExtension/BrowserHostManifest.swift`), and the id the dev key derives. Dist holds the two
-store ids, each assigned by its store at the first upload: Edge Add-ons' `bapmmpefcbjabfdfeehimdhldpjaoemd` now, the
-Chrome Web Store's once it is assigned (one line in each list). A Release Winter.app allows exactly these in the dist
+store ids, each assigned by its store at the first upload: Edge Add-ons' `bapmmpefcbjabfdfeehimdhldpjaoemd` and the
+Chrome Web Store's `flfkppajaamjgfmdljlklfdffkdcmicc` (one line in each list). A Release Winter.app allows exactly these in the dist
 host manifest it writes.
 
 **The host's home** comes from its enclosing app's bundle id: `com.winter.computeruse` → `~/.winter`,

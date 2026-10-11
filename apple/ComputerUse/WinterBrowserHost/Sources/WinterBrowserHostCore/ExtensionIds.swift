@@ -8,7 +8,7 @@ public enum ExtensionIds {
     /// "Winter for Chrome" and Edge Add-ons' "Winter for Edge".
     public static let dist: [String] = [
         "bapmmpefcbjabfdfeehimdhldpjaoemd", // Edge Add-ons: Winter for Edge
-        // Chrome Web Store: Winter for Chrome (its id goes here once the store assigns it)
+        "flfkppajaamjgfmdljlklfdffkdcmicc", // Chrome Web Store: Winter for Chrome
     ]
     /// The unpacked dev build (its id is fixed by its manifest key).
     public static let dev: [String] = ["jikdcokcpbacalfeipkognejnlnobbbf"]

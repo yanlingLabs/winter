@@ -24,7 +24,7 @@ enum BrowserHostManifest {
     /// (`extension-ids.ts`) and the host's (`ExtensionIds.swift`) dist lists by a repo test.
     static let storeExtensionIds: [String] = [
         "bapmmpefcbjabfdfeehimdhldpjaoemd", // Edge Add-ons: Winter for Edge
-        // Chrome Web Store: Winter for Chrome (its id goes here once the store assigns it)
+        "flfkppajaamjgfmdljlklfdffkdcmicc", // Chrome Web Store: Winter for Chrome
     ]
 
     /// Each browser's directory under `~/Library/Application Support/` (the manifest goes in its `NativeMessagingHosts/`).
