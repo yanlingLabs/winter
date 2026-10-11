@@ -65,12 +65,12 @@ import { renderNoCredentialHint } from "./handoff";
 import { neutralSelectionRefusal, refusalDetailCategoryFor } from "./refusal-copy";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachWinterSession } from "./messaging";
-import { buildWinterOptions, bypassAllowedAtSpawn, permissionModeFor } from "./mode-options";
+import { buildWinterOptions, bypassAllowedAtSpawn, permissionModeFor, codePermissionsFor, KNOWN_RUNTIME_BUILTINS } from "./mode-options";
 import { providerFor, rowForTag, testProviderNameFor, toolsRefusedFor } from "./provider-selection";
 import { splitTag, UNSTATED_TAG, isModelTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
 import { winterSessions } from "./sessions";
-import { canonicalCwd, storeProjectsDir } from "../agent/paths";
-import { linkedRouterSupportsRunHome } from "./run-home-support";
+import { canonicalCwd, storeProjectsDir, sdkHomeFor } from "../agent/paths";
+import { linkedRouterSupportsRunHome, disposeFailedRunHome } from "./run-home-support";
 import { isRetiredCatalogTag } from "../providers/catalog-role-problems";
 import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
@@ -108,6 +108,9 @@ import { keychainService } from "../profile";
 import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { createHostCredentialBroker, sessionCredentialAllowlist, type ProviderRefresher } from "./host-credentials";
 import { SESSION_REPLACED } from "./session-replaced";
+import { withHostCodeBinding, type HostCodeAuthority } from "./host-code-broker";
+import { CanonicalHostCodeAuthority, installedHostCodePolicyAdapter, type CanonicalHostCodePolicy } from "./host-code-authority";
+import { buildCoreBrand } from "./brand";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
@@ -435,6 +438,9 @@ export interface WinterLegDeps {
    * the leg it fed.
    */
   hooksFor?: (session: CapabilitySession) => { winter?: Options["hooks"] };
+  /** Trusted controller override for current policy and immutable Workflow workers.
+   * Otherwise built from prepared host settings and the installed SDK evaluator. */
+  hostCodeAuthorityFor?: (sessionId: string, backendSessionId: string) => HostCodeAuthority | undefined;
   /** Test seams. */
   idleTimeoutMs?: () => number;
   endGraceMs?: number;
@@ -924,6 +930,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const settings = deps.settings();
       const hook = runtime.spawnHookFor(mode);
       if (hook instanceof Error) throw new WinterLegRefusal(hook.code, hook.message);
+      const hostCodeAuthority = mode === "code" ? deps.hostCodeAuthorityFor?.(sessionId, backendSessionId) : undefined;
+      const needsHostAuthority = mode === "code" && runtime.codeExecution?.protectedStorageActive() === true;
+      const policyAdapter = needsHostAuthority && hostCodeAuthority === undefined ? installedHostCodePolicyAdapter() : undefined;
+      if (needsHostAuthority && hostCodeAuthority === undefined && policyAdapter === undefined) runtime.codeExecution?.assertAuthority(undefined);
       // Both credential probes, together: the provider inventory (`CredentialPresence`) and the ONE
       // tool key whose presence changes the tool SURFACE (0.0.17 — see `WinterOptionsInput`'s
       // `exaKeyPresent`). Independent Keychain reads, so they are issued in parallel, and re-issued at
@@ -1267,11 +1277,156 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // WS-21 (spec §3.1): LAST, so a refusal above never leaves a run folder behind. The router's Winter
       // overload reads `options.runtime.runHome` and applies it synchronously; `WinterSession` disposes it
       // when the incarnation ends (or at once, if the open fails before the child iterates).
-      if (deps.runHome === undefined) return options;
-      const runHome = await deps.runHome.build(deps.runHome.inputFor({
-        mode, dispatchChild: live.origin === "dispatch-child", leg: "winter", cwd, workdirLess: primary === undefined,
-      }));
-      return withRunHome(options, runHome);
+      let runHome: RunHome | undefined;
+      if (deps.runHome !== undefined)
+        runHome = await deps.runHome.build(
+          deps.runHome.inputFor({
+            mode,
+            dispatchChild: live.origin === "dispatch-child",
+            leg: "winter",
+            cwd,
+            workdirLess: primary === undefined,
+          }),
+        );
+      try {
+        let authority = hostCodeAuthority;
+        if (needsHostAuthority && !authority && policyAdapter) {
+          const prepared = structuredClone(runHome?.effectiveSettings ?? {});
+          const settingsRules = runHome
+            ? policyAdapter.settingsSeed(
+                {
+                  effective: prepared,
+                  provenance: {},
+                  sources: [
+                    {
+                      source: "user",
+                      settings: prepared,
+                      path: join(runHome.dir, "settings.json"),
+                    },
+                  ],
+                  perSource: [
+                    {
+                      source: "user",
+                      settings: prepared,
+                      values: prepared,
+                      path: join(runHome.dir, "settings.json"),
+                      loaded: true,
+                    },
+                  ],
+                },
+                {
+                  cwd,
+                  home: runHome.dir,
+                  allowDangerouslySkipPermissions:
+                    options.allowDangerouslySkipPermissions,
+                  disableBypassPermissionsMode:
+                    options.permissions?.disableBypassPermissionsMode,
+                },
+              )
+            : undefined;
+          // Saved allow rules are regenerated from live authoritative sources; a removed grant must
+          // not survive in the launch-time flattened settings copy. Deny/ask entries remain restrictive.
+          const seed = settingsRules as
+            | { entries?: Array<{ behavior?: string }> }
+            | undefined;
+          const preparedRules = seed
+            ? {
+                ...seed,
+                entries: seed.entries?.filter(
+                  (entry) => entry.behavior !== "allow",
+                ),
+              }
+            : undefined;
+          const definitions = structuredClone(
+            options.agents ??
+              mergedAgentDefinitions(home, cwd, deps.projectAgentDefinitions),
+          );
+          authority = new CanonicalHostCodeAuthority({
+            adapter: policyAdapter,
+            getPolicy: (): CanonicalHostCodePolicy => {
+              const current = deps.store.meta(sessionId),
+                trusted = deps.isTrusted?.(cwd) ?? false;
+              return {
+                config: {
+                  permissionMode: permissionModeFor(current.approvalPolicy),
+                  permissions: codePermissionsFor({
+                    home,
+                    policy: current.approvalPolicy,
+                    userAllow: sdkAllowRules(home),
+                    userDeny: sdkDenyRules(home),
+                    persistedAllow: deps.persistedAllowRules?.(cwd),
+                  }),
+                  allowedTools: options.allowedTools,
+                  disallowedTools: options.disallowedTools,
+                  allowDangerouslySkipPermissions: bypassAllowedAtSpawn(
+                    current.approvalPolicy,
+                  ),
+                  additionalDirectories: [...extraDirs],
+                  sandbox: options.sandbox,
+                },
+                settingsRules: preparedRules,
+                sessionRoot: cwd,
+                home: options.env?.HOME ?? home,
+                winterHome: runHome?.dir ?? home,
+                storeHome: runHome?.sdkHome ?? sdkHomeFor(home),
+                trustedWorkspace: trusted,
+                brand: buildCoreBrand(undefined, home),
+                outputsDir: deps.outDirOf(sessionId),
+                additionalDirectories: [...extraDirs],
+                tools: KNOWN_RUNTIME_BUILTINS,
+                preparedDefinitions: definitions,
+                env: { ...options.env },
+                authorityRevision: {
+                  approvalPolicy: current.approvalPolicy,
+                  trusted,
+                },
+              };
+            },
+          });
+        }
+        if (mode === "code" && authority) {
+          const currentAuthority = authority;
+          withHostCodeBinding(options, {
+            home,
+            sessionId,
+            backendSessionId,
+            allowedCwds: [cwd, ...extraDirs],
+            tempDir: deps.tmpDirOf(sessionId),
+            outDir: deps.outDirOf(sessionId),
+            policyRevision: () => currentAuthority.policyRevision(),
+            authorize: (call, currentCwd, signal) =>
+              currentAuthority.authorize(call, currentCwd, signal),
+            ...(currentAuthority.buildHookContext
+              ? {
+                  buildHookContext: (call, currentCwd) =>
+                    currentAuthority.buildHookContext!(call, currentCwd),
+                }
+              : {}),
+            ...(currentAuthority.recordPromptResult
+              ? {
+                  recordPromptResult: (receipt) =>
+                    currentAuthority.recordPromptResult!(receipt),
+                }
+              : {}),
+            ...(currentAuthority.forgetCall
+              ? { forgetCall: (callId) => currentAuthority.forgetCall!(callId) }
+              : {}),
+            ...(currentAuthority.dispose
+              ? { dispose: () => currentAuthority.dispose!() }
+              : {}),
+            ...(currentAuthority.immutableWorkflowWorker
+              ? {
+                  immutableWorkflowWorker: (runId, call) =>
+                    currentAuthority.immutableWorkflowWorker!(runId, call),
+                }
+              : {}),
+          });
+        }
+        return runHome === undefined ? options : withRunHome(options, runHome);
+      } catch (error) {
+        if (runHome) await disposeFailedRunHome(runHome, log);
+        throw error;
+      }
     };
 
     const projectorFor = (inc: WinterIncarnation): Projector =>

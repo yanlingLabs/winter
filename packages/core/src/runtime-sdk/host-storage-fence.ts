@@ -11,6 +11,13 @@ export interface HostStorageFenceOptions {
   coworkStorageActive?: boolean;
 }
 const registered = new Map<string, HostStorageFenceOptions>();
+export class HostStorageFenceUnavailable extends Error {
+  readonly code="winter_leg_unavailable" as const;
+  constructor(readonly reason:"cowork-root-symlink"|"cowork-root-not-directory"|"cowork-root-unavailable") {
+    super("Protected Cowork storage cannot be inspected safely; host runtime execution remains blocked until its storage identity is recovered");
+    this.name="HostStorageFenceUnavailable";
+  }
+}
 export function registerHostStorageFences(home: string, options: HostStorageFenceOptions): () => void {
   const key = resolve(home);
   if (!options.coordinationDir) throw new Error("Host storage registration requires an explicit coordination directory");
@@ -59,8 +66,14 @@ export function protectedHostStorageFences(home: string, options?: HostStorageFe
     for (const candidate of [owner, ...(registration.participatingHomes ?? [])]) {
       const h=resolve(candidate);
       try {
-        if (lstatSync(join(h,"cowork")).isDirectory()) { homes.add(h); retained=true; }
-      } catch { /* no materialized Cowork root; no read or ancestor floor */ }
+        const st=lstatSync(join(h,"cowork"));
+        if (st.isSymbolicLink()) throw new HostStorageFenceUnavailable("cowork-root-symlink");
+        if (!st.isDirectory()) throw new HostStorageFenceUnavailable("cowork-root-not-directory");
+        homes.add(h); retained=true;
+      } catch (error) {
+        if (error instanceof HostStorageFenceUnavailable) throw error;
+        if ((error as NodeJS.ErrnoException).code!=="ENOENT") throw new HostStorageFenceUnavailable("cowork-root-unavailable");
+      }
     }
     if (retained) coordinationDirs.add(hostStorageFenceOptions(owner, registration).coordinationDir);
   }

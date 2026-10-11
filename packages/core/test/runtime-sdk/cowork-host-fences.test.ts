@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { homeFenceFor, registerHostStorageFences, hostStorageReadPatterns, hostStorageFloorDescriptor } from "../../src/runtime-sdk/home-fence";
@@ -29,6 +29,17 @@ describe("Cowork host storage fences", () => {
     expect(() => registerHostStorageFences(home, { coordinationDir: join(home, "coordination") })).toThrow("may not overlap");
     symlinkSync(coordination, join(root, "coordination-alias"));
     expect(() => registerHostStorageFences(join(root, "coordination-alias/home"), { coordinationDir: coordination })).toThrow("may not overlap");
+  });
+  test("an active registered Cowork root becoming a symlink or non-directory fails closed",()=>{
+    const cowork=join(other,"cowork");rmSync(cowork,{recursive:true});symlinkSync(home,cowork);
+    expect(()=>hostStorageFloorDescriptor(home)).toThrow("cannot be inspected safely");
+    rmSync(cowork);writeFileSync(cowork,"not a storage root");
+    expect(()=>hostStorageFloorDescriptor(home)).toThrow("cannot be inspected safely");
+  });
+  test.skipIf(process.geteuid?.()===0)("a non-ENOENT failure inspecting active storage never removes the floor",()=>{
+    chmodSync(other,0);
+    try {expect(()=>hostStorageFloorDescriptor(home)).toThrow("cannot be inspected safely");}
+    finally {chmodSync(other,0o700);}
   });
 
   test("all host write tools refuse whole storage, ancestors and the isolated coordination directory", () => {

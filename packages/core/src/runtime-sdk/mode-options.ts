@@ -1144,6 +1144,19 @@ export function toolSurfaceViolations(initTools: readonly string[], allowed: rea
   return initTools.filter((name) => !ok.has(name) && !plainNames.has(name) && !name.startsWith("mcp__"));
 }
 
+/** The canonical live Code permission fields, shared by runtime launch and trusted host admission. */
+export function codePermissionsFor(input: {
+  home: string; policy: SessionApprovalPolicy; userAllow?: readonly string[]; userDeny?: readonly string[];
+  persistedAllow?: readonly string[]; runHomeApplied?: boolean;
+}): NonNullable<Options["permissions"]> {
+  return {
+    allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES,
+      ...(input.runHomeApplied === true ? [] : [...(input.userAllow ?? []), ...sdkAllowRulesFor(input.persistedAllow ?? [])])])],
+    deny: permissionDenyRulesFor(input.home, input.userDeny),
+    disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
+  };
+}
+
 /**
  * **The `Options` one Winter session runs under.** Pure — no I/O, no clock, no `process.env` beyond
  * the explicit `baseEnv` seam — so the 3×6 matrix test can assert the whole object.
@@ -1245,7 +1258,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       //    same as claude's headless mode applying its settings files' `permissions.allow`.
       // WS-21: on a run-home incarnation the SAVED rules reach the child through the run folder's own
       // settings tiers (user, trusted project, local), so only Winter's fixed rules are stated here.
-      ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES, ...(input.runHomeApplied === true ? [] : [...(input.userAllow ?? []), ...sdkAllowRulesFor(input.persistedAllow ?? [])])])] } : {}),
+      ...(input.mode === "code" ? { allow: codePermissionsFor(input).allow } : {}),
       deny: permissionDenyRulesFor(input.home, input.userDeny),
       disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
     },

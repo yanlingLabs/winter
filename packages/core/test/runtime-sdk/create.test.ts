@@ -5,7 +5,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createInMemoryRuntimeDirectoryStore, type RuntimeSdk, type RuntimeSdkOptions } from "@yanlinglabs/winter-runtime-sdk";
 import { buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -19,6 +19,8 @@ import { WinterExecutableUnavailable } from "../../src/runtime-sdk/executable";
 import { EmbeddedRuntimeUnavailable, type EmbeddedSessionHost } from "../../src/runtime-sdk/embedded";
 import { WINTER_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 import type { Settings } from "../../src/settings";
+import { registerHostStorageFences } from "../../src/runtime-sdk/host-storage-fence";
+import { HostCodeUnavailable, HostCodeExecutionService } from "../../src/runtime-sdk/host-code-broker";
 
 const DAY_MS = 86_400_000;
 
@@ -52,6 +54,16 @@ afterEach(async () => {
 function withRuntimes(runtimes: Omit<NonNullable<Settings["runtimes"]>, "handoff"> & { handoff?: NonNullable<Settings["runtimes"]>["handoff"] }): Settings {
   return { schemaVersion: 2, runtimes: { handoff: { crossRuntime: false }, ...runtimes } } as unknown as Settings;
 }
+
+test("active retained storage refuses Code start when no kernel floor/broker consumer is installed",async()=>{
+  mkdirSync(join(home,"cowork"));
+  const coordination=mkdtempSync(join(tmpdir(),"winter-create-floor-coordination-"));
+  const unregister=registerHostStorageFences(home,{coordinationDir:coordination,coworkStorageActive:true});
+  try {
+    const handle=await createWinterRuntimeSdk(deps({codeExecution:new HostCodeExecutionService(home,null)}));handles.push(handle);
+    expect(handle.spawnHookFor("code")).toBeInstanceOf(HostCodeUnavailable);
+  } finally {unregister();rmSync(coordination,{recursive:true,force:true});}
+});
 
 function deps(extra: Partial<WinterRuntimeSdkDeps> = {}): WinterRuntimeSdkDeps {
   return {

@@ -110,6 +110,7 @@ import type { SessionApprovalPolicy } from "../agent/gate";
 import type { RunHome } from "@yanlinglabs/winter-runtime-sdk";
 import { disposeFailedRunHome, settleRunHome } from "./run-home-support";
 import { clearQueuedInput, hostInputFoldedCount, runtimeFolds } from "./fold";
+import type { HostCodeGeneration } from "./host-code-broker";
 
 /**
  * WS-21 (spec §3.1): the per-run folder an incarnation's `Options` carry as `runtime.runHome` — the
@@ -499,6 +500,7 @@ interface Incarnation extends WinterIncarnation {
   projector: Projector;
   query: Query;
   done: Promise<void>;
+  hostCode?: HostCodeGeneration;
   /** WS-21: the run home this incarnation runs on (settled when it ends), when the router applies them. */
   runHome: RunHome | undefined;
   /** WS-25: the MCP servers this incarnation was configured with (`sessionMcpServersOf`). */
@@ -1055,6 +1057,7 @@ class WinterSessionImpl implements WinterSession {
       let queue: HostPromptQueue;
       let projector: Projector;
       let query: Query;
+      let hostCode: HostCodeGeneration | undefined;
       try {
         // The daemon may have begun stopping while this open awaited its options: refuse BEFORE the spawn,
         // so no runtime child is started into a daemon that is going away (`beginShutdown`).
@@ -1068,8 +1071,22 @@ class WinterSessionImpl implements WinterSession {
         shape = { generation, resume, abort };
         queue = (this.deps.queue ?? createHostPromptQueue)();
         projector = this.deps.projector(shape);
+        if (this.deps.mode === "code" && this.deps.runtime.codeExecution) {
+          hostCode = this.deps.runtime.codeExecution.enroll({
+            options, sessionId: this.sessionId, backendSessionId: this.backendSessionId, generation, abort,
+            isCurrent: () => !abort.signal.aborted && this.gen <= generation && (!this.inc || this.inc.generation === generation),
+            stop: () => this.end(),
+          });
+          options = hostCode.options;
+          const current = hostCode;
+          options.hooks = { ...options.hooks, PreToolUse: [...(options.hooks?.PreToolUse ?? []), {
+            matcher: "Bash|Monitor|Workflow|Agent|Task", failClosed: true,
+            hooks: [async (input) => { current.noteHook(input); return {}; }],
+          }] };
+        }
         query = this.deps.runtime.sdk.query({ prompt: queue, options });
       } catch (err) {
+        hostCode?.dispose();
         this.pendingMcpServerNames = [];
         await disposeFailedRunHome(runHome, (line) => this.log(line));
         if (runHome !== undefined) this.deps.records?.noteRunFolder?.(this.sessionId, undefined, runHome.dir);
@@ -1092,7 +1109,7 @@ class WinterSessionImpl implements WinterSession {
           /* best-effort only */
         }
       }
-      const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve(), runHome, mcpServers: sessionMcpServersOf(options), allowedTools: Array.isArray(options.tools) ? [...options.tools] : undefined, folds: runtimeFolds(runtimeVersionOf(options)) };
+      const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve(), runHome, mcpServers: sessionMcpServersOf(options), allowedTools: Array.isArray(options.tools) ? [...options.tools] : undefined, folds: runtimeFolds(runtimeVersionOf(options)), hostCode };
       this.inc = inc;
       this.pendingMcpServerNames = [];
       this.gen = generation;
@@ -1212,6 +1229,7 @@ class WinterSessionImpl implements WinterSession {
         if (!this.ending) this.log(`the winter child for ${this.sessionId} stopped: ${cls.code}`);
       }
     } finally {
+      inc.hostCode?.dispose();
       // The thinking pill: a reasoning block the child left open (no `end`, no terminal, no throw) is
       // persisted now rather than lost — empty in the ordinary case.
       try { this.emit(inc.projector.closeOpenThinking()); } catch { /* bounded: the store may be closed */ }
@@ -1397,6 +1415,7 @@ class WinterSessionImpl implements WinterSession {
 
   private emit(batch: ProjectedBatch): void {
     for (const e of batch.persist) {
+      this.inc?.hostCode?.observe(e);
       this.safeAppend(e);
       this.relayChild(e);
     }

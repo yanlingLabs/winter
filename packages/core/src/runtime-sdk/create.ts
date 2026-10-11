@@ -44,6 +44,8 @@ import { daemonResolveEndpoint } from "../providers/registry";
 import { REQUIRED_WINTER_AGENT_SDK, WINTER_PEER_VERSIONS } from "./versions";
 import type { RecoveryReport, RunHomeFor, RunHomeOutcome } from "@yanlinglabs/winter-runtime-sdk";
 import { runHomeHandleOf } from "./run-home-support";
+import { HostCodeExecutionService, HostCodeUnavailable } from "./host-code-broker";
+import { HostStorageFenceUnavailable } from "./host-storage-fence";
 
 /** `RuntimeDirectoryRetention` is not on the router's barrel; this is the same type. */
 type RuntimeDirectoryRetention = NonNullable<RuntimeDirectoryOptions["retention"]>;
@@ -136,6 +138,8 @@ export interface WinterRuntimeSdkDeps {
    * (`embedded_runtime_unavailable`); they never fall back to the spawned binary.
    */
   embedded?: EmbeddedSessionHost;
+  /** Internal host execution enrollment; the default checks installed SDK capabilities. */
+  codeExecution?: HostCodeExecutionService;
   log?: (line: string) => void;
 }
 
@@ -170,7 +174,8 @@ export interface WinterRuntimeSdk {
    * (a version-locked set that does not agree, or no embedded host wired). Returns the typed error
    * rather than throwing and NEVER falls back to the other topology — a session refuses at create.
    */
-  spawnHookFor(mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable | EmbeddedRuntimeUnavailable;
+  spawnHookFor(mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable | EmbeddedRuntimeUnavailable | HostCodeUnavailable | HostStorageFenceUnavailable;
+  readonly codeExecution?: HostCodeExecutionService;
   /**
    * P8c-12: the router's selection for a NEW session (or a resumed one's `persisted` record, which
    * the router returns BY IDENTITY — "the persisted selection wins", never re-decided). Builds
@@ -273,6 +278,7 @@ function endWithin(sessionId: string, abort: AbortController, end: () => Promise
 
 export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrides: WinterRuntimeSdkOverrides = {}): Promise<WinterRuntimeSdk> {
   const factory = overrides.createRuntimeSdk ?? createRouterSdk;
+  const codeExecution = deps.codeExecution ?? new HostCodeExecutionService(deps.home);
   // test-keychain-isolation fix: built from `deps.home` — the daemon's ACTUAL home — rather than
   // reusing the frozen, env-only `CORE_BRAND` singleton. `CORE_BRAND` resolves its `keychainService`
   // once at module load from `WINTER_HOME`/`WINTER_PROFILE` env vars alone, which a daemon booted
@@ -287,7 +293,11 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
   // advisor resolver, its capability bridge and its handoff participants are gone with the leg they
   // served; the router routes every family to the Winter runtime (`hasClaudePeer: false` below).
   const sdk = factory({
-    peers: { winter },
+    peers: { winter: { ...winter, query: (input) => {
+      // Covers both ordinary session queries and the router's own cold-resume path.
+      codeExecution.assertQueryOptions(input.options);
+      return winter.query(input);
+    } } },
     // P8b-4: host-declared, and the ONLY probe that answers inside a compiled `$bunfs` binary.
     peerVersions: { winterAgentSdk: WINTER_PEER_VERSIONS.winterAgentSdk },
     // R-1. Resolved once here, through the injected peer's own `resolveBrand`.
@@ -380,6 +390,7 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
 
   return {
     sdk,
+    codeExecution,
     // Task 12. `deps.directoryStore` is 8a's SQLite store when the spine opened and undefined when
     // it did not — in which case the sweep is this process's live sessions alone, which is the same
     // "degraded, never dead" posture the rest of this file takes.
@@ -388,7 +399,14 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
         await releaseAllHeld(sdk, deps.directoryStore, deps.log);
       },
     },
-    spawnHookFor(mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable | EmbeddedRuntimeUnavailable {
+    spawnHookFor(mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable | EmbeddedRuntimeUnavailable | HostCodeUnavailable | HostStorageFenceUnavailable {
+      if (mode === "code") {
+        try { codeExecution.assertReady(deps.home); }
+        catch (error) {
+          if (error instanceof HostCodeUnavailable || error instanceof HostStorageFenceUnavailable) return error;
+          throw error;
+        }
+      }
       if (runsEmbedded(mode)) {
         const embedded = deps.embedded;
         if (embedded === undefined) return new EmbeddedRuntimeUnavailable("this daemon was built without an embedded-session host; chat and dispatch cannot start");
@@ -396,7 +414,7 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
         // and it keeps the refusal at the one topology site rather than a boot flag someone must read.
         const versionRefusal = embeddedVersionCheck();
         if (versionRefusal !== undefined) return versionRefusal;
-        return { pathToClaudeCodeExecutable: "winter-embedded", spawnClaudeCodeProcess: (options) => embedded.spawn(options), runtimeVersion: REQUIRED_WINTER_AGENT_SDK };
+        return { pathToClaudeCodeExecutable: "winter-embedded", spawnClaudeCodeProcess: codeExecution.trustEmbeddedSpawn((options) => embedded.spawn(options)), runtimeVersion: REQUIRED_WINTER_AGENT_SDK };
       }
       const resolution = resolveWinterExecutable({
         setting: winterOptionsFromSettings(deps.settings()).winterExecutable,
