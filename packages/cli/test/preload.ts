@@ -6,6 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
 import { LEGACY_HOME_ENV } from "@yanlinglabs/winter-core";
+// Cowork-aware host fences must never inspect the user's shared coordination ledger or Git
+// configuration during private daemon/client fixtures. Match the core package test isolation.
+process.env.WINTER_COWORK_COORDINATION_DIR = mkdtempSync(join(tmpdir(), "winter-test-cowork-coordination-"));
+process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "winter-test-xdg-"));
 // Ink's own <Text dimColor>/<Text inverse> render through chalk's default (shared, singleton)
 // export, whose color LEVEL chalk auto-detects from `process.stdout` at first import — 0 whenever
 // stdout isn't a real TTY, which is every `bun test` process, with or without FORCE_COLOR (that env

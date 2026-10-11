@@ -1,5 +1,5 @@
 import {
-  LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, SessionEvent,
+  LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, SessionEvent, COWORK_RPC, type CoworkMethod, type CoworkParams, type CoworkResult,
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, HelloResult, SessionCreateResult, SessionAttachResult, SessionSendResult, SessionStageImageResult, SessionListResult,
   SessionAddDirResult, SessionSetCwdResult, TrustDirResult,
   BgListResult, BgPeekResult, BgKillResult, BgKillAllResult,
@@ -197,6 +197,13 @@ export class WinterClient {
     const r = schema.safeParse(raw);
     if (!r.success) throw new Error(`invalid result from server for ${method}`);
     return r.data;
+  }
+
+  /** Typed host metadata RPCs. Params/results retain their complete/summary distinction;
+   * no client-side selection, authority or execution fallback is inferred. */
+  async cowork<M extends CoworkMethod>(method: M, params: CoworkParams<M>): Promise<CoworkResult<M>> {
+    const checked = COWORK_RPC[method].params.parse(params);
+    return this.validated(COWORK_RPC[method].result, await this.request(method, checked), method) as CoworkResult<M>;
   }
 
   async createSession(scope: string, opts?: { cwd?: string; approvalPolicy?: ApprovalPolicy }): Promise<{ sessionId: string; trusted: boolean }> {
