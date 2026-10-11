@@ -20,10 +20,12 @@ typedef struct {
 } wc_network_policy;
 typedef struct {
     uint64_t revision, packets_in, packets_out, denied, unsupported, dropped, outbound_attempts, inbound_peer_denied;
-    uint64_t active_sockets, policy_replacements, poll_turns;
+    uint64_t active_sockets, policy_replacements, poll_turns, inventory_refreshes;
+    uint64_t synthetic_bound_sockets; uint32_t synthetic_bound_ifindex;
 } wc_network_stats;
 // NET_RT_DUMP2 is read-only. Defaults are usable only when complete and
-// unambiguous; index0 means absent/ambiguous for that family. Malformed input
+// unambiguous by interface, including paired /1 full-tunnel defaults; index0
+// means absent/ambiguous for that family. Malformed input
 // clears all usable fields. Prefixes include restricted public/VPN routes.
 #define WC_HOST_ROUTE_MAX_BYTES 2097152u
 #define WC_HOST_ROUTE_MAX_RECORDS 8192u
@@ -36,6 +38,23 @@ typedef struct {
 } wc_host_route_snapshot;
 bool wc_host_routes_parse(const uint8_t *bytes, size_t length, wc_host_route_snapshot *out);
 bool wc_host_routes_read(wc_host_route_snapshot *out);
+#define WC_NETWORK_INVENTORY_TTL_NS 200000000ULL
+#define WC_NETWORK_ROUTE_GRACE_NS 2000000000ULL
+// Host-owned cache. Route read failure retains fences but admits no new public
+// tuples. Only existing pinned flows may use a bounded grace. Changed or unknown
+// host identities invalidate that grace; exact authority is always checked live.
+typedef struct {
+    wc_host_route_snapshot routes;
+    wc_network_policy hosts; // Only public_internet and host_networks/count are used.
+    uint64_t refreshed_ns, stale_since_ns, host_generation;
+    bool attempted, has_good, stale, unsafe_hosts;
+} wc_network_inventory;
+bool wc_network_inventory_due(const wc_network_inventory *, uint64_t now_ns);
+void wc_network_inventory_update(wc_network_inventory *, const wc_host_route_snapshot *, const wc_network_policy *hosts, uint64_t now_ns);
+void wc_network_inventory_effective(const wc_network_inventory *, const wc_network_policy *, wc_network_policy *out);
+bool wc_network_inventory_admit(const wc_network_inventory *, const wc_network_policy *effective, const wc_network_address *, uint8_t protocol, bool dns, uint64_t now_ns, bool existing, uint32_t *ifindex);
+
+bool wc_network_inventory_matches(const wc_network_inventory *, const wc_network_policy *effective, const wc_network_address *, uint8_t protocol, bool dns, uint64_t now_ns, uint32_t bound_ifindex, uint64_t host_generation);
 
 typedef struct wc_network_endpoint wc_network_endpoint;
 // Addresses use family 4 or 6, bytes in network order and host-order port.
@@ -50,6 +69,9 @@ bool wc_network_bind_interface(int fd, uint8_t family, uint32_t ifindex);
 bool wc_network_admit_routed_destination(const wc_network_policy *, const wc_host_route_snapshot *, const wc_network_address *, uint8_t protocol, bool configured_dns, uint64_t now_ns, uint32_t *ifindex);
 int wc_network_classify_frame(const wc_network_policy *, const uint8_t *, size_t, uint64_t now_ns);
 wc_network_endpoint *wc_network_create(const wc_network_policy *);
+// Fixture-only construction refuses a policy that can transmit. The production
+// constructor always reads OS inventories; no guest route override is exposed.
+wc_network_endpoint *wc_network_create_inventory_fixture(const wc_network_policy *, const wc_host_route_snapshot *);
 int wc_network_guest_fd(wc_network_endpoint *); // borrowed connected datagram socket
 int wc_network_replace_policy(wc_network_endpoint *, const wc_network_policy *, uint64_t expected_revision);
 void wc_network_read_stats(wc_network_endpoint *, wc_network_stats *);

@@ -56,12 +56,24 @@ public internet access is enabled. It gives no generic private-network grant.
 The UDP query parser rejects non-query/opcode traffic, but this is a fixed DNS
 service exception, not a full DNS application firewall. Host integration must
 watch system DNS changes and replace the resolver policy before resuming work;
-automatic resolver-change observation is not implemented yet. A failed host
-interface or route snapshot conservatively disables public destinations. Host
-interface and routing inventories are captured once per native poll turn.
-Public connections require an unambiguous default interface and are bound with
-`IP_BOUND_IF`/`IPV6_BOUND_IF`; nondefault public routes (including VPN/static
-routes) require a grant. Exact grants and the configured DNS exception use the
+automatic resolver-change observation is not implemented yet. Host interface and
+routing inventories are cached for 200ms rather than captured on each packet
+wake. A failed route refresh retains the last complete snapshot and its host/LAN
+fences, denies every new public tuple, and permits previously admitted, pinned
+public tuples for at most two seconds from the first failure. Repeated failures
+do not extend that grace. An unknown or changed host-interface identity denies
+public continuation immediately after observation; a complete identity change
+also closes previously pinned public flows. Current grant/DNS authority is
+rechecked throughout; expiry, revocation and disabled internet authority never
+inherit grace. A snapshot that has never succeeded gives no public authority.
+
+Public connections require one unambiguous effective default interface and are
+bound with `IP_BOUND_IF`/`IPV6_BOUND_IF`. Multiple default routers on the same
+interface are accepted; defaults on different interfaces remain ambiguous.
+Two usable, unscoped /1 routes covering an address family on the same interface
+form an effective full-tunnel default, superseding an ordinary /0. Missing,
+restricted or ambiguous split halves remain denial prefixes. More specific
+routes (including private/static/VPN routes) still require an exact grant. Exact grants and the configured DNS exception use the
 host's ordinary route selection. A grant is authority for its exact destination.
 
 This does not detect a router's public WAN address or upstream NAT hairpinning.
@@ -84,7 +96,12 @@ Limits: 256 sockets, 64 grants, 128 supplied/observed prefixes, MTU1500, one nat
 worker, 128KiB send / 512KiB receive kernel queues per endpoint, nonblocking
 writes with visible drop counters, ingress burst64 and 1024 packets/s, at most64
 frames processed per poll turn. Idle flow revalidation waits at most100ms plus
-scheduled thread time; final outbound checks are synchronous. These bounds are
+scheduled thread time; inventory changes are observed at the next 200ms refresh
+and poll turn (up to another100ms plus scheduled thread time). The cache is a
+bounded observation window, not atomic route-change notification. During a
+route-only failure, retained flows keep their original kernel interface binding;
+that cannot prove the host kernel's route within that interface remained the
+same. Final outbound tuple/grant checks are synchronous. These bounds are
 implemented; CPU/latency under hostile sustained load is not yet benchmarked.
 The 1024pps development limit is deliberately conservative and needs product
 performance validation. It is not a user's RAM/CPU allocation control.
@@ -122,7 +139,7 @@ swift build --package-path apple/Cowork/WinterCoworkNetwork --jobs 4
 swift test --package-path apple/Cowork/WinterCoworkNetwork --jobs 4
 ```
 
-33 Swift Testing tests passed on 2026-10-11: public/private/mapped IPv6 and LAN
+45 Swift Testing tests passed on 2026-10-11: public/private/mapped IPv6 and LAN
 policy, tuple/expiry grants, configured DNS exception, gateway final tuple,
 malformed/raw/fragment denial, policy ACK/stale revision, real libslirp TCP
 connect and UDP send to scoped ephemeral loopback listeners, unsolicited UDP
@@ -135,7 +152,15 @@ exercises final translated-tuple policy without performing a public send.
 Route tests cover Darwin sockaddr alignment/short masks, malformed and bounded
 inventories, generated versus static routes, ambiguous/missing defaults,
 mapped-prefix normalization, final routed admission and kernel interface-bind
-options. The read-only live snapshot test logs counts and readiness only.
+options. Cache tests cover new admission denial, bounded continuation without
+renewing the failure window, retained LAN fences, current grant revocation and
+expiry, host identity/generation changes, and the 200ms refresh TTL. Packet wakes
+exercise that TTL in the real worker. An injected host snapshot drives actual
+libslirp TCP and UDP public-route admission and kernel socket binding to `lo0`;
+the mandatory synthetic policy refuses before `connect`/`sendto`, and its fixture
+constructor and policy replacement cannot enable transmission. This proves the
+routed binding path without changing host routes or sending public/LAN traffic.
+The read-only live snapshot test logs counts and readiness only.
 Tests use disposable local socket fixtures; no VM, real public connection,
 provider credential, global service or host pressure is involved. This does not
 prove DNS end-to-end, guest DHCP/IPv6 negotiation, VZ

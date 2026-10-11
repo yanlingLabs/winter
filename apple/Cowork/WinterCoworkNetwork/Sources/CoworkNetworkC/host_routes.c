@@ -82,6 +82,13 @@ static bool add_prefix(wc_host_route_snapshot *out, wc_network_prefix prefix) {
     out->deny_prefixes[out->deny_prefix_count++] = prefix; return true;
 }
 
+typedef struct { uint32_t index; bool ambiguous; } default_interface;
+static void candidate(default_interface *value, uint32_t index) {
+    if (value->index && value->index != index) value->ambiguous = true;
+    if (!value->index) value->index = index;
+}
+static uint32_t usable(default_interface value) { return value.ambiguous ? 0 : value.index; }
+
 bool wc_host_routes_parse(const uint8_t *bytes, size_t length, wc_host_route_snapshot *out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
@@ -90,7 +97,7 @@ bool wc_host_routes_parse(const uint8_t *bytes, size_t length, wc_host_route_sna
         RTF_DELCLONE | RTF_CLONING | RTF_XRESOLVE | RTF_LLINFO | RTF_STATIC | RTF_BLACKHOLE | RTF_NOIFREF |
         RTF_PROTO1 | RTF_PROTO2 | RTF_PROTO3 | RTF_PRCLONING | RTF_WASCLONED | RTF_PINNED | RTF_LOCAL |
         RTF_BROADCAST | RTF_MULTICAST | RTF_IFSCOPE | RTF_CONDEMNED | RTF_IFREF | RTF_PROXY | RTF_ROUTER | RTF_DEAD | RTF_GLOBAL;
-    uint32_t defaults4 = 0, defaults6 = 0;
+    default_interface defaults[2] = {{0}}, halves[2][2] = {{{0}}};
     size_t cursor = 0;
     while (cursor < length) {
         if (out->record_count >= WC_HOST_ROUTE_MAX_RECORDS || length - cursor < sizeof(struct rt_msghdr2)) return failure(out);
@@ -127,13 +134,25 @@ bool wc_host_routes_parse(const uint8_t *bytes, size_t length, wc_host_route_sna
             !(header.rtm_flags & RTF_STATIC) && !restricted;
         if (generated) out->ignored_generated_count++;
         else if (prefix.prefix_length == 0 && !restricted) {
-            if ((header.rtm_flags & RTF_UP) && !(header.rtm_flags & (RTF_IFSCOPE | RTF_CONDEMNED | RTF_DEAD)) && header.rtm_index) {
-                uint32_t *count = prefix.address.family == 4 ? &defaults4 : &defaults6;
-                uint32_t *index = prefix.address.family == 4 ? &out->default_ipv4_ifindex : &out->default_ipv6_ifindex;
-                (*count)++; *index = *count == 1 ? header.rtm_index : 0;
-            }
+            if ((header.rtm_flags & RTF_UP) && !(header.rtm_flags & (RTF_IFSCOPE | RTF_CONDEMNED | RTF_DEAD)) && header.rtm_index)
+                candidate(&defaults[prefix.address.family == 4 ? 0 : 1], header.rtm_index);
+        } else if (prefix.prefix_length == 1 && !restricted && (header.rtm_flags & RTF_UP) &&
+                   !(header.rtm_flags & (RTF_IFSCOPE | RTF_CONDEMNED | RTF_DEAD)) && header.rtm_index) {
+            // Full-tunnel VPNs commonly install two /1 routes instead of /0.
+            // Defer these fences until both halves identify the same interface.
+            candidate(&halves[prefix.address.family == 4 ? 0 : 1][prefix.address.bytes[0] >> 7], header.rtm_index);
         } else if (!add_prefix(out, prefix)) return failure(out);
         cursor += record_length;
+    }
+    for (int family = 0; family < 2; family++) {
+        uint32_t low = usable(halves[family][0]), high = usable(halves[family][1]);
+        uint32_t index = low && low == high ? low : usable(defaults[family]);
+        if (family == 0) out->default_ipv4_ifindex = index; else out->default_ipv6_ifindex = index;
+        if (!(low && low == high)) for (int half = 0; half < 2; half++) if (halves[family][half].index) {
+            wc_network_prefix fence = {.address.family = family == 0 ? 4 : 6, .prefix_length = 1};
+            fence.address.bytes[0] = half ? 128 : 0;
+            if (!add_prefix(out, fence)) return failure(out);
+        }
     }
     out->inventory_complete = true; return true;
 }

@@ -107,7 +107,33 @@ struct HostRoutesTests {
         let (valid,s)=routeParse(routeRecord("0.0.0.0",bits:0,index:4)+routeRecord("0.0.0.0",bits:0,index:8)+routeRecord("::",bits:0,index:9))
         #expect(valid);#expect(s.default_ipv4_ifindex==0);#expect(s.default_ipv6_ifindex==9)
         let (_,duplicates)=routeParse(routeRecord("0.0.0.0",bits:0,index:4)+routeRecord("0.0.0.0",bits:0,index:4))
-        #expect(duplicates.default_ipv4_ifindex==0)
+        #expect(duplicates.default_ipv4_ifindex==4)
+    }
+    @Test func repeatedIPv6RoutersOnOneInterfaceRemainUsable() {
+        let (_,same)=routeParse(routeRecord("::",bits:0,index:9)+routeRecord("::",bits:0,index:9))
+        #expect(same.default_ipv6_ifindex==9)
+        let (_,different)=routeParse(routeRecord("::",bits:0,index:9)+routeRecord("::",bits:0,index:10))
+        #expect(different.default_ipv6_ifindex==0)
+    }
+    @Test func pairedSplitDefaultsSupersedeOrdinaryDefaultButRetainOtherFences() {
+        let (_,s)=routeParse(routeRecord("0.0.0.0",bits:0,index:4)+routeRecord("0.0.0.0",bits:1,index:8)+routeRecord("128.0.0.0",bits:1,index:8)+routeRecord("::",bits:1,index:9)+routeRecord("8000::",bits:1,index:9)+routeRecord("8.8.8.0",bits:24,index:8)+routeRecord("10.0.0.0",bits:8,index:8))
+        #expect(s.inventory_complete);#expect(s.default_ipv4_ifindex==8);#expect(s.default_ipv6_ifindex==9)
+        #expect(s.deny_prefix_count==2);#expect(routeMatches(s,"8.8.8.0",24));#expect(routeMatches(s,"10.0.0.0",8))
+    }
+    @Test func incompleteAmbiguousOrRestrictedSplitDefaultsRemainDenied() {
+        let variants=[
+            routeRecord("0.0.0.0",bits:1,index:8),
+            routeRecord("0.0.0.0",bits:1,index:8)+routeRecord("128.0.0.0",bits:1,index:9),
+            routeRecord("0.0.0.0",bits:1,index:8)+routeRecord("0.0.0.0",bits:1,index:9)+routeRecord("128.0.0.0",bits:1,index:8),
+            routeRecord("0.0.0.0",bits:1,index:8)+routeRecord("128.0.0.0",bits:1,index:8,shortMask:true, parentFlags:0)+routeRecord("128.0.0.0",bits:1,flags:Int32(RTF_UP|RTF_BLACKHOLE),index:8)
+        ]
+        for (position,bytes) in variants.enumerated() {
+            let (_,s)=routeParse(routeRecord("0.0.0.0",bits:0,index:4)+bytes)
+            #expect(s.inventory_complete);#expect(s.deny_prefix_count>0)
+            #expect(routeMatches(s,position==variants.count-1 ? "128.0.0.0":"0.0.0.0",1))
+        }
+        let (_,scoped)=routeParse(routeRecord("0.0.0.0",bits:1,flags:Int32(RTF_UP|RTF_IFSCOPE),index:8)+routeRecord("128.0.0.0",bits:1,index:8))
+        #expect(scoped.default_ipv4_ifindex==0);#expect(scoped.deny_prefix_count==2)
     }
     @Test func mappedIPv6RoutesCannotLoseTheirIPv4Denial() {
         let (valid,s)=routeParse(routeRecord("::ffff:8.8.8.0",bits:120)+routeRecord("::ffff:9.9.9.9",flags:Int32(RTF_UP|RTF_HOST|RTF_STATIC)))

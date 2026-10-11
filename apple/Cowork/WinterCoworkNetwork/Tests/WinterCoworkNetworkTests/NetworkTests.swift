@@ -212,3 +212,45 @@ private func receiveTCP(_ fd:Int32,where matches:([UInt8],Int)->Bool) throws -> 
     #expect(f.withUnsafeBytes {send(fd,$0.baseAddress,$0.count,0)}==f.count);let local=packet(destination:[127,0,0,1],port:80);#expect(local.withUnsafeBytes {send(fd,$0.baseAddress,$0.count,0)}==local.count)
     try await Task.sleep(for:.milliseconds(100));#expect(try e.statistics().denied==2);#expect(try e.statistics().outboundAttempts==0);await e.shutdown()
 }
+
+@Test func syntheticRoutedPathBindsTheTranslatedSocketAndCannotTransmit() async throws {
+    for proto in [UInt8(6),UInt8(17)] {
+        let (server,port)=localSocket(proto==6 ? SOCK_STREAM:SOCK_DGRAM);defer{close(server)}
+        if proto==6 {#expect(listen(server,1)==0)}
+        var policy=try NetworkEndpointPolicy(revision:1).native(syntheticNoOutbound:true)
+        var routes=wc_host_route_snapshot();routes.inventory_complete=true;routes.default_ipv4_ifindex=if_nametoindex("lo0")
+        let endpoint=try #require(wc_network_create_inventory_fixture(&policy,&routes));defer{wc_network_destroy(endpoint)}
+        let fd=wc_network_guest_fd(endpoint)
+        // Public tuples reach real libslirp TCP/UDP sockets' IP_BOUND_IF options.
+        // Synthetic mode stops before sendto/connect; the gateway lacks a grant.
+        for destination in [[UInt8](arrayLiteral:8,8,8,8),[10,0,2,2]] {
+            let frame=packet(destination:destination,port:port,protocol:proto,payload:[])
+            #expect(frame.withUnsafeBytes{send(fd,$0.baseAddress,$0.count,0)}==frame.count)
+        }
+        var stats=wc_network_stats()
+        for _ in 0..<200 {
+            wc_network_read_stats(endpoint,&stats)
+            if stats.synthetic_bound_sockets>0 && stats.denied>0 {break}
+            try await Task.sleep(for:.milliseconds(1))
+        }
+        #expect(stats.outbound_attempts==1);#expect(stats.synthetic_bound_sockets==1)
+        #expect(stats.synthetic_bound_ifindex==if_nametoindex("lo0"));#expect(stats.denied==1)
+        #expect(!readable(server,30));#expect(stats.inventory_refreshes==0)
+        policy.revision=2;policy.synthetic_no_outbound=false
+        #expect(wc_network_replace_policy(endpoint,&policy,1)==EINVAL)
+        #expect(wc_network_create_inventory_fixture(&policy,&routes)==nil)
+    }
+}
+
+@Test func packetWakeupsDoNotRecaptureHostInventoriesEveryTurn() async throws {
+    var policy=try NetworkEndpointPolicy(revision:1).native(syntheticNoOutbound:true)
+    let endpoint=try #require(wc_network_create(&policy));defer{wc_network_destroy(endpoint)}
+    let fd=wc_network_guest_fd(endpoint),frame=packet(destination:[10,0,2,2],port:1234)
+    for _ in 0..<30 {
+        _ = frame.withUnsafeBytes{send(fd,$0.baseAddress,$0.count,0)}
+        try await Task.sleep(for:.milliseconds(2))
+    }
+    var stats=wc_network_stats();wc_network_read_stats(endpoint,&stats)
+    #expect(stats.poll_turns>=10);#expect(stats.inventory_refreshes>=1)
+    #expect(stats.inventory_refreshes<stats.poll_turns/2)
+}
