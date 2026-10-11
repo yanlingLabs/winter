@@ -554,16 +554,18 @@ extension CUCore {
         // guardian is still in visit mode, so nothing else would). When that input can't be seen at all (no session tap,
         // no gesture monitor), nothing is undone: whose switch it was can't be told.
         if reason == .neverArrived, let user = s.before.front {
+            let watchFrom = clock.nowSeconds()
             let until = clock.nowMs() + visitLateSwitchMs
-            let canTell = switchInputObservable
             var undone = 0
             var userMoved = false
             while clock.nowMs() < until, undone < 2 {
                 usleep(40_000)
                 let now = userView()
                 guard now != s.before else { continue }
+                // Read at each change (the tap can stop mid-watch), and only input since the watch began counts.
+                let canTell = switchInputObservable
                 let seenAt = clock.nowSeconds()
-                let acted = guardianLock.withLock { lastSwitchInputAt >= 0 && seenAt - lastSwitchInputAt <= Self.lateSwitchInputWindow }
+                let acted = guardianLock.withLock { switchInput.seen(from: watchFrom, seenAt: seenAt, window: Self.lateSwitchInputWindow) }
                 let theTarget = Self.lateSwitchIsTheTarget(now, before: s.before, targetPid: s.pid,
                                                            targetWindowOnScreen: sys.window(id: s.windowID)?.onScreen == true, userActed: acted)
                 if !theTarget || !canTell {
@@ -630,20 +632,28 @@ extension CUCore {
     }
 
     /// The window the return raises: the user's recorded one while it is still there — unless their app's focused
-    /// window now is another of theirs (not the target's bound window), a window they opened during the visit, which a
-    /// raise of the old one would cover: that one. Their recorded window closed: their focused window when it is not
-    /// the target's bound window, else another of their windows that was on their desktop when the visit began (review
-    /// of round 3: the fallback raised the app's focused window — the bound one, on the visited desktop). Nil: none is
-    /// raised (their app is still brought back).
+    /// window now is another of THEIRS, a window they opened during the visit, which a raise of the old one would cover:
+    /// that one. Their recorded window closed: their focused window when it is theirs, else another of their windows
+    /// that was on their desktop when the visit began (review of round 3). "Theirs" (review of round 4): one that was on
+    /// their desktop when the visit began, or one not shown on the visited desktop now — never the target's bound
+    /// window, nor an alert, panel or window the visit's own act opened on the visited desktop when their app IS the
+    /// target app (raised and made main, it kept them there). Nil: none is raised (their app is still brought back).
     func returnWindow(_ s: VisitBase) -> (element: AXUIElement?, id: CGWindowID?) {
         let user = s.before.front
         let focused = user.flatMap { ax.element(ax.application($0), kAXFocusedWindowAttribute) }
         let fid = focused.flatMap { ax.windowID($0) }
+        let recorded = Set([s.userWindowID].compactMap { $0 } + s.userOtherWindows.map(\.id))
+        let theirs = { [self] (id: CGWindowID) -> Bool in
+            guard id != s.windowID else { return false }
+            if recorded.contains(id) { return true }
+            let away = s.before.space != nil && sys.activeSpace() != s.before.space
+            return !(away && sys.window(id: id)?.onScreen == true)  // shown on the visited desktop: the visit's
+        }
         if let w = s.userWindow, let id = s.userWindowID, ax.isAlive(w) {
-            if let focused, let fid, fid != id, fid != s.windowID { return (focused, fid) }
+            if let focused, let fid, fid != id, theirs(fid) { return (focused, fid) }
             return (w, id)
         }
-        if let focused, let fid, fid != s.windowID, ax.isAlive(focused) { return (focused, fid) }
+        if let focused, let fid, theirs(fid), ax.isAlive(focused) { return (focused, fid) }
         if let other = s.userOtherWindows.first(where: { ax.isAlive($0.element) && sys.window(id: $0.id) != nil }) {
             return (other.element, other.id)
         }

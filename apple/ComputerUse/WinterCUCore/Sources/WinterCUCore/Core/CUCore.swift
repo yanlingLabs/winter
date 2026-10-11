@@ -556,11 +556,12 @@ public final class CUCore: @unchecked Sendable {
     /// The same, for a hardware ACTION only (a click, a key, a scroll, a gesture — never a pointer move): what a
     /// desktop visit counts as the user acting during it.
     var lastHardwareActionAt: TimeInterval = -1
-    /// The last hardware input that can SWITCH apps or desktops (`CUCore.canSwitch`): a ⌘ or ⌃ chord (⌘-Tab, ⌃-arrows),
-    /// a trackpad gesture (a swipe between desktops, Mission Control), a click on a bound target's window or on the
-    /// Dock — what a never-arrived visit's late-switch watch counts as the user moving (typing in their own app is not).
-    var lastSwitchInputAt: TimeInterval = -1
-    /// Whether that input can be seen at all (the session tap or the gesture monitor runs); a test sets it.
+    /// Hardware input that can SWITCH apps or desktops (`CUSwitchInput`): what a never-arrived visit's late-switch watch
+    /// counts as the user moving. Guarded by `guardianLock`.
+    var switchInput = CUSwitchInput()
+    /// When switch-capable input was last seen (for the log and tests).
+    var lastSwitchInputAt: TimeInterval { guardianLock.withLock { switchInput.lastAt } }
+    /// Whether that input can be seen at all (the session tap runs: it alone sees modifiers and clicks); a test sets it.
     var switchInputObservableOverride: Bool?
     /// Schedules the end of the guard's tail; tests run it by hand.
     var guardianTailSchedule: (TimeInterval, @escaping () -> Void) -> DispatchWorkItem? = { seconds, work in
