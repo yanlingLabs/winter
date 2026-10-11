@@ -42,6 +42,10 @@ export interface PrimitiveMetric {
   engineMs?: number;
   /** A `download()`: the saved file's size (never its name, URL or path). */
   download?: { bytes: number };
+  /** A `browsers.read()` (Phase 4): the final response's HTTP status and the body bytes read off the wire — never the
+   *  URL, its path or query, or any content. */
+  httpStatus?: number;
+  bytes?: number;
   /** An `extra` / `dict` primitive: the extra's or dictionary command's NAME (never its arguments). */
   extra?: string;
   /** An act (helper 1.9.8): the apps that came forward after the agent's action with no input of the user's since — sent

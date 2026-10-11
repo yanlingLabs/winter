@@ -261,6 +261,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     group: (o?: unknown) => call("browsers.group", undefined, opts(o)).then(nothing),
     history: (o?: unknown) => call("browsers.history", undefined, opts(o)),
     bookmarks: (o?: unknown) => call("browsers.bookmarks", undefined, opts(o)),
+    read: (url: unknown, o?: unknown) => call("browsers.read", undefined, { url, ...opts(o) }),
   });
   const screen = Object.freeze({
     screenshot: (o?: unknown) => call("screen.screenshot", undefined, opts(o)).then(toImage),

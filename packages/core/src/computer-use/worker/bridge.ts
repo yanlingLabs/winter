@@ -42,7 +42,9 @@ export const TAB_PRIMITIVES = ["state", "find", "screenshot", "click", "setValue
   "select", "hover", "waitFor", "waitForIdle", "goto", "back", "forward", "reload", "url", "title", "text", "upload", "keep", "handoff", "close",
   // Phase 3
   "console", "network", "networkBody", "inspect", "html", "assets", "dialog", "answerDialog", "viewport", "mute", "download", "waitForUser"] as const;
-export const BROWSER_PRIMITIVES = ["browsers.list", "browsers.open", "browsers.tabs", "browsers.tab", "browsers.windows", "browsers.group", "browsers.history", "browsers.bookmarks"] as const;
+export const BROWSER_PRIMITIVES = ["browsers.list", "browsers.open", "browsers.tabs", "browsers.tab", "browsers.windows", "browsers.group", "browsers.history", "browsers.bookmarks",
+  // Phase 4
+  "browsers.read"] as const;
 export type AppPrimitive = (typeof APP_PRIMITIVES)[number];
 export type GlobalPrimitive = (typeof GLOBAL_PRIMITIVES)[number];
 export type Primitive = AppPrimitive | GlobalPrimitive;
