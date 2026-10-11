@@ -37,10 +37,81 @@ describe("the allowlist", () => {
     expect(isAllowedEvent("Network.requestWillBeSentExtraInfo")).toBe(false);
   });
 
-  test("Network events leave reduced to requestId, timestamp and type", () => {
-    expect(strippedParams("Network.requestWillBeSent", { requestId: "1", timestamp: 3, type: "XHR", request: { url: "https://x/?token=1", headers: { Cookie: "a=b" } }, initiator: {} }))
-      .toEqual({ requestId: "1", timestamp: 3, type: "XHR" });
+  test("events leave reduced by cdpEventParams: a request's method and URL, never its headers; Set-Cookie never", () => {
+    expect(strippedParams("Network.requestWillBeSent", { requestId: "1", timestamp: 3, type: "XHR", request: { url: "https://x/?token=1", method: "GET", headers: { Cookie: "a=b" } }, initiator: {} }))
+      .toEqual({ requestId: "1", timestamp: 3, type: "XHR", request: { url: "https://x/?token=1", method: "GET" } });
+    expect(JSON.stringify(strippedParams("Fetch.requestPaused", { requestId: "i", responseStatusCode: 200, responseHeaders: [{ name: "Set-Cookie", value: "s=1" }, { name: "content-type", value: "text/csv" }] })))
+      .not.toContain("Set-Cookie");
     expect(strippedParams("Page.frameNavigated", { frame: { url: "https://x/" } })).toEqual({ frame: { url: "https://x/" } });
+  });
+});
+
+describe("Phase 3's rules", () => {
+  test("Network.enable: no post data, capped buffers", () => {
+    const g = new TabGuard();
+    expect(g.check("Network.enable", {})).toEqual(send);
+    expect(g.check("Network.enable", { maxResourceBufferSize: 1_048_576, maxTotalBufferSize: 8_388_608, maxPostDataSize: 0 })).toEqual(send);
+    expect(refused(g, "Network.enable", { maxPostDataSize: 1 })).toBe(true);
+    expect(refused(g, "Network.enable", { maxResourceBufferSize: 1_048_577 })).toBe(true);
+    expect(refused(g, "Network.enable", { maxTotalBufferSize: 100_000_000 })).toBe(true);
+  });
+
+  test("a response body is cut before it leaves", () => {
+    const g = new TabGuard();
+    const big = { body: "a".repeat(1_048_576 + 10), base64Encoded: false };
+    const out = g.filterResult("Network.getResponseBody", big) as { body: string; truncated?: boolean };
+    expect(out.body.length).toBe(1_048_576);
+    expect(out.truncated).toBe(true);
+    const small = { body: "ok", base64Encoded: false };
+    expect(g.filterResult("Network.getResponseBody", small)).toBe(small);
+    expect(g.filterResult("Page.getLayoutMetrics", big)).toBe(big);
+  });
+
+  test("Fetch pauses responses only, changes nothing, stops with Aborted, never answers auth", () => {
+    const g = new TabGuard();
+    const patterns = [{ urlPattern: "*", requestStage: "Response", resourceType: "Document" }];
+    expect(g.check("Fetch.enable", { patterns })).toEqual(send);
+    expect(refused(g, "Fetch.enable", { patterns: [{ urlPattern: "*", requestStage: "Request" }] })).toBe(true);
+    expect(refused(g, "Fetch.enable", { patterns: [{ urlPattern: "*" }] })).toBe(true);
+    expect(refused(g, "Fetch.enable", { patterns, handleAuthRequests: true })).toBe(true);
+    expect(refused(g, "Fetch.enable", {})).toBe(true);
+    expect(g.check("Fetch.continueRequest", { requestId: "r" })).toEqual(send);
+    for (const extra of [{ url: "https://evil/" }, { method: "POST" }, { postData: "x" }, { headers: [] }, { interceptResponse: true }]) {
+      expect(refused(g, "Fetch.continueRequest", { requestId: "r", ...extra })).toBe(true);
+    }
+    expect(g.check("Fetch.failRequest", { requestId: "r", errorReason: "Aborted" })).toEqual(send);
+    expect(refused(g, "Fetch.failRequest", { requestId: "r", errorReason: "Failed" })).toBe(true);
+    expect(g.check("Fetch.disable", {})).toEqual(send);
+  });
+
+  test("a body is read only for a response paused at the Response stage, through a stream this guard saw opened", () => {
+    const g = new TabGuard();
+    expect(refused(g, "Fetch.takeResponseBodyAsStream", { requestId: "r1" })).toBe(true);
+    g.observeEvent("Fetch.requestPaused", { requestId: "r0", request: { url: "https://x/" } }); // the Request stage: never
+    expect(refused(g, "Fetch.takeResponseBodyAsStream", { requestId: "r0" })).toBe(true);
+    g.observeEvent("Fetch.requestPaused", { requestId: "r1", responseStatusCode: 200 });
+    expect(refused(g, "Fetch.takeResponseBodyAsStream", { requestId: "r1" }, "child")).toBe(true); // another session
+    expect(g.check("Fetch.takeResponseBodyAsStream", { requestId: "r1" })).toEqual(send);
+    expect(refused(g, "IO.read", { handle: "blob:1234" })).toBe(true);
+    g.observeResult("Fetch.takeResponseBodyAsStream", { requestId: "r1" }, { stream: "7" });
+    expect(refused(g, "Fetch.takeResponseBodyAsStream", { requestId: "r1" })).toBe(true); // once
+    expect(g.check("IO.read", { handle: "7", size: 1_048_576 })).toEqual(send);
+    expect(refused(g, "IO.read", { handle: "7", size: 1_048_577 })).toBe(true);
+    expect(refused(g, "IO.read", { handle: "7", offset: 0 })).toBe(true);
+    expect(refused(g, "IO.read", { handle: "8" })).toBe(true);
+    expect(g.check("IO.close", { handle: "7" })).toEqual(send);
+    g.observeResult("IO.close", { handle: "7" }, {});
+    expect(refused(g, "IO.read", { handle: "7" })).toBe(true);
+  });
+
+  test("Emulation.setDeviceMetricsOverride takes a screen size and nothing else", () => {
+    const g = new TabGuard();
+    expect(g.check("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true })).toEqual(send);
+    expect(g.check("Emulation.clearDeviceMetricsOverride", {})).toEqual(send);
+    expect(refused(g, "Emulation.setDeviceMetricsOverride", { width: 390, height: 844, screenOrientation: { type: "portraitPrimary", angle: 0 } })).toBe(true);
+    expect(refused(g, "Emulation.setDeviceMetricsOverride", { width: 5000, height: 844 })).toBe(true);
+    expect(refused(g, "Emulation.setDeviceMetricsOverride", { width: 390.5, height: 844 })).toBe(true);
+    expect(refused(g, "Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 9 })).toBe(true);
   });
 });
 

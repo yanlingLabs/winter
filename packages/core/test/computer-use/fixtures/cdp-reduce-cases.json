@@ -1,0 +1,1701 @@
+{
+  "comment": "ComputerV2 Phase 3 — cdpEventParams cases (cdp-reduce.ts); WinterKit's CDPEventReducer must produce the same expected output. Regenerate only with a reviewed reducer change.",
+  "cases": [
+    {
+      "name": "requestWillBeSent: no headers, no post data, no initiator",
+      "method": "Network.requestWillBeSent",
+      "params": {
+        "requestId": "1.2",
+        "loaderId": "L",
+        "documentURL": "https://a.example/",
+        "timestamp": 12.5,
+        "wallTime": 1791726519.4,
+        "type": "XHR",
+        "frameId": "F",
+        "initiator": {
+          "type": "script"
+        },
+        "request": {
+          "url": "https://api.example/v1?token=abc",
+          "method": "POST",
+          "headers": {
+            "Cookie": "sid=1",
+            "Authorization": "Bearer x"
+          },
+          "postData": "password=hunter2",
+          "hasPostData": true,
+          "postDataEntries": [
+            {
+              "bytes": "cGFzcw=="
+            }
+          ]
+        },
+        "redirectResponse": {
+          "status": 302,
+          "headers": {
+            "Set-Cookie": "a=b"
+          },
+          "url": "https://a.example/old"
+        }
+      },
+      "expected": {
+        "requestId": "1.2",
+        "timestamp": 12.5,
+        "wallTime": 1791726519.4,
+        "type": "XHR",
+        "frameId": "F",
+        "request": {
+          "url": "https://api.example/v1?token=abc",
+          "method": "POST"
+        },
+        "redirectResponse": {
+          "status": 302
+        }
+      }
+    },
+    {
+      "name": "responseReceived: status/type/MIME only",
+      "method": "Network.responseReceived",
+      "params": {
+        "requestId": "1.2",
+        "loaderId": "L",
+        "timestamp": 13,
+        "type": "XHR",
+        "frameId": "F",
+        "hasExtraInfo": true,
+        "response": {
+          "url": "https://api.example/v1",
+          "status": 200,
+          "statusText": "OK",
+          "mimeType": "application/json",
+          "protocol": "h2",
+          "fromDiskCache": false,
+          "fromServiceWorker": false,
+          "encodedDataLength": 345,
+          "headers": {
+            "set-cookie": "sid=2"
+          },
+          "requestHeaders": {
+            "cookie": "sid=1"
+          },
+          "securityDetails": {
+            "subjectName": "x"
+          },
+          "remoteIPAddress": "1.2.3.4",
+          "timing": {
+            "requestTime": 1
+          }
+        }
+      },
+      "expected": {
+        "requestId": "1.2",
+        "timestamp": 13,
+        "type": "XHR",
+        "frameId": "F",
+        "response": {
+          "url": "https://api.example/v1",
+          "status": 200,
+          "statusText": "OK",
+          "mimeType": "application/json",
+          "protocol": "h2",
+          "fromDiskCache": false,
+          "fromServiceWorker": false,
+          "encodedDataLength": 345
+        }
+      }
+    },
+    {
+      "name": "loadingFinished",
+      "method": "Network.loadingFinished",
+      "params": {
+        "requestId": "1.2",
+        "timestamp": 14,
+        "encodedDataLength": 400,
+        "shouldReportCorbBlocking": false
+      },
+      "expected": {
+        "requestId": "1.2",
+        "timestamp": 14,
+        "encodedDataLength": 400
+      }
+    },
+    {
+      "name": "loadingFailed",
+      "method": "Network.loadingFailed",
+      "params": {
+        "requestId": "1.3",
+        "timestamp": 15,
+        "type": "Image",
+        "errorText": "net::ERR_FAILED",
+        "canceled": false,
+        "blockedReason": "mixed-content",
+        "corsErrorStatus": {
+          "corsError": "x"
+        }
+      },
+      "expected": {
+        "requestId": "1.3",
+        "timestamp": 15,
+        "type": "Image",
+        "errorText": "net::ERR_FAILED",
+        "canceled": false,
+        "blockedReason": "mixed-content"
+      }
+    },
+    {
+      "name": "consoleAPICalled: page objects never cross; frames capped",
+      "method": "Runtime.consoleAPICalled",
+      "params": {
+        "type": "log",
+        "timestamp": 1791726519475.3,
+        "executionContextId": 1,
+        "context": "x",
+        "args": [
+          {
+            "type": "string",
+            "value": "hello"
+          },
+          {
+            "type": "object",
+            "className": "Object",
+            "description": "Object",
+            "objectId": "-1.1.1",
+            "preview": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "token",
+                  "value": "sk-123"
+                }
+              ]
+            }
+          },
+          {
+            "type": "number",
+            "value": 42,
+            "description": "42"
+          },
+          {
+            "type": "object",
+            "value": {
+              "nested": true
+            },
+            "description": "Object"
+          },
+          {
+            "type": "bigint",
+            "unserializableValue": "12n",
+            "description": "12n"
+          }
+        ],
+        "stackTrace": {
+          "callFrames": [
+            {
+              "functionName": "f0",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 0,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f1",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 1,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f2",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 2,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f3",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 3,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f4",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 4,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f5",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 5,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f6",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 6,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f7",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 7,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f8",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 8,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f9",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 9,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f10",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 10,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f11",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 11,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f12",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 12,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f13",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 13,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f14",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 14,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f15",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 15,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f16",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 16,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f17",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 17,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f18",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 18,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f19",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 19,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f20",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 20,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f21",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 21,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f22",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 22,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f23",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 23,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f24",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 24,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f25",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 25,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f26",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 26,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f27",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 27,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f28",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 28,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f29",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 29,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f30",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 30,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f31",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 31,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f32",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 32,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f33",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 33,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f34",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 34,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f35",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 35,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f36",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 36,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f37",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 37,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f38",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 38,
+              "columnNumber": 2
+            },
+            {
+              "functionName": "f39",
+              "scriptId": "3",
+              "url": "https://a.example/app.js",
+              "lineNumber": 39,
+              "columnNumber": 2
+            }
+          ],
+          "parent": {
+            "callFrames": [
+              {
+                "functionName": "f0",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 0,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f1",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 1,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f2",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 2,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f3",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 3,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f4",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 4,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f5",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 5,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f6",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 6,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f7",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 7,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f8",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 8,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f9",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 9,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f10",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 10,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f11",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 11,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f12",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 12,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f13",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 13,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f14",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 14,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f15",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 15,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f16",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 16,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f17",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 17,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f18",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 18,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f19",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 19,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f20",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 20,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f21",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 21,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f22",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 22,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f23",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 23,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f24",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 24,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f25",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 25,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f26",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 26,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f27",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 27,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f28",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 28,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f29",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 29,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f30",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 30,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f31",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 31,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f32",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 32,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f33",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 33,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f34",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 34,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f35",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 35,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f36",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 36,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f37",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 37,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f38",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 38,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f39",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 39,
+                "columnNumber": 2
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "type": "log",
+        "timestamp": 1791726519475.3,
+        "executionContextId": 1,
+        "args": [
+          {
+            "type": "string",
+            "value": "hello"
+          },
+          {
+            "type": "object",
+            "description": "Object",
+            "className": "Object"
+          },
+          {
+            "type": "number",
+            "value": 42,
+            "description": "42"
+          },
+          {
+            "type": "object",
+            "description": "Object"
+          },
+          {
+            "type": "bigint",
+            "unserializableValue": "12n",
+            "description": "12n"
+          }
+        ],
+        "stackTrace": {
+          "callFrames": [
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 0,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 1,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 2,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 3,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 4,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 5,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 6,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 7,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 8,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 9,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 10,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 11,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 12,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 13,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 14,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 15,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 16,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 17,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 18,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 19,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 20,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 21,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 22,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 23,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 24,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 25,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 26,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 27,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 28,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 29,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 30,
+              "columnNumber": 2
+            },
+            {
+              "url": "https://a.example/app.js",
+              "lineNumber": 31,
+              "columnNumber": 2
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "exceptionThrown: the exception object never crosses",
+      "method": "Runtime.exceptionThrown",
+      "params": {
+        "timestamp": 2,
+        "exceptionDetails": {
+          "exceptionId": 1,
+          "text": "Uncaught",
+          "lineNumber": 7,
+          "columnNumber": 19,
+          "scriptId": "3",
+          "url": "https://a.example/page.html",
+          "executionContextId": 1,
+          "exception": {
+            "type": "object",
+            "subtype": "error",
+            "className": "Error",
+            "description": "Error: boom\n    at x",
+            "objectId": "-1.1.2",
+            "preview": {
+              "properties": []
+            }
+          },
+          "stackTrace": {
+            "callFrames": [
+              {
+                "functionName": "f0",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 0,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f1",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 1,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f2",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 2,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f3",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 3,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f4",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 4,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f5",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 5,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f6",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 6,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f7",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 7,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f8",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 8,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f9",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 9,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f10",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 10,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f11",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 11,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f12",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 12,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f13",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 13,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f14",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 14,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f15",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 15,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f16",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 16,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f17",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 17,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f18",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 18,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f19",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 19,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f20",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 20,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f21",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 21,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f22",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 22,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f23",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 23,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f24",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 24,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f25",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 25,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f26",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 26,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f27",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 27,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f28",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 28,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f29",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 29,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f30",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 30,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f31",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 31,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f32",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 32,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f33",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 33,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f34",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 34,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f35",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 35,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f36",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 36,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f37",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 37,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f38",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 38,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f39",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 39,
+                "columnNumber": 2
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "timestamp": 2,
+        "exceptionDetails": {
+          "text": "Uncaught",
+          "url": "https://a.example/page.html",
+          "lineNumber": 7,
+          "columnNumber": 19,
+          "executionContextId": 1,
+          "exception": {
+            "description": "Error: boom\n    at x",
+            "className": "Error"
+          }
+        }
+      }
+    },
+    {
+      "name": "Log.entryAdded: long text cut",
+      "method": "Log.entryAdded",
+      "params": {
+        "entry": {
+          "source": "network",
+          "level": "error",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "url": "https://a.example/missing.png",
+          "timestamp": 3,
+          "networkRequestId": "1.4",
+          "args": [
+            {
+              "objectId": "x"
+            }
+          ],
+          "stackTrace": {
+            "callFrames": [
+              {
+                "functionName": "f0",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 0,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f1",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 1,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f2",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 2,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f3",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 3,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f4",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 4,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f5",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 5,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f6",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 6,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f7",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 7,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f8",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 8,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f9",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 9,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f10",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 10,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f11",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 11,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f12",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 12,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f13",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 13,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f14",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 14,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f15",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 15,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f16",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 16,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f17",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 17,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f18",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 18,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f19",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 19,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f20",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 20,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f21",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 21,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f22",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 22,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f23",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 23,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f24",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 24,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f25",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 25,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f26",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 26,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f27",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 27,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f28",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 28,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f29",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 29,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f30",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 30,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f31",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 31,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f32",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 32,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f33",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 33,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f34",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 34,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f35",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 35,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f36",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 36,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f37",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 37,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f38",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 38,
+                "columnNumber": 2
+              },
+              {
+                "functionName": "f39",
+                "scriptId": "3",
+                "url": "https://a.example/app.js",
+                "lineNumber": 39,
+                "columnNumber": 2
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "entry": {
+          "source": "network",
+          "level": "error",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "url": "https://a.example/missing.png",
+          "timestamp": 3,
+          "networkRequestId": "1.4"
+        }
+      }
+    },
+    {
+      "name": "Fetch.requestPaused: Set-Cookie never crosses",
+      "method": "Fetch.requestPaused",
+      "params": {
+        "requestId": "interception-1",
+        "frameId": "F",
+        "resourceType": "Document",
+        "networkId": "1.5",
+        "request": {
+          "url": "https://a.example/file.csv",
+          "method": "GET",
+          "headers": {
+            "Cookie": "sid=1"
+          },
+          "initialPriority": "VeryHigh"
+        },
+        "responseStatusCode": 200,
+        "responseStatusText": "OK",
+        "responseHeaders": [
+          {
+            "name": "Content-Type",
+            "value": "text/csv"
+          },
+          {
+            "name": "Set-Cookie",
+            "value": "sid=2"
+          },
+          {
+            "name": "Content-Disposition",
+            "value": "attachment; filename=report.csv"
+          },
+          {
+            "name": "content-length",
+            "value": "8"
+          },
+          {
+            "name": "Authorization",
+            "value": "x"
+          },
+          {
+            "value": "no name"
+          }
+        ]
+      },
+      "expected": {
+        "requestId": "interception-1",
+        "frameId": "F",
+        "resourceType": "Document",
+        "request": {
+          "url": "https://a.example/file.csv",
+          "method": "GET"
+        },
+        "responseStatusCode": 200,
+        "responseHeaders": [
+          {
+            "name": "Content-Type",
+            "value": "text/csv"
+          },
+          {
+            "name": "Content-Disposition",
+            "value": "attachment; filename=report.csv"
+          },
+          {
+            "name": "content-length",
+            "value": "8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Page.downloadWillBegin",
+      "method": "Page.downloadWillBegin",
+      "params": {
+        "frameId": "F",
+        "guid": "g-1",
+        "url": "https://a.example/file.bin",
+        "suggestedFilename": "file.bin",
+        "extra": {
+          "a": 1
+        }
+      },
+      "expected": {
+        "frameId": "F",
+        "guid": "g-1",
+        "url": "https://a.example/file.bin",
+        "suggestedFilename": "file.bin"
+      }
+    },
+    {
+      "name": "an unlisted event leaves whole",
+      "method": "Page.frameNavigated",
+      "params": {
+        "frame": {
+          "id": "F",
+          "url": "https://a.example/",
+          "loaderId": "L"
+        },
+        "type": "Navigation"
+      },
+      "expected": {
+        "frame": {
+          "id": "F",
+          "url": "https://a.example/",
+          "loaderId": "L"
+        },
+        "type": "Navigation"
+      }
+    }
+  ]
+}

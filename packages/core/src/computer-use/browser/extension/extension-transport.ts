@@ -6,7 +6,8 @@
 // the only one that sees which execution contexts are the "winter" world). This side refuses a method or an event
 // outside `cdp-allowlist.ts` before anything is sent, and drops an event it did not subscribe to — defense in depth,
 // never the guard of record.
-import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_NETWORK_EVENT_PARAMS } from "../cdp-allowlist";
+import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS } from "../cdp-allowlist";
+import { cdpEventParams } from "../cdp-reduce";
 import {
   TransportError, type BackendId, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportErrorCode, type TransportTab,
 } from "../transport";
@@ -14,7 +15,6 @@ import { DAEMON_TO_HOST_MAX_LINE, type ExtensionMethod } from "./protocol";
 
 const ALLOWED_METHODS = new Set(CDP_ALLOWED_METHODS);
 const ALLOWED_EVENTS = new Set(CDP_ALLOWED_EVENTS);
-const NETWORK_PARAMS = new Set(CDP_NETWORK_EVENT_PARAMS);
 const TRANSPORT_CODES = new Set<TransportErrorCode>(["disconnected", "tab_gone", "attach_refused", "not_allowed", "cdp_error", "timeout", "protocol_mismatch"]);
 
 /** Per-request ceilings (ms). `cdp.send`'s two mirror the built-in browser's link (15 s, a screenshot 20 s). */
@@ -182,7 +182,7 @@ export class ExtensionTransport implements CdpTransport {
         const event: CdpEvent = {
           tabKey,
           method,
-          params: method.startsWith("Network.") ? Object.fromEntries(Object.entries(raw).filter(([k]) => NETWORK_PARAMS.has(k))) : raw,
+          params: cdpEventParams(method, raw),
           ...(typeof params.cdpSessionId === "string" ? { cdpSessionId: params.cdpSessionId } : {}),
         };
         for (const l of this.eventListeners) this.safely(() => l(event));

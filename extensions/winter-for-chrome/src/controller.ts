@@ -476,7 +476,7 @@ export class ExtensionController {
     }
     a.guard.observeResult(method, cdpParams, result, cdpSessionId);
     if (cdpSessionId === undefined && (method === "Page.enable" || method === "Page.disable")) a.pageEvents = method === "Page.enable";
-    return result ?? {};
+    return a.guard.filterResult(method, result ?? {});
   }
 
   // ── leaving a page that may ask "leave this page?" ──────────────────────────────────────────────────────────────

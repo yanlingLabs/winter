@@ -24,22 +24,35 @@
 // the browser's own words, "Cannot find context with specified id": the daemon may have sent it before it saw the same
 // event, and it treats that sentence — and only that one — as "the world is gone, make a fresh one and try again", as
 // it would for the browser's own answer. A context that was never "winter" gets the plain refusal.
-import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_NETWORK_EVENT_PARAMS, CDP_WORLD_NAME } from "../../../packages/core/src/computer-use/browser/cdp-allowlist";
+//
+// Phase 3's rules (cdp-allowlist.ts): `Network.enable` keeps no post data and capped buffers; a response body is cut
+// before it leaves (`filterResult`); `Fetch` only pauses responses, lets one through untouched (`continueRequest` with a
+// requestId alone) or stops it (`failRequest` "Aborted"), and reads only a body paused at the Response stage; `IO` reads
+// only a stream this guard saw opened by its own `Fetch.takeResponseBodyAsStream`; `Emulation.setDeviceMetricsOverride`
+// takes a screen size and nothing else. Every forwarded event is reduced by `cdpEventParams` (cdp-reduce.ts).
+import {
+  CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_IO_READ_MAX, CDP_NETWORK_BUFFER_MAX, CDP_RESPONSE_BODY_MAX_CHARS, CDP_WORLD_NAME,
+} from "../../../packages/core/src/computer-use/browser/cdp-allowlist";
+import { cdpEventParams } from "../../../packages/core/src/computer-use/browser/cdp-reduce";
 import { openable } from "./urls";
 
 const METHODS = new Set(CDP_ALLOWED_METHODS);
 const EVENTS = new Set(CDP_ALLOWED_EVENTS);
-const NETWORK_PARAMS = new Set(CDP_NETWORK_EVENT_PARAMS);
 
 export const isAllowedMethod = (method: string): boolean => METHODS.has(method);
 export const isAllowedEvent = (method: string): boolean => EVENTS.has(method);
 
-/** A Network event's params reduced to what idle detection needs (never headers, cookies, URLs or bodies). */
+/** What of an event's params leaves for Winter (`cdpEventParams`: never headers, cookies, post data or page objects). */
 export function strippedParams(method: string, params: Record<string, unknown> | undefined): Record<string, unknown> {
-  const p = params ?? {};
-  if (!method.startsWith("Network.")) return p;
-  return Object.fromEntries(Object.entries(p).filter(([k]) => NETWORK_PARAMS.has(k)));
+  return cdpEventParams(method, params);
 }
+
+/** The keys a command may carry, when anything else must be refused. */
+function onlyKeys(params: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  const extra = Object.keys(params).filter((k) => !keys.includes(k));
+  return extra.length === 0 ? undefined : extra.join(", ");
+}
+const intIn = (v: unknown, lo: number, hi: number): boolean => typeof v === "number" && Number.isInteger(v) && v >= lo && v <= hi;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
@@ -61,6 +74,10 @@ interface SessionWorlds {
   announced: Map<number, { uniqueId?: string; frameId?: string }>;
   /** Recently ended "winter" contexts, as `i:<contextId>` and `u:<uniqueId>` (bounded; a newer one supersedes). */
   ended: Set<string>;
+  /** Fetch requests seen paused at the Response stage (their body may be read), bounded. */
+  paused: Set<string>;
+  /** IO stream handles this guard saw opened by its own `Fetch.takeResponseBodyAsStream`. */
+  streams: Set<string>;
 }
 
 /** What `check` decided: send it, answer without sending, or refuse with a sentence. */
@@ -68,6 +85,7 @@ export type GuardDecision = { kind: "send" } | { kind: "answer"; result: Record<
 
 const MAX_ANNOUNCED = 64;
 const MAX_ENDED = 256;
+const MAX_PAUSED = 64;
 
 /** The browser's own sentence for a context that is gone — what the daemon retries on. */
 export const CONTEXT_GONE = "Cannot find context with specified id";
@@ -79,7 +97,7 @@ export class TabGuard {
     const key = cdpSessionId ?? "";
     let w = this.sessions.get(key);
     if (w === undefined) {
-      w = { runtime: false, contexts: new Map(), objects: new Map(), announced: new Map(), ended: new Set() };
+      w = { runtime: false, contexts: new Map(), objects: new Map(), announced: new Map(), ended: new Set(), paused: new Set(), streams: new Set() };
       this.sessions.set(key, w);
     }
     return w;
@@ -159,6 +177,53 @@ export class TabGuard {
         // An object already gone with its context: nothing to release, and nothing of the page's is ever named.
         if (!ourObject(params.objectId)) return { kind: "answer", result: {} };
         break;
+      case "Network.enable": {
+        if (params.maxPostDataSize !== undefined && params.maxPostDataSize !== 0) return { kind: "refuse", reason: "Network.enable never keeps request bodies (maxPostDataSize must be 0)" };
+        for (const [k, max] of [["maxResourceBufferSize", CDP_NETWORK_BUFFER_MAX.resource], ["maxTotalBufferSize", CDP_NETWORK_BUFFER_MAX.total]] as const) {
+          if (params[k] !== undefined && !intIn(params[k], 0, max)) return { kind: "refuse", reason: `Network.enable's ${k} is at most ${max}` };
+        }
+        break;
+      }
+      case "Fetch.enable": {
+        if (params.handleAuthRequests === true) return { kind: "refuse", reason: "Fetch never answers an auth challenge" };
+        const extra = onlyKeys(params, ["patterns", "handleAuthRequests"]);
+        if (extra !== undefined) return { kind: "refuse", reason: `Fetch.enable takes patterns only (not ${extra})` };
+        if (!Array.isArray(params.patterns) || params.patterns.length === 0) return { kind: "refuse", reason: "Fetch.enable needs its patterns (Response stage only)" };
+        for (const pat of params.patterns) {
+          if (!isRecord(pat) || pat.requestStage !== "Response") return { kind: "refuse", reason: "Fetch only pauses responses (requestStage \"Response\")" };
+        }
+        break;
+      }
+      case "Fetch.continueRequest": {
+        const extra = onlyKeys(params, ["requestId"]);
+        if (extra !== undefined) return { kind: "refuse", reason: `Fetch.continueRequest changes nothing (not ${extra})` };
+        break;
+      }
+      case "Fetch.failRequest": {
+        const extra = onlyKeys(params, ["requestId", "errorReason"]);
+        if (extra !== undefined || params.errorReason !== "Aborted") return { kind: "refuse", reason: "Fetch.failRequest only stops a response (errorReason \"Aborted\")" };
+        break;
+      }
+      case "Fetch.takeResponseBodyAsStream":
+        if (typeof params.requestId !== "string" || !w.paused.has(params.requestId)) return { kind: "refuse", reason: "only a response Winter saw paused may be read" };
+        break;
+      case "IO.read":
+        if (typeof params.handle !== "string" || !w.streams.has(params.handle)) return { kind: "refuse", reason: "IO.read reads only a download Winter caught" };
+        if (params.offset !== undefined) return { kind: "refuse", reason: "IO.read reads in order (no offset)" };
+        if (params.size !== undefined && !intIn(params.size, 1, CDP_IO_READ_MAX)) return { kind: "refuse", reason: `IO.read reads at most ${CDP_IO_READ_MAX} bytes at a time` };
+        break;
+      case "IO.close":
+        if (typeof params.handle !== "string" || !w.streams.has(params.handle)) return { kind: "refuse", reason: "IO.close closes only a download Winter caught" };
+        break;
+      case "Emulation.setDeviceMetricsOverride": {
+        const extra = onlyKeys(params, ["width", "height", "deviceScaleFactor", "mobile"]);
+        if (extra !== undefined) return { kind: "refuse", reason: `Emulation.setDeviceMetricsOverride takes a screen size only (not ${extra})` };
+        if (!intIn(params.width, 0, 4096) || !intIn(params.height, 0, 4096)) return { kind: "refuse", reason: "the emulated width and height are whole numbers up to 4096" };
+        const dsf = params.deviceScaleFactor;
+        if (dsf !== undefined && (typeof dsf !== "number" || !Number.isFinite(dsf) || dsf < 0 || dsf > 4)) return { kind: "refuse", reason: "the emulated scale is 0–4" };
+        if (params.mobile !== undefined && typeof params.mobile !== "boolean") return { kind: "refuse", reason: "mobile is true or false" };
+        break;
+      }
       default:
         if (params.objectId !== undefined && !ourObject(params.objectId)) return { kind: "refuse", reason: `${method}'s objectId is not from the "${CDP_WORLD_NAME}" world` };
     }
@@ -219,7 +284,25 @@ export class TabGuard {
       case "Runtime.releaseObject":
         if (typeof params.objectId === "string") w.objects.delete(params.objectId);
         break;
+      case "Fetch.takeResponseBodyAsStream":
+        if (typeof params.requestId === "string") w.paused.delete(params.requestId);
+        if (typeof result.stream === "string") w.streams.add(result.stream);
+        break;
+      case "Fetch.continueRequest":
+      case "Fetch.failRequest":
+        if (typeof params.requestId === "string") w.paused.delete(params.requestId);
+        break;
+      case "IO.close":
+        if (typeof params.handle === "string") w.streams.delete(params.handle);
+        break;
     }
+  }
+
+  /** An answer as it may leave for Winter: a response body is cut at CDP_RESPONSE_BODY_MAX_CHARS. */
+  filterResult(method: string, answer: unknown): unknown {
+    if (method !== "Network.getResponseBody" || !isRecord(answer) || typeof answer.body !== "string") return answer;
+    if (answer.body.length <= CDP_RESPONSE_BODY_MAX_CHARS) return answer;
+    return { ...answer, body: answer.body.slice(0, CDP_RESPONSE_BODY_MAX_CHARS), truncated: true };
   }
 
   /** Every event of the attached tab, subscribed or not: contexts come and go. */
@@ -278,6 +361,14 @@ export class TabGuard {
       case "Target.detachedFromTarget":
         if (typeof p.sessionId === "string") this.sessions.delete(p.sessionId);
         break;
+      case "Fetch.requestPaused": {
+        // Only a response (it carries a status or an error) may have its body read.
+        if (typeof p.requestId !== "string" || (p.responseStatusCode === undefined && p.responseErrorReason === undefined)) break;
+        const w = this.worlds(cdpSessionId);
+        w.paused.add(p.requestId);
+        while (w.paused.size > MAX_PAUSED) w.paused.delete(w.paused.values().next().value!);
+        break;
+      }
     }
   }
 
