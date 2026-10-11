@@ -24,7 +24,9 @@
     });
     mc.registerTool({ name: "slow_tool", description: "Never answers by itself", execute: () => new Promise(() => {}) });
     mc.registerTool({ name: "failing_tool", description: "Always fails", execute: async () => { throw new Error("out of stock"); } });
-    mc.addEventListener("toolcancel", () => { document.getElementById("log").textContent = "cancelled"; });
+    // The browser tells the page a tool was cancelled (Chrome 155+; 153 has no such event — the page says which).
+    if ("ontoolcancel" in mc) mc.addEventListener("toolcancel", () => { document.getElementById("log").textContent = "cancelled"; });
+    else document.getElementById("log").textContent = "no cancel event";
   }
   document.title = mc ? "Site tools" : "Site tools (no WebMCP)";
 </script>

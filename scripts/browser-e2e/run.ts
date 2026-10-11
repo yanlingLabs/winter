@@ -549,12 +549,16 @@ await check("WebMCP: callTool runs the page's tool from the winter world and ret
   await failsWith(W("callTool", { name: "frame_tool" }), "Error");
 });
 
-await check("WebMCP: a failing tool's words are the page's; a tool that never answers is stopped at its timeout (the page's signal aborted)", async () => {
+await check("WebMCP: a failing tool reports the browser's failure; a tool that never answers is stopped at its timeout, and the page sees the abort", async () => {
   const e = await failsWith(W("callTool", { name: "failing_tool" }), "Error");
   expect(e.message === "the site's tool failed — what it said is printed above", "the error", e.message);
   const t0 = Date.now();
   await failsWith(W("callTool", { name: "slow_tool", timeoutMs: 500 }), "WaitTimeout");
   expect(Date.now() - t0 < 4_000, "stopped within the grace", String(Date.now() - t0));
+  // The fixture's own `toolcancel` listener writes "cancelled" when the browser tells the page its tool was cancelled
+  // (a browser with no such event — Chrome 153 — says "no cancel event" instead, and only the timeout is checked).
+  const page = await W("text", { emit: false }) as string;
+  if (!page.includes("no cancel event")) await W("waitFor", { cond: { text: "cancelled" }, timeoutMs: 3_000 });
 });
 
 await check("WebMCP: plan refuses a call (an act) but still lists", async () => {
