@@ -71,9 +71,10 @@ extension CUCore {
         }
         beginGuardianSpan(t.pid, raise: false)
         defer { endGuardianSpan(t.pid, raise: false) }
-        let opener = Self.actCanOpenApps(p.action)
-        if opener { noteGuardianOpener() }
-        defer { if opener { noteGuardianOpener() } }  // its end too: what it opened may come forward a moment after
+        // Which apps it can open (round 14's queue item 1): an app outside it coming forward is never clearly the agent's.
+        let opener = Self.actCanOpenApps(p.action) ? openerScope(p.action, t) : nil
+        if let opener { noteGuardianOpener(opener) }
+        defer { if let opener { noteGuardianOpener(opener) } }  // its end too: what it opened may come forward a moment after
         if case .key(let k) = p.action, (try? CUKeyChord.parse(k.combo))?.isEscape == true {
             await MainActor.run { [weak self] in self?.events?.willSendEscape() }
         }

@@ -163,11 +163,11 @@ extension CUCore {
         let now = clock.nowSeconds()
         let observable = switchInputObservable
         let clickAt: TimeInterval? = observable ? nil : now - secondsSinceUserClick
-        let launching = guardianLock.withLock { guardianCore.launchPending }
         // (Always read: an app started a moment ago, not by the agent, comes forward on its first activation as the
-        // user's own launch even when NSWorkspace's launch notice was never heard — review of round 9, MEDIUM #5.)
+        // user's own launch even when NSWorkspace's launch notice was never heard — review of round 9, MEDIUM #5. The
+        // bundle too: whether an opener act of the agent's could have opened it — round 14's queue item 1.)
         let started = v.front.flatMap { pid in sys.processAge(pid: pid).map { now - $0 } }
-        let bundle = launching ? v.front.flatMap { sys.bundleId(pid: $0) } : nil
+        let bundle = v.front.flatMap { sys.bundleId(pid: $0) }
         // A desktop change: the apps the agent touched (with a cause that raises) whose window it showed.
         let placeSpace = guardianPlace()?.space ?? from?.space
         var shown: [pid_t] = []
@@ -198,10 +198,43 @@ extension CUCore {
         }
     }
 
-    /// The agent did something that can open another app (an opener act, an AppleScript, an open, a launch).
-    func noteGuardianOpener() {
+    /// The agent did something that can open another app (an opener act, an AppleScript, an open, a launch) — `scope`:
+    /// which apps it can open.
+    func noteGuardianOpener(_ scope: CUOpenerScope = .any) {
         let now = clock.nowSeconds()
-        guardianLock.withLock { guardianCore.noteOpenerCause(now: now) }
+        guardianLock.withLock { guardianCore.noteOpenerCause(now: now, scope: scope) }
+    }
+
+    /// The apps an act on `t` can open or bring forward (round 14's queue item 1 — a third party's activations right
+    /// after a click in Chrome were undone as the agent's): `t` itself; for an app that is not a web browser, the
+    /// default handlers of web and mail links (a link it opens lands there — a browser's links stay in it); for a menu
+    /// command, the Help viewer and the default browser (a Help menu item opens either). Finder, the Dock and launchers
+    /// open any app, and so does an act on a target whose bundle is unknown. Never an arbitrary app like Terminal.
+    func openerScope(_ a: CUAction?, _ t: CUTarget) -> CUOpenerScope {
+        guard let b = t.bundleId, !Self.opensAnyApp.contains(b) else { return .any }
+        var apps: Set<String> = [b]
+        let menu: Bool = { if case .menu? = a { return true }; return false }()
+        if !isWebBrowser(t) || menu {
+            for scheme in menu ? ["http"] : ["http", "https", "mailto"] {
+                if let h = defaultHandler(scheme) { apps.insert(h) }
+            }
+        }
+        if menu { apps.insert("com.apple.helpviewer") }
+        return .apps(apps)
+    }
+
+    /// Apps whose acts can open any other app: Finder (a document opens in its app), the Dock, launchers.
+    static let opensAnyApp: Set<String> = [
+        "com.apple.finder", "com.apple.dock", "com.apple.Spotlight", "com.runningwithcrayons.Alfred",
+        "com.raycast.macos", "com.obdev.LaunchBar",
+    ]
+
+    /// The bundle id of the app that opens `scheme:` links by default (nil: none or unknown).
+    func defaultHandler(_ scheme: String) -> String? {
+        if let o = defaultHandlerOverride { return o(scheme) }
+        guard let url = URL(string: scheme == "mailto" ? "mailto:someone@example.invalid" : "\(scheme)://example.invalid"),
+              let app = NSWorkspace.shared.urlForApplication(toOpen: url) else { return nil }
+        return Bundle(url: app)?.bundleIdentifier
     }
 
     /// The system's dialog processes (a permission or authentication prompt the user must be able to answer), and any

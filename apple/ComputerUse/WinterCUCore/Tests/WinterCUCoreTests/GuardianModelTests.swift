@@ -25,6 +25,9 @@ final class GuardianModelTests: XCTestCase {
     static let steps = Int(ProcessInfo.processInfo.environment["WINTER_CU_SIM_STEPS"] ?? "") ?? 250
     /// WINTER_CU_SIM_SURVEY=1: every seed runs to its first violation, none minimized, and they are counted (a report).
     static let survey = ProcessInfo.processInfo.environment["WINTER_CU_SIM_SURVEY"] == "1"
+    /// WINTER_CU_SIM_TARGET=<bundle id>: T is that app instead of Finder — its acts open only T, the default browser and
+    /// the mail app (round 14's queue item 1).
+    static let targetBundle = ProcessInfo.processInfo.environment["WINTER_CU_SIM_TARGET"]
 
     func testTheInvariantsHoldOverRandomInterleavings() async throws {
         var totals = SimStats()
@@ -33,7 +36,8 @@ final class GuardianModelTests: XCTestCase {
         // WINTER_CU_SIM_FIRST_SEED: a sweep of seeds first…first+seeds−1 (a long run in parallel processes).
         let first = Int(ProcessInfo.processInfo.environment["WINTER_CU_SIM_FIRST_SEED"] ?? "") ?? 1
         for seed in only.map({ [$0] }) ?? Array(first..<(first + Self.seeds)) {
-            let plan = SimPlan.generate(seed: UInt64(seed), count: Self.steps)
+            var plan = SimPlan.generate(seed: UInt64(seed), count: Self.steps)
+            if let b = Self.targetBundle { plan.targetBundle = b }
             let run = await SimRun.execute(plan)
             totals.add(run.stats)
             if let v = run.violation, Self.survey {
@@ -99,9 +103,10 @@ final class GuardianModelTests: XCTestCase {
     // MARK: the reviewer's findings, as plans (each over a dozen seeds: the world's own timing varies)
 
     /// Runs `plan` with seeds 1…`seeds`; returns the first violation (with its trace) or nil.
-    func run(_ name: String, seeds: Int = 12, flagsSeen: Bool = true, _ steps: [(Double, SimKind)]) async -> String? {
+    func run(_ name: String, seeds: Int = 12, flagsSeen: Bool = true, targetBundle: String = "com.apple.finder",
+             _ steps: [(Double, SimKind)]) async -> String? {
         for seed in 1...seeds {
-            let r = await SimRun.execute(SimPlan.scripted(seed: UInt64(seed), flagsSeen: flagsSeen, steps))
+            let r = await SimRun.execute(SimPlan.scripted(seed: UInt64(seed), flagsSeen: flagsSeen, targetBundle: targetBundle, steps))
             if ProcessInfo.processInfo.environment["WINTER_CU_SIM_TRACE_ALL"] == "1" { Self.saveTrace(name + "-ok", seed: seed, r.violation ?? "none", r.trace) }
             if let v = r.violation {
                 let at = r.trace.firstIndex { $0.hasPrefix("VIOLATION") } ?? r.trace.count
@@ -181,6 +186,27 @@ final class GuardianModelTests: XCTestCase {
     func testTheUsersOwnLaunchIsNeverSentBack() async {
         let v = await run("f2-user-launch", [(300, .userLaunch(2_700)), (3_000, .agentType(2)), (6_500, .quiet)])
         XCTAssertNil(v, v ?? "")
+    }
+
+    /// Round 14's queue item 1: T is an ordinary app (not Finder) — a third party's app (X, Terminal: another agent
+    /// session's) coming forward right after the agent's act, with no input of the user's, is outside what the act can
+    /// open: left in front and said, never undone; what the act can open (S, the default browser) is still sent back.
+    func testAThirdPartysActivationRightAfterAnActIsNeverUndone() async {
+        // A click in T (an opener act), X comes forward 250 ms later, no input of the user's for seconds before.
+        let steps: [(Double, SimKind)] = [(300, .typing(5)), (3_300, .agentClick(.field)), (3_550, .selfActivate(SimPid.third)), (6_500, .quiet)]
+        let left = await run("r14-third-party", targetBundle: "sim.editor", steps)
+        XCTAssertNil(left, left ?? "")
+        // Not vacuous: the same steps with T as Finder (whose acts open any app) send X back; with T an ordinary app,
+        // X is left in front.
+        for seed in 1...4 {
+            let finder = await SimRun.execute(SimPlan.scripted(seed: UInt64(seed), steps))
+            let editor = await SimRun.execute(SimPlan.scripted(seed: UInt64(seed), targetBundle: "sim.editor", steps))
+            XCTAssertTrue(finder.trace.contains { $0.contains("X activates itself") && $0.contains("undone") }, "seed \(seed): Finder")
+            XCTAssertTrue(editor.trace.contains { $0.contains("X activates itself") && $0.contains("left in front") }, "seed \(seed): an ordinary app")
+        }
+        let opened = await run("r14-in-scope", targetBundle: "sim.editor",
+                               [(300, .agentClick(.opener, ms: 400)), (3_000, .agentType(3)), (6_500, .quiet)])
+        XCTAssertNil(opened, opened ?? "")
     }
 
     /// #2: an already-running app the agent never touched coming forward right after its act, no input of the user's
