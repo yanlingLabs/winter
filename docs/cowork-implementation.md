@@ -30,8 +30,13 @@ separately. Cowork remains unavailable until its required gates pass.
 - A sandboxed libkrun/HVF worker has booted real ARM64 Linux with no disk, share,
   NIC or vsock. Bounded allocation/free/reuse and retained-data/heartbeat checks
   passed. Instrumentation confirms aligned 2–4 MiB free-page reports; stock
-  `MADV_FREE` still does not demonstrate reliable active return across the workload.
-  Safe vCPU/device parking and backing replacement remain unvalidated.
+  `MADV_FREE` did not demonstrate reliable active return across the workload.
+  The subsequently reviewed reclaim patch did: three live Linux cycles returned
+  about 234–271 MiB of worker footprint while heartbeat, zero-fill reuse and
+  retained-data checks passed. Root audited all 20 park/resume epochs and 296
+  replacement sequences. This proves the restricted PL011-earlycon/RNG/balloon
+  fixture, not asynchronous block/fs/network/vsock coordination or encrypted
+  storage. See the [frozen evidence](https://github.com/yanlingLabs/winter/blob/b4088811/spikes/cowork-hvf/results/2026-10-11-linux-active-reclaim.json).
 - The runtime SDK guest-transport PR is merged. The agent SDK's explicit text
   Read/Write/Edit routes use a protected file-helper binding; the exact C worker
   passed its Linux CI compartment checks, including conditional writes and symlink
@@ -44,7 +49,7 @@ separately. Cowork remains unavailable until its required gates pass.
 | --- | --- | --- |
 | Canonical host state | Schema 8, workspace/source/policy/binding repository, durable receipts/outbox and pure authority checks | Controller acknowledgments, authority service wiring, lifecycle/recovery, typed public protocol |
 | Host storage protection | Retained-home fences and Core/SDK authority consumer; proposed native key/launch broker | Actual encrypted disks and sealed launch records; native output/Workflow producer wiring; preserve ordinary Code behavior and real SDK hook ordering; stop owned host effects on daemon loss |
-| Native VM integration | VZ lifecycle/Node-API foundations; bounded Linux/HVF worker baseline and reporting evidence | Verified active reclaim, real signed worker admission/sandbox, cancellation/ownership, admitted encrypted disks/shares and concurrent latency |
+| Native VM integration | VZ research foundations; reviewed Linux/HVF restricted live reclaim; standalone host-output integration underway | Verified active reclaim, real signed worker admission/sandbox, cancellation/ownership, admitted encrypted disks/shares and concurrent latency |
 | Guest execution | Merged remote transport; confined text file routes and Linux helper evidence | Immutable Linux runtime/supervisor, complete file/process/extension routes, guest run-home/instructions, cold parent/child restoration |
 | Network and credentials | Native egress and bounded Git publication foundations, isolated package receipts | Guest parser outside credential daemon; brokered sockets and providers/MCP; GitHub auth/private clone/service wiring; native resource bounds and revocation draining |
 | Workspace behavior | Durable source/policy transitions being implemented | Live add/remove/revoke, context refresh and trust, artifact/export/backup retention, same-Project messaging |
