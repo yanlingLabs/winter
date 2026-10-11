@@ -63,10 +63,10 @@ describe("the extension ids", () => {
 describe("names and identities", () => {
   test("the native-host names: daemon, host, extension builds and Winter.app's writer", async () => {
     const identity = hostSwift("HostIdentity.swift");
-    const ext = await import(join(REPO, ...EXT, "src", "manifest.ts")) as { HOST_NAME: { dev: string; store: string } };
+    const ext = await import(join(REPO, ...EXT, "src", "manifest.ts")) as { HOST_NAME: { dev: string; store: string; edge: string } };
     expect(swiftString(identity, "distNativeHostName")).toBe(NATIVE_HOST_NAME.dist);
     expect(swiftString(identity, "devNativeHostName")).toBe(NATIVE_HOST_NAME.dev);
-    expect(ext.HOST_NAME).toEqual({ store: NATIVE_HOST_NAME.dist, dev: NATIVE_HOST_NAME.dev });
+    expect(ext.HOST_NAME).toEqual({ store: NATIVE_HOST_NAME.dist, edge: NATIVE_HOST_NAME.dist, dev: NATIVE_HOST_NAME.dev });
     expect(swiftString(read("apple", "Winter", "Sources", "BrowserExtension", "BrowserHostManifest.swift"), "hostName")).toBe(NATIVE_HOST_NAME.dist);
   });
 
