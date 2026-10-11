@@ -119,9 +119,10 @@ func computerV2DerivedLabel(code: String) -> String? {
 private let appsOpenPattern = try! NSRegularExpression(
     pattern: #"\bapps\s*\.\s*open\s*\(\s*(?:"([^"\\\n]{1,120})"|'([^'\\\n]{1,120})'|`([^`\\\n$]{1,120})`)"#)
 
-/// `browsers.open("https://example.com/…")` — a browser tab's site, shown as its host. Bounded like `apps.open`.
+/// `browsers.open("https://example.com/…")` / `browsers.read("…")` — the site a tab opens or a plain read fetches,
+/// shown as its host. Bounded like `apps.open`.
 private let browsersOpenPattern = try! NSRegularExpression(
-    pattern: #"\bbrowsers\s*\.\s*open\s*\(\s*(?:"([^"\\\n]{1,300})"|'([^'\\\n]{1,300})'|`([^`\\\n$]{1,300})`)"#)
+    pattern: #"\bbrowsers\s*\.\s*(?:open|read)\s*\(\s*(?:"([^"\\\n]{1,300})"|'([^'\\\n]{1,300})'|`([^`\\\n$]{1,300})`)"#)
 
 /// `screen.screenshot(` / `screen.windows(` / `screen.appAt(` — the look-only whole-screen members.
 private let screenMemberPattern = try! NSRegularExpression(pattern: #"\bscreen\s*\.\s*(?:screenshot|windows|appAt)\s*\("#)

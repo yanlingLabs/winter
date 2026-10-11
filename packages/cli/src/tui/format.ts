@@ -42,8 +42,8 @@ export const COMPUTER_V2_HOST_NAME = "computer_v2";
 
 const COMPUTER_V2_VERBS = /\.(state|find|screenshot|click|setValue|type|paste|key|scroll|drag|select|action|menu|waitForIdle|waitForUser|waitFor|windows|useWindow|appAt|hover|goto|back|forward|reload|text|upload|console|networkBody|network|inspect|html|assets|download|viewport|answerDialog)\s*\(/g;
 const APPS_OPEN = /apps\s*\.\s*open\s*\(\s*(["'`])((?:(?!\1)[^\\\n])+)\1/g;
-/** `browsers.open("https://example.com/…")`: the site it opens, shown as its host. */
-const BROWSERS_OPEN = /browsers\s*\.\s*open\s*\(\s*(["'`])((?:(?!\1)[^\\\n]){1,300})\1/g;
+/** `browsers.open("https://example.com/…")` / `browsers.read("…")`: the site it opens or reads, shown as its host. */
+const BROWSERS_OPEN = /browsers\s*\.\s*(?:open|read)\s*\(\s*(["'`])((?:(?!\1)[^\\\n]){1,300})\1/g;
 
 function hostOf(url: string): string | undefined {
   if (url.includes("${")) return undefined;
