@@ -78,3 +78,31 @@ test("legacy preparations without owner evidence remain pending", async () => {
   expect(await f.journal("host-b").recoverPrepared(async () => { throw new Error("unknown ownership is not termination proof"); })).toBe(0);
   expect((await f.journal("host-b").claim(f.key, f.receipt)).receipt.status).toBe("prepared");
 });
+test("failed unsent rejection is retried by a second live-owner handle without disturbing active claims", async () => {
+  const f = fixture(), journal = f.journal(); await journal.claim(f.key, f.receipt);
+  const otherKey = JSON.stringify(["user", f.workspaceId, "still-active"]), active = { ...f.receipt, operationId: randomUUID() };
+  await journal.claim(otherKey, active);
+  f.records.rs.db.exec("CREATE TRIGGER fail_reject BEFORE UPDATE ON cowork_operations WHEN NEW.status='failed' BEGIN SELECT RAISE(ABORT,'fixture write failure'); END");
+  await expect(journal.transition(f.key, "prepared", "rejected")).rejects.toThrow();
+  await expect(f.journal().claim(f.key, f.receipt)).rejects.toThrow();
+  f.records.rs.db.exec("DROP TRIGGER fail_reject");
+  expect((await f.journal().claim(f.key, f.receipt)).receipt.status).toBe("rejected");
+  expect((await f.journal().claim(otherKey, active)).receipt.status).toBe("prepared");
+  await journal.transition(otherKey, "prepared", "dispatched");
+  expect((await f.journal().claim(otherKey, active)).receipt.status).toBe("dispatched");
+});
+test("recovery reports malformed or unprovable candidates and still handles independent proven ones", async () => {
+  const f = fixture(), before = f.journal();
+  const malformed = { ...f.receipt }, unknown = { ...f.receipt, operationId: randomUUID() }, good = { ...f.receipt, operationId: randomUUID() };
+  const key = (request: string) => JSON.stringify(["user", f.workspaceId, request]);
+  await before.claim(key("bad"), malformed); await before.claim(key("unknown"), unknown); await before.claim(key("good"), good);
+  f.records.rs.db.run("UPDATE cowork_operations SET result_json='broken' WHERE operation_id=?", [malformed.operationId]);
+  const errors: [string, string][] = [];
+  expect(await f.journal("host-b").recoverPrepared(async candidate => {
+    if (candidate.operationId === unknown.operationId) throw new Error("fixture probe unavailable");
+    return true;
+  }, (id, code) => errors.push([id, code]))).toBe(1);
+  expect(errors).toContainEqual([malformed.operationId, "record_invalid"]);
+  expect(errors).toContainEqual([unknown.operationId, "proof_unavailable"]);
+  expect((await f.journal().claim(key("good"), good)).receipt.status).toBe("rejected");
+});

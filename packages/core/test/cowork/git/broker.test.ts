@@ -384,3 +384,17 @@ test("10,000 reconstructed objects stay inside compact accounting output budget"
   expect((await f.broker().publish(actor, { ...f.request, newOid: head, bundle: await f.makeBundle(f.ref) })).status).toBe("applied");
   expect(f.pushes()).toBe(1);
 }, 15_000);
+test("a Unicode remote default does not disable permitted ASCII feature branches", async () => {
+  const f = await fixture(); f.setDefault("refs/heads/équipe");
+  expect((await f.broker().publish(actor, f.request)).status).toBe("applied");
+  expect(f.pushes()).toBe(1);
+});
+test("pack count preflight rejects an oversized inventory before invoking Git", async () => {
+  const f = await fixture(), bundle = Buffer.from(f.request.bundle), start = bundle.indexOf("\n\n") + 2;
+  bundle.writeUInt32BE(200_001, start + 8);
+  createHash("sha1").update(bundle.subarray(start, bundle.length - 20)).digest().copy(bundle, bundle.length - 20);
+  let gitCalls = 0; const run = f.options.git.run.bind(f.options.git);
+  f.options.git = { run: async command => { gitCalls++; return run(command); } };
+  await refused(f.broker().publish(actor, { ...f.request, bundle }), "object_budget");
+  expect(gitCalls).toBe(0); expect(f.pushes()).toBe(0);
+});

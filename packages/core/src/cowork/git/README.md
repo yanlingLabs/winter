@@ -45,7 +45,15 @@ its hooks: Git does not propagate a client's command configuration to a server.
 Real GitHub server hooks/rules remain server policy and are not disabled by this
 broker.
 
-Object count/reconstructed size uses compact
+Before invoking Git on a pack, `checkPackBudget` checks the SHA-1 pack envelope,
+object count, each compressed-entry length and each delta's declared source and
+result sizes. Zlib output is bounded by the entry header, and aggregate delta
+program bytes and reconstructed result sizes are capped separately. This rejects
+small packs advertising explosive delta results before `unbundle`/`index-pack`;
+it does not replace Git graph/fsck checks, native process RSS limits or CPU quotas.
+The scanner never applies a delta or allocates its declared reconstructed result.
+
+The subsequent object count/reconstructed size check uses compact
 `cat-file --batch-all-objects --batch-check=%(objectsize)` output. `verify-pack -v`
 reports delta-program sizes for deltified objects, so summing its size column is
 not an expansion bound. Bundle size, output, duration, directory size and available
@@ -69,16 +77,26 @@ changes pending work. A prepared operation records its authenticated host-owner
 incarnation, shared by that host's handles. Explicit `recoverPrepared` requires
 host proof that the previous immutable owner terminated; it skips current and
 unknown/legacy owners, and rechecks exact operation/digest/owner/phase after the
-proof awaits. Production must supply this owner from the canonical admission
+proof awaits. A malformed row or unavailable proof is reported per candidate
+without preventing recovery of independent proven rows. Production must supply this owner from the canonical admission
 lifecycle, with termination evidence; a PID or stale heartbeat is insufficient.
-The current foundation does not invent such proof. Once proven, recovery rejects
+The current foundation does not invent such proof. During a live owner,
+explicitly rejected unsent claims retain bounded in-memory completion evidence
+across journal handles; a later claim retries a failed rejection write. Still-active
+claims are unaffected, and an attempted dispatch never acquires this proof. A
+persistent DB failure remains a visible error; a restarted process instead needs
+the owner-loss path. The live tracking cap is 1,024 prepared operations per
+workspace/owner, not unlimited concurrency. Once proven, recovery rejects
 unsent preparations atomically with outbox notifications, and an older caller
 loses its dispatch transition. Retries reauthorize before returning a receipt.
 Dispatched and uncertain effects remain blocked and cannot transition back to
 prepared. Status changes
 and notifications commit together. The digest binds principal/session/task/workspace/source, grant
 identity/revisions, repository/destination, branch old/new and bundle digest.
-Retries recheck authority and never redispatch any existing operation. A crash
+Retries recheck authority and never redispatch any existing operation. The current
+idempotency digest deliberately binds authority epochs: even an unrelated policy
+revision requires a new request ID rather than reusing an old approval epoch.
+Use the separate operation-status read path to inspect a prior receipt. A crash
 after dispatch or missing/ambiguous server response requires reconciliation;
 `dispatched` must not be treated as a proven rejection or success. Cancellation
 after dispatch and credential-bearing transport errors become safe uncertain

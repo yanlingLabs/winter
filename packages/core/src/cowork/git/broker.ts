@@ -3,6 +3,7 @@ import { lstatSync, realpathSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, readdir, rm, statfs, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { GitPublicationError, type GitExecutor, type PublicationAuthority, type PublicationGrant, type PublicationJournal, type PublicationReceipt, type PublicationRequest, type PublicationTransport, type Publisher } from "./types";
+import { checkPackBudget } from "./pack-budget";
 
 const OID = /^[a-f0-9]{40}$/;
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -21,6 +22,11 @@ function branch(ref: string): boolean {
   return typeof ref === "string" && ref.startsWith("refs/heads/") && ref.length <= 240 && /^[A-Za-z0-9._/-]+$/.test(ref)
     && !ref.includes("..") && !ref.includes("@{") && !ref.endsWith(".")
     && ref.split("/").every(part => !!part && !part.startsWith(".") && !part.endsWith(".lock") && part.toLowerCase() !== "head");
+}
+function remoteBranch(ref: string): boolean {
+  return typeof ref === "string" && ref.startsWith("refs/heads/") && ref.length <= 1024
+    && !/[\u0000-\u0020\u007f~^:?*\[\\]/.test(ref) && !ref.includes("..") && !ref.includes("@{") && !ref.endsWith(".")
+    && ref.split("/").every(part => !!part && !part.startsWith(".") && !part.endsWith(".lock"));
 }
 /** Single-ref publication boundary; never runs guest commands/config or receives credentials. */
 export class CoworkGitPublicationBroker {
@@ -64,8 +70,8 @@ export class CoworkGitPublicationBroker {
     if (!claimed.created) {
       if (claimed.receipt.digest !== digest) deny("request_conflict");
       // Authority is checked above even for a stored receipt. A prepared receipt
-      // can belong to another live caller; reopening the canonical journal safely
-      // retires abandoned prepared work. Dispatched/uncertain work is never replayed.
+      // can belong to another live caller. Only explicit owner-loss recovery or
+      // a retained unsent-rejection receipt retires it. Never replay an effect.
       return claimed.receipt;
     }
     let quarantine: string | undefined, dispatched = false;
@@ -85,6 +91,7 @@ export class CoworkGitPublicationBroker {
       // Initial bounded slice deliberately accepts only full SHA-1 v2 bundles, not filtered/thin packs.
       const headerEnd = Buffer.from(request.bundle).indexOf("\n\n");
       if (headerEnd < 0 || headerEnd > 4096 || Buffer.from(request.bundle).subarray(0, headerEnd).toString() !== `# v2 git bundle\n${request.newOid} ${request.ref}`) deny("invalid_bundle");
+      await checkPackBudget(request.bundle.subarray(headerEnd + 2), this.limits, signal);
       await run(["init", "--bare", "--template=", repo]);
       const git = (...args: string[]) => ["--git-dir", repo, ...args];
       if ((await run(git("bundle", "list-heads", bundle))).stdout.trim() !== `${request.newOid} ${request.ref}`) deny("invalid_bundle");
@@ -152,7 +159,7 @@ export class CoworkGitPublicationBroker {
   }
   private checkObservation(grant: PublicationGrant, request: PublicationRequest, remote: Awaited<ReturnType<PublicationTransport["observe"]>>): void {
     if (remote.repositoryId !== grant.repositoryId || remote.destinationId !== grant.destinationId) deny("authority_denied");
-    if (!branch(remote.defaultRef) || remote.protection !== "unprotected" || request.ref.toLowerCase() === remote.defaultRef.toLowerCase() || ["refs/heads/main", "refs/heads/master"].includes(request.ref.toLowerCase())) deny("ref_denied");
+    if (!remoteBranch(remote.defaultRef) || remote.protection !== "unprotected" || request.ref.toLowerCase() === remote.defaultRef.toLowerCase() || ["refs/heads/main", "refs/heads/master"].includes(request.ref.toLowerCase())) deny("ref_denied");
     if (remote.currentOid !== null && !OID.test(remote.currentOid)) deny("ref_denied");
     if (remote.currentOid !== request.oldOid) deny("remote_conflict");
   }

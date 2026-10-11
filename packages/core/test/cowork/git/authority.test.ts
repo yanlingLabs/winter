@@ -101,3 +101,11 @@ test("a pending host-folder addition disables auto publication and await-time na
   const g = fixture(); g.beforeTask(() => g.records.updatePolicy(g.context("manual"), g.request.workspaceId, { publication: "manual" }));
   await expect(g.current.authorize(g.actor, g.request)).rejects.toThrow();
 });
+test("capability set ordering does not change its normalized digest", async () => {
+  const f = fixture(), before = await f.current.authorize(f.actor, f.request);
+  const row = f.records.rs.db.query<{restrictions_json:string},[string]>("SELECT restrictions_json FROM cowork_conversations WHERE session_id=?").get(f.actor.sessionId)!;
+  const value = JSON.parse(row.restrictions_json);
+  for (const name of ["toolClasses", "hostServices", "connectors"]) value[name].reverse();
+  f.records.rs.db.run("UPDATE cowork_conversations SET restrictions_json=? WHERE session_id=?", [JSON.stringify(value), f.actor.sessionId]);
+  expect((await f.current.authorize(f.actor, f.request)).capabilityState.digest).toBe(before.capabilityState.digest);
+});
