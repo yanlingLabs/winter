@@ -21,9 +21,10 @@ final class ClickRoutingRound11Tests: XCTestCase {
 
     /// The bound window 77 at (0,0) 800×600, and another document window 78 of the app on top of it at (100,100)
     /// 800×600; `menu`: a pop-up menu window 79 (layer 101) over both; `sheet`: a sheet window 80 inside the bound one.
-    private func world(menu: Bool = false, sheet: Bool = false, accessible: Bool = true, web: Bool = false) {
+    private func world(menu: Bool = false, sheet: Bool = false, accessible: Bool = true, web: Bool = false, order: [UInt32]? = nil,
+                       axWindows: Bool = true) {
         ax = FakeAX()
-        ax.put(ax.application(pid), [kAXWindowsAttribute: [other, bound]])
+        ax.put(ax.application(pid), [kAXWindowsAttribute: axWindows ? [other, bound] : [AXUIElement]()])
         ax.add(bound, role: kAXWindowRole, subrole: kAXStandardWindowSubrole, frame: CGRect(x: 0, y: 0, width: 800, height: 600),
                extra: [kAXChildrenAttribute: [web ? webArea : field]])
         if web {
@@ -50,6 +51,10 @@ final class ClickRoutingRound11Tests: XCTestCase {
             sys.windows[80] = s
             stack.insert(s, at: 0)
         }
+        if let order {
+            let all = Dictionary(uniqueKeysWithValues: stack.map { ($0.id, $0) })
+            stack = order.compactMap { all[$0] }
+        }
         sys.stack = stack
         sys.front = 1
         poster = RecordingPoster()
@@ -71,7 +76,8 @@ final class ClickRoutingRound11Tests: XCTestCase {
     }
 
     func testAMenuOrASheetOverTheBoundWindowStillTakesTheClick() {
-        world(menu: true, sheet: true)
+        // The bound window in front of the other one; its menu and its sheet above it.
+        world(menu: true, sheet: true, order: [79, 80, 77, 78])
         let windowFor = core.windowFor(target)
         XCTAssertEqual(windowFor(CGPoint(x: 300, y: 300)), 79, "the pop-up menu over the point")
         XCTAssertEqual(windowFor(CGPoint(x: 220, y: 20)), 80, "the sheet over the point")
@@ -79,7 +85,8 @@ final class ClickRoutingRound11Tests: XCTestCase {
     }
 
     func testWithNoAccessibilityAWindowNotInsideTheBoundOneIsAnotherDocument() {
-        world(sheet: true, accessible: false)
+        // The other window in front; the bound window's sheet travels with it, right above it.
+        world(sheet: true, accessible: false, order: [78, 80, 77])
         let windowFor = core.windowFor(target)
         XCTAssertEqual(windowFor(CGPoint(x: 700, y: 500)), 77, "window 78 does not lie within the bound one")
         XCTAssertEqual(windowFor(CGPoint(x: 220, y: 20)), 80, "a window inside the bound one (a sheet) still does")
@@ -154,5 +161,20 @@ final class ClickRoutingRound11Tests: XCTestCase {
                                                      action: .click(CUClickAction(ref: ref)), access: .full,
                                                      allowForeground: false, privatePath: true))
         XCTAssertEqual(poster.entries.filter { $0.type == .leftMouseDown }.count, 1, "the key bound window takes it")
+    }
+
+    /// Review of round 11, MEDIUM #4: a popup or sheet of the USER's window (above it, which is above the bound window)
+    /// never takes the bound window's click — the first document window below it is the user's.
+    func testAPopupOfTheUsersWindowNeverTakesTheClick() {
+        world(menu: true, sheet: true, order: [79, 78, 80, 77])
+        let windowFor = core.windowFor(target)
+        XCTAssertEqual(windowFor(CGPoint(x: 300, y: 300)), 77, "the user's window's menu is not the bound window's")
+        XCTAssertEqual(windowFor(CGPoint(x: 220, y: 20)), 80, "the bound window's own sheet, right above it, still is")
+    }
+
+    /// An empty accessibility answer (a timeout) falls back to the capture-only rule — never "every window takes it".
+    func testAnEmptyAccessibilityAnswerFallsBackToTheCaptureOnlyRule() {
+        world(axWindows: false)
+        XCTAssertEqual(core.windowFor(target)(CGPoint(x: 320, y: 320)), 77)
     }
 }

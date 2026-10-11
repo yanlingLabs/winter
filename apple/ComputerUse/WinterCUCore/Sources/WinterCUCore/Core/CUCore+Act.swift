@@ -878,31 +878,48 @@ extension CUCore {
     func windowFor(_ t: CUTarget) -> (CGPoint) -> UInt32 {
         let bound = t.windowID
         let mine = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 }
-        // (Accessibility is asked only when the app has another window at the normal level on screen — most acts: none.)
-        let others = mine.contains { $0.layer == 0 && $0.id != bound } ? otherDocumentWindows(t) : []
-        let stack = mine.filter { !others.contains($0.id) }
-        return { point in stack.first { $0.frame.contains(point) }?.id ?? bound }
+        guard mine.contains(where: { $0.id != bound }) else { return { _ in bound } }
+        let documents = documentWindows(t, mine: mine)
+        // By z-order (review of round 11, MEDIUM #4): another document window never takes the click, and anything else
+        // drawn over the point — a menu, a popover, a sheet, a page's popup, a floating panel — takes it only when the
+        // first document window below it is the bound one: it belongs to the bound window, not to the user's.
+        var takers: [CUWindowServerWindow] = []
+        for (i, w) in mine.enumerated() {
+            if w.id == bound { takers.append(w); continue }
+            if documents.contains(w.id) { continue }
+            if mine[(i + 1)...].first(where: { documents.contains($0.id) })?.id == bound { takers.append(w) }
+        }
+        return { point in takers.first { $0.frame.contains(point) }?.id ?? bound }
     }
 
     /// The app's OTHER document windows: a point of the bound window that one of them covers still goes to the bound
     /// window (the event names it), never to the window on top — that is another window of the app, often the one
     /// the user works in (live, round 11: a Chrome window behind another took every click on the Web Store page into
-    /// the user's front Chrome window; the page saw none, focus was never placed). What is drawn over the bound
-    /// window as part of it — a menu, a popover, a sheet, a page's popup, a floating panel — still takes the click
-    /// at its point. An AX standard window of the app; with no accessibility (a capture-only bind), a window at the
-    /// normal level that does not lie within the bound one (a sheet does).
+    /// the user's front Chrome window; the page saw none, focus was never placed).
     func otherDocumentWindows(_ t: CUTarget) -> Set<UInt32> {
+        documentWindows(t, mine: sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 }).subtracting([t.windowID])
+    }
+
+    /// The bound window and the app's other document windows on screen. Accessibility is asked only when another window
+    /// of the app is at the normal level (most acts: none): its standard windows. With no accessibility (a capture-only
+    /// bind) or an empty answer (a timeout, an app that lists none), a normal-level window that does not lie within the
+    /// bound one (a sheet does).
+    func documentWindows(_ t: CUTarget, mine: [CUWindowServerWindow]) -> Set<UInt32> {
         let bound = t.windowID
+        var docs: Set<UInt32> = [bound]
+        guard mine.contains(where: { $0.layer == 0 && $0.id != bound }) else { return docs }
         if t.accessible {
-            var ids = Set<UInt32>()
-            for w in ax.elements(ax.application(t.pid), kAXWindowsAttribute)
-            where ax.string(w, kAXSubroleAttribute) == kAXStandardWindowSubrole {
-                if let id = ax.windowID(w), id != bound { ids.insert(id) }
+            let windows = ax.elements(ax.application(t.pid), kAXWindowsAttribute)
+            if !windows.isEmpty {
+                for w in windows where ax.string(w, kAXSubroleAttribute) == kAXStandardWindowSubrole {
+                    if let id = ax.windowID(w) { docs.insert(id) }
+                }
+                return docs
             }
-            return ids
         }
-        guard let frame = sys.window(id: bound)?.frame else { return [] }
-        return Set(sys.windows(pid: t.pid).filter { $0.layer == 0 && $0.id != bound && !frame.contains($0.frame) }.map(\.id))
+        let frame = sys.window(id: bound)?.frame
+        for w in mine where w.layer == 0 && w.id != bound && !(frame?.contains(w.frame) ?? false) { docs.insert(w.id) }
+        return docs
     }
 
     // MARK: text
