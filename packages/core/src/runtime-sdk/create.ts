@@ -44,8 +44,9 @@ import { daemonResolveEndpoint } from "../providers/registry";
 import { REQUIRED_WINTER_AGENT_SDK, WINTER_PEER_VERSIONS } from "./versions";
 import type { RecoveryReport, RunHomeFor, RunHomeOutcome } from "@yanlinglabs/winter-runtime-sdk";
 import { runHomeHandleOf } from "./run-home-support";
-import { HostCodeExecutionService, HostCodeUnavailable } from "./host-code-broker";
+import { HostCodeExecutionService, HostCodeUnavailable, type HostCodeOutputTransportFactory } from "./host-code-broker";
 import { HostStorageFenceUnavailable } from "./host-storage-fence";
+import { loadBundledHostOutputFactory } from "./host-output-loader";
 
 /** `RuntimeDirectoryRetention` is not on the router's barrel; this is the same type. */
 type RuntimeDirectoryRetention = NonNullable<RuntimeDirectoryOptions["retention"]>;
@@ -140,6 +141,8 @@ export interface WinterRuntimeSdkDeps {
   embedded?: EmbeddedSessionHost;
   /** Internal host execution enrollment; the default checks installed SDK capabilities. */
   codeExecution?: HostCodeExecutionService;
+  /** Explicit trusted host/fixture DI only, never settings or an RPC field. */
+  hostOutputTransportFactory?: HostCodeOutputTransportFactory;
   log?: (line: string) => void;
 }
 
@@ -278,7 +281,9 @@ function endWithin(sessionId: string, abort: AbortController, end: () => Promise
 
 export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrides: WinterRuntimeSdkOverrides = {}): Promise<WinterRuntimeSdk> {
   const factory = overrides.createRuntimeSdk ?? createRouterSdk;
-  const codeExecution = deps.codeExecution ?? new HostCodeExecutionService(deps.home);
+  const codeExecution = deps.codeExecution ?? new HostCodeExecutionService(deps.home, undefined, undefined, {
+    createOutputTransport: deps.hostOutputTransportFactory ?? loadBundledHostOutputFactory(),
+  });
   // test-keychain-isolation fix: built from `deps.home` — the daemon's ACTUAL home — rather than
   // reusing the frozen, env-only `CORE_BRAND` singleton. `CORE_BRAND` resolves its `keychainService`
   // once at module load from `WINTER_HOME`/`WINTER_PROFILE` env vars alone, which a daemon booted

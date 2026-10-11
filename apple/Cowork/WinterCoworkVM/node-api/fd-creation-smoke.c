@@ -9,7 +9,7 @@
 #include <sys/wait.h>
 #include <dirent.h>
 #include <stdio.h>
-#include "fd_creation.c"
+#include "../../WinterHostOutput/Sources/fd_creation.c"
 static atomic_bool running=true;
 static void *creator(void *unused){(void)unused;while(atomic_load(&running)){int fds[2];if(native_pipe_cloexec(fds)){atomic_store(&running,false);return (void *)1;}close(fds[0]);close(fds[1]);}return NULL;}
 static int extras(void){DIR *dir=opendir("/dev/fd");if(!dir)return -1;int own=dirfd(dir),count=0;struct dirent *entry;while((entry=readdir(dir))){char *end;long fd=strtol(entry->d_name,&end,10);if(*end==0 && fd>2 && fd!=own && fcntl((int)fd,F_GETFD)>=0)count++;}closedir(dir);return count;}

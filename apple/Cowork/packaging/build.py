@@ -20,6 +20,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 NETWORK = HERE.parent / "WinterCoworkNetwork"
 NATIVE = HERE.parent / "WinterCoworkVM"
+OUTPUT = HERE.parent / "WinterHostOutput"
 PINS = json.loads((HERE / "dependencies.json").read_text())
 
 
@@ -79,12 +80,13 @@ class Build:
         (self.bundle / "notices").mkdir()
         self.network = directory / "input/WinterCoworkNetwork"
         self.native = directory / "input/WinterCoworkVM"
+        self.output = directory / "input/WinterHostOutput"
         self.recipe = directory / "input/packaging"
         shutil.copytree(HERE, self.recipe, ignore=shutil.ignore_patterns("out", "__pycache__", ".git"))
         self.commit = output("git", "-C", str(ROOT), "rev-parse", "HEAD").strip()
 
     def snapshot(self):
-        for original, snapshot in ((NETWORK, self.network), (NATIVE, self.native)):
+        for original, snapshot in ((NETWORK, self.network), (NATIVE, self.native), (OUTPUT, self.output)):
             shutil.copytree(original, snapshot, ignore=shutil.ignore_patterns(".build", "out", "__pycache__", ".git"))
         # A generated provenance inventory cannot bless arbitrary vendor edits.
         # Verify the committed reviewed pin before compiling any network source.
@@ -347,7 +349,7 @@ class Build:
     def material(self):
         # Exact source snapshot for local patched libslirp, wrapper, controller and recipe.
         with tarfile.open(self.bundle / "source/winter-cowork-source.tar.gz", "w:gz") as archive:
-            for package in (self.network, self.native, self.recipe):
+            for package in (self.network, self.native, self.output, self.recipe):
                 if not package.exists():
                     continue
                 for path in sorted(package.rglob("*")):
