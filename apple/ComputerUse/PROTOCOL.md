@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.9.2` (the contents of [`VERSION`](VERSION))
+Helper version: `1.9.3` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
@@ -188,7 +188,7 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 | Method | Params | Result |
 | --- | --- | --- |
 | `target.snapshot` | `{targetId, since?, full?, within?, settle?: {maxMs}, callId?}` | `{snapshotId, text, isDiff, changedRatio, settled, waitedMs}` |
-| `target.find` | `{targetId, query}` | `{elements: [{ref, role, name?, value?, states?}], page?, note?}` |
+| `target.find` | `{targetId, query, callId?}` | `{elements: [{ref, role, name?, value?, states?}], page?, note?}` |
 | `target.screenshot` | `{targetId, region?, budget, settle?: {maxMs}, callId?, live?, desktopVisit?, visitMaxMs?}` | `{imageBase64, mime: "image/jpeg", width, height, shotId, settled, waitedMs, pointsWidth?, pointsHeight?, detail?, inVisit?}` |
 | `screen.screenshot` | `{display?, displayId?, excludeBundleIds: [string], budget}` | `{imageBase64, mime: "image/jpeg", width, height, shotId, detail?}` |
 | `screen.appAt` | `{shotId, point}` | `{app, bundleId, windowId}` |
@@ -197,7 +197,10 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   `snapshotId` of the same scope) and not `full`, the answer is a diff when at most half of it changed
   (`isDiff: true`). A diff also prints, as `+ <line> — now shown, in [p] …`, what the state shows now that the
   `since` print had folded or left out of view (a scroll, a fold that opened), and a change to an element that print
-  never showed carries the element's line and context. `within` scopes it to one ref. `settle` first waits for 150 ms of quiet, up to `maxMs`.
+  never showed carries the element's line and context. Against a folded print, `changedRatio` is also the new lines'
+  share of what the print shows (a whole new screen of rows is the state again, not a longer list); only the lines a
+  diff keeps under its cap count as seen afterwards, and a state printed instead keeps as seen what the `since` print
+  had shown that is still there unchanged. `within` scopes it to one ref. `settle` first waits for 150 ms of quiet, up to `maxMs`.
   A window with no accessibility answers a one-paragraph `text` instead. A state is folded to 300 lines (`full`:
   everything the read saw — the read stops at 2,500 elements — held to 2,500 lines and 48 KB, a long list keeping its
   head with its tail folded, and, past either cap, a last line saying where it was cut), folded parts showing
@@ -266,8 +269,11 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 - For any act: when the bound window's focus moved during it, `focusNow` says where it is now (name and role
   only — never a value, a secure field included), or `focusLost: true` when it was known before and the app
   reports none now. The focus is the bound window's own: the app's focused element when it lies in that window
-  (where its keys go), else — for a window that is not its app's key window — the element marked focused in the
-  window's web content.
+  (where its keys go), else — for a window that is not its app's key window, or an app holding no key window at
+  all — the element marked focused in the window's web content. Keys sent in a focus blip are read there too, while
+  the app answers for the bound window: `input` is the focus the first blip found before its first key, and
+  `focusNow` the one the last blip left when nothing is readable after it (a native window that is not key, and a
+  web view's app once the blip handed the key focus back, answer no focused element).
 - `pageNow`: the act changed the bound window's page — its web area's URL (or, with none, the window's title)
   is different after it: a link navigated, a tab switched; an in-page `#fragment` jump is not (a `#/…` or `#!…`
   route is). The page's title now; refs read before it are gone, and no `focusNow`/`focusLost` is sent with it
@@ -284,8 +290,14 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   every focus blip, and before a window-targeted click in the background (not a Chromium app, a window on this
   desktop), the bound window is made its app's KEY window when it is not (posted to the app alone: nothing raised or
   activated, the user's key focus unchanged), so keys, a menu command and a first click reach that window — never while
-  the app shows a menu, popover or sheet, never when another of its panels or dialogs holds the keys, never for a click
-  that lands on another of its windows, and stopped if the app comes to the front meanwhile.
+  the app shows a menu, popover or sheet (or its window list can't be read to tell), never when another of its panels
+  or dialogs holds the keys, never for a click that lands on another of its windows, and stopped if the app comes to
+  the front meanwhile. Keys — and a menu command validated in the blip, which acts where the keys go — are then sent
+  only when the app's keys reach the bound window anyway (its own focus, a popover or context menu of it, a sheet on
+  it): otherwise nothing is sent and the act is `refused` — `focus_not_placed` naming what holds the keys (`its
+  floating window "Inspector"`, `its dialog …`) or saying it can't be told, `app_in_front` when the app came to the
+  front. A background click whose app came to the front while it was prepared is not sent (`refused`,
+  `app_in_front`). A Tab in a `type`'s text goes as keys, never an accessibility insert (it moves the focus).
 - `menu` walks the app's menu bar; when that has no `path[0]` and the bound window's page has its own menu bar
   (an `AXMenuBar` in its web area) that does, each level is opened with a window-targeted click and verified by
   the menu it shows, and the last item clicked and verified by its menu closing (`detail` says which). A page menu
@@ -323,7 +335,7 @@ Errors include `stale_ref` (`ref`), `needs_foreground`, `window_elsewhere`, `ref
 `busy` (retryable), `busy` with `uncertain: true` (the action was sent but not confirmed — it may have
 happened; never retried), `cancelled`, `unsupported`.
 
-`target.foreground` — `{targetId, moveDesktop?}` → `{front, detail?}`: the user agreed (the daemon's card, the script's
+`target.foreground` — `{targetId, moveDesktop?, callId?}` → `{front, detail?}`: the user agreed (the daemon's card, the script's
 `requestForeground(reason)`) that the app may come to the front and stay there until the session's script ends —
 on the user's OWN desktop only. The helper brings it forward and holds it: its acts then run as with
 `allowForeground: true`, the user-view guard and the Focus Guardian leave it alone, and at `script.active` `false`
@@ -351,8 +363,8 @@ disappear. At the timeout `waitFor` fails `wait_timeout` with `data: {seen, wait
 | Method | Params | Result |
 | --- | --- | --- |
 | `target.applescript` | `{targetId, source, language?, timeoutMs?, callId?}` | `{result: string \| null, detail?}` |
-| `target.scriptingDictionary` | `{targetId, search?}` | `{scriptable, text?, truncated?}` |
-| `target.scriptingCommands` (1.8.0) | `{targetId, search?}` | `{scriptable, bundleVersion?, commands: [{name, suite, eventCode, description?, direct?: {type, optional, description?}, params: [{name, type, optional, description?, enumerators?}], result?: {type}}], truncated?}` |
+| `target.scriptingDictionary` | `{targetId, search?, callId?}` | `{scriptable, text?, truncated?}` |
+| `target.scriptingCommands` (1.8.0) | `{targetId, search?, callId?}` | `{scriptable, bundleVersion?, commands: [{name, suite, eventCode, description?, direct?: {type, optional, description?}, params: [{name, type, optional, description?, enumerators?}], result?: {type}}], truncated?}` |
 
 `source` is 1…64,000 bytes and may address only the bound app; `language` may only be `"applescript"`
 (the default). `timeoutMs` defaults to 10,000 and is clamped to 500…120,000 (plus 60 s when macOS will ask
@@ -384,8 +396,9 @@ begins with the `javascript:` scheme as a browser reads it (case aside, whitespa
 
 - `cancel` stops every unanswered request whose `params.callId` equals `callId`, on any connection: each is
   answered `cancelled` (a request that finished first keeps its answer). `target.act` always carries a
-  `callId`; `target.snapshot`, `target.screenshot`, `target.waitIdle`, `target.waitFor` and
-  `target.applescript` take an optional one. `cancel`'s own `callId` names the call to stop, not itself.
+  `callId`; `target.snapshot`, `target.screenshot`, `target.waitIdle`, `target.waitFor`, `target.find`,
+  `target.foreground`, `target.applescript`, `target.scriptingDictionary` and `target.scriptingCommands` take an
+  optional one (a window watched through a full-screen or Space transition is waited for under it). `cancel`'s own `callId` names the call to stop, not itself.
 - `turn.ended`: the session's turn is over — the on-screen cursor fades, a pending focus restore is flushed,
   and the session's views may pause (§7.3).
 - `session.ended`: every target of the session is released (a `view.released` each), its Esc arming and
@@ -427,7 +440,11 @@ never back and forth between their view and the window's, never held there to th
   window is brought forward once more halfway), then waits for a painted frame (about 1 s at most). A window that
   never comes on screen: the user is brought back and the request fails `unsupported` ("macOS did not show <App>'s
   desktop — nothing was done there") with `data.visit` (the closed visit's report); a switch that comes after that (the
-  app answering late) is watched for about 1.2 s and undone. A visit is refused before anything moves (`unsupported`)
+  app answering late) is watched for about 1.2 s and undone — unless input of the user's that can switch apps or
+  desktops (a ⌘ or ⌃ chord, a trackpad gesture, a click on the target's window or on the Dock) came within a second
+  before it, which makes it their move (typing in their own app does not); with no way to see such input (no session
+  tap) it is left alone. The return raises the user's recorded window, a newer one of theirs, or — when theirs closed
+  — another of their windows that was on their desktop, never the target's window; with none, their app alone. A visit is refused before anything moves (`unsupported`)
   when the user's own window can't be told while their app has windows on other desktops (the return could not tell
   where to bring them).
 - **While open.** Every primitive of that session on a window of the visited desktop runs there, with no further
@@ -537,8 +554,9 @@ useWindow to pick another", …) and reads an absent `reason` (an older helper) 
 
 `refused` reasons: `secure_field`, `auth_dialog`, `privacy_pane`, `winter_itself`, `save_path`,
 `focus_unknown`, `focus_not_placed`, `focus_not_editable`, `wrong_field_shape`, `focus_moved`, `front_unknown`, `applescript`,
-`automation_denied`. `front_unknown`: a desktop visit was not made because the app the user is in can't be read — they
-could not have been brought back; nothing was moved.
+`automation_denied`, `app_in_front`. `front_unknown`: a desktop visit was not made because the app the user is in can't be read — they
+could not have been brought back; nothing was moved. `app_in_front`: the app came to the front while a background act
+was being prepared (the user may be using it): the keys or the click were not sent.
 
 Any error of a primitive that ran inside a desktop visit carries `data.inVisit: true`.
 `focus_moved` stops a `type` whose focus left the field partway (`data.typed` / `data.total` say how far it got).
@@ -709,3 +727,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.9.0 | No wire change: the bundle carries `winter-browser-host` (`Contents/MacOS`), the native-messaging host behind Winter for Chrome — its own protocol is [`WinterBrowserHost/PROTOCOL.md`](WinterBrowserHost/PROTOCOL.md). |
 | 1 | 1.9.1 | No wire change — the live gate's fixes: a web page's state is never one folded line (WebKit's `AXDisclosing = 0` on every element no longer reads as collapsed; `full` has its own hard cap and says where it cut; a page's content folds last); a desktop visit raises the window's element and makes its app frontmost over accessibility (the by-id front and the key-window records are gone: they never switched desktops on macOS 26 and reached the user's window as a click), finds a capture-only window's element at the visit, refuses before anything moves when it can't get there, and returns the same way; the guardian counts only input a person makes (the window server's own events at an activation or a desktop change made a delayed self-activation "the user's switch"). |
 | 1 | 1.9.2 | No wire change — the live gate's second round: a window in a full-screen transition (listed, on no Space for a moment) is not a closed one; an explicit `full` state is held to 48 KB as well; a desktop visit that switched late is undone, returns to the user's own window (made main), and is refused before anything moves when the user's window can't be told; in every focus blip and before a background window-targeted click the bound window is made its app's key window (after a blip's hand-back an app held no key window and later blips left it so: keys went nowhere, Edit › Paste stayed disabled, a first click only made the window key); a page menu WebKit keeps alive after closing counts as closed; a hover over a WebKit page that shows nothing new says so. Its review: the key-window step only when the window is not key (an app's focused element tells; a blip's hand-back is remembered as none), never over a menu, popover, sheet or a panel holding the keys, never for a click landing on another window, Chromium excluded (measured), the front re-read before it acts; a visit's late-switch watch undoes only the target's own switch and never fights a window the user changed; the window-gone watch suspends under the call's cancel, coalesced per pid; a diff surfaces what its folded base never showed. |
+| 1 | 1.9.3 | Additive: `refused` gains `app_in_front` (the app came to the front while a background act was prepared: the keys or the click were not sent); `target.find`, `target.foreground`, `target.scriptingDictionary` and `target.scriptingCommands` take an optional `callId` (`cancel` reaches them; every call that can wait on a window's transition registers its cancel first). Behaviour — the live gate's third round and its review: a focus blip whose make-key step could not make the bound window the one the keys go to (a panel, a dialog or another window holds them; the app's window list unreadable; the app come to the front) sends nothing and refuses (`focus_not_placed` naming what holds the keys), while a popover or context menu of the bound window still takes them; the key-window read is made every time (a stale "stranded" mark never skips it, and is forgotten when the guardian stops and with the app's last target); `input` and `focusNow` are read where the app answers — inside the blip, and in the page when the app holds no key window — and a Tab in a `type` goes as keys; a diff counts as seen only the lines it keeps, and a whole new screen of rows is the state again; a visit's late switch is the user's only on input that can switch (⌘/⌃ chords, gestures, a click on the target or the Dock), and its return never anchors on the target's window. |
