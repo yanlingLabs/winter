@@ -2,7 +2,7 @@
 
 An independent read-only review of specification commit `c7fd1f87` found a coherent product direction but five unresolved execution/integration contracts. Source was checked against Winter `c7fd1f87`, agent SDK checkout `27f1c43e` and runtime SDK checkout `c542420`; the SDK checkout is not a claim about Winter's released pin. The revisions below update the [main specification](../cowork-spec.md) and add its normative [execution companion](../cowork-execution-contracts.md).
 
-Status: independent re-review of `da073e0d` accepted every original B1–B5, H1–H5 and R1–R8 disposition and found no contradiction with accepted product choices. It judged the specification ready to plan gates 1–2, while requesting C1/C2 before planning gates 3–4. Those additions and the further refinements below are documented and awaiting re-review. This is not implementation approval or proof that any feasibility gate passed. No VM was launched, dependency installed, live app/daemon changed, SDK released or pin bumped during these review responses.
+Status: independent re-review of `21e3e5f4` accepted C1/C2 and R-a–g, in addition to the earlier acceptance of B1–B5, H1–H5 and R1–R8 at `da073e0d`. No remaining blocker or contradiction with accepted product choices was found; the reviewed specification is ready to plan all four gates. Five non-blocking planning details from that acceptance are recorded below. This is not implementation approval or proof that any feasibility gate passed. No VM was launched, dependency installed, live app/daemon changed, SDK released or pin bumped during these review responses.
 
 | Finding | Specification disposition | Remaining validation |
 | --- | --- | --- |
@@ -52,6 +52,16 @@ The [host protocol inventory](../cowork-host-protocol.md) and expanded [executio
 | R-g: Quit stops owned work/schedules | Warn on active/unknown occupancy or enabled Cowork schedules, identify affected work and offer cancel/quit; 30 seconds bounds graceful drain only, not termination proof | Idle scheduled-only work, independent profiles, user restart/update, incomplete flush and retained disk ownership |
 
 Follow-up internal checks clarified that `session_created` stays outside history as today while preserving live/replay stream control; broker authority is revoked immediately before pending filesystem cleanup completes; canonical Project/standalone policy exists once in WorkspacePolicy; guidance provenance uses safe source-relative paths remotely; and migration cannot blindly skip user artifacts named `index.db` or SQLite sidecar names. These are specification corrections, not passing runtime tests.
+
+## Acceptance of 21e3e5f4 and planning follow-ups
+
+The final independent review accepted all documented findings at `21e3e5f4` and found no remaining blocker. It judged gates 1–4 ready for planning while explicitly leaving all feasibility tests open. The following non-blocking details were then added to the host protocol contract as planning requirements; they are not a claim of additional external review or implemented transport behavior.
+
+1. `workspace.watch` has an explicit negotiated wire kind, peer/transport-generation ownership, bounded subscription set, lease/renewal, detach/revocation/expiry cleanup and refetch on reconnect. It is not an ordinary single RPC reply or a sessionless SessionEvent.
+2. Remote frames are capped at 512 KiB after complete WireEnvelope encoding; content chunks at 256 KiB decoded; list/snapshot pages at 100 entries/256 KiB inner JSON. Final encoding checks and generation-bound chunking keep them under the current 1 MiB transport ceiling.
+3. Default approval policy initializes new conversations, while publication changes apply to existing ones: broker narrowing is immediate and generated guidance refreshes at the next safe turn/resume boundary.
+4. The external admission ledger binds HomeIdentity to canonical path, volume/directory identity and host installation. Copying DB bytes is not registration. Migration Assistant/new-Mac restore uses an explicit recovery/relocation transaction with grant revalidation; local identity tracking does not prove an unreachable old Mac stopped.
+5. A named daemon-side `assertRemoteMayUseWorkspace` resolves and checks workspace/project/source/location/file/export/delegation/subscription scope, including each chunk and stream renewal/emission. Cowork session gating delegates through its canonical binding; unknown records/modes fail closed.
 
 ## Review evidence and boundaries
 

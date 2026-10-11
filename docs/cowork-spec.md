@@ -4,6 +4,8 @@ Status: user-approved design direction, updated 2026-10-11. Cowork is not implem
 
 The [host records and protocol inventory](cowork-host-protocol.md) defines canonical state, RPCs/events and local/paired-client access. The [execution and integration contracts](cowork-execution-contracts.md) are part of this specification: Linux confinement, policy/messaging matrices, guest router/file readers, extensions/trust, provider/Git gateways, network enforcement and lifecycle/retention. The [independent review ledger](research/2026-10-11-cowork-spec-review.md) tracks the gaps those contracts address. No review or document edit establishes that a feasibility gate passed.
 
+Independent review accepted specification commit `21e3e5f4` for planning gates 1–4 with no remaining blocker. The [review ledger](research/2026-10-11-cowork-spec-review.md#acceptance-of-21e3e5f4-and-planning-follow-ups) records that acceptance and the subsequent non-blocking protocol clarifications. Feasibility and implementation remain unproven.
+
 ## Accepted behavior
 
 | Requirement | Contract |
