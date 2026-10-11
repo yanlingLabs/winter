@@ -74,8 +74,10 @@ ciphertext-at-rest and detectable-not-preventable corruption/deletion limits.
 Fence-only protection and blocking Code escapes while Cowork data exists were
 the rejected alternatives. The new [storage contract](../cowork-storage-security.md)
 records this as a subsequent product decision, not a property of the earlier
-plaintext probes or a passed gate. Private control-record protection is the
-reviewer's implementation extension; selected Mac folders and shared
+plaintext probes or a passed gate. The reviewer subsequently narrowed their
+control-record extension to integrity protection for broker/worker-consumed
+manifest, workspace/volume identity and key version, not control-record
+encryption or a helper-backed database. Selected Mac folders and shared
 instructions/memory/outputs remain plaintext. Host transcript/diff copies need
 their own explicit treatment. The separate later worker decision below changes
 process topology; active RAM return remains mandatory and unproven with Linux.
@@ -83,7 +85,11 @@ process topology; active RAM return remains mandatory and unproven with Linux.
 This supersedes the earlier C1 wording insofar as it implied that path/IPC
 denials could prevent every same-user delegation escape. Fences stay defense
 in depth. Helper authentication, encrypted block I/O, integrity/recovery and
-the protected control representation are new mandatory implementation gates.
+sealed broker-consumed identity records are new mandatory implementation gates.
+Authenticated Winter API requests can still ask a guest to return plaintext;
+this is an explicit residual alongside host transcript/diff copies. A native
+launcher handing the genuine Core instance an inherited capability descriptor
+is the candidate for broker launch admission, not a code-signature-only check.
 
 ### Subsequent worker decision
 

@@ -34,20 +34,17 @@ or recovery-required workspace, never permission to create empty replacement
 data. Corruption detection is not a claim to prevent rollback of an otherwise
 valid old snapshot; rollback/replay handling needs its own validated protocol.
 
-The reviewer additionally identified private control records as requiring this
-bar. Treat that as an implementation requirement derived from the decision:
-encrypt confidential Cowork control payloads and authenticate authority-bearing
-records, manifests and revisions. Preserve one canonical logical authority and
-transactional operation/outbox semantics. The current development SQLite
-tables are plaintext foundations and do not satisfy this requirement. The
-encrypted representation, safe indexing/projections and helper transaction
-interface must be specified and tested before activation; file modes or a
-second independently authoritative JSON copy are not substitutes. Bind protected
-records to canonical home/workspace, record type/key, revision and format. Safe
-cleartext projections may support UI/indexing but cannot confer grants. A valid
-old ciphertext/revision is still replayable without a protected freshness
-anchor; define crash recovery for that anchor and the DB/outbox transaction
-before claiming replay resistance.
+The reviewer corrected an earlier over-extension about private control records:
+this decision does **not** require encrypting grants/source IDs/policy or replacing
+the runtime-state DB with a helper-backed encrypted transactional store. Retain
+its existing single canonical authority and transaction/outbox semantics. Apply
+integrity protection to records the key broker or worker consumes: the manifest,
+sealed workspace/volume identity, format and key version. A plaintext DB row or
+manifest alone must never release a key or authorize a launch. Admission requires
+an authenticated daemon request plus the broker's own sealed identity/key-version
+record. Bind those records to the canonical home/workspace and volume; define
+freshness and recovery before claiming protection from replay of old valid data.
+This scope correction is the reviewer's clarification, not a new user choice.
 
 ## Scope and plaintext copies
 
@@ -62,6 +59,14 @@ the original disk. Host session transcripts, file diffs, tool results, staged
 artifacts and diagnostics can contain private file content; their separate
 storage policy and any redaction/encryption work must be explicit. Do not use
 blanket wording such as "all Cowork files are hidden from other programs".
+
+Requests through Winter's own authenticated API are another explicit residual.
+An authorized caller can ask an admitted Cowork session to read guest files and
+return plaintext. Today's Core signing identity can be launched in Bun interpreter
+mode, and a same-user process with access to that identity's harness/admin token
+can drive the daemon API. At-rest encryption does not prevent this route. The
+guarantee here is that **direct reads of the backing files yield ciphertext**,
+not that all same-user applications are denied every authorized Winter operation.
 
 No decrypted host mount or generic helper decrypt/readback RPC may stand in for
 the encrypted-disk boundary. The chosen block path must unlock only an admitted
@@ -84,7 +89,10 @@ broker's exact-process launch/descriptor binding must provide that separation.
 [Apple Keychain access models](https://developer.apple.com/documentation/technotes/tn3137-on-mac-keychains)
 
 Authenticate the actual native UI/Core instance or a separately validated saved
-schedule capability. A same-user caller cannot register its chosen PID, run a
+schedule capability. Candidate: the signed native app or native launch broker
+starts Core with a one-shot inherited capability descriptor, and the broker
+accepts worker launch requests only on that admitted instance's channel. A
+separately launched signed Core lacks this bootstrap capability. A same-user caller cannot register its chosen PID, run a
 copied signed Core in interpreter mode, nominate another executable, or turn
 wake into arbitrary guest execution. This launch/bootstrap and authority-record
 protocol is an implementation gate, not solved by the proposed process diagram.

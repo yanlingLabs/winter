@@ -24,8 +24,9 @@ Sanitize inherited descriptors, `/proc` visibility, Unix sockets, launch environ
 
 The user's subsequent [encrypted-at-rest decision](cowork-storage-security.md)
 sets the confidentiality bar for private VM disks. Keys belong only to a signed
-storage/key helper, not `winter-core`. Private control protection must be added
-to the logical DB contract below; current plaintext tables are not sufficient.
+storage/key helper, not `winter-core`. Keep the canonical runtime-state DB;
+integrity-protect the broker/worker-consumed manifest, workspace/volume identity
+and key version. Plaintext records alone cannot authorize launch or key release.
 Path floors and IPC restrictions are defense in depth, not a universal boundary
 against same-user delegated services. Preserve ordinary Code escape behavior
 under its existing approval policy; the rejected alternative was blocking all

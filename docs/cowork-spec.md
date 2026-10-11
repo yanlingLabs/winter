@@ -19,7 +19,7 @@ Independent review accepted specification commit `21e3e5f4` for planning gates 1
 | Resource management | No manual per-VM CPU/RAM/GPU allocation workflow. Automatic use of available host capacity must include RAM return during active work; the user explicitly rejected idle shutdown as the sole memory-return mechanism. Keep actual VM ceilings and reclaim limits explicit. |
 | Execution | Winter's agent loop and its subagents run inside one Linux VM per durable workspace, subject to the backend/security/resource gates below. |
 | Host process topology | One sandboxed VMM worker per workspace, orchestrated by the daemon. This subsequent user decision replaces the earlier in-daemon controller preference. Project conversations share their workspace's worker. |
-| Private storage | Encrypt private VM data/environment disks at rest. Keys are held only by a signed storage/key helper, not the Bun daemon. Path fences and IPC restrictions are defense in depth; same-user deletion/corruption is detectable, not preventable. See the scoped [storage contract](cowork-storage-security.md). |
+| Private storage | Required before Cowork is enabled at all: encrypt private VM data/environment disks at rest. Keys are held only by a signed storage/key helper, not the Bun daemon. Path fences and IPC restrictions are defense in depth; same-user deletion/corruption is detectable, not preventable. See the scoped [storage contract](cowork-storage-security.md). |
 | Workspace inputs | At least one explicitly allowed host directory or one selected GitHub repository. A GitHub account connection alone is not a selected repository. Combining directories and repositories is allowed. |
 | Changing inputs | Users may add repositories and folders during a conversation. They may remove sources, but at least one source must remain; add a replacement before removing the last source. Project changes affect every conversation in that workspace. |
 | Host folders | Granted writable folders are edited directly. Changes already made to host files survive VM deletion or rollback. |
@@ -68,7 +68,7 @@ See the [options comparison](research/2026-10-10-cowork-vm-options.md) for alter
 | --- | --- |
 | Host daemon | Canonical workspace/authority DB, nonauthoritative storage manifests, UI events, approvals, grants, admission, schedules, credential authority and recovery UI |
 | Sandboxed native worker | Its workspace's VM lifecycle, explicit disks/shares/devices, guest-facing parsing, bounded broker transport and native resource cleanup |
-| Signed storage/key helper | Exclusive Keychain custody of storage keys, authenticated storage/unlock operations and protected private control representation; no raw-key delivery to the daemon |
+| Signed storage/key helper | Exclusive Keychain custody of storage keys, authenticated storage/unlock operations and integrity-protected broker-consumed identity records; no raw-key delivery to the daemon |
 | Guest supervisor | Protected conversation launch, portable guest router/run-home materialization, confined tool process ownership, authenticated file/event transport, occupancy, drain/flush and recovery |
 | Guest conversation runtime | Agent loop, its own subagents and SDK store, tools and conversation-local control state |
 | Workspace storage | Shared Project files/memory/environment plus distinct per-conversation state, scratch and outputs |
@@ -98,7 +98,7 @@ Proposed guest layout:
 
 `outputs/<session-id>` is an optional destination for user-facing deliverables such as PDFs, spreadsheets, reports, images or archives. Source edits stay in their repository or mounted folder; build caches and intermediate products stay in their appropriate cache/build directories. Do not duplicate all changed files into outputs. Export a build product there only when it is a requested deliverable. Selected host folders are not copied in or synchronized out on every boot/stop; persistent guest disks and tool caches are reused rather than routinely rebuilt.
 
-The host owns the manifest and encrypted volume files beneath a Cowork workspace directory. Canonical identity, grants, trust and policy retain one host authority; the manifest cannot confer authority. Private control representation must satisfy the new [encryption and integrity contract](cowork-storage-security.md); existing plaintext runtime-state tables are development foundations. The [host-storage fence and migration contract](cowork-execution-contracts.md#host-storage-authority-fences-and-migration) supplies defense in depth for host tools, while guest tool confinement remains an enforced boundary. Mount each writable disk into at most one guest. Materialize runtime configuration/run homes using guest paths, not host symlinks or Mac cwd strings. Separate conversation runtime identity from the shared Project memory path.
+The host owns the manifest and encrypted volume files beneath a Cowork workspace directory. Canonical identity, grants, trust and policy retain one host authority; the manifest cannot confer authority. Keep the canonical runtime-state DB; integrity-protect identity/key-version records consumed by the key broker or worker under the [storage contract](cowork-storage-security.md). Plaintext records alone cannot authorize launch/unlock. The [host-storage fence and migration contract](cowork-execution-contracts.md#host-storage-authority-fences-and-migration) supplies defense in depth for host tools, while guest tool confinement remains an enforced boundary. Mount each writable disk into at most one guest. Materialize runtime configuration/run homes using guest paths, not host symlinks or Mac cwd strings. Separate conversation runtime identity from the shared Project memory path.
 
 ### Where the restored state lives on the Mac
 
@@ -297,7 +297,7 @@ Retain only the workspace portion of Projects in this scope. Keep Code behavior 
 
 The subsequent [encrypted-storage contract](cowork-storage-security.md) adds a
 mandatory security slice before activation: helper-only key custody, a real
-encrypted/integrity-protected block path, protected private control records,
+encrypted/integrity-protected block path, sealed broker-consumed identity records,
 and locked/tampered/missing-key/backup recovery behavior. Existing plaintext
 fixture results do not satisfy it. Treat Code path floors as defense in depth,
 not as a substitute or a requirement to forbid normal approved escapes.
