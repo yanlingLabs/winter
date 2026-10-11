@@ -153,10 +153,10 @@ describe("tabs.list, tabs.close, tabs.keep", () => {
   test("lists every tab of the profile (never a private one), marking Winter's", async () => {
     chrome.addTab({ windowId: 1, url: "https://secret.example/", incognito: true });
     const mine = await open();
-    const tabs = (await c.handle("tabs.list", {}) as { tabs: { tabKey: string; url: string; title: string; active: boolean; agent: boolean }[] }).tabs;
+    const tabs = (await c.handle("tabs.list", {}) as { tabs: { tabKey: string; url: string; title: string; active: boolean; agent: boolean; windowId?: number }[] }).tabs;
     expect(tabs.map((t) => t.url)).toEqual(["https://user.example/inbox", "https://user.example/doc", "https://example.com/"]);
     expect(tabs.find((t) => t.tabKey === mine.tabKey)?.agent).toBe(true);
-    expect(tabs[0]).toEqual({ tabKey: "100", url: "https://user.example/inbox", title: "Inbox", active: true, agent: false });
+    expect(tabs[0]).toEqual({ tabKey: "100", url: "https://user.example/inbox", title: "Inbox", active: true, agent: false, windowId: 1 });
   });
 
   test("closes a Winter tab; refuses the user's", async () => {
@@ -262,6 +262,78 @@ describe("tabs.list, tabs.close, tabs.keep", () => {
     await c.handle("tabs.keep", { tabKey: pinned.tabKey });
     expect(chrome.calls.filter((x) => x.api === "tabs.ungroup")).toHaveLength(1);
     expect(await code(c.handle("tabs.close", { tabKey: pinned.tabKey }))).toBe("not_allowed");
+  });
+});
+
+describe("Phase 3: tab facts, keep({ group }), mute, the session's group, windows", () => {
+  test("tabs.list says when each tab was last in front, its group's title and its window", async () => {
+    chrome.tabs_.get(100)!.lastAccessed = 1_760_000_000_123.4;
+    const mine = await open();
+    const tabs = (await c.handle("tabs.list", {}) as { tabs: Array<Record<string, unknown>> }).tabs;
+    expect(tabs[0]).toMatchObject({ tabKey: "100", lastAccessed: 1_760_000_000_123, windowId: 1 });
+    expect(tabs[0]!.group).toBeUndefined();
+    expect(tabs.find((t) => t.tabKey === mine.tabKey)).toMatchObject({ group: "Winter · Fix the build", windowId: 1 });
+    expect(mine).toMatchObject({ group: "Winter · Fix the build" });
+  });
+
+  test("keep({ group }) hands the tab over into a user group of that name — joined if it exists in the window, never a Winter group", async () => {
+    const a = await open();
+    await c.handle("tabs.keep", { tabKey: a.tabKey, group: "  Research  notes " });
+    const ga = chrome.tabs_.get(Number(a.tabKey))!.groupId;
+    expect(ga).toBeGreaterThan(0);
+    expect(chrome.groups_.get(ga)?.title).toBe("Research notes");
+    expect(await agents()).toEqual([]);
+    const b = await open();
+    await c.handle("tabs.keep", { tabKey: b.tabKey, group: "Research notes" });
+    expect(chrome.tabs_.get(Number(b.tabKey))!.groupId).toBe(ga);
+    // A Winter group named like the request is never joined.
+    const d = await open("s_2", "Research notes");
+    expect(chrome.groups_.get(chrome.tabs_.get(Number(d.tabKey))!.groupId)?.title).toBe("Winter · Research notes");
+    const e = await open("s_2", "Research notes");
+    await c.handle("tabs.keep", { tabKey: e.tabKey, group: "Winter · Research notes" });
+    expect(chrome.tabs_.get(Number(e.tabKey))!.groupId).not.toBe(chrome.tabs_.get(Number(d.tabKey))!.groupId);
+    expect(await code(c.handle("tabs.keep", { tabKey: d.tabKey, group: "   " }))).toBe("not_allowed");
+    expect(chrome.viewMovingCalls()).toEqual([]);
+  });
+
+  test("mute: only Winter's own tabs; the user's sound is theirs", async () => {
+    const mine = await open();
+    await c.handle("tabs.mute", { tabKey: mine.tabKey, muted: true });
+    expect(chrome.tabs_.get(Number(mine.tabKey))!.mutedInfo).toEqual({ muted: true });
+    await c.handle("tabs.mute", { tabKey: mine.tabKey, muted: false });
+    expect(chrome.tabs_.get(Number(mine.tabKey))!.mutedInfo).toEqual({ muted: false });
+    expect(await code(c.handle("tabs.mute", { tabKey: "100", muted: true }))).toBe("not_allowed");
+    expect(chrome.tabs_.get(100)!.mutedInfo).toBeUndefined();
+    expect(await code(c.handle("tabs.mute", { tabKey: mine.tabKey, muted: "yes" }))).toBe("not_allowed");
+    expect(chrome.viewMovingCalls()).toEqual([]);
+  });
+
+  test("group.update: the session's own group — title kept \"Winter · …\", a color, folded only while the user isn't in it", async () => {
+    expect(await code(c.handle("group.update", { sessionId: "s_1", title: "x" }))).toBe("not_allowed"); // no group yet
+    const mine = await open();
+    const gid = chrome.tabs_.get(Number(mine.tabKey))!.groupId;
+    await c.handle("group.update", { sessionId: "s_1", title: "Flights", color: "green", collapsed: true });
+    expect(chrome.groups_.get(gid)).toMatchObject({ title: "Winter · Flights", color: "green", collapsed: true });
+    // The record follows the new title (a restart keeps it).
+    const again = await make({ launch: null });
+    expect(await agents(again)).toEqual([[mine.tabKey, "s_1"]]);
+    expect(await code(c.handle("group.update", { sessionId: "s_1", color: "black" }))).toBe("not_allowed");
+    expect(await code(c.handle("group.update", { sessionId: "s_9", collapsed: false }))).toBe("not_allowed");
+    // The user has one of the group's tabs in front: folding it would switch them away — refused.
+    await c.handle("group.update", { sessionId: "s_1", collapsed: false });
+    await chrome.userActivates(Number(mine.tabKey));
+    expect(await code(c.handle("group.update", { sessionId: "s_1", collapsed: true }))).toBe("not_allowed");
+    expect(chrome.groups_.get(gid)?.collapsed).toBe(false);
+    expect(chrome.viewMovingCalls()).toEqual([]);
+  });
+
+  test("windows.list: the normal windows (never a private one), each one's tab count, and which is in front", async () => {
+    chrome.windows_[0]!.focused = true;
+    chrome.addWindow({ id: 2, incognito: false, focused: false });
+    chrome.addWindow({ id: 3, incognito: true });
+    chrome.addTab({ windowId: 2, url: "https://two.example/" });
+    chrome.addTab({ windowId: 3, url: "https://private.example/", incognito: true });
+    expect(await c.handle("windows.list", {})).toEqual({ windows: [{ id: 1, focused: true, tabs: 2 }, { id: 2, focused: false, tabs: 1 }] });
   });
 });
 

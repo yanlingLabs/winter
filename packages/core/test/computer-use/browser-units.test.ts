@@ -356,7 +356,7 @@ describe("the tool description", () => {
     expect(full).toContain("interface Tab extends Target {");
     expect(full).toContain("declare const browsers: {");
     expect(full).toContain("  handoff(): Promise<void>;   // keep this tab (yours, still in Winter's group) for your next turn only — call it again each turn you still need it");
-    expect(full).toContain("// hand this tab to the user: it leaves Winter's group and Winter never closes it");
+    expect(full).toContain("// hand this tab to the user: it leaves Winter's group (into their own group named `group`, if given) and Winter never closes it");
     expect(full).toContain("Tabs you open in the user's own browser close when your turn ends unless you call keep() (give it to the user) or handoff() (keep it for your next turn).");
     expect(full).toContain("`BrowserUnavailable`");
     expect(full).toContain("the built-in browser needs no approval");

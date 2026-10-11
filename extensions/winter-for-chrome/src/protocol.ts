@@ -7,6 +7,10 @@ export const BROWSER_HOST_PROTOCOL = 1;
 /** The extension's `hello` and every message after it. */
 export const EXTENSION_PROTOCOL = 1;
 
+/** What this build can do beyond protocol 1's first requests (`hello.features`; the daemon's EXTENSION_FEATURES lists
+ *  every name it knows, and offers a Phase 3 member only when its feature is named here). */
+export const EXTENSION_FEATURES = ["mute", "group", "keepGroup", "windows", "tabFacts"] as const;
+
 /** The error codes this side answers with (`error.data.code`) — the daemon's TransportErrorCode set. */
 export type ErrorCode = "disconnected" | "tab_gone" | "attach_refused" | "not_allowed" | "cdp_error" | "timeout";
 
@@ -23,6 +27,10 @@ export interface WireTab {
   agent: boolean;
   /** The Winter session the tab's group belongs to. */
   sessionId?: string;
+  /** When the user last had it in front (ms since the epoch), its group's title, and its window. */
+  lastAccessed?: number;
+  group?: string;
+  windowId?: number;
 }
 
 export const RPC_ERROR = -32000;

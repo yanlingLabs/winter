@@ -3,7 +3,8 @@
 //
 // The rules it keeps whatever it is asked:
 //  - It never moves the user's view: tabs open with `active: false`, in the session's Winter group; nothing here can
-//    activate a tab or focus a window (the `ChromeApi` it is given has no such call).
+//    activate a tab or focus a window (the `ChromeApi` it is given has no such call). A Winter group is never folded
+//    while the user has one of its tabs in front (the browser would switch them to another tab).
 //  - It never reads a site's cookies or storage, and runs page code only in the "winter" world (the guard).
 //  - The debugger is attached only while the daemon has the tab bound — and is detached after 5 minutes without a
 //    command, whenever the link to Winter drops, and (for any left from a previous run of the service worker) at start.
@@ -22,8 +23,8 @@
 //    The active tab, the user's own tabs, a page with no input since it loaded, and a subframe's navigation go to the
 //    browser unchanged.
 //  - Stop is the toolbar button: while any tab is driven, a click on it stops Winter there.
-import type { ChromeApi, ChromeTab, Clock, DebuggerTarget } from "./chrome-api";
-import { realClock } from "./chrome-api";
+import type { ChromeApi, ChromeTab, Clock, DebuggerTarget, GroupColor } from "./chrome-api";
+import { GROUP_COLORS, realClock } from "./chrome-api";
 import { AgentBook, groupTitle } from "./groups";
 import { isAllowedEvent, strippedParams, TabGuard } from "./guard";
 import { drawOverlay } from "./overlay";
@@ -186,7 +187,10 @@ export class ExtensionController {
       case "tabs.list": return { tabs: await this.listTabs() };
       case "tabs.create": return { tab: await this.createTab(params) };
       case "tabs.close": await this.closeTab(this.tabId(params)); return {};
-      case "tabs.keep": await this.keepTab(this.tabId(params)); return {};
+      case "tabs.keep": await this.keepTab(this.tabId(params), params.group); return {};
+      case "tabs.mute": await this.muteTab(this.tabId(params), params.muted); return {};
+      case "group.update": await this.updateGroup(params); return {};
+      case "windows.list": return { windows: await this.listWindows() };
       case "debugger.attach": return await this.attach(this.tabId(params));
       case "debugger.detach": await this.detach(this.tabId(params)); return {};
       case "cdp.send": return { result: await this.send(this.tabId(params), params) };
@@ -221,8 +225,10 @@ export class ExtensionController {
     return id;
   }
 
-  private wire(tab: ChromeTab): WireTab {
+  /** `groupTitles`: each group's title by id, when the caller read them (a tab in a group with no title says nothing). */
+  private wire(tab: ChromeTab, groupTitles?: ReadonlyMap<number, string>): WireTab {
     const sessionId = tab.id === undefined ? undefined : this.book.sessionOfTab(tab.id);
+    const group = tab.groupId >= 0 ? groupTitles?.get(tab.groupId) : undefined;
     return {
       tabKey: String(tab.id),
       url: tab.url ?? tab.pendingUrl ?? "",
@@ -230,6 +236,9 @@ export class ExtensionController {
       active: tab.active,
       agent: sessionId !== undefined,
       ...(sessionId === undefined ? {} : { sessionId }),
+      ...(typeof tab.lastAccessed === "number" && Number.isFinite(tab.lastAccessed) ? { lastAccessed: Math.round(tab.lastAccessed) } : {}),
+      ...(group === undefined || group === "" ? {} : { group }),
+      windowId: tab.windowId,
     };
   }
 
@@ -246,7 +255,9 @@ export class ExtensionController {
 
   private async listTabs(): Promise<WireTab[]> {
     const tabs = await this.chrome.tabs.query({});
-    return tabs.filter((t) => t.id !== undefined && !t.incognito).map((t) => this.wire(t));
+    let titles: Map<number, string> | undefined;
+    try { titles = new Map((await this.chrome.tabGroups.query({})).map((g) => [g.id, g.title ?? ""])); } catch { titles = undefined; }
+    return tabs.filter((t) => t.id !== undefined && !t.incognito).map((t) => this.wire(t, titles));
   }
 
   private async createTab(params: Record<string, unknown>): Promise<WireTab> {
@@ -286,7 +297,11 @@ export class ExtensionController {
     } catch (err) {
       this.opts.log?.(`tab ${tab.id}: could not put it in its Winter group (${err instanceof Error ? err.message : String(err)}) — it stays Winter's, ungrouped`);
     }
-    return this.wire({ ...tab, groupId: grouped });
+    let titles: Map<number, string> | undefined;
+    if (grouped >= 0) {
+      try { titles = new Map([[grouped, (await this.chrome.tabGroups.get(grouped)).title ?? ""]]); } catch { titles = undefined; }
+    }
+    return this.wire({ ...tab, groupId: grouped }, titles);
   }
 
   /** The window a new Winter group goes into: the one the user used last, else any normal one; never a private one. */
@@ -365,12 +380,78 @@ export class ExtensionController {
     try { await this.chrome.debugger.sendCommand({ tabId }, "Page.enable", {}); } catch { /* best effort */ }
   }
 
-  /** `keep()`: the tab is the user's for good — out of the agent tabs, out of its Winter group, never closed by Winter. */
-  private async keepTab(tabId: number): Promise<void> {
+  /**
+   * `keep()`: the tab is the user's for good — out of the agent tabs, out of its Winter group, never closed by Winter.
+   * `keep({ group })` puts it in a group of the user's by that name in its window: an existing one (one an earlier keep
+   * made, or the user's own of that name), else a new one. Never a Winter group.
+   */
+  private async keepTab(tabId: number, rawGroup?: unknown): Promise<void> {
     const tab = await this.getTab(tabId);
     if (this.book.sessionOfTab(tabId) === undefined) return; // already the user's
+    const name = typeof rawGroup === "string" ? rawGroup.trim().replace(/\s+/g, " ").slice(0, 80) : "";
+    if (rawGroup !== undefined && name === "") throw new ExtensionError("not_allowed", "a kept tab's group is a name");
     await this.book.dropTab(tabId);
     if (this.book.isWinterGroup(tab.groupId)) await this.chrome.tabs.ungroup([tabId]);
+    if (name === "") return;
+    try {
+      const existing = (await this.chrome.tabGroups.query({})).find((g) => g.windowId === tab.windowId && (g.title ?? "") === name && !this.book.isWinterGroup(g.id));
+      if (existing !== undefined) {
+        await this.chrome.tabs.group({ tabIds: [tabId], groupId: existing.id });
+      } else {
+        const id = await this.chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } });
+        await this.chrome.tabGroups.update(id, { title: name });
+      }
+    } catch (err) {
+      // The tab is the user's already: only its grouping failed.
+      throw new ExtensionError("cdp_error", `the tab is the user's now, but the browser would not put it in the group "${name}": ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** `mute()`: only Winter's own tabs (the user's sound is theirs). */
+  private async muteTab(tabId: number, muted: unknown): Promise<void> {
+    await this.getTab(tabId);
+    if (this.book.sessionOfTab(tabId) === undefined) throw new ExtensionError("not_allowed", "Winter mutes only the tabs it opened");
+    if (typeof muted !== "boolean") throw new ExtensionError("not_allowed", "tabs.mute needs muted: true or false");
+    try { await this.chrome.tabs.setMuted(tabId, muted); } catch { throw new ExtensionError("tab_gone", "the tab is closed"); }
+  }
+
+  /** `browsers.group()`: the session's Winter group — its title (kept "Winter · …"), color, folded or not. */
+  private async updateGroup(params: Record<string, unknown>): Promise<void> {
+    const { sessionId, title, color, collapsed } = params;
+    if (typeof sessionId !== "string" || sessionId === "") throw new ExtensionError("not_allowed", "a group belongs to a session");
+    const groupId = this.book.groupFor(sessionId);
+    let windowId: number | undefined;
+    if (groupId !== undefined) {
+      try { windowId = (await this.chrome.tabGroups.get(groupId)).windowId; } catch { await this.book.dropGroup(groupId); }
+    }
+    if (groupId === undefined || windowId === undefined) throw new ExtensionError("not_allowed", "this session has no tab group in this browser — open a tab with browsers.open() first");
+    const p: { title?: string; color?: GroupColor; collapsed?: boolean } = {};
+    if (title !== undefined) {
+      if (typeof title !== "string" || title.trim() === "") throw new ExtensionError("not_allowed", "a group's title is a name");
+      p.title = groupTitle(title);
+    }
+    if (color !== undefined) {
+      if (typeof color !== "string" || !(GROUP_COLORS as readonly string[]).includes(color)) throw new ExtensionError("not_allowed", `a group's color is one of ${GROUP_COLORS.join(", ")}`);
+      p.color = color as GroupColor;
+    }
+    if (collapsed !== undefined) {
+      if (typeof collapsed !== "boolean") throw new ExtensionError("not_allowed", "collapsed is true or false");
+      // Folding a group whose tab is in front would switch the user to another tab.
+      if (collapsed && (await this.chrome.tabs.query({})).some((t) => t.groupId === groupId && t.active)) {
+        throw new ExtensionError("not_allowed", "the user has one of these tabs in front — the group can't be folded now");
+      }
+      p.collapsed = collapsed;
+    }
+    if (p.title === undefined && p.color === undefined && p.collapsed === undefined) return;
+    await this.chrome.tabGroups.update(groupId, p);
+    if (p.title !== undefined) await this.book.retitle(groupId, p.title);
+  }
+
+  /** `browsers.windows()`: the browser's normal windows (never a private one) — how many tabs, which is in front. */
+  private async listWindows(): Promise<Array<{ id: number; focused: boolean; tabs: number }>> {
+    const windows = (await this.chrome.windows.getAll({ windowTypes: ["normal"] })).filter((w) => w.id !== undefined && !w.incognito);
+    const tabs = await this.chrome.tabs.query({});
+    return windows.map((w) => ({ id: w.id!, focused: w.focused === true, tabs: tabs.filter((t) => t.windowId === w.id).length }));
   }
 
   // ── the debugger ─────────────────────────────────────────────────────────────────────────────────────────────────

@@ -82,6 +82,12 @@ export class FakeTab {
   historyIndex = -1;
   closed = false;
   kept = false;
+  /** Phase 3: the group keep({ group }) named, the user's front tab, when last in front, its group's title, muted. */
+  keptGroup?: string;
+  active = false;
+  lastAccessed?: number;
+  group?: string;
+  muted?: boolean;
   /** The page has a beforeunload handler: a navigation asks first (the navigation waits for the answer). */
   beforeUnload = false;
   pendingNav?: string;
@@ -118,7 +124,23 @@ export class FakeCdpTransport implements CdpTransport {
   /** Called with every command the fake accepts, before it is answered. */
   onSend?: (method: string, params: Record<string, unknown>, session?: string) => void;
 
-  constructor(readonly backend: string, readonly family: BrowserFamily) {}
+  /** Phase 3's optional members — a user's browser (Winter for Chrome 1.1) has them; the built-in fake starts without
+   *  (a test adds or deletes them to play another build). */
+  features = new Set<string>();
+  setMuted?: CdpTransport["setMuted"];
+  updateGroup?: CdpTransport["updateGroup"];
+  listWindows?: CdpTransport["listWindows"];
+  readonly groupUpdates: Array<{ sessionId: string; title?: string; color?: string; collapsed?: boolean }> = [];
+  windows: Array<{ id: number; focused: boolean; tabs: number }> = [{ id: 1, focused: true, tabs: 2 }];
+
+  constructor(readonly backend: string, readonly family: BrowserFamily) {
+    if (family !== "winter") {
+      this.features = new Set(["mute", "group", "keepGroup", "windows", "tabFacts"]);
+      this.setMuted = async (tabKey, muted) => { this.tab(tabKey).muted = muted; };
+      this.updateGroup = async (o) => { this.groupUpdates.push({ ...o }); };
+      this.listWindows = async () => this.windows.map((w) => ({ ...w }));
+    }
+  }
 
   page(url: string): FakePage {
     const p = this.pages[url];
@@ -144,10 +166,17 @@ export class FakeCdpTransport implements CdpTransport {
     return { tabKey: t.tabKey, url: t.page.url, title: t.page.title, active: false, agent: true, sessionId: opts.sessionId };
   }
   async closeTab(tabKey: string): Promise<void> { this.tab(tabKey).closed = true; }
-  async keepTab(tabKey: string): Promise<void> { this.tab(tabKey).kept = true; }
+  async keepTab(tabKey: string, opts?: { group?: string }): Promise<void> {
+    const t = this.tab(tabKey);
+    t.kept = true;
+    if (opts?.group !== undefined) t.keptGroup = opts.group;
+  }
   async listTabs(): Promise<TransportTab[]> {
     if (!this.connected) throw new TransportError("disconnected", "gone");
-    return [...this.tabs.values()].filter((t) => !t.closed).map((t) => ({ tabKey: t.tabKey, url: t.page.url, title: t.page.title, active: false, agent: t.agent, ...(t.sessionId === undefined ? {} : { sessionId: t.sessionId }) }));
+    return [...this.tabs.values()].filter((t) => !t.closed).map((t) => ({
+      tabKey: t.tabKey, url: t.page.url, title: t.page.title, active: t.active, agent: t.agent, ...(t.sessionId === undefined ? {} : { sessionId: t.sessionId }),
+      ...(t.lastAccessed === undefined ? {} : { lastAccessed: t.lastAccessed }), ...(t.group === undefined ? {} : { group: t.group }),
+    }));
   }
   async attach(tabKey: string, opts: { sessionId: string }): Promise<{ viewport: [number, number]; dpr: number }> {
     const t = this.tab(tabKey);

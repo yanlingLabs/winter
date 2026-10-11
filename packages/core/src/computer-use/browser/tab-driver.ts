@@ -175,8 +175,11 @@ export class TabDriver {
   readonly devtools: TabDevtools;
   /** Phase 3: a download the page started by itself that nothing caught (said once, in the next state). */
   uncaughtDownloads: string[] = [];
-  /** Phase 3: an emulated screen size is on (cleared before the tab is let go). */
+  /** Phase 3: an emulated screen size is on in the browser (cleared before the tab is let go). */
   emulating = false;
+  /** Phase 3: the size `viewport()` asked for — taken off when the tab is let go, put back when it is taken again (a
+   *  built-in tab's hold goes at each turn end), until `viewport(null)` or `keep()`. */
+  private viewportWish: { width: number; height: number; mobile: boolean; scale?: number } | undefined;
   /** Phase 3: event listeners the engine adds for one wait (a download's `Fetch.requestPaused`). */
   readonly listeners = new Set<(e: CdpEvent) => void>();
 
@@ -286,6 +289,7 @@ export class TabDriver {
       await this.enableDomains(undefined);
       // Background tabs behave as focused (focus events, :focus, caret) — never by raising anything.
       await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
+      if (this.viewportWish !== undefined) await this.applyViewport(this.viewportWish).catch(() => undefined);
       await this.loadTopFrame();
       this.attached = true;
     })().finally(() => { this.attaching = undefined; });
@@ -1215,6 +1219,23 @@ export class TabDriver {
     if (info === null || "frame" in info) throw stale(ref);
     const o = rec.parentId === undefined ? { x: 0, y: 0 } : await this.frameOrigin(rec, { x: 0, y: 0 });
     return { x: info.box[0] + o.x, y: info.box[1] + o.y, width: Math.max(1, info.box[2]), height: Math.max(1, info.box[3]) };
+  }
+
+  /** `viewport()`: an emulated screen size (`null`: back to the tab's own). Taken off again before the tab is let go,
+   *  and put back when it is next taken. */
+  async setViewport(size: { width: number; height: number; mobile: boolean; scale?: number } | null): Promise<void> {
+    this.viewportWish = size ?? undefined;
+    if (size === null) {
+      if (this.emulating) await this.send("Emulation.clearDeviceMetricsOverride");
+      this.emulating = false;
+      return;
+    }
+    await this.applyViewport(size);
+  }
+
+  private async applyViewport(size: { width: number; height: number; mobile: boolean; scale?: number }): Promise<void> {
+    await this.send("Emulation.setDeviceMetricsOverride", { width: size.width, height: size.height, deviceScaleFactor: size.scale ?? 0, mobile: size.mobile });
+    this.emulating = true;
   }
 
   /** `waitFor({ load })`: the top document reached DOMContentLoaded / load, within `timeoutMs` (else `WaitTimeout`). */

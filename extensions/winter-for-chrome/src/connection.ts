@@ -5,7 +5,7 @@
 import type { ChromeApi, ChromePort, Clock } from "./chrome-api";
 import { realClock } from "./chrome-api";
 import { ExtensionError, UnknownMethod, type ExtensionController } from "./controller";
-import { EXTENSION_PROTOCOL, RPC_ERROR, RPC_METHOD_NOT_FOUND } from "./protocol";
+import { EXTENSION_FEATURES, EXTENSION_PROTOCOL, RPC_ERROR, RPC_METHOD_NOT_FOUND } from "./protocol";
 import type { StatusBoard } from "./status";
 
 const INSTANCE_KEY = "instanceId";
@@ -162,7 +162,7 @@ export class HostConnection {
     this.helloId = id;
     this.post({
       jsonrpc: "2.0", id, method: "hello",
-      params: { protocol: EXTENSION_PROTOCOL, extensionVersion: this.chrome.extensionVersion, instanceId: await this.instance() },
+      params: { protocol: EXTENSION_PROTOCOL, extensionVersion: this.chrome.extensionVersion, instanceId: await this.instance(), features: [...EXTENSION_FEATURES] },
     });
   }
 

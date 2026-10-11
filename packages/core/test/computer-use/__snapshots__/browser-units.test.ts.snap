@@ -20,7 +20,8 @@ exports[`the tool description snapshots, with and without vision 1`] = `
 - \`browsers.open(url)\` opens a tab in Winter's built-in browser — the default: it needs no window, and suits local dev servers and general browsing. Pass \`{ browser: "chrome" }\` (or another id \`browsers.list()\` shows as connected) when the task needs the user's own browser: their sign-ins, or a tab they already have open. Use the browser the user names. Google sign-in does not work in the built-in browser.
 - Tabs you open are yours. Tabs you open in the user's own browser close when your turn ends unless you call keep() (give it to the user) or handoff() (keep it for your next turn). Tabs you bind with \`browsers.tab()\` are the user's: never close them; they are released at the end of the turn.
 - A tab's refs belong to its page: after a navigation to a new page every earlier ref is stale. A page dialog (alert, confirm, prompt) shows at the top of \`state()\` — click its OK or Cancel before anything else.
-- Tabs have developer readers: \`console()\`, \`network()\` and \`networkBody(id)\`, \`inspect()\`, \`html()\`, \`assets()\` — what Winter saw while it worked in the tab since you bound it, secrets redacted.
+- Tabs have developer readers: \`console()\`, \`network()\` and \`networkBody(id)\`, \`inspect()\`, \`html()\`, \`assets()\` — what Winter saw while it worked in the tab since you bound it, secrets redacted; \`viewport()\` emulates a screen size.
+- \`browsers.group()\` names or folds your tabs' group in the user's browser; \`keep({ group })\` hands tabs to the user in a group of their own.
 
 \`\`\`ts
 type Image = unknown;                    // opaque: pass it to show()
@@ -84,7 +85,9 @@ interface Tab extends Target {
   network(o?: Quiet & { filter?: string; types?: string[]; failed?: boolean; limit?: number; clear?: boolean }): Promise<Request[]>;
   networkBody(id: string, o?: Quiet & { maxChars?: number }): Promise<string>;   // one response's text body, secrets redacted
   upload(ref: Ref, paths: string | string[]): Promise<void>;  // files from this session's working directory into a file input
-  keep(): Promise<void>;                 // hand this tab to the user: it leaves Winter's group and Winter never closes it
+  viewport(size: { width: number; height: number; mobile?: boolean; scale?: number } | null): Promise<void>;   // emulate a screen size on a tab you opened; null: back to normal
+  mute(on?: boolean): Promise<void>;     // a tab you opened
+  keep(o?: { group?: string }): Promise<void>;   // hand this tab to the user: it leaves Winter's group (into their own group named \`group\`, if given) and Winter never closes it
   handoff(): Promise<void>;   // keep this tab (yours, still in Winter's group) for your next turn only — call it again each turn you still need it
   close(): Promise<void>;                // only a tab you opened and still own (not one you kept)
 }
@@ -95,8 +98,10 @@ declare const apps: {
 declare const browsers: {
   list(o?: Quiet): Promise<{ id: string; name: string; isDefault: boolean; connected: boolean; reason?: string }[]>;
   open(url: string, o?: { browser?: string }): Promise<Tab>;   // a new tab — in Winter's built-in browser ("winter") unless you name another; prints its state
-  tabs(o?: Quiet & { browser?: string }): Promise<{ id: string; browser: string; url: string; title: string; active: boolean; yours: boolean }[]>;
-  tab(t: string | { url: string }, o?: { browser?: string }): Promise<Tab>;   // bind an open tab by id or exact URL; prints its state
+  tabs(o?: Quiet & { browser?: string }): Promise<{ id: string; browser: string; url: string; title: string; active: boolean; yours: boolean; lastUsed?: string; group?: string }[]>;
+  tab(t: string | { url: string } | { active: true }, o?: { browser?: string }): Promise<Tab>;   // bind an open tab by id, exact URL, or the one the user has in front; prints its state
+  windows(o?: Quiet & { browser?: string }): Promise<{ browser: string; id: number; focused: boolean; tabs: number }[]>;
+  group(o: { browser?: string; title?: string; color?: string; collapsed?: boolean }): Promise<void>;   // your tabs' group in a user's browser
 };
 declare const screen: {                          // look only — bind an app to act
   screenshot(o?: Quiet & { display?: number | "all" }): Promise<Image>;   // display: an index, 0 = the main display
@@ -133,7 +138,8 @@ exports[`the tool description snapshots, with and without vision 2`] = `
 - \`browsers.open(url)\` opens a tab in Winter's built-in browser — the default: it needs no window, and suits local dev servers and general browsing. Pass \`{ browser: "chrome" }\` (or another id \`browsers.list()\` shows as connected) when the task needs the user's own browser: their sign-ins, or a tab they already have open. Use the browser the user names. Google sign-in does not work in the built-in browser.
 - Tabs you open are yours. Tabs you open in the user's own browser close when your turn ends unless you call keep() (give it to the user) or handoff() (keep it for your next turn). Tabs you bind with \`browsers.tab()\` are the user's: never close them; they are released at the end of the turn.
 - A tab's refs belong to its page: after a navigation to a new page every earlier ref is stale. A page dialog (alert, confirm, prompt) shows at the top of \`state()\` — click its OK or Cancel before anything else.
-- Tabs have developer readers: \`console()\`, \`network()\` and \`networkBody(id)\`, \`inspect()\`, \`html()\`, \`assets()\` — what Winter saw while it worked in the tab since you bound it, secrets redacted.
+- Tabs have developer readers: \`console()\`, \`network()\` and \`networkBody(id)\`, \`inspect()\`, \`html()\`, \`assets()\` — what Winter saw while it worked in the tab since you bound it, secrets redacted; \`viewport()\` emulates a screen size.
+- \`browsers.group()\` names or folds your tabs' group in the user's browser; \`keep({ group })\` hands tabs to the user in a group of their own.
 
 \`\`\`ts
 type Ref = number;                       // element number from state()
@@ -191,7 +197,9 @@ interface Tab extends Target {
   network(o?: Quiet & { filter?: string; types?: string[]; failed?: boolean; limit?: number; clear?: boolean }): Promise<Request[]>;
   networkBody(id: string, o?: Quiet & { maxChars?: number }): Promise<string>;   // one response's text body, secrets redacted
   upload(ref: Ref, paths: string | string[]): Promise<void>;  // files from this session's working directory into a file input
-  keep(): Promise<void>;                 // hand this tab to the user: it leaves Winter's group and Winter never closes it
+  viewport(size: { width: number; height: number; mobile?: boolean; scale?: number } | null): Promise<void>;   // emulate a screen size on a tab you opened; null: back to normal
+  mute(on?: boolean): Promise<void>;     // a tab you opened
+  keep(o?: { group?: string }): Promise<void>;   // hand this tab to the user: it leaves Winter's group (into their own group named \`group\`, if given) and Winter never closes it
   handoff(): Promise<void>;   // keep this tab (yours, still in Winter's group) for your next turn only — call it again each turn you still need it
   close(): Promise<void>;                // only a tab you opened and still own (not one you kept)
 }
@@ -202,8 +210,10 @@ declare const apps: {
 declare const browsers: {
   list(o?: Quiet): Promise<{ id: string; name: string; isDefault: boolean; connected: boolean; reason?: string }[]>;
   open(url: string, o?: { browser?: string }): Promise<Tab>;   // a new tab — in Winter's built-in browser ("winter") unless you name another; prints its state
-  tabs(o?: Quiet & { browser?: string }): Promise<{ id: string; browser: string; url: string; title: string; active: boolean; yours: boolean }[]>;
-  tab(t: string | { url: string }, o?: { browser?: string }): Promise<Tab>;   // bind an open tab by id or exact URL; prints its state
+  tabs(o?: Quiet & { browser?: string }): Promise<{ id: string; browser: string; url: string; title: string; active: boolean; yours: boolean; lastUsed?: string; group?: string }[]>;
+  tab(t: string | { url: string } | { active: true }, o?: { browser?: string }): Promise<Tab>;   // bind an open tab by id, exact URL, or the one the user has in front; prints its state
+  windows(o?: Quiet & { browser?: string }): Promise<{ browser: string; id: number; focused: boolean; tabs: number }[]>;
+  group(o: { browser?: string; title?: string; color?: string; collapsed?: boolean }): Promise<void>;   // your tabs' group in a user's browser
 };
 declare const screen: {                          // look only — bind an app to act
   windows(o?: Quiet): Promise<{ app: string; title: string; frame: [x: number, y: number, w: number, h: number]; onScreen: boolean }[]>;  // onScreen false: another Space, full screen or minimized

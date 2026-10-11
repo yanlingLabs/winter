@@ -1,7 +1,7 @@
 // An in-memory browser behind the `ChromeApi` the extension is written against: windows, tabs (one active per window),
 // groups, the debugger, scripting, storage and a native port — every call recorded, so a test can prove what the
 // extension did and, as importantly, what it never did.
-import type { ChromeApi, ChromePort, ChromeTab, ChromeTabGroup, ChromeWindow, Clock, DebuggerTarget, MessageSender } from "../src/chrome-api";
+import type { ChromeApi, ChromePort, ChromeTab, ChromeTabGroup, ChromeWindow, Clock, DebuggerTarget, GroupColor, MessageSender } from "../src/chrome-api";
 
 type Listener<F> = { listeners: F[]; addListener(l: F): void };
 function event<F>(): Listener<F> {
@@ -221,6 +221,10 @@ export class FakeChrome implements ChromeApi {
       for (const t of tabIds) this.tabOr(t).groupId = -1;
       this.pruneGroups();
     },
+    setMuted: async (tabId: number, muted: boolean) => {
+      this.record("tabs.setMuted", tabId, muted);
+      this.tabOr(tabId).mutedInfo = { muted };
+    },
     onRemoved: this.tabsOnRemoved,
     onActivated: this.tabsOnActivated,
   };
@@ -232,13 +236,16 @@ export class FakeChrome implements ChromeApi {
       if (g === undefined) throw new Error(`No group with id: ${groupId}.`);
       return { ...g };
     },
-    update: async (groupId: number, p: { title: string; color: "blue" }) => {
+    update: async (groupId: number, p: { title?: string; color?: GroupColor; collapsed?: boolean }) => {
       this.record("tabGroups.update", groupId, p);
       const g = this.groups_.get(groupId);
       if (g === undefined) throw new Error(`No group with id: ${groupId}.`);
-      g.title = p.title;
+      if (p.title !== undefined) g.title = p.title;
+      if (p.color !== undefined) g.color = p.color;
+      if (p.collapsed !== undefined) g.collapsed = p.collapsed;
       return { ...g };
     },
+    query: async (q: Record<string, never>) => { this.record("tabGroups.query", q); return [...this.groups_.values()].map((g) => ({ ...g })); },
     onRemoved: this.groupsOnRemoved,
   };
 

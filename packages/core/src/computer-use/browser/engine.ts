@@ -35,6 +35,8 @@ const SETTLE_CAP_MS = 1_500;
 const HTML_DEFAULT_CHARS = 100_000;
 const HTML_MAX_CHARS = 500_000;
 const ASSET_KINDS = ["image", "media", "font", "stylesheet", "script"] as const;
+/** Chrome's tab-group colors. */
+const GROUP_COLORS: readonly string[] = ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"];
 const WAIT_FOR_DEFAULT_MS = 10_000;
 const NO_VISION = "this model can't see images — use state()";
 const FOCUS_NOT_EDITABLE = "the focus is not a text field, so nothing was typed — click the field or pass { into }";
@@ -96,6 +98,8 @@ interface SessionBrowsers {
 interface AgentTab { backend: BackendId; tabKey: string; kept: boolean; handoff: boolean }
 
 export interface BrowserListRow { id: string; name: string; isDefault: boolean; connected: boolean; reason?: string }
+/** One `browsers.tabs()` row. */
+type TabRow = { id: string; browser: string; url: string; title: string; active: boolean; yours: boolean; lastUsed?: string; group?: string };
 
 /** At most this many tabs held (a live built-in browser, an attached debugger) per session and in all; past it the
  *  least recently used is let go (still open: its next use takes it again). */
@@ -192,6 +196,8 @@ export class BrowserEngine {
         case "browsers.open": return await this.open(scope, args);
         case "browsers.tabs": return await this.tabs(scope, args);
         case "browsers.tab": return await this.bindCall(scope, args);
+        case "browsers.windows": return await this.windowsCall(scope, args);
+        case "browsers.group": return await this.groupCall(scope, args);
         default: throw bad(`unknown primitive ${primitive}`);
       }
     } finally {
@@ -711,7 +717,7 @@ export class BrowserEngine {
   }
 
   /** `yours`: an agent tab this session still owns — a kept one is the user's (it follows the user-tab rule). */
-  private async tabRows(scope: TabRunScope, backend: BackendId): Promise<Array<{ id: string; browser: string; url: string; title: string; active: boolean; yours: boolean }>> {
+  private async tabRows(scope: TabRunScope, backend: BackendId): Promise<TabRow[]> {
     const s = this.session(scope.sessionId);
     if (this.familyOf(backend) === "winter") {
       const fold = this.deps.winterTabs(scope.sessionId);
@@ -728,7 +734,10 @@ export class BrowserEngine {
     if (bundleId !== undefined) await scope.authorize(this.appRef(backend, bundleId), { kind: "bind" });
     let tabs: TransportTab[];
     try { tabs = await transport.listTabs(); } catch (err) { throw transportFailure(err, this.browserName(backend)); }
-    return tabs.map((t) => ({ id: `${backend}:${t.tabKey}`, browser: backend, url: t.url, title: t.title, active: t.active, yours: s.agentTabs.get(tabKeyOf(backend, t.tabKey))?.kept === false }));
+    return tabs.map((t) => ({
+      id: `${backend}:${t.tabKey}`, browser: backend, url: t.url, title: t.title, active: t.active, yours: s.agentTabs.get(tabKeyOf(backend, t.tabKey))?.kept === false,
+      ...(t.lastAccessed === undefined ? {} : { lastUsed: new Date(t.lastAccessed).toISOString() }), ...(t.group === undefined ? {} : { group: t.group }),
+    }));
   }
 
   /**
@@ -751,10 +760,10 @@ export class BrowserEngine {
   private async tabs(scope: TabRunScope, args: Record<string, unknown>): Promise<unknown> {
     const chosen = args.browser === undefined ? this.defaultBackends(scope) : { ids: [this.backendFor(args.browser)], leftOut: [] as string[] };
     const leftOut = [...chosen.leftOut];
-    const rows: Array<{ id: string; browser: string; url: string; title: string; active: boolean; yours: boolean }> = [];
+    const rows: TabRow[] = [];
     for (const b of chosen.ids) {
       // What the model reads: credentials in a URL, and token-looking text in a title, redacted.
-      try { rows.push(...(await this.tabRows(scope, b)).map((r) => ({ ...r, url: redactUrl(r.url), title: redactText(r.title) }))); } catch (err) {
+      try { rows.push(...(await this.tabRows(scope, b)).map((r) => ({ ...r, url: redactUrl(r.url), title: redactText(r.title), ...(r.group === undefined ? {} : { group: redactText(r.group) }) }))); } catch (err) {
         if (args.browser !== undefined || !skippable(err)) throw err;
         leftOut.push(`${this.browserName(b)} (${b}) — ${err instanceof AutomationFailure && err.kind === "NotAllowed" ? "not allowed" : "can't be reached"}`);
       }
@@ -765,7 +774,7 @@ export class BrowserEngine {
     }
     scope.builder.markScreenRead();
     if (args.emit !== false) {
-      scope.builder.text(rows.length === 0 ? "(no tabs)" : rows.map((r) => `${r.id} — ${JSON.stringify(r.title.slice(0, 120))} ${r.url.slice(0, 200)}${r.active ? " (active)" : ""}${r.yours ? " (yours)" : ""}`).join("\n"), { screen: true });
+      scope.builder.text(rows.length === 0 ? "(no tabs)" : rows.map((r) => `${r.id} — ${JSON.stringify(r.title.slice(0, 120))} ${r.url.slice(0, 200)}${r.active ? " (active)" : ""}${r.yours ? " (yours)" : ""}${r.group === undefined ? "" : ` · group ${JSON.stringify(redactText(r.group).slice(0, 60))}`}`).join("\n"), { screen: true });
     }
     return rows;
   }
@@ -788,6 +797,18 @@ export class BrowserEngine {
           : `no tab ${t.slice(0, 80)} is open — browsers.tabs() lists them`);
       }
       url = hit.url;
+    } else if (t !== null && typeof t === "object" && (t as { active?: unknown }).active === true) {
+      // The tab the user has in front in a user's browser (named, or the one allowed and connected).
+      const chosen = args.browser === undefined ? this.defaultBackends(scope).ids.filter((id) => this.familyOf(id) !== "winter") : [this.backendFor(args.browser)];
+      if (chosen.length === 0) throw bad("browsers.tab({ active: true }) needs a user's browser: name it with { browser } (browsers.list() shows them)");
+      if (chosen.length > 1) throw bad(`several browsers are connected — name one with { browser }: ${chosen.join(", ")}`);
+      backend = chosen[0]!;
+      if (this.familyOf(backend) === "winter") throw bad("browsers.tab({ active: true }) is for a user's browser — bind a built-in tab by its id from browsers.tabs()");
+      const rows = await this.tabRows(scope, backend);
+      const front = rows.filter((r) => r.active).sort((a, b) => (b.lastUsed ?? "").localeCompare(a.lastUsed ?? ""))[0];
+      if (front === undefined) throw new AutomationFailure("TargetLost", `no tab is in front in ${this.browserName(backend)}`);
+      tabKey = front.id.slice(backend.length + 1);
+      url = front.url;
     } else if (t !== null && typeof t === "object" && typeof (t as { url?: unknown }).url === "string") {
       const want = stripFragment((t as { url: string }).url.trim());
       const chosen = args.browser === undefined ? this.defaultBackends(scope) : { ids: [this.backendFor(args.browser)], leftOut: [] as string[] };
@@ -1169,10 +1190,49 @@ export class BrowserEngine {
       case "keep": {
         if (b.kind !== "agent") return undefined; // a tab the user already owns
         const a = this.session(sid).agentTabs.get(tabKeyOf(b.backend, b.tabKey));
+        const group = typeof args.group === "string" && args.group.trim().length > 0 ? args.group.trim().slice(0, 80) : undefined;
+        if (args.group !== undefined && group === undefined) throw bad("keep()'s group is a name");
+        // The tab is the user's from now on: an emulated screen size goes first.
+        await driver.setViewport(null).catch(() => undefined);
         if (this.familyOf(b.backend) !== "winter") {
-          try { await driver.transport.keepTab(b.tabKey); } catch (err) { throw transportFailure(err, this.browserName(b.backend)); }
+          try { await driver.transport.keepTab(b.tabKey, group === undefined ? undefined : { group }); } catch (err) { throw transportFailure(err, this.browserName(b.backend)); }
+          if (group !== undefined && !(driver.transport as { features?: ReadonlySet<string> }).features?.has("keepGroup")) {
+            scope.builder.daemonLine("kept — but this Winter for Chrome is too old to put it in a group; the user can update it");
+          }
+        } else if (group !== undefined) {
+          scope.builder.daemonLine("kept — Winter's built-in browser has no tab groups, so the group name was not used");
         }
         if (a !== undefined) { a.kept = true; a.handoff = false; }
+        return undefined;
+      }
+      case "viewport": {
+        this.requireOwnTab(sid, b, "viewport()");
+        const size = args.size;
+        if (size === null) { await driver.setViewport(null); scope.acted.add(b.targetId); return undefined; }
+        if (size === null || typeof size !== "object" || Array.isArray(size)) throw bad("viewport() takes { width, height, mobile?, scale? } or null");
+        const o = size as Record<string, unknown>;
+        const w = o.width, h = o.height;
+        if (typeof w !== "number" || typeof h !== "number" || !Number.isInteger(w) || !Number.isInteger(h) || w < 200 || w > 3840 || h < 200 || h > 2160) {
+          throw bad("viewport()'s width is a whole number 200–3840 and its height 200–2160 (CSS px)");
+        }
+        const scale = o.scale === undefined ? undefined : o.scale;
+        if (scale !== undefined && (typeof scale !== "number" || !Number.isFinite(scale) || scale < 1 || scale > 3)) throw bad("viewport()'s scale is 1–3");
+        await driver.setViewport({ width: w, height: h, mobile: o.mobile === true, ...(scale === undefined ? {} : { scale: scale as number }) });
+        scope.acted.add(b.targetId);
+        scope.diffBases.clearTarget(sid, b.targetId);
+        return undefined;
+      }
+      case "mute": {
+        this.requireOwnTab(sid, b, "mute()");
+        const on = args.on === undefined ? true : args.on;
+        if (typeof on !== "boolean") throw bad("mute() takes true (the default) or false");
+        const t = driver.transport;
+        if (t.setMuted === undefined) {
+          throw this.familyOf(b.backend) === "winter"
+            ? new Error("Winter's built-in browser can't mute a tab yet — update Winter")
+            : new AutomationFailure("BrowserUnavailable", `this Winter for Chrome is too old for mute() — ask the user to update Winter for Chrome`);
+        }
+        try { await t.setMuted(b.tabKey, on); } catch (err) { throw transportFailure(err, this.browserName(b.backend)); }
         return undefined;
       }
       case "handoff": {
@@ -1233,6 +1293,62 @@ export class BrowserEngine {
       ].join("\n"), { screen: true });
     }
     return out;
+  }
+
+  /** viewport()/mute(): only a tab Winter opened and still owns (never the user's page). */
+  private requireOwnTab(sessionId: string, b: Binding, what: string): void {
+    if (b.kind !== "agent" || this.session(sessionId).agentTabs.get(tabKeyOf(b.backend, b.tabKey))?.kept === true) {
+      throw new AutomationFailure("NotAllowed", `${what} works on a tab you opened with browsers.open() and still own — this one is the user's`);
+    }
+  }
+
+  /** The user's browser a `{ browser }`-less call means: the one connected and allowed in this session. */
+  private oneUserBrowser(scope: TabRunScope, named: unknown, what: string): BackendId {
+    if (named !== undefined) {
+      const id = this.backendFor(named);
+      if (this.familyOf(id) === "winter") throw new Error(`Winter's built-in browser has no ${what} — name a user's browser (browsers.list())`);
+      return id;
+    }
+    const ids = this.defaultBackends(scope).ids.filter((id) => this.familyOf(id) !== "winter");
+    if (ids.length === 1) return ids[0]!;
+    throw bad(ids.length === 0 ? `name the user's browser with { browser } (browsers.list() shows them) — none is allowed in this session yet` : `several browsers are connected — name one with { browser }: ${ids.join(", ")}`);
+  }
+
+  private async windowsCall(scope: TabRunScope, args: Record<string, unknown>): Promise<unknown> {
+    const ids = args.browser !== undefined ? [this.oneUserBrowser(scope, args.browser, "windows")] : this.defaultBackends(scope).ids.filter((id) => this.familyOf(id) !== "winter");
+    const rows: Array<{ browser: string; id: number; focused: boolean; tabs: number }> = [];
+    for (const id of ids) {
+      const t = this.deps.registry.get(id);
+      if (t === undefined || !t.connected) throw this.unavailable(id);
+      if (t.listWindows === undefined) throw new AutomationFailure("BrowserUnavailable", `the Winter for Chrome in ${this.browserName(id)} is too old for browsers.windows() — ask the user to update it`);
+      const bundleId = this.bundleIdOf(id);
+      if (bundleId !== undefined) await scope.authorize(this.appRef(id, bundleId), { kind: "bind" });
+      try { for (const w of await t.listWindows()) rows.push({ browser: id, ...w }); } catch (err) { throw transportFailure(err, this.browserName(id)); }
+      scope.live();
+    }
+    if (args.emit !== false) scope.builder.text(rows.length === 0 ? "(no windows)" : rows.map((w) => `${w.browser} window ${w.id} — ${w.tabs} tab${w.tabs === 1 ? "" : "s"}${w.focused ? " (in front)" : ""}`).join("\n"));
+    return rows;
+  }
+
+  private async groupCall(scope: TabRunScope, args: Record<string, unknown>): Promise<undefined> {
+    const id = this.oneUserBrowser(scope, args.browser, "tab groups");
+    const t = this.deps.registry.get(id);
+    if (t === undefined || !t.connected) throw this.unavailable(id);
+    if (t.updateGroup === undefined) throw new AutomationFailure("BrowserUnavailable", `the Winter for Chrome in ${this.browserName(id)} is too old for browsers.group() — ask the user to update it`);
+    const facts = scope.sessionFacts();
+    if (facts.mode === "chat" || facts.policy === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
+    const bundleId = this.bundleIdOf(id);
+    if (bundleId !== undefined) await scope.authorize(this.appRef(id, bundleId), { kind: "act", primitive: "browsers.group" });
+    const o: { sessionId: string; title?: string; color?: string; collapsed?: boolean } = { sessionId: scope.sessionId };
+    if (args.title !== undefined) { if (typeof args.title !== "string" || args.title.trim().length === 0) throw bad("browsers.group()'s title is a name"); o.title = args.title.trim().slice(0, 60); }
+    if (args.color !== undefined) {
+      if (typeof args.color !== "string" || !GROUP_COLORS.includes(args.color)) throw bad(`browsers.group()'s color is one of ${GROUP_COLORS.join(", ")}`);
+      o.color = args.color;
+    }
+    if (args.collapsed !== undefined) { if (typeof args.collapsed !== "boolean") throw bad("browsers.group()'s collapsed is true or false"); o.collapsed = args.collapsed; }
+    if (o.title === undefined && o.color === undefined && o.collapsed === undefined) throw bad("browsers.group() takes a title, color or collapsed");
+    try { await t.updateGroup(o); } catch (err) { throw transportFailure(err, this.browserName(id)); }
+    return undefined;
   }
 
   private consoleCall(scope: TabRunScope, driver: TabDriver, args: Record<string, unknown>): unknown {

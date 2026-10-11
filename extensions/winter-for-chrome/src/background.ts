@@ -23,12 +23,15 @@ const api: ChromeApi = {
     discard: (tabId) => chrome.tabs.discard(tabId),
     group: (p) => chrome.tabs.group(p),
     ungroup: (tabIds) => chrome.tabs.ungroup(tabIds),
+    // The one property `tabs.update` is ever given here (it can't activate or move anything with only this).
+    setMuted: async (tabId, muted) => { await chrome.tabs.update(tabId, { muted }); },
     onRemoved: chrome.tabs.onRemoved,
     onActivated: chrome.tabs.onActivated,
   },
   tabGroups: {
     get: (groupId) => chrome.tabGroups.get(groupId),
     update: (groupId, p) => chrome.tabGroups.update(groupId, p),
+    query: (q) => chrome.tabGroups.query(q),
     onRemoved: chrome.tabGroups.onRemoved,
   },
   windows: {

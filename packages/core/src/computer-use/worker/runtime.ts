@@ -228,7 +228,9 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     assets(o?: unknown) { return call("assets", tid(this), opts(o)); }
     dialog() { return call("dialog", tid(this), {}); }
     answerDialog(accept: unknown, text?: unknown) { return call("answerDialog", tid(this), { accept, ...(text === undefined ? {} : { text }) }).then(nothing); }
-    keep() { return call("keep", tid(this), {}).then(nothing); }
+    keep(o?: unknown) { return call("keep", tid(this), opts(o)).then(nothing); }
+    viewport(size: unknown) { return call("viewport", tid(this), { size: size === undefined ? null : size }).then(nothing); }
+    mute(on?: unknown) { return call("mute", tid(this), on === undefined ? {} : { on }).then(nothing); }
     handoff() { return call("handoff", tid(this), {}).then(nothing); }
     close() { return call("close", tid(this), {}).then(nothing); }
     toString(): string { return `[Tab ${(this as unknown as { id: string }).id}]`; }
@@ -252,6 +254,8 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     open: (url: unknown, o?: unknown) => call("browsers.open", undefined, { url, ...opts(o) }).then(toTab),
     tabs: (o?: unknown) => call("browsers.tabs", undefined, opts(o)),
     tab: (t: unknown, o?: unknown) => call("browsers.tab", undefined, { tab: t, ...opts(o) }).then(toTab),
+    windows: (o?: unknown) => call("browsers.windows", undefined, opts(o)),
+    group: (o?: unknown) => call("browsers.group", undefined, opts(o)).then(nothing),
   });
   const screen = Object.freeze({
     screenshot: (o?: unknown) => call("screen.screenshot", undefined, opts(o)).then(toImage),

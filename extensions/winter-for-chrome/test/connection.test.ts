@@ -3,7 +3,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { HostConnection } from "../src/connection";
 import { ExtensionController } from "../src/controller";
-import { EXTENSION_PROTOCOL } from "../src/protocol";
+import { EXTENSION_FEATURES, EXTENSION_PROTOCOL } from "../src/protocol";
 import { StatusBoard } from "../src/status";
 import { FakeChrome, flush, ManualClock, type FakePort } from "./fake-chrome";
 
@@ -43,6 +43,7 @@ describe("hello", () => {
     expect(hello).toMatchObject({ jsonrpc: "2.0", method: "hello", params: { protocol: EXTENSION_PROTOCOL, extensionVersion: "1.0.0" } });
     expect(hello.id).toMatch(/^e\d+$/);
     expect(hello.params.instanceId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(hello.params.features).toEqual([...EXTENSION_FEATURES]);
     await port().deliver({ id: hello.id, result: { protocol: EXTENSION_PROTOCOL, backend: { id: "chrome", name: "Google Chrome" } } });
     expect(status.get()).toEqual({ state: "connected", backend: { id: "chrome", name: "Google Chrome" } });
     expect(chrome.calls.filter((c) => c.api === "action.setBadgeText").at(-1)?.args).toEqual([{ text: "" }]);
