@@ -31,6 +31,15 @@ enum CUApps {
         return out
     }
 
+    /// Whether the app at `bundleURL` is a web browser: it declares the http or https URL scheme in its Info.plist (what
+    /// LaunchServices offers as a default browser) — generic, never a list of apps. An app that is not one (Mail, Slack,
+    /// Notes, Messages) opens a link it shows in the default browser, which comes to the front.
+    static func isWebBrowser(bundleURL: URL?) -> Bool {
+        guard let url = bundleURL, let info = Bundle(url: url)?.infoDictionary,
+              let types = info["CFBundleURLTypes"] as? [[String: Any]] else { return false }
+        return types.contains { ($0["CFBundleURLSchemes"] as? [String])?.contains { ["http", "https"].contains($0.lowercased()) } ?? false }
+    }
+
     static func displayName(_ b: Bundle, fallback: String) -> String {
         (b.localizedInfoDictionary?["CFBundleDisplayName"] as? String)
             ?? (b.infoDictionary?["CFBundleDisplayName"] as? String)

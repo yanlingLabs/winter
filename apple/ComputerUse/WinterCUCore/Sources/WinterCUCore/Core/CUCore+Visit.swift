@@ -241,6 +241,7 @@ extension CUCore {
             return v
         }
         made.visit = v
+        judgeBeforeTaking("a desktop visit's start")
         // The switch there and the way back are the agent's own: both apps touched while it lasts, so only the user's input
         // after it can make a change theirs.
         guardianLock.withLock {
@@ -531,9 +532,36 @@ extension CUCore {
             CULog.act.notice("visit \(v.id, privacy: .public) to \(s.appName, privacy: .public)'s desktop (\(reason.rawValue, privacy: .public)): the user moved elsewhere during it — left there (\(ms, privacy: .public) ms, \(actions, privacy: .public) actions)")
             return report(ms, false, true, "the user moved somewhere else during the visit, so Winter left them there")
         }
+        // They moved during the visit, and its own switch landed over their move (it arrived after it): back to where
+        // THEY went — their place as the guardian has it now, never the one recorded when the visit began (I2, found by the
+        // model-based test: a click into another display's window during the way there, then the return to the app
+        // they had left).
+        if sawUserMove, let place = guardianPlace(), let user = place.app,
+           CUUserView(space: place.space, front: user) != s.before, sys.appRunning(user) {
+            let target = CUUserView(space: place.space, front: user)
+            let back = now == target || restoreUserView(target, user: user) == target
+            let at = clock.nowSeconds()
+            guardianLock.withLock { _ = guardianCore.endVisit(now: at) }
+            let ms = Int(clock.nowMs() - s.startedMs)
+            CULog.act.notice("visit \(v.id, privacy: .public) to \(s.appName, privacy: .public)'s desktop (\(reason.rawValue, privacy: .public)): the user moved during it and the visit's switch landed after — back to where they went: \(back ? "ok" : "not yet", privacy: .public)")
+            return report(ms, back, true, "the user moved somewhere else during the visit, so Winter brought them back there, not to where the visit began")
+        }
         var back = now == s.before && userWindowBack(s) && displaysBack(s)
+        // The user moved during the return (the rule found it — their switch input, their click): never pulled back again.
+        let movedMeanwhile = { [self] in guardianLock.withLock { guardianCore.visitSawUserInput } }
         if !back, let user = s.before.front {
             back = returnOnce(s, user: user) == s.before && userWindowBack(s) && displaysBack(s)
+            if !back, movedMeanwhile() {
+                let at = clock.nowSeconds()
+                let here = userView()
+                guardianLock.withLock {
+                    guardianCore.endVisit(now: at)
+                    guardianCore.adoptUserView(CUGuardedView(app: here.front, space: here.space), now: at)
+                }
+                let ms = Int(clock.nowMs() - s.startedMs)
+                CULog.act.notice("visit \(v.id, privacy: .public) to \(s.appName, privacy: .public)'s desktop (\(reason.rawValue, privacy: .public)): the user moved while being brought back — left there (\(ms, privacy: .public) ms)")
+                return report(ms, false, true, "the user moved somewhere else while being brought back, so Winter left them there")
+            }
             if !back {
                 // Once more, the way the guardian restores (the app's focused window, the activation retried).
                 CULog.guardian.notice("visit \(v.id, privacy: .public): not back after the first return — trying once more")
@@ -566,7 +594,7 @@ extension CUCore {
                 let now = userView()
                 guard now != s.before else { continue }
                 let owner = judgeMove(now, since: watchFrom, from: s.before, path: "a desktop visit's late-switch watch")
-                if owner.isUsers {
+                if !owner.undoes {
                     userMoved = true
                     CULog.act.notice("visit \(v.id, privacy: .public): after the return the view changed — \(owner.words, privacy: .public) (front \(now.front.map(String.init) ?? "?", privacy: .public)) — left there")
                     break

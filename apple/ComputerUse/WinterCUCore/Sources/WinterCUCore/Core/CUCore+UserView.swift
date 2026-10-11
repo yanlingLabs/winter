@@ -73,10 +73,11 @@ extension CUCore {
         guard !t.consentedForeground else { return }
         let after = view(after: before, settleMs: userViewSettleMs)
         if after != before {
-            // The user's own move during the act (the one rule, from the act's start — uncapped: a long act's after-check
-            // still sees switch input from its beginning): left alone.
-            if isUsersMove(after, since: since, from: before, path: "\(route): the after-check") {
-                CULog.act.notice("\(route, privacy: .public) in \(t.appName, privacy: .public): the user moved during it — left there")
+            // Not the agent's own doing (the one rule, from the act's start — uncapped: a long act's after-check still sees
+            // switch input from its beginning): the user's move, another session's desktop visit or consented foreground,
+            // an app the agent never touched — left alone (I5).
+            if leftAlone(after, since: since, from: before, path: "\(route): the after-check") {
+                CULog.act.notice("\(route, privacy: .public) in \(t.appName, privacy: .public): the view changed during it, not by the agent's doing — left as it is")
                 return
             }
             t.addViewNote(viewMoved(before, after, t, route: route, late: false))
@@ -93,7 +94,7 @@ extension CUCore {
         guard t.actSeq == seq, !t.consentedForeground else { return }
         let now = userView()
         guard now.front == t.pid, before.front != t.pid else { return }
-        if isUsersMove(now, since: since, from: before, path: "\(route): the late check") { return }
+        if leftAlone(now, since: since, from: before, path: "\(route): the late check") { return }
         t.addViewNote("after the previous action, " + viewMoved(before, now, t, route: route, late: true))
     }
 
@@ -143,6 +144,9 @@ extension CUCore {
            let window = recorded ?? (raiseFocused ? ax.element(ax.application(user), kAXFocusedWindowAttribute) : nil) {
             try? ax.perform(window, kAXRaiseAction)
         }
+        // A restore of ours may land late (~0.3 s across desktops): once the user's place moves away from `user`, its
+        // landing is undone, never taken for their move (I2, the review of round 8).
+        noteRestore(user)
         _ = sys.activate(pid: user)
         // A background process's activation can be refused (cooperative activation, macOS 14+; measured on 26.6:
         // refused for a whole 2 s); the app made frontmost over accessibility is not (~5 ms here, ~0.3 s across
@@ -161,8 +165,15 @@ extension CUCore {
             // one rule (their move ends the restore), and their place having moved on meanwhile ends it too (the model-
             // based test: a retry 22 ms after a Dock click of theirs pulled them back out of the app they chose).
             if guardianPlace() != placeAtStart { break }
-            if let f = now.front, f != user, isUsersMove(now, since: startedAt, from: before, path: "a restore, before trying again") { break }
+            // Another app in front by the user's move, or an untouched app's (never fought) — not a visit's own switch or the
+            // consented foreground, which a visit's return and a give-back are bringing them back FROM.
+            if let f = now.front, f != user {
+                let owner = judgeMove(now, since: startedAt, from: before, path: "a restore, before trying again")
+                if owner.isUsers { break }
+                if case .unexplained = owner { break }
+            }
             if now.front != user, clock.nowMs() - lastActivate >= restoreRetryMs, clock.nowMs() < deadline {
+                noteRestore(user)
                 _ = sys.activate(pid: user)
                 try? ax.set(ax.application(user), kAXFrontmostAttribute, kCFBooleanTrue)
                 lastActivate = clock.nowMs()
@@ -182,8 +193,8 @@ extension CUCore {
     func viewNoteAfterBind(_ before: CUUserView, app: String, pid: pid_t, route: String, since: TimeInterval) -> String? {
         let after = view(after: before, settleMs: userViewSettleMs)
         guard after != before else { return nil }
-        if isUsersMove(after, since: since, from: before, path: "\(route): the after-check") {
-            CULog.act.notice("\(route, privacy: .public) in \(app, privacy: .public): the user moved during it — left there")
+        if leftAlone(after, since: since, from: before, path: "\(route): the after-check") {
+            CULog.act.notice("\(route, privacy: .public) in \(app, privacy: .public): the view changed during it, not by the agent's doing — left as it is")
             return nil
         }
         return viewMoved(before, after, app: app, pid: pid, route: route, late: false)
@@ -204,10 +215,12 @@ extension CUCore {
 
     /// Runs a background step and checks the user's view `stepSettleMs` later. A step that moved it is undone,
     /// the view restored, the act told, and the step never used again.
-    /// `usersOwn`: a change of the view that is the USER's doing (they brought the target forward themselves, with
-    /// their own input) — never the step's: nothing undone, the step not retired, nobody pulled back out of the app they
-    /// chose (review of round 4: a ⌘-Tab into the target during a typing burst retired the focus records for the
-    /// helper's life and yanked the user back to their previous app).
+    /// `usersOwn`: a change of the view that is NOT the agent's doing (the user's own move — review of round 4: a ⌘-Tab
+    /// into the target during a typing burst retired the focus records for the helper's life and yanked the user back —,
+    /// another session's desktop visit or consented foreground, an app the agent never touched): nothing undone, the step
+    /// not retired. And the agent's doing counts as the STEP's only when the step's own target came forward (or the
+    /// desktop moved under it with the user's app still in front): another app the agent touched coming forward is the
+    /// guardian's to undo, and retires nothing (the review of round 8).
     func backgroundStep(_ step: CUBackgroundStep, _ t: CUTarget, run: () -> Bool, undo: () -> Void,
                         usersOwn: (CUUserView) -> Bool = { _ in false }) -> StepResult {
         guard !isRetired(step) else { return .notRun }
@@ -216,7 +229,11 @@ extension CUCore {
         let after = view(after: before, settleMs: stepSettleMs)
         guard after != before else { return .ran }
         if usersOwn(after) {
-            CULog.act.notice("\(step.rawValue, privacy: .public) in \(t.appName, privacy: .public): the user brought it forward meanwhile — their move, left as it is")
+            CULog.act.notice("\(step.rawValue, privacy: .public) in \(t.appName, privacy: .public): the view changed meanwhile, not by the agent's doing — left as it is")
+            return .ran
+        }
+        guard after.front == t.pid || (after.front == before.front && after.space != before.space) else {
+            CULog.act.notice("\(step.rawValue, privacy: .public) in \(t.appName, privacy: .public): another app came forward meanwhile (\(after.front ?? 0, privacy: .public)) — not this step's doing, not retired")
             return .ran
         }
         undo()
@@ -286,7 +303,7 @@ extension CUCore {
         let startView = userView()
         // Whose move a change during the step is: the one rule, never the step's own guess.
         let usersMove = { [self] (now: CUUserView) -> Bool in
-            isUsersMove(now, since: stepStart, from: startView, path: "the focus blip's make-key step")
+            leftAlone(now, since: stepStart, from: startView, path: "the focus blip's make-key step")
         }
         let step = backgroundStep(.focusRecords, t, run: { [self] in
             // The focus record is a synthetic event too: an activation right after it is not the user's by itself
@@ -312,9 +329,10 @@ extension CUCore {
         // The front moved during the step after its settle (or the user's move it already judged): judged again, by the
         // same rule — the user's: no hand-back; the app's own: the blip ends the ordinary way, which puts them back.
         if let front = sys.frontmostPid(), front != user {
-            if isUsersMove(userView(), since: stepStart, from: startView, path: "the focus blip's make-key step, after it") {
-                CULog.act.notice("\(t.appName, privacy: .public): nothing sent in the focus blip — the user moved (front \(front, privacy: .public))")
-                return .userTookTheApp(usersMoveRefusal(t, front: front, typed: false))
+            let owner = judgeMove(userView(), since: stepStart, from: startView, path: "the focus blip's make-key step, after it")
+            if !owner.undoes {
+                CULog.act.notice("\(t.appName, privacy: .public): nothing sent in the focus blip — the view changed, not by the agent's doing (front \(front, privacy: .public))")
+                return .userTookTheApp(usersMoveRefusal(t, front: front, typed: false, owner: owner))
             }
             return .refused(undo: undo, activatedItselfRefusal(t))
         }
@@ -325,9 +343,15 @@ extension CUCore {
         return .keyed(undo: undo)
     }
 
-    /// The user moved — into the target app, or to another app — while keys were about to go (or going) to it.
-    func usersMoveRefusal(_ t: CUTarget, front: pid_t, typed: Bool) -> CUError {
+    /// The user moved — into the target app, or to another app — while keys were about to go (or going) to it; or
+    /// another app came to the front that is not the agent's doing (`owner`: a desktop visit, the consented foreground,
+    /// an app the agent never touched), left there.
+    func usersMoveRefusal(_ t: CUTarget, front: pid_t, typed: Bool, owner: CUMoveOwner = .user("")) -> CUError {
         let stop = typed ? "the typing was stopped" : "nothing was typed"
+        if !owner.isUsers {
+            let what = front == t.pid ? t.appName : appName(front)
+            return CUError.refused(.appInFront, "\(what) came to the front while keys were going to \(t.appName) — not by the agent's doing (\(owner.words)) — so \(stop) and it was left in front; check state(), and try again if it is still wanted")
+        }
         let msg = front == t.pid
             ? "\(t.appName) came to the front — the user brought it forward (their switch: ⌘-Tab, a click, the Dock), so \(stop); check state(), and try again if it is still wanted"
             : "the user switched to another app while keys were going to \(t.appName), so \(stop) — they were left where they went; check state(), and try again if it is still wanted"
@@ -627,7 +651,7 @@ extension CUCore {
         // Whose move it was decides (review of round 6: the synthetic marks just posted made the guardian take a ⌘-Tab of
         // the user's for a theft and pull them back out): the user's → told to the guardian, the click not sent; the
         // app's own → not sent, and the guardian puts the user back.
-        return isUsersMove(userView(), since: prepStart, from: startView, path: "a background click's preparation") ? .appInFront : .activatedItself
+        return leftAlone(userView(), since: prepStart, from: startView, path: "a background click's preparation") ? .appInFront : .activatedItself
     }
 
     /// The click not sent because the app activated itself while it was being prepared.
@@ -656,6 +680,6 @@ extension CUCore {
         noteGuardianCause(t.pid, raise: true)  // a main-window write can bring the window's desktop forward
         // A change meanwhile is judged by the one rule (review of round 7: it was always the step's).
         _ = backgroundStep(.axMain, t, run: { (try? ax.set(w, kAXMainAttribute, kCFBooleanTrue)) != nil }, undo: {},
-                           usersOwn: { [self] in isUsersMove($0, since: start, from: startView, path: "making the bound window main") })
+                           usersOwn: { [self] in leftAlone($0, since: start, from: startView, path: "making the bound window main") })
     }
 }

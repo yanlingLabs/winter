@@ -275,7 +275,7 @@ public final class CUCore: @unchecked Sendable {
         var named: (app: String, pid: pid_t)?
         defer { endGuardianLaunch(launch, pid: named?.pid) }
         do {
-            var r = try await bind(p) { named = ($0, $1) }
+            var r = try await CUCore.$bindLaunchToken.withValue(launch) { try await bind(p) { named = ($0, $1) } }
             if let named, let note = viewNoteAfterBind(before, app: named.app, pid: named.pid, route: "bind", since: startedAt) {
                 r.detail = [r.detail, note].compactMap { $0 }.joined(separator: "; ")
             }
@@ -549,6 +549,20 @@ public final class CUCore: @unchecked Sendable {
     var guardianRefs = 0
     var guardianObservers: [NSObjectProtocol] = []
     var pendingGuardianNotes: [String] = []
+    /// The apps that came forward after the agent's action with no input of the user's since the last act (for the act's
+    /// result: a metric).
+    var pendingViewMovedBy: [String] = []
+    /// When the last activation notification was handled (a later one of an app seen in front since is no new change).
+    var lastActivationHeardAt: TimeInterval = -.infinity
+    /// The window numbers of the helper's own panels that take clicks (the desktop-switch prompt), as the presentation
+    /// says; nil: by level (`ownWindowTakesClicks`).
+    var ownClickableWindows: (() -> Set<UInt32>)?
+    /// Every note the guardian leaves for the next result, as it is left (the model-based test).
+    var guardianNoted: ((String) -> Void)?
+    /// Whether a bound app is a web browser, as a test says (live: its Info.plist declares http/https).
+    var isWebBrowserOverride: ((CUTarget) -> Bool)?
+    /// The bind whose launch a resolver is naming (`noteGuardianLaunchBundle`).
+    @TaskLocal static var bindLaunchToken: Int?
     /// Sessions with a script running, the latest private-path setting seen, and the pending end of the tail.
     var guardianScripts: Set<String> = []
     var guardianPrivatePath = false
@@ -1443,6 +1457,7 @@ public final class CUCore: @unchecked Sendable {
 
     /// The pids of all bound targets (for the Focus Guardian's CPS tap).
     func boundTargetPids() -> Set<pid_t> { lock.withLock { Set(targets.values.map(\.pid)) } }
+    func boundTargets() -> [CUTarget] { lock.withLock { Array(targets.values) } }
 
     private func remove(_ id: String) -> CUTarget? {
         lock.lock()

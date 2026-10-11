@@ -30,6 +30,8 @@ enum SimKind {
     /// The app's main window becomes `window` (it opened or raised one there): its next activation goes there.
     case mainWindow(pid_t, UInt32)
     case selfActivate(pid_t)
+    /// The user launches an app themselves (Spotlight: the keys, then Return); it comes forward `after` ms later.
+    case userLaunch(Double)
     case banner(pid_t)
     case prompt(Bool)
     // session s2 (inside the world's events)
@@ -38,11 +40,13 @@ enum SimKind {
     case rung4(Double)
     // session s1: the agent (awaited in turn)
     case agentType(Int)
-    /// A click in T; `link`: a link — S comes forward `linkMs` (nil: 150–900) after the act began.
-    case agentClick(link: Bool, linkMs: Double? = nil)
+    /// A click in T on a field, on a LINK (an AX link with its URL: the engine opens it in the background), or on a
+    /// button whose action brings S forward `ms` (nil: 150–900) after the act began — an indirect effect no source fix
+    /// catches.
+    case agentClick(SimClickWhat, ms: Double? = nil)
     /// An AppleScript run in T for `seconds`; `opens`: it opens a file in P (or raises CoreServicesUIAgent's dialog)
     /// `opensMs` in (nil: 200 ms – 1 s).
-    case agentAppleScript(Double, opens: Bool, opensMs: Double? = nil)
+    case agentAppleScript(Double, opens: Bool, opensMs: Double? = nil, dialog: Bool? = nil)
     case agentBindLaunch(Double)
     /// `count` quick acts on T, `gapMs` apart (nil: 100–300).
     case agentBusy(Int, gapMs: Double? = nil)
@@ -78,14 +82,15 @@ enum SimKind {
         case .secureEntry(let on): return "Terminal's Secure Keyboard Entry \(on ? "on" : "off")"
         case .mainWindow(let a, let id): return "\(n(a))'s main window becomes \(id)"
         case .selfActivate(let a): return "\(n(a)) activates itself"
+        case .userLaunch(let ms): return "the user launches an app (Spotlight), which comes forward \(Int(ms)) ms later"
         case .banner(let a): return "a notification banner about \(n(a)) appears"
         case .prompt(let on): return "the helper's prompt panel \(on ? "shows" : "hides")"
         case .visit(let ms): return "session s2 visits T2's desktop for \(Int(ms)) ms"
         case .hold(let ms): return "session s2 holds T3 in front for \(Int(ms)) ms"
         case .rung4(let ms): return "session s2 brings T3 forward for one action (rung 4, \(Int(ms)) ms)"
         case .agentType(let k): return "the agent types \(k) characters into T"
-        case .agentClick(let link, let ms): return "the agent clicks \(link ? "a link" : "a field") in T\(link ? " (S comes forward\(ms.map { " \(Int($0)) ms" } ?? "") after)" : "")"
-        case .agentAppleScript(let s, let opens, let ms): return "the agent runs an AppleScript in T for \(String(format: "%.1f", s)) s\(opens ? " that opens something\(ms.map { " at \(Int($0)) ms" } ?? "")" : "")"
+        case .agentClick(let what, let ms): return "the agent clicks \(what.rawValue) in T\(what == .opener ? " (S comes forward\(ms.map { " \(Int($0)) ms" } ?? "") after)" : "")"
+        case .agentAppleScript(let s, let opens, let ms, _): return "the agent runs an AppleScript in T for \(String(format: "%.1f", s)) s\(opens ? " that opens something\(ms.map { " at \(Int($0)) ms" } ?? "")" : "")"
         case .agentBindLaunch(let ms): return "the agent binds an app it launches (it activates \(Int(ms)) ms in)"
         case .agentBusy(let k, let gap): return "the agent runs \(k) quick acts on T\(gap.map { " \(Int($0)) ms apart" } ?? "")"
         case .quiet: return "nothing (a pause)"
@@ -140,7 +145,7 @@ struct SimPlan {
             case 48..<57:
                 let who: [pid_t] = [SimPid.target, SimPid.target, SimPid.target, SimPid.target, SimPid.third, SimPid.safari, SimPid.preview, SimPid.user]
                 k = .selfActivate(who[r.int(who.count)])
-            case 57..<58: k = .banner(r.chance(0.6) ? SimPid.target : SimPid.third)
+            case 57..<58: k = r.chance(0.5) ? .banner(r.chance(0.6) ? SimPid.target : SimPid.third) : .userLaunch(r.double(300, 3_000))
             case 58..<59: k = .prompt(r.chance(0.5))
             case 59..<62:
                 guard t >= s2FreeAt else { k = .quiet; break }
@@ -148,7 +153,7 @@ struct SimPlan {
                 k = [SimKind.visit(ms), .hold(ms), .rung4(r.double(80, 400))][r.int(3)]
                 s2FreeAt = t + ms + 600
             case 62..<74: k = .agentType(1 + r.int(8))
-            case 74..<81: k = .agentClick(link: r.chance(0.3))
+            case 74..<81: k = .agentClick([SimClickWhat.field, .field, .link, .opener][r.int(4)])
             case 81..<86: k = .agentAppleScript(r.double(0.2, 4), opens: r.chance(0.3))
             case 86..<88: k = .agentBindLaunch(r.double(30, 3_000))
             default: k = .agentBusy(2 + r.int(6))
@@ -184,7 +189,10 @@ final class SimRun {
     let visited: CUTarget
     let heldTarget: CUTarget
     let field = fakeElement(97_002)
+    let link = fakeElement(97_030)
+    let opener = fakeElement(97_031)
     var launchSeq: pid_t = 800
+    var userLaunchSeq: pid_t = 0
     var openVisit: CUOpenVisit?
 
     var trace: [String] { world.trace }
@@ -211,7 +219,13 @@ final class SimRun {
             return el
         }
         let tWindow = win(77, SimPid.target, 97_001)
-        ax.put(tWindow, [kAXChildrenAttribute: [field]])
+        ax.put(tWindow, [kAXChildrenAttribute: [field, link, opener]])
+        ax.add(link, role: "AXLink", title: "a link", frame: CGRect(x: 520, y: 100, width: 120, height: 20),
+               extra: [kAXWindowAttribute: tWindow, "AXURL": URL(string: "https://example.com/page")! as CFURL])
+        ax.setActions(link, [kAXPressAction])
+        ax.add(opener, role: kAXButtonRole, title: "Open in Safari", frame: CGRect(x: 520, y: 140, width: 120, height: 24),
+               extra: [kAXWindowAttribute: tWindow])
+        ax.setActions(opener, [kAXPressAction])
         ax.makeSettable(tWindow, kAXMainAttribute)
         ax.add(field, role: kAXTextFieldRole, frame: CGRect(x: 520, y: 60, width: 200, height: 24), extra: [kAXWindowAttribute: tWindow])
         ax.put(ax.application(SimPid.target), [kAXWindowsAttribute: [tWindow]])
@@ -242,8 +256,12 @@ final class SimRun {
         ax.onPerform = { what in
             let parts = what.split(separator: ":")
             guard parts.count == 2 else { return }
+            // A raise (a restore's or an act's: no cause either way — the engine counts the act itself); an action on an
+            // agent target's element: an event of the agent's (the latest its last cause can be).
             if parts[1] == "AXRaise", let id = byToken[String(parts[0])] { w.raised(id) }
-            else if let id = byToken[String(parts[0])], let p = w.wins[id]?.pid, SimPid.agentTargets.contains(p) { w.agentCause(p) }
+            else if let id = byToken[String(parts[0])], let p = w.wins[id]?.pid, SimPid.agentTargets.contains(p) {
+                w.lock.withLock { w.lastPostAt = w.now }
+            }
         }
         ax.onSet = { what in
             let parts = what.split(separator: ":")
@@ -300,6 +318,13 @@ final class SimRun {
             return "ok"
         }
         core.automationPermissionOverride = { _ in OSStatus(noErr) }
+        // T (Finder) is no web browser: a link pressed in it opens in the background (no app comes forward).
+        core.isWebBrowserOverride = { _ in false }
+        core.openDocumentsOverride = { p in
+            w.log("  the engine opens \(p.urls.joined(separator: ", ")) in the background (activates: false — nothing comes forward)")
+            w.lock.withLock { w.backgroundOpens += 1 }
+            return OpenDocumentsResult(app: CUBoundApp(name: "S", bundleId: "com.apple.Safari", pid: SimPid.safari), windowID: nil)
+        }
         let enforcer = FakeFocusEnforcer()
         enforcer.onForce = { w.agentCause(SimPid.target); w.advance(by: 2) }
         enforcer.onDeactivate = { w.agentCause(SimPid.target); w.advance(by: 2) }
@@ -348,15 +373,24 @@ final class SimRun {
             w.log("focus record → \(SimPid.name(p))")
             w.advance(by: 3)
         }
-        core.moveJudged = { path, v, owner in
+        core.moveJudged = { [unowned core] path, v, owner in
             w.log("  \(path): front \(SimPid.name(v.front ?? 0)), desktop \(v.space ?? 0) — \(owner.words)")
+            if ProcessInfo.processInfo.environment["WINTER_CU_SIM_DEBUG"] == "1" {
+                // Diagnostics for a reader of the trace only — never read by the oracle.
+                let ins = core.guardianLock.withLock { core.guardianCore.input.instants.map { "\(Int($0.at * 1000 - 1_000_000))\($0.kind == .app ? "a" : "d")\($0.target.map { "→\(SimPid.name($0))" } ?? "")" } }
+                w.log("    (engine instants: \(ins.joined(separator: " ")))")
+            }
             w.lock.withLock {
+                // One change, one verdict: a state judged the user's MOVE is never judged the agent's later (their place —
+                // nothing moved as far as the engine knew — may be judged again once a late notification shows something
+                // came between).
                 let key = "\(w.episode):\(v.front ?? 0):\(v.space ?? 0)"
-                if owner.isUsers { w.judgedUsers.insert(key) } else if case .agent = owner, w.judgedUsers.contains(key) {
+                if case .user = owner { w.judgedUsers.insert(key) } else if case .agent = owner, w.judgedUsers.contains(key) {
                     w.fail("I5: \(path) judged the agent's a state already judged the user's (front \(SimPid.name(v.front ?? 0)), desktop \(v.space ?? 0))")
                 }
             }
         }
+        core.guardianNoted = { note in w.lock.withLock { w.notes.append(note); w.notedAt = w.now }; w.log("  the guardian says: \(note)") }
         core.visitCloseDispatch = { [unowned self] v, reason in
             w.schedule(after: 1, "the visit closes (\(reason.rawValue))") { self.closeVisit(v, reason) }
         }
@@ -440,7 +474,7 @@ final class SimRun {
                 let seen: Bool? = secureNow ? w.flagsSeenUnderSecure : nil
                 let at = tabSeen && !secure ? tabAt : w.now
                 let i = w.addSwitch(SimSwitch(at: at, app: true, desktop: false, dest: a, secureFlags: seen,
-                                              lifeMs: seen == true ? 300 : 1000, keyboard: true))
+                                              lifeMs: seen == true ? 700 : 1000, keyboard: true))
                 w.schedule(after: land, "the switcher activates \(SimPid.name(a))") { [unowned self] in
                     self.landSwitch(i, a, why: "the user ⌘-Tabbed to \(SimPid.name(a))")
                 }
@@ -453,7 +487,7 @@ final class SimRun {
                 w.release(.maskCommand)
                 // Under Secure Event Input the tap saw the modifier but not the S: it looks like a ⌘-Tab's release.
                 if secure, w.flagsSeenUnderSecure {
-                    w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, dest: nil, secureFlags: true, lifeMs: 300, keyboard: true))
+                    w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, dest: nil, secureFlags: true, lifeMs: 700, keyboard: true))
                 }
             }
         case .controlArrow(let s, let seen):
@@ -486,6 +520,38 @@ final class SimRun {
                 core.secureInputOverride = w.secure
             }
             w.log("Terminal's Secure Keyboard Entry \(on ? "on" : "off")")
+        case .userLaunch(let after):
+            // Spotlight: ⌘-Space, a few keys, Return (the tap sees them), then the app starts and later comes forward.
+            w.press(.maskCommand)
+            w.key(.keyDown, flags: .maskCommand, keycode: 49)
+            w.release(.maskCommand)
+            for k in 0..<3 { w.schedule(after: 60 + Double(k) * 50, "a Spotlight key") { w.key(.keyDown); w.key(.keyUp) } }
+            w.schedule(after: 260, "Return") { [unowned self] in
+                w.key(.keyDown, keycode: 36)
+                let pid = w.lock.withLock { () -> pid_t in
+                    self.userLaunchSeq += 1
+                    let pid = 950 + self.userLaunchSeq
+                    let wid = UInt32(9_500 + Int(pid))
+                    w.running.insert(pid)
+                    w.bundles[pid] = "sim.user.launched.\(pid)"
+                    w.startedAt[pid] = w.now
+                    w.wins[wid] = SimWin(id: wid, pid: pid, frame: CGRect(x: 300, y: 600, width: 300, height: 200), space: w.space1)
+                    w.mainWin[pid] = wid
+                    w.zOrder.append(pid)
+                    w.userLaunches[pid] = w.now
+                    return pid
+                }
+                w.log("the user's app \(SimPid.name(pid)) starts")
+                w.schedule(after: 30, "NSWorkspace: \(SimPid.name(pid)) launched") { [unowned self] in self.core.onAppLaunched(pid: pid) }
+                w.schedule(after: after, "\(SimPid.name(pid)) comes forward (the user's launch)") {
+                    w.lock.withLock {
+                        let n = w.landingPlace(pid)
+                        guard n.app != w.front || n.space != w.space else { return }
+                        w.change(to: n, cause: w.untouchedCause(pid, indirect: false, why: "the user's own launch", newPlace: n),
+                                 why: "\(SimPid.name(pid)) comes forward (the user launched it)")
+                    }
+                }
+            }
         case .mainWindow(let a, let id):
             w.lock.withLock {
                 w.mainWin[a] = id
@@ -494,7 +560,8 @@ final class SimRun {
             w.log("\(SimPid.name(a))'s main window becomes \(id)")
         case .selfActivate(let a):
             w.lock.withLock {
-                guard w.running.contains(a) else { return }
+                // An app already in front does not activate itself again (nothing moves).
+                guard w.running.contains(a), a != w.front else { return }
                 let n = w.landingPlace(a)
                 guard n.app != w.front || n.space != w.space else { return }
                 let cause = w.selfCause(a, newPlace: n)
@@ -569,7 +636,15 @@ final class SimRun {
         w.lock.withLock {
             let n = w.landingPlace(app, onSpace: onSpace)
             guard n.app != w.front || n.space != w.space else {
-                w.log("\(why) — already there, nothing changes")
+                // Their switch to what is in front already: it is now their choice — if the engine sees it (it judges
+                // nothing new unless a path looks again).
+                let cur = SPlace(app: w.front, space: w.space)
+                if w.cands.contains(where: { $0.place != cur || $0.held != nil }) {
+                    w.cands.formUnion(w.cands.map { _ in SimCand(place: cur, expected: cur, held: nil) })
+                    w.log("\(why) — already there, nothing changes (their place may now be \(cur))")
+                } else {
+                    w.log("\(why) — already there, nothing changes")
+                }
                 return
             }
             let cause = w.userLandingCause(i, dest: n, why: why)
@@ -582,6 +657,8 @@ final class SimRun {
     func landDesktop(_ i: Int, _ s: UInt64, why: String) {
         let w = world
         w.lock.withLock {
+            // Already on that desktop: the switch does nothing (its input explains nothing that came of it).
+            guard s != w.space1 || w.focusDisplay != 1 else { w.log("\(why) — already there"); return }
             let app = w.zOrder.first { p in w.appWindow(p, onSpace: s) != nil } ?? w.front
             w.switches[i].dest = app
             let n = SPlace(app: app, space: s)
@@ -613,13 +690,11 @@ final class SimRun {
     func s2Visit(_ ms: Double) {
         let w = world
         guard !w.lock.withLock({ w.visiting || w.holding }), core.visitLock.withLock({ core.openVisit == nil }) else { return }
-        w.lock.withLock { w.visiting = true; w.stats.s2Ops += 1 }
+        w.lock.withLock { w.visiting = true; w.visitStartedAt = w.now; w.visitUserApp = w.front; w.stats.s2Ops += 1 }
         w.log("— session s2 opens a desktop visit to T2")
-        w.agentBegins(SimPid.visited, raise: true)
         let v = try? w.within(.visitArrive(SimPid.visited)) {
             try core.visitArrive(visited, why: .act, privatePath: true, sessionId: "s2", callId: "v\(w.now)", maxMs: nil, made: VisitBox())
         }
-        w.agentEnds(SimPid.visited)
         guard let v else {
             w.log("  the visit did not open (refused, or never arrived)")
             w.lock.withLock {
@@ -642,14 +717,20 @@ final class SimRun {
         }
         guard claimed else { return }
         w.log("— session s2's visit closes (\(reason.rawValue))")
-        w.agentCause(SimPid.visited, raise: true)
         let report = w.within(.visitFinish) { core.finishVisit(v, reason: reason) }
+        // Its target stays touched for the causal window after it (the engine's visit end says so too).
+        w.lock.withLock { w.lastTouchAt[SimPid.visited] = w.now }
         core.recordClosed(v, report)
         if openVisit === v { openVisit = nil }
         w.log("  the visit's report: returned \(report.returned), userMoved \(report.userMoved.map(String.init) ?? "nil")")
         w.lock.withLock {
             w.visiting = false
-            w.cands = Set(w.cands.map { SimCand(place: $0.place, expected: $0.place, held: $0.held) })
+            // Back where they belong: where a return went (their place, or what was in front when the visit began), else
+            // their place.
+            w.cands = Set(w.cands.map { c in
+                let returned = c.visitPre == nil || c.expected == c.place || c.expected == c.visitPre
+                return SimCand(place: c.place, expected: returned ? c.expected : c.place, held: c.held)
+            })
             w.scheduleSettle()
         }
     }
@@ -659,9 +740,7 @@ final class SimRun {
         guard !w.lock.withLock({ w.visiting || w.holding }) else { return }
         w.lock.withLock { w.holding = true; w.stats.s2Ops += 1 }
         w.log("— session s2 holds T3 in front")
-        w.agentBegins(SimPid.held, raise: true)
         let r = w.within(.hold(SimPid.held)) { core.holdForegroundNow(heldTarget) }
-        w.agentEnds(SimPid.held)
         w.log("  the hold: front \(r.front)")
         w.schedule(after: ms, "session s2's script ends (the hold is released)") { [unowned self] in self.s2Release() }
     }
@@ -679,13 +758,11 @@ final class SimRun {
         guard !w.lock.withLock({ w.visiting || w.holding }) else { return }
         w.lock.withLock { w.stats.s2Ops += 1 }
         w.log("— session s2 brings T3 forward for one action (rung 4)")
-        w.agentBegins(SimPid.held, raise: true)
         do {
             try w.within(.rung4(SimPid.held)) { try core.inForeground(heldTarget) { w.advance(by: ms) } }
         } catch {
             w.log("  rung 4: \((error as? CUError)?.message ?? "\(error)")")
         }
-        w.agentEnds(SimPid.held)
         afterConsent()
     }
 
@@ -730,14 +807,15 @@ final class SimRun {
         switch step.kind {
         case .agentType(let n):
             await act(.type(CUTypeAction(text: String(repeating: "x", count: n))), "c\(step.seed)")
-        case .agentClick(let link, let ms):
-            if link { indirect(SimPid.safari, after: ms ?? r.double(150, 900), why: "the link the agent clicked in T") }
-            let ref = target.refs.ref(for: AXIdentity(element: field))
+        case .agentClick(let what, let ms):
+            if what == .opener { indirect(SimPid.safari, after: ms ?? r.double(150, 900), why: "the button the agent clicked in T opened it") }
+            let el = what == .link ? link : what == .opener ? opener : field
+            let ref = target.refs.ref(for: AXIdentity(element: el))
             await act(.click(CUClickAction(ref: ref)), "c\(step.seed)")
-        case .agentAppleScript(let seconds, let opens, let ms):
+        case .agentAppleScript(let seconds, let opens, let ms, let dialog):
             w.lock.withLock { w.scriptMs = seconds * 1000 }
             if opens {
-                let app = r.chance(0.7) ? SimPid.preview : SimPid.coreServices
+                let app = (dialog ?? !r.chance(0.7)) ? SimPid.coreServices : SimPid.preview
                 indirect(app, after: ms ?? r.double(200, min(1_000, seconds * 1000)), why: "what the agent's AppleScript opened")
             }
             w.agentBegins(tpid, raise: true)
@@ -770,6 +848,8 @@ final class SimRun {
                     w.change(to: n, cause: w.selfCause(pid, newPlace: n), why: "the launched app activates itself")
                 }
             }
+            // NSWorkspace says the app launched, a moment in (its bundle was named before: the agent's own launch).
+            w.schedule(after: 25, "NSWorkspace: \(SimPid.name(pid)) launched") { [unowned self] in self.core.onAppLaunched(pid: pid) }
             core.resolveBindApp = { _, core in
                 core.noteGuardianLaunchBundle(bundle)
                 return CUCore.BindApp(pid: pid, bundleIdentifier: bundle, name: "Launched", executableName: "Launched",

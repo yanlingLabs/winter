@@ -11,6 +11,8 @@ extension CUCore {
         var pid: pid_t
         var appName: String
         var previous: pid_t?
+        /// Where the user was when the hold began (the give-back's place when the guardian is not running).
+        var previousView: CUGuardedView?
         var token = UUID()
     }
 
@@ -34,14 +36,17 @@ extension CUCore {
             CULog.act.notice("foreground in \(t.appName, privacy: .public): its window is on another desktop — not held in front there")
             return TargetForegroundResult(front: false, detail: Self.foregroundElsewhere(t.appName))
         }
+        judgeBeforeTaking("the held foreground's start")
         let previous = sys.frontmostPid()
         let first = holdLock.withLock { () -> Bool in
             if heldForeground[t.id] != nil { return false }
             heldForeground[t.id] = HeldForeground(sessionId: t.sessionId, pid: t.pid, appName: t.appName,
-                                                  previous: previous == t.pid ? nil : previous)
+                                                  previous: previous == t.pid ? nil : previous,
+                                                  previousView: previous == t.pid ? nil : CUGuardedView(app: previous, space: sys.activeSpace()))
             return true
         }
-        guardianLock.withLock { guardianCore.exempt(t.pid, until: clock.nowSeconds() + Self.holdForegroundMaxSeconds) }
+        let at = clock.nowSeconds()
+        guardianLock.withLock { guardianCore.exempt(t.pid, until: at + Self.holdForegroundMaxSeconds, now: at) }
         if sys.frontmostPid() != t.pid {
             noteGuardianCause(t.pid, raise: true)
             _ = sys.activate(pid: t.pid)
@@ -81,11 +86,22 @@ extension CUCore {
         giveBack(h)
     }
 
+    /// The hold is over: the front goes back to the user's place AS IT IS NOW — the guardian's (the place before the
+    /// hold, unless they moved meanwhile), else the app captured at the hold's start — only while the held app still has
+    /// it (a move of theirs, into the held app included, is left alone), retried the way a restore is (a refused
+    /// activation left them in the held app). Off the caller (it may wait up to the restore's deadline). Review of round 8:
+    /// it activated the pid captured at the start, over a move of the user's.
     private func giveBack(_ h: HeldForeground) {
         guardianLock.withLock { guardianCore.endExempt(h.pid) }
-        if sys.frontmostPid() == h.pid, let prev = h.previous, sys.appRunning(prev) {
-            _ = sys.activate(pid: prev)
-            CULog.act.notice("foreground in \(h.appName, privacy: .public): the front given back")
+        let back = { [weak self] in
+            guard let self, self.sys.frontmostPid() == h.pid else { return }
+            let place = self.guardianPlace() ?? h.previousView
+            guard let user = place?.app, user != h.pid, self.sys.appRunning(user) else { return }
+            let ended = self.restoreUserView(CUUserView(space: place?.space, front: user), user: user)
+            CULog.act.notice("foreground in \(h.appName, privacy: .public): the front given back — \(ended.front == user ? "ok" : "not yet", privacy: .public)")
+        }
+        if let schedule = guardianRestoreDispatch { schedule(back) } else if guardianRestoreSync { back() } else {
+            DispatchQueue.global(qos: .userInitiated).async(execute: back)
         }
     }
 

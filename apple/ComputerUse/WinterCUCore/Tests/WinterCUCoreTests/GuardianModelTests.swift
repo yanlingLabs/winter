@@ -103,24 +103,50 @@ final class GuardianModelTests: XCTestCase {
         XCTAssertNil(v, v ?? "")
     }
 
-    /// #2: a link the agent clicked in T opens in S, with no input of the user's: neither adopted as the user's place nor
-    /// undone (and said) — a later theft is put back to THEIR app.
-    func testALinkTheAgentClickedIsNotTheUsersPlace() async {
-        let v = await run("f2-link", [(300, .agentClick(link: true, linkMs: 400)), (3_000, .agentType(3)), (3_400, .selfActivate(SimPid.target)),
-                                     (6_500, .quiet)])
+    /// #2 (the user's ruling: blocked at the source): a link the agent clicks in an app that is not a web browser opens in
+    /// the background — nothing comes forward.
+    func testALinkTheAgentClickedOpensInTheBackground() async {
+        for seed in 1...6 {
+            let r = await SimRun.execute(SimPlan.scripted(seed: UInt64(seed), [(300, .agentClick(.link)), (3_000, .quiet)]))
+            XCTAssertNil(r.violation, r.violation ?? "")
+            XCTAssertEqual(r.world.backgroundOpens, 1, "opened in the background")
+            XCTAssertFalse(r.trace.contains { $0.contains("S@") }, "S never came forward")
+        }
+    }
+
+    /// #2 (the user's ruling: the rest undone): what a button the agent clicked brought forward (an app it never touched,
+    /// with no input of the user's since) is sent back at once, the user's place unchanged, and said; a later theft is put
+    /// back to THEIR app.
+    func testWhatTheAgentsClickBroughtForwardIsSentBack() async {
+        let v = await run("f2-opener", [(300, .agentClick(.opener, ms: 400)), (3_000, .agentType(3)), (3_400, .selfActivate(SimPid.target)),
+                                        (6_500, .quiet)])
         XCTAssertNil(v, v ?? "")
     }
 
-    /// #2: a file the agent's AppleScript opened in P, with no input of the user's: the same.
-    func testWhatTheAgentsAppleScriptOpenedIsNotTheUsersPlace() async {
-        let v = await run("f2-applescript-open", [(300, .agentAppleScript(1.5, opens: true, opensMs: 600)), (4_000, .quiet)])
+    /// #2: what the agent's AppleScript opened in Preview: sent back, said.
+    func testWhatTheAgentsAppleScriptOpenedIsSentBack() async {
+        let v = await run("f2-applescript-open", [(300, .agentAppleScript(1.5, opens: true, opensMs: 600, dialog: false)), (4_000, .quiet)])
         XCTAssertNil(v, v ?? "")
     }
 
-    /// #2, the other side: the user's own app launched from Spotlight comes forward late, after an act of the agent's — it
-    /// is never undone.
-    func testTheUsersOwnLateAppAfterAnActIsNotUndone() async {
-        let v = await run("f2-spotlight-late", [(300, .typing(5)), (3_300, .agentType(2)), (3_600, .selfActivate(SimPid.third)), (6_500, .quiet)])
+    /// #2: a system dialog (CoreServicesUIAgent) the agent's AppleScript raised is never sent back — the user must be able
+    /// to answer it — and it is said.
+    func testASystemDialogTheAgentRaisedIsLeftForTheUser() async {
+        let v = await run("f2-system-dialog", [(300, .agentAppleScript(1.5, opens: true, opensMs: 600, dialog: true)), (4_000, .quiet)])
+        XCTAssertNil(v, v ?? "")
+    }
+
+    /// #2, the other side: the user's own app, launched from Spotlight, comes forward for the first time right after an
+    /// act of the agent's (no input of theirs since) — theirs, never sent back.
+    func testTheUsersOwnLaunchIsNeverSentBack() async {
+        let v = await run("f2-user-launch", [(300, .userLaunch(2_700)), (3_000, .agentType(2)), (6_500, .quiet)])
+        XCTAssertNil(v, v ?? "")
+    }
+
+    /// #2: an already-running app the agent never touched coming forward right after its act, no input of the user's
+    /// since: the agent's indirect effect — sent back (the old answer, "the user's", is gone).
+    func testARunningAppAfterAnActWithNoInputIsSentBack() async {
+        let v = await run("f2-running-app", [(300, .typing(5)), (3_300, .agentType(2)), (3_600, .selfActivate(SimPid.third)), (6_500, .quiet)])
         XCTAssertNil(v, v ?? "")
     }
 
@@ -191,7 +217,7 @@ final class GuardianModelTests: XCTestCase {
     /// 50 ms before the switcher's activation lands — an act's (non-raising) cause never makes their move the agent's.
     func testABusyScriptNeverOutranksTheUsersSwitch() async {
         let v = await run("f8-busy-script", [(300, .agentBusy(6, gapMs: 60)), (800, .commandTab(SimPid.target, tabSeen: false, holdMs: 100, landMs: 70)),
-                                             (920, .agentClick(link: false)), (5_000, .quiet)])
+                                             (920, .agentClick(.field)), (5_000, .quiet)])
         XCTAssertNil(v, v ?? "")
     }
 
