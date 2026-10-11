@@ -1521,11 +1521,14 @@ export class BrowserEngine {
   /**
    * `waitForUser(reason, { timeoutMs })`: a page needs the user (a sign-in, a 2-step code, a CAPTCHA). Winter asks on a
    * card under every policy but `dont-ask` (which never asks: refused, and the model tells the user in its reply).
-   * "Show me the tab" lets the tab go — nothing is read while the user types — and brings it forward: the built-in
-   * browser shows the session's window with that tab; a user's browser activates the tab and focuses its window (the
-   * one place Winter for Chrome does). A second card waits for "Done" (the browser's own toolbar offers it too). Done:
-   * the tab is taken again and its whole state printed — `{ done: true }`. Declined, "Stop waiting" or no answer:
-   * `{ done: false }`, the tab left with the user. The tab closed meanwhile is `TargetLost`.
+   * The tab is let go BEFORE the card — by every session that holds it, a full detach (`TabDriver.handOff`) — so
+   * nothing of Winter's reads it while the user works there, whichever answer they give, and the built-in browser's
+   * native prompts (passkeys, permission prompts) can show. "Show me the tab" brings it forward: the built-in browser
+   * shows the session's window with that tab; a user's browser activates the tab and focuses its window (the one place
+   * Winter for Chrome does). A second card waits for "Done" (the browser's own toolbar offers it too). Done (or "I've
+   * done it" on the first card): the tab is taken again and its whole state printed — `{ done: true }`; what the page
+   * logged meanwhile stays out of `console()`. Declined, "Stop waiting" or no answer: `{ done: false }`, the tab left
+   * with the user. The tab closed meanwhile is `TargetLost`.
    */
   private async waitForUserCall(scope: TabRunScope, b: Binding, driver: TabDriver, args: Record<string, unknown>): Promise<{ done: boolean }> {
     const sid = scope.sessionId;
@@ -1550,6 +1553,8 @@ export class BrowserEngine {
     }
     scope.noteHandoff?.();
     const t0 = this.now();
+    // Let the tab go first, for every session: whatever the user does in it from here is theirs alone.
+    await driver.handOff();
     const ask = await scope.userCard(`${name} — ${host}: ${reason}. Winter waits while you do it.`, HANDOFF_ASK_OPTIONS, total);
     scope.live();
     if (!ask.approved) {
@@ -1557,18 +1562,8 @@ export class BrowserEngine {
       return { done: false };
     }
     if (ask.optionId !== "handoff_done") {
-      // Hand the tab over: nothing of Winter's reads it while the user is there.
       const key = tabKeyOf(b.backend, b.tabKey);
-      try {
-        if (winter) {
-          // Shown first (so the built-in browser keeps it live in the panel), then let go.
-          await transport.present(b.tabKey, { sessionId: sid });
-          await driver.release(sid);
-        } else {
-          await driver.release(sid);
-          await transport.present(b.tabKey, { sessionId: sid });
-        }
-      } catch (err) { throw transportFailure(err, name); }
+      try { await transport.present(b.tabKey, { sessionId: sid }); } catch (err) { throw transportFailure(err, name); }
       scope.builder.daemonLine(winter ? `showed the tab to the user in Winter's window` : `brought the tab forward in ${name} for the user`);
       const left = Math.max(1_000, total - (this.now() - t0));
       let wait: { approved: boolean; optionId?: string; by?: string };

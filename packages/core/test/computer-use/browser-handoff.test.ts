@@ -1,7 +1,7 @@
 // ComputerV2 Phase 3 — `waitForUser(reason)`, the sign-in hand-off, over the fake transports: the two cards (their
-// words, options and clocks), the tab let go before it is shown (the built-in browser shown first, then let go), Done
-// from the card or from the browser's own toolbar, declining, no answer, the tab closed meanwhile, dont-ask refused,
-// plan allowed, and the audit count.
+// words, options and clocks), the tab let go — by every session, a full detach — before the first card, Done from the
+// card or from the browser's own toolbar, declining, no answer, the tab closed meanwhile, what the page logged while
+// the user had it kept out of console(), dont-ask refused, plan allowed, and the audit count.
 import { describe, expect, test } from "bun:test";
 import { AutomationFailure } from "../../src/computer-use/errors";
 import type { TabHandle } from "../../src/computer-use/worker/bridge";
@@ -51,11 +51,56 @@ describe("waitForUser(): the cards", () => {
     r.end();
   });
 
-  test("I've done it on the first card: nothing is shown, the tab read again at once", async () => {
-    const { h, r, p } = await opened("chrome", { answer: () => "handoff_done" });
+  test("I've done it on the first card: nothing is shown; the tab was let go while the card was up, and is read again", async () => {
+    const seen: boolean[] = [];
+    let fake: { attached: boolean } | undefined;
+    const { h, r, key, p } = await opened("chrome", { answer: () => { seen.push(fake!.attached); return "handoff_done"; } });
+    fake = h.chrome.tabs.get(key)!;
+    expect(fake.attached).toBe(true);
     expect(await p({ reason: "sign in" })).toEqual({ done: true });
+    expect(seen).toEqual([false]);
+    expect(fake.attached).toBe(true);
     expect(h.chrome.presented).toEqual([]);
     expect(h.cards).toHaveLength(1);
+    r.end();
+  });
+
+  test("another session holding the tab does not keep it attached: the hand-off is a full detach, and that session attaches afresh later", async () => {
+    const seen: boolean[] = [];
+    let fake: { attached: boolean } | undefined;
+    const { h, r, tab, key } = await opened("chrome", { answer: (s) => { seen.push(fake!.attached); return s.startsWith("Google Chrome — ") ? "handoff_show" : "handoff_done"; } });
+    fake = h.chrome.tabs.get(key)!;
+    r.end();
+    // A second session binds and reads the same tab: it holds it now too.
+    const r2 = h.run("s2");
+    const b2 = await h.engine.global(r2.scope, "browsers.tab", { tab: tab.id }) as TabHandle;
+    await h.engine.primitive(r2.scope, b2.targetId, "state", { emit: false });
+    r2.end();
+    const r1 = h.run("s1");
+    const out = await h.engine.primitive(r1.scope, tab.targetId, "waitForUser", { reason: "sign in" });
+    expect(out).toEqual({ done: true });
+    // Detached while either card was up, although s2 still held the tab.
+    expect(seen).toEqual([false, false]);
+    r1.end();
+    // s2's next read attaches again by itself.
+    const r3 = h.run("s2");
+    expect(typeof await h.engine.primitive(r3.scope, b2.targetId, "state", { emit: false })).toBe("string");
+    expect(fake.attached).toBe(true);
+    r3.end();
+  });
+
+  test("what the page logged while the user had the tab is not Winter's: replayed console entries from the hand-off are dropped", async () => {
+    let during = 0;
+    const { h, r, key, p } = await opened("chrome", { answer: (s) => { if (s.startsWith("Google Chrome — ")) return "handoff_show"; during = Date.now(); return "handoff_done"; } });
+    const before = Date.now() - 1_000;
+    h.chrome.pageEvent(key, "Runtime.consoleAPICalled", { type: "log", timestamp: before, args: [{ type: "string", value: "before the hand-off" }] });
+    expect(await p({ reason: "sign in" })).toEqual({ done: true });
+    // The browser replays the sign-in page's messages on Runtime.enable; one from after Winter is back is live.
+    h.chrome.pageEvent(key, "Runtime.consoleAPICalled", { type: "log", timestamp: during, args: [{ type: "string", value: "one-time code 492817 accepted" }] });
+    h.chrome.pageEvent(key, "Log.entryAdded", { entry: { source: "network", level: "error", text: "sign-in request failed", timestamp: during } });
+    h.chrome.pageEvent(key, "Runtime.consoleAPICalled", { type: "log", timestamp: Date.now() + 5, args: [{ type: "string", value: "after the hand-off" }] });
+    const entries = await h.engine.primitive(r.scope, (await h.engine.global(r.scope, "browsers.tab", { tab: `chrome:${key}` }) as TabHandle).targetId, "console", { emit: false }) as Array<{ text: string }>;
+    expect(entries.map((e) => e.text)).toEqual(["before the hand-off", "after the hand-off"]);
     r.end();
   });
 
@@ -96,13 +141,13 @@ describe("waitForUser(): the cards", () => {
     r.end();
   });
 
-  test("the built-in browser: shown in Winter's window FIRST, then let go", async () => {
+  test("the built-in browser: its hold is dropped before the first card (native prompts can show), then the tab is shown in Winter's window", async () => {
     const order: string[] = [];
     const { h, r, key, p } = await opened("winter", { answer: (s) => (s.startsWith("Winter's browser — ") ? "handoff_show" : "handoff_done") });
     const present = h.winter.present!;
     h.winter.present = async (k, o) => { order.push(`present attached=${h.winter.tabs.get(k)!.attached}`); await present(k, o); };
     expect(await p({ reason: "solve the CAPTCHA" })).toEqual({ done: true });
-    expect(order).toEqual(["present attached=true"]);
+    expect(order).toEqual(["present attached=false"]);
     expect(h.winter.presented).toEqual([`${key}@s1`]);
     expect(r.text()).toContain("showed the tab to the user in Winter's window");
     r.end();

@@ -284,29 +284,41 @@ export class TabDriver {
     this.lastUsed = this.now();
     if (this.attached) return;
     this.attaching ??= (async () => {
-      let info: { viewport: [number, number]; dpr: number } | undefined;
-      for (let attempt = 0; info === undefined; attempt++) {
-        try { info = await this.transport.attach(this.tabKey, { sessionId }); } catch (err) {
-          if (err instanceof TransportError && err.code === "tab_gone") {
-            const moved = movedTo(err);
-            if (moved !== undefined && attempt === 0 && this.onRekey?.(moved) === true) continue;
-            if (o.transient === true) throw new TabBetween();
-            this.gone ??= "closed";
-            throw this.lost();
-          }
-          throw transportFailure(err, this.browserName);
-        }
+      // Taken back after a hand-off: what the page logged while the user had it is replayed by the browser on
+      // Runtime.enable / Log.enable, and is not Winter's to read.
+      const handedOff = this.handedOffAt;
+      if (handedOff !== undefined) {
+        this.devtools.hideWindow(handedOff, this.now());
+        this.devtools.hideUntimed(true);
       }
-      this.viewport = info.viewport;
-      this.dpr = info.dpr > 0 ? info.dpr : 1;
-      const events = transportHasCdp3(this.transport) ? TAB_EVENTS : TAB_EVENTS.filter((e) => !PHASE3_TAB_EVENTS.has(e));
-      try { await this.transport.subscribe(this.tabKey, events); } catch (err) { throw transportFailure(err, this.browserName); }
-      await this.enableDomains(undefined);
-      // Background tabs behave as focused (focus events, :focus, caret) — never by raising anything.
-      await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
-      if (this.viewportWish !== undefined) await this.applyViewport(this.viewportWish).catch(() => undefined);
-      await this.loadTopFrame();
-      this.attached = true;
+      try {
+        let info: { viewport: [number, number]; dpr: number } | undefined;
+        for (let attempt = 0; info === undefined; attempt++) {
+          try { info = await this.transport.attach(this.tabKey, { sessionId }); } catch (err) {
+            if (err instanceof TransportError && err.code === "tab_gone") {
+              const moved = movedTo(err);
+              if (moved !== undefined && attempt === 0 && this.onRekey?.(moved) === true) continue;
+              if (o.transient === true) throw new TabBetween();
+              this.gone ??= "closed";
+              throw this.lost();
+            }
+            throw transportFailure(err, this.browserName);
+          }
+        }
+        this.viewport = info.viewport;
+        this.dpr = info.dpr > 0 ? info.dpr : 1;
+        const events = transportHasCdp3(this.transport) ? TAB_EVENTS : TAB_EVENTS.filter((e) => !PHASE3_TAB_EVENTS.has(e));
+        try { await this.transport.subscribe(this.tabKey, events); } catch (err) { throw transportFailure(err, this.browserName); }
+        await this.enableDomains(undefined);
+        // Background tabs behave as focused (focus events, :focus, caret) — never by raising anything.
+        await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
+        if (this.viewportWish !== undefined) await this.applyViewport(this.viewportWish).catch(() => undefined);
+        await this.loadTopFrame();
+        this.attached = true;
+        this.handedOffAt = undefined;
+      } finally {
+        this.devtools.hideUntimed(false);
+      }
     })().finally(() => { this.attaching = undefined; });
     await this.attaching;
   }
@@ -376,6 +388,21 @@ export class TabDriver {
       try { await this.transport.detach(this.tabKey); } catch { /* the tab or the link is gone already */ }
     })().finally(() => { this.releasing = undefined; });
     await this.releasing;
+  }
+
+  /** When the tab was handed to the user (`handOff`), until Winter attaches again. */
+  private handedOffAt: number | undefined;
+
+  /**
+   * The sign-in hand-off: the tab is let go for EVERY session that holds it — a full detach, so nothing of Winter's
+   * reads it while the user works there, and the built-in browser's hold (which keeps native prompts — passkeys,
+   * permission prompts — from showing) is dropped. Whatever the page logs until Winter attaches again stays out of
+   * `console()`. Another session's next primitive on the tab attaches it afresh (its refs are new).
+   */
+  async handOff(): Promise<void> {
+    this.handedOffAt = this.now();
+    this.holders.clear();
+    await this.release("");
   }
 
   /** Is the tab attached (held) now? */

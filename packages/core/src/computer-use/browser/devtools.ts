@@ -204,7 +204,23 @@ export class TabDevtools {
     this.addLog("page", `— new page: ${redactUrl(cut(url, 200))} —`, this.now(), undefined, `p|${this.now()}|${url}`);
   }
 
+  /** Stretches of time Winter was NOT in the tab on purpose (the sign-in hand-off): the browser replays what the page
+   *  logged meanwhile when Winter attaches again (`Runtime.enable`, `Log.enable`), and none of it is Winter's to read. */
+  private readonly hidden: Array<[number, number]> = [];
+  /** Entries with no time of their own that arrive while the tab is being taken back are replays too. */
+  private hidingUntimed = false;
+
+  /** Hand-off: nothing the page logged between `fromMs` and `toMs` (epoch ms) is kept. */
+  hideWindow(fromMs: number, toMs: number): void {
+    this.hidden.push([fromMs, toMs]);
+    while (this.hidden.length > 16) this.hidden.shift();
+  }
+
+  /** While a hand-off's tab is being attached again: an entry with no timestamp is a replay. */
+  hideUntimed(on: boolean): void { this.hidingUntimed = on; }
+
   private addLog(level: ConsoleLevel | "page", text: string, atMs: number | undefined, source: string | undefined, keyBase: string): void {
+    if (atMs === undefined ? this.hidingUntimed : this.hidden.some(([a, b]) => atMs >= a && atMs <= b)) return;
     const key = `${keyBase}|${text.slice(0, 200)}`;
     if (this.logKeys.has(key)) return;
     this.logKeys.add(key);
