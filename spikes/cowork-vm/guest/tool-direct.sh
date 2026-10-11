@@ -7,16 +7,18 @@ supervisor_userns=${1:?}
 control=${2:?}
 source=/workspace/source
 failures=0
+checks=0
 check() {
+    checks=$((checks + 1))
     id=$1; shift
     if "$@" >/dev/null 2>&1; then result=pass; else result=fail; failures=$((failures + 1)); fi
     printf '{"kind":"check","suite":"direct_strict_source","policy":"%s","uid":%s,"id":"%s","status":"%s"}\n' "$policy" "$uid" "$id" "$result"
 }
-denied() {
-    id=$1; shift
-    if "$@" >/dev/null 2>&1; then result=fail; failures=$((failures + 1)); else result=pass; fi
-    printf '{"kind":"check","suite":"direct_strict_source","policy":"%s","uid":%s,"id":"%s","status":"%s"}\n' "$policy" "$uid" "$id" "$result"
+emit_denial() {
+    checks=$((checks + 1)); [ "$2" != fail ] || failures=$((failures + 1))
+    printf '{"kind":"check","suite":"direct_strict_source","policy":"%s","uid":%s,"id":"%s","status":"%s","denial":{"exitCode":%s,"failureClass":"%s","expectedFailureClasses":%s,"positiveControlPassed":%s,"positiveControlExitCode":%s}}\n' "$policy" "$uid" "$1" "$2" "$3" "$4" "$5" "$6" "$7"
 }
+. /opt/denials.sh
 projection() {
     object=$1; filename=$2
     projected_uid=$(stat -c %u "$filename" 2>/dev/null || printf -- -1)
@@ -25,6 +27,12 @@ projection() {
 }
 check distinct_tool_uid test "$(id -u)" = "$uid"
 check original_user_namespace test "$(readlink /proc/self/ns/user)" = "$supervisor_userns"
+check no_new_privs test "$(status_value NoNewPrivs)" = 1
+check zero_effective_caps test "$(status_value CapEff)" = 0000000000000000
+check zero_permitted_caps test "$(status_value CapPrm)" = 0000000000000000
+check zero_inheritable_caps test "$(status_value CapInh)" = 0000000000000000
+check zero_ambient_caps test "$(status_value CapAmb)" = 0000000000000000
+check zero_bounding_caps test "$(status_value CapBnd)" = 0000000000000000
 projection source "$source"
 projection seed "$source/seed.txt"
 check source_mode_preserved test "$(stat -c %a "$source")" = 755
@@ -52,5 +60,5 @@ else
     denied plan_chmod chmod 0666 "$source/seed.txt"
     check plan_scratch_write sh -c 'printf scratch > /workspace/.winter/scratch/direct-plan'
 fi
-printf '{"kind":"summary","id":"direct_tool_view","policy":"%s","uid":%s,"failures":%s,"status":"%s"}\n' "$policy" "$uid" "$failures" "$( [ "$failures" = 0 ] && printf pass || printf fail )"
+printf '{"kind":"summary","id":"direct_tool_view","policy":"%s","uid":%s,"checks":%s,"failures":%s,"status":"%s"}\n' "$policy" "$uid" "$checks" "$failures" "$( [ "$failures" = 0 ] && printf pass || printf fail )"
 [ "$failures" = 0 ]

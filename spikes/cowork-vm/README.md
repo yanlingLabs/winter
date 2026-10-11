@@ -45,6 +45,15 @@ host-share writes. The host requires complete successful structured evidence and
 exact file contents, not just exit zero. A later process boots the same retained
 disk and verifies both a changed kernel boot identity and preserved content.
 
+Denied writes record a recognized failure class and a successful positive control
+using the same command shape against writable scratch. Missing commands, syntax
+errors and missing target files do not establish a read-only boundary. Both the
+general and direct-share suites validate named checks and summary counts. Separate
+host-backed guidance/memory fixtures exercise a host-read-only export and a
+writable export narrowed read-only inside each tool view; the built VZ share
+configuration is checked before startup. Guest UID/GID permissions do not provide
+per-conversation access isolation on these host shares.
+
 A separate owner-only source fixture keeps normal host modes (directory 0755,
 files 0644). Two distinct guest tool UIDs edit/create/reopen those files; the Mac
 independently verifies unchanged ownership/modes, and the plan view cannot write.
@@ -64,6 +73,9 @@ supervisor proc mount before ballooning. That privileged action is not exposed
 to the confined tools. Reports keep `reclaimVerified: false`; a sustained backing
 footprint decrease is reported as a separate observation. The initial measured
 run did **not** demonstrate host memory return, even after guest compaction.
+Passive full footprint categories and `vmmap -summary` are retained for the
+single candidate backing service when ownership is unambiguous. This does not
+generate host memory pressure; pressure experiments require separate approval.
 
 The runner prints its temp fixture path and writes `out/latest-fixture.txt`.
 Per-phase JSON reports, image disks, boot logs and `owner.json` remain in that
@@ -81,7 +93,7 @@ still reuses the fixture disk across phases under that same orchestrator.
 
 Use `bun run spikes/cowork-vm/summarize.ts <fixture> <summary.json>` to produce a
 shareable summary without host paths, unrelated process details or process IDs.
-The checked-in [initial summary](results/2026-10-11-offline-probe.json) and
+The checked-in [reviewed summary](results/2026-10-11-reviewed-offline-probe.json) and
 [measurement record](../../docs/research/2026-10-11-cowork-gate1-results.md) separate
 observed success from the unresolved gate requirements.
 

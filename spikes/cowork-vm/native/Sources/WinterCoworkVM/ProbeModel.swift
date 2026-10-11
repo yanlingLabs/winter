@@ -16,6 +16,8 @@ struct Request: Decodable, Sendable {
     let rootfsPath: String?
     let sourcePath: String?
     let payloadPath: String?
+    let sharedReadOnlyPath: String?
+    let sharedReadWritePath: String?
     let memoryBytes: UInt64?
     let args: [String]?
     let cwd: String?
@@ -187,5 +189,12 @@ final class EventQueue: @unchecked Sendable {
         guard !events.isEmpty else { return nil }
         outstanding -= 1
         return events.removeFirst()
+    }
+    func pollAllocated(_ allocate: (String) -> UnsafeMutablePointer<CChar>?) -> UnsafeMutablePointer<CChar>? {
+        lock.lock(); defer { lock.unlock() }
+        guard let event = events.first, let value = allocate(event) else { return nil }
+        events.removeFirst()
+        outstanding -= 1
+        return value
     }
 }

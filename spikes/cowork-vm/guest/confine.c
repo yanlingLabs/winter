@@ -121,7 +121,7 @@ int main(int argc, char **argv) {
 #endif
         else return 64;
         int error = errno;
-        printf("{\"kind\":\"observation\",\"id\":\"syscall_%s\",\"result\":%ld,\"errno\":%d}\n", argv[2], result, error);
+        printf("{\"kind\":\"observation\",\"id\":\"syscall_%s\",\"policy\":\"%s\",\"uid\":%ld,\"result\":%ld,\"errno\":%d}\n", argv[2], getenv("FIXTURE_POLICY") ? getenv("FIXTURE_POLICY") : "supervisor", (long)getuid(), result, error);
         if (!strcmp(argv[2], "landlock")) return result > 0 ? 0 : 77;
         return result == -1 && error == EPERM ? 0 : 1;
     }
@@ -152,7 +152,7 @@ int main(int argc, char **argv) {
     pid_t init = fork(); must(init, "pid namespace fork");
     if (init) return wait_child(init);
     must(mount("tmpfs", root, "tmpfs", MS_NOSUID | MS_NODEV, "mode=0755,size=16m"), "tool root");
-    const char *dirs[] = { "/bin", "/sbin", "/lib", "/usr", "/usr/bin", "/usr/sbin", "/usr/lib", "/proc", "/dev", "/tmp", "/run", "/root", "/opt", "/workspace", "/workspace/source", "/workspace/.winter", "/workspace/.winter/memory", "/workspace/.winter/scratch" };
+    const char *dirs[] = { "/bin", "/sbin", "/lib", "/usr", "/usr/bin", "/usr/sbin", "/usr/lib", "/proc", "/dev", "/tmp", "/run", "/root", "/opt", "/workspace", "/workspace/source", "/workspace/.winter", "/workspace/.winter/memory", "/workspace/.winter/scratch", "/workspace/.winter/host-ro", "/workspace/.winter/host-ro/instructions", "/workspace/.winter/host-ro/memory", "/workspace/.winter/host-rw", "/workspace/.winter/host-rw/instructions", "/workspace/.winter/host-rw/memory", "/workspace/.winter/host-rw/writable-memory" };
     for (size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); i++) directory(root, dirs[i], 0755);
     const char *binaries[] = { "/bin", "/sbin", "/lib", "/usr/bin", "/usr/sbin", "/usr/lib" };
     for (size_t i = 0; i < sizeof(binaries)/sizeof(binaries[0]); i++) {
@@ -162,12 +162,23 @@ int main(int argc, char **argv) {
     bind_path(root, "/workspace/source", resolved[0], ro, 1);
     bind_path(root, "/workspace/.winter/memory", resolved[1], ro, 0);
     bind_path(root, "/workspace/.winter/scratch", resolved[2], 0, 1);
+    bind_path(root, "/workspace/.winter/host-ro/instructions", "/workspace/host-ro/instructions", 1, 0);
+    bind_path(root, "/workspace/.winter/host-ro/memory", "/workspace/host-ro/memory", 1, 0);
+    bind_path(root, "/workspace/.winter/host-rw/instructions", "/workspace/host-rw/instructions", 1, 0);
+    bind_path(root, "/workspace/.winter/host-rw/memory", "/workspace/host-rw/memory", 1, 0);
+    bind_path(root, "/workspace/.winter/host-rw/writable-memory", "/workspace/host-rw/writable-memory", ro, 0);
     char dest[4096]; path(dest, sizeof(dest), root, "/workspace/.winter/WINTER.md");
     must(close(open(dest, O_CREAT | O_WRONLY | O_EXCL, 0444)), "instruction mountpoint");
     bind_path(root, "/workspace/.winter/WINTER.md", resolved[3], 1, 0);
     path(dest, sizeof(dest), root, "/opt/tool-smoke.sh");
     must(close(open(dest, O_CREAT | O_WRONLY | O_EXCL, 0444)), "suite mountpoint");
     bind_path(root, "/opt/tool-smoke.sh", resolved[4], 1, 0);
+    char helper[4096];
+    char *last_slash = strrchr(resolved[4], '/');
+    if (snprintf(helper, sizeof(helper), "%.*s/denials.sh", (int)(last_slash - resolved[4]), resolved[4]) >= (int)sizeof(helper)) { errno = ENAMETOOLONG; unsupported("denial helper path"); }
+    path(dest, sizeof(dest), root, "/opt/denials.sh");
+    must(close(open(dest, O_CREAT | O_WRONLY | O_EXCL, 0444)), "denial helper mountpoint");
+    bind_path(root, "/opt/denials.sh", helper, 1, 0);
     path(dest, sizeof(dest), root, "/opt/syscall-probe");
     must(close(open(dest, O_CREAT | O_WRONLY | O_EXCL, 0555)), "probe mountpoint");
     bind_path(root, "/opt/syscall-probe", executable, 1, 1);

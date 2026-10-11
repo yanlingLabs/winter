@@ -3,6 +3,7 @@ import Foundation
 import Containerization
 import ContainerizationError
 import Darwin
+import Virtualization
 @testable import WinterCoworkVM
 
 final class ProbeTests: XCTestCase {
@@ -152,6 +153,61 @@ final class ProbeTests: XCTestCase {
         XCTAssertEqual(queue.poll(), "two")
         XCTAssertEqual(queue.poll(), "three")
         XCTAssertNil(queue.poll())
+    }
+
+    func testPollAllocationFailureKeepsCompletionAndReservation() {
+        let queue = EventQueue(limit: 1)
+        XCTAssertEqual(queue.reserve(), 1)
+        queue.finish("completion")
+        XCTAssertNil(queue.pollAllocated { _ in nil })
+        XCTAssertNil(queue.reserve())
+        let allocated = queue.pollAllocated { strdup($0) }
+        XCTAssertNotNil(allocated)
+        if let allocated { XCTAssertEqual(String(cString: allocated), "completion"); free(allocated) }
+        XCTAssertEqual(queue.reserve(), 2)
+    }
+
+    func testStopClosesDeviceAdmissionAndDrainsPendingWork() async throws {
+        let gate = DeviceOperationGate()
+        try gate.begin(); try gate.begin()
+        let drained = expectation(description: "queued device operations finished before stop")
+        let stop = Task { await gate.closeAndDrain(); drained.fulfill() }
+        for _ in 0..<200 {
+            if gate.snapshot().closing { break }
+            await Task.yield()
+        }
+        XCTAssertTrue(gate.snapshot().closing)
+        XCTAssertEqual(gate.snapshot().active, 2)
+        XCTAssertThrowsError(try gate.begin())
+        gate.finish()
+        XCTAssertEqual(gate.snapshot().active, 1)
+        gate.finish()
+        await fulfillment(of: [drained], timeout: 1)
+        await stop.value
+        XCTAssertEqual(gate.snapshot().active, 0)
+        XCTAssertThrowsError(try gate.begin())
+    }
+
+    func testBuiltVZSharePolicyRejectsReadOnlyMismatchAndAliases() throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let ro = root.appendingPathComponent("ro"), rw = root.appendingPathComponent("rw")
+        try FileManager.default.createDirectory(at: ro, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: rw, withIntermediateDirectories: false)
+        let expected = [HostSharePolicy(sourcePath: ro.path, guestPath: "/workspace/host-ro", readOnly: true),
+                        HostSharePolicy(sourcePath: rw.path, guestPath: "/workspace/host-rw", readOnly: false)]
+        try SharePolicy.validate(expected, backing: [])
+        XCTAssertThrowsError(try SharePolicy.validate([expected[0], HostSharePolicy(sourcePath: ro.path, guestPath: "/other", readOnly: false)], backing: []))
+        let config = VZVirtualMachineConfiguration()
+        let device = VZVirtioFileSystemDeviceConfiguration(tag: "virtiofs")
+        config.directorySharingDevices = [device]
+        device.share = VZMultipleDirectoryShare(directories: ["read": VZSharedDirectory(url: ro, readOnly: true), "write": VZSharedDirectory(url: rw, readOnly: false)])
+        let mounts = ["fixture": expected.map(\.mount)]
+        XCTAssertNoThrow(try SharePolicy.assertBuilt(config, expected: expected, mountsByID: mounts))
+        device.share = VZMultipleDirectoryShare(directories: ["read": VZSharedDirectory(url: ro, readOnly: false), "write": VZSharedDirectory(url: rw, readOnly: false)])
+        XCTAssertThrowsError(try SharePolicy.assertBuilt(config, expected: expected, mountsByID: mounts))
+        device.share = VZMultipleDirectoryShare(directories: ["read": VZSharedDirectory(url: ro, readOnly: true), "alias": VZSharedDirectory(url: ro, readOnly: false)])
+        XCTAssertThrowsError(try SharePolicy.assertBuilt(config, expected: expected, mountsByID: mounts))
     }
 
     func testConcurrentReservationsAreUniqueAndBounded() {

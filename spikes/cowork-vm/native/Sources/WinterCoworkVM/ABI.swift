@@ -42,8 +42,7 @@ public func winterCoworkVMSubmit(_ json: UnsafePointer<CChar>?) -> UInt64 {
 
 @_cdecl("winter_cowork_vm_poll")
 public func winterCoworkVMPoll() -> UnsafeMutablePointer<CChar>? {
-    guard let event = events.poll() else { return nil }
-    return strdup(event)
+    events.pollAllocated { strdup($0) }
 }
 
 @_cdecl("winter_cowork_vm_string_free")

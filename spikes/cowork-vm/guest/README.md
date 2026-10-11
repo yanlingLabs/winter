@@ -15,7 +15,7 @@ zig cc -target aarch64-linux-musl -O2 -Wall -Wextra -Werror -static confine.c -o
 zig cc -target aarch64-linux-musl -O2 -Wall -Wextra -Werror -static memprobe.c -o memprobe
 ```
 
-Bake `run.sh`, `tool-smoke.sh`, `confine`, and `memprobe` into an Alpine arm64 rootfs
+Bake `run.sh`, `tool-smoke.sh`, `denials.sh`, `confine`, and `memprobe` into an Alpine arm64 rootfs
 at `/opt/cowork-fixture/`. The controller's separate initfs must contain a compatible
 Containerization `vminitd` and `vmexec`; an Alpine rootfs is not that initfs.
 BusyBox provides the required shell/file/process commands. The supervisor needs
@@ -106,6 +106,30 @@ text. Exit0 means this suite's required assertions passed; exit77 means required
 confinement was unavailable; exit1 means an assertion failed. Argument misuse
 returns64. Unsupported Landlock is an optional observation and does not fail this
 mount/identity/seccomp candidate. No summary proves the entire Cowork gate passed.
+
+Denial checks require a successful positive control using the same argv and shell
+operation shape against fresh writable scratch in that same tool view, followed
+by a nonzero exit and an expected failure class. `denials.sh` is mounted read-only
+inside the compartment. It classifies known C-locale diagnostic text; UNKNOWN,
+syntax failures and command-not-found errors do not pass. Structured `denial`
+records include actual exit code, failure class, per-check expected classes and
+positive-control status/exit code. ENOENT is accepted only for the named hidden
+control writes; EXDEV only for the protected hardlink attempt; EBUSY only for
+explicit mountpoint/ancestor rename checks. Other writes require EACCES, EROFS
+or EPERM. The host independently enforces the per-ID class inventories.
+
+Additional host shares at supervisor-only `/workspace/host-ro` and
+`/workspace/host-rw` expose guidance and memory sentinels. Tools receive only
+narrowed read-only binds under `/workspace/.winter/host-{ro,rw}`; the raw supervisor
+paths and `/run/virtiofs` are omitted. Guidance/memory reads and direct, computed,
+symlink, unlink, rename, chmod and create denials test VZ-read-only shares and
+read-only binds of writable shares. The trusted driver first proves the original
+RW sentinels writable by append/restore and confirms RO rejection using the same
+operation shape. A separate `host-rw/writable-memory/seed.txt` is writable under
+auto and read-only under plan. Native/harness provisioning must stage all three
+subtrees, preserve exact newline-terminated sentinels, and verify host bytes.
+Capability checks include effective, permitted, inheritable, ambient and bounding
+sets. Each policy view receives a fresh scratch epoch directory.
 
 The host harness must treat a missing summary, process crash, timeout, malformed
 JSON, or required unsupported result as incomplete/failure for its corresponding

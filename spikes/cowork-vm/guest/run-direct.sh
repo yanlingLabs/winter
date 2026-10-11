@@ -32,7 +32,9 @@ userns=$(readlink /proc/self/ns/user)
 status=0
 for view in 'auto 10001' 'auto 10002' 'plan 10001'; do
     set -- $view
-    if "$here/confine" "$1" "$2" "$source" "$control/memory" "$control/scratch-$2" "$control/WINTER.md" "$here/tool-direct.sh" "$userns" "$control"; then :; else
+    scratch_view=$(mktemp -d "$control/scratch-$2/epoch-$1-XXXXXX")
+    chmod 2777 "$scratch_view"
+    if "$here/confine" "$1" "$2" "$source" "$control/memory" "$scratch_view" "$control/WINTER.md" "$here/tool-direct.sh" "$userns" "$control"; then :; else
         code=$?; if [ "$code" = 77 ]; then status=77; break; else status=1; fi
     fi
 done

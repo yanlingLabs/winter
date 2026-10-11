@@ -23,6 +23,7 @@ final class CaptureWriter: Writer, @unchecked Sendable {
 }
 
 struct BalloonExtension: VZInstanceExtension {
+    let shares: [HostSharePolicy]
     func configureVZ(_ config: inout VZVirtualMachineConfiguration,
                      allocator: any AddressAllocator<Character>, storageDeviceCount: Int,
                      mountsByID: [String: [Containerization.Mount]]) throws {
@@ -30,15 +31,19 @@ struct BalloonExtension: VZInstanceExtension {
         guard config.networkDevices.isEmpty else {
             throw ProbeFailure(code: "network_refused", message: "networkless probe cannot attach a network device")
         }
+        try SharePolicy.assertBuilt(config, expected: shares, mountsByID: mountsByID)
     }
 }
 
 final class ProbeManager: VirtualMachineManager, @unchecked Sendable {
     private let kernel: Kernel
     private let initfs: Containerization.Mount
+    private let shares: [HostSharePolicy]
     private let lock = NSLock()
     private var instance: VZVirtualMachineInstance?
-    init(kernel: Kernel, initfs: Containerization.Mount) { self.kernel = kernel; self.initfs = initfs }
+    init(kernel: Kernel, initfs: Containerization.Mount, shares: [HostSharePolicy]) {
+        self.kernel = kernel; self.initfs = initfs; self.shares = shares
+    }
     private func capture(_ vm: VZVirtualMachineInstance) { lock.lock(); instance = vm; lock.unlock() }
     func current() -> VZVirtualMachineInstance? { lock.lock(); defer { lock.unlock() }; return instance }
     func create(config: some VMCreationConfig) async throws -> any VirtualMachineInstance {
@@ -54,7 +59,7 @@ final class ProbeManager: VirtualMachineManager, @unchecked Sendable {
             settings.interfaces = []
             settings.mountsByID = input.mountsByID
             settings.bootLog = input.bootLog
-            settings.extensions = [BalloonExtension()]
+            settings.extensions = [BalloonExtension(shares: shares)]
         }
         capture(vm)
         return vm
@@ -67,6 +72,7 @@ private struct Guest: Sendable {
     let lease: DiskLease
     let memoryBytes: UInt64
     let rootfsPath: String
+    let deviceOperations: DeviceOperationGate
 }
 
 actor ProbeController {
@@ -129,20 +135,27 @@ actor ProbeController {
         let rootfs = try FixturePaths.existing(request.rootfsPath, within: root)
         let source = try FixturePaths.existing(request.sourcePath, within: root, directory: true)
         let payload = try FixturePaths.existing(request.payloadPath, within: root, directory: true)
+        let sharedRO = try FixturePaths.existing(request.sharedReadOnlyPath, within: root, directory: true)
+        let sharedRW = try FixturePaths.existing(request.sharedReadWritePath, within: root, directory: true)
+        let shares = [HostSharePolicy(sourcePath: source.path, guestPath: "/workspace/source", readOnly: false),
+                      HostSharePolicy(sourcePath: payload.path, guestPath: "/opt/cowork-fixture", readOnly: true),
+                      HostSharePolicy(sourcePath: sharedRO.path, guestPath: "/workspace/host-ro", readOnly: true),
+                      HostSharePolicy(sourcePath: sharedRW.path, guestPath: "/workspace/host-rw", readOnly: false)]
         try FixturePaths.validateBackingFiles([kernel, initfs, rootfs])
         try FixturePaths.validateShares(source: source, payload: payload, backing: [kernel, initfs, rootfs])
+        try FixturePaths.validateShares(source: source, payload: sharedRO, backing: [kernel, initfs, rootfs])
+        try SharePolicy.validate(shares, backing: [kernel, initfs, rootfs])
         let memory = request.memoryBytes ?? 1024 * 1024 * 1024
         guard memory >= 512 * 1024 * 1024, memory <= 2 * 1024 * 1024 * 1024,
               memory % (1024 * 1024) == 0 else { throw ProbeFailure(code: "invalid_memory", message: "test ceiling must be MiB-aligned and between 512 MiB and 2 GiB") }
         let lease = try DiskLease(path: rootfs.path, fixtureRoot: root)
         let manager = ProbeManager(kernel: Kernel(path: kernel, platform: .linuxArm),
-                                   initfs: .block(format: "ext4", source: initfs.path, destination: "/", options: ["ro"]))
+                                   initfs: .block(format: "ext4", source: initfs.path, destination: "/", options: ["ro"]), shares: shares)
         var settings = LinuxContainer.Configuration()
         settings.cpus = 2
         settings.memoryInBytes = memory - 128 * 1024 * 1024
         settings.interfaces = []
-        settings.mounts.append(.share(source: source.path, destination: "/workspace/source"))
-        settings.mounts.append(.share(source: payload.path, destination: "/opt/cowork-fixture", options: ["ro"]))
+        settings.mounts.append(contentsOf: shares.map(\.mount))
         let bootLog = try FixturePaths.output(root.appendingPathComponent("boot-\(id)-\(UUID().uuidString).log").path, within: root)
         settings.bootLog = .file(path: bootLog)
         settings.process.arguments = ["/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done"]
@@ -152,14 +165,16 @@ actor ProbeController {
         settings.process.capabilities = .allCapabilities
         let container = try LinuxContainer(id, rootfs: .block(format: "ext4", source: rootfs.path, destination: "/"),
                                            vmm: manager, vm: VMResources(cpus: 2, memoryInBytes: memory), configuration: settings)
-        let entry = Guest(container: container, manager: manager, lease: lease, memoryBytes: memory, rootfsPath: rootfs.path)
+        let entry = Guest(container: container, manager: manager, lease: lease, memoryBytes: memory, rootfsPath: rootfs.path, deviceOperations: DeviceOperationGate())
         // Hold even failed/uncertain guests until stop can establish VZ stopped.
         guests[id] = entry
         lifecycleBusy.insert(id)
         defer { lifecycleBusy.remove(id) }
         try await container.create()
         try await container.start()
-        return ["id": id, "network": "none", "memoryCeilingBytes": memory, "sourceGuestPath": "/workspace/source", "payloadGuestPath": "/opt/cowork-fixture", "payloadReadOnly": true, "rootfsRetained": true]
+        return ["id": id, "network": "none", "memoryCeilingBytes": memory, "sourceGuestPath": "/workspace/source", "payloadGuestPath": "/opt/cowork-fixture", "payloadReadOnly": true, "rootfsRetained": true,
+                "builtSharePolicyVerified": true,
+                "shares": shares.map { ["sourcePath": $0.sourcePath, "guestPath": $0.guestPath, "readOnly": $0.readOnly] }]
     }
 
     private func exec(_ request: Request) async throws -> [String: Any] {
@@ -197,6 +212,8 @@ actor ProbeController {
 
     private func vmSnapshot(_ entry: Guest, target: UInt64? = nil) async throws -> Data {
         guard let vm = entry.manager.current() else { throw ProbeFailure(code: "guest_unavailable", message: "VZ instance not created") }
+        try entry.deviceOperations.begin()
+        defer { entry.deviceOperations.finish() }
         return try await withCheckedThrowingContinuation { continuation in
             vm.vmQueue.async {
                 guard let balloon = vm.vzVirtualMachine.memoryBalloonDevices.first as? VZVirtioTraditionalMemoryBalloonDevice else {
@@ -229,6 +246,7 @@ actor ProbeController {
         result["activeExecs"] = activeExecs[id, default: 0]
         result["controllerPid"] = ProcessInfo.processInfo.processIdentifier
         result["uncertainExecs"] = execHealth[id, default: ExecHealth()].uncertain
+        result["pendingDeviceOperations"] = entry.deviceOperations.snapshot().active
         return result
     }
 
@@ -237,6 +255,7 @@ actor ProbeController {
         guard activeExecs[id, default: 0] == 0 else { throw ProbeFailure(code: "guest_busy", message: "wait for exec operations before stopping") }
         lifecycleBusy.insert(id)
         defer { lifecycleBusy.remove(id) }
+        await entry.deviceOperations.closeAndDrain()
         var cleanupError: String?
         // First invite cooperative container-init termination, then rely on
         // Containerization's kill/unmount/sync/VM-stop cleanup. Never call this

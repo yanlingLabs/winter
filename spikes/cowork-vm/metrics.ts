@@ -29,3 +29,12 @@ export async function footprint(pid: number) {
   const text = await command("/usr/bin/footprint", ["-p", String(pid)]);
   return { pid, summary: text.split("\n").filter(line => /footprint|phys_footprint|Physical|unavailable/i.test(line)).slice(0, 20) };
 }
+
+/** Passive diagnostics for the single newly observed probe backing service only. */
+export async function memoryCategories(pid: number) {
+  const [footprintCategories, vmmapSummary] = await Promise.all([
+    command("/usr/bin/footprint", ["-f", "bytes", "--swapped", "--wired", "-p", String(pid)]),
+    command("/usr/bin/vmmap", ["-summary", String(pid)]),
+  ]);
+  return { pid, footprintCategories, vmmapSummary };
+}

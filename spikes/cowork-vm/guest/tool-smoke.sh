@@ -14,7 +14,11 @@ emit() {
     printf '{"kind":"check","policy":"%s","uid":%s,"id":"%s","status":"%s","detail":"%s"}\n' "$policy" "$tool_uid" "$1" "$2" "$3"
 }
 check() { id=$1; shift; if "$@" >/dev/null 2>&1; then emit "$id" pass observed; else emit "$id" fail assertion_failed; fi; }
-denied() { id=$1; shift; if "$@" >/dev/null 2>&1; then emit "$id" fail mutation_or_access_succeeded; else emit "$id" pass operation_denied; fi; }
+emit_denial() {
+    checks=$((checks + 1)); [ "$2" != fail ] || failures=$((failures + 1))
+    printf '{"kind":"check","policy":"%s","uid":%s,"id":"%s","status":"%s","detail":"classified_denial_with_matching_positive_control","denial":{"exitCode":%s,"failureClass":"%s","expectedFailureClasses":%s,"positiveControlPassed":%s,"positiveControlExitCode":%s}}\n' "$policy" "$tool_uid" "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+}
+. /opt/denials.sh
 status_value() { awk -v key="$1:" '$1 == key { print $2; found=1; exit } END { if (!found) exit 1 }' /proc/self/status; }
 probe=/opt/syscall-probe
 scratch=/workspace/.winter/scratch
@@ -27,6 +31,9 @@ check pid_namespace test "$(readlink /proc/self/ns/pid)" != "$supervisor_pidns"
 check mount_namespace test "$(readlink /proc/self/ns/mnt)" != "$supervisor_mountns"
 check no_new_privs test "$(status_value NoNewPrivs)" = 1
 check zero_effective_caps test "$(status_value CapEff)" = 0000000000000000
+check zero_permitted_caps test "$(status_value CapPrm)" = 0000000000000000
+check zero_inheritable_caps test "$(status_value CapInh)" = 0000000000000000
+check zero_ambient_caps test "$(status_value CapAmb)" = 0000000000000000
 check zero_bounding_caps test "$(status_value CapBnd)" = 0000000000000000
 check syscall_filter_installed test "$(status_value Seccomp)" = 2
 check namespace_init_identity sh -c 'test "$(awk '\''$1=="Uid:" {print $2}'\'' /proc/1/status)" = "$1"' sh "$tool_uid"
@@ -59,6 +66,31 @@ for syscall in vsock mount ptrace unshare; do
     # Probe emits its actual return and errno, then returns success only on EPERM.
     if "$probe" --probe "$syscall"; then emit "syscall_$syscall" pass denied_with_eperm; else emit "syscall_$syscall" fail required_syscall_denial_missing; fi
 done
+for backing in host-ro host-rw; do
+    data=/workspace/.winter/$backing
+    check "${backing}_instructions_read" grep -qx host-shared-instruction "$data/instructions/WINTER.md"
+    check "${backing}_memory_read" grep -qx host-shared-memory "$data/memory/seed.txt"
+    denied "${backing}_instructions_write" sh -c 'printf attacked > "$1"' sh "$data/instructions/WINTER.md"
+    denied "${backing}_instructions_indirect" sh -c 'p=$1; f=WINTER.md; eval "printf attacked > \"$p/$f\""' sh "$data/instructions"
+    denied "${backing}_instructions_unlink" rm -f "$data/instructions/WINTER.md"
+    denied "${backing}_memory_write" sh -c 'printf attacked > "$1"' sh "$data/memory/seed.txt"
+    denied "${backing}_instructions_chmod" chmod 0666 "$data/instructions/WINTER.md"
+    check "${backing}_instructions_symlink_setup" ln -s "$data/instructions/WINTER.md" "$scratch/$backing-instructions-link-$token"
+    denied "${backing}_instructions_symlink" sh -c 'printf attacked > "$1"' sh "$scratch/$backing-instructions-link-$token"
+    denied "${backing}_instructions_parent_rename" mv "$data/instructions" "$data/instructions-moved"
+    denied "${backing}_memory_rename" mv "$data/memory/seed.txt" "$data/memory/seed-moved.txt"
+    denied "${backing}_memory_chmod" chmod 0666 "$data/memory/seed.txt"
+    denied "${backing}_memory_create" sh -c 'printf attacked > "$1/new-file"' sh "$data/memory"
+done
+check raw_host_ro_hidden test ! -e /workspace/host-ro
+check raw_host_rw_hidden test ! -e /workspace/host-rw
+check raw_virtiofs_hidden test ! -e /run/virtiofs
+check host_rw_writable_memory_read grep -q 'host-writable-memory\|tool-host-memory' /workspace/.winter/host-rw/writable-memory/seed.txt
+if [ "$policy" = auto ]; then
+    check host_rw_writable_memory_write sh -c 'printf tool-host-memory > "$1"' sh /workspace/.winter/host-rw/writable-memory/seed.txt
+else
+    denied host_rw_writable_memory_plan_write sh -c 'printf attacked > "$1"' sh /workspace/.winter/host-rw/writable-memory/seed.txt
+fi
 if "$probe" --probe landlock; then landlock_status=available; else landlock_status=unsupported; fi
 printf '{"kind":"observation","id":"landlock_abi","status":"%s","required":false,"detail":"supplementary_not_used_by_this_boundary"}\n' "$landlock_status"
 if [ "$policy" = auto ]; then

@@ -14,6 +14,9 @@ guest or demonstrate SDK conversation/subagent restoration.
   Swift dynamic library loaded in-process by a compiled Bun executable through
   an asynchronous C ABI and bounded polling. This proves local embedding, not
   the final Node-API binding or actual winter-core integration.
+- The native library and Containerization dependency used Swift's debug build.
+  Boots were sequential on a warm host cache; these are probe measurements,
+  not release-build performance targets.
 - Ad-hoc signed fixture executable, explicit virtualization/JIT/FFI entitlements.
   Production Developer ID, library validation and TCC packaging remain untested.
 - Kata 3.17.0 ARM64 kernel `6.12.28`, digest-pinned upstream vminit and Alpine
@@ -25,7 +28,7 @@ guest or demonstrate SDK conversation/subagent restoration.
   Only newly created temporary fixture folders/disks were attached. No live
   Winter home, app/daemon, Keychain or real user source folder was used.
 
-The [sanitized JSON evidence](../../spikes/cowork-vm/results/2026-10-11-offline-probe.json)
+The [reviewed-run JSON evidence](../../spikes/cowork-vm/results/2026-10-11-reviewed-offline-probe.json)
 is derived from the actual per-phase reports, which remain in the local fixture
 named by the runner. No large VM images or build outputs are checked in.
 
@@ -34,9 +37,9 @@ named by the runner. No large VM images or build outputs are checked in.
 | Check | Observation | Limit |
 | --- | --- | --- |
 | In-process control | Native VZ controller and Bun share the probe process; a new Apple VM backing service was observed per boot | Not the signed production daemon; no claim that Apple's backing service disappears from the process topology |
-| Prepared guest readiness | Five final-run boots took approximately 314–339 ms from create submission through guest init/shell start | Excludes image download/unpack, library loading, a real Winter runtime and model readiness; not a statistical performance benchmark |
-| Tool confinement | 44 assertions for each of two distinct auto tool UIDs and 52 for the plan UID passed, plus host/driver checks | Identities ran sequentially; not proof of concurrent Project sessions, every future tool integration or a complete security audit |
-| Protected control state | Tool views could not access/change the fixture's supervisor/config/SDK state, replace shared guidance or create vsock sockets; capability sets were zero with no_new_privs enabled | Uses synthetic control files and a fixed test suite, not production authenticated channels |
+| Prepared guest readiness | Five final-run boots took approximately 305–320 ms from create submission through guest init/shell start | Excludes image download/unpack, library loading, a real Winter runtime and model readiness; not a statistical performance benchmark |
+| Tool confinement | 78 assertions for each of two distinct auto tool UIDs and 86 for the plan UID passed, plus 64 direct-view assertions and host/driver checks | Identities ran sequentially; not proof of concurrent Project sessions, every future tool integration or a complete security audit |
+| Protected control state | Tool views could not access/change the fixture's supervisor/config/SDK state, replace shared guidance or create vsock sockets; capability sets were zero with no_new_privs enabled | Includes guest-local control files and host-backed guidance/memory in both host-RO and RW-to-tool-RO shapes; not production authenticated channels |
 | Direct folder edits | Guest writes appeared directly in host fixture files; a separate 0755/0644 owner-only fixture allowed both tool UIDs to edit/create/reopen | Mac ownership/modes remained unchanged; mixed owners, ACLs, TCC, revocation, watchers and broad filesystem compatibility remain untested |
 | Plan view | Read-only source/memory views rejected the tested direct/indirect/alias/rename/create/chmod writes | Not yet wired to Winter approval-policy transitions or real file tools |
 | Cold persistence | A new compiled host process and different guest boot ID read the exact marker written by the previous guest | Ordinary durable-file proof only; not a VM RAM snapshot or SDK parent/child continuation |
@@ -56,9 +59,9 @@ stayed alive, requested a balloon target, then deflated and successfully allocat
 again. Both plain and compact-before-balloon conditions ran successfully.
 
 In the final plain condition, the candidate owning Apple service's physical
-footprint was about 121 MB initially, 508 MB after allocation and 508 MB after
-free; it stayed at about 509 MB throughout four balloon samples. In the compact
-condition, footprint was 506 MB after free and about 507 MB while inflated
+footprint was about 121 MB initially, 493 MB after allocation and 493 MB after
+free; it stayed at about 494 MB throughout four balloon samples. In the compact
+condition, footprint was 508 MB after free and about 508–509 MB while inflated
 (units as reported by macOS `footprint`).
 Guest balloon counters reached 196608 inflated pages for the 256 MiB target;
 compaction scan counters changed in the compact condition. An earlier 512 MiB
@@ -71,12 +74,54 @@ remains open for this configuration.** Target readback and lower guest available
 memory are not proof that macOS got memory back. Other host activity makes global
 free-memory or swap changes unsuitable as a substitute.
 
-The next isolated diagnostic should retain full `footprint -f bytes --swapped
---wired -p <owned-pid>` and `vmmap -summary <owned-pid>` category output, without
-permission escalation or generating host memory pressure. Total footprint can
-hide offsetting allocation/accounting changes. If that remains flat, compare a
-matched kernel at or above the package's tested baseline, changing one variable
-at a time. This result is not a claim that every Apple VM backend fails reclaim.
+Passive `footprint -f bytes --swapped --wired` and `vmmap -summary` captures
+succeeded at each sample. The dominant app-specific tag 1 / Memory Tag 240
+category covers eight regions and 1 GiB virtual space. Its allocation response
+suggests guest RAM, but that interpretation is an inference rather than an API
+guarantee. It remained at zero reclaimable, volatile and empty bytes throughout
+ballooning. In the plain condition, approximately 416 MiB became
+swapped/compressed while staying charged to the footprint; that is not evidence
+of balloon return. The summary includes the corresponding category rows. The
+dedicated reusable-page counter was not captured, so these categories do not
+prove that every possible lazy-release mechanism is absent.
+
+Next compare a matched kernel at or above the package's tested baseline,
+changing one variable at a time. No deliberate host-allocation/pressure test
+was run; such an experiment needs separate user approval on this shared Mac.
+This result is not a claim that every Apple VM backend fails reclaim.
+
+## Review follow-up
+
+The [original run](../../spikes/cowork-vm/results/2026-10-11-offline-probe.json)
+retains the initial 314–339 ms measurements and simpler guest-local checks.
+Independent review identified that arbitrary command failure was insufficient
+denial evidence and that virtiofs protection needed its own tests. The reviewed
+run supersedes those checks:
+
+- Each denied shell operation records a recognized failure class and a successful
+  same-shape positive control in writable scratch. Missing files count only for
+  named hidden-control checks; EXDEV/EBUSY are limited to the relevant hardlink
+  or mountpoint-rename checks. Syscall observations record actual errno per view.
+- Both suites require named checks, complete counts and trusted post-checks.
+  The new checks demonstrated 130 classified shell denials with successful
+  positive controls, including supervisor checks, plus 12 measured syscall denials.
+- Intentionally host-writable files are protected once by the VZ RO export and
+  separately by a tool RO bind over a proven writable export. The same separate
+  host-memory file is writable in auto and denied in plan. Host sentinel bytes
+  and modes were independently checked after the guest views ran.
+- The actual built VZ directory-sharing graph is verified against the four
+  distinct source identities and per-source read-only policy. Conflicting aliases
+  and overlapping exports refuse before start. Guest group permissions are not
+  claimed as an access boundary on VZ shares.
+- Both suites check all five capability sets and no_new_privs. Each view gets a
+  fresh scratch epoch. The fixture still uses chroot and a syscall denylist;
+  production root detachment and broader syscall-policy review remain outstanding.
+
+Two failed development runs were retained: the first caught musl's alternate
+EXDEV wording; the second caught a validator ID shared by a positive auto write
+and a plan denial. Neither was counted as a pass. The final fresh pipeline
+passed, every guest reported a flushed stop, its controller/backing candidates
+were absent afterward, and no fixture ownership claim remained.
 
 ## Validation and remaining scope
 

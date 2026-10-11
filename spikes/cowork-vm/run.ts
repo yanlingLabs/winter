@@ -14,7 +14,7 @@ const fixture = realpathSync(mkdtempSync(join(tmpdir(), "winter-cowork-vm-")));
 const orchestration = acquireOrchestrator(fixture);
 let launched = false;
 try {
-  for (const name of ["source", "payload", "home"]) {
+  for (const name of ["source", "payload", "home", "shared-ro", "shared-rw"]) {
     const dir = join(fixture, name);
     if (!existsSync(dir)) mkdirSync(dir);
     if (!lstatSync(dir).isDirectory() || lstatSync(dir).isSymbolicLink()) throw new Error("fixture directories cannot be aliases");
@@ -36,8 +36,21 @@ try {
   if (existsSync(strictSeed) && (!lstatSync(strictSeed).isFile() || lstatSync(strictSeed).isSymbolicLink())) throw new Error("strict seed must be regular");
   writeFileSync(strictSeed, "source-seed"); chmodSync(strictSeed, 0o644);
   if (!existsSync(join(strict, "seed-alias"))) symlinkSync("seed.txt", join(strict, "seed-alias"));
+  for (const share of ["shared-ro", "shared-rw"]) {
+    chmodSync(join(fixture, share), 0o755);
+    for (const directory of ["instructions", "memory"]) {
+      mkdirSync(join(fixture, share, directory), { mode: 0o755 });
+      chmodSync(join(fixture, share, directory), 0o755);
+    }
+    for (const [name, content] of [["instructions/WINTER.md", "host-shared-instruction\n"], ["memory/seed.txt", "host-shared-memory\n"]]) {
+      const file = join(fixture, share, name!);
+      writeFileSync(file, content!); chmodSync(file, 0o644);
+    }
+  }
+  mkdirSync(join(fixture, "shared-rw/writable-memory"), { mode: 0o755 });
+  writeFileSync(join(fixture, "shared-rw/writable-memory/seed.txt"), "host-writable-memory\n", { mode: 0o644 });
   const payloadDigests: Record<string, string> = {};
-  for (const name of ["run.sh", "tool-smoke.sh", "run-direct.sh", "tool-direct.sh", "confine", "memprobe"]) {
+  for (const name of ["run.sh", "tool-smoke.sh", "run-direct.sh", "tool-direct.sh", "denials.sh", "confine", "memprobe"]) {
     const from = name.endsWith(".sh") ? join(root, "guest", name) : artifacts.helpers[name]!;
     copyFileSync(from, join(fixture, "payload", name)); chmodSync(join(fixture, "payload", name), 0o555);
     payloadDigests[name] = await sha256(join(fixture, "payload", name));

@@ -2,10 +2,10 @@ import { existsSync, readFileSync, writeFileSync, lstatSync, mkdirSync, rmdirSyn
 import { join, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
-import { validateConfinement, memoryObservation } from "./evidence";
+import { validateConfinement, validateDirect, memoryObservation } from "./evidence";
 import { assertOrchestrator } from "./claims";
 import { NativeClient } from "./client";
-import { footprint, hostMetrics, processes } from "./metrics";
+import { footprint, hostMetrics, memoryCategories } from "./metrics";
 
 const argv = process.argv.slice(2);
 function option(name: string): string {
@@ -49,7 +49,9 @@ async function main() {
   };
   const sample = async (label: string) => {
     const start = performance.now();
-    const value = { label, host: await hostMetrics(), guest: await exec(["/bin/sh", "-c", "cat /proc/meminfo; cat /proc/vmstat | grep -E 'balloon|pswp|pgscan|pgsteal|compact_' || true"]), native: await client.request({ method: "stats", id: "probe" }), footprint: await Promise.all((await processes()).map(p => footprint(p.pid))) };
+    const ownedCandidates = report.newBackingServiceCandidates ?? [];
+    const singleCandidate = ownedCandidates.length === 1 ? ownedCandidates[0].pid : undefined;
+    const value = { label, host: await hostMetrics(), guest: await exec(["/bin/sh", "-c", "cat /proc/meminfo; cat /proc/vmstat | grep -E 'balloon|pswp|pgscan|pgsteal|compact_' || true"]), native: await client.request({ method: "stats", id: "probe" }), footprint: await Promise.all([process.pid, ...(singleCandidate ? [singleCandidate] : [])].map(pid => footprint(pid))), categories: singleCandidate ? await memoryCategories(singleCandidate) : { unavailable: "ambiguous backing-service ownership" } };
     report.samples.push(value);
     mark("sample", { label, durationMs: performance.now() - start });
   };
@@ -67,7 +69,7 @@ async function main() {
       writeFileSync(join(fixtureRoot, "owner.json"), JSON.stringify({ pid: process.pid, stopped: false, phase }));
       created = true; // A failed create can still own a VZ instance and disk lease.
       const started = performance.now();
-      const result = await client.request({ method: "create", id: "probe", fixtureRoot, kernelPath: join(fixtureRoot, "vmlinux"), initfsPath: join(fixtureRoot, "initfs.ext4"), rootfsPath: join(fixtureRoot, "rootfs.ext4"), sourcePath: join(fixtureRoot, "source"), payloadPath: join(fixtureRoot, "payload"), memoryBytes: 1024 * 1024 * 1024 });
+      const result = await client.request({ method: "create", id: "probe", fixtureRoot, kernelPath: join(fixtureRoot, "vmlinux"), initfsPath: join(fixtureRoot, "initfs.ext4"), rootfsPath: join(fixtureRoot, "rootfs.ext4"), sourcePath: join(fixtureRoot, "source"), payloadPath: join(fixtureRoot, "payload"), sharedReadOnlyPath: join(fixtureRoot, "shared-ro"), sharedReadWritePath: join(fixtureRoot, "shared-rw"), memoryBytes: 1024 * 1024 * 1024 });
       report.readyMs = performance.now() - started;
       mark("guest-ready", { ...result, elapsedMs: report.readyMs });
       report.bootId = (await exec(["cat", "/proc/sys/kernel/random/boot_id"])).trim();
@@ -78,6 +80,14 @@ async function main() {
         const fixture = await client.request({ method: "exec", id: "probe", args: ["/bin/sh", "/opt/cowork-fixture/run.sh"], timeoutSeconds: 120 }, 135_000);
         report.confinement = fixture;
         report.confinementRecords = validateConfinement(fixture);
+        for (const share of ["shared-ro", "shared-rw"]) {
+          for (const [name, content] of [["instructions/WINTER.md", "host-shared-instruction\n"], ["memory/seed.txt", "host-shared-memory\n"]]) {
+            const path = join(fixtureRoot, share, name!), metadata = lstatSync(path);
+            check(metadata.isFile() && !metadata.isSymbolicLink() && (metadata.mode & 0o777) === 0o644 && readFileSync(path, "utf8") === content, "host-backed guidance/memory changed");
+          }
+        }
+        check(readFileSync(join(fixtureRoot, "shared-rw/writable-memory/seed.txt"), "utf8") === "tool-host-memory", "host memory auto-write/plan-preservation missing");
+        mark("host-backed-protected-state", "host-ro and rw-to-tool-ro fixture guidance/memory remain unchanged");
         mark("confinement", { records: report.confinementRecords.length, summaries: report.confinementRecords.filter((row: any) => row.kind === "summary") });
         for (const uid of [10001, 10002]) {
           const file = join(fixtureRoot, `source/.cowork-gate1-${uid}-auto-share.txt`);
@@ -94,17 +104,13 @@ async function main() {
         check(await exec(["cat", "/root/cowork-cold-state"]) === "winter-cold-state-v1", "retained guest file mismatch");
         mark("cold-persistence", { previousPid: first.pid, previousBootId: first.bootId, bootId: report.bootId });
       } else if (phase === "direct") {
-        const suiteId = "direct_strict_source";
         const strict = join(fixtureRoot, "source/strict-source");
         const metadata = (path: string) => { const st = lstatSync(path); check(!st.isSymbolicLink(), "strict host metadata path cannot be symlink"); return { uid: st.uid, gid: st.gid, mode: st.mode & 0o7777 }; };
         const before = { source: metadata(strict), seed: metadata(join(strict, "seed.txt")) };
         const result = await client.request({ method: "exec", id: "probe", args: ["/bin/sh", "/opt/cowork-fixture/run-direct.sh"], timeoutSeconds: 120 }, 135_000);
         report.direct = result;
-        check(result.exitCode === 0 && !result.stdoutTruncated && !result.stderrTruncated, `direct fixture incomplete: ${result.exitCode}`);
-        const records = String(result.stdout).trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
-        check(!records.some(row => ["fail", "unsupported"].includes(row.status)), "direct assertion failed/unsupported");
-        check(records.filter(row => row.kind === "summary" && row.id === suiteId && row.status === "pass" && row.exitCode === 0).length === 1, "direct suite summary missing");
-        for (const [policy, uid] of [["auto", 10001], ["auto", 10002], ["plan", 10001]]) check(records.filter(row => row.kind === "summary" && row.id === "direct_tool_view" && row.policy === policy && row.uid === uid && row.status === "pass" && row.failures === 0).length === 1, "direct view summary missing");
+        const records = validateDirect(result);
+        report.directRecords = records;
         const after = { source: metadata(strict), seed: metadata(join(strict, "seed.txt")) };
         check(JSON.stringify(before) === JSON.stringify(after), "host strict source ownership/modes changed");
         check(readFileSync(join(strict, "seed.txt"), "utf8") === "direct-seed-10002\n", "strict source edit missing");
