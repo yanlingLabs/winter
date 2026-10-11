@@ -727,7 +727,11 @@ export class FakeCdpTransport implements CdpTransport {
     }
   }
 
+  /** Every page-runtime call, in order (what a test asks of the page: a point brought into view, an inspect, …). */
+  readonly ops: Array<{ tabKey: string; frameId: string; op: string; arg: Record<string, any> | null }> = [];
+
   private op(t: FakeTab, frameId: string, op: string, arg: Record<string, any> | null): unknown {
+    this.ops.push({ tabKey: t.tabKey, frameId, op, arg });
     const f = this.frameOf(t, frameId);
     const key = (id: unknown): string => `${frameId}:${String(id)}`;
     const all = (): RtNode[] => { const out: RtNode[] = []; const v = (n: RtNode): void => { out.push(n); for (const c of n.children ?? []) v(c); }; for (const n of f.nodes) v(n); return out; };

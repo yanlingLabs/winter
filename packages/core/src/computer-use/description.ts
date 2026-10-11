@@ -99,7 +99,7 @@ export function computerV2Description(input: ComputerV2DescriptionInput): string
     "  title(): Promise<string>;",
     "  goto(url: string): Promise<void>;      // waits for the new page (at most 10 s); every earlier ref is stale after it. Not on the user's own tab in their browser (NotAllowed — open the page with browsers.open)",
     "  back(): Promise<void>; forward(): Promise<void>; reload(): Promise<void>;   // the same rule as goto",
-    ...(v ? ["  screenshot(o?: Quiet & { region?: [x: number, y: number, w: number, h: number]; within?: Ref; fullPage?: boolean }): Promise<Image>;   // within: one element; fullPage: the whole page, for looking"] : []),
+    ...(v ? ["  screenshot(o?: Quiet & { region?: [x: number, y: number, w: number, h: number]; within?: Ref; fullPage?: boolean }): Promise<Image>;   // within: one element; fullPage: the whole page, for looking (the user's own tab: only what is in view, never moved)"] : []),
     "  setValue(ref: Ref, value: string | boolean): Promise<void>;   // true/false: a check box, radio or switch",
     "  text(o?: Quiet & { markdown?: boolean; within?: Ref }): Promise<string>;   // the page's (or one element's) readable text",
     "  html(o?: Quiet & { within?: Ref; maxChars?: number }): Promise<string>;   // markup — scripts, field values and secrets left out",

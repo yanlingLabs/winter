@@ -27,7 +27,7 @@ import { BLOCKED_TAB_PRIMITIVES, blockedTabMembers, ensureSiteAllowed, listedHos
 import type { TabRunScope } from "./tab-scope";
 import { redactText, redactUrl } from "./page-runtime/redact";
 import { cssSelectorRefusal } from "./page-runtime/rules";
-import { pickerSentence, shownUrl, TabDriver, transportFailure, transportHasCdp3 } from "./tab-driver";
+import { pickerSentence, shownUrl, TabDriver, transportFailure, transportHasCdp3, USER_TAB_FULL_PAGE } from "./tab-driver";
 import { TransportError, type BackendId, type BrowserFamily, type CdpTransport, type TransportTab } from "./transport";
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
 import { BODY_DEFAULT_CHARS, BODY_MAX_CHARS, isTextMime, redactBody } from "./body-redact";
@@ -1927,10 +1927,14 @@ export class BrowserEngine {
     let region = Array.isArray(r) && r.length === 4 && r.every((n) => typeof n === "number" && Number.isFinite(n))
       ? { x: r[0] as number, y: r[1] as number, width: r[2] as number, height: r[3] as number } : undefined;
     const fullPage = args.fullPage === true;
+    // A picture never moves the USER's own tab (one Winter did not open, or handed over with keep()): no full-page
+    // relayout, and an element shot only where it already is.
+    const usersTab = this.usersTab(scope.sessionId, b);
+    if (fullPage && usersTab) throw new AutomationFailure("NotAllowed", USER_TAB_FULL_PAGE);
     if (args.within !== undefined) {
       if (!isRef(args.within)) throw bad("screenshot()'s within takes an element ref");
       if (fullPage) throw bad("screenshot() takes within or fullPage, not both");
-      region = await driver.rectForRef(args.within);
+      region = await driver.rectForRef(args.within, { scroll: !usersTab });
       scope.live();
     }
     const settle = this.settleFor(scope, b, args);

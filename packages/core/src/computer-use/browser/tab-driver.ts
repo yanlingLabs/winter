@@ -831,17 +831,18 @@ export class TabDriver {
   }
 
   /** Where `rec`'s viewport sits in the top frame's (CSS px), with the point `inner` (in `rec`'s viewport) brought
-   *  into view in every ancestor on the way up — so a click there lands in `rec`. */
-  private async frameOrigin(rec: FrameRec, inner: { x: number; y: number }): Promise<{ x: number; y: number }> {
+   *  into view in every ancestor on the way up — so a click there lands in `rec`. `scroll: false`: read where it is,
+   *  moving nothing. */
+  private async frameOrigin(rec: FrameRec, inner: { x: number; y: number }, scroll = true): Promise<{ x: number; y: number }> {
     if (rec.parentId === undefined) return { x: 0, y: 0 };
     const parent = this.frames.get(rec.parentId);
     if (parent === undefined) throw new AutomationFailure("StaleRef", "that element's frame is gone — call state()");
     await this.ensureRuntime(parent);
     await this.ensureOwners(parent);
     if (rec.owner === undefined) throw new Error("can't place that frame on the page");
-    const off = await this.callIn<{ x: number; y: number } | null>(parent, "frameOffset", { id: rec.owner.id, scroll: true, inner }, { expectRt: rec.owner.parentRt });
+    const off = await this.callIn<{ x: number; y: number } | null>(parent, "frameOffset", { id: rec.owner.id, scroll, inner }, { expectRt: rec.owner.parentRt });
     if (off === null) throw new AutomationFailure("StaleRef", "that element's frame is gone — call state()");
-    const up = await this.frameOrigin(parent, { x: off.x + inner.x, y: off.y + inner.y });
+    const up = await this.frameOrigin(parent, { x: off.x + inner.x, y: off.y + inner.y }, scroll);
     return { x: off.x + up.x, y: off.y + up.y };
   }
 
@@ -1267,14 +1268,23 @@ export class TabDriver {
     return await this.callIn<{ checkable: boolean; checked?: boolean }>(rec, "checkState", { id }, { expectRt: rtId });
   }
 
-  /** An element's box in the top frame's viewport (CSS px), brought into view first (for a screenshot of it). */
-  async rectForRef(ref: number): Promise<CssRect> {
-    await this.pointForRef(ref);
+  /** An element's box in the top frame's viewport (CSS px), brought into view first (for a screenshot of it).
+   *  `scroll: false` (the user's own tab): nothing is moved — an element not wholly in view is refused. */
+  async rectForRef(ref: number, o: { scroll?: boolean } = {}): Promise<CssRect> {
+    const scroll = o.scroll !== false;
+    if (scroll) await this.pointForRef(ref);
     const { rec, id, rtId } = this.resolve(ref);
     const info = await this.callIn<RtInspect | null>(rec, "inspect", { id }, { expectRt: rtId });
     if (info === null || "frame" in info) throw stale(ref);
-    const o = rec.parentId === undefined ? { x: 0, y: 0 } : await this.frameOrigin(rec, { x: 0, y: 0 });
-    return { x: info.box[0] + o.x, y: info.box[1] + o.y, width: Math.max(1, info.box[2]), height: Math.max(1, info.box[3]) };
+    const at = rec.parentId === undefined ? { x: 0, y: 0 } : await this.frameOrigin(rec, { x: 0, y: 0 }, scroll);
+    const rect = { x: info.box[0] + at.x, y: info.box[1] + at.y, width: Math.max(1, info.box[2]), height: Math.max(1, info.box[3]) };
+    if (!scroll) {
+      const [vw, vh] = await this.viewportSize();
+      if (rect.x < -1 || rect.y < -1 || rect.x + rect.width > vw + 1 || rect.y + rect.height > vh + 1) {
+        throw new AutomationFailure("NotAllowed", USER_TAB_SHOT_OUT_OF_VIEW);
+      }
+    }
+    return rect;
   }
 
   /** `viewport()`: an emulated screen size (`null`: back to the tab's own). Taken off again before the tab is let go,
@@ -1662,6 +1672,10 @@ export class TabDriver {
 
 /** A full-page screenshot's document height at most this (CSS px). */
 export const FULL_PAGE_MAX_CSS = 10_000;
+
+/** The user's own tab is never moved for a picture: `fullPage` lays the page out again, `within` would scroll. */
+export const USER_TAB_FULL_PAGE = "screenshot({ fullPage }) lays the page out again, which can move what the user sees — on the user's own tab Winter takes only what is in view: screenshot(), or text() for the whole page";
+export const USER_TAB_SHOT_OUT_OF_VIEW = "that element is not wholly in view, and Winter doesn't scroll the user's own tab for a picture — scroll() it into view first, or take screenshot()";
 
 interface FrameTreeNode { frame: { id: string; parentId?: string; url: string; urlFragment?: string }; childFrames?: FrameTreeNode[] }
 
