@@ -557,8 +557,8 @@ public struct CUFocusGuardianCore: Sendable {
 
     /// Input that can switch by itself: a click on the Dock, on a window of an app that is not in front (or on another
     /// display), on a status item, a banner or a floating panel, a trackpad swipe the gesture monitor saw.
-    mutating func noteSwitch(now: TimeInterval, _ kind: CUSwitchInput.Kind = .app, target: pid_t? = nil) {
-        input.note(now, kind, target: target)
+    mutating func noteSwitch(now: TimeInterval, _ kind: CUSwitchInput.Kind = .app, target: pid_t? = nil, quiet: Bool = false) {
+        input.note(now, kind, target: target, quiet: quiet)
         evidence += 1
     }
 
@@ -1040,8 +1040,11 @@ public struct CUFocusGuardianCore: Sendable {
         return w == app
     }
 
-    /// An app activated (heard by the always-on observer, guarding or not): the user's work in any OTHER app is over.
-    public mutating func otherAppActivated(_ pid: pid_t) {
+    /// An app activated (heard by the always-on observer, guarding or not): the user's work in any OTHER app is over —
+    /// only when that app is IN FRONT NOW and the agent has no live cause on it (a blip, a visit, a hold, rung 4, an open:
+    /// its own activation, heard late or not, never ends the user's work — review of round 12, MEDIUM #2).
+    public mutating func otherAppActivated(_ pid: pid_t, front: pid_t?, now: TimeInterval) {
+        guard front == pid, !isTouched(pid, now: now), exemptions[pid] == nil, !(visiting(now: now) && pid == visitApp) else { return }
         if let w = userWorkingApp, w != pid { userWorkingApp = nil }
         if let p = pendingWork, p.app != pid { pendingWork = nil }
     }
@@ -1175,10 +1178,14 @@ struct CUSwitchInput {
         return false
     }
 
-    mutating func note(_ now: TimeInterval, _ kind: Kind = .app, target: pid_t? = nil) { add(now, kind, target: target) }
+    mutating func note(_ now: TimeInterval, _ kind: Kind = .app, target: pid_t? = nil, quiet: Bool = false) {
+        add(now, kind, target: target, quiet: quiet)
+    }
 
-    private mutating func add(_ now: TimeInterval, _ kind: Kind, target: pid_t? = nil, life: TimeInterval = keep) {
-        lastAt = now
+    /// `quiet`: an instant that explains only its own app's change and is no "switch input" by itself (`lastAt` stays —
+    /// a click inside the app already in front switches nothing; seed 1067).
+    private mutating func add(_ now: TimeInterval, _ kind: Kind, target: pid_t? = nil, life: TimeInterval = keep, quiet: Bool = false) {
+        if !quiet { lastAt = now }
         instants.removeAll { now - $0.at > Self.keep }
         seconds.removeAll { now > $0.until }
         instants.append((now, kind, target, life))

@@ -239,6 +239,12 @@ export class BrowserEngine {
 
   owns(sessionId: string, targetId: string): boolean { return this.sessions.get(sessionId)?.bindings.has(targetId) === true; }
 
+  /** The dangerous-domain floor for a URL the daemon opens OUTSIDE a tab — a link the helper rerouted out of another
+   *  app into its default opener: the same card (or block) as `browsers.open`, the same per-session approvals. */
+  async ensureLinkAllowed(scope: TabRunScope, url: string, openerName: string): Promise<void> {
+    await ensureSiteAllowed(scope, this.approvals, this.deps.site ?? {}, url, openerName, this.cwdOf(scope.sessionId));
+  }
+
   label(sessionId: string, targetId: string): string | undefined {
     const b = this.sessions.get(sessionId)?.bindings.get(targetId);
     if (b === undefined) return undefined;

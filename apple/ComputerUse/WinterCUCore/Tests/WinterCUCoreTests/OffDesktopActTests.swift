@@ -397,6 +397,32 @@ final class OffDesktopActTests: XCTestCase {
         XCTAssertEqual(poster.entries.filter { $0.type == .leftMouseDown }.count, 1, "clicked where it is, once")
     }
 
+    /// Round 13 (dogfood): the press from the other desktop HAD landed (its dialog was there once the window was on the
+    /// user's desktop) — in the visit it is looked at first, and not clicked a second time.
+    func testAnUnconfirmedPressThatLandedIsNotClickedAgainInTheVisit() async throws {
+        world()
+        let go = fakeElement(95_037)
+        ax.add(go, role: kAXButtonRole, title: "Add a new item", frame: CGRect(x: 120, y: 400, width: 160, height: 30),
+               extra: [kAXParentAttribute: webArea])
+        ax.setActions(go, [kAXPressAction])
+        let r = ref(go)
+        do { _ = try await act(.click(CUClickAction(ref: r))); XCTFail("expected needs_desktop_visit") }
+        catch let e as CUError { XCTAssertEqual(e.code, "needs_desktop_visit", e.message) }
+        // What it did shows only now: the dialog's content near it.
+        let dialog = fakeElement(95_038)
+        ax.add(dialog, role: kAXGroupRole, title: "New item", frame: CGRect(x: 300, y: 300, width: 300, height: 200),
+               extra: [kAXParentAttribute: webArea])
+        ax.put(webArea, [kAXChildrenAttribute: ax.elements(webArea, kAXChildrenAttribute) + [dialog]])
+        var w = sys.windows[77]!
+        w.onScreen = true
+        sys.windows[77] = w
+        sys.stack = [w]
+        let done = try await act(.click(CUClickAction(ref: r)))
+        XCTAssertTrue(done.detail?.contains("took effect (seen now, on its desktop)") == true, done.detail ?? "-")
+        XCTAssertEqual(ax.performed.count, 1, "pressed once")
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "not clicked again")
+    }
+
     /// No visit is offered for an element already in its pressed state (a selected tab) or a command whose effect is not
     /// on the page (Copy): the press's answer says so instead.
     func testNoVisitIsOfferedForAnAlreadySelectedTabOrACopyCommand() async throws {

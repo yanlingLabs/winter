@@ -38,6 +38,7 @@ import type { AdapterRunScope, AppAdapters } from "./adapters";
 import { AdapterDelivery } from "./adapters/delivery";
 import type { BrowserEngine } from "./browser/engine";
 import type { TabRunScope } from "./browser/tab-scope";
+import { listedHost } from "./browser/site-policy";
 
 export const SCRIPT_TIMEOUT_DEFAULT_MS = 30_000;
 export const SCRIPT_TIMEOUT_MIN_MS = 1_000;
@@ -1273,8 +1274,9 @@ export class ComputerV2Service {
   }
 
   /** A link the helper rerouted (round 10's MEDIUM #7): opened in the background in its default app through the daemon's
-   *  own door — the opener's effective access and per-app card, like `apps.open` — and NOT bound (the agent's click
-   *  asked for no app to work in). Only http(s) and mailto. */
+   *  own door — the opener's effective access and per-app card as an ACT (opening a page in it is acting in it: a
+   *  view-only or click-only opener refuses, and so does `plan`), the dangerous-domain floor on the URL (the card or
+   *  block `browsers.open` has) — and NOT bound (the agent's click asked for no app to work in). Only http(s) and mailto. */
   private async openLink(ctx: RunCtx, url: string, metric: PrimitiveMetric): Promise<void> {
     let parsed: URL;
     try { parsed = new URL(url); } catch { throw new AutomationFailure("Refused", "the link's address could not be read — nothing was opened"); }
@@ -1284,13 +1286,28 @@ export class ComputerV2Service {
     const settings = this.deps.settings();
     const who = await this.helperCall<{ bundleId: string; name: string; path: string }>(ctx, "apps.defaultOpener", { urls: [url] }, metric);
     this.live(ctx);
-    await this.deps.policy.authorize(ctx.grants, { bundleId: who.bundleId, name: who.name }, { kind: "bind" }, ctx.abort.signal);
+    await this.deps.policy.authorize(ctx.grants, { bundleId: who.bundleId, name: who.name }, { kind: "act", primitive: "click", access: "full" }, ctx.abort.signal);
     this.live(ctx);
+    if (parsed.protocol !== "mailto:") {
+      if (this.deps.browsers !== undefined) {
+        await this.deps.browsers.ensureLinkAllowed(this.tabScope(ctx, metric), url, who.name);
+      } else {
+        // No browser engine (its site approvals live there): the shipped half of the list, refused outright.
+        const match = listedHost(url, {}, undefined);
+        if (match !== null) {
+          (ctx.sites ??= new Set()).add(match.host);
+          throw new AutomationFailure("NotAllowed", `${match.host} is on the dangerous-domains list (${match.matchedEntry}) — the link was not opened; ask the user if they need it`);
+        }
+      }
+      this.live(ctx);
+    }
     const res = await this.helperCall<{ app: { name: string; bundleId: string; pid: number }; windowID?: number }>(
       ctx, "apps.openDocument",
-      { urls: [url], sessionId: ctx.sessionId, mirror: computerUseMirrorFrom(settings), privatePath: computerUsePrivateEventPathFrom(settings) },
+      { urls: [url], app: who.bundleId, sessionId: ctx.sessionId, mirror: computerUseMirrorFrom(settings), privatePath: computerUsePrivateEventPathFrom(settings) },
       metric, undefined, { afterEnd: true });
     this.live(ctx);
+    ctx.apps.add(res.app.name);
+    if (parsed.protocol !== "mailto:") (ctx.sites ??= new Set()).add(parsed.hostname);
     const host = parsed.protocol === "mailto:" ? "a mail link" : parsed.host;
     ctx.builder.daemonLine(`the link (${host}) opened in ${res.app.name} in the background — not bound; apps.open() it to work in it`);
   }

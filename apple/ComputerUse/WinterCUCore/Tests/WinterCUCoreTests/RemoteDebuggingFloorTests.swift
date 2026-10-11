@@ -123,6 +123,7 @@ final class RemoteDebuggingFloorTests: XCTestCase {
     /// Review of round 11, MEDIUM #8: any Chromium-based app (Edge Canary is in no list), any non-web scheme's `inspect`.
     func testEveryChromiumAppAndAnyNonWebSchemeAreCovered() {
         world(bundle: "com.microsoft.edgemac.Canary", url: "edge://inspect/#devices", chromium: true)
+        core.isWebBrowserOverride = { _ in true }  // it declares http/https: a browser
         XCTAssertThrowsError(try core.floorCheckRemoteDebugging(params(.click(CUClickAction(ref: ref(checkbox)))), target))
         XCTAssertTrue(CUCore.isInspectPage("comet://inspect/#remote-debugging"))
         XCTAssertFalse(CUCore.isInspectPage("https://inspect.example.com/"))
@@ -145,5 +146,38 @@ final class RemoteDebuggingFloorTests: XCTestCase {
         XCTAssertThrowsError(try core.floorCheckRemoteDebugging(params(.click(CUClickAction(ref: ref(toolbarButton)))), target)) {
             XCTAssertTrue(isRemoteDebuggingRefusal($0))
         }
+    }
+
+    /// Review of round 12, MEDIUM #5: an Electron or CEF app (no browser) is never covered — its own `<scheme>://inspect`
+    /// route is its business.
+    func testANonBrowserChromiumAppIsNotCovered() {
+        world(bundle: "com.tinyspeck.slackmacgap", url: "slack://inspect/x", chromium: true)
+        core.isWebBrowserOverride = { _ in false }
+        XCTAssertNoThrow(try core.floorCheckRemoteDebugging(params(.click(CUClickAction(ref: ref(checkbox)))), target))
+    }
+
+    /// Review of round 12, MEDIUM #5: a standard window whose walk is cut short (a deep page) is no dialog candidate —
+    /// a tab titled "how to allow remote debugging" never refuses every act.
+    func testADeepPageWindowIsNoDialogCandidate() {
+        world(url: "https://example.com", standardTitled: "how to allow remote debugging – Google Search")
+        var parent = other
+        var chain: [AXUIElement] = []
+        for i in 0..<230 {
+            let g = fakeElement(Int32(99_100 + i))
+            ax.add(g, role: kAXGroupRole, extra: [kAXParentAttribute: parent])
+            ax.put(parent, [kAXChildrenAttribute: [g]])
+            chain.append(g)
+            parent = g
+        }
+        XCTAssertNoThrow(try core.floorCheckRemoteDebugging(params(.click(CUClickAction(ref: ref(toolbarButton)))), target))
+    }
+
+    /// Review of round 12, LOW: the capture-only title rule is anchored.
+    func testTheInspectTitleRuleIsAnchored() {
+        XCTAssertTrue(CUCore.isInspectPageTitle("Inspect with Chrome Developer Tools"))
+        XCTAssertFalse(CUCore.isInspectPageTitle("How to Inspect with Chrome Developer Tools"))
+        XCTAssertTrue(CUCore.isInspectPageTitle("chrome://inspect/#devices"))
+        XCTAssertFalse(CUCore.isInspectPageTitle("https://inspect.example.com"))
+        XCTAssertFalse(CUCore.isInspectPageTitle("chrome://inspection-notes"))
     }
 }

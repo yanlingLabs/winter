@@ -125,8 +125,14 @@ public struct CUStateFormatter: Sendable {
     public func renderedValue(_ n: CUNode) -> String? {
         if n.isSecure { return "<redacted>" }
         guard let v = n.value, !v.isEmpty, v != n.name else { return nil }
-        return quote(cut(v))
+        guard v.count > valueCap else { return quote(v) }
+        // A long value is cut, and says how long it is and where it reads whole (round 13's dogfood item 14).
+        let whole = valueCap < Self.wholeValueCap ? " — state({within:\(n.ref)}) shows it whole" : ""
+        return quote(cut(v)) + " (\(v.count) characters\(whole))"
     }
+
+    /// The value cap of a `state({ within })` read: one element's field, read back whole up to this many characters.
+    public static let wholeValueCap = 8000
 
     /// Where typed text goes in a focused text element: "caret 12/40" (the caret's UTF-16 offset and the text's
     /// length, as accessibility counts), or `selected 3–9 ("hello")` with the selected text cut to 40 characters.

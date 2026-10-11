@@ -75,10 +75,10 @@ final class GuardianRound11Tests: XCTestCase {
         g.end()
         g.begin(view: CUGuardedView(app: 7, space: 100))
         XCTAssertTrue(g.userIsWorking(in: 7, front: 7, now: 30), "still in it, after a pause between scripts")
-        g.otherAppActivated(7)
+        g.otherAppActivated(7, front: 7, now: 31)
         XCTAssertTrue(g.userIsWorking(in: 7, front: 7, now: 31), "its own activation ends nothing")
         g.end()
-        g.otherAppActivated(8)  // between scripts: they went to another app
+        g.otherAppActivated(8, front: 8, now: 40)  // between scripts: they went to another app
         g.begin(view: CUGuardedView(app: 7, space: 100))
         XCTAssertFalse(g.userIsWorking(in: 7, front: 7, now: 60), "back to look: not until they interact anew")
     }
@@ -207,6 +207,11 @@ final class GuardianRound11Tests: XCTestCase {
         core.secureInputOwnerOverride = 1
         XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "another app holds it")
         core.secureInputOwnerOverride = 500
+        // Review of round 12, MEDIUM #3: held by the app in front, but the user is only looking (Terminal's Secure
+        // Keyboard Entry): nothing corroborates work — not refused.
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "only looking")
+        // Input of theirs a moment ago: working.
+        core.noteHardwareInput(now: core.clock.nowSeconds(), move: false)
         XCTAssertThrowsError(try core.refuseWhileUserWorks(t))
         sys.front = 1
         XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "not in front")

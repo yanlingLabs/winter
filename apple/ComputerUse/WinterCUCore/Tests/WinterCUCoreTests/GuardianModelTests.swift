@@ -83,7 +83,6 @@ final class GuardianModelTests: XCTestCase {
         // Round 11's sweep of seeds 1000–1079 (each failed on round 10's engine too; 10 more of its failures are gone):
         (1018, "I4: settled at U, should be X@200 — an untouched U sent back as the agent's indirect effect after the user moved"),
         (1022, "I2: the engine's place T@200, the user's T@100 — the same app on two desktops"),
-        (1067, "I2: the engine's place T2@300 (the visited app), the user's X@200"),
     ]
 
     func testKnownFailingSeedsAreStillKnown() async {

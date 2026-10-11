@@ -121,6 +121,8 @@ struct CUAXWindow {
     var frame: CGRect
     var focused: Bool
     var main: Bool
+    /// A standard (document) window — not a panel, a dialog or a find bar's utility window. Unknown counts as standard.
+    var standard: Bool = true
 }
 
 enum CUAXWindows {
@@ -146,12 +148,28 @@ enum CUAXWindows {
             }
             guard let wid = id else { continue }
             used.insert(wid)
+            let sub = ax.string(w, kAXSubroleAttribute)
             out.append(CUAXWindow(element: w, id: wid, title: title, frame: frame,
                                   focused: focused.map { CFEqual($0, w) } ?? false,
-                                  main: main.map { CFEqual($0, w) } ?? false))
+                                  main: main.map { CFEqual($0, w) } ?? false,
+                                  standard: sub == nil || sub == kAXStandardWindowSubrole))
         }
         return out
     }
+
+    /// A window by title, best match first (dogfood, round 13: a bind by the page's title matched Chrome's find bar,
+    /// "Find in page ⏎ <title>"): an exact title on a standard window, then an exact title on any, then a title that
+    /// contains it on a standard window, then on any. Pure.
+    static func titleMatch(_ windows: [CUAXWindow], _ t: String) -> CUAXWindow? {
+        let want = t.lowercased()
+        let exact = windows.filter { $0.title.lowercased() == want }
+        if let w = exact.first(where: \.standard) ?? exact.first { return w }
+        let partial = windows.filter { $0.title.lowercased().contains(want) }
+        return partial.first(where: \.standard) ?? partial.first
+    }
+
+    /// Whether `t` names `w` exactly (any case).
+    static func exactTitle(_ w: CUAXWindow, _ t: String) -> Bool { w.title.lowercased() == t.lowercased() }
 
     /// The requested window, else the main one, else the focused one, else the first.
     static func choose(_ windows: [CUAXWindow], selector: CUWindowSelector?, appName: String = "The app") throws -> CUAXWindow {
@@ -161,9 +179,7 @@ enum CUAXWindows {
                 if let w = windows.first(where: { $0.id == id }) { return w }
                 throw CUError.invalidParams("this app has no window \(id)")
             case .title(let t):
-                let want = t.lowercased()
-                if let w = windows.first(where: { $0.title.lowercased() == want })
-                    ?? windows.first(where: { $0.title.lowercased().contains(want) }) { return w }
+                if let w = titleMatch(windows, t) { return w }
                 let have = windows.map { "“\($0.title)”" }.joined(separator: ", ")
                 throw CUError.invalidParams("no window titled “\(t)” — windows: \(have.isEmpty ? "none" : have)")
             }
@@ -234,6 +250,13 @@ enum CUWindowResolver {
         let listed = Set(axWindows.map(\.id))
         let offSpace = server.filter { CUWindowServer.isRealWindow($0) && !listed.contains($0.id) }
         if let selector {
+            // A window on this desktop whose title only CONTAINS the one asked for never beats one elsewhere whose title IS
+            // it (round 13: the find bar's "Find in page ⏎ <title>" here won over the page's own window on another
+            // desktop).
+            if case .title(let t) = selector, let here = try? CUAXWindows.choose(axWindows, selector: selector, appName: appName),
+               !CUAXWindows.exactTitle(here, t), let there = offSpace.first(where: { $0.title.lowercased() == t.lowercased() }) {
+                return try reach([there], appName: appName, privatePath: privatePath, fx)
+            }
             if let w = try? CUAXWindows.choose(axWindows, selector: selector, appName: appName) { return Outcome(window: w) }
             let match: CUWindowServerWindow? = {
                 switch selector {

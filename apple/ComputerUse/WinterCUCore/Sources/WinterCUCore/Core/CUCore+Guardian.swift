@@ -352,6 +352,17 @@ extension CUCore {
             userInteracted(front)
         case .rightMouseDown, .otherMouseDown, .scrollWheel:
             if guardianLock.withLock({ guardianCore.userWorkingApp == front }) { return }  // marked already: no window lookup
+            // A scroll comes in bursts of dozens of events: the window under the pointer is read at most every 250 ms
+            // (review of round 12, LOW — a full window-list read per event over another app).
+            if type == .scrollWheel {
+                let now = clock.nowSeconds()
+                let due = guardianLock.withLock { () -> Bool in
+                    guard now - lastScrollWorkCheck >= 0.25 else { return false }
+                    lastScrollWorkCheck = now
+                    return true
+                }
+                guard due else { return }
+            }
             guard let point = location, windowUnder(point)?.pid == front else { return }
             userInteracted(front)
         default:
@@ -402,7 +413,18 @@ extension CUCore {
     func refuseWhileUserWorks(_ t: CUTarget) throws {
         // Under Secure Event Input the tap sees no key: when the bound app in front holds it itself (a password or a
         // secure field of its own has the keyboard), the user is taken to be working in it (review of round 10, LOW #10).
-        let secureOwner = secureInputOn && sys.frontmostPid() == t.pid && secureInputOwnerPid() == t.pid
+        // Corroborated (review of round 12, MEDIUM #3: Terminal's Secure Keyboard Entry holds it whenever Terminal is in
+        // front, and a user switching there only to look must block nothing): a secure field of the app has the focus, or
+        // input of theirs came in the last 2.5 s. The owner may be a true part of the app (a WebContent's password field).
+        let secureOwner: Bool = {
+            guard secureInputOn, sys.frontmostPid() == t.pid, let owner = secureInputOwnerPid(),
+                  owner == t.pid || sys.isContentProcess(owner, of: t.pid) else { return false }
+            let now = clock.nowSeconds()
+            let recent = guardianLock.withLock { now - lastHardwareActionAt <= 2.5 }
+            let secureField = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
+                .flatMap { ax.string($0, kAXSubroleAttribute) } == kAXSecureTextFieldSubrole
+            return recent || secureField
+        }()
         guard secureOwner || userIsWorking(in: t.pid) else { return }
         CULog.act.notice("act in \(t.appName, privacy: .public): refused — the user is working in it")
         throw CUError.refused(.userWorking, "the user is working in \(t.appName) right now — wait and retry, or ask them")
@@ -778,6 +800,9 @@ extension CUCore {
         let front = sys.frontmostPid()
         let elsewhere = sys.activeSpace().flatMap { active in sys.windowSpaces(hit.id).map { !$0.contains(active) } } ?? false
         let isTarget = boundTargetPids().contains(hit.pid)
+        // A click into the app already in front is still input for THAT app: should their place move before the click
+        // lands (a desktop switch of theirs right after), the app coming back is theirs (seed 1067).
+        if hit.pid == front, !elsewhere { guardianLock.withLock { guardianCore.noteSwitch(now: now, .app, target: hit.pid, quiet: true) } }
         guard hit.pid != front || elsewhere || isTarget else { return nil }
         if hit.pid == front, !elsewhere {
             // Into the bound target that is in front already: no activation will come — their place now.
@@ -796,18 +821,37 @@ extension CUCore {
         if isTarget, sys.frontmostPid() != hit.pid {
             // The window clicked comes forward with its app — never the app's main window elsewhere (an activation alone
             // follows that one, to its desktop: found by the model-based test, a click into the target's window here took
-            // the user to the desktop of its other window).
-            let pid = hit.pid
-            let wid = hit.id
-            let bring = { [weak self] in
-                guard let self else { return }
-                if let w = self.targetWindowElement(pid: pid, windowID: wid) { try? self.ax.perform(w, kAXRaiseAction) }
-                _ = self.sys.activate(pid: pid)
-            }
-            if guardianRestoreSync { bring() } else { DispatchQueue.global(qos: .userInitiated).async(execute: bring) }
+            // the user to the desktop of its other window). Only once the button comes up WITHOUT a drag (review of round
+            // 9, #8): a drag out of a background window activates nothing — a file dragged from a background Finder into
+            // Mail must not bring Finder up over the drop.
+            guardianLock.withLock { pendingClickBring = (hit.pid, hit.id, point, now) }
         }
         return hit.pid
     }
+
+    /// The user's left button came up (the session tap): a click — not a drag — into a bound target's background window
+    /// brings that window forward with its app now.
+    func onPhysicalMouseUp(at point: CGPoint, userData: Int64, now: Double) {
+        guard !CUEventStamp.isOurs(userData) else { return }
+        guard let p = guardianLock.withLock({ () -> (pid: pid_t, wid: UInt32, at: CGPoint, time: Double)? in
+            defer { pendingClickBring = nil }
+            return pendingClickBring
+        }) else { return }
+        guard now - p.time <= 2, hypot(point.x - p.at.x, point.y - p.at.y) <= Self.clickSlop else {
+            CULog.guardian.notice("the user dragged out of \(self.appName(p.pid), privacy: .public)'s window: nothing brought forward")
+            return
+        }
+        guard sys.frontmostPid() != p.pid else { return }
+        let bring = { [weak self] in
+            guard let self else { return }
+            if let w = self.targetWindowElement(pid: p.pid, windowID: p.wid) { try? self.ax.perform(w, kAXRaiseAction) }
+            _ = self.sys.activate(pid: p.pid)
+        }
+        if guardianRestoreSync { bring() } else { DispatchQueue.global(qos: .userInitiated).async(execute: bring) }
+    }
+
+    /// How far the pointer may move between a button's down and up and still be a click (points).
+    static let clickSlop: CGFloat = 4
 
     /// The accessibility element of a bound target's window `windowID` (its bound window's, else the app's listing).
     func targetWindowElement(pid: pid_t, windowID: UInt32) -> AXUIElement? {
@@ -854,11 +898,20 @@ extension CUCore {
             let source = CFMachPortCreateRunLoopSource(nil, port, 0)
             CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
             CGEvent.tapEnable(tap: port, enable: true)
-            while !Thread.current.isCancelled, CFRunLoopRunInMode(.defaultMode, 0.25, false) != .stopped {}
+            // (A run loop with no source left returns `.finished` at once: the thread ends then, never spins.)
+            while !Thread.current.isCancelled {
+                let r = CFRunLoopRunInMode(.defaultMode, 0.25, false)
+                if r == .stopped || r == .finished { break }
+            }
         }
         thread.name = "Winter CPS focus tap"
         cpsTapThread = thread
         thread.start()
+    }
+
+    /// The CPS tap was disabled by the system (a slow callback, or secure input): on again (review of round 12, LOW).
+    func reenableCPSTap() {
+        guardianLock.withLock { if let port = cpsTapPort { CGEvent.tapEnable(tap: port, enable: true) } }
     }
 
     /// Tears down the CPS tap. Called from `stopGuardian`, which already holds `guardianLock`, so it resets
@@ -879,12 +932,13 @@ final class CUCPSTapContext {
 }
 
 /// The listen-only CPS tap callback: reads the type-21 notification's fields and hands them to the core. It
-/// returns the event unchanged (listen-only ignores the return, but a disabled tap is re-enabled).
+/// returns the event unchanged (listen-only ignores the return); a tap the system disabled is enabled again.
 private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
-    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+    guard let refcon, let core = Unmanaged<CUCPSTapContext>.fromOpaque(refcon).takeUnretainedValue().core else {
         return Unmanaged.passUnretained(event)
     }
-    guard let refcon, let core = Unmanaged<CUCPSTapContext>.fromOpaque(refcon).takeUnretainedValue().core else {
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        core.reenableCPSTap()
         return Unmanaged.passUnretained(event)
     }
     // Hardware-origin input (no source process, not ours, a type a person makes): the user's own — a pointer move
@@ -901,6 +955,10 @@ private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
     if type == .leftMouseDown {
         core.onPhysicalClick(at: event.location, userData: event.getIntegerValueField(.eventSourceUserData), flags: event.flags,
                              now: core.clock.nowSeconds())
+        return Unmanaged.passUnretained(event)
+    }
+    if type == .leftMouseUp {
+        core.onPhysicalMouseUp(at: event.location, userData: event.getIntegerValueField(.eventSourceUserData), now: core.clock.nowSeconds())
         return Unmanaged.passUnretained(event)
     }
     guard type.rawValue == CUFocusTaps.processNotificationType else { return Unmanaged.passUnretained(event) }

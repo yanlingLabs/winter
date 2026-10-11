@@ -239,6 +239,28 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertEqual(poster.keyDowns.count, 2)
     }
 
+    /// Round 13's dogfood item 13: a field scrolled out of view is scrolled to before the focus click — the click goes
+    /// to where it is now, never to a point outside the window (it would land on something else).
+    func testAFieldScrolledOutOfViewIsScrolledToBeforeTheFocusClick() async throws {
+        safari(fieldOwner: pid)
+        _ = searchHasFocus()
+        ax.put(field, [kAXFocusedAttribute: kCFBooleanFalse])
+        var below = CGPoint(x: 20, y: 1400), size = CGSize(width: 300, height: 24)
+        ax.put(field, [kAXPositionAttribute: AXValueCreate(.cgPoint, &below)!, kAXSizeAttribute: AXValueCreate(.cgSize, &size)!])
+        ax.refuses.insert("\(token(field)):\(kAXPressAction)")
+        ax.onPerform = { [unowned self] action in
+            guard action == "\(token(field)):AXScrollToVisible" else { return }
+            var into = CGPoint(x: 20, y: 300)
+            ax.put(field, [kAXPositionAttribute: AXValueCreate(.cgPoint, &into)!])
+        }
+        poster.onPost = { [unowned self] e in if e.type == .leftMouseUp { ax.focus(pid: pid, on: field) } }
+        try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+        XCTAssertTrue(ax.performed.contains("\(token(field)):AXScrollToVisible"), "scrolled to first")
+        let downs = poster.entries.filter { $0.type == .leftMouseDown }
+        XCTAssertEqual(downs.count, 1)
+        XCTAssertEqual(downs.first?.location.y ?? 0, 312, accuracy: 1, "at the field's centre where it is now")
+    }
+
     func testAMenuCommandMakesTheBoundWindowKeyThroughTheElementJustWorkedOn() async throws {
         safari(fieldOwner: pid)
         ax.makeSettable(field, kAXValueAttribute)
@@ -379,9 +401,15 @@ final class KeyboardTargetTests: XCTestCase {
         sys.contentProcesses[content] = pid
         ax.put(field, [kAXValueAttribute: "existing"])
         let start = Date()
-        let r = try await act(.paste(CUPasteAction(text: "hello")))
+        // Round 13's dogfood item 12: never a success — Uncertain (sent, not confirmed; never retried).
+        do {
+            _ = try await act(.paste(CUPasteAction(text: "hello")))
+            XCTFail("a field that shows its text and not the paste is no success")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["uncertain"], .bool(true), e.message)
+            XCTAssertTrue(e.message.contains("does not show the pasted text"), e.message)
+        }
         XCTAssertLessThan(Date().timeIntervalSince(start), 1.0, "no 1.5 s wait for a web editor")
-        XCTAssertTrue(r.detail?.contains("unconfirmed") ?? false, r.detail ?? "")
     }
 
     func testAnInsertThatCantBeReadBackInWebContentIsNeverTypedAgain() async throws {
@@ -604,6 +632,10 @@ final class KeyboardTargetTests: XCTestCase {
 
     func testSeveralLinesIntoAFieldThatReadsBackGoAsAPasteAndSaySo() async throws {
         safari(fieldOwner: pid)
+        // The paste lands (⌘V): the field shows it — an unshown paste is Uncertain since round 13.
+        poster.onPost = { [unowned self] e in
+            if e.type == .keyDown, e.flags.contains(.maskCommand) { ax.put(field, [kAXValueAttribute: "one\ntwo"]) }
+        }
         let r = try await act(.type(CUTypeAction(text: "one\ntwo", into: ref(field))))
         XCTAssertTrue(r.detail?.hasPrefix("as a paste (several lines go as a paste into a field that reads them back)") ?? false, r.detail ?? "")
     }

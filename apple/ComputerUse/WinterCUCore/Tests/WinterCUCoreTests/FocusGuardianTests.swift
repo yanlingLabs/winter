@@ -605,11 +605,22 @@ final class FocusGuardianTests: XCTestCase {
         let (core, sys) = clickWorld()
         defer { core.stopGuardian() }
         XCTAssertEqual(core.onPhysicalClick(at: CGPoint(x: 100, y: 100), userData: 0, now: 10), 500)
+        XCTAssertEqual(sys.activated, [], "nothing until the button comes up — it may be a drag (review of round 9, #8)")
+        core.onPhysicalMouseUp(at: CGPoint(x: 101, y: 100), userData: 0, now: 10.1)
         XCTAssertEqual(sys.activated, [500], "activated so the user's click works normally")
         // The activation that follows is the user's: nothing put back, nothing said.
         core.onActivation(pid: 500)
         XCTAssertEqual(sys.activated, [500], "the guardian did not fight the user")
         XCTAssertTrue(core.takeGuardianNotes().isEmpty)
+    }
+
+    /// Review of round 9, #8: a drag out of a bound target's background window brings nothing forward.
+    func testADragOutOfABoundTargetsWindowBringsNothingForward() {
+        let (core, sys) = clickWorld()
+        defer { core.stopGuardian() }
+        _ = core.onPhysicalClick(at: CGPoint(x: 100, y: 100), userData: 0, now: 10)
+        core.onPhysicalMouseUp(at: CGPoint(x: 400, y: 300), userData: 0, now: 10.6)
+        XCTAssertEqual(sys.activated, [], "a drag: nothing brought forward")
     }
 
     func testAHelperStampedClickIsIgnoredAndTheActivationIsStillPutBack() {
