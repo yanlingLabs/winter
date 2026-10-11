@@ -84,8 +84,9 @@ func computerV2CleanTitle(_ title: String?) -> String? {
 ///   a bundle id or an `.app` path, shown as the app's name), the host of each `browsers.open(…)` URL
 ///   ("example.com"), plus "Screen" for the whole-screen members. At most two are named; the rest are
 ///   counted ("Notes, Mail +1").
-/// - **Verbs** are the target API's members the script calls (`click`, `paste`, `state`, …), deduped in
-///   first-seen order, at most four. `apps.open` itself is not a verb: it is the app part.
+/// - **Verbs** are the target API's members the script calls (`click`, `paste`, `state`, …) and the saved scripts
+///   it runs (`scripts.exportCsv(…)` → "script exportCsv"), deduped in first-seen order, at most four.
+///   `apps.open` itself is not a verb: it is the app part; `scripts.save` is not a saved script's call.
 /// - A script that uses verbs on an app bound by an EARLIER call (the runtime persists variables) names
 ///   no app, and reads "Using the computer · click, state" rather than a bare verb list.
 func computerV2DerivedLabel(code: String) -> String? {
@@ -183,16 +184,25 @@ func computerV2AppDisplayName(_ raw: String) -> String? {
     return shortened(trimmed)
 }
 
-/// PURE: the target-API members a script calls, deduped, in first-seen order.
+/// A saved script's call (Phase 4): `scripts.exportCsv(` — its name bounded like the daemon's rule.
+private let savedScriptCallPattern = try! NSRegularExpression(pattern: #"\bscripts\s*\.\s*([a-z][A-Za-z0-9_]{0,47})\s*\("#)
+
+/// PURE: the target-API members a script calls and the saved scripts it runs ("script exportCsv"), deduped, in
+/// first-seen order.
 func computerV2Verbs(in code: String) -> [String] {
-    var seen: Set<String> = []
-    var verbs: [String] = []
-    for match in verbPattern.matches(in: code, range: NSRange(code.startIndex..., in: code)) {
+    let whole = NSRange(code.startIndex..., in: code)
+    var found: [(offset: Int, verb: String)] = []
+    for match in verbPattern.matches(in: code, range: whole) {
         guard let range = Range(match.range(at: 1), in: code) else { continue }
-        let verb = String(code[range])
-        if seen.insert(verb).inserted { verbs.append(verb) }
+        found.append((match.range.location, String(code[range])))
     }
-    return verbs
+    for match in savedScriptCallPattern.matches(in: code, range: whole) {
+        guard let range = Range(match.range(at: 1), in: code) else { continue }
+        let name = String(code[range])
+        if name != "save" { found.append((match.range.location, "script \(name)")) }
+    }
+    var seen: Set<String> = []
+    return found.sorted { $0.offset < $1.offset }.map(\.verb).filter { seen.insert($0).inserted }
 }
 
 // MARK: - The script

@@ -32,7 +32,8 @@ import type { RecentApps } from "./recent-apps";
 import { ResultBuilder, type ResultContent, type ScriptError } from "./result";
 import type { AutomationTelemetry, PrimitiveMetric } from "./telemetry";
 import { AutomationWorker, AutomationWorkerUnavailable, type AutomationWorkerOptions, type CallMessage } from "./worker-host";
-import { APP_PRIMITIVES, BROWSER_PRIMITIVES, EXTRA_PRIMITIVES, GLOBAL_PRIMITIVES, TAB_PRIMITIVES, type AppHandle, type ImageHandle } from "./worker/bridge";
+import { APP_PRIMITIVES, BROWSER_PRIMITIVES, EXTRA_PRIMITIVES, GLOBAL_PRIMITIVES, SCRIPT_PRIMITIVES, savedScriptNameOk, TAB_PRIMITIVES, type AppHandle, type ImageHandle, type SavedScriptSource } from "./worker/bridge";
+import { SavedScripts } from "./saved-scripts";
 import type { AdapterRunScope, AppAdapters } from "./adapters";
 import { AdapterDelivery } from "./adapters/delivery";
 import type { BrowserEngine } from "./browser/engine";
@@ -105,6 +106,8 @@ export interface ComputerV2ServiceDeps {
   screenshotSink?(shot: { sessionId: string; primitive: string; mime: string; base64: string }): void;
   /** App adapters (Phase 2): extras, dictionary wrappers and guides, delivered at bind (`adapters/`). */
   adapters?: AppAdapters;
+  /** Phase 4: the sessions' saved scripts (`scripts.save`); the service makes its own when absent. */
+  savedScripts?: SavedScripts;
 }
 
 /** `windowId`: the bound window (its window-server id), from the bind and every `useWindow` — what an app adapter's
@@ -252,6 +255,9 @@ interface RunCtx {
   handoffs?: number;
   /** Phase 2: browser-tab primitives still running (the run's tab locks wait for them at its end). */
   tabWork?: Set<Promise<unknown>>;
+  /** Phase 4, for the audit line: the saved scripts this run saved and ran (names only). */
+  scriptsSaved?: Set<string>;
+  scriptsRan?: Set<string>;
 }
 
 const isRef = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
@@ -276,11 +282,20 @@ export class ComputerV2Service {
   /** Which apps' "web pages don't react to hover" line this session's model has seen (once per session per app; again
    *  after a compaction, a reset, a worker restart — the adapter delivery's rule). */
   readonly hoverNotes = new AdapterDelivery();
+  /** Phase 4: the sessions' saved scripts — outside `SessionState`, which the idle end deletes. */
+  readonly savedScripts: SavedScripts;
+  /**
+   * Sessions that have had a worker (spine §5.7): kept OUTSIDE `SessionState` — the idle end deletes that, so without
+   * this the next call started silently and the model found out from an `undefined` or a `TargetLost` that its
+   * variables and handles were gone. Removed only when the session is deleted (and with the daemon).
+   */
+  private readonly ranWorker = new Set<string>();
   private stopped = false;
 
   constructor(private readonly deps: ComputerV2ServiceDeps) {
     this.locks = deps.locks ?? new TargetLocks();
     this.diffBases = deps.diffBases ?? new DiffBases();
+    this.savedScripts = deps.savedScripts ?? new SavedScripts();
   }
 
   private now(): number { return (this.deps.now ?? Date.now)(); }
@@ -325,19 +340,29 @@ export class ComputerV2Service {
   private async runNow(call: ScriptCall, input: ScriptInput, state: SessionState, timeoutMs: number): Promise<ScriptResult> {
     const { sessionId } = call;
     const builder = new ResultBuilder();
+    // Saved scripts survive a reset and every restart (re-installed below): the notice says so — never which.
+    const kept = this.savedScripts.any(sessionId) ? " Saved scripts are kept." : "";
     if (input.reset === true) {
       this.resetSession(sessionId, state);
-      builder.notice("The automation runtime was reset: earlier variables and bindings are gone (apps stay open).");
+      builder.notice(`The automation runtime was reset: earlier variables and bindings are gone (apps stay open).${kept}`);
     } else if (state.worker === undefined || !state.worker.alive) {
-      if (state.hadWorker) builder.notice("The automation runtime restarted; earlier variables and bindings are gone.");
+      if (state.hadWorker) builder.notice(`The automation runtime restarted; earlier variables and bindings are gone.${kept}`);
+      // The idle end deleted this session's state with its `hadWorker`; `ranWorker` remembers it had one (§5.7).
+      else if (this.ranWorker.has(sessionId)) builder.notice(`The automation runtime restarted after ${idleWords(this.deps.idleMs ?? WORKER_IDLE_MS)} without use; earlier variables and bindings are gone.${kept}`);
       this.forgetBindings(sessionId, state);
     }
     // The fence is per SESSION: a runtime that read the screen in an earlier call may print what it read now.
     if (state.tainted) builder.markScreenRead();
+    // A FRESH worker (a first call, a reset, an idle end, a crash, a cancel that killed it) gets the session's saved
+    // scripts before its first run.
+    let install: SavedScriptSource[] | undefined;
     if (state.worker === undefined || !state.worker.alive) {
       try {
         state.worker = await (this.deps.startWorker?.() ?? AutomationWorker.start({ ...this.deps.worker, log: (l) => this.log(l) }));
         state.hadWorker = true;
+        this.ranWorker.add(sessionId);
+        const saved = this.savedScripts.forInstall(sessionId);
+        if (saved.length > 0) install = saved;
       } catch (err) {
         const message = err instanceof AutomationWorkerUnavailable ? err.message : `the automation runtime could not start (${err instanceof Error ? err.message : "error"})`;
         return builder.build({ error: { name: "HelperUnavailable", message } });
@@ -391,7 +416,17 @@ export class ComputerV2Service {
         if (img === undefined) { builder.text("[show(): that image is no longer available]"); return; }
         builder.image(img.data, img.mime);
       },
-    });
+    }, install);
+    // A saved script the fresh worker could not re-create (it compiled when it was saved, so this takes an engine
+    // change): dropped, and said — only for names this run actually sent (the worker is untrusted).
+    if (outcome.kind === "done" && install !== undefined && outcome.installFailed !== undefined) {
+      const sent = new Set(install.map((e) => e.name));
+      for (const name of new Set(outcome.installFailed)) {
+        if (!sent.has(name)) continue;
+        this.savedScripts.drop(sessionId, name);
+        builder.notice(`The saved script ${name} could not be re-created in the restarted runtime and was dropped — save it again.`);
+      }
+    }
 
     // Cancelled with a type/paste still in flight: the worker gave the script up at once, but the helper's answer
     // (how far the typing got) is worth the wait — the helper stops within a key and answers within the client's
@@ -459,6 +494,10 @@ export class ComputerV2Service {
       durationMs: this.now() - started, outcome: outcomeWord, ...(ctx.visitsClaimed > 0 ? { desktopVisits: ctx.visitsClaimed } : {}),
       ...(ctx.sites === undefined ? {} : { sites: [...ctx.sites] }), ...(ctx.browsers === undefined ? {} : { browsers: [...ctx.browsers] }),
       ...(ctx.downloads === undefined ? {} : { downloads: ctx.downloads }), ...(ctx.handoffs === undefined ? {} : { handoffs: ctx.handoffs }),
+      // Saved scripts: their NAMES only — never a source or an argument.
+      ...(ctx.scriptsSaved === undefined && ctx.scriptsRan === undefined ? {} : {
+        scripts: { ...(ctx.scriptsSaved === undefined ? {} : { saved: [...ctx.scriptsSaved] }), ...(ctx.scriptsRan === undefined ? {} : { ran: [...ctx.scriptsRan] }) },
+      }),
     });
     return builder.build(error === undefined ? {} : { error });
   }
@@ -543,6 +582,8 @@ export class ComputerV2Service {
       case "screen.screenshot": return await this.screenScreenshot(ctx, args, metric);
       case "screen.windows": return await this.screenWindows(ctx, args, metric);
       case "screen.appAt": return await this.screenAppAt(ctx, args, metric);
+      case "scripts.save": return this.saveScript(ctx, args, metric);
+      case "scripts.run": return this.runSavedScript(ctx, args, metric);
       default: break;
     }
     const targetId = msg.target ?? "";
@@ -551,6 +592,28 @@ export class ComputerV2Service {
     const run = prev.catch(() => {}).then(() => this.targetPrimitive(ctx, targetId, msg.primitive, args, metric));
     ctx.chains.set(targetId, run);
     return await run;
+  }
+
+  // ── saved scripts (Phase 4) ────────────────────────────────────────────────────────────────────
+
+  /** `scripts.save(name, fn)`: kept for the session (memory only). Allowed under every policy — saving code does
+   *  nothing; what it later does is checked primitive by primitive. Everything is checked again here (the worker is
+   *  untrusted); the source is never logged, measured or audited — the metric carries the NAME only. */
+  private saveScript(ctx: RunCtx, args: Record<string, unknown>, metric: PrimitiveMetric): undefined {
+    if (savedScriptNameOk(args.name)) metric.script = args.name;
+    const res = this.savedScripts.save(ctx.sessionId, args.name, args.source);
+    if ("refused" in res) throw bad(res.refused);
+    (ctx.scriptsSaved ??= new Set()).add(args.name as string);
+    return undefined;
+  }
+
+  /** A saved script starting (`scripts.<name>(…)` asks first): counted, and refused for a name the session never
+   *  saved (a forged call — the worker only calls this for a name it holds). A cancelled run stops it here. */
+  private runSavedScript(ctx: RunCtx, args: Record<string, unknown>, metric: PrimitiveMetric): undefined {
+    if (!savedScriptNameOk(args.name) || !this.savedScripts.has(ctx.sessionId, args.name)) throw bad("no script was saved under that name in this session");
+    metric.script = args.name;
+    (ctx.scriptsRan ??= new Set()).add(args.name);
+    return undefined;
   }
 
   private async targetPrimitive(ctx: RunCtx, targetId: string, primitive: string, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<unknown> {
@@ -1612,6 +1675,11 @@ export class ComputerV2Service {
    */
   endSession(sessionId: string, reason: "deleted" | "idle" | "stop" = "deleted"): void {
     if (reason !== "idle") this.deps.policy.clearSession(sessionId);
+    // Saved scripts and the restart notice's memory outlive the idle end; a deleted session takes them with it.
+    if (reason === "deleted") {
+      this.savedScripts.clearSession(sessionId);
+      this.ranWorker.delete(sessionId);
+    }
     this.deps.browsers?.sessionEnded(sessionId, reason);
     const state = this.sessions.get(sessionId);
     if (state === undefined) return;
@@ -1706,6 +1774,9 @@ export class ComputerV2Service {
   stop(): void {
     this.stopped = true;
     for (const sessionId of [...this.sessions.keys()]) this.endSession(sessionId, "stop");
+    // D11: saved scripts are memory only — nothing survives the daemon.
+    this.savedScripts.clearAll();
+    this.ranWorker.clear();
     this.deps.browsers?.stop();
   }
 
@@ -1713,12 +1784,19 @@ export class ComputerV2Service {
   workerPid(sessionId: string): number | undefined { return this.sessions.get(sessionId)?.worker?.pid; }
 }
 
+/** The idle end's length in words: "30 minutes" (a test's shorter seam in seconds). */
+export function idleWords(ms: number): string {
+  if (ms >= 60_000) { const m = Math.round(ms / 60_000); return `${m} minute${m === 1 ? "" : "s"}`; }
+  const s = Math.max(1, Math.round(ms / 1000));
+  return `${s} second${s === 1 ? "" : "s"}`;
+}
+
 function failure(name: string, message: string): ScriptResult {
   return new ResultBuilder().build({ error: { name, message, trusted: true } });
 }
 
 /** The functions a script may call — anything else from the worker is refused unrecorded (review I6). */
-const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES, ...EXTRA_PRIMITIVES, ...TAB_PRIMITIVES, ...BROWSER_PRIMITIVES]);
+const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES, ...EXTRA_PRIMITIVES, ...TAB_PRIMITIVES, ...BROWSER_PRIMITIVES, ...SCRIPT_PRIMITIVES]);
 /** A browser tab's primitives no app has (refused on an app target before the helper sees them). */
 const TAB_ONLY_PRIMITIVES: ReadonlySet<string> = new Set<string>(TAB_PRIMITIVES.filter((p) => !(APP_PRIMITIVES as readonly string[]).includes(p)));
 /** How long a run's end waits for its tab input to stop before letting the tab locks go. */

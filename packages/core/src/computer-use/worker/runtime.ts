@@ -9,7 +9,7 @@
 // the store, so top-level declarations persist and may be redeclared, and top-level `await` just works.
 // Sloppy mode, deliberately — `with` and block-level function hoisting need it.
 import { AUTOMATION_ERROR_KINDS, type AutomationErrorKind } from "../errors";
-import type { AppHandle, HostToWorker, ImageHandle, TabHandle, WorkerToHost } from "./bridge";
+import { savedScriptNameOk, type AppHandle, type HostToWorker, type ImageHandle, type SavedScriptSource, type TabHandle, type WorkerToHost } from "./bridge";
 import { prepareScript, type PreparedScript } from "./repl";
 
 export interface AutomationRuntimeDeps {
@@ -21,6 +21,8 @@ export interface AutomationRuntimeDeps {
 
 /** What a script's stack frames are attributed to — how a thrown error is placed on a line of the script. */
 const SCRIPT_URL = "winter-script";
+/** A saved script's frames: `winter-saved:<name>` — how a throw inside one is placed on a line of ITS source. */
+const SAVED_URL = "winter-saved:";
 /** Ambient names a script must not reach through the scope chain. Defense in depth only: the seatbelt is the
  *  boundary (no network, no writes, no Keychain), and sloppy-mode `this` can still reach the global object. */
 const SHADOWED = ["process", "require", "module", "exports", "Bun", "globalThis", "global", "self", "fetch", "XMLHttpRequest", "WebSocket", "__filename", "__dirname", "Deno"];
@@ -315,11 +317,79 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     });
   };
 
+  // ── saved scripts (Phase 4) ──────────────────────────────────────────────────────────────────────────
+  // `scripts.save(name, fn)` keeps a function for the rest of the SESSION; `scripts.<name>(…)` runs it. What runs is
+  // always the function RE-CREATED from its source (here at save, and in every fresh worker from the daemon's copy),
+  // never the original closure — so it behaves the same before and after a restart, and one that relied on a
+  // variable it closed over fails at its first call, not mysteriously later. `scripts` reveals nothing: no keys, no
+  // listing, no source (a product rule — the source was in the model's own call; nothing relies on it being secret).
+  const saved = new Map<string, (...a: unknown[]) => unknown>();
+  const wrappers = new Map<string, (...a: unknown[]) => Promise<unknown>>();
+  /** Re-create a saved function from its source, in this runtime: free names resolve, when it runs, to the
+   *  top-level declarations then (the persistent scope) and the built-in API — nothing else it closed over. */
+  const compileSaved = (name: string, source: string): ((...a: unknown[]) => unknown) => {
+    // eslint-disable-next-line no-new-func
+    const make = new Function(...PARAMS, `with (__scope) { return (\n${source}\n); }\n//# sourceURL=${SAVED_URL}${name}`);
+    const fn = make(scope, store, ...API_NAMES.map((n) => API[n]), ...SHADOWED.map(() => undefined)) as unknown;
+    if (typeof fn !== "function") throw new TypeError("not a function");
+    return fn as (...a: unknown[]) => unknown;
+  };
+  const wrapperFor = (name: string): ((...a: unknown[]) => Promise<unknown>) => {
+    let w = wrappers.get(name);
+    if (w !== undefined) return w;
+    w = async (...args: unknown[]): Promise<unknown> => {
+      // The daemon hears of the run first: it counts it, and a cancelled run stops it before it starts.
+      await call("scripts.run", undefined, { name });
+      const fn = saved.get(name);
+      if (fn === undefined) throw new TypeError(`scripts.${name} is not a function`);
+      return await fn(...args);
+    };
+    Object.defineProperty(w, "name", { value: name });
+    Object.defineProperty(w, "toString", { value: () => `function ${name}() { [saved script] }` });
+    wrappers.set(name, w);
+    return w;
+  };
+  const saveScript = async (name: unknown, fn: unknown): Promise<void> => {
+    if (!savedScriptNameOk(name)) {
+      throw new TypeError("scripts.save() takes a name that starts with a lowercase letter, then letters, digits or _ (at most 48), and is not save, then, toString or another built-in name");
+    }
+    if (typeof fn !== "function") throw new TypeError("scripts.save() takes a function written in your script");
+    const source = Function.prototype.toString.call(fn);
+    if (/\[native code\]\s*\}\s*$/.test(source)) throw new TypeError("scripts.save() takes a function written in your script");
+    if (/^class\b/.test(source.trimStart())) throw new TypeError("scripts.save() takes a function, not a class");
+    let compiled: (...a: unknown[]) => unknown;
+    try { compiled = compileSaved(name, source); } catch {
+      throw new TypeError("scripts.save() could not re-create that function from its source — write it as an arrow or function expression: scripts.save(\"name\", async (a, b) => { … })");
+    }
+    await call("scripts.save", undefined, { name, source });
+    saved.set(name, compiled);
+  };
+  const scripts = new Proxy({} as Record<string, unknown>, {
+    get: (_t, k) => (k === "save" ? saveScript : typeof k === "string" && saved.has(k) ? wrapperFor(k) : undefined),
+    has: (_t, k) => k === "save",
+    ownKeys: () => [],
+    getOwnPropertyDescriptor: () => undefined,
+    set: () => false,
+    defineProperty: () => false,
+    deleteProperty: () => false,
+    setPrototypeOf: () => false,
+    preventExtensions: () => false,
+  });
+  /** The daemon's copy, into a fresh worker before its first run: the names that could not be re-created. */
+  const install = (entries: readonly SavedScriptSource[] | undefined): string[] => {
+    const failed: string[] = [];
+    for (const e of Array.isArray(entries) ? entries : []) {
+      if (e === null || typeof e !== "object" || !savedScriptNameOk(e.name) || typeof e.source !== "string") continue;
+      try { saved.set(e.name, compileSaved(e.name, e.source)); } catch { failed.push(e.name); }
+    }
+    return failed;
+  };
+
   // The API, by the names a script sees. Passed as PARAMETERS of the script function (so a script cannot
   // reassign them for the next call — though a top-level declaration of the same name shadows one, by choice).
   /** The ms this run has left (its deadline, as extended, minus what has run; a card's wait does not count). */
   const timeLeft = (): Promise<unknown> => call("timeLeft", undefined, {});
-  const API: Record<string, unknown> = { apps, browsers, screen, print, show, sleep, timeLeft, App, Tab, Image, AutomationError, ...errorClasses };
+  const API: Record<string, unknown> = { apps, browsers, screen, scripts, print, show, sleep, timeLeft, App, Tab, Image, AutomationError, ...errorClasses };
   const API_NAMES = Object.keys(API);
   const PARAMS = ["__scope", "__store", ...API_NAMES, ...SHADOWED];
 
@@ -340,6 +410,25 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     }
     return 3;
   })();
+  // A saved script's own header lines, calibrated the same way: a throw on line 1 of a saved source.
+  const savedLineOffset = ((): number => {
+    try {
+      // eslint-disable-next-line no-new-func
+      (new Function(...PARAMS, `with (__scope) { return (\n() => { throw new Error("calibrate") }\n); }\n//# sourceURL=${SAVED_URL}calibrate`)(scope, store) as () => void)();
+    } catch (e) {
+      const m = /winter-saved:calibrate:(\d+)/.exec(e instanceof Error ? e.stack ?? "" : "");
+      if (m !== null) return Number(m[1]) - 1;
+    }
+    return 3;
+  })();
+  /** "(in saved script exportCsv, line 3)" when the throw happened inside a saved script's own code. */
+  const savedPlace = (err: unknown): string | undefined => {
+    const stack = err !== null && typeof err === "object" && typeof (err as { stack?: unknown }).stack === "string" ? (err as { stack: string }).stack : "";
+    const m = /winter-saved:([a-z][A-Za-z0-9_]{0,47}):(\d+)/.exec(stack);
+    if (m === null || m[1] === "calibrate") return undefined;
+    const line = Number(m[2]) - savedLineOffset;
+    return line >= 1 ? `(in saved script ${m[1]}, line ${line})` : `(in saved script ${m[1]})`;
+  };
   function scriptLineOf(err: unknown, offset: number): number | undefined {
     const stack = err !== null && typeof err === "object" && typeof (err as { stack?: unknown }).stack === "string" ? (err as { stack: string }).stack : "";
     const m = new RegExp(`${SCRIPT_URL}:(\\d+)(?::\\d+)?`).exec(stack);
@@ -395,14 +484,17 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     }
   };
 
-  const runScript = async (runId: string, code: string): Promise<void> => {
+  const runScript = async (runId: string, code: string, toInstall?: readonly SavedScriptSource[]): Promise<void> => {
+    // A fresh worker's saved scripts first, whatever the script itself turns out to be.
+    const failedInstall = toInstall === undefined ? [] : install(toInstall);
+    const installed = failedInstall.length === 0 ? {} : { installFailed: failedInstall };
     if (run !== undefined) {
-      deps.post({ op: "done", runId, error: { name: "Error", message: "another script is still running in this session's runtime" } });
+      deps.post({ op: "done", runId, error: { name: "Error", message: "another script is still running in this session's runtime" }, ...installed });
       return;
     }
     const compiled = compile(code);
     if ("error" in compiled) {
-      deps.post({ op: "done", runId, error: compiled.error });
+      deps.post({ op: "done", runId, error: compiled.error, ...installed });
       return;
     }
     const state: RunState = { id: runId, cancelled: false, reason: "the script was cancelled", sleeps: new Set(), printed: 0, cut: false };
@@ -413,7 +505,8 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       await compiled.fn.call(undefined, scope, store, ...API_NAMES.map((n) => API[n]), ...SHADOWED.map(() => undefined));
     } catch (e) {
       const name = e instanceof Error ? e.name : "Error";
-      const message = e instanceof Error ? e.message : formatValue(e);
+      const where = savedPlace(e);
+      const message = `${e instanceof Error ? e.message : formatValue(e)}${where === undefined ? "" : ` ${where}`}`;
       const line = compiled.transpiled ? undefined : scriptLineOf(e, lineOffset);
       failure = { name, message, ...(line === undefined ? {} : { line }) };
     } finally {
@@ -421,7 +514,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       // A primitive the script started and never awaited does not outlive it.
       settlePending(runId, "the script ended before this call finished", "drop");
     }
-    deps.post({ op: "done", runId, ...(failure === undefined ? {} : { error: failure }), ...(compiled.note === undefined ? {} : { note: compiled.note }) });
+    deps.post({ op: "done", runId, ...(failure === undefined ? {} : { error: failure }), ...(compiled.note === undefined ? {} : { note: compiled.note }), ...installed });
   };
 
   return {
@@ -429,7 +522,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     handle(message: HostToWorker): void {
       switch (message.op) {
         case "run":
-          void runScript(message.runId, message.code);
+          void runScript(message.runId, message.code, message.install);
           return;
         case "reply": {
           const p = pending.get(message.id);
