@@ -10,7 +10,21 @@ type Row = { operation_id: string; request_digest: string; status: string; resul
  * Dispatched/uncertain effects stay blocked for explicit reconciliation, never prepared again. */
 export class CanonicalPublicationJournal implements PublicationJournal {
   constructor(private readonly records: CoworkRepository, private readonly workspaceId: string,
-    private readonly now: () => string = () => new Date().toISOString()) { records.get(workspaceId); }
+    private readonly now: () => string = () => new Date().toISOString()) {
+    records.get(workspaceId);
+    // A prepared operation cannot have reached transport: dispatch commits first.
+    // Reopening the host journal retires abandoned preparations atomically. If a
+    // previous host caller is still live, its prepared->dispatched CAS loses and
+    // it cannot send. Ordinary duplicate claims on this journal remain pending.
+    records.rs.transaction(() => {
+      const rows = records.rs.db.query<Row & { principal_id: string; request_id: string }, [string]>(
+        "SELECT operation_id,request_digest,status,result_json,principal_id,request_id FROM cowork_operations WHERE method='git.publish' AND scope=? AND status='pending'").all(workspaceId);
+      for (const row of rows) {
+        if (this.receipt(row).status !== "prepared") throw new GitPublicationError("command_failed");
+        this.move({ principalId: row.principal_id, requestId: row.request_id }, "prepared", "rejected");
+      }
+    }, { mode: "immediate" });
+  }
   private key(raw: string): { principalId: string; requestId: string } {
     let parts: unknown;
     try { parts = JSON.parse(raw); } catch { throw new GitPublicationError("invalid_request"); }
@@ -56,15 +70,16 @@ export class CanonicalPublicationJournal implements PublicationJournal {
     const key = this.key(raw);
     const allowed = from === "prepared" ? ["dispatched","rejected"] : from === "dispatched" ? ["applied","rejected","uncertain"] : [];
     if (!allowed.includes(to)) throw new GitPublicationError("request_conflict");
-    return this.records.rs.transaction(() => {
-      const row = this.row(key); if (!row) throw new GitPublicationError("request_conflict");
-      const previous = this.receipt(row);
-      if (previous.status === to) return previous;
-      if (previous.status !== from) throw new GitPublicationError("request_conflict");
-      const next = { ...previous, status: to }, envelope = JSON.parse(row.result_json);
-      envelope.value.publication = next;
-      this.records.rs.db.run("UPDATE cowork_operations SET status=?,result_json=?,updated_at=? WHERE operation_id=?", [statusOf(to),JSON.stringify(envelope),this.now(),next.operationId]);
-      this.emit(next); return next;
-    }, { mode: "immediate" });
+    return this.records.rs.transaction(() => this.move(key, from, to), { mode: "immediate" });
+  }
+  private move(key: { principalId: string; requestId: string }, from: PublicationStatus, to: PublicationStatus): PublicationReceipt {
+    const row = this.row(key); if (!row) throw new GitPublicationError("request_conflict");
+    const previous = this.receipt(row);
+    if (previous.status === to) return previous;
+    if (previous.status !== from) throw new GitPublicationError("request_conflict");
+    const next = { ...previous, status: to }, envelope = JSON.parse(row.result_json);
+    envelope.value.publication = next;
+    this.records.rs.db.run("UPDATE cowork_operations SET status=?,result_json=?,updated_at=? WHERE operation_id=?", [statusOf(to),JSON.stringify(envelope),this.now(),next.operationId]);
+    this.emit(next); return next;
   }
 }

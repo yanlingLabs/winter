@@ -39,3 +39,15 @@ test("publication status and outbox commit atomically, duplicate transitions emi
   await expect(journal.transition(f.key,"prepared","rejected")).rejects.toMatchObject({code:"request_conflict"});
   await expect(journal.claim(JSON.stringify(["user","foreign","request"]),f.receipt)).rejects.toMatchObject({code:"invalid_request"});
 });
+test("reopened canonical journal atomically retires prepared work with no possible transport replay", async () => {
+  const f = fixture(), before = f.journal(); await before.claim(f.key, f.receipt);
+  expect((await before.claim(f.key, { ...f.receipt, operationId: randomUUID() })).receipt.status).toBe("prepared");
+  const reopened = f.journal();
+  expect((await reopened.claim(f.key, { ...f.receipt, operationId: randomUUID() })).receipt.status).toBe("rejected");
+  await expect(before.transition(f.key, "prepared", "dispatched")).rejects.toMatchObject({ code: "request_conflict" });
+  expect(f.records.operation(f.workspaceId, f.receipt.operationId)).toMatchObject({ status: "failed", terminal: true });
+  const statuses = f.records.rs.db.query<{ payload_json: string }, [string]>("SELECT payload_json FROM cowork_outbox WHERE operation_id=? ORDER BY sequence").all(f.receipt.operationId);
+  expect(statuses.map(row => JSON.parse(row.payload_json).publicationStatus)).toEqual(["prepared", "rejected"]);
+  f.journal();
+  expect(f.records.rs.db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM cowork_outbox WHERE operation_id=?").get(f.receipt.operationId)?.n).toBe(2);
+});
