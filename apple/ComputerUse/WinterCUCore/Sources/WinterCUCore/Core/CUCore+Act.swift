@@ -2146,7 +2146,11 @@ extension CUCore {
             // is the app's KEY window: then the menu item's action goes down that window's responder chain.
             let editingShortcut = Self.isEditingShortcut(chord) && editableFocus(t, g.explicit ?? reportedFocus(t))
             let editing = editingShortcut && boundWindowIsKeyInApp(t) != true
-            if !editing, t.accessible, let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
+            // A shortcut aimed INTO a sheet, a panel or a dialog goes there as keys, never to the app's menu bar (dogfood,
+            // round 13: ⌘⇧G into Chrome's open panel ran Chrome's own "Find Previous" instead of the panel's Go to Folder).
+            let intoPanel = g.explicit.map { inSheetOrPanel($0, t) } ?? false
+            if intoPanel { CULog.act.notice("key in \(t.appName, privacy: .public): aimed into a sheet or panel — keys, never its menu bar") }
+            if !editing, !intoPanel, t.accessible, let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
                 if CUPasteMenu.isPasteTitle(item.title) { try requirePasteSafe(p, t, g) }
                 // Another of the app's windows is its key window (the user's, perhaps): the menu action would go
                 // there (live: Open Location acted on another window). Pressed only with the bound window key.
@@ -2159,7 +2163,7 @@ extension CUCore {
             }
             // Its menu item reads disabled with the app in the background: the app has not re-validated it (a
             // selection-dependent command). Re-validated in the focus blip, else the keys as before.
-            if !editing, t.accessible, p.privatePath, sys.frontmostPid() != t.pid,
+            if !editing, !intoPanel, t.accessible, p.privatePath, sys.frontmostPid() != t.pid,
                let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid, includeDisabled: true) {
                 if CUPasteMenu.isPasteTitle(item.title) { try requirePasteSafe(p, t, g) }
                 guard let code = CUKeyCodes.code(for: ch) else { throw CUError.unsupported("no key for “\(ch)” on this keyboard") }
@@ -2178,6 +2182,24 @@ extension CUCore {
         }
         return .events(code: code, flags: chord.modifiers.cgFlags,
                        decision: try CUInputLadder.decideEvents(context(p, t, pointer: false)))
+    }
+
+    /// `e` lies in a sheet, a panel or a dialog — not in the bound window's own content (its ancestors reach an `AXSheet`,
+    /// or a window that is not the bound one, or one that is not a standard window).
+    func inSheetOrPanel(_ e: AXUIElement, _ t: CUTarget) -> Bool {
+        var cur: AXUIElement? = e
+        for _ in 0..<60 {
+            guard let c = cur else { return false }
+            let role = ax.string(c, kAXRoleAttribute)
+            if role == kAXSheetRole { return true }
+            if role == kAXWindowRole {
+                if let id = ax.windowID(c), id != t.windowID { return true }
+                let sub = ax.string(c, kAXSubroleAttribute)
+                return sub != nil && sub != kAXStandardWindowSubrole
+            }
+            cur = ax.element(c, kAXParentAttribute)
+        }
+        return false
     }
 
     /// Select all, copy, cut, paste, undo and redo: the shortcuts that act on the focused text.
