@@ -217,3 +217,58 @@ The historical build-ycs24bpl bundle above remains unchanged and predates these
 fixes. The recipe now requires the expanded receipts; a fresh frozen package
 must be built before claiming they passed for a new protected artifact. Native
 Swift/VZ and network sources were not modified for this adapter review.
+
+## Frozen round3 combined artifact
+
+```sh
+python3 apple/Cowork/packaging/build.py --jobs 4 \
+  --dependency-bundle apple/Cowork/packaging/out/build-nzn18phm/bundle \
+  --libslirp-upstream-checkout apple/Cowork/packaging/out/libslirp-upstream-9nc0wfan
+python3 apple/Cowork/packaging/closure.py \
+  apple/Cowork/packaging/out/build-lopgrnzk/bundle/lib
+```
+
+The first attempt `out/build-8wqt7avx` failed its initial UDP regression and is
+retained without an accepted bundle manifest. The exact isolated test failed
+again; a same-library diagnostic found the UDP socket already closed before the
+rogue packet, despite successful sends. Logs remain at
+/tmp/cowork-network-failed-fixture-followup.log and
+/tmp/cowork-network-udp-diagnostic.log. Network checkpoint8c03132d fixes startup
+clock ordering and adds a fresh-process regression with the original exact
+denied-peer assertion. No assertion was weakened to accept the failed attempt.
+
+Fresh `out/build-lopgrnzk/bundle` passes, built in319 seconds from actual source
+commit `8c03132db9a0adad19dc2887211ea610f1f3c870`, including frozen output fixes
+`2edb4e737ef456b6ecd94e4b0a3e5d6ce6dcc3fc`. Its manifest records that actual
+built commit; this later evidence prose is not retroactively inserted into the
+source snapshot. Network passes53 Swift Testing tests. Native verified-eof runs
+45 XCTest tests:44 pass and1 unavailable APFS Data alias fixture skips. Twelve
+packaging regressions pass. Exact suite logs are retained in
+`build-logs/10-network-tests.log` and `build-logs/14-native-tests.log`.
+
+All five mandatory execution receipts are retained and their copied log hashes
+were independently checked: relocated network32, native33, typed client34,
+ordinary output35 and compiled output37. Both output receipts include exact
+10MiB transfer, pause/backpressure, both EOFs,12 streams, actual140-FD inheritance
+enumeration, staleWriterGettersDenied, invalidStatisticsThrows and
+exitWithoutDispose. The nested exit fixture holds32 queued native data callbacks
+while exiting without disposal. Empty/incorrect receipts cannot pass.
+
+The committed pin is read from the built Git object; dirty vendor/packaging is
+refused, and the66 vendor blobs from reviewedVendorCommit02fb0e26 match the pin.
+Upstream/patch reconstruction and the fixed verified-EOF archive/tree checks
+pass. The independent closure check accepts six arm64 Mach-O files with only
+bundle-relative or Apple system references. No actual Keychain, VM, live Winter
+state or host-pressure test is used. Dependency cache bytes remain unchanged.
+
+| Material | SHA256 |
+| --- | --- |
+| `manifest.json` | `4a03cba1ebf1eb4988c1d4cba68f54cb0c1683ba5761f3e6aa17d074b53cec11` |
+| `libWinterCoworkNative.dylib` | `cbec4313a5fd672e79d95503f82ad80b5fafac05978fad36416824077aea0f80` |
+| `libWinterCoworkNetwork.dylib` | `640197866ce2e72356efd97b5280aa3c9eed529ee08014ebc6f5003252c331b9` |
+| `winter-cowork-native.node` | `c70edc4c68ada6eedf39ea608728fa42e366cfee113d7b38539195a0a2e156b3` |
+
+Root-verifiable command logs are /tmp/cowork-output-round3-package-final.log and
+/tmp/cowork-output-round3-package-closure.log, plus the bundle's build-logs and
+manifest. This ad-hoc signed foundation still records productionReady:false; it
+is not worker activation, key-custody/disk encryption or active RAM-return proof.
