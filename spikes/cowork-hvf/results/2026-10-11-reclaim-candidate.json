@@ -1,15 +1,23 @@
 {
-  "status": "candidate prepared; no patched VM run; independent review pending",
+  "status": "review fixes frozen; no patched VM run; independent re-review pending",
   "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
   "patch": "spikes/cowork-hvf/patches/0002-proposed-active-reclaim.patch",
-  "patchSha256": "353e6676f2b9bddde82748b43e210fe6c4d43adec6bf7246c98af894433b598e",
+  "patchSha256": "a6e26d15693007d42df5c60155055b09c69897584665d227c8ee9c720d3cfb31",
   "appliesTo": "pristine pinned upstream, separately from instrumentation patch",
   "cargoCheckPassed": true,
-  "simulationTestCount": 23,
+  "simulationTestCount": 39,
   "simulationTestsPassed": true,
-  "testCommand": "spikes/cowork-hvf/out/rust/bin/rustc --edition=2021 --test spikes/cowork-hvf/reclaim_tests.rs -o spikes/cowork-hvf/out/reclaim-tests && spikes/cowork-hvf/out/reclaim-tests",
+  "testCommand": "python3 spikes/cowork-hvf/prepare_reclaim.py && python3 spikes/cowork-hvf/test_reclaim.py",
   "cargoCheckCommand": "PATH=\"$PWD/spikes/cowork-hvf/out/rust/bin:$PATH\" CARGO_HOME=\"$PWD/spikes/cowork-hvf/out/cargo-home\" cargo check --manifest-path spikes/cowork-hvf/out/libkrun-reclaim/Cargo.toml -p libkrun --locked --no-default-features --jobs 4",
   "activeReturnVerified": false,
   "productionReady": false,
-  "nativeLoopAndActualHvfRaceValidated": false
+  "nativeLoopAndActualHvfRaceValidated": false,
+  "actualFrqUnitTestCount": 6,
+  "focusedTestTotal": 45,
+  "actualExtractedControlAndCoordinatorTested": true,
+  "actualQueueCoordinatorIntegrationTested": true,
+  "planningRejectionAcknowledgedAsNoop": true,
+  "emptyKickDoesNotInventUsedEntries": true,
+  "frqReadinessAndWholeRingSpansCheckedBeforeLenPopAndAck": true,
+  "malformedFrqDoesNotMapOrAcknowledge": true
 }

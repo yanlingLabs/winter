@@ -30,6 +30,10 @@ impl Barrier {
         if self.phase!=Phase::Replacing { return Err("invalid mapping state"); }
         self.phase=Phase::Mapped; Ok(())
     }
+    pub fn prepare_noop(&mut self)->Result<(),&'static str> {
+        if self.phase!=Phase::Parked { return Err("CPUs not parked for no-op"); }
+        self.phase=Phase::Mapped; Ok(())
+    }
     pub fn acknowledge_used(&mut self)->Result<(),&'static str> {
         if self.phase!=Phase::Mapped { return Err("mappings incomplete"); }
         self.phase=Phase::Acknowledged; Ok(())

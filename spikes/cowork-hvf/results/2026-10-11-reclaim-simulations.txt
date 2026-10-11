@@ -1,20 +1,49 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-reclaim/target/debug/deps/krun_devices-f461235d8d7cc392)
 
-running 23 tests
-test cowork_barrier::tests::unknown_or_duplicate_roster_refused ... ok
-test cowork_ranges::tests::adjacent_regions_are_not_one_owned_span ... ok
-test cowork_barrier::tests::exact_roster_and_epoch_before_any_mapping ... ok
+running 6 tests
+test virtio::queue::cowork_frq_tests::cowork_frq_nonready_nonzero_metadata_never_pops_or_acks ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_pending_count_and_whole_ring_spans_before_pop ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_malformed_chain_never_acknowledged ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_ring_intersection_is_returnable_valid_chain_for_noop ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_zero_length_payload_is_structurally_valid_for_noop ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_two_kicks_one_batch_second_has_no_invented_head ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 47 filtered out; finished in 0.00s
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+
+running 39 tests
+test cowork_control::tests::actual_step_stop_bypasses_queued_pause_ack ... ok
+test cowork_control::tests::actual_handler_rejects_wrong_resume_epoch ... ok
 test cowork_barrier::tests::partial_failure_never_acknowledges_or_resumes ... ok
-test cowork_ops::tests::empty_plan_is_not_a_replacement ... ok
-test cowork_ops::tests::full_sequence_preserves_every_hva_and_delays_used_ack ... ok
-test cowork_ops::tests::missing_stale_duplicate_cpu_means_zero_map_calls ... ok
+test cowork_coordinator::tests::actual_transaction_malformed_frq_never_maps_acks_or_resumes ... ok
+test cowork_coordinator::tests::actual_transaction_limit_rejection_returns_heads_without_mapping ... ok
+test cowork_barrier::tests::exact_roster_and_epoch_before_any_mapping ... ok
+test cowork_barrier::tests::unknown_or_duplicate_roster_refused ... ok
 test cowork_barrier::tests::stale_unknown_duplicate_acks_permanently_forbid_mutation ... ok
 test cowork_barrier::tests::stop_wins_over_every_pause_or_mapping_phase ... ok
-test cowork_ranges::tests::dma_or_ring_exclusion_even_one_byte ... ok
-test cowork_ops::tests::stop_at_each_transition_prevents_more_operations_or_ack ... ok
-test cowork_ops::tests::malformed_report_or_ring_intersection_rejected_before_any_map_call ... ok
+test cowork_coordinator::tests::actual_transaction_partial_map_failure_stays_parked_without_ack ... ok
+test cowork_control::tests::actual_wfe_preserves_irq_received_while_parked ... ok
+test cowork_control::tests::actual_boot_wait_parks_then_preserves_boot_arrival ... ok
+test cowork_coordinator::tests::actual_transaction_planner_rejection_acks_noop_and_allows_resume ... ok
+test cowork_coordinator::tests::actual_transaction_two_kicks_one_batch_second_is_empty_no_ack ... ok
+test cowork_control::tests::actual_step_unlocks_mmio_before_pause_ack ... ok
+test cowork_ops::tests::empty_plan_is_not_a_replacement ... ok
 test cowork_ops::tests::every_partial_hvf_or_mmap_failure_forbids_ack_resume ... ok
+test cowork_ops::tests::full_sequence_preserves_every_hva_and_delays_used_ack ... ok
+test cowork_ops::tests::malformed_report_or_ring_intersection_rejected_before_any_map_call ... ok
+test cowork_ops::tests::missing_stale_duplicate_cpu_means_zero_map_calls ... ok
+test cowork_ops::tests::stop_at_each_transition_prevents_more_operations_or_ack ... ok
+test cowork_queue_integration::tests::real_nonready_nonzero_queue_with_ring_overlap_has_no_maps_or_ack ... ok
+test cowork_queue_integration::tests::real_queue_two_kicks_one_batch_has_exactly_one_used_entry ... ok
+test cowork_queue_integration::tests::real_queue_chain_error_and_partial_mapping_failure_never_ack_or_resume ... ok
+test cowork_ranges::tests::adjacent_regions_are_not_one_owned_span ... ok
 test cowork_ranges::tests::bounded_fixture_limit_and_descriptor_count ... ok
+test cowork_ranges::tests::dma_or_ring_exclusion_even_one_byte ... ok
+test cowork_queue_integration::tests::real_queue_unaligned_or_ring_overlap_is_acknowledged_noop ... ok
 test cowork_ranges::tests::duplicate_or_overlapping_reports_rejected ... ok
+test cowork_ranges::tests::explicit_limit_can_narrow_admission_to_region_budget ... ok
 test cowork_ranges::tests::full_span_translation ... ok
 test cowork_ranges::tests::overflow_and_empty_inputs ... ok
 test cowork_ranges::tests::partial_host_pages_are_never_rounded ... ok
@@ -23,5 +52,8 @@ test cowork_ranges::tests::valid_start_invalid_full_span ... ok
 test simulations::sticky_hvf_exit_model_closes_check_then_run_race ... ok
 test simulations::running_wfe_and_waiting_boot_simulations_ack_exact_epoch ... ok
 test simulations::blocked_mmio_finishes_only_after_coordinator_releases_device_mutex ... ok
+test cowork_control::tests::actual_wfe_deadline_is_not_restarted_after_pause ... ok
 
-test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+{"source": "spikes/cowork-hvf/out/libkrun-reclaim", "revision": "227b2de6ed323fe180e02f871c5f325a90c13cc2", "patchSha256": "a6e26d15693007d42df5c60155055b09c69897584665d227c8ee9c720d3cfb31", "vmStarted": false}

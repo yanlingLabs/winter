@@ -2,6 +2,9 @@
 #[path="reclaim_ranges.rs"] mod cowork_ranges;
 #[path="reclaim_barrier.rs"] mod cowork_barrier;
 #[path="reclaim_ops.rs"] mod cowork_ops;
+#[path="reclaim_control.rs"] mod cowork_control;
+#[path="reclaim_coordinator.rs"] mod cowork_coordinator;
+#[path="reclaim_queue_integration.rs"] mod cowork_queue_integration;
 
 #[cfg(test)] mod simulations {
     use super::cowork_barrier::{Barrier,Phase};

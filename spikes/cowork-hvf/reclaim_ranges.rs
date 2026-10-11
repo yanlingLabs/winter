@@ -23,6 +23,13 @@ fn overlaps(a: Extent, b: Extent) -> Result<bool, Reject> {
 pub fn plan(regions: &[OwnedRegion], excluded: &[Extent], reports: &[Extent], host_page: u64)
     -> Result<Vec<ReclaimSpan>, Reject>
 {
+    let owned_bytes=regions.iter().try_fold(0u64,|total,r|total.checked_add(r.len)).ok_or(Reject::Overflow)?;
+    // The ceiling is a bounded-fixture policy. Production can call plan_with_limit with admission policy.
+    plan_with_limit(regions,excluded,reports,host_page,owned_bytes.min(384*1024*1024))
+}
+pub fn plan_with_limit(regions:&[OwnedRegion],excluded:&[Extent],reports:&[Extent],host_page:u64,limit:u64)
+    -> Result<Vec<ReclaimSpan>,Reject>
+{
     if host_page != 16384 { return Err(Reject::HostPageSize); }
     if reports.is_empty() { return Err(Reject::Empty); }
     if reports.len()>256 || regions.len()>256 || excluded.len()>4096 { return Err(Reject::TooMany); }
@@ -44,7 +51,7 @@ pub fn plan(regions: &[OwnedRegion], excluded: &[Extent], reports: &[Extent], ho
         let report_end=end(report.start,report.len)?;
         if report.start%host_page!=0 || report.len%host_page!=0 { return Err(Reject::Alignment); }
         total=total.checked_add(report.len).ok_or(Reject::Overflow)?;
-        if total>384*1024*1024 { return Err(Reject::Limit); }
+        if total>limit { return Err(Reject::Limit); }
         let region=regions.iter().find(|r| report.start>=r.gpa && report_end<=r.gpa+r.len).ok_or(Reject::Unowned)?;
         let hva=region.hva.checked_add(report.start-region.gpa).ok_or(Reject::Overflow)?;
         if hva%host_page!=0 || end(hva,report.len)?>region.hva+region.len { return Err(Reject::Alignment); }
@@ -108,5 +115,10 @@ mod tests {
         assert_eq!(plan(&[r],&[],&[report(r.gpa,385*1024*1024)],PAGE),Err(Reject::Limit));
         assert_eq!(plan(&[r],&[],&vec![report(r.gpa,PAGE);257],PAGE),Err(Reject::TooMany));
         assert_eq!(plan(&[r],&[],&[report(r.gpa,PAGE)],4096),Err(Reject::HostPageSize));
+    }
+    #[test] fn explicit_limit_can_narrow_admission_to_region_budget() {
+        let r=region();
+        assert_eq!(plan_with_limit(&[r],&[],&[report(r.gpa,2*PAGE)],PAGE,PAGE),Err(Reject::Limit));
+        assert!(plan_with_limit(&[r],&[],&[report(r.gpa,PAGE)],PAGE,PAGE).is_ok());
     }
 }

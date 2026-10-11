@@ -1,5 +1,5 @@
 diff --git a/src/devices/src/virtio/balloon/device.rs b/src/devices/src/virtio/balloon/device.rs
-index 85b2812..31aa9e1 100644
+index 85b2812..d21b701 100644
 --- a/src/devices/src/virtio/balloon/device.rs
 +++ b/src/devices/src/virtio/balloon/device.rs
 @@ -46,6 +46,9 @@ pub struct VirtioBalloonConfig {
@@ -39,7 +39,7 @@ index 85b2812..31aa9e1 100644
          self.queues = Some(queues);
          self.device_state = DeviceState::Activated(mem, interrupt);
  
-@@ -193,3 +202,40 @@ impl VirtioDevice for Balloon {
+@@ -193,3 +202,27 @@ impl VirtioDevice for Balloon {
          self.device_state.is_activated()
      }
  }
@@ -49,42 +49,29 @@ index 85b2812..31aa9e1 100644
 +        let mut out=Vec::new();
 +        if let DeviceState::Activated(mem,_) = &self.device_state {
 +            for (index,q) in self.queues.as_ref().ok_or("balloon queues")?.iter().enumerate() {
++                if index==FRQ_INDEX {q.queue.fixture_validate_report(mem)?;}
 +                out.extend(q.queue.fixture_exclusions(mem,index!=FRQ_INDEX)?);
 +            }
 +        } else { return Err("balloon inactive"); }
 +        Ok(out)
 +    }
 +    pub fn fixture_pop(&mut self) -> Result<Vec<(u16,Vec<(u64,u64)>)>, &'static str> {
-+        let mem=match &self.device_state { DeviceState::Activated(mem,_)=>mem, _=>return Err("balloon inactive") };
-+        let queues=self.queues.as_mut().ok_or("balloon queues")?;
-+        let queue=&mut queues[FRQ_INDEX].queue;
-+        let mut batches=Vec::new();
-+        while queue.len(mem)>0 {
-+            if batches.len()>=256 { return Err("report batch bound"); }
-+            let head=queue.pop(mem).ok_or("report head")?; let index=head.index;
-+            let descriptors=super::super::queue::fixture_chain(head)?;
-+            let mut ranges=Vec::new();
-+            for desc in descriptors {
-+                if !desc.is_write_only() { return Err("report writable flag"); }
-+                ranges.push((desc.addr.0,u64::from(desc.len)));
-+            }
-+            batches.push((index,ranges));
-+        }
-+        self.fixture_pending=false;
-+        Ok(batches)
++        let mem=match &self.device_state {DeviceState::Activated(mem,_)=>mem,_=>return Err("balloon inactive")};
++        let queue=&mut self.queues.as_mut().ok_or("balloon queues")?[FRQ_INDEX].queue;
++        let result=queue.fixture_pop_reports(mem)?;self.fixture_pending=false;Ok(result)
 +    }
-+    pub fn fixture_ack(&mut self, indices: &[u16]) -> Result<(), &'static str> {
-+        let mem=match &self.device_state { DeviceState::Activated(mem,_)=>mem, _=>return Err("balloon inactive") };
-+        let queues=self.queues.as_mut().ok_or("balloon queues")?;
-+        for &index in indices { queues[FRQ_INDEX].queue.add_used(mem,index,0).map_err(|_| "report ack")?; }
-+        self.device_state.signal_used_queue(); Ok(())
++    pub fn fixture_ack(&mut self,indices:&[u16])->Result<(),&'static str> {
++        let mem=match &self.device_state {DeviceState::Activated(mem,_)=>mem,_=>return Err("balloon inactive")};
++        let queue=&mut self.queues.as_mut().ok_or("balloon queues")?[FRQ_INDEX].queue;
++        queue.fixture_ack_reports(mem,indices)?;
++        if !indices.is_empty() {self.device_state.signal_used_queue();}Ok(())
 +    }
 +}
 diff --git a/src/devices/src/virtio/queue.rs b/src/devices/src/virtio/queue.rs
-index 2fb7428..5101422 100644
+index 2fb7428..6ece08e 100644
 --- a/src/devices/src/virtio/queue.rs
 +++ b/src/devices/src/virtio/queue.rs
-@@ -1141,3 +1141,38 @@ pub(crate) mod tests {
+@@ -1141,3 +1141,103 @@ pub(crate) mod tests {
          assert_eq!(x.len, 0x1000);
      }
  }
@@ -107,7 +94,7 @@ index 2fb7428..5101422 100644
 +                let ring=4+2*((self.next_avail.0.wrapping_add(offset))%self.actual_size());
 +                let index=mem.read_obj::<u16>(self.avail_ring.checked_add(u64::from(ring)).ok_or("ring offset")?).map_err(|_| "ring read")?;
 +                let head=DescriptorChain::checked_new(mem,self.desc_table,self.actual_size(),u16::from_le(index)).ok_or("pending descriptor")?;
-+                for descriptor in fixture_chain(head)? { ranges.push((descriptor.addr.raw_value(),u64::from(descriptor.len))); }
++                for descriptor in fixture_chain(head)? { if descriptor.len!=0 {ranges.push((descriptor.addr.raw_value(),u64::from(descriptor.len)));} }
 +            }
 +        }
 +        Ok(ranges)
@@ -117,11 +104,76 @@ index 2fb7428..5101422 100644
 +pub fn fixture_chain(head: DescriptorChain<'_>) -> Result<Vec<DescriptorChain<'_>>, &'static str> {
 +    let mut out=Vec::new(); let mut seen=std::collections::HashSet::new(); let mut next=Some(head);
 +    while let Some(desc)=next {
-+        if out.len()>=256 || !seen.insert(desc.index) || desc.flags & 4 != 0 || desc.len==0 { return Err("descriptor chain"); }
++        if out.len()>=256 || !seen.insert(desc.index) || desc.flags & !3 != 0 { return Err("descriptor chain"); }
 +        next=if desc.flags & 1 != 0 { Some(desc.next_descriptor().ok_or("descriptor NEXT")?) } else { None };
 +        out.push(desc);
 +    }
 +    Ok(out)
++}
++
++impl Queue {
++    pub fn fixture_validate_report(&self,mem:&GuestMemoryMmap)->Result<(),&'static str> {
++        if !self.ready {return Err("FRQ not ready");}
++        self.fixture_exclusions(mem,false).map(|_|())
++    }
++    pub fn fixture_pop_reports(&mut self,mem:&GuestMemoryMmap)->Result<Vec<(u16,Vec<(u64,u64)>)>,&'static str> {
++        self.fixture_validate_report(mem)?; // BEFORE len/pop or any consumed head.
++        let mut batches=Vec::new();let mut heads=std::collections::HashSet::new();
++        while self.len(mem)>0 {
++            if batches.len()>=256 {return Err("report batch bound");}
++            let head=self.pop(mem).ok_or("report head")?;let index=head.index;
++            if !heads.insert(index) {return Err("duplicate report head");}
++            let mut ranges=Vec::new();
++            for desc in fixture_chain(head)? {
++                if !desc.is_write_only() {return Err("report writable flag");}
++                ranges.push((desc.addr.0,u64::from(desc.len)));
++            }
++            batches.push((index,ranges));
++        }
++        Ok(batches)
++    }
++    pub fn fixture_ack_reports(&mut self,mem:&GuestMemoryMmap,indices:&[u16])->Result<(),&'static str> {
++        self.fixture_validate_report(mem)?; // ACK also independently enforces active valid FRQ.
++        for &index in indices {if index>=self.actual_size() {return Err("ACK head index");}}
++        for &index in indices {self.add_used(mem,index,0).map_err(|_|"report ack")?;}
++        Ok(())
++    }
++}
++#[cfg(test)] mod cowork_frq_tests {
++    use super::*;
++    fn setup()->(Queue,GuestMemoryMmap) {
++        let mem=GuestMemoryMmap::from_ranges(&[(GuestAddress(0),65536)]).unwrap();
++        let mut q=Queue::new(8);q.size=8;q.ready=true;q.desc_table=GuestAddress(0x1000);q.avail_ring=GuestAddress(0x2000);q.used_ring=GuestAddress(0x3000);(q,mem)
++    }
++    fn report(q:&Queue,mem:&GuestMemoryMmap,addr:u64,len:u32,flags:u16) {
++        mem.write_obj(Descriptor{addr,len,flags,next:0},q.desc_table).unwrap();
++        mem.write_obj(0u16,q.avail_ring.unchecked_add(4)).unwrap();mem.write_obj(1u16,q.avail_ring.unchecked_add(2)).unwrap();
++    }
++    fn used(q:&Queue,mem:&GuestMemoryMmap)->u16 {mem.read_obj(q.used_ring.unchecked_add(2)).unwrap()}
++    #[test] fn cowork_frq_nonready_nonzero_metadata_never_pops_or_acks() {
++        let(mut q,mem)=setup();report(&q,&mem,q.used_ring.0,16384,2);q.ready=false;
++        assert!(q.fixture_pop_reports(&mem).is_err());assert_eq!(q.next_avail.0,0);assert!(q.fixture_ack_reports(&mem,&[0]).is_err());assert_eq!(used(&q,&mem),0);
++    }
++    #[test] fn cowork_frq_pending_count_and_whole_ring_spans_before_pop() {
++        let(mut q,mem)=setup();mem.write_obj(9u16,q.avail_ring.unchecked_add(2)).unwrap();assert!(q.fixture_pop_reports(&mem).is_err());assert_eq!(q.next_avail.0,0);
++        let mem=GuestMemoryMmap::from_ranges(&[(GuestAddress(0),8192),(GuestAddress(8192),8192)]).unwrap();q.size=8;q.desc_table=GuestAddress(8192-64);q.avail_ring=GuestAddress(10000);q.used_ring=GuestAddress(11000);
++        assert!(q.fixture_pop_reports(&mem).is_err());assert_eq!(q.next_avail.0,0);
++    }
++    #[test] fn cowork_frq_two_kicks_one_batch_second_has_no_invented_head() {
++        let(mut q,mem)=setup();report(&q,&mem,0x4000,16384,2);
++        let first=q.fixture_pop_reports(&mem).unwrap();assert_eq!(first,vec![(0,vec![(0x4000,16384)])]);q.fixture_ack_reports(&mem,&[0]).unwrap();assert_eq!(used(&q,&mem),1);
++        assert!(q.fixture_pop_reports(&mem).unwrap().is_empty());q.fixture_ack_reports(&mem,&[]).unwrap();assert_eq!(used(&q,&mem),1);
++    }
++    #[test] fn cowork_frq_ring_intersection_is_returnable_valid_chain_for_noop() {
++        let(mut q,mem)=setup();report(&q,&mem,q.used_ring.0,16384,2);let batch=q.fixture_pop_reports(&mem).unwrap();assert_eq!(batch[0].1[0].0,q.used_ring.0);
++        q.fixture_ack_reports(&mem,&[0]).unwrap();assert_eq!(used(&q,&mem),1);
++    }
++    #[test] fn cowork_frq_malformed_chain_never_acknowledged() {
++        for flags in [3,6,10] {let(mut q,mem)=setup();report(&q,&mem,0x4000,16384,flags);assert!(q.fixture_pop_reports(&mem).is_err());assert_eq!(used(&q,&mem),0);}
++    }
++    #[test] fn cowork_frq_zero_length_payload_is_structurally_valid_for_noop() {
++        let(mut q,mem)=setup();report(&q,&mem,0x4000,0,2);assert_eq!(q.fixture_pop_reports(&mem).unwrap(),vec![(0,vec![(0x4000,0)])]);q.fixture_ack_reports(&mem,&[0]).unwrap();assert_eq!(used(&q,&mem),1);
++    }
 +}
 diff --git a/src/devices/src/virtio/rng/device.rs b/src/devices/src/virtio/rng/device.rs
 index c008c61..2c468b5 100644
@@ -299,10 +351,10 @@ index 72831f1..4f62fe8 100644
      // The device mutex mustn't be locked here otherwise it will deadlock.
 diff --git a/src/vmm/src/cowork_barrier.rs b/src/vmm/src/cowork_barrier.rs
 new file mode 100644
-index 0000000..f231887
+index 0000000..b005b36
 --- /dev/null
 +++ b/src/vmm/src/cowork_barrier.rs
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,97 @@
 +//! Exact-epoch coordinator state. No OS/HVF calls; runtime must supply the actual immutable roster.
 +use std::collections::BTreeSet;
 +#[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,6 +385,10 @@ index 0000000..f231887
 +    }
 +    pub fn mappings_complete(&mut self)->Result<(),&'static str> {
 +        if self.phase!=Phase::Replacing { return Err("invalid mapping state"); }
++        self.phase=Phase::Mapped; Ok(())
++    }
++    pub fn prepare_noop(&mut self)->Result<(),&'static str> {
++        if self.phase!=Phase::Parked { return Err("CPUs not parked for no-op"); }
 +        self.phase=Phase::Mapped; Ok(())
 +    }
 +    pub fn acknowledge_used(&mut self)->Result<(),&'static str> {
@@ -396,14 +452,202 @@ index 0000000..f231887
 +        assert!(Barrier::new(0,&[0]).is_err());
 +    }
 +}
+diff --git a/src/vmm/src/cowork_control.rs b/src/vmm/src/cowork_control.rs
+new file mode 100644
+index 0000000..a5deaf1
+--- /dev/null
++++ b/src/vmm/src/cowork_control.rs
+@@ -0,0 +1,95 @@
++//! Actual control/wait functions used by the native candidate, testable without creating an HVF VM.
++use crossbeam_channel::{Receiver, Sender, TryRecvError};
++use std::time::{Duration,Instant};
++#[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum Meaning { Pause(u64), Resume(u64), Other }
++pub trait Event { fn meaning(&self)->Meaning; }
++pub trait Response { fn paused(epoch:u64)->Self; fn resumed(epoch:u64)->Self; }
++#[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum Fault { ControlClosed, AckClosed, Epoch, ResumeWithoutPause, BootClosed, IrqClosed }
++
++pub fn handle<E:Event,A:Response>(event:E, control:&Receiver<E>, ack:&Sender<A>)->Result<(),Fault> {
++    match event.meaning() {
++        Meaning::Pause(epoch) => {
++            ack.send(A::paused(epoch)).map_err(|_|Fault::AckClosed)?;
++            match control.recv().map_err(|_|Fault::ControlClosed)?.meaning() {
++                Meaning::Resume(resume) if resume==epoch => { ack.send(A::resumed(epoch)).map_err(|_|Fault::AckClosed)?; Ok(()) },
++                _ => Err(Fault::Epoch),
++            }
++        },
++        Meaning::Resume(_) => Err(Fault::ResumeWithoutPause),
++        Meaning::Other => Ok(()),
++    }
++}
++pub fn drain<E:Event,A:Response>(control:&Receiver<E>,ack:&Sender<A>)->Result<(),Fault> {
++    loop { match control.try_recv() { Ok(event)=>handle(event,control,ack)?,Err(TryRecvError::Empty)=>return Ok(()),Err(TryRecvError::Disconnected)=>return Err(Fault::ControlClosed) } }
++}
++pub fn boot<E:Event,A:Response>(entry:&Receiver<u64>,control:&Receiver<E>,ack:&Sender<A>)->Result<u64,Fault> {
++    loop { crossbeam_channel::select! {
++        recv(entry) -> value => return value.map_err(|_|Fault::BootClosed),
++        recv(control) -> event => handle(event.map_err(|_|Fault::ControlClosed)?,control,ack)?,
++    } }
++}
++pub fn wfe<E:Event,A:Response>(irq:&Receiver<u32>,control:&Receiver<E>,ack:&Sender<A>,timeout:Option<Duration>,should_wait:impl Fn()->bool)->Result<(),Fault> {
++    let deadline=timeout.map(|d|Instant::now()+d);
++    loop {
++        if !should_wait() { return Ok(()); }
++        if let Some(deadline)=deadline {
++            let remaining=deadline.saturating_duration_since(Instant::now()); if remaining.is_zero() { return Ok(()); }
++            crossbeam_channel::select! {
++                recv(irq) -> value => { value.map_err(|_|Fault::IrqClosed)?;return Ok(()); },
++                recv(control) -> event => handle(event.map_err(|_|Fault::ControlClosed)?,control,ack)?,
++                default(remaining) => return Ok(()),
++            }
++        } else { crossbeam_channel::select! {
++            recv(irq) -> value => { value.map_err(|_|Fault::IrqClosed)?;return Ok(()); },
++            recv(control) -> event => handle(event.map_err(|_|Fault::ControlClosed)?,control,ack)?,
++        } }
++    }
++}
++/// Called around the actual MMIO/emulation callback. Its borrowed guards end before post-step ACK.
++pub fn step<E:Event,A:Response,T>(control:&Receiver<E>,ack:&Sender<A>,emulate:impl FnOnce()->T,is_stop:impl FnOnce(&T)->bool)->Result<T,Fault> {
++    drain(control,ack)?; let result=emulate();
++    if !is_stop(&result) { drain(control,ack)?; }
++    Ok(result)
++}
++
++#[cfg(test)] mod tests {
++    use super::*;use crossbeam_channel::unbounded;use std::thread;use std::sync::{Arc,Mutex};
++    impl Event for Meaning { fn meaning(&self)->Meaning { *self } }
++    #[derive(Debug,PartialEq,Eq)] enum Ack { Pause(u64), Resume(u64) }
++    impl Response for Ack { fn paused(e:u64)->Self {Self::Pause(e)} fn resumed(e:u64)->Self {Self::Resume(e)} }
++    #[test] fn actual_boot_wait_parks_then_preserves_boot_arrival() {
++        let (entry,boot_rx)=unbounded();let (send,control)=unbounded();let (acks,response)=unbounded::<Ack>();
++        send.send(Meaning::Pause(11)).unwrap();let worker=thread::spawn(move||boot(&boot_rx,&control,&acks));
++        assert_eq!(response.recv_timeout(Duration::from_secs(1)).unwrap(),Ack::Pause(11));entry.send(0x8100).unwrap();
++        assert!(response.try_recv().is_err());send.send(Meaning::Resume(11)).unwrap();
++        assert_eq!(response.recv_timeout(Duration::from_secs(1)).unwrap(),Ack::Resume(11));assert_eq!(worker.join().unwrap(),Ok(0x8100));
++    }
++    #[test] fn actual_wfe_preserves_irq_received_while_parked() {
++        let (irq,irq_rx)=unbounded();let (send,control)=unbounded();let (acks,response)=unbounded::<Ack>();
++        send.send(Meaning::Pause(12)).unwrap();let worker=thread::spawn(move||wfe(&irq_rx,&control,&acks,None,||true));
++        assert_eq!(response.recv_timeout(Duration::from_secs(1)).unwrap(),Ack::Pause(12));irq.send(3).unwrap();send.send(Meaning::Resume(12)).unwrap();
++        assert_eq!(response.recv_timeout(Duration::from_secs(1)).unwrap(),Ack::Resume(12));assert_eq!(worker.join().unwrap(),Ok(()));
++    }
++    #[test] fn actual_wfe_deadline_is_not_restarted_after_pause() {
++        let (_irq,irq_rx)=unbounded();let (send,control)=unbounded();let (acks,response)=unbounded::<Ack>();let (done,completed)=unbounded();
++        send.send(Meaning::Pause(13)).unwrap();let worker=thread::spawn(move|| { let result=wfe(&irq_rx,&control,&acks,Some(Duration::from_millis(150)),||true);done.send(result).unwrap(); });
++        assert_eq!(response.recv_timeout(Duration::from_secs(1)).unwrap(),Ack::Pause(13));thread::sleep(Duration::from_millis(180));send.send(Meaning::Resume(13)).unwrap();
++        assert_eq!(response.recv_timeout(Duration::from_secs(1)).unwrap(),Ack::Resume(13));assert_eq!(completed.recv_timeout(Duration::from_millis(100)).unwrap(),Ok(()));worker.join().unwrap();
++    }
++    #[test] fn actual_step_unlocks_mmio_before_pause_ack() {
++        let device=Arc::new(Mutex::new(()));let (send,control)=unbounded();let (acks,response)=unbounded::<Ack>();let (entered,at_mmio)=unbounded();let (finish,may_finish)=unbounded();let cpu_device=device.clone();
++        let worker=thread::spawn(move||step(&control,&acks,|| { let _guard=cpu_device.lock().unwrap();entered.send(()).unwrap();may_finish.recv().unwrap();42 },|_|false));
++        at_mmio.recv_timeout(Duration::from_secs(1)).unwrap();send.send(Meaning::Pause(14)).unwrap();assert!(response.try_recv().is_err());finish.send(()).unwrap();
++        assert_eq!(response.recv_timeout(Duration::from_secs(1)).unwrap(),Ack::Pause(14));assert!(device.try_lock().is_ok());send.send(Meaning::Resume(14)).unwrap();
++        assert_eq!(response.recv_timeout(Duration::from_secs(1)).unwrap(),Ack::Resume(14));assert_eq!(worker.join().unwrap(),Ok(42));
++    }
++    #[test] fn actual_step_stop_bypasses_queued_pause_ack() {
++        let (send,control)=unbounded();let (acks,response)=unbounded::<Ack>();
++        send.send(Meaning::Other).unwrap();
++        let result=step(&control,&acks,|| {send.send(Meaning::Pause(15)).unwrap();true},|stop|*stop);assert_eq!(result,Ok(true));assert!(response.try_recv().is_err());
++    }
++    #[test] fn actual_handler_rejects_wrong_resume_epoch() {
++        let (send,control)=unbounded();let (acks,response)=unbounded::<Ack>();send.send(Meaning::Resume(17)).unwrap();
++        assert_eq!(handle(Meaning::Pause(16),&control,&acks),Err(Fault::Epoch));assert_eq!(response.recv().unwrap(),Ack::Pause(16));assert!(response.try_recv().is_err());
++    }
++}
+diff --git a/src/vmm/src/cowork_coordinator.rs b/src/vmm/src/cowork_coordinator.rs
+new file mode 100644
+index 0000000..f8e0e6e
+--- /dev/null
++++ b/src/vmm/src/cowork_coordinator.rs
+@@ -0,0 +1,81 @@
++//! Actual parked report transaction used by the candidate native event-loop adapter.
++use crate::cowork_barrier::Barrier;
++use crate::cowork_ranges::{self,OwnedRegion,Extent,Reject};
++use crate::cowork_ops::{self,ReplaceOps};
++#[derive(Default)] pub struct Snapshot { pub indices:Vec<u16>,pub reports:Vec<Extent>,pub exclusions:Vec<Extent> }
++pub trait ReportOps:ReplaceOps {
++    fn snapshot(&mut self)->Result<Snapshot,()>;
++    fn acknowledge(&mut self,indices:&[u16])->Result<(),()>;
++}
++#[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum Disposition { Empty, Noop(Reject), Replaced{bytes:u64,spans:usize} }
++#[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum Fatal { Malformed, Stop, Replacement(cowork_ops::Failure), State, Acknowledge }
++pub fn finish(barrier:&mut Barrier,regions:&[OwnedRegion],host_page:u64,ops:&mut impl ReportOps)->Result<Disposition,Fatal> {
++    if ops.stopped() { barrier.stop();return Err(Fatal::Stop); }
++    let snapshot=ops.snapshot().map_err(|_| {barrier.fail();Fatal::Malformed})?;
++    if snapshot.indices.is_empty()!=snapshot.reports.is_empty() {barrier.fail();return Err(Fatal::Malformed);}
++    for extent in &snapshot.exclusions {
++        let end=extent.start.checked_add(extent.len).ok_or_else(|| {barrier.fail();Fatal::Malformed})?;
++        if extent.len==0 || !regions.iter().any(|r|extent.start>=r.gpa && r.gpa.checked_add(r.len).is_some_and(|last|end<=last)) {barrier.fail();return Err(Fatal::Malformed);}
++    }
++    let disposition=if snapshot.reports.is_empty() {
++        barrier.prepare_noop().map_err(|_|Fatal::State)?;Disposition::Empty
++    } else {
++        match cowork_ranges::plan(regions,&snapshot.exclusions,&snapshot.reports,host_page) {
++            Ok(spans)=> {cowork_ops::apply(barrier,&spans,ops).map_err(Fatal::Replacement)?;
++                Disposition::Replaced{bytes:spans.iter().map(|r|r.len).sum(),spans:spans.len()}},
++            Err(reject)=> {barrier.prepare_noop().map_err(|_|Fatal::State)?;Disposition::Noop(reject)},
++        }
++    };
++    if ops.stopped() {barrier.stop();return Err(Fatal::Stop);}
++    // Empty/stale kicks invent no used entries. Valid planning rejects return every consumed head.
++    if !snapshot.indices.is_empty() {ops.acknowledge(&snapshot.indices).map_err(|_| {barrier.fail();Fatal::Acknowledge})?;}
++    barrier.acknowledge_used().map_err(|_|Fatal::State)?;
++    Ok(disposition)
++}
++#[cfg(test)] mod tests {
++    use super::*;use crate::cowork_ranges::ReclaimSpan;use crate::cowork_barrier::Phase;
++    struct Fake { snapshot:Option<Result<Snapshot,()>>,calls:Vec<&'static str>,ack:Vec<u16>,fail:Option<usize> }
++    impl ReplaceOps for Fake {
++        fn stopped(&self)->bool {false}
++        fn unmap(&mut self,_:ReclaimSpan)->Result<(),()> {self.op("unmap")}
++        fn replace(&mut self,_:ReclaimSpan)->Result<(),()> {self.op("replace")}
++        fn map(&mut self,_:ReclaimSpan)->Result<(),()> {self.op("map")}
++    }
++    impl Fake {fn op(&mut self,name:&'static str)->Result<(),()> {self.calls.push(name);if self.fail==Some(self.calls.len()) {Err(())}else{Ok(())}}}
++    impl ReportOps for Fake {
++        fn snapshot(&mut self)->Result<Snapshot,()> {self.snapshot.take().unwrap()}
++        fn acknowledge(&mut self,indices:&[u16])->Result<(),()> {self.ack.extend(indices);Ok(())}
++    }
++    fn region()->OwnedRegion {OwnedRegion{gpa:0x80000000,hva:0x100000000,len:8*16384,private_anonymous:true}}
++    fn parked()->Barrier {let mut b=Barrier::new(1,&[0]).unwrap();b.pause_ack(0,1).unwrap();b}
++    fn fake(snapshot:Result<Snapshot,()>)->Fake {Fake{snapshot:Some(snapshot),calls:Vec::new(),ack:Vec::new(),fail:None}}
++    #[test] fn actual_transaction_planner_rejection_acks_noop_and_allows_resume() {
++        let r=region();
++        for reports in [vec![Extent{start:r.gpa,len:4096}],vec![Extent{start:r.gpa+r.len,len:16384}],vec![Extent{start:r.gpa,len:16384};2]] {
++            let mut b=parked();let mut ops=fake(Ok(Snapshot{indices:vec![3],reports,exclusions:vec![]}));
++            assert!(matches!(finish(&mut b,&[r],16384,&mut ops),Ok(Disposition::Noop(_))));assert!(ops.calls.is_empty());assert_eq!(ops.ack,[3]);b.begin_resume().unwrap();
++        }
++        let mut b=parked();let mut ops=fake(Ok(Snapshot{indices:vec![4],reports:vec![Extent{start:r.gpa,len:16384}],exclusions:vec![Extent{start:r.gpa+1,len:2}]}));
++        assert_eq!(finish(&mut b,&[r],16384,&mut ops),Ok(Disposition::Noop(Reject::Excluded)));assert!(ops.calls.is_empty());assert_eq!(ops.ack,[4]);
++    }
++    #[test] fn actual_transaction_two_kicks_one_batch_second_is_empty_no_ack() {
++        let r=region();let mut first=parked();let mut ops=fake(Ok(Snapshot{indices:vec![7],reports:vec![Extent{start:r.gpa,len:16384}],exclusions:vec![]}));
++        assert!(matches!(finish(&mut first,&[r],16384,&mut ops),Ok(Disposition::Replaced{..})));assert_eq!(ops.ack,[7]);
++        let mut second=parked();ops.calls.clear();ops.ack.clear();ops.snapshot=Some(Ok(Snapshot::default()));
++        assert_eq!(finish(&mut second,&[r],16384,&mut ops),Ok(Disposition::Empty));assert!(ops.calls.is_empty());assert!(ops.ack.is_empty());second.begin_resume().unwrap();
++    }
++    #[test] fn actual_transaction_malformed_frq_never_maps_acks_or_resumes() {
++        let mut b=parked();let mut ops=fake(Err(()));assert_eq!(finish(&mut b,&[region()],16384,&mut ops),Err(Fatal::Malformed));
++        assert!(ops.calls.is_empty());assert!(ops.ack.is_empty());assert_eq!(b.phase(),Phase::Failed);assert!(b.begin_resume().is_err());
++    }
++    #[test] fn actual_transaction_partial_map_failure_stays_parked_without_ack() {
++        for failure in 1..=6 {
++            let r=region();let mut b=parked();let mut ops=fake(Ok(Snapshot{indices:vec![2],reports:vec![Extent{start:r.gpa,len:16384},Extent{start:r.gpa+16384,len:16384}],exclusions:vec![]}));ops.fail=Some(failure);
++            assert!(matches!(finish(&mut b,&[r],16384,&mut ops),Err(Fatal::Replacement(_))));assert_eq!(ops.calls.len(),failure);assert!(ops.ack.is_empty());assert!(b.begin_resume().is_err());
++        }
++    }
++    #[test] fn actual_transaction_limit_rejection_returns_heads_without_mapping() {
++        let r=OwnedRegion{len:512*1024*1024,..region()};let mut b=parked();let mut ops=fake(Ok(Snapshot{indices:vec![1],reports:vec![Extent{start:r.gpa,len:385*1024*1024}],exclusions:vec![]}));
++        assert_eq!(finish(&mut b,&[r],16384,&mut ops),Ok(Disposition::Noop(Reject::Limit)));assert!(ops.calls.is_empty());assert_eq!(ops.ack,[1]);b.begin_resume().unwrap();
++    }
++}
 diff --git a/src/vmm/src/cowork_fixture.rs b/src/vmm/src/cowork_fixture.rs
 new file mode 100644
-index 0000000..45f08ec
+index 0000000..7b6d8a3
 --- /dev/null
 +++ b/src/vmm/src/cowork_fixture.rs
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,126 @@
 +//! TEST-ONLY, PL011/RNG/balloon topology. Called on the main event thread, outside device callbacks.
-+use super::{Vmm, vstate::{VcpuEvent, VcpuResponse}, cowork_barrier::Barrier, cowork_ranges::{self, Extent}};
++use super::{Vmm, vstate::{VcpuEvent, VcpuResponse}, cowork_barrier::Barrier, cowork_ranges::Extent};
 +use std::sync::atomic::{AtomicBool, Ordering};
 +use std::time::{Duration, Instant};
 +static STOPPED: AtomicBool = AtomicBool::new(false);
@@ -448,32 +692,16 @@ index 0000000..45f08ec
 +        eprintln!("{{\"kind\":\"reclaim_parked\",\"epoch\":{},\"roster\":{:?},\"pauseMicros\":{}}}",epoch,ids,pause_started.elapsed().as_micros());
 +        let rng_arc=self.cowork_rng.as_ref().unwrap_or_else(|| fatal("rng missing")).clone();
 +        let rng=rng_arc.lock().unwrap(); let mut balloon=balloon_arc.lock().unwrap();
-+        if balloon.fixture_generation!=generation { fatal("queue generation changed"); }
-+        // Only the event thread processes RNG/balloon RAM; no event dispatch occurs in this function.
-+        // PL011 has no GuestMemory/DMA worker. All vCPU MMIO accesses finished before exact ACK.
-+        let exclusions=checked(balloon.fixture_exclusions(),"balloon queue snapshot");
-+        let mut excluded:Vec<_>=exclusions.into_iter().map(|(start,len)|Extent{start,len}).collect();
-+        excluded.extend(checked(rng.fixture_exclusions(),"rng queue snapshot").into_iter().map(|(start,len)|Extent{start,len}));
-+        let batches=checked(balloon.fixture_pop(),"report chain snapshot");
-+        let indices:Vec<_>=batches.iter().map(|(index,_)|*index).collect();
-+        let reports:Vec<_>=batches.iter().flat_map(|(_,ranges)|ranges.iter().map(|&(start,len)|Extent{start,len})).collect();
-+        if reports.is_empty() { fatal("empty staged report"); }
-+        let page=unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-+        if page!=16384 { fatal("host page mismatch"); }
-+        for x in &excluded {
-+            let end=x.start.checked_add(x.len).unwrap_or_else(|| fatal("excluded overflow"));
-+            if x.len==0 || !self.cowork_owned.iter().any(|r| x.start>=r.gpa && end<=r.gpa+r.len) { fatal("excluded full span"); }
-+        }
-+        let spans=checked(cowork_ranges::plan(&self.cowork_owned,&excluded,&reports,page as u64),"complete span validation");
-+        for extent in &excluded { eprintln!("{{\"kind\":\"reclaim_exclusion\",\"epoch\":{},\"gpa\":{},\"len\":{}}}",epoch,extent.start,extent.len); }
-+        // Full validation completes for every span before the first mapping is changed.
-+        let mut operations=HvfOps{vm:self.vm.hvf_vm(),epoch};
-+        checked(super::cowork_ops::apply(&mut barrier,&spans,&mut operations),"coordinated replacement failed");
-+        let replaced:u64=spans.iter().map(|span|span.len).sum();
-+        alive(&mut barrier);
-+        checked(barrier.acknowledge_used(),"used ACK phase");
-+        checked(balloon.fixture_ack(&indices),"used ACK write");
-+        eprintln!("{{\"kind\":\"reclaim_used_ack\",\"epoch\":{},\"indices\":{:?},\"replacedBytes\":{}}}",epoch,indices,replaced);
++        let page=unsafe {libc::sysconf(libc::_SC_PAGESIZE)};
++        if page!=16384 {fatal("host page mismatch");}
++        let mut operations=FixtureOps{mapping:HvfOps{vm:self.vm.hvf_vm(),epoch},balloon:&mut balloon,rng:&rng,generation,epoch};
++        let disposition=checked(super::cowork_coordinator::finish(&mut barrier,&self.cowork_owned,page as u64,&mut operations),"report transaction failed");
++        let span_count=match disposition {
++            super::cowork_coordinator::Disposition::Replaced{bytes,spans}=> {
++                eprintln!("{{\"kind\":\"reclaim_disposition\",\"epoch\":{},\"disposition\":\"replaced\",\"bytes\":{}}}",epoch,bytes);spans
++            },
++            other=> {eprintln!("{{\"kind\":\"reclaim_disposition\",\"epoch\":{},\"disposition\":\"{:?}\",\"bytes\":0}}",epoch,other);0},
++        };
 +        drop(balloon); drop(rng);
 +        alive(&mut barrier); checked(barrier.begin_resume(),"resume phase");
 +        for handle in &self.vcpus_handles { checked(handle.send_event(VcpuEvent::FixtureResume(epoch)),"send resume"); }
@@ -485,7 +713,7 @@ index 0000000..45f08ec
 +                _ => fatal("unexpected resume response"),
 +            }
 +        }
-+        eprintln!("{{\"kind\":\"reclaim_resumed\",\"epoch\":{},\"roster\":{:?},\"parkMicros\":{},\"spanCount\":{}}}",epoch,ids,pause_started.elapsed().as_micros(),spans.len());
++        eprintln!("{{\"kind\":\"reclaim_resumed\",\"epoch\":{},\"roster\":{:?},\"parkMicros\":{},\"spanCount\":{}}}",epoch,ids,pause_started.elapsed().as_micros(),span_count);
 +        debug_assert_eq!(barrier.phase(),super::cowork_barrier::Phase::Finished);
 +    }
 +}
@@ -514,6 +742,34 @@ index 0000000..45f08ec
 +        let result=unsafe { self.vm.fixture_map(hva,span.gpa,len) };
 +        eprintln!("{{\"kind\":\"reclaim_map\",\"epoch\":{},\"gpa\":{},\"sameHVA\":true,\"flags\":\"RWX\",\"return\":{}}}",self.epoch,span.gpa,result);
 +        if result==0 { Ok(()) } else { Err(()) }
++    }
++}
++
++struct FixtureOps<'a> {
++    mapping:HvfOps<'a>,balloon:&'a mut devices::virtio::Balloon,rng:&'a devices::virtio::Rng,generation:u64,epoch:u64,
++}
++impl super::cowork_ops::ReplaceOps for FixtureOps<'_> {
++    fn stopped(&self)->bool {super::cowork_ops::ReplaceOps::stopped(&self.mapping)}
++    fn unmap(&mut self,s:super::cowork_ranges::ReclaimSpan)->Result<(),()> {super::cowork_ops::ReplaceOps::unmap(&mut self.mapping,s)}
++    fn replace(&mut self,s:super::cowork_ranges::ReclaimSpan)->Result<(),()> {super::cowork_ops::ReplaceOps::replace(&mut self.mapping,s)}
++    fn map(&mut self,s:super::cowork_ranges::ReclaimSpan)->Result<(),()> {super::cowork_ops::ReplaceOps::map(&mut self.mapping,s)}
++}
++impl super::cowork_coordinator::ReportOps for FixtureOps<'_> {
++    fn snapshot(&mut self)->Result<super::cowork_coordinator::Snapshot,()> {
++        let mut excluded=self.balloon.fixture_exclusions().map_err(|_|())?;
++        excluded.extend(self.rng.fixture_exclusions().map_err(|_|())?);
++        let exclusions:Vec<_>=excluded.into_iter().map(|(start,len)|Extent{start,len}).collect();
++        for extent in &exclusions {eprintln!("{{\"kind\":\"reclaim_exclusion\",\"epoch\":{},\"gpa\":{},\"len\":{}}}",self.epoch,extent.start,extent.len);}
++        if self.balloon.fixture_generation!=self.generation {
++            self.balloon.fixture_pending=false;return Ok(super::cowork_coordinator::Snapshot{exclusions,..Default::default()});
++        }
++        let batches=self.balloon.fixture_pop().map_err(|_|())?;
++        Ok(super::cowork_coordinator::Snapshot{indices:batches.iter().map(|(index,_)|*index).collect(),
++            reports:batches.iter().flat_map(|(_,ranges)|ranges.iter().map(|&(start,len)|Extent{start,len})).collect(),exclusions})
++    }
++    fn acknowledge(&mut self,indices:&[u16])->Result<(),()> {
++        self.balloon.fixture_ack(indices).map_err(|_|())?;
++        eprintln!("{{\"kind\":\"reclaim_used_ack\",\"epoch\":{},\"indices\":{:?}}}",self.epoch,indices);Ok(())
 +    }
 +}
 diff --git a/src/vmm/src/cowork_ops.rs b/src/vmm/src/cowork_ops.rs
@@ -611,10 +867,10 @@ index 0000000..89256d2
 +}
 diff --git a/src/vmm/src/cowork_ranges.rs b/src/vmm/src/cowork_ranges.rs
 new file mode 100644
-index 0000000..d64879a
+index 0000000..e558cca
 --- /dev/null
 +++ b/src/vmm/src/cowork_ranges.rs
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,124 @@
 +//! Pure planning only: never unmaps or modifies memory. Runtime owns the registry and exclusions.
 +//! Compile tests with the slice-local rustc --test; no VM or library linkage is needed.
 +#[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -640,6 +896,13 @@ index 0000000..d64879a
 +pub fn plan(regions: &[OwnedRegion], excluded: &[Extent], reports: &[Extent], host_page: u64)
 +    -> Result<Vec<ReclaimSpan>, Reject>
 +{
++    let owned_bytes=regions.iter().try_fold(0u64,|total,r|total.checked_add(r.len)).ok_or(Reject::Overflow)?;
++    // The ceiling is a bounded-fixture policy. Production can call plan_with_limit with admission policy.
++    plan_with_limit(regions,excluded,reports,host_page,owned_bytes.min(384*1024*1024))
++}
++pub fn plan_with_limit(regions:&[OwnedRegion],excluded:&[Extent],reports:&[Extent],host_page:u64,limit:u64)
++    -> Result<Vec<ReclaimSpan>,Reject>
++{
 +    if host_page != 16384 { return Err(Reject::HostPageSize); }
 +    if reports.is_empty() { return Err(Reject::Empty); }
 +    if reports.len()>256 || regions.len()>256 || excluded.len()>4096 { return Err(Reject::TooMany); }
@@ -661,7 +924,7 @@ index 0000000..d64879a
 +        let report_end=end(report.start,report.len)?;
 +        if report.start%host_page!=0 || report.len%host_page!=0 { return Err(Reject::Alignment); }
 +        total=total.checked_add(report.len).ok_or(Reject::Overflow)?;
-+        if total>384*1024*1024 { return Err(Reject::Limit); }
++        if total>limit { return Err(Reject::Limit); }
 +        let region=regions.iter().find(|r| report.start>=r.gpa && report_end<=r.gpa+r.len).ok_or(Reject::Unowned)?;
 +        let hva=region.hva.checked_add(report.start-region.gpa).ok_or(Reject::Overflow)?;
 +        if hva%host_page!=0 || end(hva,report.len)?>region.hva+region.len { return Err(Reject::Alignment); }
@@ -726,12 +989,17 @@ index 0000000..d64879a
 +        assert_eq!(plan(&[r],&[],&vec![report(r.gpa,PAGE);257],PAGE),Err(Reject::TooMany));
 +        assert_eq!(plan(&[r],&[],&[report(r.gpa,PAGE)],4096),Err(Reject::HostPageSize));
 +    }
++    #[test] fn explicit_limit_can_narrow_admission_to_region_budget() {
++        let r=region();
++        assert_eq!(plan_with_limit(&[r],&[],&[report(r.gpa,2*PAGE)],PAGE,PAGE),Err(Reject::Limit));
++        assert!(plan_with_limit(&[r],&[],&[report(r.gpa,PAGE)],PAGE,PAGE).is_ok());
++    }
 +}
 diff --git a/src/vmm/src/lib.rs b/src/vmm/src/lib.rs
-index 0f0f8c2..42edbf0 100644
+index 0f0f8c2..25baba8 100644
 --- a/src/vmm/src/lib.rs
 +++ b/src/vmm/src/lib.rs
-@@ -192,7 +192,25 @@ pub trait VmmEventsObserver {
+@@ -192,7 +192,29 @@ pub trait VmmEventsObserver {
  pub type Result<T> = std::result::Result<T, Error>;
  
  /// Contains the state and associated methods required for the Firecracker VMM.
@@ -743,6 +1011,10 @@ index 0f0f8c2..42edbf0 100644
 +mod cowork_barrier;
 +#[cfg(target_os = "macos")]
 +mod cowork_ops;
++#[cfg(target_os = "macos")]
++mod cowork_control;
++#[cfg(target_os = "macos")]
++mod cowork_coordinator;
  pub struct Vmm {
 +    #[cfg(target_os = "macos")]
 +    cowork_owned: Vec<cowork_ranges::OwnedRegion>,
@@ -758,20 +1030,19 @@ index 0f0f8c2..42edbf0 100644
      guest_memory: GuestMemoryMmap,
      arch_memory_info: ArchMemoryInfo,
 diff --git a/src/vmm/src/macos/vstate.rs b/src/vmm/src/macos/vstate.rs
-index ccafa1c..a1c3b71 100644
+index ccafa1c..bc49eea 100644
 --- a/src/vmm/src/macos/vstate.rs
 +++ b/src/vmm/src/macos/vstate.rs
-@@ -10,15 +10,15 @@ use std::collections::HashMap;
+@@ -10,7 +10,7 @@ use std::collections::HashMap;
  use std::fmt::{Display, Formatter};
  use std::io;
  use std::result;
 -use std::sync::Arc;
 +use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
  use std::thread;
--use std::time::Duration;
-+use std::time::{Duration, Instant};
+ use std::time::Duration;
  
- use super::super::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK};
+@@ -18,7 +18,7 @@ use super::super::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK};
  use crate::vmm_config::machine_config::CpuFeaturesTemplate;
  
  use arch::ArchMemoryInfo;
@@ -820,31 +1091,34 @@ index ccafa1c..a1c3b71 100644
          init_tls_sender
              .send(true)
              .expect("Cannot notify vcpu TLS initialization.");
-@@ -450,8 +455,13 @@ impl Vcpu {
+@@ -450,8 +455,8 @@ impl Vcpu {
          let (wfe_sender, wfe_receiver) = unbounded();
          self.vcpu_list.register(hvf_vcpuid, wfe_sender);
  
 -        let entry_addr = if let Some(boot_receiver) = &self.boot_receiver {
 -            boot_receiver.recv().unwrap()
 +        let entry_addr = if let Some(boot_receiver) = self.boot_receiver.clone() {
-+            loop {
-+                crossbeam_channel::select! {
-+                    recv(boot_receiver) -> entry => break entry.expect("boot channel closed"),
-+                    recv(self.event_receiver) -> event => self.fixture_control(event.expect("control closed")),
-+                }
-+            }
++            crate::cowork_control::boot(&boot_receiver,&self.event_receiver,&self.response_sender).expect("fixture boot control")
          } else {
              self.boot_entry_addr
          };
-@@ -461,6 +471,7 @@ impl Vcpu {
+@@ -460,8 +465,14 @@ impl Vcpu {
+             .set_initial_state(self.ipa_size, entry_addr, self.fdt_addr)
              .unwrap_or_else(|_| panic!("Can't set HVF vCPU {hvf_vcpuid} initial state"));
  
++        let fixture_events=self.event_receiver.clone();let fixture_acks=self.response_sender.clone();
          loop {
-+            while let Ok(event) = self.event_receiver.try_recv() { self.fixture_control(event); }
-             match self.run_emulation(&mut hvf_vcpu) {
+-            match self.run_emulation(&mut hvf_vcpu) {
++            let emulation=crate::cowork_control::step(&fixture_events,&fixture_acks,|| {
++                let result=self.run_emulation(&mut hvf_vcpu);
++                if matches!(&result,Ok(VcpuEmulation::Stopped)|Err(_)) {crate::cowork_fixture::mark_stop();}
++                result
++            },|result|matches!(result,Ok(VcpuEmulation::Stopped)|Err(_))).expect("fixture run control");
++            match emulation {
                  // Emulation ran successfully, continue.
                  Ok(VcpuEmulation::Handled) => (),
-@@ -494,24 +505,47 @@ impl Vcpu {
+                 // Emulation was interrupted by a breakpoint.
+@@ -494,24 +505,14 @@ impl Vcpu {
          receiver: &Receiver<u32>,
          timeout: Option<Duration>,
      ) {
@@ -856,44 +1130,15 @@ index ccafa1c..a1c3b71 100644
 -                        RecvTimeoutError::Timeout => {}
 -                        RecvTimeoutError::Disconnected => panic!("WFE channel closed unexpectedly"),
 -                    },
-+        let deadline = timeout.map(|d| Instant::now() + d);
-+        loop {
-+            if !self.vcpu_list.should_wait(hvf_vcpuid) { return; }
-+            if let Some(deadline) = deadline {
-+                let remaining = deadline.saturating_duration_since(Instant::now());
-+                if remaining.is_zero() { return; }
-+                crossbeam_channel::select! {
-+                    recv(receiver) -> irq => { irq.expect("WFE channel closed"); return; },
-+                    recv(self.event_receiver) -> event => self.fixture_control(event.expect("control closed")),
-+                    default(remaining) => return,
-                 }
-             } else {
+-                }
+-            } else {
 -                receiver.recv().unwrap();
-+                crossbeam_channel::select! {
-+                    recv(receiver) -> irq => { irq.expect("WFE channel closed"); return; },
-+                    recv(self.event_receiver) -> event => self.fixture_control(event.expect("control closed")),
-+                }
-             }
-         }
+-            }
+-        }
++        crate::cowork_control::wfe(receiver,&self.event_receiver,&self.response_sender,timeout,
++            || self.vcpu_list.should_wait(hvf_vcpuid)).expect("fixture WFE control");
      }
  
-+    fn fixture_control(&mut self, event: VcpuEvent) {
-+        if let VcpuEvent::FixturePause(epoch) = event {
-+            // Called only outside hv_vcpu_run/MMIO emulation: no device mutex or guest slice survives.
-+            self.response_sender.send(VcpuResponse::FixturePaused(epoch)).expect("pause ACK closed");
-+            loop {
-+                match self.event_receiver.recv().expect("parked control closed") {
-+                    VcpuEvent::FixtureResume(resume) if resume == epoch => {
-+                        self.response_sender.send(VcpuResponse::FixtureResumed(epoch)).expect("resume ACK closed");
-+                        return;
-+                    },
-+                    _ => panic!("mismatched fixture park epoch"),
-+                }
-+            }
-+        } else if matches!(event, VcpuEvent::FixtureResume(_)) {
-+            panic!("fixture resume without park");
-+        }
-+    }
      fn wait_for_resume(&mut self) {}
  
      fn exit(&mut self, exit_code: u8) {
@@ -901,7 +1146,7 @@ index ccafa1c..a1c3b71 100644
          self.response_sender
              .send(VcpuResponse::Exited(exit_code))
              .expect("failed to send Exited status");
-@@ -535,6 +569,8 @@ impl Drop for Vcpu {
+@@ -535,6 +536,8 @@ impl Drop for Vcpu {
  pub enum VcpuEvent {
      /// Pause the Vcpu.
      Pause,
@@ -910,7 +1155,7 @@ index ccafa1c..a1c3b71 100644
      /// Event that should resume the Vcpu.
      Resume,
      // Serialize and Deserialize to follow after we get the support from kvm-ioctls.
-@@ -545,6 +581,8 @@ pub enum VcpuEvent {
+@@ -545,6 +548,8 @@ pub enum VcpuEvent {
  pub enum VcpuResponse {
      /// Vcpu is paused.
      Paused,
@@ -919,7 +1164,7 @@ index ccafa1c..a1c3b71 100644
      /// Vcpu is resumed.
      Resumed,
      /// Vcpu is stopped.
-@@ -553,6 +591,7 @@ pub enum VcpuResponse {
+@@ -553,6 +558,7 @@ pub enum VcpuResponse {
  
  /// Wrapper over Vcpu that hides the underlying interactions with the Vcpu thread.
  pub struct VcpuHandle {
@@ -927,7 +1172,7 @@ index ccafa1c..a1c3b71 100644
      event_sender: Sender<VcpuEvent>,
      response_receiver: Receiver<VcpuResponse>,
  }
-@@ -562,10 +601,12 @@ impl VcpuHandle {
+@@ -562,10 +568,12 @@ impl VcpuHandle {
          event_sender: Sender<VcpuEvent>,
          response_receiver: Receiver<VcpuResponse>,
          _vcpu_thread: thread::JoinHandle<()>,
@@ -940,7 +1185,7 @@ index ccafa1c..a1c3b71 100644
          }
      }
  
-@@ -586,6 +627,12 @@ impl VcpuHandle {
+@@ -586,6 +594,12 @@ impl VcpuHandle {
          Ok(())
      }
  
@@ -953,18 +1198,30 @@ index ccafa1c..a1c3b71 100644
      pub fn response_receiver(&self) -> &Receiver<VcpuResponse> {
          &self.response_receiver
      }
-@@ -604,9 +651,9 @@ enum VcpuEmulation {
+@@ -604,7 +618,7 @@ enum VcpuEmulation {
  mod tests {
      #[cfg(target_arch = "x86_64")]
      use crossbeam_channel::RecvTimeoutError;
 -    use std::sync::Arc;
 +    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
      #[cfg(target_arch = "x86_64")]
--    use std::time::Duration;
-+    use std::time::{Duration, Instant};
+     use std::time::Duration;
  
-     use super::*;
-     use arch::aarch64::layout::DRAM_MEM_START_EFI;
+@@ -732,3 +746,14 @@ mod tests {
+         );
+     }
+ }
++
++impl crate::cowork_control::Event for VcpuEvent {
++    fn meaning(&self)->crate::cowork_control::Meaning {
++        use crate::cowork_control::Meaning;
++        match self {Self::FixturePause(epoch)=>Meaning::Pause(*epoch),Self::FixtureResume(epoch)=>Meaning::Resume(*epoch),_=>Meaning::Other}
++    }
++}
++impl crate::cowork_control::Response for VcpuResponse {
++    fn paused(epoch:u64)->Self {Self::FixturePaused(epoch)}
++    fn resumed(epoch:u64)->Self {Self::FixtureResumed(epoch)}
++}
 diff --git a/src/vmm/src/resources.rs b/src/vmm/src/resources.rs
 index aa32404..ca025a5 100644
 --- a/src/vmm/src/resources.rs
