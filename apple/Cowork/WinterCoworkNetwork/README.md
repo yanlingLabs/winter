@@ -2,10 +2,10 @@
 
 Implemented native component, not an integrated or passed VM gate. All packet,
 userspace TCP/UDP stack, and host socket work stays on a dedicated pthread inside
-the caller process. Production placement is unresolved: putting a C packet
-parser in the credential daemon expands its attack surface. This component
-must remain unavailable until the reviewed process/connection-broker boundary
-is implemented. No helper process, VZ NAT attachment, bridge, host port
+the caller process. Production placement is the approved sandboxed VMM worker
+per workspace; guest packet parsing must never run in the credential daemon.
+This component must remain unavailable until the reviewed worker/broker boundary
+is implemented. No VZ NAT attachment, bridge, host port
 forward, guest exec service, or global firewall change is exposed.
 
 ## Interface and ownership
@@ -61,9 +61,16 @@ routing inventories are cached for 200ms rather than captured on each packet
 wake. A failed route refresh retains the last complete snapshot and its host/LAN
 fences, denies every new public tuple, and permits previously admitted, pinned
 public tuples for at most two seconds from the first failure. Repeated failures
-do not extend that grace. An unknown or changed host-interface identity denies
-public continuation immediately after observation; a complete identity change
-also closes previously pinned public flows. Current grant/DNS authority is
+do not extend that grace. Unknown host inventory denies public continuation
+immediately and cannot regain grace until a combined complete refresh succeeds.
+Known changes use monotonic interface/address-family identity epochs based on
+normalized connected subnet sets. A removed/reappearing interface or changed
+bound network closes its old flows; unrelated interface/family changes preserve
+them. Temporary host address rotation within an unchanged subnet preserves its
+identity, while full host/LAN destination fences are still rechecked. Destination
+fences observed during route failure remain effective until recovery. Every
+continuation also rechecks the default interface and destination-specific route
+denials; numeric interface index equality alone is insufficient. Current grant/DNS authority is
 rechecked throughout; expiry, revocation and disabled internet authority never
 inherit grace. A snapshot that has never succeeded gives no public authority.
 
@@ -91,6 +98,15 @@ polling socket behind. Policy replacement resets all flows, while periodic
 revalidation closes only affected sockets. No unsolicited listener or
 forwarding API is reachable through the wrapper. Internet ping/raw sockets are
 explicitly disabled in the vendored paths as defense in depth.
+
+libslirp has process-global clock/DNS cache state. All wrapper calls, including
+construction, cleanup, poll, guest input, timer and selective-close APIs, share
+one process mutex. Its lock order precedes the endpoint counter/control mutex;
+blocking OS polls, condition waits and joins hold neither. Multiple endpoints
+remain supported within a process without racing those globals. Poll dispatch
+precedes guest input, updating the upstream clock before the first UDP socket
+gets an expiry and consuming the previously filled poll set before new sockets
+are created. The vendored library is unchanged by this ordering fix.
 
 Limits: 256 sockets, 64 grants, 128 supplied/observed prefixes, MTU1500, one native
 worker, 128KiB send / 512KiB receive kernel queues per endpoint, nonblocking
@@ -139,7 +155,7 @@ swift build --package-path apple/Cowork/WinterCoworkNetwork --jobs 4
 swift test --package-path apple/Cowork/WinterCoworkNetwork --jobs 4
 ```
 
-45 Swift Testing tests passed on 2026-10-11: public/private/mapped IPv6 and LAN
+53 Swift Testing tests passed in Debug and Release on 2026-10-11: public/private/mapped IPv6 and LAN
 policy, tuple/expiry grants, configured DNS exception, gateway final tuple,
 malformed/raw/fragment denial, policy ACK/stale revision, real libslirp TCP
 connect and UDP send to scoped ephemeral loopback listeners, unsolicited UDP
@@ -154,7 +170,13 @@ inventories, generated versus static routes, ambiguous/missing defaults,
 mapped-prefix normalization, final routed admission and kernel interface-bind
 options. Cache tests cover new admission denial, bounded continuation without
 renewing the failure window, retained LAN fences, current grant revocation and
-expiry, host identity/generation changes, and the 200ms refresh TTL. Packet wakes
+expiry, scoped host identity changes, unrelated interface and other-family churn,
+temporary IPv6 address rotation, interface disappearance/reuse, destination
+becoming a host address, route changes and the 200ms refresh TTL. A new test
+process runs the first-UDP fixture alone so a warmed process-global clock cannot
+hide immediate socket expiry. Eight concurrent endpoints exercise independent
+UDP authority, exact unsolicited-peer rejection, policy replacement and cleanup.
+Packet wakes
 exercise that TTL in the real worker. An injected host snapshot drives actual
 libslirp TCP and UDP public-route admission and kernel socket binding to `lo0`;
 the mandatory synthetic policy refuses before `connect`/`sendto`, and its fixture

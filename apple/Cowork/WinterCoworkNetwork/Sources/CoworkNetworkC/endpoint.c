@@ -15,8 +15,14 @@
 #define MAX_SOCKETS 256
 #define MAX_POLLS (MAX_SOCKETS + 2)
 #define MAX_UDP_PEERS 16
-typedef struct { wc_network_address address; bool dns; uint64_t sent_ns; uint32_t bound_ifindex; uint64_t host_generation; } udp_peer;
-typedef struct { int fd; wc_network_address peer; int protocol; bool dns; uint32_t bound_ifindex; uint64_t host_generation; udp_peer udp[MAX_UDP_PEERS]; size_t udp_count; } flow;
+// libslirp's curtime and DNS caches are process-global, not Slirp-owned. All
+// public calls made by this wrapper are serialized, even for separate endpoints.
+// Lock order is slirp_lock -> ctx->lock (callbacks update counters). Public
+// control APIs never acquire slirp_lock while holding ctx->lock; poll and joins
+// happen without either lock, so a quiet endpoint cannot stall another worker.
+static pthread_mutex_t slirp_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef struct { wc_network_address address; bool dns; uint64_t sent_ns; uint32_t bound_ifindex; uint64_t interface_generation; } udp_peer;
+typedef struct { int fd; wc_network_address peer; int protocol; bool dns; uint32_t bound_ifindex; uint64_t interface_generation; udp_peer udp[MAX_UDP_PEERS]; size_t udp_count; } flow;
 typedef struct { SlirpTimerId id; void *opaque; int64_t expires_ms; bool used; } timer;
 struct wc_network_endpoint {
     pthread_t thread; pthread_mutex_t lock; pthread_cond_t changed;
@@ -52,8 +58,8 @@ static void host_snapshot(wc_network_policy *policy) {
         if(!address_from_sockaddr(i->ifa_addr,&a)) continue;
         uint32_t identity=if_nametoindex(i->ifa_name);
         if(!identity) {policy->public_internet=false;continue;}
-        // Prefix matching deliberately ignores scope; the cache uses this field
-        // to detect an address/LAN moving between interfaces as an identity change.
+        // Destination matching ignores scope. The cache separately tracks
+        // connected-network identities by interface and address family.
         a.scope_id=identity;
         policy->host_networks[policy->host_network_count++]=(wc_network_prefix){.address=a,.prefix_length=a.family==4?32:128};
         if(policy->host_network_count==WC_NETWORK_MAX_PREFIXES) break;
@@ -91,7 +97,7 @@ static bool destination(int fd,int protocol,const struct sockaddr *sa,size_t len
     if(!admitted && protocol==17) for(size_t i=0;i<f->udp_count;i++) {
         // A stale inventory can retain a previously admitted UDP tuple, never
         // add another peer to the shared socket during the grace period.
-        if(address_equal(&f->udp[i].address,&peer) && current_matches(ctx,&peer,protocol,dns,f->udp[i].bound_ifindex,f->udp[i].host_generation)) {
+        if(address_equal(&f->udp[i].address,&peer) && current_matches(ctx,&peer,protocol,dns,f->udp[i].bound_ifindex,f->udp[i].interface_generation)) {
             interface=f->udp[i].bound_ifindex;admitted=true;break;
         }
     }
@@ -114,17 +120,17 @@ static bool destination(int fd,int protocol,const struct sockaddr *sa,size_t len
     if(protocol==17) {
         size_t at=0;for(;at<f->udp_count;at++) if(address_equal(&f->udp[at].address,&peer)) break;
         if(at==MAX_UDP_PEERS) { stat_add(ctx,&ctx->stats.denied); return false; }
-        f->udp[at]=(udp_peer){.address=peer,.dns=dns,.sent_ns=now_ns(),.bound_ifindex=interface,.host_generation=ctx->inventory.host_generation};if(at==f->udp_count) f->udp_count++;
+        f->udp[at]=(udp_peer){.address=peer,.dns=dns,.sent_ns=now_ns(),.bound_ifindex=interface,.interface_generation=wc_network_inventory_identity(&ctx->inventory,interface,peer.family)};if(at==f->udp_count) f->udp_count++;
     }
-    f->peer=peer; f->protocol=protocol; f->dns=dns; f->bound_ifindex=interface;f->host_generation=ctx->inventory.host_generation;return true;
+    f->peer=peer; f->protocol=protocol; f->dns=dns; f->bound_ifindex=interface;f->interface_generation=wc_network_inventory_identity(&ctx->inventory,interface,peer.family);return true;
 }
 static bool inbound(int fd,int protocol,const struct sockaddr *sa,size_t length,void *opaque) {
     (void)length; wc_network_endpoint *ctx=opaque; wc_network_address peer; flow *f=find_flow(ctx,fd);
     bool allowed=false;
     if(f && address_from_sockaddr(sa,&peer) && protocol==f->protocol) {
         if(protocol==17) {
-            for(size_t i=0;i<f->udp_count;i++) if(address_equal(&peer,&f->udp[i].address) && current_matches(ctx,&peer,protocol,f->udp[i].dns,f->udp[i].bound_ifindex,f->udp[i].host_generation)) { allowed=true;break; }
-        } else allowed=address_equal(&peer,&f->peer) && current_matches(ctx,&peer,protocol,f->dns,f->bound_ifindex,f->host_generation);
+            for(size_t i=0;i<f->udp_count;i++) if(address_equal(&peer,&f->udp[i].address) && current_matches(ctx,&peer,protocol,f->udp[i].dns,f->udp[i].bound_ifindex,f->udp[i].interface_generation)) { allowed=true;break; }
+        } else allowed=address_equal(&peer,&f->peer) && current_matches(ctx,&peer,protocol,f->dns,f->bound_ifindex,f->interface_generation);
     }
     if(!allowed) stat_add(ctx,&ctx->stats.inbound_peer_denied); return allowed;
 }
@@ -132,7 +138,7 @@ static bool peer_current(int fd,void *opaque) {
     wc_network_endpoint *ctx=opaque; flow *f=find_flow(ctx,fd); if(!f || !f->peer.family) return false;
     // This is our immutable admitted connected tuple. getpeername may fail after RST,
     // which must reach upstream recv/close handling instead of turning into a poll spin.
-    return current_matches(ctx,&f->peer,f->protocol,f->dns,f->bound_ifindex,f->host_generation);
+    return current_matches(ctx,&f->peer,f->protocol,f->dns,f->bound_ifindex,f->interface_generation);
 }
 static bool capacity(void *opaque) { return ((wc_network_endpoint *)opaque)->flow_count<MAX_SOCKETS; }
 static bool dns(int family,struct sockaddr *sa,size_t length,void *opaque) {
@@ -205,30 +211,37 @@ static void *worker(void *opaque) {
         }
         wc_network_inventory_effective(&ctx->inventory,&ctx->policy,&ctx->effective_policy);
         stat_add(ctx,&ctx->stats.poll_turns);
+        pthread_mutex_lock(&slirp_lock);
         if(replace) {
             reset_stack(ctx); pthread_mutex_lock(&ctx->lock); ctx->stats.revision=ctx->policy.revision; ctx->stats.policy_replacements++; if(!ctx->slirp) ctx->stopped=true; ctx->replacement_done=true; pthread_cond_broadcast(&ctx->changed); pthread_mutex_unlock(&ctx->lock);
         }
-        if(!ctx->slirp) break;
+        if(!ctx->slirp) { pthread_mutex_unlock(&slirp_lock); break; }
         // Prune only affected tuples. An expired grant must not reset unrelated connections.
         for(size_t i=0;i<ctx->flow_count;) {
             flow *f=&ctx->flows[i];bool expired=false;
             if(f->protocol==17 && f->peer.family) {
                 for(size_t n=0;n<f->udp_count;) {
-                    if(now_ns()-f->udp[n].sent_ns>120ULL*1000000000 || !current_matches(ctx,&f->udp[n].address,17,f->udp[n].dns,f->udp[n].bound_ifindex,f->udp[n].host_generation)) f->udp[n]=f->udp[--f->udp_count];
+                    if(now_ns()-f->udp[n].sent_ns>120ULL*1000000000 || !current_matches(ctx,&f->udp[n].address,17,f->udp[n].dns,f->udp[n].bound_ifindex,f->udp[n].interface_generation)) f->udp[n]=f->udp[--f->udp_count];
                     else n++;
                 }
                 expired=f->udp_count==0;
-            } else expired=f->peer.family && !current_matches(ctx,&f->peer,f->protocol,f->dns,f->bound_ifindex,f->host_generation);
+            } else expired=f->peer.family && !current_matches(ctx,&f->peer,f->protocol,f->dns,f->bound_ifindex,f->interface_generation);
             if(expired) { int fd=f->fd;slirp_winter_close_socket(ctx->slirp,fd);if(i<ctx->flow_count && ctx->flows[i].fd==fd)i++; }
             else i++;
         }
-        if(!ctx->slirp) break;
         uint32_t timeout=100; ctx->poll_count=2; ctx->polls[0]=(struct pollfd){.fd=ctx->engine_fd,.events=POLLIN}; ctx->polls[1]=(struct pollfd){.fd=ctx->control[0],.events=POLLIN};
         slirp_pollfds_fill_socket(ctx->slirp,&timeout,add_poll,ctx);
         uint64_t ms=now_ns()/1000000;
         for(int i=0;i<4;i++) if(ctx->timers[i].used && ctx->timers[i].expires_ms>=0) { uint64_t expiry=(uint64_t)ctx->timers[i].expires_ms; if(expiry<=ms) timeout=0; else if(expiry-ms<timeout) timeout=(uint32_t)(expiry-ms); }
+        pthread_mutex_unlock(&slirp_lock);
         int ready=poll(ctx->polls,ctx->poll_count,(int)timeout);
         if(ctx->polls[1].revents&POLLIN) { uint8_t b[64]; while(read(ctx->control[0],b,sizeof(b))>0){} continue; }
+        pthread_mutex_lock(&slirp_lock);
+        // Dispatch the filled poll set before adding sockets from guest frames.
+        // This public API also updates libslirp's clock. Feeding the first UDP
+        // frame first would set so_expire relative to its initial zero curtime,
+        // then expire it immediately when poll advances to host uptime.
+        slirp_pollfds_poll(ctx->slirp,ready<0,revents,ctx);
         if(ctx->polls[0].revents&POLLIN) for(int budget=0;budget<64;budget++) {
             uint8_t frame[1515]; ssize_t length=recv(ctx->engine_fd,frame,sizeof(frame),0); if(length<0) break;
             stat_add(ctx,&ctx->stats.packets_in);
@@ -237,10 +250,12 @@ static void *worker(void *opaque) {
             int admitted=wc_network_classify_frame(&ctx->effective_policy,frame,(size_t)length,now_ns());
             if(admitted==1) slirp_input(ctx->slirp,frame,(int)length); else stat_add(ctx,admitted==0?&ctx->stats.denied:&ctx->stats.unsupported);
         }
-        slirp_pollfds_poll(ctx->slirp,ready<0,revents,ctx);
         ms=now_ns()/1000000; for(int i=0;i<4;i++) if(ctx->timers[i].used && ctx->timers[i].expires_ms>=0 && (uint64_t)ctx->timers[i].expires_ms<=ms) { ctx->timers[i].expires_ms=-1; slirp_handle_timer(ctx->slirp,ctx->timers[i].id,ctx->timers[i].opaque); }
+        pthread_mutex_unlock(&slirp_lock);
     }
+    pthread_mutex_lock(&slirp_lock);
     if(ctx->slirp) { slirp_cleanup(ctx->slirp); ctx->slirp=NULL; }
+    pthread_mutex_unlock(&slirp_lock);
     pthread_mutex_lock(&ctx->lock); ctx->stopped=true; ctx->replacement_done=true; pthread_cond_broadcast(&ctx->changed); pthread_mutex_unlock(&ctx->lock); return NULL;
 }
 static wc_network_endpoint *create(const wc_network_policy *policy,const wc_host_route_snapshot *fixture) {
@@ -249,7 +264,7 @@ static wc_network_endpoint *create(const wc_network_policy *policy,const wc_host
     pthread_mutex_init(&ctx->lock,NULL); pthread_cond_init(&ctx->changed,NULL); ctx->policy=*policy; ctx->stats.revision=policy->revision;
     if(fixture) {
         if(!policy->synthetic_no_outbound) goto failed;
-        wc_network_policy hosts={.public_internet=true};
+        wc_network_policy hosts={.public_internet=true};host_snapshot(&hosts);
         wc_network_inventory_update(&ctx->inventory,fixture,&hosts,now_ns());ctx->inventory_fixture=true;
     }
     int pair[2]; if(socketpair(AF_UNIX,SOCK_DGRAM,0,pair)!=0) goto failed; ctx->guest_fd=pair[0]; ctx->engine_fd=pair[1];
@@ -257,10 +272,12 @@ static wc_network_endpoint *create(const wc_network_policy *policy,const wc_host
     int snd=128*1024,rcv=512*1024,no_sigpipe=1;
     for(int i=0;i<2;i++) { fcntl(pair[i],F_SETFL,O_NONBLOCK); fcntl(pair[i],F_SETFD,FD_CLOEXEC); if(setsockopt(pair[i],SOL_SOCKET,SO_SNDBUF,&snd,sizeof(snd)) || setsockopt(pair[i],SOL_SOCKET,SO_RCVBUF,&rcv,sizeof(rcv)) || setsockopt(pair[i],SOL_SOCKET,SO_NOSIGPIPE,&no_sigpipe,sizeof(no_sigpipe))) goto failed; }
     for(int i=0;i<2;i++) { fcntl(ctx->control[i],F_SETFL,O_NONBLOCK); fcntl(ctx->control[i],F_SETFD,FD_CLOEXEC); }
-    ctx->slirp=new_stack(ctx); if(!ctx->slirp || pthread_create(&ctx->thread,NULL,worker,ctx)!=0) goto failed;
+    pthread_mutex_lock(&slirp_lock); ctx->slirp=new_stack(ctx); pthread_mutex_unlock(&slirp_lock);
+    if(!ctx->slirp || pthread_create(&ctx->thread,NULL,worker,ctx)!=0) goto failed;
     return ctx;
 failed:
-    if(ctx->slirp) slirp_cleanup(ctx->slirp); if(ctx->guest_fd>=0) close(ctx->guest_fd); if(ctx->engine_fd>=0) close(ctx->engine_fd); if(ctx->control[0]>=0) close(ctx->control[0]); if(ctx->control[1]>=0) close(ctx->control[1]); pthread_mutex_destroy(&ctx->lock); pthread_cond_destroy(&ctx->changed); free(ctx); return NULL;
+    pthread_mutex_lock(&slirp_lock); if(ctx->slirp) slirp_cleanup(ctx->slirp); pthread_mutex_unlock(&slirp_lock);
+    if(ctx->guest_fd>=0) close(ctx->guest_fd); if(ctx->engine_fd>=0) close(ctx->engine_fd); if(ctx->control[0]>=0) close(ctx->control[0]); if(ctx->control[1]>=0) close(ctx->control[1]); pthread_mutex_destroy(&ctx->lock); pthread_cond_destroy(&ctx->changed); free(ctx); return NULL;
 }
 wc_network_endpoint *wc_network_create(const wc_network_policy *policy) {return create(policy,NULL);}
 wc_network_endpoint *wc_network_create_inventory_fixture(const wc_network_policy *policy,const wc_host_route_snapshot *routes) {

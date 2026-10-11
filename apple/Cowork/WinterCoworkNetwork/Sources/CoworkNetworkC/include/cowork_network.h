@@ -41,20 +41,25 @@ bool wc_host_routes_read(wc_host_route_snapshot *out);
 #define WC_NETWORK_INVENTORY_TTL_NS 200000000ULL
 #define WC_NETWORK_ROUTE_GRACE_NS 2000000000ULL
 // Host-owned cache. Route read failure retains fences but admits no new public
-// tuples. Only existing pinned flows may use a bounded grace. Changed or unknown
-// host identities invalidate that grace; exact authority is always checked live.
+// tuples. Only existing pinned flows may use a bounded grace. Unknown host
+// inventory invalidates that grace. Known changes are scoped to interface/family
+// identity and destination fences; exact authority is always checked live.
+typedef struct { uint32_t ifindex; uint8_t family; uint64_t generation; } wc_network_interface_identity;
 typedef struct {
     wc_host_route_snapshot routes;
     wc_network_policy hosts; // Only public_internet and host_networks/count are used.
-    uint64_t refreshed_ns, stale_since_ns, host_generation;
+    wc_network_policy grace_hosts; // Retain observed fences throughout route grace.
+    wc_network_interface_identity identities[WC_NETWORK_MAX_PREFIXES]; size_t identity_count;
+    uint64_t refreshed_ns, stale_since_ns, identity_generation;
     bool attempted, has_good, stale, unsafe_hosts;
 } wc_network_inventory;
 bool wc_network_inventory_due(const wc_network_inventory *, uint64_t now_ns);
 void wc_network_inventory_update(wc_network_inventory *, const wc_host_route_snapshot *, const wc_network_policy *hosts, uint64_t now_ns);
 void wc_network_inventory_effective(const wc_network_inventory *, const wc_network_policy *, wc_network_policy *out);
 bool wc_network_inventory_admit(const wc_network_inventory *, const wc_network_policy *effective, const wc_network_address *, uint8_t protocol, bool dns, uint64_t now_ns, bool existing, uint32_t *ifindex);
+uint64_t wc_network_inventory_identity(const wc_network_inventory *, uint32_t bound_ifindex, uint8_t family);
 
-bool wc_network_inventory_matches(const wc_network_inventory *, const wc_network_policy *effective, const wc_network_address *, uint8_t protocol, bool dns, uint64_t now_ns, uint32_t bound_ifindex, uint64_t host_generation);
+bool wc_network_inventory_matches(const wc_network_inventory *, const wc_network_policy *effective, const wc_network_address *, uint8_t protocol, bool dns, uint64_t now_ns, uint32_t bound_ifindex, uint64_t interface_generation);
 
 typedef struct wc_network_endpoint wc_network_endpoint;
 // Addresses use family 4 or 6, bytes in network order and host-order port.

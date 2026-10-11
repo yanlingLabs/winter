@@ -103,8 +103,10 @@ private func scope()->NetworkEndpointScope {.init(workspaceId:"test-workspace",i
 private func localSocket(_ type:Int32)->(Int32,UInt16) {
     let fd=socket(AF_INET,type,0);precondition(fd>=0);var a=sockaddr_in();a.sin_len=UInt8(MemoryLayout<sockaddr_in>.size);a.sin_family=sa_family_t(AF_INET);a.sin_addr.s_addr=inet_addr("127.0.0.1")
     let result=withUnsafePointer(to:&a) {$0.withMemoryRebound(to:sockaddr.self,capacity:1) {bind(fd,$0,socklen_t(MemoryLayout<sockaddr_in>.size))}};precondition(result==0)
-    var n=socklen_t(MemoryLayout<sockaddr_in>.size);withUnsafeMutablePointer(to:&a) {$0.withMemoryRebound(to:sockaddr.self,capacity:1) {_=getsockname(fd,$0,&n)}}
-    _ = fcntl(fd,F_SETFL,O_NONBLOCK)
+    var n=socklen_t(MemoryLayout<sockaddr_in>.size)
+    let named=withUnsafeMutablePointer(to:&a) {$0.withMemoryRebound(to:sockaddr.self,capacity:1) {getsockname(fd,$0,&n)}}
+    precondition(named==0 && n==MemoryLayout<sockaddr_in>.size && a.sin_port != 0)
+    precondition(fcntl(fd,F_SETFL,O_NONBLOCK)==0)
     return (fd,UInt16(bigEndian:a.sin_port))
 }
 private func readable(_ fd:Int32,_ timeout:Int32=1500)->Bool {var p=pollfd(fd:fd,events:Int16(POLLIN),revents:0);return poll(&p,1,timeout)>0 && p.revents&Int16(POLLIN) != 0}
@@ -112,16 +114,48 @@ private func readable(_ fd:Int32,_ timeout:Int32=1500)->Bool {var p=pollfd(fd:fd
     let (server,port)=localSocket(SOCK_DGRAM);defer {close(server)}
     let e=try CoworkNetworkEndpoint(scope:scope(),policy:.init(revision:1,publicInternet:false,grants:[.init(address:"127.0.0.1",port:port,transport:.udp)]))
     let fd=try e.duplicateGuestFDForSyntheticTest();defer{close(fd)}
-    let frame=packet(destination:[10,0,2,2],port:port,payload:[0x77,0x69,0x6e]);#expect(frame.withUnsafeBytes {send(fd,$0.baseAddress,$0.count,0)}==frame.count)
-    #expect(readable(server));var bytes=[UInt8](repeating:0,count:64);var peer=sockaddr_storage();var n=socklen_t(MemoryLayout<sockaddr_storage>.size)
-    let received=withUnsafeMutablePointer(to:&peer) {$0.withMemoryRebound(to:sockaddr.self,capacity:1) {sa in recvfrom(server,&bytes,bytes.count,0,sa,&n)}};#expect(received==3)
+    let frame=packet(destination:[10,0,2,2],port:port,payload:[0x77,0x69,0x6e]);try #require(frame.withUnsafeBytes {send(fd,$0.baseAddress,$0.count,0)}==frame.count)
+    try #require(readable(server));var bytes=[UInt8](repeating:0,count:64);var peer=sockaddr_storage();var n=socklen_t(MemoryLayout<sockaddr_storage>.size)
+    let received=withUnsafeMutablePointer(to:&peer) {$0.withMemoryRebound(to:sockaddr.self,capacity:1) {sa in recvfrom(server,&bytes,bytes.count,0,sa,&n)}};try #require(received==3)
+    try #require(peer.ss_family == sa_family_t(AF_INET));try #require(n == MemoryLayout<sockaddr_in>.size)
+    // The stack has already turned its poll set after the initial send. Its
+    // first UDP socket must survive that turn before the rogue probe is valid.
+    try #require(try e.statistics().activeSockets == 1)
     let (rogue,_)=localSocket(SOCK_DGRAM);defer{close(rogue)}
-    withUnsafePointer(to:&peer) {$0.withMemoryRebound(to:sockaddr.self,capacity:1) {_=sendto(rogue,[UInt8](repeating:8,count:3),3,0,$0,n)}}
+    let rogueBytes=[UInt8](repeating:8,count:3)
+    let rogueSent=withUnsafePointer(to:&peer) {$0.withMemoryRebound(to:sockaddr.self,capacity:1) {destination in rogueBytes.withUnsafeBytes {sendto(rogue,$0.baseAddress,$0.count,0,destination,n)}}}
+    try #require(rogueSent == rogueBytes.count)
     for _ in 0..<2000 {if try e.statistics().inboundPeerDenied>0 {break};try await Task.sleep(for:.milliseconds(1))}
     let deniedPeers=try e.statistics().inboundPeerDenied;#expect(deniedPeers==1)
     try await e.replacePolicy(.init(revision:2,publicInternet:false),expectedRevision:1);#expect(try e.statistics().activeSockets==0)
     #expect(frame.withUnsafeBytes {send(fd,$0.baseAddress,$0.count,0)}==frame.count);#expect(!readable(server,150));#expect(try e.statistics().denied>0)
     await e.shutdown()
+}
+@Test func firstUDPInFreshProcessKeepsItsSocketAndRejectsUnsolicitedPeer() async throws {
+    // A regular suite run may warm libslirp's process-global curtime in another
+    // endpoint. Relaunch only the first-UDP fixture in a new process; do not
+    // reset or warm upstream globals in the fixture itself.
+    let bundleFlag=try #require(CommandLine.arguments.firstIndex(of:"--test-bundle-path"))
+    let bundle=CommandLine.arguments[bundleFlag+1]
+    let child=Process(),output=Pipe()
+    child.executableURL=URL(fileURLWithPath:CommandLine.arguments[0])
+    child.arguments=["--test-bundle-path",bundle,"--filter","^WinterCoworkNetworkTests.realUDPRequiresGrantAndRejectsUnsolicitedPeer",bundle,"--testing-library","swift-testing"]
+    child.standardOutput=output;child.standardError=output
+    try child.run()
+    let deadline=Date().addingTimeInterval(15)
+    while child.isRunning && Date()<deadline {try await Task.sleep(for:.milliseconds(10))}
+    if child.isRunning {child.terminate()}
+    child.waitUntilExit()
+    let log=String(decoding:output.fileHandleForReading.readDataToEndOfFile(),as:UTF8.self)
+    #expect(child.terminationStatus == 0, "Fresh-process UDP fixture failed: \(log)")
+    #expect(log.contains("Test realUDPRequiresGrantAndRejectsUnsolicitedPeer() passed"), "Fresh process must execute the UDP fixture: \(log)")
+    #expect(log.contains("Test run with 1 test"), "The first UDP fixture must run alone: \(log)")
+}
+@Test func concurrentEndpointsKeepIndependentUDPAuthorityThroughReplacement() async throws {
+    try await withThrowingTaskGroup(of:Void.self) { group in
+        for _ in 0..<8 {group.addTask {try await realUDPRequiresGrantAndRejectsUnsolicitedPeer()}}
+        try await group.waitForAll()
+    }
 }
 private func udpReply(_ server:Int32,_ text:String)throws {
     try #require(readable(server));var data=[UInt8](repeating:0,count:64),peer=sockaddr_storage();var size=socklen_t(MemoryLayout<sockaddr_storage>.size)
@@ -151,7 +185,7 @@ private func receiveUDPText(_ fd:Int32,_ expected:String)throws {
     #expect(try endpoint.statistics().inboundPeerDenied==0);#expect(try endpoint.statistics().activeSockets==1)
     // Queue a second B request before A expires, then reply after the deadline. A stack
     // reset would close B's old host socket and lose this legitimate response.
-    let f=packet(destination:[10,0,2,2],port:portB);_ = f.withUnsafeBytes{send(fd,$0.baseAddress,$0.count,0)}
+    let f=packet(destination:[10,0,2,2],port:portB);try #require(f.withUnsafeBytes{send(fd,$0.baseAddress,$0.count,0)}==f.count)
     try await Task.sleep(for:.milliseconds(600));#expect(try endpoint.statistics().activeSockets==1)
     try udpReply(b,"still-second");try receiveUDPText(fd,"still-second");await endpoint.shutdown()
 }
