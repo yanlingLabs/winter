@@ -55,10 +55,15 @@ extension CUCore {
         // The act is an operation on the app: touched while it runs (I1: "while an operation on it runs"), for the causal
         // window after it — however it ends. A cause that can't raise a window: the user's switch input just before it
         // still outranks it (#8).
-        // (Checked first: a refused act opens no span and records no cause — review of round 10, LOW #9.)
+        // (Checked first: a refused act opens no span and records no cause — review of round 10, LOW #9 — the floors
+        // included: review of round 11, LOW #9. They are checked again in the act itself.)
         do {
             try Self.checkAccess(p.action, access: p.access, appName: t.appName)
             try refuseWhileUserWorks(t)
+            try await queues.run(t.pid) { [self] in
+                try floorCheckPrivacy(t)
+                try floorCheckRemoteDebugging(p, t)
+            }
         } catch {
             cursor(t, "refused")
             logAct(p, t, failed: error)

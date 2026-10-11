@@ -150,4 +150,15 @@ final class GuardianRound11Tests: XCTestCase {
         XCTAssertTrue(CUProcessFacts.isPart(5, of: 4, responsible: 5, parent: nil, executable: "/Applications/Google Chrome.app/Contents/x",
                                             appBundle: "/Applications/Google Chrome.app"))
     }
+
+    /// Review of round 11, LOW #10: a launch notice heard long after the process started judges nothing clearly (the facts
+    /// from then are gone) — the launch is not taken for the agent's.
+    func testALateLaunchNoticeJudgesNothingClearly() {
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 100))
+        g.noteCause(500, now: 20)
+        g.noteOpenerCause(now: 20)
+        g.appLaunched(905, startedAt: 20.4, now: 40)  // heard 19.6 s after the start
+        XCTAssertFalse(g.judge(CUMoveQuery(app: 905, space: 100, appStartedAt: 20.4), now: 41).undoes)
+    }
 }

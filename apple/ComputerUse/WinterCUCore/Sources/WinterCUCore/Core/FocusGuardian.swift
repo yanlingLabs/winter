@@ -469,7 +469,10 @@ public struct CUFocusGuardianCore: Sendable {
         // agent's own action caused — a link it pressed opening a browser that was not running — is no launch of the user's.
         let start = min(startedAt ?? now, now)
         coldLaunches = coldLaunches.filter { now - $0.value.start <= Self.launchFirstWindow }
-        coldLaunches[pid] = (start, inputObservable && !secureInput && clearlyAt(start, hardwareAt: nil))
+        // (Only while the facts from the start are still kept: a notice heard later judges nothing clearly — review of
+        // round 11, LOW #10.)
+        let judgeable = now - start <= Self.keepFacts - Self.quietBeforeUndo
+        coldLaunches[pid] = (start, judgeable && inputObservable && !secureInput && clearlyAt(start, hardwareAt: nil))
     }
     /// The untouched launches heard of, by process: its start, and whether it was clearly the agent's then.
     private var coldLaunches: [pid_t: (start: TimeInterval, clearly: Bool)] = [:]
