@@ -65,11 +65,14 @@ if (chrome === undefined) {
 const FIXTURE = join(import.meta.dir, "fixture-web");
 const serve = (port: number, rewrite: (s: string) => string) => Bun.serve({
   port, hostname: "127.0.0.1",
-  fetch(req) {
+  fetch(req): Response {
     const path = new URL(req.url).pathname.replace(/^\/$/, "/index.html");
     // Phase 3's downloads: an attachment, and a PDF a browser would show (no disposition).
     if (path === "/files/prices.csv") return new Response("item,price\ntea,3\n", { headers: { "content-type": "text/csv", "content-disposition": 'attachment; filename="prices.csv"' } });
     if (path === "/files/doc.pdf") return new Response("%PDF-1.4\n%fake\n", { headers: { "content-type": "application/pdf" } });
+    // A download that comes through two redirects, the middle one on the other origin (the floor holds every hop).
+    if (path === "/files/hop") return Response.redirect(`${OOP_ORIGIN}/files/hop2`, 302);
+    if (path === "/files/hop2") return Response.redirect(`${BASE}/files/prices.csv`, 302);
     // Phase 3's readers: an API answer with a secret in it, a stylesheet and an image.
     if (path === "/api/items") return Response.json({ items: [{ name: "tea" }, { name: "cake" }], token: "tok_live_should_never_show", owner: "shop" });
     if (path === "/static/site.css") return new Response("h1 { color: navy; }", { headers: { "content-type": "text/css" } });
@@ -80,10 +83,13 @@ const serve = (port: number, rewrite: (s: string) => string) => Bun.serve({
   },
 });
 const oop = serve(0, (s) => s);
-const OOP_ORIGIN = `http://127.0.0.1:${oop.port}`;
+const OOP_ORIGIN: string = `http://127.0.0.1:${oop.port}`;
 const main = serve(0, (s) => s.replaceAll("OOP_ORIGIN", OOP_ORIGIN.replace("127.0.0.1", "127.0.0.1")));
 // The main pages are served as localhost, the payment frame as 127.0.0.1: two sites.
-const BASE = `http://localhost:${main.port}`;
+const BASE: string = `http://localhost:${main.port}`;
+
+/** The dangerous-domain list's additions (one scenario lists the other origin's host for a moment). */
+let listedDomains: string[] = [];
 
 // ── the engine over the pipe ─────────────────────────────────────────────────────────────────────
 const transport = new PipeTransport("winter", "winter");
@@ -107,7 +113,7 @@ const engine = new BrowserEngine({
   mintWinterTab: () => `tab${++tabSeq}`,
   winterTabs: () => ({ tabs: [] }),
   sessionInfo: () => ({ cwd, title: "e2e" }),
-  site: { dangerousDomainsAdded: () => [], savedAllowRules: () => [] },
+  site: { dangerousDomainsAdded: () => listedDomains, savedAllowRules: () => [] },
   home: mkdtempSync(join(tmpdir(), "winter-browser-e2e-home-")),
   uploadRoots: () => ({ denyRead: [] }),
   downloadRoots: () => ({ tmpDir: sessionTmp, denyWrite: [], denyRead: [] }),
@@ -531,6 +537,20 @@ await check("download(link) in a user's browser: a temporary tab under Fetch int
   expect((await userBrowser.listTabs()).length === tabsBefore, "the temporary tab closed");
   await new Promise((r) => setTimeout(r, 500));
   expect(browserFolder().length === 0, "the browser saved nothing", browserFolder().join(", "));
+});
+
+await check("download({ url }) through two redirects: a listed MIDDLE hop is refused before a byte is read; unlisted, the redirected file is saved", async () => {
+  listedDomains = ["127.0.0.1"];
+  try {
+    await failsWith(D("download", { target: { url: `${BASE}/files/hop` } }), "NotAllowed");
+  } finally {
+    listedDomains = [];
+  }
+  await new Promise((r) => setTimeout(r, 300));
+  expect(browserFolder().length === 0, "the browser saved nothing", browserFolder().join(", "));
+  const got = await D("download", { target: { url: `${BASE}/files/hop` } }) as { name: string; bytes: number };
+  // (the earlier link's prices.csv is already in the folder: this one is "prices (2).csv")
+  expect(/^prices( \(\d+\))?\.csv$/.test(got.name) && got.bytes === 17, "the redirected file", JSON.stringify(got));
 });
 
 await check("download(button) in the bound tab: armed, clicked, caught — the page stays", async () => {

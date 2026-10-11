@@ -167,8 +167,10 @@ final class BrowserLinkHost: BrowserLinkHandler {
 
     /// The sign-in handoff: the session's window shows this tab and Winter comes forward — only ever after the user's
     /// OK on Winter's card (the engine asks first). The tab's native UI is the user's again at once: dialogs,
-    /// permission prompts, its keys and focus. (The engine lets the hold go right after; a later `tab.ensure` takes
-    /// it back, suppression included.)
+    /// permission prompts, its keys and focus. (The engine has already let the hold go — before its first card, so
+    /// passkey and permission prompts can show while the user decides — and a later `tab.ensure` takes it back,
+    /// suppression included. An unheld tab left unseen past the lifecycle's linger may have been stopped by then:
+    /// showing it here loads it again.)
     private func present(sessionId: String, tabId: String, reply: BrowserLinkReplier) {
         guard let onPresent else {
             reply(.failure(code: .notAllowed, message: "Winter can't show the tab right now"))

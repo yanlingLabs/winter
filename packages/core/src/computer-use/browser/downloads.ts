@@ -79,9 +79,11 @@ const HTML_MIME = new Set(["text/html", "application/xhtml+xml"]);
  * The Fetch capture on one tab driver. A response is the file when it is an ATTACHMENT (from any frame), or the tab's
  * own TOP-LEVEL document that says a non-HTML type — a frame's document is the page's own and is left alone, and a
  * document that names no type is left to the browser. `anyResponse`: the URL route (a temporary tab Winter navigates
- * itself) — its top-level document is the file whatever its type. `checkUrl`: the dangerous-domain floor, held to every
- * address the file came through (each redirect, and its own) before a byte is read; the request waits paused meanwhile
- * (a card may be up), and the wait's clock with it.
+ * itself) — its top-level document is the file whatever its type. `checkUrl`: the dangerous-domain floor, held to each
+ * redirect of the tab's top-level document as it is paused (before the browser follows it) and to the file's own
+ * address before a byte is read; the request waits paused meanwhile (a card may be up), and the wait's clock with it.
+ * Chromium pauses every hop of a redirect chain under its OWN request id (measured), so a hop is checked where it is
+ * seen; a frame's redirects are not (they are the page's own loads), only a frame attachment's final address.
  */
 export class FetchCapture {
   private readonly armed = new Set<string>();
@@ -96,10 +98,8 @@ export class FetchCapture {
   started = false;
   /** When the last bytes arrived (each `IO.read`): a slow file is alive while they keep coming. */
   lastProgress = 0;
-  /** The addresses a paused request answered with a redirect, by request id (Fetch keeps the id across redirects). */
-  private readonly hops = new Map<string, string[]>();
-  /** The floor is being asked about the file's addresses (a card may be up): the wait's clock stops. */
-  private checking = false;
+  /** The floor is being asked about an address (a card may be up): the wait's clock stops. */
+  private checking = 0;
 
   constructor(
     private readonly driver: TabDriver,
@@ -151,25 +151,38 @@ export class FetchCapture {
     const go = async (): Promise<void> => { try { await this.driver.send("Fetch.continueRequest", { requestId }, session); } catch { /* the request went away */ } };
     const status = typeof p.responseStatusCode === "number" ? p.responseStatusCode : undefined;
     const url = String((p.request as { url?: unknown } | undefined)?.url ?? "");
-    if (this.done || this.capturing || status === undefined || p.responseErrorReason !== undefined) { this.hops.delete(requestId); await go(); return; }
+    if (this.done || this.capturing || status === undefined || p.responseErrorReason !== undefined) { await go(); return; }
+    const abort = async (): Promise<void> => { try { await this.driver.send("Fetch.failRequest", { requestId, errorReason: "Aborted" }, session); } catch { /* already gone */ } };
+    const topDocument = p.resourceType === "Document" && session === undefined
+      && typeof p.frameId === "string" && p.frameId.length > 0 && p.frameId === this.driver.mainFrameId;
+    /** The floor on one address; false (the capture failed, the request stopped) when it refuses or the run ended. */
+    const floorAllows = async (u: string): Promise<boolean> => {
+      if (this.o.checkUrl === undefined) return true;
+      this.checking++;
+      try {
+        await this.o.checkUrl(u);
+      } catch (err) {
+        this.fail(err instanceof Error ? err : new Error(String(err)));
+        await abort();
+        return false;
+      } finally {
+        this.checking--;
+      }
+      if (this.done) { await abort(); return false; } // cancelled while the floor asked
+      return true;
+    };
     if (status >= 300 && status < 400) {
-      // A redirect: the request comes back paused at its next address, under the same id.
-      const h = this.hops.get(requestId) ?? [];
-      if (h.length < 20) h.push(url);
-      this.hops.set(requestId, h);
+      // A redirect of the tab's own document: this hop's address is held to the floor before the browser follows it.
+      if (topDocument && !(await floorAllows(url))) return;
       await go();
       return;
     }
-    const hops = this.hops.get(requestId) ?? [];
-    this.hops.delete(requestId);
     const headers = p.responseHeaders;
     const disposition = header(headers, "content-disposition");
     const contentType = header(headers, "content-type");
     const mime = mimeOf(contentType);
     const ok = status >= 200 && status < 300;
     const attachment = disposition !== undefined && /^\s*attachment/i.test(disposition);
-    const topDocument = p.resourceType === "Document" && session === undefined
-      && typeof p.frameId === "string" && p.frameId.length > 0 && p.frameId === this.driver.mainFrameId;
     const isDownload = ok && (attachment || (topDocument && (this.o.anyResponse || (contentType !== undefined && !HTML_MIME.has(mime)))));
     if (!isDownload) {
       if (topDocument) this.sighting.pages++;
@@ -177,20 +190,7 @@ export class FetchCapture {
       return;
     }
     this.capturing = true;
-    const abort = async (): Promise<void> => { try { await this.driver.send("Fetch.failRequest", { requestId, errorReason: "Aborted" }, session); } catch { /* already gone */ } };
-    if (this.o.checkUrl !== undefined) {
-      this.checking = true;
-      try {
-        for (const u of new Set([...hops, url])) await this.o.checkUrl(u);
-      } catch (err) {
-        this.fail(err instanceof Error ? err : new Error(String(err)));
-        await abort();
-        return;
-      } finally {
-        this.checking = false;
-      }
-      if (this.done) { await abort(); return; } // cancelled while the floor asked
-    }
+    if (!(await floorAllows(url))) return;
     this.started = true;
     this.lastProgress = (this.o.now ?? Date.now)();
     const name = dispositionName(disposition) ?? urlName(url) ?? "download";
@@ -240,7 +240,7 @@ export class FetchCapture {
 
   get file(): Promise<CapturedFile> { return this.result; }
   progressAt(): number { return this.lastProgress; }
-  held(): boolean { return this.checking; }
+  held(): boolean { return this.checking > 0; }
 
   /** Take the arm off everywhere it was put (always — in a `finally`). */
   async disarm(): Promise<void> {

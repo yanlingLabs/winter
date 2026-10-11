@@ -216,12 +216,14 @@ export class FakeCdpTransport implements CdpTransport {
 
   /** Pause a response under Fetch interception, as Chromium does; resolves when the engine continues or fails it. */
   private pauseResponse(t: FakeTab, url: string, file: FakeFile, resourceType: "Document" | "Other"): Promise<"continue" | "fail"> {
-    const requestId = `interception-${this.nextReq++}`;
+    const job = `interception-job-${this.nextReq++}`;
+    let k = 0;
     const frameId = file.frame ?? "top";
-    // Redirects pause too (a 3xx at the Response stage), under the same request id, before the final answer.
+    // Redirects pause too (a 3xx at the Response stage) — each hop under its OWN request id, as Chromium does.
     const hops = file.redirectTo === undefined ? [] : [url, ...(file.redirectThrough ?? [])];
     return new Promise((resolve) => {
       const step = (): void => {
+        const requestId = `${job}.${k++}`;
         const hop = hops.shift();
         if (hop !== undefined) {
           t.paused.set(requestId, { session: "", url: hop, body: Buffer.alloc(0), taken: false, settle: (how) => { t.paused.delete(requestId); if (how === "fail") resolve("fail"); else step(); } });
