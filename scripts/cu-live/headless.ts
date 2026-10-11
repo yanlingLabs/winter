@@ -8,7 +8,9 @@
  *   --app <path>        the helper to drive (default `$WINTER_HEADLESS_APP`); a dev build from `bun run dev:headless`
  *   --no-verify         skip the signature check of the spawned process (an unsigned build only)
  *   --user-typing       drill 2's second variant: put another app in front and keep typing in it — the run starts 10 s
- *                       later; the user's own switches are then reported, never failed
+ *                       later; the user's own switches are then reported, never failed. They are told apart by the
+ *                       monitor's hardware tap, which sees KEYS only when the terminal has Input Monitoring: switch apps
+ *                       with the pointer (a click, the Dock), or grant it — a ⌘-Tab it cannot see reads as unexplained
  *   --load              drill 2's cold start on a LOADED Mac: one `yes > /dev/null` per core while the helper starts
  *   --prompt-probes     ALSO the pages that ask for the camera, microphone, location and notifications, and fetch a LAN
  *                       address and an mDNS name. They may raise a macOS prompt (TCC, Local Network) — the drill's
@@ -683,6 +685,8 @@ async function main(): Promise<void> {
     measures.windows = [...windowsSeen.entries()].map(([id, w]) => ({ id, ...w }));
     measures.applicationTypes = Object.fromEntries(appTypes);
     measures.helperPids = [...helperPids];
+    const keysWatched = monitor.items.some((s) => s.hwKeys === true);
+    measures.hardwareKeysWatched = keysWatched;
     const runChecks = [
       check("the helper was never the frontmost app", !changes.some((c) => c.by === "helper"), changes.filter((c) => c.by === "helper").map((c) => c.what).join("; ")),
       check(o.userTyping ? "no change of the front app or Space without the user's input just before" : "the frontmost app and the Space never changed",
@@ -694,7 +698,7 @@ async function main(): Promise<void> {
       check("the screen stayed usable (not locked)", locked === undefined, locked === undefined ? "" : locked.what),
     ];
     results.push({ name: "the whole run: never move the view", group: "drill 2", status: statusOf(runChecks), ms: to - from, checks: runChecks,
-      note: `${changes.length} front/Space change(s) (${changes.filter((c) => c.by === "user").length} the user's); ${windowsSeen.size} window(s) owned by ${owner} (${onScreen.length} on screen); application types ${JSON.stringify(Object.fromEntries(appTypes))}` });
+      note: `${changes.length} front/Space change(s) (${changes.filter((c) => c.by === "user").length} the user's${keysWatched ? "" : "; the user's keys were not visible to the monitor (no Input Monitoring), so a keyboard-only switch reads as unexplained"}); ${windowsSeen.size} window(s) owned by ${owner} (${onScreen.length} on screen); application types ${JSON.stringify(Object.fromEntries(appTypes))}` });
 
     // The daemon's stop ends the helper and everything it started.
     pool.stop();
