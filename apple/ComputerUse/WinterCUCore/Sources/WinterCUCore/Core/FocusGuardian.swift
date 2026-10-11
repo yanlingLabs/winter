@@ -177,15 +177,17 @@ public struct CUFocusGuardianCore: Sendable {
     /// When the user last moved to `view` themselves.
     public private(set) var viewAt: TimeInterval = -.infinity
     public private(set) var active = false
-    /// The one exemption: the consented foreground, for one app, until a deadline — and the user's place before it came
-    /// forward (its end gives the front back there, unless the user moved meanwhile).
-    private var exemptApp: pid_t?
-    private var exemptUntil: TimeInterval = 0
-    private var exemptPrevious: CUGuardedView?
-    /// When the consented foreground's own activation was issued: its landing (within `restoreLateWindow`) is the
-    /// consent's — never taken for a switch of the user's that a moment later brings them elsewhere (found by the model-based
-    /// test: the held app's landing took the user's Dock click, and the Dock's own activation was undone).
-    private var exemptIssuedAt: TimeInterval = -.infinity
+    /// The consented foreground, ONE EXEMPTION PER APP (review of round 9, MEDIUM #3: a hold and another session's rung 4
+    /// shared one slot): until a deadline; when its own activation was issued (its landing within `restoreLateWindow` is
+    /// the consent's — never taken for a switch of the user's a moment later); and the user's place before it came forward
+    /// (its end gives the front back there, unless the user moved meanwhile).
+    private struct Exemption { var until: TimeInterval; var issuedAt: TimeInterval; var previous: CUGuardedView? }
+    private var exemptions: [pid_t: Exemption] = [:]
+    private func exemption(_ app: pid_t?, now: TimeInterval) -> Exemption? {
+        app.flatMap { exemptions[$0] }.flatMap { now < $0.until ? $0 : nil }
+    }
+    /// A move of the user's: no consent's end gives the front back to a place from before it.
+    private mutating func forgetExemptPrevious() { for k in exemptions.keys { exemptions[k]?.previous = nil } }
     /// When each app was last judged in front: a late activation notification of one seen since the last notification is
     /// a change already judged.
     private var seenFront: [pid_t: TimeInterval] = [:]
@@ -285,8 +287,7 @@ public struct CUFocusGuardianCore: Sendable {
     public mutating func end() {
         active = false
         thefts.removeAll()
-        exemptApp = nil
-        exemptPrevious = nil
+        exemptions.removeAll()
         claim = nil
         judged = nil
         lastSeen = nil
@@ -528,7 +529,7 @@ public struct CUFocusGuardianCore: Sendable {
         view = CUGuardedView(app: app, space: space ?? view.space)
         viewAt = now
         thefts[app] = nil
-        exemptPrevious = nil
+        forgetExemptPrevious()
         judged = nil
     }
 
@@ -637,9 +638,9 @@ public struct CUFocusGuardianCore: Sendable {
             viewAt = now
             if let a = q.app { thefts[a] = nil }
             claim = nil
-            exemptPrevious = nil
+            forgetExemptPrevious()
         case .consented:
-            if exemptPrevious == nil, view.app != q.app { exemptPrevious = view }
+            if let a = q.app, exemptions[a] != nil, exemptions[a]?.previous == nil, view.app != a { exemptions[a]?.previous = view }
             view = CUGuardedView(app: q.app ?? view.app, space: q.space ?? view.space)
         case .agent:
             if let a = q.app {
@@ -732,20 +733,20 @@ public struct CUFocusGuardianCore: Sendable {
         // A restore's late landing (an app touched only by our restore of it) is never a switch's SECOND explanation: the
         // input that took them elsewhere was used by that move.
         // Nor the consented foreground's own landing.
-        let onlyLate = (late > -.infinity && !isTouchedByTheAgent(app, q: q, now: now)) || (app != nil && app == exemptApp && now < exemptUntil)
+        let onlyLate = (late > -.infinity && !isTouchedByTheAgent(app, q: q, now: now)) || exemption(app, now: now) != nil
         if let i = input.explanation(from: from, after: cause, raiseAfter: raiseCause, now: upTo,
                                      app: appMoved, desktop: desktopMoved, front: app, seconds: !onlyLate) {
             // On the visited desktop, their input in the visited app is no move away: the visit's end decides.
             if visit, let a = app, a == visitApp { return (.visit, nil) }
             // (The app the consented foreground is bringing forward: their input may have been for another app landing
             // right after — it stays a short second explanation, as for an untouched app; found by the model-based test.)
-            let consentApp = app != nil && app == exemptApp && now < exemptUntil
+            let consentApp = exemption(app, now: now) != nil
             return (.user("their input that switches apps or desktops (⌘-Tab, ⌃-arrows, a swipe, the Dock, a click on another app's window), after the agent's last action that could raise it"), .instant(i, keep: consentApp))
         }
         // The consented foreground's own landing: the consent's — unless a switch of theirs AFTER it was issued explains
         // it (above: their ⌘-Tab into the app being held is theirs, and its end gives nothing back — found by the
         // model-based test).
-        if let a = app, a == exemptApp, now < exemptUntil, now - exemptIssuedAt <= Self.restoreLateWindow {
+        if let e = exemption(app, now: now), now - e.issuedAt <= Self.restoreLateWindow {
             return (.consented, nil)
         }
         if !q.inputObservable, let c = q.clickAt, now - c <= Self.userInputWindow, c > cause, c <= upTo, !visit || c >= visitStartedAt {
@@ -753,7 +754,7 @@ public struct CUFocusGuardianCore: Sendable {
             return (.user("a click of theirs just before it (no input source tells more)"), nil)
         }
         if visit { return (.visit, nil) }
-        if let a = app, a == exemptApp, now < exemptUntil { return (.consented, nil) }
+        if exemption(app, now: now) != nil { return (.consented, nil) }
         return (.agent(q.inputObservable
             ? "the agent touched it, and no input of the user's that switches apps or desktops came after"
             : "the agent touched it, and no input source tells more"), nil)
@@ -790,24 +791,21 @@ public struct CUFocusGuardianCore: Sendable {
     /// The consented foreground takes the front (for one action, or held for a script): its activation is allowed until
     /// `until`.
     public mutating func exempt(_ app: pid_t, until: TimeInterval, now: TimeInterval? = nil) {
-        if let now { exemptIssuedAt = now }
-        // A longer exemption of the same app (an app held in front for a script) is never cut short.
-        if exemptApp == app, exemptUntil > until { return }
-        if exemptApp != app { exemptPrevious = nil }
-        exemptApp = app
-        exemptUntil = until
+        var e = exemptions[app] ?? Exemption(until: 0, issuedAt: -.infinity, previous: nil)
+        if let now { e.issuedAt = now }
+        // A longer exemption of the same app (an app held in front for a script) is never cut short; another app's
+        // exemption is its own (never cleared here).
+        e.until = max(e.until, until)
+        exemptions[app] = e
     }
 
     /// Ends `app`'s exemption now (its hold or its action ended): the user's place is the one before it again — unless
     /// they moved meanwhile (their move is their place). Judged afresh from now on.
     public mutating func endExempt(_ app: pid_t, now: TimeInterval? = nil) {
-        guard exemptApp == app else { return }
-        exemptApp = nil
-        exemptUntil = 0
+        guard let e = exemptions.removeValue(forKey: app) else { return }
         // (The place moves now: a restore of ours toward the held app that lands after this is a late landing, undone —
         // found by the model-based test.)
-        if let prev = exemptPrevious, view.app == app { view = prev; if let now { viewAt = now } }
-        exemptPrevious = nil
+        if let prev = e.previous, view.app == app { view = prev; if let now { viewAt = now } }
         judged = nil
     }
 
@@ -924,14 +922,14 @@ public struct CUFocusGuardianCore: Sendable {
             viewAt = now
             thefts[app] = nil
             claim = nil
-            exemptPrevious = nil
+            forgetExemptPrevious()
             judged = nil  // what is in front now is judged afresh, as a change from this app
             return owner
         case .consented:
             // The consented foreground's own landing, heard only after something else came forward over it: the held app
             // is where a theft after it is put back (its end gives the place back — found by the model-based test: a late
             // landing over rung 4's app was "put back" to the place from before the consent).
-            if exemptPrevious == nil, view.app != app { exemptPrevious = view }
+            if exemptions[app] != nil, exemptions[app]?.previous == nil, view.app != app { exemptions[app]?.previous = view }
             view = CUGuardedView(app: app, space: space ?? view.space)
             lastSeen = CUGuardedView(app: app, space: space)
             lastSeenSince = now

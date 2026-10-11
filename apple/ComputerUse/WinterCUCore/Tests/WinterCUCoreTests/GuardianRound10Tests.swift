@@ -76,4 +76,20 @@ final class GuardianRound10Tests: XCTestCase {
         XCTAssertNil(core.linkURL(same, ElementInfo(same, ax)), "the same site: the app's own navigation")
         XCTAssertNil(core.linkURL(image, ElementInfo(image, ax)), "an image's src is no link")
     }
+    /// Review of round 9, MEDIUM #3: a hold and another session's rung 4 on another app each have their OWN exemption —
+    /// the rung 4's end neither ends the hold's nor drops the place the hold's end gives back.
+    func testEachConsentedForegroundHasItsOwnExemption() {
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 100))
+        g.noteCause(600, raise: true, now: 10)
+        g.exempt(600, until: 40, now: 10)                       // session A holds 600 in front
+        XCTAssertEqual(g.judge(CUMoveQuery(app: 600, space: 100), now: 10.1), .consented)
+        g.noteCause(700, raise: true, now: 11)
+        g.exempt(700, until: 16, now: 11)                       // session B's rung 4 on 700
+        XCTAssertEqual(g.judge(CUMoveQuery(app: 700, space: 100), now: 11.1), .consented)
+        g.endExempt(700, now: 11.5)
+        XCTAssertFalse(g.judge(CUMoveQuery(app: 600, space: 100), now: 12).undoes, "the hold's exemption stands")
+        g.endExempt(600, now: 13)
+        XCTAssertEqual(g.view.app, 1, "the hold's end gives the place from before it back")
+    }
 }
