@@ -780,7 +780,7 @@ extension CUCore {
         let isTarget = boundTargetPids().contains(hit.pid)
         // A click into the app already in front is still input for THAT app: should their place move before the click
         // lands (a desktop switch of theirs right after), the app coming back is theirs (seed 1067).
-        if hit.pid == front, !elsewhere { noteSwitchInput(now: now, .app, target: hit.pid) }
+        if hit.pid == front, !elsewhere { guardianLock.withLock { guardianCore.noteSwitch(now: now, .app, target: hit.pid, quiet: true) } }
         guard hit.pid != front || elsewhere || isTarget else { return nil }
         if hit.pid == front, !elsewhere {
             // Into the bound target that is in front already: no activation will come — their place now.
