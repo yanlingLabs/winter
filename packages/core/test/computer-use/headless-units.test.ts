@@ -1,28 +1,36 @@
-// ComputerV2 Phase 4 — the headless pool's pure rules: the private-network rule (D4), the engine ladder and the
-// requirement it holds the helper to, and D2's lifecycle row.
+// ComputerV2 Phase 4 — the headless pool's pure rules: the private-network rule, the engine ladder and the requirement
+// it holds the helper to, and the lifecycle row for headless tabs.
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { headlessRequirementFor, resolveWinterHeadless, winterHeadlessAppPath } from "../../src/computer-use/browser/headless/engines";
-import { isPrivateNetworkUrl } from "../../src/computer-use/browser/headless/private-network";
+import { ipv6Bytes, isPrivateNetworkHost, isPrivateNetworkUrl } from "../../src/computer-use/browser/headless/private-network";
 import { shouldCloseAgentTab } from "../../src/computer-use/browser/lifecycle";
 import { headlessErrorToTransport } from "../../src/computer-use/browser/headless/winter-engine";
 
-describe("the private-network rule (D4)", () => {
-  test("the LAN is private; this Mac and the public internet are not", () => {
-    const lan = [
-      "http://10.0.0.1/", "http://10.255.255.255:8080/x", "http://172.16.0.1/", "http://172.31.255.255/", "http://192.168.0.1/",
-      "http://169.254.169.254/latest/meta-data", "http://100.64.0.1/", "http://100.127.255.255/", "http://0.0.0.0/", "http://224.0.0.1/",
-      "http://[fd12:3456::1]/", "http://[fe80::1]/", "http://[::ffff:192.168.1.1]/", "http://[::ffff:c0a8:101]/", "http://[::]/",
-      "http://nas.local/", "http://printer.local./", "http://box.home.arpa/", "http://router/", "https://intranet:8443/",
-      // URL spellings the parser canonicalises to a private address.
-      "http://0xa.0.0.1/", "http://10.1/", "http://3232235777/",
-    ];
-    for (const u of lan) expect([u, isPrivateNetworkUrl(u)]).toEqual([u, true]);
-    const open = [
-      "http://localhost:3000/", "http://dev.localhost/", "http://127.0.0.1:5173/", "http://127.1.2.3/", "http://[::1]:8080/",
-      "https://example.com/", "http://8.8.8.8/", "http://172.32.0.1/", "http://100.128.0.1/", "http://[2001:4860::8888]/",
-      "about:blank", "not a url", "file:///etc/hosts",
-    ];
-    for (const u of open) expect([u, isPrivateNetworkUrl(u)]).toEqual([u, false]);
+describe("the private-network rule (the user's ruling: this Mac allowed, the LAN refused, by the address as written)", () => {
+  const fixture = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "headless-private-network.json"), "utf8")) as { refused: string[]; allowed: string[] };
+
+  test("every row of the shared fixture (Winter Headless's Swift copy answers the same file)", () => {
+    expect(fixture.refused.length).toBeGreaterThan(20);
+    for (const u of fixture.refused) expect([u, isPrivateNetworkUrl(u)]).toEqual([u, true]);
+    for (const u of fixture.allowed) expect([u, isPrivateNetworkUrl(u)]).toEqual([u, false]);
+  });
+
+  test("URL spellings the parser canonicalises to a private address, and what is not an http(s) URL", () => {
+    for (const u of ["http://0xa.0.0.1/", "http://10.1/", "http://3232235777/", "http://0300.0250.1.1/", "http://[::ffff:192.168.1.1]/", "http://[::192.168.1.1]/", "HTTP://ROUTER.LAN/", "https://intranet:8443/"]) {
+      expect([u, isPrivateNetworkUrl(u)]).toEqual([u, true]);
+    }
+    for (const u of ["about:blank", "not a url", "file:///etc/hosts", "http://[::ffff:127.0.0.1]/"]) expect([u, isPrivateNetworkUrl(u)]).toEqual([u, false]);
+  });
+
+  test("IPv6 parsing: groups, the elision, a dotted tail; nonsense is refused (fail closed)", () => {
+    expect(ipv6Bytes("::1")).toEqual([...new Array(15).fill(0), 1]);
+    expect(ipv6Bytes("1:2:3:4:5:6:7:8")).toEqual([0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8]);
+    expect(ipv6Bytes("::ffff:10.0.0.1")!.slice(10)).toEqual([0xff, 0xff, 10, 0, 0, 1]);
+    expect(ipv6Bytes("fe80::1%en0")!.slice(0, 2)).toEqual([0xfe, 0x80]);
+    for (const bad of ["", "1::2::3", "1:2:3:4:5:6:7:8:9", "12345::", "::1.2.3.256", "g::1"]) expect([bad, ipv6Bytes(bad)]).toEqual([bad, undefined]);
+    expect(isPrivateNetworkHost("[1::2::3]")).toBe(true);
   });
 });
 

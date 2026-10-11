@@ -11,6 +11,9 @@
 //   http://crash.test/        — it answers, then exits 1 (a crash of the whole browser)
 //   http://renderer.test/     — it answers, then reports the tab gone `crashed` (one renderer)
 //   http://events.test/       — it answers, then sends events for the tab (one off the allowlist, one for an unknown tab)
+//   http://wedge.test/        — it answers, then never answers a cdp.send for that tab (a wedged browser)
+//   http://notice.test/       — it answers, then reports a refused popup twice and a refused local-network request
+//                               once (plus a notice of an unknown kind, and one for an unknown tab)
 // It exits 0 on EOF, like the real helper.
 import { appendFileSync } from "node:fs";
 
@@ -66,6 +69,15 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
       reply(cmdId, { url: t.url, title: `title of ${t.url}`, loading: false, sessionId: t.sessionId, viewport: [1280, 800], dpr: 1 });
       if (t.url === "http://crash.test/") setTimeout(() => process.exit(1), 20);
       if (t.url === "http://renderer.test/") setTimeout(() => { tabs.delete(tabId); send("browserLink.tabGone", { linkId, tabId, reason: "crashed" }); }, 20);
+      if (t.url === "http://notice.test/") {
+        setTimeout(() => {
+          send("headless.notice", { linkId, tabId, kind: "popup" });
+          send("headless.notice", { linkId, tabId, kind: "popup" });
+          send("headless.notice", { linkId, tabId, kind: "local-network" });
+          send("headless.notice", { linkId, tabId, kind: "camera" });
+          send("headless.notice", { linkId, tabId: "w-unknown", kind: "popup" });
+        }, 20);
+      }
       if (t.url === "http://events.test/") {
         setTimeout(() => send("browserLink.events", { linkId, events: [
           { tabId, method: "Page.loadEventFired", params: { timestamp: 1 } },
@@ -81,6 +93,7 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
     case "tabs.live": return reply(cmdId, { tabs: [...tabs].map(([tabId, t]) => ({ tabId, sessionId: t.sessionId, url: t.url, title: `live ${t.url}`, held: true })) });
     case "cdp.send": {
       if (!tabs.has(String(p.tabId))) return fail(cmdId, "tab_gone", "the headless tab is gone");
+      if (tabs.get(String(p.tabId))!.url === "http://wedge.test/") return; // never answered
       if (p.method === "Runtime.evaluate") return reply(cmdId, { result: { result: { type: "number", value: 2 } } });
       return reply(cmdId, { result: {} });
     }

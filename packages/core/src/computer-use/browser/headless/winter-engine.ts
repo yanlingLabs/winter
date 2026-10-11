@@ -6,8 +6,13 @@
 //
 // The vocabulary is the browser link's: `browserLink.command {linkId, cmdId, op, params}` answered by ONE
 // `browserLink.result`, plus the helper's own `browserLink.events` and `browserLink.tabGone`. The helper speaks first
-// (`headless.hello {protocol, linkId, pid, version}`), and there is one more op, `context.dispose {sessionId}`. Closing
-// fd 3 is how the daemon stops it — and how a daemon that dies takes it along.
+// (`headless.hello {protocol, linkId, pid, version}`), there is one more op, `context.dispose {sessionId}`, and one more
+// message from the helper, `headless.notice {tabId, kind}` — a page tried something the helper refused (`popup`: to open
+// a window; `local-network`: to reach a private address). Closing fd 3 is how the daemon stops it — and how a daemon
+// that dies takes it along.
+//
+// Winter Headless exposes ONLY these link ops — no browser-level CDP command at all (no `Target.createTarget`, no
+// `Browser.*`). A browser-level command list belongs to installed browsers run headless, a later stage.
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { createReadStream, write } from "node:fs";
 import { CDP_ALLOWED_EVENTS } from "../cdp-allowlist";
@@ -39,27 +44,53 @@ export interface EngineChild {
   /** Close fd 3: the helper sees EOF and exits. */
   closeInput(): void;
   kill(signal: NodeJS.Signals): void;
+  /** The daemon's own two descriptors of the pipe (its write end, its read end), when it has them — for tests. */
+  readonly daemonFds?: readonly [write: number, read: number];
 }
 
 export type SpawnEngine = (command: string, args: readonly string[]) => EngineChild;
 
-/** libc's `pipe(2)` and `close(2)`, for the two pipes the helper gets (bound once, lazily). */
-let libc: { pipe(fds: Int32Array): number; close(fd: number): number } | undefined;
+/** `ioctl(fd, FIOCLEX)` / `ioctl(fd, FIONCLEX)`: set / clear close-on-exec. (`fcntl` is variadic, which an FFI call
+ *  cannot pass on arm64; these take no third argument.) `_IO('f', 1)` and `_IO('f', 2)` in <sys/filio.h>. */
+const FIOCLEX = 0x20006601;
+const FIONCLEX = 0x20006602;
+
+/** libc's `pipe(2)`, `close(2)` and `ioctl(2)` (bound once, lazily). */
+let libc: { pipe(fds: Int32Array): number; close(fd: number): number; cloexec(fd: number, on: boolean): number } | undefined;
 function pipes(): NonNullable<typeof libc> {
   if (libc === undefined) {
     const lib = dlopen("/usr/lib/libSystem.B.dylib", {
       pipe: { args: [FFIType.ptr], returns: FFIType.i32 },
       close: { args: [FFIType.i32], returns: FFIType.i32 },
+      ioctl: { args: [FFIType.i32, FFIType.u64], returns: FFIType.i32 },
     });
-    libc = { pipe: (fds) => lib.symbols.pipe(ptr(fds)), close: (fd) => lib.symbols.close(fd) };
+    libc = { pipe: (fds) => lib.symbols.pipe(ptr(fds)), close: (fd) => lib.symbols.close(fd), cloexec: (fd, on) => lib.symbols.ioctl(fd, on ? FIOCLEX : FIONCLEX) };
   }
   return libc;
 }
 
+/**
+ * A pipe whose both ends are close-on-exec: no OTHER child the daemon starts inherits either (a child holding a copy of
+ * the write end would keep the helper's fd 3 open after the daemon dies — no EOF, a helper left running). The helper
+ * still gets its two: a spawn hands them over as fds 3 and 4 by `dup2`, and a duplicate does not carry the flag.
+ */
 function makePipe(): [read: number, write: number] {
   const fds = new Int32Array(2);
   if (pipes().pipe(fds) !== 0) throw new Error("pipe() failed");
+  for (const fd of fds) pipes().cloexec(fd, true);
   return [fds[0]!, fds[1]!];
+}
+
+/**
+ * The helper's environment: nothing of the daemon's (a dev daemon's shell may export keys) — a fixed PATH, the user's
+ * HOME (Chromium reads it), and the temp directory when one is set.
+ */
+export function headlessHelperEnv(env: Readonly<Record<string, string | undefined>> = process.env): Record<string, string> {
+  return {
+    PATH: "/usr/bin:/bin",
+    ...(env.HOME === undefined ? {} : { HOME: env.HOME }),
+    ...(env.TMPDIR === undefined ? {} : { TMPDIR: env.TMPDIR }),
+  };
 }
 
 /**
@@ -74,9 +105,12 @@ function makePipe(): [read: number, write: number] {
 export const spawnEngineProcess: SpawnEngine = (command, args) => {
   const [childRead, daemonWrite] = makePipe();
   const [daemonRead, childWrite] = makePipe();
+  // A child end that already IS its target number is not duplicated, so it must not be close-on-exec itself.
+  if (childRead === 3) pipes().cloexec(childRead, false);
+  if (childWrite === 4) pipes().cloexec(childWrite, false);
   let proc: ReturnType<typeof Bun.spawn>;
   try {
-    proc = Bun.spawn([command, ...args], { stdio: ["ignore", "ignore", "pipe", childRead, childWrite], env: { ...process.env } });
+    proc = Bun.spawn([command, ...args], { stdio: ["ignore", "ignore", "pipe", childRead, childWrite], env: headlessHelperEnv() });
   } catch (err) {
     for (const fd of [childRead, daemonWrite, daemonRead, childWrite]) pipes().close(fd);
     throw err;
@@ -121,6 +155,7 @@ export const spawnEngineProcess: SpawnEngine = (command, args) => {
   })();
 
   return {
+    daemonFds: [daemonWrite, daemonRead] as const,
     get pid() { return proc.pid; },
     write(line) {
       if (!open) return false;
@@ -139,6 +174,9 @@ export const spawnEngineProcess: SpawnEngine = (command, args) => {
 };
 
 interface Pending { op: string; resolve(v: unknown): void; reject(e: Error): void; timer: ReturnType<typeof setTimeout> }
+
+/** What a page tried that the helper refused, as `headless.notice` says it. */
+export type HeadlessNoticeKind = "popup" | "local-network";
 
 /** A helper error code → the transport's. `not_live` reads as the tab gone; a refusal marked `capacity` is the helper's
  *  own tab ceiling. */
@@ -161,6 +199,7 @@ export class WinterHeadlessProcess {
   private readonly eventListeners = new Set<(e: CdpEvent) => void>();
   private readonly goneListeners = new Set<(tabKey: string, reason: "closed" | "crashed" | "stopped") => void>();
   private readonly exitListeners = new Set<(code: number | null, signal: string | null) => void>();
+  private readonly noticeListeners = new Set<(tabKey: string, kind: HeadlessNoticeKind) => void>();
   private helloWaiter: { resolve(h: HeadlessHello): void; reject(e: Error): void } | undefined;
   private hello: HeadlessHello | undefined;
   private exited = false;
@@ -221,6 +260,7 @@ export class WinterHeadlessProcess {
 
   onEvent(listener: (e: CdpEvent) => void): () => void { this.eventListeners.add(listener); return () => { this.eventListeners.delete(listener); }; }
   onTabGone(listener: (tabKey: string, reason: "closed" | "crashed" | "stopped") => void): () => void { this.goneListeners.add(listener); return () => { this.goneListeners.delete(listener); }; }
+  onNotice(listener: (tabKey: string, kind: HeadlessNoticeKind) => void): () => void { this.noticeListeners.add(listener); return () => { this.noticeListeners.delete(listener); }; }
   onExit(listener: (code: number | null, signal: string | null) => void): () => void {
     if (this.exited) { listener(null, null); return () => {}; }
     this.exitListeners.add(listener);
@@ -300,6 +340,13 @@ export class WinterHeadlessProcess {
         }
         return;
       }
+      case "headless.notice": {
+        if (p.linkId !== this.linkId || typeof p.tabId !== "string" || (p.kind !== "popup" && p.kind !== "local-network")) return;
+        for (const l of [...this.noticeListeners]) {
+          try { l(p.tabId, p.kind); } catch { /* a listener never breaks the pipe */ }
+        }
+        return;
+      }
       case "browserLink.tabGone": {
         if (p.linkId !== this.linkId || typeof p.tabId !== "string") return;
         const reason = p.reason === "crashed" || p.reason === "stopped" ? p.reason : "closed";
@@ -328,6 +375,8 @@ export class WinterHeadlessProcess {
     if (this.exited) return;
     this.exited = true;
     if (this.killTimer !== undefined) clearTimeout(this.killTimer);
+    // The daemon's write end goes with the process (a crash would otherwise leave it open).
+    this.child.closeInput();
     this.helloWaiter?.reject(new TransportError("disconnected", `Winter's headless browser exited before it was ready (${signal ?? `exit ${code ?? "?"}`})`));
     this.helloWaiter = undefined;
     for (const [id, p] of this.pending) {

@@ -6,9 +6,12 @@
 // (`winter-engine.ts`, `engines.ts`) — on demand:
 //   - started by the first tab (`createTab`), never by a listing (`listTabs` answers `[]` with nothing running);
 //   - at most 8 open tabs per session and 24 in all, and no new tab while the helper's process tree holds more than
-//     3 GB (D3): running out answers `capacity` (the engine reads it as `TargetBusy`); nothing is closed for the model;
-//   - gone after 5 minutes with no tab, at daemon stop, and when `computerUse.headless.enabled` turns off (read live);
-//   - a crash loses every tab (`tabGone(crashed)`; the next `browsers.open` starts a fresh helper);
+//     3 GB (the user's ruling on the budget): running out answers `capacity` (the engine reads it as `TargetBusy`);
+//     nothing is closed for the model;
+//   - gone after 5 minutes with no tab, at daemon stop, and when `computerUse.headless.enabled` turns off (read live,
+//     at every command and every 10 s);
+//   - a crash loses every tab (`tabGone(crashed)`; the next `browsers.open` starts a fresh helper) — and so does a
+//     helper that stops answering: 3 commands in a row that time out and it is killed as wedged;
 //   - `<home>/run/headless.pid` names the running helper (pid + start time) and `<home>/cache/headless-cef/<random>`
 //     is its own cache root, so the next daemon's boot sweep (`sweepHeadless`) can clear what a dead one left.
 // A session's context (its cookies) outlives its tabs while the helper runs, and goes when the session's runtime ends
@@ -23,9 +26,9 @@ import type { PrimitiveMetric } from "../../telemetry";
 import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS } from "../cdp-allowlist";
 import { TransportError, type CdpEvent, type CdpTransport, type TransportTab } from "../transport";
 import { DEFAULT_HEADLESS_ENGINE, HEADLESS_ENGINES, type ResolvedEngine } from "./engines";
-import { HEADLESS_PIPE_PROTOCOL, HEADLESS_TIMEOUTS, spawnEngineProcess, WinterHeadlessProcess, type SpawnEngine } from "./winter-engine";
+import { HEADLESS_PIPE_PROTOCOL, HEADLESS_TIMEOUTS, spawnEngineProcess, WinterHeadlessProcess, type HeadlessNoticeKind, type HeadlessOp, type SpawnEngine } from "./winter-engine";
 
-/** D3: the open-tab budget and the memory guard. */
+/** The open-tab budget and the memory guard (the user's ruling). */
 export const HEADLESS_TABS_PER_SESSION = 8;
 export const HEADLESS_TABS_GLOBAL = 24;
 export const HEADLESS_RSS_LIMIT_BYTES = 3 * 1024 * 1024 * 1024;
@@ -35,11 +38,19 @@ export const HEADLESS_IDLE_EXIT_MS = 5 * 60_000;
 export const HEADLESS_ENABLED_POLL_MS = 10_000;
 /** The memory reading is reused this long. */
 const RSS_CACHE_MS = 1_000;
+/** This many commands in a row that time out and the helper is wedged: it is killed, and every tab it held is lost. */
+export const HEADLESS_WEDGED_AFTER_TIMEOUTS = 3;
 
 export const HEADLESS_NAME = "Winter (headless)";
 export const HEADLESS_DISABLED_REASON = "turned off in Settings";
 
 const STOPPED = "Winter's headless browser stopped — open the page again";
+
+/** The daemon's line for a refusal the helper reported, once per tab and kind. */
+const NOTICE_LINES: Record<HeadlessNoticeKind, string> = {
+  popup: "computer-use: a page in Winter's headless browser tried to open a window — refused",
+  "local-network": "computer-use: a page in Winter's headless browser tried to reach the local network — refused before anything was sent",
+};
 
 export interface HeadlessPoolDeps {
   home: string;
@@ -61,7 +72,7 @@ export interface HeadlessPoolDeps {
   log?(line: string): void;
 }
 
-interface PoolTab { tabKey: string; sessionId: string; proc: WinterHeadlessProcess; url: string; title: string }
+interface PoolTab { tabKey: string; sessionId: string; proc: WinterHeadlessProcess; url: string; title: string; noticed: Set<HeadlessNoticeKind>; localNetworkAt?: number }
 
 type ExitReason = "idle" | "stop" | "crash" | "disabled";
 
@@ -123,7 +134,10 @@ export class HeadlessPool implements CdpTransport {
   readonly family = "headless" as const;
   private proc: WinterHeadlessProcess | undefined;
   private launching: Promise<WinterHeadlessProcess> | undefined;
-  private runDir: string | undefined;
+  /** Each helper run's own cache directory, removed when it exits (and again, for a stop, at once). */
+  private readonly runDirs = new Map<WinterHeadlessProcess, string>();
+  /** Commands in a row that timed out, for the running helper. */
+  private timeoutStreak = 0;
   private readonly tabs = new Map<string, PoolTab>();
   /** Slots taken by `createTab` calls still in flight (so two at once cannot both pass the budget). */
   private readonly reserved = new Map<string, number>();
@@ -202,11 +216,13 @@ export class HeadlessPool implements CdpTransport {
     const child = (this.deps.spawn ?? spawnEngineProcess)(r.executable, [`--winter-cache-root=${runDir}`]);
     const proc = new WinterHeadlessProcess(child, { ...(this.deps.timeouts === undefined ? {} : { timeouts: this.deps.timeouts }), ...(this.deps.log === undefined ? {} : { log: this.deps.log }) });
     this.proc = proc;
-    this.runDir = runDir;
+    this.runDirs.set(proc, runDir);
     this.exitReason = undefined;
+    this.timeoutStreak = 0;
     proc.onExit((code, signal) => this.exited(proc, code, signal));
     proc.onEvent((e) => this.event(proc, e));
     proc.onTabGone((tabKey, reason) => this.helperTabGone(proc, tabKey, reason));
+    proc.onNotice((tabKey, kind) => this.notice(proc, tabKey, kind));
     this.writePidFile(proc.pid);
     // The process this daemon just spawned must be Winter's own before anything is sent to it.
     if (this.deps.verify !== undefined && !this.deps.verify(proc.pid, r.requirement)) {
@@ -231,7 +247,7 @@ export class HeadlessPool implements CdpTransport {
     if (this.proc === proc) this.proc = undefined;
     proc.kill();
     this.clearTimers();
-    this.cleanupRun();
+    this.cleanupRun(proc);
     this.deps.log?.(`computer-use: ${why}`);
     return new AutomationFailure("BrowserUnavailable", why);
   }
@@ -246,6 +262,11 @@ export class HeadlessPool implements CdpTransport {
 
   /** The helper's process ended — asked (idle, stop, disabled) or not (a crash): every tab it held is gone. */
   private exited(proc: WinterHeadlessProcess, code: number | null, signal: string | null): void {
+    // Its cache directory goes now, whatever else happened: a stop removed it already, but the helper may have written
+    // to it while it died.
+    const dir = this.runDirs.get(proc);
+    this.runDirs.delete(proc);
+    if (dir !== undefined) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* the next boot sweeps it */ } }
     if (this.proc !== proc) return;
     const reason: ExitReason = this.exitReason ?? "crash";
     this.proc = undefined;
@@ -256,15 +277,14 @@ export class HeadlessPool implements CdpTransport {
     if (reason === "crash" || reason === "disabled") for (const t of lost) this.emitGone(t.tabKey, reason === "crash" ? "crashed" : "closed");
     if (reason === "crash") this.deps.log?.(`computer-use: Winter's headless browser exited unexpectedly (${signal ?? `exit ${code ?? "?"}`}); ${lost.length} tab(s) lost`);
     this.metric("headless.exit", this.launchedAt === 0 ? 0 : this.now() - this.launchedAt, { headlessEngine: DEFAULT_HEADLESS_ENGINE, exitReason: reason });
-    this.cleanupRun();
+    try { rmSync(headlessPidPath(this.deps.home), { force: true }); } catch { /* best effort */ }
   }
 
-  private cleanupRun(): void {
+  /** The pid file and `proc`'s cache directory, removed now (`exited` removes the directory again when it really ends). */
+  private cleanupRun(proc: WinterHeadlessProcess | undefined): void {
     try { rmSync(headlessPidPath(this.deps.home), { force: true }); } catch { /* best effort */ }
-    if (this.runDir !== undefined) {
-      try { rmSync(this.runDir, { recursive: true, force: true }); } catch { /* the next boot sweeps it */ }
-      this.runDir = undefined;
-    }
+    const dir = proc === undefined ? undefined : this.runDirs.get(proc);
+    if (dir !== undefined) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* the next boot sweeps it */ } }
   }
 
   private shutdown(reason: Exclude<ExitReason, "crash">): void {
@@ -292,15 +312,43 @@ export class HeadlessPool implements CdpTransport {
 
   private watchEnabled(): void {
     if (this.enabledTimer !== undefined) clearInterval(this.enabledTimer);
-    this.enabledTimer = setInterval(() => {
-      let on = true;
-      try { on = this.deps.enabled(); } catch { on = false; }
-      if (!on) {
-        this.deps.log?.("computer-use: Winter's headless browser was turned off in Settings — stopping it");
-        this.shutdown("disabled");
-      }
-    }, this.deps.enabledPollMs ?? HEADLESS_ENABLED_POLL_MS);
+    this.enabledTimer = setInterval(() => { this.stillEnabled(); }, this.deps.enabledPollMs ?? HEADLESS_ENABLED_POLL_MS);
     (this.enabledTimer as { unref?: () => void }).unref?.();
+  }
+
+  /** `computerUse.headless.enabled`, read now: off stops a running helper (its tabs read why). */
+  private stillEnabled(): boolean {
+    let on = true;
+    try { on = this.deps.enabled(); } catch { on = false; }
+    if (!on && this.proc?.alive === true && this.exitReason === undefined) {
+      this.deps.log?.("computer-use: Winter's headless browser was turned off in Settings — stopping it");
+      this.shutdown("disabled");
+    }
+    return on;
+  }
+
+  /**
+   * One command to the helper. A timeout counts toward the wedge: `HEADLESS_WEDGED_AFTER_TIMEOUTS` in a row and the
+   * helper is killed (a crash: every tab it held is lost, the next open starts a fresh one). Any answer resets it.
+   */
+  private async command(proc: WinterHeadlessProcess, op: HeadlessOp, params: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {
+    try {
+      const r = await proc.command(op, params, timeoutMs);
+      if (this.proc === proc) this.timeoutStreak = 0;
+      return r;
+    } catch (err) {
+      if (this.proc === proc) {
+        if (err instanceof TransportError && err.code === "timeout") {
+          if (++this.timeoutStreak >= HEADLESS_WEDGED_AFTER_TIMEOUTS && proc.alive) {
+            this.deps.log?.(`computer-use: Winter's headless browser stopped answering (${this.timeoutStreak} commands in a row timed out) — restarting it`);
+            proc.kill();
+          }
+        } else if (err instanceof TransportError && err.code !== "tab_gone") {
+          this.timeoutStreak = 0;
+        }
+      }
+      throw err;
+    }
   }
 
   private metric(primitive: string, ms: number, extra: Partial<PrimitiveMetric>): void {
@@ -310,10 +358,11 @@ export class HeadlessPool implements CdpTransport {
   /** Daemon stop: the helper is killed at once (its tabs go with it). */
   stop(): void {
     this.stopped = true;
+    const proc = this.proc;
     this.shutdown("stop");
     this.clearTimers();
     // The daemon may be gone before the exit is reported: what this run made goes now.
-    this.cleanupRun();
+    this.cleanupRun(proc);
   }
 
   /** The session's runtime ended (idle, deleted): its tabs are forgotten and its context (its cookies) disposed. */
@@ -322,7 +371,7 @@ export class HeadlessPool implements CdpTransport {
     for (const t of mine) { this.tabs.delete(t.tabKey); this.emitGone(t.tabKey, "closed"); }
     const proc = this.proc;
     if (proc?.alive === true) {
-      void proc.command("context.dispose", { sessionId }).catch((err: unknown) => this.deps.log?.(`computer-use: disposing a headless context failed (${err instanceof Error ? err.message : "error"})`));
+      void this.command(proc, "context.dispose", { sessionId }).catch((err: unknown) => this.deps.log?.(`computer-use: disposing a headless context failed (${err instanceof Error ? err.message : "error"})`));
     }
     this.armIdle();
   }
@@ -360,10 +409,10 @@ export class HeadlessPool implements CdpTransport {
     try {
       const proc = await this.engine();
       const tabKey = `w-${randomBytes(6).toString("hex")}`;
-      const r = await proc.command("tab.ensure", { sessionId: opts.sessionId, tabId: tabKey, url: opts.url }, this.deps.timeouts?.ensure ?? HEADLESS_TIMEOUTS.ensure) as { url?: unknown; title?: unknown };
+      const r = await this.command(proc, "tab.ensure", { sessionId: opts.sessionId, tabId: tabKey, url: opts.url }, this.deps.timeouts?.ensure ?? HEADLESS_TIMEOUTS.ensure) as { url?: unknown; title?: unknown };
       const url = typeof r?.url === "string" ? r.url : opts.url;
       const title = typeof r?.title === "string" ? r.title : "";
-      this.tabs.set(tabKey, { tabKey, sessionId: opts.sessionId, proc, url, title });
+      this.tabs.set(tabKey, { tabKey, sessionId: opts.sessionId, proc, url, title, noticed: new Set() });
       return { tabKey, url, title, active: false, agent: true, sessionId: opts.sessionId };
     } finally {
       const left = (this.reserved.get(opts.sessionId) ?? 1) - 1;
@@ -377,7 +426,7 @@ export class HeadlessPool implements CdpTransport {
     if (t === undefined) return;
     this.tabs.delete(tabKey);
     try {
-      if (t.proc.alive) await t.proc.command("tab.close", { tabId: tabKey });
+      if (t.proc.alive) await this.command(t.proc, "tab.close", { tabId: tabKey });
     } finally {
       this.armIdle();
     }
@@ -386,6 +435,10 @@ export class HeadlessPool implements CdpTransport {
   /** A headless tab is never handed to anyone (the engine refuses `keep()` first). */
   async keepTab(): Promise<void> {}
 
+  /** Every headless tab is silent already (the helper runs with `--mute-audio`): muting is a no-op, and the engine
+   *  refuses unmuting first. */
+  async setMuted(): Promise<void> {}
+
   /** The open headless tabs — `[]`, and nothing started, while the helper is not running. */
   async listTabs(opts?: { sessionId?: string }): Promise<TransportTab[]> {
     const proc = this.proc;
@@ -393,7 +446,7 @@ export class HeadlessPool implements CdpTransport {
     const mine = [...this.tabs.values()].filter((t) => t.proc === proc && (opts?.sessionId === undefined || t.sessionId === opts.sessionId));
     if (mine.length === 0) return [];
     try {
-      const r = await proc.command("tabs.live", {}) as { tabs?: Array<{ tabId?: unknown; url?: unknown; title?: unknown }> };
+      const r = await this.command(proc, "tabs.live", {}) as { tabs?: Array<{ tabId?: unknown; url?: unknown; title?: unknown }> };
       for (const row of r?.tabs ?? []) {
         const t = typeof row.tabId === "string" ? this.tabs.get(row.tabId) : undefined;
         if (t === undefined) continue;
@@ -404,16 +457,21 @@ export class HeadlessPool implements CdpTransport {
     return mine.map((t) => ({ tabKey: t.tabKey, url: t.url, title: t.title, active: false, agent: true, sessionId: t.sessionId }));
   }
 
+  /** The tab, for a command — the setting read now (off stops the helper at once, not at its next poll). */
   private live(tabKey: string): PoolTab {
+    if (!this.stillEnabled()) throw new TransportError("disconnected", HEADLESS_DISABLED_REASON);
     const t = this.tabs.get(tabKey);
     if (t === undefined || !t.proc.alive) throw new TransportError("tab_gone", t === undefined ? "the headless tab is gone" : STOPPED);
     return t;
   }
 
+  /** When a page in this tab last tried to reach the local network and the helper refused it (undefined: never). */
+  localNetworkRefusedAt(tabKey: string): number | undefined { return this.tabs.get(tabKey)?.localNetworkAt; }
+
   async attach(tabKey: string, opts: { sessionId: string }): Promise<{ viewport: [w: number, h: number]; dpr: number }> {
     const t = this.live(tabKey);
     if (t.sessionId !== opts.sessionId) throw new TransportError("not_allowed", "that headless tab belongs to another session");
-    const r = await t.proc.command("tab.ensure", { sessionId: t.sessionId, tabId: tabKey }, this.deps.timeouts?.ensure ?? HEADLESS_TIMEOUTS.ensure) as { viewport?: unknown; dpr?: unknown };
+    const r = await this.command(t.proc, "tab.ensure", { sessionId: t.sessionId, tabId: tabKey }, this.deps.timeouts?.ensure ?? HEADLESS_TIMEOUTS.ensure) as { viewport?: unknown; dpr?: unknown };
     const vp = Array.isArray(r?.viewport) && r.viewport.length === 2 ? r.viewport : [0, 0];
     return { viewport: [Number(vp[0]) || 0, Number(vp[1]) || 0], dpr: typeof r?.dpr === "number" && r.dpr > 0 ? r.dpr : 1 };
   }
@@ -421,14 +479,14 @@ export class HeadlessPool implements CdpTransport {
   async detach(tabKey: string): Promise<void> {
     const t = this.tabs.get(tabKey);
     if (t === undefined || !t.proc.alive) return;
-    await t.proc.command("tab.release", { tabId: tabKey });
+    await this.command(t.proc, "tab.release", { tabId: tabKey });
   }
 
   async send<T = unknown>(tabKey: string, method: string, params: Record<string, unknown> = {}, opts: { cdpSessionId?: string; timeoutMs?: number } = {}): Promise<T> {
     if (!CDP_ALLOWED_METHODS.includes(method)) throw new TransportError("not_allowed", `${method} is not on the allowlist`);
     const t = this.live(tabKey);
     const timeout = opts.timeoutMs ?? (method === "Page.captureScreenshot" ? (this.deps.timeouts?.screenshot ?? HEADLESS_TIMEOUTS.screenshot) : (this.deps.timeouts?.send ?? HEADLESS_TIMEOUTS.send));
-    const r = await t.proc.command("cdp.send", { tabId: tabKey, method, params, ...(opts.cdpSessionId === undefined ? {} : { cdpSessionId: opts.cdpSessionId }) }, timeout) as { result?: unknown };
+    const r = await this.command(t.proc, "cdp.send", { tabId: tabKey, method, params, ...(opts.cdpSessionId === undefined ? {} : { cdpSessionId: opts.cdpSessionId }) }, timeout) as { result?: unknown };
     return (r?.result ?? {}) as T;
   }
 
@@ -436,7 +494,7 @@ export class HeadlessPool implements CdpTransport {
     const bad = events.find((e) => !CDP_ALLOWED_EVENTS.includes(e));
     if (bad !== undefined) throw new TransportError("not_allowed", `${bad} is not an allowed event`);
     const t = this.live(tabKey);
-    await t.proc.command("cdp.subscribe", { tabId: tabKey, events: [...events] });
+    await this.command(t.proc, "cdp.subscribe", { tabId: tabKey, events: [...events] });
   }
 
   onEvent(listener: (e: CdpEvent) => void): () => void { this.eventListeners.add(listener); return () => { this.eventListeners.delete(listener); }; }
@@ -450,6 +508,16 @@ export class HeadlessPool implements CdpTransport {
     for (const l of [...this.eventListeners]) {
       try { l(e); } catch { /* a listener never breaks the pool */ }
     }
+  }
+
+  /** A page tried something the helper refused: one daemon line per tab and kind (never the page's address). */
+  private notice(proc: WinterHeadlessProcess, tabKey: string, kind: HeadlessNoticeKind): void {
+    const t = this.tabs.get(tabKey);
+    if (t === undefined || t.proc !== proc) return;
+    if (kind === "local-network") t.localNetworkAt = this.now();
+    if (t.noticed.has(kind)) return;
+    t.noticed.add(kind);
+    this.deps.log?.(NOTICE_LINES[kind]);
   }
 
   /** The helper lost a tab by itself (its renderer crashed). */

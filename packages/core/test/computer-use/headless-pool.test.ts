@@ -3,14 +3,15 @@
 // signature and protocol checks, a crash, the idle exit, the setting turned off, a session's context disposed, the
 // daemon's stop, and the boot sweep.
 import { afterEach, describe, expect, test } from "bun:test";
+import { dlopen, FFIType } from "bun:ffi";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AutomationFailure } from "../../src/computer-use/errors";
 import {
-  headlessCacheRoot, headlessPidPath, HeadlessPool, HEADLESS_TABS_GLOBAL, HEADLESS_TABS_PER_SESSION, sweepHeadless, type HeadlessPoolDeps,
+  headlessCacheRoot, headlessPidPath, HeadlessPool, HEADLESS_TABS_GLOBAL, HEADLESS_TABS_PER_SESSION, HEADLESS_WEDGED_AFTER_TIMEOUTS, sweepHeadless, type HeadlessPoolDeps,
 } from "../../src/computer-use/browser/headless/pool";
-import { spawnEngineProcess } from "../../src/computer-use/browser/headless/winter-engine";
+import { headlessHelperEnv, spawnEngineProcess, WinterHeadlessProcess, type EngineChild } from "../../src/computer-use/browser/headless/winter-engine";
 import type { PrimitiveMetric } from "../../src/computer-use/telemetry";
 import { TransportError } from "../../src/computer-use/browser/transport";
 
@@ -22,6 +23,7 @@ interface Rig {
   log: string;
   spawned: number;
   metrics: PrimitiveMetric[];
+  logs: string[];
   enabled: { on: boolean };
   commands(): Array<{ op: string; params: Record<string, unknown> }>;
 }
@@ -29,13 +31,14 @@ interface Rig {
 const pools: HeadlessPool[] = [];
 afterEach(() => { for (const p of pools.splice(0)) p.stop(); });
 
-function rig(o: { mode?: string; verify?: boolean; rss?: number; idleExitMs?: number; enabledPollMs?: number; missing?: boolean } = {}): Rig {
+function rig(o: { mode?: string; verify?: boolean; rss?: number; idleExitMs?: number; enabledPollMs?: number; missing?: boolean; sendTimeoutMs?: number } = {}): Rig {
   const home = mkdtempSync(join(tmpdir(), "winter-headless-home-"));
   const log = join(home, "fake.log");
   const metrics: PrimitiveMetric[] = [];
+  const logs: string[] = [];
   const enabled = { on: true };
   const r: Rig = {
-    pool: undefined as unknown as HeadlessPool, home, log, spawned: 0, metrics, enabled,
+    pool: undefined as unknown as HeadlessPool, home, log, spawned: 0, metrics, logs, enabled,
     commands: () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l) as { op: string; params: Record<string, unknown> }) : []),
   };
   const deps: HeadlessPoolDeps = {
@@ -46,9 +49,10 @@ function rig(o: { mode?: string; verify?: boolean; rss?: number; idleExitMs?: nu
     verify: () => o.verify ?? true,
     rssOf: () => o.rss ?? 100 * 1024 * 1024,
     metric: (m) => metrics.push(m),
+    log: (l) => logs.push(l),
     ...(o.idleExitMs === undefined ? {} : { idleExitMs: o.idleExitMs }),
     ...(o.enabledPollMs === undefined ? {} : { enabledPollMs: o.enabledPollMs }),
-    timeouts: { hello: 5_000 },
+    timeouts: { hello: 5_000, ...(o.sendTimeoutMs === undefined ? {} : { send: o.sendTimeoutMs }) },
   };
   r.pool = new HeadlessPool(deps);
   pools.push(r.pool);
@@ -264,15 +268,108 @@ describe("the helper's life", () => {
     expect((await r.pool.listTabs()).map((t) => t.tabKey)).toEqual([theirs.tabKey]);
   });
 
-  test("the daemon's stop kills it at once and removes what this run made", async () => {
+  test("the daemon's stop kills it at once and removes what this run made — again once it has really exited", async () => {
     const r = rig();
     await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
+    const runDir = join(headlessCacheRoot(r.home), readdirSync(headlessCacheRoot(r.home))[0]!);
     r.pool.stop();
     expect(existsSync(headlessPidPath(r.home))).toBe(false);
     expect(readdirSync(headlessCacheRoot(r.home))).toEqual([]);
+    // What a dying helper writes after the removal (a cache index) goes when its exit is reported.
+    mkdirSync(join(runDir, "Default"), { recursive: true });
     await until("the exit", () => !r.pool.running);
+    await until("the second removal", () => !existsSync(runDir));
     expect(r.pool.connected).toBe(false);
     expect(r.metrics.find((m) => m.primitive === "headless.exit")).toMatchObject({ exitReason: "stop" });
+  });
+
+  test(`${HEADLESS_WEDGED_AFTER_TIMEOUTS} commands in a row that time out: the helper is killed as wedged, its tabs lost, and the next open starts a fresh one`, async () => {
+    const r = rig({ sendTimeoutMs: 100 });
+    const gone: Array<[string, string]> = [];
+    r.pool.onTabGone((k, why) => gone.push([k, why]));
+    const ok = await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
+    const stuck = await r.pool.createTab({ sessionId: "s1", url: "http://wedge.test/" });
+    for (let i = 1; i < HEADLESS_WEDGED_AFTER_TIMEOUTS; i++) {
+      expect(((await failure(r.pool.send(stuck.tabKey, "Page.enable"))) as TransportError).code).toBe("timeout");
+    }
+    // An answer in between resets the count.
+    await r.pool.send(ok.tabKey, "Page.enable");
+    for (let i = 1; i < HEADLESS_WEDGED_AFTER_TIMEOUTS; i++) await failure(r.pool.send(stuck.tabKey, "Page.enable"));
+    expect(r.pool.running).toBe(true);
+    await failure(r.pool.send(stuck.tabKey, "Page.enable"));
+    await until("the kill", () => !r.pool.running);
+    expect(gone.sort()).toEqual(([[ok.tabKey, "crashed"], [stuck.tabKey, "crashed"]] as Array<[string, string]>).sort());
+    expect(r.logs.some((l) => l.includes(`stopped answering (${HEADLESS_WEDGED_AFTER_TIMEOUTS} commands in a row timed out) — restarting it`))).toBe(true);
+    expect(r.metrics.find((m) => m.primitive === "headless.exit")).toMatchObject({ exitReason: "crash" });
+    await r.pool.createTab({ sessionId: "s1", url: "https://again.example/" });
+    expect(r.spawned).toBe(2);
+  });
+
+  test("turned off in Settings: the next command stops the helper at once, not at the next poll", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
+    r.enabled.on = false;
+    const e = await failure(r.pool.send(t.tabKey, "Page.enable")) as TransportError;
+    expect([e.code, e.message]).toEqual(["disconnected", "turned off in Settings"]);
+    await until("the stop", () => !r.pool.running, 2_000);
+    expect(r.metrics.find((m) => m.primitive === "headless.exit")).toMatchObject({ exitReason: "disabled" });
+  });
+
+  test("a page's refused popup or local-network reach: one daemon line per tab and kind, never its address", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "http://notice.test/" });
+    await until("the notices", () => r.pool.localNetworkRefusedAt(t.tabKey) !== undefined);
+    await Bun.sleep(50);
+    const lines = r.logs.filter((l) => l.includes("tried to"));
+    expect(lines).toEqual([
+      "computer-use: a page in Winter's headless browser tried to open a window — refused",
+      "computer-use: a page in Winter's headless browser tried to reach the local network — refused before anything was sent",
+    ]);
+    expect(r.pool.localNetworkRefusedAt("w-unknown")).toBeUndefined();
+  });
+
+  test("muting is a no-op: every headless tab is silent already", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
+    await r.pool.setMuted();
+    expect(r.commands().filter((c) => c.op === "cdp.send")).toEqual([]);
+    expect(t.tabKey.length).toBeGreaterThan(0);
+  });
+
+  test("the daemon's ends of the pipe are close-on-exec: no other child it starts can hold the helper's fd 3 open", async () => {
+    const child = spawnEngineProcess("/bin/sh", ["-c", 'exec "$0" "$@" 0<&3 1>&4 3<&- 4>&-', process.execPath, FAKE]);
+    try {
+      // `fcntl(fd, F_GETFD)` takes no third argument, so it can be called over FFI.
+      const lib = dlopen("/usr/lib/libSystem.B.dylib", { fcntl: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
+      const F_GETFD = 1;
+      const FD_CLOEXEC = 1;
+      expect(child.daemonFds).toBeDefined();
+      for (const fd of child.daemonFds!) expect(lib.symbols.fcntl(fd, F_GETFD) & FD_CLOEXEC).toBe(FD_CLOEXEC);
+      lib.close();
+    } finally {
+      child.closeInput();
+      child.kill("SIGKILL");
+    }
+  });
+});
+
+describe("the pipe's process", () => {
+  test("the helper's environment carries nothing of the daemon's but PATH, HOME and TMPDIR", () => {
+    expect(headlessHelperEnv({ PATH: "/opt/x", HOME: "/Users/u", TMPDIR: "/tmp/t/", ANTHROPIC_API_KEY: "k", WINTER_HOME: "/h", SSH_AUTH_SOCK: "/s" }))
+      .toEqual({ PATH: "/usr/bin:/bin", HOME: "/Users/u", TMPDIR: "/tmp/t/" });
+    expect(headlessHelperEnv({})).toEqual({ PATH: "/usr/bin:/bin" });
+  });
+
+  test("an exit closes the daemon's write end (a crash never leaves it open)", () => {
+    let closed = 0;
+    let onExit: ((code: number | null, signal: string | null) => void) | undefined;
+    const child: EngineChild = {
+      pid: 1, write: () => true, onData: () => {}, onStderr: () => {}, onExit: (l) => { onExit = l; }, closeInput: () => { closed++; }, kill: () => {},
+    };
+    const proc = new WinterHeadlessProcess(child);
+    onExit!(null, "SIGSEGV");
+    expect(closed).toBe(1);
+    expect(proc.alive).toBe(false);
   });
 });
 

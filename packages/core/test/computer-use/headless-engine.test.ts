@@ -137,6 +137,18 @@ describe("the tab lifecycle (D2)", () => {
     expect(h.headless.tabs.get(keyOf(handed))?.closed).toBe(true);
   });
 
+  test("a headless tab is closed at the turn's end even while the pool is not offered (it never stays counted)", async () => {
+    const h = withHeadless();
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    r.end();
+    h.headless.connected = false;
+    const asked: string[] = [];
+    h.headless.closeTab = async (tabKey: string) => { asked.push(tabKey); };
+    h.engine.turnEnded("s1");
+    expect(asked).toEqual([keyOf(tab)]);
+  });
+
   test("the runtime idling out or the session deleted closes the session's headless tabs and disposes its context; the daemon's stop does neither", async () => {
     for (const reason of ["idle", "deleted"] as const) {
       const h = withHeadless();

@@ -378,7 +378,9 @@ export class BrowserEngine {
     const d = this.drivers.get(key);
     if (d !== undefined) { void d.release(sessionId); d.onGone("closed"); this.drivers.delete(key); }
     const transport = this.deps.registry.get(a.backend);
-    if (transport === undefined || !transport.connected) return;
+    // The headless pool is asked even while it is not offered (turned off, its app gone): it forgets the tab at once,
+    // so a tab it can no longer close never stays counted against the open-tab budget.
+    if (transport === undefined || (!transport.connected && this.familyOf(a.backend) !== "headless")) return;
     void transport.closeTab(a.tabKey).catch((err: unknown) => this.deps.log?.(`computer-use: closing ${a.backend}:${a.tabKey} failed (${err instanceof Error ? err.message : "error"})`));
   }
 
@@ -1381,6 +1383,8 @@ export class BrowserEngine {
         this.requireOwnTab(sid, b, "mute()");
         const on = args.on === undefined ? true : args.on;
         if (typeof on !== "boolean") throw bad("mute() takes true (the default) or false");
+        // A headless tab is silent already (its browser runs muted); unmuting was refused above.
+        if (this.isHeadless(b.backend)) return undefined;
         const t = driver.transport;
         if (t.setMuted === undefined) {
           throw this.familyOf(b.backend) === "winter"

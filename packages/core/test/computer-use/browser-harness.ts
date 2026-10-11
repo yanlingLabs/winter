@@ -51,6 +51,8 @@ export function harness(o: HarnessOpts = {}) {
   const winterReg = registry.register(winter, { family: "winter", name: "Winter (built-in)", instanceKey: "winter" });
   const chromeReg = registry.register(chrome, { family: "chrome", name: "Google Chrome", bundleId: "com.google.Chrome", instanceKey: "chrome-instance-1" });
   const headless = new FakeCdpTransport("headless", "headless");
+  // The headless pool's own surface: the fake must not lend the engine a capability the pool's path never uses.
+  delete (headless as { setMuted?: unknown }).setMuted;
   if (o.headless === true) registry.register(headless, { family: "headless", name: "Winter (headless)", instanceKey: "headless" });
   const panel = new Map<string, Array<{ tabId: string; url?: string; title?: string }>>();
   const closedWinter: Array<{ sessionId: string; tabId: string }> = [];
