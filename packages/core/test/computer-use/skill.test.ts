@@ -45,8 +45,13 @@ function declaredMembers(description: string, header: RegExp, end: string): Map<
   expect(start).toBeGreaterThanOrEqual(0);
   const out = new Map<string, string>();
   for (let i = start + 1; i < lines.length && lines[i] !== end; i++) {
-    const m = /^ {2}(\w+)\(/.exec(lines[i]!);
-    if (m) out.set(m[1]!, lines[i]!.split("//")[0]!);
+    // A line may declare several members (`back(): …; forward(): …; reload(): …`): each is its own signature.
+    const code = lines[i]!.split("//")[0]!;
+    if (!/^ {2}\w+\(/.test(code)) continue;
+    for (const part of code.split(/;\s*(?=\w+\()/)) {
+      const m = /^\s*(\w+)\(/.exec(part);
+      if (m) out.set(m[1]!, part);
+    }
   }
   return out;
 }

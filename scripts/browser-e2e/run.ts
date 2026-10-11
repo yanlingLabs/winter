@@ -70,6 +70,10 @@ const serve = (port: number, rewrite: (s: string) => string) => Bun.serve({
     // Phase 3's downloads: an attachment, and a PDF a browser would show (no disposition).
     if (path === "/files/prices.csv") return new Response("item,price\ntea,3\n", { headers: { "content-type": "text/csv", "content-disposition": 'attachment; filename="prices.csv"' } });
     if (path === "/files/doc.pdf") return new Response("%PDF-1.4\n%fake\n", { headers: { "content-type": "application/pdf" } });
+    // Phase 3's readers: an API answer with a secret in it, a stylesheet and an image.
+    if (path === "/api/items") return Response.json({ items: [{ name: "tea" }, { name: "cake" }], token: "tok_live_should_never_show", owner: "shop" });
+    if (path === "/static/site.css") return new Response("h1 { color: navy; }", { headers: { "content-type": "text/css" } });
+    if (path === "/static/logo.png") return new Response(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"), { headers: { "content-type": "image/png" } });
     const file = join(FIXTURE, path.replace(/\.\./g, ""));
     if (!existsSync(file)) return new Response("not found", { status: 404 });
     return new Response(rewrite(readFileSync(file, "utf8")), { headers: { "content-type": "text/html; charset=utf-8" } });
@@ -414,6 +418,83 @@ await check("with nothing editable focused, a key carrying a command keeps its d
   await P("key", { combo: "backspace" });
   await P("waitFor", { cond: { text: "key Backspace" }, timeoutMs: 3_000 });
 });
+
+// ── Phase 3: the readers and the element members, in the page runtime against a real page ────────────
+const run3 = scope("r3");
+let rtab!: TabHandle;
+const R = (primitive: string, args: Record<string, unknown> = {}) => engine.primitive(run3.s, rtab.targetId, primitive, args);
+
+await check("console(): the page's console calls and its uncaught exception, as text", async () => {
+  rtab = await engine.global(run3.s, "browsers.open", { url: `${BASE}/readers.html` }) as TabHandle;
+  await R("waitFor", { cond: { load: "load" }, timeoutMs: 5_000 });
+  await new Promise((r) => setTimeout(r, 300));
+  const entries = await R("console", { emit: false }) as Array<{ level: string; text: string }>;
+  const lines = entries.map((e) => `${e.level} ${e.text}`);
+  expect(lines.some((l) => l.startsWith("log ready")), "the log line", lines.join("\n"));
+  expect(lines.some((l) => l === "error failed to load widget"), "the error line", lines.join("\n"));
+  expect(lines.some((l) => l.startsWith("error") && l.includes("boom from the page")), "the uncaught exception", lines.join("\n"));
+});
+
+await check("network() and networkBody(id): the API call with its status; its JSON body with the secret redacted", async () => {
+  // What Winter saw since it bound the tab: the first load's requests came before; a reload is seen whole.
+  await R("reload");
+  await R("waitFor", { cond: { load: "load" }, timeoutMs: 5_000 });
+  await new Promise((r) => setTimeout(r, 300));
+  const api = await R("network", { filter: "/api/items", emit: false }) as Array<{ id: string; url: string; status?: number; mime?: string }>;
+  expect(api.length === 1 && api[0]!.status === 200, "the request and its status", JSON.stringify(api));
+  const body = await R("networkBody", { id: api[0]!.id, emit: false }) as string;
+  expect(body.includes('"owner": "shop"') && body.includes("<redacted>") && !body.includes("tok_live_should_never_show"), "the body, its token redacted", body);
+});
+
+await check("find()'s DOM keys reach real elements: testId, label, placeholder, css", async () => {
+  const one = async (q: Record<string, unknown>) => (await R("find", { query: q, emit: false }) as Array<{ ref: number; role: string }>);
+  expect((await one({ testId: "buy" })).length === 1, "testId");
+  expect((await one({ label: "Email" }))[0]?.role === "text field", "label → the email field", JSON.stringify(await one({ label: "Email" })));
+  expect((await one({ placeholder: "Search products" })).length === 1, "placeholder");
+  expect((await one({ css: "a.price" })).length === 1, "css");
+});
+
+await check("inspect(ref | point), html(), text({ within }), assets()", async () => {
+  const link = (await R("find", { query: { testId: "buy" }, emit: false }) as Array<{ ref: number }>)[0]!.ref;
+  const info = await R("inspect", { target: link, emit: false }) as { tag: string; attributes: Record<string, string>; box: number[]; visible: boolean };
+  expect(info.tag === "a" && info.attributes["data-testid"] === "buy" && info.visible && info.box[2]! > 0, "the link's facts", JSON.stringify(info));
+  const shot = await R("screenshot", { emit: false }) as { width: number; height: number };
+  // The image's pixels per CSS px (the viewport is 1200 CSS px wide here; its height is the window's).
+  const scale = shot.width / 1200;
+  const at = await R("inspect", { target: [Math.round((info.box[0]! + info.box[2]! / 2) * scale), Math.round((info.box[1]! + info.box[3]! / 2) * scale)], emit: false }) as { tag: string };
+  expect(at.tag === "a", "a point inspects the element there", JSON.stringify({ at, box: info.box, shot }));
+  const html = await R("html", { emit: false }) as string;
+  expect(html.includes('data-testid="buy"') && !html.includes("script-secret-value") && !html.includes("hunter2"), "the markup, scripts and field values left out", html.slice(0, 600));
+  const title = (await R("find", { query: { role: "heading" }, emit: false }) as Array<{ ref: number }>)[0]!.ref;
+  expect(await R("text", { within: title, emit: false }) === "Price list", "text({ within }) reads one element");
+  const assets = await R("assets", { emit: false }) as Array<{ kind: string; url: string }>;
+  expect(assets.some((a) => a.kind === "stylesheet" && a.url.endsWith("/static/site.css")) && assets.some((a) => a.kind === "image" && a.url.endsWith("/static/logo.png")), "assets: the stylesheet and the image", JSON.stringify(assets));
+});
+
+await check("setValue(check box, true) presses it once; dialog() and answerDialog(false)", async () => {
+  const news = (await R("find", { query: { label: "Newsletter" }, emit: false }) as Array<{ ref: number }>)[0]!.ref;
+  await R("setValue", { ref: news, value: true });
+  await R("setValue", { ref: news, value: true });
+  const st = await R("state", { full: true, emit: false }) as string;
+  expect(/check box "Newsletter" \([^)]*\bchecked\)/.test(st), "checked, once", st);
+  const del = (await R("find", { query: { role: "button", name: "Delete" }, emit: false }) as Array<{ ref: number }>)[0]!.ref;
+  await R("click", { target: del });
+  const d = await R("dialog") as { type: string; message: string } | null;
+  expect(d?.type === "confirm" && d.message === "Delete it?", "the open dialog as a value", JSON.stringify(d));
+  await R("answerDialog", { accept: false });
+  await R("waitFor", { cond: { text: "kept" }, timeoutMs: 3_000 });
+});
+
+await check("screenshot({ fullPage }) and viewport(): the whole page, and an emulated phone width the page sees", async () => {
+  const whole = await R("screenshot", { fullPage: true, emit: false }) as { width: number; height: number };
+  const view = await R("screenshot", { emit: false }) as { width: number; height: number };
+  expect(whole.height / whole.width > view.height / view.width * 2, "the full page is much taller than the viewport", JSON.stringify({ whole, view }));
+  await R("viewport", { size: { width: 390, height: 844, mobile: true } });
+  await R("waitFor", { cond: { text: "width 390" }, timeoutMs: 3_000 });
+  await R("viewport", { size: null });
+  await R("waitFor", { cond: { text: "width 1200" }, timeoutMs: 3_000 });
+});
+run3.end();
 
 // ── Phase 3: download() in a user's browser (Fetch interception) ─────────────────────────────────────
 const run2 = scope("r2");

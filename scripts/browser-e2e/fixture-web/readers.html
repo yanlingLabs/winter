@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Readers</title>
+<link rel="stylesheet" href="/static/site.css">
+<style>body { font-family: sans-serif; margin: 20px; } #tall { height: 2400px; }</style>
+</head>
+<body>
+<h1 id="title">Price list</h1>
+<p><a class="price" data-testid="buy" href="/files/prices.csv">Buy the list</a></p>
+<label>Email <input id="email" type="email" placeholder="you@example.com"></label>
+<input id="search" type="search" placeholder="Search products">
+<label>Password <input id="pw" type="password" value="hunter2"></label>
+<label><input id="news" type="checkbox"> Newsletter</label>
+<img src="/static/logo.png" alt="Logo" width="16" height="16">
+<button id="ask" onclick="document.getElementById('answer').textContent = confirm('Delete it?') ? 'deleted' : 'kept'">Delete</button>
+<p id="answer">untouched</p>
+<p id="width">width unknown</p>
+<div id="tall">tall content</div>
+<p id="bottom">the bottom</p>
+<script>
+  const secret = "script-secret-value";
+  console.log("ready", { items: 3 });
+  console.error("failed to load widget");
+  setTimeout(() => { throw new Error("boom from the page"); }, 0);
+  fetch("/api/items").then((r) => r.json()).then((j) => { document.getElementById("title").dataset.count = String(j.items.length); });
+  const showWidth = () => { document.getElementById("width").textContent = "width " + window.innerWidth; };
+  showWidth();
+  window.addEventListener("resize", showWidth);
+</script>
+</body></html>

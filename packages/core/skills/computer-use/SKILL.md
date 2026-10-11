@@ -325,10 +325,11 @@ await shop.state();
 
 ## 14. Debug a page: console and network
 
-What the page logged and loaded since you opened or bound the tab. Secrets come back as `<redacted>`.
+What the page logged and loaded since you opened or bound the tab: requests made while it first loaded can come before Winter was watching, so reload it to see a load from the start. Secrets come back as `<redacted>`.
 
 ```js
 const page = await browsers.open('http://localhost:3000/');
+await page.reload();
 const errors = await page.console({ levels: ['error'], emit: false });
 const failed = await page.network({ failed: true, emit: false });
 print({ errors: errors.map((e) => e.text), failed: failed.map((r) => r.url) });
