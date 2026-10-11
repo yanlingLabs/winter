@@ -231,8 +231,10 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
   napi_add_env_cleanup_hook(env, cleanup, ctx);
   return result;
 }
+#include "output_transport.c"
+
 static napi_value initialize(napi_env env, napi_value exports) {
   napi_property_descriptor method = {"open", NULL, open_controller, NULL, NULL, NULL, napi_default, NULL};
-  napi_define_properties(env, exports, 1, &method); return exports;
+  napi_define_properties(env, exports, 1, &method); output_initialize(env, exports); return exports;
 }
 NAPI_MODULE(winter_cowork_native, initialize)

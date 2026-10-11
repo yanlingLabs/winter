@@ -237,3 +237,51 @@ capacity, reservation acquisition/abort/retry/coalescing, constructed-state abor
 refusal and prevention of release without flush. These test fake host proof and
 compile the VZ path; they do not prove real guest cancellation, VZ backing-service
 termination, dirty-disk recovery, active RAM return or production integration.
+
+## Packaged host output transport
+
+`node-api/output-transport.ts` provides
+`createNativeHostOutputTransportFactory(verifiedAddonPath)`, matching the SDK's
+host-only HostOutputTransportFactory. The host verifies that absolute packaged
+addon path, hash/signature and protection before injecting the factory. Runtime
+RPC may nominate neither factories nor descriptors. The SDK keeps final authority
+checks, spawning, framing, quotas and owned process cleanup.
+
+The immutable addon now creates stdout/stderr pipes directly with compiled C
+calls. All parent descriptors are CLOEXEC; reader endpoints are nonblocking and
+writer endpoints remain blocking for real kernel backpressure. Numeric writer
+FDs are copied onto child1/2 during spawn; closeWriters immediately closes the
+parent copies. No runtime bun:ffi or temporary source compilation is involved.
+
+One shared native poll readiness thread per addon environment services at most128
+transports. It sleeps in poll rather than a JS10ms timer or one fs worker per
+stream. At most one64KiB chunk per stream is outstanding in native delivery;
+TSFN queues are bounded and terminal storage is reserved at construction. Native
+pending bytes are therefore at most128KiB per transport. The SDK/consumer must
+also bound any bytes it retains after the callback returns. pause stops native
+reads, including before start and from inside a callback; resume wakes readiness.
+Read errors, callback exceptions and disposal reject start. Successful start
+completion requires BOTH actual EOFs and delivery of all queued chunks.
+
+closeWriters/dispose are idempotent. dispose closes only owned descriptors,
+unregisters readiness and prevents later chunks. Poll snapshots retain context
+and revalidate descriptor ownership before reading, so a reused FD cannot be
+mistaken for its disposed reader. TSFN and wrapper references retain the engine
+through callback drain/GC. Thread-safe callback releases and JS allocations occur
+outside the engine mutex to permit reentrant cleanup. This is a byte transport,
+not process termination or disk/authority proof.
+
+```
+/bin/sh apple/Cowork/WinterCoworkVM/node-api/build.sh
+bun run apple/Cowork/WinterCoworkVM/node-api/output-smoke.ts
+```
+
+Ordinary and compiled Bun fixture checks emitted nonempty JSON receipts proving
+exact10MiB transfer, actual paused-pipe producer backpressure, pause-before-start
+and pause-inside-callback,12 concurrent stdout/stderr transports, both EOFs,
+visible callback failures, no chunks after disposal and no extra inherited
+parent descriptors. The factory also passed strict standalone TypeScript checks.
+Existing VM addon/client fake smokes continue to pass. No daemon/provider/VM or
+live home/Keychain/global service is involved. This adds the packaged capability;
+real host-broker injection/integration and independent security review remain
+required before production use.
