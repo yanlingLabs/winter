@@ -54,7 +54,10 @@ extension CUCore {
     /// the focus record ENDS the blip the ordinary way first (the hand-back, the wait for the user's app, a second
     /// hand-back, the tap removed only then, the guardian's restore if they are still not back): review of round 4, a
     /// refusal handed back once, removed the tap at once and threw, and the target could keep the user's keys.
-    func beginBlip(_ p: TargetActParams, _ t: CUTarget, why: String, boundMs: Double = CUCore.blipDeadlineMs) throws -> CUFocusBlip? {
+    /// `forKeys`: a keyboard blip — when the app activated itself on the focus record (the step undone), its keys are
+    /// refused rather than sent with no blip; a menu blip falls back to its other routes, as before.
+    func beginBlip(_ p: TargetActParams, _ t: CUTarget, why: String, boundMs: Double = CUCore.blipDeadlineMs,
+                   forKeys: Bool = false) throws -> CUFocusBlip? {
         let app = t.appName
         guard p.privatePath, let user = sys.frontmostPid(), user != t.pid else {
             CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used (private path off, or the app is in front)")
@@ -77,6 +80,12 @@ extension CUCore {
         case .refusedBeforeAnything(let e):
             reroute.end()
             throw e
+        case .undone(let e):
+            // The step already undone and the user's view put back.
+            reroute.end()
+            if forKeys { throw e }
+            CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used — the app activated itself on the focus records (undone)")
+            return nil
         case .userTookTheApp(let e):
             // The user is in the target app now: the key focus is theirs there — never handed back to the app they left.
             reroute.end()
@@ -243,7 +252,7 @@ final class CUKeyBlips {
             settled = bursts == 0
             return
         }
-        guard let b = try core.beginBlip(p, t, why: "\(why) (burst \(bursts + 1))", boundMs: core.keyBlipBoundMs) else {
+        guard let b = try core.beginBlip(p, t, why: "\(why) (burst \(bursts + 1))", boundMs: core.keyBlipBoundMs, forKeys: true) else {
             settled = true
             return
         }

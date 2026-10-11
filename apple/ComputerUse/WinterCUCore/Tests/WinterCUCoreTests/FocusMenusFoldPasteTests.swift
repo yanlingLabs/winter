@@ -876,6 +876,30 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         XCTAssertEqual(poster.keyDowns.map(\.unicode), ["b"])
     }
 
+    func testTheTargetActivatingItselfDuringABlipIsUndoneAndNothingIsTyped() async throws {
+        finder(focusedField: true)
+        let other = fakeElement(98_020)
+        ax.add(other, role: kAXWindowRole, title: "Other")
+        ax.windowIDs[AXIdentity(element: other)] = 78
+        ax.focus(pid: pid, on: other)
+        ax.put(window, [kAXFocusedUIElementAttribute: field])
+        let enforcer = FakeFocusEnforcer()
+        enforcer.onDeactivate = { [unowned self] in sys.front = pid }  // the app activates itself — nobody's input
+        core.focusEnforcerFactory = { _ in enforcer }
+        core.secondsSinceUserInputOverride = { 5 }
+        do {
+            try await act(.type(CUTypeAction(text: "a")))
+            XCTFail("typed")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("focus_not_placed"))
+            XCTAssertTrue(e.message.contains("activated itself"), e.message)
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty, "nothing typed with no blip")
+        XCTAssertEqual(sys.activated.first, 1, "the user's app put back")
+        XCTAssertTrue(core.isRetired(.focusRecords), "the step retired: it moved the view")
+        XCTAssertEqual(installer.removed, installer.installed.count)
+    }
+
     /// Review of round 4 (MEDIUM): the click that puts the focus in a field saw the app come to the front and returned a
     /// silent `false` — the typing carried on, into whatever window of the now-front app held the keys, and the act's
     /// check then pulled the user back out. Now the refusal stops the act, and the user is left where they went.

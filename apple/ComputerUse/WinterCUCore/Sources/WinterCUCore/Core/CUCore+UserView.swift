@@ -169,28 +169,46 @@ extension CUCore {
 
     func isRetired(_ step: CUBackgroundStep) -> Bool { retiredStepsLock.withLock { retiredSteps.contains(step) } }
 
+    enum StepResult: Equatable {
+        /// Ran, and the user's view stayed (or the change was the user's own).
+        case ran
+        /// Not run: retired, or it failed.
+        case notRun
+        /// Ran and moved the user's view: undone, the view restored, the step retired.
+        case undone
+    }
+
     /// Runs a background step and checks the user's view `stepSettleMs` later. A step that moved it is undone,
-    /// the view restored, the act told, and the step never used again. False: skipped, failed or undone.
+    /// the view restored, the act told, and the step never used again.
     /// `usersOwn`: a change of the view that is the USER's doing (they brought the target forward themselves, with
     /// their own input) — never the step's: nothing undone, the step not retired, nobody pulled back out of the app they
     /// chose (review of round 4: a ⌘-Tab into the target during a typing burst retired the focus records for the
     /// helper's life and yanked the user back to their previous app).
     func backgroundStep(_ step: CUBackgroundStep, _ t: CUTarget, run: () -> Bool, undo: () -> Void,
-                        usersOwn: (CUUserView) -> Bool = { _ in false }) -> Bool {
-        guard !isRetired(step) else { return false }
+                        usersOwn: (CUUserView) -> Bool = { _ in false }) -> StepResult {
+        guard !isRetired(step) else { return .notRun }
         let before = userView()
-        guard run() else { return false }
+        guard run() else { return .notRun }
         let after = view(after: before, settleMs: stepSettleMs)
-        guard after != before else { return true }
+        guard after != before else { return .ran }
         if usersOwn(after) {
             CULog.act.notice("\(step.rawValue, privacy: .public) in \(t.appName, privacy: .public): the user brought it forward meanwhile — their move, left as it is")
-            return true
+            return .ran
         }
         undo()
         retiredStepsLock.withLock { _ = retiredSteps.insert(step) }
         let said = viewMoved(before, after, t, route: step.rawValue, late: false)
         t.addViewNote("\(said) (\(step.rawValue) is no longer used)")
-        return false
+        return .undone
+    }
+
+    /// The user's own click, key or modifier within the guardian's window — the HID state (the helper's posted events
+    /// never count there: measured on 2026-10-11, a key and a click it posted left "seconds since the last key/click"
+    /// at over an hour) or the session tap's hardware actions (never a pointer move: moving the mouse activates nothing).
+    func userActedRecently(now: TimeInterval) -> Bool {
+        if secondsSinceUserInput < CUFocusGuardianCore.userInputWindow { return true }
+        let last = guardianLock.withLock { lastHardwareActionAt }
+        return last >= 0 && now - last <= Self.guardianHardwareWindow
     }
 
     /// How a focus blip's start went (`keyWithoutRaise`).
@@ -199,6 +217,10 @@ extension CUCore {
         case unavailable
         /// Refused before anything was posted (the user's view untouched).
         case refusedBeforeAnything(CUError)
+        /// The app activated itself on the focus record (no input of the user's behind it): undone, the user's view
+        /// put back, the focus records retired — and nothing may be typed (review of round 4: the act typed on with no
+        /// blip, into the app's key window).
+        case undone(CUError)
         /// The bound window holds the key focus; `undo` hands it back.
         case keyed(undo: () -> Void)
         /// Posted, then refused: the blip must END the ordinary way (hand-back, the wait for the user's app, the
@@ -241,8 +263,8 @@ extension CUCore {
         // paste of a run read Edit › Paste disabled and took no ⌘V; keys for the Docs window went nowhere). Once the
         // app has taken the activation, the bound window is made its key window — only when it is not (`makeKeyInApp`).
         var made = MakeKeyOutcome.notApplicable
-        let usersMove = { [self] (now: CUUserView) -> Bool in now.front == tp && userInputRecent(now: clock.nowSeconds()) }
-        guard backgroundStep(.focusRecords, t, run: { [self] in
+        let usersMove = { [self] (now: CUUserView) -> Bool in now.front == tp && userActedRecently(now: clock.nowSeconds()) }
+        let step = backgroundStep(.focusRecords, t, run: { [self] in
             guard sky.focusWithoutRaise(pid: tp, windowID: tw) else { return false }
             made = makeKeyInApp(t) { [self] in
                 // After the deactivation the app is told it is active again (the blip keeps it so), to the app alone.
@@ -251,7 +273,14 @@ extension CUCore {
             }
             return true
         }, undo: { _ = undo() }, usersOwn: usersMove)
-        else { return .unavailable }
+        switch step {
+        case .notRun:
+            return .unavailable
+        case .undone:
+            return .undone(CUError.refused(.focusNotPlaced, "\(t.appName) activated itself when its window was being made key; the user's app was put back and nothing was typed — check state(), and try again"))
+        case .ran:
+            break
+        }
         CULog.act.notice("\(t.appName, privacy: .public): window \(tw, privacy: .public) made key without raising (\(made.words, privacy: .public))")
         if sys.frontmostPid() == tp {
             let e = CUError.refused(.appInFront, "\(t.appName) came to the front while its window was being made key — the user may be using it now, so nothing was typed; check state(), and try again if it is still wanted")

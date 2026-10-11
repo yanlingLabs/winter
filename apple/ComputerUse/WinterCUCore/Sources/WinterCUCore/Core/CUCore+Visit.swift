@@ -646,8 +646,11 @@ extension CUCore {
         let theirs = { [self] (id: CGWindowID) -> Bool in
             guard id != s.windowID else { return false }
             if recorded.contains(id) { return true }
+            guard let w = sys.window(id: id) else { return false }
+            // On their desktop: shown there once they are back on it, not shown while the visited desktop is (a second
+            // return attempt can run with their desktop already back and their app not yet in front).
             let away = s.before.space != nil && sys.activeSpace() != s.before.space
-            return !(away && sys.window(id: id)?.onScreen == true)  // shown on the visited desktop: the visit's
+            return away ? !w.onScreen : w.onScreen
         }
         if let w = s.userWindow, let id = s.userWindowID, ax.isAlive(w) {
             if let focused, let fid, fid != id, theirs(fid) { return (focused, fid) }

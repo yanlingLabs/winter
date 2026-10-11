@@ -733,6 +733,9 @@ final class DesktopVisitTests: XCTestCase {
         let newer = fakeElement(96_102)
         ax.add(newer, role: kAXWindowRole, title: "New", frame: CGRect(x: 0, y: 0, width: 400, height: 300))
         ax.windowIDs[AXIdentity(element: newer)] = 502
+        var w502 = FakeSystem.window(502, pid: user, CGRect(x: 0, y: 0, width: 400, height: 300))
+        w502.onScreen = false  // on their desktop, not the visited one
+        sys.windows[502] = w502
         ax.put(ax.application(user), [kAXFocusedWindowAttribute: newer])  // a window the user's app opened meanwhile
         closed = try await close()
         report = try XCTUnwrap(closed.first)
@@ -839,6 +842,32 @@ final class DesktopVisitTests: XCTestCase {
         XCTAssertEqual(returns.first, "\(pid):66", "their own window raised, not the visit's alert: \(returns)")
         XCTAssertFalse(returns.contains("\(pid):79"))
         XCTAssertEqual(userView.space, 1, "back on their desktop")
+    }
+
+    /// The same once their desktop is back but their app is not yet in front (a second return attempt): the alert, now
+    /// off screen on the visited desktop, is still not theirs.
+    func testASecondReturnAttemptNeverAnchorsOnTheVisitsWindowEither() async throws {
+        world()
+        let mine = fakeElement(96_066), alert = fakeElement(96_079)
+        ax.add(mine, role: kAXWindowRole, title: "Mine", frame: CGRect(x: 0, y: 0, width: 400, height: 300))
+        ax.windowIDs[AXIdentity(element: mine)] = 66
+        sys.windows[66] = FakeSystem.window(66, pid: pid, CGRect(x: 0, y: 0, width: 400, height: 300))
+        ax.add(alert, role: kAXWindowRole, subrole: kAXDialogSubrole, title: "Save?")
+        ax.windowIDs[AXIdentity(element: alert)] = 79
+        sys.front = pid
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: mine])
+        sys.onActivate = { _ in }
+        _ = try await click(visit: true)
+        // The visit's act opened an alert on the visited desktop; then their desktop came back on its own, the alert
+        // with the visited one went off screen, and the app's focused window is still the alert.
+        var a = FakeSystem.window(79, pid: pid, CGRect(x: 100, y: 100, width: 300, height: 150))
+        a.onScreen = false
+        sys.windows[79] = a
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: alert])
+        show(1)
+        XCTAssertNotEqual(core.returnWindow(try XCTUnwrap(core.openVisit?.base)).id, 79, "never the visit's alert")
+        _ = try await close()
+        XCTAssertFalse(sys.frontedWindows.dropFirst().contains { $0.windowID == 79 })
     }
 
     func testAVisitWithNothingToAnchorTheReturnIsRefusedWhenTheUsersAppHasWindowsElsewhere() async throws {
