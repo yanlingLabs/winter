@@ -1018,9 +1018,10 @@ public struct CUFocusGuardianCore: Sendable {
     /// to look is not working in it). The agent is hands-off it until it leaves the front (user ruling, round 10).
     public private(set) var userWorkingApp: pid_t?
     /// A click of theirs into a window of an app NOT in front: working in it once its own activation lands (within
-    /// `workClickWindow`) — a drag out of a background window activates nothing and is no work in it.
+    /// `workClickWindow` — the claim's own window: a slow app's activation lands up to 1.5 s after the click, review of
+    /// round 10, MEDIUM #5) — a drag out of a background window activates nothing and is no work in it.
     private var pendingWork: (app: pid_t, until: TimeInterval)?
-    static let workClickWindow: TimeInterval = 0.5
+    static let workClickWindow: TimeInterval = causalWindow
 
     /// Their click, key or scroll in `app`'s window (the caller attributes it), with `front` in front.
     public mutating func userInteracted(_ app: pid_t, front: pid_t?, now: TimeInterval) {

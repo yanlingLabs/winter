@@ -93,4 +93,29 @@ final class GuardianRound11Tests: XCTestCase {
         XCTAssertFalse(g.clearlyAt(39, hardwareAt: nil), "the launch began after")
         XCTAssertTrue(g.clearlyAt(40.5, hardwareAt: nil))
     }
+
+    /// A key the window server delivers to ANOTHER process — Spotlight's or a launcher's panel, the emoji picker, a
+    /// menu-bar item's popover — is no work in the bound app in front; nor ⌥-Space or Escape. A key it delivers to the
+    /// bound app (or none named) is.
+    func testOnlyAKeyTheBoundAppReceivesIsWorkInIt() throws {
+        let sys = FakeSystem()
+        sys.running = [1, 500, 610]; sys.front = 500; sys.space = 100
+        sys.windows[77] = FakeSystem.window(77, pid: 500, CGRect(x: 500, y: 0, width: 400, height: 300))
+        sys.stack = [sys.windows[77]!]
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        let t = CUTarget(id: "t1", sessionId: "s", pid: 500, bundleId: "com.apple.finder", appName: "Finder",
+                         isChromium: false, mirror: false, windowID: 77, windowTitle: "")
+        core.registerForTesting(t, windowElement: nil)
+        core.switchInputObservableOverride = true
+        XCTAssertTrue(core.startGuardian(privatePath: true))
+        defer { core.stopGuardian() }
+        let now = core.clock.nowSeconds()
+        core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: 0, targetPid: 610, now: now)  // into Spotlight's panel
+        core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, flags: .maskAlternate, keycode: 49, now: now)  // ⌥-Space
+        core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: 53, now: now)  // Escape
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t))
+        core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: 0, targetPid: 500, now: now)
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(t))
+    }
 }
