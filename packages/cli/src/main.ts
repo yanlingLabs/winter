@@ -57,6 +57,7 @@ import { formatRoutineDetail } from "./routines-cli";
 import { runAgentsCommand } from "./agents-cli";
 import { mountAgents } from "./tui/agents-view";
 import { MEMORY_USAGE, formatDeleted, formatFactDetail, parseMemoryArgs, runMemoryRoute } from "./memory-cli";
+import { COWORK_CLI_USAGE, parseCoworkArgs, runCoworkRoute, formatCoworkResult, coworkErrorMessage } from "./cowork-cli";
 import { formatOptionLines, isOtherChoice, parseQuestionAnswer } from "./questions";
 import { parsePlanResponse } from "./plan-response";
 import { ShellCardQueue, approvalPromptLine, approvalResolvedHow } from "./shell-cards";
@@ -2378,6 +2379,23 @@ if (import.meta.main) {
     c.close();
     break;
   }
+  case "workspace":
+  case "project": {
+    let route: ReturnType<typeof parseCoworkArgs>;
+    try { route = parseCoworkArgs(cmdKey, process.argv.slice(3)); }
+    catch (error) { console.error(coworkErrorMessage(error)); console.error(COWORK_CLI_USAGE); process.exit(1); }
+    if ("help" in route) { console.log(COWORK_CLI_USAGE); break; }
+    // Use the existing local harness connection. Parsing/help never opens a socket, and no
+    // picker, grant resolution, provisioning or execution fallback is performed by the CLI.
+    let client: WinterClient | undefined;
+    try {
+      client = await connect(`cli-${cmdKey}`);
+      const result = await runCoworkRoute(client, route);
+      for (const line of formatCoworkResult(route, result)) console.log(line);
+    } catch (error) { console.error(coworkErrorMessage(error)); process.exitCode = 1; }
+    finally { client?.close(); }
+    break;
+  }
   case "watch": {
     const sessionId = process.argv[3];
     if (!sessionId) { console.error("usage: winter watch <sessionId>"); process.exit(1); }
@@ -3090,6 +3108,7 @@ if (import.meta.main) {
   routines [list] | routines create "<spec>" [--policy auto|plan] -- <prompt>
     | routines delete <id> | routines enable <id> | routines disable <id>       manage scheduled routines
   memory [list] [--project] | show <name> [--project] | rm <name> [--project]  manage saved memory facts
+  workspace --help | project --help                Cowork workspace metadata administration (creation unavailable)
   login [--api-key] [--anthropic-key] [--anthropic-console] [--exa-key]
   logout [--anthropic] [--anthropic-console] [--openai]           (bare: signs out of ChatGPT/Codex)
   credentials [list] | credentials set <providerId> | credentials remove <providerId>   every provider's API key (masked prompt)
