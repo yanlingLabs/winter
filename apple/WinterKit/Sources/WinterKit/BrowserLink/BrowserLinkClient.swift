@@ -39,7 +39,7 @@ public struct BrowserLinkReplier: Sendable {
 /// other and with replies exactly as they are made (one queue), and are dropped when no link is up.
 public protocol BrowserLinkOutput: AnyObject, Sendable {
     /// One CDP event for the daemon. `params` is the event's JSON params as the browser wrote them;
-    /// `stripNetworkParams` cuts them to `CDPAllowlist.networkEventParams` before they leave.
+    /// `stripNetworkParams` reduces them by `CDPEventReducer` (`CDPAllowlist.eventParams`) before they leave.
     func emitEvent(tabId: String, method: String, params: Data, cdpSessionId: String?, stripNetworkParams: Bool)
     func tabGone(tabId: String, reason: BrowserLinkProtocol.TabGoneReason)
 }
@@ -337,7 +337,7 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
             let event = queued.event
             var params = (try? JSONDecoder().decode(JSONValue.self, from: event.params)) ?? .object([:])
             if case .object = params {} else { params = .object([:]) }
-            if event.strip { params = CDPTabGate.strippedNetworkParams(params) }
+            if event.strip { params = CDPTabGate.reducedParams(method: event.method, params: params) }
             params = BrowserLinkEventLimits.truncatingLongStrings(params, maxBytes: configuration.eventStringMaxBytes)
             var entry: [String: JSONValue] = ["tabId": .string(event.tabId), "method": .string(event.method), "params": params]
             if let session = event.cdpSessionId { entry["cdpSessionId"] = .string(session) }

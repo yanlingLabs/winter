@@ -39,7 +39,7 @@ final class CDPTabGateTests: XCTestCase {
 
     func testAMethodOffTheAllowlistIsRefused() {
         let gate = CDPTabGate()
-        for method in ["Network.getCookies", "Storage.getCookies", "Network.getResponseBody", "Runtime.compileScript",
+        for method in ["Network.getCookies", "Storage.getCookies", "Network.getRequestPostData", "Runtime.compileScript",
                        "Page.addScriptToEvaluateOnNewDocument", "Browser.close", "Target.createTarget"] {
             XCTAssertNotNil(gate.check(method: method, params: obj([:]), cdpSessionId: nil), method)
         }
@@ -48,7 +48,11 @@ final class CDPTabGateTests: XCTestCase {
     func testEveryAllowlistedMethodWithoutAWorldRulePasses() {
         let gate = CDPTabGate()
         let worldRuled: Set<String> = ["Runtime.evaluate", "Runtime.callFunctionOn", "DOM.resolveNode",
-                                       "Page.createIsolatedWorld", "Page.navigate"]
+                                       "Page.createIsolatedWorld", "Page.navigate",
+                                       // Phase 3: a screen size is required; the link refuses Fetch and IO outright.
+                                       "Emulation.setDeviceMetricsOverride",
+                                       "Fetch.enable", "Fetch.disable", "Fetch.continueRequest", "Fetch.failRequest",
+                                       "Fetch.takeResponseBodyAsStream", "IO.read", "IO.close"]
         for method in CDPAllowlist.methods where !worldRuled.contains(method) {
             XCTAssertNil(gate.check(method: method, params: obj([:]), cdpSessionId: nil), method)
         }
@@ -185,27 +189,77 @@ final class CDPTabGateTests: XCTestCase {
         XCTAssertEqual(gate.disposition(forEvent: "Page.frameNavigated"), .forward)
         XCTAssertEqual(gate.disposition(forEvent: "Network.requestWillBeSent"), .forwardStripped)
         XCTAssertEqual(gate.disposition(forEvent: "Page.loadEventFired"), .drop, "allowlisted, not subscribed")
-        XCTAssertEqual(gate.disposition(forEvent: "Network.responseReceived"), .drop, "not allowlisted")
+        XCTAssertEqual(gate.disposition(forEvent: "Network.responseReceivedExtraInfo"), .drop, "not allowlisted")
+        XCTAssertNil(gate.subscribe(["Page.frameNavigated", "Runtime.consoleAPICalled"]))
+        XCTAssertEqual(gate.disposition(forEvent: "Runtime.consoleAPICalled"), .forwardStripped, "page data leaves reduced")
     }
 
     func testASubscribeOutsideTheAllowlistIsRefusedWhole() {
         let gate = CDPTabGate()
         XCTAssertNil(gate.subscribe(["Page.frameNavigated"]))
-        let refusal = gate.subscribe(["Page.loadEventFired", "Network.responseReceived"])
+        let refusal = gate.subscribe(["Page.loadEventFired", "Network.responseReceivedExtraInfo"])
         XCTAssertNotNil(refusal)
-        XCTAssertTrue(refusal?.message.contains("Network.responseReceived") == true)
+        XCTAssertTrue(refusal?.message.contains("Network.responseReceivedExtraInfo") == true)
         XCTAssertEqual(gate.subscribed, ["Page.frameNavigated"], "a refused subscribe changes nothing")
         XCTAssertNil(gate.subscribe([]))
         XCTAssertEqual(gate.subscribed, [])
     }
 
-    func testNetworkParamsAreCutToThree() {
+    func testNetworkParamsLeaveReducedNeverWithHeaders() {
         let full = obj(["requestId": .string("r1"), "timestamp": .number(12.5), "type": .string("Document"),
-                        "request": obj(["url": .string("https://x/?token=secret"), "headers": obj(["Cookie": .string("c")])]),
+                        "request": obj(["url": .string("https://x/?token=secret"), "method": .string("GET"),
+                                        "headers": obj(["Cookie": .string("c")])]),
                         "documentURL": .string("https://x/")])
-        XCTAssertEqual(CDPTabGate.strippedNetworkParams(full),
-                       obj(["requestId": .string("r1"), "timestamp": .number(12.5), "type": .string("Document")]))
-        XCTAssertEqual(CDPTabGate.strippedNetworkParams(.string("x")), obj([:]))
+        XCTAssertEqual(CDPTabGate.reducedParams(method: "Network.requestWillBeSent", params: full),
+                       obj(["requestId": .string("r1"), "timestamp": .number(12.5), "type": .string("Document"),
+                            "request": obj(["url": .string("https://x/?token=secret"), "method": .string("GET")])]))
+        XCTAssertEqual(CDPTabGate.reducedParams(method: "Network.requestWillBeSent", params: .string("x")), obj([:]))
+    }
+
+    // MARK: - Phase 3's rules
+
+    func testNetworkEnableKeepsNoPostDataAndCappedBuffers() {
+        let gate = CDPTabGate()
+        XCTAssertNil(gate.check(method: "Network.enable", params: obj([:]), cdpSessionId: nil))
+        XCTAssertNil(gate.check(method: "Network.enable", params: obj(["maxResourceBufferSize": .number(1_048_576),
+                                                                        "maxTotalBufferSize": .number(8_388_608),
+                                                                        "maxPostDataSize": .number(0)]), cdpSessionId: nil))
+        XCTAssertNotNil(gate.check(method: "Network.enable", params: obj(["maxPostDataSize": .number(1)]), cdpSessionId: nil))
+        XCTAssertNotNil(gate.check(method: "Network.enable", params: obj(["maxResourceBufferSize": .number(2_000_000)]), cdpSessionId: nil))
+        XCTAssertNotNil(gate.check(method: "Network.enable", params: obj(["maxTotalBufferSize": .number(100_000_000)]), cdpSessionId: nil))
+    }
+
+    func testTheLinkRefusesFetchAndIOOutright() {
+        let gate = CDPTabGate()
+        for method in ["Fetch.enable", "Fetch.disable", "Fetch.continueRequest", "Fetch.failRequest",
+                       "Fetch.takeResponseBodyAsStream", "IO.read", "IO.close"] {
+            XCTAssertNotNil(gate.check(method: method, params: obj([:]), cdpSessionId: nil), method)
+        }
+    }
+
+    func testEmulationTakesAScreenSizeOnly() {
+        let gate = CDPTabGate()
+        XCTAssertNil(gate.check(method: "Emulation.setDeviceMetricsOverride",
+                                params: obj(["width": .number(390), "height": .number(844), "deviceScaleFactor": .number(3), "mobile": .bool(true)]),
+                                cdpSessionId: nil))
+        XCTAssertNil(gate.check(method: "Emulation.clearDeviceMetricsOverride", params: obj([:]), cdpSessionId: nil))
+        for bad in [obj(["width": .number(390), "height": .number(844), "screenOrientation": obj([:])]),
+                    obj(["width": .number(5000), "height": .number(844)]),
+                    obj(["width": .number(390.5), "height": .number(844)]),
+                    obj(["width": .number(390), "height": .number(844), "deviceScaleFactor": .number(9)]),
+                    obj(["width": .number(390)])] {
+            XCTAssertNotNil(gate.check(method: "Emulation.setDeviceMetricsOverride", params: bad, cdpSessionId: nil))
+        }
+    }
+
+    func testAResponseBodyIsCutBeforeItLeaves() {
+        let big = String(repeating: "a", count: CDPAllowlist.responseBodyMaxChars + 10)
+        let out = CDPTabGate.filterResult(method: "Network.getResponseBody", result: obj(["body": .string(big), "base64Encoded": .bool(false)]))
+        XCTAssertEqual(out["body"]?.stringValue?.utf16.count, CDPAllowlist.responseBodyMaxChars)
+        XCTAssertEqual(out["truncated"], .bool(true))
+        let small = obj(["body": .string("ok"), "base64Encoded": .bool(false)])
+        XCTAssertEqual(CDPTabGate.filterResult(method: "Network.getResponseBody", result: small), small)
+        XCTAssertEqual(CDPTabGate.filterResult(method: "Page.getLayoutMetrics", result: obj(["body": .string(big)])), obj(["body": .string(big)]))
     }
 
     // MARK: - The amended world rules (cdp-allowlist.ts, f0853b5a)

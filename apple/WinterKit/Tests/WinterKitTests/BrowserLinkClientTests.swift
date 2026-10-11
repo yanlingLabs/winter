@@ -302,7 +302,7 @@ final class BrowserLinkClientTests: XCTestCase {
         XCTAssertEqual(order, ["browserLink.events", "browserLink.result"])
     }
 
-    func testNetworkEventParamsLeaveStripped() async throws {
+    func testNetworkEventParamsLeaveReduced() async throws {
         let daemon = FakeLinkDaemon(attach: .link("L1"))
         let handler = FakeLinkHandler()
         let link = makeLink(Daemons([daemon]), handler: handler)
@@ -313,10 +313,12 @@ final class BrowserLinkClientTests: XCTestCase {
                        stripNetworkParams: true)
         await eventually("a batch") { !daemon.requests("browserLink.events").isEmpty }
         let line = try XCTUnwrap(daemon.sent.first { $0.contains("browserLink.events") })
-        XCTAssertFalse(line.contains("secret"))
+        // Phase 3: the request's URL and method may leave (network()); its headers never do.
         XCTAssertFalse(line.contains("Authorization"))
+        XCTAssertFalse(line.contains("Bearer"))
         let params = (((decodeLine(line)["params"] as? [String: Any])?["events"] as? [[String: Any]])?.first?["params"]) as? [String: Any]
-        XCTAssertEqual(Set(params.map { Array($0.keys) } ?? []), ["requestId", "timestamp", "type"])
+        XCTAssertEqual(Set(params.map { Array($0.keys) } ?? []), ["requestId", "timestamp", "type", "request"])
+        XCTAssertEqual(Set(((params?["request"]) as? [String: Any]).map { Array($0.keys) } ?? []), ["url"])
     }
 
     func testATabGoneIsReported() async throws {

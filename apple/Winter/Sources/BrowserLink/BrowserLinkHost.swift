@@ -323,6 +323,14 @@ final class BrowserLinkHost: BrowserLinkHandler {
                 let result = Self.decode(payload) ?? .object([:])
                 gates[tabId]?.noteResult(method: method, params: params, cdpSessionId: cdpSessionId, result: result)
                 reply(.ok(.object(["result": result])))
+            } else if method == "Network.getResponseBody" {
+                // A response body leaves cut (`CDPTabGate.filterResult`); decoded only up to the result bound.
+                guard BrowserLinkProtocol.resultFits(bytes: payload.utf8.count) else {
+                    reply(BrowserLinkProtocol.resultTooLarge(bytes: payload.utf8.count))
+                    return
+                }
+                let result = CDPTabGate.filterResult(method: method, result: Self.decode(payload) ?? .object([:]))
+                reply(.ok(.object(["result": result])))
             } else {
                 reply(.okRaw(key: "result", json: payload))
             }
