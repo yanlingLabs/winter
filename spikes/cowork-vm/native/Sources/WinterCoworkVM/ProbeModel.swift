@@ -1,11 +1,7 @@
+import WinterCoworkPrimitives
 import Foundation
 import Darwin
 
-struct ProbeFailure: Error, LocalizedError, Sendable {
-    let code: String
-    let message: String
-    var errorDescription: String? { message }
-}
 
 struct Request: Decodable, Sendable {
     let method: String
@@ -163,38 +159,4 @@ final class DiskLease: @unchecked Sendable {
     // Leave sidecars in place: unlinking a held/recent lock could let another
     // process lock a replacement inode while an old owner retains its fd.
     deinit { flock(fd, LOCK_UN); Darwin.close(fd) }
-}
-
-/// Reservations include both in-flight and unconsumed terminal events, so a
-/// slow consumer cannot silently lose completion/error events.
-final class EventQueue: @unchecked Sendable {
-    private let lock = NSLock()
-    private var nextID: UInt64 = 1
-    private var outstanding = 0
-    private var events: [String] = []
-    let limit: Int
-    init(limit: Int = 128) { self.limit = limit }
-    func reserve() -> UInt64? {
-        lock.lock(); defer { lock.unlock() }
-        guard outstanding < limit, nextID < UInt64.max else { return nil }
-        let id = nextID; nextID += 1; outstanding += 1
-        return id
-    }
-    func finish(_ event: String) {
-        lock.lock(); defer { lock.unlock() }
-        events.append(event)
-    }
-    func poll() -> String? {
-        lock.lock(); defer { lock.unlock() }
-        guard !events.isEmpty else { return nil }
-        outstanding -= 1
-        return events.removeFirst()
-    }
-    func pollAllocated(_ allocate: (String) -> UnsafeMutablePointer<CChar>?) -> UnsafeMutablePointer<CChar>? {
-        lock.lock(); defer { lock.unlock() }
-        guard let event = events.first, let value = allocate(event) else { return nil }
-        events.removeFirst()
-        outstanding -= 1
-        return value
-    }
 }

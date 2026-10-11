@@ -1,8 +1,8 @@
 import Foundation
 import ContainerizationError
 
-enum NativeDiagnostics {
-    static func safeMessage(_ value: String, fixtureRoot: URL?) -> String {
+public enum NativeDiagnostics {
+    public static func safeMessage(_ value: String, fixtureRoot: URL?) -> String {
         var result = String(value.prefix(2048))
         if let urls = try? NSRegularExpression(pattern: "https?://[^\\s\\\"<>]+") {
             result = urls.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "<redacted-url>")
@@ -24,7 +24,7 @@ enum NativeDiagnostics {
         return result
     }
 
-    static func chain(_ error: any Error, fixtureRoot: URL?) -> [[String: Any]] {
+    public static func chain(_ error: any Error, fixtureRoot: URL?) -> [[String: Any]] {
         var output: [[String: Any]] = []
         var next: (any Error)? = error
         var seen: Set<ObjectIdentifier> = []

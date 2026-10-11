@@ -1,0 +1,5 @@
+module CGLib [system] {
+    header "shim.h"
+    link "glib-2.0"
+    export *
+}
