@@ -1,0 +1,10 @@
+[GNUPG:] NEWSIG
+gpgv: Signature made Tue Jun  9 11:31:33 2026 WEST
+gpgv:                using RSA key 647F28654894E3BD457199BE38DBBDC86092693E
+[GNUPG:] KEY_CONSIDERED 647F28654894E3BD457199BE38DBBDC86092693E 0
+[GNUPG:] SIG_ID 53+rSCiHyOnGO1wMgiDRQLYF1t0 2026-06-09 1781001093
+[GNUPG:] GOODSIG 38DBBDC86092693E Greg Kroah-Hartman (Linux kernel stable release signing key) <greg@kroah.com>
+gpgv: Good signature from "Greg Kroah-Hartman (Linux kernel stable release signing key) <greg@kroah.com>"
+gpgv:                 aka "Greg Kroah-Hartman <gregkh@kernel.org>"
+gpgv:                 aka "Greg Kroah-Hartman <gregkh@linuxfoundation.org>"
+[GNUPG:] VALIDSIG 647F28654894E3BD457199BE38DBBDC86092693E 2026-06-09 1781001093 0 4 0 1 10 00 647F28654894E3BD457199BE38DBBDC86092693E

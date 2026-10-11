@@ -1,0 +1,42 @@
+{
+  "status": "inputs-pinned-build-not-executed",
+  "kernelBuilt": false,
+  "initramfsBuilt": false,
+  "productionReady": false,
+  "kernel": {
+    "version": "6.18.35",
+    "url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.35.tar.xz",
+    "sha256": "f78602932219125e211c5f5bfd84edcfd4ec5ce88fc944f8248413f665bef236",
+    "signatureSha256": "3ab523660ccff4ee386a36aab368fc5d64bb7611afc21591a970a8bbeb9e5ca0",
+    "signerFingerprint": "647F28654894E3BD457199BE38DBBDC86092693E",
+    "publicKeySha256": "61b758f0d4a386fc83565b92cfd6c05879573df0e96d44b71a5a3e19e1a8581a",
+    "publicKeySource": "https://kernel.org/.well-known/openpgpkey/hu/e3n9xnm94c5apezqnj1pmrfuaoyfm8cf?l=gregkh",
+    "signaturePolicy": "Developer signature over decompressed tar; fingerprint from kernel.org signature page. WKD/TLS public-key retrieval; no live GPG home."
+  },
+  "baseConfig": {
+    "file": "base-apple-6.18.35.config",
+    "sha256": "a5dfc1ee37dcd4bc6d727e4de617bc45a40cf32e7ebc52fb6f0472c8fbf60c21",
+    "provenance": "Exact cached Apple/Kata feasibility config. Not production security selection."
+  },
+  "fragment": {
+    "file": "crypto-candidate.fragment",
+    "sha256": "9c431090d38b05a1fdf0bd3d13a7255b277518878b65e69939fbd08f331c48bc"
+  },
+  "toolchainCandidate": {
+    "version": "LLVM-20.1.8",
+    "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-Linux-ARM64.tar.xz",
+    "sha256": "b855cc17d935fdd83da82206b7a7cfc680095efd1e9e8182c4a05e761958bef8",
+    "bytes": 1859437192,
+    "provenance": "LLVM project release asset GitHub API digest. Volunteer binary; not downloaded/executed or accepted as production toolchain.",
+    "host": "aarch64-linux",
+    "release": "https://github.com/llvm/llvm-project/releases/tag/llvmorg-20.1.8"
+  },
+  "builder": {
+    "required": "Pinned isolated Linux arm64 filesystem/container image digest and host-tools/dependency receipt; offline guest build, <=2 build jobs. No auto-launch or global install.",
+    "selected": false
+  },
+  "userspace": {
+    "selected": false,
+    "required": "Pinned cryptsetup/libcryptsetup and complete dependencies/license list, trusted PID1/key receiver, immutable bundle file manifest, synthetic-key-only fixture. No initramfs encryption/unlock readiness claimed."
+  }
+}

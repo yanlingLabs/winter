@@ -1,0 +1,11 @@
+{
+  "sourceVerified": true,
+  "sourceSha256": "f78602932219125e211c5f5bfd84edcfd4ec5ce88fc944f8248413f665bef236",
+  "signerFingerprint": "647F28654894E3BD457199BE38DBBDC86092693E",
+  "sourceExtracted": false,
+  "kernelBuilt": false,
+  "initramfsBuilt": false,
+  "productionReady": false,
+  "builderReady": false,
+  "remaining": "Pinned isolated Linux arm64 filesystem/container image digest and host-tools/dependency receipt; offline guest build, <=2 build jobs. No auto-launch or global install."
+}

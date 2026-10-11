@@ -1,0 +1,32 @@
+{
+  "status": "candidate-no-vm-review-required",
+  "productionReady": false,
+  "vmStarted": false,
+  "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+  "patchSha256": "4ddbf8a2d1c04a0fcd07320b18c0dd253214797e405286b0b965037eb1e2ed87",
+  "preservedA6PatchSha256": "a6e26d15693007d42df5c60155055b09c69897584665d227c8ee9c720d3cfb31",
+  "features": [
+    "blk"
+  ],
+  "defaultFeatures": false,
+  "memoryMiB": 768,
+  "vcpus": 2,
+  "source": "out/libkrun-block-reclaim",
+  "moduleCorrespondence": {
+    "reclaim_access.rs": "src/devices/src/reclaim_access.rs",
+    "block_bounce.rs": "src/devices/src/block_bounce.rs"
+  },
+  "reviewRequired": [
+    "actual barrier/lifecycle/mapping order",
+    "guarded block raw-memory leaf and queue/pin validation",
+    "reset/Stop and blocked IO termination",
+    "bounded disk-bearing Linux reclaim before any crypto claims"
+  ],
+  "knownLimitations": [
+    "No block-bearing VM run.",
+    "DAX/fs/net/vsock/virtio-console/GPU/audio/input disabled.",
+    "Host I/O may block indefinitely; it holds no RAM lease, but device reset join can block until worker process termination.",
+    "WFE absolute deadline fix remains required before timing guarantees.",
+    "Crypto kernel and userspace not built/selected."
+  ]
+}

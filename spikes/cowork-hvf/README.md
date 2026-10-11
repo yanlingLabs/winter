@@ -99,3 +99,7 @@ The following acceptance requirements remain pending native review and real vali
 5. Validate malformed descriptors against real queue parsing, cross-region spans, 4 KiB partial host pages, overlap/DMA exclusions, repeated cycles, remap failure, teardown races, and two or more active vCPUs. Then run bounded real Linux reporting/reuse while concurrent live work continues; show worker `phys_footprint` reduction, bounded host-wide memory evidence without pressure generation, zero-fill on reuse and retained-range integrity. Reclaim latency and pause budget must be measured. Production page ownership/DMA coordination and workload-wide concurrency are separate acceptance evidence.
 
 This baseline records `activeReturnVerified: false` deliberately. A successful guest free or reporting feature negotiation is not RAM-return proof. Crypto is also outside this slice: the cached kernel has `CONFIG_MD` disabled; no private data disk is created, and no plaintext disk is represented as production encryption.
+
+## Guarded block follow-on and crypto preparation
+
+`block-readiness.md` records the separate no-VM block candidate, actual worker/access tests and review limits. Run `python3 spikes/cowork-hvf/test_block.py` to check exact source correspondence, 32 actual-source tests and the reduced native build. This does not alter the verified A6 profile or add a block launch option. See `kernel/README.md` for verified source/config inputs and the explicit offline Linux builder entry point; neither a crypto kernel nor a trusted unlock initramfs has been built.
