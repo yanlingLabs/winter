@@ -77,9 +77,17 @@ transport remain implementation decisions requiring evidence.
 
 ## Proposed key and launch mechanism
 
-A tiny separately signed native broker is the proposed sole Keychain master-key
-custodian. It derives domain-separated workspace/volume keys using canonical
-home, workspace, volume, creation and key-version identities. It launches a
+A tiny separately signed native broker is the proposed sole Keychain wrapping-key
+custodian. Each private volume receives a random data-encryption key (DEK),
+wrapped under the broker's key-encryption key (KEK). Canonical home, workspace,
+volume, creation, purpose, format and wrapping-version identities are authenticated
+as associated data; they do not determine the disk key. In particular, home path,
+device and inode changes after an approved move or restore must not change the
+DEK. An explicitly authorized relocation re-seals the same DEK with the reconciled
+identity. KEK rotation re-wraps existing DEKs, with a new wrapping version; it does
+not re-encrypt disk contents. Existing volume identities cannot be silently
+re-provisioned. Durable record/KEK transactions, rollback protection and recovery
+must be validated before this mechanism is enabled. It launches a
 fixed verified worker and sends only that worker's material over a one-shot
 inherited private descriptor; close it before guest/tool execution. Workers
 have no Keychain access, generic key-request interface or sibling-volume access.

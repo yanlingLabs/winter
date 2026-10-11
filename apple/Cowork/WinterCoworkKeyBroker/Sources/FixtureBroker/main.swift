@@ -21,8 +21,8 @@ do {
         try VolumeIdentity(homeId:homeId,homePath:home.path,homeDevice:UInt64(bitPattern:Int64(info.st_dev)),homeInode:info.st_ino,workspaceId:workspace,volumeId:volume,creationId:creation,keyVersion:version,purpose:purpose)
     }
     let vault=SyntheticVault(),first=try vault.provisionForFixture(identity()),second=try vault.provisionForFixture(identity())
-    try require(try vault.fixtureDomainSeparation([first,second]))
-    for _ in 0..<160 { let fd=open("/dev/null",O_RDONLY|O_CLOEXEC);try require(fd>=0);extras.append(fd) }
+    try require(try vault.fixtureKeysDistinct([first,second]))
+    for _ in 0..<160 { let fd=open("/dev/null",O_RDONLY);try require(fd>=0 && fcntl(fd,F_GETFD)&FD_CLOEXEC==0);extras.append(fd) }
     let launcher=FixtureWorkerLauncher(image:worker,vault:vault)
     func request(_ mode: String, record: SealedRecord) throws -> (OneShotAdmission,[Data],Int32) {
         let (host,peer)=try fixturePipe(channel:true),(reportReader,reportWriter)=try fixturePipe()
@@ -74,5 +74,5 @@ do {
     try require(swapLauncher.keyDeliveries==0 && launcher.keyDeliveries==deliveries)
     // A worker's possession proof for A cannot prove possession of B's key.
     try require(!(try vault.proofMatches(receipts[0].proof,record:second,challenge:receipts[0].challenge)))
-    try emitFixtureJSON(["nativeKeyBrokerFixture":true,"twoWorkspaceWorkers":true,"sealedIdentity":true,"perWorkspaceKeyRouting":true,"inheritedOneShotAdmission":true,"crossWorkspaceDenied":true,"crossHomeVolumeCreationVersionDenied":true,"clientPIDAndExecutableDenied":true,"replayDenied":true,"replayRealPacketsDenied":true,"genericDeriveDecryptDenied":true,"sameChallengeCrossKeyProofDenied":true,"independentClientDenied":true,"swappedExecutedImageDenied":true,"extra160FDsExcluded":true,"actualSandboxDenials":true,"daemonReceivesNoKeys":true,"actualKeychain":false,"realVM":false,"productionReady":false])
+    try emitFixtureJSON(["nativeKeyBrokerFixture":true,"twoWorkspaceWorkers":true,"sealedIdentity":true,"ownedWorkerKeyDelivery":true,"daemonWorkspaceAuthorizationVerified":false,"inheritedOneShotEchoAdmission":true,"brokerSelectedIdentityEchoTamperingDenied":true,"clientPIDAndExecutableDenied":true,"replayDenied":true,"replayRealPacketsDenied":true,"genericDeriveDecryptDenied":true,"sameChallengeCrossKeyProofDenied":true,"independentClientDenied":true,"swappedExecutedImageDenied":true,"extra160InheritableFDsExcluded":true,"actualSandboxDenials":true,"daemonReceivesNoKeys":true,"actualKeychain":false,"realVM":false,"productionReady":false])
 } catch { try? emitFixtureJSON(["nativeKeyBrokerFixture":false]);exit(72) }

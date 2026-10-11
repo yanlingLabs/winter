@@ -5,13 +5,16 @@ external dependency, actual Keychain item/API, VM, daemon or live home access.
 SwiftPM builds ad-hoc fixture code signatures automatically; these are not
 production team/hardened/library-validation evidence.
 
-The native broker alone holds a random in-memory synthetic master. HKDF contexts
-use explicit domain separation and length-prefixed home ID/path/dev/inode,
-workspace, volume, creation, purpose, format and key-version identities. Record
-integrity uses a separate derived HMAC key. The broker requires both a valid MAC
-and its current sealed identity/version; changing a plaintext row cannot release
-material. Its current-record map is volatile, not a durable rollback protocol.
-The ordinary canonical runtime-state DB is unchanged and outside this package.
+The native broker alone holds a random in-memory synthetic wrapping key (KEK).
+Each new volume receives a random32-byte disk key (DEK), sealed with AES-GCM.
+The length-prefixed home ID/path/dev/inode, workspace, volume, creation, purpose,
+format and wrapping-version identity is authenticated associated data, never KDF
+input. Re-provisioning an existing volume refuses. Explicit native fixture
+relocation re-seals the same DEK, and KEK rotation re-wraps every current DEK;
+neither changes disk keys. Tests verify this across changed home identities and
+two wrapping-key rotations. The current-record map is volatile; the fixture is
+not a durable rollback/recovery protocol. The ordinary canonical runtime-state
+DB is unchanged and outside this package.
 
 The fixture launcher creates a private inherited one-shot daemon channel and
 registers the OS-returned child PID itself. It sends a scope-specific random
@@ -31,18 +34,20 @@ private inherited pipe. The worker closes bootstrap before its proof/test phase;
 no generic worker key-request endpoint survives. HMAC possession proof is
 verified only inside the broker; the client receives only a one-byte ACK.
 
-Seven unit tests pass: identity/purpose key separation, metadata tampering,
-current-version freshness after valid old seals, PID/nonce/record binding, replay
-on success or failure, exact nested schema, canonical spelling and default
-production refusal. The actual process fixture passes with two workspace key
+Ten unit tests pass: random volume keys and duplicate-provision refusal, AAD and
+wrapped-key tampering, relocation and KEK rotation preserving DEKs, stale-record
+refusal, failed-rotation atomicity in memory, PID/nonce/record echo binding, replay
+on failure, exact nested schema, canonical spelling and default production refusal. The actual process fixture passes with two workspace key
 identities and a separate sequential replay-channel worker. It checks:
 
 - A's proof cannot validate under B's key using the same challenge.
-- Cross-home/workspace/volume/creation/key-version/token, supplied PID/executable, and generic derive/decrypt
-  requests fail without extra key delivery.
+- Changes to the broker-selected bootstrap identity/token, supplied PID/executable,
+  and generic derive/decrypt fields fail without extra key delivery. The broker
+  chooses the record before it asks the client to echo that identity. This checks
+  echo tampering, not how a real daemon is authorized for a workspace.
 - Two actual duplicate request packets produce one admitted launch; the replay
   is refused. The independent client exits71 without receiving material.
-- 160 open parent fixture FDs do not appear in workers; bootstrap is closed and
+- 160 inheritable parent fixture FDs (FD_CLOEXEC explicitly absent) do not appear in workers; bootstrap is closed and
   /dev/fd enumeration finds only0/1/2 in the post-bootstrap test phase.
 - Actual deny-default Seatbelt prevents reading the disposable sibling sentinel,
   loopback connection and child exec. A security-service policy check has an
@@ -54,8 +59,10 @@ apple/Cowork/WinterCoworkKeyBroker/.build/debug/cowork-key-broker-fixture \
   --fixture "$PWD/apple/Cowork/WinterCoworkKeyBroker/.build/debug"
 ```
 
-Evidence: /tmp/cowork-keybroker-tests.log (7 pass) and
+Evidence: /tmp/cowork-keybroker-tests.log (10 pass) and
 /tmp/cowork-keybroker-process-smoke.log (actual JSON completion receipt).
+The process receipt names owned-worker key delivery and echo-tampering checks;
+`daemonWorkspaceAuthorizationVerified` remains false.
 No raw material is written to logs, environment, argv, manifests or fixture
 files. Pipes, processes, deadlines and reaping remain broker-owned. This is
 synthetic process/descriptor evidence, not encrypted-disk read/write/cold restore.
@@ -64,14 +71,15 @@ Darwin LOCAL_PEERPID reports the last sender, not an atomic per-message,
 nondelegable audit identity. The private channel and single admitted owner limit
 this fixture; deliberate capability forwarding/colluding writers are not proved
 excluded. Native app/Core launch authentication, saved-schedule authority,
-canonical authority/lease integration and exact production channel attestation
+daemon workspace request authorization/mapping, canonical authority/lease integration
+and exact production channel attestation
 remain gates. Code signing here verifies ad-hoc fixture images, not a hardened
 signed bundle or denial of debugger/library injection by a hostile same-user
 process. The deprecated sandbox_init/private sandbox_check APIs are fixture
 probes, not a supported complete production VMM sandbox policy.
 
 ProductionKeyBroker.launch always throws productionBlocked. There is no real
-Keychain provider or generic decrypt API. Master durability, sealed-record
+Keychain provider or generic decrypt API. KEK durability, sealed-record
 recovery/replay across restart, real signing/sandbox/key custody, authenticated
 disk format/sector integrity, active RAM return and worker integration remain
 unimplemented. No source/policy DB encryption is implied. Do not enable Cowork

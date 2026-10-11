@@ -14,26 +14,79 @@ final class BrokerTests: XCTestCase {
         var material=try vault.unlockMaterial(record);defer { wipe(&material) }
         return Data(SHA256.hash(data:material)) // Tests never print raw material.
     }
-    func testEveryIdentityDimensionAndPurposeSeparatesKeys() throws {
-        let vault=SyntheticVault(),base=try identity();let first=try vault.provisionForFixture(base),original=try fingerprint(first,vault)
-        for change:[String:Any] in [["homeId":"00000000-0000-0000-0000-000000000006"],["homePath":"/fixture/other"],["homeDevice":9],["homeInode":9],
-            ["workspaceId":"00000000-0000-0000-0000-000000000006"],["volumeId":"00000000-0000-0000-0000-000000000006"],
-            ["creationId":"00000000-0000-0000-0000-000000000006"],["keyVersion":2],["purpose":"environment"]] {
-            let next=try vault.provisionForFixture(identity(change));XCTAssertNotEqual(try fingerprint(next,vault),original)
-        }
+    func testProvisionUsesRandomKeysAndNeverReplacesAnExistingVolume() throws {
+        let vault = SyntheticVault(), base = try identity()
+        let first = try vault.provisionForFixture(base), original = try fingerprint(first, vault)
+        let second = try vault.provisionForFixture(identity(["volumeId": "00000000-0000-0000-0000-000000000006"]))
+        XCTAssertNotEqual(try fingerprint(second, vault), original)
+        let independentVault = SyntheticVault()
+        XCTAssertNotEqual(try fingerprint(independentVault.provisionForFixture(base), independentVault), original)
+        XCTAssertThrowsError(try vault.provisionForFixture(base)) { XCTAssertEqual($0 as? BrokerFailure, .recordAlreadyExists) }
+        XCTAssertEqual(try fingerprint(first, vault), original)
     }
-    func testSealTamperAndChangedIdentityAreRefused() throws {
-        let vault=SyntheticVault(),record=try vault.provisionForFixture(identity())
+    func testWrappedKeyTamperAndEveryIdentityDimensionAreRefused() throws {
+        let vault = SyntheticVault(), record = try vault.provisionForFixture(identity())
         try vault.validate(record)
-        XCTAssertThrowsError(try vault.validate(.init(identity:record.identity,authentication:Data(repeating:0,count:32))))
-        for change:[String:Any] in [["keyVersion":2],["creationId":"00000000-0000-0000-0000-000000000006"],["purpose":"environment"],["homeInode":3]] {
-            XCTAssertThrowsError(try vault.validate(.init(identity:identity(change),authentication:record.authentication)))
+        var modified = record.wrappedKey
+        modified[0] ^= 1
+        XCTAssertThrowsError(try vault.validate(.init(identity: record.identity, wrappedKey: modified)))
+        for change: [String: Any] in [["homeId": "00000000-0000-0000-0000-000000000006"], ["homePath": "/fixture/other"],
+            ["homeDevice": 9], ["homeInode": 9], ["workspaceId": "00000000-0000-0000-0000-000000000006"],
+            ["volumeId": "00000000-0000-0000-0000-000000000006"], ["creationId": "00000000-0000-0000-0000-000000000006"],
+            ["keyVersion": 2], ["purpose": "environment"]] {
+            XCTAssertThrowsError(try vault.validate(.init(identity: identity(change), wrappedKey: record.wrappedKey)))
+        }
+        try vault.validate(record)
+    }
+    func testExplicitHomeRelocationPreservesDiskKeyAndInvalidatesOldRecord() throws {
+        let vault = SyntheticVault(), original = try vault.provisionForFixture(identity())
+        let before = try fingerprint(original, vault)
+        let moved = try identity(["homeId": "00000000-0000-0000-0000-000000000006", "homePath": "/restored/home", "homeDevice": 99, "homeInode": 101, "keyVersion": 2])
+        let rebound = try vault.rebindForFixture(original, to: moved)
+        XCTAssertEqual(try fingerprint(rebound, vault), before)
+        XCTAssertNotEqual(rebound.wrappedKey, original.wrappedKey)
+        XCTAssertEqual(rebound.identity, moved)
+        XCTAssertThrowsError(try vault.validate(original)) { XCTAssertEqual($0 as? BrokerFailure, .staleRecord) }
+        // A valid old seal cannot be used to rebind again after ownership moved.
+        XCTAssertThrowsError(try vault.rebindForFixture(original, to: identity(["keyVersion": 2])))
+    }
+    func testRebindingCannotChangeVolumeWorkspacePurposeOrSkipVersion() throws {
+        let vault = SyntheticVault(), original = try vault.provisionForFixture(identity())
+        let before = try fingerprint(original, vault)
+        for change: [String: Any] in [["workspaceId": "00000000-0000-0000-0000-000000000006", "keyVersion": 2],
+            ["volumeId": "00000000-0000-0000-0000-000000000006", "keyVersion": 2],
+            ["creationId": "00000000-0000-0000-0000-000000000006", "keyVersion": 2],
+            ["purpose": "environment", "keyVersion": 2], ["keyVersion": 1], ["keyVersion": 3]] {
+            XCTAssertThrowsError(try vault.rebindForFixture(original, to: identity(change))) {
+                XCTAssertEqual($0 as? BrokerFailure, .invalidTransition)
+            }
+        }
+        XCTAssertEqual(try fingerprint(original, vault), before)
+    }
+    func testWrappingKeyRotationPreservesEveryDiskKey() throws {
+        let vault = SyntheticVault()
+        var records = [try vault.provisionForFixture(identity()), try vault.provisionForFixture(identity([
+            "volumeId": "00000000-0000-0000-0000-000000000006", "purpose": "environment"]))]
+        let original = try Dictionary(uniqueKeysWithValues: records.map { ($0.identity.volumeId, try fingerprint($0, vault)) })
+        for expectedVersion: UInt64 in [2, 3] {
+            let old = records
+            records = try vault.rotateWrappingKeyForFixture()
+            XCTAssertEqual(records.count, 2)
+            for record in records {
+                XCTAssertEqual(record.identity.keyVersion, expectedVersion)
+                XCTAssertEqual(try fingerprint(record, vault), original[record.identity.volumeId])
+                XCTAssertFalse(old.contains { $0.wrappedKey == record.wrappedKey })
+            }
+            for record in old { XCTAssertThrowsError(try vault.validate(record)) }
         }
     }
-    func testOldValidSealNeedsCurrentVersionNotOnlyMAC() throws {
-        let vault=SyntheticVault(),old=try vault.provisionForFixture(identity())
-        _=try vault.provisionForFixture(identity(["keyVersion":2]))
-        XCTAssertThrowsError(try vault.validate(old)){XCTAssertEqual($0 as? BrokerFailure,.staleRecord)}
+    func testFailedRotationDoesNotPartiallyReplaceCurrentRecords() throws {
+        let vault = SyntheticVault()
+        let records = [try vault.provisionForFixture(identity()), try vault.provisionForFixture(identity([
+            "volumeId": "00000000-0000-0000-0000-000000000006", "keyVersion": UInt64.max]))]
+        let before = try records.map { try fingerprint($0, vault) }
+        XCTAssertThrowsError(try vault.rotateWrappingKeyForFixture()) { XCTAssertEqual($0 as? BrokerFailure, .invalidTransition) }
+        XCTAssertEqual(try records.map { try fingerprint($0, vault) }, before)
     }
     func testChannelUsesOwnedPIDNonceRecordAndConsumesOnFailure() throws {
         let vault=SyntheticVault(),record=try vault.provisionForFixture(identity()),permit=OneShotAdmission(record:record,launchedPID:100)

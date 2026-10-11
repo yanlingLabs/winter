@@ -1,7 +1,7 @@
 import Foundation
 import CryptoKit
 
-public enum BrokerFailure: String, Error { case invalidIdentity, invalidSeal, staleRecord, unauthorizedChannel, replay, forbiddenField, imageMismatch, processFailure, sandboxRequired, productionBlocked }
+public enum BrokerFailure: String, Error { case invalidIdentity, invalidSeal, staleRecord, unauthorizedChannel, replay, forbiddenField, imageMismatch, processFailure, sandboxRequired, productionBlocked, recordAlreadyExists, invalidTransition }
 public enum VolumePurpose: String, Codable, Sendable { case data, environment }
 public struct VolumeIdentity: Codable, Equatable, Sendable {
     public let homeId: String
@@ -33,37 +33,104 @@ public struct VolumeIdentity: Codable, Equatable, Sendable {
         return output
     }
 }
-public struct SealedRecord: Codable, Sendable { public let identity: VolumeIdentity; public let authentication: Data }
+public struct SealedRecord: Codable, Equatable, Sendable {
+    public let identity: VolumeIdentity
+    /// AES-GCM nonce, ciphertext and tag. Never a plaintext data-encryption key.
+    public let wrappedKey: Data
+}
 
 /// Synthetic volatile store only. No Keychain/storage implementation exists.
 /// This type lives only in the native broker process, never the client protocol.
 public final class SyntheticVault {
-    private let master: SymmetricKey
+    private var wrappingKey = SymmetricKey(size: .bits256)
     private var current: [String: SealedRecord] = [:]
-    public init() { master=SymmetricKey(size:.bits256) }
-    private func key(_ identity: VolumeIdentity, domain: String) throws -> SymmetricKey {
-        HKDF<SHA256>.deriveKey(inputKeyMaterial:master,salt:Data("WinterCowork/HKDF/SHA256/v1".utf8),info:try identity.canonical(domain:domain),outputByteCount:32)
+    public init() {}
+
+    private func seal(_ material: Data, identity: VolumeIdentity, using key: SymmetricKey) throws -> SealedRecord {
+        guard material.count == 32 else { throw BrokerFailure.invalidSeal }
+        let box = try AES.GCM.seal(material, using: key, authenticating: identity.canonical(domain: "wrapped-volume-dek"))
+        guard let combined = box.combined else { throw BrokerFailure.invalidSeal }
+        return SealedRecord(identity: identity, wrappedKey: combined)
+    }
+    private func verifiedMaterial(_ record: SealedRecord) throws -> Data {
+        try record.identity.validate()
+        var material: Data
+        do {
+            material = try AES.GCM.open(AES.GCM.SealedBox(combined: record.wrappedKey), using: wrappingKey,
+                authenticating: record.identity.canonical(domain: "wrapped-volume-dek"))
+        } catch { throw BrokerFailure.invalidSeal }
+        guard material.count == 32, current[record.identity.volumeId] == record else {
+            wipe(&material)
+            throw BrokerFailure.staleRecord
+        }
+        return material
     }
     public func provisionForFixture(_ identity: VolumeIdentity) throws -> SealedRecord {
-        let record=SealedRecord(identity:identity,authentication:Data(HMAC<SHA256>.authenticationCode(for:try identity.canonical(domain:"sealed-volume-record"),using:try key(identity,domain:"record-integrity"))))
-        current[identity.volumeId]=record;return record
+        try identity.validate()
+        // Re-provisioning an existing identity must never silently replace its
+        // disk key. Relocation/KEK rotation use explicit re-sealing below.
+        guard current[identity.volumeId] == nil else { throw BrokerFailure.recordAlreadyExists }
+        var material = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
+        defer { wipe(&material) }
+        let record = try seal(material, identity: identity, using: wrappingKey)
+        current[identity.volumeId] = record
+        return record
     }
     public func validate(_ record: SealedRecord) throws {
-        guard HMAC<SHA256>.isValidAuthenticationCode(record.authentication,authenticating:try record.identity.canonical(domain:"sealed-volume-record"),using:try key(record.identity,domain:"record-integrity")) else { throw BrokerFailure.invalidSeal }
-        guard current[record.identity.volumeId]?.identity == record.identity else { throw BrokerFailure.staleRecord }
+        var material = try verifiedMaterial(record)
+        wipe(&material)
     }
-    // Internal, so client/worker targets cannot expose a generic derivation RPC.
-    func unlockMaterial(_ record: SealedRecord) throws -> Data {
-        try validate(record)
-        return try key(record.identity,domain:"volume-unlock").withUnsafeBytes { Data($0) }
+    // Internal, so client/worker targets cannot expose a generic unwrap RPC.
+    func unlockMaterial(_ record: SealedRecord) throws -> Data { try verifiedMaterial(record) }
+
+    /// An explicitly authorized native relocation would re-seal the SAME DEK.
+    /// This fixture method does not implement the production authorization or
+    /// persistent transaction. No JSON/client request can invoke it.
+    public func rebindForFixture(_ record: SealedRecord, to identity: VolumeIdentity) throws -> SealedRecord {
+        try identity.validate()
+        let old = record.identity
+        guard old.keyVersion < UInt64.max, identity.keyVersion == old.keyVersion + 1,
+              identity.workspaceId == old.workspaceId, identity.volumeId == old.volumeId,
+              identity.creationId == old.creationId, identity.purpose == old.purpose,
+              identity.formatVersion == old.formatVersion else { throw BrokerFailure.invalidTransition }
+        var material = try verifiedMaterial(record)
+        defer { wipe(&material) }
+        let rebound = try seal(material, identity: identity, using: wrappingKey)
+        current[identity.volumeId] = rebound
+        return rebound
+    }
+    /// In-memory atomic replacement only: durable crash/rollback recovery and
+    /// Keychain KEK custody remain production gates. Disk keys do not rotate.
+    public func rotateWrappingKeyForFixture() throws -> [SealedRecord] {
+        let nextKey = SymmetricKey(size: .bits256)
+        var next: [String: SealedRecord] = [:]
+        for old in current.values {
+            let value = old.identity
+            guard value.keyVersion < UInt64.max else { throw BrokerFailure.invalidTransition }
+            let identity = try VolumeIdentity(homeId: value.homeId, homePath: value.homePath,
+                homeDevice: value.homeDevice, homeInode: value.homeInode, workspaceId: value.workspaceId,
+                volumeId: value.volumeId, creationId: value.creationId, keyVersion: value.keyVersion + 1,
+                formatVersion: value.formatVersion, purpose: value.purpose)
+            var material = try verifiedMaterial(old)
+            defer { wipe(&material) }
+            next[identity.volumeId] = try seal(material, identity: identity, using: nextKey)
+        }
+        wrappingKey = nextKey
+        current = next
+        return next.values.sorted { $0.identity.volumeId < $1.identity.volumeId }
     }
     public func proofMatches(_ proof: Data, record: SealedRecord, challenge: Data) throws -> Bool {
-        try validate(record)
-        return HMAC<SHA256>.isValidAuthenticationCode(proof,authenticating:challenge,using:try key(record.identity,domain:"volume-unlock"))
+        var material = try verifiedMaterial(record)
+        defer { wipe(&material) }
+        return HMAC<SHA256>.isValidAuthenticationCode(proof, authenticating: challenge, using: SymmetricKey(data: material))
     }
-    public func fixtureDomainSeparation(_ records: [SealedRecord]) throws -> Bool {
-        let keys=try records.map { try key($0.identity,domain:"volume-unlock").withUnsafeBytes { Data($0) } }
-        return Set(keys).count==keys.count
+    public func fixtureKeysDistinct(_ records: [SealedRecord]) throws -> Bool {
+        let fingerprints = try records.map { record in
+            var material = try verifiedMaterial(record)
+            defer { wipe(&material) }
+            return Data(SHA256.hash(data: material))
+        }
+        return Set(fingerprints).count == fingerprints.count
     }
 }
 
