@@ -213,6 +213,17 @@ describe("diffs against a folded print (review of round 2, MEDIUM)", () => {
     expect(diffState(h, base, printed("s3", nearRoots), undefined, printedState(h, nearRoots, true).shown).changedRatio).toBeLessThanOrEqual(0.5);
   });
 
+  test("additions the print folds never tip the diff into the print by themselves (review of round 4, LOW)", () => {
+    const base = printed("s1", page(0));
+    const nowRoots = page(0);
+    const list = nowRoots[0]!.children![0]!;
+    list.children = [...list.children!, ...Array.from({ length: 50 }, (_, i) => node(900 + i, "text field", { name: `New ${i}`, value: "x", off: true }))];
+    const shown = printedState(h, nowRoots, true).shown!;
+    expect([...shown].some((r) => r >= 900)).toBe(false);
+    const d = diffState(h, base, printed("s2", nowRoots), undefined, shown);
+    expect(d.changedRatio).toBeLessThanOrEqual(0.5);
+  });
+
   test("printed instead of a diff, what the base showed stays seen unless it changed (review of round 3, LOW)", () => {
     const base = printed("s1", page(0));
     const farRoots = page(200, "b");

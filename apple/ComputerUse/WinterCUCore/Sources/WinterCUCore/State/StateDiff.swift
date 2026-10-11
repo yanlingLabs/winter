@@ -134,7 +134,8 @@ public struct CUStateDiff: Sendable, Equatable {
         let changed = added.count + removed.count + modified.count + surfaced.count
         var ratio = union == 0 ? 0 : Double(changed) / Double(union)
         if let now = shownNow, !now.isEmpty {
-            ratio = max(ratio, Double(added.count + surfaced.count) / Double(now.count))
+            // Lines the print SHOWS: an addition it folds (off screen) is no new line of it (review of round 4).
+            ratio = max(ratio, Double(added.filter { now.contains($0) }.count + surfaced.count) / Double(now.count))
         }
         var d = CUStateDiff(added: added, removed: removed, modified: modified, changes: changes,
                             changedRatio: min(1, ratio))

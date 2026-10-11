@@ -412,7 +412,8 @@ export function diffState(h: TabHeader, old: TabSnapshot, next: TabSnapshot, lin
   const changed = added.length + removed.length + modified.length + surfaced.length;
   // Against a folded print, the new lines' share of what it shows counts too: a scroll on a big folded page surfaced
   // row after row while the union of every ref kept the ratio low, and the diff grew longer than the print.
-  const shareOfPrint = shownNow === undefined || shownNow.size === 0 ? 0 : (added.length + surfaced.length) / shownNow.size;
+  // Only lines the print SHOWS count: an addition it folds (off screen) is no new line of it (review of round 4).
+  const shareOfPrint = shownNow === undefined || shownNow.size === 0 ? 0 : (added.filter((r) => shownNow.has(r)).length + surfaced.length) / shownNow.size;
   const changedRatio = Math.min(1, Math.max(union === 0 ? 0 : changed / union, shareOfPrint));
   const withContext = (r: number): string => { const c = seenContext(r, next, seen); return c === undefined ? "" : `, ${c}`; };
   let body: Array<{ text: string; ref?: number }> = [
