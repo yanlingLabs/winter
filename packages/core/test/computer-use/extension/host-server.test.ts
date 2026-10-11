@@ -110,7 +110,18 @@ describe("host.hello", () => {
     expect(verified).toEqual([]);
   });
 
-  test("the dist profile accepts no extension until the store ids exist", async () => {
+  test("the dist profile accepts the store builds, never the dev one", async () => {
+    expect(EXTENSION_IDS.dist.length).toBeGreaterThan(0);
+    for (const id of EXTENSION_IDS.dist) {
+      const { verified } = start({ profile: "dist", allowedExtensionIds: undefined });
+      const c = await connect();
+      const r = await c.request("h1", "host.hello", hostHello({ origin: `chrome-extension://${id}/` }));
+      expect(r).toMatchObject({ id: "h1", result: { protocol: BROWSER_HOST_PROTOCOL } });
+      expect(verified).toEqual([{ pid: 4242, requirement: browserHostRequirementFor("dist") }]);
+      c.close();
+      server!.stop();
+      server = undefined;
+    }
     start({ profile: "dist", allowedExtensionIds: undefined });
     const c = await connect();
     const r = await c.request("h1", "host.hello", hostHello());

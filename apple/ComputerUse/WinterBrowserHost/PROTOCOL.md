@@ -25,7 +25,7 @@ until they agree; keep the lines' exact format.
 
 | Piece | Where | Identity |
 | --- | --- | --- |
-| Extension | Chrome Web Store and Edge Add-ons (publisher yanlingLabs); the dev build unpacked | Store ids assigned at the first upload. Dev: `jikdcokcpbacalfeipkognejnlnobbbf`, fixed by the dev manifest's `key` (`extensions/winter-for-chrome/keys/dev.pub`, a public key) |
+| Extension | Chrome Web Store ("Winter for Chrome") and Edge Add-ons ("Winter for Edge", the same build under another name), publisher yanlingLabs; the dev build unpacked | The store ids (`ExtensionIds.dist`), each assigned by its store at the first upload. Dev: `jikdcokcpbacalfeipkognejnlnobbbf`, fixed by the dev manifest's `key` (`extensions/winter-for-chrome/keys/dev.pub`, a public key) |
 | Native host | `Winter Computer Use.app/Contents/MacOS/winter-browser-host` (the dist helper inside Winter.app, and the dev helper `bun run dev:helper` builds) | codesign identifier `com.winter.browserhost` / `com.winter.browserhost.dev`, Winter's team, hardened runtime, no entitlements, a **stated** designated requirement: `identifier "<id>" and anchor apple generic and certificate leaf[subject.OU] = "37N77U9RSZ"` |
 | Native-messaging host name | the host manifests (§8) | `com.winter.browser` (dist), `com.winter.browser.dev` (dev) |
 | Daemon endpoint | `<home>/run/browser.sock`, mode `0600`, created by the daemon at boot (a stale file unlinked first) | `winter-core` (dist) / `com.winter.core.dev` (dev), Winter's team |
@@ -33,7 +33,9 @@ until they agree; keep the lines' exact format.
 **The extension-id allowlist** is defined once per language and kept equal by the parity test: the daemon's
 `extension-ids.ts`, the host's `ExtensionIds.swift`, Winter.app's manifest writer
 (`apple/Winter/Sources/BrowserExtension/BrowserHostManifest.swift`), and the id the dev key derives. Dist holds the two
-store ids — none until the first upload, so until then the user's browsers stay "not connected" on dist.
+store ids, each assigned by its store at the first upload: Edge Add-ons' `bapmmpefcbjabfdfeehimdhldpjaoemd` and the
+Chrome Web Store's `flfkppajaamjgfmdljlklfdffkdcmicc` (one line in each list). A Release Winter.app allows exactly these in the dist
+host manifest it writes.
 
 **The host's home** comes from its enclosing app's bundle id: `com.winter.computeruse` → `~/.winter`,
 `com.winter.computeruse.dev` → `~/.winter-dev`. Anything else (a bare binary, another app) refuses to start unless it is

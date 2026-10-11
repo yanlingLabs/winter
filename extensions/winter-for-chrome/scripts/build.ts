@@ -1,9 +1,10 @@
 /**
  * Builds Winter for Chrome, unpacked, into `extensions/winter-for-chrome/dist/<flavor>/` (git-ignored):
  *
- *   bun run build                       both flavors
+ *   bun run build                       every flavor
  *   bun run build --flavor dev          the dev build (fixed id from keys/dev.pub; host com.winter.browser.dev)
- *   bun run build --flavor store        the store build (no key; host com.winter.browser)
+ *   bun run build --flavor store        the Chrome Web Store build (no key; host com.winter.browser)
+ *   bun run build --flavor edge         the Edge Add-ons build: the store build named "Winter for Edge"
  *   bun run build --out <dir>           somewhere else (`<dir>/<flavor>/`)
  *
  * The daemon's pinned CDP allowlist (packages/core/src/computer-use/browser/cdp-allowlist.ts) is bundled in from source,
@@ -11,9 +12,9 @@
  * never uploads or publishes anything.
  */
 import { Resvg } from "@resvg/resvg-js";
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { extensionManifest, HOST_NAME, type Flavor } from "../src/manifest";
+import { extensionManifest, FLAVORS, HOST_NAME, PRODUCT_NAMES, type Flavor } from "../src/manifest";
 
 const ROOT = resolve(import.meta.dir, "..");
 const REPO = resolve(ROOT, "..", "..");
@@ -73,7 +74,7 @@ async function buildFlavor(flavor: Flavor, outRoot: string): Promise<string> {
     format: "esm",
     minify: false,
     splitting: false,
-    define: { __WINTER_HOST_NAME__: JSON.stringify(HOST_NAME[flavor]) },
+    define: { __WINTER_HOST_NAME__: JSON.stringify(HOST_NAME[flavor]), __WINTER_PRODUCT_NAME__: JSON.stringify(PRODUCT_NAMES[flavor]) },
   });
   if (!built.success) throw new Error(`bundling failed:\n${built.logs.map((l) => String(l)).join("\n")}`);
   for (const file of ["background.js", "popup.js"]) {
@@ -81,7 +82,7 @@ async function buildFlavor(flavor: Flavor, outRoot: string): Promise<string> {
     const hits = forbiddenHits(bundle);
     if (hits.length > 0) throw new Error(`the ${flavor} ${file} contains what Winter for Chrome must never do: ${hits.map((h) => h.why).join("; ")}`);
   }
-  cpSync(join(ROOT, "src", "popup.html"), join(out, "popup.html"));
+  writeFileSync(join(out, "popup.html"), readFileSync(join(ROOT, "src", "popup.html"), "utf8").replaceAll("Winter for Chrome", PRODUCT_NAMES[flavor]));
   const svg = readFileSync(join(REPO, "assets", "brand", "scale-burst.svg"), "utf8");
   for (const size of [16, 32, 48, 128]) {
     const png = new Resvg(svg, { fitTo: { mode: "width", value: size }, background: "rgba(0,0,0,0)" }).render().asPng();
@@ -104,11 +105,11 @@ if (import.meta.main) {
     return i >= 0 ? argv[i + 1] : undefined;
   };
   const flavorArg = flag("--flavor") ?? "all";
-  if (!["dev", "store", "all"].includes(flavorArg)) {
-    console.error(`--flavor must be dev, store or all (got ${flavorArg})`);
+  if (flavorArg !== "all" && !FLAVORS.includes(flavorArg as Flavor)) {
+    console.error(`--flavor must be ${FLAVORS.join(", ")} or all (got ${flavorArg})`);
     process.exit(1);
   }
-  const flavors: Flavor[] = flavorArg === "all" ? ["dev", "store"] : [flavorArg as Flavor];
+  const flavors: Flavor[] = flavorArg === "all" ? [...FLAVORS] : [flavorArg as Flavor];
   const outRoot = flag("--out");
   for (const out of await build(flavors, outRoot === undefined ? undefined : resolve(outRoot))) console.error(`built ${out}`);
 }

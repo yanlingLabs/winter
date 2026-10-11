@@ -5,6 +5,7 @@
 // it handed to the user (a sign-in), the button stays the popup — its Done for that tab first, and Stop as a button
 // there when Winter is also driving other tabs — so the user's click never stops another task instead of answering.
 import type { ChromeApi } from "./chrome-api";
+import { PRODUCT_NAME } from "./product";
 
 export type ExtensionStatus =
   | { state: "connecting" }
@@ -22,9 +23,9 @@ export function statusSentence(s: ExtensionStatus): string {
     case "connected": return `Connected to Winter (${s.backend.name}).`;
     case "host-missing": return "Winter isn't installed on this Mac, or this browser can't find it yet. Install Winter, then restart the browser.";
     case "no-daemon": return "Winter isn't running.";
-    case "unverified": return "The Winter on this Mac could not be verified, so Winter for Chrome is not talking to it.";
+    case "unverified": return `The Winter on this Mac could not be verified, so ${PRODUCT_NAME} is not talking to it.`;
     case "refused": return s.message;
-    case "mismatch": return s.message === "update Winter" ? "This Winter is older than Winter for Chrome — update Winter." : "Winter for Chrome is too old for this Winter — update Winter for Chrome.";
+    case "mismatch": return s.message === "update Winter" ? `This Winter is older than ${PRODUCT_NAME} — update Winter.` : `${PRODUCT_NAME} is too old for this Winter — update ${PRODUCT_NAME}.`;
     case "unavailable": return s.message;
   }
 }
@@ -95,7 +96,7 @@ export class StatusBoard {
     void this.chrome.action.setBadgeText({ text: (ok || this.current.state === "connecting") && this.needs === 0 ? "" : "!" }).catch(() => undefined);
     void this.chrome.action.setBadgeBackgroundColor({ color: "#d9822b" }).catch(() => undefined);
     void this.chrome.action.setTitle({ title: this.needs > 0 && ok
-      ? "Winter for Chrome — Winter asked for something this browser hasn't allowed yet: open this menu"
-      : `Winter for Chrome — ${statusSentence(this.current)}` }).catch(() => undefined);
+      ? `${PRODUCT_NAME} — Winter asked for something this browser hasn't allowed yet: open this menu`
+      : `${PRODUCT_NAME} — ${statusSentence(this.current)}` }).catch(() => undefined);
   }
 }
