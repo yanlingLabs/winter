@@ -105,6 +105,45 @@ instead change the accepted isolation model. This process/security tradeoff is
 why a backend change needs a focused user decision, not an unnoticed library swap.
 [Apple Hypervisor virtual-resource mapping](https://developer.apple.com/documentation/hypervisor).
 
+## What sharing system resources means
+
+There is no separate pool of physical RAM or dedicated set of Mac CPU cores
+that the user must partition manually. VZ's configured memory size is a guest
+physical address-space ceiling backed by host virtual memory; Apple explicitly
+documents that backing is not allocated immediately. HVF vCPUs correspond to
+host POSIX threads, scheduled alongside other work. Raising the ceiling or
+putting the controller in the daemon does not implement guest-free-page return.
+Linux still owns its page allocator, and the backend needs a safe handoff before
+discarding backing that the guest may reuse. This is the outstanding mechanism,
+not a missing permission to use the Mac's RAM.
+[VZ memorySize](https://developer.apple.com/documentation/virtualization/vzvirtualmachineconfiguration/memorysize),
+[HVF resource mapping](https://developer.apple.com/documentation/hypervisor).
+
+The user asked whether direct system-resource use avoids workers. Three HVF
+topologies remain candidates; none has been adopted:
+
+| Topology | Mac-side process layout | Isolation/recovery consequence |
+| --- | --- | --- |
+| One HVF VM per workspace | Daemon plus one small worker per active workspace | Closest to the selected separate-VM design; changes the process preference. |
+| One outer HVF VM with workspace containers | One VM may be controlled inside the daemon | Shared Linux kernel and restart; changes workspace isolation. |
+| One outer HVF VM with nested workspace VMs | One outer VM controlled inside daemon; inner VMMs run in Linux | Separate inner kernels, but a new outer Linux/KVM trusted layer and two-stage file/reclaim forwarding. |
+
+The read-only capability investigation on this M4 Pro/macOS 26.6.1 returned
+`HV_SUCCESS` and `hv_vm_config_get_el2_supported=true`; it did not create a VM.
+Apple documents nested Linux virtualization for M3 or later and macOS 15 or
+later with a KVM-enabled custom kernel. That makes nesting a research candidate,
+not a proven low-overhead Winter backend. Active return still needs the inner
+guest, outer guest and Mac backing to hand pages back safely; cgroup reclaim
+alone does not demonstrate Mac memory return.
+[Apple nested virtualization requirements](https://github.com/apple/container/blob/main/docs/container-machine.md#nested-virtualization-and-custom-kernels).
+
+Recommendation remains a small worker per workspace for the shortest path to
+the selected isolation model. If avoiding those workers is the stronger
+requirement, a shared outer VM is possible only with an explicit revised
+isolation/recovery decision. Continue backend-independent implementation while
+that decision is pending; do not enable an arbitrary native-host execution
+fallback under the name Cowork.
+
 ## Local bounded HVF primitive, after the active-return decision
 
 The independent [C fixture](hvf-reclaim.c) and [bare-metal guest](hvf-reclaim-guest.S)
