@@ -536,6 +536,12 @@ extension CUCore {
                     throw CUError.needsDesktopVisit(t.appName, why: .act, "[\(ref)]'s press from here had no visible effect, and it is not pressed again — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
                 }
                 t.unconfirmedPress = nil
+                // Looked at first, on its desktop now (dogfood, round 13: the press from the other desktop HAD landed — the
+                // dialog it opened was there): what it changed shows now, and it is not clicked a second time.
+                if let before = mark.before, Self.pressShowed(webPressEvidence(e, t), since: before) {
+                    CULog.act.notice("click in \(t.appName, privacy: .public): its press from another desktop took effect after all — not clicked again")
+                    return ActOutcome(rung: .accessibility, detail: "the press on \(Self.elementLabel(ref, info)) from the other desktop took effect (seen now, on its desktop) — it was not clicked again")
+                }
                 announceTarget(t, info, pressing: true)
                 cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
                 CULog.act.notice("click in \(t.appName, privacy: .public): its press from another desktop was unconfirmed — clicked where it is, not pressed again")
@@ -771,7 +777,7 @@ extension CUCore {
                             if let why = noVisitForUnconfirmedPress(el, info, t) {
                                 return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.noEffectNote(Self.elementLabel(nil, info))) (\(why))")
                             }
-                            throw offerVisitAfterPress(el, info, t)
+                            throw offerVisitAfterPress(el, info, t, before: webBefore)
                         }
                         if !prefersWebClicks(t) || statefulWithoutReadableState(el, info) {
                             CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): no visible effect — not clicked as well")
@@ -3091,7 +3097,7 @@ extension CUCore {
             if let why = noVisitForUnconfirmedPress(e, info, t) {
                 return ActOutcome(rung: .accessibility, detail: "\(Self.noEffectNote(label)) (\(why))")
             }
-            throw offerVisitAfterPress(e, info, t)
+            throw offerVisitAfterPress(e, info, t, before: before)
         }
         if offScreenSubject(t) != nil {
             CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect, and the window is not on screen — not clicked as well")
@@ -3114,8 +3120,8 @@ extension CUCore {
 
     /// The desktop visit offered after a press from another desktop showed no effect (the element marked: never
     /// pressed again).
-    func offerVisitAfterPress(_ e: AXUIElement, _ info: ElementInfo, _ t: CUTarget) -> CUError {
-        t.unconfirmedPress = (AXIdentity(element: e), clock.nowMs())
+    func offerVisitAfterPress(_ e: AXUIElement, _ info: ElementInfo, _ t: CUTarget, before: WebPressEvidence?) -> CUError {
+        t.unconfirmedPress = (AXIdentity(element: e), clock.nowMs(), before)
         CULog.act.notice("click in \(t.appName, privacy: .public) (another desktop): no visible effect — a desktop visit would click it")
         return CUError.needsDesktopVisit(t.appName, why: .act, "the accessibility press on \(Self.elementLabel(nil, info)) had no effect accessibility can see from here, and \(t.appName)'s window is on another desktop — a desktop visit would click it where it is (the user taken to that desktop for a moment and brought back)")
     }
@@ -3136,6 +3142,17 @@ extension CUCore {
             return "a command whose effect does not show on the page"
         }
         return nil
+    }
+
+    /// What a press changed, judged from evidence read on ANOTHER desktop before it — the focus and the window list
+    /// left out (a desktop visit moves the focus and brings the app's other windows on screen by itself). Pure.
+    static func pressShowed(_ now: WebPressEvidence, since before: WebPressEvidence) -> Bool {
+        var a = now, b = before
+        a.focused = nil
+        b.focused = nil
+        a.windows = []
+        b.windows = []
+        return a != b
     }
 
     static func noEffectNote(_ label: String) -> String {

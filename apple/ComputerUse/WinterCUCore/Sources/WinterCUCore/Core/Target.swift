@@ -114,7 +114,7 @@ final class CUTarget: @unchecked Sendable {
     /// The element whose press, sent from another desktop, showed no effect — the desktop visit was offered for it.
     /// The act asked again does not press it again: from another desktop it waits for the visit, and in the visit it is
     /// clicked where it is, once (review of round 11, MEDIUM #5). Pid-queue only.
-    var unconfirmedPress: (element: AXIdentity, atMs: Double)?
+    var unconfirmedPress: (element: AXIdentity, atMs: Double, before: CUCore.WebPressEvidence?)?
 
     /// The focus read after the last act, and when: the next act's "before". Pid-queue only.
     var focusAfterLastAct: (atMs: Double, focus: CUCore.WindowFocus)?
