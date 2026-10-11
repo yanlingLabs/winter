@@ -562,6 +562,11 @@ public struct CUFocusGuardianCore: Sendable {
             }
             // Back at their place: a claim of a click elsewhere is gone (they moved on from it).
             if previous != current, let c = claim, c.app != app { claim = nil }
+            // Back at their place DURING a desktop visit (no restore runs then, and the visit takes them elsewhere): their
+            // own move — the visit's end leaves them there (the model-based test: their ⌘-Tab back during the visit, and
+            // its end took them to the dialog that was in front when it began).
+            // (Not the visit's own way back to the app they were in when it began.)
+            if previous != current, visiting(now: now), app != visitApp, app != visitUser { visitSawUserInput = true }
             judged = nil
             lastReason = CUMoveOwner.theirPlace.words
             return .theirPlace
@@ -590,8 +595,8 @@ public struct CUFocusGuardianCore: Sendable {
         case .instant(let at, let keep)?: input.use(at, heardAt: seenAt, keepSecond: keep)
         case .oldest(let app, let desktop)?:
             input.useOldest(from: now - Self.switchWindow, upTo: seenAt, app: app, desktop: desktop, front: q.app, heardAt: seenAt)
-        case .latestAny?:
-            input.useLatestAny(from: now - Self.switchWindow, upTo: seenAt, front: q.app)
+        case .latest(let app, let desktop)?:
+            input.useLatest(from: now - Self.switchWindow, upTo: seenAt, app: app, desktop: desktop, front: q.app)
         case nil: break
         }
         judged = (q.app, q.space, owner, evidence, lastCause(q.app), seenAt, before)
@@ -631,7 +636,7 @@ public struct CUFocusGuardianCore: Sendable {
 
     /// Which switch input a verdict used up: the one that explained it (`keep`: an untouched app's — it stays a second,
     /// short-lived explanation when heard right after the input), or the oldest one that fits the change.
-    enum InputUse: Equatable { case instant(TimeInterval, keep: Bool), oldest(app: Bool, desktop: Bool), latestAny }
+    enum InputUse: Equatable { case instant(TimeInterval, keep: Bool), oldest(app: Bool, desktop: Bool), latest(app: Bool, desktop: Bool) }
 
     private func decide(_ q: CUMoveQuery, place: CUGuardedView, before: CUGuardedView, upTo: TimeInterval,
                         now: TimeInterval) -> (CUMoveOwner, InputUse?) {
@@ -670,7 +675,8 @@ public struct CUFocusGuardianCore: Sendable {
             // Their input made it: the latest that could (of any kind — a Dock click on the app already in front switches
             // its desktop) is used up, never left to explain the agent's indirect effect a moment later (found by the
             // model-based test).
-            return (.user("the agent did not touch it — an app it never touched coming forward after input of theirs is theirs"), .latestAny)
+            return (.user("the agent did not touch it — an app it never touched coming forward after input of theirs is theirs"),
+                    .latest(app: appMoved, desktop: desktopMoved))
         }
         let late = app.flatMap { restoreLate($0, now: now) } ?? -.infinity
         let cause = max(front ? max(lastCause(app), late) : -.infinity, shown.map { raises[$0] ?? -.infinity }.max() ?? -.infinity)
@@ -864,7 +870,7 @@ public struct CUFocusGuardianCore: Sendable {
             switch use {
             case .instant(let at, let keep)?: input.use(at, heardAt: now, keepSecond: keep)
             case .oldest(let a, let d)?: input.useOldest(from: now - Self.switchWindow, upTo: now, app: a, desktop: d, front: app, heardAt: now)
-            case .latestAny?: input.useLatestAny(from: now - Self.switchWindow, upTo: now, front: app)
+            case .latest(let a, let d)?: input.useLatest(from: now - Self.switchWindow, upTo: now, app: a, desktop: d, front: app)
             case nil: break
             }
             view = CUGuardedView(app: app, space: space)
@@ -891,6 +897,14 @@ public struct CUFocusGuardianCore: Sendable {
         default:
             return nil
         }
+    }
+
+    /// An activation was heard (NSWorkspace). Of an app other than the last state seen: the front was somewhere else in
+    /// between, unseen — the state in front now is no longer known to have stayed unchanged since it was first seen (found
+    /// by the model-based test: the target, left for a visit's return and brought back by the user's click, was judged
+    /// on the facts from before the click).
+    public mutating func activationHeard(_ pid: pid_t, now: TimeInterval) {
+        if lastSeen?.app != pid { lastSeenSince = now }
     }
 
     /// The user is somewhere of their own now (they moved during a visit): that is where later restores return them.
@@ -1126,14 +1140,17 @@ struct CUSwitchInput {
         }
     }
 
-    /// A change their input made with no instant of a fitting kind (an untouched app after their input): the latest one
-    /// that could have made it — for that app or for none — is used up.
-    mutating func useLatestAny(from: TimeInterval, upTo: TimeInterval, front: pid_t?) {
+    /// A change their input made with no instant that explained it (an untouched app after their input): the latest that
+    /// could have made it is used up — one for that very app (a click on its window or its Dock tile: whatever the kind),
+    /// else one of the change's own kind.
+    mutating func useLatest(from: TimeInterval, upTo: TimeInterval, app: Bool, desktop: Bool, front: pid_t?) {
         let pending = pendingTabs(now: upTo)
-        if let i = instants.last(where: { $0.at >= from && $0.at <= upTo && upTo - $0.at <= $0.life && ($0.target == nil || $0.target == front)
-                                            && !pending.contains($0.at) }) {
-            use(i.at)
+        let alive = { (i: (at: TimeInterval, kind: Kind, target: pid_t?, life: TimeInterval)) in
+            i.at >= from && i.at <= upTo && upTo - i.at <= i.life && !pending.contains(i.at)
         }
+        let primary: Kind = app ? .app : .desktop
+        if let f = front, let i = instants.last(where: { $0.target == f && alive($0) }) { use(i.at); return }
+        if let i = instants.last(where: { $0.target == nil && $0.kind == primary && alive($0) }) { use(i.at) }
     }
 
     /// For the model-based test's trace (diagnostics only): the seconds, the hold, the last ⌃ hold.

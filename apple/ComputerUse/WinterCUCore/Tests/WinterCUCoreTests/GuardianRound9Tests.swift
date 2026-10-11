@@ -122,7 +122,7 @@ final class GuardianRound9Tests: XCTestCase {
         var g = started(app: 1, space: 100)
         g.noteCause(500, now: 80.0)
         g.noteHardwareAction(now: 80.1)
-        g.noteSwitch(now: 80.1, .app)                       // the Dock click
+        g.noteSwitch(now: 80.1, .app, target: 1)            // the click on its Dock tile
         XCTAssertTrue(judge(&g, 1, 300, now: 80.2).isUsers) // their own app, on another desktop
         g.noteCause(500, now: 80.4)                         // the agent acts again
         XCTAssertTrue(judge(&g, 77, 300, now: 80.7).undoes, "the click was used: an app coming forward next is not theirs by it")

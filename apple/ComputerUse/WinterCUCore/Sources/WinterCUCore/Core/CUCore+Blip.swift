@@ -155,7 +155,10 @@ extension CUCore {
             // model-based test, the focus records left the target holding the keys behind an app that came forward on its
             // own); else (an app that had taken the front by itself, being put back) their place as the guardian knows it
             // (review of round 6: the restore ignored where they had gone).
-            let place = startWasTheirs && !(startUnexplained && nowView.front != user)
+            // (Their place having moved since the blip began — a move of theirs heard late — it is there.)
+            let startWasPlace: Bool = { guard let o = startOwner else { return true }; if case .theirPlace = o { return true }; return o.isUsers }()
+            let placeMoved = startWasPlace && (guardianPlace().map { $0.app != nil && $0.app != user } ?? false)
+            let place = startWasTheirs && !(startUnexplained && nowView.front != user) && !placeMoved
                 ? CUGuardedView(app: user, space: space) : (guardianPlace() ?? CUGuardedView(app: user, space: space))
             let home = place.app ?? user
             if home == user { undo() }  // the user's key window handed back (the record names their window)

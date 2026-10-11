@@ -474,6 +474,8 @@ extension CUCore {
     /// desktop as they are now — a late notification of an app that is no longer in front judges nothing stale.
     func onActivation(pid: pid_t) {
         appActivated(pid: pid)  // really activated: it has its key window back (or the user picks one)
+        let heardAt = clock.nowSeconds()
+        guardianLock.withLock { guardianCore.activationHeard(pid, now: heardAt) }
         // An app was activated, and something else is in front already: that past change is judged by the one rule — the
         // user's: their place went there before whatever came next, and a theft after it is put back THERE (the model-based
         // test: an app came forward 5 ms after it, before the guardian heard of either).

@@ -326,6 +326,8 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     var switches: [SimSwitch] = []
     /// The last change that was not the landing of a user's own switch (it may have used up their switch input).
     var lastOtherChangeAt: Double = -.infinity
+    /// The last landing of a switch of the user's (two inputs before two landings: the engine may pair them either way).
+    var lastUserChangeAt: Double = -.infinity
     /// The world's own record of the agent: operations running per app, the last thing it did to each app (a cause, or
     /// an operation's end), its last cause on any app (the earliest the engine may count) and its last posted event (the
     /// latest), and its last action that can raise a window or a desktop.
@@ -758,7 +760,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
                 return .either([mine, .agentDirect(n.app, "a window the agent raised after their input is on that desktop")],
                                "the agent raised a window on that desktop after their input")
             }
-            if lastOtherChangeAt > s.at {
+            if lastOtherChangeAt > s.at || lastUserChangeAt > s.at {
                 return .either([mine, .agentDirect(n.app, "their input used by another change")], "another change came between their input and their switch")
             }
         } else if lastOtherChangeAt > s.at {
@@ -812,7 +814,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             } else {
                 stats.decided += 1
             }
-            if case .user = cause {} else if case .engine = cause {} else { lastOtherChangeAt = now }
+            if case .user = cause { lastUserChangeAt = now } else if case .engine = cause {} else { lastOtherChangeAt = now }
             userLaunches[n.app] = nil  // its first activation, done
             frontCause = cause
             if n.app == SimPid.target { targetForwardDuringOp = true }
