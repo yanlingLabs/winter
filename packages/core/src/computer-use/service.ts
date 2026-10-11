@@ -342,6 +342,8 @@ export class ComputerV2Service {
     const builder = new ResultBuilder();
     // Saved scripts survive a reset and every restart (re-installed below): the notice says so — never which.
     const kept = this.savedScripts.any(sessionId) ? " Saved scripts are kept." : "";
+    // The daemon-wide memory cap cleared this session's scripts for another one: said once.
+    if (this.savedScripts.takeEvicted(sessionId)) builder.notice("This session's saved scripts were cleared to free memory — save them again.");
     if (input.reset === true) {
       this.resetSession(sessionId, state);
       builder.notice(`The automation runtime was reset: earlier variables and bindings are gone (apps stay open).${kept}`);
@@ -417,14 +419,13 @@ export class ComputerV2Service {
         builder.image(img.data, img.mime);
       },
     }, install);
-    // A saved script the fresh worker could not re-create (it compiled when it was saved, so this takes an engine
-    // change): dropped, and said — only for names this run actually sent (the worker is untrusted).
+    // A saved script the fresh worker left out (it stores the daemon's copy only after the same name and shape checks
+    // the daemon made, so only a FORGED report reaches this): said once, unnamed (a name is the model's own text), and
+    // only for a name this run actually sent. The daemon keeps its copy — there is no delete door.
     if (outcome.kind === "done" && install !== undefined && outcome.installFailed !== undefined) {
       const sent = new Set(install.map((e) => e.name));
-      for (const name of new Set(outcome.installFailed)) {
-        if (!sent.has(name)) continue;
-        this.savedScripts.drop(sessionId, name);
-        builder.notice(`The saved script ${name} could not be re-created in the restarted runtime and was dropped — save it again.`);
+      if (outcome.installFailed.some((name) => sent.has(name))) {
+        builder.notice("A saved script could not be re-created in the fresh runtime and was dropped from it.");
       }
     }
 
@@ -613,6 +614,7 @@ export class ComputerV2Service {
     if (!savedScriptNameOk(args.name) || !this.savedScripts.has(ctx.sessionId, args.name)) throw bad("no script was saved under that name in this session");
     metric.script = args.name;
     (ctx.scriptsRan ??= new Set()).add(args.name);
+    this.savedScripts.ran(ctx.sessionId);
     return undefined;
   }
 

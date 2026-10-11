@@ -2,7 +2,8 @@
 // nothing; what runs is always the function re-created from its source), and the service around them — kept through a
 // reset, the idle end, a crash; gone with the session; the metric and the audit line carry names only.
 import { afterEach, describe, expect, test } from "bun:test";
-import { SavedScripts } from "../../src/computer-use/saved-scripts";
+import { SAVED_SCRIPTS_DAEMON_MAX_BYTES, SavedScripts } from "../../src/computer-use/saved-scripts";
+import { savedScriptShapeOk } from "../../src/computer-use/worker/saved-shape";
 import { SAVED_SCRIPT_MAX_BYTES, SAVED_SCRIPTS_MAX_COUNT, savedScriptNameOk, type WorkerToHost } from "../../src/computer-use/worker/bridge";
 import { createAutomationRuntime, type AutomationRuntime } from "../../src/computer-use/worker/runtime";
 import { computerV2Description, COMPUTER_V2_INPUT_SCHEMA } from "../../src/computer-use/description";
@@ -10,7 +11,7 @@ import { ComputerV2Service, normaliseScriptError } from "../../src/computer-use/
 import type { ComputerPolicy } from "../../src/computer-use/policy";
 import type { HelperClient } from "../../src/computer-use/helper-client";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
-import { savedScriptsWorld, sleepMs, textOf } from "./saved-scripts-harness";
+import { InProcessWorker, savedScriptsWorld, sleepMs, textOf } from "./saved-scripts-harness";
 
 const services: ComputerV2Service[] = [];
 afterEach(() => { for (const s of services.splice(0)) s.stop(); });
@@ -28,7 +29,7 @@ describe("SavedScripts (the daemon's store, memory only)", () => {
     expect(s.save("s1", "ok", 42)).toMatchObject({ refused: expect.stringContaining("a function written in your script") });
   });
 
-  test("limits: 32 KiB per script; 32 per session; 256 KiB in all — replacing a name is always allowed", () => {
+  test("limits: 32 KiB per script; 32 per session; 256 KiB in all — replacing a name is allowed within the 256 KiB", () => {
     const s = new SavedScripts();
     expect(s.save("s1", "big", `() => "${"x".repeat(SAVED_SCRIPT_MAX_BYTES)}"`)).toMatchObject({ refused: expect.stringContaining("at most 32 KiB") });
     // UTF-8 bytes count, not characters.
@@ -45,9 +46,45 @@ describe("SavedScripts (the daemon's store, memory only)", () => {
     // Replacing one with a shorter text frees room.
     expect(t.save("s1", "g0", "() => 0")).toMatchObject({ ok: true, replaced: true });
     expect(t.save("s1", "g8", thirty)).toMatchObject({ ok: true, replaced: false });
+    // A replacement that would take the session past the total says so in its own words.
+    expect(t.save("s1", "g0", thirty)).toMatchObject({ refused: "replacing it would take this session's saved scripts past 256 KiB — save a shorter version or replace a bigger one" });
   });
 
-  test("per session; forInstall hands back name and source; drop; clearSession and clearAll", () => {
+  test("the shape: exactly one function or arrow expression — anything that would run code when re-created is refused", () => {
+    const s = new SavedScripts();
+    for (const ok of ["(x) => x", "x => x + 1", "async (a, b) => { return a }", "async x => x", "function f(a) { return a }", "async function* g() { yield 1 }",
+      "function () {}", "({ a }, [b] = [1]) => a + b", "(x) => (print(x), x)", "x => `t ${x} ${`${x}`}`", "() => ({ a: 1 })", "async => async"]) {
+      expect(s.save("s1", "ok", ok)).toMatchObject({ ok: true });
+      expect(savedScriptShapeOk(ok)).toBe(true);
+    }
+    for (const bad of ["(setTimeout(() => {}, 0), (x) => x)", "(() => 1)()", "function f() {}()", "function f() {}.call(null)", "x => x, alert(1)",
+      "(x) => x; y()", "m() { return 1 }", "class K {}", "1 + 1", "(x) => x)(y", "(x) => { }}", "`${(() => 1)()}`", "get x() { return 1 }", "() =>"]) {
+      expect(savedScriptShapeOk(bad)).toBe(false);
+      expect(s.save("s1", "bad", bad)).toMatchObject({ refused: expect.stringContaining("one function or arrow expression") });
+    }
+  });
+
+  test("16 MiB across the daemon: the least recently USED other session's scripts are cleared (never the saver's), and it is told once", () => {
+    const s = new SavedScripts(100);
+    const src = (n: number) => `() => "${"x".repeat(n)}"`;      // 8 + n bytes
+    expect(s.save("a", "one", src(32))).toMatchObject({ ok: true });   // a: 40
+    expect(s.save("b", "one", src(32))).toMatchObject({ ok: true });   // b: 40
+    s.ran("a");                                                        // a used after b
+    expect(s.save("c", "one", src(32))).toMatchObject({ ok: true });   // 120 > 100: b (least recently used) goes
+    expect(s.any("b")).toBe(false);
+    expect(s.any("a")).toBe(true);
+    expect(s.takeEvicted("b")).toBe(true);
+    expect(s.takeEvicted("b")).toBe(false);
+    expect(s.takeEvicted("a")).toBe(false);
+    // The saver's own scripts are never cleared for itself: alone it may hold what the per-session caps allow.
+    const t = new SavedScripts(60);
+    expect(t.save("a", "one", src(40))).toMatchObject({ ok: true });
+    expect(t.save("a", "two", src(40))).toMatchObject({ refused: expect.stringContaining("too many saved scripts") });
+    expect(t.any("a")).toBe(true);
+    expect(SAVED_SCRIPTS_DAEMON_MAX_BYTES).toBe(16 * 1024 * 1024);
+  });
+
+  test("per session; forInstall hands back name and source; clearSession and clearAll", () => {
     const s = new SavedScripts();
     s.save("s1", "a", "() => 1");
     s.save("s1", "b", "(x) => x");
@@ -55,8 +92,6 @@ describe("SavedScripts (the daemon's store, memory only)", () => {
     expect(s.any("s1")).toBe(true);
     expect(s.has("s1", "c")).toBe(false);
     expect(s.forInstall("s1")).toEqual([{ name: "a", source: "() => 1" }, { name: "b", source: "(x) => x" }]);
-    s.drop("s1", "a");
-    expect(s.forInstall("s1").map((e) => e.name)).toEqual(["b"]);
     s.clearSession("s1");
     expect(s.any("s1")).toBe(false);
     expect(s.any("s2")).toBe(true);
@@ -180,22 +215,58 @@ describe("the worker's scripts", () => {
     expect((await run("print(await scripts.twice(4))")).prints).toEqual(["8"]);
   });
 
-  test("a fresh worker installs the daemon's copy before the run; one it can't re-create is reported, not fatal", async () => {
+  test("installing is INERT: a fresh worker stores the daemon's copy and evaluates nothing; a wrong shape is left out and reported", async () => {
     const { run } = runtime();
-    const r = await run("print(await scripts.add(2, 3), typeof scripts.broken)", [
+    const r = await run("print(typeof scripts.add, typeof scripts.ghost, typeof scripts.broken)", [
       { name: "add", source: "(a, b) => a + b" },
+      { name: "ghost", source: "(print('GHOST at install'), (x) => x)" },
       { name: "broken", source: "m() { return 1 }" },
       { name: "Bad", source: "() => 1" },
     ]);
-    expect(r.prints).toEqual(["5 undefined"]);
-    expect(r.done.installFailed).toEqual(["broken"]);
+    expect(r.prints).toEqual(["function undefined undefined"]);
+    expect(r.done.installFailed).toEqual(["ghost", "broken"]);
+    // Re-created at the first call, and only when its own source is exactly the stored text.
+    expect((await run("print(await scripts.add(2, 3))")).prints).toEqual(["5"]);
   });
 
-  test("a throw inside a saved script says which and where", async () => {
+  test("a re-created function whose own source is not the stored text is never run, and is dropped", async () => {
+    const { run } = runtime();
+    const r = await run("let m; try { await scripts.spaced(1) } catch (e) { m = e.name + ': ' + e.message }\nprint(m, typeof scripts.spaced)", [{ name: "spaced", source: "(a) => a   " }]);
+    expect(r.prints).toEqual(["TypeError: scripts.spaced could not be re-created in this runtime — save it again undefined"]);
+    expect(r.calls).toEqual([]);
+  });
+
+  test("the source is read with Function.prototype.toString and Reflect.apply as they were before any script ran", async () => {
+    const { run } = runtime();
+    // (In-process: the overrides are this test process's own globals — the script puts them back.)
+    const r = await run([
+      "const t0 = Function.prototype.toString, a0 = Reflect.apply",
+      "try {",
+      "  Function.prototype.toString = function () { return '(print(\"GHOST\"), (x) => x)' }",
+      "  Reflect.apply = () => '(print(\"GHOST2\"), (x) => x)'",
+      "  await scripts.save('looksHarmless', (x) => x)",
+      "  print(await scripts.looksHarmless(7))",
+      "} finally { Function.prototype.toString = t0; Reflect.apply = a0 }",
+    ].join("\n"));
+    expect(r.done.error).toBeUndefined();
+    expect(r.calls[0]!.args).toEqual({ name: "looksHarmless", source: "(x) => x" });
+    expect(r.prints).toEqual(["7"]);
+  });
+
+  test("a saved script's own wrapper can't be saved again (its text is the runtime's, not the model's)", async () => {
+    const { run } = runtime();
+    const r = await run("await scripts.save('a', (x) => x * 2)\nawait scripts.save('b', scripts.a)");
+    expect(r.done.error).toMatchObject({ name: "TypeError", message: expect.stringContaining("that is a saved script already") });
+    expect(r.calls.filter((c) => c.primitive === "scripts.save").length).toBe(1);
+  });
+
+  test("a throw inside a saved script says which and where — a script named calibrate too", async () => {
     const { run } = runtime();
     await run("await scripts.save('boom', (x) => {\n  const y = x + 1\n  throw new RangeError('too far: ' + y)\n})");
     const r = await run("await scripts.boom(1)");
     expect(r.done.error).toMatchObject({ name: "RangeError", message: "too far: 2 (in saved script boom, line 3)", line: 1 });
+    await run("await scripts.save('calibrate', () => {\n  throw new Error('c')\n})");
+    expect((await run("await scripts.calibrate()")).done.error).toMatchObject({ message: "c (in saved script calibrate, line 2)" });
   });
 });
 
@@ -255,6 +326,7 @@ describe("saved scripts in the service", () => {
       { op: "call", id: 90_001, runId, primitive: "scripts.save", args: { name: "huge", source: `() => "${"z".repeat(SAVED_SCRIPT_MAX_BYTES + 1)}"` } },
       { op: "call", id: 90_002, runId, primitive: "scripts.save", args: { name: "Not OK", source: "() => 1" } },
       { op: "call", id: 90_003, runId, primitive: "scripts.run", args: { name: "neverSaved" } },
+      { op: "call", id: 90_004, runId, primitive: "scripts.save", args: { name: "helper", source: "(setTimeout(() => print('GHOST'), 5), () => 1)" } },
     ];
     await w.run("await sleep(20)");
     await sleepMs(20);
@@ -262,7 +334,11 @@ describe("saved scripts in the service", () => {
     expect(answers[90_001]).toMatchObject({ ok: false, error: { kind: "TypeError", message: expect.stringContaining("at most 32 KiB") } });
     expect(answers[90_002]).toMatchObject({ ok: false, error: { kind: "TypeError", message: expect.stringContaining("lowercase letter") } });
     expect(answers[90_003]).toMatchObject({ ok: false, error: { kind: "TypeError", message: "no script was saved under that name in this session" } });
+    expect(answers[90_004]).toMatchObject({ ok: false, error: { kind: "TypeError", message: expect.stringContaining("one function or arrow expression") } });
     expect(w.svc.savedScripts.any("s1")).toBe(false);
+    // Nothing a forged save sent can run at a later worker's start: the reset's run prints only its own text.
+    const after = await w.run("await sleep(30)\nprint('clean')", { reset: true });
+    expect(textOf(after)).not.toContain("GHOST");
   });
 
   test("limits reach the script as a TypeError: too large (said by the worker, never sent) and too many (the daemon's)", async () => {
@@ -286,14 +362,43 @@ describe("saved scripts in the service", () => {
     expect(normaliseScriptError({ name: "Error", message: `${sentence} (in saved script fill)` }, new Set([sentence])).trusted).toBe(false);
   });
 
-  test("a saved script the fresh worker can't re-create is dropped and said, by name", async () => {
+  test("a FORGED install report: one unnamed notice, the daemon keeps its copy (no delete door), a name it never sent ignored", async () => {
     const w = world();
-    await w.run("print('warm')");
-    // Only reachable through a changed engine: put a source the daemon accepts but the worker can't compile.
-    w.svc.savedScripts.save("s1", "odd", "m() { return 1 }");
-    const r = await w.run("print(typeof scripts.odd)", { reset: true });
-    expect(textOf(r)).toContain("The saved script odd could not be re-created in the restarted runtime and was dropped — save it again.");
-    expect(w.svc.savedScripts.has("s1", "odd")).toBe(false);
+    await w.run("await scripts.save('keepMe', () => 1)");
+    const start = (w.svc as unknown as { deps: { startWorker: () => Promise<InProcessWorker> } }).deps;
+    const original = start.startWorker;
+    let names = ["keepMe"];
+    start.startWorker = async () => { const x = await original(); x.forge = (runId) => [{ op: "done", runId, installFailed: names }]; return x; };
+    w.latest().kill();
+    const r = await w.run("print('x')");
+    expect(textOf(r)).toContain("A saved script could not be re-created in the fresh runtime and was dropped from it.");
+    expect(textOf(r)).not.toContain("keepMe");
+    expect(w.svc.savedScripts.has("s1", "keepMe")).toBe(true);
+    names = ["neverSent"];
+    w.latest().kill();
+    expect(textOf(await w.run("print('y')"))).not.toContain("could not be re-created");
+  });
+
+  test("a toString override at save time, then a reset: the saved function is the real one, and calls work", async () => {
+    const w = world();
+    // (In-process: the override is this test process's own global — the script puts it back.)
+    await w.run("const t0 = Function.prototype.toString\ntry {\n  Function.prototype.toString = function () { return '(print(\"GHOST\"), (x) => x)' }\n  await scripts.save('looksHarmless', (x) => x + 1)\n} finally { Function.prototype.toString = t0 }");
+    expect(w.svc.savedScripts.forInstall("s1")).toEqual([{ name: "looksHarmless", source: "(x) => x + 1" }]);
+    const r = await w.run("print(await scripts.looksHarmless(1))", { reset: true });
+    expect(r.isError).toBe(false);
+    expect(textOf(r)).toContain("2");
+    expect(textOf(r)).not.toContain("GHOST");
+  });
+
+  test("the daemon-wide cap clears another session's scripts, and that session is told at its next call", async () => {
+    const w = savedScriptsWorld({ savedScripts: new SavedScripts(120) });
+    services.push(w.svc);
+    await w.run(`await scripts.save('one', () => "${"a".repeat(60)}")`, { sessionId: "older" });
+    await w.run(`await scripts.save('two', () => "${"b".repeat(60)}")`, { sessionId: "newer" });
+    const r = await w.run("print(typeof scripts.one)", { sessionId: "older", reset: true });
+    expect(textOf(r)).toContain("This session's saved scripts were cleared to free memory — save them again.");
+    expect(textOf(r)).toContain("undefined");
+    expect(textOf(await w.run("print(2)", { sessionId: "older" }))).not.toContain("cleared to free memory");
   });
 
   test("metrics carry the NAME only; the audit line lists the names saved and run; no source anywhere", async () => {
@@ -312,7 +417,9 @@ describe("saved scripts in the service", () => {
     const w = world();
     let asked = 0;
     (w.svc as unknown as { deps: { policy: { authorize: () => Promise<void> } } }).deps.policy.authorize = async () => { asked++; };
-    await w.run("await scripts.save('noop', () => 1)\nawait scripts.noop()");
+    const r = await w.run("await scripts.save('noop', () => 41)\nprint(await scripts.noop() + 1)");
+    expect(r.isError).toBe(false);
+    expect(textOf(r)).toContain("42");
     expect(asked).toBe(0);
   });
 
@@ -348,6 +455,31 @@ describe("through the REAL sandboxed worker (the bridge's own lines)", () => {
   }, 30_000);
 });
 
+describe("through the REAL sandboxed worker: a replaced toString can't plant code that runs at every fresh worker", () => {
+  const macOnly = sandboxAvailable() ? test : test.skip;
+  macOnly("a toString that returns a stalling expression: the saved function is the real one, and resets keep working", async () => {
+    const helper = { connected: false, generation: 0, tell: () => {} } as unknown as HelperClient;
+    const policy = { clearSession: () => {}, persistentlyAllowed: () => false, authorize: async () => {} } as unknown as ComputerPolicy;
+    const svc = new ComputerV2Service({ helper, policy, settings: () => null });
+    services.push(svc);
+    const call = (code: string, o: { reset?: boolean; timeoutMs?: number } = {}) => svc.run({ sessionId: "stall", vision: true }, { code, ...o });
+    const saved = await call([
+      "Function.prototype.toString = function () { return '(setTimeout(() => { const t = Date.now(); while (Date.now() - t < 4000) {} }, 0), (x) => x)' }",
+      "await scripts.save('looksHarmless', (x) => x)",
+      "print('saved')",
+    ].join("\n"), { timeoutMs: 2000 });
+    expect(textOf(saved)).toContain("saved");
+    expect(svc.savedScripts.forInstall("stall")).toEqual([{ name: "looksHarmless", source: "(x) => x" }]);
+    for (let i = 0; i < 2; i++) {
+      const t0 = Date.now();
+      const r = await call("await sleep(100)\nprint('model code: hello', await scripts.looksHarmless(3))", { reset: true, timeoutMs: 2000 });
+      expect(r.isError).toBe(false);
+      expect(textOf(r)).toContain("model code: hello 3");
+      expect(Date.now() - t0).toBeLessThan(2000);
+    }
+  }, 30_000);
+});
+
 describe("the description and the schema", () => {
   for (const vision of [true, false]) {
     test(`declares scripts, explains it, names it as built-in (vision ${vision})`, () => {
@@ -355,6 +487,7 @@ describe("the description and the schema", () => {
       expect(d).toContain("declare const scripts: {");
       expect(d).toContain("  save(name: string, fn: (...args: any[]) => unknown): Promise<void>;");
       expect(d).toContain("Saved scripts can't be listed or read back: remember the names and parameters you will need.");
+      expect(d).toContain("keeps a function for the rest of this session (until Winter restarts)");
       expect(d).toContain("(`apps`, `browsers`, `screen`, `scripts`, `print`, `sleep`, `timeLeft`)");
       expect(d.indexOf("declare const scripts")).toBeGreaterThan(d.indexOf("declare const browsers"));
     });

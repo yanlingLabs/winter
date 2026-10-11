@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ComputerPolicy } from "../../src/computer-use/policy";
 import type { HelperClient } from "../../src/computer-use/helper-client";
+import type { SavedScripts } from "../../src/computer-use/saved-scripts";
 import { ComputerV2Service, type ScriptResult } from "../../src/computer-use/service";
 import { AutomationTelemetry } from "../../src/computer-use/telemetry";
 import type { AutomationWorker, RunHandlers, WorkerRunOutcome } from "../../src/computer-use/worker-host";
@@ -76,7 +77,7 @@ export class InProcessWorker {
   }
 }
 
-export function savedScriptsWorld(opts: { idleMs?: number } = {}) {
+export function savedScriptsWorld(opts: { idleMs?: number; savedScripts?: SavedScripts } = {}) {
   const home = mkdtempSync(join(tmpdir(), "winter-cu-saved-"));
   const workers: InProcessWorker[] = [];
   const audits: Array<Record<string, unknown>> = [];
@@ -87,6 +88,7 @@ export function savedScriptsWorld(opts: { idleMs?: number } = {}) {
     helper, policy, settings: () => null, telemetry, audit: (l) => audits.push(l),
     startWorker: async () => { const w = new InProcessWorker(); workers.push(w); return w as unknown as AutomationWorker; },
     ...(opts.idleMs === undefined ? {} : { idleMs: opts.idleMs }),
+    ...(opts.savedScripts === undefined ? {} : { savedScripts: opts.savedScripts }),
   });
   const run = (code: string, o: { sessionId?: string; reset?: boolean } = {}): Promise<ScriptResult> =>
     svc.run({ sessionId: o.sessionId ?? "s1", vision: true, model: "anthropic/claude-opus-5-5" }, { code, ...(o.reset === undefined ? {} : { reset: o.reset }) });

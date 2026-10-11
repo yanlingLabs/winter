@@ -9,6 +9,7 @@
 // the store, so top-level declarations persist and may be redeclared, and top-level `await` just works.
 // Sloppy mode, deliberately — `with` and block-level function hoisting need it.
 import { AUTOMATION_ERROR_KINDS, type AutomationErrorKind } from "../errors";
+import { savedScriptShapeOk } from "./saved-shape";
 import { SAVED_SCRIPT_MAX_BYTES, savedScriptNameOk, savedScriptTooLarge, type AppHandle, type HostToWorker, type ImageHandle, type SavedScriptSource, type TabHandle, type WorkerToHost } from "./bridge";
 import { prepareScript, type PreparedScript } from "./repl";
 
@@ -319,34 +320,59 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
 
   // ── saved scripts (Phase 4) ──────────────────────────────────────────────────────────────────────────
   // `scripts.save(name, fn)` keeps a function for the rest of the SESSION; `scripts.<name>(…)` runs it. What runs is
-  // always the function RE-CREATED from its source (here at save, and in every fresh worker from the daemon's copy),
-  // never the original closure — so it behaves the same before and after a restart, and one that relied on a
-  // variable it closed over fails at its first call, not mysteriously later. `scripts` reveals nothing: no keys, no
-  // listing, no source (a product rule — the source was in the model's own call; nothing relies on it being secret).
-  const saved = new Map<string, (...a: unknown[]) => unknown>();
+  // always the function RE-CREATED from its source (here at save, and in a fresh worker from the daemon's copy on its
+  // first call), never the original closure — so it behaves the same before and after a restart, and one that relied
+  // on a variable it closed over fails at its first call, not mysteriously later. `scripts` reveals nothing: no keys,
+  // no listing, no source (a product rule — the source was in the model's own call; nothing relies on it being secret).
+  //
+  // A stored source is text that later workers evaluate, so it is held to three rules:
+  //  1. it is read only through `Function.prototype.toString` and `Reflect.apply` as they were BEFORE any script ran
+  //     (a script can replace both) — captured here;
+  //  2. it has one shape — exactly one function or arrow expression (`saved-shape.ts`, checked again by the daemon),
+  //     whose evaluation runs nothing;
+  //  3. installing is INERT: a fresh worker only stores the daemon's copy; the first `scripts.<name>(…)` re-creates the
+  //     function and runs it only if the re-created function's own source is exactly the stored text.
+  // A FORGED bridge save (the model's code can write bridge lines itself) can still store any source the daemon's
+  // checks accept; rules 2 and 3 keep what it can do to running that one function when it is called by name — the
+  // same thing the model could do by running the code directly — never at a worker's start or after a reset.
+  const fnToString = Function.prototype.toString;
+  const reflectApply = Reflect.apply;
+  const FunctionCtor = Function;
+  const sourceOf = (fn: unknown): string => reflectApply(fnToString, fn, []) as string;
+  interface SavedEntry { source: string; fn?: (...a: unknown[]) => unknown }
+  const saved = new Map<string, SavedEntry>();
   const wrappers = new Map<string, (...a: unknown[]) => Promise<unknown>>();
+  const wrapperSet = new WeakSet<object>();
   /** Re-create a saved function from its source, in this runtime: free names resolve, when it runs, to the
-   *  top-level declarations then (the persistent scope) and the built-in API — nothing else it closed over. */
+   *  top-level declarations then (the persistent scope) and the built-in API — nothing else it closed over. Only
+   *  ever called on a source of the one shape (rule 2), and the result is checked against it (rule 3). */
   const compileSaved = (name: string, source: string): ((...a: unknown[]) => unknown) => {
     // eslint-disable-next-line no-new-func
-    const make = new Function(...PARAMS, `with (__scope) { return (\n${source}\n); }\n//# sourceURL=${SAVED_URL}${name}`);
-    const fn = make(scope, store, ...API_NAMES.map((n) => API[n]), ...SHADOWED.map(() => undefined)) as unknown;
-    if (typeof fn !== "function") throw new TypeError("not a function");
+    const make = new FunctionCtor(...PARAMS, `with (__scope) { return (\n${source}\n); }\n//# sourceURL=${SAVED_URL}${name}`) as (...a: unknown[]) => unknown;
+    const fn = reflectApply(make, undefined, [scope, store, ...API_NAMES.map((n) => API[n]), ...SHADOWED.map(() => undefined)]) as unknown;
+    if (typeof fn !== "function" || sourceOf(fn) !== source) throw new TypeError("not the saved function");
     return fn as (...a: unknown[]) => unknown;
   };
   const wrapperFor = (name: string): ((...a: unknown[]) => Promise<unknown>) => {
     let w = wrappers.get(name);
     if (w !== undefined) return w;
     w = async (...args: unknown[]): Promise<unknown> => {
+      const entry = saved.get(name);
+      if (entry === undefined) throw new TypeError(`scripts.${name} is not a function`);
+      if (entry.fn === undefined) {
+        try { entry.fn = compileSaved(name, entry.source); } catch {
+          saved.delete(name);
+          throw new TypeError(`scripts.${name} could not be re-created in this runtime — save it again`);
+        }
+      }
       // The daemon hears of the run first: it counts it, and a cancelled run stops it before it starts.
       await call("scripts.run", undefined, { name });
-      const fn = saved.get(name);
-      if (fn === undefined) throw new TypeError(`scripts.${name} is not a function`);
-      return await fn(...args);
+      return await entry.fn(...args);
     };
     Object.defineProperty(w, "name", { value: name });
     Object.defineProperty(w, "toString", { value: () => `function ${name}() { [saved script] }` });
     wrappers.set(name, w);
+    wrapperSet.add(w);
     return w;
   };
   const saveScript = async (name: unknown, fn: unknown): Promise<void> => {
@@ -354,18 +380,21 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       throw new TypeError("scripts.save() takes a name that starts with a lowercase letter, then letters, digits or _ (at most 48), and is not save, then, toString or another built-in name");
     }
     if (typeof fn !== "function") throw new TypeError("scripts.save() takes a function written in your script");
-    const source = Function.prototype.toString.call(fn);
+    if (wrapperSet.has(fn)) {
+      throw new TypeError("that is a saved script already — to keep it under another name too, save a function that calls it: scripts.save(\"other\", (...a) => scripts.<its name>(...a))");
+    }
+    const source = sourceOf(fn);
     if (/\[native code\]\s*\}\s*$/.test(source)) throw new TypeError("scripts.save() takes a function written in your script");
     if (/^class\b/.test(source.trimStart())) throw new TypeError("scripts.save() takes a function, not a class");
     // Said here, before a source too large for the daemon could be sent at all (the daemon checks again).
     const bytes = new TextEncoder().encode(source).length;
     if (bytes > SAVED_SCRIPT_MAX_BYTES) throw new TypeError(savedScriptTooLarge(bytes));
+    const notShaped = "scripts.save() could not re-create that function from its source — write it as an arrow or function expression: scripts.save(\"name\", async (a, b) => { … })";
+    if (!savedScriptShapeOk(source)) throw new TypeError(notShaped);
     let compiled: (...a: unknown[]) => unknown;
-    try { compiled = compileSaved(name, source); } catch {
-      throw new TypeError("scripts.save() could not re-create that function from its source — write it as an arrow or function expression: scripts.save(\"name\", async (a, b) => { … })");
-    }
+    try { compiled = compileSaved(name, source); } catch { throw new TypeError(notShaped); }
     await call("scripts.save", undefined, { name, source });
-    saved.set(name, compiled);
+    saved.set(name, { source, fn: compiled });
   };
   const scripts = new Proxy({} as Record<string, unknown>, {
     get: (_t, k) => (k === "save" ? saveScript : typeof k === "string" && saved.has(k) ? wrapperFor(k) : undefined),
@@ -378,12 +407,14 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     setPrototypeOf: () => false,
     preventExtensions: () => false,
   });
-  /** The daemon's copy, into a fresh worker before its first run: the names that could not be re-created. */
+  /** The daemon's copy, into a fresh worker before its first run: STORED, never evaluated here (rule 3). The names
+   *  left out (a name or shape the daemon should never have kept) are reported. */
   const install = (entries: readonly SavedScriptSource[] | undefined): string[] => {
     const failed: string[] = [];
     for (const e of Array.isArray(entries) ? entries : []) {
-      if (e === null || typeof e !== "object" || !savedScriptNameOk(e.name) || typeof e.source !== "string") continue;
-      try { saved.set(e.name, compileSaved(e.name, e.source)); } catch { failed.push(e.name); }
+      if (e === null || typeof e !== "object" || !savedScriptNameOk(e.name)) continue;
+      if (typeof e.source !== "string" || !savedScriptShapeOk(e.source)) { failed.push(e.name); continue; }
+      saved.set(e.name, { source: e.source });
     }
     return failed;
   };
@@ -417,9 +448,10 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
   const savedLineOffset = ((): number => {
     try {
       // eslint-disable-next-line no-new-func
-      (new Function(...PARAMS, `with (__scope) { return (\n() => { throw new Error("calibrate") }\n); }\n//# sourceURL=${SAVED_URL}calibrate`)(scope, store) as () => void)();
+      // "-calibrate": a sourceURL no saved script's name can produce (a name starts with a lowercase letter).
+      (new Function(...PARAMS, `with (__scope) { return (\n() => { throw new Error("calibrate") }\n); }\n//# sourceURL=${SAVED_URL}-calibrate`)(scope, store) as () => void)();
     } catch (e) {
-      const m = /winter-saved:calibrate:(\d+)/.exec(e instanceof Error ? e.stack ?? "" : "");
+      const m = /winter-saved:-calibrate:(\d+)/.exec(e instanceof Error ? e.stack ?? "" : "");
       if (m !== null) return Number(m[1]) - 1;
     }
     return 3;
@@ -428,7 +460,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
   const savedPlace = (err: unknown): string | undefined => {
     const stack = err !== null && typeof err === "object" && typeof (err as { stack?: unknown }).stack === "string" ? (err as { stack: string }).stack : "";
     const m = /winter-saved:([a-z][A-Za-z0-9_]{0,47}):(\d+)/.exec(stack);
-    if (m === null || m[1] === "calibrate") return undefined;
+    if (m === null) return undefined;
     const line = Number(m[2]) - savedLineOffset;
     return line >= 1 ? `(in saved script ${m[1]}, line ${line})` : `(in saved script ${m[1]})`;
   };
