@@ -609,6 +609,17 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         }
     }
 
+    /// Two landings of the user's before the engine heard of the first (one change, as far as it can see): it pairs that
+    /// change with one of the two inputs, so the other may still explain a change within its life.
+    var lastLanding: (index: Int, at: Double)?
+    func mergeLandings(_ i: Int) {
+        if let l = lastLanding, l.index != i, pendingNotes > 0, now - l.at < 150 {
+            switches[l.index].landedAt = nil
+            switches[i].landedAt = nil
+        }
+        lastLanding = (i, now)
+    }
+
     /// A user's switch input that may explain a change of `pid` (an app change and/or a desktop change) now, as far as the
     /// engine can tell: visible to it, alive, not used in truth by the change it was for (it has not landed, or changed
     /// nothing, or landed only just now), fitting.

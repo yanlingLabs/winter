@@ -646,7 +646,7 @@ public struct CUFocusGuardianCore: Sendable {
         // I1 — an app the agent never touched (during a visit, what it brings up is the visit's: below).
         if !front && shown.isEmpty, !visit {
             if let i = input.explanation(from: from, after: -.infinity, raiseAfter: -.infinity, now: upTo,
-                                         app: appMoved, desktop: desktopMoved, front: app) {
+                                         app: appMoved, desktop: desktopMoved, front: app, targetedFirst: false) {
                 return (.user("their input that switches apps or desktops, to an app the agent never touched"), .instant(i, keep: true))
             }
             // Its INDIRECT effect (a link it clicked opening in another app, a file it opened, a system agent's dialog):
@@ -823,8 +823,10 @@ public struct CUFocusGuardianCore: Sendable {
         if let j = judged, j.app == live.app, j.space == live.space, j.owner.isUsers { return nil }
         // What is in front now is their place (judged theirs): a change before it, heard late, takes nothing back (I5 —
         // found by the model-based test: the Dock click's app on the other display, heard after the change it was paired
-        // with, made that change the agent's).
-        if live.app == view.app, live.space == nil || view.space == nil || live.space == view.space { return nil }
+        // with, made that change the agent's) — unless they CLICKED into that app's window: that was their move, and
+        // what came after it is judged from there (the model-based test: a restore landing 6 ms after their click into
+        // another display's window).
+        if !clicked, live.app == view.app, live.space == nil || view.space == nil || live.space == view.space { return nil }
         let q = CUMoveQuery(app: app, space: space, inputObservable: inputObservable, hardwareAt: hardwareAt)
         let (owner, use) = decide(q, place: view, before: lastSeen ?? view, upTo: now, now: now)
         switch owner {
@@ -895,8 +897,8 @@ struct CUSwitchInput {
     static let holdMax: TimeInterval = 10
     /// Instants older than this are dropped.
     static let keep: TimeInterval = 10
-    /// A ⌘ release under Secure Event Input explains only a change heard within this of it (the switcher's latency and
-    /// NSWorkspace's notification).
+    /// A hold's release with no key seen (a ⌘-Tab under Secure Event Input, a ⌃ hold whose arrows were not seen) explains
+    /// only a change heard within this of it (the switcher's or the desktop's latency and NSWorkspace's notification).
     static let secureLife: TimeInterval = 0.7
     /// An instant used up by an untouched app's change heard within this of it stays a second explanation …
     static let secondHeard: TimeInterval = 0.1
@@ -940,11 +942,12 @@ struct CUSwitchInput {
             // switch (found by the model-based test: the release's instant, left unused, made an untouched app's coming
             // forward a moment later "the user's").
             guard !h.used else { return false }
-            if h.secure || secure, !h.control {
-                add(now, .app, life: Self.secureLife)  // a ⌘-Tab under Secure Event Input, or a ⌘ shortcut: briefly
-                return true
-            }
-            add(now, h.control ? .desktop : .app)
+            // A release with no key seen (a ⌘-Tab whose Tab the tap did not get — Secure Event Input, or the switcher
+            // took it; a ⌃ hold whose arrows it did not get): what it switched lands within moments of the release, so it
+            // explains only a change heard that soon (found by the model-based test: a ⌃ hold whose desktop switch was
+            // never heard on its own — the user's click on another display came first — explained an app's own coming
+            // forward 0.7 s later).
+            add(now, h.control ? .desktop : .app, life: Self.secureLife)
             return true
         case CGEventType.keyDown.rawValue:
             if flags.contains(.maskControl), Self.controlSwitchKeys.contains(keycode) {
@@ -997,7 +1000,8 @@ struct CUSwitchInput {
     /// ⌃ hold going on (which explains every desktop it passes), −∞, nothing to use up. An instant for a known app
     /// explains only that app coming forward (`front`).
     func explanation(from: TimeInterval, after cause: TimeInterval, raiseAfter: TimeInterval, now: TimeInterval,
-                     app: Bool = true, desktop: Bool = true, front: pid_t? = nil, seconds useSeconds: Bool = true) -> TimeInterval? {
+                     app: Bool = true, desktop: Bool = true, front: pid_t? = nil, seconds useSeconds: Bool = true,
+                     targetedFirst: Bool = true) -> TimeInterval? {
         let ok = { (at: TimeInterval, kind: Kind, target: pid_t?) -> Bool in
             at >= from && at <= now && Self.fits(kind, app: app, desktop: desktop) && (target == nil || target == front)
                 && at > raiseAfter && (at > cause || now - at <= CUFocusGuardianCore.switchLandWindow)
@@ -1012,7 +1016,11 @@ struct CUSwitchInput {
         let alive = { (i: (at: TimeInterval, kind: Kind, target: pid_t?, life: TimeInterval)) in
             ok(i.at, i.kind, i.target) && now - i.at <= i.life && !pending.contains(i.at)
         }
-        if let f = front, let i = instants.first(where: { $0.target == f && alive($0) }) { return i.at }
+        // (An app the agent never touched is the user's whichever input it pairs with: the LATEST that fits is the one that
+        // made it — found by the model-based test: a drag out of its window, 0.3 s before their ⌘-Tab to it, took the
+        // landing, and the ⌘-Tab's release then explained the next desktop switch, whose own arrow explained an indirect
+        // effect.)
+        if targetedFirst, let f = front, let i = instants.first(where: { $0.target == f && alive($0) }) { return i.at }
         // The kind the change is about first: an app switch for a change of the front app (a ⌘-Tab, the Dock — the desktop
         // came along), a desktop switch for a change of the desktop alone (found by the model-based test: an unused swipe
         // explained the ⌘-Tab's own landing, and the ⌘-Tab's release then explained an indirect effect a moment later).

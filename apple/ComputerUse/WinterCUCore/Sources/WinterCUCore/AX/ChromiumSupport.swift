@@ -7,6 +7,7 @@ import Foundation
 enum CUChromium {
     static let bundleIds: Set<String> = [
         "com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.dev", "com.google.Chrome.canary",
+        "com.google.chrome.for.testing",
         "org.chromium.Chromium", "com.microsoft.edgemac", "com.microsoft.edgemac.Beta", "com.microsoft.edgemac.Dev",
         "com.brave.Browser", "com.vivaldi.Vivaldi", "com.operasoftware.Opera", "company.thebrowser.Browser",
         "company.thebrowser.dia", "com.openai.atlas",

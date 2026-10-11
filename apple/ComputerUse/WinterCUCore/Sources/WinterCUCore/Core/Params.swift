@@ -141,11 +141,16 @@ public struct TargetBindResult: Codable, Sendable, Equatable {
     /// What the bind had to do to get a usable window (bound one on another Space in place, moved one here,
     /// opened a new one), for the model; absent when it simply bound a window on this desktop.
     public var detail: String?
-    public init(targetId: String, app: CUBoundApp, window: CUWindowInfo, detail: String? = nil) {
+    /// The window holds web content (an `AXWebArea`: Safari, WKWebView apps, Chrome and the Chromium family): its pages
+    /// take no hover from a pointer that is not the real one while the app is in the background (measured for both
+    /// engines) — the daemon says so once per session per app (1.9.8).
+    public var webContent: Bool?
+    public init(targetId: String, app: CUBoundApp, window: CUWindowInfo, detail: String? = nil, webContent: Bool? = nil) {
         self.targetId = targetId
         self.app = app
         self.window = window
         self.detail = detail
+        self.webContent = webContent
     }
 }
 
@@ -160,9 +165,12 @@ public struct TargetUseWindowParams: Codable, Sendable, Equatable {
 public struct TargetUseWindowResult: Codable, Sendable, Equatable {
     public var window: CUWindowInfo
     public var detail: String?
-    public init(window: CUWindowInfo, detail: String? = nil) {
+    /// As `TargetBindResult.webContent` (1.9.8).
+    public var webContent: Bool?
+    public init(window: CUWindowInfo, detail: String? = nil, webContent: Bool? = nil) {
         self.window = window
         self.detail = detail
+        self.webContent = webContent
     }
 }
 

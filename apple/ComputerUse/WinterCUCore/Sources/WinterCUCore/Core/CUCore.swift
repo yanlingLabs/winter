@@ -302,10 +302,12 @@ public final class CUCore: @unchecked Sendable {
         if !launched, let existing = reusableTarget(sessionId: p.sessionId, pid: pid, selector: p.window) {
             CULog.bind.notice("bind \(appName, privacy: .public): reused \(existing.id, privacy: .public) (window \(existing.windowID, privacy: .public))")
             let facts = Self.bundleFacts(app.running)
+            let web = try await queues.run(pid) { [self] in hasWebContent(existing) }
             return TargetBindResult(targetId: existing.id,
                                     app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid, path: facts.path, version: facts.version),
                                     window: CUWindowInfo(id: existing.windowID, title: existing.windowTitle,
-                                                         frame: cuFrame(sys.window(id: existing.windowID)?.frame ?? .zero)))
+                                                         frame: cuFrame(sys.window(id: existing.windowID)?.frame ?? .zero)),
+                                    webContent: web ? true : nil)
         }
         monitor.watch(pid: pid)
 
@@ -367,11 +369,22 @@ public final class CUCore: @unchecked Sendable {
         let offDesktop = sys.window(id: chosen.id)?.onScreen == false && !outcome.captureOnly
         let costs = offDesktop ? Self.offDesktopCosts(appName) : nil
         let facts = Self.bundleFacts(app.running)
+        let web = try await queues.run(pid) { [self] in hasWebContent(target) }
         return TargetBindResult(targetId: target.id,
                                 app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid, path: facts.path, version: facts.version),
                                 window: CUWindowInfo(id: chosen.id, title: chosen.title, frame: cuFrame(chosen.frame)),
                                 detail: [found.reopened ? "opened the app's default window" : nil, outcome.detail, costs]
-                                    .compactMap { $0 }.joined(separator: "; ").nonEmptyOrNil)
+                                    .compactMap { $0 }.joined(separator: "; ").nonEmptyOrNil,
+                                webContent: web ? true : nil)
+    }
+
+    /// The bound window holds web content: an `AXWebArea` (found by the page reader's bounded walk). A background web page
+    /// takes no hover from a pointer that is not the real one — WebKit (measured 2026-10-10) and Chromium alike (run111,
+    /// 2026-10-11: a background Chrome page got the private path's moves, but neither a mouseenter nor a :hover, on either
+    /// route). On the target's queue.
+    func hasWebContent(_ t: CUTarget) -> Bool {
+        guard t.accessible, let win = try? windowElement(t) else { return false }
+        return firstWebArea(win) != nil
     }
 
     /// What working a window on another desktop costs (said at bind). Pure.
@@ -777,8 +790,9 @@ public final class CUCore: @unchecked Sendable {
             emit { $0.targetReleased(sessionId: t.sessionId, pid: t.pid, windowID: old) }
             emit { $0.targetBound(sessionId: t.sessionId, pid: t.pid, windowID: chosen.id, appName: t.appName, mirror: t.mirror) }
         }
+        let web = try await queues.run(t.pid) { [self] in hasWebContent(t) }
         return TargetUseWindowResult(window: CUWindowInfo(id: chosen.id, title: chosen.title, frame: cuFrame(chosen.frame)),
-                                     detail: outcome.detail)
+                                     detail: outcome.detail, webContent: web ? true : nil)
     }
 
     public func targetWindows(_ p: TargetWindowsParams) async throws -> TargetWindowsResult {

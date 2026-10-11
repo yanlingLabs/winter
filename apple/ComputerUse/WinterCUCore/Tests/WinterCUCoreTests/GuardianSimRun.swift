@@ -488,8 +488,9 @@ final class SimRun {
                 // The switcher switches at the release: a Tab seen counts from there when the release is seen (the contract).
                 if let t = tabSwitch { w.lock.withLock { if seen != false { w.switches[t].at = w.now }; w.switches[t].pending = false } }
                 let at = tabSeen && !secure ? tabAt : w.now
+                // A release with no Tab seen explains only a change heard within 0.7 s of it (the contract).
                 let i = tabSwitch ?? w.addSwitch(SimSwitch(at: at, app: true, desktop: false, dest: a, secureFlags: seen,
-                                                           lifeMs: seen == true ? 700 : 1000, keyboard: true))
+                                                           lifeMs: 700, keyboard: true))
                 w.schedule(after: land, "the switcher activates \(SimPid.name(a))") { [unowned self] in
                     self.landSwitch(i, a, why: "the user ⌘-Tabbed to \(SimPid.name(a))")
                 }
@@ -514,7 +515,11 @@ final class SimRun {
                                secureFlags: secure ? w.flagsSeenUnderSecure : nil, lifeMs: 1_600, keyboard: true)
             // The arrow unseen (swallowed, or Secure Event Input): the engine can't count the desktops the hold passed —
             // every desktop change heard during it and up to 450 ms after its release may be one of them (the contract).
-            if !seen || secure { sw.countlessUntil = downAt + releaseAfter + 450 }
+            if !seen || secure {
+                sw.countlessUntil = downAt + releaseAfter + 450
+                // Its release explains only a change heard within 0.7 s of it (the contract).
+                sw.lifeMs = releaseAfter + 700
+            }
             let i = w.addSwitch(sw)
             w.schedule(after: 40, "the arrow") {
                 if seen, !secure { w.key(.keyDown, flags: .maskControl, keycode: 124); w.key(.keyUp, flags: .maskControl, keycode: 124) }
@@ -671,6 +676,7 @@ final class SimRun {
             // A landing the engine may take for the agent's (the consented foreground, a raise of its own) uses up no input
             // of theirs (the contract: only a verdict of theirs uses one): it may still explain a change within its life.
             if !cause.isTheft { w.switches[i].landedAt = w.now }
+            w.mergeLandings(i)
             w.change(to: n, cause: cause, why: why)
         }
     }
@@ -696,6 +702,7 @@ final class SimRun {
             guard n.app != w.front || n.space != w.space else { return }
             let cause = w.userLandingCause(i, dest: n, why: why)
             if !cause.isTheft { w.switches[i].landedAt = w.now }
+            w.mergeLandings(i)
             w.change(to: n, cause: cause, why: why)
         }
     }
@@ -709,7 +716,12 @@ final class SimRun {
                 if pid == SimPid.coreServices { w.wins[761]?.shown = true; w.wins[761]?.space = w.space1 }
                 let n = w.landingPlace(pid)
                 guard n.app != w.front || n.space != w.space else { return }
-                let cause = w.untouchedCause(pid, indirect: true, why: why, newPlace: n)
+                var cause = w.untouchedCause(pid, indirect: true, why: why, newPlace: n)
+                // The engine was restoring the user to it a moment ago (their place since moved away): its coming forward
+                // may be that restore landing late — the engine can't tell (the contract's restore-late rule, 0.8 s).
+                if let r = w.restoreIssuedAt[pid], w.now - r < 950, !w.cands.contains(where: { $0.place.app == pid }) {
+                    cause = .either([cause, .agentDirect(pid, "a restore of the engine's toward it, landing late")], "it was being restored a moment ago")
+                }
                 w.change(to: n, cause: cause, why: "\(SimPid.name(pid)) comes forward — \(why)")
                 w.indirectSince[pid] = w.now
             }
