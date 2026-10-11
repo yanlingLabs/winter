@@ -1,0 +1,20 @@
+[
+  {
+    "attempt": 1,
+    "fixture": "spikes/cowork-hvf/out/fixture-3oezhfzj",
+    "exitCode": 0,
+    "harnessPassed": false,
+    "reasonNotCredited": "Regular PL011 console unavailable; guest telemetry absent",
+    "workerLogSha256": "325cd4d014d11406fbb070e6347b6e427c701cc4b126de9c811fb9ab372acf9d",
+    "nativePatchSha256": "a6e26d15693007d42df5c60155055b09c69897584665d227c8ee9c720d3cfb31"
+  },
+  {
+    "attempt": 2,
+    "fixture": "spikes/cowork-hvf/out/fixture-8ox8lywj",
+    "exitCode": 0,
+    "harnessPassed": false,
+    "reasonNotCredited": "Guest kmsg rate limiting omitted phase/completion telemetry",
+    "workerLogSha256": "8a91bcbc333e0ac0d9de3e5e5d805877eb3c7059f49ecf759763f3a97ac5cd2d",
+    "nativePatchSha256": "a6e26d15693007d42df5c60155055b09c69897584665d227c8ee9c720d3cfb31"
+  }
+]

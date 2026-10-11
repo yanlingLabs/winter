@@ -17,6 +17,12 @@
 /* Seatbelt SPI also used by Winter's OfficeHelper bridge. Not a stable public SDK API. */
 extern int sandbox_init_with_parameters(const char *, uint64_t, const char *const [], char **);
 extern int sandbox_check(pid_t, const char *, int);
+#ifdef COWORK_FIXTURE_RECLAIM
+extern int32_t krun_enable_cowork_fixture_reclaim(uint32_t);
+#define FIXTURE_RUN_MODE "--run-reclaim-fixture"
+#else
+#define FIXTURE_RUN_MODE "--run-fixture"
+#endif
 
 static void require(int yes, const char *operation) {
     if (!yes) { fprintf(stderr, "fixture refused: %s (errno=%d)\n", operation, errno); exit(1); }
@@ -35,7 +41,7 @@ static void *sample(void *unused) {
     }
 }
 int main(int argc, char **argv) {
-    require(argc == 5 && (!strcmp(argv[1], "--run-fixture") || !strcmp(argv[1], "--sandbox-check")), "explicit fixture mode required");
+    require(argc == 5 && (!strcmp(argv[1], FIXTURE_RUN_MODE) || !strcmp(argv[1], "--sandbox-check")), "explicit fixture mode required");
     char executable[4096], resolved[4096], kernel[4096], initramfs[4096]; uint32_t length = sizeof executable;
     require(_NSGetExecutablePath(executable, &length) == 0 && realpath(executable, resolved), "worker path");
     char *slash = strrchr(resolved, '/'); require(slash != NULL, "worker directory"); *slash = 0;
@@ -77,8 +83,17 @@ int main(int argc, char **argv) {
     api(krun_set_vm_config(ctx, 2, 768), "bounded configuration");
     api(krun_disable_implicit_vsock(ctx), "disable implicit vsock");
     const char *env[] = { NULL }; api(krun_set_env(ctx, env), "empty environment");
+#ifdef COWORK_FIXTURE_RECLAIM
+    api(krun_disable_implicit_console(ctx), "disable implicit console");
+    api(krun_add_serial_console_default(ctx, -1, 1), "PL011 output-only serial");
+    api(krun_set_kernel(ctx, argv[3], KRUN_KERNEL_FORMAT_RAW, argv[4],
+        "console=ttyAMA0 keep_bootcon printk.devkmsg=on rdinit=/init panic=1 reboot=k loglevel=4"), "external kernel/initramfs");
+    api(krun_enable_cowork_fixture_reclaim(ctx), "explicit fixture reclaim opt-in");
+    fprintf(stderr,"{\"kind\":\"reclaim_profile\",\"console\":\"PL011\",\"implicitConsole\":false,\"fixtureOnly\":true}\n");
+#else
     api(krun_set_kernel(ctx, argv[3], KRUN_KERNEL_FORMAT_RAW, argv[4],
         "console=hvc0 rdinit=/init panic=1 reboot=k loglevel=4"), "external kernel/initramfs");
+#endif
     fprintf(stderr, "{\"kind\":\"worker\",\"pid\":%d,\"vcpus\":2,\"ramMiB\":768,\"networkDevices\":0,\"vsock\":false,\"hostShares\":0}\n", getpid());
     api(krun_start_enter(ctx), "start");
     return 1; /* Successful krun_start_enter owns the process and never returns. */

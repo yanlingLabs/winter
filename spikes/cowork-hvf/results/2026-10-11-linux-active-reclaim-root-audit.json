@@ -1,0 +1,22 @@
+{
+  "epochs": 20,
+  "remappedBytesCumulative": 1210056704,
+  "rangeOperations": 296,
+  "parkMicrosMin": 180,
+  "parkMicrosMax": 10217,
+  "cycles": [
+    {
+      "cycle": 1,
+      "footprintReturnedMiB": 233.922
+    },
+    {
+      "cycle": 2,
+      "footprintReturnedMiB": 271.391
+    },
+    {
+      "cycle": 3,
+      "footprintReturnedMiB": 238.125
+    }
+  ],
+  "scope": "restricted Linux/HVF fixture; no production device, encryption or whole Cowork claim"
+}

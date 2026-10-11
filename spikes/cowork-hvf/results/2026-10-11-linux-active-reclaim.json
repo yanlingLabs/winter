@@ -1,0 +1,128 @@
+{
+  "fixture": "spikes/cowork-hvf/out/fixture-fo4oa4c5",
+  "exitCode": 0,
+  "timedOut": false,
+  "sandboxPassed": true,
+  "linuxBoot": {
+    "kind": "linux_boot",
+    "release": "6.18.35",
+    "machine": "aarch64",
+    "bootId": "ada13c5b-2a0b-4795-8dcc-f31f0ff76cf6",
+    "channel": "stdout",
+    "hostElapsedSeconds": 0.746
+  },
+  "boundedBaselinePassed": true,
+  "deviceInventoryPassed": true,
+  "freePageReportingNegotiated": true,
+  "memory": [
+    {
+      "cycle": 1,
+      "touchedFootprintBytes": 429245376,
+      "postFreeFootprintBytes": 183960368,
+      "observedFootprintDropBytes": 245285008
+    },
+    {
+      "cycle": 2,
+      "touchedFootprintBytes": 429540336,
+      "postFreeFootprintBytes": 144966424,
+      "observedFootprintDropBytes": 284573912
+    },
+    {
+      "cycle": 3,
+      "touchedFootprintBytes": 396788744,
+      "postFreeFootprintBytes": 147096344,
+      "observedFootprintDropBytes": 249692400
+    }
+  ],
+  "activeReturnVerified": true,
+  "productionReady": false,
+  "pins": {
+    "libkrun": {
+      "url": "https://github.com/containers/libkrun.git",
+      "tag": "v1.19.6",
+      "revision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+      "lockSha256": "a73d2ee0e4f2d2b63c7b4a00d2639076e4f7884a40cec495d5d82eed14dcd873",
+      "features": [],
+      "defaultFeatures": false
+    },
+    "rust": {
+      "version": "1.90.0",
+      "url": "https://static.rust-lang.org/dist/rust-1.90.0-aarch64-apple-darwin.tar.xz",
+      "sha256": "9772d20d5cd736079a0ee84d00e6697cf2084f0fc4621b011e24e6f2d08d2d7f"
+    },
+    "kernel": {
+      "cachedPath": "../cowork-vm/out/assets/vmlinux-apple-6.18.35",
+      "sha256": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d",
+      "version": "6.18.35-197-debug",
+      "format": "RAW",
+      "provenance": "Existing cowork-vm/pins.json Apple-recommended Kata archive; verify cached member before copying."
+    },
+    "zig": {
+      "cachedPath": "../cowork-vm/out/tools/zig-aarch64-macos-0.14.1/zig",
+      "version": "0.14.1",
+      "archiveSha256": "39f3dc5e79c22088ce878edc821dedb4ca5a1cd9f5ef915e9b3cc3053e8faefa"
+    }
+  },
+  "artifactDigests": {
+    "cowork-hvf-worker": "9e80bf177a29703af75a3b45b612c27b40db75eb4c886c4519990e79f3243174",
+    "libkrun.1.dylib": "2b894daa32bd7c4a7f8cde2ed51b7ca1899bf5df36aedafe029a2c54f3193488",
+    "kernel": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d",
+    "initramfs.cpio": "1b90bd8546f1ffa4487165756f6dc513062749aba36a692cc07339c90db26f7b"
+  },
+  "reclaimPatchSha256": "a6e26d15693007d42df5c60155055b09c69897584665d227c8ee9c720d3cfb31",
+  "profile": "reviewed-linux-hvf-reclaim-fixture",
+  "wfeAbsoluteDeadlineCaveat": true,
+  "timerLatencyGuarantee": false,
+  "boundedReclaimRunPassed": true,
+  "reclaimReceipts": {
+    "receiptOrderingPassed": true,
+    "errors": [],
+    "epochCount": 20,
+    "spanCount": 296,
+    "cumulativeReplacedBytes": 1210056704,
+    "sizesBytes": {
+      "4194304": 281,
+      "2097152": 15
+    },
+    "dispositions": {
+      "replaced": 20
+    },
+    "maxPauseAckMicros": 1769,
+    "maxParkThroughResumeMicros": 10217,
+    "afterGuestFree": [
+      {
+        "cycle": 1,
+        "spanCount": 100,
+        "cumulativeReplacedBytes": 417333248,
+        "firstUnmapAfterFreeSeconds": 0.878,
+        "heartbeatsDuringWindow": 10
+      },
+      {
+        "cycle": 2,
+        "spanCount": 66,
+        "cumulativeReplacedBytes": 264241152,
+        "firstUnmapAfterFreeSeconds": 2.017,
+        "heartbeatsDuringWindow": 10
+      },
+      {
+        "cycle": 3,
+        "spanCount": 64,
+        "cumulativeReplacedBytes": 260046848,
+        "firstUnmapAfterFreeSeconds": 2.019,
+        "heartbeatsDuringWindow": 10
+      }
+    ],
+    "timerLatencyGuarantee": false
+  },
+  "guestReuseIntegrityPassed": true,
+  "regularGuestConsoleWorking": false,
+  "telemetrySink": "guest-kmsg-via-PL011-earlycon",
+  "kernelLogRateLimitDisabledForFixture": true,
+  "verificationScope": "restricted-linux-HVF/PL011-earlycon+RNG+balloon;768MiB;2vCPU;bounded-fixture-only",
+  "verificationSource": "Root independently audited raw events and exact artifact/patch hashes",
+  "stageActiveReturnVerified": false,
+  "fullResourceGatePassed": false,
+  "rootAuditArtifact": "results/2026-10-11-linux-active-reclaim-root-audit.json",
+  "originalStageResultArtifact": "results/2026-10-11-linux-active-reclaim-stage-result.json",
+  "guestCompleteIsHistoricalStageOutput": true
+}

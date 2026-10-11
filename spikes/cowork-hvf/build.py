@@ -30,13 +30,18 @@ def cpio(entries):
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument("--instrument-reports",action="store_true")
+    profile=parser.add_mutually_exclusive_group()
+    profile.add_argument("--instrument-reports",action="store_true")
+    profile.add_argument("--reclaim",action="store_true")
     args=parser.parse_args()
     if os.uname().sysname != "Darwin" or os.uname().machine != "arm64":
         raise RuntimeError("Apple Silicon macOS required")
     OUT.mkdir(exist_ok=True)
-    source = OUT / ("libkrun-instrumented" if args.instrument_reports else "libkrun")
-    artifacts=OUT/"instrumented" if args.instrument_reports else OUT
+    if args.reclaim:
+        from prepare_reclaim import prepare
+        source=prepare()
+    else: source = OUT / ("libkrun-instrumented" if args.instrument_reports else "libkrun")
+    artifacts=OUT/("reclaim" if args.reclaim else "instrumented") if args.reclaim or args.instrument_reports else OUT
     artifacts.mkdir(exist_ok=True)
     if not source.exists():
         checked(["git", "clone", "--depth", "1", "--branch", PINS["libkrun"]["tag"], PINS["libkrun"]["url"], source])
@@ -53,7 +58,7 @@ def main():
             raise RuntimeError("Unexpected changes or untracked files in instrumentation source")
         if subprocess.check_output(["git","-C",str(source),"diff","--binary"]) != patch.read_bytes():
             raise RuntimeError("Instrumentation source differs from reviewed patch")
-    elif subprocess.check_output(["git", "-C", str(source), "status", "--porcelain"], text=True).strip():
+    elif not args.reclaim and subprocess.check_output(["git", "-C", str(source), "status", "--porcelain"], text=True).strip():
         raise RuntimeError("libkrun source modified; baseline must be unpatched")
     archive = OUT / "rust-1.90.0-aarch64-apple-darwin.tar.xz"
     if not archive.exists():
@@ -80,7 +85,8 @@ def main():
     shutil.copy2(source / "target/debug/libkrun.dylib", library)
     checked(["/usr/bin/install_name_tool", "-id", "@rpath/libkrun.1.dylib", library])
     checked(["/usr/bin/codesign", "--force", "--sign", "-", library])
-    checked(["/usr/bin/clang", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations", "-I", source / "include", ROOT / "worker.c", library, "-Wl,-rpath,@executable_path", "-o", artifacts / "cowork-hvf-worker"])
+    fixture_defines=["-DCOWORK_FIXTURE_RECLAIM=1"] if args.reclaim else []
+    checked(["/usr/bin/clang", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations", *fixture_defines,"-I", source / "include", ROOT / "worker.c", library, "-Wl,-rpath,@executable_path", "-o", artifacts / "cowork-hvf-worker"])
     checked(["/usr/bin/codesign", "--force", "--sign", "-", "--identifier", "dev.cowork.hvf.fixture-worker", "--entitlements", ROOT / "worker.entitlements", artifacts / "cowork-hvf-worker"])
     zig = (ROOT / PINS["zig"]["cachedPath"]).resolve()
     verify(ROOT / "../cowork-vm/out/tools/zig.tar.xz", PINS["zig"]["archiveSha256"])
@@ -88,7 +94,8 @@ def main():
         raise RuntimeError("Unexpected Zig version")
     zig_env = os.environ.copy()
     zig_env.update(ZIG_GLOBAL_CACHE_DIR=str(OUT/"zig-global-cache"), ZIG_LOCAL_CACHE_DIR=str(OUT/"zig-local-cache"))
-    checked([zig, "cc", "-target", "aarch64-linux-musl", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-pthread", ROOT / "init.c", "-o", artifacts / "init"], env=zig_env)
+    guest_defines=["-DCOWORK_FIXTURE_SERIAL_LOG=1"] if args.reclaim else []
+    checked([zig, "cc", "-target", "aarch64-linux-musl", "-static", "-O2", "-Wall", "-Wextra", "-Werror", *guest_defines,"-pthread", ROOT / "init.c", "-o", artifacts / "init"], env=zig_env)
     kernel = (ROOT / PINS["kernel"]["cachedPath"]).resolve()
     verify(kernel, PINS["kernel"]["sha256"])
     shutil.copy2(kernel, artifacts / "kernel")
@@ -99,6 +106,7 @@ def main():
         ("TRAILER!!!", 0, b"", 0, 0)]))
     info={"pins":PINS, "librarySha256":digest(library), "workerSha256":digest(artifacts/"cowork-hvf-worker"), "initSha256":digest(artifacts/"init"), "initramfsSha256":digest(artifacts/"initramfs.cpio")}
     if args.instrument_reports: info["instrumentationPatchSha256"]=digest(patch)
+    if args.reclaim: info["reclaimPatchSha256"]=digest(ROOT/"patches/0002-proposed-active-reclaim.patch")
     (artifacts / "build.json").write_text(json.dumps(info, indent=2) + "\n")
 
 if __name__ == "__main__": main()

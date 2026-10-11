@@ -13,6 +13,18 @@
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+#ifdef COWORK_FIXTURE_SERIAL_LOG
+#include <stdarg.h>
+#include <sys/sysmacros.h>
+static int telemetry_fd=-1;
+static int fixture_printf(const char *format,...) {
+    char line[4096];memcpy(line,"<0>",3);va_list args;va_start(args,format);
+    int n=vsnprintf(line+3,sizeof(line)-3,format,args);va_end(args);
+    if(n<0 || (size_t)n>=sizeof(line)-3 || telemetry_fd<0) return -1;
+    ssize_t written=write(telemetry_fd,line,(size_t)n+3);return written==n+3?n:-1;
+}
+#define printf fixture_printf
+#endif
 #define MIB (1024UL * 1024UL)
 static atomic_uint heartbeat = 0;
 static void *work(void *unused) {
@@ -44,6 +56,13 @@ int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     mkdir("/proc",0755); mkdir("/sys",0755);
     if (mount("proc","/proc","proc",0,NULL) || mount("sysfs","/sys","sysfs",0,NULL)) fail("mount");
+#ifdef COWORK_FIXTURE_SERIAL_LOG
+    /* Upstream PL011 earlycon works, but its FDT does not bind the regular console here.
+     * Public guest kmsg writes use that same serial path, without virtio-console RAM threads. */
+    if(mknod("/dev/kmsg",S_IFCHR|0600,makedev(1,11)) && access("/dev/kmsg",F_OK)) fail("kmsg node");
+    telemetry_fd=open("/dev/kmsg",O_WRONLY);if(telemetry_fd<0) fail("kmsg open");
+    printf("{\"kind\":\"guest_telemetry\",\"sink\":\"guest-kmsg-via-PL011-earlycon\",\"regularConsoleOpened\":false}\n");
+#endif
     struct utsname u; if (uname(&u)) fail("uname"); char boot[80]; text("/proc/sys/kernel/random/boot_id",boot,sizeof boot);
     printf("{\"kind\":\"linux_boot\",\"release\":\"%s\",\"machine\":\"%s\",\"bootId\":\"%s\"}\n",u.release,u.machine,boot);
     DIR *dir = opendir("/sys/bus/virtio/devices"); if (!dir) fail("virtio inventory"); struct dirent *ent;
@@ -58,8 +77,10 @@ int main(void) {
     for(unsigned cycle=1;cycle<=3;cycle++) {
         uint64_t *p=mmap(NULL,256*MIB,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
         if(p==MAP_FAILED) fail("bounded allocation"); const uint64_t value=0x12345678abcdef00ULL+cycle;
+        for(size_t i=0;i<256*MIB/8;i++) if(p[i]!=0) fail("anonymous reuse zero fill");
         for(size_t i=0;i<256*MIB/8;i++) p[i]=value;
         for(size_t i=0;i<256*MIB/8;i++) if(p[i]!=value) fail("allocated integrity");
+        printf("{\"kind\":\"guest_reuse\",\"cycle\":%u,\"anonymousZeroFill\":true,\"writtenIntegrity\":true,\"bytes\":268435456}\n",cycle);
         printf("{\"kind\":\"guest_touched\",\"cycle\":%u,\"bytes\":268435456,\"liveBytes\":33554432}\n",cycle);
         vmstat(cycle,"touched");
         sleep(3); if(munmap(p,256*MIB)) fail("free");

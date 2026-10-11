@@ -1,5 +1,5 @@
 {
-  "status": "review fixes frozen; no patched VM run; independent re-review pending",
+  "status": "Astra cleared exact frozen patch for bounded experiment; restricted active return independently verified",
   "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
   "patch": "spikes/cowork-hvf/patches/0002-proposed-active-reclaim.patch",
   "patchSha256": "a6e26d15693007d42df5c60155055b09c69897584665d227c8ee9c720d3cfb31",
@@ -9,7 +9,7 @@
   "simulationTestsPassed": true,
   "testCommand": "python3 spikes/cowork-hvf/prepare_reclaim.py && python3 spikes/cowork-hvf/test_reclaim.py",
   "cargoCheckCommand": "PATH=\"$PWD/spikes/cowork-hvf/out/rust/bin:$PATH\" CARGO_HOME=\"$PWD/spikes/cowork-hvf/out/cargo-home\" cargo check --manifest-path spikes/cowork-hvf/out/libkrun-reclaim/Cargo.toml -p libkrun --locked --no-default-features --jobs 4",
-  "activeReturnVerified": false,
+  "activeReturnVerified": true,
   "productionReady": false,
   "nativeLoopAndActualHvfRaceValidated": false,
   "actualFrqUnitTestCount": 6,
@@ -19,5 +19,10 @@
   "planningRejectionAcknowledgedAsNoop": true,
   "emptyKickDoesNotInventUsedEntries": true,
   "frqReadinessAndWholeRingSpansCheckedBeforeLenPopAndAck": true,
-  "malformedFrqDoesNotMapOrAcknowledge": true
+  "malformedFrqDoesNotMapOrAcknowledge": true,
+  "verificationScope": "restricted-linux-HVF/PL011-earlycon+RNG+balloon;768MiB;2vCPU;bounded-fixture-only",
+  "fullResourceGatePassed": false,
+  "boundedExperimentArtifact": "results/2026-10-11-linux-active-reclaim.json",
+  "restrictedNativeLoopExecuted": true,
+  "generalHvfRaceValidationComplete": false
 }
