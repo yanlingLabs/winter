@@ -121,6 +121,9 @@ public struct CUMoveQuery: Equatable, Sendable {
     /// Secure Event Input is on: the session tap can't see the user's keys, so their input can't be ruled out (round 10:
     /// an untouched app is never sent back then).
     public var secureInput: Bool
+    /// A change heard only after something else came forward (`adoptPast`): when its desktop is not known (the app has
+    /// windows on several), no desktop switch can be shown to have made it.
+    var pastChange = false
 
     public init(app: pid_t?, space: UInt64?, since: TimeInterval? = nil, from: CUGuardedView? = nil,
                 appStartedAt: TimeInterval? = nil, appBundle: String? = nil, inputObservable: Bool = true, clickAt: TimeInterval? = nil,
@@ -684,8 +687,12 @@ public struct CUFocusGuardianCore: Sendable {
         }
         // I1 — an app the agent never touched (during a visit, what it brings up is the visit's: below).
         if !front && shown.isEmpty, !visit {
+            // (A past change heard late, its desktop unknown: a desktop switch can't be shown to have made it — it is
+            // the switch of what came after, found by the model-based test: seed 418, a swipe adopted the app that came
+            // forward on its own 5 ms before the swipe's own landing, and the landing was then undone.)
+            let desktopKnown = q.space != nil || !q.pastChange
             if let i = input.explanation(from: from, after: -.infinity, raiseAfter: -.infinity, now: upTo,
-                                         app: appMoved, desktop: desktopMoved, front: app, targetedFirst: false) {
+                                         app: appMoved, desktop: desktopMoved && desktopKnown, front: app, targetedFirst: false) {
                 return (.user("their input that switches apps or desktops, to an app the agent never touched"), .instant(i, keep: true))
             }
             // Its INDIRECT effect, sent back ONLY when clearly the agent's (round 10, the user's ruling): no key or click
@@ -877,7 +884,8 @@ public struct CUFocusGuardianCore: Sendable {
             // moved, and the visit's end brings them back THERE (found by the model-based test: their ⌘-Tab during the
             // visit's way there, heard after the visit arrived, and the end took them to where the visit began).
             guard app != visitApp else { return nil }
-            let q = CUMoveQuery(app: app, space: space, inputObservable: inputObservable, hardwareAt: hardwareAt)
+            var q = CUMoveQuery(app: app, space: space, inputObservable: inputObservable, hardwareAt: hardwareAt)
+            q.pastChange = true
             let (owner, use) = decide(q, place: view, before: lastSeen ?? view, upTo: now, now: now)
             guard case .user = owner, case .instant(let at, _)? = use else { return nil }
             input.use(at, heardAt: now)
@@ -899,7 +907,8 @@ public struct CUFocusGuardianCore: Sendable {
         // change is judged: the model-based test, the user's own launch coming forward 3 ms before a restore's landing.)
         let liveRestored = live.app.flatMap { restoredAt[$0] }.map { now - $0 <= Self.restoreLateWindow } ?? false
         if !clicked, !liveRestored, live.app == view.app, live.space == nil || view.space == nil || live.space == view.space { return nil }
-        let q = CUMoveQuery(app: app, space: space, inputObservable: inputObservable, hardwareAt: hardwareAt)
+        var q = CUMoveQuery(app: app, space: space, inputObservable: inputObservable, hardwareAt: hardwareAt)
+            q.pastChange = true
         let (owner, use) = decide(q, place: view, before: lastSeen ?? view, upTo: now, now: now)
         switch owner {
         case .user:

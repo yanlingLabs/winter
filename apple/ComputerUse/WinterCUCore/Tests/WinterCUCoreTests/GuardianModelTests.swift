@@ -74,6 +74,25 @@ final class GuardianModelTests: XCTestCase {
         XCTAssertLessThan(Double(totals.unchecked), Double(totals.changes) * 0.05, "unchecked: \(totals.words)")
     }
 
+    /// Seeds KNOWN to fail (round 11's first item), pinned so CI meets them: each must still fail (an expected failure,
+    /// shown as such), and a seed that passes is reported, to come off the list.
+    static let knownFailing: [(seed: Int, what: String)] = [
+        (338, "I3: a user key reached T with no reroute while T was in the background (a blip ending during a theft)"),
+        (508, "I2: the engine's place U, the user's P — Secure Event Input with the modifiers unseen"),
+        (556, "I2: the engine's place U, the user's X — Secure Event Input with the modifiers unseen"),
+    ]
+
+    func testKnownFailingSeedsAreStillKnown() async {
+        for (seed, what) in Self.knownFailing {
+            let r = await SimRun.execute(SimPlan.generate(seed: UInt64(seed), count: Self.steps))
+            if let v = r.violation {
+                XCTExpectFailure("KNOWN, round 11: seed \(seed) — \(what)", strict: true) { XCTFail("seed \(seed): \(v)") }
+            } else {
+                XCTFail("seed \(seed) passes now — take it off GuardianModelTests.knownFailing")
+            }
+        }
+    }
+
     // MARK: the reviewer's findings, as plans (each over a dozen seeds: the world's own timing varies)
 
     /// Runs `plan` with seeds 1…`seeds`; returns the first violation (with its trace) or nil.
