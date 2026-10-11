@@ -180,6 +180,24 @@ final class HeadlessHostTests: XCTestCase {
         XCTAssertEqual(fake.sent.map(\.method), ["Page.createIsolatedWorld", "Runtime.evaluate"])
     }
 
+    /// A click that navigates ends the winter world before the daemon hears of it: its next call there is
+    /// answered in the browser's own words (what the daemon retries on), unsubscribed events or not.
+    func testAWinterWorldThatEndedIsAnsweredInTheBrowsersWords() {
+        _ = open("w-1")
+        fake.sendAnswer = { _ in (.ok, #"{"executionContextId":7}"#) }
+        _ = run(.cdpSend(tabId: "w-1", method: "Page.createIsolatedWorld",
+                         params: .object(["frameId": .string("F"), "worldName": .string("winter")]), cdpSessionId: nil))
+        fake.eventObservers[ObjectIdentifier(fake.created[0].key)]?("Runtime.executionContextDestroyed",
+                                                                    Data(#"{"executionContextId":7}"#.utf8), nil)
+        let reply = run(.cdpSend(tabId: "w-1", method: "Runtime.callFunctionOn",
+                                 params: .object(["functionDeclaration": .string("f"), "executionContextId": .number(7)]),
+                                 cdpSessionId: nil))
+        guard case .failure(let code, let message, _)? = reply else { return XCTFail("expected a refusal") }
+        XCTAssertEqual(code, .notAllowed)
+        XCTAssertTrue(message.hasPrefix("Cannot find context with specified id"), message)
+        XCTAssertEqual(fake.sent.map(\.method), ["Page.createIsolatedWorld"], "nothing refused reaches CEF")
+    }
+
     func testAnOrdinaryResultLeavesRawAndAnUnheldTabIsNotLive() {
         _ = open("w-1")
         fake.sendAnswer = { _ in (.ok, #"{"data":"AAAA"}"#) }
