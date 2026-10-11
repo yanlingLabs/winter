@@ -62,6 +62,14 @@ review work includes native output teardown/descriptor ownership, unintended
 unprotected Code observation limits, real SDK callback ordering, and VM/admission
 recovery after worker loss or sleep. An accepted specification, merged transport,
 compiled helper or passing fixture is not a claim those integrations are complete.
+The admission ledger's v2 migration preserves the accounting phase before a
+heartbeat-only interruption. A fresh heartbeat from the exact still-live owner
+and verified home restores that phase, including draining; it neither frees
+capacity nor establishes guest readiness/disk ownership. Harder uncertainty and
+legacy rows with no saved phase remain blocked. Verified stop evidence is bound
+to the exact owner/incarnation independently of wall-clock changes. A native
+worker service still needs to supply that protected evidence in production;
+dead daemon PIDs alone are not substituted for VM termination.
 Tests use injected temporary homes, grants, credentials and coordination. Real-VM
 experiments remain opt-in, disposable and sequential; none touches the live
 Winter installation or deliberately creates host memory pressure.

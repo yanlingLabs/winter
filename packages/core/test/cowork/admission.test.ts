@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -125,10 +126,14 @@ test("owner nonce and process-start bindings cannot be changed, including by a r
   code(()=>ledger.heartbeat(record.admissionId,owner),"owner_mismatch");
   code(()=>reserve(ledger,home,{...owner,startToken:"reused-pid-start"},"workspace-three","third",1),"owner_mismatch");
 });
-test("state transitions and heartbeats do not turn uncertainty into an adopted running VM",()=>{
+test("heartbeats restore only heartbeat-interrupted accounting; explicit uncertainty needs separate recovery",()=>{
   const f=fixture(),ledger=f.open(),home=f.makeHome("home-one"),owner=f.makeOwner(111);ledger.registerHome(home,home.canonicalPath);
   const record=reserve(ledger,home,owner);ledger.transition(record.admissionId,owner,"reserved","booting");
   ledger.transition(record.admissionId,owner,"booting","running");f.setTime(2001);ledger.reconcile();
+  expect(ledger.get(record.admissionId).heartbeatResumeState).toBe("running");
+  expect(ledger.heartbeat(record.admissionId,owner).state).toBe("running");
+  ledger.transition(record.admissionId,owner,"running","uncertain");
+  f.setTime(4002); ledger.reconcile();
   expect(ledger.heartbeat(record.admissionId,owner).state).toBe("uncertain");
   code(()=>ledger.transition(record.admissionId,owner,"uncertain","running"),"transition_refused");
   expect(ledger.transition(record.admissionId,owner,"uncertain","draining").state).toBe("draining");
@@ -214,3 +219,51 @@ finally{ledger.close();}
     expect(results.map(row=>row.result).sort()).toEqual(["admitted","capacity_exceeded"]);expect(ledger.listActive()).toHaveLength(1);
   } finally { for(const child of processes) if(child.exitCode===null)child.kill();await Promise.all(processes.map(child=>child.exited)); }
 },10_000);
+
+
+test("sleep and backward clocks preserve each accounting phase across independent handles",()=>{
+  for (const phase of ["reserved","booting","running","draining"] as const) {
+    for (const now of [900, 2001]) {
+      const f=fixture(),ledger=f.open(),home=f.makeHome("home-one"),owner=f.makeOwner(111);
+      ledger.registerHome(home,home.canonicalPath); const record=reserve(ledger,home,owner);
+      if (phase!=="reserved") ledger.transition(record.admissionId,owner,"reserved","booting");
+      if (phase==="running" || phase==="draining") ledger.transition(record.admissionId,owner,"booting","running");
+      if (phase==="draining") ledger.transition(record.admissionId,owner,"running","draining");
+      f.setTime(now); ledger.reconcile(); ledger.reconcile();
+      expect(ledger.get(record.admissionId)).toMatchObject({state:"uncertain",heartbeatResumeState:phase,uncertainReason:"heartbeat-expired"});
+      const resumed=f.open().heartbeat(record.admissionId,owner);
+      expect(resumed).toMatchObject({state:phase,heartbeatResumeState:null,uncertainReason:null,releasedAt:null});
+      expect(resumed.commitment).toEqual(record.commitment);
+      code(()=>reserve(ledger,home,f.makeOwner(222),"workspace-one","new-owner",512,2),"workspace_busy");
+    }
+  }
+});
+test("a harder owner uncertainty cannot be overwritten by a later heartbeat gap",()=>{
+  const f=fixture(),ledger=f.open(),home=f.makeHome("home-one"),owner=f.makeOwner(111);
+  ledger.registerHome(home,home.canonicalPath); const record=reserve(ledger,home,owner);
+  f.setTime(2001); ledger.reconcile();
+  f.processes.set(owner.pid,{state:"unknown"}); ledger.reconcile();
+  f.processes.set(owner.pid,{state:"alive",startToken:owner.startToken,bootId:owner.bootId}); ledger.reconcile();
+  expect(ledger.heartbeat(record.admissionId,owner)).toMatchObject({state:"uncertain",heartbeatResumeState:null,uncertainReason:"owner-unknown"});
+});
+test("backward time alone cannot release admission but cannot invalidate a genuine exact stop proof",()=>{
+  const f=fixture(),ledger=f.open(),home=f.makeHome("home-one"),owner=f.makeOwner(111);
+  ledger.registerHome(home,home.canonicalPath); const record=reserve(ledger,home,owner);
+  f.setTime(900); ledger.reconcile();
+  const receipt=f.receipt(record); code(()=>ledger.release(record.admissionId,owner,receipt),"stop_unconfirmed");
+  f.proofs.add(receipt.confirmationId);
+  const result=ledger.release(record.admissionId,owner,receipt);
+  expect(result.record).toMatchObject({state:"released",heartbeatResumeState:null});
+  expect(result.diskOwnershipVerified).toBe(false);
+});
+test("v1 ledger migrates without inventing a prior phase for legacy uncertainty",()=>{
+  const f=fixture(),ledger=f.open(),home=f.makeHome("home-one"),owner=f.makeOwner(111);
+  ledger.registerHome(home,home.canonicalPath); const record=reserve(ledger,home,owner);
+  ledger.transition(record.admissionId,owner,"reserved","uncertain");
+  ledger.close(); handles.splice(handles.indexOf(ledger),1);
+  const db=new Database(f.path,{readwrite:true});
+  db.exec("ALTER TABLE admission_records DROP COLUMN heartbeat_resume_state; PRAGMA user_version=1"); db.close();
+  const migrated=f.open();
+  expect(migrated.get(record.admissionId)).toMatchObject({state:"uncertain",heartbeatResumeState:null,commitment:record.commitment});
+  expect(migrated.heartbeat(record.admissionId,owner).state).toBe("uncertain");
+});

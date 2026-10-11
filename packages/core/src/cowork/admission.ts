@@ -39,6 +39,8 @@ export interface AdmissionProbes {
   hostIdentity(): HostIdentity | null;
   homeIdentity(atPath: string): HomeObservation | null;
   processIdentity(pid: number): ProcessObservation | null;
+  /** Validate the exact protected native evidence and incarnation, not just a
+   * confirmation ID or wall-clock age. Clock changes must not forge/erase proof. */
   verifyStopReceipt(receipt: StopReceipt, record: AdmissionRecord): boolean;
   /** A changed token alone is insufficient: this probe confirms the old OS boot actually ended. */
   confirmsPreviousBootEnded(previousBootId: string, current: HostIdentity): boolean;
@@ -51,6 +53,8 @@ export interface AdmissionRecord {
   createdAt: number; updatedAt: number; heartbeatAt: number; reconciledAt: number | null;
   uncertainReason: string | null; releasedAt: number | null; releaseReason: "confirmed-stop" | "trusted-new-boot" | null;
   stopConfirmationId: string | null;
+  /** Accounting phase before a heartbeat-only interruption; never VM readiness proof. */
+  heartbeatResumeState: "reserved" | "booting" | "running" | "draining" | null;
 }
 export interface AdmissionLedgerOptions {
   path: string; domainId: string; probes: AdmissionProbes;
@@ -141,7 +145,7 @@ export class CoworkAdmissionLedger {
   }
   private initialize(db: Database, host: HostIdentity): void {
     const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
-    if (version > 1) throw new AdmissionError("newer_schema");
+    if (version > 2) throw new AdmissionError("newer_schema");
     if (version === 0) {
       if (db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()) throw new AdmissionError("ledger_corrupt");
       db.exec(`
@@ -154,6 +158,10 @@ export class CoworkAdmissionLedger {
       `);
       db.run("INSERT INTO admission_meta VALUES(1,?,?,?,?)", [this.options.domainId, host.machineId, host.installationId, this.path]);
       db.run("PRAGMA user_version=1");
+    }
+    if (version < 2) {
+      db.exec("ALTER TABLE admission_records ADD COLUMN heartbeat_resume_state TEXT CHECK(heartbeat_resume_state IN ('reserved','booting','running','draining'))");
+      db.run("PRAGMA user_version=2");
     }
     const meta = db.query<Row, []>("SELECT * FROM admission_meta WHERE singleton=1").get();
     if (!meta || meta.domain_id !== this.options.domainId || meta.machine_id !== host.machineId || meta.installation_id !== host.installationId || meta.canonical_path !== this.path) throw new AdmissionError("ledger_identity_mismatch");
@@ -251,7 +259,10 @@ export class CoworkAdmissionLedger {
     try {
       const state=row.state as AdmissionState; if (!STATES.has(state)) throw new Error();
       const resourceObservation=JSON.parse(row.resource_json as string) as ResourceObservation;
-      return {admissionId:id(row.admission_id),domainId:id(row.domain_id),homeId:id(row.home_id),owner:owner({pid:row.pid as number,startToken:row.start_token as string,bootId:row.boot_id as string,instanceNonce:row.owner_nonce as string}),workspaceId:id(row.workspace_id),incarnationId:id(row.incarnation_id),leaseEpoch:integer(row.lease_epoch,1),requestId:id(row.request_id),commitment:commitment({memoryBytes:row.memory_bytes as number,cpuUnits:row.cpu_units as number}),resourceObservation,state,createdAt:integer(row.created_at),updatedAt:integer(row.updated_at),heartbeatAt:integer(row.heartbeat_at),reconciledAt:row.reconciled_at===null?null:integer(row.reconciled_at),uncertainReason:row.uncertain_reason as string|null,releasedAt:row.released_at===null?null:integer(row.released_at),releaseReason:row.release_reason as AdmissionRecord["releaseReason"],stopConfirmationId:row.stop_confirmation_id as string|null};
+      const heartbeatResumeState = row.heartbeat_resume_state as AdmissionRecord["heartbeatResumeState"];
+      if (heartbeatResumeState !== null && !["reserved","booting","running","draining"].includes(heartbeatResumeState)) throw new Error();
+      if (heartbeatResumeState !== null && (state !== "uncertain" || row.uncertain_reason !== "heartbeat-expired")) throw new Error();
+      return {admissionId:id(row.admission_id),domainId:id(row.domain_id),homeId:id(row.home_id),owner:owner({pid:row.pid as number,startToken:row.start_token as string,bootId:row.boot_id as string,instanceNonce:row.owner_nonce as string}),workspaceId:id(row.workspace_id),incarnationId:id(row.incarnation_id),leaseEpoch:integer(row.lease_epoch,1),requestId:id(row.request_id),commitment:commitment({memoryBytes:row.memory_bytes as number,cpuUnits:row.cpu_units as number}),resourceObservation,state,createdAt:integer(row.created_at),updatedAt:integer(row.updated_at),heartbeatAt:integer(row.heartbeat_at),reconciledAt:row.reconciled_at===null?null:integer(row.reconciled_at),uncertainReason:row.uncertain_reason as string|null,releasedAt:row.released_at===null?null:integer(row.released_at),releaseReason:row.release_reason as AdmissionRecord["releaseReason"],stopConfirmationId:row.stop_confirmation_id as string|null,heartbeatResumeState};
     } catch { throw new AdmissionError("ledger_corrupt"); }
   }
   listActive(): AdmissionRecord[] { return this.db.query<{admission_id:string},[]>("SELECT admission_id FROM admission_records WHERE state!='released' ORDER BY created_at,admission_id LIMIT 4097").all().map(row=>this.get(row.admission_id)); }
@@ -265,22 +276,35 @@ export class CoworkAdmissionLedger {
       const record=this.owned(admissionId,claimed);
       const transitions:Record<AdmissionState,AdmissionState[]>={reserved:["booting","draining","uncertain"],booting:["running","draining","uncertain"],running:["draining","uncertain"],draining:["uncertain"],uncertain:["draining"],released:[]};
       if (record.state!==expected || !transitions[record.state].includes(next)) throw new AdmissionError("transition_refused");
-      const now=this.time(); this.db.run("UPDATE admission_records SET state=?,updated_at=?,heartbeat_at=? WHERE admission_id=?",[next,now,now,admissionId]); return this.get(admissionId);
+      const now=this.time(); this.db.run("UPDATE admission_records SET state=?,updated_at=?,heartbeat_at=?,heartbeat_resume_state=NULL,uncertain_reason=NULL WHERE admission_id=?",[next,now,now,admissionId]); return this.get(admissionId);
     });
   }
   heartbeat(admissionId: string, claimed: AdmissionOwner): AdmissionRecord {
-    return this.transaction(() => { const record=this.owned(admissionId,claimed); if (record.state==="released") throw new AdmissionError("transition_refused"); const now=this.time(); this.db.run("UPDATE admission_records SET heartbeat_at=?,updated_at=? WHERE admission_id=?",[now,now,admissionId]); return this.get(admissionId); });
+    return this.transaction(() => {
+      const record=this.owned(admissionId,claimed); if (record.state==="released") throw new AdmissionError("transition_refused");
+      const now=this.time();
+      if (record.state==="uncertain" && record.uncertainReason==="heartbeat-expired" && record.heartbeatResumeState!==null) {
+        // This exact live owner/home recovered after sleep or a wall-clock jump.
+        // Restore only its accounting phase: no released capacity, guest adoption,
+        // fresh task authority, or writable-disk attachment is implied.
+        this.db.run("UPDATE admission_records SET state=?,heartbeat_at=?,updated_at=?,uncertain_reason=NULL,heartbeat_resume_state=NULL WHERE admission_id=?",[record.heartbeatResumeState,now,now,admissionId]);
+      } else this.db.run("UPDATE admission_records SET heartbeat_at=?,updated_at=? WHERE admission_id=?",[now,now,admissionId]);
+      return this.get(admissionId);
+    });
   }
   release(admissionId: string, claimed: AdmissionOwner, receipt: StopReceipt): {record:AdmissionRecord;admissionReleased:true;diskOwnershipVerified:false} {
     return this.transaction(() => {
       const record=this.owned(admissionId,claimed,false); id(receipt?.confirmationId); integer(receipt?.confirmedAt);
       this.host();
-      if (receipt.admissionId!==record.admissionId || receipt.homeId!==record.homeId || receipt.workspaceId!==record.workspaceId || receipt.incarnationId!==record.incarnationId || receipt.leaseEpoch!==record.leaseEpoch || !sameOwner(owner(receipt.owner),record.owner) || receipt.confirmedAt<record.createdAt || receipt.confirmedAt>this.time() || this.probe(()=>this.options.probes.verifyStopReceipt(receipt,record))!==true) throw new AdmissionError("stop_unconfirmed");
+      // The protected verifier and exact incarnation bind stop evidence. Wall
+      // clocks may move backward between reservation and a genuine stop; recorded
+      // timestamps are diagnostics, not a substitute for that verifier.
+      if (receipt.admissionId!==record.admissionId || receipt.homeId!==record.homeId || receipt.workspaceId!==record.workspaceId || receipt.incarnationId!==record.incarnationId || receipt.leaseEpoch!==record.leaseEpoch || !sameOwner(owner(receipt.owner),record.owner) || this.probe(()=>this.options.probes.verifyStopReceipt(receipt,record))!==true) throw new AdmissionError("stop_unconfirmed");
       const proofDigest=digest(receipt);
       if (record.state==="released") {
         const prior=this.db.query<{stop_digest:string|null},[string]>("SELECT stop_digest FROM admission_records WHERE admission_id=?").get(admissionId);
         if (record.releaseReason==="confirmed-stop" && prior?.stop_digest!==proofDigest) throw new AdmissionError("request_conflict");
-      } else { const now=this.time(); this.db.run("UPDATE admission_records SET state='released',released_at=?,updated_at=?,release_reason='confirmed-stop',stop_confirmation_id=?,stop_digest=? WHERE admission_id=?",[now,now,receipt.confirmationId,proofDigest,admissionId]); }
+      } else { const now=this.time(); this.db.run("UPDATE admission_records SET state='released',released_at=?,updated_at=?,release_reason='confirmed-stop',stop_confirmation_id=?,stop_digest=?,heartbeat_resume_state=NULL WHERE admission_id=?",[now,now,receipt.confirmationId,proofDigest,admissionId]); }
       return {record:this.get(admissionId),admissionReleased:true,diskOwnershipVerified:false};
     });
   }
@@ -291,7 +315,7 @@ export class CoworkAdmissionLedger {
         let reason:string|null=null;
         if (record.owner.bootId!==host.bootId) {
           let ended=false; try { ended=this.options.probes.confirmsPreviousBootEnded(record.owner.bootId,host); } catch { /* uncertainty consumes capacity */ }
-          if (ended===true) { this.db.run("UPDATE admission_records SET state='released',released_at=?,updated_at=?,reconciled_at=?,release_reason='trusted-new-boot' WHERE admission_id=?",[now,now,now,record.admissionId]); continue; }
+          if (ended===true) { this.db.run("UPDATE admission_records SET state='released',released_at=?,updated_at=?,reconciled_at=?,release_reason='trusted-new-boot',heartbeat_resume_state=NULL WHERE admission_id=?",[now,now,now,record.admissionId]); continue; }
           reason="previous-boot-unconfirmed";
         } else {
           let observed:ProcessObservation|null=null; try { observed=this.options.probes.processIdentity(record.owner.pid); } catch { /* unknown owner */ }
@@ -304,7 +328,13 @@ export class CoworkAdmissionLedger {
             catch { reason="home-identity-unavailable"; }
           }
         }
-        if (reason) this.db.run("UPDATE admission_records SET state='uncertain',uncertain_reason=?,updated_at=?,reconciled_at=? WHERE admission_id=?",[reason,now,now,record.admissionId]);
+        if (reason) {
+          const resume = reason==="heartbeat-expired" ? (record.state==="uncertain" ? record.heartbeatResumeState : record.state) : null;
+          // Heartbeat loss must not erase a harder previous uncertainty (or an
+          // explicit transition to uncertain) and make it resumable accidentally.
+          if (reason==="heartbeat-expired" && record.state==="uncertain" && resume===null) reason=record.uncertainReason;
+          this.db.run("UPDATE admission_records SET state='uncertain',uncertain_reason=?,heartbeat_resume_state=?,updated_at=?,reconciled_at=? WHERE admission_id=?",[reason,resume,now,now,record.admissionId]);
+        }
         else this.db.run("UPDATE admission_records SET reconciled_at=? WHERE admission_id=?",[now,record.admissionId]);
       }
       return this.listActive();
