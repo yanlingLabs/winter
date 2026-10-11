@@ -6,6 +6,8 @@ Status: proposed specification, 2026-10-11. This is the gate-3/4 planning contra
 
 Workspace, Project, Source, Delegation, trust/policy and durable transition/outbox records live in new versioned tables in `<WINTER_HOME>/runtimes/runtime-state.db`. Extend the existing runtime/session/lease/mailbox store; do not create an independently authoritative JSON manifest or session-index copy. The schema version must reject incompatible older writers. The admission ledger is the explicit cross-home exception described below. [Existing durable records](../packages/core/src/runtime-state/db.ts#L35)
 
+This is the logical record contract. The subsequent [private-storage decision](cowork-storage-security.md) requires encrypted confidential Cowork payloads and authenticated control authority, with keys unavailable to the daemon. The plaintext development tables do not meet that requirement. The helper-backed representation, safe cleartext projections and transactional interface must preserve these records' single authority, idempotency and outbox invariants; any physical schema/store-placement change requires a coordinated migration before activation. Never silently mirror decrypted private payloads into another DB, manifest or log. Storage descriptors carry opaque key/format references, never key material.
+
 | Record | Required fields and invariants |
 | --- | --- |
 | `HomeIdentity` | Host-only immutable `homeId` in versioned runtime-state DB metadata, canonical location and schema version; distinct from daemon instance/PID. Relocation preserves it. Copying a home cannot create a second valid owner; a separately authorized clone/import needs a new home identity and explicit provenance/identity reconciliation, otherwise it is refused. |
