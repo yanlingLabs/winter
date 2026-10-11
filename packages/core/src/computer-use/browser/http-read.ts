@@ -8,7 +8,8 @@
 //     user name or password, the DANGEROUS-DOMAIN floor exactly as for tabs (`site-policy.ts`: a site card under
 //     ask/accept-edits/plan, a hard block elsewhere and in Dispatch), and the ADDRESS RULE: this Mac's loopback is
 //     allowed (a local dev server), every other private address refused — on the host as written and as
-//     canonicalised, and again on EVERY address its name resolves to. The connect is pinned to a checked address
+//     canonicalised, and again on EVERY address its name resolves to; a redirect may lead INTO loopback only from a
+//     read that started there (a public page must not make the daemon call the user's local services). The connect is pinned to a checked address
 //     (`web.ts`'s `followRedirectsWith`), so a second DNS answer cannot move it into the LAN, and the LAN is never
 //     dialled (no Local Network prompt for Winter).
 //   - 15 s per read (clamped to the script's time left, cancelled with the run), at most 5 MiB off the wire, HTML
@@ -274,6 +275,9 @@ export class HttpReader {
     const timeout = AbortSignal.timeout(timeoutMs);
     const signal = AbortSignal.any([scope.signal, timeout]);
     let hop = 0;
+    // A read that STARTS on this Mac may stay on it; one that starts on a public site may never be redirected INTO it
+    // (a page must not make the daemon send a request to the user's local services).
+    let startedLocal = false;
     const prepare = async (url: URL): Promise<{ addresses: readonly string[] } | { refused: string }> => {
       const first = hop++ === 0;
       // The dangerous-domain floor, exactly as for a tab: a card under the policies that ask, else a hard block.
@@ -289,8 +293,15 @@ export class HttpReader {
         if (signal.aborted) throw e;
         throw new Error(`browsers.read(): ${url.hostname} could not be resolved — check the address`);
       }
+      let local = lexical?.cls === "loopback";
       for (const a of addresses) {
-        if (ipAddressClass(a) === "private") return { refused: privateSentence(url.hostname, first) };
+        const cls = ipAddressClass(a);
+        if (cls === "private") return { refused: privateSentence(url.hostname, first) };
+        if (cls === "loopback") local = true;
+      }
+      if (first) startedLocal = local;
+      else if (local && !startedLocal) {
+        return { refused: `a redirect from a public site led to this Mac's own address (${url.hostname}) — browsers.read() follows redirects into localhost only from localhost` };
       }
       return { addresses };
     };

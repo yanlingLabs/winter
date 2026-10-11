@@ -130,6 +130,25 @@ describe("browsers.read: a page's text over plain HTTP", () => {
     expect(r2.sent).toEqual([]);
   });
 
+  test("a redirect may lead into this Mac's loopback only from a read that started there", async () => {
+    const t = setup({
+      names: { "pub.example": ["93.184.216.34"], "rebind.example": ["127.0.0.1"], localhost: ["127.0.0.1"] },
+      pages: {
+        "pub.example/to-local": () => redirect("http://127.0.0.1:8080/admin"),
+        "pub.example/to-rebind": () => redirect("http://rebind.example:8080/admin"),
+        "localhost:3000/old": () => redirect("http://127.0.0.1:3000/new"),
+        "127.0.0.1:3000/new": () => html("<p>moved locally</p>"),
+      },
+    });
+    for (const path of ["/to-local", "/to-rebind"]) {
+      const e = await failure(t.read(`https://pub.example${path}`));
+      expect(kind(e)).toBe("NotAllowed");
+      expect(e.message).toContain("follows redirects into localhost only from localhost");
+    }
+    expect(t.sent.some((s) => s.host.endsWith(":8080"))).toBe(false);
+    expect((await t.read("http://localhost:3000/old")).text).toBe("moved locally");
+  });
+
   test("a URL with a user name or password is refused; a non-http(s) one is refused before any browser or socket", async () => {
     const t = setup({ pages: {} });
     const e = await failure(t.read("https://user:pw@docs.example.com/"));
