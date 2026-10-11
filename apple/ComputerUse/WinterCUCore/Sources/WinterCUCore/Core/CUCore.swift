@@ -935,6 +935,10 @@ public final class CUCore: @unchecked Sendable {
             let sid = t.nextSnapshotId()
             let page = pageNumber(t, pageSignature(t))
             if within == nil { t.pageNumberAtState = page }
+            // A read `within` one element shows its values whole, up to 8,000 characters (a window's read cuts them at
+            // 200 and says so — round 13's dogfood item 14: a long field could not be read back).
+            var formatter = formatter
+            if within != nil { formatter.valueCap = CUStateFormatter.wholeValueCap }
             let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note,
                                        caret: obs.caret, focusText: obs.focusText, page: page,
                                        stateNumber: Int(sid.components(separatedBy: ".s").last ?? ""), unread: obs.unread)

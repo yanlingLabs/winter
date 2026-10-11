@@ -101,7 +101,11 @@ final class StateFormatterTests: XCTestCase {
     func testValuesAreQuotedCutAndRedacted() {
         let long = String(repeating: "a", count: 250)
         XCTAssertEqual(f.line(CUNode(ref: 5, role: "AXTextField", value: long)),
-                       "[5] text field value=\"\(String(repeating: "a", count: 200))…\"")
+                       "[5] text field value=\"\(String(repeating: "a", count: 200))…\" (250 characters — state({within:5}) shows it whole)")
+        // Round 13's dogfood item 14: a `within` read shows it whole.
+        var whole = f
+        whole.valueCap = CUStateFormatter.wholeValueCap
+        XCTAssertEqual(whole.line(CUNode(ref: 5, role: "AXTextField", value: long)), "[5] text field value=\"\(long)\"")
         XCTAssertEqual(f.line(CUNode(ref: 6, role: "AXTextField", name: "Say \"hi\"", value: "line1\nline2")),
                        "[6] text field \"Say \\\"hi\\\"\" value=\"line1\\nline2\"")
         // Secure fields always read <redacted>, even with no value and even if one slipped through.
