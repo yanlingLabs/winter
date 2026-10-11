@@ -186,5 +186,6 @@ final class HeadlessLayoutTests: XCTestCase {
         XCTAssertTrue(argv.contains("--use-mock-keychain"))
         XCTAssertTrue(argv.contains("--enable-features=WebMCP"))
         XCTAssertTrue(argv.contains("--mute-audio"))
+        XCTAssertTrue(argv.contains(HeadlessNetworkRule.hostResolverRulesSwitch))
     }
 }

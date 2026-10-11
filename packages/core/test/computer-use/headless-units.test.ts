@@ -4,12 +4,16 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { headlessRequirementFor, resolveWinterHeadless, winterHeadlessAppPath } from "../../src/computer-use/browser/headless/engines";
-import { ipv6Bytes, isPrivateNetworkHost, isPrivateNetworkUrl } from "../../src/computer-use/browser/headless/private-network";
+import { ipv6Bytes, isPrivateNetworkHost, isPrivateNetworkUrl, LOCAL_NAME_SUFFIXES } from "../../src/computer-use/browser/headless/private-network";
 import { shouldCloseAgentTab } from "../../src/computer-use/browser/lifecycle";
 import { headlessErrorToTransport } from "../../src/computer-use/browser/headless/winter-engine";
 
 describe("the private-network rule (the user's ruling: this Mac allowed, the LAN refused, by the address as written)", () => {
-  const fixture = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "headless-private-network.json"), "utf8")) as { refused: string[]; allowed: string[] };
+  const fixture = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "headless-private-network.json"), "utf8")) as { refused: string[]; allowed: string[]; localNameSuffixes: string[] };
+
+  test("the local-name suffixes are the fixture's (the helper's copy, and its resolver belt, read the same list)", () => {
+    expect([...LOCAL_NAME_SUFFIXES]).toEqual(fixture.localNameSuffixes);
+  });
 
   test("every row of the shared fixture (Winter Headless's Swift copy answers the same file)", () => {
     expect(fixture.refused.length).toBeGreaterThan(20);

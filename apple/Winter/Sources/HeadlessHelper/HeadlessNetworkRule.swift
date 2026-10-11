@@ -18,6 +18,16 @@ enum HeadlessNetworkRule {
     /// Name suffixes only a local network resolves (as `LOCAL_NAME_SUFFIXES`).
     static let localNameSuffixes = [".local", ".home.arpa", ".internal", ".lan", ".home", ".corp", ".intranet", ".private", ".localdomain"]
 
+    /// **The resolver belt**: Chromium's own host resolver maps every name under those suffixes (with or without the
+    /// root's trailing dot) to "not found", so nothing in the browser can resolve one — a WebSocket included, which the
+    /// request guard never sees, and anything else that resolves a name (a preconnect, a DNS prefetch). It covers
+    /// NAMES only: an IP literal is not resolved, and the resolver's patterns cannot say "a single label" (a `*` with
+    /// no dot), so a single-label name is the request guard's alone.
+    static var hostResolverRulesSwitch: String {
+        let rules = localNameSuffixes.flatMap { ["MAP *\($0) ~NOTFOUND", "MAP *\($0). ~NOTFOUND"] }
+        return "--host-resolver-rules=" + rules.joined(separator: ",")
+    }
+
     /// Must a request to `url` be refused? A network URL whose host cannot be read is refused (fail closed); a
     /// non-network scheme is not.
     static func refuses(_ url: String) -> Bool {

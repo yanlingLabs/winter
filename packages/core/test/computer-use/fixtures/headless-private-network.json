@@ -1,5 +1,6 @@
 {
   "comment": "The headless browser's local-network rule, in URLs as the browser canonicalises them. The daemon's private-network.ts and Winter Headless's HeadlessNetworkRule.swift must both answer every row.",
+  "localNameSuffixes": [".local", ".home.arpa", ".internal", ".lan", ".home", ".corp", ".intranet", ".private", ".localdomain"],
   "refused": [
     "http://10.0.0.1/",
     "http://10.255.255.255:8080/x",

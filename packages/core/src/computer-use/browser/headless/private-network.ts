@@ -18,7 +18,9 @@
 /** The private-network sentence the model reads. */
 export const HEADLESS_LAN_REFUSAL = "Winter's headless browser doesn't open pages on the local network (a private, link-local or .local address) — only public sites and this Mac's own servers (localhost)";
 
-/** Name suffixes only a local network resolves. */
+/** Name suffixes only a local network resolves. Winter Headless also maps every name under them to "not found" in its
+ *  browser's own resolver (`--host-resolver-rules`, `HeadlessNetworkRule.hostResolverRulesSwitch`), so nothing it runs
+ *  — a WebSocket included — can resolve one. */
 export const LOCAL_NAME_SUFFIXES: readonly string[] = [".local", ".home.arpa", ".internal", ".lan", ".home", ".corp", ".intranet", ".private", ".localdomain"];
 
 /** Is this URL's host on the local network (and not this Mac itself)? Non-URLs and non-http(s) URLs answer false — the

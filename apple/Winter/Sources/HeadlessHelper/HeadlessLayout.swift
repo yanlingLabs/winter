@@ -56,12 +56,15 @@ struct HeadlessArguments: Equatable {
     ///  * `--mute-audio` — nobody hears a headless tab;
     ///  * `--disable-features=MediaRouter,DialMediaRouteProvider` — no cast discovery, so no "accept incoming
     ///    network connections?" dialog;
-    ///  * `--enable-features=WebMCP` — a site's own agent tools (`document.modelContext`).
+    ///  * `--enable-features=WebMCP` — a site's own agent tools (`document.modelContext`);
+    ///  * `--host-resolver-rules=…` — every local-network NAME resolves to "not found"
+    ///    (`HeadlessNetworkRule.hostResolverRulesSwitch`), whatever asks: a WebSocket too.
     static let fixedSwitches = [
         "--use-mock-keychain",
         "--mute-audio",
         "--disable-features=MediaRouter,DialMediaRouteProvider",
         "--enable-features=WebMCP",
+        HeadlessNetworkRule.hostResolverRulesSwitch,
     ]
 
     static func parse(_ arguments: [String]) -> HeadlessArguments? {

@@ -3,7 +3,7 @@ import XCTest
 /// The local-network rule inside the browser (`HeadlessNetworkRule`) answers every row of the fixture the daemon's own
 /// copy (`private-network.ts`) answers — one file holds the two equal.
 final class HeadlessNetworkRuleTests: XCTestCase {
-    private struct Fixture: Decodable { let refused: [String]; let allowed: [String] }
+    private struct Fixture: Decodable { let refused: [String]; let allowed: [String]; let localNameSuffixes: [String] }
 
     private func fixture() throws -> Fixture {
         // Tests/WinterHeadlessTests → apple/Winter → apple → the repository.
@@ -18,6 +18,19 @@ final class HeadlessNetworkRuleTests: XCTestCase {
         XCTAssertGreaterThan(f.refused.count, 20)
         for url in f.refused { XCTAssertTrue(HeadlessNetworkRule.refuses(url), url) }
         for url in f.allowed { XCTAssertFalse(HeadlessNetworkRule.refuses(url), url) }
+    }
+
+    func testTheSuffixesAreTheFixturesAndTheResolverBeltMapsEachToNotFound() throws {
+        XCTAssertEqual(HeadlessNetworkRule.localNameSuffixes, try fixture().localNameSuffixes)
+        let belt = HeadlessNetworkRule.hostResolverRulesSwitch
+        XCTAssertTrue(belt.hasPrefix("--host-resolver-rules=MAP *.local ~NOTFOUND,MAP *.local. ~NOTFOUND,"), belt)
+        let rules = belt.dropFirst("--host-resolver-rules=".count).split(separator: ",").map(String.init)
+        XCTAssertEqual(rules.count, HeadlessNetworkRule.localNameSuffixes.count * 2)
+        for suffix in HeadlessNetworkRule.localNameSuffixes {
+            XCTAssertTrue(rules.contains("MAP *\(suffix) ~NOTFOUND"), suffix)
+            XCTAssertTrue(rules.contains("MAP *\(suffix). ~NOTFOUND"), suffix)
+        }
+        XCTAssertFalse(belt.contains("localhost"), "this Mac's own names are never mapped")
     }
 
     func testWebSocketsAreJudgedAndOtherSchemesOpenNothing() {

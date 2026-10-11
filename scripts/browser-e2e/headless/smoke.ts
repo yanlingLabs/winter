@@ -3,7 +3,8 @@
 // sends — a winter world, an evaluation, a screenshot, a click, an out-of-process-iframe page — then close the pipe
 // and check the helper exits. Also checks, from outside, that the helper never owns a window and never becomes the
 // frontmost app; and that the local-network rule cancels a script's navigation, a redirect, a sub-resource and a fetch
-// to a refused host before anything is sent, saying so (`headless.notice`), and that a refused popup is said too. The
+// to a refused host before anything is sent, saying so (`headless.notice`), that a refused popup is said too, and that
+// the resolver belt fails a WebSocket to a local-network name (one to this Mac still opens). The
 // refused hosts are random `.internal` names: nothing could answer them, and nothing on the LAN is ever reached even if
 // the rule failed.
 //
@@ -45,6 +46,13 @@ let preconnects = 0;
 const counter = createServer((socket) => { preconnects++; socket.destroy(); });
 await new Promise<void>((resolve) => counter.listen(0, "127.0.0.1", resolve));
 const counterPort = (counter.address() as { port: number }).port;
+// A loopback WebSocket server: an ordinary socket to this Mac must still open under the resolver belt.
+let socketOpens = 0;
+const sockets = Bun.serve({
+  hostname: "127.0.0.1", port: 0,
+  fetch: (req, server) => (server.upgrade(req) ? undefined : new Response("websocket only", { status: 400 })),
+  websocket: { open() { socketOpens++; }, message() {} },
+});
 const page = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
@@ -288,11 +296,25 @@ try {
   if (subWorld !== undefined) await cdp("Runtime.evaluate", { expression: "window.open('https://example.com/'); 1", contextId: subWorld, returnByValue: true, userGesture: true });
   check("a popup is refused and said", await eventually("a popup notice", () => noticed("popup", mark)));
 
-  await Bun.sleep(600);
-  mark = notices.length;
-  if (subWorld !== undefined) await cdp("Runtime.evaluate", { expression: `try { new WebSocket(${JSON.stringify(nowhere("socket").replace("http:", "ws:"))}); } catch (e) {} 1`, contextId: subWorld, returnByValue: true });
-  const socketNoticed = await eventually("a WebSocket notice", () => noticed("local-network", mark), 2_000);
-  console.log(`INFO a WebSocket to a refused host: ${socketNoticed ? "cancelled by the request guard" : "NOT seen by the request guard"}`);
+  // A WebSocket never meets the request guard (measured): the resolver belt (`--host-resolver-rules`) answers every
+  // local-network NAME "not found" before any query leaves the browser. One to this Mac still opens.
+  // The switch reaches the browser's NETWORK SERVICE (a "Winter Helper" utility process the browser passes it to).
+  const ps = Bun.spawnSync(["/bin/ps", "-A", "-o", "ppid=,args="], { stdout: "pipe", env: { ...process.env, LC_ALL: "C" } }).stdout.toString();
+  const network = ps.split("\n").find((l) => new RegExp(`^\\s*${proc.pid}\\s`).test(l) && l.includes("NetworkService")) ?? "";
+  check("the browser's network service runs with the resolver belt", network.includes("--host-resolver-rules=MAP *.local ~NOTFOUND") && network.includes("MAP *.internal ~NOTFOUND"),
+    network.length === 0 ? "no network-service process under the helper" : network.replace(/.*(--host-resolver-rules=.{0,70}).*/, "$1"));
+  const socketTo = async (target: string): Promise<string> => {
+    if (subWorld === undefined) return "no world";
+    const r = await cdp("Runtime.evaluate", {
+      expression: `new Promise((done) => { const t0 = Date.now(); const ws = new WebSocket(${JSON.stringify(target)}); ws.onopen = () => { ws.close(); done("open"); }; ws.onerror = () => done("error after " + (Date.now() - t0) + " ms"); setTimeout(() => done("no answer"), 5000); })`,
+      contextId: subWorld, awaitPromise: true, returnByValue: true,
+    }) as { result?: { value?: unknown } };
+    return String(r.result?.value);
+  };
+  const refusedSocket = await socketTo(nowhere("socket").replace("http:", "ws:").replace(/\/$/, `:${sockets.port}/`));
+  check("a WebSocket to a local-network name fails to resolve", refusedSocket.startsWith("error"), refusedSocket);
+  const loopbackSocket = await socketTo(`ws://127.0.0.1:${sockets.port}/`);
+  check("a WebSocket to this Mac still opens", loopbackSocket === "open" && socketOpens > 0, `${loopbackSocket}, ${socketOpens} accepted`);
 
   await cdp("Page.navigate", { url: `${url}preconnect` });
   await Bun.sleep(1_500);
@@ -316,6 +338,7 @@ try {
   page.stop(true);
   frame.stop(true);
   counter.close();
+  sockets.stop(true);
   if (!process.argv.includes("--keep")) rmSync(cacheRoot, { recursive: true, force: true });
   if (process.argv.includes("--stderr")) console.log(stderr);
   const failed = results.filter(([, ok]) => !ok).length;
