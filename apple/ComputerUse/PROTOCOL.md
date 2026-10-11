@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.9.8` (the contents of [`VERSION`](VERSION))
+Helper version: `1.9.9` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
@@ -540,16 +540,21 @@ the change, run108; the world allows 120 ms, a stress sweep 400 ms) and Secure E
   began), runs an operation on it (an AppleScript, a bind's window wait, `useWindow`), or restored the user to it a
   moment ago (its late landing: within 0.8 s of the attempt, once the user's place moved away) — within 1.5 s of that,
   or while it runs. What the agent does to an app while it is in front counts once it has left the front, as a cause
-  at the time it was done. An app the agent never touched coming forward is the user's — unless it is the agent's
-  indirect effect: the agent was active (an operation running, or a cause on any app within 1.5 s), the session tap
-  saw no hardware input of the user's since the agent's last cause, and no switch input of theirs explains it. That is
-  undone the same way, silently, and the next result says so once ("<App> came forward after your action and was sent
-  back — avoid that …"). Never undone: the first activation of an app after a launch the agent did not make (the user's
-  own slow launch), and a system dialog's process (UserNotificationCenter, CoreServicesUIAgent, SecurityAgent — any app
-  that is not a regular one): left in front for the user to answer, and said ("… (a system dialog) came up after your
-  action — it was left in front for the user to answer …"). The common indirect causes are prevented at the source:
-  pressing a LINK (an element with an `AXURL` — an `AXLink`, or a link in a web area) in an app that is not a web
-  browser opens its URL (`http`, `https`, `mailto` only) in the background (NSWorkspace, `activates: false`) instead —
+  at the time it was done. An app the agent never touched coming forward is the user's when their switch input
+  explains it (a click on its window or its Dock tile counts for it whatever moved), or when the agent was not active.
+  It is the agent's INDIRECT effect — undone the same way, silently, and said once ("<App> came forward after your
+  action and was sent back — avoid that …") — ONLY when clearly the agent's (round 10, the user's ruling): no input of
+  the user's the tap saw in the last 2.5 s (whatever the agent did in between), an action of the agent's that can open
+  apps within 1.5 s (a click, a press, a menu command, Return/Space/Enter, a typed newline, an AppleScript, an open, a
+  launch — never a read, plain typing, a scroll or a hover), and no Secure Event Input. In every other case it is left
+  in front, never adopted as their place, and said ("<App> came forward around your action — the user's view may have
+  moved"). Never undone: the first activation of an app after a launch the agent did not make (the user's own slow
+  launch), and a system dialog's process (UserNotificationCenter, CoreServicesUIAgent, SecurityAgent — any app that is
+  not a regular one): left in front for the user to answer, and said ("… (a system dialog) came up after your action —
+  it was left in front for the user to answer …"). A background open is the agent's from BEFORE it starts (a launch of
+  its opener, a running opener touched). The common indirect causes are prevented at the source: pressing an `AXLink`
+  to another site (never one to the page's own site, never in an Electron/CEF app, which navigate in-app) in an app
+  that is not a web browser opens its URL (`http`, `https`, `mailto` only) in the background (NSWorkspace, `activates: false`) instead —
   "opened <host> in <browser> in the background … it isn't bound"; documents open through `apps.open`, and Finder's
   Open is rerouted there. Bringing the user back to their own place never touches their app. During a desktop visit
   what comes forward is the visit's.
@@ -567,6 +572,12 @@ the change, run108; the world allows 120 ms, a stress sweep 400 ms) and Secure E
   their place moved during it: to their place).
 - **I4.** A touched app that comes forward with no switch-capable input of the user's since the agent's last cause on
   it is undone, and a typing act into it stops (at most the key already in flight); so is the agent's indirect effect.
+- **I6.** (Round 10, the user's ruling.) Once the user WORKS in a bound target — a click into its window (counted once
+  its own activation lands, within 0.5 s: a drag out of a background window is no work), a key with no ⌘/⌃ (a ⌘/⌃ chord
+  may be the system's: ⌘-Space, ⌘-Tab, ⌃-arrows), a right or other click or a scroll in its window, while it is in
+  front — the agent is hands-off it: every act and AppleScript on it is refused at once, `refused` with reason
+  `user_working` ("the user is working in <App> right now — wait and retry, or ask them"), until it is no longer in
+  front; reads (state, find, screenshot, waits) go on. Switching there to look blocks nothing.
 - **I5.** Every path that can see the user's front app or desktop change — the guardian's activation and desktop
   observers, a focus blip's make-key step, each of its keys, its end and its waits, the reroute, a background click's
   preparation, the act's after-check and late check, a bind, `useWindow`, an AppleScript, making the bound window main,
@@ -706,7 +717,8 @@ useWindow to pick another", …) and reads an absent `reason` (an older helper) 
 
 `refused` reasons: `secure_field`, `auth_dialog`, `privacy_pane`, `winter_itself`, `save_path`,
 `focus_unknown`, `focus_not_placed`, `focus_not_editable`, `wrong_field_shape`, `focus_moved`, `front_unknown`, `applescript`,
-`automation_denied`, `app_in_front`. `front_unknown`: a desktop visit was not made because the app the user is in can't be read — they
+`automation_denied`, `app_in_front`, `user_working`. `user_working` (1.9.9): the user is working in the app (I6, §4.12) — every act
+on it is refused until it leaves the front; retry later. `front_unknown`: a desktop visit was not made because the app the user is in can't be read — they
 could not have been brought back; nothing was moved. `app_in_front`: the app came to the front while a background act
 was being prepared (the user may be using it): the keys or the click were not sent.
 
@@ -823,7 +835,8 @@ None of this exists in a dev or release binary; `scripts/release.ts` scans the s
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `test.activate` | `{pid}` | `{frontmostSet, raised, frontmost}` — puts the suite's own "user's app" in front |
+| `test.activate` | `{pid, asUser?}` | `{frontmostSet, raised, frontmost}` — puts the suite's own "user's app" in front; `asUser` (1.9.9): first records what the USER's switch would leave (hardware input, a switch for that app, claimed), so the guardian treats it as theirs |
+| `test.userInput` | `{pid}` | `{}` — (1.9.9) records the user's work in that app (I6), as their click into its window would |
 | `test.capture` | `{windowId, source: "skylight"\|"stream", path, rect?: [x, y, w, h]}` | `{width, height, frameAgeMs?}` — writes one PNG (inside the instance's home only) of a window: the off-Space still path (`skylight`) or the latest frame of the test stream (`stream`); `rect` in the window's points |
 | `test.stream` | `{windowId, on, fps?}` | `{running}` — starts/stops a desktop-independent ScreenCaptureKit stream on that window (the freshness measurement) |
 | `test.automation` | `{pid?, bundleId?}` | `{status: "granted" \| "would_ask" \| "denied" \| "not_running" \| "unknown", code}` — may this helper already send the app Apple Events; asked with `AEDeterminePermissionToAutomateTarget(…, askUserIfNeeded: false)`, so it NEVER raises macOS's Automation question (the suite runs an AppleScript-backed scenario only on `granted`) |
@@ -885,3 +898,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.9.6 | No wire change — one rule decides whose move a change of the user's front app or desktop is (§4.12), asked by every path that used to decide on its own (the guardian, a blip's step, each key and its end, a click's preparation, the after-check, a visit's watch), each path that finds it the user's telling the guardian. So: a switch the user makes during a typing burst stops the typing with nothing handed back or restored, their keys in the target they switched into stay there; typing in their own app no longer makes a target's self-activation theirs; their ⌘-Tab right after a synthetic event is theirs; the hand-back with no readable window of theirs names none (the app takes back its own key window); a ⌘/⌃ hold with a mouse chord is no switch, a seen ⌘-Tab is one, a hold counts only from when it began; with no input source a late switch of the target is undone; a visit's return checks Space membership and each display's Space. |
 | 1 | 1.9.7 | No wire change — the one rule's contract (§4.12: invariants I1–I5, checked after every event by a model-based test of the real engine in simulated time) and the code made to satisfy it: the rule owns every fact it reads — the agent's causes PER APP (a synthetic mark on the target never makes another app's change the agent's: an app the agent never touched coming forward is always the user's), causes that raise, operations still running (an AppleScript, a bind's window wait, `useWindow`) and pending launches; switch input as instants that explain one change only, only after the agent's last cause on that app, of a kind that fits (an app switch, a desktop switch, a click for its own app), never the generic gesture event, no ⌘/⌃ hold under Secure Event Input; a click's claim used up and gone once the user moves; one verdict per state until new facts. Every restore goes to the user's place as it is when it runs (a retry never lands over a move of theirs); the reroute sends each user key to their place by the rule; bind, `useWindow`, AppleScript and making the bound window main are judged from their start; a click on another app's window makes it their place at once; a late-heard activation of an untouched app is their place; an act's or an operation's end, and what is done to an app while it is in front, never outrank the user's input; a blip ended by its bound is no blip; the target coming forward before an act's first key stops it; the blip's end asks again while it waits; during a visit what the agent brings up is the visit's; the other display's return is followed by the ordinary return. |
 | 1 | 1.9.8 | Additive: `target.act` results carry `guardian` (the Focus Guardian's notes since the last act) and `viewMovedBy`; `target.bind` and `target.useWindow` results carry `webContent` (§4.12). The model-based test made honest (its oracle reads only the world's own record; a faithful world — the helper's own windows, the menu bar, banners, picture in picture, panels, the desktop, a second display, launches, system dialogs, activation latency and refusals, async restores, late and reordered notifications, Secure Event Input) and what it found fixed: the agent's INDIRECT effect (an untouched app coming forward right after its action, with no hardware input of the user's since) is undone and said — never the first activation after the user's own launch, never a system dialog (left in front, said); a link pressed in an app that is not a browser opens in the background; a click through the helper's own click-through windows counts for the window under it, a click on the menu bar, a status item, a banner, PiP or a panel is no place, a click on the empty desktop is Finder's; a ⌘-Tab switches at its release, a release with no key seen explains only 0.7 s, a ⌃ hold explains what it passes and 0.45 s after its release, one input per click, inputs pair with the change they landed for (latest first), a claim uses its click, a second explanation only within 0.1/0.15 s; an act's cause never outranks the user's switch heard within 0.45 s; a restore's late landing (0.8 s) is undone and never a switch's second explanation; the consented foreground's own landing is consented unless a switch of the user's after it was issued explains it (their ⌘-Tab into the held app is theirs, never given back), it is brought forward over accessibility too, and rung 4 inside a hold leaves the hold alone; facts are judged as of when a state was first seen and a verdict of the user's is never taken back; a visit, a hold and rung 4 judge what is in front first, a visit never undoes what came before it and returns to the guardian's place, its end leaves the user only where they went; a desktop-only theft is put back, onto their window on their own desktop; Chrome for Testing is Chromium; a hover on a web page with the app held in front uses the real pointer; WebKit's lazily built accessibility tree is waited for at bind (≤ ~160 ms); no restore runs during a desktop visit (its own return aside); a Dock click is input for the tile's app, claimed; a switch of the user's heard late during a visit is their move, the consented foreground's landing heard late is where a theft goes back; an untouched app theirs by their input uses that input up; facts as of first seen survive a cleared verdict until another app's activation is heard; after a hold ends, a key in a blip goes to their place, and a blip hands back to their place when it moved during the blip; coming back to their place during a visit is their move. |
+| 1 | 1.9.9 | Additive: `refused` gains `user_working` (I6: once the user works in a bound target — a click into its window, a key with no ⌘/⌃, a right/other click or a scroll while it is in front — every act and AppleScript on it is refused until it leaves the front; reads go on); the live-test-only `test.activate` takes `asUser` and `test.userInput` exists. Round 10, the user's rulings and the review of round 9: an untouched app is sent back only when CLEARLY the agent's (no input of the user's for 2.5 s, an opener action of the agent's within 1.5 s, no Secure Event Input) — else left in front, never adopted, said "<App> came forward around your action — the user's view may have moved"; background opens are the agent's from before they start; only an `AXLink` to another site is rerouted, never in an Electron/CEF app; one consented-foreground exemption per app; a visit whose user moved on the way back keeps the rule's place; a restore's retries stop on anything the rule leaves alone; a hold's end moves the place at that time; a consented app's explaining input stays a short second explanation; an activation heard of another app clears the kept verdict; a past change heard late, its desktop unknown, is never a desktop switch's; the daemon fences the guardian's notes (they name apps by their own names). |
