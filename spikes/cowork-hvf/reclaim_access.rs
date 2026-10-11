@@ -31,6 +31,7 @@ struct State {
     stopped: bool,
     closed: Option<u64>,
     last_epoch: u64,
+    mutating: bool,
     devices: BTreeMap<u64, u64>,
     active: usize,
     pins: BTreeMap<u64, (Device, Vec<Range>)>,
@@ -40,6 +41,7 @@ struct State {
 struct Inner {
     state: Mutex<State>,
     wake: Condvar,
+    terminal: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     max_devices: usize,
     max_pins: usize,
     max_pinned_bytes: u64,
@@ -81,6 +83,7 @@ impl Access {
                     stopped: false,
                     closed: None,
                     last_epoch: 0,
+                    mutating: false,
                     devices: BTreeMap::new(),
                     active: 0,
                     pins: BTreeMap::new(),
@@ -88,6 +91,7 @@ impl Access {
                     pinned_bytes: 0,
                 }),
                 wake: Condvar::new(),
+                terminal: Mutex::new(None),
                 max_devices,
                 max_pins,
                 max_pinned_bytes,
@@ -181,6 +185,8 @@ impl Access {
             if remaining.is_zero() {
                 state.stopped = true;
                 self.inner.wake.notify_all();
+                drop(state);
+                signal_terminal(&self.inner);
                 return Err(Fault::Timeout);
             }
             let (waited, _) = self.inner.wake.wait_timeout(state, remaining).unwrap();
@@ -203,6 +209,25 @@ impl Access {
             ranges,
         })
     }
+    /// Notification contains no guest RAM; runs only after the state lock is released.
+    pub fn set_terminal_notifier(&self, notify: Arc<dyn Fn() + Send + Sync>) {
+        *self.inner.terminal.lock().unwrap() = Some(notify);
+    }
+    /// Serialize Stop against EACH actual mapping/FRQ ACK operation; never a VMM/device drain wait.
+    pub fn frozen_operation<T>(
+        &self,
+        epoch: u64,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, Fault> {
+        let state = self.inner.state.lock().unwrap();
+        if state.stopped {
+            return Err(Fault::Stopped);
+        }
+        if state.closed != Some(epoch) || !state.mutating || state.active != 0 {
+            return Err(Fault::Mutation);
+        }
+        Ok(operation())
+    }
     pub fn stopped(&self) -> bool {
         self.inner.state.lock().unwrap().stopped
     }
@@ -213,6 +238,14 @@ impl Access {
         let mut s = self.inner.state.lock().unwrap();
         s.stopped = true;
         self.inner.wake.notify_all();
+        drop(s);
+        signal_terminal(&self.inner);
+    }
+}
+fn signal_terminal(inner: &Inner) {
+    let notify = inner.terminal.lock().unwrap().clone();
+    if let Some(notify) = notify {
+        notify();
     }
 }
 impl Lease {
@@ -276,7 +309,7 @@ impl Frozen {
         &self.ranges
     }
     pub fn begin_mutation(&mut self) -> Result<(), Fault> {
-        let s = self.inner.state.lock().unwrap();
+        let mut s = self.inner.state.lock().unwrap();
         if s.stopped {
             return Err(Fault::Stopped);
         }
@@ -286,6 +319,7 @@ impl Frozen {
         if self.mutation {
             return Err(Fault::Mutation);
         }
+        s.mutating = true;
         self.mutation = true;
         Ok(())
     }
@@ -312,9 +346,12 @@ impl Frozen {
             s.stopped = true;
             self.finished = true;
             self.inner.wake.notify_all();
+            drop(s);
+            signal_terminal(&self.inner);
             return Err(Fault::Mutation);
         }
         s.closed = None;
+        s.mutating = false;
         self.finished = true;
         self.inner.wake.notify_all();
         Ok(())
@@ -323,6 +360,7 @@ impl Frozen {
         self.inner.state.lock().unwrap().stopped = true;
         self.finished = true;
         self.inner.wake.notify_all();
+        signal_terminal(&self.inner);
     }
 }
 impl Drop for Frozen {
@@ -330,6 +368,7 @@ impl Drop for Frozen {
         if !self.finished {
             self.inner.state.lock().unwrap().stopped = true;
             self.inner.wake.notify_all();
+            signal_terminal(&self.inner);
         }
     }
 }
@@ -477,5 +516,37 @@ mod tests {
             .unwrap()
             .exclusions()
             .is_empty());
+    }
+    #[test]
+    fn frozen_mapping_and_stop_are_serialized_no_operations_after_stop() {
+        let (a, _) = access();
+        let mut frozen = a.freeze(1, Duration::from_secs(1)).unwrap();
+        frozen.begin_mutation().unwrap();
+        let mapping = a.clone();
+        let (entered, inside) = std::sync::mpsc::sync_channel(0);
+        let (release, go) = std::sync::mpsc::sync_channel(0);
+        let worker = thread::spawn(move || {
+            mapping.frozen_operation(1, || {
+                entered.send(()).unwrap();
+                go.recv_timeout(Duration::from_secs(1)).unwrap();
+            })
+        });
+        inside.recv_timeout(Duration::from_secs(1)).unwrap();
+        let stopper = a.clone();
+        let (stop_entered, stop_started) = std::sync::mpsc::sync_channel(0);
+        let stopped = thread::spawn(move || {
+            stop_entered.send(()).unwrap();
+            stopper.stop();
+        });
+        stop_started.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(!stopped.is_finished());
+        release.send(()).unwrap();
+        assert_eq!(worker.join().unwrap(), Ok(()));
+        stopped.join().unwrap();
+        assert_eq!(
+            a.frozen_operation(1, || panic!("mapping/ACK after Stop")),
+            Err(Fault::Stopped)
+        );
+        assert!(frozen.complete_mutation().is_err());
     }
 }

@@ -4,9 +4,10 @@ from build import ROOT, OUT, PINS, checked, digest, verify
 
 def prepare():
     pin=json.loads((ROOT/'block-candidate.json').read_text())
-    patch=ROOT/'patches/0003-proposed-guarded-block.patch'
+    patch=ROOT/pin['patchFile']
     verify(patch,pin['patchSha256'])
     verify(ROOT/'patches/0002-proposed-active-reclaim.patch',pin['preservedA6PatchSha256'])
+    verify(ROOT/pin['previousCandidate']['patchFile'],pin['previousCandidate']['patchSha256'])
     source=OUT/'libkrun-block-reclaim'
     if not source.exists():
         base=OUT/'libkrun'
@@ -24,7 +25,7 @@ def prepare():
     for local,native in pin['moduleCorrespondence'].items():
         if (ROOT/local).read_bytes()!=(source/native).read_bytes():raise RuntimeError('Actual/shared module differs: '+local)
     # Unchanged reviewed core remains identical, not a parallel control model.
-    for name in ['ranges','barrier','ops','control','coordinator']:
+    for name in ['ranges','barrier','ops','coordinator']:
         if (ROOT/f'reclaim_{name}.rs').read_bytes()!=(source/f'src/vmm/src/cowork_{name}.rs').read_bytes():raise RuntimeError('Reviewed core differs: '+name)
     print(json.dumps({'source':str(source),'patchSha256':digest(patch),'vmStarted':False}))
     return source

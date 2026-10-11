@@ -3,7 +3,7 @@
   "productionReady": false,
   "vmStarted": false,
   "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
-  "patchSha256": "4ddbf8a2d1c04a0fcd07320b18c0dd253214797e405286b0b965037eb1e2ed87",
+  "patchSha256": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481",
   "preservedA6PatchSha256": "a6e26d15693007d42df5c60155055b09c69897584665d227c8ee9c720d3cfb31",
   "features": [
     "blk"
@@ -14,7 +14,8 @@
   "source": "out/libkrun-block-reclaim",
   "moduleCorrespondence": {
     "reclaim_access.rs": "src/devices/src/reclaim_access.rs",
-    "block_bounce.rs": "src/devices/src/block_bounce.rs"
+    "block_bounce.rs": "src/devices/src/block_bounce.rs",
+    "block_reclaim_control.rs": "src/vmm/src/cowork_control.rs"
   },
   "reviewRequired": [
     "actual barrier/lifecycle/mapping order",
@@ -26,7 +27,14 @@
     "No block-bearing VM run.",
     "DAX/fs/net/vsock/virtio-console/GPU/audio/input disabled.",
     "Host I/O may block indefinitely; it holds no RAM lease, but device reset join can block until worker process termination.",
-    "WFE absolute deadline fix remains required before timing guarantees.",
-    "Crypto kernel and userspace not built/selected."
-  ]
+    "Crypto kernel and userspace not built/selected.",
+    "WFE deadline now captured before post-emulation park and actual functions regressed; no timer SLA or latency guarantee established."
+  ],
+  "revision": 2,
+  "patchFile": "patches/0004-proposed-guarded-block-reviewed-fixes.patch",
+  "previousCandidate": {
+    "commit": "90c34d59c74b4d09ccc9dcba5da3c2a532d74c83",
+    "patchFile": "patches/0003-proposed-guarded-block.patch",
+    "patchSha256": "4ddbf8a2d1c04a0fcd07320b18c0dd253214797e405286b0b965037eb1e2ed87"
+  }
 }
