@@ -112,12 +112,18 @@ describe("browsers.list / open / tabs / tab", () => {
     const handle = await h.engine.global(r.scope, "browsers.tab", { tab: "chrome:600" }) as TabHandle;
     expect(r.text()).toContain('"Row 0"');
     expect(r.text()).not.toContain('"Row 60"');
-    tab.page.nodes[0]!.children![0]!.children = rows(50);  // scrolled: rows 50… in view
+    tab.page.nodes[0]!.children![0]!.children = rows(3);  // scrolled a little: rows 20–22 came into view
     const after = await h.engine.primitive(r.scope, handle.targetId, "state", {}) as string;
     expect(after).not.toContain("(no changes)");
-    expect(after).toMatch(/\+ \[\d+\] text field "Row 60" value="x" — now shown, in \[\d+\] list "List"/);
+    expect(after).toMatch(/\+ \[\d+\] text field "Row 22" value="x" — now shown, in \[\d+\] list "List"/);
     const again = await h.engine.primitive(r.scope, handle.targetId, "state", {}) as string;
     expect(again).toContain("(no changes)");
+    // A whole new screen (review of round 3): the state is printed again — a list of surfaced rows would be longer.
+    tab.page.nodes[0]!.children![0]!.children = rows(50);
+    const far = await h.engine.primitive(r.scope, handle.targetId, "state", {}) as string;
+    expect(far).not.toContain("now shown");
+    expect(far).toContain('"Row 60"');
+    expect(await h.engine.primitive(r.scope, handle.targetId, "state", {}) as string).toContain("(no changes)");
     tab.page.nodes[0]!.children![0]!.children = rows(50, "b");  // row 300 — never shown, out of view — changes
     const changed = await h.engine.primitive(r.scope, handle.targetId, "state", {}) as string;
     expect(changed).toMatch(/~ \[\d+\] value "a" → "b" — \[\d+\] text field "Row 300" value="b", in \[\d+\] list "List"/);

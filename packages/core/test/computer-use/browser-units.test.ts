@@ -187,6 +187,47 @@ describe("diffs against a folded print (review of round 2, MEDIUM)", () => {
     expect(d.text).toContain('~ [107] value "a" → "b" — [107] text field "Row 7" value="b", in [3] list "List"');
   });
 
+  test("refs the cap cut are not counted as seen — the next diff surfaces them (review of round 3)", () => {
+    const keep = node(1, "button", { name: "Keep" });
+    const rows = Array.from({ length: 39 }, (_, i) => node(2 + i, "button", { name: `n${2 + i}` }));
+    const a = makeSnapshot("a", [node(900, "main", { children: [keep] })], undefined, new Set([900, 1]));
+    const b = makeSnapshot("b", [node(900, "main", { children: [keep, ...rows] })]);
+    const d = diffState(h, a, b, 10);
+    expect(d.text.split("\n").at(-1)).toBe("… (29 more changes — state({full:true}))");
+    expect([...d.shown!].sort((x, y) => x - y)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 900]);
+    b.shown = d.shown;
+    const c = makeSnapshot("c", [node(900, "main", { children: [keep, ...rows] })]);
+    const d2 = diffState(h, b, c, 400, new Set([900, 1, ...rows.map((r) => r.ref)]));
+    expect(d2.text).not.toContain("(no changes)");
+    expect(d2.text).toContain('+ [40] button "n40" — now shown');
+  });
+
+  test("a whole new screen of rows is the print again, not a list of surfaced rows (review of round 3)", () => {
+    const base = printed("s1", page(0));
+    const farRoots = page(200);
+    const far = diffState(h, base, printed("s2", farRoots), undefined, printedState(h, farRoots, true).shown);
+    const union = 20 / 400;
+    expect(union).toBeLessThan(0.5);
+    expect(far.changedRatio).toBeGreaterThan(0.5);
+    const nearRoots = page(3);
+    expect(diffState(h, base, printed("s3", nearRoots), undefined, printedState(h, nearRoots, true).shown).changedRatio).toBeLessThanOrEqual(0.5);
+  });
+
+  test("printed instead of a diff, what the base showed stays seen unless it changed (review of round 3, LOW)", () => {
+    const base = printed("s1", page(0));
+    const farRoots = page(200, "b");
+    const far = printed("s2", farRoots);
+    const d = diffState(h, base, far, undefined, printedState(h, farRoots, true).shown);
+    expect(d.changedRatio).toBeGreaterThan(0.5);
+    expect(d.seenStill!.has(100)).toBe(true);
+    expect(d.seenStill!.has(107)).toBe(false);
+    far.shown = new Set([...far.shown!, ...d.seenStill!]);
+    const backRoots = page(0, "b");
+    const back = diffState(h, far, printed("s3", backRoots), undefined, printedState(h, backRoots, true).shown);
+    expect(back.text).not.toContain('"Row 0" value="x" — now shown');
+    expect(back.text).toContain('"Row 7" value="b" — now shown');
+  });
+
   test("a snapshot made without a print keeps the old behaviour", () => {
     const a = makeSnapshot("a", [node(1, "main", { children: [node(2, "button", { name: "Send" })] })]);
     const d = diffState(h, a, makeSnapshot("b", [node(1, "main", { children: [node(2, "button", { name: "Send" })] })]), undefined, new Set([1, 2]));

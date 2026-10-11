@@ -835,9 +835,12 @@ public final class CUCore: @unchecked Sendable {
                 ratio = d.changedRatio
                 if ratio <= 0.5 {
                     isDiff = true
-                    text = d.render(header: header, new: snap, includeWindowTitle: old.header.windowTitle != obs.title,
-                                    formatter: formatter, seen: old.shown)
-                    snap.shown = d.shownAfter(old: old, new: snap)
+                    let r = d.rendered(header: header, new: snap, includeWindowTitle: old.header.windowTitle != obs.title,
+                                       formatter: formatter, seen: old.shown)
+                    text = r.text
+                    snap.shown = r.shown
+                } else {
+                    snap.shown = d.shownAfterPrint(old: old, new: snap, printed: printed.shown)
                 }
             }
             // A menu command or a click may open a window the target is not bound to (Finder's Go › Downloads

@@ -71,7 +71,7 @@ final class StateDiffTests: XCTestCase {
         XCTAssertTrue(text.contains("+ [150] text field \"Row 50\" value=\"x\" — now shown, in [3] group \"List\""), text)
         // Once printed, they count as seen: the same view again is "(no changes)".
         var seenNow = now
-        seenNow.shown = d.shownAfter(old: base, new: now)
+        seenNow.shown = d.rendered(header: now.header, new: now, includeWindowTitle: false, formatter: f, seen: base.shown).shown
         let (again, againShown) = printedSnap("s3", page(offset: 1000), f)
         let d2 = CUStateDiff.compute(old: seenNow, new: again, shownNow: againShown)
         XCTAssertTrue(d2.isEmpty)
@@ -134,6 +134,58 @@ final class StateDiffTests: XCTestCase {
         let b = snap("b", [CUNode(ref: 2, role: "AXButton", name: "OK")], title: "Two")
         let d = CUStateDiff.compute(old: a, new: b)
         XCTAssertTrue(d.render(header: b.header, new: b, includeWindowTitle: true).hasPrefix("Notes — window \"Two\" · settled 80 ms"))
+    }
+
+    /// Review of round 3: refs whose lines the cap cut were recorded as shown, and read "(no changes)" until they
+    /// changed. Only the lines the text keeps are seen; the next diff surfaces the rest.
+    func testRefsTheCapCutAreNotCountedAsSeen() {
+        let f = CUStateFormatter(lineCap: 10)
+        var a = snap("a", [CUNode(ref: 1, role: "AXButton", name: "Keep")])
+        a.shown = [1]
+        let rows = (2...40).map { CUNode(ref: $0, role: "AXButton", name: "n\($0)") }
+        var b = snap("b", [CUNode(ref: 1, role: "AXButton", name: "Keep")] + rows)
+        let d = CUStateDiff.compute(old: a, new: b)
+        let r = d.rendered(header: b.header, new: b, includeWindowTitle: false, formatter: f, seen: a.shown)
+        XCTAssertTrue(r.text.hasSuffix("… (29 more changes — state({full:true}))"), r.text)
+        XCTAssertEqual(r.shown, Set([1] + Array(2...11)), "the ten lines kept, and what the base showed")
+        b.shown = r.shown
+        let c = snap("c", [CUNode(ref: 1, role: "AXButton", name: "Keep")] + rows)
+        let d2 = CUStateDiff.compute(old: b, new: c, shownNow: Set(1...40))
+        XCTAssertEqual(d2.surfaced, Array(12...40), "never “(no changes)” for lines the model never saw")
+    }
+
+    /// Review of round 3: on a big folded page a scroll surfaced row after row while the union of every ref kept the
+    /// ratio under 0.5 — the diff became a list longer than the print. Against a folded print, the new lines' share of
+    /// what the print shows counts: a whole new screen of rows is the state again.
+    func testABigScrollOnAFoldedPageIsThePrintNotAListOfRows() {
+        let f = CUStateFormatter(lineCap: 40)
+        let (base, _) = printedSnap("s1", page(offset: 0), f)
+        let (now, nowShown) = printedSnap("s2", page(offset: 1000), f)
+        let d = CUStateDiff.compute(old: base, new: now, shownNow: nowShown)
+        let union = Double(d.surfaced.count) / Double(Set(base.order).union(now.order).count)
+        XCTAssertLessThan(union, 0.5, "by the union alone it would have been a diff")
+        XCTAssertGreaterThan(d.changedRatio, 0.5, "\(d.surfaced.count) rows surfaced of \(nowShown.count) shown: the print")
+        // A small scroll stays a diff.
+        let (near, nearShown) = printedSnap("s3", page(offset: 60), f)
+        XCTAssertLessThanOrEqual(CUStateDiff.compute(old: base, new: near, shownNow: nearShown).changedRatio, 0.5)
+    }
+
+    /// Review of round 3 (LOW): when the state is printed instead of a diff, what the base had shown and is still there
+    /// unchanged stays seen (it was "surfaced" again later) — a row changed meanwhile does not.
+    func testWhatTheBaseShowedStaysSeenAfterAPrint() {
+        let f = CUStateFormatter(lineCap: 40)
+        let (base, baseShown) = printedSnap("s1", page(offset: 0), f)
+        XCTAssertTrue(baseShown.contains(100) && baseShown.contains(107))
+        var (now, nowShown) = printedSnap("s2", page(offset: 1000, v7: "b"), f)
+        let d = CUStateDiff.compute(old: base, new: now, shownNow: nowShown)
+        XCTAssertGreaterThan(d.changedRatio, 0.5, "printed")
+        now.shown = d.shownAfterPrint(old: base, new: now, printed: nowShown)
+        XCTAssertTrue(now.shown?.contains(100) ?? false, "seen at the top, folded now: still seen")
+        XCTAssertFalse(now.shown?.contains(107) ?? true, "changed while folded: not seen as it is")
+        let (back, backShown) = printedSnap("s3", page(offset: 0, v7: "b"), f)
+        let d2 = CUStateDiff.compute(old: now, new: back, shownNow: backShown)
+        XCTAssertFalse(d2.surfaced.contains(100), "never re-surfaced")
+        XCTAssertTrue(d2.surfaced.contains(107), "the changed one is shown as it is now")
     }
 
     func testDiffLinesAreCapped() {

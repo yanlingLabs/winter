@@ -75,8 +75,10 @@ public struct CUSnapshot: Sendable {
 ///     ~ [14] value "milk, eggs" → "milk, eggs, bread"
 ///     - [13]
 ///
-/// `changedRatio` = changed elements / elements in either snapshot. Callers fall back to the full state
-/// when it exceeds 0.5.
+/// `changedRatio` = changed elements / elements in either snapshot — or, against a folded print, the new lines
+/// (added and surfaced) / the lines the print shows, when that is more: a scroll on a big folded page surfaced row
+/// after row while the union of every ref kept the ratio low, and the diff grew into a list longer than the print
+/// (review of round 3). Callers fall back to the full state when it exceeds 0.5.
 public struct CUStateDiff: Sendable, Equatable {
     public var added: [Int]
     public var removed: [Int]
@@ -130,7 +132,10 @@ public struct CUStateDiff: Sendable, Equatable {
         }
         let union = Set(old.order).union(newRefs).count
         let changed = added.count + removed.count + modified.count + surfaced.count
-        let ratio = union == 0 ? 0 : Double(changed) / Double(union)
+        var ratio = union == 0 ? 0 : Double(changed) / Double(union)
+        if let now = shownNow, !now.isEmpty {
+            ratio = max(ratio, Double(added.count + surfaced.count) / Double(now.count))
+        }
         var d = CUStateDiff(added: added, removed: removed, modified: modified, changes: changes,
                             changedRatio: min(1, ratio))
         d.surfaced = surfaced
@@ -138,11 +143,12 @@ public struct CUStateDiff: Sendable, Equatable {
         return d
     }
 
-    /// What the model has seen once this diff is printed: the base's shown refs still there, plus every line it prints.
-    public func shownAfter(old: CUSnapshot, new: CUSnapshot) -> Set<Int>? {
-        guard let seen = old.shown else { return nil }
-        let newRefs = Set(new.order)
-        return seen.intersection(newRefs).union(added).union(surfaced).union(modified)
+    /// What the model has seen once a print of the WHOLE state replaced this diff (it changed too much): what the print
+    /// shows, plus what the base had shown that is still there unchanged — folded now, it was seen (review of round 3:
+    /// forgotten, it was "surfaced" again later). A changed one folded now was not seen as it is.
+    public func shownAfterPrint(old: CUSnapshot, new: CUSnapshot, printed: Set<Int>?) -> Set<Int>? {
+        guard let printed, let seen = old.shown else { return printed }
+        return printed.union(seen.intersection(Set(new.order)).subtracting(modified))
     }
 
     /// `[p] role "name"` for the nearest ancestor of `ref` the model has seen (the base's shown refs), for a line the
@@ -166,29 +172,39 @@ public struct CUStateDiff: Sendable, Equatable {
     /// The diff text, capped at `lineCap` change lines.
     public func render(header: CUStateHeader, new: CUSnapshot, includeWindowTitle: Bool,
                        formatter f: CUStateFormatter = CUStateFormatter(), seen: Set<Int>? = nil) -> String {
+        rendered(header: header, new: new, includeWindowTitle: includeWindowTitle, formatter: f, seen: seen).text
+    }
+
+    /// The diff text, and what the model has seen once it is printed: `seen` (the base's shown refs) still there, plus
+    /// the element of every line the text KEEPS — a line the `lineCap` cut was never seen (review of round 3: refs cut
+    /// off counted as shown and read "(no changes)" until they changed). Nil `seen`: nil (everything counts as seen).
+    public func rendered(header: CUStateHeader, new: CUSnapshot, includeWindowTitle: Bool,
+                         formatter f: CUStateFormatter = CUStateFormatter(), seen: Set<Int>? = nil) -> (text: String, shown: Set<Int>?) {
         var lines = [f.header(header, includeWindow: includeWindowTitle)]
-        var body: [String] = []
-        for ref in added { if let l = new.facets[ref]?.line { body.append("+ " + l) } }
+        var body: [(text: String, ref: Int?)] = []
+        for ref in added { if let l = new.facets[ref]?.line { body.append(("+ " + l, ref)) } }
         // Not changed, but new to the model: scrolled into view, or out of a fold.
         for ref in surfaced {
             guard let l = new.facets[ref]?.line else { continue }
-            body.append("+ " + l + " — now shown" + (context(ref, new: new, seen: seen, f).map { ", " + $0 } ?? ""))
+            body.append(("+ " + l + " — now shown" + (context(ref, new: new, seen: seen, f).map { ", " + $0 } ?? ""), ref))
         }
         for ref in modified {
             var text = "~ [\(ref)] " + (changes[ref] ?? []).joined(separator: "; ")
             if unseen.contains(ref), let l = new.facets[ref]?.line {
                 text += " — " + l + (context(ref, new: new, seen: seen, f).map { ", " + $0 } ?? "")
             }
-            body.append(text)
+            body.append((text, ref))
         }
-        for ref in removed { body.append("- [\(ref)]") }
-        if body.isEmpty { body.append("(no changes)") }
+        for ref in removed { body.append(("- [\(ref)]", nil)) }
+        if body.isEmpty { body.append(("(no changes)", nil)) }
+        var more = 0
         if body.count > f.lineCap {
-            let more = body.count - f.lineCap
+            more = body.count - f.lineCap
             body = Array(body.prefix(f.lineCap))
-            body.append("… (\(more) more changes — state({full:true}))")
         }
-        lines.append(contentsOf: body)
-        return lines.joined(separator: "\n")
+        lines.append(contentsOf: body.map(\.text))
+        if more > 0 { lines.append("… (\(more) more changes — state({full:true}))") }
+        let shown = seen.map { s in s.intersection(Set(new.order)).union(body.compactMap(\.ref)) }
+        return (lines.joined(separator: "\n"), shown)
     }
 }
