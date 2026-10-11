@@ -105,6 +105,8 @@ export interface BrowserEngineDeps {
   headlessSessionEnded?(sessionId: string): void;
   /** Phase 4: why the headless browser is not offered, when it is not ("turned off in Settings", missing). */
   headlessReason?(): string | undefined;
+  /** When Winter Headless last refused a request of this tab to the local network (the pool's `localNetworkRefusedAt`). */
+  headlessLocalNetworkRefusedAt?(tabKey: string): number | undefined;
   now?(): number;
   log?(line: string): void;
   /** Phase 4: the plain-HTTP page reader `browsers.read` uses (default: one on the system resolver and `fetch`). */
@@ -2122,8 +2124,21 @@ export class BrowserEngine {
 
   private async navigate(scope: TabRunScope, b: Binding, driver: TabDriver, go: () => Promise<boolean>): Promise<undefined> {
     driver.agentNavigating = b.kind === "agent";
+    const startedAt = Date.now();
     let loaded: boolean;
-    try { loaded = await go(); } finally { driver.agentNavigating = false; }
+    try {
+      loaded = await go();
+    } catch (err) {
+      // A headless navigation the browser itself cancelled because it led to the local network (a redirect there):
+      // the model reads why, not a bare net error.
+      const refusedAt = this.isHeadless(b.backend) ? this.deps.headlessLocalNetworkRefusedAt?.(b.tabKey) : undefined;
+      if (refusedAt !== undefined && refusedAt >= startedAt) {
+        throw new AutomationFailure("NotAllowed", `${HEADLESS_LAN_REFUSAL} — the page led there (a redirect); nothing was sent to it`);
+      }
+      throw err;
+    } finally {
+      driver.agentNavigating = false;
+    }
     scope.live();
     scope.acted.add(b.targetId);
     scope.diffBases.clearTarget(scope.sessionId, b.targetId);

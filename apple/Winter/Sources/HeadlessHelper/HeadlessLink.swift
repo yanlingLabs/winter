@@ -127,6 +127,12 @@ final class HeadlessLink: HeadlessOutput, @unchecked Sendable {
         }
     }
 
+    func notice(tabId: String, kind: String) {
+        out.async { [self] in
+            for line in outbox.notice(tabId: tabId, kind: kind) { write(line) }
+        }
+    }
+
     /// The whole line, or the pipe is gone.
     private func write(_ line: Data) {
         guard !writeFailed else { return }

@@ -854,6 +854,19 @@ BOOL WinterCEFHeadlessReady(void);
 /// nobody can see or answer this browser's UI. Its pop-ups are refused (no pop-up observer is ever set).
 void WinterCEFCreateWindowlessBrowser(NSView *key, const char *url, const char *sessionId);
 
+/// The headless browser's LOCAL-NETWORK rule (the helper's `HeadlessNetworkRule`): true when a request to `url` —
+/// as Chromium canonicalised it — must be refused. Installed by the helper before `WinterCEFInitializeHeadless`, and
+/// applied to every request a headless browser makes: a navigation and each of its redirects (`OnBeforeBrowse`), and
+/// every other load, a sub-resource, a fetch, a service worker's (`OnBeforeResourceLoad`, `OnResourceRedirect`) —
+/// cancelled before any socket opens. Called on CEF's UI and IO threads: it must be pure. Unset, every request is
+/// refused (fail closed).
+typedef bool (*WinterCEFHeadlessRequestRule)(const char *url);
+void WinterCEFHeadlessSetRequestRule(WinterCEFHeadlessRequestRule rule);
+
+/// What a headless page tried and the helper refused, reported on the main thread with the browser's identifier and
+/// a kind: "popup" (it tried to open a window) or "local-network" (a request the rule refused). Never the URL.
+void WinterCEFHeadlessSetNoticeObserver(void (^observer)(int browserId, const char *kind));
+
 /// Forget `sessionId`'s request context: its cookies are deleted and the context released. The caller closes
 /// the session's browsers first (`WinterCEFCloseBrowser`); a browser still open keeps its context alive until
 /// it closes. A creation still waiting for the context is dropped. Unknown sessions are a no-op.

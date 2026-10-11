@@ -297,6 +297,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     ...(deps.turnRunning === undefined ? {} : { turnRunning: deps.turnRunning }),
     headlessSessionEnded: (sessionId) => headless.disposeSession(sessionId),
     headlessReason: () => headless.reason,
+    headlessLocalNetworkRefusedAt: (tabKey) => headless.localNetworkRefusedAt(tabKey),
     log,
   });
 

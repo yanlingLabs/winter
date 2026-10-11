@@ -62,6 +62,9 @@ let chromiumArgv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?> = {
     return argv
 }()
 
+// The local-network rule, before any browser can exist (unset, CEF would refuse every request).
+WinterCEFHeadlessSetRequestRule(headlessRequestRefused)
+
 guard WinterCEFInitializeHeadless(Int32(chromiumArguments.count), chromiumArgv, layout.frameworkDir,
                                   layout.mainBundle, layout.subprocessPath, arguments.cacheRoot) else {
     fail("CEF did not start: \(String(cString: WinterCEFLastError()))", code: 4)

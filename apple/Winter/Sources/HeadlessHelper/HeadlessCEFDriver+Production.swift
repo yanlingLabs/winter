@@ -43,7 +43,12 @@ extension HeadlessCEFDriver {
             return WinterCEFResolveHeldDialog(key, cefAction, prompt ?? "")
         },
         close: { WinterCEFCloseBrowser($0) },
-        disposeContext: { WinterCEFHeadlessDisposeContext($0) })
+        disposeContext: { WinterCEFHeadlessDisposeContext($0) },
+        setNoticeObserver: { observer in
+            WinterCEFHeadlessSetNoticeObserver(observer.map { observe in
+                { browserId, kind in observe(Int(browserId), kind.map { String(cString: $0) } ?? "") }
+            })
+        })
 
     static func status(_ status: WinterCEFCDPStatus) -> HeadlessCDPStatus {
         switch status {

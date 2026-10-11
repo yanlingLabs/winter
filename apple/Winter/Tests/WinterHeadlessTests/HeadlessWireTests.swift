@@ -131,6 +131,16 @@ final class HeadlessWireTests: XCTestCase {
         XCTAssertEqual(gone["method"], .string("browserLink.tabGone"))
         XCTAssertEqual(gone["params"]?["reason"], .string("crashed"))
     }
+
+    func testANoticeFollowsThePendingEventsAndNamesNoAddress() throws {
+        let outbox = HeadlessOutbox(linkId: "h-1")
+        _ = outbox.event(.init(tabId: "w-1", method: "Page.loadEventFired", params: Data("{}".utf8), cdpSessionId: nil, strip: false))
+        let lines = outbox.notice(tabId: "w-1", kind: "local-network")
+        XCTAssertEqual(lines.count, 2)
+        let notice = try XCTUnwrap(decode(lines[1]))
+        XCTAssertEqual(notice["method"], .string("headless.notice"))
+        XCTAssertEqual(notice["params"], .object(["linkId": .string("h-1"), "tabId": .string("w-1"), "kind": .string("local-network")]))
+    }
 }
 
 final class HeadlessLayoutTests: XCTestCase {

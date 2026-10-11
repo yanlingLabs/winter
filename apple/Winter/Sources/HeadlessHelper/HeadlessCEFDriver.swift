@@ -41,4 +41,6 @@ struct HeadlessCEFDriver {
     /// Close the key's browser (it never runs a `beforeunload` prompt — there is nobody to ask).
     var close: (NSView) -> Void
     var disposeContext: (String) -> Void
+    /// What a page tried and was refused, by browser id: `"popup"` or `"local-network"` (main thread). `nil` stops it.
+    var setNoticeObserver: (((Int, String) -> Void)?) -> Void = { _ in }
 }

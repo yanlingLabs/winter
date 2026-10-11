@@ -90,6 +90,24 @@ describe("the local network (D4)", () => {
     r.end();
   });
 
+  test("a navigation the browser cancelled because it led to the LAN (a redirect) reads as the LAN refusal, not a net error", async () => {
+    let refusedAt: number | undefined;
+    const h = withHeadless({ engineDeps: { headlessLocalNetworkRefusedAt: () => refusedAt } });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    h.headless.failNextNavigate = "net::ERR_ABORTED";
+    refusedAt = Date.now() + 1;
+    const e = await failure(h.engine.primitive(r.scope, tab.targetId, "goto", { url: "https://redirects.example/" }));
+    expect((e as AutomationFailure).kind).toBe("NotAllowed");
+    expect(e.message).toBe(`${HEADLESS_LAN_REFUSAL} — the page led there (a redirect); nothing was sent to it`);
+    // An older refusal (before this navigation) leaves an ordinary failure as it is.
+    refusedAt = 1;
+    h.headless.failNextNavigate = "net::ERR_NAME_NOT_RESOLVED";
+    const plain = await failure(h.engine.primitive(r.scope, tab.targetId, "goto", { url: "https://nowhere.example/" }));
+    expect(plain.message).toContain("net::ERR_NAME_NOT_RESOLVED");
+    r.end();
+  });
+
   test("goto onto the LAN is refused; a tab that lands there (a redirect) is read and acted on no further", async () => {
     const h = withHeadless();
     h.headless.pages["https://pub.example/"] = { url: "http://192.168.1.10/", title: "Router", nodes: [{ id: 1, role: "button", name: "Reboot" }] };

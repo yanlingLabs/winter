@@ -71,6 +71,28 @@ final class HeadlessHost {
     init(driver: HeadlessCEFDriver, clock: Clock = .production) {
         self.driver = driver
         self.clock = clock
+        driver.setNoticeObserver { [weak self] browserId, kind in
+            MainActor.assumeIsolated { self?.browserNotice(browserId: browserId, kind: kind) }
+        }
+    }
+
+    // MARK: - Refusals the browser reports
+
+    /// The kinds `headless.notice` carries.
+    static let noticeKinds: Set<String> = ["popup", "local-network"]
+    /// At most one notice per tab and kind this often: a page looping `window.open` cannot flood the pipe.
+    static let noticeInterval: TimeInterval = 0.5
+    private var lastNotice: [String: Date] = [:]
+
+    /// A page in the browser `browserId` tried something the browser refused: said to the daemon, by tab.
+    func browserNotice(browserId: Int, kind: String) {
+        guard browserId != 0, Self.noticeKinds.contains(kind),
+              let tab = tabs.values.first(where: { driver.browserIdentifier($0.key) == browserId }) else { return }
+        let key = "\(tab.tabId)|\(kind)"
+        let now = clock.now()
+        if let last = lastNotice[key], now.timeIntervalSince(last) < Self.noticeInterval { return }
+        lastNotice[key] = now
+        output?.notice(tabId: tab.tabId, kind: kind)
     }
 
     // MARK: - Commands
@@ -213,6 +235,7 @@ final class HeadlessHost {
 
     private func close(_ tabId: String) {
         guard let tab = tabs.removeValue(forKey: tabId) else { return }
+        lastNotice = lastNotice.filter { !$0.key.hasPrefix("\(tabId)|") }
         tab.gate = nil
         driver.setEventObserver(tab.key, nil)
         driver.setCrashObserver(tab.key, nil)
@@ -361,6 +384,8 @@ final class HeadlessHost {
 protocol HeadlessOutput: AnyObject {
     func emitEvent(tabId: String, method: String, params: Data, cdpSessionId: String?, strip: Bool)
     func tabGone(tabId: String, reason: BrowserLinkProtocol.TabGoneReason)
+    /// A page tried something the browser refused (`headless.notice`): `"popup"` or `"local-network"`.
+    func notice(tabId: String, kind: String)
 }
 
 /// The answer door for ONE command. A second answer is ignored, so a late completion racing a failure can never

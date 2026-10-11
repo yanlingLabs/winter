@@ -28,6 +28,7 @@ enum HeadlessWire {
         static let result = BrowserLinkProtocol.Method.result
         static let events = BrowserLinkProtocol.Method.events
         static let tabGone = BrowserLinkProtocol.Method.tabGone
+        static let notice = "headless.notice"
     }
 
     enum Op {
@@ -199,6 +200,14 @@ final class HeadlessOutbox {
         var lines = flush()
         lines.append(Self.line(method: HeadlessWire.Method.tabGone,
                                params: ["linkId": .string(linkId), "tabId": .string(tabId), "reason": .string(reason.rawValue)]))
+        return lines
+    }
+
+    /// A page tried something the browser refused — after the events already pending, so it follows them.
+    func notice(tabId: String, kind: String) -> [Data] {
+        var lines = flush()
+        lines.append(Self.line(method: HeadlessWire.Method.notice,
+                               params: ["linkId": .string(linkId), "tabId": .string(tabId), "kind": .string(kind)]))
         return lines
     }
 

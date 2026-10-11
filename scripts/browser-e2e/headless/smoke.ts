@@ -2,12 +2,16 @@
 // (fds 3/4), open a windowless tab on a local fixture page, and drive it with the very commands the daemon's pool
 // sends — a winter world, an evaluation, a screenshot, a click, an out-of-process-iframe page — then close the pipe
 // and check the helper exits. Also checks, from outside, that the helper never owns a window and never becomes the
-// frontmost app.
+// frontmost app; and that the local-network rule cancels a script's navigation, a redirect, a sub-resource and a fetch
+// to a refused host before anything is sent, saying so (`headless.notice`), and that a refused popup is said too. The
+// refused hosts are random `.internal` names: nothing could answer them, and nothing on the LAN is ever reached even if
+// the rule failed.
 //
 //   bun scripts/browser-e2e/headless/smoke.ts --app "<path to Winter Headless Dev.app>" [--out <dir>] [--keep]
 //
 // Writes its screenshot into --out (default: a temp dir). Nothing is written outside temp dirs.
 import { spawn } from "node:child_process";
+import { createServer } from "node:net";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,10 +37,29 @@ const frame = Bun.serve({
   port: 0,
   fetch: () => new Response("<!doctype html><title>frame</title><p id=f>inside the frame</p>", { headers: { "content-type": "text/html" } }),
 });
+// Refused hosts nobody can answer (a random label under the private-use `.internal`).
+const nowhere = (what: string): string => `http://${what}-${Math.random().toString(36).slice(2, 10)}.internal/`;
+const requested: string[] = [];
+// A loopback listener that only counts connections: does a page's <link rel=preconnect> open a socket?
+let preconnects = 0;
+const counter = createServer((socket) => { preconnects++; socket.destroy(); });
+await new Promise<void>((resolve) => counter.listen(0, "127.0.0.1", resolve));
+const counterPort = (counter.address() as { port: number }).port;
 const page = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
-  fetch: () => new Response(
+  fetch: (req) => {
+    const path = new URL(req.url).pathname;
+    requested.push(path);
+    if (path === "/redirect-internal") return new Response(null, { status: 302, headers: { location: nowhere("redirected") } });
+    if (path === "/sub") {
+      return new Response(`<!doctype html><title>sub-resources</title><p id=r>pending</p>
+        <img src="${nowhere("img")}x.png" onerror="document.getElementById('i').textContent='img error'"><p id=i>img pending</p>
+        <script>fetch('/redirect-internal').then(() => 'fetched', (e) => 'fetch failed: ' + e.name).then((t) => { document.getElementById('r').textContent = t; });</script>`,
+      { headers: { "content-type": "text/html" } });
+    }
+    if (path === "/preconnect") return new Response(`<!doctype html><title>preconnect</title><link rel=preconnect href="http://127.0.0.1:${counterPort}"><link rel=dns-prefetch href="${nowhere("prefetch")}"><p>hint</p>`, { headers: { "content-type": "text/html" } });
+    return new Response(
     `<!doctype html><title>Winter Headless smoke</title>
      <body style="margin:0;font:24px system-ui">
        <h1 style="background:#ff00ff;margin:0;height:120px">Winter Headless</h1>
@@ -45,7 +68,8 @@ const page = Bun.serve({
        <input id=t style="position:absolute;left:100px;top:320px;width:200px;height:30px">
        <input id=f type=file style="position:absolute;left:100px;top:380px;width:200px;height:30px">
      </body>`,
-    { headers: { "content-type": "text/html" } }),
+    { headers: { "content-type": "text/html" } });
+  },
 });
 const url = `http://127.0.0.1:${page.port}/`;
 
@@ -72,6 +96,7 @@ const exited = new Promise<void>((resolve) => proc.on("exit", (code, signal) => 
 type Message = { method: string; params: Record<string, unknown> };
 const waiters: Array<{ match: (m: Message) => boolean; resolve: (m: Message) => void }> = [];
 const events: Message[] = [];
+const notices: Array<{ tabId: string; kind: string }> = [];
 let pending = Buffer.alloc(0);
 fromHelper.on("data", (chunk: Buffer) => {
   pending = Buffer.concat([pending, chunk]);
@@ -81,6 +106,7 @@ fromHelper.on("data", (chunk: Buffer) => {
     if (text.length === 0) continue;
     const m = JSON.parse(text) as Message;
     if (m.method === "browserLink.events") events.push(m);
+    if (m.method === "headless.notice") notices.push({ tabId: String(m.params.tabId), kind: String(m.params.kind) });
     const i = waiters.findIndex((w) => w.match(m));
     if (i >= 0) waiters.splice(i, 1)[0]!.resolve(m);
   }
@@ -213,6 +239,7 @@ try {
   check("a file chooser is intercepted (no native panel)", chooser);
   await cdp("Page.setInterceptFileChooserDialog", { enabled: false });
 
+
   // WebMCP behind its feature (reported, not required: it is an origin-trial API).
   const webmcp = await evalWinter("typeof document.modelContext + '/' + typeof navigator.modelContext");
   console.log(`INFO WebMCP: document.modelContext / navigator.modelContext = ${String(webmcp)}`);
@@ -221,6 +248,56 @@ try {
 
   const live = await command("tabs.live", {}) as { tabs?: Array<{ sessionId?: string }> };
   check("tabs.live names the session", live.tabs?.[0]?.sessionId === "s_smoke");
+
+  // ── the local-network rule, inside the browser ──
+  const topUrl = async (): Promise<string> => String(((await cdp("Page.getFrameTree")) as { frameTree?: { frame?: { url?: string } } }).frameTree?.frame?.url ?? "");
+  const noticed = (kind: string, after: number) => notices.slice(after).some((n) => n.tabId === "w-1" && n.kind === kind);
+  let mark = notices.length;
+  await evalWinter(`location.href = ${JSON.stringify(nowhere("router"))}; 1`);
+  const scriptNoticed = await eventually("a local-network notice (script navigation)", () => noticed("local-network", mark));
+  await Bun.sleep(300);
+  check("a page's own navigation to a refused host is cancelled before it is sent, and said", scriptNoticed && await topUrl() === url, await topUrl());
+
+  await Bun.sleep(600);
+  mark = notices.length;
+  const navigated = await cdp("Page.navigate", { url: `${url}redirect-internal` }) as { errorText?: string };
+  const redirectNoticed = await eventually("a local-network notice (redirect)", () => noticed("local-network", mark));
+  await Bun.sleep(300);
+  const after = await topUrl();
+  check("a redirect to a refused host is never followed, and said", redirectNoticed && requested.includes("/redirect-internal") && !after.includes(".internal"),
+    `errorText=${navigated.errorText ?? "none"} url=${after}`);
+
+  await Bun.sleep(600);
+  mark = notices.length;
+  await cdp("Page.navigate", { url: `${url}sub` });
+  let subWorld: number | undefined;
+  let subText = "";
+  for (let i = 0; i < 50 && !(subText.includes("fetch failed") && subText.includes("img error")); i++) {
+    await Bun.sleep(100);
+    if (!(await topUrl()).endsWith("/sub")) continue;
+    if (subWorld === undefined) {
+      const tree = await cdp("Page.getFrameTree") as { frameTree?: { frame?: { id?: string } } };
+      subWorld = ((await cdp("Page.createIsolatedWorld", { frameId: tree.frameTree?.frame?.id, worldName: "winter" })) as { executionContextId?: number }).executionContextId;
+    }
+    subText = String(((await cdp("Runtime.evaluate", { expression: "document.body.innerText", contextId: subWorld, returnByValue: true })) as { result?: { value?: unknown } }).result?.value ?? "");
+  }
+  check("a sub-resource and a fetch redirected to a refused host fail, and are said", subText.includes("fetch failed") && subText.includes("img error") && noticed("local-network", mark), subText.replace(/\s+/g, " ").slice(0, 200));
+
+  mark = notices.length;
+  // With a user gesture (Chromium's own blocker drops a popup without one before the browser is asked).
+  if (subWorld !== undefined) await cdp("Runtime.evaluate", { expression: "window.open('https://example.com/'); 1", contextId: subWorld, returnByValue: true, userGesture: true });
+  check("a popup is refused and said", await eventually("a popup notice", () => noticed("popup", mark)));
+
+  await Bun.sleep(600);
+  mark = notices.length;
+  if (subWorld !== undefined) await cdp("Runtime.evaluate", { expression: `try { new WebSocket(${JSON.stringify(nowhere("socket").replace("http:", "ws:"))}); } catch (e) {} 1`, contextId: subWorld, returnByValue: true });
+  const socketNoticed = await eventually("a WebSocket notice", () => noticed("local-network", mark), 2_000);
+  console.log(`INFO a WebSocket to a refused host: ${socketNoticed ? "cancelled by the request guard" : "NOT seen by the request guard"}`);
+
+  await cdp("Page.navigate", { url: `${url}preconnect` });
+  await Bun.sleep(1_500);
+  const prediction = /network prediction: ([^)]+)\)/.exec(stderr)?.[1] ?? "not logged";
+  console.log(`INFO <link rel=preconnect> to a loopback listener: ${preconnects} connection(s); the browser's network prediction preference: ${prediction}`);
 
   const front = await frontmost();
   check("the frontmost app never changed", front === before, `${before} → ${front}`);
@@ -238,6 +315,7 @@ try {
   check("the helper exits when its pipe closes", exitCode === 0, `exit ${exitCode}`);
   page.stop(true);
   frame.stop(true);
+  counter.close();
   if (!process.argv.includes("--keep")) rmSync(cacheRoot, { recursive: true, force: true });
   if (process.argv.includes("--stderr")) console.log(stderr);
   const failed = results.filter(([, ok]) => !ok).length;

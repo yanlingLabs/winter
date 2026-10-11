@@ -16,6 +16,7 @@ final class FakeHeadlessDriver {
     var heldDialog = false
     var closed: [ObjectIdentifier] = []
     var disposed: [String] = []
+    var noticeObserver: ((Int, String) -> Void)?
     /// Browsers appear at once unless a test says otherwise.
     var browsersArriveAtOnce = true
 
@@ -44,13 +45,16 @@ final class FakeHeadlessDriver {
                 closed.append(ObjectIdentifier(key))
                 browserIds[ObjectIdentifier(key)] = nil
             },
-            disposeContext: { [unowned self] session in disposed.append(session) })
+            disposeContext: { [unowned self] session in disposed.append(session) },
+            setNoticeObserver: { [unowned self] observer in noticeObserver = observer })
     }
 }
 
 final class RecordingOutput: HeadlessOutput {
     var events: [(tabId: String, method: String, strip: Bool)] = []
     var gone: [(String, BrowserLinkProtocol.TabGoneReason)] = []
+    var notices: [(tabId: String, kind: String)] = []
+    func notice(tabId: String, kind: String) { notices.append((tabId, kind)) }
     func emitEvent(tabId: String, method: String, params: Data, cdpSessionId: String?, strip: Bool) {
         events.append((tabId, method, strip))
     }
@@ -114,6 +118,23 @@ final class HeadlessHostTests: XCTestCase {
         XCTAssertNotNil(run(.tabRelease(tabId: "w-1")))
         if case .ok? = run(.tabEnsure(sessionId: "s_a", tabId: "w-1", url: nil)) {} else { XCTFail("re-hold") }
         XCTAssertEqual(fake.created.count, 1)
+    }
+
+    /// A refused popup or local-network request is said to the daemon by TAB — once per tab and kind per half second
+    /// (a page looping `window.open` cannot flood the pipe); an unknown kind or browser is dropped.
+    func testARefusalTheBrowserReportsIsANoticeForItsTab() {
+        _ = open("w-1")
+        _ = open("w-2")
+        let observe = try! XCTUnwrap(fake.noticeObserver, "the host listens from the start")
+        observe(2, "popup")
+        observe(2, "popup")
+        observe(1, "local-network")
+        observe(1, "camera")
+        observe(99, "popup")
+        XCTAssertEqual(output.notices.map { "\($0.tabId) \($0.kind)" }, ["w-2 popup", "w-1 local-network"])
+        now = now.addingTimeInterval(HeadlessHost.noticeInterval + 0.01)
+        observe(2, "popup")
+        XCTAssertEqual(output.notices.count, 3)
     }
 
     func testATabBelongsToItsOwnSessionOnly() {

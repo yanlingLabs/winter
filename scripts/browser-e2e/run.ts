@@ -96,6 +96,8 @@ const serve = (port: number, rewrite: (s: string) => string) => Bun.serve({
     // A download that comes through two redirects, the middle one on the other origin (the floor holds every hop).
     if (path === "/files/hop") return Response.redirect(`${OOP_ORIGIN}/files/hop2`, 302);
     if (path === "/files/hop2") return Response.redirect(`${BASE}/files/prices.csv`, 302);
+    // Phase 4 (headless): a redirect onto a local-network name nobody can answer (a random `.internal` label).
+    if (path === "/redirect-lan") return Response.redirect(`http://e2e-${Math.random().toString(36).slice(2, 10)}.internal/`, 302);
     // Phase 3's readers: an API answer with a secret in it, a stylesheet and an image.
     if (path === "/api/items") return Response.json({ items: [{ name: "tea" }, { name: "cake" }], token: "tok_live_should_never_show", owner: "shop" });
     if (path === "/static/site.css") return new Response("h1 { color: navy; }", { headers: { "content-type": "text/css" } });
@@ -173,7 +175,10 @@ const engine = new BrowserEngine({
   home: mkdtempSync(join(tmpdir(), "winter-browser-e2e-home-")),
   uploadRoots: () => ({ denyRead: [] }),
   downloadRoots: () => ({ tmpDir: sessionTmp, denyWrite: [], denyRead: [] }),
-  ...(headlessPool === undefined ? {} : { headlessSessionEnded: (sid: string) => headlessPool.disposeSession(sid), headlessReason: () => headlessPool.reason }),
+  ...(headlessPool === undefined ? {} : {
+    headlessSessionEnded: (sid: string) => headlessPool.disposeSession(sid), headlessReason: () => headlessPool.reason,
+    headlessLocalNetworkRefusedAt: (tabKey: string) => headlessPool.localNetworkRefusedAt(tabKey),
+  }),
 });
 const locks = new TargetLocks();
 const diffBases = new DiffBases();
@@ -637,6 +642,12 @@ if (!HEADLESS) await check("WebMCP in a user's browser (its per-app policy): lis
   const found = await U("callTool", { name: "search_products", input: { q: "black" } }) as { results: string[] };
   expect(found.results[0] === "black tea", "the answer", JSON.stringify(found));
 });
+if (HEADLESS) await check("headless: a redirect onto the local network is cancelled inside the browser, before it is sent, and reads as the LAN refusal", async () => {
+  const e = await failsWith(W("goto", { url: `${BASE}/redirect-lan` }), "NotAllowed");
+  expect(/the page led there \(a redirect\); nothing was sent to it$/.test(e.message), "the LAN sentence", e.message);
+  expect(!(await W("url", {}) as string).includes(".internal"), "the tab never went there");
+});
+
 run4.end();
 
 // ── Phase 3: download() in a user's browser (Fetch interception) ─────────────────────────────────────

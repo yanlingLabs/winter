@@ -1268,6 +1268,7 @@ targets:
       - path: Sources/HeadlessHelper/HeadlessCEFDriver.swift
       - path: Sources/HeadlessHelper/HeadlessWire.swift
       - path: Sources/HeadlessHelper/HeadlessLayout.swift
+      - path: Sources/HeadlessHelper/HeadlessNetworkRule.swift
       - path: ../WinterKit/Sources/WinterKit/JSONValue.swift
       - path: ../WinterKit/Sources/WinterKit/LineDecoder.swift
       - path: ../WinterKit/Sources/WinterKit/BrowserLink/BrowserLinkProtocol.swift
