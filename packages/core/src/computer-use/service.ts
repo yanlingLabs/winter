@@ -527,11 +527,13 @@ export class ComputerV2Service {
         if (!target) throw bad("apps.open() takes an app name or bundle id, or a file path or URL to open");
         const opener = str((args as Record<string, unknown>).with)?.trim();
         // A file path or URL (or an explicit opener) opens a document; a name or an .app bundle binds the app.
+        // `{ emit: false }`: bound without printing its state (queue item 4 — a bind always printed the whole window).
+        const quiet = (args as Record<string, unknown>).emit === false;
         if (opener !== undefined || isDocumentTarget(target)) {
-          return await this.openDocument(ctx, target, opener, metric);
+          return await this.openDocument(ctx, target, opener, metric, quiet);
         }
         const window = typeof args.window === "string" || typeof args.window === "number" ? args.window : undefined;
-        return await this.bind(ctx, { app: target, ...(window === undefined ? {} : { window }) }, metric);
+        return await this.bind(ctx, { app: target, ...(window === undefined ? {} : { window }), quiet }, metric);
       }
       case "screen.screenshot": return await this.screenScreenshot(ctx, args, metric);
       case "screen.windows": return await this.screenWindows(ctx, args, metric);
@@ -716,7 +718,7 @@ export class ComputerV2Service {
 
   /** Opens a file path or URL with an app, never activating it (NSWorkspace.open activates:false). The opener
    *  gets its per-app card and the save-path floors apply to the paths; the opened document's window is bound. */
-  private async openDocument(ctx: RunCtx, target: string, opener: string | undefined, metric: PrimitiveMetric): Promise<AppHandle> {
+  private async openDocument(ctx: RunCtx, target: string, opener: string | undefined, metric: PrimitiveMetric, quiet = false): Promise<AppHandle> {
     const settings = this.deps.settings();
     const urls = [target];
     // Who will open it — for the per-app card — resolved without opening anything.
@@ -733,12 +735,12 @@ export class ComputerV2Service {
     this.live(ctx);
     ctx.builder.daemonLine(`opened ${target.split("/").pop()} in ${res.app.name} (in the background)`);
     // Bind the opener's document window; the per-app grant from the card above means bind does not re-ask.
-    return await this.bind(ctx, { app: res.app.bundleId, known: app,
+    return await this.bind(ctx, { app: res.app.bundleId, known: app, quiet,
       ...(res.windowID === undefined ? {} : { window: res.windowID }) }, metric);
   }
 
   /** `apps.open` / `screen.appAt`: policy BEFORE the helper launches anything, bind, lock, print the full state. */
-  private async bind(ctx: RunCtx, req: { app: string; window?: string | number; known?: AppRef }, metric: PrimitiveMetric): Promise<AppHandle> {
+  private async bind(ctx: RunCtx, req: { app: string; window?: string | number; known?: AppRef; quiet?: boolean }, metric: PrimitiveMetric): Promise<AppHandle> {
     const known: AppRef & { path?: string } = req.known ?? await this.identifyApp(ctx, req.app, metric);
     await this.deps.policy.authorize(ctx.grants, known, { kind: "bind" }, ctx.abort.signal);
     this.live(ctx);
@@ -775,6 +777,15 @@ export class ComputerV2Service {
     }
     ctx.apps.add(app.name);
     this.deps.recentApps?.note(app.bundleId, app.name);
+    // `{ emit: false }`: bound, nothing of the window read or printed (no screen read, no diff base) — what the bind had
+    // to do and Winter's own adapter block still say themselves.
+    if (req.quiet === true) {
+      const detail = helperDetail(res.detail);
+      if (detail !== undefined) ctx.builder.daemonLine(detail);
+      if (res.webContent === true) this.hoverNote(ctx, info);
+      const adapted = await this.deps.adapters?.onBind(this.adapterScope(ctx, metric), info);
+      return { targetId: info.targetId, name: app.name, bundleId: app.bundleId, ...adapted?.handle };
+    }
     // The same window bound again (the helper hands back the same target): what changed since its last printed
     // state, not the whole tree once more (live: re-binding in every script cost ~13 KB a call).
     // A first bind prints the ORDINARY state (viewport first, folded to its line cap), never `full`: a full state is
