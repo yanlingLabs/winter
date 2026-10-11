@@ -3,7 +3,7 @@
   "productionReady": false,
   "vmStarted": false,
   "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
-  "patchSha256": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481",
+  "patchSha256": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775",
   "preservedA6PatchSha256": "a6e26d15693007d42df5c60155055b09c69897584665d227c8ee9c720d3cfb31",
   "features": [
     "blk"
@@ -30,11 +30,14 @@
     "Crypto kernel and userspace not built/selected.",
     "WFE deadline now captured before post-emulation park and actual functions regressed; no timer SLA or latency guarantee established."
   ],
-  "revision": 2,
-  "patchFile": "patches/0004-proposed-guarded-block-reviewed-fixes.patch",
+  "revision": 3,
+  "patchFile": "patches/0005-proposed-guarded-block-producer-progress.patch",
   "previousCandidate": {
-    "commit": "90c34d59c74b4d09ccc9dcba5da3c2a532d74c83",
-    "patchFile": "patches/0003-proposed-guarded-block.patch",
-    "patchSha256": "4ddbf8a2d1c04a0fcd07320b18c0dd253214797e405286b0b965037eb1e2ed87"
-  }
+    "commit": "20619b730c757cb378f202d9dbfd32a273a6cdd5",
+    "patchFile": "patches/0004-proposed-guarded-block-reviewed-fixes.patch",
+    "patchSha256": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481",
+    "review": "Astra accepted original five fixes and WFE for single-outstanding raw-block fixture; valid producer append still required correction."
+  },
+  "patchType": "incremental-against-previousCandidate",
+  "fullSourceDiffSha256": "1d6782b10e0608b3ce2e7ab246e4962efc1be678779c0a9f33e470de3b38c5bf"
 }

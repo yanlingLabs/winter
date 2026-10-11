@@ -102,4 +102,4 @@ This baseline records `activeReturnVerified: false` deliberately. A successful g
 
 ## Guarded block follow-on and crypto preparation
 
-`block-readiness.md` records the separate no-VM block candidate, actual worker/access tests and review limits. Run `python3 spikes/cowork-hvf/test_block.py` to check exact source correspondence, 49 actual-source tests and the reduced native build. This does not alter the verified A6 profile or add a block launch option. See `kernel/README.md` for verified source/config inputs and the explicit offline Linux builder entry point; neither a crypto kernel nor a trusted unlock initramfs has been built.
+`block-readiness.md` records the separate no-VM block candidate, actual worker/access tests and review limits. Run `python3 spikes/cowork-hvf/test_block.py` to check exact source correspondence, 51 actual-source tests and the reduced native build. This does not alter the verified A6 profile or add a block launch option. See `kernel/README.md` for verified source/config inputs and the explicit offline Linux builder entry point; neither a crypto kernel nor a trusted unlock initramfs has been built.
