@@ -1885,12 +1885,18 @@ function helperDetail(detail: unknown, cap = 300): string | undefined {
   return line.length === 0 ? undefined : line;
 }
 
+/** What the worker appends to an error thrown inside a saved script (`worker/runtime.ts`'s `savedPlace`). */
+const SAVED_SCRIPT_PLACE = / \(in saved script [a-z][A-Za-z0-9_]{0,47}(?:, line \d+)?\)$/;
+
 export function normaliseScriptError(e: { name?: unknown; message?: unknown; line?: unknown }, daemonSentences: ReadonlySet<string>): ScriptError {
   const name = typeof e.name === "string" && KNOWN_ERROR_NAMES.has(e.name) ? e.name : "Error";
   const raw = typeof e.message === "string" ? e.message : String(e.message ?? "");
   const message = raw.slice(0, ERROR_MESSAGE_CAP);
   const line = typeof e.line === "number" && Number.isInteger(e.line) && e.line > 0 && e.line < 1_000_000 ? e.line : undefined;
-  const trusted = (AUTOMATION_ERROR_KINDS as readonly string[]).includes(name) && daemonSentences.has(raw);
+  // A daemon sentence thrown inside a saved script carries the worker's "(in saved script x, line n)" after it: still
+  // the daemon's words.
+  const own = raw.replace(SAVED_SCRIPT_PLACE, "");
+  const trusted = (AUTOMATION_ERROR_KINDS as readonly string[]).includes(name) && (daemonSentences.has(raw) || daemonSentences.has(own));
   return { name, message, ...(line === undefined ? {} : { line }), trusted };
 }
 

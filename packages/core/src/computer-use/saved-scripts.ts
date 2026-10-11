@@ -9,7 +9,7 @@
 //   line (names only there), or sent anywhere but into the session's own fresh worker.
 // - The worker is untrusted (the model's code shares its process), so every save is checked again here.
 import {
-  SAVED_SCRIPT_MAX_BYTES, SAVED_SCRIPTS_MAX_COUNT, SAVED_SCRIPTS_MAX_TOTAL_BYTES, savedScriptNameOk, type SavedScriptSource,
+  SAVED_SCRIPT_MAX_BYTES, SAVED_SCRIPTS_MAX_COUNT, SAVED_SCRIPTS_MAX_TOTAL_BYTES, savedScriptNameOk, savedScriptTooLarge, type SavedScriptSource,
 } from "./worker/bridge";
 
 /** Why a save was refused: one sentence for the model (shown as a `TypeError`). */
@@ -27,7 +27,7 @@ export class SavedScripts {
     }
     if (typeof source !== "string" || source.trim().length === 0) return { refused: "scripts.save() takes a function written in your script" };
     const bytes = Buffer.byteLength(source, "utf8");
-    if (bytes > SAVED_SCRIPT_MAX_BYTES) return { refused: `a saved script is at most ${kib(SAVED_SCRIPT_MAX_BYTES)} of source — this one is ${kib(bytes)}` };
+    if (bytes > SAVED_SCRIPT_MAX_BYTES) return { refused: savedScriptTooLarge(bytes) };
     const mine = this.bySession.get(sessionId) ?? new Map<string, string>();
     const old = mine.get(name);
     if (old === undefined && mine.size >= SAVED_SCRIPTS_MAX_COUNT) {

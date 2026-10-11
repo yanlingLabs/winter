@@ -6,7 +6,7 @@ import { SavedScripts } from "../../src/computer-use/saved-scripts";
 import { SAVED_SCRIPT_MAX_BYTES, SAVED_SCRIPTS_MAX_COUNT, savedScriptNameOk, type WorkerToHost } from "../../src/computer-use/worker/bridge";
 import { createAutomationRuntime, type AutomationRuntime } from "../../src/computer-use/worker/runtime";
 import { computerV2Description, COMPUTER_V2_INPUT_SCHEMA } from "../../src/computer-use/description";
-import { ComputerV2Service } from "../../src/computer-use/service";
+import { ComputerV2Service, normaliseScriptError } from "../../src/computer-use/service";
 import type { ComputerPolicy } from "../../src/computer-use/policy";
 import type { HelperClient } from "../../src/computer-use/helper-client";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
@@ -265,12 +265,25 @@ describe("saved scripts in the service", () => {
     expect(w.svc.savedScripts.any("s1")).toBe(false);
   });
 
-  test("a limit refusal reaches the script as a TypeError in the daemon's words", async () => {
+  test("limits reach the script as a TypeError: too large (said by the worker, never sent) and too many (the daemon's)", async () => {
     const w = world();
-    const r = await w.run(`await scripts.save("big", () => "${"q".repeat(SAVED_SCRIPT_MAX_BYTES)}")`);
-    expect(r.isError).toBe(true);
-    expect(textOf(r)).toContain("TypeError");
-    expect(textOf(r)).toContain("a saved script is at most 32 KiB of source");
+    const big = await w.run(`await scripts.save("big", () => "${"q".repeat(SAVED_SCRIPT_MAX_BYTES)}")`);
+    expect(big.isError).toBe(true);
+    expect(textOf(big)).toContain("TypeError");
+    expect(textOf(big)).toContain("a saved script is at most 32 KiB of source");
+    expect(w.metrics().some((m) => m.primitive === "scripts.save")).toBe(false);
+    const many = await w.run(`for (let i = 0; i < ${SAVED_SCRIPTS_MAX_COUNT}; i++) await scripts.save("f" + i, () => 1)\nawait scripts.save("oneMore", () => 1)`);
+    expect(many.isError).toBe(true);
+    expect(textOf(many)).toContain("this session keeps at most 32 saved scripts — save over one you no longer need");
+    // Replacing one is still allowed.
+    expect((await w.run(`await scripts.save("f3", () => 3)\nprint(await scripts.f3())`)).isError).toBe(false);
+  });
+
+  test("a daemon sentence thrown inside a saved script is still the daemon's own (kept outside the fence)", () => {
+    const sentence = "Notes quit — open it again with apps.open()";
+    expect(normaliseScriptError({ name: "TargetLost", message: `${sentence} (in saved script fill, line 2)` }, new Set([sentence])).trusted).toBe(true);
+    expect(normaliseScriptError({ name: "TargetLost", message: `${sentence} — and more (in saved script fill, line 2)` }, new Set([sentence])).trusted).toBe(false);
+    expect(normaliseScriptError({ name: "Error", message: `${sentence} (in saved script fill)` }, new Set([sentence])).trusted).toBe(false);
   });
 
   test("a saved script the fresh worker can't re-create is dropped and said, by name", async () => {

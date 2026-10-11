@@ -72,6 +72,9 @@ export const SAVED_SCRIPT_RESERVED: ReadonlySet<string> = new Set(["save", "then
 export const SAVED_SCRIPT_MAX_BYTES = 32 * 1024;
 export const SAVED_SCRIPTS_MAX_COUNT = 32;
 export const SAVED_SCRIPTS_MAX_TOTAL_BYTES = 256 * 1024;
+/** The sentence for a source over the per-script limit (the worker says it before sending, the daemon after). */
+export const savedScriptTooLarge = (bytes: number): string =>
+  `a saved script is at most ${SAVED_SCRIPT_MAX_BYTES / 1024} KiB of source — this one is ${Math.ceil(bytes / 1024)} KiB`;
 /** Whether `name` may name a saved script (the worker checks it, and the daemon again — the worker is untrusted). */
 export const savedScriptNameOk = (name: unknown): name is string => typeof name === "string" && SAVED_SCRIPT_NAME.test(name) && !SAVED_SCRIPT_RESERVED.has(name);
 

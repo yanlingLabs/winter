@@ -9,7 +9,7 @@
 // the store, so top-level declarations persist and may be redeclared, and top-level `await` just works.
 // Sloppy mode, deliberately — `with` and block-level function hoisting need it.
 import { AUTOMATION_ERROR_KINDS, type AutomationErrorKind } from "../errors";
-import { savedScriptNameOk, type AppHandle, type HostToWorker, type ImageHandle, type SavedScriptSource, type TabHandle, type WorkerToHost } from "./bridge";
+import { SAVED_SCRIPT_MAX_BYTES, savedScriptNameOk, savedScriptTooLarge, type AppHandle, type HostToWorker, type ImageHandle, type SavedScriptSource, type TabHandle, type WorkerToHost } from "./bridge";
 import { prepareScript, type PreparedScript } from "./repl";
 
 export interface AutomationRuntimeDeps {
@@ -357,6 +357,9 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     const source = Function.prototype.toString.call(fn);
     if (/\[native code\]\s*\}\s*$/.test(source)) throw new TypeError("scripts.save() takes a function written in your script");
     if (/^class\b/.test(source.trimStart())) throw new TypeError("scripts.save() takes a function, not a class");
+    // Said here, before a source too large for the daemon could be sent at all (the daemon checks again).
+    const bytes = new TextEncoder().encode(source).length;
+    if (bytes > SAVED_SCRIPT_MAX_BYTES) throw new TypeError(savedScriptTooLarge(bytes));
     let compiled: (...a: unknown[]) => unknown;
     try { compiled = compileSaved(name, source); } catch {
       throw new TypeError("scripts.save() could not re-create that function from its source — write it as an arrow or function expression: scripts.save(\"name\", async (a, b) => { … })");
