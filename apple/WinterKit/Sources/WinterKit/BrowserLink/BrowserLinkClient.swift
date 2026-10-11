@@ -42,6 +42,13 @@ public protocol BrowserLinkOutput: AnyObject, Sendable {
     /// `stripNetworkParams` reduces them by `CDPEventReducer` (`CDPAllowlist.eventParams`) before they leave.
     func emitEvent(tabId: String, method: String, params: Data, cdpSessionId: String?, stripNetworkParams: Bool)
     func tabGone(tabId: String, reason: BrowserLinkProtocol.TabGoneReason)
+    /// Phase 3: one download the tab's own handler reported (`browserLink.download`) — `download` is the
+    /// `TransportDownload` object (id, state, name, url?, path?, bytes, totalBytes?, mime?, error?).
+    func download(tabId: String, download: JSONValue)
+}
+
+public extension BrowserLinkOutput {
+    func download(tabId: String, download: JSONValue) {}
 }
 
 public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
@@ -130,6 +137,11 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
     public func tabGone(tabId: String, reason: BrowserLinkProtocol.TabGoneReason) {
         guard let linkId else { return }
         outbox.push(.tabGone(linkId: linkId, tabId: tabId, reason: reason.rawValue))
+    }
+
+    public func download(tabId: String, download: JSONValue) {
+        guard let linkId else { return }
+        outbox.push(.download(linkId: linkId, tabId: tabId, download: download))
     }
 
     private func replier(linkId: String, cmdId: String) -> BrowserLinkReplier {
@@ -389,6 +401,10 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
             guard itemLink == linkId else { return }
             await request(client, BrowserLinkProtocol.Method.tabGone,
                           ["linkId": .string(linkId), "tabId": .string(tabId), "reason": .string(reason)])
+        case .download(let itemLink, let tabId, let download):
+            guard itemLink == linkId else { return }
+            await request(client, BrowserLinkProtocol.Method.download,
+                          ["linkId": .string(linkId), "tabId": .string(tabId), "download": download])
         case .event:
             break // events leave in batches, above
         }
@@ -514,6 +530,7 @@ final class BrowserLinkOutbox: @unchecked Sendable {
         case result(linkId: String, cmdId: String, reply: BrowserLinkReply)
         case event(linkId: String, event: PendingEvent, at: ContinuousClock.Instant)
         case tabGone(linkId: String, tabId: String, reason: String)
+        case download(linkId: String, tabId: String, download: JSONValue)
     }
 
     private let lock = NSLock()

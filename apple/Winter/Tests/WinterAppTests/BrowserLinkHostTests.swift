@@ -25,6 +25,11 @@ final class BrowserLinkHostTests: XCTestCase {
         /// Whether a container holds a dialog `resolveHeldDialog` can answer.
         var heldDialog: Set<ObjectIdentifier> = []
         var resolved: [String] = []
+        /// Phase 3: the download arms, the download observers, the downloads started, the mutes.
+        var arms: [ObjectIdentifier: (dir: String?, until: Double, maxBytes: Int64)] = [:]
+        var downloadObservers: [ObjectIdentifier: ([AnyHashable: Any]) -> Void] = [:]
+        var started: [String] = []
+        var muted: [ObjectIdentifier: Bool] = [:]
 
         var driver: BrowserLinkCEFDriver {
             BrowserLinkCEFDriver(
@@ -49,7 +54,16 @@ final class BrowserLinkHostTests: XCTestCase {
                     self.resolved.append("\(action.rawValue):\(prompt ?? "-")")
                     return self.heldDialog.remove(key) != nil
                 },
-                reload: { [unowned self] _ in self.log.append("reload") })
+                reload: { [unowned self] _ in self.log.append("reload") },
+                setDownloadArm: { [unowned self] container, dir, until, maxBytes in
+                    self.arms[ObjectIdentifier(container)] = (dir, until, maxBytes)
+                    self.log.append("arm=\(dir ?? "nil")")
+                },
+                setDownloadObserver: { [unowned self] container, observer in
+                    self.downloadObservers[ObjectIdentifier(container)] = observer
+                },
+                startDownload: { [unowned self] _, url in self.started.append(url); return true },
+                setAudioMuted: { [unowned self] container, muted in self.muted[ObjectIdentifier(container)] = muted })
         }
 
         func answer(_ status: WinterCEFCDPStatus, _ payload: String) {
@@ -61,6 +75,8 @@ final class BrowserLinkHostTests: XCTestCase {
     final class FakeOutput: BrowserLinkOutput, @unchecked Sendable {
         var events: [(tabId: String, method: String, params: String, session: String?, strip: Bool)] = []
         var gone: [(String, BrowserLinkProtocol.TabGoneReason)] = []
+        var downloads: [(String, JSONValue)] = []
+        func download(tabId: String, download: JSONValue) { downloads.append((tabId, download)) }
         func emitEvent(tabId: String, method: String, params: Data, cdpSessionId: String?, stripNetworkParams: Bool) {
             events.append((tabId, method, String(decoding: params, as: UTF8.self), cdpSessionId, stripNetworkParams))
         }
@@ -94,6 +110,8 @@ final class BrowserLinkHostTests: XCTestCase {
     private var clock: ManualClock!
     private var output: FakeOutput!
     private var host: BrowserLinkHost!
+    /// Phase 3: the app's downloads folder (`<home>/cache/downloads`), a temp directory.
+    private var downloadsRoot: URL!
 
     override func setUp() async throws {
         cef = BrowserRuntimeTests.CEFRecorder()
@@ -102,7 +120,11 @@ final class BrowserLinkHostTests: XCTestCase {
         link = LinkDriverRecorder()
         clock = ManualClock()
         output = FakeOutput()
-        host = BrowserLinkHost(runtime: runtime, driver: link.driver, clock: clock.clock)
+        downloadsRoot = FileManager.default.temporaryDirectory.appendingPathComponent("winter-link-downloads-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: downloadsRoot.appendingPathComponent("s1/abc"), withIntermediateDirectories: true)
+        let root = downloadsRoot!
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        host = BrowserLinkHost(runtime: runtime, driver: link.driver, clock: clock.clock, downloadsRoot: downloadsRoot.path)
         host.output = output
         host.browserLinkAttached(linkId: "L1")
     }
@@ -456,13 +478,94 @@ final class BrowserLinkHostTests: XCTestCase {
 
     func testASubscribeOutsideTheAllowlistIsRefused() {
         ensureLive()
-        let answer = run(.cdpSubscribe(tabId: "t1", events: ["Network.responseReceived"]))
+        let answer = run(.cdpSubscribe(tabId: "t1", events: ["Network.requestWillBeSentExtraInfo"]))
         XCTAssertEqual(failureCode(answer), .notAllowed)
         XCTAssertEqual(failureCode(run(.cdpSubscribe(tabId: "nope", events: []))), .notLive)
     }
 
     func testOverlayIsABestEffortNoOp() {
         XCTAssertEqual(run(.overlay(tabId: "t1", active: true, cursor: nil)).value, .empty)
+    }
+
+    // MARK: - Phase 3 (link protocol 2)
+
+    func testPresentShowsTheTabThroughTheAppAndGivesTheUserItsNativeUIBack() {
+        XCTAssertEqual(failureCode(run(.tabPresent(sessionId: "s1", tabId: "t1"))), .notAllowed, "nobody to show it")
+        let container = ensureLive()
+        var shown: [String] = []
+        host.onPresent = { sessionId, tabId in shown.append("\(sessionId)/\(tabId)") }
+        XCTAssertEqual(run(.tabPresent(sessionId: "s1", tabId: "t1")).value, .empty)
+        XCTAssertEqual(shown, ["s1/t1"])
+        XCTAssertEqual(link.nativeUI[ObjectIdentifier(container)], 0, "dialogs, prompts, keys and focus are the user's again")
+        // Taken again later: suppressed again.
+        _ = run(.tabEnsure(sessionId: "s1", tabId: "t1", url: nil))
+        XCTAssertEqual(link.nativeUI[ObjectIdentifier(container)], BrowserNativeUIPolicy.flags(held: true))
+    }
+
+    func testMuteReachesTheTabsBrowser() {
+        XCTAssertEqual(failureCode(run(.tabMute(tabId: "t1", muted: true))), .notLive)
+        let container = ensureLive()
+        XCTAssertEqual(run(.tabMute(tabId: "t1", muted: true)).value, .empty)
+        XCTAssertEqual(link.muted[ObjectIdentifier(container)], true)
+    }
+
+    func testTheDownloadArmTakesOnlyAFolderInsideTheAppsDownloadsFolder() {
+        let container = ensureLive()
+        let inside = downloadsRoot.appendingPathComponent("s1/abc").path
+        XCTAssertEqual(run(.tabDownloads(tabId: "t1", arm: .init(dir: inside, until: 9e12, maxBytes: 10))).value, .empty)
+        XCTAssertEqual(link.arms[ObjectIdentifier(container)]?.dir, inside)
+        XCTAssertEqual(link.arms[ObjectIdentifier(container)]?.maxBytes, 10)
+        for outside in [NSTemporaryDirectory(), downloadsRoot.path, downloadsRoot.appendingPathComponent("s1/../..").path,
+                        downloadsRoot.appendingPathComponent("s1/missing").path] {
+            XCTAssertEqual(failureCode(run(.tabDownloads(tabId: "t1", arm: .init(dir: outside, until: 9e12, maxBytes: 10)))), .notAllowed, outside)
+        }
+        // A link out of the folder is followed, and refused.
+        let escape = downloadsRoot.appendingPathComponent("s1/escape")
+        try? FileManager.default.createSymbolicLink(atPath: escape.path, withDestinationPath: NSTemporaryDirectory())
+        XCTAssertEqual(failureCode(run(.tabDownloads(tabId: "t1", arm: .init(dir: escape.path, until: 9e12, maxBytes: 10)))), .notAllowed)
+        XCTAssertEqual(run(.tabDownloads(tabId: "t1", arm: nil)).value, .empty)
+        XCTAssertNil(link.arms[ObjectIdentifier(container)]?.dir)
+        // Releasing the tab disarms it too.
+        _ = run(.tabDownloads(tabId: "t1", arm: .init(dir: inside, until: 9e12, maxBytes: 10)))
+        _ = run(.tabRelease(tabId: "t1"))
+        XCTAssertNil(link.arms[ObjectIdentifier(container)]?.dir)
+    }
+
+    func testADownloadStartsOnlyForAnHttpURLInAHeldTab() {
+        XCTAssertEqual(failureCode(run(.tabDownload(tabId: "t1", url: "https://x/a.csv"))), .notLive)
+        ensureLive()
+        XCTAssertEqual(run(.tabDownload(tabId: "t1", url: "https://x/a.csv")).value, .empty)
+        XCTAssertEqual(failureCode(run(.tabDownload(tabId: "t1", url: "file:///etc/hosts"))), .notAllowed)
+        XCTAssertEqual(link.started, ["https://x/a.csv"])
+    }
+
+    func testDownloadReportsGoToTheDaemonWithProgressThinnedOut() throws {
+        let container = ensureLive()
+        let report = try XCTUnwrap(link.downloadObservers[ObjectIdentifier(container)])
+        report(["id": "cef-1", "state": "started", "name": "a.csv", "bytes": NSNumber(value: 0), "totalBytes": NSNumber(value: 4)])
+        report(["id": "cef-1", "state": "progress", "name": "a.csv", "bytes": NSNumber(value: 1)])
+        report(["id": "cef-1", "state": "progress", "name": "a.csv", "bytes": NSNumber(value: 2)])
+        clock.now = clock.now.addingTimeInterval(1)
+        report(["id": "cef-1", "state": "progress", "name": "a.csv", "bytes": NSNumber(value: 3)])
+        report(["id": "cef-1", "state": "done", "name": "a.csv", "bytes": NSNumber(value: 4), "path": "/h/a.csv", "mime": "text/csv"])
+        report(["id": "x", "state": "exploded", "name": "b", "bytes": NSNumber(value: 1)])
+        XCTAssertEqual(output.downloads.map { $0.1["state"]?.stringValue }, ["started", "progress", "progress", "done"])
+        XCTAssertEqual(output.downloads.last?.1["path"]?.stringValue, "/h/a.csv")
+        XCTAssertEqual(output.downloads.last?.0, "t1")
+        _ = run(.tabRelease(tabId: "t1"))
+        XCTAssertNil(link.downloadObservers[ObjectIdentifier(container)], "a released tab reports nothing")
+    }
+
+    func testAnArmedDownloadsFileNameIsSafe() {
+        XCTAssertEqual(WinterCEFDownloadFileName("report.csv"), "report.csv")
+        XCTAssertEqual(WinterCEFDownloadFileName("../../etc/passwd"), "passwd")
+        XCTAssertEqual(WinterCEFDownloadFileName("..\\win.ini"), "win.ini")
+        XCTAssertEqual(WinterCEFDownloadFileName("...env"), "env")
+        XCTAssertEqual(WinterCEFDownloadFileName("a:b\u{7}c.txt"), "abc.txt")
+        XCTAssertEqual(WinterCEFDownloadFileName(""), "download")
+        let long = WinterCEFDownloadFileName(String(repeating: "é", count: 150) + ".tar.gz") ?? ""
+        XCTAssertLessThanOrEqual(long.utf8.count, 200)
+        XCTAssertTrue(long.hasSuffix(".gz"))
     }
 
     // MARK: - No native UI

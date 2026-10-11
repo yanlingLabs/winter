@@ -1943,6 +1943,14 @@ final class ShellSessionHost: ObservableObject {
         }
     }
 
+    /// ComputerV2 Phase 3 — **the sign-in handoff**: select session `sessionId`'s web tab and show the panel, so the
+    /// user can finish a sign-in (a 2-step code, a CAPTCHA) in the very tab Winter was working in. Reached only from
+    /// the browser link's `tab.present`, which the daemon sends only after the user's OK on Winter's card.
+    func showWebTab(_ tabId: String, sessionId: String) {
+        activatePanelTab(tabId, sessionId: sessionId)
+        revealPanel()
+    }
+
     /// diff-tabs Task 10: **the diff tab's READ door** — the one way `PanelDiffTabModel` reaches
     /// `panel.readDiff`, because `managementClient` is private to this type.
     ///

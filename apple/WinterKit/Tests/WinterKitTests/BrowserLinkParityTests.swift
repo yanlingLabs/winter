@@ -125,6 +125,24 @@ final class BrowserLinkParityTests: XCTestCase {
         }
     }
 
+    /// Every op the daemon's `BrowserLinkOp` names is one `BrowserLinkCommand.parse` reads (and no other).
+    func testTheLinkOpsEqualTheDaemons() throws {
+        let url = Self.repoRoot.appendingPathComponent("\(Self.browserDir)/cef-link/cef-transport.ts")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let decl = try NSRegularExpression(pattern: #"export type BrowserLinkOp = ([^;]+);"#)
+        let match = try XCTUnwrap(decl.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)))
+        let union = String(source[Range(match.range(at: 1), in: source)!])
+        let quoted = try NSRegularExpression(pattern: #""([^"]+)""#)
+        let ops = quoted.matches(in: union, range: NSRange(union.startIndex..., in: union)).compactMap { m in
+            Range(m.range(at: 1), in: union).map { String(union[$0]) }
+        }
+        let swift = [BrowserLinkProtocol.Op.tabEnsure, BrowserLinkProtocol.Op.tabRelease, BrowserLinkProtocol.Op.tabClose,
+                     BrowserLinkProtocol.Op.tabsLive, BrowserLinkProtocol.Op.cdpSend, BrowserLinkProtocol.Op.cdpSubscribe,
+                     BrowserLinkProtocol.Op.overlay, BrowserLinkProtocol.Op.tabPresent, BrowserLinkProtocol.Op.tabMute,
+                     BrowserLinkProtocol.Op.tabDownloads, BrowserLinkProtocol.Op.tabDownload]
+        XCTAssertEqual(Set(ops), Set(swift), "the daemon's BrowserLinkOp and WinterKit's ops drifted")
+    }
+
     func testTheLinkProtocolNumberEqualsTheDaemons() throws {
         let dir = Self.repoRoot.appendingPathComponent("\(Self.browserDir)/cef-link")
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {

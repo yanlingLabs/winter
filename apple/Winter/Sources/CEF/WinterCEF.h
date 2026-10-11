@@ -433,6 +433,28 @@ typedef NS_ENUM(int, WinterCEFHeldDialogAction) {
 /// Resolve the dialog `parent`'s tab is holding, if any. Returns whether there was one.
 BOOL WinterCEFResolveHeldDialog(NSView *parent, WinterCEFHeldDialogAction action, const char *promptText);
 
+/// ComputerV2 Phase 3 — **the tab's own download handler, armed by the browser link** (`download()`).
+///
+/// Armed (`dir` set, until `untilMs` — ms since the epoch), the tab's next download — a link, a button, a file the page
+/// made itself (`blob:`), a `data:` link, or one `WinterCEFStartDownload` started — is allowed at `CanDownload`, saved
+/// with no dialog into `<dir>/<its suggested name>` at `OnBeforeDownload`, followed at `OnDownloadUpdated`, and
+/// cancelled past `maxBytes` or `untilMs`, or once the arm is taken off. Unarmed, a held tab refuses every download
+/// (`WinterCEFAutomationCancelsDownloads`) and REPORTS the refusal (state "refused"), so the engine can say a page tried
+/// to download; a tab the link does not hold keeps CEF's own default (Alloy style: cancelled). `dir` must be inside the
+/// app's own home's `cache/downloads/` — the Swift caller checks it before arming.
+void WinterCEFSetDownloadArm(NSView *parent, NSString *dir, double untilMs, int64_t maxBytes);
+/// Where `parent`'s tab reports its downloads: `{id, state (started|progress|done|failed|refused), name, url?, path?,
+/// bytes, totalBytes?, mime?, error?}`. Called on the MAIN thread (CEF's UI thread). `nil` stops the reports.
+void WinterCEFSetDownloadObserver(NSView *parent, void (^observer)(NSDictionary *info));
+/// Download `url` in the tab's browser (its cookies), with no navigation (`CefBrowserHost::StartDownload`). NO if the
+/// tab has no live browser.
+BOOL WinterCEFStartDownload(NSView *parent, const char *url);
+/// Mute or unmute the tab's sound (`CefBrowserHost::SetAudioMuted`).
+void WinterCEFSetAudioMuted(NSView *parent, BOOL muted);
+/// **Test seam.** The file name an armed download is saved under, for a suggested name: its last path component, no
+/// control characters, `/`, `\`, `:` or leading dots, at most 200 bytes; "download" when nothing is left.
+NSString *WinterCEFDownloadFileName(NSString *suggested);
+
 /// **What no flag can reach, said plainly.** In this windowed (Alloy, native-view) embed on macOS, CEF
 /// offers no client handler for: a `<select>`'s popup menu (an `NSMenu` Chromium runs itself), the
 /// date/time pickers (a popup widget window) or the color chooser. Those are kept away from a held tab
