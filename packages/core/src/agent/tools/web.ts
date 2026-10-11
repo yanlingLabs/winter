@@ -1034,3 +1034,204 @@ export async function followRedirects(startUrl: string, opts: FollowRedirectsOpt
     return { ok: true, url: current, status: res.status, contentType, body: text, bytesRead };
   }
 }
+
+// ── ComputerV2's page reader (`browsers.read`): ADDITIVE — everything above keeps its behaviour ─────────────────────
+//
+// The reader (`computer-use/browser/http-read.ts`) differs from the old Browser's fetch in three ways, and each lives
+// here as a new export rather than as a change to `followRedirects`/`ssrfGuard`/`htmlToText`:
+//
+//   * THE ADDRESS RULE: this Mac's own loopback is allowed (a local dev server), every other private address refused —
+//     judged on the host as written AND as canonicalised (the same readings `privateAddressRefusal` takes), and again
+//     on every address the name resolves to (`addressClassOf`, `ipAddressClass`);
+//   * A PINNED CONNECT: each hop connects to an address that was checked — the URL's host swapped for it, the original
+//     host kept as the `Host` header and the TLS server name — so a second DNS answer between the check and the
+//     connect cannot change the target (`followRedirectsWith`);
+//   * NUMERIC CHARACTER REFERENCES, decoded by their own helper (`decodeNumericEntities`).
+
+/** What a host is under the reader's rule: this Mac's `loopback`, or another `private` address (or name). */
+export type AddressClass = "loopback" | "private";
+
+function ipv4Class(bits: number): AddressClass | null {
+  if (bits === 0) return "private"; // 0.0.0.0, unspecified
+  return ipv4Refusal((bits >>> 24) & 0xff, (bits >>> 16) & 0xff) === null ? null : ((bits >>> 24) & 0xff) === 127 ? "loopback" : "private";
+}
+
+function ipv6Class(bytes: Uint8Array): AddressClass | null {
+  if (bytes.every((b) => b === 0)) return "private"; // ::
+  if (bytes.slice(0, 15).every((b) => b === 0) && bytes[15] === 1) return "loopback"; // ::1
+  if (bytes.slice(0, 10).every((b) => b === 0) && bytes[10] === 0xff && bytes[11] === 0xff) {
+    const v4 = ipv4Class(((bytes[12]! << 24) | (bytes[13]! << 16) | (bytes[14]! << 8) | bytes[15]!) >>> 0);
+    if (v4 !== null) return v4;
+  }
+  return ipv6Refusal(bytes) === null ? null : "private";
+}
+
+/** One host under the reader's rule (the normalisation is `hostRefusal`'s). Several readings: any `private` one wins,
+ *  then any `loopback` one; `null` for a public host. */
+function hostClass(host: string): AddressClass | null {
+  let h = host.toLowerCase();
+  if (h.endsWith(".")) h = h.slice(0, -1);
+  if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1);
+  if (h === "") return null;
+  if (h === "localhost" || h.endsWith(".localhost")) return "loopback";
+  if (h === "local" || h.endsWith(".local")) return "private";
+  const bytes = ipv6Bytes(h);
+  if (bytes) return ipv6Class(bytes);
+  let found: AddressClass | null = null;
+  for (const bits of ipv4Interpretations(h)) {
+    const c = ipv4Class(bits);
+    if (c === "private") return "private";
+    if (c === "loopback") found = "loopback";
+  }
+  return found;
+}
+
+/**
+ * The reader's LEXICAL address judgement for a URL: the host as WHATWG canonicalised it and as written (the readings
+ * `privateAddressRefusal` takes), `private` winning over `loopback`; `undefined` for a public host or an unparseable
+ * URL (the reader refuses those on its own).
+ */
+export function addressClassOf(raw: string): { host: string; cls: AddressClass } | undefined {
+  let u: URL; try { u = new URL(raw); } catch { return undefined; }
+  const canonical = u.hostname.toLowerCase();
+  const written = rawAuthorityHost(raw);
+  const hosts = written !== null && written !== canonical ? [canonical, written] : [canonical];
+  let loopback: string | undefined;
+  for (const h of hosts) {
+    const c = hostClass(h);
+    if (c === "private") return { host: h, cls: "private" };
+    if (c === "loopback") loopback ??= h;
+  }
+  return loopback === undefined ? undefined : { host: loopback, cls: "loopback" };
+}
+
+/** An address a name RESOLVED to (an IPv4 or IPv6 literal) under the reader's rule; `null` for a public address. A
+ *  string that is no address at all reads as `private` (fail closed). */
+export function ipAddressClass(ip: string): AddressClass | null {
+  const h = ip.toLowerCase();
+  const bytes = ipv6Bytes(h);
+  if (bytes) return ipv6Class(bytes);
+  const quad = strictDottedQuad(h);
+  if (quad === null) return "private";
+  return ipv4Class(quad);
+}
+
+/**
+ * Decimal and hexadecimal character references (`&#8217;`, `&#x2019;`) as their characters; a reference to U+0000, a
+ * lone surrogate or past U+10FFFF reads U+FFFD (the HTML rule). Linear: one pass of a bounded pattern.
+ */
+export function decodeNumericEntities(text: string): string {
+  return text.replace(/&#(?:([0-9]{1,8})|[xX]([0-9a-fA-F]{1,7}));/g, (_m, dec: string | undefined, hex: string | undefined) => {
+    const cp = dec !== undefined ? Number.parseInt(dec, 10) : Number.parseInt(hex!, 16);
+    if (!Number.isFinite(cp) || cp === 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return "�";
+    return String.fromCodePoint(cp);
+  });
+}
+
+/** One hop's plan: the CHECKED addresses to connect to, in order (the next is tried only when one fails to connect). */
+export interface PinnedHop { addresses: readonly string[] }
+
+export interface FollowWithOptions {
+  /** Checks one hop (its scheme is http or https, it carries no user name or password): the addresses it may connect
+   *  to, or why not. May throw (a policy refusal the caller raises itself). */
+  prepare(url: URL): Promise<PinnedHop | { refused: string }>;
+  fetchFn?: (url: string, init: RequestInit & { tls?: { serverName?: string } }) => Promise<Response>;
+  signal?: AbortSignal;
+  maxHops: number;
+  /** At most this many body bytes are read off the wire (streamed; past it the body is cut and `truncated`). */
+  maxBytes: number;
+  /** Sent with every hop (the reader's fixed Accept and User-Agent). `Host` is the hop's own, always. */
+  headers: Record<string, string>;
+}
+
+export type FollowWithResult =
+  | { ok: true; url: string; status: number; contentType: string; body: Uint8Array; bytesRead: number; truncated: boolean }
+  | { ok: false; kind: "refused" | "redirects" | "timeout" | "network" | "invalid"; error: string; url: string };
+
+/** `readCapped`'s streaming cut, keeping the BYTES (the reader decodes by the page's own charset). */
+async function readCappedBytes(res: Response, capBytes: number): Promise<{ body: Uint8Array; bytesRead: number; truncated: boolean }> {
+  if (!res.body) {
+    const all = new Uint8Array(await res.arrayBuffer());
+    return all.byteLength > capBytes ? { body: all.subarray(0, capBytes), bytesRead: capBytes, truncated: true } : { body: all, bytesRead: all.byteLength, truncated: false };
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let truncated = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      chunks.push(value);
+      if (total > capBytes) {
+        truncated = true;
+        try { await reader.cancel(); } catch { /* stream already closing */ }
+        break;
+      }
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* already released by cancel() */ }
+  }
+  const combined = Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)));
+  const body = new Uint8Array(combined.buffer, combined.byteOffset, Math.min(combined.byteLength, capBytes));
+  return { body, bytesRead: body.byteLength, truncated };
+}
+
+/**
+ * A GET with redirects followed BY HAND, every hop prepared (its scheme, its credentials, `prepare`'s address rule and
+ * policy) BEFORE anything is sent to it, and connected to an address `prepare` checked: the URL's host is swapped for
+ * that address and the original host travels as the `Host` header and the TLS server name (certificates are verified
+ * against it). A status ≥ 400 is a result, not a failure. `followRedirects` above is unchanged for the old Browser.
+ */
+export async function followRedirectsWith(startUrl: string, opts: FollowWithOptions): Promise<FollowWithResult> {
+  const fetchFn = opts.fetchFn ?? ((url: string, init: RequestInit) => fetch(url, init));
+  let current = startUrl;
+  for (let redirects = 0; ; redirects++) {
+    let url: URL;
+    try { url = new URL(current); } catch { return { ok: false, kind: "invalid", error: "a redirect named an address that is not a URL", url: current }; }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return { ok: false, kind: "refused", error: `a redirect led to a ${url.protocol} address — only http(s) is read`, url: current };
+    if (url.username !== "" || url.password !== "") return { ok: false, kind: "refused", error: "a URL with a user name or password is not read", url: current };
+    const plan = await opts.prepare(url);
+    if ("refused" in plan) return { ok: false, kind: "refused", error: plan.refused, url: current };
+    if (plan.addresses.length === 0) return { ok: false, kind: "network", error: `${url.hostname} has no address`, url: current };
+    const hostIsIp = ipv6Bytes(url.hostname.replace(/^\[|\]$/g, "").toLowerCase()) !== null || strictDottedQuad(url.hostname) !== null;
+    let res: Response | undefined;
+    let failure: string | undefined;
+    for (const address of plan.addresses) {
+      const connect = new URL(url.toString());
+      connect.hostname = address.includes(":") ? `[${address}]` : address;
+      const init: RequestInit & { tls?: { serverName?: string } } = {
+        method: "GET", redirect: "manual", signal: opts.signal,
+        headers: { ...opts.headers, Host: url.host },
+        ...(url.protocol === "https:" && !hostIsIp ? { tls: { serverName: url.hostname } } : {}),
+      };
+      try {
+        res = await fetchFn(connect.toString(), init);
+        break;
+      } catch (e) {
+        const name = e instanceof Error ? e.name : "";
+        if (opts.signal?.aborted === true || name === "AbortError" || name === "TimeoutError") {
+          return { ok: false, kind: "timeout", error: `timed out reading ${url.host}`, url: current };
+        }
+        failure = e instanceof Error ? e.message : String(e);
+      }
+    }
+    if (res === undefined) return { ok: false, kind: "network", error: `could not connect to ${url.host}${failure === undefined ? "" : ` (${failure.slice(0, 160)})`}`, url: current };
+    if (res.status >= 300 && res.status < 400 && res.headers.get("location") !== null) {
+      try { await res.body?.cancel(); } catch { /* already closed */ }
+      if (redirects >= opts.maxHops) return { ok: false, kind: "redirects", error: `too many redirects (more than ${opts.maxHops})`, url: current };
+      try { current = new URL(res.headers.get("location")!, url).toString(); } catch {
+        return { ok: false, kind: "invalid", error: "a redirect named an address that is not a URL", url: current };
+      }
+      continue;
+    }
+    let read: { body: Uint8Array; bytesRead: number; truncated: boolean };
+    try { read = await readCappedBytes(res, opts.maxBytes); } catch (e) {
+      if (opts.signal?.aborted === true) return { ok: false, kind: "timeout", error: `timed out reading ${url.host}`, url: current };
+      return { ok: false, kind: "network", error: `the connection to ${url.host} broke while reading`, url: current };
+    }
+    return { ok: true, url: current, status: res.status, contentType: res.headers.get("content-type") ?? "", ...read };
+  }
+}
