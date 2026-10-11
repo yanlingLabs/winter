@@ -454,6 +454,12 @@ void WinterCEFSetAudioMuted(NSView *parent, BOOL muted);
 /// **Test seam.** The file name an armed download is saved under, for a suggested name: its last path component, no
 /// control characters, `/`, `\`, `:` or leading dots, at most 200 bytes; "download" when nothing is left.
 NSString *WinterCEFDownloadFileName(NSString *suggested);
+/// **Test seam.** The follow / cancel bookkeeping an armed tab keeps for its downloads, run with a stand-in item
+/// callback and no CEF: follows 1 (its callback known) and 2 (none yet), cancels them as a re-arm does, then 2's first
+/// update — as `key=value` pairs joined by `;`.
+NSString *WinterCEFDownloadFollowingDecisions(void);
+/// **Test seam.** Whether `parent`'s tab is armed for a download now (its deadline ends the arm by itself).
+BOOL WinterCEFDownloadArmed(NSView *parent);
 
 /// **What no flag can reach, said plainly.** In this windowed (Alloy, native-view) embed on macOS, CEF
 /// offers no client handler for: a `<select>`'s popup menu (an `NSMenu` Chromium runs itself), the

@@ -12,6 +12,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -530,8 +531,8 @@ static NSMutableArray<WinterCEFPendingBrowser *> *g_pending = nil;
 @property(nonatomic, copy) NSString *downloadArmDir;
 @property(nonatomic) double downloadArmUntil;
 @property(nonatomic) int64_t downloadArmMaxBytes;
-/// The downloads the arm accepted (CEF ids), followed through `OnDownloadUpdated`.
-@property(nonatomic, strong) NSMutableSet<NSNumber *> *armedDownloads;
+/// Bumped by every arm and disarm: the deadline timer of an earlier arm does nothing.
+@property(nonatomic) NSUInteger armGeneration;
 /// Where this tab's download reports go (`WinterCEFSetDownloadObserver`).
 @property(nonatomic, copy) void (^downloadObserver)(NSDictionary *);
 /// Refused downloads reported so far (their report ids).
@@ -539,10 +540,24 @@ static NSMutableArray<WinterCEFPendingBrowser *> *g_pending = nil;
 /// The JS dialog this tab is holding under `WinterCEFAutomationHoldsJSDialogs`, until it is answered.
 - (void)holdDialog:(CefRefPtr<CefJSDialogCallback>)callback;
 - (CefRefPtr<CefJSDialogCallback>)takeHeldDialog;
+/// ComputerV2 Phase 3 — the downloads the arm FOLLOWS: each with its latest CEF item callback (none until its first
+/// update), so a re-arm, a disarm, the link letting go and the deadline CANCEL it rather than leave it running past the
+/// size cap and the time limit. A cancelled one is still reported once its cancel lands.
+- (void)followDownload:(uint32_t)downloadId;
+- (BOOL)followsDownload:(uint32_t)downloadId;
+- (NSUInteger)followedDownloadCount;
+- (void)noteDownload:(uint32_t)downloadId callback:(CefRefPtr<CefDownloadItemCallback>)callback;
+- (void)forgetDownload:(uint32_t)downloadId;
+/// Cancel every followed download (one with no callback yet is cancelled at its first update).
+- (void)cancelDownloads;
+/// A download being cancelled: cancel it now if it can be (its callback), and whether it was one.
+- (BOOL)cancellingDownload:(uint32_t)downloadId callback:(CefRefPtr<CefDownloadItemCallback>)callback;
 @end
 
 @implementation WinterCEFTabBridge {
   CefRefPtr<CefJSDialogCallback> _heldDialog;
+  std::map<uint32_t, CefRefPtr<CefDownloadItemCallback>> _downloads;
+  std::set<uint32_t> _cancelling;
 }
 - (instancetype)init {
   if ((self = [super init])) {
@@ -558,6 +573,34 @@ static NSMutableArray<WinterCEFPendingBrowser *> *g_pending = nil;
   CefRefPtr<CefJSDialogCallback> taken = _heldDialog;
   _heldDialog = nullptr;
   return taken;
+}
+- (void)followDownload:(uint32_t)downloadId {
+  _downloads[downloadId] = nullptr;
+}
+- (BOOL)followsDownload:(uint32_t)downloadId {
+  return _downloads.count(downloadId) > 0;
+}
+- (NSUInteger)followedDownloadCount {
+  return _downloads.size();
+}
+- (void)noteDownload:(uint32_t)downloadId callback:(CefRefPtr<CefDownloadItemCallback>)callback {
+  if (_downloads.count(downloadId) > 0 && callback) _downloads[downloadId] = callback;
+}
+- (void)forgetDownload:(uint32_t)downloadId {
+  _downloads.erase(downloadId);
+  _cancelling.erase(downloadId);
+}
+- (void)cancelDownloads {
+  for (auto &entry : _downloads) {
+    if (entry.second) entry.second->Cancel();
+    _cancelling.insert(entry.first);
+  }
+  _downloads.clear();
+}
+- (BOOL)cancellingDownload:(uint32_t)downloadId callback:(CefRefPtr<CefDownloadItemCallback>)callback {
+  if (_cancelling.count(downloadId) == 0) return NO;
+  if (callback) callback->Cancel();
+  return YES;
 }
 @end
 
@@ -1944,14 +1987,13 @@ class WinterClient : public CefClient,
     if (!DownloadArmed(tab) || !download_item || !callback) {
       return false;
     }
-    if (tab.armedDownloads.count > 0) {
+    if ([tab followedDownloadCount] > 0) {
       // One download per arm: a second one the page starts meanwhile is not Winter's.
       return false;
     }
     NSString *name = WinterCEFDownloadFileName(StringOf(suggested_name));
     NSString *path = [tab.downloadArmDir stringByAppendingPathComponent:name];
-    if (tab.armedDownloads == nil) tab.armedDownloads = [NSMutableSet set];
-    [tab.armedDownloads addObject:@(download_item->GetId())];
+    [tab followDownload:download_item->GetId()];
     callback->Continue(CefString(path.UTF8String), false);
     Log("download-armed-saving (an armed tab)");
     ReportDownload(tab, DownloadInfoOf(download_item, @"started", name, nil));
@@ -1966,19 +2008,30 @@ class WinterClient : public CefClient,
     if (tab == nil || !download_item) {
       return;
     }
-    NSNumber *key = @(download_item->GetId());
-    if (![tab.armedDownloads containsObject:key]) {
-      return;
-    }
+    const uint32_t key = download_item->GetId();
     NSString *name = StringOf(download_item->GetFullPath()).lastPathComponent;
     if (name.length == 0) name = WinterCEFDownloadFileName(StringOf(download_item->GetSuggestedFileName()));
+    // A download a re-arm, a disarm or the deadline cancelled: cancelled now if it was not yet, and said once it lands.
+    if ([tab cancellingDownload:key callback:callback]) {
+      if (download_item->IsCanceled() || download_item->IsInterrupted() || download_item->IsComplete()) {
+        [tab forgetDownload:key];
+        ReportDownload(tab, DownloadInfoOf(download_item, @"failed", name, @"Winter stopped waiting for it"));
+      }
+      return;
+    }
+    if (![tab followsDownload:key]) {
+      return;
+    }
+    [tab noteDownload:key callback:callback];
     if (download_item->IsComplete()) {
-      [tab.armedDownloads removeObject:key];
+      [tab forgetDownload:key];
       ReportDownload(tab, DownloadInfoOf(download_item, @"done", name, nil));
       return;
     }
     if (download_item->IsCanceled() || download_item->IsInterrupted()) {
-      [tab.armedDownloads removeObject:key];
+      // An interrupted download could RESUME later, past the cap and the deadline: cancelled for good.
+      if (download_item->IsInterrupted() && callback) callback->Cancel();
+      [tab forgetDownload:key];
       NSString *why = download_item->IsCanceled()
           ? @"cancelled"
           : [NSString stringWithFormat:@"interrupted (%d)", static_cast<int>(download_item->GetInterruptReason())];
@@ -1993,7 +2046,7 @@ class WinterClient : public CefClient,
     else if (NowEpochMs() >= tab.downloadArmUntil) stop = @"timed out";
     if (stop != nil) {
       if (callback) callback->Cancel();
-      [tab.armedDownloads removeObject:key];
+      [tab forgetDownload:key];
       ReportDownload(tab, DownloadInfoOf(download_item, @"failed", name, stop));
       return;
     }
@@ -3808,12 +3861,23 @@ void WinterCEFSetDownloadArm(NSView *parent, NSString *dir, double untilMs, int6
   if (bridge == nil) {
     return;
   }
+  // Whatever an earlier arm still follows is cancelled — a re-arm, a disarm and the link letting go alike — so nothing
+  // keeps running past its size cap or its deadline into the staging folder.
+  [bridge cancelDownloads];
+  const NSUInteger generation = ++bridge.armGeneration;
   bridge.downloadArmDir = dir.length > 0 ? dir : nil;
   bridge.downloadArmUntil = dir.length > 0 ? untilMs : 0;
   bridge.downloadArmMaxBytes = dir.length > 0 ? maxBytes : 0;
   if (dir.length > 0) {
-    // A fresh arm follows only its own download.
-    [bridge.armedDownloads removeAllObjects];
+    // The deadline, enforced even if no update ever comes again: the arm ends and its download is cancelled.
+    const double delaySeconds = std::max(0.0, (untilMs - NowEpochMs()) / 1000.0);
+    __weak WinterCEFTabBridge *weakBridge = bridge;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(delaySeconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      WinterCEFTabBridge *b = weakBridge;
+      if (b == nil || b.armGeneration != generation) return;
+      b.downloadArmDir = nil;
+      [b cancelDownloads];
+    });
   }
 }
 
@@ -3836,6 +3900,39 @@ void WinterCEFSetAudioMuted(NSView *parent, BOOL muted) {
   if (auto browser = BrowserForParent(parent)) {
     browser->GetHost()->SetAudioMuted(muted == YES);
   }
+}
+
+namespace {
+/// A stand-in `CefDownloadItemCallback` for the test seam: counts its cancels (header-only, no framework symbol).
+class WinterFakeDownloadCallback : public CefDownloadItemCallback {
+ public:
+  int cancels = 0;
+  void Cancel() override { cancels++; }
+  void Pause() override {}
+  void Resume() override {}
+  IMPLEMENT_REFCOUNTING(WinterFakeDownloadCallback);
+};
+}  // namespace
+
+NSString *WinterCEFDownloadFollowingDecisions(void) {
+  WinterCEFTabBridge *b = [[WinterCEFTabBridge alloc] init];
+  CefRefPtr<WinterFakeDownloadCallback> one = new WinterFakeDownloadCallback();
+  CefRefPtr<WinterFakeDownloadCallback> two = new WinterFakeDownloadCallback();
+  [b followDownload:1];
+  [b noteDownload:1 callback:one];
+  [b followDownload:2];
+  const unsigned long before = (unsigned long)[b followedDownloadCount];
+  [b cancelDownloads];
+  const unsigned long after = (unsigned long)[b followedDownloadCount];
+  const BOOL twoCancelling = [b cancellingDownload:2 callback:two];
+  const BOOL unknown = [b cancellingDownload:3 callback:nullptr];
+  return [NSString stringWithFormat:@"followed=%lu;after=%lu;one=%d;two=%d;twoCancelling=%d;unknownCancelling=%d", before, after,
+                                    one->cancels, two->cancels, twoCancelling ? 1 : 0, unknown ? 1 : 0];
+}
+
+BOOL WinterCEFDownloadArmed(NSView *parent) {
+  WinterCEFTabBridge *bridge = ExistingBridgeFor(parent);
+  return bridge != nil && DownloadArmed(bridge);
 }
 
 NSString *WinterCEFDownloadFileName(NSString *suggested) {

@@ -196,21 +196,23 @@ final class BrowserLinkHost: BrowserLinkHandler {
             reply(.failure(code: .notLive, message: "the tab is not held — tab.ensure it first"))
             return
         }
-        guard let root = downloadsRoot, Self.isInside(arm.dir, root: root) else {
+        guard let root = downloadsRoot, let resolved = Self.resolvedInside(arm.dir, root: root) else {
             reply(.failure(code: .notAllowed, message: "Winter saves a download only into its own downloads folder"))
             return
         }
-        driver.setDownloadArm(container, arm.dir, arm.until, arm.maxBytes)
+        // Armed with the very path that was checked (standardised, links resolved) — never the raw one again.
+        driver.setDownloadArm(container, resolved, arm.until, arm.maxBytes)
         reply(.empty)
     }
 
-    /// Whether `path` is an existing directory strictly inside `root` (both resolved, links followed).
-    static func isInside(_ path: String, root: String) -> Bool {
+    /// `path` standardised with its links resolved, when that is an existing directory strictly inside `root` (resolved
+    /// the same way); nil otherwise.
+    static func resolvedInside(_ path: String, root: String) -> String? {
         let resolved = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
         let base = URL(fileURLWithPath: root).standardizedFileURL.resolvingSymlinksInPath().path
         var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: resolved, isDirectory: &isDir), isDir.boolValue else { return false }
-        return resolved.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+        guard FileManager.default.fileExists(atPath: resolved, isDirectory: &isDir), isDir.boolValue else { return nil }
+        return resolved.hasPrefix(base.hasSuffix("/") ? base : base + "/") ? resolved : nil
     }
 
     /// One download report from the tab's handler, on to the daemon (progress thinned out).

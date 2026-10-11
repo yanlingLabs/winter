@@ -513,7 +513,13 @@ final class BrowserLinkHostTests: XCTestCase {
         let container = ensureLive()
         let inside = downloadsRoot.appendingPathComponent("s1/abc").path
         XCTAssertEqual(run(.tabDownloads(tabId: "t1", arm: .init(dir: inside, until: 9e12, maxBytes: 10))).value, .empty)
-        XCTAssertEqual(link.arms[ObjectIdentifier(container)]?.dir, inside)
+        // Armed with the path that was checked: standardised, links resolved (/var → /private/var here).
+        let resolvedInside = URL(fileURLWithPath: inside).standardizedFileURL.resolvingSymlinksInPath().path
+        XCTAssertEqual(link.arms[ObjectIdentifier(container)]?.dir, resolvedInside)
+        // A spelling with `..` that still lands inside is armed with the resolved path, not as written.
+        let dotted = downloadsRoot.appendingPathComponent("s1/abc/../abc").path
+        XCTAssertEqual(run(.tabDownloads(tabId: "t1", arm: .init(dir: dotted, until: 9e12, maxBytes: 10))).value, .empty)
+        XCTAssertEqual(link.arms[ObjectIdentifier(container)]?.dir, resolvedInside)
         XCTAssertEqual(link.arms[ObjectIdentifier(container)]?.maxBytes, 10)
         for outside in [NSTemporaryDirectory(), downloadsRoot.path, downloadsRoot.appendingPathComponent("s1/../..").path,
                         downloadsRoot.appendingPathComponent("s1/missing").path] {
@@ -554,6 +560,30 @@ final class BrowserLinkHostTests: XCTestCase {
         XCTAssertEqual(output.downloads.last?.0, "t1")
         _ = run(.tabRelease(tabId: "t1"))
         XCTAssertNil(link.downloadObservers[ObjectIdentifier(container)], "a released tab reports nothing")
+    }
+
+    /// Review MEDIUM 5: a re-arm (and a disarm, and the link letting go) CANCELS what the earlier arm still follows — the
+    /// one whose callback is known at once, the one without at its first update — never leaves it running past the cap.
+    func testARearmCancelsEveryDownloadTheEarlierArmFollows() {
+        XCTAssertEqual(WinterCEFDownloadFollowingDecisions(), "followed=2;after=0;one=1;two=1;twoCancelling=1;unknownCancelling=0")
+    }
+
+    /// Review MEDIUM 5: the arm's deadline ends it by itself, even if no download update ever comes again.
+    func testTheArmsDeadlineEndsItWithNoUpdate() {
+        let view = NSView()
+        WinterCEFSetDownloadArm(view, "/tmp/winter-arm-test", Date().timeIntervalSince1970 * 1000 + 150, 10)
+        XCTAssertTrue(WinterCEFDownloadArmed(view))
+        let ended = expectation(description: "the deadline ends the arm")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            XCTAssertFalse(WinterCEFDownloadArmed(view))
+            ended.fulfill()
+        }
+        wait(for: [ended], timeout: 3)
+        // A disarm ends it at once too.
+        WinterCEFSetDownloadArm(view, "/tmp/winter-arm-test", Date().timeIntervalSince1970 * 1000 + 60_000, 10)
+        XCTAssertTrue(WinterCEFDownloadArmed(view))
+        WinterCEFSetDownloadArm(view, nil, 0, 0)
+        XCTAssertFalse(WinterCEFDownloadArmed(view))
     }
 
     func testAnArmedDownloadsFileNameIsSafe() {
