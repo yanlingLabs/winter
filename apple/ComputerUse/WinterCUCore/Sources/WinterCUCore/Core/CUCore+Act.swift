@@ -542,12 +542,47 @@ extension CUCore {
             guard let center = clickablePoint(e, info, t) else {
                 throw CUError.unsupported("[\(ref)] is outside the window and could not be scrolled into view — scroll to it first")
             }
+            // A click on web content that went out as events (no press, or one the element refused) is checked like
+            // the press is: never a silent no-op (live, round 11: clicks on the Web Store page returned nothing while
+            // none of them reached it).
+            // (On another desktop the click's own words say it can't be confirmed there.)
+            if isWebContent(e), button == .left, count == 1, flags.isEmpty, offScreenSubject(t) == nil {
+                let crop = pressCrop(e, info, t)
+                return try webClickVerified(e, t, pressIgnored: false, why: nil, label: Self.elementLabel(ref, info),
+                                            crop: crop, shotBefore: crop.flatMap { pressShot($0, t) }) {
+                    try pointerClick(p, t, at: center, button: button, count: count, flags: flags, token, announced: announced,
+                                     element: e, axTried: announced)
+                }
+            }
             return try pointerClick(p, t, at: center, button: button, count: count, flags: flags, token, announced: announced,
                                     element: e, axTried: announced)
         }
         guard let px = try cuPoint(a.point) else { throw CUError.invalidParams("click needs a ref or a point") }
         let pt = try screenPoint(for: t, shotId: a.shotId, pixel: px)
-        return try pointerClick(p, t, at: pt, button: button, count: count, flags: flags, token)
+        return try pointClickVerified(t, at: pt) {
+            try pointerClick(p, t, at: pt, button: button, count: count, flags: flags, token)
+        }
+    }
+
+    /// A click at a point of a window on this desktop, checked by its pixels around the point and the app's windows (a
+    /// menu or popover opening): a click that changed neither says so — never a silent no-op. Nothing is said when
+    /// there is no picture to compare (no Screen Recording, a blank capture), or for a click the app took in front.
+    func pointClickVerified(_ t: CUTarget, at pt: CGPoint, _ click: () throws -> ActOutcome) throws -> ActOutcome {
+        guard offScreenSubject(t) == nil, let window = sys.window(id: t.windowID)?.frame else { return try click() }
+        let crop = CGRect(x: pt.x - 120, y: pt.y - 80, width: 240, height: 160).intersection(window)
+        guard !crop.isNull, !crop.isEmpty, let before = pressShot(crop, t) else { return try click() }
+        let windowsBefore = Set(sys.windows(pid: t.pid).map(\.id))
+        let o = try click()
+        guard o.rung != .foreground else { return o }
+        let deadline = clock.nowMs() + webPressWatchMs
+        repeat {
+            if Set(sys.windows(pid: t.pid).map(\.id)) != windowsBefore { return o }
+            if let after = pressShot(crop, t), CUImageTools.differs(before, after) { return o }
+            if clock.nowMs() >= deadline { break }
+            clock.pause(ms: 150)
+        } while true
+        CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect at the point")
+        return o.noting("the click at that point had no visible effect (nothing changed there, and no window opened) — check with state() or a screenshot before clicking again")
     }
 
     /// `announced`: the cursor already showed this press (an AX attempt that fell back to events). `element`:
@@ -801,9 +836,31 @@ extension CUCore {
     /// Events are routed to the target pid's front-most window under the point (a sheet, popover or panel),
     /// falling back to the bound window. One window-list read per action.
     func windowFor(_ t: CUTarget) -> (CGPoint) -> UInt32 {
-        let stack = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 }
         let bound = t.windowID
+        let others = otherDocumentWindows(t)
+        let stack = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 && !others.contains($0.id) }
         return { point in stack.first { $0.frame.contains(point) }?.id ?? bound }
+    }
+
+    /// The app's OTHER document windows: a point of the bound window that one of them covers still goes to the bound
+    /// window (the event names it), never to the window on top — that is another window of the app, often the one
+    /// the user works in (live, round 11: a Chrome window behind another took every click on the Web Store page into
+    /// the user's front Chrome window; the page saw none, focus was never placed). What is drawn over the bound
+    /// window as part of it — a menu, a popover, a sheet, a page's popup, a floating panel — still takes the click
+    /// at its point. An AX standard window of the app; with no accessibility (a capture-only bind), a window at the
+    /// normal level that does not lie within the bound one (a sheet does).
+    func otherDocumentWindows(_ t: CUTarget) -> Set<UInt32> {
+        let bound = t.windowID
+        if t.accessible {
+            var ids = Set<UInt32>()
+            for w in ax.elements(ax.application(t.pid), kAXWindowsAttribute)
+            where ax.string(w, kAXSubroleAttribute) == kAXStandardWindowSubrole {
+                if let id = ax.windowID(w), id != bound { ids.insert(id) }
+            }
+            return ids
+        }
+        guard let frame = sys.window(id: bound)?.frame else { return [] }
+        return Set(sys.windows(pid: t.pid).filter { $0.layer == 0 && $0.id != bound && !frame.contains($0.frame) }.map(\.id))
     }
 
     // MARK: text
@@ -2911,14 +2968,26 @@ extension CUCore {
 
     /// Runs `click`, then says what it did: the effect seen (the app's web content ignored the press: counted,
     /// see `prefersWebClicks`), or plainly that nothing changed that accessibility can see — never a silent success.
-    func webClickVerified(_ e: AXUIElement, _ t: CUTarget, pressIgnored: Bool, why: String, label: String,
+    /// `why` nil: a plain click (no press was tried) — nothing said when it took effect; `crop`/`shotBefore`: its
+    /// pixels, so an effect accessibility can't see (a canvas) is not called none.
+    func webClickVerified(_ e: AXUIElement, _ t: CUTarget, pressIgnored: Bool, why: String?, label: String,
+                          crop: CGRect? = nil, shotBefore: CGImage? = nil,
                           _ click: () throws -> ActOutcome) throws -> ActOutcome {
         let before = webPressEvidence(e, t)
         let o = try click()
         if webPressChanged(e, t, since: before) {
             if pressIgnored { noteWebPressIgnored(t) }
             CULog.act.notice("click in \(t.appName, privacy: .public): the window-targeted click took effect")
+            guard let why else { return o }
             return o.noting(pressIgnored ? "\(why); clicked it instead" : "\(why), so \(label) was clicked")
+        }
+        if let crop, let shotBefore, let after = pressShot(crop, t), CUImageTools.differs(shotBefore, after) {
+            CULog.act.notice("click in \(t.appName, privacy: .public): the click changed pixels but nothing accessibility can see")
+            return o
+        }
+        guard let why else {
+            CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect after the window-targeted click")
+            return o.noting("the click on \(label) had no visible effect (nothing changed that accessibility can see) — check with state() or a screenshot before clicking again")
         }
         CULog.act.notice("click in \(t.appName, privacy: .public): nothing changed after the window-targeted click either")
         return o.noting("\(why); clicked \(label), and nothing changed that accessibility can see — check with state() or a screenshot")
