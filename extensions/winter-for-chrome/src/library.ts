@@ -47,7 +47,13 @@ function safeSegment(name: string): string {
   return n === "" ? "download" : n.slice(0, 200);
 }
 
-interface Arm { tabId: number; subdir: string; until: number; maxBytes: number; origin?: string; armedAt: number; downloadId?: number; timer?: unknown }
+interface Arm {
+  tabId: number; subdir: string; until: number; maxBytes: number; origin?: string; armedAt: number; downloadId?: number; timer?: unknown;
+  /** The progress poll while the download runs (`chrome.downloads.onChanged` carries no byte counts). */
+  poll?: unknown; lastBytes?: number;
+}
+/** How often a running download's bytes are read for Winter (a slow file is alive while they grow). */
+export const DOWNLOAD_PROGRESS_POLL_MS = 2_000;
 
 export interface LibraryOptions {
   notify(method: string, params: Record<string, unknown>): void;
@@ -174,6 +180,33 @@ export class Library {
     if (a === undefined) return;
     this.arms.delete(tabId);
     if (a.timer !== undefined) this.opts.clock.clearTimeout(a.timer);
+    if (a.poll !== undefined) this.opts.clock.clearTimeout(a.poll);
+  }
+
+  /** While the arm's download runs: its received bytes, every DOWNLOAD_PROGRESS_POLL_MS, as `progress` when they grew. */
+  private schedulePoll(a: Arm): void {
+    a.poll = this.opts.clock.setTimeout(() => { void this.pollProgress(a); }, DOWNLOAD_PROGRESS_POLL_MS);
+  }
+
+  private async pollProgress(a: Arm): Promise<void> {
+    if (this.arms.get(a.tabId) !== a || a.downloadId === undefined) return;
+    const api = this.chrome.optional().downloads;
+    let item: ChromeDownloadItem | undefined;
+    try { item = (await api?.search({ id: a.downloadId }))?.[0]; } catch { item = undefined; }
+    if (this.arms.get(a.tabId) !== a) return;
+    if (item !== undefined && item.state === "in_progress") {
+      if (item.bytesReceived > a.maxBytes) {
+        void api?.cancel(item.id).catch(() => undefined);
+        this.tell(a, { id: String(item.id), state: "failed", name: safeSegment(item.filename), bytes: item.bytesReceived, error: "too large" });
+        this.disarm(a.tabId);
+        return;
+      }
+      if (item.bytesReceived !== a.lastBytes) {
+        a.lastBytes = item.bytesReceived;
+        this.tell(a, { id: String(item.id), state: "progress", name: safeSegment(item.filename), bytes: item.bytesReceived, ...(item.totalBytes > 0 ? { totalBytes: item.totalBytes } : {}) });
+      }
+    }
+    if (item === undefined || item.state === "in_progress") this.schedulePoll(a);
   }
 
   disarmAll(): void { for (const tabId of [...this.arms.keys()]) this.disarm(tabId); }
@@ -219,6 +252,7 @@ export class Library {
         this.disarm(a.tabId);
         return undefined;
       }
+      this.schedulePoll(a);
       this.tell(a, {
         id: String(item.id), state: "started", name: safeSegment(item.filename), bytes: 0,
         ...(item.totalBytes > 0 ? { totalBytes: item.totalBytes } : {}), ...(typeof item.mime === "string" ? { mime: item.mime } : {}),

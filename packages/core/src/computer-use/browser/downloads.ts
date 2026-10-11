@@ -87,10 +87,12 @@ export class FetchCapture {
   private capturing = false;
   /** Set when the capture started reading (the "start" the start deadline waits for). */
   started = false;
+  /** When the last bytes arrived (each `IO.read`): a slow file is alive while they keep coming. */
+  lastProgress = 0;
 
   constructor(
     private readonly driver: TabDriver,
-    private readonly o: { anyResponse: boolean; stagingDir: string; maxBytes: number },
+    private readonly o: { anyResponse: boolean; stagingDir: string; maxBytes: number; now?: () => number },
   ) {
     this.result = new Promise<CapturedFile>((resolve, reject) => { this.resolveFn = resolve; this.rejectFn = reject; });
     this.result.catch(() => undefined);
@@ -155,6 +157,7 @@ export class FetchCapture {
     }
     this.capturing = true;
     this.started = true;
+    this.lastProgress = (this.o.now ?? Date.now)();
     const url = String((p.request as { url?: unknown } | undefined)?.url ?? "");
     const name = dispositionName(disposition) ?? urlName(url) ?? "download";
     const length = Number(header(headers, "content-length"));
@@ -181,6 +184,7 @@ export class FetchCapture {
       for (;;) {
         if (this.done) throw new AutomationFailure("Cancelled", "the download was cancelled");
         const chunk = await this.driver.send<{ data?: unknown; base64Encoded?: unknown; eof?: unknown }>("IO.read", { handle, size: IO_CHUNK }, session);
+        this.lastProgress = (this.o.now ?? Date.now)();
         const data = typeof chunk.data === "string" ? chunk.data : "";
         const buf = chunk.base64Encoded === true ? Buffer.from(data, "base64") : Buffer.from(data, "utf8");
         bytes += buf.length;
@@ -201,6 +205,7 @@ export class FetchCapture {
   fail(e: Error): void { if (!this.done) { this.done = true; this.rejectFn?.(e); } }
 
   get file(): Promise<CapturedFile> { return this.result; }
+  progressAt(): number { return this.lastProgress; }
 
   /** Take the arm off everywhere it was put (always — in a `finally`). */
   async disarm(): Promise<void> {
@@ -239,6 +244,7 @@ export class NativeCapture {
   async arm(): Promise<void> {
     const t = this.transport;
     if (t.armDownloads === undefined || t.onDownload === undefined) throw new Error("this browser can't save downloads for Winter");
+    this.lastProgress = this.o.now();
     this.off = t.onDownload((tabKey, d) => { if (tabKey === this.tabKey) this.onDownload(d); });
     try {
       await t.armDownloads(this.tabKey, { dir: this.o.dir, subdir: this.o.subdir, until: this.o.until, maxBytes: this.o.maxBytes });
@@ -275,6 +281,7 @@ export class NativeCapture {
 
   fail(e: Error): void { if (!this.done) { this.done = true; this.rejectFn?.(e); } }
   get file(): Promise<CapturedFile> { return this.result; }
+  progressAt(): number { return this.lastProgress; }
   get id(): string | undefined { return [...this.ids][0]; }
 
   async disarm(): Promise<void> {
@@ -309,8 +316,8 @@ export function decodeDataUrl(url: string, maxBytes: number): { bytes: Buffer; m
 
 /** A capture's wait: until the file is in, the start deadline passes with nothing started, the total cap, or a cancel. */
 export async function waitForCapture(
-  capture: { file: Promise<CapturedFile>; started: boolean; fail(e: Error): void },
-  o: { startMs: number; totalMs: number; signal: AbortSignal; now: () => number; nothing: () => string; progressAt?: () => number },
+  capture: { file: Promise<CapturedFile>; started: boolean; fail(e: Error): void; progressAt?(): number },
+  o: { startMs: number; totalMs: number; signal: AbortSignal; now: () => number; nothing: () => string },
 ): Promise<CapturedFile> {
   const t0 = o.now();
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -322,7 +329,8 @@ export async function waitForCapture(
       const now = o.now();
       if (!capture.started && now - t0 >= o.startMs) capture.fail(new AutomationFailure("WaitTimeout", o.nothing()));
       else if (now - t0 >= o.totalMs) capture.fail(new AutomationFailure("WaitTimeout", `the download did not finish within ${Math.round(o.totalMs / 1000)} s`));
-      else if (capture.started && o.progressAt !== undefined && now - o.progressAt() >= o.startMs) capture.fail(new AutomationFailure("WaitTimeout", "the download stalled — no bytes arrived for a while"));
+      // Stalled: started, but no bytes for as long as a start may take (the progress of the capture that started).
+      else if (capture.started && capture.progressAt !== undefined && now - capture.progressAt() >= o.startMs) capture.fail(new AutomationFailure("WaitTimeout", "the download stalled — no bytes arrived for a while"));
     }, 50);
     return await capture.file;
   } finally {

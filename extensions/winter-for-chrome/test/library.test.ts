@@ -113,6 +113,23 @@ describe("downloads (a file the page makes itself)", () => {
     expect(chrome.suggested.get(big)).toBeUndefined();
   });
 
+  test("a running download's bytes are reported as progress while they grow (onChanged carries none)", async () => {
+    chrome.grant("downloads");
+    const tabId = await armedTab();
+    await c.handle("downloads.arm", { tabKey: String(tabId), subdir: "Winter/abc123", until: Date.now() + 600_000, maxBytes: 1_000_000 });
+    const id = await chrome.pageDownload({ url: "blob:https://shop.example.com/slow", name: "slow.bin", bytes: 900_000, downloadsDir: "/d", complete: false });
+    chrome.downloadProgress(id, 100_000);
+    await clock.advance(2_000);
+    chrome.downloadProgress(id, 400_000);
+    await clock.advance(2_000);
+    await clock.advance(2_000); // no growth: nothing new said
+    const states = notes.filter((n) => n.method === "download").map((n) => [(n.params.download as { state: string }).state, (n.params.download as { bytes: number }).bytes]);
+    expect(states).toEqual([["started", 0], ["progress", 100_000], ["progress", 400_000]]);
+    chrome.downloadProgress(id, 2_000_000);
+    await clock.advance(2_000);
+    expect(chrome.cancelled).toEqual([id]); // past maxBytes: cancelled
+  });
+
   test("switched off and on again: the arms go, and the new downloads API is listened to afresh", async () => {
     chrome.grant("downloads");
     const tabId = await armedTab();

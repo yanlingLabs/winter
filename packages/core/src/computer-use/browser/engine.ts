@@ -1695,7 +1695,7 @@ export class BrowserEngine {
     const name = this.browserName(b.backend);
     const transport = driver.transport;
     if (o.fetch) this.requireCdp3(driver, "download()");
-    const fetch = o.fetch ? new FetchCapture(driver, { anyResponse: false, stagingDir: o.staging, maxBytes: DOWNLOAD_MAX_BYTES }) : undefined;
+    const fetch = o.fetch ? new FetchCapture(driver, { anyResponse: false, stagingDir: o.staging, maxBytes: DOWNLOAD_MAX_BYTES, now: () => this.now() }) : undefined;
     const subdir = winter ? "" : `Winter/${randomBytes(6).toString("hex")}`;
     let native: NativeCapture | undefined;
     if (transport.armDownloads !== undefined && transport.onDownload !== undefined) {
@@ -1724,7 +1724,6 @@ export class BrowserEngine {
       const any = firstOf(captures);
       const file = await waitForCapture(any, {
         startMs: o.startMs, totalMs: o.totalMs, signal: scope.signal, now: () => this.now(),
-        ...(native === undefined ? {} : { progressAt: () => native!.lastProgress }),
         nothing: () => {
           const pageMade = fetch?.sighting.pageDownload;
           if (pageMade !== undefined) {
@@ -1758,7 +1757,7 @@ export class BrowserEngine {
       try { await native.arm(); } catch (err) { throw transportFailure(err, this.browserName(b.backend)); }
       try { await transport.startDownload(b.tabKey, url); } catch (err) { throw transportFailure(err, this.browserName(b.backend)); }
       return await waitForCapture(native, {
-        startMs: o.startMs, totalMs: o.totalMs, signal: scope.signal, now: () => this.now(), progressAt: () => native.lastProgress,
+        startMs: o.startMs, totalMs: o.totalMs, signal: scope.signal, now: () => this.now(),
         nothing: () => `the download of ${redactUrl(url).slice(0, 200)} did not start within ${Math.round(o.startMs / 1000)} s`,
       });
     } finally {
@@ -1790,7 +1789,7 @@ export class BrowserEngine {
     try {
       await temp.ensureAttached(sid);
       scope.live();
-      fetch = new FetchCapture(temp, { anyResponse: true, stagingDir: o.staging, maxBytes: DOWNLOAD_MAX_BYTES });
+      fetch = new FetchCapture(temp, { anyResponse: true, stagingDir: o.staging, maxBytes: DOWNLOAD_MAX_BYTES, now: () => this.now() });
       await fetch.arm();
       const f = fetch;
       void temp.send<{ errorText?: unknown }>("Page.navigate", { url }).then((res) => {
@@ -1947,8 +1946,9 @@ function extFor(mime: string): string {
   return map[mime] ?? "";
 }
 
-/** The first capture to catch a file wins; the wait fails only when every capture failed (with the first's error). */
-function firstOf(captures: Array<FetchCapture | NativeCapture>): { file: Promise<CapturedFile>; readonly started: boolean; fail(e: Error): void } {
+/** The first capture to catch a file wins; the wait fails only when every capture failed (with the first's error). Its
+ *  progress is that of the capture(s) that STARTED — one still waiting never makes a running one look stalled. */
+function firstOf(captures: Array<FetchCapture | NativeCapture>): { file: Promise<CapturedFile>; readonly started: boolean; fail(e: Error): void; progressAt(): number } {
   const file = new Promise<CapturedFile>((resolve, reject) => {
     let failed = 0;
     let first: unknown;
@@ -1965,6 +1965,7 @@ function firstOf(captures: Array<FetchCapture | NativeCapture>): { file: Promise
     file,
     get started() { return captures.some((c) => c.started); },
     fail: (e) => { for (const c of captures) c.fail(e); },
+    progressAt: () => Math.max(0, ...captures.filter((c) => c.started).map((c) => c.progressAt())),
   };
 }
 

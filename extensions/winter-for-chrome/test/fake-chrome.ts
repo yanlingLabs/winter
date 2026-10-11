@@ -437,9 +437,12 @@ export class FakeChrome implements ChromeApi {
     };
   }
 
+  /** A running download's bytes grow (the browser's own progress). */
+  downloadProgress(id: number, bytes: number): void { const d = this.downloadItems.get(id)!; d.bytesReceived = bytes; }
+
   /** A page starts a download (the browser's own): created, named (the listeners' suggestion), saved under
    *  `downloadsDir`, completed. Returns its id. */
-  async pageDownload(o: { url: string; referrer?: string; name: string; bytes: number; downloadsDir: string; mime?: string; startTime?: number }): Promise<number> {
+  async pageDownload(o: { url: string; referrer?: string; name: string; bytes: number; downloadsDir: string; mime?: string; startTime?: number; complete?: boolean }): Promise<number> {
     const id = this.nextDownload++;
     const item: ChromeDownloadItem = {
       id, url: o.url, ...(o.referrer === undefined ? {} : { referrer: o.referrer }), filename: `${o.downloadsDir}/${o.name}`,
@@ -452,6 +455,7 @@ export class FakeChrome implements ChromeApi {
     for (const l of this.downloadsOnDeterminingFilename.listeners) l({ ...item }, (sug) => { name = sug?.filename; });
     this.suggested.set(id, name);
     item.filename = `${o.downloadsDir}/${name ?? o.name}`;
+    if (o.complete === false) { await flush(); return id; }
     item.state = "complete";
     item.fileSize = o.bytes;
     item.bytesReceived = o.bytes;

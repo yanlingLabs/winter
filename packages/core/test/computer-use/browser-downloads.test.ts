@@ -103,6 +103,17 @@ describe("a user's browser (Fetch interception)", () => {
     r.end();
   });
 
+  test("both captures armed (the downloads permission on) and a SLOW Fetch read: bytes arriving keep it alive — not 'stalled'", async () => {
+    const big = "https://shop.example.com/big.bin";
+    const page: FakePage = { ...PAGE, url: "https://shop.example.com/export", clickDownload: big };
+    const { h, r, p } = await opened("chrome", page, { nativeDownloads: ["chrome"] });
+    h.chrome.files[big] = { body: "x".repeat(200 * 1024), headers: { "content-type": "application/octet-stream", "content-disposition": 'attachment; filename="big.bin"' } };
+    h.chrome.commandDelay = (method) => (method === "IO.read" ? 80 : 0);
+    const got = await p("download", { target: 2, timeoutMs: 150 }) as { name: string; bytes: number };
+    expect(got).toMatchObject({ name: "big.bin", bytes: 200 * 1024 });
+    r.end();
+  });
+
   test("a click that opens a page instead: the page goes through, and the wait says so", async () => {
     const html = "https://shop.example.com/report.html";
     const page: FakePage = { ...PAGE, url: "https://shop.example.com/export", clickDownload: html };
