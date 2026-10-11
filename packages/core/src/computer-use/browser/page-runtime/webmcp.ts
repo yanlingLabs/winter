@@ -62,6 +62,14 @@ function oneLine(s: string): string { return s.replace(CONTROLS, " ").replace(/\
 function cut(s: string, n: number): string { return s.length <= n ? s : `${s.slice(0, n)}…`; }
 function pageText(s: string, n: number): string { return cut(redactText(oneLine(s)), n); }
 
+const INVISIBLE = new RegExp("[\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", "g");
+/** Page text printed as-is elsewhere (a schema's JSON, a tool's answer): the characters that can break or reorder a
+ *  line where JSON leaves them alone — line and paragraph separators, bidi controls, zero-width marks — written as
+ *  `\uXXXX` escapes, so nothing the page wrote can pass for a line of Winter's. */
+export function escapeInvisible(s: string): string {
+  return s.replace(INVISIBLE, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 function field(o: object, k: string): unknown {
   try { return (o as Record<string, unknown>)[k]; } catch { return undefined; }
 }
@@ -88,7 +96,7 @@ export function siteToolInfo(raw: unknown): RtSiteTool | undefined {
     let parsed: unknown;
     try { parsed = JSON.parse(json); } catch { parsed = undefined; }
     if (json.length <= SITE_TOOL_CAPS.schemaChars && parsed !== null && typeof parsed === "object") info.inputSchema = parsed;
-    else info.schemaText = cut(redactText(json), SITE_TOOL_CAPS.schemaChars);
+    else info.schemaText = pageText(json, SITE_TOOL_CAPS.schemaChars);
   }
   const ann = field(raw, "annotations");
   if (ann !== null && typeof ann === "object") {
@@ -106,21 +114,28 @@ function within<T>(p: Promise<T>, ms: number): Promise<T> {
   });
 }
 
+/** A tool's name when it is shaped as the draft says (a valid name and a description) — the cheap check a state's line
+ *  and a call need; `siteToolInfo` reads the rest only when tools are described. */
+function siteToolName(raw: object): string | undefined {
+  const name = field(raw, "name");
+  return typeof name === "string" && SITE_TOOL_NAME.test(name) && typeof field(raw, "description") === "string" ? name : undefined;
+}
+
 /** The page's tools for THIS frame: those whose `window` is its own and whose `origin` is its own — a frame's tools are
  *  never the page's. Duplicate names keep the first. Each element of the answer is checked as it is read. */
-async function ownTools(mc: ModelContextLike, own: SiteToolOwner, listMs: number): Promise<Array<{ raw: object; info: RtSiteTool }> | null> {
+async function ownTools(mc: ModelContextLike, own: SiteToolOwner, listMs: number): Promise<Array<{ raw: object; name: string }> | null> {
   let raw: unknown;
   try { raw = await within(Promise.resolve(mc.getTools()), listMs); } catch { return null; }
   if (!Array.isArray(raw)) return null;
-  const out: Array<{ raw: object; info: RtSiteTool }> = [];
+  const out: Array<{ raw: object; name: string }> = [];
   const seen = new Set<string>();
   for (const r of raw.slice(0, 1_000) as unknown[]) {
     if (r === null || typeof r !== "object") continue;
     if (field(r, "window") !== own.window || field(r, "origin") !== own.origin) continue;
-    const info = siteToolInfo(r);
-    if (info === undefined || seen.has(info.name)) continue;
-    seen.add(info.name);
-    out.push({ raw: r, info });
+    const name = siteToolName(r);
+    if (name === undefined || seen.has(name)) continue;
+    seen.add(name);
+    out.push({ raw: r, name });
   }
   return out;
 }
@@ -131,15 +146,17 @@ export async function listSiteTools(mc: ModelContextLike | undefined, own: SiteT
   if (mc === undefined) return null;
   const tools = await ownTools(mc, own, o.listMs ?? SITE_TOOL_CAPS.listMs);
   if (tools === null) return null;
-  const names = tools.slice(0, SITE_TOOL_CAPS.names).map((t) => t.info.name);
+  const names = tools.slice(0, SITE_TOOL_CAPS.names).map((t) => t.name);
   if (o.describe !== true) return { names, total: tools.length };
   const described: RtSiteTool[] = [];
   let bytes = 0;
   for (const t of tools.slice(0, SITE_TOOL_CAPS.described)) {
-    const size = JSON.stringify(t.info).length;
+    const info = siteToolInfo(t.raw);
+    if (info === undefined) continue;
+    const size = JSON.stringify(info).length;
     if (described.length > 0 && bytes + size > SITE_TOOL_CAPS.describedBytes) break;
     bytes += size;
-    described.push(t.info);
+    described.push(info);
   }
   return { names, total: tools.length, tools: described, more: tools.length - described.length };
 }
@@ -178,13 +195,14 @@ export class SiteToolCalls {
     if (mc === undefined || typeof a.name !== "string" || typeof a.callId !== "string") return { ok: false, reason: "unknown" };
     // The tool must be one this document offers NOW (the list the model read may be from an earlier page).
     const tools = await ownTools(mc, own, SITE_TOOL_CAPS.listMs);
-    const hit = tools?.find((t) => t.info.name === a.name);
+    const hit = tools?.find((t) => t.name === a.name);
     if (hit === undefined) return { ok: false, reason: "unknown" };
     const ac = new AbortController();
     this.pending.set(a.callId, ac);
     try {
       const result = await executeSiteTool(mc, hit.raw, a.input, ac.signal);
-      if (result === null || result === undefined) return { ok: true, result: null };
+      // A tool that returns nothing answers the bare string "undefined" (measured, Chrome 153 and 156): no answer.
+      if (result === null || result === undefined || result === "undefined") return { ok: true, result: null };
       const text = typeof result === "string" ? result : (() => { try { return JSON.stringify(result) ?? String(result); } catch { return String(result); } })();
       return text.length > SITE_TOOL_CAPS.resultChars ? { ok: true, result: text.slice(0, SITE_TOOL_CAPS.resultChars), cut: true } : { ok: true, result: text };
     } catch (e) {

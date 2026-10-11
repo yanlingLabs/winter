@@ -103,7 +103,8 @@ export class FakeModelContext {
     });
     try {
       const r = await Promise.race([work, aborted]);
-      return r === null ? null : JSON.stringify(r);
+      // Chrome serialises a tool's result; one that returns nothing answers the bare string "undefined" (measured).
+      return r === null ? null : r === undefined ? "undefined" : JSON.stringify(r);
     } catch (e) {
       if ((e as { name?: unknown }).name === "AbortError") throw e;
       throw Object.assign(new Error("Tool was executed but the invocation failed. For example, the script function threw an error"), { name: "UnknownError" });

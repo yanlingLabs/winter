@@ -94,8 +94,10 @@ export type SiteToolCall =
   | { kind: "stopped"; why: "cancel" | "timeout"; settled: boolean }
   /** The page navigated while the tool ran (its world went with the document). */
   | { kind: "navigated" };
-/** After a call is asked to stop, how long its own answer is waited for. */
+/** After a call is asked to stop, how long its own answer is waited for (at most — the engine keeps it within the run). */
 export const SITE_TOOL_STOP_GRACE_MS = 2_000;
+/** A site tool is called only in the document whose tools were last read (a whole-tab state, or tools()). */
+export const SITE_TOOLS_PAGE_CHANGED = "the page changed since you read it — call state()";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 const bad = (message: string): Error => Object.assign(new TypeError(message), { name: "TypeError" });
@@ -166,6 +168,8 @@ export class TabDriver {
   busy = 0;
   /** The top frame's runtime at the last state: a different one means a new document even if its event was lost. */
   private lastTopRt?: string;
+  /** Phase 4 (WebMCP): the top frame's runtime (its document) whose site tools were last read — a call runs only there. */
+  private toolsReadRt?: string;
   private viewport: [number, number] = [0, 0];
   private dpr = 1;
   private readonly frames = new Map<string, FrameRec>();
@@ -687,6 +691,7 @@ export class TabDriver {
   /** A new top-frame document: every ref is stale, the snapshots go, the next state is full and says "new page". */
   private newTopDocument(): void {
     this.lastTopRt = undefined;
+    this.toolsReadRt = undefined;
     this.generation++;
     this.newPage = true;
     this.snapshots = [];
@@ -755,9 +760,9 @@ export class TabDriver {
   }
 
   /** One page-runtime op in `rec`'s current document. */
-  private async callIn<T>(rec: FrameRec, op: string, arg: unknown, opts: { byValue?: boolean; expectRt?: string; timeoutMs?: number } = {}): Promise<T> {
+  private async callIn<T>(rec: FrameRec, op: string, arg: unknown, opts: { byValue?: boolean; expectRt?: string; timeoutMs?: number; staleMessage?: string } = {}): Promise<T> {
     await this.ensureRuntime(rec);
-    if (opts.expectRt !== undefined && rec.rtId !== opts.expectRt) throw new AutomationFailure("StaleRef", "that element is gone (the page changed) — call state()");
+    if (opts.expectRt !== undefined && rec.rtId !== opts.expectRt) throw new AutomationFailure("StaleRef", opts.staleMessage ?? "that element is gone (the page changed) — call state()");
     const res = await this.send<{ result?: { value?: unknown; objectId?: string }; exceptionDetails?: { text?: string; exception?: { description?: string } } }>("Runtime.callFunctionOn", {
       functionDeclaration: PAGE_RUNTIME_CALL, executionContextId: rec.ctx, arguments: [{ value: op }, { value: arg ?? null }],
       returnByValue: opts.byValue !== false, awaitPromise: true,
@@ -863,7 +868,7 @@ export class TabDriver {
 
   // ── state ──────────────────────────────────────────────────────────────────────────────────────
 
-  private async readTree(within: number | undefined): Promise<{ roots: TabNode[]; focusedRef?: number; unread?: number }> {
+  private async readTree(within: number | undefined): Promise<{ roots: TabNode[]; focusedRef?: number; unread?: number; topRt?: string }> {
     await this.settleChildSetups();
     const budget = { frames: 0 };
     if (within !== undefined) {
@@ -883,8 +888,9 @@ export class TabDriver {
     this.title = snap.title;
     const focus: { ref?: number; frame?: { rec: FrameRec; id: number } } = {};
     if (snap.focused !== undefined && top.rtId !== undefined) focus.ref = this.refFor(top.rtId, snap.focused);
+    const topRt = top.rtId;
     const roots = await this.convert(top, snap.roots, budget, 0, focus, snap.focusedFrame);
-    return { roots, ...(focus.ref === undefined ? {} : { focusedRef: focus.ref }), ...(snap.unread === undefined ? {} : { unread: snap.unread }) };
+    return { roots, ...(focus.ref === undefined ? {} : { focusedRef: focus.ref }), ...(snap.unread === undefined ? {} : { unread: snap.unread }), ...(topRt === undefined ? {} : { topRt }) };
   }
 
   private async convert(rec: FrameRec, nodes: readonly RtNode[], budget: { frames: number }, depth: number, focus: { ref?: number }, focusedFrame?: number): Promise<TabNode[]> {
@@ -956,7 +962,7 @@ export class TabDriver {
     const header = this.header(settle, tree.focusedRef, tree.unread, o.within !== undefined);
     // Phase 4 (WebMCP): the page's own tools, read with every whole-tab state (the set is per document). A page with
     // none — or no such API, or one that fails — prints nothing.
-    const tools = o.siteTools === true && o.within === undefined ? await this.siteToolNames() : undefined;
+    const tools = o.siteTools === true && o.within === undefined && tree.topRt !== undefined ? await this.siteToolNames(tree.topRt) : undefined;
     const toolsSig = tools === undefined ? undefined : tools.total === 0 ? "" : `${tools.total}:${tools.names.join(",")}`;
     if (tools !== undefined && tools.total > 0) header.siteTools = tools;
     // A whole-tab, non-full state folds what is out of view first; `full` is everything the read saw (its cap said).
@@ -1015,38 +1021,51 @@ export class TabDriver {
   async siteTools(describe: boolean): Promise<RtSiteTools | null> {
     this.requireNoDialog("tools()");
     await this.settleChildSetups();
+    const top = this.top();
     try {
-      return await this.callFresh<RtSiteTools | null>(this.top(), "siteTools", { describe });
+      const r = await this.callFresh<RtSiteTools | null>(top, "siteTools", { describe });
+      // This read binds a later call to the document it was made in (as a whole-tab state does).
+      this.toolsReadRt = top.rtId;
+      return r;
     } catch (err) {
       if (err instanceof AutomationFailure) throw err;
       return null;
     }
   }
 
-  /** The names alone, for a state's line — never throws (anything wrong reads as no tools). */
-  private async siteToolNames(): Promise<{ names: string[]; total: number }> {
+  /** The names alone, for a state's line, read in the SAME document as the state's tree (`topRt`) — `undefined` (no
+   *  line) when the document changed between the two reads; anything else wrong reads as no tools. */
+  private async siteToolNames(topRt: string): Promise<{ names: string[]; total: number } | undefined> {
+    let r: RtSiteTools | null;
     try {
-      const r = await this.callFresh<RtSiteTools | null>(this.top(), "siteTools", { describe: false });
-      return r === null || !Array.isArray(r.names) ? { names: [], total: 0 } : { names: r.names.filter((n) => typeof n === "string"), total: typeof r.total === "number" ? r.total : r.names.length };
-    } catch {
-      return { names: [], total: 0 };
+      r = await this.callIn<RtSiteTools | null>(this.top(), "siteTools", { describe: false }, { expectRt: topRt });
+    } catch (err) {
+      return err instanceof AutomationFailure && err.kind === "StaleRef" ? undefined : { names: [], total: 0 };
     }
+    this.toolsReadRt = topRt;
+    return r === null || !Array.isArray(r.names) ? { names: [], total: 0 } : { names: r.names.filter((n) => typeof n === "string"), total: typeof r.total === "number" ? r.total : r.names.length };
   }
 
   /**
    * Run one of the page's own tools (`executeTool` in the top frame's winter world — the page's own callback runs, in
    * the page's world). It waits at most `timeoutMs`; on that, or on `signal`, the page's AbortSignal is aborted (a
-   * second call into the runtime) and the page's own answer is waited for `SITE_TOOL_STOP_GRACE_MS` more. A call
-   * whose page navigates never answers: read as `navigated`.
+   * second call into the runtime) and the page's own answer is waited for `stopMs` more (`SITE_TOOL_STOP_GRACE_MS` at
+   * most). A call whose page navigates never answers: read as `navigated`. It runs ONLY in the document whose tools
+   * were last read (a whole-tab state or `tools()`) — the one the model read and the site floor passed: any other is
+   * refused before anything is sent (`SITE_TOOLS_PAGE_CHANGED`), as a stale ref is.
    */
-  async callSiteTool(name: string, input: unknown, o: { timeoutMs: number; signal: AbortSignal }): Promise<SiteToolCall> {
+  async callSiteTool(name: string, input: unknown, o: { timeoutMs: number; signal: AbortSignal; stopMs?: number }): Promise<SiteToolCall> {
     this.requireNoDialog("callTool()");
+    const read = this.toolsReadRt;
+    if (read === undefined) throw new AutomationFailure("StaleRef", SITE_TOOLS_PAGE_CHANGED);
     await this.settleChildSetups();
     const top = this.top();
     const generation = this.generation;
+    const stopMs = Math.max(0, Math.min(SITE_TOOL_STOP_GRACE_MS, o.stopMs ?? SITE_TOOL_STOP_GRACE_MS));
     const callId = `wm${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
     type Outcome = { answer: RtSiteToolAnswer } | { err: unknown };
-    const call: Promise<Outcome> = this.callIn<RtSiteToolAnswer>(top, "callSiteTool", { name, input, callId }, { timeoutMs: o.timeoutMs + SITE_TOOL_STOP_GRACE_MS + 5_000 })
+    const call: Promise<Outcome> = this.callIn<RtSiteToolAnswer>(top, "callSiteTool", { name, input, callId },
+      { timeoutMs: o.timeoutMs + stopMs + 5_000, expectRt: read, staleMessage: SITE_TOOLS_PAGE_CHANGED })
       .then((answer) => ({ answer }), (err: unknown) => ({ err }));
     let why: "cancel" | "timeout" | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1066,15 +1085,16 @@ export class TabDriver {
     }
     if (first === undefined) {
       // Asked to stop: abort the page's signal; its own AbortError settles the call (a page that ignores the signal
-      // keeps running — nothing more can stop page code, as for a click's handler).
-      try { await this.callIn<boolean>(top, "cancelSiteTool", { callId }, { timeoutMs: SITE_TOOL_STOP_GRACE_MS }); } catch { /* the page moved on */ }
-      const late = await Promise.race([call, sleep(SITE_TOOL_STOP_GRACE_MS).then(() => undefined)]);
+      // keeps running — nothing more can stop page code, as for a click's handler). The whole stop fits in `stopMs`.
+      void this.callIn<boolean>(top, "cancelSiteTool", { callId }, { timeoutMs: Math.max(1, stopMs), expectRt: read }).catch(() => undefined);
+      const late = await Promise.race([call, sleep(stopMs).then(() => undefined)]);
       const settled = late !== undefined && "answer" in late && !late.answer.ok && late.answer.reason === "aborted";
       return { kind: "stopped", why: why ?? "cancel", settled };
     }
     if ("err" in first) {
       const err = first.err;
-      if (err instanceof AutomationFailure && err.kind !== "StaleRef") throw err;
+      // The document changed before anything was sent: nothing ran.
+      if (err instanceof AutomationFailure && (err.kind !== "StaleRef" || err.message === SITE_TOOLS_PAGE_CHANGED)) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       if (this.generation !== generation || isContextGone(err) || /navigated or closed|navigated meanwhile/i.test(msg)) return { kind: "navigated" };
       throw err;

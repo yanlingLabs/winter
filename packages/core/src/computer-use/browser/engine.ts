@@ -27,7 +27,8 @@ import { BLOCKED_TAB_PRIMITIVES, blockedTabMembers, ensureSiteAllowed, listedHos
 import type { TabRunScope } from "./tab-scope";
 import { redactText, redactUrl } from "./page-runtime/redact";
 import { cssSelectorRefusal } from "./page-runtime/rules";
-import { pickerSentence, shownUrl, TabDriver, transportFailure, transportHasCdp3, USER_TAB_FULL_PAGE } from "./tab-driver";
+import { escapeInvisible } from "./page-runtime/webmcp";
+import { pickerSentence, shownUrl, SITE_TOOL_STOP_GRACE_MS, TabDriver, transportFailure, transportHasCdp3, USER_TAB_FULL_PAGE } from "./tab-driver";
 import { TransportError, type BackendId, type BrowserFamily, type CdpTransport, type TransportTab } from "./transport";
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
 import { BODY_DEFAULT_CHARS, BODY_MAX_CHARS, isTextMime, redactBody } from "./body-redact";
@@ -59,6 +60,8 @@ const SITE_TOOL_INPUT_MAX = 64 * 1024;
 const SITE_TOOL_TIMEOUT_DEFAULT_MS = 30_000;
 const SITE_TOOL_TIMEOUT_MAX_MS = 5 * 60_000;
 const SITE_TOOLS_OFF = "site tools are turned off in Settings";
+/** A site tool call needs at least this long (else it would be sent and stopped at once). */
+const SITE_TOOL_MIN_MS = 500;
 /** waitForUser(): 5 minutes by default, at most 30 (the script's clock is paused while the user works). */
 const HANDOFF_DEFAULT_MS = 5 * 60_000;
 const HANDOFF_MAX_MS = 30 * 60_000;
@@ -1916,7 +1919,7 @@ export class BrowserEngine {
         for (const t of tools) {
           const marks = [t.readOnly ? "read-only" : undefined, t.consequential ? "consequential" : undefined].filter((m) => m !== undefined);
           lines.push(`- ${t.name}${t.title === undefined ? "" : ` (${t.title})`}${marks.length === 0 ? "" : ` [${marks.join(", ")}]`}: ${t.description}`);
-          if (t.inputSchema !== undefined) lines.push(`  input: ${JSON.stringify(t.inputSchema)}`);
+          if (t.inputSchema !== undefined) lines.push(`  input: ${escapeInvisible(JSON.stringify(t.inputSchema))}`);
           else if (t.schemaText !== undefined) lines.push(`  input (cut): ${t.schemaText}`);
         }
         const more = r.total - tools.length;
@@ -1929,7 +1932,7 @@ export class BrowserEngine {
 
   /**
    * `callTool(name, input, { timeoutMs })`: run one of the page's own tools — an ACT (the page's own code runs, as for
-   * a click), under the ordinary policy, with no card of its own (D10). Its answer is page data: redacted like a
+   * a click), under the ordinary policy, with no card of its own (the user's ruling). Its answer is page data: redacted like a
    * response body, printed fenced, returned parsed when it is JSON. A failure's words are the page's, so they are
    * printed fenced and the error itself says only that it failed.
    */
@@ -1943,9 +1946,15 @@ export class BrowserEngine {
     if (Buffer.byteLength(json, "utf8") > SITE_TOOL_INPUT_MAX) throw new AutomationFailure("NotAllowed", "callTool()'s input is larger than 64 KiB");
     const t = args.timeoutMs === undefined ? SITE_TOOL_TIMEOUT_DEFAULT_MS : args.timeoutMs;
     if (typeof t !== "number" || !Number.isFinite(t) || t <= 0) throw bad("callTool()'s timeoutMs is a positive number of ms");
-    const timeoutMs = scope.clampWait(Math.min(t, SITE_TOOL_TIMEOUT_MAX_MS));
-    scope.noteSiteTool?.();
-    const out = await driver.callSiteTool(args.name, JSON.parse(json) as unknown, { timeoutMs, signal: scope.signal });
+    // The stop (the page's signal aborted, its answer awaited) must fit in what the run has left too.
+    const left = scope.timeLeft();
+    const stopMs = Math.min(SITE_TOOL_STOP_GRACE_MS, Math.floor(left / 4));
+    const timeoutMs = Math.min(scope.clampWait(Math.min(t, SITE_TOOL_TIMEOUT_MAX_MS)), Math.max(0, left - stopMs - 200));
+    // Cut short by the run's end (not the model's own short timeout): refused up front rather than sent and stopped.
+    if (timeoutMs < Math.min(t, SITE_TOOL_MIN_MS)) throw new AutomationFailure("WaitTimeout", "too little of this call's time is left to run the site's tool — call it in a new script");
+    const out = await driver.callSiteTool(args.name, JSON.parse(json) as unknown, { timeoutMs, stopMs, signal: scope.signal });
+    // Counted when the page's tool was actually asked to run (not for a refusal, nor for a name the page doesn't have).
+    if (out.kind !== "unknown") scope.noteSiteTool?.();
     scope.live();
     scope.acted.add(b.targetId);
     switch (out.kind) {
@@ -1963,14 +1972,14 @@ export class BrowserEngine {
         return null;
       case "answered": {
         if (out.result === null) {
-          scope.builder.daemonLine("the site's tool returned nothing (it may have navigated the page) — call state()");
+          scope.builder.daemonLine("the site's tool returned nothing");
           return null;
         }
         const r = redactBody(out.result, "application/json", 256 * 1024);
         let value: unknown = r.text;
         try { value = JSON.parse(r.text); } catch { value = r.text; }
         scope.builder.markScreenRead();
-        if (args.emit !== false) scope.builder.text(`site tool result${out.cut || r.cut ? " (cut at 256 KiB)" : ""}:\n${r.text}`, { screen: true });
+        if (args.emit !== false) scope.builder.text(`site tool result${out.cut || r.cut ? " (cut at 256 KiB)" : ""}:\n${escapeInvisible(r.text)}`, { screen: true });
         return value;
       }
     }
