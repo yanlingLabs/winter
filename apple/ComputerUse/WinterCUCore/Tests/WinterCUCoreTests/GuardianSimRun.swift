@@ -638,6 +638,8 @@ final class SimRun {
             return (h, d, SimSwitch(at: t, app: true, desktop: elsewhere, target: h.pid, claim: true, dest: h.pid), nil)
         }
         w.hardware(observable: true)
+        // A click into an agent target's ordinary window (not a ⌘-click): they are working in it (round 10).
+        if let h = hit, h.layer == 0, h.pid != SimPid.own, !flags.contains(.maskCommand) { w.userInteracted(h.pid) }
         w.log("the user \(flags.contains(.maskCommand) ? "⌘-" : "")\(drag ? "drags from" : "clicks") (\(Int(p.x)), \(Int(p.y))) — \(hit.map { "\(SimPid.name($0.pid))'s window \($0.id)" } ?? "the desktop")")
         core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, flags: flags, now: clock.nowSeconds())
         let i = sw.map { w.addSwitch($0) }
@@ -851,27 +853,44 @@ final class SimRun {
             }
             w.agentBegins(tpid)
             defer { w.agentEnds(tpid) }
+            // I6 (round 10): an act on the app the user is working in is refused at once; any other act is not refused for it.
+            let working = w.userWorks(in: tpid)
+            let opener = CUCore.actCanOpenApps(action)
+            if opener { w.lock.withLock { w.lastOpenerAt = w.now } }
+            defer { if opener { w.lock.withLock { w.lastOpenerAt = w.now } } }
             do {
                 _ = try await core.targetAct(TargetActParams(targetId: "tsim", sessionId: "s", callId: id, action: action, access: .full,
                                                              allowForeground: false, privatePath: true))
-            } catch { w.log("the act: \((error as? CUError)?.message ?? "\(error)")") }
+                if working { w.lock.withLock { w.fail("I6: the agent acted on T while the user was working in it (they clicked or typed in it, and it is still in front)") } }
+            } catch {
+                let e = error as? CUError
+                w.log("the act: \(e?.message ?? "\(error)")")
+                let refusedForWork = e?.code == "refused" && e?.data?["reason"] == .string("user_working")
+                if refusedForWork, !working {
+                    w.lock.withLock { w.fail("I6: the act was refused as \"the user is working in it\", but they are not (only switched there, or left it)") }
+                } else if refusedForWork {
+                    w.lock.withLock { w.stats.handsOff += 1 }
+                }
+            }
         }
         switch step.kind {
         case .agentType(let n):
             await act(.type(CUTypeAction(text: String(repeating: "x", count: n))), "c\(step.seed)")
         case .agentClick(let what, let ms):
-            if what == .opener { indirect(SimPid.safari, after: ms ?? r.double(150, 900), why: "the button the agent clicked in T opened it") }
+            // (An act refused because the user works in T opens nothing.)
+            if what == .opener, !w.userWorks(in: tpid) { indirect(SimPid.safari, after: ms ?? r.double(150, 900), why: "the button the agent clicked in T opened it") }
             let el = what == .link ? link : what == .opener ? opener : field
             let ref = target.refs.ref(for: AXIdentity(element: el))
             await act(.click(CUClickAction(ref: ref)), "c\(step.seed)")
         case .agentAppleScript(let seconds, let opens, let ms, let dialog):
             w.lock.withLock { w.scriptMs = seconds * 1000 }
-            if opens {
+            if opens, !w.userWorks(in: tpid) {  // (a script refused because the user works in T opens nothing)
                 let app = (dialog ?? !r.chance(0.7)) ? SimPid.coreServices : SimPid.preview
                 indirect(app, after: ms ?? r.double(200, min(1_000, seconds * 1000)), why: "what the agent's AppleScript opened")
             }
             w.agentBegins(tpid, raise: true)
-            defer { w.agentEnds(tpid) }
+            w.lock.withLock { w.lastOpenerAt = w.now }
+            defer { w.agentEnds(tpid); w.lock.withLock { w.lastOpenerAt = w.now } }
             do {
                 _ = try await core.targetAppleScript(TargetAppleScriptParams(targetId: "tsim", source: "tell application \"Finder\" to get name"))
             } catch { w.log("the script: \((error as? CUError)?.message ?? "\(error)")") }
@@ -881,6 +900,7 @@ final class SimRun {
             let wid = UInt32(8000 + pid)
             let bundle = "sim.launched.\(pid)"
             w.agentBegins(pid, raise: true)
+            w.lock.withLock { w.lastOpenerAt = w.now }  // a launch can open apps (the engine notes its start and end)
             w.lock.withLock {
                 w.running.insert(pid)
                 w.bundles[pid] = bundle
@@ -910,7 +930,7 @@ final class SimRun {
             do {
                 _ = try await core.targetBind(TargetBindParams(sessionId: "s", app: bundle, mirror: false))
             } catch { w.log("the bind: \((error as? CUError)?.message ?? "\(error)")") }
-            w.agentEnds(pid)
+            w.agentEnds(pid); w.lock.withLock { w.lastOpenerAt = w.now }
         case .agentBusy(let n, let gap):
             for k in 0..<n {
                 if w.violation != nil { break }

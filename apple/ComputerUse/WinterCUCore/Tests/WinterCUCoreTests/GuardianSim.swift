@@ -187,6 +187,8 @@ struct SimStats {
     var uncheckedWhy: [String: Int] = [:]
     /// Engine activations (restores, a visit's return) checked against more than one right answer: issued before the engine
     /// had heard of a change, they decide nothing between that change's answers.
+    /// Acts refused because the user was working in the app (round 10).
+    var handsOff = 0
     var activationsOpen = 0
     var activationsOpenWhy: [String: Int] = [:]
     var settleChecks = 0
@@ -202,7 +204,7 @@ struct SimStats {
         changes += o.changes; decided += o.decided; ambiguous += o.ambiguous; unchecked += o.unchecked
         settleChecks += o.settleChecks; restoresChecked += o.restoresChecked; keysChecked += o.keysChecked
         userKeysRerouted += o.userKeysRerouted; undone += o.undone; userMovesKept += o.userMovesKept; leftAlone += o.leftAlone
-        agentActs += o.agentActs; s2Ops += o.s2Ops; activationsOpen += o.activationsOpen
+        agentActs += o.agentActs; s2Ops += o.s2Ops; activationsOpen += o.activationsOpen; handsOff += o.handsOff
         for (k, v) in o.activationsOpenWhy { activationsOpenWhy[k, default: 0] += v }
         for (k, v) in o.ambiguousWhy { ambiguousWhy[k, default: 0] += v }
         for (k, v) in o.uncheckedWhy { uncheckedWhy[k, default: 0] += v }
@@ -216,7 +218,8 @@ struct SimStats {
             \(unchecked) unchecked (\(pct(unchecked))\(unc.isEmpty ? "" : ": " + unc)); \(settleChecks) settle checks, \
             \(restoresChecked) engine activations checked (\(activationsOpen) of them against several answers: \(activationsOpenWhy.sorted { $0.value > $1.value }.map { "\($0.value) \($0.key)" }.joined(separator: "; "))), \(keysChecked) user keys checked (\(userKeysRerouted) through the \
             reroute); \(agentActs) agent operations, \(s2Ops) of session s2 (visits, holds, rung 4); \(undone) thefts undone, \
-            \(userMovesKept) user moves kept, \(leftAlone) changes left alone (neither adopted nor undone)
+            \(userMovesKept) user moves kept, \(leftAlone) changes left alone (neither adopted nor undone), \(handsOff) acts refused while the \
+            user worked in the app
             """
     }
     func pct(_ n: Int) -> String { changes == 0 ? "0%" : String(format: "%.1f%%", 100 * Double(n) / Double(changes)) }
@@ -328,6 +331,24 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     var lastOtherChangeAt: Double = -.infinity
     /// The last landing of a switch of the user's (two inputs before two landings: the engine may pair them either way).
     var lastUserChangeAt: Double = -.infinity
+    /// Round 10 (user ruling): the agent target the user is WORKING in — they clicked into its window, or typed while it
+    /// was in front (keys the tap can see) — until it leaves the front; a click into it while it is not in front counts
+    /// once its activation lands (within 0.5 s).
+    var userWorkingIn: pid_t?
+    var pendingWork: (app: pid_t, until: Double)?
+    /// The world's answer: is the user working in `pid` now?
+    func userWorks(in pid: pid_t) -> Bool {
+        lock.withLock {
+            if let p = pendingWork, front == p.app, now <= p.until { userWorkingIn = p.app; pendingWork = nil }
+            return userWorkingIn == pid && front == pid
+        }
+    }
+    func userInteracted(_ app: pid_t) {
+        lock.withLock {
+            guard SimPid.agentTargets.contains(app) else { return }
+            if front == app { userWorkingIn = app; pendingWork = nil } else { pendingWork = (app, now + 500) }
+        }
+    }
     /// The world's own record of the agent: operations running per app, the last thing it did to each app (a cause, or
     /// an operation's end), its last cause on any app (the earliest the engine may count) and its last posted event (the
     /// latest), and its last action that can raise a window or a desktop.
@@ -341,6 +362,8 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// The user's hardware input: any, and what the session tap could see.
     var lastHardwareAt: Double = -.infinity
     var lastObservableHardwareAt: Double = -.infinity
+    /// The agent's last action that can open apps (a click, a press, an AppleScript, a launch, an open): round 10.
+    var lastOpenerAt: Double = -.infinity
     var visiting = false
     var visitStartedAt: Double = -.infinity
     /// The app in front when the visit began (the visit's way back is the agent's too).
@@ -589,6 +612,9 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     func key(_ type: CGEventType, flags f: CGEventFlags = [], keycode: Int64 = 0) {
         hardware(observable: !secure)
         guard !secure else { return }
+        // A key the tap sees (typing — no ⌘/⌃ chord) while an agent target is in front: the contract counts it as work in
+        // it (round 10's I6), wherever the key lands (Spotlight's panel too: the engine can't tell).
+        if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl) { userInteracted(lock.withLock { front }) }
         core?.noteTapEvent(type: type, sourcePid: 0, userData: 0, flags: f, keycode: keycode, now: now / 1000)
     }
 
@@ -670,27 +696,31 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             return left
         }
         var base: SimCause
+        // Round 10 (the user's ruling): sent back only when CLEARLY the agent's — no input of the user's the tap saw in the
+        // last 2.5 s, an action of the agent's that can open apps within 1.5 s, no Secure Event Input; otherwise, with the
+        // agent active, left in front (never adopted — only their switch input does that), said.
+        let left = SimCause.untouched(pid, .leftAlone, indirect: indirect, why + " (not clearly the agent's)")
+        let quiet = now - lastObservableHardwareAt, opener = now - lastOpenerAt
+        let clearly: Touch = secure ? .no
+            : (quiet > 2_600 && opener <= 1_400) ? .yes
+            : (quiet < 2_400 || opener > 1_600) ? .no : .edge
         switch agentRecent(at: now) {
         case .no:
-            base = adopt
+            base = clearly == .yes ? notTheirs : adopt
         case .edge:
-            base = .either([adopt, notTheirs], "at the edge of the causal window")
+            base = .either([adopt, left, notTheirs], "at the edge of the causal window")
         case .yes:
-            // Input of theirs the tap saw since the agent's last cause on any app: theirs (I1). The agent's last cause is
-            // known within a range (an operation's start or a synthetic activation the engine counts — up to the last event
-            // it posted).
-            let lo = lastCauseAt.values.max() ?? -.infinity
-            let hi = max(lo, lastPostAt)
-            let hw = lastObservableHardwareAt
-            if hw > hi + 30 { base = adopt } else if hw < lo - 30 { base = notTheirs } else {
-                base = .either([adopt, notTheirs], "the user's input among the agent's events")
+            switch clearly {
+            case .yes: base = notTheirs
+            case .no: base = left
+            case .edge: base = .either([left, notTheirs], "at the edge of 'clearly the agent's' (2.5 s quiet, 1.5 s opener)")
             }
         }
-        // Heard later: the agent's next cause can make an adopted one the agent's, the user's input a not-theirs one theirs.
+        // Heard later: the agent's next action, or the user's input, can tip it either way.
         if case .untouched(_, .adopt, _, _) = base {
-            nextWiden = (.agentCause, notTheirs, "the agent acted before the engine heard of an untouched app's coming forward")
-        } else if case .untouched = base {
-            nextWiden = (.hardware, adopt, "input of the user's arrived before the engine heard of an untouched app's coming forward")
+            nextWiden = (.agentCause, left, "the agent acted before the engine heard of an untouched app's coming forward")
+        } else if case .untouched(_, .undone, _, _) = base {
+            nextWiden = (.hardware, left, "input of the user's arrived before the engine heard of an untouched app's coming forward")
         }
         if case .untouched(_, .adopt, _, _) = base { return base }
         if competingSwitch(for: pid, app: n.app != front, desktop: n.space != space) != nil {
@@ -788,6 +818,8 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     func change(to n: SPlace, cause: SimCause, why: String) {
         lock.withLock {
             let oldFront = front, oldSpace = space
+            if let p = pendingWork, n.app == p.app, now <= p.until { userWorkingIn = p.app; pendingWork = nil }
+            if let w = userWorkingIn, n.app != w { userWorkingIn = nil }  // they left the app they were working in
             if n.space == 400 { focusDisplay = 2 } else { focusDisplay = 1; space1 = n.space }
             if let w = appWindow(n.app, onSpace: n.space), mainWin[n.app] != w.id {
                 mainWin[n.app] = w.id
@@ -1114,6 +1146,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
 
     func userKey(flags f: CGEventFlags = []) {
         key(.keyDown, flags: f)
+
         lock.withLock {
             let to = keyFocus
             var landed = to

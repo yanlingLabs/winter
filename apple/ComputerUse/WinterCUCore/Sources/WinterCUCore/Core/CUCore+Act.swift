@@ -59,11 +59,15 @@ extension CUCore {
         defer { endGuardianSpan(t.pid, raise: false) }
         do {
             try Self.checkAccess(p.action, access: p.access, appName: t.appName)
+            try refuseWhileUserWorks(t)
         } catch {
             cursor(t, "refused")
             logAct(p, t, failed: error)
             throw error
         }
+        let opener = Self.actCanOpenApps(p.action)
+        if opener { noteGuardianOpener() }
+        defer { if opener { noteGuardianOpener() } }  // its end too: what it opened may come forward a moment after
         if case .key(let k) = p.action, (try? CUKeyChord.parse(k.combo))?.isEscape == true {
             await MainActor.run { [weak self] in self?.events?.willSendEscape() }
         }
@@ -3170,7 +3174,7 @@ extension CUCore {
             // The front given back to the user's place AS IT IS NOW (the guardian's: the one before this action, unless
             // they moved), only while this app still has it — a move of theirs is left alone, and an activation that never
             // landed gives nothing back (review of round 8: it activated the pid captured before, over whatever was in front).
-            if !held { guardianLock.withLock { guardianCore.endExempt(t.pid) } }
+            if !held { let endedAt = clock.nowSeconds(); guardianLock.withLock { guardianCore.endExempt(t.pid, now: endedAt) } }
             if !held, sys.frontmostPid() == t.pid,
                let place = guardianPlace() ?? previous.front.map({ CUGuardedView(app: $0, space: previous.space) }),
                let user = place.app, user != t.pid {

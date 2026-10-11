@@ -78,6 +78,7 @@ final class GuardianRound9Tests: XCTestCase {
     func testAVisitNeverUndoesWhatWasJudgedBeforeIt() {
         var g = started()
         g.noteCause(500, now: 50.0)
+        g.noteOpenerCause(now: 50.0)
         if case .indirect = judge(&g, 77, now: 50.2) {} else { XCTFail("an untouched app right after the agent's act: its indirect effect") }
         g.beginVisit(app: 600, user: 1, now: 50.25)
         XCTAssertEqual(judge(&g, 77, now: 50.3), .visit)
@@ -113,6 +114,7 @@ final class GuardianRound9Tests: XCTestCase {
         g.inputEvent(type: .flagsChanged, flags: [], now: 60.3)
         XCTAssertTrue(judge(&g, 1, now: 60.35).isUsers)
         g.noteCause(500, now: 60.4)
+        g.noteOpenerCause(now: 60.4)
         XCTAssertTrue(judge(&g, 77, 200, now: 60.6).undoes, "the click was used: 77's own return is not theirs")
     }
     /// An app the agent never touched, the user's by their input since the agent's last cause with no instant of a
@@ -125,7 +127,9 @@ final class GuardianRound9Tests: XCTestCase {
         g.noteSwitch(now: 80.1, .app, target: 1)            // the click on its Dock tile
         XCTAssertTrue(judge(&g, 1, 300, now: 80.2).isUsers) // their own app, on another desktop
         g.noteCause(500, now: 80.4)                         // the agent acts again
-        XCTAssertTrue(judge(&g, 77, 300, now: 80.7).undoes, "the click was used: an app coming forward next is not theirs by it")
+        g.noteOpenerCause(now: 80.4)
+        // (Their input 0.6 s before: not clearly the agent's — left, round 10 — but never theirs by the used click.)
+        XCTAssertFalse(judge(&g, 77, 300, now: 80.7).isUsers, "the click was used: an app coming forward next is not theirs by it")
     }
 
     /// During a visit, an app coming forward that a switch of theirs since the visit began explains (heard after the visit

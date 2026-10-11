@@ -1840,6 +1840,7 @@ function refusedWords(reason: string, name: string): string {
     case "focus_not_editable": return `the focus in ${name} is not a text field, so nothing was typed — click the field or pass { into }`;
     case "focus_moved": return `the focus left the field partway in ${name}, so the rest was not typed — check state(), then type the rest with { into }`;
     case "app_in_front": return `${name} came to the front while the action was being prepared — the user may be using it now, so nothing was sent; check state(), and try again if it is still wanted`;
+    case "user_working": return `the user is working in ${name} right now — wait and retry, or ask them (reading it with state(), find() or screenshot() still works)`;
     case "wrong_field_shape": return `the text does not fit the field that has the focus in ${name} (several lines, or a long text, for a one-line field or the browser's own) — pass { into } for the field you mean`;
     case "auth_dialog": return "that is a system authentication dialog — ask the user to handle it";
     case "privacy_pane": return "System Settings' Privacy & Security panes are off limits — ask the user to change them";

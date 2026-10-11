@@ -107,6 +107,22 @@ final class GuardianModelTests: XCTestCase {
 
     /// #2 (the user's ruling: blocked at the source): a link the agent clicks in an app that is not a web browser opens in
     /// the background — nothing comes forward.
+    /// Round 10 (the user's ruling from the hands-on test): once the user WORKS in the target (a click into its window, a
+    /// key while it is in front) the agent is hands-off it — every act refused at once, typed — until it leaves the front;
+    /// merely switching there to look blocks nothing (I6, checked on every act of the random test too).
+    func testTheAgentIsHandsOffAnAppTheUserIsWorkingIn() async {
+        for seed in 1...8 {
+            let r = await SimRun.execute(SimPlan.scripted(seed: UInt64(seed), [
+                (300, .commandTab(SimPid.target, tabSeen: true)), (1_000, .agentType(2)),   // only looking: not blocked
+                (1_600, .click(77)), (1_900, .agentType(2)),                                 // clicked into it: refused
+                (2_500, .typing(3)), (2_900, .agentType(2)),                                 // typing in it: refused
+                (3_400, .commandTab(SimPid.user, tabSeen: true)), (4_300, .agentType(2)),    // left it: acts again
+                (6_500, .quiet)]))
+            XCTAssertNil(r.violation, "seed \(seed): \(r.violation ?? "")\n\(r.trace.suffix(40).joined(separator: "\n"))")
+            XCTAssertGreaterThanOrEqual(r.world.stats.handsOff, 2, "seed \(seed): the acts while they worked in it were refused")
+        }
+    }
+
     func testALinkTheAgentClickedOpensInTheBackground() async {
         for seed in 1...6 {
             let r = await SimRun.execute(SimPlan.scripted(seed: UInt64(seed), [(300, .agentClick(.link)), (3_000, .quiet)]))
