@@ -205,6 +205,9 @@ final class FocusGuardianTests: XCTestCase {
     func testAnAppTheAgentIsLaunchingIsTouched() {
         var g = started()
         let launch = g.beginLaunch(now: 10)
+        // (The user's own starts come with their click — a Dock tile: a launch with no input of theirs before it, while the
+        // agent's launch is pending, is clearly the agent's — round 11.)
+        g.noteHardwareAction(now: 10.45)
         g.appLaunched(800, startedAt: 10.5, bundle: "com.example.new", now: 10.55)  // NSWorkspace: launched — nothing named yet
         XCTAssertTrue(g.judge(CUMoveQuery(app: 800, space: 100, appStartedAt: 10.5, appBundle: "com.example.new"), now: 11).isUsers,
                       "nothing launched yet: theirs")

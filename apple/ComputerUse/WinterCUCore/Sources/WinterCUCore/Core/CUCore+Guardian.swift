@@ -273,7 +273,10 @@ extension CUCore {
         // The agent's own launch (a bind's, its bundle named before it launched) is no user's launch.
         let started = sys.processAge(pid: pid).map { now - $0 }
         let bundle = sys.bundleId(pid: pid)
-        guardianLock.withLock { guardianCore.appLaunched(pid, startedAt: started, bundle: bundle, now: now) }
+        let observable = switchInputObservable, secure = secureInputOn
+        guardianLock.withLock {
+            guardianCore.appLaunched(pid, startedAt: started, bundle: bundle, now: now, inputObservable: observable, secureInput: secure)
+        }
     }
 
     /// The user's place, while guarding.
