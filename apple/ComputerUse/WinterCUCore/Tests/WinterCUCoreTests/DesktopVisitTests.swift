@@ -727,7 +727,11 @@ final class DesktopVisitTests: XCTestCase {
         c.event(type: .flagsChanged, flags: .maskCommand, now: 70)
         c.event(type: .keyDown, flags: .maskCommand, keycode: 1, now: 70.1)    // ⌘S
         c.event(type: .keyDown, flags: .maskCommand, keycode: 48, now: 70.3)   // ⌘-Tab
-        XCTAssertTrue(c.explains(from: 69, after: 0, now: 70.4), "the switch after a chord in one hold")
+        // Round 9: the switcher switches at the RELEASE — nothing is explained while ⌘ is still down, and the switch counts
+        // from the release (an agent's cause between the Tab and the release never outranks it).
+        XCTAssertFalse(c.explains(from: 69, after: 0, now: 70.4), "a ⌘-Tab still held has not switched")
+        c.event(type: .flagsChanged, flags: [], now: 70.5)
+        XCTAssertTrue(c.explains(from: 69, after: 70.45, now: 70.55), "the switch after a chord in one hold, at its release")
         var d = CUSwitchInput()
         d.event(type: .keyDown, flags: .maskControl, keycode: 124, now: 80)    // ⌃→: the next desktop
         XCTAssertTrue(d.explains(from: 79, after: 0, now: 80.2))

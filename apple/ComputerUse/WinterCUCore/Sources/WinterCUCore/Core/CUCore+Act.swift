@@ -3132,6 +3132,8 @@ extension CUCore {
         let previous = userView()
         let cursor = sys.cursorLocation()
         _ = sys.activate(pid: t.pid)
+        // Refusable (cooperative activation); accessibility's frontmost is not (as a restore does).
+        if sys.frontmostPid() != t.pid { try? ax.set(ax.application(t.pid), kAXFrontmostAttribute, kCFBooleanTrue) }
         if let w = try? windowElement(t) { try? ax.perform(w, kAXRaiseAction) }
         var front = false
         for _ in 0..<50 {

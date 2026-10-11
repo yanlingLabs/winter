@@ -169,6 +169,10 @@ struct SimSwitch {
     /// How long it can explain a change.
     var lifeMs: Double = 1000
     var keyboard = false
+    /// A ⌃ hold whose arrows the engine can't count: it may explain any desktop change heard until then, landed or not.
+    var countlessUntil: Double?
+    /// A ⌘-Tab whose ⌘ is still down: it switches (and explains anything) only from its release.
+    var pending = false
     /// The engine sees it at all.
     var visible: Bool { secureFlags != false }
 }
@@ -181,6 +185,10 @@ struct SimStats {
     var ambiguousWhy: [String: Int] = [:]
     var unchecked = 0
     var uncheckedWhy: [String: Int] = [:]
+    /// Engine activations (restores, a visit's return) checked against more than one right answer: issued before the engine
+    /// had heard of a change, they decide nothing between that change's answers.
+    var activationsOpen = 0
+    var activationsOpenWhy: [String: Int] = [:]
     var settleChecks = 0
     var restoresChecked = 0
     var keysChecked = 0
@@ -194,7 +202,8 @@ struct SimStats {
         changes += o.changes; decided += o.decided; ambiguous += o.ambiguous; unchecked += o.unchecked
         settleChecks += o.settleChecks; restoresChecked += o.restoresChecked; keysChecked += o.keysChecked
         userKeysRerouted += o.userKeysRerouted; undone += o.undone; userMovesKept += o.userMovesKept; leftAlone += o.leftAlone
-        agentActs += o.agentActs; s2Ops += o.s2Ops
+        agentActs += o.agentActs; s2Ops += o.s2Ops; activationsOpen += o.activationsOpen
+        for (k, v) in o.activationsOpenWhy { activationsOpenWhy[k, default: 0] += v }
         for (k, v) in o.ambiguousWhy { ambiguousWhy[k, default: 0] += v }
         for (k, v) in o.uncheckedWhy { uncheckedWhy[k, default: 0] += v }
     }
@@ -205,7 +214,7 @@ struct SimStats {
             \(changes) changes of the user's view: \(decided) with ONE right outcome (\(pct(decided))), \(ambiguous) with \
             several right outcomes, all kept and the engine held to the one it took (\(pct(ambiguous)): \(amb)), \
             \(unchecked) unchecked (\(pct(unchecked))\(unc.isEmpty ? "" : ": " + unc)); \(settleChecks) settle checks, \
-            \(restoresChecked) engine activations checked, \(keysChecked) user keys checked (\(userKeysRerouted) through the \
+            \(restoresChecked) engine activations checked (\(activationsOpen) of them against several answers: \(activationsOpenWhy.sorted { $0.value > $1.value }.map { "\($0.value) \($0.key)" }.joined(separator: "; "))), \(keysChecked) user keys checked (\(userKeysRerouted) through the \
             reroute); \(agentActs) agent operations, \(s2Ops) of session s2 (visits, holds, rung 4); \(undone) thefts undone, \
             \(userMovesKept) user moves kept, \(leftAlone) changes left alone (neither adopted nor undone)
             """
@@ -553,7 +562,9 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         cands.formUnion(w.alt)
         // Another right answer now: what the engine must say is no longer one thing.
         if let o = owedNote, o.episode == episode { owedNote = nil }
-        if let f = cands.first?.expected.app { dueNotes.removeAll { $0.pid == f } }
+        // (No change since that one: what is in front is the app it brought forward.)
+        let changed = front
+        dueNotes.removeAll { $0.pid == changed }
         stats.ambiguous += 1
         stats.decided -= 1
         stats.ambiguousWhy[w.why, default: 0] += 1
@@ -605,7 +616,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         let t = now
         let fits = { (i: Int) -> Bool in
             let s = self.switches[i]
-            guard i != excluding, s.visible, !s.claim, t - s.at <= s.lifeMs, t >= s.at else { return false }
+            guard i != excluding, s.visible, !s.claim, !s.pending, t - s.at <= s.lifeMs, t >= s.at else { return false }
             if let target = s.target, target != pid { return false }
             return (s.app && app) || (s.desktop && desktop)
         }
@@ -613,6 +624,9 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         // Not used in truth (not landed, or changed nothing, or landed only just now) — or more than one input in the
         // window: the engine pairs inputs with changes oldest first, and may have used another one for that landing.
         if let i = window.reversed().first(where: { switches[$0].landedAt.map { t - $0 <= 150 } ?? true }) { return switches[i] }
+        if desktop, let i = window.reversed().first(where: { switches[$0].countlessUntil.map { t <= $0 + self.nextHearing() } ?? false }) {
+            return switches[i]
+        }
         if window.count >= 2 { return switches[window.last!] }
         return nil
     }
@@ -630,6 +644,15 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         let notTheirs = SimCause.untouched(pid, systemUI ? .leftAlone : .undone, indirect: indirect, why)
         // The first activation after a launch of the user's own: theirs.
         if let l = userLaunches[pid], now - l < 60_000 { return adopt }
+        // During a desktop visit an app coming forward is the visit's (left in front until it ends) — unless a switch input
+        // of the user's since the visit began explains it.
+        if visiting {
+            let left = SimCause.untouched(pid, .leftAlone, indirect: indirect, why + " (during a desktop visit)")
+            if let s = competingSwitch(for: pid, app: n.app != front, desktop: n.space != space), s.at >= visitStartedAt {
+                return .either([left, adopt], "a switch input of the user's during a desktop visit")
+            }
+            return left
+        }
         var base: SimCause
         switch agentRecent(at: now) {
         case .no:
@@ -708,6 +731,13 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         if touchedDest {
             if let r = raiseAt[n.app], r > s.at {
                 return .either([mine, .agentDirect(n.app, "raised by the agent after their input")], "the agent raised it after their input")
+            }
+            // Their app stayed in front while the desktop changed, and the agent raised a window shown on the new desktop
+            // after their input: that raise may have switched it (the engine can't tell).
+            if n.app == front, n.space != space,
+               raiseAt.contains(where: { p, r in p != n.app && r > s.at && now - r <= 1_500 && appWindow(p, onSpace: n.space) != nil }) {
+                return .either([mine, .agentDirect(n.app, "a window the agent raised after their input is on that desktop")],
+                               "the agent raised a window on that desktop after their input")
             }
             if lastOtherChangeAt > s.at {
                 return .either([mine, .agentDirect(n.app, "their input used by another change")], "another change came between their input and their switch")
@@ -806,7 +836,14 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// The next activation notification's delay, drawn ahead (the classification of a change uses it: the engine judges a
     /// change when it hears of it).
     var drawnNoteDelay: Double?
-    func noteDelay() -> Double { rng.chance(0.7) ? rng.double(3, 90) : rng.double(90, 400) }
+    /// NSWorkspace's notification delay. Measured (run108, 41 activations): within 0–13 ms of the window server's front
+    /// change, the desktop change 6–11 ms — so the default world allows up to 120 ms (~10× the worst seen), reordering the
+    /// two kinds; WINTER_CU_SIM_STRESS=1 goes to 400 ms (a busy main queue), reported apart as a stress sweep.
+    static let stress = ProcessInfo.processInfo.environment["WINTER_CU_SIM_STRESS"] == "1"
+    func noteDelay() -> Double {
+        if Self.stress { return rng.chance(0.7) ? rng.double(3, 90) : rng.double(90, 400) }
+        return rng.chance(0.85) ? rng.double(1, 20) : rng.double(20, 120)
+    }
     func nextHearing() -> Double {
         if let d = drawnNoteDelay { return d }
         let d = max(noteDelay(), lastActivationNoteAt - now + 0.1)
@@ -881,18 +918,26 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
                     fail("I5 (#6): the engine restored to \(SimPid.name(pid)) during session s2's desktop visit (\(how)) — a visit's own switch is neither undone nor adopted")
                 }
                 let ok = cands.filter { $0.place.app == pid }
-                if !ok.isEmpty {
+                let beforeUnheard = unheard.contains(where: { now <= $0.until && $0.places.contains { $0.app == pid } })
+                if !ok.isEmpty, beforeUnheard, ok.count < cands.count {
+                    // A restore to the place from before a change the engine has not heard of yet: it decides nothing
+                    // between that change's right answers (the engine will judge it when it hears of it).
+                    stats.activationsOpen += 1
+                    stats.activationsOpenWhy["a restore to the place from before a change the engine had not heard of yet", default: 0] += 1
+                    log("  (a restore to \(SimPid.name(pid)), the place before a change not heard of yet)")
+                } else if !ok.isEmpty {
                     cands = ok
-                } else if unheard.contains(where: { now <= $0.until && $0.places.contains { $0.app == pid } }) {
+                } else if beforeUnheard {
                     // A change the engine has not heard of yet moved the place: a restore to the one before it is all it can
                     // do now (the world must still settle where the user belongs).
-                    stats.ambiguous += 1
-                    stats.ambiguousWhy["a restore to the place from before a change the engine had not heard of yet", default: 0] += 1
+                    stats.activationsOpen += 1
+                    stats.activationsOpenWhy["a restore to the place from before a change the engine had not heard of yet", default: 0] += 1
                     log("  (a restore to \(SimPid.name(pid)), the place before a change not heard of yet)")
                 } else {
                     fail("I2: the engine restored to \(SimPid.name(pid)) (\(how)), but the user's place is \(Set(cands.map(\.place)).map(\.description).sorted().joined(separator: " or "))")
                 }
             case .giveBack:
+                restoreIssuedAt[pid] = now  // an activation of the engine's toward it: it may come forward late, by itself
                 var next: Set<SimCand> = []
                 for c in cands {
                     // Back to where they were before the consented foreground — or, when it never came forward, nowhere new
@@ -906,6 +951,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
                     cands = next
                 }
             case .visitReturn:
+                restoreIssuedAt[pid] = now
                 // Back to their place, or to what was in front when it began (where they were looking).
                 var ok: Set<SimCand> = []
                 for c in cands {
@@ -915,8 +961,8 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
                 }
                 if ok.isEmpty, unheard.contains(where: { now <= $0.until && $0.places.contains { $0.app == pid } }) {
                     // A move of theirs the engine has not heard of yet: the return goes where they were before it.
-                    stats.ambiguous += 1
-                    stats.ambiguousWhy["a visit's return to the place from before a change the engine had not heard of yet", default: 0] += 1
+                    stats.activationsOpen += 1
+                    stats.activationsOpenWhy["a visit's return to the place from before a change the engine had not heard of yet", default: 0] += 1
                     log("  (a visit's return to \(SimPid.name(pid)), the place before a change not heard of yet)")
                 } else if ok.isEmpty {
                     fail("I2: a desktop visit brought the user back to \(SimPid.name(pid)) (\(how)), but their place is \(Set(cands.map(\.place)).map(\.description).sorted().joined(separator: " or ")) — they moved during it")
@@ -954,7 +1000,20 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             guard running.contains(pid) else { return }
             let n = landingPlace(pid)
             if case .restore = kind, n.app != front || n.space != space { stats.undone += 1 }
-            change(to: n, cause: .engine(kind), why: "\(SimPid.name(pid)) activated by the engine (\(kind))")
+            var cause = SimCause.engine(kind)
+            // An activation of the engine's landing while a switch of the user's is pending: it may be taken for theirs.
+            switch kind {
+            case .restore, .giveBack, .visitReturn:
+                if competingSwitch(for: pid, app: n.app != front, desktop: n.space != space) != nil {
+                    cause = .either([cause, .user(n, "taken for their switch")], "an activation of the engine's landing while a switch of the user's is pending")
+                }
+            case .userClick(let d) where visiting && d.app == SimPid.visited:
+                // Their click into the visited app during a desktop visit: no move away (the contract) — the visit's end
+                // may bring them back, or leave them there.
+                cause = .either([cause, .engine(.visitThere)], "the user's click into the visited app during a desktop visit")
+            default: break
+            }
+            change(to: n, cause: cause, why: "\(SimPid.name(pid)) activated by the engine (\(kind))")
         }
     }
 
@@ -1030,7 +1089,8 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
                 landed = h(e) != nil ? to : (lastReroute ?? -1)
                 stats.userKeysRerouted += 1
                 stats.keysChecked += 1
-                let allowed = cands.filter { $0.expected.app == landed || (visiting && $0.place.app == landed) }
+                // During a visit, what is in front may be the visit's or a theft it leaves be: the key may go there too.
+                let allowed = cands.filter { $0.expected.app == landed || (visiting && ($0.place.app == landed || front == landed)) }
                 if allowed.isEmpty {
                     fail("I3: the user's key went to \(SimPid.name(landed)), but they are at \(Set(cands.map(\.expected)).map(\.description).sorted().joined(separator: " or "))")
                 } else {

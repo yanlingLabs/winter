@@ -50,6 +50,10 @@ extension CUCore {
         if sys.frontmostPid() != t.pid {
             noteGuardianCause(t.pid, raise: true)
             _ = sys.activate(pid: t.pid)
+            // A background process's activation can be refused (cooperative activation); the app made frontmost over
+            // accessibility is not — as a restore does (found by the model-based test: the refused activation left the user's
+            // own ⌘-Tab into the app, a moment later, to be taken for the consented one and given back).
+            try? ax.set(ax.application(t.pid), kAXFrontmostAttribute, kCFBooleanTrue)
             if let w = try? windowElement(t) { try? ax.perform(w, kAXRaiseAction) }
         }
         var front = false

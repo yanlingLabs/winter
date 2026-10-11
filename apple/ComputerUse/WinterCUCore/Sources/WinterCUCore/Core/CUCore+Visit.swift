@@ -208,7 +208,16 @@ extension CUCore {
             CULog.act.notice("visit (\(why.rawValue, privacy: .public)): \(t.appName, privacy: .public)'s window has no element and the app has a window on the user's desktop — not reachable, nothing moved")
             throw CUError.unsupported("\(t.appName)'s window can't be brought forward on its desktop: macOS has not exposed it (it has not been shown there since it opened), and \(t.appName) has a window on this desktop, where it would stay — ask the user to show it once; nothing was moved")
         }
-        let before = userView()
+        // What is in front now is judged first (a move of theirs not heard of yet is their place). A theft the guardian
+        // has not put back yet (an app the agent's action brought forward) is not where they are: the way back is to
+        // their place as the guardian has it (found by the model-based test: an indirect effect in front when a visit
+        // began was the place the visit brought them back to).
+        let live = userView()
+        var before = live
+        if judgeBeforeTaking("a desktop visit's start")?.undoes == true, let place = guardianPlace(), let user = place.app,
+           user != live.front, sys.appRunning(user) {
+            before = CUUserView(space: place.space ?? live.space, front: user)
+        }
         // Where to bring the user back: without their front app, nowhere — so they are not taken anywhere.
         guard before.front != nil else {
             CULog.act.notice("visit (\(why.rawValue, privacy: .public)): the user's front app can't be read — not visited, nothing moved")
@@ -241,7 +250,6 @@ extension CUCore {
             return v
         }
         made.visit = v
-        judgeBeforeTaking("a desktop visit's start")
         // The switch there and the way back are the agent's own: both apps touched while it lasts, so only the user's input
         // after it can make a change theirs.
         guardianLock.withLock {
@@ -521,7 +529,11 @@ extension CUCore {
         }
         let now = userView()
         let sawUserMove = guardianLock.withLock { guardianCore.visitSawUserInput }
-        if let arrived, sawUserMove, now != s.before, now != arrived {
+        // Where they are now is where they went (their place as the guardian has it) — not the visit's own switch landing
+        // after their move (found by the model-based test: their ⌘-Tab onto the visited desktop was taken for the
+        // arrival, and the visited app coming forward after it was "where they went").
+        let isTheirPlace = guardianPlace().map { p in p.app == now.front && (p.space == nil || now.space == nil || p.space == now.space) } ?? true
+        if let arrived, sawUserMove, now != s.before, now != arrived, isTheirPlace {
             // Theirs, never fought.
             let at = clock.nowSeconds()
             guardianLock.withLock {

@@ -407,9 +407,10 @@ extension CUCore {
     /// now is judged first, so a move of theirs that landed a moment before — not heard of yet — is their place before
     /// the agent's own switch is laid over it (found by the model-based test: their ⌘-Tab 15 ms before a visit was "the
     /// visit's", and the visit's end took them back to the app they had left).
-    func judgeBeforeTaking(_ path: String) {
-        guard guardianRunning else { return }
-        _ = judgeMove(userView(), since: nil, path: path)
+    @discardableResult
+    func judgeBeforeTaking(_ path: String) -> CUMoveOwner? {
+        guard guardianRunning else { return nil }
+        return judgeMove(userView(), since: nil, path: path)
     }
 
     /// Notes the guardian left for the next tool result (a restore happened between acts).
@@ -539,9 +540,12 @@ extension CUCore {
     /// Runs OFF the main queue (dispatched by the observers), so a restore never blocks the UI or event delivery.
     func guardianRestore(thief: pid_t, fallback: CUGuardedView? = nil, repeatOffender: Bool = false, force: Bool = false,
                          cause: String, silent: Bool = false) {
-        guard let place = guardianPlace() ?? fallback, let user = place.app, user != thief else { return }
-        let target = CUUserView(space: place.space, front: user)
         let now = userView()
+        // The thief may be their own app — the desktop changed under it (a raise of the agent's on another desktop): the
+        // desktop is put back (found by the model-based test: nothing was restored, the user left on the other desktop).
+        guard let place = guardianPlace() ?? fallback, let user = place.app,
+              user != thief || (place.space != nil && now.space != nil && now.space != place.space) else { return }
+        let target = CUUserView(space: place.space, front: user)
         guard force || now.front != user || (place.space != nil && now.space != nil && now.space != place.space) else { return }
         // The user's own place is never marked as touched by bringing them back to it (that made their next move back
         // into it, under Secure Event Input, the agent's — the model-based test); a retry never lands over a move of
@@ -638,9 +642,10 @@ extension CUCore {
             CULog.guardian.notice("the user clicked into \(self.appName(hit.pid), privacy: .public), in front already: their place")
             return hit.pid
         }
-        // A click on a window is for ITS app: it explains that app coming forward (and its desktop), nothing else.
-        if elsewhere { noteSwitchInput(now: now, .desktop, target: hit.pid) }
-        if hit.pid != front { noteSwitchInput(now: now, .app, target: hit.pid) }
+        // A click on a window is for ITS app: it explains that app coming forward (and its desktop), nothing else — ONE
+        // input for one change (an app switch takes the desktop along; found by the model-based test: a click on another
+        // display's window left a second instant that made the app's own coming forward later "theirs").
+        if hit.pid != front { noteSwitchInput(now: now, .app, target: hit.pid) } else if elsewhere { noteSwitchInput(now: now, .desktop, target: hit.pid) }
         let space = elsewhere ? sys.windowSpaces(hit.id)?.first : sys.activeSpace()
         guardianLock.withLock { guardianCore.userClicked(app: hit.pid, space: space, now: now) }
         let name = appName(hit.pid)
@@ -671,8 +676,8 @@ extension CUCore {
     /// forward on this desktop — claimed as the user's (the review of round 8: with Finder bound and touched, it was
     /// undone).
     private func desktopClick(now: Double, flags: CGEventFlags) -> pid_t? {
-        guard !flags.contains(.maskCommand), let finder = sys.runningPid(bundleId: "com.apple.finder"),
-              sys.frontmostPid() != finder else { return nil }
+        // (Finder in front already: still claimed — something else may come forward before its activation lands.)
+        guard !flags.contains(.maskCommand), let finder = sys.runningPid(bundleId: "com.apple.finder") else { return nil }
         noteSwitchInput(now: now, .app, target: finder)
         guardianLock.withLock { guardianCore.userClicked(app: finder, space: sys.activeSpace(), now: now) }
         CULog.guardian.notice("the user clicked the empty desktop: Finder's coming forward claimed as their move")

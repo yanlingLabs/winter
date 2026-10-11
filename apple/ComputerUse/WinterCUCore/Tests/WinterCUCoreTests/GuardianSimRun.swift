@@ -243,6 +243,8 @@ final class SimRun {
         world.onMainWindow = { pid, id in
             if let el = elements[id], pid != SimPid.target { ax.put(ax.application(pid), [kAXFocusedWindowAttribute: el]) }
         }
+        // A window on another desktop is reachable by its id (a remote token: each was shown on the active desktop once).
+        ax.remoteWindows = elements
         // Accessibility lists an app's windows on the desktops shown (a window on another Space is not listed — what tells
         // the engine a window is "off this desktop").
         world.onDesktop = {
@@ -270,6 +272,9 @@ final class SimRun {
                 w.engineActivates(pid, how: "AXFrontmost", refusable: false)
             } else if parts[1] == "AXMain", let id = byToken[String(parts[0])] {
                 w.raised(id)
+                // The agent's main-window write on its target: it can bring the window's desktop forward — a raise of the
+                // agent's (the engine counts it so too).
+                if let p = w.lock.withLock({ w.wins[id]?.pid }), SimPid.agentTargets.contains(p) { w.agentCause(p, raise: true) }
             }
         }
         core = CUCore(events: nil, clock: clock, skyLight: focusSkyLight(), poster: poster, ax: ax, sys: world,
@@ -362,7 +367,8 @@ final class SimRun {
                 } else {
                     // The hand-back: to where the user is.
                     w.stats.keysChecked += 1
-                    let ok = w.cands.filter { $0.expected.app == p || $0.place.app == p }
+                    // (During a visit, what is in front may be the visit's or a theft it leaves be: there too.)
+                    let ok = w.cands.filter { $0.expected.app == p || $0.place.app == p || (w.visiting && w.front == p) }
                     if ok.isEmpty {
                         w.fail("I3: the key focus was handed to \(SimPid.name(p)), but the user is at \(Set(w.cands.map(\.expected)).map(\.description).sorted().joined(separator: " or "))")
                     } else {
@@ -378,7 +384,8 @@ final class SimRun {
             if ProcessInfo.processInfo.environment["WINTER_CU_SIM_DEBUG"] == "1" {
                 // Diagnostics for a reader of the trace only — never read by the oracle.
                 let ins = core.guardianLock.withLock { core.guardianCore.input.instants.map { "\(Int($0.at * 1000 - 1_000_000))\($0.kind == .app ? "a" : "d")\($0.target.map { "→\(SimPid.name($0))" } ?? "")" } }
-                w.log("    (engine instants: \(ins.joined(separator: " ")))")
+                let more = core.guardianLock.withLock { core.guardianCore.input.debugState + " | place \(core.guardianCore.view.app.map(SimPid.name) ?? "?")@\(core.guardianCore.view.space ?? 0)" }
+                w.log("    (engine instants: \(ins.joined(separator: " ")) \(more))")
             }
             w.lock.withLock {
                 // One change, one verdict: a state judged the user's MOVE is never judged the agent's later (their place —
@@ -463,8 +470,14 @@ final class SimRun {
             w.press(.maskCommand)
             let secure = w.lock.withLock { w.secure }
             let tabAt = w.now + 30
+            // The Tab the tap sees (no secure input then): the switch input is there from it (the engine's instant).
+            var tabSwitch: Int?
             if tabSeen, !secure {
-                w.schedule(after: 30, "Tab (⌘ held)") { w.key(.keyDown, flags: .maskCommand, keycode: 48); w.key(.keyUp, flags: .maskCommand, keycode: 48) }
+                w.schedule(after: 30, "Tab (⌘ held)") {
+                    let stillVisible = w.lock.withLock { !w.secure }
+                    w.key(.keyDown, flags: .maskCommand, keycode: 48); w.key(.keyUp, flags: .maskCommand, keycode: 48)
+                    if stillVisible { tabSwitch = w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, dest: a, keyboard: true, pending: true)) }
+                }
             }
             let hold = holdMs ?? r.double(60, 350)
             let land = landMs ?? r.double(10, 70)
@@ -472,9 +485,11 @@ final class SimRun {
                 let secureNow = w.lock.withLock { w.secure }
                 w.release(.maskCommand)
                 let seen: Bool? = secureNow ? w.flagsSeenUnderSecure : nil
+                // The switcher switches at the release: a Tab seen counts from there when the release is seen (the contract).
+                if let t = tabSwitch { w.lock.withLock { if seen != false { w.switches[t].at = w.now }; w.switches[t].pending = false } }
                 let at = tabSeen && !secure ? tabAt : w.now
-                let i = w.addSwitch(SimSwitch(at: at, app: true, desktop: false, dest: a, secureFlags: seen,
-                                              lifeMs: seen == true ? 700 : 1000, keyboard: true))
+                let i = tabSwitch ?? w.addSwitch(SimSwitch(at: at, app: true, desktop: false, dest: a, secureFlags: seen,
+                                                           lifeMs: seen == true ? 700 : 1000, keyboard: true))
                 w.schedule(after: land, "the switcher activates \(SimPid.name(a))") { [unowned self] in
                     self.landSwitch(i, a, why: "the user ⌘-Tabbed to \(SimPid.name(a))")
                 }
@@ -494,15 +509,20 @@ final class SimRun {
             let secure = w.lock.withLock { w.secure }
             w.press(.maskControl)
             let downAt = w.now
-            let i = w.addSwitch(SimSwitch(at: downAt, app: false, desktop: true, dest: nil,
-                                          secureFlags: secure ? w.flagsSeenUnderSecure : nil, lifeMs: 1_600, keyboard: true))
+            let releaseAfter = r.double(100, 600)
+            var sw = SimSwitch(at: downAt, app: false, desktop: true, dest: nil,
+                               secureFlags: secure ? w.flagsSeenUnderSecure : nil, lifeMs: 1_600, keyboard: true)
+            // The arrow unseen (swallowed, or Secure Event Input): the engine can't count the desktops the hold passed —
+            // every desktop change heard during it and up to 450 ms after its release may be one of them (the contract).
+            if !seen || secure { sw.countlessUntil = downAt + releaseAfter + 450 }
+            let i = w.addSwitch(sw)
             w.schedule(after: 40, "the arrow") {
                 if seen, !secure { w.key(.keyDown, flags: .maskControl, keycode: 124); w.key(.keyUp, flags: .maskControl, keycode: 124) }
                 w.schedule(after: r.double(150, 400), "the desktop switches") { [unowned self] in
                     self.landDesktop(i, s, why: "the user ⌃-arrowed to desktop \(s)")
                 }
             }
-            w.schedule(after: r.double(100, 600), "⌃ released") { w.release(.maskControl) }
+            w.schedule(after: releaseAfter, "⌃ released") { w.release(.maskControl) }
         case .swipe(let s):
             w.log("the user swipes")
             w.gesture(31)
@@ -648,7 +668,9 @@ final class SimRun {
                 return
             }
             let cause = w.userLandingCause(i, dest: n, why: why)
-            w.switches[i].landedAt = w.now
+            // A landing the engine may take for the agent's (the consented foreground, a raise of its own) uses up no input
+            // of theirs (the contract: only a verdict of theirs uses one): it may still explain a change within its life.
+            if !cause.isTheft { w.switches[i].landedAt = w.now }
             w.change(to: n, cause: cause, why: why)
         }
     }
@@ -657,14 +679,23 @@ final class SimRun {
     func landDesktop(_ i: Int, _ s: UInt64, why: String) {
         let w = world
         w.lock.withLock {
-            // Already on that desktop: the switch does nothing (its input explains nothing that came of it).
-            guard s != w.space1 || w.focusDisplay != 1 else { w.log("\(why) — already there"); return }
+            // Already on that desktop: the switch does nothing — it confirms where they are, if the engine looks again.
+            guard s != w.space1 || w.focusDisplay != 1 else {
+                let cur = SPlace(app: w.front, space: w.space)
+                if w.cands.contains(where: { $0.place != cur || $0.held != nil }) {
+                    w.cands.formUnion(w.cands.map { _ in SimCand(place: cur, expected: cur, held: nil) })
+                    w.log("\(why) — already there (their place may now be \(cur))")
+                } else {
+                    w.log("\(why) — already there")
+                }
+                return
+            }
             let app = w.zOrder.first { p in w.appWindow(p, onSpace: s) != nil } ?? w.front
             w.switches[i].dest = app
             let n = SPlace(app: app, space: s)
             guard n.app != w.front || n.space != w.space else { return }
             let cause = w.userLandingCause(i, dest: n, why: why)
-            w.switches[i].landedAt = w.now
+            if !cause.isTheft { w.switches[i].landedAt = w.now }
             w.change(to: n, cause: cause, why: why)
         }
     }

@@ -140,8 +140,8 @@ extension CUCore {
     /// nothing then (a visit's return, whose own choice of window found none of the user's).
     @discardableResult
     func restoreUserView(_ before: CUUserView, user: pid_t, window recorded: AXUIElement? = nil, raiseFocused: Bool = true) -> CUUserView {
-        if before.space != nil, userView().space != before.space,
-           let window = recorded ?? (raiseFocused ? ax.element(ax.application(user), kAXFocusedWindowAttribute) : nil) {
+        if let space = before.space, userView().space != space,
+           let window = recorded ?? (raiseFocused ? windowOn(space, of: user) ?? ax.element(ax.application(user), kAXFocusedWindowAttribute) : nil) {
             try? ax.perform(window, kAXRaiseAction)
         }
         // A restore of ours may land late (~0.3 s across desktops): once the user's place moves away from `user`, its
@@ -185,6 +185,18 @@ extension CUCore {
             CULog.guardian.notice("restore: activated the user's app \(attempts, privacy: .public) times; \(now == before ? "back" : "not back within the deadline", privacy: .public)")
         }
         return now
+    }
+
+    /// A window of `pid` on desktop `space` that accessibility can raise: the way back to THAT desktop when the app has
+    /// windows on several (its focused window may be on the one the user was taken to — found by the model-based test).
+    func windowOn(_ space: UInt64, of pid: pid_t) -> AXUIElement? {
+        let ids = Set(sys.windows(pid: pid).filter { CUWindowServer.isRealWindow($0) && sys.windowSpaces($0.id)?.contains(space) == true }.map(\.id))
+        guard !ids.isEmpty else { return nil }
+        let app = ax.application(pid)
+        if let focused = ax.element(app, kAXFocusedWindowAttribute), let id = ax.windowID(focused), ids.contains(id) { return focused }
+        if let e = ax.elements(app, kAXWindowsAttribute).first(where: { ax.windowID($0).map(ids.contains) ?? false }) { return e }
+        // Not listed (it is on another desktop): found by its id (the guardian runs on the private path only).
+        return ax.remoteWindows(pid: pid, windowIDs: Array(ids)).values.first
     }
 
     /// A bind, `useWindow` or AppleScript (which may launch the app, reopen it, move its window here or run for
