@@ -1847,6 +1847,7 @@ function refusedWords(reason: string, name: string): string {
     case "privacy_pane": return "System Settings' Privacy & Security panes are off limits — ask the user to change them";
     case "winter_itself": return "Winter never controls itself";
     case "save_path": return "that save location is protected (shell startup files, ~/.ssh, LaunchAgents) — choose another";
+    case "remote_debugging": return "Winter never turns on or approves remote debugging in a browser — it would give any app on this Mac full control of the browser and its sign-ins. Ask the user to do it if they really want it.";
     default: return `${name} refused that action${reason ? ` (${reason})` : ""}`;
   }
 }

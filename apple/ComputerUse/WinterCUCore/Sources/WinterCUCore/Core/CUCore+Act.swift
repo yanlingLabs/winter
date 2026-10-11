@@ -55,8 +55,7 @@ extension CUCore {
         // The act is an operation on the app: touched while it runs (I1: "while an operation on it runs"), for the causal
         // window after it — however it ends. A cause that can't raise a window: the user's switch input just before it
         // still outranks it (#8).
-        beginGuardianSpan(t.pid, raise: false)
-        defer { endGuardianSpan(t.pid, raise: false) }
+        // (Checked first: a refused act opens no span and records no cause — review of round 10, LOW #9.)
         do {
             try Self.checkAccess(p.action, access: p.access, appName: t.appName)
             try refuseWhileUserWorks(t)
@@ -65,6 +64,8 @@ extension CUCore {
             logAct(p, t, failed: error)
             throw error
         }
+        beginGuardianSpan(t.pid, raise: false)
+        defer { endGuardianSpan(t.pid, raise: false) }
         let opener = Self.actCanOpenApps(p.action)
         if opener { noteGuardianOpener() }
         defer { if opener { noteGuardianOpener() } }  // its end too: what it opened may come forward a moment after
@@ -146,6 +147,7 @@ extension CUCore {
             // A cancel that arrived while this act waited behind others stops it here.
             try token.check()
             try floorCheckPrivacy(t)
+            try floorCheckRemoteDebugging(p, t)
             try saveFloorBeforeAct(p, t)
             do {
                 let focusBefore = t.accessible ? focusBeforeAct(t) : nil
