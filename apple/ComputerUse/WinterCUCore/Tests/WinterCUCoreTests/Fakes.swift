@@ -83,6 +83,21 @@ final class FakeAX: CUAXBackend {
     /// Element owners a test states ("token" → pid); any other element is of an unknown process — the act's write guard
     /// takes it for the target's (round 17).
     var owners: [Int32: pid_t] = [:]
+    /// The app's hit test, as WebKit's: the DEEPEST element (the last drawn, among equals) whose frame holds the point,
+    /// over the whole tree from the app's windows — a child outside its parent's box, or under a box-less wrapper, found.
+    func elementAt(pid: pid_t, _ point: CGPoint) -> AXUIElement? {
+        var best: (depth: Int, e: AXUIElement)?
+        var queue = elements(application(pid), kAXWindowsAttribute).map { ($0, 0) }
+        var seen = Set<AXIdentity>()
+        while !queue.isEmpty {
+            let (e, d) = queue.removeFirst()
+            guard seen.insert(AXIdentity(element: e)).inserted else { continue }
+            if let f = frame(e), f.width > 0, f.height > 0, f.contains(point), d >= (best?.depth ?? -1) { best = (d, e) }
+            queue += elements(e, kAXChildrenAttribute).map { ($0, d + 1) }
+        }
+        return best?.e
+    }
+
     func ownerPid(_ e: AXUIElement) -> pid_t? {
         let t = token(e)
         if let o = owners[t] { return o }
@@ -204,7 +219,15 @@ final class FakeKeyTapInstaller: CUKeyTapInstalling, @unchecked Sendable {
 /// A key event as the tap would see it: the user's own (no stamp) or the helper's (stamped).
 func keyEvent(down: Bool = true, stamped: Bool) -> CGEvent {
     let e = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down)!
-    if stamped { CUEventStamp.stamp(e) }
+    if stamped { CUEventStamp.stamp(e) } else { hardware(e) }
+    return e
+}
+
+/// The user's own key, as the window server delivers a hardware event: no source process (an event made here carries
+/// this process's pid — round 17b: the reroute's work mark takes hardware keys only).
+@discardableResult
+func hardware(_ e: CGEvent) -> CGEvent {
+    e.setIntegerValueField(.eventSourceUnixProcessID, value: 0)
     return e
 }
 
