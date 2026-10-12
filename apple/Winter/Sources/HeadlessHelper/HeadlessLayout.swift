@@ -8,10 +8,10 @@ import Foundation
 /// subprocess enters a sandbox that may read only inside its BROWSER process's main bundle; this helper's bundle holds
 /// them for its own browser, and Winter.app's holds this helper for Winter's.
 ///
-/// CEF's main bundle is the OUTERMOST app around the helper processes — Winter.app when nested at
-/// `Winter.app/Contents/Helpers/Winter Headless.app`, this helper itself when it stands alone (the dev helper,
-/// `bun run dev:headless`) — because the subprocesses work out the same outer bundle from their own location and the
-/// two must agree (the browser and its subprocesses meet by a name derived from it).
+/// CEF's main bundle is THIS helper — nested at `Winter.app/Contents/Helpers/Winter Headless.app` or standing alone
+/// (the dev helper, `bun run dev:headless`) alike. The subprocesses are handed it and read it from inside their sandbox,
+/// which reads only inside this process's own bundle: measured, naming the enclosing Winter.app crashed every
+/// subprocess at start, while this bundle (or any bundle inside it) runs.
 struct HeadlessLayout: Equatable {
     let mainBundle: String
     let frameworkDir: String
@@ -29,17 +29,7 @@ struct HeadlessLayout: Equatable {
         guard exists(framework.appendingPathComponent("Chromium Embedded Framework").path), exists(helper.path) else {
             return nil
         }
-        return HeadlessLayout(mainBundle: outermostApp(of: bundle).path, frameworkDir: framework.path, subprocessPath: helper.path)
-    }
-
-    /// The outermost `.app` on the path to `bundle` (`bundle` itself when nothing encloses it).
-    static func outermostApp(of bundle: URL) -> URL {
-        var url = URL(fileURLWithPath: "/")
-        for component in bundle.pathComponents.dropFirst() {
-            url.appendPathComponent(component)
-            if component.hasSuffix(".app") { return url }
-        }
-        return bundle
+        return HeadlessLayout(mainBundle: bundle.path, frameworkDir: framework.path, subprocessPath: helper.path)
     }
 }
 

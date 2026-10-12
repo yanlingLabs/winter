@@ -10,6 +10,9 @@ import Foundation
 /// for Winter's too. (The other way round — the helper borrowing Winter.app's `Contents/Frameworks` — was measured on a
 /// Release build: the helper's subprocesses could not read the framework.)
 ///
+/// Winter.app keeps CEF's default main bundle — Winter.app itself, which its subprocesses read from inside that same
+/// sandbox (Winter Headless, whose browser process IS the helper, names its own bundle instead).
+///
 /// The helper is `Winter Headless.app` in a Release build and `Winter Headless Dev.app` in a Debug one ("Winter Dev"
 /// runs its CEF from the nested helper exactly as Release does). Pure path arithmetic — nothing is loaded here.
 enum WinterChromium {
