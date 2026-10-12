@@ -1,4 +1,6 @@
-# RAW block fixture prelaunch checkpoint
+# RAW block fixture review and run record
+
+Current status: the one reviewed run completed, and root independently verified active return with RAW disk I/O. See the final section and `results/2026-10-12-raw-block-root-audit.json`. The prelaunch sections below retain their original scope and hashes; statements that no VM had run describe those checkpoints.
 
 Implemented and built, **not launched**. The accepted0004+0005 source remains preserved;0006 adds bounded metadata instrumentation and an explicit25 ms post-I/O owned-completion hold. This hold is fixture-only, not a blocked OS syscall or a production timing policy. Independent source/fixture review must precede any VM run.
 
@@ -65,3 +67,18 @@ The old `osSyscallOverlap` label is superseded by `ownedIoIntervalOverlap`. Nati
 The receipt now binds all custom launch/audit imports, including `block_capture.py`, `reclaim_receipts.py` and `build.py`, plus preparer/pins/entitlements/candidate. The runner requires its mandatory dependency set, so an omitted or changed imported audit helper is rejected before spawn.
 
 Eight focused no-VM capture/termination/dependency tests pass: bounded success, flood channel/total overflow, newline-free/terminated oversized lines, parsed-row cap, finite unreapable-child handling, omitted/changed dependencies and actual runner skip-disk behavior after uncertain exit. Five receipt tests pass, including honest owned-interval labeling and every-word RAW tamper detection. The unchanged signed native worker's new bounded sandbox-only run exits 0, keeps disk identity, reaps its child and passes all prior RAW full-sync/denial checks. `results/2026-10-12-raw-block-bounded-*` preserve this evidence. No disk-bearing VM has run. The crypto owner reports its offline toolset compile/containers quiescent; ordinary pressure/compile preflight must still run at actual launch after root accepts this new build.
+
+## Completed run and independent audit
+
+After the bounded-capture review, root verified the final build `99162c0f198d128f80cf5c6a0a57af964df924c60e162e050cf0a523320adf55`, its bound source and artifact hashes, and issued the one-run private review receipt. The run used `out/raw-block-fixture-zmjzld57`, worker PID 68876 and Linux boot ID `d52e8550-a1e3-4702-b543-eac1fd14fef6`. No second run occurred.
+
+The worker exited 0 and was reaped; capture completed without overflow or timeout, and both reader threads joined. Root independently checked all 17 CPU park/ACK/resume epochs, 297 mapping replacement sequences, frozen request/ring exclusions, all 1,486 read/write/flush completions, continued per-window I/O and heartbeats, retained/reused memory and every word of both 4 MiB disk extents. Footprint fell by 270.938, 242.000 and 236.078 MiB while the VM stayed active.
+
+All 17 frozen outstanding-request observations occurred during the explicit post-I/O completion holds. `ownedIoIntervalOverlapObserved` and `blockedSyscallOverlapVerified` are false. No real blocked host syscall is credited. The old measured kernel was used; the new crypto kernel, encrypted storage and other asynchronous devices remain untested here. Production and full-resource gates remain open.
+
+The committed raw stdout/stderr/events and original stage result have the same hashes recorded by the independent audit. Preserve the stage's `activeReturnVerified:false`, which was emitted before root's audit; the separate root report carries the later scoped conclusion. Reproduce only the read-only audit, without starting a VM:
+
+```sh
+python3 spikes/cowork-hvf/results/2026-10-12-raw-block-audit.py \
+  spikes/cowork-hvf/out/raw-block-fixture-zmjzld57
+```

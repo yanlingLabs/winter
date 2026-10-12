@@ -1,0 +1,68 @@
+{
+  "status": "completed-independently-audited",
+  "actualLinuxBootConfirmed": true,
+  "bootId": "d52e8550-a1e3-4702-b543-eac1fd14fef6",
+  "runnerVmStartedFieldMeaning": "Requested mode; actual boot established separately by linux_boot receipt",
+  "fixture": "raw-block-fixture-zmjzld57",
+  "exitCode": 0,
+  "exitVerified": true,
+  "ownedChildReaped": true,
+  "killIssued": false,
+  "timedOut": false,
+  "captureOverflow": false,
+  "footprint": [
+    {
+      "cycle": 1,
+      "touchedBytes": 431424448,
+      "postFreeBytes": 147325696,
+      "observedReductionMiB": 270.938
+    },
+    {
+      "cycle": 2,
+      "touchedBytes": 401179584,
+      "postFreeBytes": 147424024,
+      "observedReductionMiB": 242.0
+    },
+    {
+      "cycle": 3,
+      "touchedBytes": 403424216,
+      "postFreeBytes": 155878192,
+      "observedReductionMiB": 236.078
+    }
+  ],
+  "diskIntegrity": {
+    "passed": true,
+    "threads": [
+      {
+        "thread": 0,
+        "iterations": 92,
+        "everyWordPassed": true
+      },
+      {
+        "thread": 1,
+        "iterations": 92,
+        "everyWordPassed": true
+      }
+    ]
+  },
+  "harnessChecksPassed": true,
+  "activeReturnVerified": true,
+  "blockedSyscallOverlapVerified": false,
+  "ownedCompletionHoldMillis": 25,
+  "productionReady": false,
+  "fullResourceGatePassed": false,
+  "encryption": false,
+  "buildSha256": "99162c0f198d128f80cf5c6a0a57af964df924c60e162e050cf0a523320adf55",
+  "rawEvidenceSha256": {
+    "stdout.log": "084ce446dc37ba197801e8eac6a7fc23508c8947d9ffc909897eda3ec2460b60",
+    "stderr.log": "3ff908bb194431277970fe75303c275cb337d67a171cb41bcb250a688de32bee",
+    "events.jsonl": "bd29a207853882f1f14057ed14ee43cbe4075d7e2aaf9119a2d59334185fe195",
+    "result.json": "53dff2be80222a20ab9c961eb7743819f177f3fbc24da93284e7bc7d3ebb1cfa"
+  },
+  "independentAudit": "2026-10-12-raw-block-root-audit.json",
+  "independentAuditSha256": "0e8217c82b8059dd8018bec00198289338d916e23621ed63987d4def2150a792",
+  "originalStageResult": "2026-10-12-raw-block-stage-result.json",
+  "ownedIoIntervalOverlapObserved": false,
+  "newCryptoKernelTested": false,
+  "scope": "One RAW disk plus PL011/RNG/balloon; outstanding pin observations only during controlled post-I/O completion holds"
+}

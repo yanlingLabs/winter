@@ -102,6 +102,22 @@ This baseline records `activeReturnVerified: false` deliberately. A successful g
 
 ## Guarded block follow-on and crypto preparation
 
-`block-readiness.md` records the separate no-VM block candidate, actual worker/access tests and review limits. Run `python3 spikes/cowork-hvf/test_block.py` to check exact source correspondence, 51 actual-source tests and the reduced native build. This does not alter the verified A6 profile or add a block launch option. See `kernel/README.md` for verified source/config inputs and the explicit offline Linux builder entry point; neither a crypto kernel nor a trusted unlock initramfs has been built.
+`block-readiness.md` records the guarded block implementation, actual worker/access tests and review limits. Run `python3 spikes/cowork-hvf/test_block.py` to check exact source correspondence, 51 actual-source tests and the reduced native build. This does not alter the historical A6 profile. The block candidate also captures an absolute WFE deadline before parking, closing the relative-deadline issue in that later implementation. See `kernel/README.md` for the separately built crypto-capable comparison kernel and `kernel/userspace/README.md` for the neutral cryptsetup toolset. Neither has been booted; the trusted unlock initramfs and final encryption profile remain unimplemented.
 
-`raw-block-readiness.md` records the separately built RAW fixture, frozen instrumentation and sandbox-only prelaunch proof. No disk-bearing VM has run; the explicit runner requires the exact independent build-review receipt.
+`raw-block-readiness.md` preserves the prelaunch reviews and the completed bounded RAW run. The explicit runner requires an independent review receipt for the exact build.
+
+## Independently verified active return with RAW disk I/O
+
+One reviewed run on 2026-10-12 added exactly one 64 MiB RAW disk to the 768 MiB/two-vCPU guest. It used the original measured kernel, not the new crypto-capable build. Two guest threads performed direct reads and writes with separate 256 KiB buffers and 4 MiB extents, periodically flushing while the three allocation/free/reuse cycles and retained-data checks continued.
+
+| Cycle | Touched worker footprint | Footprint after free | Observed reduction | Read/write/flush completions during free window |
+| --- | ---: | ---: | ---: | --- |
+| 1 | 431,424,448 bytes | 147,325,696 bytes | 270.938 MiB | 184 / 189 / 2 |
+| 2 | 401,179,584 bytes | 147,424,024 bytes | 242.000 MiB | 188 / 184 / 2 |
+| 3 | 403,424,216 bytes | 155,878,192 bytes | 236.078 MiB | 184 / 188 / 2 |
+
+Every free window included ten heartbeats and progress from both I/O threads. Root independently audited 17 epochs, 297 successful unmap/same-address replacement/remap sequences and all 1,486 completed block requests (737 reads, 736 writes, 13 flushes). All mapped ranges were aligned and outside the frozen ring/request exclusions. A separate host read verified every word of both final disk extents: 1,048,576 words, or 8 MiB. The guest completed and its worker was reaped without timeout, forced termination or capture overflow.
+
+Each epoch observed an outstanding pinned request during a deliberate **25 ms post-I/O completion hold**. No reclaim overlap with the measured owned-I/O interval was observed, and this does not prove a blocked OS syscall. The hold is fixture instrumentation, not a production timing policy. This result covers one RAW disk with the existing PL011/RNG/balloon devices; it covers no filesystem shares, network, vsock, GPU, encryption, production runtime or automatic resource-management policy.
+
+`results/2026-10-12-raw-block-root-audit.json` contains the independent scoped conclusion, with `activeReturnVerified: true`, `fullResourceGatePassed: false` and `productionReady: false`. The original stage result retains its pending-audit `false`; raw logs and events remain byte-identical. `results/2026-10-12-raw-block-audit.py` reproduces the event/disk audit against the retained local fixture without launching a VM. The run summary links the original stage and independent audit separately.

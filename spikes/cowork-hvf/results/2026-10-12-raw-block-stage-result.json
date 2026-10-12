@@ -1,0 +1,342 @@
+{
+  "fixture": "raw-block-fixture-zmjzld57",
+  "vmStarted": true,
+  "exitCode": 0,
+  "timedOut": false,
+  "diskSameIdentity": true,
+  "diskSha256": "1d0de59c70e773bb3f41b72a3e46afa7df5be903b5987d249c515acbf03d7843",
+  "buildSha256": "99162c0f198d128f80cf5c6a0a57af964df924c60e162e050cf0a523320adf55",
+  "candidate": {
+    "status": "candidate-no-vm-review-required",
+    "productionReady": false,
+    "vmStarted": false,
+    "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+    "patchSha256": "00e169fb7e5c527d348269cc8211afc99daa800622bce6140a4b2b42c204951d",
+    "preservedA6PatchSha256": "a6e26d15693007d42df5c60155055b09c69897584665d227c8ee9c720d3cfb31",
+    "features": [
+      "blk"
+    ],
+    "defaultFeatures": false,
+    "memoryMiB": 768,
+    "vcpus": 2,
+    "source": "out/libkrun-block-reclaim",
+    "moduleCorrespondence": {
+      "reclaim_access.rs": "src/devices/src/reclaim_access.rs",
+      "block_bounce.rs": "src/devices/src/block_bounce.rs",
+      "block_reclaim_control.rs": "src/vmm/src/cowork_control.rs",
+      "block_trace.rs": "src/devices/src/block_trace.rs"
+    },
+    "reviewRequired": [
+      "actual barrier/lifecycle/mapping order",
+      "guarded block raw-memory leaf and queue/pin validation",
+      "reset/Stop and blocked IO termination",
+      "bounded disk-bearing Linux reclaim before any crypto claims"
+    ],
+    "knownLimitations": [
+      "No block-bearing VM run.",
+      "DAX/fs/net/vsock/virtio-console/GPU/audio/input disabled.",
+      "Host I/O may block indefinitely; it holds no RAM lease, but device reset join can block until worker process termination.",
+      "Crypto kernel and userspace not built/selected.",
+      "WFE deadline now captured before post-emulation park and actual functions regressed; no timer SLA or latency guarantee established."
+    ],
+    "revision": 4,
+    "patchFile": "patches/0006-proposed-raw-block-trace.patch",
+    "previousCandidate": {
+      "commit": "734ba3a21cadbf781fe4b0ec1c36f215ae9bc30a",
+      "patchFile": "patches/0005-proposed-guarded-block-producer-progress.patch",
+      "patchSha256": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775",
+      "review": "Astra accepted bounded RAW experiment subject to frozen instrumentation prelaunch review."
+    },
+    "patchType": "incremental-against-previousCandidate",
+    "fullSourceDiffSha256": "356ea78c37bc4467d9e6cb425f97fc574deafbfb4ed8e7bd77fd7cfc942dfcc6",
+    "basePatches": [
+      {
+        "patchFile": "patches/0004-proposed-guarded-block-reviewed-fixes.patch",
+        "patchSha256": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481"
+      },
+      {
+        "patchFile": "patches/0005-proposed-guarded-block-producer-progress.patch",
+        "patchSha256": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775"
+      }
+    ],
+    "nativeOwnedCompletionHoldMillis": 25
+  },
+  "exitVerified": true,
+  "terminationUncertain": false,
+  "ownedChildReaped": true,
+  "killIssued": false,
+  "terminationError": null,
+  "captureError": null,
+  "captureOverflow": false,
+  "captureComplete": true,
+  "readerThreadsJoined": true,
+  "channelBytes": {
+    "stdout": 13135,
+    "stderr": 1984707
+  },
+  "totalBytes": 1997842,
+  "parsedRows": 9335,
+  "limits": {
+    "channel_bytes": 33554432,
+    "total_bytes": 50331648,
+    "line_bytes": 65536,
+    "parsed_rows": 80000,
+    "queue_items": 64,
+    "chunk_bytes": 16384,
+    "run_seconds": 130,
+    "normal_wait_seconds": 2,
+    "kill_wait_seconds": 3,
+    "reader_join_seconds": 0.2
+  },
+  "productionReady": false,
+  "fullResourceGatePassed": false,
+  "encryption": false,
+  "audit": {
+    "blockReceiptsPassed": true,
+    "errors": [],
+    "requestCount": 1486,
+    "commands": {
+      "Read": 737,
+      "Write": 736,
+      "Flush": 13
+    },
+    "outstandingRequestOverlap": [
+      {
+        "epoch": 1,
+        "request": 75,
+        "pin": 76,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 2,
+        "request": 75,
+        "pin": 76,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 3,
+        "request": 150,
+        "pin": 151,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 4,
+        "request": 150,
+        "pin": 151,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 5,
+        "request": 226,
+        "pin": 227,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 6,
+        "request": 226,
+        "pin": 227,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 7,
+        "request": 330,
+        "pin": 331,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 8,
+        "request": 451,
+        "pin": 452,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 9,
+        "request": 686,
+        "pin": 687,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 10,
+        "request": 686,
+        "pin": 687,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 11,
+        "request": 782,
+        "pin": 783,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 12,
+        "request": 889,
+        "pin": 890,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 13,
+        "request": 964,
+        "pin": 965,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 14,
+        "request": 1040,
+        "pin": 1041,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 15,
+        "request": 1178,
+        "pin": 1179,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 16,
+        "request": 1178,
+        "pin": 1179,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 17,
+        "request": 1376,
+        "pin": 1377,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      }
+    ],
+    "ringPinCount": 1,
+    "freedWindows": [
+      {
+        "cycle": 1,
+        "progressReceipts": 2,
+        "threads": [
+          0,
+          1
+        ]
+      },
+      {
+        "cycle": 2,
+        "progressReceipts": 2,
+        "threads": [
+          0,
+          1
+        ]
+      },
+      {
+        "cycle": 3,
+        "progressReceipts": 2,
+        "threads": [
+          0,
+          1
+        ]
+      }
+    ],
+    "reclaim": {
+      "receiptOrderingPassed": true,
+      "errors": [],
+      "epochCount": 17,
+      "spanCount": 297,
+      "cumulativeReplacedBytes": 1210056704,
+      "sizesBytes": {
+        "4194304": 280,
+        "2097152": 17
+      },
+      "dispositions": {
+        "replaced": 17
+      },
+      "maxPauseAckMicros": 96,
+      "maxParkThroughResumeMicros": 5292,
+      "afterGuestFree": [
+        {
+          "cycle": 1,
+          "spanCount": 104,
+          "cumulativeReplacedBytes": 427819008,
+          "firstUnmapAfterFreeSeconds": 0.828,
+          "heartbeatsDuringWindow": 10
+        },
+        {
+          "cycle": 2,
+          "spanCount": 65,
+          "cumulativeReplacedBytes": 262144000,
+          "firstUnmapAfterFreeSeconds": 1.995,
+          "heartbeatsDuringWindow": 10
+        },
+        {
+          "cycle": 3,
+          "spanCount": 63,
+          "cumulativeReplacedBytes": 251658240,
+          "firstUnmapAfterFreeSeconds": 2.031,
+          "heartbeatsDuringWindow": 10
+        }
+      ],
+      "timerLatencyGuarantee": false
+    },
+    "activeReturnVerified": false,
+    "verificationPending": "Independent root raw receipt/footprint audit",
+    "productionReady": false,
+    "fullResourceGatePassed": false,
+    "encryption": false,
+    "blockedSyscallOverlapVerified": false,
+    "overlapMeaning": "Owned perform interval includes allocations, multiple syscalls and gaps; no actual blocked-syscall proof."
+  },
+  "diskIntegrity": {
+    "passed": true,
+    "threads": [
+      {
+        "thread": 0,
+        "iterations": 92,
+        "everyWordPassed": true
+      },
+      {
+        "thread": 1,
+        "iterations": 92,
+        "everyWordPassed": true
+      }
+    ]
+  },
+  "footprint": [
+    {
+      "cycle": 1,
+      "touchedBytes": 431424448,
+      "postFreeBytes": 147325696
+    },
+    {
+      "cycle": 2,
+      "touchedBytes": 401179584,
+      "postFreeBytes": 147424024
+    },
+    {
+      "cycle": 3,
+      "touchedBytes": 403424216,
+      "postFreeBytes": 155878192
+    }
+  ],
+  "fixtureChecksPassed": true,
+  "sandbox": {
+    "kind": "sandbox",
+    "hostReadDenied": true,
+    "networkOutboundDenied": true,
+    "unrelatedWritesDenied": true,
+    "rawDiskOnly": true,
+    "rawReadWriteFullSync": true,
+    "channel": "stderr",
+    "hostElapsedSeconds": 0.915978
+  }
+}

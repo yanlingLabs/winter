@@ -1,0 +1,168 @@
+{
+  "scope": "Bounded Linux/HVF RAW block fixture with controlled post-I/O completion holds",
+  "buildSha256": "99162c0f198d128f80cf5c6a0a57af964df924c60e162e050cf0a523320adf55",
+  "guestBootId": "d52e8550-a1e3-4702-b543-eac1fd14fef6",
+  "singleRunningVm": true,
+  "exitVerified": true,
+  "traceAndSourcesFrozen": true,
+  "epochsAudited": 17,
+  "replacementSequencesAudited": 297,
+  "completedBlockRequests": 1486,
+  "commands": {
+    "Read": 737,
+    "Write": 736,
+    "Flush": 13
+  },
+  "frozenOutstandingRequestPins": [
+    {
+      "epoch": 1,
+      "request": 75,
+      "pin": 76
+    },
+    {
+      "epoch": 2,
+      "request": 75,
+      "pin": 76
+    },
+    {
+      "epoch": 3,
+      "request": 150,
+      "pin": 151
+    },
+    {
+      "epoch": 4,
+      "request": 150,
+      "pin": 151
+    },
+    {
+      "epoch": 5,
+      "request": 226,
+      "pin": 227
+    },
+    {
+      "epoch": 6,
+      "request": 226,
+      "pin": 227
+    },
+    {
+      "epoch": 7,
+      "request": 330,
+      "pin": 331
+    },
+    {
+      "epoch": 8,
+      "request": 451,
+      "pin": 452
+    },
+    {
+      "epoch": 9,
+      "request": 686,
+      "pin": 687
+    },
+    {
+      "epoch": 10,
+      "request": 686,
+      "pin": 687
+    },
+    {
+      "epoch": 11,
+      "request": 782,
+      "pin": 783
+    },
+    {
+      "epoch": 12,
+      "request": 889,
+      "pin": 890
+    },
+    {
+      "epoch": 13,
+      "request": 964,
+      "pin": 965
+    },
+    {
+      "epoch": 14,
+      "request": 1040,
+      "pin": 1041
+    },
+    {
+      "epoch": 15,
+      "request": 1178,
+      "pin": 1179
+    },
+    {
+      "epoch": 16,
+      "request": 1178,
+      "pin": 1179
+    },
+    {
+      "epoch": 17,
+      "request": 1376,
+      "pin": 1377
+    }
+  ],
+  "hostDiskWordsIndependentlyChecked": 1048576,
+  "cycles": [
+    {
+      "cycle": 1,
+      "touchedBytes": 431424448,
+      "postFreeBytes": 147325696,
+      "returnedBytes": 284098752,
+      "returnedMiB": 270.938,
+      "heartbeats": 10,
+      "completedCommandsWhileFree": {
+        "Write": 189,
+        "Read": 184,
+        "Flush": 2
+      },
+      "bothIoThreadsProgressed": true
+    },
+    {
+      "cycle": 2,
+      "touchedBytes": 401179584,
+      "postFreeBytes": 147424024,
+      "returnedBytes": 253755560,
+      "returnedMiB": 242.0,
+      "heartbeats": 10,
+      "completedCommandsWhileFree": {
+        "Read": 188,
+        "Write": 184,
+        "Flush": 2
+      },
+      "bothIoThreadsProgressed": true
+    },
+    {
+      "cycle": 3,
+      "touchedBytes": 403424216,
+      "postFreeBytes": 155878192,
+      "returnedBytes": 247546024,
+      "returnedMiB": 236.078,
+      "heartbeats": 10,
+      "completedCommandsWhileFree": {
+        "Write": 188,
+        "Read": 184,
+        "Flush": 2
+      },
+      "bothIoThreadsProgressed": true
+    }
+  ],
+  "rawSha256": {
+    "stdout.log": "084ce446dc37ba197801e8eac6a7fc23508c8947d9ffc909897eda3ec2460b60",
+    "stderr.log": "3ff908bb194431277970fe75303c275cb337d67a171cb41bcb250a688de32bee",
+    "events.jsonl": "bd29a207853882f1f14057ed14ee43cbe4075d7e2aaf9119a2d59334185fe195",
+    "result.json": "53dff2be80222a20ab9c961eb7743819f177f3fbc24da93284e7bc7d3ebb1cfa",
+    "fixture.raw": "1d0de59c70e773bb3f41b72a3e46afa7df5be903b5987d249c515acbf03d7843"
+  },
+  "activeReturnVerified": true,
+  "ownedIoIntervalOverlapObserved": false,
+  "blockedSyscallOverlapVerified": false,
+  "completionHoldMillis": 25,
+  "fullResourceGatePassed": false,
+  "encryption": false,
+  "newCryptoKernelTested": false,
+  "productionReady": false,
+  "limitations": [
+    "All frozen outstanding-request observations occurred during deliberate post-I/O completion holds, not proven blocked OS syscalls.",
+    "No fs/network/vsock/GPU devices, encrypted data or production guest/runtime integration tested.",
+    "No latency or automatic resource-management guarantee established."
+  ]
+}
