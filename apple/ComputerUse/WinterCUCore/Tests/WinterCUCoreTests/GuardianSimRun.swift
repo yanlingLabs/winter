@@ -507,17 +507,18 @@ final class SimRun {
             let i = w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, target: a, claim: true, dest: a))
             // R17-b (the controller's ruling): a click on the FRONT app's Dock tile makes that app their place AT THE CLICK,
             // strictly — a replacement, never a union (as a click into its window does).
-            w.lock.withLock {
-                guard a == w.front, !w.visiting else { return }
+            let strict = w.lock.withLock { () -> Bool in
+                guard a == w.front, !w.visiting else { return false }
                 let cur = SPlace(app: w.front, space: w.space)
                 w.cands = [SimCand(place: cur, expected: cur, held: nil)]
                 w.log("  (a click on the front app's Dock tile: \(cur) is their place now)")
+                return true
             }
             w.lock.withLock { w.dockTileApp = a }
             _ = core.onPhysicalClick(at: CGPoint(x: 800, y: 975), userData: 0, now: clock.nowSeconds())
             w.lock.withLock { w.dockTileApp = nil }
             w.schedule(after: r.double(20, 200), "the Dock activates \(SimPid.name(a))") { [unowned self] in
-                self.landSwitch(i, a, why: "the user clicked \(SimPid.name(a)) in the Dock")
+                self.landSwitch(i, a, why: "the user clicked \(SimPid.name(a)) in the Dock", strictAtClick: strict)
             }
         case .commandTab(let a, let tabSeen, let holdMs, let landMs):
             w.press(.maskCommand)
@@ -755,11 +756,18 @@ final class SimRun {
     }
 
     /// The user's switch `i` lands: `app` comes forward (on `onSpace`, or where its main window is).
-    func landSwitch(_ i: Int, _ app: pid_t, onSpace: UInt64? = nil, why: String) {
+    /// `strictAtClick`: a click on the FRONT app's Dock tile, their place already AT THE CLICK (R17-b) — the Dock's own
+    /// activation of it a moment later adds nothing (round 18: R17-b's loose union here removed, the controller's ruling
+    /// that it is a replacement, not a union).
+    func landSwitch(_ i: Int, _ app: pid_t, onSpace: UInt64? = nil, why: String, strictAtClick: Bool = false) {
         let w = world
         w.lock.withLock {
             let n = w.landingPlace(app, onSpace: onSpace)
             guard n.app != w.front || n.space != w.space else {
+                if strictAtClick {
+                    w.log("\(why) — already there, their place since the click (R17-b)")
+                    return
+                }
                 // Their switch to what is in front already: it is now their choice — if the engine sees it (it judges
                 // nothing new unless a path looks again).
                 let cur = SPlace(app: w.front, space: w.space)
