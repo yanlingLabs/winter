@@ -9,3 +9,10 @@ A smaller receive-buffer experiment exposed a macOS-specific cleanup hazard: rec
 Both normal-capacity and reduced-capacity subprocess tests pass. This is process cleanup evidence only, never native device drain or volume-release proof. Independent review and worker integration remain required. Existing fixture caches, raw evidence and prior candidates are unchanged.
 
 The adjacent `workspace_fixture_worker.c` and `workspace_fixture_init.c` are draft adaptations of the frozen generic fixture. The worker installs its existing purpose-built sandbox before receiving the pair and uses the native descriptor API rather than reopening disk paths. The guest gives one existing direct-I/O thread to each disk. macOS strict C syntax validation and Linux ARM64 static cross-compilation pass. They have no admitted build receipt, launcher or post-run oracle yet and MUST NOT be launched as a VM. These drafts do not format ext4 or establish durable SDK continuation. The unchanged generic sources and caches remain the prior measured evidence.
+
+The bounded draft is now completed in the separate two-disk fixture slice; see
+[worker/guest/launcher and exact artifact evidence](2026-10-12-cowork-two-disk-fixture-integration.md).
+The channel check now precedes intake, Linux binds serial/capacity/device roles
+before writes, and the per-disk oracle classifies runtime access as device 2.
+A signed offline artifact exists, but independent launch admission and two-disk
+VM verification still have not occurred.

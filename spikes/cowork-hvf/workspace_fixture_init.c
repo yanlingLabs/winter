@@ -18,6 +18,9 @@
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <sys/ioctl.h>
+#include <linux/fs.h>
+#include "workspace_fixture_layout.h"
 #include <unistd.h>
 #ifdef COWORK_FIXTURE_SERIAL_LOG
 #include <stdarg.h>
@@ -61,20 +64,22 @@ static void vmstat(unsigned cycle, const char *phase) {
 static atomic_uint io_stop=0,io_cycle=0;
 static atomic_ullong io_reads=0,io_writes=0,io_flushes=0;
 static int io_disks[2]={-1,-1};
+static atomic_ullong disk_reads[2],disk_writes[2],disk_flushes[2];
+static unsigned disk_iterations[2];
 #define IO_BYTES (256UL*1024)
 static uint64_t pattern(unsigned id,unsigned loop,size_t word){return 0x6a39000000000000ULL ^ ((uint64_t)id<<48) ^ ((uint64_t)loop<<24) ^ word;}
 static void *disk_work(void *argument){
     unsigned id=(unsigned)(uintptr_t)argument;int io_disk=io_disks[id];uint64_t *buffer=NULL;if(posix_memalign((void**)&buffer,16384,IO_BYTES))fail("bounded aligned IO buffer");
     unsigned completed=0;for(unsigned loop=0;loop<1400 && !atomic_load(&io_stop);loop++){
         off_t offset=(off_t)(id*4*MIB+(loop%16)*IO_BYTES);for(size_t word=0;word<IO_BYTES/8;word++)buffer[word]=pattern(id,loop,word);
-        if(pwrite(io_disk,buffer,IO_BYTES,offset)!=(ssize_t)IO_BYTES)fail("direct block write");atomic_fetch_add(&io_writes,1);
-        memset(buffer,0,IO_BYTES);if(pread(io_disk,buffer,IO_BYTES,offset)!=(ssize_t)IO_BYTES)fail("direct block read");atomic_fetch_add(&io_reads,1);
+        if(pwrite(io_disk,buffer,IO_BYTES,offset)!=(ssize_t)IO_BYTES)fail("direct block write");atomic_fetch_add(&io_writes,1);atomic_fetch_add(&disk_writes[id],1);
+        memset(buffer,0,IO_BYTES);if(pread(io_disk,buffer,IO_BYTES,offset)!=(ssize_t)IO_BYTES)fail("direct block read");atomic_fetch_add(&io_reads,1);atomic_fetch_add(&disk_reads[id],1);
         for(size_t word=0;word<IO_BYTES/8;word++)if(buffer[word]!=pattern(id,loop,word))fail("every-byte disk integrity");
-        if(loop%16==0){if(fsync(io_disk))fail("block full sync");atomic_fetch_add(&io_flushes,1);}
-        if(loop%16==0)printf("{\"kind\":\"guest_block_progress\",\"thread\":%u,\"cycle\":%u,\"iteration\":%u,\"reads\":%llu,\"writes\":%llu,\"flushes\":%llu,\"direct\":true,\"integrity\":true}\n",id,atomic_load(&io_cycle),loop,atomic_load(&io_reads),atomic_load(&io_writes),atomic_load(&io_flushes));
+        if(loop%16==0){if(fsync(io_disk))fail("block full sync");atomic_fetch_add(&io_flushes,1);atomic_fetch_add(&disk_flushes[id],1);}
+        if(loop%16==0)printf("{\"kind\":\"guest_block_progress\",\"thread\":%u,\"cycle\":%u,\"iteration\":%u,\"reads\":%llu,\"writes\":%llu,\"flushes\":%llu,\"direct\":true,\"integrity\":true}\n",id,atomic_load(&io_cycle),loop,atomic_load(&disk_reads[id]),atomic_load(&disk_writes[id]),atomic_load(&disk_flushes[id]));
         completed=loop+1;usleep(40000);
     }
-    printf("{\"kind\":\"guest_block_thread_complete\",\"thread\":%u,\"iterations\":%u}\n",id,completed);free(buffer);return NULL;
+    disk_iterations[id]=completed;printf("{\"kind\":\"guest_block_thread_complete\",\"thread\":%u,\"iterations\":%u}\n",id,completed);free(buffer);return NULL;
 }
 
 /* Nonsecret raw oracle: each aligned 256-byte span contains every possible byte. */
@@ -157,10 +162,16 @@ int main(void) {
     } closedir(dir);
     for(unsigned id=0;id<2;id++){
         char sysfs[80],node[80],device[80];snprintf(sysfs,sizeof sysfs,"/sys/block/vd%c/dev",'a'+id);snprintf(node,sizeof node,"/dev/vd%c",'a'+id);
-        text(sysfs,device,sizeof device);unsigned major=0,minor=0;if(sscanf(device,"%u:%u",&major,&minor)!=2)fail("guest block sysfs identity");
+        char serial[80],sectors[80];snprintf(sysfs,sizeof sysfs,"/sys/block/vd%c/serial",'a'+id);text(sysfs,serial,sizeof serial);
+        if(strcmp(serial,workspace_serials[id]))fail("guest stable disk serial");
+        snprintf(sysfs,sizeof sysfs,"/sys/block/vd%c/size",'a'+id);text(sysfs,sectors,sizeof sectors);char *end=NULL;unsigned long long sector_count=strtoull(sectors,&end,10);
+        if(!end || *end || sector_count!=workspace_capacities[id]/512)fail("guest disk capacity");
+        snprintf(sysfs,sizeof sysfs,"/sys/block/vd%c/dev",'a'+id);text(sysfs,device,sizeof device);unsigned major=0,minor=0;if(sscanf(device,"%u:%u",&major,&minor)!=2)fail("guest block sysfs identity");
         if(mknod(node,S_IFBLK|0600,makedev(major,minor)) && access(node,F_OK))fail("guest block node");
-        io_disks[id]=open(node,O_RDWR|O_DIRECT);if(io_disks[id]<0)fail("guest direct disk open");
-        printf("{\"kind\":\"guest_workspace_disk\",\"index\":%u,\"node\":\"%s\",\"major\":%u,\"minor\":%u}\n",id,node,major,minor);
+        io_disks[id]=open(node,O_RDWR|O_DIRECT|O_NOFOLLOW|O_CLOEXEC);if(io_disks[id]<0)fail("guest direct disk open");
+        struct stat opened;unsigned long long capacity=0;if(fstat(io_disks[id],&opened) || !S_ISBLK(opened.st_mode) || opened.st_rdev!=makedev(major,minor) || ioctl(io_disks[id],BLKGETSIZE64,&capacity) || capacity!=workspace_capacities[id])fail("opened guest disk identity");
+        if(id){struct stat previous;if(fstat(io_disks[0],&previous) || previous.st_rdev==opened.st_rdev)fail("distinct guest disk identities");}
+        printf("{\"kind\":\"guest_workspace_disk\",\"index\":%u,\"node\":\"%s\",\"major\":%u,\"minor\":%u,\"serial\":\"%s\",\"capacityBytes\":%llu}\n",id,node,major,minor,serial,capacity);
     }
     pthread_t io_threads[2];for(unsigned id=0;id<2;id++)if(pthread_create(&io_threads[id],NULL,disk_work,(void*)(uintptr_t)id))fail("IO thread");
     stream_open();pthread_t stream_threads[2];for(unsigned direction=0;direction<2;direction++)if(pthread_create(&stream_threads[direction],NULL,stream_work,(void*)(uintptr_t)direction))fail("stream thread");
@@ -194,7 +205,7 @@ int main(void) {
         vmstat(cycle,"after-report-delay");
     }
     atomic_store(&stream_stop,1);for(unsigned direction=0;direction<2;direction++)if(pthread_join(stream_threads[direction],NULL))fail("stream join");sleep(2); /* bounded data-drain grace; supervisor fd remains open through poweroff */
-    atomic_store(&io_stop,1);for(unsigned id=0;id<2;id++)if(pthread_join(io_threads[id],NULL))fail("IO join");for(unsigned id=0;id<2;id++){if(fsync(io_disks[id]))fail("final sync");close(io_disks[id]);}
+    atomic_store(&io_stop,1);for(unsigned id=0;id<2;id++)if(pthread_join(io_threads[id],NULL))fail("IO join");for(unsigned id=0;id<2;id++){if(fsync(io_disks[id]))fail("final sync");close(io_disks[id]);printf("{\"kind\":\"guest_workspace_disk_complete\",\"index\":%u,\"serial\":\"%s\",\"iterations\":%u,\"reads\":%llu,\"writes\":%llu,\"flushes\":%llu,\"finalSync\":true,\"closed\":true}\n",id,workspace_serials[id],disk_iterations[id],atomic_load(&disk_reads[id]),atomic_load(&disk_writes[id]),atomic_load(&disk_flushes[id]));}
     printf("{\"kind\":\"guest_block_complete\",\"reads\":%llu,\"writes\":%llu,\"flushes\":%llu,\"threadsJoined\":true,\"integrity\":true}\n",atomic_load(&io_reads),atomic_load(&io_writes),atomic_load(&io_flushes));
     printf("{\"kind\":\"guest_generic_shutdown\",\"supervisorPortHeldOpen\":true,\"diskFlushed\":true,\"streamThreadsJoined\":true,\"closeControlSent\":false}\n");
     printf("{\"kind\":\"guest_complete\",\"cycles\":3,\"activeReturnVerified\":false}\n");

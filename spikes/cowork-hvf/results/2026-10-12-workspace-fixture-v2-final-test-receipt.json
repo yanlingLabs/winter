@@ -1,0 +1,20 @@
+{
+  "testsRun": 60,
+  "failures": 0,
+  "errors": 0,
+  "passed": true,
+  "excludedCachedGenericArtifactTest": [
+    "test_generic_fixture.FixtureTests.test_exact_build_binds_all_launch_sources_and_artifacts"
+  ],
+  "exclusionReason": "Fresh worktree lacks frozen generic-fixture-sampler build cache; its artifact-binding test was not rerun",
+  "vmStarted": false,
+  "workerExecuted": false,
+  "sources": {
+    "test_workspace_fixture.py": "1e78f68b6b049a4f9cd47923a4ad3b683c4a9c4c7ece2cbc71085cc251ed31a0",
+    "workspace_fixture.py": "eeba3caa682900c55c6476ddbd40b3c6332b8e9b6be2951a6c63a23c01d8f247",
+    "workspace_fd_handoff.h": "d124befb1dffadcac17ca08ea0b8c5635f96f13396854bf600beca34dffe674f",
+    "workspace_fd_handoff_test.c": "063dafefc377e1ddcd1e9e2d5f9b87c9895a8ab72dea6aeacd3cd33c5bc99862",
+    "workspace_fixture_worker.c": "1a94a9c90a81698786c6d089ad16867632dc879b4ee7cdddfe810ea2d4e671de",
+    "workspace_fixture_init.c": "9f4102b873acdc6662a3026272122866fd66ea469c00648f7bfe675f5a0f427e"
+  }
+}

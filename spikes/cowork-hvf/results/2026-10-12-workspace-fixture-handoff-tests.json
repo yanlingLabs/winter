@@ -1,0 +1,20 @@
+{
+  "vmStarted": false,
+  "workerExecuted": false,
+  "cases": [
+    {
+      "capacity": 256,
+      "exitCode": 0,
+      "stdout": "FD handoff cases passed; truncated ancillary path requires terminal worker exit; no VM started"
+    },
+    {
+      "capacity": 16,
+      "exitCode": 0,
+      "stdout": "FD handoff cases passed; truncated ancillary path requires terminal worker exit; no VM started"
+    }
+  ],
+  "sources": {
+    "workspace_fd_handoff.h": "d124befb1dffadcac17ca08ea0b8c5635f96f13396854bf600beca34dffe674f",
+    "workspace_fd_handoff_test.c": "063dafefc377e1ddcd1e9e2d5f9b87c9895a8ab72dea6aeacd3cd33c5bc99862"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "buildSha256": "4eb061c0e2549fd1ef7b39e27613d037ee076144c0ab74503f5ed9e9500b84ea",
+  "sourceAndArtifactChecksPassed": true,
+  "signing": {
+    "hardenedRuntime": true,
+    "libraryValidationRetained": true,
+    "debuggerEntitlement": false,
+    "entitlements": {
+      "com.apple.security.hypervisor": true
+    },
+    "runtimeDependencies": [
+      "/System/Library/Frameworks/Hypervisor.framework/Versions/A/Hypervisor",
+      "/usr/lib/libiconv.2.dylib",
+      "/usr/lib/libSystem.B.dylib"
+    ]
+  },
+  "workerExecuted": false,
+  "vmStarted": false,
+  "twoDiskActiveReturnVerified": false
+}

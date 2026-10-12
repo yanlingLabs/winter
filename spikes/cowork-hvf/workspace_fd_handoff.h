@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -22,6 +23,17 @@ struct workspace_handoff_record {
 };
 _Static_assert(sizeof(struct workspace_handoff_record)==72,"fixed local handoff layout");
 
+static int workspace_admit_channel(int channel) {
+    int kind=0,flags=fcntl(channel,F_GETFD);socklen_t size=sizeof kind;
+    struct sockaddr_un local={0},peer={0};socklen_t ll=sizeof local,pl=sizeof peer;
+    if(channel<3 || flags<0 || !(flags&FD_CLOEXEC) || getsockopt(channel,SOL_SOCKET,SO_TYPE,&kind,&size) || kind!=SOCK_DGRAM ||
+       getsockname(channel,(struct sockaddr*)&local,&ll) || getpeername(channel,(struct sockaddr*)&peer,&pl) ||
+       ll>sizeof local || pl>sizeof peer || local.sun_family!=AF_UNIX || peer.sun_family!=AF_UNIX){errno=EINVAL;return -1;}
+    for(size_t i=offsetof(struct sockaddr_un,sun_path);i<ll;i++)if(((unsigned char*)&local)[i]){errno=EINVAL;return -1;}
+    for(size_t i=offsetof(struct sockaddr_un,sun_path);i<pl;i++)if(((unsigned char*)&peer)[i]){errno=EINVAL;return -1;}
+    return 0;
+}
+
 /* Caller retains the channel. Outputs are owned only on success, otherwise -1.
  * DGRAM gives one atomic envelope; accept exactly one rights item with two FDs.
  * Receive buffer deliberately holds extras so all installed FDs can be closed.
@@ -30,12 +42,7 @@ _Static_assert(sizeof(struct workspace_handoff_record)==72,"fixed local handoff 
  * is descriptor cleanup only, not a canonical volume-release receipt. */
 static int workspace_receive_pair(int channel,struct workspace_handoff_record *record,int output[2]) {
     output[0]=output[1]=-1;
-    int kind=0; socklen_t size=sizeof kind;
-    struct sockaddr_un local,peer; socklen_t ll=sizeof local,pl=sizeof peer;
-    memset(&local,0,sizeof local);memset(&peer,0,sizeof peer);
-    if(channel<3 || getsockopt(channel,SOL_SOCKET,SO_TYPE,&kind,&size) || kind!=SOCK_DGRAM ||
-       getsockname(channel,(struct sockaddr*)&local,&ll) || getpeername(channel,(struct sockaddr*)&peer,&pl) ||
-       local.sun_family!=AF_UNIX || peer.sun_family!=AF_UNIX){errno=EINVAL;return -1;}
+    if(workspace_admit_channel(channel))return -1;
     struct pollfd wait={.fd=channel,.events=POLLIN};
     /* Do not retry EINTR: bounded refusal is safe, unlike resetting a deadline. */
     if(poll(&wait,1,3000)!=1 || !(wait.revents&POLLIN)){errno=ETIMEDOUT;return -1;}

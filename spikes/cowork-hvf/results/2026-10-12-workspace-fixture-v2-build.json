@@ -1,0 +1,185 @@
+{
+  "schemaVersion": 1,
+  "artifactDirectory": "workspace-fixture-v2",
+  "identity": "dev.cowork.hvf.workspace-fixture-worker",
+  "candidate": {
+    "status": "native-source-only-independent-review-required",
+    "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+    "source": "out/libkrun-workspace-disks-v2",
+    "basePatches": [
+      {
+        "patchFile": "patches/0004-proposed-guarded-block-reviewed-fixes.patch",
+        "patchSha256": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481"
+      },
+      {
+        "patchFile": "patches/0005-proposed-guarded-block-producer-progress.patch",
+        "patchSha256": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775"
+      },
+      {
+        "patchFile": "patches/0006-proposed-raw-block-trace.patch",
+        "patchSha256": "00e169fb7e5c527d348269cc8211afc99daa800622bce6140a4b2b42c204951d"
+      },
+      {
+        "patchFile": "patches/0007-proposed-guarded-stream.patch",
+        "patchSha256": "4acf7d82622d98ca1265e6a57bcd167f6df1fd5efb6a63cc65a9f6b24f35e044"
+      },
+      {
+        "patchFile": "patches/0008-proposed-guarded-stream-reviewed-fixes.patch",
+        "patchSha256": "43331eedec8e73f735830932b56c28cb3eb311f1c9bcbf3535f497063a369378"
+      },
+      {
+        "patchFile": "patches/0009-proposed-guarded-stream-closed-factory.patch",
+        "patchSha256": "ae46b3d1732cf6e00b3cb451334be04b222093cd78418b91b706d2a33a4f35c4"
+      },
+      {
+        "patchFile": "patches/0010-proposed-generic-runtime-port.patch",
+        "patchSha256": "62298de5d9176725d6a4bf0f79183a141de6d3162ff6085bce42ecd43f235752"
+      },
+      {
+        "patchFile": "patches/0011-proposed-runtime-port-fixture-trace.patch",
+        "patchSha256": "fe41eb3b7891d4c7bb7fa61d43508d4173d9e72a27b9476bb4de0c64ea5815c0"
+      },
+      {
+        "patchFile": "patches/0012-proposed-admitted-workspace-disks.patch",
+        "patchSha256": "c956cfcedc99dcebee26784873fd22f7efd3fa1fb22b3beb937b974756efcba7"
+      }
+    ],
+    "patchFile": "patches/0013-proposed-workspace-disks-startup-phases.patch",
+    "patchSha256": "f70c5b11586211c81b88a0acc27bdc357ed4437418bdffbf8cae0a2217c152ae",
+    "fullSourceDiffSha256": "1f10f599acb6a29455c0422011aaa851cd598e6a7fee7e3699eb0f6988cfc300",
+    "allAddedFiles": [
+      "src/devices/src/block_bounce.rs",
+      "src/devices/src/block_trace.rs",
+      "src/devices/src/reclaim_access.rs",
+      "src/devices/src/stream_io.rs",
+      "src/devices/src/virtio/block/cowork.rs",
+      "src/devices/src/virtio/block/workspace_fd_tests.rs",
+      "src/devices/src/virtio/console/cowork_stream.rs",
+      "src/devices/src/virtio/console/runtime_port.rs",
+      "src/devices/src/virtio/console/runtime_port_control.rs",
+      "src/devices/src/virtio/console/runtime_port_fixture_trace.rs",
+      "src/devices/src/workspace_disks.rs",
+      "src/devices/src/workspace_raw_storage.rs",
+      "src/libkrun/src/cowork_workspace_disks_tests.rs",
+      "src/vmm/src/cowork_barrier.rs",
+      "src/vmm/src/cowork_control.rs",
+      "src/vmm/src/cowork_coordinator.rs",
+      "src/vmm/src/cowork_fixture.rs",
+      "src/vmm/src/cowork_ops.rs",
+      "src/vmm/src/cowork_ranges.rs",
+      "src/vmm/src/vmm_config/workspace_disks_builder_tests.rs"
+    ],
+    "incrementalAddedFiles": [],
+    "moduleCorrespondence": {
+      "stream_reclaim_access.rs": "src/devices/src/reclaim_access.rs",
+      "stream_io_v3.rs": "src/devices/src/stream_io.rs",
+      "runtime_port_control.rs": "src/devices/src/virtio/console/runtime_port_control.rs",
+      "runtime_port_traced.rs": "src/devices/src/virtio/console/runtime_port.rs",
+      "runtime_port_fixture_trace.rs": "src/devices/src/virtio/console/runtime_port_fixture_trace.rs",
+      "workspace_raw_storage.rs": "src/devices/src/workspace_raw_storage.rs",
+      "workspace_disks_device_tests.rs": "src/devices/src/virtio/block/workspace_fd_tests.rs",
+      "workspace_disks_builder_tests.rs": "src/vmm/src/vmm_config/workspace_disks_builder_tests.rs",
+      "workspace_disks_v2.rs": "src/devices/src/workspace_disks.rs",
+      "workspace_disks_api_tests_v2.rs": "src/libkrun/src/cowork_workspace_disks_tests.rs"
+    },
+    "features": [
+      "blk"
+    ],
+    "defaultFeatures": false,
+    "profile": "developer-only-admitted-raw-pair-and-generic-runtime-port",
+    "factoryAPI": "krun_set_cowork_workspace_disks",
+    "expectedIdentityABIBytes": 32,
+    "volumes": [
+      {
+        "purpose": "data",
+        "blockId": "winter-data",
+        "accessDeviceId": 0
+      },
+      {
+        "purpose": "environment",
+        "blockId": "winter-environment",
+        "accessDeviceId": 1
+      }
+    ],
+    "runtimeAccessDeviceId": 2,
+    "maxDevices": 3,
+    "maxPins": 48,
+    "maxPinnedBytes": 8388608,
+    "volumeMinBytes": 16777216,
+    "volumeMaxBytes": 274877906944,
+    "volumeAlignmentBytes": 4096,
+    "vcpuCount": 2,
+    "memoryMiB": 768,
+    "fixedResourcesAreDeveloperBounds": true,
+    "fdPolicy": "Borrowed input fd>=3; F_DUPFD_CLOEXEC; pinned regular RW non-append, current UID exact0600, nlink1 and expected dev/ino/capacity; reject same-inode aliases; pair revalidated before publication. Owned descriptor-only fixed-capacity positional RAW storage; no path reopening or constructor writes.",
+    "nativeAuthorityImplemented": false,
+    "signedWorkerAdmissionVerified": false,
+    "workerBuilt": false,
+    "vmStarted": false,
+    "guestFilesystemReady": false,
+    "twoDiskActiveReturnVerified": false,
+    "productionReady": false,
+    "fullResourceGatePassed": false,
+    "encryption": false,
+    "knownLimits": [
+      "Expected identities and descriptor ownership do not grant daemon/workspace/worker authority.",
+      "No VM/worker launch, guest mount/format/bootstrap readiness, two-disk active RAM return or integration proof.",
+      "Approved raw plaintext residual includes same-user concurrent mutation; metadata checks are not cryptographic content integrity.",
+      "Existing guarded block reset/join and bounded completion-hold limitations remain unchanged.",
+      "Full krun-vmm unit harness has stale patched-candidate HVF constructor/resource fixtures; exact block-builder source tested via libkrun harness.",
+      "Live sandbox/no-fork/signature/library validation and durable native-stop receipts remain production gates."
+    ],
+    "priorCheckpoint": "a4856143dffc33389fc24fcdb315657fa996c576",
+    "priorFullSourceDiffSha256": "610667ff8cac9325f3358f00234e3bf48174605b089de057ee11df77d46a8517",
+    "startupPhases": "BeforeConstruction requires no list or retained provenance; actual cowork_prepare_blocks prevalidates, constructs and postvalidates; final normalized BeforeVmm check requires exact internally minted ordered Arc pair and fixed per-block expected identity/capacity/provenance."
+  },
+  "nativeBuildSha256": "7647e440b001edd53621d9ac44f28f032d90c8098c2bceb6a67fc69c62ebac85",
+  "nativeArchiveSha256": "0d902f302ddc8935f2b993bbb8c96e26dd9f170281a32f791bc71ee8536bb6ca",
+  "artifacts": {
+    "libkrun.a": "0d902f302ddc8935f2b993bbb8c96e26dd9f170281a32f791bc71ee8536bb6ca",
+    "cowork-hvf-workspace-worker": "fbfa5740a3e74ff66960c248d35930a6337d6f633de2573cfcc0c11adf0dee84",
+    "init": "d5c0daf9bd6030a75706afb0986a0c0639afe560413c9217c365b5bbaebfef88",
+    "initramfs.cpio": "fa00021c1efaf1d77dc5c7ac92372c1b76e28470f4bd1e2330fd5666d0b0774b",
+    "kernel": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d"
+  },
+  "fixtureSources": {
+    "workspace_fixture_worker.c": "1a94a9c90a81698786c6d089ad16867632dc879b4ee7cdddfe810ea2d4e671de",
+    "workspace_fixture_init.c": "9f4102b873acdc6662a3026272122866fd66ea469c00648f7bfe675f5a0f427e",
+    "workspace_fixture_layout.h": "f6bae576f1d9e30e1008e007192dc3d15c45f453bd741c9e902ccf388e78d791",
+    "workspace_fd_handoff.h": "d124befb1dffadcac17ca08ea0b8c5635f96f13396854bf600beca34dffe674f",
+    "workspace_fixture.py": "eeba3caa682900c55c6476ddbd40b3c6332b8e9b6be2951a6c63a23c01d8f247",
+    "build_workspace_fixture.py": "3cf6868b7a7359c2f71b32d8c221aa734d7ae6bfccecf2bcf89eae2e9c658970",
+    "run_workspace_fixture.py": "5bbf4fdde0a2868d05f7881566fb8eaf265a54781649ee4a8e87344aa564d9e0",
+    "generic_fixture_lifecycle.py": "3912adf9ca57d36c6da05cafeddbe2cce5fce4f2a4b28da49df2e3c1cb6562bb",
+    "generic_fixture_oracle.py": "47ecb3a3b6bf551622d3aedb2a0cc9299e309b28f709b38b32412093cc54a13f",
+    "generic_fixture_receipts.py": "7e2f46bcb68bfb967b9799c925f3a50c226d58f1db825a03a3adfdac429de117",
+    "generic_capture.py": "5689f2302161956f325a9183433c74fb72289bebd6c405177bc0ca289304b568",
+    "generic_sampler.h": "ce8c8f8816103cc413d76e911ee79c516d7572ff11a83034d3c52343c7283016",
+    "generic_port_discovery.h": "76a973b942053e206862ce37c73600e49704d658b236f264f24d85b0fa21695a",
+    "stream_frame_deadline.h": "c1e366ecc9140c381a61ab0781516b31d44a64c716ecf1455a9d619c710c530b",
+    "stream_capture_v2.py": "28ac65306b3fa73ff6088e9183dbba64e494ed907b687d40e538d2fec988102b",
+    "stream_lifecycle.py": "9c704b28204efcc55b668da26136205cae2d2d06c50469166b2ac969f87cc4b8",
+    "stream_fixture_oracle.py": "8969f8c5d23399bc108b000c00c8fc6c6f06ffbd270e024ca378c7fac9e3ebdb",
+    "run_stream_fixture.py": "b109d2361f4cd83caa61a85f3bb9efee548e2aa4bebad18e0a96330ff89cd67a",
+    "run_block.py": "58c4b9c22685101e37b8e65b049417e5eb19ee36cc64e5094d093570619232aa",
+    "block_capture.py": "bc4648193e2e06a3871bc9ec07fbdc58037eb5d9eea3606abd3cf17e50a8b89a",
+    "block_receipts.py": "9c1c7603d46b43cead995fdb2c3fe3b5fa0583ad27bf42558fab475b7b28b01d",
+    "reclaim_receipts.py": "b7ef0e1bb84209df4d26c8a14466a72bd151a0f2dc688497352e0f878b6e3db4",
+    "build.py": "ee5ccec6b096c5391dbe8fc599b8142499556d90d38af7219d38566852895cb4",
+    "worker.entitlements": "70d65ae13874e183526aa48e55bb330f2156da94effca24f89b5e2f940262723",
+    "pins.json": "ee52a593846568dbefe811abe39efce808b72383c07d47af0ce1a5c86b0fdf17",
+    "workspace-disks-candidate-v2.json": "33568cdf6d08406fb18dca8b439642276098c3f70d563bd4622dab0f0184c9f6"
+  },
+  "hostSamplerTransport": "dedicated-inherited-pipe-v1",
+  "volumeHandoff": "unnamed-datagram-after-sandbox-v1",
+  "runtimeAccessDevice": 2,
+  "volumeCapacities": [
+    67108864,
+    83886080
+  ],
+  "vmStarted": false,
+  "workerExecuted": false,
+  "twoDiskActiveReturnVerified": false,
+  "productionReady": false,
+  "encryption": false
+}

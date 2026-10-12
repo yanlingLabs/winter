@@ -2,6 +2,7 @@
 #include "libkrun.h"
 #include "generic_sampler.h"
 #include "workspace_fd_handoff.h"
+#include "workspace_fixture_layout.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <mach/mach.h>
@@ -48,6 +49,8 @@ int main(int argc, char **argv) {
     char *control_end=NULL; long admitted_control=strtol(argv[6],&control_end,10);
     require(control_end && !*control_end && admitted_control>=3 && admitted_control<1024,"inherited control descriptor number");
     sampler_fd=generic_sampler_admit(argv[7],(int)admitted_control); require(sampler_fd>=3,"dedicated inherited sampler pipe");
+    /* pass_fds clears CLOEXEC for exec inheritance; restore before ANY intake. */
+    require(fcntl((int)admitted_control,F_SETFD,FD_CLOEXEC)==0 && workspace_admit_channel((int)admitted_control)==0,"unnamed inherited control before volume intake");
     char executable[4096], resolved[4096], kernel[4096], initramfs[4096], disk[4096], environment[4096]; uint32_t length = sizeof executable;
     require(_NSGetExecutablePath(executable, &length) == 0 && realpath(executable, resolved), "worker path");
     char *slash = strrchr(resolved, '/'); require(slash != NULL, "worker directory"); *slash = 0;
@@ -90,6 +93,7 @@ int main(int argc, char **argv) {
     int received=workspace_receive_pair((int)admitted_control,&handoff,volume_fds);
     if(received==-2)_exit(79); /* Truncated SCM_RIGHTS may leave undisclosed FDs: terminal. */
     require(received==0,"bounded admitted volume pair handoff");
+    require(handoff.data.capacity_bytes==WORKSPACE_DATA_BYTES && handoff.environment.capacity_bytes==WORKSPACE_ENVIRONMENT_BYTES,"fixed distinguishable two-disk capacities");
     fprintf(stderr,"{\"kind\":\"sandbox\",\"hostReadDenied\":true,\"networkOutboundDenied\":true,\"unrelatedWritesDenied\":true,\"volumeFDsReceivedAfterSandbox\":true}\n");
     alarm(120);
     api(krun_init_log(2, KRUN_LOG_LEVEL_INFO, KRUN_LOG_STYLE_NEVER, KRUN_LOG_OPTION_NO_ENV), "log");
@@ -105,6 +109,7 @@ int main(int argc, char **argv) {
     fprintf(stderr,"{\"kind\":\"reclaim_profile\",\"console\":\"PL011+generic-runtime-port\",\"implicitConsole\":false,\"fixtureOnly\":true}\n");
     api(krun_set_cowork_workspace_disks(ctx,volume_fds[0],&handoff.data,volume_fds[1],&handoff.environment),"owned two-volume pair");
     close(volume_fds[0]);close(volume_fds[1]);
+    fprintf(stderr,"{\"kind\":\"workspace_pair\",\"dataSerial\":\"%s\",\"environmentSerial\":\"%s\",\"dataCapacityBytes\":%llu,\"environmentCapacityBytes\":%llu,\"runtimeAccessDevice\":2,\"callerVolumeFDsClosed\":true}\n",workspace_serials[0],workspace_serials[1],workspace_capacities[0],workspace_capacities[1]);
     /* No-fork/exec is established BEFORE the library creates either stream endpoint. */
     require(sandbox_check(getpid(),"process-fork",0)!=0 && sandbox_check(getpid(),"process-exec",0)!=0,"sandbox fork/exec policy denial");
     errno=0; pid_t fork_result=fork();
