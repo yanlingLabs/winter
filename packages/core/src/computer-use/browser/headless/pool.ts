@@ -15,7 +15,10 @@
 //     only the tabs those commands named are lost (a page busy-looping in its renderer); not answered within 3 s, the
 //     helper is wedged and killed, every tab with it;
 //   - `<home>/run/headless.pid` names the running helper (pid + start time) and `<home>/cache/headless-cef/<random>`
-//     is its own cache root, so the next daemon's boot sweep (`sweepHeadless`) can clear what a dead one left.
+//     is its own cache root, so the next daemon's boot sweep (`sweepHeadless`) can clear what a dead one left;
+//   - only the browser's COMPONENTS (the root store, the CRLSet, …) outlive a run: kept in
+//     `<home>/cache/headless-components`, cloned into each fresh cache root and taken back when the helper ends
+//     (`components.ts`) — never its cookies, cache or anything else.
 // A session's context (its cookies) outlives its tabs while the helper runs, and goes when the session's runtime ends
 // (`disposeSession`) or the helper exits.
 import { randomBytes } from "node:crypto";
@@ -27,6 +30,7 @@ import { AutomationFailure } from "../../errors";
 import type { PrimitiveMetric } from "../../telemetry";
 import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS } from "../cdp-allowlist";
 import { TransportError, type CdpEvent, type CdpTransport, type TransportTab } from "../transport";
+import { harvestHeadlessComponents, headlessComponentsDir, seedHeadlessComponents } from "./components";
 import { DEFAULT_HEADLESS_ENGINE, HEADLESS_ENGINES, type ResolvedEngine } from "./engines";
 import { HEADLESS_PIPE_PROTOCOL, HEADLESS_TIMEOUTS, spawnEngineProcess, WinterHeadlessProcess, type HeadlessNoticeKind, type HeadlessOp, type SpawnEngine } from "./winter-engine";
 
@@ -219,6 +223,8 @@ export class HeadlessPool implements CdpTransport {
     const t0 = this.now();
     const runDir = join(headlessCacheRoot(this.deps.home), randomBytes(8).toString("hex"));
     mkdirSync(runDir, { recursive: true, mode: 0o700 });
+    // The kept components first, so the browser starts on them and its updater only checks them.
+    seedHeadlessComponents(headlessComponentsDir(this.deps.home), runDir, this.deps.log);
     const child = (this.deps.spawn ?? spawnEngineProcess)(r.executable, [`--winter-cache-root=${runDir}`]);
     const proc = new WinterHeadlessProcess(child, { ...(this.deps.timeouts === undefined ? {} : { timeouts: this.deps.timeouts }), ...(this.deps.log === undefined ? {} : { log: this.deps.log }) });
     this.proc = proc;
@@ -273,7 +279,10 @@ export class HeadlessPool implements CdpTransport {
     // to it while it died.
     const dir = this.runDirs.get(proc);
     this.runDirs.delete(proc);
-    if (dir !== undefined) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* the next boot sweeps it */ } }
+    if (dir !== undefined) {
+      harvestHeadlessComponents(dir, headlessComponentsDir(this.deps.home), this.deps.log);
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* the next boot sweeps it */ }
+    }
     if (this.proc !== proc) return;
     const reason: ExitReason = this.exitReason ?? "crash";
     this.proc = undefined;
@@ -291,7 +300,10 @@ export class HeadlessPool implements CdpTransport {
   private cleanupRun(proc: WinterHeadlessProcess | undefined): void {
     try { rmSync(headlessPidPath(this.deps.home), { force: true }); } catch { /* best effort */ }
     const dir = proc === undefined ? undefined : this.runDirs.get(proc);
-    if (dir !== undefined) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* the next boot sweeps it */ } }
+    if (dir !== undefined) {
+      harvestHeadlessComponents(dir, headlessComponentsDir(this.deps.home), this.deps.log);
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* the next boot sweeps it */ }
+    }
   }
 
   private shutdown(reason: Exclude<ExitReason, "crash">): void {
