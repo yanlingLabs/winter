@@ -1,6 +1,6 @@
 # Winter for Chrome / Winter for Edge — Privacy Policy
 
-Effective 11 October 2026 (version 1.1.0) · Publisher: yanlingLabs
+Effective 12 October 2026 (version 1.2.0) · Publisher: yanlingLabs
 
 Winter for Chrome is a browser extension for Google Chrome and other Chromium-based browsers; on Microsoft Edge
 Add-ons it is published as Winter for Edge, the same extension under another name. It lets **Winter**, an assistant app
@@ -37,6 +37,15 @@ something in your browser. Depending on the task, it may:
   removes anything that looks like a secret before reading it. The data a page sends is never read.
 - **Save a file you asked for** — when you ask Winter to download a file, the extension lets Winter catch it as the
   browser receives it and saves it into the folder Winter works in on your Mac, instead of your Downloads folder.
+- **Wait for you** (version 1.2.0) — when Winter needs you to do something in a tab before it can go on (fill in a form
+  and press Submit, for example), it can ask the extension to watch for that one thing: a click on one button, a form
+  being sent, a field being changed, a text or a title appearing or going away, or the page moving to another address.
+  While it watches, the page shows a small pill saying what Winter is waiting for ("Winter continues when you click
+  “Submit”") and a ring around that element. When it happens, the extension tells Winter only which watch it was, when it
+  happened, and the page's address (and, for a title, the title) — never what you typed, where you clicked, or the rest of
+  the page. The watching ends when it happens, when Winter or you stop waiting, when the tab closes, or when the
+  connection to Winter drops. It does not use the debugging interface: the little code that watches runs in the
+  extension's own isolated context in that one tab, so the browser shows no debugging notice while Winter waits.
 
 To do this it uses the browser's debugging interface (`chrome.debugger`), attached only to a tab Winter is working in and
 detached when Winter is done with it, after five minutes without use, or as soon as the connection to Winter drops.
@@ -73,6 +82,8 @@ The extension keeps a few small records in the browser's extension storage on yo
 - the identifiers of the tabs and tab groups Winter opened, so it never mistakes one of your tabs for its own (this
   record is cleared when the browser restarts);
 - which tabs it is currently attached to, so it can detach from them cleanly (cleared when the browser quits).
+
+What Winter waits for in a tab is kept only in the extension's memory while it waits, never stored.
 
 It stores no page content, no addresses and no history. Removing the extension deletes these records. (A file you
 asked Winter to download passes through your Downloads folder only when "Save files a page makes" is on, and is moved

@@ -153,7 +153,7 @@ On `host.status { daemon: "connected" }` the extension sends:
   unknown method. `cdp3` — its bundled allowlist is Phase 3's (without it the engine subscribes to 1.0.0's events only);
   `present` (`tabs.present`); `userDone` (`user.done`); `mute`; `group` (`group.update`); `keepGroup` (`tabs.keep` with
   `group`); `windows`; `history`; `bookmarks`; `downloads` (`downloads.arm`/`downloads.release`, `download`); `tabFacts`
-  (`Tab`'s `lastAccessed`, `group`, `windowId`). The daemon's list (`EXTENSION_FEATURES`) names every one it knows; a
+  (`Tab`'s `lastAccessed`, `group`, `windowId`); (1.2.0) `watch` (`watch.arm`/`watch.cancel`, `watch.event` — §5.5). The daemon's list (`EXTENSION_FEATURES`) names every one it knows; a
   repo test holds the extension's names to it.
 
 - **Mismatch:** `protocol_mismatch` `{ expected }`, message `"update Winter for Chrome"` (the extension is older) or
@@ -184,6 +184,8 @@ On `host.status { daemon: "connected" }` the extension sends:
 | `bookmarks.search` | `{ text?, maxResults }` | `{ items: [{ url, title, folder }] }` — feature `bookmarks`, read only (no `text`: the most recent); folders and `javascript:`/`data:` bookmarks left out; `not_allowed` with `data.permission: "bookmarks"` until granted |
 | `downloads.arm` | `{ tabKey, subdir, until, maxBytes }` or `{ tabKey, subdir: null }` | `{}` — feature `downloads`: the tab's next download that its page made (its URL or final URL is one the tab's own debugger sessions — its frames' too — announced with `Page.downloadWillBegin` after the arm, and the browser created it after the arm; a same-site item that comes before that announcement is held, its name undecided, for at most 3 s) is named `<subdir>/<name>` in the browser's download folder (`subdir` is `Winter/<hex>`, the daemon's) and reported (`download`); past `maxBytes` or `until` it is cancelled. Every other download is answered at once and left as the browser would have it. `not_allowed` with `data.permission: "downloads"` until granted |
 | `downloads.release` | `{ id }` | `{}` — the daemon took the file: the item leaves the browser's downloads list (never the file itself) |
+| `watch.arm` | `{ tabKey, spec }` | the watcher's answer `{ ok: true, installed, doc, met? }` or `{ ok: false, reason: "met" \| "gone" \| "doc" \| "noform" }` — feature `watch` (1.2.0), §5.5; refused `not_allowed` with `data.reason` `"page"` (a page that takes no script) or `"malformed"` |
+| `watch.cancel` | `{ tabKey, watchId }` | `{}` — idempotent; the watcher (its ring and pill) leaves the page |
 | `debugger.attach` | `{ tabKey }` | `{ viewport: [w, h], dpr }` — idempotent; the CSS viewport and the device pixel ratio from `Page.getLayoutMetrics` |
 | `debugger.detach` | `{ tabKey }` | `{}` — idempotent; never closes the tab |
 | `cdp.send` | `{ tabKey, method, params, cdpSessionId? }` | `{ result }` — `cdpSessionId` addresses a flattened child target (an out-of-process iframe). A top-level `Page.navigate` / `Page.reload` / `Page.navigateToHistoryEntry` of a background agent tab whose page may ask "leave this page?" first DISCARDS the page, then runs as asked (§5.3) |
@@ -215,6 +217,7 @@ user's from then on.
 | `tab.gone` | `{ tabKey, reason: "closed" \| "crashed" }` | the tab closed (once per tab), or its renderer crashed |
 | `debugger.detached` | `{ tabKey, reason: "canceled_by_user" \| "target_closed" \| "idle" }` | the user dismissed the browser's debugging bar; the page went where the debugger cannot follow; or 5 minutes without a command |
 | `stop.pressed` | `{ tabKey }` | the user clicked the extension's toolbar button while Winter was driving that tab (one per driven tab) |
+| `watch.event` | `{ tabKey, watchId, outcome: "fired" \| "pressed" \| "lost" \| "url", at, url?, title?, reason?, own? }` | feature `watch` (1.2.0): what a watch saw (§5.5) |
 
 The daemon reads `canceled_by_user` as the user taking the tab back ("the user stopped Winter from controlling this tab",
 a lost tab). For `idle` and `target_closed` the tab is still open: the transport hands the engine the debugger's own
@@ -269,6 +272,45 @@ when it next needs the tab. Only a tab really closed or crashed is reported gone
 JSON-RPC errors (`code: -32000`) whose `data.code` is one of `disconnected`, `tab_gone`, `attach_refused`, `not_allowed`,
 `cdp_error` (with `data.cdpCode` / `data.cdpMessage` when the browser answered one), `timeout`. An unknown method is
 `-32601`.
+
+### 5.5 Watches (1.2.0, feature `watch`)
+
+A wake trigger waits for the USER to do something in a tab (click an element, submit a form, change a field, a text or
+a title appearing or going away, the page moving) — and the extension keeps it with NO debugger, so the browser shows
+no debugging bar while Winter waits. The engine reads the element once, while the tab is attached, in the "winter" world:
+its role and name, the secure-field floor (a password, one-time-code or payment field, or anything in a payment
+provider's frame, is never watched), and a LOCATOR (`performance.timeOrigin` of its document, its path from `<html>`
+through open shadow roots, and its steady identifying attributes). `spec` is the daemon's `WatchSpec`
+(`packages/core/src/computer-use/browser/page-runtime/watch.ts`): `{ watchId: "wk_<12 hex>", kind, locator?, text?,
+title?, anyForm?, settleMs?, pill, expiresAt }`.
+
+- **Injection:** the page watcher — `wakeWatcher`, the daemon's own source bundled in, the same function the engine's
+  page runtime runs in the winter world — with `chrome.scripting.executeScript({ world: "ISOLATED" })` into the
+  extension's own isolated world in the tab's TOP frame (never the page's main world, never the winter world, never a
+  declared content script). `watch.arm` injects it with `initial: "refuse"`: a state condition already true answers
+  `met`. The extension injects it again into each new document of the tab (`tabs.onUpdated` `status: "complete"`):
+  `initial: "fire"` (a new document that shows it is the transition), or `"baseline"` when the navigation came within
+  500 ms of the extension's own debugger input or navigation. A watch of an element whose document went answers `doc`
+  there: the extension drops it and sends `watch.event { outcome: "lost", reason: "doc" }`.
+- **Reports:** the watcher sends the extension a runtime message from that world (`winter.wake.event`; the page cannot —
+  there is no `externally_connectable`); the extension relays it, from frame 0 of a tab it keeps that watch for, with
+  only these fields: `outcome` `fired` (the user's trusted event, or a false→true transition of a state condition),
+  `pressed` (a trusted press of the watched element or form — a navigation right after it is the user's own), `lost`
+  (`reason` `gone`: the element went and could not be found again); `at` (the page's clock); `url` (the top document's,
+  ≤ 4,096 characters); `title` (a title watch, ≤ 300); and `own: true` when the extension's own debugger sent the tab
+  any `Input.*`, `Page.navigate`, `Page.reload` or `Page.navigateToHistoryEntry` in flight at `at` or within 500 ms
+  before. A `navigated` watch has no page part beyond its pill: the extension sends `outcome: "url"` with the tab's new
+  URL on every `tabs.onUpdated` URL change (a same-document one too). Never a value the user typed, never coordinates.
+- **What the user sees:** while armed, a pill at the page's bottom left with the daemon's fixed words ("Winter continues
+  when you click “Submit for review”" — only the element's own label) and a ring around the element, in a closed shadow
+  root under one `<winter-wake-overlay>` element that takes no pointer event (the engine leaves it out of its tree walk
+  and hit tests).
+- **Ending:** `watch.cancel`; the tab closing; the link to Winter dropping (every watcher is taken down, and the daemon
+  reads each watch as lost); and the watcher itself, at its 20-second heartbeat (`winter.wake.alive`), takes down any
+  watch the extension no longer knows (a service-worker restart), and removes itself a little after its `expiresAt`.
+
+An extension without `watch` (1.1.0 and older) gets no `watch.*`: the engine keeps such a wait on its debugger path
+(holding the debugger, with its bar) and tells the model to suggest updating Winter for Chrome.
 
 ## 6. Timeouts and sizes (the daemon's side)
 
@@ -424,3 +466,4 @@ A test build serves the dev extension ids.
 | --- | --- | --- | --- | --- |
 | 1 | 1 | 1.9.0 | 1.0.0 | Initial. |
 | 1 | 1 | (unchanged) | 1.1.0 | ComputerV2 Phase 3, additive behind `hello.features`: the Phase 3 allowlist (`cdp3`), the hand-off (`tabs.present`, `user.done`), `tabs.mute`, `group.update`, `tabs.keep { group }`, `windows.list`, `Tab` facts, and under the optional permissions `history.search`, `bookmarks.search`, `downloads.arm`/`release` and `download`. More browser channels and their manifest directories. |
+| 1 | 1 | (unchanged) | 1.2.0 | Wake triggers, additive behind `hello.features` (`watch`): `watch.arm`, `watch.cancel` and `watch.event` — the page watcher injected with `chrome.scripting` into the extension's own isolated world, no debugger, no new permission (§5.5). |

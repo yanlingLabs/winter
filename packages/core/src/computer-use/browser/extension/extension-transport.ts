@@ -8,8 +8,10 @@
 // never the guard of record.
 import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS } from "../cdp-allowlist";
 import { cdpEventParams } from "../cdp-reduce";
+import type { WatchArmResult } from "../page-runtime/watch";
 import {
   TransportError, type BackendId, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportDownload, type TransportErrorCode, type TransportTab,
+  type TransportWatchEvent,
 } from "../transport";
 import { DAEMON_TO_HOST_MAX_LINE, type ExtensionMethod } from "./protocol";
 
@@ -64,6 +66,9 @@ export class ExtensionTransport implements CdpTransport {
   private readonly stopListeners = new Set<(tabKey: string) => void>();
   private readonly doneListeners = new Set<(tabKey: string, done: boolean) => void>();
   private readonly downloadListeners = new Set<(tabKey: string, d: TransportDownload) => void>();
+  private readonly watchListeners = new Set<(tabKey: string, e: TransportWatchEvent) => void>();
+  /** 1.2.0: the watches this extension keeps for the engine (`tabKey|watchId`) — lost all at once if the link drops. */
+  private readonly watching = new Set<string>();
   /** Phase 3: what this extension build said it can do. */
   readonly features: ReadonlySet<string>;
 
@@ -78,6 +83,9 @@ export class ExtensionTransport implements CdpTransport {
   armDownloads?: CdpTransport["armDownloads"];
   onDownload?: CdpTransport["onDownload"];
   releaseDownload?: CdpTransport["releaseDownload"];
+  watch?: CdpTransport["watch"];
+  unwatch?: CdpTransport["unwatch"];
+  onWatchEvent?: CdpTransport["onWatchEvent"];
 
   constructor(private readonly opts: ExtensionTransportOptions) {
     this.family = opts.family;
@@ -114,6 +122,20 @@ export class ExtensionTransport implements CdpTransport {
       this.armDownloads = async (tabKey, o) => { await this.request("downloads.arm", o === null ? { tabKey, subdir: null } : { tabKey, subdir: o.subdir, until: o.until, maxBytes: o.maxBytes }, t.command); };
       this.onDownload = (l) => { this.downloadListeners.add(l); return () => { this.downloadListeners.delete(l); }; };
       this.releaseDownload = async (id) => { await this.request("downloads.release", { id }, t.command); };
+    }
+    if (f.has("watch")) {
+      this.watch = async (tabKey, spec) => {
+        const r = await this.request("watch.arm", { tabKey, spec }, t.command);
+        const result = parseArmResult(r);
+        if (result === undefined) throw malformed("watch.arm");
+        if (result.ok) this.watching.add(`${tabKey}|${spec.watchId}`);
+        return result;
+      };
+      this.unwatch = async (tabKey, watchId) => {
+        this.watching.delete(`${tabKey}|${watchId}`);
+        await this.request("watch.cancel", { tabKey, watchId }, t.command);
+      };
+      this.onWatchEvent = (l) => { this.watchListeners.add(l); return () => { this.watchListeners.delete(l); }; };
     }
   }
 
@@ -271,6 +293,13 @@ export class ExtensionTransport implements CdpTransport {
         if (d !== undefined) for (const l of this.downloadListeners) this.safely(() => l(tabKey, d));
         return true;
       }
+      case "watch.event": {
+        const e = parseWatchEvent(params);
+        if (e === undefined || !this.watching.has(`${tabKey}|${e.watchId}`)) return true;
+        if (e.outcome === "lost") this.watching.delete(`${tabKey}|${e.watchId}`);
+        for (const l of this.watchListeners) this.safely(() => l(tabKey, e));
+        return true;
+      }
       default:
         return true;
     }
@@ -286,6 +315,14 @@ export class ExtensionTransport implements CdpTransport {
       p.reject(new TransportError("disconnected", why));
     }
     this.subscriptions.clear();
+    // Every watch the extension kept for the engine ends with the link (the extension takes its watchers down too).
+    const watches = [...this.watching];
+    this.watching.clear();
+    for (const key of watches) {
+      const i = key.indexOf("|");
+      const e: TransportWatchEvent = { watchId: key.slice(i + 1), outcome: "lost", at: Date.now(), reason: "disconnected" };
+      for (const l of this.watchListeners) this.safely(() => l(key.slice(0, i), e));
+    }
   }
 
   // ── internals ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -333,6 +370,29 @@ function parseTab(raw: unknown): TransportTab | undefined {
     ...(typeof group === "string" && group.length > 0 ? { group } : {}),
     ...(typeof windowId === "number" && Number.isFinite(windowId) ? { windowId } : {}),
   };
+}
+
+const WATCH_OUTCOMES = new Set(["fired", "pressed", "lost", "url"]);
+/** One `watch.event` (its strings capped; what the page said is only ever a URL or a title, redacted by the engine). */
+function parseWatchEvent(raw: Record<string, unknown>): TransportWatchEvent | undefined {
+  const { watchId, outcome, at, url, title, reason, own } = raw;
+  if (typeof watchId !== "string" || !/^wk_[0-9a-f]{12}$/.test(watchId) || typeof outcome !== "string" || !WATCH_OUTCOMES.has(outcome)) return undefined;
+  if (typeof at !== "number" || !Number.isFinite(at)) return undefined;
+  return {
+    watchId, outcome: outcome as TransportWatchEvent["outcome"], at,
+    ...(typeof url === "string" ? { url: url.slice(0, 4096) } : {}), ...(typeof title === "string" ? { title: title.slice(0, 300) } : {}),
+    ...(typeof reason === "string" ? { reason: reason.slice(0, 40) } : {}), ...(own === true ? { own: true } : {}),
+  };
+}
+
+/** The watcher's answer to `watch.arm`. */
+function parseArmResult(raw: unknown): WatchArmResult | undefined {
+  if (!isRecord(raw)) return undefined;
+  if (raw.ok === true && (raw.installed === "new" || raw.installed === "alive") && typeof raw.doc === "number") {
+    return { ok: true, installed: raw.installed, doc: raw.doc, ...(typeof raw.met === "boolean" ? { met: raw.met } : {}) };
+  }
+  if (raw.ok === false && (raw.reason === "met" || raw.reason === "gone" || raw.reason === "doc" || raw.reason === "noform")) return { ok: false, reason: raw.reason };
+  return undefined;
 }
 
 const DOWNLOAD_STATES = new Set(["started", "progress", "done", "failed", "refused"]);
