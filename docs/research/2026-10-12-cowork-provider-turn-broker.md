@@ -121,12 +121,18 @@ four, and verifies the first reply and unrelated invocation remain timely.
 Current limits are eight invocations per binding and 32 across the broker. A
 binding-local monotonically increasing `invocationOrdinal` replaces the historical
 4,096-ID lifetime set. The host keeps a contiguous consumed watermark and at most
-128 out-of-order ordinals; old frames cannot become executable by eviction.
+128 out-of-order ordinals. If both a begin and its best-effort cancel are lost,
+a later ordinal advances the window floor instead of permanently blocking the
+lease at128. Every consumed/expired ordinal remains refused. Exact active calls
+use their independent invocation map, so advancing the window preserves their
+continuation and scoped cancellation. No frame, authority or automatic retry
+contract changes.
 Cancellation consumes its ordinal even before begin, and filling an earlier gap
 advances through canceled ordinals. Capacity refusals consume their ordinal too;
 a new attempt is a new invocation, never a replay of the original begin.
 
-18 Core broker tests pass (including 5,000 sequential invocations, replay/reorder,
+20 Core broker tests pass (including a lost ordinal1 followed by2–201,
+active-stream continuation/cancellation across a lost gap, 5,000 sequential invocations, replay/reorder,
 late terminal event and rejected finalizer cases); three existing actual adapter
 bridge tests also pass. Core and SDK typechecks pass. This changes the unreleased
 private provider request contract; old artifacts must be rebuilt and cannot be

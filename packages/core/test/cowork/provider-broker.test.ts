@@ -160,9 +160,11 @@ test("out-of-order invocation ordinals are consumed once within a bounded reorde
  const lease=new CoworkProviderBroker({secrets,assertCurrent:()=>{}}).open(fixture(async function*(){yield {type:"done",stopReason:"end_turn"};}));
  const first=randomUUID(),second=randomUUID();
  expect((await lease.handle(frame(second,"begin",0,{turn:payload,invocationOrdinal:2}))).kind).toBe("accepted");
+ expect((await lease.handle(frame(randomUUID(),"begin",0,{turn:payload,invocationOrdinal:2}))).code).toBe("authority_denied");
  expect((await lease.handle(frame(first,"begin",0,{turn:payload,invocationOrdinal:1}))).kind).toBe("accepted");
  expect((await lease.handle(frame(randomUUID(),"begin",0,{turn:payload,invocationOrdinal:1}))).kind).toBe("refused");
- expect((await lease.handle(frame(randomUUID(),"begin",0,{turn:payload,invocationOrdinal:131}))).kind).toBe("refused");lease.close();
+ expect((await lease.handle(frame(randomUUID(),"begin",0,{turn:payload,invocationOrdinal:131}))).kind).toBe("accepted");
+ expect((await lease.handle(frame(randomUUID(),"begin",0,{turn:payload,invocationOrdinal:3}))).code).toBe("authority_denied");lease.close();
 });
 test("late terminal event returns without waiting for its slow finalizer",async()=>{
  let finish!:()=>void,retired=false;
@@ -188,4 +190,51 @@ test("background finalizer rejection retains its slot without delaying a termina
  const id=randomUUID();await lease.handle(frame(id,"begin",0,{turn:payload}));expect((await lease.handle(frame(id,"next",1))).event?.type).toBe("done");await Bun.sleep(0);
  for(let i=0;i<7;i++)expect((await lease.handle(frame(randomUUID(),"begin",0,{turn:payload}))).kind).toBe("accepted");
  expect((await lease.handle(frame(randomUUID(),"begin",0,{turn:payload}))).code).toBe("capacity_busy");lease.close();
+});
+
+
+test("a lost begin and cancel ordinal never exhausts the sliding invocation window", async () => {
+  const lease = new CoworkProviderBroker({ secrets, assertCurrent: () => {} }).open(fixture(async function* () { yield { type: "done", stopReason: "end_turn" }; }));
+  try {
+    // Ordinal1 never arrived: neither its begin nor its cancellation reached Core.
+    for (let value = 2; value <= 201; value++) {
+      const id = randomUUID();
+      expect((await lease.handle(frame(id, "begin", 0, { turn: payload, invocationOrdinal: value }))).kind).toBe("accepted");
+      expect((await lease.handle(frame(id, "next", 1, { invocationOrdinal: value }))).event?.type).toBe("done");
+      await Promise.resolve();
+    }
+    expect((await lease.handle(frame(randomUUID(), "begin", 0, { turn: payload, invocationOrdinal: 1 }))).code).toBe("authority_denied");
+  } finally { lease.close(); }
+});
+
+test("window advancement preserves exact old active stream continuation and cancellation", async () => {
+  let heldClosed = 0;
+  const admission = fixture(async function* (request) {
+    if (request.messages[0]?.content === "held") {
+      try { yield { type: "text_delta", text: "before-window" }; yield { type: "text_delta", text: "after-window" }; yield { type: "done", stopReason: "end_turn" }; }
+      finally { heldClosed++; }
+    } else yield { type: "done", stopReason: "end_turn" };
+  });
+  const lease = new CoworkProviderBroker({ secrets, assertCurrent: () => {} }).open(admission), continuing = randomUUID(), cancelling = randomUUID();
+  const held = { ...payload, messages: [{ role: "user" as const, content: "held" }] };
+  try {
+    for (const [id, value] of [[continuing, 1], [cancelling, 2]] as const) {
+      expect((await lease.handle(frame(id, "begin", 0, { turn: held, invocationOrdinal: value }))).kind).toBe("accepted");
+      expect((await lease.handle(frame(id, "next", 1, { invocationOrdinal: value }))).event).toEqual({ type: "text_delta", text: "before-window" });
+    }
+    // Missing3 forces the new window path while both original calls remain live.
+    for (let value = 4; value <= 203; value++) {
+      const id = randomUUID();
+      expect((await lease.handle(frame(id, "begin", 0, { turn: payload, invocationOrdinal: value }))).kind).toBe("accepted");
+      expect((await lease.handle(frame(id, "next", 1, { invocationOrdinal: value }))).event?.type).toBe("done");
+      await Promise.resolve();
+    }
+    expect((await lease.handle(frame(continuing, "next", 2, { invocationOrdinal: 1 }))).event).toEqual({ type: "text_delta", text: "after-window" });
+    expect((await lease.handle(frame(continuing, "next", 3, { invocationOrdinal: 1 }))).event?.type).toBe("done");
+    expect((await lease.handle(frame(cancelling, "cancel", 2, { invocationOrdinal: 2 }))).kind).toBe("closed");
+    await Promise.resolve(); await Promise.resolve();
+    expect(heldClosed).toBe(2);
+    expect((await lease.handle(frame(randomUUID(), "begin", 0, { turn: payload, invocationOrdinal: 1 }))).code).toBe("authority_denied");
+    expect((await lease.handle(frame(randomUUID(), "begin", 0, { turn: payload, invocationOrdinal: 3 }))).code).toBe("authority_denied");
+  } finally { lease.close(); }
 });
