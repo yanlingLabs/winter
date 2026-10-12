@@ -16,13 +16,16 @@
 // does). A diff compares facets per ref and falls back to the full tree when more than half the elements changed.
 
 import { escapeInvisible } from "./page-runtime/webmcp";
+import { valueWithLength, VALUE_CAP as RUNTIME_VALUE_CAP, WHOLE_VALUE_CAP } from "./page-runtime/widgets";
 
 export const STATE_LINE_CAP = 300;
 /** A `full: true` state's hard cap: the page runtime's default read budget (`snapshot`'s `maxNodes`)… */
 export const FULL_STATE_LINE_CAP = 4_000;
 /** …and in bytes: a ComputerV2 result's text is cut at 64 KiB, and a full state's own cut line must survive it. */
 export const FULL_STATE_BYTE_CAP = 48 * 1024;
-const VALUE_CAP = 200;
+const VALUE_CAP = RUNTIME_VALUE_CAP;
+/** A `state({ within })` read's value cap: one element's field shown whole up to this many characters. */
+export { WHOLE_VALUE_CAP };
 const URL_CAP = 200;
 
 export interface TabNode {
@@ -30,6 +33,8 @@ export interface TabNode {
   role: string;
   name?: string;
   value?: string;
+  /** The value's full length (characters) when the page runtime cut it. */
+  valueLength?: number;
   showEmptyValue?: boolean;
   secure?: boolean;
   states: string[];
@@ -124,20 +129,22 @@ function headLines(h: TabHeader): string[] {
   return out;
 }
 
-/** `"…"` for a value, `<redacted>` for a secure or secret-looking one, nothing when it says nothing. */
-export function renderedValue(n: TabNode): string | undefined {
+/** `"…"` for a value, `<redacted>` for a secure or secret-looking one, nothing when it says nothing. A long value is cut
+ *  at `valueCap` and says its length and where it reads whole (the helper's wording): `"<first 200>…" (250 characters
+ *  — state({within:5}) shows it whole)`; a `within` read's cap is `WHOLE_VALUE_CAP`. */
+export function renderedValue(n: TabNode, valueCap = VALUE_CAP): string | undefined {
   if (n.secure === true || n.value === "<redacted>") return "<redacted>";
   if (n.value === undefined) return undefined;
   if (n.value.length === 0) return n.showEmptyValue === true ? "\"\"" : undefined;
   if (n.value === n.name) return undefined;
-  return quote(cut(n.value));
+  return valueWithLength(n.ref, n.value, n.valueLength, valueCap, quote);
 }
 
 /** One node's line, without indentation or a fold marker. */
-export function nodeLine(n: TabNode): string {
+export function nodeLine(n: TabNode, valueCap = VALUE_CAP): string {
   let s = `[${n.ref}] ${n.role}`;
   if (n.name !== undefined && n.name.length > 0) s += ` ${quote(cut(n.name))}`;
-  const v = renderedValue(n);
+  const v = renderedValue(n, valueCap);
   if (v !== undefined) s += ` value=${v}`;
   const paren: string[] = [];
   if (n.origin !== undefined) paren.push(n.origin);
@@ -164,20 +171,20 @@ function descendantCount(n: TabNode): number {
  *  as fits (a long list keeps its head, its tail behind one marker), and a state that still had to fold ends with a
  *  line saying so. */
 export function bodyLines(roots: readonly TabNode[], focusedRef: number | undefined, viewportFirst: boolean, lineCap = STATE_LINE_CAP,
-                          whole = false, byteCap = FULL_STATE_BYTE_CAP): string[] {
-  return bodyAndShown(roots, focusedRef, viewportFirst, lineCap, whole, byteCap).lines;
+                          whole = false, byteCap = FULL_STATE_BYTE_CAP, valueCap = VALUE_CAP): string[] {
+  return bodyAndShown(roots, focusedRef, viewportFirst, lineCap, whole, byteCap, valueCap).lines;
 }
 
 /** `bodyLines`, with the refs whose own line it prints — what the model sees of the tree (folded and out-of-view
  *  elements are not), so a later diff can surface what it had not shown. */
 export function bodyAndShown(roots: readonly TabNode[], focusedRef: number | undefined, viewportFirst: boolean, lineCap = STATE_LINE_CAP,
-                             whole = false, byteCap = FULL_STATE_BYTE_CAP): { lines: string[]; shown: Set<number> } {
+                             whole = false, byteCap = FULL_STATE_BYTE_CAP, valueCap = VALUE_CAP): { lines: string[]; shown: Set<number> } {
   interface Item { node: TabNode; parent?: number; depth: number; descendants: number; outOfView: boolean; bytes: number; childIndex: number }
   const items: Item[] = [];
   const childrenOf = new Map<number, number[]>();
   const add = (n: TabNode, parent: number | undefined, depth: number, parentOff: boolean, childIndex: number): void => {
     const idx = items.length;
-    const bytes = whole ? depth * 2 + utf8Length(nodeLine(n)) + 1 : 0;
+    const bytes = whole ? depth * 2 + utf8Length(nodeLine(n, valueCap)) + 1 : 0;
     items.push({ node: n, ...(parent === undefined ? {} : { parent }), depth, descendants: 0, outOfView: parent !== undefined && n.off === true && !parentOff, bytes, childIndex });
     if (parent !== undefined) {
       const siblings = childrenOf.get(parent);
@@ -309,7 +316,7 @@ export function bodyAndShown(roots: readonly TabNode[], focusedRef: number | und
       }
       continue;
     }
-    let text = `${"  ".repeat(it.depth)}${nodeLine(it.node)}`;
+    let text = `${"  ".repeat(it.depth)}${nodeLine(it.node, valueCap)}`;
     if (collapsed.has(i)) text += ` ${collapseMarker(descendantCount(it.node), it.node.ref)}`;
     else if (it.node.unread !== undefined && it.node.unread > 0) text += ` ${collapseMarker(it.node.unread, it.node.ref)}`;
     out.push(text);
@@ -340,8 +347,8 @@ export function fullState(h: TabHeader, roots: readonly TabNode[], viewportFirst
 
 /** `fullState`, with the refs its print shows (kept with the snapshot: a later diff surfaces what it had folded). */
 export function printedState(h: TabHeader, roots: readonly TabNode[], viewportFirst: boolean, lineCap = STATE_LINE_CAP,
-                             whole = false): { text: string; shown: Set<number> } {
-  const b = bodyAndShown(roots, h.focusedRef, viewportFirst, whole ? Math.max(lineCap, FULL_STATE_LINE_CAP) : lineCap, whole);
+                             whole = false, valueCap = VALUE_CAP): { text: string; shown: Set<number> } {
+  const b = bodyAndShown(roots, h.focusedRef, viewportFirst, whole ? Math.max(lineCap, FULL_STATE_LINE_CAP) : lineCap, whole, FULL_STATE_BYTE_CAP, valueCap);
   return { text: [...headLines(h), ...b.lines].join("\n"), shown: b.shown };
 }
 
@@ -364,7 +371,7 @@ export interface TabSnapshot {
   siteTools?: string;
 }
 
-export function makeSnapshot(id: string, roots: readonly TabNode[], scope?: number, shown?: Set<number>): TabSnapshot {
+export function makeSnapshot(id: string, roots: readonly TabNode[], scope?: number, shown?: Set<number>, valueCap = VALUE_CAP): TabSnapshot {
   const facets = new Map<number, Facets>();
   const order: number[] = [];
   const parents = new Map<number, number>();
@@ -376,10 +383,10 @@ export function makeSnapshot(id: string, roots: readonly TabNode[], scope?: numb
     if (!facets.has(n.ref)) {
       order.push(n.ref);
       const name = n.name === undefined || n.name.length === 0 ? undefined : quote(cut(n.name));
-      const value = renderedValue(n);
+      const value = renderedValue(n, valueCap);
       facets.set(n.ref, {
         role: n.role, ...(name === undefined ? {} : { name }), ...(value === undefined ? {} : { value }), states: [...n.states],
-        ...(n.items === undefined ? {} : { items: n.items }), extra: `${n.level ?? ""}|${n.href ?? ""}|${n.origin ?? ""}`, line: nodeLine(n),
+        ...(n.items === undefined ? {} : { items: n.items }), extra: `${n.level ?? ""}|${n.href ?? ""}|${n.origin ?? ""}`, line: nodeLine(n, valueCap),
       });
     }
     for (const c of n.children) visit(c);
