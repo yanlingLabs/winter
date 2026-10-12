@@ -37,6 +37,7 @@ import { ComputerV2Service } from "./service";
 import { AutomationTelemetry } from "./telemetry";
 import type { AutomationWorker, AutomationWorkerOptions } from "./worker-host";
 import type { MessagingDriverHandle } from "../agent/session-messaging";
+import { AppWakeBackend } from "./wakes/app-backend";
 import { WakeStore } from "./wakes/persist";
 import { WakeRegistry, type WakeBackends } from "./wakes/registry";
 import type { WakeSessionState } from "./wakes/delivery";
@@ -334,7 +335,14 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
   const wakeBackends: WakeBackends = { ...(deps.inject?.wakeBackends ?? {}) };
   if (deps.inject?.wakeBackends === undefined) {
     // [wake backend: tab — lane B] wakeBackends.tab = …;
-    // [wake backend: app — lane C] wakeBackends.app = …;
+    // The helper's watches (lane C). Its hooks — the helper's `watchEvent`, the connection's loss, the daemon's stop —
+    // reach it through the registry, which fans the helper callbacks above and its own `stop()` out to each backend.
+    wakeBackends.app = new AppWakeBackend({
+      helper,
+      target: (sessionId, targetId) => service?.appTarget(sessionId, targetId),
+      persistentlyAllowed: (sessionId, bundleId) => policy.persistentlyAllowed(sessionId, bundleId),
+      log,
+    });
   }
   const sessionState = (sessionId: string): WakeSessionState => {
     try { return deps.store.meta(sessionId).archived === true ? "archived" : "live"; } catch { return "gone"; }
