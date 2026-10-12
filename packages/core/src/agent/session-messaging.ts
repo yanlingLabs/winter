@@ -13,14 +13,15 @@
 // USER RULINGS (2026-10-02), binding:
 //   - SendMessage is the ONE tool that messages a session and resumes it; ManageSession is gone from
 //     Dispatch. TaskStop stops a session's running turn (by `s_…` id) the way it stops a subagent.
-//   - Supported TARGETS are code sessions. `participatesInActivity` also reserves `cowork` for
-//     future lifecycle integration; Cowork has no supported creation path today. Chat and dispatch
-//     sessions are refused, typed.
-//   - SENDERS are whoever has the tool. Chat does not (its allowed list dropped SendMessage, ListAgents and
+//   - Host targets are Code sessions. Cowork peers additionally require active canonical
+//     bindings to the same retained Project; activity participation is not authority.
+//     Cowork creation/runtime execution is gated separately. Chat/dispatch targets are refused.
+//   - Host SENDERS are whoever has the tool. Chat does not (its allowed list dropped SendMessage, ListAgents and
 //     ReadNotifications), and a chat caller is refused here too, defensively.
 //   - A message runs at the TARGET's own approval policy, with no card for the message itself — a session
 //     at `ask` can drive one at `bypass`. That escalation is the user's DELIBERATE decision (it was the
-//     reviewer's HIGH finding #1), not an oversight.
+//     reviewer's HIGH finding #1), not an oversight. This broader host-to-host ruling does
+//     not allow Cowork to drive host sessions, or host sessions to drive Cowork without delegation.
 //   - Approvals: a top-level code session messaging another forwards NOTHING — each shows its own cards in
 //     its own window. Only Dispatch-spawned sessions forward cards through Dispatch, whoever messaged them
 //     (`DispatchChildren`'s relay).
@@ -61,6 +62,8 @@ import { participatesInActivity } from "../sessions/activity";
 import type { SessionRow } from "../sessions/store";
 import { renderAttributedTurn } from "../runtime-sdk/messaging";
 import { isSessionReplaced } from "../runtime-sdk/session-replaced";
+import { mayContactCoworkPeer, type CoworkMessagingRecords, type CoworkPeerOperation } from "../cowork/messaging-authority";
+import { CoworkError } from "../cowork/types";
 
 /** The `clientName` a SendMessage delivery lands under in the target (`DispatchChildren`'s observer reads it). */
 export const MESSAGING_CLIENT_NAME = "messaging";
@@ -75,7 +78,7 @@ export const DELIVERY_DEDUPE_MAX = 500;
 
 /** The refusal a chat session gets (it has no SendMessage; defensive). */
 export const CHAT_SENDER_REFUSAL = "a chat session cannot message or stop other Winter sessions";
-/** The refusal for a chat or dispatch TARGET. The predicate also reserves future Cowork support. */
+/** The refusal for a chat or dispatch TARGET, after the workspace authority check. */
 export const TARGET_MODE_REFUSAL = "only code sessions can currently be messaged or stopped; chat and dispatch targets are unsupported";
 
 /** The slice of a session's live driver this file uses (`LegSession`). */
@@ -96,6 +99,8 @@ export interface MessagingDriverHandle {
 }
 
 export interface SessionMessagingDeps {
+  /** Canonical host DB bindings, never runtime-supplied workspace/project fields. */
+  cowork?: CoworkMessagingRecords;
   store: {
     /** Throws for an unknown session. */
     meta(sessionId: string): { mode?: string; archived?: boolean; origin?: string; parentSessionId?: string; approvalPolicy?: string };
@@ -147,6 +152,7 @@ export class SessionMessaging {
   private readonly now: () => number;
   private readonly log: (line: string) => void;
   private draining = false;
+  private authorityReadFaultLogged = false;
   /** (caller, message id, target, text digest) → the delivery's answer, in flight or settled. */
   private readonly deliveries = new Map<string, { at: number; answer: Promise<SendAnswer> }>();
 
@@ -176,16 +182,59 @@ export class SessionMessaging {
 
   /** The target checks every door shares: a session id, known, not the caller, lifecycle-participating
    *  (code today; the predicate also reserves cowork). */
-  private resolveTarget(callerSessionId: string, to: string): { id: string; meta: Meta } | { answer: { status: "refused" | "not_found"; reason: string } } {
+  private resolveTarget(callerSessionId: string, to: string, operation: CoworkPeerOperation = "send"): { id: string; meta: Meta } | { answer: { status: "refused" | "not_found"; reason: string } } {
     const id = sessionIdFromAddress(to);
     if (id === undefined) {
       return { answer: { status: "not_found", reason: `no agent or session named "${to}" is reachable — address a Winter session by its id (s_…), from SpawnSession, ListSessions or ListAgents` } };
     }
     if (id === callerSessionId) return { answer: { status: "refused", reason: "cannot target your own session" } };
-    let meta: Meta;
-    try { meta = this.deps.store.meta(id); } catch { return { answer: { status: "not_found", reason: `no Winter session '${id}'` } }; }
+    let meta: Meta, caller: Meta;
+    const hidden = { answer: { status: "not_found" as const, reason: `no reachable Winter session '${id}'` } };
+    try { caller = this.deps.store.meta(callerSessionId); } catch { return hidden; }
+    try { meta = this.deps.store.meta(id); } catch {
+      return caller.mode === "cowork" ? hidden : { answer: { status: "not_found", reason: `no Winter session '${id}'` } };
+    }
+    if (!this.mayContact(callerSessionId, caller, id, meta, operation)) return hidden;
     if (!participatesInActivity(meta.mode)) return { answer: { status: "refused", reason: TARGET_MODE_REFUSAL } };
     return { id, meta };
+  }
+
+  private mayContact(callerId: string, caller: Meta, targetId: string, target: Meta, operation: CoworkPeerOperation): boolean {
+    if (caller.mode !== undefined && caller.mode !== "code" && caller.mode !== "dispatch" && caller.mode !== "cowork") return false;
+    if (!this.consistentMode(callerId, caller) || !this.consistentMode(targetId, target)) return false;
+    if (caller.mode !== "cowork" && target.mode !== "cowork") return true;
+    if (caller.mode !== "cowork" || target.mode !== "cowork") return false;
+    return mayContactCoworkPeer(this.deps.cowork, callerId, targetId, operation);
+  }
+
+  /** A stale/rebuilt session index cannot downgrade a canonical guest binding to host authority. */
+  private consistentMode(sessionId: string, meta: Meta): boolean {
+    if (!this.deps.cowork) return meta.mode !== "cowork";
+    try { this.deps.cowork.binding(sessionId); return meta.mode === "cowork"; }
+    catch (error) {
+      if (error instanceof CoworkError && error.code === "not_found") return meta.mode !== "cowork";
+      if (!this.authorityReadFaultLogged) {
+        this.authorityReadFaultLogged = true;
+        this.log("session_authority_unavailable: canonical conversation records could not be read; refusing agent session access");
+      }
+      return false;
+    }
+  }
+
+  /** All-session discovery uses the same authority before query/count/path projection.
+   * Listing oneself is permitted; it never authorizes send/stop to oneself. */
+  mayList(callerSessionId: string, targetSessionId: string): boolean {
+    try {
+      const caller = this.deps.store.meta(callerSessionId), target = this.deps.store.meta(targetSessionId);
+      if (caller.mode === "chat" || !participatesInActivity(target.mode)) return false;
+      if (!this.consistentMode(callerSessionId, caller) || !this.consistentMode(targetSessionId, target)) return false;
+      if (callerSessionId === targetSessionId && caller.mode === "cowork") {
+        const binding = this.deps.cowork?.binding(callerSessionId);
+        return binding?.sessionId === callerSessionId && binding.state === "active"
+          && this.deps.cowork?.get(binding.workspaceId).state === "retained";
+      }
+      return this.mayContact(callerSessionId, caller, targetSessionId, target, "list");
+    } catch { return false; }
   }
 
   /** One SendMessage the caller's runtime could not resolve in-process. Never throws. */
@@ -258,6 +307,9 @@ export class SessionMessaging {
     // daemon began stopping while the target came up.
     if (this.draining) return notDelivered("Winter began shutting down");
     if (cancelled()) return notDelivered("the sender was interrupted");
+    const current = this.resolveTarget(callerSessionId, targetId);
+    if ("answer" in current) return current.answer;
+    if (current.meta.archived) return refused("the receiving session was archived; nothing was delivered");
 
     const undoFollowUp = ownChild ? this.deps.followUp?.()?.expectFollowUp(targetId, callerSessionId, text) : undefined;
     let sent: { queued: boolean; steered: boolean; behind: number };
@@ -268,9 +320,13 @@ export class SessionMessaging {
         // The target's runtime was replaced while it was starting (`session_replaced`): nothing was taken, so
         // the message goes ONCE to the session's next driver -- after the same shutdown/cancel re-checks.
         if (!isSessionReplaced(err)) throw err;
+        const beforeRetry = this.resolveTarget(callerSessionId, targetId);
+        if ("answer" in beforeRetry || beforeRetry.meta.archived) throw new Error("session messaging authority changed");
         const successor = this.deps.sessions.get(targetId) ?? await this.deps.sessions.ensure(targetId);
         if (successor === undefined || successor === driver) throw err;
         if (this.draining || cancelled()) throw err;
+        const afterRetry = this.resolveTarget(callerSessionId, targetId);
+        if ("answer" in afterRetry || afterRetry.meta.archived) throw new Error("session messaging authority changed");
         resumed = resumed || (successor.state !== undefined && successor.state !== "live");
         sent = await deliverInto(successor, text);
       }
@@ -310,7 +366,7 @@ export class SessionMessaging {
     let caller: Meta;
     try { caller = this.deps.store.meta(callerSessionId); } catch { return { status: "refused", reason: "the calling session is not known to Winter" }; }
     if (caller.mode === "chat") return { status: "refused", reason: CHAT_SENDER_REFUSAL };
-    const resolved = this.resolveTarget(callerSessionId, request.id);
+    const resolved = this.resolveTarget(callerSessionId, request.id, "stop");
     if ("answer" in resolved) {
       return resolved.answer.status === "not_found" ? { status: "not_found", reason: resolved.answer.reason } : { status: "refused", reason: resolved.answer.reason };
     }
@@ -334,19 +390,21 @@ export class SessionMessaging {
     }
   }
 
-  /** ListAgents' session rows for `callerSessionId`: the RUNNING code peers today (plus reserved
-   *  cowork-shaped rows if injected; see the header), never itself. */
+  /** ListAgents' running, authorized peers. Cowork membership is read from the host DB. */
   list(callerSessionId: string): HostMessageListAnswer {
-    let caller: { mode?: string };
+    let caller: Meta;
     try { caller = this.deps.store.meta(callerSessionId); } catch { return { sessions: [] }; }
     if (caller.mode === "chat") return { sessions: [] };
     const at = this.now();
     const rows: SessionRow[] = [];
     for (const row of this.deps.store.list()) {
       if (row.sessionId === callerSessionId || !participatesInActivity(row.mode) || row.archived === true) continue;
+      let target: Meta;
+      try { target = this.deps.store.meta(row.sessionId); } catch { continue; }
+      if (!this.mayContact(callerSessionId, caller, row.sessionId, target, "list")) continue;
       let activity: Activity | undefined;
       try { activity = this.deps.derive(row, row.sessionId, at); } catch { continue; }
-      if (this.deps.working(row.sessionId) || activity === "active") rows.push(row);
+      if (this.deps.working(row.sessionId) || activity === "active") rows.push({ ...row, mode: target.mode });
     }
     const sessions: HostReachableSession[] = rows.slice(0, LIST_AGENTS_SESSION_MAX).map((row) => {
       const title = row.title?.replace(/\s+/g, " ").trim();
@@ -355,7 +413,7 @@ export class SessionMessaging {
         ...(title ? { name: title } : {}),
         status: this.deps.sessions.get(row.sessionId)?.turnRunning === true ? "running" : "idle",
         mode: row.mode ?? "code",
-        ...(row.cwd ? { cwd: row.cwd } : {}),
+        ...(row.cwd && row.mode !== "cowork" ? { cwd: row.cwd } : {}),
       };
     });
     const omitted = rows.length - sessions.length;

@@ -18,6 +18,7 @@ export const LIST_SESSIONS_TOOL = "list_sessions";
  *  `ReaperStore`/`CleanerStore` precedent) so tests drive it without a live daemon. */
 export interface ListSessionsStore {
   list(): SessionRow[];
+  meta?(sessionId: string): { mode?: string };
   lastEventTs(sessionId: string): number;
   transcriptPath(sessionId: string): string;
   /** The files the session edited (the store's edited-files index), most recent first. */
@@ -31,6 +32,8 @@ export interface ListSessionsStore {
 
 export interface ListSessionsDeps {
   store: ListSessionsStore;
+  /** Host-owned caller/target authority, evaluated before reading or counting any target metadata. */
+  mayList?(callerSessionId: string, targetSessionId: string): boolean;
   /** THE activity derivation — `makeActivityDeriver`'s output, in production the very function
    *  `session.list` stamps its rows with (published by `startIpcServer`). Not rebuilt here: a
    *  management surface that derives state its own way is a second answer to one question. */
@@ -98,35 +101,48 @@ export function listSessionsToolDefs(deps: ListSessionsDeps): ToolDefinition[] {
       "Message a session (or resume a finished one) with SendMessage to its id; stop its running turn with TaskStop and its id.",
     ].join(" "),
     args: ListSessionsArgs,
-    run(args: z.infer<typeof ListSessionsArgs>) {
+    run(args: z.infer<typeof ListSessionsArgs>, ctx) {
       const at = now();
-      const rows = deps.store.list().filter((s) => participatesInActivity(s.mode));
+      const mayList = (row: SessionRow): boolean => {
+        if (deps.mayList !== undefined) return deps.mayList(ctx.sessionId, row.sessionId);
+        // Legacy host-only callers can omit the gate; Cowork never inherits this fallback.
+        let callerMode: string | undefined = ctx.mode;
+        if (deps.store.meta !== undefined) {
+          try { callerMode = deps.store.meta(ctx.sessionId).mode ?? "code"; } catch { return false; }
+        }
+        return (callerMode === "code" || callerMode === "dispatch") && row.mode !== "cowork";
+      };
+      const rows = deps.store.list().filter((s) => participatesInActivity(s.mode) && mayList(s));
       const line = (row: SessionRow, activity: Activity | undefined, why?: string[]): string => {
         const parts = [row.sessionId, stateOf(row, activity), row.mode ?? "code"];
         const startedAt = deps.turnStartedAt(row.sessionId);
         if (startedAt !== undefined) parts.push(`running ${elapsedS(startedAt, at)}s`);
-        parts.push(`cwd ${row.cwd ?? "(none)"}`);
+        if (row.mode !== "cowork") parts.push(`cwd ${row.cwd ?? "(none)"}`);
         if (row.title) parts.push(`"${row.title}"`);
-        parts.push(deps.store.transcriptPath(row.sessionId));
+        if (row.mode !== "cowork") parts.push(deps.store.transcriptPath(row.sessionId));
         if (why !== undefined && why.length > 0) parts.push(`matched: ${why.join(", ")}`);
         return parts.join(" | ");
       };
-      const footer = "Message one with SendMessage (to: its session id; a finished one is resumed for it); stop its running turn with TaskStop (task_id: its session id).";
+      const footer = rows.some(row => row.mode === "cowork")
+        ? "Message an authorized Project peer with SendMessage (to: its session id; a finished one is resumed for it). Project membership does not authorize TaskStop on another conversation."
+        : "Message one with SendMessage (to: its session id; a finished one is resumed for it); stop its running turn with TaskStop (task_id: its session id).";
 
       if (args.query !== undefined) {
-        if (deps.store.editedFilesBackfilled?.() === false) deps.store.backfillEditedFiles?.();
+        if (rows.some((row) => row.mode !== "cowork") && deps.store.editedFilesBackfilled?.() === false) deps.store.backfillEditedFiles?.();
         const activityOf = new Map<string, Activity | undefined>();
         const queryable: QueryableSession[] = rows.map((row) => {
           activityOf.set(row.sessionId, deps.derive(row, row.sessionId, at));
-          const firstMessage = deps.store.firstMessage(row.sessionId);
+          // Cowork discovery exposes bounded metadata. Host paths/transcript content require
+          // a separate guest-safe projection; never let a query's match reason disclose them.
+          const firstMessage = row.mode === "cowork" ? undefined : deps.store.firstMessage(row.sessionId);
           return {
             sessionId: row.sessionId,
             ...(row.title ? { title: row.title } : {}),
             ...(firstMessage !== undefined ? { firstMessage } : {}),
-            ...(row.cwd ? { cwd: row.cwd } : {}),
+            ...(row.mode !== "cowork" && row.cwd ? { cwd: row.cwd } : {}),
             createdAt: row.createdAt,
             lastEventTs: deps.store.lastEventTs(row.sessionId),
-            editedFiles: deps.store.editedFiles(row.sessionId),
+            editedFiles: row.mode === "cowork" ? [] : deps.store.editedFiles(row.sessionId),
           };
         });
         const ranked = rankSessions(queryable, parseSessionQuery(args.query, at));
