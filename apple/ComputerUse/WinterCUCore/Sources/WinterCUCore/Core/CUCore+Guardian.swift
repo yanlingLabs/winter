@@ -271,6 +271,11 @@ extension CUCore {
         return nil
     }
 
+    /// The interactive launchers whose panel a Return launches from (R17-d (ii)): Spotlight and the common launchers.
+    static let launcherPanels: Set<String> = ["com.apple.Spotlight", "com.runningwithcrayons.Alfred", "com.raycast.macos",
+                                              "com.obdev.LaunchBar"]
+    func isInteractiveLauncher(_ pid: pid_t) -> Bool { sys.bundleId(pid: pid).map(Self.launcherPanels.contains) ?? false }
+
     /// Apps whose acts can open any other app: Finder (a document opens in its app), the Dock, launchers.
     static let opensAnyApp: Set<String> = [
         "com.apple.finder", "com.apple.dock", "com.apple.Spotlight", "com.runningwithcrayons.Alfred",
@@ -407,7 +412,8 @@ extension CUCore {
     /// One event the listen-only session tap saw (not a type-21 process notification): the user's input only when
     /// `CUHardwareInput` says so — the window server's own events around an activation or a desktop change are not.
     func noteTapEvent(type: CGEventType, sourcePid: Int64, userData: Int64, flags: CGEventFlags = [], keycode: Int64 = -1,
-                      location: CGPoint? = nil, targetPid: Int64 = 0, now: TimeInterval) {
+                      location: CGPoint? = nil, targetPid: Int64 = 0, scrollPhase: Int64 = 0, momentumPhase: Int64 = 0,
+                      now: TimeInterval) {
         let kind = CUHardwareInput.classify(type: type, sourcePid: sourcePid, userData: userData)
         // (Not the user's — a synthetic event, the helper's own: nothing to read, not even Secure Event Input — round 17b.)
         guard kind != .none else { return }
@@ -418,11 +424,36 @@ extension CUCore {
         guardianLock.withLock { guardianCore.noteSecureInputIfChanged(secureNow, now: now) }
         noteHardwareInput(now: now, move: kind == .move)
         guard kind == .action else { return }
+        // The launch rule's facts (R17-d, the controller's ruling): input that can launch an app (i), and an interactive
+        // launcher's Return — a key the window server delivers to Spotlight's or a launcher's panel (ii).
+        if CUHardwareInput.canLaunch(type: type, flags: flags, keycode: keycode) {
+            let launcher = type == .keyDown && (keycode == 36 || keycode == 76) && targetPid > 0
+                && isInteractiveLauncher(pid_t(truncatingIfNeeded: targetPid))
+            guardianLock.withLock {
+                guardianCore.noteLaunchCapableInput(now: now)
+                if launcher { guardianCore.noteLauncherInput(now: now) }
+            }
+        }
         // Typing into the app in front (no ⌘/⌃, not Escape): an app left in front becomes their place — a restore never
         // pulls them out of it (the ruling, round 16).
         if type == .keyDown, !flags.contains(.maskCommand), !flags.contains(.maskControl), keycode != 53 {
             let front = sys.frontmostPid()
             guardianLock.withLock { guardianCore.userInputInFront(front, now: now) }
+        }
+        // A scroll in the app in front's own window: USE of an app left in front — their place, as typing in it is (round
+        // 18, the controller's ruling: scrolling there is work per I6). (The window under the pointer is read only while the
+        // app in front is a left one.)
+        // R18-b (the controller's ruling): only a scroll whose gesture BEGAN after the app came forward — a gesture's
+        // began event since then, or a plain wheel event (no phase) — never momentum, nor the tail of a gesture begun
+        // before it.
+        if type == .scrollWheel {
+            if scrollPhase == Self.scrollPhaseBegan { guardianLock.withLock { scrollGestureBeganAt = now } }
+            if momentumPhase == 0, let p = location, let front = sys.frontmostPid(),
+               let since = guardianLock.withLock({ guardianCore.isLeftInFront(front) ? guardianCore.frontSince(front) : nil }),
+               scrollPhase == 0 || guardianLock.withLock({ scrollGestureBeganAt.map { $0 >= since } ?? false }),
+               windowUnder(p)?.pid == front {
+                guardianLock.withLock { guardianCore.userInputInFront(front, now: now) }
+            }
         }
         noteUserInteraction(type: type, flags: flags, keycode: keycode, location: location, targetPid: targetPid)
         let secure = (type == .flagsChanged || type == .keyDown) && secureNow
@@ -952,7 +983,7 @@ extension CUCore {
     /// - no window: the empty desktop — Finder comes forward: claimed for Finder.
     /// A ⌘-click works a window in the background (no activation): no move. Returns the pid claimed, for the test.
     @discardableResult
-    func onPhysicalClick(at point: CGPoint, userData: Int64, flags: CGEventFlags = [], now: Double) -> pid_t? {
+    func onPhysicalClick(at point: CGPoint, userData: Int64, flags: CGEventFlags = [], clickCount: Int64 = 1, now: Double) -> pid_t? {
         guard !CUEventStamp.isOurs(userData) else { return nil }
         guard guardianLock.withLock({ guardianCore.active }) else { return nil }
         let own = getpid()
@@ -967,6 +998,11 @@ extension CUCore {
             // before the clicked one, which was then undone). Anything else in the Dock: an app switch of no known app.
             guard let app = sys.dockItemApp(at: point, dockPid: hit.pid), app != own else {
                 noteSwitchInput(now: now, .app)
+                // A tile that LAUNCHES (an app not running, Launchpad) — an interactive launcher (R17-d (ii)); the Trash, a
+                // stack, a minimized window, a separator, or a tile that can't be read are not (R18-a).
+                if sys.dockItemLaunches(at: point, dockPid: hit.pid) == true {
+                    guardianLock.withLock { guardianCore.noteLauncherInput(now: now) }
+                }
                 return nil
             }
             // The FRONT app's tile (R17-b, the controller's ruling): their place AT THE CLICK, as a click into its window
@@ -986,6 +1022,12 @@ extension CUCore {
             return app
         }
         guard !flags.contains(.maskCommand) else { return nil }
+        // A double-click in a Finder window on an application or a document — an interactive launcher (R17-d (ii)); never
+        // on a folder, nor where it can't be read (R18-a).
+        if clickCount >= 2, hit.layer == 0, sys.bundleId(pid: hit.pid) == "com.apple.finder",
+           sys.finderItemLaunches(at: point, finderPid: hit.pid) == true {
+            guardianLock.withLock { guardianCore.noteLauncherInput(now: now) }
+        }
         // A click into an ordinary window of a bound target: the user is working in it (round 10) — hands off it until it
         // leaves the front.
         if hit.layer == 0, boundTargetPids().contains(hit.pid) { userInteracted(hit.pid) }
@@ -1152,16 +1194,19 @@ private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
     // told apart.
     if type.rawValue != CUFocusTaps.processNotificationType {
         let pointer = type == .rightMouseDown || type == .otherMouseDown || type == .scrollWheel
+        let scroll = type == .scrollWheel
         core.noteTapEvent(type: type, sourcePid: event.getIntegerValueField(.eventSourceUnixProcessID),
                           userData: event.getIntegerValueField(.eventSourceUserData), flags: event.flags,
                           keycode: type == .keyDown ? event.getIntegerValueField(.keyboardEventKeycode) : -1,
                           location: pointer ? event.location : nil,
                           targetPid: type == .keyDown ? event.getIntegerValueField(.eventTargetUnixProcessID) : 0,
+                          scrollPhase: scroll ? event.getIntegerValueField(.scrollWheelEventScrollPhase) : 0,
+                          momentumPhase: scroll ? event.getIntegerValueField(.scrollWheelEventMomentumPhase) : 0,
                           now: core.clock.nowSeconds())
     }
     if type == .leftMouseDown {
         core.onPhysicalClick(at: event.location, userData: event.getIntegerValueField(.eventSourceUserData), flags: event.flags,
-                             now: core.clock.nowSeconds())
+                             clickCount: event.getIntegerValueField(.mouseEventClickState), now: core.clock.nowSeconds())
         return Unmanaged.passUnretained(event)
     }
     if type == .leftMouseUp {
@@ -1178,6 +1223,20 @@ private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
 
 /// What one input event is to the guardian. Pure.
 enum CUHardwareInput: Equatable {
+    /// Input that can launch an app (the launch rule's (1), R17-d (i), the controller's ruling): a button down, Return or
+    /// Enter, a key with ⌘, ⌃ or ⌥, a function key — never plain character typing, a key-up, a scroll or a pointer move.
+    static func canLaunch(type: CGEventType, flags: CGEventFlags, keycode: Int64) -> Bool {
+        switch type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown: return true
+        case .keyDown:
+            if keycode == 36 || keycode == 76 || functionKeys.contains(keycode) { return true }
+            return flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
+        default: return false
+        }
+    }
+    /// F1–F20's virtual key codes.
+    static let functionKeys: Set<Int64> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90]
+
     /// Not the user's: a process posted it (synthetic), the helper did (its stamp), or it is no input at all.
     case none
     /// The pointer moved, and nothing else.

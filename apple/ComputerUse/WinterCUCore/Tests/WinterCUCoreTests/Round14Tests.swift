@@ -69,15 +69,27 @@ final class Round14Tests: XCTestCase {
     }
 
     /// (1) Input of the user's BETWEEN the act and the process start (their Spotlight Return): their own launch — adopted.
+    /// R17-d (i), the controller's ruling: only input that can LAUNCH counts (a click, Return/Enter, a ⌘/⌃/⌥ chord, a
+    /// function key) — plain typing between is no launch of theirs: left in front and said, never adopted.
     func testAColdLaunchAfterTheUsersInputIsTheirs() {
         var g = started()
         g.noteCause(500, now: 10.0)
         g.noteOpenerCause(now: 10.0, scope: .apps(["com.apple.mail"]))
         g.noteHardwareAction(now: 10.1)
+        g.noteLaunchCapableInput(now: 10.1)  // their Return
         g.appLaunched(90, startedAt: 10.2, bundle: "com.apple.Notes", now: 10.25)
         let v = judge(&g, 90, bundle: "com.apple.Notes", now: 11.0)
         XCTAssertTrue(v.isUsers, "\(v)")
         XCTAssertEqual(g.view.app, 90, "their place")
+
+        var t = started()
+        t.noteCause(500, now: 10.0)
+        t.noteOpenerCause(now: 10.0, scope: .apps(["com.apple.mail"]))
+        t.noteHardwareAction(now: 10.1)  // a character typed: no launch
+        t.appLaunched(90, startedAt: 10.2, bundle: "com.apple.Notes", now: 10.25)
+        let typed = judge(&t, 90, bundle: "com.apple.Notes", now: 11.0)
+        if case .unexplained = typed {} else { XCTFail("plain typing between: left in front and said — \(typed)") }
+        XCTAssertEqual(t.view.app, 1, "never adopted")
     }
 
     /// (3) A left app the user then types in: their place — a restore never pulls them out of it.

@@ -276,6 +276,13 @@ final class FakeSystem: CUSystemBackend {
     /// The app whose Dock tile is under the pointer (a click on the Dock).
     var dockTile: pid_t?
     func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? { dockTile }
+    /// What a Dock click where no running app's tile is would do (R18-a): true launches, false not, nil unreadable.
+    var dockLaunches: Bool?
+    func dockItemLaunches(at point: CGPoint, dockPid: pid_t) -> Bool? { dockLaunches }
+    /// What a double-click in a Finder window at a point would open (R18-a): true an app or a document, false a folder,
+    /// nil unreadable.
+    var finderLaunches: Bool?
+    func finderItemLaunches(at point: CGPoint, finderPid: pid_t) -> Bool? { finderLaunches }
     /// Runs on every activation (after `front` is set): a test moves the Space back as macOS would.
     var onActivate: ((pid_t) -> Void)?
     /// Apps whose activation macOS refuses (a background caller's, under cooperative activation): recorded, no effect.
