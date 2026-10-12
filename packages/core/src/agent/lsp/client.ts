@@ -1,3 +1,4 @@
+import { daemonChildSpawnWithFloor, trackDaemonChildSpawn, type DaemonChildFloorApplier } from "../../runtime-sdk/daemon-path-fence";
 import { spawn, type ChildProcess } from "node:child_process";
 
 // Minimal LSP stdio client: JSON-RPC over child-process stdio, Content-Length framed (LSP's
@@ -233,13 +234,22 @@ export class LspClient {
   // the offending server in an LspNotSupportedError message; never consulted for routing/behavior.
   private serverName: string | undefined;
 
-  constructor(private readonly cfg: { command: string; args?: string[]; rootUri: string; startTimeoutMs?: number; diagSettleMs?: number; diagTimeoutMs?: number }) {}
+  constructor(private readonly cfg: { home?: string; applyFloor?: DaemonChildFloorApplier; command: string; args?: string[]; rootUri: string; startTimeoutMs?: number; diagSettleMs?: number; diagTimeoutMs?: number }) {}
 
   get alive(): boolean { return !this._dead; }
 
   async start(): Promise<void> {
     const timeoutMs = this.cfg.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
-    const child = spawn(this.cfg.command, this.cfg.args ?? [], { stdio: ["pipe", "pipe", "pipe"] });
+    const executable = this.cfg.home ? Bun.which(this.cfg.command) : this.cfg.command;
+    if (!executable) throw new Error("LSP executable unavailable");
+    const prepared = daemonChildSpawnWithFloor(this.cfg.home, {
+      command: executable, args: this.cfg.args ?? [], cwd: process.cwd(),
+      env: Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    }, this.cfg.applyFloor);
+    const child = spawn(prepared.command, prepared.args, { stdio: ["pipe", "pipe", "pipe"], cwd: prepared.cwd, env: prepared.env });
+    const retireFloor = trackDaemonChildSpawn(this.cfg.home, prepared, () => child.kill("SIGKILL"));
+    child.once("close", retireFloor);
+    child.once("error", retireFloor);
     this.child = child;
     child.on("error", (e) => this.die(new LspServerExitedError(this.withStderr(`lsp server failed to start: ${e.message}`))));
     child.on("exit", (code, signal) => this.die(new LspServerExitedError(this.withStderr(`lsp server exited (code=${code} signal=${signal})`))));

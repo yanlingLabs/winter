@@ -1,3 +1,4 @@
+import { assertDaemonPathAccess } from "../../runtime-sdk/daemon-path-fence";
 // ComputerV2 Phase 2 — `tab.upload(ref, paths)`: which files a script may hand a page's file input. Each path is
 // resolved (`realpath`) and must be a regular file — not a symlink (`lstat`) — inside the session's working directory
 // (its stored cwd) or its temp directory, never under the Winter home and never on the sandbox's read-deny list. At
@@ -61,6 +62,9 @@ export function checkUploadFiles(input: unknown, roots: UploadRoots): CheckedUpl
     if (link.isSymbolicLink()) throw new AutomationFailure("NotAllowed", `${shown} is a symbolic link — upload the file itself`);
     const path = real(given);
     if (path === undefined) throw new AutomationFailure("NotAllowed", `${shown}: no such file`);
+    try { assertDaemonPathAccess(roots.home, path, "/"); } catch {
+      throw new AutomationFailure("NotAllowed", "Protected Winter storage cannot be uploaded");
+    }
     const st = statSync(path);
     if (!st.isFile()) throw new AutomationFailure("NotAllowed", `${shown} is not a regular file`);
     if (!allowedRoots.some((r) => inside(path, r))) {
@@ -97,11 +101,12 @@ export function stageUploads(files: readonly CheckedUpload[], home: string, sess
     let src: number | undefined;
     let dst: number | undefined;
     try {
-      try { src = openSync(f.path, constants.O_RDONLY | constants.O_NOFOLLOW); } catch {
+      try { assertDaemonPathAccess(home, f.path, "/"); src = openSync(f.path, constants.O_RDONLY | constants.O_NOFOLLOW); } catch {
         throw new AutomationFailure("NotAllowed", `${basename(f.path)} changed while it was being uploaded — try again`);
       }
       const st = fstatSync(src);
       if (!st.isFile() || st.dev !== f.dev || st.ino !== f.ino) throw new AutomationFailure("NotAllowed", `${basename(f.path)} changed while it was being uploaded — try again`);
+      assertDaemonPathAccess(home, f.path, "/");
       const dest = join(dir, name);
       dst = openSync(dest, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       for (;;) {

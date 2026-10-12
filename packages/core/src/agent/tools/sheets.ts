@@ -1,3 +1,4 @@
+import { assertDaemonPathAccess } from "../../runtime-sdk/daemon-path-fence";
 import { z } from "zod";
 import { realpathSync } from "node:fs";
 import { resolveLeafSymlinks, canonicalizeForWrite } from "../paths";
@@ -431,6 +432,8 @@ async function settleOrAbort(
 // ================================================================================================
 
 export interface SheetsToolDeps {
+  /** Trusted daemon home; never derived from tool arguments. */
+  home?: string;
   /** `PanelCommandRegistry.dispatch` — identical contract `browser.ts`'s own deps document: the
    *  returned promise ALWAYS settles (result or timeout), never rejects. */
   dispatch(cmd: {
@@ -711,6 +714,8 @@ export function sheetsToolDefs(deps: SheetsToolDeps): ToolDefinition[] {
         throw new Error(`path is outside the allowed directories: ${a.path}. Winter's office tools `
           + "are limited to the session's working directories.");
       }
+
+      assertDaemonPathAccess(deps.home, resolvedPath, "/", a.verb === "info" || a.verb === "read" ? "read" : "write");
 
       // Rung 3 — reach (the only TRANSIENT rung, checked last of the three, mirroring browser.ts's
       // own "permanent facts before transient ones" ladder).
