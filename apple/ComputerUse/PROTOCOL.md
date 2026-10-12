@@ -748,29 +748,39 @@ acts: it only looks.
   title comes to contain the text. A `ref` is a `target.snapshot` ref; a text or title is 1…500 characters, matched as
   `target.waitFor` matches (names and non-secure values, case and diacritics folded, the first 1,500 elements read).
   `submitted` and `navigated` are for browser tabs only: refused `invalid_params`.
-- **Arming** checks, in order, and arms nothing when one fails: the target is bound and alive (`target_lost`); the
-  Accessibility grant (`permission_missing`); never Winter (`refused`, `winter_itself`); the window exposes accessibility
-  (a capture-only bind: `unsupported`); never System Settings' Privacy & Security (`refused`, `privacy_pane`); the ref's
+- **Arming** checks, in this order, and arms nothing when one fails: the params' shape — `watchId`, `targetId`, the
+  condition (`invalid_params`); a `watchId` already armed (`invalid_params`); more than 64 watches in the helper
+  (`busy`); the Accessibility grant (`permission_missing`); the target bound (`target_lost`) and alive (`target_lost`);
+  never Winter (`refused`, `winter_itself`); the window exposes accessibility (a capture-only bind: `unsupported`,
+  `data.reason: "no_accessibility"`); never System Settings' Privacy & Security (`refused`, `privacy_pane`); the ref's
   element exists (`stale_ref`); never a password or payment field, nor anything inside one (`refused`, `secure_field`);
-  a STATE condition (`appeared`, `gone`, `titled`) that already holds is refused `not_allowed` with `reason:
-  "already_met"` (the controller's ruling: only a false→true transition after arming fires); a `watchId` already armed
-  is `invalid_params`; more than 64 watches in the helper is `busy`.
+  a STATE condition (`appeared`, `gone`, `titled`) that already holds (`not_allowed`, `reason: "already_met"` — the
+  controller's ruling: only a false→true transition after arming fires); last, the arming daemon connection still open
+  and the request not given up (`cancelled` — an arm that would outlive its connection arms nothing). An engine that is
+  going away answers `unsupported` with `data.reason: "engine_gone"`; an older helper answers `unsupported` ("unknown
+  method"). A refused arm keeps nothing.
 - **The answer**: `element` — the watched element as `target.snapshot` names it: its role words and its title, else its
   description, else its placeholder; `targetLabel` — "<App> — <window title>" (the title as the state header prints it:
   app window titles are not redacted). Both are screen text: the daemon fences them for the model.
-- **A watch lives on its own.** It holds the target's pid, window and element itself (and reads the window through its
-  own element and ref cache, never touching the target's refs), so `target.release`, `session.ended` (a script's reset,
-  a worker restart, the worker's idle end) never end it. It ends on `watch.cancel`, on its one `watchEvent`, when the
+- **A watch lives on its own** (the controller's ruling: better than keeping the target bound). It holds the target's
+  pid, window and element itself (and reads the window through its own element and ref cache, never touching the
+  target's refs), so `target.release`, `session.ended` (a script's reset, a worker restart, the worker's idle end) never
+  end it. It ends on `watch.cancel`, on its one `watchEvent`, when the
   daemon connection that armed it closes (silently — the daemon reads its connection closing as the helper gone and ends
   each trigger itself), or at its backstop (silently). An armed watch keeps the helper running (§8.1).
 - **What fires it** — only what the USER did, never Winter's own input:
-  - `clicked`: a HARDWARE mouse-down (any button) whose app hit-test (`AXUIElementCopyElementAtPosition` in the window's
-    app, the window under the point being that app's) lands on the element or inside it. The helper's own listen-only
-    session tap for the three mouse-down types (nothing else: no keys, no moves) runs only while a `clicked` or `changed`
-    watch is armed — the same public API as the work watcher (§4.12), covered by the Accessibility grant: no other
-    permission, no prompt. An event with a source process (the helper's own stamped ones, another process's synthetic
-    ones) never counts — except, on a live-test instance only, the live suite's test click (§9). The point is dropped
-    once judged; nothing of it is logged or sent.
+  - `clicked`: a HARDWARE LEFT mouse-down (the controller's ruling: no other button) on the element or inside it. The
+    helper's own listen-only session tap for the left mouse-down alone (no other button, no keys, no moves) runs only
+    while a `clicked` or `changed` watch is armed — the same public API as the work watcher (§4.12), covered by the
+    Accessibility grant: no other permission, no prompt. A click outside every watched window (as last read) is judged
+    with no window-server query; one in the watched app's window (the window under the point) is the element's when it
+    lies in the element's frame read in the last 1.5 s; else the app's own hit test (`AXUIElementCopyElementAtPosition`)
+    is asked directly — never queued behind the app's work — and asked again while the app is busy; an element GONE
+    right after a click in its window (the click closed its sheet) counts, unless a fresh frame of it puts the click
+    elsewhere. An event with a source process (the helper's own stamped ones, another process's synthetic ones) never
+    counts — except, on a live-test instance only, the live suite's test click (§9). A hardware click is the user's by
+    its source alone: Winter's own input in flight never drops one. The point is dropped once judged; nothing of it is
+    logged or sent.
   - `changed`: the user's input must explain the change. Keys can't be seen without Input Monitoring (never asked for),
     so a change counts as the user's when the field (or something inside it) holds the keyboard focus while its app is
     frontmost, or when their hardware click went to the field within the last 30 s (to its window within 3 s). A change
@@ -781,12 +791,19 @@ acts: it only looks.
   - **Winter's own input**: a change that lands while a request that can send input to that app is in flight —
     `target.act`, `target.applescript`, `target.foreground`, `target.useWindow` on any target of that app; `target.bind`
     and `apps.openDocument` for EVERY app (their app is known only once they answer) — or within 500 ms after it, is
-    Winter's: a click then is ignored, a state transition becomes the baseline (it must go and come back to fire), and a
-    `gone` element removed by it is lost.
-- **When it looks**: an `AXObserver` per watched app (creations, destructions, values, titles, layout, focus, windows),
-  debounced 250 ms and at most 1 s apart while notifications keep coming; a fallback look every 5 s; a `changed` field's
-  settle. Every look reads the window afresh on the app's own queue. Timers carry leeway (an hour-long watch costs almost
-  no wake-ups).
+    Winter's: a state transition becomes the baseline (it must go and come back to fire), a `changed` value too, and a
+    `gone` element removed by it is lost. A change is dated by the FIRST notification of its burst (a look after the
+    grace judges what landed after it as the user's); a look no notification asked for (the fallback, a settle) judges
+    the whole interval since the last look.
+- **When it looks**: an `AXObserver` per watched app (creations, destructions, values, titles, layout, focus, window
+  creation — no moved or resized notifications), debounced 250 ms and at most 1 s apart while notifications keep coming;
+  a text watch (`appeared`, `gone` with a text) reads the window's tree at most once per 2 s (the looks in between wait
+  for the 2 s to end, keeping their date), a `titled` one reads the title alone; a fallback look every 10 s; a `changed`
+  field's settle. Every look reads the window afresh on the app's own queue. Timers carry leeway, and while any watch is
+  armed the helper holds off App Nap (a user-initiated activity that still allows idle system sleep). Measured (2026-10-12,
+  a screen-free fixture of 300+ elements, one watch of each kind): idle, the watching engine 0.13–0.27 % of one core and
+  +0.3 wake-ups/s, the watched app 0.4–0.5 % (the text watches' fallback reads); a storm of 10 changes a second, the
+  engine 0.6 % and ~5 wake-ups/s, the text watch reading its tree 14–16 times in 30 s.
 - **Lost** (`watchEvent` `outcome: "lost"`), with the helper's `reason`: "the app quit"; "the window closed" (a window
   that reads as gone is looked at again 1.5 s later — a full-screen or Space transition); "the element is gone (the
   window changed under it)"; "the element went away while Winter was acting in the app"; "Winter Computer Use lost its
@@ -986,7 +1003,7 @@ None of this exists in a dev or release binary; `scripts/release.ts` scans the s
 | `test.capture` | `{windowId, source: "skylight"\|"stream", path, rect?: [x, y, w, h]}` | `{width, height, frameAgeMs?}` — writes one PNG (inside the instance's home only) of a window: the off-Space still path (`skylight`) or the latest frame of the test stream (`stream`); `rect` in the window's points |
 | `test.stream` | `{windowId, on, fps?}` | `{running}` — starts/stops a desktop-independent ScreenCaptureKit stream on that window (the freshness measurement) |
 | `test.automation` | `{pid?, bundleId?}` | `{status: "granted" \| "would_ask" \| "denied" \| "not_running" \| "unknown", code}` — may this helper already send the app Apple Events; asked with `AEDeterminePermissionToAutomateTarget(…, askUserIfNeeded: false)`, so it NEVER raises macOS's Automation question (the suite runs an AppleScript-backed scenario only on `granted`) |
-| `test.userClick` | `{pid, name}` | `{clicked}` — (1.17.0) the USER's click for the wake-trigger rows: a real left click posted at the HID level (the pointer moves there and is put back) at the centre of the first element of that app whose title or description is `name`, stamped `CUWatchTestStamp` — the one synthetic input a live-test instance's watches count as the user's (nothing else counts it, and no other helper has the route) |
+| `test.userClick` | `{pid, name, stamp?}` | `{clicked}` — (1.17.0) the USER's click for the wake-trigger rows: a real left click posted at the HID level (the pointer moves there and is put back) at the centre of the first element of that app whose title or description is `name`, stamped `CUWatchTestStamp` — the one synthetic input a live-test instance's watches count as the user's (nothing else counts it, and no other helper has the route); `stamp: "winter"` stamps it as the helper's own instead (the converse row: a watch must ignore it). Its element search never runs on the main actor |
 
 ## 10. Compatibility and versioning
 
