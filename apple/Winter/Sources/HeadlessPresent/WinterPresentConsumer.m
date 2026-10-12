@@ -2,6 +2,7 @@
 
 #import <IOSurface/IOSurface.h>
 #include <mach/mach.h>
+#include <math.h>
 #include <mach/mach_time.h>
 #include <mach/notify.h>
 #include <servers/bootstrap.h>
@@ -15,6 +16,7 @@
 @property(nonatomic, readwrite) uint64_t sequence, paintedAt, copiedAt, receivedAt, inputSequence;
 @property(nonatomic, readwrite) uint32_t droppedBefore;
 @property(nonatomic, readwrite) double scale;
+@property(nonatomic, readwrite) int cssWidth, cssHeight;
 @end
 
 @implementation WinterPresentFrame
@@ -75,6 +77,7 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
   os_unfair_lock _lock;   // guards the slot bookkeeping (releases arrive from GPU completion threads)
   uint32_t _generation;
   double _scale;
+  int _cssWidth, _cssHeight;  // the generation's view in CSS pixels
   id<MTLTexture> _textures[WinterPresentPoolSlots];
   BOOL _held[WinterPresentPoolSlots];
   uint64_t _inputSequence;
@@ -224,7 +227,10 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
       if (!ok) return;           // destroyed already: never twice
       os_unfair_lock_lock(&_lock);
       _generation = m->generation;
-      _scale = m->scale;
+      _scale = m->scale >= 1.0 && m->scale <= 4.0 ? m->scale : 1.0;
+      // The view these frames show: their pixels divided by the scale they were painted at.
+      _cssWidth = (int)lround(m->pixelWidth / _scale);
+      _cssHeight = (int)lround(m->pixelHeight / _scale);
       for (int i = 0; i < WinterPresentPoolSlots; i++) {
         _textures[i] = textures[i];
         _held[i] = NO;  // the old generation's reads finish on their own; its slots are not ours to release
@@ -246,6 +252,7 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
         _staleFrames++;
       }
       const double scale = _scale;
+      const int cssWidth = _cssWidth, cssHeight = _cssHeight;
       os_unfair_lock_unlock(&_lock);
       if (!current) break;
       WinterPresentFrame *frame = [[WinterPresentFrame alloc] init];
@@ -259,6 +266,8 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
       frame.inputSequence = m->inputSequence;
       frame.droppedBefore = m->dropped;
       frame.scale = scale;
+      frame.cssWidth = cssWidth;
+      frame.cssHeight = cssHeight;
       [delegate presentConsumer:self frame:frame];
       break;
     }
@@ -507,9 +516,11 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
   return [self sendToProducer:&input.header size:sizeof(input) timeout:droppable ? 0 : 50] ? sequence : 0;
 }
 
-- (void)setScale:(double)scale {
+- (void)setViewWidth:(int)width height:(int)height scale:(double)scale {
   WinterPresentResizeMsg m = {};
   m.header.msgh_id = WinterPresentMsgResize;
+  m.cssWidth = width > 0 && height > 0 ? width : 0;
+  m.cssHeight = width > 0 && height > 0 ? height : 0;
   m.scale = scale;
   [self sendToProducer:&m.header size:sizeof(m) timeout:50];
 }

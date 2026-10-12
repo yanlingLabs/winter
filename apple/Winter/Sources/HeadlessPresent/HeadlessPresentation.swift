@@ -31,7 +31,8 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
     @Published private(set) var phase: Phase = .connecting
     /// The person holds control (input, IME, edits, dialogs, file choosers) — from the welcome and every CONTROL.
     @Published private(set) var control: Bool
-    /// The page's size in CSS pixels (the welcome's).
+    /// The page's view in CSS pixels as last drawn (the welcome's until the first frame): what a point in the panel's
+    /// view maps onto.
     @Published private(set) var cssSize = CGSize(width: 1280, height: 800)
     /// An action of the person's on its way to the daemon.
     @Published private(set) var pending: BrowserLinkHeadlessAction?
@@ -58,11 +59,14 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
     /// The store's hook: the presentation ended by itself.
     var onEnded: ((HeadlessPresentation) -> Void)?
 
-    // The render scale.
-    private var sentScale: Double = 1
-    private var wantedScale: Double?
-    private var scaleWork: DispatchWorkItem?
-    static let scaleDebounce: TimeInterval = 0.25
+    // The view the page is laid out in (the panel's size at its backing scale): the newest wish, the last one sent, and
+    // when. Sent at most every `viewInterval` while the panel is being resized (the producer applies one at most every
+    // 300 ms anyway), the newest always last.
+    private var wantedView: HeadlessPresentGeometry.ViewWish?
+    private var sentView: HeadlessPresentGeometry.ViewWish?
+    private var viewSentAt: TimeInterval = 0
+    private var viewWork: DispatchWorkItem?
+    static let viewInterval: TimeInterval = 0.1
 
     // Dialogs and file choosers wait here until a view on a window can show them, one at a time.
     private enum Prompt {
@@ -109,7 +113,7 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
         guard !closed else { return }
         closed = true
         teardownPrompts()
-        scaleWork?.cancel()
+        viewWork?.cancel()
         renderer.reset()
         let consumer = ConsumerRef(consumer)
         queue.async { consumer.consumer.close() }
@@ -120,10 +124,19 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
     fileprivate func welcomed(cssWidth: Int32, cssHeight: Int32, scale: Double, control: Bool) {
         guard !closed else { return }
         if cssWidth > 0, cssHeight > 0 { cssSize = CGSize(width: Int(cssWidth), height: Int(cssHeight)) }
-        sentScale = scale
         self.control = control
         phase = .live
-        if let wanted = wantedScale { scheduleScale(wanted) }
+        // The page is still in the agent's view: the panel's own size goes at once.
+        sentView = nil
+        viewSentAt = 0
+        scheduleView()
+        view?.presentationChanged()
+    }
+
+    /// The renderer drew a frame of another view (a new size or scale applied): points map onto it from now on.
+    fileprivate func contentSizeChanged(_ size: CGSize) {
+        guard !closed, size.width > 0, size.height > 0, size != cssSize else { return }
+        cssSize = size
         view?.presentationChanged()
     }
 
@@ -161,7 +174,7 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
         guard !closed else { return }
         closed = true
         teardownPrompts()
-        scaleWork?.cancel()
+        viewWork?.cancel()
         renderer.reset()
         phase = .ended(reason)
         view?.presentationChanged()
@@ -261,25 +274,37 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
         }
     }
 
-    /// The view wants pixels at `scale` (device pixels per CSS pixel): asked of the producer after the welcome, only
-    /// when it changed, and only once a live resize has settled.
-    func viewWants(scale: Double) {
-        wantedScale = scale
+    /// The panel's view wants the page laid out in `wish` (its size in points at its backing scale): asked of the
+    /// producer after the welcome, only when it changed, at most every `viewInterval` while the panel is being resized —
+    /// the newest wish always reaching it last. The page reflows (never reloads).
+    func viewWants(_ wish: HeadlessPresentGeometry.ViewWish) {
+        wantedView = wish
         guard phase == .live else { return }
-        scheduleScale(scale)
+        scheduleView()
     }
 
-    private func scheduleScale(_ scale: Double) {
-        scaleWork?.cancel()
-        guard scale != sentScale, !closed else { return }
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, !self.closed, self.phase == .live, scale != self.sentScale else { return }
-            self.sentScale = scale
-            let consumer = ConsumerRef(self.consumer)
-            self.queue.async { consumer.consumer.setScale(scale) }
+    private func scheduleView() {
+        guard !closed, phase == .live, let wish = wantedView, wish != sentView, viewWork == nil else { return }
+        let wait = viewSentAt + Self.viewInterval - ProcessInfo.processInfo.systemUptime
+        guard wait > 0 else {
+            sendView(wish)
+            return
         }
-        scaleWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.scaleDebounce, execute: work)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.viewWork = nil
+            guard !self.closed, self.phase == .live, let wish = self.wantedView, wish != self.sentView else { return }
+            self.sendView(wish)
+        }
+        viewWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
+    }
+
+    private func sendView(_ wish: HeadlessPresentGeometry.ViewWish) {
+        sentView = wish
+        viewSentAt = ProcessInfo.processInfo.systemUptime
+        let consumer = ConsumerRef(consumer)
+        queue.async { consumer.consumer.setViewWidth(wish.width, height: wish.height, scale: wish.scale) }
     }
 
     // MARK: - The person's actions (set by the store)
@@ -441,6 +466,10 @@ final class HeadlessPresentBridge: NSObject, WinterPresentConsumerDelegate, @unc
 
     init(renderer: HeadlessPresentRenderer) {
         self.renderer = renderer
+        super.init()
+        // The view the drawn frames show changed (the producer applied a new size or scale): the main thread maps points
+        // onto it from now on.
+        renderer.onContentSize = { [weak self] size in self?.onMain { $0.contentSizeChanged(size) } }
     }
 
     private func onMain(_ work: @escaping @MainActor (HeadlessPresentation) -> Void) {

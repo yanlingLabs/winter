@@ -17,13 +17,18 @@
 //
 // The page also runs a CSS animation, so frames keep coming at the presentation's 60 a second.
 //
+// Every presentation is laid out in the PANEL's size (`--panel WxH`, points; 704×900 by default — the drill's panel) at
+// a backing scale of 2, as Winter.app asks: input→pixel and the GPU copy are measured at that size, and one step drags the
+// panel's edge (a wish every 40 ms), moves it to a 1× display and back, and checks the agent's own 1280×800 at 1 comes
+// back when the presentation ends — the oracle holding through all of it (a reflow, never a reload).
+//
 // Wire version 2, with the person in control: a page dialog shown to them and answered there once; an IME composition
 // and a paste (its text from the viewer) into a field; a file chooser answered with a copy inside the uploads folder,
 // and an answer naming a file anywhere else refused; the control messages; and a WINDOW the person opens (a sign-in
 // window): created by CEF with the opener kept (the window posts to `window.opener`), announced as a tab of its own
 // (`headless.popupOpened`), presentable, and gone as a tab when the page closes it.
 //
-//   bun scripts/browser-e2e/headless/present/proof.ts --app "<Winter Headless Dev.app>" [--cycles 8] [--report <file>]
+//   bun scripts/browser-e2e/headless/present/proof.ts --app "<Winter Headless Dev.app>" [--cycles 8] [--panel 704x900] [--report <file>]
 //     [--skip dialog,ime,files,window,drag]   leave out version 2's steps (to tell which one a failure follows)
 //     [--helper-log]              print the helper's stderr when something failed
 import { spawn, spawnSync } from "node:child_process";
@@ -39,6 +44,9 @@ function arg(name: string): string | undefined {
 const app = arg("--app");
 if (app === undefined) { console.error("usage: proof.ts --app <Winter Headless .app> [--cycles N] [--report file]"); process.exit(2); }
 const cycles = Number(arg("--cycles") ?? "8");
+// The panel the page is shown in, in points (it is laid out in that size at the backing scale, 2 here): the drill's panel
+// was about 704 points wide.
+const [panelW, panelH] = (arg("--panel") ?? "704x900").split("x").map(Number) as [number, number];
 const exe = join(app, "Contents", "MacOS", app.split("/").pop()!.replace(/\.app$/, ""));
 const repo = join(import.meta.dir, "..", "..", "..", "..");
 const work = mkdtempSync(join(tmpdir(), "winter-present-proof-"));
@@ -91,6 +99,8 @@ document.getElementById("file").addEventListener("change", (e) => {
   if (f) f.text().then((t) => { S.files = f.name + ":" + f.size + ":" + t; });
 });
 document.addEventListener("visibilitychange", () => { S.visibilityChanges++; S.hidden = document.hidden; });
+S.resizes = 0;
+window.addEventListener("resize", () => { S.resizes++; });
 const tick = (() => { let n = 0; return () => ++n; })();
 let parity = 0;
 document.addEventListener("keydown", (e) => {
@@ -108,7 +118,7 @@ history.pushState({ n: 1 }, "", "#one");
 history.pushState({ n: 2 }, "", "#two");
 setInterval(() => {
   S.ticks = tick();
-  document.body.dataset.sentinel = JSON.stringify({ ...S, history: history.length, a: document.getElementById("a").value, b: document.getElementById("b").value, s: document.getElementById("s").value, c: document.getElementById("c").value });
+  document.body.dataset.sentinel = JSON.stringify({ ...S, history: history.length, a: document.getElementById("a").value, b: document.getElementById("b").value, s: document.getElementById("s").value, c: document.getElementById("c").value, w: innerWidth, h: innerHeight, dpr: devicePixelRatio });
 }, 100);
 </script>`;
 let serverPort = 0;
@@ -220,6 +230,15 @@ class ViewerProc {
     }
     throw new Error(`the viewer never said ${event}: ${JSON.stringify(this.events.slice(-5))}`);
   }
+  /** The first event `event` (at or after index `from`) that `match` accepts. */
+  async untilMatch(event: string, match: (e: ViewerEvent) => boolean, ms = 10_000, from = 0): Promise<ViewerEvent> {
+    for (const end = Date.now() + ms; Date.now() < end;) {
+      const e = this.events.slice(from).find((x) => x.event === event && match(x));
+      if (e !== undefined) return e;
+      await Bun.sleep(10);
+    }
+    throw new Error(`the viewer never said ${event} as expected: ${JSON.stringify(this.events.filter((x) => x.event === event).slice(-5))}`);
+  }
   async stats(): Promise<ViewerEvent> {
     const before = this.events.filter((e) => e.event === "stats").length;
     this.send({ cmd: "stats" });
@@ -240,6 +259,19 @@ async function present(control: boolean): Promise<{ viewer: ViewerProc; nonce: s
   const r = await command("headless.present", { tabId: "w-1", nonce, viewerRequirement, control, scale: 2 });
   const viewer = new ViewerProc(String(r.service), nonce);
   return { viewer, nonce, requestedAt };
+}
+
+/** The panel asks for the page to be laid out in `w`×`h` CSS pixels at `scale` (its size in points at its backing scale):
+ *  resolved with the time until the first frame of that view reached the viewer. */
+const viewWaits: number[] = [];
+async function atView(viewer: ViewerProc, w: number, h: number, scale: number, ms = 5_000): Promise<number> {
+  const from = viewer.events.length;
+  const t0 = performance.now();
+  viewer.send({ cmd: "view", width: w, height: h, scale });
+  await viewer.untilMatch("generation", (e) => e.cssWidth === w && e.cssHeight === h && e.scale === scale && e.width === Math.round(w * scale) && e.height === Math.round(h * scale), ms, from);
+  const waited = performance.now() - t0;
+  viewWaits.push(waited);
+  return waited;
 }
 
 // The agent's own read of the sentinel (its world), and the server's.
@@ -314,6 +346,9 @@ try {
     await viewer.until("welcome");
     for (const end = Date.now() + 5_000; Date.now() < end && (await viewer.stats()).frames === 0;) await Bun.sleep(50);
     firstFrameMs.push(performance.now() - requestedAt);
+    // As the panel does: the page laid out in its size at its backing scale, so input→pixel and the GPU copy are
+    // measured at the size the person really sees.
+    await atView(viewer, panelW, panelH, 2);
     await Bun.sleep(500);
     await command("headless.control", { tabId: "w-1", control: true });
     viewer.send({ cmd: "click", x: bBox.x + 10, y: bBox.y + bBox.height / 2 });
@@ -353,6 +388,77 @@ try {
   const ports = producerStats.map((p) => Number(p.taskPorts));
   check("the helper holds no more Mach ports after many presentations than after the first ones (no leaked right)",
     ports.length >= 3 && ports[ports.length - 1]! <= ports[1]! + 8, `port names after each: ${ports.join(" ")}`);
+
+  // ── the panel's size: the page laid out in it at the backing scale, following a live resize and a move to another
+  //    display, re-laid out (never reloaded), and the agent's own view back when the presentation ends ──
+  {
+    const before = await sentinelState();
+    const { viewer } = await present(true);
+    await viewer.until("welcome");
+    const firstWait = await atView(viewer, panelW, panelH, 2);
+    await Bun.sleep(300);
+    const laid = await sentinelState();
+    check("the page is laid out in the panel's size at its backing scale while shown (one CSS pixel per point, crisp)",
+      laid.w === panelW && laid.h === panelH && laid.dpr === 2,
+      `the page reads ${String(laid.w)}×${String(laid.h)} at ${String(laid.dpr)} (asked ${panelW}×${panelH} at 2; first frame of it ${firstWait.toFixed(0)} ms after the ask)`);
+    // A live resize: the panel's edge dragged for 0.6 s, a wish every 40 ms (the panel sends one at most every 100 ms;
+    // this is harder), then let go.
+    const gensBefore = viewer.events.filter((e) => e.event === "generation").length;
+    const dragFrom = viewer.events.length;
+    const resizesBefore = Number(laid.resizes);
+    const steps = 15;
+    let w = panelW, h = panelH;
+    let lastWishAt = 0;
+    for (let i = 1; i <= steps; i++) {
+      w = panelW + i * 20;
+      h = panelH - i * 10;
+      viewer.send({ cmd: "view", width: w, height: h, scale: 2 });
+      lastWishAt = performance.now();
+      await Bun.sleep(40);
+    }
+    await viewer.untilMatch("generation", (e) => e.cssWidth === w && e.cssHeight === h, 5_000, dragFrom);
+    const settledMs = performance.now() - lastWishAt;
+    await Bun.sleep(300);
+    const dragged = await sentinelState();
+    const gens = viewer.events.filter((e) => e.event === "generation").length - gensBefore;
+    check("a live resize: the page follows the panel, re-laid out at most every 300 ms, and ends at the panel's final size",
+      dragged.w === w && dragged.h === h && gens >= 2 && gens <= Math.ceil((steps * 40) / 300) + 2,
+      `${steps} wishes over ${steps * 40} ms → ${gens} new view(s); the page reads ${String(dragged.w)}×${String(dragged.h)} (asked ${w}×${h}); ${Number(dragged.resizes) - resizesBefore} resize event(s); the final view drawn ${settledMs.toFixed(0)} ms after the last wish`);
+    // To a 1× display and back (a window moved between screens).
+    await atView(viewer, w, h, 1);
+    await Bun.sleep(200);
+    const onOne = await sentinelState();
+    await atView(viewer, w, h, 2);
+    await Bun.sleep(200);
+    const onTwo = await sentinelState();
+    check("moved to a 1× display and back: the page renders at each display's scale",
+      onOne.dpr === 1 && onTwo.dpr === 2 && onOne.w === w && onTwo.w === w, `devicePixelRatio ${String(onOne.dpr)} then ${String(onTwo.dpr)}`);
+    // Input→pixel at the panel's size, with the person in control (typing at the end of their field, as in the cycles).
+    await atView(viewer, panelW, panelH, 2);
+    await Bun.sleep(300);
+    viewer.send({ cmd: "click", x: bBox.x + 10, y: bBox.y + bBox.height / 2 });
+    await Bun.sleep(150);
+    viewer.send({ cmd: "key", code: 35, native: 119, fn: 0xf72b });  // End
+    await Bun.sleep(50);
+    for (let p = 0; p < 20; p++) { viewer.send({ cmd: "press" }); await Bun.sleep(150); }
+    await Bun.sleep(300);
+    const vs = await viewer.stats();
+    const ps = await command("headless.unpresent", { tabId: "w-1" });
+    viewer.send({ cmd: "bye" });
+    await viewer.exited();
+    report.panelSize = { panel: [panelW, panelH], viewer: vs, producer: ps, firstViewMs: firstWait, liveResize: { steps, newViews: gens, settledMs } };
+    check("input→pixel and the GPU copy measured at the panel's size at 2×",
+      Number(vs.inputToPixelCount) >= 16 && Number(ps.cssWidth) === panelW && Number(ps.scale) === 2 && vs.reusedInFlight === 0,
+      `${String(vs.inputToPixelCount)} presses: input→pixel p50 ${Number(vs.inputToPixelP50).toFixed(1)} ms, p95 ${Number(vs.inputToPixelP95).toFixed(1)} ms; the GPU copy (${panelW * 2}×${panelH * 2} px) p50 ${Number(ps.copyP50Ms).toFixed(2)} ms, p99 ${Number(ps.copyP99Ms).toFixed(2)} ms, max ${Number(ps.copyMaxMs).toFixed(2)} ms; ${String(ps.resizes)} view change(s) asked`);
+    userText += "k".repeat(20);  // the presses reached the person's focused field too
+    // The presentation is over: the agent's own view comes back (after the 300 ms settle at most).
+    let back = await sentinelState();
+    for (const end = Date.now() + 2_000; Date.now() < end && !(back.w === 1280 && back.h === 800 && back.dpr === 1);) { await Bun.sleep(100); back = await sentinelState(); }
+    check("when the presentation ends, the agent's own view comes back: 1280×800 at 1",
+      back.w === 1280 && back.h === 800 && back.dpr === 1 && before.w === 1280 && before.dpr === 1,
+      `before ${String(before.w)}×${String(before.h)} at ${String(before.dpr)}; after ${String(back.w)}×${String(back.h)} at ${String(back.dpr)}; ${Number(back.resizes) - Number(before.resizes)} resize event(s) in all`);
+    await oracle("the panel's size (a live resize, a move between displays)", { b: userText });
+  }
 
   // ── a scale change mid-presentation: new generations, nothing stale shown ──
   {
@@ -637,6 +743,9 @@ try {
     inputToPixelMsP50PerCycle: all("inputToPixelP50"), inputToPixelMsP95PerCycle: all("inputToPixelP95"), inputToPixelMsP99PerCycle: all("inputToPixelP99"),
     frameAgeMsP50PerCycle: all("frameAgeP50"), frameAgeMsP95PerCycle: all("frameAgeP95"),
     copyMsP50: producerStats.map((p) => Number(p.copyP50Ms)), copyMsP99: producerStats.map((p) => Number(p.copyP99Ms)), copyMsMax: producerStats.map((p) => Number(p.copyMaxMs)),
+    // From the panel's wish to the first frame of that view at the viewer (the 300 ms settle included when it applies).
+    viewWaitMs: { p50: pct(viewWaits, 0.5), max: Math.max(...viewWaits, -1) },
+    panel: [panelW, panelH],
   };
   report.summary = summary;
   console.log(`INFO ${JSON.stringify(summary)}`);

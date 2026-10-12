@@ -6,27 +6,51 @@ import XCTest
 import WinterKit
 @testable import Winter
 
-/// ComputerV2 Phase 4 (lane H3) — the headless presentation's pure pieces in Winter.app: the geometry (fit, the
-/// inverse fit, the render scale, wheel deltas, the IME rect), the key and cursor tables, the modifier bits, the
-/// upload copier's rules, the chrome's state model, and the store's handling of the browser link's ops that need no
-/// producer. Nothing here launches a helper or connects to one.
+/// ComputerV2 Phase 4 (lane H3) — the headless presentation's pure pieces in Winter.app: the geometry (the view the
+/// panel asks for, where the page is drawn and its inverse, wheel deltas, the IME rect), the key and cursor tables, the
+/// modifier bits, the upload copier's rules, the chrome's state model, and the store's handling of the browser link's ops
+/// that need no producer. Nothing here launches a helper or connects to one.
 @MainActor
 final class HeadlessPresentGeometryTests: XCTestCase {
     private let page = CGSize(width: 1280, height: 800)
 
-    func testAWideViewLetterboxesLeftAndRight() {
-        let fit = HeadlessPresentGeometry.fitRect(content: page, in: CGSize(width: 1000, height: 400))
-        XCTAssertEqual(fit, CGRect(x: 180, y: 0, width: 640, height: 400))
+    func testThePageIsDrawnFromTheTopLeftAtOnePointPerCSSPixel() {
+        // Laid out in the panel's own size: it fills the view exactly, never stretched.
+        XCTAssertEqual(HeadlessPresentGeometry.pageRect(content: CGSize(width: 704, height: 900), in: CGSize(width: 704.5, height: 900)),
+                       CGRect(x: 0, y: 0, width: 704, height: 900))
+        // A frame from before a growing resize: drawn as it is, the rest of the view left to the background.
+        XCTAssertEqual(HeadlessPresentGeometry.pageRect(content: CGSize(width: 600, height: 500), in: CGSize(width: 800, height: 700)),
+                       CGRect(x: 0, y: 0, width: 600, height: 500))
     }
 
-    func testATallViewLetterboxesTopAndBottom() {
-        let fit = HeadlessPresentGeometry.fitRect(content: page, in: CGSize(width: 640, height: 1000))
-        XCTAssertEqual(fit, CGRect(x: 0, y: 300, width: 640, height: 400))
+    func testAPageLargerThanTheViewIsScaledDownNeverUp() {
+        // The agent's 1280×800 before the panel's size reached it: scaled down to fit, from the top-left corner.
+        XCTAssertEqual(HeadlessPresentGeometry.pageRect(content: page, in: CGSize(width: 640, height: 1000)),
+                       CGRect(x: 0, y: 0, width: 640, height: 400))
+        XCTAssertEqual(HeadlessPresentGeometry.pageRect(content: page, in: CGSize(width: 1000, height: 400)),
+                       CGRect(x: 0, y: 0, width: 640, height: 400))
     }
 
     func testAnEmptyViewOrPageFitsNothing() {
-        XCTAssertEqual(HeadlessPresentGeometry.fitRect(content: page, in: .zero), .zero)
-        XCTAssertEqual(HeadlessPresentGeometry.fitRect(content: .zero, in: CGSize(width: 10, height: 10)), .zero)
+        XCTAssertEqual(HeadlessPresentGeometry.pageRect(content: page, in: .zero), .zero)
+        XCTAssertEqual(HeadlessPresentGeometry.pageRect(content: .zero, in: CGSize(width: 10, height: 10)), .zero)
+    }
+
+    func testThePanelAsksForItsOwnSizeInPointsAtItsBackingScale() {
+        XCTAssertEqual(HeadlessPresentGeometry.viewWish(bounds: CGSize(width: 704.5, height: 900.9), backingScale: 2),
+                       .init(width: 704, height: 900, scale: 2), "whole points, rounded down: the page is never wider than the view")
+        XCTAssertEqual(HeadlessPresentGeometry.viewWish(bounds: CGSize(width: 704, height: 900), backingScale: 1),
+                       .init(width: 704, height: 900, scale: 1), "a 1× display")
+        XCTAssertEqual(HeadlessPresentGeometry.viewWish(bounds: CGSize(width: 100, height: 50), backingScale: 2),
+                       .init(width: Int32(WinterCEFHeadlessViewMinWidth), height: Int32(WinterCEFHeadlessViewMinHeight), scale: 2),
+                       "never below the producer's least (the page is then scaled down to fit)")
+        XCTAssertEqual(HeadlessPresentGeometry.viewWish(bounds: CGSize(width: 9000, height: 5000), backingScale: 2),
+                       .init(width: Int32(WinterCEFHeadlessViewMaxPixels / 2), height: Int32(WinterCEFHeadlessViewMaxPixels / 2), scale: 2),
+                       "never more device pixels a side than the producer's most")
+        XCTAssertEqual(HeadlessPresentGeometry.viewWish(bounds: CGSize(width: 800, height: 600), backingScale: 8)?.scale, 4, "a scale of 4 at most")
+        XCTAssertNil(HeadlessPresentGeometry.viewWish(bounds: .zero, backingScale: 2))
+        XCTAssertNil(HeadlessPresentGeometry.viewWish(bounds: CGSize(width: 800, height: 600), backingScale: .nan))
+        XCTAssertNil(HeadlessPresentGeometry.viewWish(bounds: CGSize(width: CGFloat.infinity, height: 600), backingScale: 2))
     }
 
     func testAViewPointBecomesACSSPixelAndTheLetterboxIsNothing() {
@@ -49,17 +73,17 @@ final class HeadlessPresentGeometryTests: XCTestCase {
                        CGRect(x: 230, y: 100, width: 10, height: 20))
     }
 
-    func testTheRenderScaleIsSteppedUpAndClamped() {
-        XCTAssertEqual(HeadlessPresentGeometry.renderScale(fitScale: 0.5, backingScale: 2), 1.0)
-        XCTAssertEqual(HeadlessPresentGeometry.renderScale(fitScale: 0.6, backingScale: 2), 1.25)
-        XCTAssertEqual(HeadlessPresentGeometry.renderScale(fitScale: 0.75, backingScale: 2), 1.5)
-        XCTAssertEqual(HeadlessPresentGeometry.renderScale(fitScale: 0.3, backingScale: 1), 1.0, "never below 1")
-        XCTAssertEqual(HeadlessPresentGeometry.renderScale(fitScale: 3, backingScale: 2), 4.0, "never above 4")
-        XCTAssertEqual(HeadlessPresentGeometry.renderScale(fitScale: .nan, backingScale: 2), 1.0)
-        // A live resize between two steps asks for one scale, not one per frame.
-        let a = HeadlessPresentGeometry.renderScale(fitScale: 0.51, backingScale: 2)
-        let b = HeadlessPresentGeometry.renderScale(fitScale: 0.62, backingScale: 2)
-        XCTAssertEqual(a, b)
+    func testAPointMapsOneToOneOnceThePageIsInThePanelsSize() {
+        let fit = HeadlessPresentGeometry.pageRect(content: CGSize(width: 704, height: 900), in: CGSize(width: 704, height: 900))
+        XCTAssertEqual(HeadlessPresentGeometry.cssPoint(CGPoint(x: 123.7, y: 456.2), fit: fit, content: CGSize(width: 704, height: 900)),
+                       CGPoint(x: 123, y: 456))
+        XCTAssertEqual(HeadlessPresentGeometry.fitScale(fit: fit, content: CGSize(width: 704, height: 900)), 1)
+    }
+
+    func testTheViewportDrawsThePageOneTexelPerDevicePixel() {
+        XCTAssertEqual(HeadlessPresentRenderer.Viewport(drawableSize: CGSize(width: 1409, height: 1800), bounds: CGSize(width: 704.5, height: 900),
+                                                        backingScale: 2, clear: MTLClearColor()).pageRect(content: CGSize(width: 704, height: 900)),
+                       CGRect(x: 0, y: 0, width: 1408, height: 1800), "one texel per device pixel")
     }
 
     func testPreciseWheelDeltasFollowTheFingersAndLinesAreFortyPixels() {

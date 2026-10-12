@@ -6,7 +6,9 @@ import WinterKit
 /// ComputerV2 Phase 4 (lane H3) — **the live page in Winter's panel**: a viewport onto a `HeadlessPresentation`.
 ///
 /// It draws nothing itself: its backing layer is a `CAMetalLayer` the presentation's renderer draws the producer's
-/// frames into (aspect-fit, letterboxed in the panel's own surface colour). What it owns is the person's side:
+/// frames into. It asks for the page to be laid out in its own size — its bounds in points at its screen's backing scale,
+/// following a resize, the panel's expand button and a move to another display — so the page reflows to the panel and
+/// is drawn one CSS pixel per point, crisp (`HeadlessPresentGeometry`). What it owns is the person's side:
 ///
 /// - **Input, only while they hold control** (a watch-only view shows the page and its cursor and sends nothing):
 ///   mouse moves, presses and drags in CSS pixels through the inverse of the fit (outside the page ignored, a drag
@@ -120,7 +122,8 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
     // MARK: - Geometry
 
     private var cssSize: CGSize { presentation?.cssSize ?? CGSize(width: 1280, height: 800) }
-    private var pageRect: CGRect { HeadlessPresentGeometry.fitRect(content: cssSize, in: bounds.size) }
+    /// Where the page is drawn (top-left, one point per CSS pixel; `HeadlessPresentGeometry.pageRect`).
+    private var pageRect: CGRect { HeadlessPresentGeometry.pageRect(content: cssSize, in: bounds.size) }
 
     override func layout() {
         super.layout()
@@ -163,17 +166,17 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
         guard let presentation, presentation.view === self else { return }
         let backing = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         metalLayer.contentsScale = backing
-        let fit = pageRect
         // Off screen (no window, a miniaturised or fully covered one): nothing is drawn — the renderer keeps copying
         // frames, and draws the newest as soon as the window can be seen again.
         let visible = window?.occlusionState.contains(.visible) == true
         presentation.renderer.setViewport(.init(
             drawableSize: visible ? CGSize(width: (bounds.width * backing).rounded(), height: (bounds.height * backing).rounded()) : .zero,
-            fit: CGRect(x: fit.minX * backing, y: fit.minY * backing, width: fit.width * backing, height: fit.height * backing),
-            clear: letterboxColor()))
-        let fitScale = HeadlessPresentGeometry.fitScale(fit: fit, content: cssSize)
-        if fitScale > 0 {
-            presentation.viewWants(scale: HeadlessPresentGeometry.renderScale(fitScale: Double(fitScale), backingScale: Double(backing)))
+            bounds: bounds.size, backingScale: backing, clear: letterboxColor()))
+        // The page is laid out in this view's own size at its screen's backing scale, following it live: a resize, the
+        // panel's expand button, a move to another display. Only from a view in a window (a view being torn down, or not
+        // yet placed, asks nothing).
+        if window != nil, let wish = HeadlessPresentGeometry.viewWish(bounds: bounds.size, backingScale: Double(backing)) {
+            presentation.viewWants(wish)
         }
     }
 

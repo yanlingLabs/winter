@@ -833,8 +833,16 @@ BOOL WinterCEFDidShutdown(void);
 // request context.
 // ---------------------------------------------------------------------------------------------------
 
-/// The fixed view every headless browser reports: 1280×800 at a device scale factor of 1.
-enum { WinterCEFHeadlessViewWidth = 1280, WinterCEFHeadlessViewHeight = 800 };
+/// The view every headless browser reports while nobody views it — the agent's: 1280×800 at a device scale factor of 1.
+/// A presentation lays the page out in the panel's size instead while it lasts (`WinterCEFHeadlessSetPresentation`),
+/// within these bounds: at least MinWidth×MinHeight CSS pixels, at most MaxPixels device pixels a side.
+enum {
+  WinterCEFHeadlessViewWidth = 1280,
+  WinterCEFHeadlessViewHeight = 800,
+  WinterCEFHeadlessViewMinWidth = 320,
+  WinterCEFHeadlessViewMinHeight = 240,
+  WinterCEFHeadlessViewMaxPixels = 8192,
+};
 
 /// `CefInitialize` for the headless helper: the framework loaded BY PATH (`frameworkDir` is the
 /// `Chromium Embedded Framework.framework` directory), windowless rendering enabled, `mainBundlePath` the app
@@ -896,8 +904,10 @@ int WinterCEFHeadlessContextCount(void);
 
 /// Every view or popup frame of every headless browser, synchronously on the CEF UI (main) thread while the borrowed
 /// `surface` is valid: the observer must finish reading it (a GPU copy waited on) before it returns. `type` 0 is the
-/// view, 1 a popup widget (a `<select>` list). `nil` stops it.
-void WinterCEFHeadlessSetPaintObserver(void (^observer)(int browserId, int type, IOSurfaceRef surface));
+/// view, 1 a popup widget (a `<select>` list). With it, the view the frame was painted at: its CSS size and device scale
+/// (a popup's: the view's now). `nil` stops it.
+void WinterCEFHeadlessSetPaintObserver(void (^observer)(int browserId, int type, IOSurfaceRef surface, int cssWidth,
+                                                        int cssHeight, double scale));
 
 /// A browser's popup widget: `kind` 0 hidden, 1 shown, 2 moved to (x, y, width, height) in CSS pixels. `nil` stops it.
 void WinterCEFHeadlessSetPopupObserver(void (^observer)(int browserId, int kind, int x, int y, int width, int height));
@@ -905,10 +915,16 @@ void WinterCEFHeadlessSetPopupObserver(void (^observer)(int browserId, int kind,
 /// The page's cursor changed (`cef_cursor_type_t`). `nil` stops it.
 void WinterCEFHeadlessSetCursorObserver(void (^observer)(int browserId, int cursorType));
 
-/// Render `key`'s browser at `scale` device pixels per CSS pixel (its CSS size stays the fixed view) at `frameRate`
-/// frames a second, and repaint it now. A presentation raises both while it lasts and puts them back after (1.0, the
-/// helper's own rate): nothing of the page is reloaded — it sees a device-pixel-ratio change, as on a new display.
-void WinterCEFHeadlessSetPresentation(NSView *key, double scale, int frameRate);
+/// Lay `key`'s browser out in a view of `cssWidth`×`cssHeight` CSS pixels (≤ 0: the agent's fixed view), render it at
+/// `scale` device pixels per CSS pixel and at `frameRate` frames a second, and repaint it now. A presentation asks for
+/// the panel's size in points at the screen's backing scale while it lasts, and puts the agent's view back after (0, 0,
+/// 1.0, the helper's own rate): nothing of the page is reloaded — it sees a window resize and a device-pixel-ratio change,
+/// as a browser window does on a new display. Size and scale settle together: a change is applied at most once per
+/// 300 ms (the newest wish wins), since two quick ones stall CEF's windowless painting. Clamped to the view's bounds.
+void WinterCEFHeadlessSetPresentation(NSView *key, int cssWidth, int cssHeight, double scale, int frameRate);
+
+/// The view `key`'s browser is laid out in now (as applied: a wish still settling is not counted). NO for no browser.
+BOOL WinterCEFHeadlessViewGeometry(NSView *key, int *cssWidth, int *cssHeight, double *scale);
 
 // ---- Presentation, version 2: IME, edit commands, page dialogs and file choosers for the person in control ----------
 

@@ -23,7 +23,7 @@ static NSMutableDictionary<NSNumber *, NSNumber *> *g_paintsSeen;
 static NSMutableDictionary<NSNumber *, WinterHeadlessPresenter *> *g_presenters;
 
 @interface WinterHeadlessPresenter ()
-- (void)paintType:(int)type surface:(IOSurfaceRef)surface;
+- (void)paintType:(int)type surface:(IOSurfaceRef)surface cssWidth:(int)cssWidth cssHeight:(int)cssHeight scale:(double)scale;
 - (void)popupKind:(int)kind x:(int)x y:(int)y width:(int)width height:(int)height;
 - (void)cursor:(int)type;
 - (void)imeRangeStart:(int)start end:(int)end rects:(NSArray<NSValue *> *)rects;
@@ -46,9 +46,9 @@ static void InstallObservers(void) {
   installed = YES;
   g_presenters = [NSMutableDictionary dictionary];
   g_paintsSeen = [NSMutableDictionary dictionary];
-  WinterCEFHeadlessSetPaintObserver(^(int browserId, int type, IOSurfaceRef surface) {
+  WinterCEFHeadlessSetPaintObserver(^(int browserId, int type, IOSurfaceRef surface, int cssWidth, int cssHeight, double scale) {
     g_paintsSeen[@(browserId)] = @(g_paintsSeen[@(browserId)].unsignedLongLongValue + 1);
-    [g_presenters[@(browserId)] paintType:type surface:surface];
+    [g_presenters[@(browserId)] paintType:type surface:surface cssWidth:cssWidth cssHeight:cssHeight scale:scale];
   });
   WinterCEFHeadlessSetPopupObserver(^(int browserId, int kind, int x, int y, int width, int height) {
     [g_presenters[@(browserId)] popupKind:kind x:x y:y width:width height:height];
@@ -97,6 +97,8 @@ static double Percentile(NSArray<NSNumber *> *values, double p) {
   int _browserId;
   uint64_t _nonce;
   NSString *_requirement;
+  // The view the viewer wants the page laid out in (RESIZE): CSS size (0: the agent's own) and device scale.
+  int _cssWidth, _cssHeight;
   double _scale;
   void (^_started)(void);
   void (^_ended)(NSString *);
@@ -108,7 +110,9 @@ static double Percentile(NSArray<NSNumber *> *values, double p) {
   BOOL _stopped;
 
   uint32_t _generation;
-  int _poolWidth, _poolHeight;
+  int _poolWidth, _poolHeight;          // device pixels
+  int _poolCssWidth, _poolCssHeight;    // the view its frames were painted at
+  double _poolScale;
   IOSurfaceRef _surfaces[WinterPresentPoolSlots];
   id<MTLTexture> _textures[WinterPresentPoolSlots];
   BOOL _leased[WinterPresentPoolSlots];
@@ -121,10 +125,12 @@ static double Percentile(NSArray<NSNumber *> *values, double p) {
   int _popupX, _popupY, _popupWidth, _popupHeight;  // CSS pixels
   id<MTLTexture> _popup;                            // the popup's last frame, owned
 
-  uint64_t _sequence, _frames, _dropped, _droppedSinceFrame, _inputs, _lastInputSequence;
+  uint64_t _sequence, _frames, _dropped, _droppedSinceFrame, _inputs, _lastInputSequence, _resizes;
   // The first frame after the viewer was accepted (or after a scale change), awaited: a page with nothing moving paints
-  // only when asked, so the view is asked again until a frame comes (`-kickAfter:`).
+  // only when asked, so the view is asked again until a frame comes (`-kickSoon`).
   BOOL _awaitingFrame;
+  BOOL _kicking;               // a kick is scheduled (one at a time, however many times a frame is owed again)
+  NSUInteger _kickAttempts;    // kicks since a frame was last owed
   NSUInteger _kicks;
   NSMutableArray<NSNumber *> *_copyMs;
 }
@@ -251,6 +257,11 @@ static NSUInteger TaskPortCount(void) {
     @"paintsSeen" : g_paintsSeen[@(_browserId)] ?: @0,
     @"dropped" : @(_dropped),
     @"generations" : @(_generation),
+    @"resizes" : @(_resizes),
+    // The last generation's view: what the viewer was last shown.
+    @"cssWidth" : @(_poolCssWidth),
+    @"cssHeight" : @(_poolCssHeight),
+    @"scale" : @(_poolScale),
     @"inputs" : @(_inputs),
     @"copyP50Ms" : @(Percentile(_copyMs, 0.50)),
     @"copyP95Ms" : @(Percentile(_copyMs, 0.95)),
@@ -317,13 +328,20 @@ static NSUInteger TaskPortCount(void) {
       break;
     }
     case WinterPresentMsgResize: {
+      // The view the viewer wants the page laid out in: its size in points (0: keep the size) at its backing scale.
+      // Applied by WinterCEF at most once per 300 ms (the newest wish wins); a reflow, never a reload.
       if (header->msgh_size < sizeof(WinterPresentResizeMsg)) break;
       const WinterPresentResizeMsg *m = (const WinterPresentResizeMsg *)header;
-      if (m->scale >= 1.0 && m->scale <= 4.0 && m->scale != _scale) {
-        _scale = m->scale;
-        WinterCEFHeadlessSetPresentation(_key, _scale, 60);
-        [self awaitFrame];
-      }
+      if (!(m->scale >= 1.0 && m->scale <= 4.0)) break;
+      const int width = m->cssWidth > 0 && m->cssHeight > 0 ? m->cssWidth : _cssWidth;
+      const int height = m->cssWidth > 0 && m->cssHeight > 0 ? m->cssHeight : _cssHeight;
+      if (width == _cssWidth && height == _cssHeight && m->scale == _scale) break;
+      _cssWidth = width;
+      _cssHeight = height;
+      _scale = m->scale;
+      _resizes++;
+      WinterCEFHeadlessSetPresentation(_key, _cssWidth, _cssHeight, _scale, 60);
+      [self awaitFrame];
       break;
     }
     case WinterPresentMsgBye:
@@ -398,21 +416,29 @@ static NSUInteger TaskPortCount(void) {
 
 // MARK: - The first frame
 
-/// A frame is owed (the viewer was just accepted, or the scale changed): until one comes, the view is asked again every
-/// 250 ms, 40 times at most.
+/// A frame is owed (the viewer was just accepted, or the view changed): until one comes, the view is asked again every
+/// 250 ms, 40 times at most. One kick at a time, however often a frame is owed again (a live resize owes one per step).
 - (void)awaitFrame {
   _awaitingFrame = YES;
-  [self kickAfter:0];
+  _kickAttempts = 0;
+  if (_kicking) return;
+  _kicking = YES;
+  [self kickSoon];
 }
 
-- (void)kickAfter:(NSUInteger)attempt {
+- (void)kickSoon {
   __weak WinterHeadlessPresenter *weak = self;
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
     WinterHeadlessPresenter *strong = weak;
-    if (strong == nil || strong->_stopped || strong->_viewer == MACH_PORT_NULL || !strong->_awaitingFrame || attempt >= 40) return;
+    if (strong == nil) return;
+    if (strong->_stopped || strong->_viewer == MACH_PORT_NULL || !strong->_awaitingFrame || strong->_kickAttempts >= 40) {
+      strong->_kicking = NO;
+      return;
+    }
+    strong->_kickAttempts++;
     strong->_kicks++;
-    WinterCEFHeadlessSetPresentation(strong->_key, strong->_scale, 60);
-    [strong kickAfter:attempt + 1];
+    WinterCEFHeadlessSetPresentation(strong->_key, strong->_cssWidth, strong->_cssHeight, strong->_scale, 60);
+    [strong kickSoon];
   });
 }
 
@@ -567,14 +593,18 @@ static NSUInteger TaskPortCount(void) {
   welcome.header.msgh_id = WinterPresentMsgWelcome;
   welcome.version = WinterPresentWireVersion;
   welcome.control = _control ? 1 : 0;
-  welcome.cssWidth = WinterCEFHeadlessViewWidth;
-  welcome.cssHeight = WinterCEFHeadlessViewHeight;
+  // The view the page is laid out in now (the agent's, until the viewer says its own size).
+  int cssWidth = WinterCEFHeadlessViewWidth, cssHeight = WinterCEFHeadlessViewHeight;
+  double appliedScale = 1.0;
+  WinterCEFHeadlessViewGeometry(_key, &cssWidth, &cssHeight, &appliedScale);
+  welcome.cssWidth = cssWidth;
+  welcome.cssHeight = cssHeight;
   welcome.scale = _scale;
   mach_msg(&welcome.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(welcome), 0, MACH_PORT_NULL, 100, MACH_PORT_NULL);
   NSString *pageURL = nil, *pageTitle = nil;
   if (WinterCEFHeadlessCurrentPage(_key, &pageURL, &pageTitle)) [self pageURL:pageURL ?: @"" title:pageTitle ?: @""];
-  // Render for the viewer from now on: its scale, a viewer's frame rate, a fresh frame now.
-  WinterCEFHeadlessSetPresentation(_key, _scale, 60);
+  // Render for the viewer from now on: its scale (its size once it says it), a viewer's frame rate, a fresh frame now.
+  WinterCEFHeadlessSetPresentation(_key, _cssWidth, _cssHeight, _scale, 60);
   [self awaitFrame];
   if (_control) {
     WinterCEFHeadlessSetUserControl(_key, YES);
@@ -602,9 +632,10 @@ static NSUInteger TaskPortCount(void) {
   _poolWidth = _poolHeight = 0;
 }
 
-/// A new generation sized to what CEF painted (`width`×`height` device pixels): new owned surfaces, their send
-/// rights handed to the viewer once. The old generation's surfaces are the viewer's to drop when it is done reading.
-- (BOOL)newPoolWidth:(int)width height:(int)height {
+/// A new generation sized to what CEF painted (`width`×`height` device pixels, the view `cssWidth`×`cssHeight` at
+/// `scale`): new owned surfaces, their send rights handed to the viewer once. The old generation's surfaces are the
+/// viewer's to drop when it is done reading.
+- (BOOL)newPoolWidth:(int)width height:(int)height cssWidth:(int)cssWidth cssHeight:(int)cssHeight scale:(double)scale {
   [self releasePool];
   _generation++;
   WinterPresentPoolMsg pool = {};
@@ -616,7 +647,8 @@ static NSUInteger TaskPortCount(void) {
   pool.generation = _generation;
   pool.pixelWidth = width;
   pool.pixelHeight = height;
-  pool.scale = _scale;
+  // The scale these frames were painted at (the viewer's CSS size is the pixels divided by it).
+  pool.scale = scale;
   const size_t bytesPerRow = ((size_t)width * 4 + 63) & ~(size_t)63;
   NSDictionary *props = @{
     (id)kIOSurfaceWidth : @(width),
@@ -645,6 +677,9 @@ static NSUInteger TaskPortCount(void) {
   }
   _poolWidth = width;
   _poolHeight = height;
+  _poolCssWidth = cssWidth;
+  _poolCssHeight = cssHeight;
+  _poolScale = scale;
   kern_return_t kr = mach_msg(&pool.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(pool), 0, MACH_PORT_NULL, 100, MACH_PORT_NULL);
   if (kr != KERN_SUCCESS) {
     mach_msg_destroy(&pool.header);
@@ -654,7 +689,7 @@ static NSUInteger TaskPortCount(void) {
   return YES;
 }
 
-- (void)paintType:(int)type surface:(IOSurfaceRef)surface {
+- (void)paintType:(int)type surface:(IOSurfaceRef)surface cssWidth:(int)cssWidth cssHeight:(int)cssHeight scale:(double)scale {
   if (_viewer == MACH_PORT_NULL || _stopped) return;
   const uint64_t paintedAt = mach_absolute_time();
   if (type == 1) {
@@ -663,8 +698,10 @@ static NSUInteger TaskPortCount(void) {
     return;
   }
   const int width = (int)IOSurfaceGetWidth(surface), height = (int)IOSurfaceGetHeight(surface);
-  if (width != _poolWidth || height != _poolHeight) {
-    if (![self newPoolWidth:width height:height]) return;
+  // A new generation for any change of the view: its pixels, or the size and scale they stand for (1280×800 at 1 and
+  // 640×400 at 2 are the same pixels, not the same page).
+  if (width != _poolWidth || height != _poolHeight || cssWidth != _poolCssWidth || cssHeight != _poolCssHeight || scale != _poolScale) {
+    if (![self newPoolWidth:width height:height cssWidth:cssWidth cssHeight:cssHeight scale:scale]) return;
   }
   int slot = -1;
   for (int i = 0; i < WinterPresentPoolSlots; i++) {
@@ -691,7 +728,7 @@ static NSUInteger TaskPortCount(void) {
     [blit copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1)
                 toTexture:_textures[slot] destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
     if (_popupVisible && _popup != nil) {
-      const int px = (int)lround(_popupX * _scale), py = (int)lround(_popupY * _scale);
+      const int px = (int)lround(_popupX * scale), py = (int)lround(_popupY * scale);
       const int pw = (int)MIN((NSInteger)_popup.width, (NSInteger)width - px), ph = (int)MIN((NSInteger)_popup.height, (NSInteger)height - py);
       if (px >= 0 && py >= 0 && pw > 0 && ph > 0) {
         [blit copyFromTexture:_popup sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(pw, ph, 1)
@@ -780,7 +817,7 @@ static NSUInteger TaskPortCount(void) {
   dispatch_async(dispatch_get_main_queue(), ^{
     WinterHeadlessPresenter *strong = weak;
     if (strong == nil || strong->_stopped || strong->_viewer == MACH_PORT_NULL) return;
-    WinterCEFHeadlessSetPresentation(strong->_key, strong->_scale, 60);
+    WinterCEFHeadlessSetPresentation(strong->_key, strong->_cssWidth, strong->_cssHeight, strong->_scale, 60);
   });
 }
 
@@ -829,10 +866,12 @@ static NSUInteger TaskPortCount(void) {
   // are cancelled.
   _dialogId = 0;
   [self cancelFileChoosers];
-  // Back to the tab's own rendering: scale 1, the helper's own frame rate; the user's focus taken back.
+  // Back to the tab's own rendering: the agent's view (1280×800 at 1), the helper's own frame rate; the user's focus
+  // taken back. The page is re-laid out in the agent's view (never reloaded), so what the agent reads next — a
+  // screenshot, a point, the layout of a site that answers to its width — is what it read before the person saw it.
   if (_control) WinterCEFHeadlessSendInput(_key, WinterPresentInputFocus, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
   WinterCEFHeadlessSetUserControl(_key, NO);
-  WinterCEFHeadlessSetPresentation(_key, 1.0, 0);
+  WinterCEFHeadlessSetPresentation(_key, 0, 0, 1.0, 0);
   [g_presenters removeObjectForKey:@(_browserId)];
   _started = nil;
   if (reason != 0 && _ended != nil) {

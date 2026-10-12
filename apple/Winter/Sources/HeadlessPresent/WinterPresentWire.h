@@ -15,7 +15,9 @@
 // frames into a FREE slot on the GPU and waits for the copy before CEF's callback returns (its contract); a slot is
 // free again only when the viewer says its own GPU read of it completed (RELEASE). No free slot: the frame is
 // dropped, never queued. A resize or a scale change starts a new generation; a stale generation's FRAME or RELEASE
-// is ignored.
+// is ignored. While it is shown, the page is laid out in the VIEWER's size (RESIZE: the panel's size in points at the
+// screen's backing scale), so it reflows to the panel and is drawn one CSS pixel per point; the agent's own view
+// (1280×800 at 1) comes back when the presentation ends.
 //
 // Version 2 adds what makes the shown page behave like a browser for the person using it, all of it only while the
 // viewer holds CONTROL (a take-over; a watch-only viewer gets none of it):
@@ -55,7 +57,7 @@ enum {
   WinterPresentMsgHello = 0x57500001,    // + a send right to the viewer's port (msgh_local_port, MAKE_SEND)
   WinterPresentMsgRelease = 0x57500002,  // the viewer's GPU read of a slot completed
   WinterPresentMsgInput = 0x57500003,    // one human input event (only while the viewer holds control)
-  WinterPresentMsgResize = 0x57500004,   // the viewer's drawable size and scale changed
+  WinterPresentMsgResize = 0x57500004,   // the view the viewer wants the page laid out in: its size and scale
   WinterPresentMsgBye = 0x57500005,      // the viewer stops presenting
   // viewer → producer, version 2 (only while the viewer holds control)
   WinterPresentMsgIme = 0x57500006,          // the input method edited, committed, finished or cancelled a composition
@@ -94,6 +96,8 @@ typedef struct {
   double scale;
 } WinterPresentWelcomeMsg;
 
+/// A generation's frames are all `pixelWidth`×`pixelHeight` device pixels, painted at `scale`: the page's view in CSS
+/// pixels is their size divided by it. Any change of the view (size or scale) starts a new generation.
 typedef struct {
   mach_msg_header_t header;
   mach_msg_body_t body;
@@ -155,9 +159,13 @@ typedef struct {
   uint32_t reserved;
 } WinterPresentInputMsg;
 
+/// The view the viewer wants the page laid out in while it shows it: `cssWidth`×`cssHeight` CSS pixels (its own size in
+/// points) at `scale` device pixels per CSS pixel (its screen's backing scale). A size of 0 keeps the size (a viewer that
+/// asks only for a scale). The producer applies it at most once per 300 ms and puts the agent's view back when the
+/// presentation ends; the page is re-laid out, never reloaded.
 typedef struct {
   mach_msg_header_t header;
-  int32_t pixelWidth, pixelHeight;
+  int32_t cssWidth, cssHeight;
   double scale;
 } WinterPresentResizeMsg;
 

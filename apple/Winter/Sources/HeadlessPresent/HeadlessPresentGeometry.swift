@@ -1,23 +1,47 @@
 import CoreGraphics
 import Foundation
 
-/// ComputerV2 Phase 4 (lane H3) — **the headless presentation's geometry**, pure: where the page sits in the panel's
-/// view (aspect-fit, letterboxed, centred), how a point in the view becomes a CSS pixel of the page and back, the
-/// render scale to ask the producer for, and a wheel event's deltas.
+/// ComputerV2 Phase 4 (lane H3) — **the headless presentation's geometry**, pure: the view the panel asks the page to be
+/// laid out in, where the page sits in the panel's view, how a point in the view becomes a CSS pixel of the page and
+/// back, and a wheel event's deltas.
+///
+/// While the panel shows it, the page is laid out in the PANEL's size — its bounds in points, at the screen's backing
+/// scale (`viewWish`) — so it reflows to the panel and is drawn one CSS pixel per point, crisp: what a browser window
+/// that size would show. Until the producer has applied a new size (a live resize settles at most every 300 ms), the
+/// frame it has is drawn from the top-left corner at one point per CSS pixel, scaled down only while it is larger than
+/// the view (`pageRect`) — never stretched, never letterboxed around a centred page.
 ///
 /// Every coordinate here is TOP-LEFT origin, y down — the presentation view is flipped, and CSS pixels are the page's
-/// own coordinates (CEF's `CefMouseEvent`, the IME's character rects). The page's CSS size is the producer's
-/// welcome (Winter Headless renders a fixed 1280×800 view).
+/// own coordinates (CEF's `CefMouseEvent`, the IME's character rects).
 enum HeadlessPresentGeometry {
 
-    /// Where a page of `content` CSS pixels is drawn inside `bounds` (view points): the largest rect with the page's
-    /// aspect that fits, centred. Empty when either size is empty.
-    static func fitRect(content: CGSize, in bounds: CGSize) -> CGRect {
+    /// The view the panel asks the page to be laid out in: its own size in whole points (rounded down, so the page is
+    /// never wider than the view) at its backing scale, within the producer's bounds (`WinterCEFHeadlessViewMinWidth`/
+    /// `MinHeight` CSS pixels at least, `WinterCEFHeadlessViewMaxPixels` device pixels a side at most). nil for an empty
+    /// or nonsensical view.
+    struct ViewWish: Equatable {
+        var width: Int32
+        var height: Int32
+        var scale: Double
+    }
+
+    static func viewWish(bounds: CGSize, backingScale: Double) -> ViewWish? {
+        guard bounds.width.isFinite, bounds.height.isFinite, bounds.width >= 1, bounds.height >= 1,
+              backingScale.isFinite, backingScale > 0 else { return nil }
+        let scale = min(max(backingScale, minScale), maxScale)
+        let most = Int(Double(WinterCEFHeadlessViewMaxPixels) / scale)
+        let width = min(max(Int(bounds.width.rounded(.down)), Int(WinterCEFHeadlessViewMinWidth)), most)
+        let height = min(max(Int(bounds.height.rounded(.down)), Int(WinterCEFHeadlessViewMinHeight)), most)
+        return ViewWish(width: Int32(width), height: Int32(height), scale: scale)
+    }
+
+    /// Where a page of `content` CSS pixels is drawn inside `bounds` (view points): from the top-left corner, one point
+    /// per CSS pixel — scaled down (never up) only while the page is larger than the view (a frame from before a
+    /// resize, a view smaller than the producer's least). Empty when either size is empty.
+    static func pageRect(content: CGSize, in bounds: CGSize) -> CGRect {
         guard content.width > 0, content.height > 0, bounds.width > 0, bounds.height > 0 else { return .zero }
-        let scale = min(bounds.width / content.width, bounds.height / content.height)
-        let size = CGSize(width: content.width * scale, height: content.height * scale)
-        return CGRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2,
-                      width: size.width, height: size.height)
+        let scale = min(1, bounds.width / content.width, bounds.height / content.height)
+        return CGRect(x: 0, y: 0, width: content.width * scale, height: content.height * scale)
     }
 
     /// View points per CSS pixel for `fit` (0 when nothing is drawn).
@@ -52,18 +76,6 @@ enum HeadlessPresentGeometry {
     /// The producer renders between these scales (device pixels per CSS pixel).
     static let minScale = 1.0
     static let maxScale = 4.0
-    /// Scales are asked for in steps of this, so a live resize does not ask for a new pool generation per frame.
-    static let scaleStep = 0.25
-
-    /// The render scale to ask the producer for: device pixels per CSS pixel on screen — the fit scale times the
-    /// display's backing scale — rounded UP to a `scaleStep` (never blurrier than the screen), clamped to
-    /// [`minScale`, `maxScale`].
-    static func renderScale(fitScale: Double, backingScale: Double) -> Double {
-        let wanted = fitScale * backingScale
-        guard wanted.isFinite, wanted > 0 else { return minScale }
-        let stepped = (wanted / scaleStep - 1e-9).rounded(.up) * scaleStep
-        return min(max(stepped, minScale), maxScale)
-    }
 
     /// How a wheel line becomes CSS pixels (a mouse wheel's notch, as Chromium counts it).
     static let pixelsPerLine = 40.0

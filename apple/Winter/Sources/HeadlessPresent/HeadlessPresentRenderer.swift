@@ -5,9 +5,11 @@ import QuartzCore
 /// ComputerV2 Phase 4 (lane H3) — **the headless presentation's GPU side in Winter.app.**
 ///
 /// Every frame the producer hands over (`WinterPresentFrame`, a slot of its IOSurface pool) is copied ON THE GPU into
-/// a texture of the renderer's own, and that copy is what is drawn — aspect-fit, letterboxed, centred — into the
-/// view's `CAMetalLayer`. The slot goes back to the producer (`-releaseSlot:generation:`) only from the command
-/// buffer's COMPLETED handler, never on commit: until then the GPU may still be reading it.
+/// a texture of the renderer's own, and that copy is what is drawn into the view's `CAMetalLayer` — from the top-left
+/// corner at one point per CSS pixel (`HeadlessPresentGeometry.pageRect`): with the page laid out in the panel's own
+/// size at its backing scale, one texel per device pixel. The slot goes back to the producer
+/// (`-releaseSlot:generation:`) only from the command buffer's COMPLETED handler, never on commit: until then the GPU
+/// may still be reading it.
 ///
 /// - **Coalesced**: frames that arrive while one is already waiting to be drawn replace it, and the superseded
 ///   frame's slot is released at once (nothing ever read it). Only the newest frame is drawn.
@@ -23,16 +25,29 @@ final class HeadlessPresentRenderer: @unchecked Sendable {
     struct Viewport: Equatable {
         /// The layer's drawable size, in device pixels.
         var drawableSize: CGSize
-        /// Where the page is drawn, in device pixels, top-left origin.
-        var fit: CGRect
-        /// The letterbox's colour (the panel's own surface, resolved for the view's appearance).
+        /// The view's size in points, and device pixels per point.
+        var bounds: CGSize
+        var backingScale: CGFloat
+        /// The colour around the page (the panel's own surface, resolved for the view's appearance) — seen only while a
+        /// resize has not reached the page yet.
         var clear: MTLClearColor
 
         static func == (a: Viewport, b: Viewport) -> Bool {
-            a.drawableSize == b.drawableSize && a.fit == b.fit && a.clear.red == b.clear.red && a.clear.green == b.clear.green
+            a.drawableSize == b.drawableSize && a.bounds == b.bounds && a.backingScale == b.backingScale
+                && a.clear.red == b.clear.red && a.clear.green == b.clear.green
                 && a.clear.blue == b.clear.blue && a.clear.alpha == b.clear.alpha
         }
+
+        /// Where a page of `content` CSS pixels is drawn, in device pixels, top-left origin.
+        func pageRect(content: CGSize) -> CGRect {
+            let page = HeadlessPresentGeometry.pageRect(content: content, in: bounds)
+            return CGRect(x: page.minX * backingScale, y: page.minY * backingScale,
+                          width: page.width * backingScale, height: page.height * backingScale)
+        }
     }
+
+    /// The view the drawn frames show (CSS pixels) changed — called on `queue`. Set once, before the first frame.
+    var onContentSize: ((CGSize) -> Void)?
 
     let queue: DispatchQueue
     let device: MTLDevice
@@ -44,6 +59,8 @@ final class HeadlessPresentRenderer: @unchecked Sendable {
     // On `queue` only.
     private var layer: CAMetalLayer?
     private var copy: MTLTexture?
+    /// The view the copy shows, in CSS pixels.
+    private var copyContent: CGSize = .zero
     private var pending: WinterPresentFrame?
     private var drawScheduled = false
     private var redrawScheduled = false
@@ -133,6 +150,7 @@ final class HeadlessPresentRenderer: @unchecked Sendable {
                 self.pending = nil
             }
             self.copy = nil
+            self.copyContent = .zero
             self.layer = nil
         }
     }
@@ -163,12 +181,24 @@ final class HeadlessPresentRenderer: @unchecked Sendable {
                   sourceSize: MTLSize(width: source.width, height: source.height, depth: 1),
                   to: copy, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
         blit.endEncoding()
+        let content = Self.content(of: frame)
+        if content != copyContent {
+            copyContent = content
+            onContentSize?(content)
+        }
         _ = encodeDraw(into: commands)
         // The slot is the producer's again only once the GPU has finished reading it — completed, not committed.
         let consumer = self.consumer
         commands.addCompletedHandler { _ in consumer?.releaseSlot(slot, generation: generation) }
         commands.commit()
         drawnFrames += 1
+    }
+
+    /// The view a frame shows, in CSS pixels: as its generation says, else its pixels at its scale.
+    static func content(of frame: WinterPresentFrame) -> CGSize {
+        if frame.cssWidth > 0, frame.cssHeight > 0 { return CGSize(width: Int(frame.cssWidth), height: Int(frame.cssHeight)) }
+        let scale = frame.scale >= 1 ? frame.scale : 1
+        return CGSize(width: (Double(frame.texture.width) / scale).rounded(), height: (Double(frame.texture.height) / scale).rounded())
     }
 
     private func ensureCopy(width: Int, height: Int) -> Bool {
@@ -183,8 +213,8 @@ final class HeadlessPresentRenderer: @unchecked Sendable {
         return copy != nil
     }
 
-    /// The copy, aspect-fit, into the layer's next drawable. False when nothing could be encoded (no view, no
-    /// copy yet, an empty view, no drawable).
+    /// The copy, from the top-left corner at one point per CSS pixel, into the layer's next drawable. False when nothing
+    /// could be encoded (no view, no copy yet, an empty view, no drawable).
     private func encodeDraw(into commands: MTLCommandBuffer) -> Bool {
         guard let layer, let viewport = lock.withLock({ viewport }),
               viewport.drawableSize.width >= 1, viewport.drawableSize.height >= 1,
@@ -203,8 +233,9 @@ final class HeadlessPresentRenderer: @unchecked Sendable {
         pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[0].clearColor = viewport.clear
         guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return false }
-        if let copy, viewport.fit.width >= 1, viewport.fit.height >= 1 {
-            var rect = Self.ndcRect(fit: viewport.fit, drawable: viewport.drawableSize)
+        let fit = viewport.pageRect(content: copyContent)
+        if let copy, fit.width >= 1, fit.height >= 1 {
+            var rect = Self.ndcRect(fit: fit, drawable: viewport.drawableSize)
             encoder.setRenderPipelineState(pipeline)
             encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
             encoder.setFragmentTexture(copy, index: 0)

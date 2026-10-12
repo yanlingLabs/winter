@@ -15,6 +15,8 @@
 //   {"cmd":"type","text":".."}     characters
 //   {"cmd":"lag","ms":N}          hold every frame N ms before reading it (a slow viewer: the producer must drop)
 //   {"cmd":"scale","value":S}     render at S device pixels per CSS pixel (a new pool generation)
+//   {"cmd":"view","width":W,"height":H,"scale":S}  lay the page out in W×H CSS pixels at S (the panel's size in points at
+//                                 its backing scale), as the panel asks on every resize
 //   {"cmd":"stats"}               print what was measured
 //   version 2 (only while the viewer holds control; the producer drops them otherwise):
 //   {"cmd":"ime","kind":"set"|"commit"|"finish"|"cancel","text":".."}  the input method's composition
@@ -109,7 +111,8 @@ static void Emit(NSDictionary *object) {
   _droppedReported += frame.droppedBefore;
   if (frame.generation != _lastGeneration) {
     _lastGeneration = frame.generation;
-    Emit(@{@"event" : @"generation", @"generation" : @(frame.generation), @"width" : @(frame.texture.width), @"height" : @(frame.texture.height), @"scale" : @(frame.scale)});
+    Emit(@{@"event" : @"generation", @"generation" : @(frame.generation), @"width" : @(frame.texture.width), @"height" : @(frame.texture.height), @"scale" : @(frame.scale),
+           @"cssWidth" : @(frame.cssWidth), @"cssHeight" : @(frame.cssHeight)});
   }
   if (_lagMs > 0) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)_lagMs * NSEC_PER_MSEC), _work, ^{ [self read:frame]; });
@@ -348,7 +351,9 @@ static void Emit(NSDictionary *object) {
   } else if ([cmd isEqualToString:@"lag"]) {
     _lagMs = [c[@"ms"] intValue];
   } else if ([cmd isEqualToString:@"scale"]) {
-    [self.consumer setScale:[c[@"value"] doubleValue]];
+    [self.consumer setViewWidth:0 height:0 scale:[c[@"value"] doubleValue]];
+  } else if ([cmd isEqualToString:@"view"]) {
+    [self.consumer setViewWidth:[c[@"width"] intValue] height:[c[@"height"] intValue] scale:[c[@"scale"] doubleValue]];
   } else if ([cmd isEqualToString:@"stats"]) {
     [self emitStats];
   } else if ([cmd isEqualToString:@"bye"]) {

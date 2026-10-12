@@ -4906,6 +4906,8 @@ BOOL WinterCEFDidShutdown(void) {
 // ---------------------------------------------------------------------------------------------------
 
 #include <atomic>
+#include <cmath>
+#include <cstdlib>
 
 #include "include/cef_cookie.h"
 #include "include/cef_render_handler.h"
@@ -4923,7 +4925,7 @@ bool g_headless = false;
 /// The view a headless browser reports. Paint goes nowhere: the engine reads pixels only through
 /// `Page.captureScreenshot`, which the compositor answers on its own.
 /// Presentation (`WinterCEFHeadlessSet*Observer`, `WinterCEFHeadlessSetPresentation`). Main (CEF UI) thread only.
-void (^g_headless_paint_observer)(int, int, IOSurfaceRef) = nil;
+void (^g_headless_paint_observer)(int, int, IOSurfaceRef, int, int, double) = nil;
 void (^g_headless_popup_observer)(int, int, int, int, int, int) = nil;
 void (^g_headless_cursor_observer)(int, int) = nil;
 /// Version 2 of a presentation (`WinterPresentWire.h`): where the IME composition is drawn, the page's dialogs and file
@@ -4984,12 +4986,6 @@ std::set<int> &HeadlessUserControlled() {
   static auto *ids = new std::set<int>();
   return *ids;
 }
-/// The device scale a presented browser renders at, by browser id (absent: 1).
-std::map<int, double> &HeadlessScales() {
-  static auto *scales = new std::map<int, double>();
-  return *scales;
-}
-
 /// An in-page drag the person started in a presented browser (HTML5 drag and drop: a list reordered, a card moved):
 /// run inside the browser itself — its drag data handed straight back as the drop target's, the person's moves its drag
 /// moves, their release its drop — since there is no window here for a system drag. By browser id.
@@ -5004,21 +5000,61 @@ std::map<int, HeadlessDrag> &HeadlessDrags() {
   return *drags;
 }
 
-/// A browser's device scale as applied, and when it last changed. Two changes in quick succession (a presentation ending
-/// at one scale and the next starting at another a few milliseconds later) left the browser painting NOTHING — measured:
-/// no `OnAcceleratedPaint` at all afterwards, whatever was asked of it — so a change is applied at most once per
-/// `kHeadlessScaleSettle`; a later wish waits for the rest of it, and only the last one is applied.
-struct HeadlessScaleState {
-  double applied = 1.0;
-  double wanted = 1.0;
+/// The view a headless browser lays its page out in — its size in CSS pixels — and its device scale. Nobody watching:
+/// the agent's fixed view (`WinterCEFHeadlessViewWidth`×`Height` at 1). Shown in Winter's panel: the panel's size in
+/// points at the screen's backing scale (`WinterCEFHeadlessSetPresentation`).
+struct HeadlessGeometry {
+  int width = WinterCEFHeadlessViewWidth;
+  int height = WinterCEFHeadlessViewHeight;
+  double scale = 1.0;
+  bool operator==(const HeadlessGeometry &o) const { return width == o.width && height == o.height && scale == o.scale; }
+  bool operator!=(const HeadlessGeometry &o) const { return !(*this == o); }
+  /// A frame `pixelWidth`×`pixelHeight` device pixels big was painted at this geometry.
+  bool Paints(int pixelWidth, int pixelHeight) const {
+    return std::abs(static_cast<long>(std::lround(width * scale)) - pixelWidth) <= 1 &&
+           std::abs(static_cast<long>(std::lround(height * scale)) - pixelHeight) <= 1;
+  }
+};
+
+/// A browser's view as applied (what `GetViewRect`/`GetScreenInfo` answer), the one before it (frames the compositor
+/// painted before it caught up), the newest wish, and when the view last changed. Two changes in quick succession (a
+/// presentation ending at one scale and the next starting at another a few milliseconds later) left the browser painting
+/// NOTHING — measured: no `OnAcceleratedPaint` at all afterwards, whatever was asked of it — so a change (of size or scale
+/// alike) is applied at most once per `kHeadlessScaleSettle`; a later wish waits for the rest of it, and only the last
+/// one is applied. A live resize of the panel therefore re-lays the page out at most every 300 ms.
+struct HeadlessViewState {
+  HeadlessGeometry applied;
+  HeadlessGeometry previous;
+  HeadlessGeometry wanted;
   CFAbsoluteTime changedAt = 0;
   bool scheduled = false;
 };
-std::map<int, HeadlessScaleState> &HeadlessScaleStates() {
-  static auto *states = new std::map<int, HeadlessScaleState>();
+std::map<int, HeadlessViewState> &HeadlessViewStates() {
+  static auto *states = new std::map<int, HeadlessViewState>();
   return *states;
 }
 const CFTimeInterval kHeadlessScaleSettle = 0.3;
+
+/// The view `browser` is laid out in now (the agent's fixed one for a browser nobody has shown).
+HeadlessGeometry HeadlessAppliedGeometry(CefRefPtr<CefBrowser> browser) {
+  if (!browser) return HeadlessGeometry();
+  auto it = HeadlessViewStates().find(browser->GetIdentifier());
+  return it == HeadlessViewStates().end() ? HeadlessGeometry() : it->second.applied;
+}
+
+/// The geometry a frame of `pixelWidth`×`pixelHeight` was painted at: the applied view when its size is that, else the
+/// one before it (a frame the compositor painted before it caught up), else the applied scale with the size the frame
+/// itself has.
+HeadlessGeometry HeadlessGeometryOfFrame(CefRefPtr<CefBrowser> browser, int pixelWidth, int pixelHeight) {
+  auto it = browser ? HeadlessViewStates().find(browser->GetIdentifier()) : HeadlessViewStates().end();
+  const HeadlessGeometry applied = it == HeadlessViewStates().end() ? HeadlessGeometry() : it->second.applied;
+  if (applied.Paints(pixelWidth, pixelHeight)) return applied;
+  if (it != HeadlessViewStates().end() && it->second.previous.Paints(pixelWidth, pixelHeight)) return it->second.previous;
+  HeadlessGeometry g = applied;
+  g.width = static_cast<int>(std::lround(pixelWidth / applied.scale));
+  g.height = static_cast<int>(std::lround(pixelHeight / applied.scale));
+  return g;
+}
 
 
 class WinterHeadlessRenderHandler : public CefRenderHandler {
@@ -5026,17 +5062,15 @@ class WinterHeadlessRenderHandler : public CefRenderHandler {
   WinterHeadlessRenderHandler() = default;
 
   void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect &rect) override {
-    rect = CefRect(0, 0, WinterCEFHeadlessViewWidth, WinterCEFHeadlessViewHeight);
+    const HeadlessGeometry g = HeadlessAppliedGeometry(browser);
+    rect = CefRect(0, 0, g.width, g.height);
   }
 
+  /// The "screen" is the view itself (a page's `screen.width` is what it is laid out in), at the view's device scale.
   bool GetScreenInfo(CefRefPtr<CefBrowser> browser, CefScreenInfo &screen_info) override {
-    const CefRect screen(0, 0, WinterCEFHeadlessViewWidth, WinterCEFHeadlessViewHeight);
-    double scale = 1.0;
-    if (browser) {
-      auto it = HeadlessScales().find(browser->GetIdentifier());
-      if (it != HeadlessScales().end()) scale = it->second;
-    }
-    screen_info.Set(static_cast<float>(scale), 24, 8, false, screen, screen);
+    const HeadlessGeometry g = HeadlessAppliedGeometry(browser);
+    const CefRect screen(0, 0, g.width, g.height);
+    screen_info.Set(static_cast<float>(g.scale), 24, 8, false, screen, screen);
     return true;
   }
 
@@ -5048,14 +5082,18 @@ class WinterHeadlessRenderHandler : public CefRenderHandler {
                int width,
                int height) override {}
 
-  /// The borrowed frame goes to the presentation, if any, synchronously: it must be read before this returns.
+  /// The borrowed frame goes to the presentation, if any, synchronously: it must be read before this returns. With it,
+  /// the view it was painted at (a popup's: the view's now).
   void OnAcceleratedPaint(CefRefPtr<CefBrowser> browser,
                           PaintElementType type,
                           const RectList &dirtyRects,
                           const CefAcceleratedPaintInfo &info) override {
     if (!g_headless_paint_observer || !browser || !info.shared_texture_io_surface) return;
-    g_headless_paint_observer(browser->GetIdentifier(), type == PET_POPUP ? 1 : 0,
-                              reinterpret_cast<IOSurfaceRef>(info.shared_texture_io_surface));
+    IOSurfaceRef surface = reinterpret_cast<IOSurfaceRef>(info.shared_texture_io_surface);
+    const HeadlessGeometry g = type == PET_POPUP
+        ? HeadlessAppliedGeometry(browser)
+        : HeadlessGeometryOfFrame(browser, static_cast<int>(IOSurfaceGetWidth(surface)), static_cast<int>(IOSurfaceGetHeight(surface)));
+    g_headless_paint_observer(browser->GetIdentifier(), type == PET_POPUP ? 1 : 0, surface, g.width, g.height, g.scale);
   }
 
   void OnPopupShow(CefRefPtr<CefBrowser> browser, bool show) override {
@@ -5282,8 +5320,7 @@ class WinterHeadlessClient : public WinterClient {
       if (g_headless_closed_observer) g_headless_closed_observer(browser->GetIdentifier());
       HeadlessUserControlled().erase(browser->GetIdentifier());
       HeadlessDrags().erase(browser->GetIdentifier());
-      HeadlessScales().erase(browser->GetIdentifier());
-      HeadlessScaleStates().erase(browser->GetIdentifier());
+      HeadlessViewStates().erase(browser->GetIdentifier());
       HeadlessPages().erase(browser->GetIdentifier());
       DialogGone(browser);
       WinterCEFHeadlessCancelFileChoosers(browser->GetIdentifier());
@@ -5807,7 +5844,8 @@ int WinterCEFHeadlessContextCount(void) {
   return static_cast<int>(HeadlessContexts().size());
 }
 
-void WinterCEFHeadlessSetPaintObserver(void (^observer)(int browserId, int type, IOSurfaceRef surface)) {
+void WinterCEFHeadlessSetPaintObserver(void (^observer)(int browserId, int type, IOSurfaceRef surface, int cssWidth,
+                                                        int cssHeight, double scale)) {
   g_headless_paint_observer = [observer copy];
 }
 
@@ -5966,32 +6004,47 @@ void WinterCEFHeadlessEdit(NSView *key, int command, NSString *text) {
 }
 
 
-void ApplyHeadlessScale(CefRefPtr<CefBrowser> browser, HeadlessScaleState &state) {
-  const int id = browser->GetIdentifier();
+/// The wish, applied: CEF re-reads the view (`GetViewRect`) and the screen (`GetScreenInfo`) and lays the SAME document
+/// out again — a resize and a device-pixel-ratio change, never a reload.
+void ApplyHeadlessView(CefRefPtr<CefBrowser> browser, HeadlessViewState &state) {
+  if (state.wanted == state.applied) return;
+  state.previous = state.applied;
   state.applied = state.wanted;
   state.changedAt = CFAbsoluteTimeGetCurrent();
-  if (state.applied > 1.0) HeadlessScales()[id] = state.applied; else HeadlessScales().erase(id);
   CefRefPtr<CefBrowserHost> host = browser->GetHost();
   host->NotifyScreenInfoChanged();
   host->WasResized();
   host->Invalidate(PET_VIEW);
 }
 
-void WinterCEFHeadlessSetPresentation(NSView *key, double scale, int frameRate) {
+/// What a presentation may ask for: a size of at least `WinterCEFHeadlessViewMinWidth`×`MinHeight` CSS pixels and at most
+/// `WinterCEFHeadlessViewMaxPixels` device pixels a side, a scale in [1, 4]; nothing (≤ 0): the agent's fixed view.
+HeadlessGeometry HeadlessClampedGeometry(int cssWidth, int cssHeight, double scale) {
+  HeadlessGeometry g;
+  g.scale = std::isfinite(scale) && scale > 1.0 ? std::min(scale, 4.0) : 1.0;
+  if (cssWidth > 0 && cssHeight > 0) {
+    const int most = static_cast<int>(static_cast<double>(WinterCEFHeadlessViewMaxPixels) / g.scale);
+    g.width = std::min(std::max(cssWidth, static_cast<int>(WinterCEFHeadlessViewMinWidth)), most);
+    g.height = std::min(std::max(cssHeight, static_cast<int>(WinterCEFHeadlessViewMinHeight)), most);
+  }
+  return g;
+}
+
+void WinterCEFHeadlessSetPresentation(NSView *key, int cssWidth, int cssHeight, double scale, int frameRate) {
   CefRefPtr<CefBrowser> browser = BrowserForParent(key);
   if (!browser) return;
   const int id = browser->GetIdentifier();
   CefRefPtr<CefBrowserHost> host = browser->GetHost();
   host->SetWindowlessFrameRate(frameRate > 0 ? frameRate : kHeadlessFrameRate);
-  HeadlessScaleState &state = HeadlessScaleStates()[id];
-  state.wanted = scale > 1.0 ? scale : 1.0;
+  HeadlessViewState &state = HeadlessViewStates()[id];
+  state.wanted = HeadlessClampedGeometry(cssWidth, cssHeight, scale);
   if (state.wanted == state.applied) {
     host->Invalidate(PET_VIEW);
     return;
   }
   const CFTimeInterval wait = state.changedAt + kHeadlessScaleSettle - CFAbsoluteTimeGetCurrent();
   if (wait <= 0) {
-    ApplyHeadlessScale(browser, state);
+    ApplyHeadlessView(browser, state);
     return;
   }
   host->Invalidate(PET_VIEW);
@@ -5999,14 +6052,24 @@ void WinterCEFHeadlessSetPresentation(NSView *key, double scale, int frameRate) 
   state.scheduled = true;
   __weak NSView *weakKey = key;
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-    auto it = HeadlessScaleStates().find(id);
-    if (it == HeadlessScaleStates().end()) return;
+    auto it = HeadlessViewStates().find(id);
+    if (it == HeadlessViewStates().end()) return;
     it->second.scheduled = false;
     NSView *k = weakKey;
     CefRefPtr<CefBrowser> current = k == nil ? nullptr : BrowserForParent(k);
-    if (!current || current->GetIdentifier() != id || it->second.wanted == it->second.applied) return;
-    ApplyHeadlessScale(current, it->second);
+    if (!current || current->GetIdentifier() != id) return;
+    ApplyHeadlessView(current, it->second);
   });
+}
+
+BOOL WinterCEFHeadlessViewGeometry(NSView *key, int *cssWidth, int *cssHeight, double *scale) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return NO;
+  const HeadlessGeometry g = HeadlessAppliedGeometry(browser);
+  if (cssWidth) *cssWidth = g.width;
+  if (cssHeight) *cssHeight = g.height;
+  if (scale) *scale = g.scale;
+  return YES;
 }
 
 void WinterCEFHeadlessSendInput(NSView *key, int kind, int x, int y, int dx, int dy, int button, int clickCount,

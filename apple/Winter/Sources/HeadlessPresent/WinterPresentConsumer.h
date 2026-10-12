@@ -18,7 +18,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) uint32_t generation, slot;
 @property(nonatomic, readonly) uint64_t sequence, paintedAt, copiedAt, receivedAt, inputSequence;
 @property(nonatomic, readonly) uint32_t droppedBefore;
+/// The device scale the frame was painted at, and the view it shows in CSS pixels (its pixels divided by `scale`).
 @property(nonatomic, readonly) double scale;
+@property(nonatomic, readonly) int cssWidth, cssHeight;
 @end
 
 /// A page dialog waiting for the user (`WinterPresentMsgDialog`).
@@ -83,8 +85,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// Returns its sequence. Any thread.
 - (uint64_t)sendInput:(WinterPresentInputMsg)input;
 
-/// Render at `scale` device pixels per CSS pixel from now on (a new pool generation follows).
-- (void)setScale:(double)scale;
+/// Lay the page out in a view of `width`×`height` CSS pixels (the viewer's own size in points; 0, 0: keep the size) and
+/// render it at `scale` device pixels per CSS pixel (the viewer's backing scale) from now on. A new pool generation
+/// follows once the producer applied it (at most once per 300 ms); the page is re-laid out, never reloaded.
+- (void)setViewWidth:(int)width height:(int)height scale:(double)scale;
 
 // ---- version 2: only while the viewer holds control (the producer drops them otherwise) ----
 
