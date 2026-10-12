@@ -79,13 +79,24 @@ separately. Cowork remains unavailable until its required gates pass.
   acknowledged paths leave running Code intact. No daemon restart is required.
   Core source review is accepted; platform parity and full SDK/embedded coverage
   are still pending. Protected Chat/Dispatch refusal is interim only.
-- The guarded stream v3 source is independently accepted for a nonsecret Linux
-  fixture. Its closed factory exposes only the peer endpoint; native tests cover
-  queue pins, partial I/O, EventManager retirement and malformed activation. A
-  statically linked hardened worker passed host-only sandbox checks, including
-  fork/exec denial before factory creation. Guest HVC duplex/backpressure and
-  reclaim with the stream have not run. No key-release authority follows from
-  this transport evidence. See [draft native evidence](https://github.com/yanlingLabs/winter/pull/19).
+- The guarded stream v3 source and signed-worker setup are independently reviewed.
+  A real RAW-plus-stream run now has separate root/Astra byte, disk, pin and
+  mapping audits: three live footprint drops of 238.406/236.281/236.063 MiB while
+  both communication directions and disk threads progressed. Its original
+  aggregate remains false for absent guest-TX EAGAIN; Linux HVC can wait inside
+  the driver and still return a full write. The unconsumed host-sent suffix is
+  explicit. A generic non-console port is being implemented for asynchronous
+  runtime data traffic; the console evidence does not cover its new control
+  queues. See [recorded results](https://github.com/yanlingLabs/winter/blob/18fafff1/docs/research/2026-10-12-cowork-stream-results.md).
+- Project peer messaging/discovery authority is merged into the feature
+  composition through PR #23. Canonical membership, stale-index refusal,
+  post-resume checks and host-path redaction are tested; durable cross-restart
+  delivery, guest caller transport and raw transcript/output fences remain open.
+- The native Code compatibility matrix is accepted: Swift build/test, actual
+  SourceKit indexing, Chromium, Playwright and local Xcode package resolution
+  match main in sandboxed/escaped modes, except intended protected sandbox reads.
+  Native/embedded context-reader coverage has a candidate implementation under
+  independent review; it is not yet accepted activation coverage.
 
 ## Work in progress
 
