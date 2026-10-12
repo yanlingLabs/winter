@@ -139,8 +139,48 @@ final class BrowserLinkParityTests: XCTestCase {
         let swift = [BrowserLinkProtocol.Op.tabEnsure, BrowserLinkProtocol.Op.tabRelease, BrowserLinkProtocol.Op.tabClose,
                      BrowserLinkProtocol.Op.tabsLive, BrowserLinkProtocol.Op.cdpSend, BrowserLinkProtocol.Op.cdpSubscribe,
                      BrowserLinkProtocol.Op.overlay, BrowserLinkProtocol.Op.tabPresent, BrowserLinkProtocol.Op.tabMute,
-                     BrowserLinkProtocol.Op.tabDownloads, BrowserLinkProtocol.Op.tabDownload]
+                     BrowserLinkProtocol.Op.tabDownloads, BrowserLinkProtocol.Op.tabDownload,
+                     BrowserLinkProtocol.Op.headlessShow, BrowserLinkProtocol.Op.headlessHide,
+                     BrowserLinkProtocol.Op.headlessTabs]
         XCTAssertEqual(Set(ops), Set(swift), "the daemon's BrowserLinkOp and WinterKit's ops drifted")
+        // Every op is read by exactly one of the two parsers: the headless ones by `BrowserLinkHeadlessCommand`,
+        // the rest by `BrowserLinkCommand` (whose closed `Op` Winter Headless switches over).
+        for op in swift {
+            let headless = BrowserLinkHeadlessCommand.handles(op: op)
+            XCTAssertEqual(headless, op.hasPrefix("headless."), op)
+        }
+    }
+
+    /// Feature names: the app's `BrowserLinkProtocol.features` equals the daemon's `BROWSER_LINK_FEATURES`
+    /// (packages/protocol/src/methods.ts), read from the TypeScript source itself.
+    func testTheLinkFeaturesEqualTheDaemons() throws {
+        let url = Self.repoRoot.appendingPathComponent("packages/protocol/src/methods.ts")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let decl = try NSRegularExpression(pattern: #"export const BROWSER_LINK_FEATURES = \[([^\]]*)\] as const;"#)
+        let match = try XCTUnwrap(decl.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)),
+                                  "BROWSER_LINK_FEATURES not found in methods.ts")
+        let list = String(source[Range(match.range(at: 1), in: source)!])
+        let quoted = try NSRegularExpression(pattern: #""([^"]+)""#)
+        let features = quoted.matches(in: list, range: NSRange(list.startIndex..., in: list)).compactMap { m in
+            Range(m.range(at: 1), in: list).map { String(list[$0]) }
+        }
+        XCTAssertFalse(features.isEmpty)
+        XCTAssertEqual(features, BrowserLinkProtocol.features, "BrowserLinkProtocol.features drifted from BROWSER_LINK_FEATURES")
+    }
+
+    /// The person's actions: `BrowserLinkHeadlessAction` equals the daemon's `BrowserLinkHeadlessAction` enum.
+    func testTheHeadlessActionsEqualTheDaemons() throws {
+        let url = Self.repoRoot.appendingPathComponent("packages/protocol/src/methods.ts")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let decl = try NSRegularExpression(pattern: #"export const BrowserLinkHeadlessAction = z\.enum\(\[([^\]]*)\]\)"#)
+        let match = try XCTUnwrap(decl.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)))
+        let list = String(source[Range(match.range(at: 1), in: source)!])
+        let quoted = try NSRegularExpression(pattern: #""([^"]+)""#)
+        let actions = quoted.matches(in: list, range: NSRange(list.startIndex..., in: list)).compactMap { m in
+            Range(m.range(at: 1), in: list).map { String(list[$0]) }
+        }
+        XCTAssertEqual(actions, BrowserLinkHeadlessAction.allCases.map(\.rawValue))
+        XCTAssertTrue(source.contains("browserLinkHeadless: \"\(BrowserLinkProtocol.Method.headless)\""))
     }
 
     func testTheLinkProtocolNumberEqualsTheDaemons() throws {
