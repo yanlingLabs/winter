@@ -1,0 +1,41 @@
+{
+  "sourceCommit": "9c48655d8d37bc9d14c3bf3d6dbda4270c07787e",
+  "commands": [
+    {
+      "command": [
+        "bun",
+        "test",
+        "packages/core/test/cowork/volume-filesystem.test.ts",
+        "packages/core/test/cowork/volumes.test.ts",
+        "packages/core/test/cowork/repository.test.ts",
+        "packages/core/test/cowork/admission.test.ts",
+        "packages/core/test/runtime-state/db-run-folder.test.ts"
+      ],
+      "exitCode": 0
+    },
+    {
+      "command": [
+        "python3",
+        "-I",
+        "-S",
+        "spikes/cowork-filesystem-bootstrap/test_bootstrap.py"
+      ],
+      "exitCode": 0
+    }
+  ],
+  "hostTestsPassed": 98,
+  "hostAssertions": 771,
+  "macProtocolAndMockTestsPassed": 6,
+  "actualLinuxTestsSkipped": 9,
+  "formatterExecuted": false,
+  "journalReplayExecuted": false,
+  "mountExecuted": false,
+  "vmStarted": false,
+  "sourceHashes": {
+    "packages/core/src/cowork/volume-filesystem.ts": "2fdf03a761c48e2d86202adf97e2a8de781d2f26d78beade39e9d1c061663288",
+    "packages/core/src/cowork/volumes.ts": "8b2f6e9f758ea7e63fe069dfdb27b9005d4a6852c11017c539ede90084889af6",
+    "spikes/cowork-filesystem-bootstrap/bootstrap.py": "d466236f0d995242112f9705f6b3890815c545e841fa71165543850a378f1013",
+    "spikes/cowork-filesystem-bootstrap/test_bootstrap.py": "f6e8fdad7240871e4eb27e4a9a0d94185f00889fd6d0d5587997defb4e0d328d",
+    "packages/core/test/cowork/volume-filesystem.test.ts": "3405bcbf6b7ca52f409e321e608863062a0ef6fd05ca403fdb127b78c479784c"
+  }
+}
