@@ -77,5 +77,5 @@ export function homeFenceFor(home: string, options?: HostStorageFenceOptions): H
   const active = protectedHostStorageFences(home, options);
   return { dirs: homeFencedDirs(home, options), files: homeFencedFiles(home), segments: PROJECT_FENCED_SEGMENTS,
     coworkRoots: active.homes.map((h) => join(h, "cowork")), coordinationDir: active.coordinationDirs[0],
-    readDirs: [...active.homes.map((h) => join(h, "runtimes")), ...active.coordinationDirs], controlEntries: COWORK_CONTROL_ENTRIES };
+    readDirs: [...active.homes.flatMap((h) => [join(h, "runtimes"), join(h, "run")]), ...active.coordinationDirs], controlEntries: COWORK_CONTROL_ENTRIES };
 }

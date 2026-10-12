@@ -1,3 +1,4 @@
+import { protectedHostStorageFences } from "./home-fence";
 import { assertDaemonPathAccess, readDaemonTextFile } from "./daemon-path-fence";
 // Phase 8c Lane 3, Tasks 3.2-3.4 — the Winter-leg `Options.hooks` wiring, gated on the P8c-7
 // measurement (`test/runtime-sdk/hooks-measure.e2e.test.ts`: measured = YES — a real spawned
@@ -466,10 +467,11 @@ const WRITE_ONLY_DIR_VARIABLES: readonly string[] = [
  */
 function floorNeedles(home: string): FloorNeedle[] {
   const prefixes = homePrefixes(home);
+  const coordinationRoots = new Set(protectedHostStorageFences(home).coordinationDirs);
   const out = new Map<string, boolean>();
   for (const p of [...homeFencedDirs(home), ...homeFencedFiles(home)]) {
     const r = relative(home, p);
-    const writeOnly = isHomeWriteOnly(r) || p.endsWith("/cowork");
+    const writeOnly = isHomeWriteOnly(r) || p.endsWith("/cowork") || coordinationRoots.has(p);
     const spellings = r.length === 0 || r.startsWith("..") || isAbsolute(r)
       ? [p.toLowerCase()]
       : prefixes.map((pre) => `${pre}/${r}`.toLowerCase());
@@ -1076,11 +1078,8 @@ function escapeFloorHitIn(command: string, home: string | undefined, cwd?: strin
   if (home === undefined || home.length === 0) return undefined;
   const bareHome = home.replace(/\/+$/, "");
   const storageFence = homeFenceFor(bareHome);
-  for (const word of c.split(/[\s;&|()<>"']+/)) {
-    if (!word.includes("/")) continue;
-    const hit = hostStorageReadTarget(word, cwd ?? "/", storageFence, false);
-    if (hit) return "Cowork control storage or host coordination";
-  }
+  // Approved escapes retain ordinary host execution. Cowork mentions are inspected only in
+  // write-shaped positions for integrity; encrypted disks/helper custody own confidentiality.
   // Actual destructive targets include ancestors; a cd/du/find operand is not itself a write.
   const storageOnly = { ...storageFence, dirs: [...(storageFence.coworkRoots ?? []), ...(storageFence.coordinationDir ? [storageFence.coordinationDir] : [])], files: [], segments: [] };
   for (const segment of shellSegments(c)) for (const target of segmentWriteTargets(segment,true)) {

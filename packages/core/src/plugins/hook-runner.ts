@@ -1,4 +1,3 @@
-import { daemonChildSpawnWithFloor, trackDaemonChildSpawn, type DaemonChildFloorApplier } from "../runtime-sdk/daemon-path-fence";
 /**
  * HookRunner — pure process mechanics for ONE plugin hook invocation (Phase 4f design §Protocol,
  * plan Task 1). Spawns `sh -c <command>` with the event JSON on stdin, races the exit against a
@@ -105,35 +104,27 @@ async function readCapped(stream: ReadableStream<Uint8Array> | null, cap: number
 }
 
 export class HookRunner {
-  constructor(private readonly deps: { home?: string; applyFloor?: DaemonChildFloorApplier } = {}) {}
   async run(spec: HookSpec, payload: HookEventPayload): Promise<HookResult> {
     const startTime = Date.now(); // for the stream-read deadline below (remaining timeout budget)
     let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
-    let retireFloor: () => void;
     try {
-      const prepared = daemonChildSpawnWithFloor(this.deps.home, {
-        command: "/bin/sh", args: ["-c", spec.command], cwd: spec.cwd,
+      proc = Bun.spawn(["sh", "-c", spec.command], {
+        cwd: spec.cwd,
         env: {
-          ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+          ...process.env,
           WINTER_SESSION_ID: payload.sessionId,
           WINTER_PLUGIN_ID: spec.pluginId,
           WINTER_HOOK_EVENT: payload.event,
         },
-      }, this.deps.applyFloor);
-      proc = Bun.spawn([prepared.command, ...prepared.args], {
-        cwd: prepared.cwd, env: prepared.env,
         stdin: "pipe",
         stdout: "pipe",
         stderr: "pipe",
       });
-      retireFloor = trackDaemonChildSpawn(this.deps.home, prepared, () => proc.kill("SIGKILL"));
     } catch (err) {
       // Spawn itself threw (e.g. `cwd` doesn't exist, `sh` missing) — never propagate, report it
       // the same shape as any other hook failure.
       return { status: "error", stdout: "", reason: err instanceof Error ? err.message : String(err) };
     }
-
-    void proc.exited.then(retireFloor, retireFloor);
 
     // Fire-and-forget: write/end the stdin payload as a CONCURRENT task, not one the timeout race
     // below awaits. Bun's FileSink write()/end() are typed `number | Promise<number>` — a bare

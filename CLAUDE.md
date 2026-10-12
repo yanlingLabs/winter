@@ -10,6 +10,14 @@ Winter is a macOS-native AI assistant: a TypeScript/Bun daemon (`winter-core`) p
 
 The daemon owns everything around that child: IPC, event-sourced session storage, settings, approvals/questions, the capability tools it hands the child over MCP, the hooks, and the SDK-message→`SessionEvent` projector. Session modes are `code`, `dispatch`, `chat` (`SessionMode`, `runtime-sdk/create.ts`). **Cowork is not an implemented session mode.** Its Mac/iOS placeholders, rejected spawn type, and reserved lifecycle predicates do not enable creation or execution. See [Cowork implementation map](docs/cowork-status.md) for the working infrastructure and remaining gaps.
 
+## Cowork and ordinary host execution policy
+
+Accepted policy on 2026-10-12: ordinary native Code, approved shell escapes, plugin hooks, LSP and third-party MCP tools do not receive a persistent outer Cowork Seatbelt profile. Keep each tool's own sandbox unchanged and never inject sandbox/GPU/Chromium/LSP compatibility overrides. Sandboxed Bash receives protected Cowork, runtime, control and socket roots in the existing `sandboxConfigFor` denyRead/denyWrite arrays, rendered as one profile. Approved escapes retain main's behavior and no Seatbelt; Cowork escape matching is write-shaped integrity guidance, not confidentiality.
+
+Core/SDK file tools keep canonical protected-path checks. Encrypted private disks and native key custody own the at-rest boundary; approved same-user host execution and authenticated API access remain residuals. Actual floors apply only to explicitly Winter-owned Cowork workers/bridges. Ordinary child execution history never requires a daemon restart before first activation.
+
+The installed SDK has no live sandbox-settings control. `refreshForStorage` awaits daemon policy consumers: Code holds queued work, lets its current turn finish, then recreates its logical incarnation/run home with the same session/backend identity and current sandbox paths; held work resumes there. Existing embedded Workers must close before activation can complete. Chat/Dispatch launches remain refused with active storage until full file/context policy coverage is accepted. A pending/failed policy refresh blocks provisioning, without claiming third-party descendants were stopped. Historical persistent-Code-floor reports describe the superseded approach.
+
 ## Commands
 
 ```sh

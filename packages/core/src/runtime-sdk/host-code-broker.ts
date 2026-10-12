@@ -18,6 +18,7 @@ import {
   hostStorageFloorDescriptor,
   type HostStorageFloorDescriptor,
   registerHostStorageFences,
+  refreshHostStoragePolicies,
   type HostStorageFenceOptions,
 } from "./host-storage-fence";
 
@@ -25,7 +26,7 @@ export class HostCodeUnavailable extends Error {
   readonly code = "winter_leg_unavailable" as const;
   constructor(readonly reason: string) {
     super(
-      `Code host execution is unavailable (${reason}); protected Cowork storage requires an enrolled runtime generation`,
+      `Host execution boundary is unavailable (${reason})`,
     );
     this.name = "HostCodeUnavailable";
   }
@@ -267,7 +268,8 @@ function hasFloor(floor: HostStorageFloorDescriptor): boolean {
   );
 }
 function fingerprint(floor: HostStorageFloorDescriptor): string {
-  return createHash("sha256").update(JSON.stringify(floor)).digest("hex");
+  const paths = Object.fromEntries(Object.entries(floor).sort(([a], [b]) => a.localeCompare(b)).map(([key, values]) => [key, [...new Set(values)].sort()]));
+  return createHash("sha256").update(JSON.stringify(paths)).digest("hex");
 }
 function canonicalDirectory(path: string): string {
   if (!isAbsolute(path)) throw new HostCodeUnavailable("cwd-not-absolute");
@@ -312,14 +314,14 @@ interface LiveGeneration {
   registration?: HostCodeRegistration;
 }
 
-/** One service per daemon; cross-home coordinator must collect equivalent enrollment receipts from
- * every participating daemon before provisioning. This service never materializes storage itself. */
+/** One service per daemon; cross-home coordinator must collect policy acknowledgments from
+ * every participating daemon before provisioning. Only explicit owned bridges enroll in real floors. This service never materializes storage itself. */
 export class HostCodeExecutionService {
   private readonly live = new Map<string, LiveGeneration>();
   private refreshing = false;
-  private readonly enrolledSpawns = new WeakSet<SpawnClaudeCodeProcess>();
+  /** Last completed consumer acknowledgment, not a fresh filesystem-derived before snapshot. */
+  private acknowledgedStoragePolicy: string | undefined;
   private readonly embeddedSpawns = new WeakSet<SpawnClaudeCodeProcess>();
-  private retiredUnprotected = false;
   private readonly retiredProtectedFloors = new Set<string>();
   private retiredFloorOverflow = false;
   constructor(
@@ -338,19 +340,11 @@ export class HostCodeExecutionService {
   assertReady(home: string): void {
     if (resolve(home) !== resolve(this.home))
       throw new HostCodeUnavailable("foreign-service-home");
-    if (this.refreshing)
-      throw new HostCodeUnavailable("floor-refresh-in-progress");
-    if (hasFloor(hostStorageFloorDescriptor(home))) {
-      if (!this.adapter)
-        throw new HostCodeUnavailable("sdk-floor-broker-capability-missing");
-      if (
-        this.adapter.requiresNativeOutput &&
-        !this.lifecycle?.createOutputTransport
-      )
-        throw new HostCodeUnavailable("native-output-transport-missing");
-    }
+    // Ordinary native Code is not conditioned on an outer profile or broker/output capability.
+    // Preserve storage identity validation; existing file hooks/sandbox consume this registration.
+    hostStorageFloorDescriptor(home);
   }
-  /** The router also has host-internal cold-resume paths; none may bypass generation enrollment. */
+  /** Host-internal cold-resume paths also retain the interim embedded policy gate. */
   protectedStorageActive(): boolean {
     return hasFloor(hostStorageFloorDescriptor(this.home));
   }
@@ -360,11 +354,7 @@ export class HostCodeExecutionService {
     const spawn = options?.spawnClaudeCodeProcess;
     if (spawn && this.embeddedSpawns.has(spawn))
       throw new HostCodeUnavailable("embedded-host-floor-unavailable");
-    if (
-      !spawn ||
-      (!this.enrolledSpawns.has(spawn) && !this.embeddedSpawns.has(spawn))
-    )
-      throw new HostCodeUnavailable("query-generation-not-enrolled");
+
   }
   trustEmbeddedSpawn(spawn: SpawnClaudeCodeProcess): SpawnClaudeCodeProcess {
     // Capture only a guarded closure. A topology chosen while storage was inactive cannot
@@ -380,11 +370,13 @@ export class HostCodeExecutionService {
   }
   assertAuthority(authority: HostCodeAuthority | undefined): void {
     this.assertReady(this.home);
-    if (hasFloor(hostStorageFloorDescriptor(this.home)) && !authority)
-      throw new HostCodeUnavailable("host-policy-authority-missing");
+    // Canonical SDK permissions/hooks own ordinary Code authority, regardless of Cowork storage.
+    void authority;
   }
   enroll(input: {
     options: Options;
+    /** Explicit Winter-owned worker/bridge operation; never inferred from storage activation. */
+    ownedBridge?: true;
     sessionId: string;
     backendSessionId: string;
     generation: number;
@@ -398,7 +390,11 @@ export class HostCodeExecutionService {
     if (this.refreshing)
       throw new HostCodeUnavailable("floor-refresh-in-progress");
     const floor = hostStorageFloorDescriptor(home);
-    const required = hasFloor(floor);
+    const required = input.ownedBridge === true;
+    if (required && !hasFloor(floor))
+      throw new HostCodeUnavailable("owned-bridge-floor-unavailable");
+    if (required && (!this.adapter || (this.adapter.requiresNativeOutput && !this.lifecycle?.createOutputTransport)))
+      throw new HostCodeUnavailable("owned-bridge-capability-unavailable");
     if (required && (!binding || !this.adapter))
       throw new HostCodeUnavailable("host-policy-or-sdk-capability-missing");
     if (
@@ -747,10 +743,9 @@ export class HostCodeExecutionService {
       )
         return;
       if (entry.processExit) {
-        if (entry.unprotected) this.retiredUnprotected = true;
-        else if (this.retiredProtectedFloors.size < 1024)
+        if (!entry.unprotected && this.retiredProtectedFloors.size < 1024)
           this.retiredProtectedFloors.add(entry.floor);
-        else this.retiredFloorOverflow = true;
+        else if (!entry.unprotected) this.retiredFloorOverflow = true;
       }
       this.live.delete(id);
     };
@@ -1148,7 +1143,6 @@ export class HostCodeExecutionService {
         hook.completed = true;
       };
     }
-    this.enrolledSpawns.add(options.spawnClaudeCodeProcess!);
     entry.generation = generation;
     this.live.set(id, entry);
     return generation;
@@ -1166,15 +1160,22 @@ export class HostCodeExecutionService {
       throw new HostCodeUnavailable("invalid-refresh-deadline");
     if (this.refreshing)
       throw new HostCodeUnavailable("floor-refresh-in-progress");
-    if (!this.adapter)
-      throw new HostCodeUnavailable("sdk-floor-broker-capability-missing");
     this.refreshing = true;
     let unregister: (() => void) | undefined;
     try {
       unregister = registerHostStorageFences(home, options);
       const deadline = Date.now() + timeoutMs;
       const targetFloor = fingerprint(hostStorageFloorDescriptor(this.home));
+      const policyChanged = this.acknowledgedStoragePolicy !== targetFloor;
+      let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          policyChanged ? refreshHostStoragePolicies() : Promise.resolve(),
+          new Promise<never>((_, reject) => { refreshTimer = setTimeout(() => reject(new HostCodeUnavailable("host-storage-policy-refresh-pending")), timeoutMs); }),
+        ]);
+      } finally { if (refreshTimer) clearTimeout(refreshTimer); }
       for (const entry of this.live.values()) {
+        if (!entry.generation.protectedStorage) continue; // ordinary children require no descendant-stop proof
         entry.generation.dispose();
         const remaining = deadline - Date.now();
         if (remaining <= 0)
@@ -1222,7 +1223,6 @@ export class HostCodeExecutionService {
           throw new HostCodeUnavailable("old-code-stop-unconfirmed");
       }
       if (
-        this.retiredUnprotected ||
         this.retiredFloorOverflow ||
         [...this.retiredProtectedFloors].some((floor) => floor !== targetFloor)
       ) {
@@ -1246,10 +1246,12 @@ export class HostCodeExecutionService {
         } finally {
           if (timer) clearTimeout(timer);
         }
-        this.retiredUnprotected = false;
         this.retiredProtectedFloors.clear();
         this.retiredFloorOverflow = false;
       }
+      if (fingerprint(hostStorageFloorDescriptor(this.home)) !== targetFloor)
+        throw new HostCodeUnavailable("host-storage-policy-changed-during-refresh");
+      this.acknowledgedStoragePolicy = targetFloor;
       this.live.clear();
       return unregister;
     } catch (error) {

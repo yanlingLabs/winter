@@ -1073,19 +1073,8 @@ class WinterSessionImpl implements WinterSession {
         shape = { generation, resume, abort };
         queue = (this.deps.queue ?? createHostPromptQueue)();
         projector = this.deps.projector(shape);
-        if (this.deps.mode === "code" && this.deps.runtime.codeExecution) {
-          hostCode = this.deps.runtime.codeExecution.enroll({
-            options, sessionId: this.sessionId, backendSessionId: this.backendSessionId, generation, abort,
-            isCurrent: () => !abort.signal.aborted && this.gen <= generation && (!this.inc || this.inc.generation === generation),
-            stop: () => this.end(),
-          });
-          options = hostCode.options;
-          const current = hostCode;
-          if (current.protectedStorage) options.hooks = { ...options.hooks, PreToolUse: [...(options.hooks?.PreToolUse ?? []), {
-            matcher: "Bash|Monitor|Workflow|Agent|Task", failClosed: true,
-            hooks: [async (input, _toolUseId, context) => { await current.completeHook(input, context.signal); return {}; }],
-          }] };
-        }
+        // Native Code follows its canonical SDK permissions/hooks and own Bash sandbox.
+        // Active Cowork storage never enrolls it in a persistent host process floor/broker.
         query = this.deps.runtime.sdk.query({ prompt: queue, options });
       } catch (err) {
         hostCode?.dispose();

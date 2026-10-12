@@ -35,10 +35,6 @@ export function registerHostStorageFences(home: string, options: HostStorageFenc
   const previous = registered.get(key);
   const registration = { ...options, participatingHomes: [...(options.participatingHomes ?? [])] };
   registered.set(key, registration);
-  try { assertDaemonChildFloorsCoverStorage(); } catch (error) {
-    if (previous) registered.set(key, previous); else registered.delete(key);
-    throw error;
-  }
   return () => {
     if (registered.get(key) !== registration) return;
     if (previous) registered.set(key, previous); else registered.delete(key);
@@ -59,7 +55,7 @@ export const COWORK_CONTROL_ENTRIES = ["manifest.json", "env.ext4", "data.ext4",
 export const COWORK_RUNTIME_AUTHORITY_FILES = ["runtime-state.db", "runtime-state.db-wal", "runtime-state.db-shm"] as const;
 /** Only explicit coordinator registrations can introduce Cowork read/ancestor protection. A disabled
  * feature or an unused home must not change ordinary Code scans of HOME, Library or /. Provisioning
- * creates an empty owned root, registers it and refreshes runtime floors BEFORE materializing data. */
+ * creates an empty owned root, registers it and refreshes existing sandbox/path policies BEFORE materializing data. */
 export function protectedHostStorageFences(home: string, options?: HostStorageFenceOptions): { homes: string[]; coordinationDirs: string[] } {
   const registrations: Array<readonly [string, HostStorageFenceOptions]> = [...registered];
   if (options) registrations.push([resolve(home), options]);
@@ -86,7 +82,7 @@ export function protectedHostStorageFences(home: string, options?: HostStorageFe
 }
 export function hostStorageWriteRoots(home: string, options?: HostStorageFenceOptions): string[] {
   const active = protectedHostStorageFences(home, options);
-  return [...active.homes.flatMap((h) => [join(h, "cowork"), join(h, "runtimes")]), ...active.coordinationDirs];
+  return [...active.homes.flatMap((h) => [join(h, "cowork"), join(h, "runtimes"), join(h, "run")]), ...active.coordinationDirs];
 }
 /** Literal prefixes and glob tails are kept separate until a consumer spells its own grammar. */
 export function hostStorageReadPatterns(home: string, options?: HostStorageFenceOptions): Array<{ root: string; tail: string }> {
@@ -95,16 +91,17 @@ export function hostStorageReadPatterns(home: string, options?: HostStorageFence
     ...active.coordinationDirs.map(root => ({root, tail:"**"})),
     ...active.homes.flatMap((h) => [
       { root: join(h, "runtimes"), tail: "**" },
+      { root: join(h, "run"), tail: "**" },
       { root: join(h, "cowork", "control"), tail: "**" },
       ...COWORK_CONTROL_ENTRIES.map((entry) => ({ root: join(h, "cowork", "workspaces"), tail: `*/${entry}${entry === "control" ? "/**" : ""}` })),
     ]),
   ];
 }
 
-/** Host-owned spawn input, never an editable settings value. The SDK consumes this outside normal
- * permission policy and wraps the whole Code runtime, including its file tools and shell escapes.
- * Applying a changed descriptor requires draining/restarting every affected runtime generation.
- * This descriptor alone does not activate kernel enforcement or enable Cowork. */
+/** Host-owned descriptor for Winter-owned Cowork workers/bridges, never ordinary Code runtimes
+ * or third-party tools. Ordinary host execution uses its existing sandbox and approval pipeline;
+ * approved escapes have no persistent outer profile. This descriptor alone does not activate
+ * worker kernel enforcement or enable Cowork. */
 export interface HostStorageFloorDescriptor {
   denyReadPaths: string[];
   denyWritePaths: string[];
@@ -144,32 +141,15 @@ export function hostStorageFloorDescriptor(home: string, options?: HostStorageFe
     denyLinkPaths:[...write],protectAncestorsOf:[...write]};
 }
 
-/** Parent close proves only that parent exited: hooks/LSP servers can leave descendants behind.
- * Retain each inherited floor for the daemon lifetime, including retired direct children. Stable
- * roots cover new workspaces without transition. A newly protected root with weaker historical
- * children needs a fresh daemon or a future native descendant-drain receipt; never kill-as-proof. */
-const daemonChildFloors = new Map<string, { home: string; floor: HostStorageFloorDescriptor; live: Set<() => void> }>();
-export function trackDaemonChildFloor(home: string, floor: HostStorageFloorDescriptor, stop: () => void): () => void {
-  const key = JSON.stringify([resolve(home), floor]);
-  let record = daemonChildFloors.get(key);
-  if (!record) {
-    record = { home: resolve(home), floor, live: new Set() };
-    daemonChildFloors.set(key, record);
-  }
-  record.live.add(stop);
-  return () => { record!.live.delete(stop); };
+
+/** Policy consumers are daemon-owned session/Worker hosts, never model/plugin registrations.
+ * Registration records paths synchronously; storage activation awaits these policy acknowledgments.
+ * This refresh is logical session lifecycle, not third-party descendant-stop evidence. */
+const policyConsumers = new Set<() => Promise<void>>();
+export function registerHostStoragePolicyConsumer(refresh: () => Promise<void>): () => void {
+  policyConsumers.add(refresh);
+  return () => { policyConsumers.delete(refresh); };
 }
-function assertDaemonChildFloorsCoverStorage(): void {
-  for (const record of daemonChildFloors.values()) {
-    const required = hostStorageFloorDescriptor(record.home);
-    // Equal or stronger inherited floors remain sufficient. Removing a fixture registration
-    // does not invent a new protection requirement; adding new roots never inherits a receipt.
-    const covered = (Object.keys(required) as Array<keyof HostStorageFloorDescriptor>)
-      .every(key => required[key].every(entry => record.floor[key].includes(entry)));
-    if (covered) continue;
-    for (const stop of record.live) { try { stop(); } catch { /* a stop request is not proof */ } }
-    const error = new Error("Daemon child descendants are unconfirmed for newly protected storage; restart with storage registration before child launch");
-    Object.assign(error, { code: "winter_leg_unavailable", reason: "daemon-child-descendants-unconfirmed" });
-    throw error;
-  }
+export async function refreshHostStoragePolicies(): Promise<void> {
+  await Promise.all([...policyConsumers].map(refresh => refresh()));
 }
