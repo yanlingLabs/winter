@@ -1141,7 +1141,12 @@ public struct CUFocusGuardianCore: Sendable {
 
     /// The app the user is WORKING in: they clicked, typed or scrolled in its window while it was in front (switching there
     /// to look is not working in it). The agent is hands-off it until it leaves the front (user ruling, round 10).
-    public private(set) var userWorkingApp: pid_t?
+    public private(set) var userWorkingApp: pid_t? {
+        // Every time the mark LANDS on an app (round 17b): an act compares the count with its start (sticky in flight).
+        didSet { if let a = userWorkingApp, a != oldValue { workMarks[a, default: 0] += 1 } }
+    }
+    /// How many times the user's work mark has landed on each app.
+    public private(set) var workMarks: [pid_t: Int] = [:]
     /// A click of theirs into a window of an app NOT in front: working in it once its own activation lands (within
     /// `workClickWindow` — the claim's own window: a slow app's activation lands up to 1.5 s after the click, review of
     /// round 10, MEDIUM #5) — a drag out of a background window activates nothing and is no work in it.

@@ -409,11 +409,14 @@ extension CUCore {
     func noteTapEvent(type: CGEventType, sourcePid: Int64, userData: Int64, flags: CGEventFlags = [], keycode: Int64 = -1,
                       location: CGPoint? = nil, targetPid: Int64 = 0, now: TimeInterval) {
         let kind = CUHardwareInput.classify(type: type, sourcePid: sourcePid, userData: userData)
-        // Secure Event Input sampled on EVERY tap event, not only at judgments (R17-a, the user's ruling): a password-field
-        // period with no change of the front app is seen — on at any moment of the quiet window, never quiet.
+        // (Not the user's — a synthetic event, the helper's own: nothing to read, not even Secure Event Input — round 17b.)
+        guard kind != .none else { return }
+        // Secure Event Input sampled on every tap event of the user's, not only at judgments (R17-a, the user's ruling) —
+        // and 4 times a second while the guardian runs (`pollSecureInput`, round 17b): on at any moment of the quiet window,
+        // never quiet.
         let secureNow = secureInputOn
         guardianLock.withLock { guardianCore.noteSecureInputIfChanged(secureNow, now: now) }
-        if kind != .none { noteHardwareInput(now: now, move: kind == .move) }
+        noteHardwareInput(now: now, move: kind == .move)
         guard kind == .action else { return }
         // Typing into the app in front (no ⌘/⌃, not Escape): an app left in front becomes their place — a restore never
         // pulls them out of it (the ruling, round 16).
@@ -495,6 +498,13 @@ extension CUCore {
             return guardianCore.userWorkingApp != app
         }
         if changed { CULog.guardian.notice("the user is working in \(self.appName(app), privacy: .public): hands off it until it leaves the front") }
+    }
+
+    /// One reading of Secure Event Input for the guardian (its 4 Hz poll; round 17b, the review of round 17's M2).
+    func pollSecureInput(now: TimeInterval? = nil) {
+        let on = secureInputOn
+        let t = now ?? clock.nowSeconds()
+        guardianLock.withLock { guardianCore.noteSecureInputIfChanged(on, now: t) }
     }
 
     /// Whether the user is working in `pid` now (round 10): the agent does not act on it.
@@ -645,7 +655,14 @@ extension CUCore {
         guardianCore.begin(view: CUGuardedView(app: sys.frontmostPid(), space: sys.activeSpace()))
         // (Never in a test's core: the machine's REAL activations — another app, a probe running meanwhile — reached the
         // model-based test's simulated world as an unknown pid and failed a seed, round 14.)
-        if guardianLiveTapEnabled { installGuardianObservers() }
+        if guardianLiveTapEnabled {
+            installGuardianObservers()
+            let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+            timer.schedule(deadline: .now(), repeating: .milliseconds(250), leeway: .milliseconds(50))
+            timer.setEventHandler { [weak self] in self?.pollSecureInput() }
+            timer.resume()
+            secureInputPoll = timer
+        }
         startCPSTap()
         startGestureMonitor()
         CULog.guardian.notice("guarding the user's view while a script runs")
@@ -660,6 +677,8 @@ extension CUCore {
         guardianCore.end()
         for o in guardianObservers { NSWorkspace.shared.notificationCenter.removeObserver(o) }
         guardianObservers.removeAll()
+        secureInputPoll?.cancel()
+        secureInputPoll = nil
         stopCPSTap()
         stopGestureMonitor()
         CULog.guardian.notice("stopped guarding: no script running")

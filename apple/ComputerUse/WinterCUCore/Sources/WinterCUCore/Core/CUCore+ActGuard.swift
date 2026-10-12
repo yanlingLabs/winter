@@ -19,9 +19,14 @@ final class CUActScope {
     /// down in the app, and no lone up for a down that never went).
     var buttonsDown = 0
     var keysDown = 0
-    init(pid: pid_t, appName: String) {
+    /// How many times the user's work mark had landed on the target when the act began (`CUFocusGuardianCore.workMarks`):
+    /// a count that moved since means they worked in it during the act — even if they have left it since (the review of
+    /// round 17, M1).
+    let workMarksAtStart: Int
+    init(pid: pid_t, appName: String, workMarksAtStart: Int = 0) {
         self.pid = pid
         self.appName = appName
+        self.workMarksAtStart = workMarksAtStart
     }
 
     private static let key = "WinterCUCore.actScope"
@@ -41,10 +46,14 @@ final class CUActWriteGuard: @unchecked Sendable {
 
     /// May the act running on this thread write to (or post to) `owner` now? `owner` nil: not known — the target's
     /// (fail closed). For an event, `owner` is the process it is posted to (the target, or a content process of it).
+    /// STICKY (the review of round 17, M1): once the act was stopped, or the user worked in the target at any moment since
+    /// the act began, every later write or start event aimed at the target is refused for the rest of the act — the user
+    /// leaving the target meanwhile reopens nothing.
     func allows(owner: pid_t?, _ what: @autoclosure () -> String) -> Bool {
         guard let scope = CUActScope.current, let core else { return true }
-        guard core.userIsWorking(in: scope.pid) else { return true }
         if let owner, owner != scope.pid, !core.sys.isContentProcess(owner, of: scope.pid) { return true }  // another app's: a restore
+        if scope.stopped != nil { return false }
+        guard core.userIsWorking(in: scope.pid) || core.workMarks(scope.pid) != scope.workMarksAtStart else { return true }
         if scope.stopped == nil {
             scope.stopped = what()
             CULog.act.notice("act in \(scope.appName, privacy: .public): the user started working in it — \(scope.stopped ?? "", privacy: .public) not sent, the act stops")
@@ -98,6 +107,9 @@ struct CUActGuardedPoster: CUEventPoster {
     func post(_ event: CGEvent, pid: pid_t, route: CURoute, authenticate: Bool) -> CURoute {
         let type = event.type
         if Self.starts(type), !guardian.allows(owner: pid, Self.words(type)) { return route }  // not sent (the target's, or its own process's)
+        // A drag's moves are checked like a start (the review of round 17, H1: they kept dragging after the user started
+        // working, and the act said it was done): once stopped, only the release goes.
+        if Self.drags(type), !guardian.allows(owner: pid, "a drag") { return route }
         if let scope = CUActScope.current {
             switch type {
             case .leftMouseDown, .rightMouseDown, .otherMouseDown: scope.buttonsDown += 1
@@ -105,8 +117,6 @@ struct CUActGuardedPoster: CUEventPoster {
             case .leftMouseUp, .rightMouseUp, .otherMouseUp:
                 if scope.stopped != nil, scope.buttonsDown == 0 { return route }  // its down never went
                 scope.buttonsDown = max(0, scope.buttonsDown - 1)
-            case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
-                if scope.stopped != nil, scope.buttonsDown == 0 { return route }
             case .keyUp:
                 if scope.stopped != nil, scope.keysDown == 0 { return route }
                 scope.keysDown = max(0, scope.keysDown - 1)
@@ -114,6 +124,10 @@ struct CUActGuardedPoster: CUEventPoster {
             }
         }
         return inner.post(event, pid: pid, route: route, authenticate: authenticate)
+    }
+
+    static func drags(_ type: CGEventType) -> Bool {
+        type == .leftMouseDragged || type == .rightMouseDragged || type == .otherMouseDragged
     }
 
     static func words(_ type: CGEventType) -> String {
@@ -146,7 +160,7 @@ extension CUCore {
     /// reaches `t`, and the act ends refused (`user_working`) — its own sentence kept when it said so itself (a burst's
     /// "typed N of M"), the guard's otherwise.
     func withActWriteGuard<T>(_ t: CUTarget, _ body: () throws -> T) throws -> T {
-        let scope = CUActScope(pid: t.pid, appName: t.appName)
+        let scope = CUActScope(pid: t.pid, appName: t.appName, workMarksAtStart: workMarks(t.pid))
         let outer = CUActScope.swap(scope)
         defer { _ = CUActScope.swap(outer) }
         let result: T
@@ -159,6 +173,16 @@ extension CUCore {
         }
         if scope.stopped != nil { throw Self.stoppedRefusal(t) }
         return result
+    }
+
+    /// How many times the user's work mark has landed on `pid` (sticky in-flight checks compare it with an act's start).
+    func workMarks(_ pid: pid_t) -> Int {
+        let front = sys.frontmostPid()
+        let now = clock.nowSeconds()
+        return guardianLock.withLock { () -> Int in
+            _ = guardianCore.userIsWorking(in: pid, front: front, now: now)  // (a pending click's mark lands here first)
+            return guardianCore.workMarks[pid, default: 0]
+        }
     }
 
     static func stoppedRefusal(_ t: CUTarget) -> CUError {

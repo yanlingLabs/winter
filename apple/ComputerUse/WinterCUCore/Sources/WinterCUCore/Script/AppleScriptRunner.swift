@@ -87,7 +87,9 @@ enum CUAppleScriptRunner {
             if case .refuse(let why) = verdict { state.refuse(why) }
             return OSErr(errAEEventNotPermitted)
         }
-        // The user started working in the bound app while the script ran: no further event of it is sent.
+        // The user started working in the bound app while the script ran: no further event of it is sent — sticky for the
+        // rest of the run once one was refused (the review of round 17, M1).
+        if state.stopped != nil { return OSErr(errAEEventNotPermitted) }
         if let why = state.stop?() {
             state.stopped(why)
             return OSErr(errAEEventNotPermitted)

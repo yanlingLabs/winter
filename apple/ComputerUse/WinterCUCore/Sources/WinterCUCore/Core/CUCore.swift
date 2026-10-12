@@ -683,6 +683,9 @@ public final class CUCore: @unchecked Sendable {
     var cpsReleaseOverride: ((Int32) -> Bool)?
     /// Whether the live CPS event tap runs (off in tests — a real tap spins a run-loop thread).
     var guardianLiveTapEnabled = true
+    /// Secure Event Input read 4 times a second while the guardian runs (round 17b, the review of round 17's M2): a
+    /// keyboard-only secure period (Tab into a password field, typing, Return) brings no tap event to sample it on.
+    var secureInputPoll: DispatchSourceTimer?
     /// Whether the guardian's restore runs inline (tests, synchronous) rather than dispatched off-main.
     var guardianRestoreSync = false
     /// Where the guardian's restore is dispatched, when a test runs it on its own schedule (the model-based test: off

@@ -3211,7 +3211,10 @@ extension CUCore {
             if let fromInfo { announceTarget(t, fromInfo, pressing: false) }
             return try eventsElsewhere(p, t, token, cursor: CursorEvent(kind: "drag", point: from, dragTo: to), what: "the drag",
                                        subject: subject) { synth, route in
-                try synth.drag(pid: t.pid, windowFor: { _ in t.windowID }, from: from, to: to, route: route)
+                // (Each step checked like the on-screen routes': the user's work stops it, the button released where it
+                // stopped — round 17b, H1.)
+                try synth.drag(pid: t.pid, windowFor: { _ in t.windowID }, from: from, to: to, route: route,
+                               check: { [self] _, _ in try token.check(); try refuseIfUserWorkMarked(t) })
             }
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
@@ -3879,6 +3882,7 @@ extension CUCore {
         case .foreground:
             let check: CUEventSynth.PointerCheck = { [self] _, point in
                 try token.check()
+                try refuseIfUserWorkMarked(t)  // every press, drag step and release (round 17b, H1)
                 try hitTest(point, t)
             }
             cursor(t, "foreground", at: sys.cursorLocation(), text: "on", remember: false)
@@ -3893,7 +3897,7 @@ extension CUCore {
             CUUserInputGuard.waitForQuiet()
             // No focus records here (the user's ruling: the focus blip is for menu validation only, never for
             // typing, clicks or reads): window-targeted events after the synthetic activation.
-            let used = try body(.skyLight) { _, _ in try token.check() }
+            let used = try body(.skyLight) { [self] _, _ in try token.check(); try refuseIfUserWorkMarked(t) }
             if used != .skyLight {
                 logOnce("skylight-fallback", "SkyLight posting unavailable; falling back to public pid events")
                 return ActOutcome(rung: .processEvents, detail: "the private event path failed, so public events were used")
@@ -3902,7 +3906,7 @@ extension CUCore {
         case .accessibility, .processEvents:
             send(event, t)
             if focus { syntheticFocus(t) }
-            _ = try body(.publicPid) { _, _ in try token.check() }
+            _ = try body(.publicPid) { [self] _, _ in try token.check(); try refuseIfUserWorkMarked(t) }
             return ActOutcome(rung: .processEvents, detail: d.detail)
         }
     }
