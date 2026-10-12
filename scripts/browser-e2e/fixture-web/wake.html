@@ -8,6 +8,11 @@
   <button id="submit" type="submit">Submit for review</button>
 </form>
 <p id="status"></p>
+<!-- A form that really submits: the page navigates away as the user presses its button. -->
+<form id="g" aria-label="Continue" action="/wake.html" method="get">
+  <input type="hidden" name="step" value="3">
+  <button id="go" type="submit">Send and continue</button>
+</form>
 <button id="other" type="button">Another button</button>
 <a id="next" href="/page2.html">Next page</a>
 <script>

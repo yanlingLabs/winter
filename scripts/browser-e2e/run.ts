@@ -820,6 +820,20 @@ if (!HEADLESS) await check("wake: the user following a link fires a { url } wake
   sc.end();
 });
 
+if (!HEADLESS) await check("wake: the user presses a submit button and the page navigates away at once — both the submit wake and the click wake fire, never lost", async () => {
+  const sc = scope("rw4");
+  const { t, key, state } = await wakeTab(sc);
+  const submitted = await armWake(t.targetId, { kind: "submitted", ref: String(refOf(state, /form "Continue"/)) });
+  const clicked = await armWake(t.targetId, { kind: "clicked", ref: String(refOf(state, /button "Send and continue"/)) });
+  await userClicks(key, "#go");
+  const s1 = await wakeEvent(submitted.id);
+  const c1 = await wakeEvent(clicked.id);
+  expect(s1.outcome === "fired" && s1.detail === "submitted the form", "the submit wake fired", JSON.stringify(s1));
+  expect(c1.outcome === "fired" && c1.detail === "clicked", "the click wake fired", JSON.stringify(c1));
+  expect(String(await userReads(key, "location.search")) === "?step=3", "the page did navigate");
+  sc.end();
+});
+
 if (HEADLESS) await check("the engine never sent a method outside the allowlist, and Winter Headless refused nothing", async () => {
   expect(headlessSent.length > 0 && headlessSent.every((m) => CDP_ALLOWED_METHODS.includes(m)), "all methods allowlisted");
   expect(headlessRefused.length === 0, "nothing refused", headlessRefused.join("\n"));

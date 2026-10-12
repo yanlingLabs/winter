@@ -403,6 +403,22 @@ async function wakeRow(t: CdpTransport, base: string, profile: string): Promise<
     check(dn?.outcome === "fired" && dn.detail === "appeared", "the new document gets the watcher again, and its text fires the appeared wake", dn ?? events);
     const left = await cdp.inWorker<number>(`chrome.debugger.getTargets().then((ts) => ts.filter((x) => x.attached && x.tabId === ${listed!.tabKey}).length)`);
     check(left === 0, "…with no debugger attached at any point of the wait", left);
+
+    // The headline case: the user presses a form's submit button and the page navigates away at once.
+    const run3 = runScope("rwake3");
+    const third = await engine.global(run3.s, "browsers.tab", { tab: `chrome:${listed!.tabKey}` }) as TabHandle;
+    const st3 = await engine.primitive(run3.s, third.targetId, "state", { full: true, emit: false }) as string;
+    const ref3 = (re: RegExp) => String(/\[(\d+)\]/.exec(st3.split("\n").find((l) => re.test(l)) ?? "")?.[1] ?? "");
+    const sub = await arm(third.targetId, { kind: "submitted", ref: ref3(/form "Continue"/) });
+    const go = await arm(third.targetId, { kind: "clicked", ref: ref3(/button "Send and continue"/) });
+    run3.end();
+    engine.turnEnded("s_wake");
+    await sleep(500);
+    await userClicks("/wake.html?step=2", "#go");
+    const se = await eventOf(sub.id);
+    const ge = await eventOf(go.id);
+    check(se?.outcome === "fired" && se.detail === "submitted the form", "a submit that navigates the page away fires the submit wake (never lost)", se ?? events);
+    check(ge?.outcome === "fired" && ge.detail === "clicked", "…and the click wake on its button", ge ?? events);
   } finally {
     wakes.stop();
     engine.stop();
