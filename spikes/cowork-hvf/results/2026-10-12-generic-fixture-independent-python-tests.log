@@ -1,0 +1,41 @@
+test_exact_generic_port_identity (test_generic_discovery.DiscoveryTests.test_exact_generic_port_identity) ... ok
+test_extra_port_wrong_port_id_and_wrong_parent_are_refused (test_generic_discovery.DiscoveryTests.test_extra_port_wrong_port_id_and_wrong_parent_are_refused) ... ok
+test_missing_multiport_is_refused (test_generic_discovery.DiscoveryTests.test_missing_multiport_is_refused) ... ok
+test_missing_version1_and_additional_feature_are_refused (test_generic_discovery.DiscoveryTests.test_missing_version1_and_additional_feature_are_refused) ... ok
+test_second_virtio_console_is_refused (test_generic_discovery.DiscoveryTests.test_second_virtio_console_is_refused) ... ok
+test_unbound_or_wrong_driver_is_refused (test_generic_discovery.DiscoveryTests.test_unbound_or_wrong_driver_is_refused) ... ok
+test_wrong_generic_device_number_is_refused (test_generic_discovery.DiscoveryTests.test_wrong_generic_device_number_is_refused) ... ok
+test_absolute_deadline_nanoseconds_and_positive_progress (test_generic_lifecycle.LifecycleTests.test_absolute_deadline_nanoseconds_and_positive_progress) ... ok
+test_error_after_ack_before_capture_reaps_direct_child (test_generic_lifecycle.LifecycleTests.test_error_after_ack_before_capture_reaps_direct_child) ... ok
+test_error_after_actual_oracle_thread_start_joins_writer (test_generic_lifecycle.LifecycleTests.test_error_after_actual_oracle_thread_start_joins_writer) ... ok
+test_interrupt_after_ack_reaps_direct_child (test_generic_lifecycle.LifecycleTests.test_interrupt_after_ack_reaps_direct_child) ... ok
+test_interrupt_capture_supervision_reaps_and_joins_oracle (test_generic_lifecycle.LifecycleTests.test_interrupt_capture_supervision_reaps_and_joins_oracle) ... ok
+test_interrupt_inside_capture_reaps_and_joins_partial_readers (test_generic_lifecycle.LifecycleTests.test_interrupt_inside_capture_reaps_and_joins_partial_readers) ... ok
+test_oracle_thread_start_failure_closes_peer (test_generic_lifecycle.LifecycleTests.test_oracle_thread_start_failure_closes_peer) ... ok
+test_partial_capture_reader_start_reaps_and_joins (test_generic_lifecycle.LifecycleTests.test_partial_capture_reader_start_reaps_and_joins) ... ok
+test_runner_skips_disk_and_raw_inspection_when_owners_uncertain (test_generic_lifecycle.LifecycleTests.test_runner_skips_disk_and_raw_inspection_when_owners_uncertain) ... ERROR
+test_unreapable_child_is_finite_and_keeps_ownership_uncertain (test_generic_lifecycle.LifecycleTests.test_unreapable_child_is_finite_and_keeps_ownership_uncertain) ... ok
+test_actual_normal_runner_aggregates_generic_audit_key (test_generic_fixture.FixtureTests.test_actual_normal_runner_aggregates_generic_audit_key) ... ok
+test_actual_raw_pause_with_owned_worker_alive_and_recovery (test_generic_fixture.FixtureTests.test_actual_raw_pause_with_owned_worker_alive_and_recovery) ... ok
+test_missing_concurrent_disk_heartbeat_or_worker_liveness_fails (test_generic_fixture.FixtureTests.test_missing_concurrent_disk_heartbeat_or_worker_liveness_fails) ... ok
+test_missing_control_ack_wrong_channel_or_ended_stall_fails (test_generic_fixture.FixtureTests.test_missing_control_ack_wrong_channel_or_ended_stall_fails) ... ok
+test_normal_owner_exit_during_stall_drains_pending_bytes_to_eof_without_tx (test_generic_fixture.FixtureTests.test_normal_owner_exit_during_stall_drains_pending_bytes_to_eof_without_tx) ... ok
+test_terminal_close_ack_and_effect_uncertainty_are_distinct (test_generic_fixture.FixtureTests.test_terminal_close_ack_and_effect_uncertainty_are_distinct) ... ok
+test_terminal_owner_exit_during_stall_keeps_partial_capture_explicit (test_generic_fixture.FixtureTests.test_terminal_owner_exit_during_stall_keeps_partial_capture_explicit) ... ok
+
+======================================================================
+ERROR: test_runner_skips_disk_and_raw_inspection_when_owners_uncertain (test_generic_lifecycle.LifecycleTests.test_runner_skips_disk_and_raw_inspection_when_owners_uncertain)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<checkout>/spikes/cowork-hvf/test_generic_lifecycle.py", line 109, in test_runner_skips_disk_and_raw_inspection_when_owners_uncertain
+    with self.assertRaises(SystemExit):runner.main()
+                                       ~~~~~~~~~~~^^
+  File "<checkout>/spikes/cowork-hvf/run_generic_fixture.py", line 46, in main
+    rows,capture,raw_result,sandbox_eof=supervise(command,fixture,run_requested,parent_control,worker_control,scenario=scenario)
+                                        ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: LifecycleTests.test_runner_skips_disk_and_raw_inspection_when_owners_uncertain.<locals>.lifecycle() got an unexpected keyword argument 'scenario'
+
+----------------------------------------------------------------------
+Ran 24 tests in 1.084s
+
+FAILED (errors=1)

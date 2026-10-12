@@ -1,0 +1,46 @@
+$ spikes/cowork-hvf/out/libkrun-runtime-port-trace/target/debug/deps/krun_devices-196ba91e2a52c433 runtime_port --test-threads=1 --nocapture
+
+running 28 tests
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_control_ack_remains_live_during_data_peer_backpressure ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_control_freeze_holds_pin_no_ack_or_phase_advance ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_control_rx_freeze_holds_entire_destination_until_fresh_copy_ack ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_four_queue_linux_handshake_copy_ack_and_data_gate ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_malformed_control_direction_span_length_and_state_fault ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_stale_control_generation_never_acks_or_advances ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_fixture_trace_frozen_control_has_no_rows_until_actual_used_ack ... {"kind":"runtime_control_used_ack","row":0,"queue":3,"id":4294967295,"event":0,"value":1,"usedAck":true}
+{"kind":"runtime_control_used_ack","row":1,"queue":2,"id":0,"event":1,"value":0,"usedAck":true}
+ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_requires_both_features_before_four_queue_activation ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_event_manager_notify_before_finished_reset_completion ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_queue_socketpair_duplex_owned_io ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_short_tx_has_no_replay_across_freeze_or_reset ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_socket_backpressure_poll_is_stop_interruptible_without_ram_lease ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_worker_rx_wait_survives_freeze_then_acks_after_resume ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_worker_tx_backpressure_keeps_pin_stop_has_zero_old_ack ... ok
+test virtio::console::runtime_port::tests::runtime_port_async_pending_reactivation_waits_old_owner_then_real_io ... ok
+test virtio::console::runtime_port::tests::runtime_port_explicit_rx_owned_limit_report_limit_and_cross_region ... ok
+test virtio::console::runtime_port::tests::runtime_port_frozen_pending_rx_tx_keep_pins_and_no_guest_ack ... ok
+test virtio::console::runtime_port::tests::runtime_port_malformed_and_oversized_spans_reject_before_payload_io ... ok
+test virtio::console::runtime_port::tests::runtime_port_peer_eof_terminal_notifier_never_acks_guest ... ok
+test virtio::console::runtime_port::tests::runtime_port_reset_retires_but_holds_ownership_until_actual_thread_completion ... ok
+test virtio::console::runtime_port_control::tests::runtime_port_all_later_phase_adversarial_messages_and_duplicate_refusal ... ok
+test virtio::console::runtime_port_control::tests::runtime_port_bounded_adversarial_events_ids_values_lengths ... ok
+test virtio::console::runtime_port_control::tests::runtime_port_exact_linux_handshake_and_close ... ok
+test virtio::console::runtime_port_control::tests::runtime_port_no_state_change_before_ack ... ok
+test virtio::console::runtime_port_fixture_trace::tests::runtime_port_fixture_trace_exact_fields_and_strict_shared_cap ... ok
+test virtio::console::runtime_port_fixture_trace::tests::runtime_port_fixture_trace_rejects_data_queues_and_bad_sizes_without_rows ... ok
+test virtio::mmio::runtime_port_mmio_tests::runtime_port_actual_mmio_nonready_fails_terminal_without_poison ... ok
+test virtio::mmio::runtime_port_mmio_tests::runtime_port_actual_mmio_ready_cross_region_fails_terminal_without_poison ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 114 filtered out; finished in 0.13s
+
+
+$ spikes/cowork-hvf/out/libkrun-runtime-port-trace/target/debug/deps/krun-fe8b317545a4d4ac runtime_port --test-threads=1 --nocapture
+
+running 3 tests
+test runtime_port_api_tests::runtime_port_existing_hvc_factory_excludes_generic_variant ... ok
+test runtime_port_api_tests::runtime_port_public_factory_is_closed_opt_in_exclusive_and_peer_owned ... ok
+test runtime_port_trace_api_tests::runtime_port_fixture_trace_requires_exact_opt_in ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.01s
+

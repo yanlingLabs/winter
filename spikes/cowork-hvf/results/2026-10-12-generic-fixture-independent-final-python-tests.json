@@ -1,0 +1,16 @@
+{
+  "vmStarted": false,
+  "workerStarted": false,
+  "testsRun": 25,
+  "passed": true,
+  "sourceHashes": {
+    "test_generic_discovery.py": "7695f4c37999ec94315710b717fa8a6af8c6f3868495ad2c1dbb55c2286f939c",
+    "test_generic_lifecycle.py": "3b193268ce249018e8e4a48553a168495a0df06a5094eaaf1bf876e6b5f72751",
+    "test_generic_fixture.py": "6e5e48f1d6b54a63e7c8803c2d6a1660f052f7977e9179fcee15aaeb9380b361",
+    "generic_fixture_oracle.py": "47ecb3a3b6bf551622d3aedb2a0cc9299e309b28f709b38b32412093cc54a13f",
+    "run_generic_fixture.py": "f63607c98f6ad80ea0647d388f7be1cd7220db5a0775b41fb36fde1eec56dc40",
+    "generic_fixture_lifecycle.py": "b59d24183d8c8d9054cdea50735fe9964c86045a1f9aa91e7d882314b2730e61",
+    "generic_fixture_receipts.py": "7e2f46bcb68bfb967b9799c925f3a50c226d58f1db825a03a3adfdac429de117"
+  },
+  "buildSha256": "821c5f7341f760bb0e5f1e584115bf5e247438d13f5c7883d0e143e4c164e9d3"
+}

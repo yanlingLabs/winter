@@ -1,0 +1,25 @@
+[    0.067062] Warning: unable to open an initial console.
+[    0.067916] {"kind":"guest_telemetry","sink":"guest-kmsg-via-PL011-earlycon","regularConsoleOpened":false}
+[    0.068690] {"kind":"linux_boot","release":"6.18.35","machine":"aarch64","bootId":"9f6dac78-31d4-4c0f-9ce6-65dbcd9a7c31"}
+[    0.069587] {"kind":"virtio_device","name":"virtio1","device":"0x0004","features":"00000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}
+[    0.071069] {"kind":"virtio_device","name":"virtio2","device":"0x0003","features":"01000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}
+[    0.072567] {"kind":"virtio_device","name":"virtio0","device":"0x0005","features":"01010100000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}
+[    0.074068] {"kind":"virtio_device","name":"virtio3","device":"0x0002","features":"01100000010000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}
+[    0.075807] {"kind":"guest_generic_ready","virtioDevice":"virtio2","port":"vport2p0","major":247,"minor":0,"portId":0,"generic":true,"tty":false,"nonblocking":true,"exclusiveOwner":true,"openControlAckReturned":true,"queues":[0,1,2,3],"multiport":true}
+[    0.077619] {"kind":"guest_heartbeat","tick":1}
+[    0.077679] {"kind":"guest_stream_progress","direction":"guest-to-host","cycle":0,"bytes":65536,"frames":1,"raw":true,"integrity":true}
+[    0.078974] {"kind":"guest_stream_progress","direction":"guest-to-host","cycle":0,"bytes":589824,"frames":9,"raw":true,"integrity":true}
+[    0.080118] {"kind":"guest_generic_tx_backpressure","bytes":1048576,"frameOffset":0,"eagain":1,"heartbeat":1,"reads":0,"writes":0}
+[    0.218770] {"kind":"guest_block_progress","thread":1,"cycle":0,"iteration":0,"reads":2,"writes":2,"flushes":1,"direct":true,"integrity":true}
+[    0.248782] {"kind":"guest_block_progress","thread":0,"cycle":0,"iteration":0,"reads":2,"writes":2,"flushes":2,"direct":true,"integrity":true}
+[    1.079536] {"kind":"guest_heartbeat","tick":2}
+[    1.991717] {"kind":"guest_block_progress","thread":1,"cycle":0,"iteration":16,"reads":33,"writes":34,"flushes":3,"direct":true,"integrity":true}
+[    2.050811] {"kind":"guest_block_progress","thread":0,"cycle":0,"iteration":16,"reads":34,"writes":34,"flushes":4,"direct":true,"integrity":true}
+[    2.078173] {"kind":"guest_stream_progress","direction":"host-to-guest","cycle":0,"bytes":65536,"frames":1,"raw":true,"integrity":true}
+[    2.080612] {"kind":"guest_heartbeat","tick":3}
+[    3.081910] {"kind":"guest_heartbeat","tick":4}
+[    3.120398] {"kind":"guest_stream_complete","direction":"host-to-guest","bytes":262144,"frames":4,"waits":1,"shortOperations":60,"eagain":1,"raw":true,"integrity":true}
+[    3.125984] {"kind":"guest_terminal_partial_stream","direction":"guest-to-host","completedBytes":1048576,"partialAcceptedBytes":0,"eagain":30}
+[    3.127817] {"kind":"guest_stream_complete","direction":"guest-to-host","bytes":1048576,"frames":16,"waits":30,"shortOperations":16,"eagain":30,"raw":true,"integrity":true}
+[    3.130148] {"kind":"guest_terminal_close_requested","dataBackpressureObserved":true,"streamThreadsJoined":true,"heartbeat":4,"reads":54,"writes":54,"effectOutcome":"UNCERTAIN"}
+[    3.132570] {"kind":"guest_terminal_close_returned","e

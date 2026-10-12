@@ -1,0 +1,92 @@
+{
+  "fixture": "generic-fixture-0zaad_cn",
+  "vmStarted": true,
+  "scenario": "terminal-close",
+  "exitCode": 77,
+  "exitVerified": true,
+  "terminationUncertain": false,
+  "ownedChildReaped": true,
+  "killIssued": false,
+  "terminationError": null,
+  "timedOut": false,
+  "captureError": null,
+  "interrupted": false,
+  "captureOverflow": false,
+  "captureComplete": true,
+  "readerThreadsJoined": true,
+  "readerThreadsStarted": 2,
+  "channelBytes": {
+    "stdout": 3520,
+    "stderr": 127484
+  },
+  "totalBytes": 131004,
+  "parsedRows": 906,
+  "limits": {
+    "channel_bytes": 33554432,
+    "total_bytes": 50331648,
+    "line_bytes": 65536,
+    "parsed_rows": 80000,
+    "queue_items": 64,
+    "chunk_bytes": 16384,
+    "run_seconds": 130,
+    "normal_wait_seconds": 2,
+    "kill_wait_seconds": 3,
+    "reader_join_seconds": 0.2
+  },
+  "lifecycleError": null,
+  "oracleCleanupError": null,
+  "ownersQuiescent": true,
+  "diskAuditSkipped": true,
+  "diskSha256": null,
+  "effectOutcome": "UNCERTAIN",
+  "streamOracle": {
+    "receivedBytes": 8192,
+    "sentBytes": 303104,
+    "receiveOraclePassed": true,
+    "wouldBlockWrites": 1,
+    "shortWrites": 56,
+    "readPauseSeconds": 6,
+    "peerEOF": false,
+    "error": null,
+    "rawBinaryCaptured": true,
+    "blockedSyscallVerified": false,
+    "ownerExitCode": 77,
+    "threadStarted": true,
+    "threadJoined": true,
+    "limits": {
+      "bytes_per_direction": 16777216,
+      "read_chunk": 16384,
+      "write_chunk": 16384,
+      "event_rows": 8192,
+      "seconds": 125,
+      "join_seconds": 1,
+      "initial_read_pause_seconds": 6
+    },
+    "eventRows": 6
+  },
+  "genericAudit": {
+    "genericChecksPassed": true,
+    "errors": [],
+    "controlUsedAcks": 6,
+    "sinkStallHeartbeats": 4,
+    "sinkStallDiskThreads": [
+      0,
+      1
+    ],
+    "sinkStallWorkerAliveReceipts": 4,
+    "terminalCloseScenario": true,
+    "activeReturnVerified": false,
+    "effectOutcome": "UNCERTAIN",
+    "guestCloseReturnedObserved": false
+  },
+  "buildSha256": "821c5f7341f760bb0e5f1e584115bf5e247438d13f5c7883d0e143e4c164e9d3",
+  "productionReady": false,
+  "fullResourceGatePassed": false,
+  "activeReturnVerified": false,
+  "encryption": false,
+  "terminalRecoveryChecksPassed": true,
+  "rawCaptureHashes": {
+    "stream-host-to-guest.bin": "1de650178a221ba9e3fc88af10b14727033884a971a2b8f220ef44d45be839c2",
+    "stream-guest-to-host.bin": "1e1e6dfd47c271908a13831d7d365aec28e60c6b0835964f585bc1c36fac8027"
+  }
+}

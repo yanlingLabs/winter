@@ -1,0 +1,402 @@
+{
+  "buildSha256": "821c5f7341f760bb0e5f1e584115bf5e247438d13f5c7883d0e143e4c164e9d3",
+  "reviewerVmLaunches": 0,
+  "reviewerWorkerLaunches": 0,
+  "normal": {
+    "fixture": "generic-fixture-7zmd1ypu",
+    "originalResultSha256": "8bafc3a7c9bc3db1b6c5187864410e4c368dd7f70d8f21771e8832a8fff13664",
+    "originalAggregatePassed": false,
+    "exitCode": 0,
+    "originalArtifactHashes": {
+      "result.json": "8bafc3a7c9bc3db1b6c5187864410e4c368dd7f70d8f21771e8832a8fff13664",
+      "stdout.log": "3c1afc038166e0447543243278d6bbc4da3d55fed8998242474e376325323b82",
+      "stderr.log": "3c4be015d07bc26ce3d913b86d6c2b5201b6c40bc03b8c57b3cefc2d2f0c0801",
+      "events.jsonl": "480df5116e19f29f213cc472e46760957b8993b31f4567084e87d180112cb5bb",
+      "stream-host-to-guest.bin": "5629186b2df194227949a6d1cb1a2e6857fa6be579356de0064d9b2b77b99411",
+      "stream-guest-to-host.bin": "ef829d7336a45029d859be41bd712c32c515352444186fb6f44fa62a318d99b5",
+      "cowork-hvf-generic-worker": "9c40eb0bdcf8cb3232fd6af91d89a108dd33950b887180ec7f111dc18892cc45",
+      "initramfs.cpio": "4f175f0832de9851b2efff703545cd1eaccb6b5fcc78664ce121c53b5de3d0e2",
+      "kernel": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d"
+    },
+    "rawParsingMatchesEvents": true,
+    "malformedTelemetry": [
+      {
+        "channel": "stderr",
+        "line": 4365,
+        "text": "{\"kind\":\"{\"kind\":\"host_memory\",\"pid\":39664,\"footprintBytes\":435045360,\"residentBytes\":444891136}"
+      },
+      {
+        "channel": "stderr",
+        "line": 4366,
+        "text": "block_used_ack\",\"clockMicros\":18017838,\"row\":3390,\"request\":665,\"head\":7,\"success\":true }"
+      }
+    ],
+    "controlAcks": [
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 0,
+        "queue": 3,
+        "id": 4294967295,
+        "event": 0,
+        "value": 1,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.094097
+      },
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 1,
+        "queue": 2,
+        "id": 0,
+        "event": 1,
+        "value": 0,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.094111
+      },
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 2,
+        "queue": 3,
+        "id": 0,
+        "event": 3,
+        "value": 1,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.096448
+      },
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 3,
+        "queue": 2,
+        "id": 0,
+        "event": 6,
+        "value": 1,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.096468
+      },
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 4,
+        "queue": 3,
+        "id": 0,
+        "event": 6,
+        "value": 1,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.13942
+      }
+    ],
+    "stallSecondsObserved": 6.006405625026673,
+    "stallHeartbeats": 6,
+    "stallDiskThreads": [
+      0,
+      1
+    ],
+    "stallAliveReceipts": 6,
+    "guestBackpressure": [
+      {
+        "kind": "guest_generic_tx_backpressure",
+        "bytes": 1048576,
+        "frameOffset": 0,
+        "eagain": 1,
+        "heartbeat": 0,
+        "reads": 0,
+        "writes": 0,
+        "channel": "stdout",
+        "hostElapsedSeconds": 0.144446
+      }
+    ],
+    "rawStreams": {
+      "hostToGuest": {
+        "bytes": 9375744,
+        "sha256": "5629186b2df194227949a6d1cb1a2e6857fa6be579356de0064d9b2b77b99411",
+        "everyBytePassed": true
+      },
+      "guestToHost": {
+        "bytes": 14876672,
+        "sha256": "ef829d7336a45029d859be41bd712c32c515352444186fb6f44fa62a318d99b5",
+        "everyBytePassed": true
+      }
+    },
+    "originalsUnchanged": true,
+    "request665": {
+      "cause": "C host_memory record inserted inside Rust block_used_ack record; two malformed NDJSON lines discarded",
+      "rawLines": [
+        4365,
+        4366
+      ],
+      "recoveredAckExactBytes": {
+        "kind": "block_used_ack",
+        "clockMicros": 18017838,
+        "row": 3390,
+        "request": 665,
+        "head": 7,
+        "success": true
+      },
+      "recoveredHostMemoryUntimed": {
+        "kind": "host_memory",
+        "pid": 39664,
+        "footprintBytes": 435045360,
+        "residentBytes": 444891136
+      },
+      "completeNativeBlockRowRange": [
+        0,
+        7849
+      ],
+      "derivedCompletionAuditPassed": true,
+      "originalAggregateRemainsFailed": true
+    },
+    "diskSha256": "5f653e955b4f3cca04af8719ce9cb0a69858208339b41bc1699fba1a7db97841",
+    "diskThreads": [
+      {
+        "thread": 0,
+        "iterations": 374,
+        "wordsChecked": 524288,
+        "everyWordPassed": true
+      },
+      {
+        "thread": 1,
+        "iterations": 374,
+        "wordsChecked": 524288,
+        "everyWordPassed": true
+      }
+    ],
+    "untouchedDiskTailZero": true,
+    "mappingAudit": {
+      "epochs": 18,
+      "replacedSpans": 300,
+      "mappingOrderAndExclusionsPassed": true,
+      "frozenPinObservations": 119,
+      "genericFrozenPinObservations": 83
+    },
+    "activeWindows": [
+      {
+        "cycle": 1,
+        "touchedSamples": [
+          432915416,
+          433472472,
+          433652696
+        ],
+        "lateFreeSamples": [
+          174752560,
+          174752560
+        ],
+        "peakDropBytes": 258900136,
+        "peakDropMiB": 246.90641021728516,
+        "conservativeDropBytes": 258162856,
+        "heartbeats": 10,
+        "streamDirections": [
+          "guest-to-host",
+          "host-to-guest"
+        ],
+        "diskThreads": [
+          0,
+          1
+        ],
+        "retainedAndReuseChecksPassed": true
+      },
+      {
+        "cycle": 2,
+        "touchedSamples": [
+          434947056,
+          434947056,
+          434947056
+        ],
+        "lateFreeSamples": [
+          176980784,
+          174949168
+        ],
+        "peakDropBytes": 259997888,
+        "peakDropMiB": 247.95330810546875,
+        "conservativeDropBytes": 257966272,
+        "heartbeats": 10,
+        "streamDirections": [
+          "guest-to-host",
+          "host-to-guest"
+        ],
+        "diskThreads": [
+          0,
+          1
+        ],
+        "retainedAndReuseChecksPassed": true
+      },
+      {
+        "cycle": 3,
+        "touchedSamples": [
+          437257248,
+          435291168,
+          435291168
+        ],
+        "lateFreeSamples": [
+          172983088,
+          173048624
+        ],
+        "peakDropBytes": 264274160,
+        "peakDropMiB": 252.03147888183594,
+        "conservativeDropBytes": 262242544,
+        "heartbeats": 10,
+        "streamDirections": [
+          "guest-to-host",
+          "host-to-guest"
+        ],
+        "diskThreads": [
+          0,
+          1
+        ],
+        "retainedAndReuseChecksPassed": true
+      }
+    ],
+    "guestConsumedStreamBytes": {
+      "guest-to-host": 14876672,
+      "host-to-guest": 9240576
+    },
+    "narrowActiveReturnEvidencePassed": true
+  },
+  "terminal": {
+    "fixture": "generic-fixture-0zaad_cn",
+    "originalResultSha256": "80f9a666f0ad14f58783920d7e95e06467821cab8709a95af5f0ce24cb440cea",
+    "originalAggregatePassed": true,
+    "exitCode": 77,
+    "originalArtifactHashes": {
+      "result.json": "80f9a666f0ad14f58783920d7e95e06467821cab8709a95af5f0ce24cb440cea",
+      "stdout.log": "d2f794b95d7d38e01b63b6518f3714ad534848a6f9081c004bc8a9cde5d82eae",
+      "stderr.log": "5caab90571e6146d6e25d42e50595e3f91aedbd2b6569d0e5b471d7607d5cb19",
+      "events.jsonl": "fefeeb6d438a1a384a45a91255c313f6dc01f551a990897408b23f6989122ad2",
+      "stream-host-to-guest.bin": "1de650178a221ba9e3fc88af10b14727033884a971a2b8f220ef44d45be839c2",
+      "stream-guest-to-host.bin": "1e1e6dfd47c271908a13831d7d365aec28e60c6b0835964f585bc1c36fac8027",
+      "cowork-hvf-generic-worker": "9c40eb0bdcf8cb3232fd6af91d89a108dd33950b887180ec7f111dc18892cc45",
+      "initramfs.cpio": "4f175f0832de9851b2efff703545cd1eaccb6b5fcc78664ce121c53b5de3d0e2",
+      "kernel": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d"
+    },
+    "rawParsingMatchesEvents": true,
+    "malformedTelemetry": [
+      {
+        "channel": "stdout",
+        "line": 25,
+        "text": "[    3.132570] {\"kind\":\"guest_terminal_close_returned\",\"e"
+      }
+    ],
+    "controlAcks": [
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 0,
+        "queue": 3,
+        "id": 4294967295,
+        "event": 0,
+        "value": 1,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.096517
+      },
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 1,
+        "queue": 2,
+        "id": 0,
+        "event": 1,
+        "value": 0,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.096531
+      },
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 2,
+        "queue": 3,
+        "id": 0,
+        "event": 3,
+        "value": 1,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.096651
+      },
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 3,
+        "queue": 2,
+        "id": 0,
+        "event": 6,
+        "value": 1,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.096663
+      },
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 4,
+        "queue": 3,
+        "id": 0,
+        "event": 6,
+        "value": 1,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.138251
+      },
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 5,
+        "queue": 3,
+        "id": 0,
+        "event": 6,
+        "value": 0,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 3.19497
+      }
+    ],
+    "stallSecondsObserved": 3.0812583749648184,
+    "stallHeartbeats": 4,
+    "stallDiskThreads": [
+      0,
+      1
+    ],
+    "stallAliveReceipts": 4,
+    "guestBackpressure": [
+      {
+        "kind": "guest_generic_tx_backpressure",
+        "bytes": 1048576,
+        "frameOffset": 0,
+        "eagain": 1,
+        "heartbeat": 1,
+        "reads": 0,
+        "writes": 0,
+        "channel": "stdout",
+        "hostElapsedSeconds": 0.143439
+      }
+    ],
+    "rawStreams": {
+      "hostToGuest": {
+        "bytes": 303104,
+        "sha256": "1de650178a221ba9e3fc88af10b14727033884a971a2b8f220ef44d45be839c2",
+        "everyBytePassed": true
+      },
+      "guestToHost": {
+        "bytes": 8192,
+        "sha256": "1e1e6dfd47c271908a13831d7d365aec28e60c6b0835964f585bc1c36fac8027",
+        "everyBytePassed": true
+      }
+    },
+    "originalsUnchanged": true,
+    "terminalOutcome": "UNCERTAIN",
+    "diskInspected": false,
+    "guestCloseReturnedObserved": false,
+    "closeRequestSeconds": 3.194898,
+    "closeAckSeconds": 3.19497,
+    "workerExitObservationSeconds": 3.2222359171137214,
+    "scopedTerminalRecoveryPassed": true
+  },
+  "fullResourceGatePassed": false,
+  "productionReady": false,
+  "authenticatedProtocolImplemented": false,
+  "liveResetOrHostDisconnectVerified": false,
+  "telemetrySerializationFixRequired": true,
+  "durableCaptureManifest": {
+    "path": "results/2026-10-12-generic-live-capture-manifest.json",
+    "sha256": "abbd0ec9f93a83b06a8a93521025d9a37f5e784a6aa0b56384fbeaab6e400982",
+    "filesVerified": 12,
+    "compressedAndUncompressedHashesPassed": true
+  },
+  "auditScriptSha256": "4ee4accedcc802f063c9e2898d5ae0f902d19fc6377f3ca4d3a971f459efb6f9"
+}

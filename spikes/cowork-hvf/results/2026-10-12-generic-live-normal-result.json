@@ -1,0 +1,559 @@
+{
+  "fixture": "generic-fixture-7zmd1ypu",
+  "vmStarted": true,
+  "exitCode": 0,
+  "timedOut": false,
+  "diskSameIdentity": true,
+  "diskSha256": "5f653e955b4f3cca04af8719ce9cb0a69858208339b41bc1699fba1a7db97841",
+  "buildSha256": "821c5f7341f760bb0e5f1e584115bf5e247438d13f5c7883d0e143e4c164e9d3",
+  "candidate": {
+    "status": "fixture-only-control-trace-prelaunch-review-required",
+    "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+    "source": "out/libkrun-runtime-port-trace",
+    "basePatches": [
+      {
+        "patchFile": "patches/0004-proposed-guarded-block-reviewed-fixes.patch",
+        "patchSha256": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481"
+      },
+      {
+        "patchFile": "patches/0005-proposed-guarded-block-producer-progress.patch",
+        "patchSha256": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775"
+      },
+      {
+        "patchFile": "patches/0006-proposed-raw-block-trace.patch",
+        "patchSha256": "00e169fb7e5c527d348269cc8211afc99daa800622bce6140a4b2b42c204951d"
+      },
+      {
+        "patchFile": "patches/0007-proposed-guarded-stream.patch",
+        "patchSha256": "4acf7d82622d98ca1265e6a57bcd167f6df1fd5efb6a63cc65a9f6b24f35e044"
+      },
+      {
+        "patchFile": "patches/0008-proposed-guarded-stream-reviewed-fixes.patch",
+        "patchSha256": "43331eedec8e73f735830932b56c28cb3eb311f1c9bcbf3535f497063a369378"
+      },
+      {
+        "patchFile": "patches/0009-proposed-guarded-stream-closed-factory.patch",
+        "patchSha256": "ae46b3d1732cf6e00b3cb451334be04b222093cd78418b91b706d2a33a4f35c4"
+      },
+      {
+        "patchFile": "patches/0010-proposed-generic-runtime-port.patch",
+        "patchSha256": "62298de5d9176725d6a4bf0f79183a141de6d3162ff6085bce42ecd43f235752"
+      }
+    ],
+    "patchFile": "patches/0011-proposed-runtime-port-fixture-trace.patch",
+    "patchSha256": "fe41eb3b7891d4c7bb7fa61d43508d4173d9e72a27b9476bb4de0c64ea5815c0",
+    "fullSourceDiffSha256": "c39d78098ca2a994182a2361e8fe21aac956ef8a943d1cffe7ed49df4eab306c",
+    "moduleCorrespondence": {
+      "stream_reclaim_access.rs": "src/devices/src/reclaim_access.rs",
+      "stream_io_v3.rs": "src/devices/src/stream_io.rs",
+      "runtime_port_control.rs": "src/devices/src/virtio/console/runtime_port_control.rs",
+      "runtime_port_traced.rs": "src/devices/src/virtio/console/runtime_port.rs",
+      "runtime_port_fixture_trace.rs": "src/devices/src/virtio/console/runtime_port_fixture_trace.rs"
+    },
+    "features": [
+      "blk"
+    ],
+    "defaultFeatures": false,
+    "devices": [
+      "PL011",
+      "balloon",
+      "bounded RNG",
+      "one RAW block",
+      "one generic non-console port0 (four virtqueues)"
+    ],
+    "streamAdmission": "Closed library-created AF_UNIX SOCK_STREAM socketpair; only opposite peer fd>=3/CLOEXEC published; private device endpoint nonblocking/CLOEXEC and every duplicate internal. Caller-FD setter always refuses.",
+    "maxDevices": 2,
+    "maxPins": 32,
+    "maxPinnedBytes": 8388608,
+    "maxTxBytes": 65536,
+    "maxRxOwnedBytes": 16384,
+    "maxRxReportedChainBytes": 1048576,
+    "queueSize": 32,
+    "terminalFaultExitCode": 77,
+    "terminalFaultOutcome": "UNCERTAIN",
+    "vmStarted": false,
+    "payloadLogging": false,
+    "credentialAuthorityImplemented": false,
+    "keysOrUnlockImplemented": false,
+    "productionReady": false,
+    "fullResourceGatePassed": false,
+    "limitations": [
+      "Generic device has not booted; prior HVC resource evidence is not transferred.",
+      "Linux generic data path is asynchronous; Linux __send_control_msg still spins until control ACK.",
+      "One boot port lifetime: guest CLOSE is ACKed then terminal/UNCERTAIN; no hotplug/name/resize/remove/reopen protocol.",
+      "Host Stop/reset and short-copy constraints retained; live generic guest reset/cancellation remains unproved.",
+      "Reset may deliver/consume already-started owned bytes; no authenticated runtime/replay/exactly-once guarantee.",
+      "No key delivery, guest confinement, worker admission or full Cowork integration is supplied by this source candidate.",
+      "Existing RAW block reset/25ms completion-hold limitations remain unchanged."
+    ],
+    "priorCheckpoint": "020e1547586c26a95c9a8fe83ee84e064758e3c2",
+    "priorFullSourceDiffSha256": "6331d0e07ba4cfab8a318bd31ef52cf1645ffedfee6e46da185c568db0e15c2d",
+    "factoryAPI": "krun_create_cowork_runtime_stream(ctx_id)",
+    "factoryReturns": "Peer FD>=3 on success, caller owns/closes it; negative errno on failure, no endpoint published and all newly created endpoints closed.",
+    "workerNoForkContract": "Before production factory call, install worker purpose-built sandbox denying process-fork/exec; never fork afterward. Threads allowed. Signed-worker process-fork denial test remains required before secret-bearing guest run.",
+    "hostileSameProcessBoundary": false,
+    "forkClosureProvenByLibrary": false,
+    "darwinPrivateABIUsed": false,
+    "queueCount": 4,
+    "queueRoles": [
+      "port0 RX",
+      "port0 TX",
+      "control RX",
+      "control TX"
+    ],
+    "featuresRequired": [
+      "VERSION_1",
+      "MULTIPORT"
+    ],
+    "maxPorts": 1,
+    "maxPendingControlResponses": 1,
+    "maxControlTxReportedBytes": 8,
+    "maxControlRxReportedChainBytes": 1048576,
+    "maxControlPacketsPerTurn": 2,
+    "genericDataAfter": "generation-checked PORT_OPEN(0,1) used ACK",
+    "activeReturnVerified": false,
+    "incrementalAddedFiles": [
+      "src/devices/src/virtio/console/runtime_port_fixture_trace.rs"
+    ],
+    "maxControlOwnedBytesPerFrame": 8,
+    "maxPendingControlRxFrames": 1,
+    "maxPendingControlTxFrames": 1,
+    "maxPendingControlPayloadBytesUpperBound": 24,
+    "fixtureControlTraceMaxRows": 64,
+    "fixtureControlTraceAPI": "krun_enable_cowork_runtime_port_fixture_trace(ctx_id)",
+    "fixtureControlTraceFields": [
+      "row",
+      "queue",
+      "id",
+      "event",
+      "value",
+      "usedAck"
+    ],
+    "fixtureControlTraceDataPayload": false
+  },
+  "exitVerified": true,
+  "terminationUncertain": false,
+  "ownedChildReaped": true,
+  "killIssued": false,
+  "terminationError": null,
+  "captureError": null,
+  "interrupted": false,
+  "captureOverflow": false,
+  "captureComplete": true,
+  "readerThreadsJoined": true,
+  "readerThreadsStarted": 2,
+  "channelBytes": {
+    "stdout": 26652,
+    "stderr": 1548313
+  },
+  "totalBytes": 1574965,
+  "parsedRows": 9894,
+  "limits": {
+    "channel_bytes": 33554432,
+    "total_bytes": 50331648,
+    "line_bytes": 65536,
+    "parsed_rows": 80000,
+    "queue_items": 64,
+    "chunk_bytes": 16384,
+    "run_seconds": 130,
+    "normal_wait_seconds": 2,
+    "kill_wait_seconds": 3,
+    "reader_join_seconds": 0.2
+  },
+  "lifecycleError": null,
+  "oracleCleanupError": null,
+  "ownersQuiescent": true,
+  "productionReady": false,
+  "fullResourceGatePassed": false,
+  "encryption": false,
+  "streamOracle": {
+    "receivedBytes": 14876672,
+    "sentBytes": 9375744,
+    "receiveOraclePassed": true,
+    "wouldBlockWrites": 328,
+    "shortWrites": 1717,
+    "readPauseSeconds": 6,
+    "peerEOF": true,
+    "error": null,
+    "rawBinaryCaptured": true,
+    "blockedSyscallVerified": false,
+    "threadStarted": true,
+    "threadJoined": true,
+    "limits": {
+      "bytes_per_direction": 16777216,
+      "read_chunk": 16384,
+      "write_chunk": 16384,
+      "event_rows": 8192,
+      "seconds": 125,
+      "join_seconds": 1,
+      "initial_read_pause_seconds": 6
+    },
+    "eventRows": 151
+  },
+  "peerTransferError": null,
+  "sandboxPeerEOF": null,
+  "audit": {
+    "blockReceiptsPassed": false,
+    "errors": [
+      "incomplete request 665"
+    ],
+    "requestCount": 1546,
+    "commands": {
+      "Read": 749,
+      "Write": 748,
+      "Flush": 49
+    },
+    "outstandingRequestOverlap": [
+      {
+        "epoch": 1,
+        "request": 70,
+        "pin": 113,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 2,
+        "request": 70,
+        "pin": 113,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 3,
+        "request": 145,
+        "pin": 264,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 4,
+        "request": 145,
+        "pin": 264,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 5,
+        "request": 220,
+        "pin": 415,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 6,
+        "request": 220,
+        "pin": 415,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 7,
+        "request": 301,
+        "pin": 798,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 8,
+        "request": 402,
+        "pin": 1093,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 9,
+        "request": 508,
+        "pin": 1404,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 10,
+        "request": 678,
+        "pin": 1896,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 11,
+        "request": 678,
+        "pin": 1896,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 12,
+        "request": 807,
+        "pin": 2274,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 13,
+        "request": 954,
+        "pin": 2701,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 14,
+        "request": 1029,
+        "pin": 2921,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 15,
+        "request": 1166,
+        "pin": 3316,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 16,
+        "request": 1167,
+        "pin": 3318,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 17,
+        "request": 1291,
+        "pin": 3685,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      },
+      {
+        "epoch": 18,
+        "request": 1476,
+        "pin": 4216,
+        "ownedCompletionHold": true,
+        "ownedIoIntervalOverlap": false
+      }
+    ],
+    "ringPinCount": 1,
+    "freedWindows": [
+      {
+        "cycle": 1,
+        "progressReceipts": 12,
+        "threads": [
+          0,
+          1
+        ]
+      },
+      {
+        "cycle": 2,
+        "progressReceipts": 10,
+        "threads": [
+          0,
+          1
+        ]
+      },
+      {
+        "cycle": 3,
+        "progressReceipts": 12,
+        "threads": [
+          0,
+          1
+        ]
+      }
+    ],
+    "reclaim": {
+      "receiptOrderingPassed": true,
+      "errors": [],
+      "epochCount": 18,
+      "spanCount": 300,
+      "cumulativeReplacedBytes": 1235222528,
+      "sizesBytes": {
+        "4194304": 289,
+        "2097152": 11
+      },
+      "dispositions": {
+        "replaced": 18
+      },
+      "maxPauseAckMicros": 82,
+      "maxParkThroughResumeMicros": 4311,
+      "afterGuestFree": [
+        {
+          "cycle": 1,
+          "spanCount": 104,
+          "cumulativeReplacedBytes": 434110464,
+          "firstUnmapAfterFreeSeconds": 0.843,
+          "heartbeatsDuringWindow": 10
+        },
+        {
+          "cycle": 2,
+          "spanCount": 64,
+          "cumulativeReplacedBytes": 262144000,
+          "firstUnmapAfterFreeSeconds": 1.997,
+          "heartbeatsDuringWindow": 10
+        },
+        {
+          "cycle": 3,
+          "spanCount": 64,
+          "cumulativeReplacedBytes": 264241152,
+          "firstUnmapAfterFreeSeconds": 1.997,
+          "heartbeatsDuringWindow": 10
+        }
+      ],
+      "timerLatencyGuarantee": false
+    },
+    "activeReturnVerified": false,
+    "verificationPending": "Independent root raw receipt/footprint audit",
+    "productionReady": false,
+    "fullResourceGatePassed": false,
+    "encryption": false,
+    "blockedSyscallOverlapVerified": false,
+    "overlapMeaning": "Owned perform interval includes allocations, multiple syscalls and gaps; no actual blocked-syscall proof."
+  },
+  "diskIntegrity": {
+    "passed": true,
+    "threads": [
+      {
+        "thread": 0,
+        "iterations": 374,
+        "everyWordPassed": true
+      },
+      {
+        "thread": 1,
+        "iterations": 374,
+        "everyWordPassed": true
+      }
+    ]
+  },
+  "streamAudit": {
+    "genericChecksPassed": true,
+    "errors": [],
+    "controlUsedAcks": 5,
+    "sinkStallHeartbeats": 6,
+    "sinkStallDiskThreads": [
+      0,
+      1
+    ],
+    "sinkStallWorkerAliveReceipts": 6,
+    "terminalCloseScenario": false,
+    "activeReturnVerified": false,
+    "effectOutcome": "independent-audit-pending",
+    "streamAudit": {
+      "streamChecksPassed": true,
+      "errors": [],
+      "freedWindows": [
+        {
+          "cycle": 1,
+          "directions": [
+            "guest-to-host",
+            "host-to-guest"
+          ],
+          "progressReceipts": 14
+        },
+        {
+          "cycle": 2,
+          "directions": [
+            "guest-to-host",
+            "host-to-guest"
+          ],
+          "progressReceipts": 11
+        },
+        {
+          "cycle": 3,
+          "directions": [
+            "guest-to-host",
+            "host-to-guest"
+          ],
+          "progressReceipts": 11
+        }
+      ],
+      "guestCompletion": {
+        "guest-to-host": {
+          "kind": "guest_stream_complete",
+          "direction": "guest-to-host",
+          "bytes": 14876672,
+          "frames": 227,
+          "waits": 154,
+          "shortOperations": 227,
+          "eagain": 154,
+          "raw": true,
+          "integrity": true,
+          "channel": "stdout",
+          "hostElapsedSeconds": 39.724752
+        },
+        "host-to-guest": {
+          "kind": "guest_stream_complete",
+          "direction": "host-to-guest",
+          "bytes": 9240576,
+          "frames": 141,
+          "waits": 101,
+          "shortOperations": 2115,
+          "eagain": 101,
+          "raw": true,
+          "integrity": true,
+          "channel": "stdout",
+          "hostElapsedSeconds": 39.747849
+        }
+      },
+      "streamFrozenPinObservations": 83,
+      "activeReturnVerified": false,
+      "blockedSyscallVerified": false,
+      "authenticatedProtocolImplemented": false
+    }
+  },
+  "footprint": [
+    {
+      "cycle": 1,
+      "touchedBytes": 433652696,
+      "postFreeBytes": 174752560
+    },
+    {
+      "cycle": 2,
+      "touchedBytes": 434947056,
+      "postFreeBytes": 174949168
+    },
+    {
+      "cycle": 3,
+      "touchedBytes": 437257248,
+      "postFreeBytes": 172983088
+    }
+  ],
+  "fixtureChecksPassed": false,
+  "signing": {
+    "hardenedRuntime": true,
+    "libraryValidationRetained": true,
+    "debuggerEntitlement": false,
+    "entitlements": {
+      "com.apple.security.hypervisor": true
+    },
+    "runtimeDependencies": [
+      "/System/Library/Frameworks/Hypervisor.framework/Versions/A/Hypervisor",
+      "/usr/lib/libiconv.2.dylib",
+      "/usr/lib/libSystem.B.dylib"
+    ]
+  },
+  "rawCaptureHashes": {
+    "stream-host-to-guest.bin": "5629186b2df194227949a6d1cb1a2e6857fa6be579356de0064d9b2b77b99411",
+    "stream-guest-to-host.bin": "ef829d7336a45029d859be41bd712c32c515352444186fb6f44fa62a318d99b5"
+  },
+  "streamSandbox": {
+    "kind": "stream_sandbox",
+    "sandboxBeforeFactory": true,
+    "forkDenied": true,
+    "execDenied": true,
+    "closedFactorySucceeded": true,
+    "oppositePeerOnlyTransferred": true,
+    "genericRuntimeFactory": true,
+    "fixtureControlTrace": true,
+    "channel": "stderr",
+    "hostElapsedSeconds": 0.000938
+  },
+  "activeReturnVerified": false,
+  "streamStopVerified": false,
+  "sandbox": {
+    "kind": "sandbox",
+    "hostReadDenied": true,
+    "networkOutboundDenied": true,
+    "unrelatedWritesDenied": true,
+    "rawDiskOnly": true,
+    "rawReadWriteFullSync": true,
+    "channel": "stderr",
+    "hostElapsedSeconds": 0.000906
+  }
+}

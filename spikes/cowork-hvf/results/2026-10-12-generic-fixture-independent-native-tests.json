@@ -1,0 +1,16 @@
+{
+  "vmStarted": false,
+  "compiled": false,
+  "results": [
+    {
+      "binary": "spikes/cowork-hvf/out/libkrun-runtime-port-trace/target/debug/deps/krun_devices-196ba91e2a52c433",
+      "sha256": "5dd1ead411fdeae1877c63ceb6a02a268639769ada7d4208b9d89266b1980ccf",
+      "exitCode": 0
+    },
+    {
+      "binary": "spikes/cowork-hvf/out/libkrun-runtime-port-trace/target/debug/deps/krun-fe8b317545a4d4ac",
+      "sha256": "e6952169c7e2cef889d6c878142e25a8f41e101a6e4c6bd6fb1127a4eae80a22",
+      "exitCode": 0
+    }
+  ]
+}

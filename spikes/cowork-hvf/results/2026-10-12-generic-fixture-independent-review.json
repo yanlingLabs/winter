@@ -1,0 +1,46 @@
+{
+  "accepted": true,
+  "scope": "Independent no-launch source and exact signed fixture artifact review; sandbox and VM execution remain separate",
+  "sourceCommit": "f44098fb5b85167981af3f23228b1ffe61fea2c0",
+  "buildSha256": "821c5f7341f760bb0e5f1e584115bf5e247438d13f5c7883d0e143e4c164e9d3",
+  "patchSha256": "fe41eb3b7891d4c7bb7fa61d43508d4173d9e72a27b9476bb4de0c64ea5815c0",
+  "fullSourceDiffSha256": "c39d78098ca2a994182a2361e8fe21aac956ef8a943d1cffe7ed49df4eab306c",
+  "artifacts": {
+    "libkrun.a": "ac5b21bbf1c175af5d24c2c475659a27f82e9794142816e69e3e377dfdb94430",
+    "cowork-hvf-generic-worker": "9c40eb0bdcf8cb3232fd6af91d89a108dd33950b887180ec7f111dc18892cc45",
+    "init": "afd6b543b53e506efcaabeb80dc332acd4059b6c9a86dbb90aa63d21523395c8",
+    "initramfs.cpio": "4f175f0832de9851b2efff703545cd1eaccb6b5fcc78664ce121c53b5de3d0e2",
+    "kernel": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d"
+  },
+  "signing": {
+    "hardenedRuntime": true,
+    "libraryValidationRetained": true,
+    "debuggerEntitlement": false,
+    "entitlements": {
+      "com.apple.security.hypervisor": true
+    },
+    "runtimeDependencies": [
+      "/System/Library/Frameworks/Hypervisor.framework/Versions/A/Hypervisor",
+      "/usr/lib/libiconv.2.dylib",
+      "/usr/lib/libSystem.B.dylib"
+    ]
+  },
+  "nativeTestsPassed": 31,
+  "pythonTestsPassed": 25,
+  "nativeTestsUsedExistingBinaries": true,
+  "heavyCompileQuiescent": true,
+  "fixtureWorkersAbsent": true,
+  "vmStarted": false,
+  "workerStarted": false,
+  "activeReturnVerified": false,
+  "productionReady": false,
+  "fullResourceGatePassed": false,
+  "report": "docs/research/2026-10-12-cowork-generic-fixture-independent-review.md",
+  "evidence": [
+    "results/2026-10-12-generic-fixture-independent-native-tests.json",
+    "results/2026-10-12-generic-fixture-independent-native-tests.log",
+    "results/2026-10-12-generic-fixture-independent-python-tests.log",
+    "results/2026-10-12-generic-fixture-independent-final-python-tests.json",
+    "results/2026-10-12-generic-fixture-independent-final-python-tests.log"
+  ]
+}
