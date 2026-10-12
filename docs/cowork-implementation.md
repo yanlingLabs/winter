@@ -141,14 +141,15 @@ Darwin-only skip), and the composed host suites passed 70 tests/540 assertions.
 This does not establish guest mounts or a production native stop adapter. See
 [Linux filesystem evidence](research/2026-10-12-cowork-filesystem-v2-linux-ci.md).
 
-SDK PR #5 at `5ef3482a` now passes its actual Linux supervisor CI job against
+SDK PR #5 at `39ba77ec` now passes actual native ARM64 and x64 Linux supervisor CI jobs against
 byte-identical service source. The real SDK Read/Edit/Write/Bash routes, two runtime
 UIDs, plan/read-only mounts, cancellation/revocation and namespace descendant
 cleanup passed; all 11 protocol tests passed on Linux. Earlier actual startup
 failures exposed inherited mount-descriptor namespace ownership; the correction
 clones detached mounts before unsharing and attaches those exact objects afterward.
 A pathname-replacement regression preserves the admitted directory identity.
-Full PR CI and designated re-review remain separate from this Linux job result.
+See [architecture-specific Linux evidence](research/2026-10-12-cowork-linux-supervisor-ci.md).
+Full PR CI and designated re-review remain separate from these Linux job results.
 Full guest startup is still disabled, and Winter's SDK pin is unchanged.
 
 The two-disk fixture at `9a588735` is built and signed with 60 Python regressions

@@ -1,0 +1,5 @@
+2026-10-12T11:10:17.4739652Z x86_64
+2026-10-12T11:10:17.4816729Z 4096
+2026-10-12T11:10:29.6615968Z {"passed": true, "fullGuestExecutionEnabled": false, "checks": ["actual-registry-read-edit-write-bash", "two-distinct-runtime-uids", "plan-and-readonly-kernel-mounts", "no-runtime-proc-env-view", "private-peer-credential-admission", "bounded-cancel-and-revoke", "setsid-descendants-reaped"]}
+2026-10-12T11:10:30.1220136Z Ran 11 tests in 0.340s
+2026-10-12T11:10:30.1220537Z OK

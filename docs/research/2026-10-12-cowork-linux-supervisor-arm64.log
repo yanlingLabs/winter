@@ -1,0 +1,5 @@
+2026-10-12T11:10:17.4089145Z aarch64
+2026-10-12T11:10:17.4219633Z 4096
+2026-10-12T11:10:27.1337619Z {"passed": true, "fullGuestExecutionEnabled": false, "checks": ["actual-registry-read-edit-write-bash", "two-distinct-runtime-uids", "plan-and-readonly-kernel-mounts", "no-runtime-proc-env-view", "private-peer-credential-admission", "bounded-cancel-and-revoke", "setsid-descendants-reaped"]}
+2026-10-12T11:10:27.7339726Z Ran 11 tests in 0.339s
+2026-10-12T11:10:27.7339923Z OK
