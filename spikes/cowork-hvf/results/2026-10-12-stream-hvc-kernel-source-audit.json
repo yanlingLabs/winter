@@ -1,0 +1,32 @@
+{
+  "vmRerun": false,
+  "kernelVersion": "6.18.35",
+  "cachedSourceArchive": "out/kernel-crypto/linux-6.18.35.tar.xz",
+  "sourceArchiveSha256": "f78602932219125e211c5f5bfd84edcfd4ec5ce88fc944f8248413f665bef236",
+  "sourceArchiveHashVerified": true,
+  "signatureReverifiedThisTurn": false,
+  "priorSignaturePin": "kernel/crypto-inputs.json",
+  "measuredKernelSha256": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d",
+  "measuredKernelSourceBuildEquivalenceVerified": false,
+  "guestReportedRelease": "6.18.35",
+  "sourceMembers": {
+    "drivers/tty/hvc/hvc_console.c": "69fb3de81e04e9897d6add781541f461e0fe239e31288611205039fa6f929e42",
+    "drivers/tty/hvc/hvc_console.h": "b7fa7aa37ac53e913cbe1289a627f1307ec48b9a494d222e3c793067e320a78e",
+    "drivers/tty/tty_io.c": "24a5992815a83f7699c65519cbbf54e4cb9061c6bd01117c156dd7046e17cc36",
+    "drivers/char/virtio_console.c": "e45bc817d3864e0672b9a0f10657b5a7fb6907e8c71cf5b639106c0ab2b3075e",
+    "drivers/base/core.c": "2325fba27f15805e9f0146e65f9e3e9da90d85dfd689de9930ab7d0313ea5fe4"
+  },
+  "facts": {
+    "registeredHvcSlots": 8,
+    "hvcDriverDynamicDeviceFlag": false,
+    "unallocatedHvcInstallReturns": "-ENODEV",
+    "singlePortQueueCount": 2,
+    "singlePortRxQueue": 0,
+    "singlePortTxQueue": 1,
+    "singlePortId": 0,
+    "portClass": "virtio-ports",
+    "portParent": "virtio_device.dev"
+  },
+  "actualFailedRunHvcCount": null,
+  "explanationScope": "Verified pinned upstream source for the boot-reported version; actual failed-run class count was not logged."
+}

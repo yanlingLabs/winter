@@ -115,7 +115,7 @@ def audit(rows,oracle):
         exclusions=[r for r in rows if r.get('kind')=='reclaim_exclusion' and r.get('epoch')==pin['epoch']]
         if not pin.get('ranges') or any(not any(e['gpa']<=span['gpa'] and span['gpa']+span['len']<=e['gpa']+e['len'] for e in exclusions) for span in pin.get('ranges',[])):errors.append('stream frozen pin outside reclaim exclusions')
     ready=[r for r in rows if r.get('kind')=='guest_stream_ready']
-    if len(ready)!=1 or not ready[0].get('rawReadback') or ready[0].get('hvcCount')!=1:errors.append('single raw Linux hvc not established')
+    if len(ready)!=1 or not ready[0].get('rawReadback') or ready[0].get('connectedHvcCount')!=1 or ready[0].get('virtioConsoleCount')!=1 or ready[0].get('portId')!=0 or ready[0].get('multiport') is not False or ready[0].get('singlePortQueues')!=[0,1] or ready[0].get('registeredClassSlots')!=8:errors.append('single raw Linux hvc not established')
     completion={r['direction']:r for r in rows if r.get('kind')=='guest_stream_complete'}
     if set(completion)!={'guest-to-host','host-to-guest'}:errors.append('both guest streams must finish/join')
     if completion.get('guest-to-host',{}).get('bytes')!=oracle.get('receivedBytes'):errors.append('guest TX and raw host RX counts differ')

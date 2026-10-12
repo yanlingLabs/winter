@@ -1,0 +1,17 @@
+{
+  "vmRerun": false,
+  "discoveryTestsPassed": 12,
+  "oracleTestsPassed": 9,
+  "lifecycleDeadlineTestsPassed": 10,
+  "buildSha256": "b4e5b6908ecfa6eb220f478c4d0c27e59e28900c4d697ef9527d30b52e93d139",
+  "testSourceSha256": {
+    "test_stream_hvc_discovery.py": "d85d0eb4b870ab707ca11560a1ca3f1adc571183e6f8d31b20e929e1c1898623",
+    "test_stream_fixture.py": "c2fc7308c03024fcbf9eacd721a41a6f4ea61b599a04caa27c7f1f24e83675e7",
+    "test_stream_lifecycle.py": "da3afadc11bf2636a0634a289118af81639b72712a47f59aa5f624790e987581"
+  },
+  "sandboxPassed": true,
+  "guestDiscoveryValidated": false,
+  "activeReturnVerified": false,
+  "nativeSourceChanged": false,
+  "productionReady": false
+}

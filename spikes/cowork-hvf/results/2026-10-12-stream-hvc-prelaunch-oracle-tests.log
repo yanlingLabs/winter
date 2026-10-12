@@ -1,0 +1,16 @@
+test_every_byte_and_offset_identity (test_stream_fixture.FixtureTests.test_every_byte_and_offset_identity) ... ok
+test_missing_guest_and_backpressure_fail_audit (test_stream_fixture.FixtureTests.test_missing_guest_and_backpressure_fail_audit) ... ok
+test_no_peer_progress_has_finite_deadline (test_stream_fixture.FixtureTests.test_no_peer_progress_has_finite_deadline) ... ok
+test_only_opposite_peer_transfer (test_stream_fixture.FixtureTests.test_only_opposite_peer_transfer) ... ok
+test_prepared_receipt_binds_every_launch_dependency (test_stream_fixture.FixtureTests.test_prepared_receipt_binds_every_launch_dependency) ... ok
+test_raw_duplex_byte_captures (test_stream_fixture.FixtureTests.test_raw_duplex_byte_captures) ... ok
+test_receive_overflow_is_bounded (test_stream_fixture.FixtureTests.test_receive_overflow_is_bounded) ... ok
+test_reject_multiple_or_missing_peer (test_stream_fixture.FixtureTests.test_reject_multiple_or_missing_peer) ... ${REPOSITORY_ROOT}/spikes/cowork-hvf/stream_fixture_oracle.py:14: RuntimeWarning: received malformed or improperly-truncated ancillary data
+  message,ancillary,flags,_=control.recvmsg(1,socket.CMSG_SPACE(4))
+ok
+test_tamper_fails_with_raw_evidence (test_stream_fixture.FixtureTests.test_tamper_fails_with_raw_evidence) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.338s
+
+OK

@@ -1,0 +1,35 @@
+test_absolute_deadline_nanoseconds_and_positive_progress (test_stream_lifecycle.LifecycleTests.test_absolute_deadline_nanoseconds_and_positive_progress) ... ok
+test_error_after_ack_before_capture_reaps_direct_child (test_stream_lifecycle.LifecycleTests.test_error_after_ack_before_capture_reaps_direct_child) ... ok
+test_error_after_actual_oracle_thread_start_joins_writer (test_stream_lifecycle.LifecycleTests.test_error_after_actual_oracle_thread_start_joins_writer) ... ok
+test_interrupt_after_ack_reaps_direct_child (test_stream_lifecycle.LifecycleTests.test_interrupt_after_ack_reaps_direct_child) ... ok
+test_interrupt_capture_supervision_reaps_and_joins_oracle (test_stream_lifecycle.LifecycleTests.test_interrupt_capture_supervision_reaps_and_joins_oracle) ... ok
+test_interrupt_inside_capture_reaps_and_joins_partial_readers (test_stream_lifecycle.LifecycleTests.test_interrupt_inside_capture_reaps_and_joins_partial_readers) ... ok
+test_oracle_thread_start_failure_closes_peer (test_stream_lifecycle.LifecycleTests.test_oracle_thread_start_failure_closes_peer) ... ok
+test_partial_capture_reader_start_reaps_and_joins (test_stream_lifecycle.LifecycleTests.test_partial_capture_reader_start_reaps_and_joins) ... ok
+test_runner_skips_disk_and_raw_inspection_when_owners_uncertain (test_stream_lifecycle.LifecycleTests.test_runner_skips_disk_and_raw_inspection_when_owners_uncertain) ... ok
+test_unreapable_child_is_finite_and_keeps_ownership_uncertain (test_stream_lifecycle.LifecycleTests.test_unreapable_child_is_finite_and_keeps_ownership_uncertain) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 2.980s
+
+OK
+{
+  "fixture": "stream-fixture-v3-btrt9f5a",
+  "vmStarted": false,
+  "exitCode": null,
+  "exitVerified": false,
+  "ownersQuiescent": false,
+  "timedOut": false,
+  "lifecycleError": "injected",
+  "readerThreadsJoined": false,
+  "diskAuditSkipped": true,
+  "diskSha256": null,
+  "streamOracle": null,
+  "peerTransferError": "injected",
+  "buildSha256": "pin",
+  "candidate": {},
+  "productionReady": false,
+  "fullResourceGatePassed": false,
+  "encryption": false,
+  "activeReturnVerified": false
+}

@@ -1,0 +1,23 @@
+{
+  "vmStarted": true,
+  "fixtureChecksPassed": false,
+  "activeReturnVerified": false,
+  "buildSha256": "390213327256cdd23390b9ae84fe1da8c8ca9aaf180083c5fb3b1a6691ead1c6",
+  "fixture": "stream-fixture-v3-p4m_1bcp",
+  "workerPid": 22713,
+  "linuxBootId": "7f41add7-6bf3-4f72-b835-54d083cdaac1",
+  "guestFailure": "exact single hvc roster",
+  "exitCode": 0,
+  "ownersQuiescent": true,
+  "ownedChildReaped": true,
+  "streamBytes": 0,
+  "reclaimEpochs": 0,
+  "hvcClassCountMeasured": null,
+  "evidenceSha256": {
+    "stdout.log": "4a0af9d54204d0ed6960549b9e2bcac1ed944f78be1f6a032eee3d49e6c87549",
+    "stderr.log": "e90fbaeace0dc93741a8801b3b471f4d7fa55f425f9941d20549b684c4736359",
+    "events.jsonl": "45484579228b3cc70e06b19b211e596ff778a0ee57ef52778bc3046e31feedc1",
+    "result.json": "9ff4bedb5374aea147e376b3e41153a9df9f7b2abcc9b44ac32e5738ed4a0ab8"
+  },
+  "productionReady": false
+}

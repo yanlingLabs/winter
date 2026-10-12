@@ -113,19 +113,27 @@ static void *stream_work(void *argument){
     printf("{\"kind\":\"guest_stream_complete\",\"direction\":\"%s\",\"bytes\":%zu,\"frames\":%u,\"waits\":%u,\"shortOperations\":%u,\"raw\":true,\"integrity\":true}\n",tx?"guest-to-host":"host-to-guest",bytes,frames,waits,short_ops);
     free(buffer);return NULL;
 }
+#include "stream_hvc_discovery.h"
+static int probe_hvc(const char *name,unsigned index,unsigned major,unsigned minor,void *unused){
+    (void)index;(void)unused;char path[80];if(snprintf(path,sizeof path,"/dev/%s",name)>=(int)sizeof path)return -ENAMETOOLONG;
+    if(mknod(path,S_IFCHR|0600,makedev(major,minor)) && errno!=EEXIST)return -errno;
+    struct stat node;if(lstat(path,&node) || !S_ISCHR(node.st_mode) || node.st_rdev!=makedev(major,minor))return -EPROTO;
+    int fd=open(path,O_RDWR|O_NOCTTY|O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW);if(fd<0)return -errno;
+    if(fstat(fd,&node) || !S_ISCHR(node.st_mode) || node.st_rdev!=makedev(major,minor)){close(fd);return -EPROTO;}
+    return fd;
+}
+static void hvc_diagnostic(unsigned index,unsigned major,unsigned minor,int outcome,void *unused){
+    (void)unused;printf("{\"kind\":\"guest_hvc_slot\",\"index\":%u,\"major\":%u,\"minor\":%u,\"openOutcome\":%d,\"connected\":%s}\n",index,major,minor,outcome,outcome==0?"true":"false");
+}
 static void stream_open(void){
-    char identity[80];unsigned major=0,minor=0;for(unsigned attempt=0;attempt<50;attempt++){
-        text("/sys/class/tty/hvc0/dev",identity,sizeof identity);if(sscanf(identity,"%u:%u",&major,&minor)==2)break;usleep(100000);
-    }
-    if(!major)fail("one Linux hvc0 device discovery");
-    DIR *dir=opendir("/sys/class/tty");if(!dir)fail("tty inventory");struct dirent *ent;unsigned hvc_count=0;
-    while((ent=readdir(dir)))if(!strncmp(ent->d_name,"hvc",3))hvc_count++;closedir(dir);if(hvc_count!=1)fail("exact single hvc roster");
-    if(mknod("/dev/hvc0",S_IFCHR|0600,makedev(major,minor)) && access("/dev/hvc0",F_OK))fail("hvc node");
-    stream_fd=open("/dev/hvc0",O_RDWR|O_NOCTTY|O_NONBLOCK);if(stream_fd<0)fail("raw hvc open");
+    struct stream_hvc_identity identity;
+    int discovery=stream_discover_hvc("/sys/bus/virtio/devices","/sys/class/virtio-ports","/sys/class/tty",probe_hvc,hvc_diagnostic,NULL,&identity);
+    printf("{\"kind\":\"guest_hvc_discovery\",\"result\":%d,\"examinedClassSlots\":%u,\"connectedHvcCount\":%u,\"virtioDevice\":\"%s\",\"port\":\"%s\",\"singlePortQueues\":[0,1],\"queueIdentityBasis\":\"pinned-kernel-single-port-driver+VERSION_1-only\"}\n",discovery,identity.class_slots,identity.connected_slots,identity.console,identity.port);
+    if(discovery)fail("single connected HVC console identity");stream_fd=identity.fd;
     struct termios mode;if(tcgetattr(stream_fd,&mode))fail("hvc termios");cfmakeraw(&mode);mode.c_cc[VMIN]=1;mode.c_cc[VTIME]=0;
     if(tcsetattr(stream_fd,TCSANOW,&mode) || tcgetattr(stream_fd,&mode))fail("hvc raw configuration");
     if(mode.c_iflag&(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL|IXON) || mode.c_oflag&OPOST || mode.c_lflag&(ECHO|ECHONL|ICANON|ISIG|IEXTEN) || (mode.c_cflag&CSIZE)!=CS8 || mode.c_cflag&PARENB)fail("hvc raw readback");
-    printf("{\"kind\":\"guest_stream_ready\",\"device\":\"hvc0\",\"major\":%u,\"minor\":%u,\"hvcCount\":1,\"rawReadback\":true,\"bytesPerFrame\":65536,\"maxFramesPerDirection\":256,\"maxBytesPerDirection\":16777216}\n",major,minor);
+    printf("{\"kind\":\"guest_stream_ready\",\"device\":\"hvc0\",\"major\":229,\"minor\":0,\"registeredClassSlots\":%u,\"connectedHvcCount\":1,\"virtioConsoleCount\":1,\"portId\":0,\"multiport\":false,\"singlePortQueues\":[0,1],\"rawReadback\":true,\"bytesPerFrame\":65536,\"maxFramesPerDirection\":256,\"maxBytesPerDirection\":16777216}\n",identity.class_slots);
 }
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
