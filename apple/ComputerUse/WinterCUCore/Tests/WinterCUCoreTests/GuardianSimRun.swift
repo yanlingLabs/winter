@@ -496,7 +496,6 @@ final class SimRun {
             click(at: CGPoint(x: 780, y: 480), r: &r)
         case .dock(let a):
             w.hardware(observable: true)
-            w.launchCapable()  // a click (R17-d (i))
             w.log("the user clicks \(SimPid.name(a)) in the Dock")
             core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: clock.nowSeconds())
             // A click on that app's Dock tile: input for THAT app, claimed (the contract).
@@ -702,7 +701,6 @@ final class SimRun {
             return (h, d, SimSwitch(at: t, app: true, desktop: elsewhere, target: h.pid, claim: true, dest: h.pid), nil)
         }
         w.hardware(observable: true)
-        w.launchCapable()  // a click (R17-d (i))
         // A click into an agent target's ordinary window (not a ⌘-click): they are working in it (round 10).
         if let h = hit, h.layer == 0, h.pid != SimPid.own, !flags.contains(.maskCommand) { w.userInteracted(h.pid) }
         w.log("the user \(flags.contains(.maskCommand) ? "⌘-" : "")\(drag ? "drags from" : "clicks") (\(Int(p.x)), \(Int(p.y))) — \(hit.map { "\(SimPid.name($0.pid))'s window \($0.id)" } ?? "the desktop")")

@@ -334,9 +334,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         return o
     }
     func noteLaunchStart(_ pid: pid_t) {
-        // (R17-d (i), the controller's ruling: LAUNCH-CAPABLE input only — a click, Return/Enter, a chord with ⌘/⌃/⌥, a
-        // function key; never plain typing, a key-up or a scroll.)
-        if let o = openerBefore(now) { inputAfterOpener[pid] = lastLaunchCapableAt > o } else { inputAfterOpener[pid] = nil }
+        if let o = openerBefore(now) { inputAfterOpener[pid] = lastObservableHardwareAt > o } else { inputAfterOpener[pid] = nil }
     }
     /// The apps the world left in front (an untouched app judged left): the user's own typing in one makes it their place.
     var leftApps: Set<pid_t> = []
@@ -392,10 +390,6 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// The user's hardware input: any, and what the session tap could see.
     var lastHardwareAt: Double = -.infinity
     var lastObservableHardwareAt: Double = -.infinity
-    /// The user's last input that can launch an app (R17-d (i)): a click, Return/Enter, a chord with ⌘/⌃/⌥, a function key
-    /// — seen by the tap.
-    var lastLaunchCapableAt: Double = -.infinity
-    func launchCapable() { lock.withLock { lastLaunchCapableAt = now } }
     /// The agent's last action that can open apps (a click, a press, an AppleScript, a launch, an open): round 10.
     var lastOpenerAt: Double = -.infinity
     /// Every such action and WHICH apps (bundle ids) it can open — nil: any (round 14's queue item 1).
@@ -659,9 +653,6 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     func key(_ type: CGEventType, flags f: CGEventFlags = [], keycode: Int64 = 0) {
         hardware(observable: !secure)
         guard !secure else { return }
-        let fKeys: Set<Int64> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90]
-        if type == .keyDown, keycode == 36 || keycode == 76 || fKeys.contains(keycode)
-            || f.contains(.maskCommand) || f.contains(.maskControl) || f.contains(.maskAlternate) { launchCapable() }
         // A key the tap sees (typing — no ⌘/⌃ chord) while an agent target is in front: the contract counts it as work in
         // it (round 10's I6), wherever the key lands (Spotlight's panel too: the engine can't tell).
         let receiver = lock.withLock { front }
