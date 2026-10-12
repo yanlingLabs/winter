@@ -85,9 +85,11 @@ mkdir -p "${DEST_DIR}"
 for OTHER in "Winter Headless" "Winter Headless Dev"; do
   [ "${OTHER}" = "${NAME}" ] || rm -rf "${DEST_DIR}/${OTHER}.app"
 done
-# rm first: ditto merges into an existing bundle, so a file dropped from the helper would otherwise linger.
+# rm first: ditto merges into an existing bundle, so a file dropped from the helper would otherwise linger. --clone:
+# the helper carries Winter's whole Chromium (~350 MB), and a clone on the same volume (APFS) costs no copy — a plain
+# ditto copied all of it on every build.
 rm -rf "${DEST}"
-ditto "${SRC}" "${DEST}"
+ditto --clone "${SRC}" "${DEST}"
 
 REQUIREMENT="identifier \"${IDENTIFIER}\" and anchor apple generic and certificate leaf[subject.OU] = \"${TEAM}\""
 codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier "${IDENTIFIER}" --options runtime ${TS} \

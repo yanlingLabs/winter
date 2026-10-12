@@ -141,6 +141,12 @@ describe("embed-headless-helper.sh (the 'Embed Winter Headless' postCompileScrip
     expect(embed(dir).status).toBe(0);
     expect(existsSync(stray)).toBe(false);
   });
+
+  test("the helper is copied as a CLONE: its ~350 MB Chromium costs no disk write per build (a plain ditto wrote all of it)", () => {
+    const script = readFileSync(join(import.meta.dir, "embed-headless-helper.sh"), "utf8");
+    expect(script).toContain('ditto --clone "${SRC}" "${DEST}"');
+    expect(script).not.toMatch(/^ditto "\$\{SRC\}"/m);
+  });
 });
 
 describe("headless-helper-lib", () => {
