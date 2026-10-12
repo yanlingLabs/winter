@@ -326,6 +326,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     headlessSessionEnded: (sessionId) => headless.disposeSession(sessionId),
     headlessReason: () => headless.reason,
     headlessLocalNetworkRefusedAt: (tabKey) => headless.localNetworkRefusedAt(tabKey),
+    // [wake own input — lane B] ownAppInputAt: (bundleId, at) => service?.ownAppInputAt(bundleId, at) === true,
     log,
   });
 

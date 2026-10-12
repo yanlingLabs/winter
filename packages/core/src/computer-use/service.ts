@@ -43,12 +43,16 @@ import { AdapterDelivery } from "./adapters/delivery";
 import type { BrowserEngine } from "./browser/engine";
 import type { TabRunScope } from "./browser/tab-scope";
 import { listedHost, type SiteFloorDeps } from "./browser/site-policy";
+import { OwnAppInput } from "./own-app-input";
 
 export const SCRIPT_TIMEOUT_DEFAULT_MS = 30_000;
 export const SCRIPT_TIMEOUT_MIN_MS = 1_000;
 export const SCRIPT_TIMEOUT_MAX_MS = 300_000;
 /** The text primitives whose cancellation reports how far they got. */
 const TEXT_PRIMITIVES = new Set(["type", "paste"]);
+/** The helper methods that send their target's app input (`ownAppInputAt`) — the ones the helper's own ledger marks for
+ *  that app (`CUOwnInputLedger`): an act, an AppleScript's events, bringing it to the front, switching its window. */
+const HELPER_INPUT_METHODS: ReadonlySet<string> = new Set(["target.act", "target.applescript", "target.foreground", "target.useWindow"]);
 /** How long a cancelled run waits for a type/paste's answer (the helper-client's 1 s cancel grace, and a margin). */
 const TEXT_ANSWER_AFTER_CANCEL_MS = 1_500;
 /** A cancelled script that has not settled after this long loses its worker. */
@@ -120,6 +124,9 @@ export interface ComputerV2ServiceDeps {
   savedScripts?: SavedScripts;
   /** Wake triggers (2026-10-12): the registry `wakeWhen` arms through (`wakes/registry.ts`). Absent: `NotAllowed`. */
   wakes?: WakeRegistry;
+  /** Wake triggers across backends: the record of Winter's helper input per app (`ownAppInputAt`); the service makes
+   *  its own when absent. */
+  ownAppInput?: OwnAppInput;
 }
 
 /** `windowId`: the bound window (its window-server id), from the bind and every `useWindow` — what an app adapter's
@@ -304,12 +311,15 @@ export class ComputerV2Service {
    * variables and handles were gone. Removed only when the session is deleted (and with the daemon).
    */
   private readonly ranWorker = new Set<string>();
+  /** Wake triggers: Winter's helper input to each app, from every session (`ownAppInputAt`). */
+  private readonly ownAppInput: OwnAppInput;
   private stopped = false;
 
   constructor(private readonly deps: ComputerV2ServiceDeps) {
     this.locks = deps.locks ?? new TargetLocks();
     this.diffBases = deps.diffBases ?? new DiffBases();
     this.savedScripts = deps.savedScripts ?? new SavedScripts();
+    this.ownAppInput = deps.ownAppInput ?? new OwnAppInput(() => this.now());
   }
 
   private now(): number { return (this.deps.now ?? Date.now)(); }
@@ -701,6 +711,13 @@ export class ComputerV2Service {
     return t === undefined ? undefined : { bundleId: t.bundleId, name: t.name, pid: t.pid, ...(t.lost === undefined ? {} : { lost: t.lost }) };
   }
 
+  /** Did Winter's helper send input to this app — from ANY session — at `at` (epoch ms), or end one at most the grace
+   *  before? The browser engine's door (`BrowserEngineDeps.ownAppInputAt`): a browser bound as an app takes the
+   *  helper's clicks as trusted DOM events, which a tab wake trigger must never take for the user's. */
+  ownAppInputAt(bundleId: string, at: number): boolean {
+    return this.ownAppInput.at(bundleId, at);
+  }
+
   // ── saved scripts (Phase 4) ────────────────────────────────────────────────────────────────────
 
   /** `scripts.save(name, fn)`: kept for the session (memory only). Allowed under every policy — saving code does
@@ -819,6 +836,11 @@ export class ComputerV2Service {
 
   private async helperCall<T>(ctx: RunCtx, method: string, params: Record<string, unknown>, metric: PrimitiveMetric, timeoutMs?: number, opts: { afterEnd?: boolean } = {}): Promise<T> {
     const t0 = this.now();
+    // Input the helper sends an app (an act, an AppleScript, its window raised — every door: `act`, the adapters' extras
+    // and dictionary wrappers, `applescript`, `requestForeground`, `useWindow`; the busy retry included) is Winter's
+    // own while in flight and for the grace after.
+    const inputTo = HELPER_INPUT_METHODS.has(method) && typeof params.targetId === "string" ? ctx.state.targets.get(params.targetId)?.bundleId : undefined;
+    const endInput = inputTo === undefined ? undefined : this.ownAppInput.begin(inputTo);
     const once = (): Promise<T> => this.deps.helper.request<T>(method, params, { signal: ctx.abort.signal, callId: ctx.callId, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
     try {
       let res: T;
@@ -849,6 +871,7 @@ export class ComputerV2Service {
       this.tellScriptActive(ctx);
       return res;
     } finally {
+      endInput?.();
       metric.helperMs += this.now() - t0;
     }
   }
