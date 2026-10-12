@@ -111,6 +111,8 @@ final class CUTarget: @unchecked Sendable {
     /// Floor F's dialog scan: the app's window-server windows when it last ran, and its answer — scanned again only when
     /// they change (the dialog is a window of its own). Pid-queue only.
     var remoteDebuggingScan: (windows: Set<UInt32>, shown: Bool)?
+    /// Floor F: the windows whose walk ran out of time, and when (walked again only after a while). Pid-queue only.
+    var remoteDebuggingSlowWalks: [UInt32: Double] = [:]
     /// The element whose press, sent from another desktop, showed no effect — the desktop visit was offered for it.
     /// The act asked again does not press it again: from another desktop it waits for the visit, and in the visit it is
     /// clicked where it is, once (review of round 11, MEDIUM #5). Pid-queue only.
@@ -119,9 +121,13 @@ final class CUTarget: @unchecked Sendable {
     /// opened — kept while they are on screen: they belong to the bound window even where another document window of the
     /// app lies between them and it in the z-order (review of round 12, LOW). Pid-queue only.
     var agentPopups: Set<UInt32> = []
+    /// When the last act that opened one ended (the list is kept a few seconds across acts that open nothing).
+    var agentPopupsAtMs: Double = -.infinity
     /// Under Secure Event Input, the focused element's text as the agent last saw it (its own acts' end): a change since
     /// is the user typing (review of round 13, MEDIUM #6). Under the guardian lock.
     var secureTypingBase: (focus: AXIdentity?, chars: Int?)?
+    /// That text changed while the app stayed in front (the refusal's reason, until it leaves). Under the guardian lock.
+    var secureTextChanged = false
 
     /// The focus read after the last act, and when: the next act's "before". Pid-queue only.
     var focusAfterLastAct: (atMs: Double, focus: CUCore.WindowFocus)?

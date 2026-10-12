@@ -492,7 +492,9 @@ public struct CUFocusGuardianCore: Sendable {
         // (Only while the facts from the start are still kept: a notice heard later judges nothing clearly — review of
         // round 11, LOW #10.)
         let judgeable = now - start <= Self.keepFacts - Self.quietBeforeUndo
-        coldLaunches[pid] = (start, judgeable && inputObservable && !secureInput && clearlyAt(start, hardwareAt: nil, bundle: bundle))
+        // (A COLD launch is judged with any opener's reach — review of round 14, HIGH #1: a zoommtg: link, Open System
+        // Settings, an attachment, a mailto: in a browser, an auto-opened download start apps no scope names.)
+        coldLaunches[pid] = (start, judgeable && inputObservable && !secureInput && clearlyAt(start, hardwareAt: nil, bundle: bundle, anyReach: true))
     }
     /// The untouched launches heard of, by process: its start, and whether it was clearly the agent's then.
     private var coldLaunches: [pid_t: (start: TimeInterval, clearly: Bool)] = [:]
@@ -506,8 +508,21 @@ public struct CUFocusGuardianCore: Sendable {
         guard q.inputObservable, !q.secureInput, let a = q.app, !everFront.contains(a), !agentLaunched.contains(a) else { return nil }
         if let c = coldLaunches[a] { return c.clearly ? c.start : nil }
         guard let s = q.appStartedAt, s <= upTo, upTo - s <= Self.keepFacts - Self.quietBeforeUndo,
-              clearlyAt(s, hardwareAt: q.hardwareAt.flatMap { $0 <= s ? $0 : nil }, bundle: q.appBundle) else { return nil }
+              clearlyAt(s, hardwareAt: q.hardwareAt.flatMap { $0 <= s ? $0 : nil }, bundle: q.appBundle, anyReach: true) else { return nil }
         return s
+    }
+
+    /// An app coming forward for the FIRST time whose process started within the causal window after an opener act of
+    /// the agent's (any reach) or while a launch of the agent's was pending: never the user's own launch, never adopted —
+    /// at most left in front and said (review of round 14, HIGH #1).
+    func openerBeforeStart(_ q: CUMoveQuery) -> Bool {
+        // (Not only its first sighting: a state heard again must not turn into "their launch" — the ordinary-target
+        // survey's seed 26. Only the facts kept: an old process's start has no opener act near it.)
+        guard let a = q.app, !agentLaunched.contains(a) else { return false }
+        guard let s = coldLaunches[a]?.start ?? q.appStartedAt else { return false }
+        if openerTimes.contains(where: { $0.at <= s && s - $0.at <= Self.causalWindow }) { return true }
+        // (A pending launch counts for its own bundle, or for any while its bundle is not known yet.)
+        return launches.values.contains { $0.since <= s && ($0.bundle == nil || $0.bundle == q.appBundle) }
     }
 
     /// The user's hardware action (a key, a click, a scroll, a gesture — never a pointer move), as the session tap saw it.
@@ -547,10 +562,10 @@ public struct CUFocusGuardianCore: Sendable {
     /// No key or click of the user's in the `quietBeforeUndo` up to `t`, and an opener act of the agent's that can open
     /// `bundle` (the app that came forward; nil: unknown — only an act that can open any app covers it) within the causal
     /// window up to `t`, or a launch of the agent's begun by `t` and still pending — the facts from before `t` only.
-    func clearlyAt(_ t: TimeInterval, hardwareAt: TimeInterval?, bundle: String? = nil) -> Bool {
+    func clearlyAt(_ t: TimeInterval, hardwareAt: TimeInterval?, bundle: String? = nil, anyReach: Bool = false) -> Bool {
         if hardwareTimes.contains(where: { $0 <= t && t - $0 <= Self.quietBeforeUndo }) { return false }
         if let h = hardwareAt, h <= t, t - h <= Self.quietBeforeUndo { return false }
-        if openerTimes.contains(where: { $0.at <= t && t - $0.at <= Self.causalWindow && $0.scope.covers(bundle) }) { return true }
+        if openerTimes.contains(where: { $0.at <= t && t - $0.at <= Self.causalWindow && (anyReach || $0.scope.covers(bundle)) }) { return true }
         // A launch pending: what it launches (once its bundle is known — round 14: an open or a launch reaches the app it
         // opens, never any app).
         return launches.values.contains { $0.since <= t && ($0.bundle == nil || $0.bundle == bundle) }
@@ -595,6 +610,11 @@ public struct CUFocusGuardianCore: Sendable {
     public mutating func userClicked(app: pid_t, space: UInt64?, now: TimeInterval) {
         evidence += 1
         claim = (app, now + Self.clickClaimWindow)
+    }
+
+    /// The user's button-down on `app`'s window turned out to be a drag: no claim of a click on it.
+    public mutating func dropClaim(app: pid_t) {
+        if claim?.app == app { claim = nil }
     }
 
     /// The user physically clicked into a window of the app ALREADY in front (a bound target's — held in front for a
@@ -772,7 +792,7 @@ public struct CUFocusGuardianCore: Sendable {
         // Never a system dialog started on demand (review of round 10, MEDIUM #2: SecurityAgent, CoreServicesUIAgent and
         // UserNotificationCenter start when asked for — theirs to answer, left, never adopted as the user's place), and
         // never a launch that was clearly the agent's at its process start (HIGH #1).
-        let launchIsTheirs = !front && !q.appIsSystemUI && agentsColdLaunch(q, upTo: upTo) == nil
+        let launchIsTheirs = !front && !q.appIsSystemUI && agentsColdLaunch(q, upTo: upTo) == nil && !openerBeforeStart(q)
         if launchIsTheirs, let a = app, let l = othersLaunches[a], now - l <= Self.launchFirstWindow {
             return (.user("the first activation of an app the user launched"), nil)
         }
@@ -803,9 +823,9 @@ public struct CUFocusGuardianCore: Sendable {
             }
             // Ambiguous — the agent was active, but their input (or input the tap can't see) could have done it: left in
             // front, never adopted as their place (only their switch input does that), said.
-            if agentActive(now: now, at: upTo) {
+            if agentActive(now: now, at: upTo) || openerBeforeStart(q) {
                 return (.unexplained(q.appIsSystemUI ? "a system dialog came up after the agent's action"
-                                                     : "an app the agent never touched came forward around its action, and the user may have done it"), nil)
+                                                     : "an app came forward around the agent's action — it may have been the agent's or the user's"), nil)
             }
             // Their input made it: the latest that could (of any kind — a Dock click on the app already in front switches
             // its desktop) is used up, never left to explain the agent's indirect effect a moment later (found by the

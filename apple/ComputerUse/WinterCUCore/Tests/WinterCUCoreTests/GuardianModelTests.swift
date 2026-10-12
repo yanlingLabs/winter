@@ -89,10 +89,11 @@ final class GuardianModelTests: XCTestCase {
         (1022, "I2: the engine's place T@200, the user's T@100 — the same app on two desktops"),
     ]
 
-    /// The standing second check (round 14): T an ORDINARY app (its acts reach T, the default browser and the mail app
-    /// only; X is Terminal, a third party's) — the same invariants over seeds 1–12. Seed 2 is known to fail there (a ⌃-arrow
-    /// overridden by a restore's landing a few ms later stays unused and later explains T's own activation).
-    static let ordinaryTargetKnownFailing: Set<Int> = [2]
+    /// The standing second check (round 14): T an ORDINARY app (its acts reach T, Finder, the default browser and the mail
+    /// app only; X is Terminal, a third party's) — the same invariants over seeds 1–12. (Seed 2, pinned in round 14, passes
+    /// since round 15 — the round's changes alter its path; the class it showed, a switch input left unused under a
+    /// restore's landing, is not fixed as such.)
+    static let ordinaryTargetKnownFailing: Set<Int> = []
 
     func testTheInvariantsHoldWithAnOrdinaryTarget() async {
         for seed in 1...12 {
@@ -109,8 +110,8 @@ final class GuardianModelTests: XCTestCase {
             }
             if let v = r.violation {
                 let at = r.trace.firstIndex { $0.hasPrefix("VIOLATION") } ?? r.trace.count
+                // (Every failing seed reported, not only the first — review of round 14, LOW #8.)
                 XCTFail("seed \(seed) (an ordinary target): \(v)\n\(r.trace[max(0, at - 60)..<min(r.trace.count, at + 2)].joined(separator: "\n"))")
-                return
             }
         }
     }

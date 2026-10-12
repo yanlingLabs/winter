@@ -301,7 +301,7 @@ final class SimRun {
             // only; X is Terminal — a third party's app, outside every act's reach.
             world.bundles[SimPid.safari] = "com.apple.Safari"
             world.bundles[SimPid.third] = "com.apple.Terminal"
-            world.targetScope = [plan.targetBundle, "com.apple.Safari", "com.apple.mail"]
+            world.targetScope = [plan.targetBundle, "com.apple.finder", "com.apple.Safari", "com.apple.mail"]
             core.isWebBrowserOverride = { _ in false }
             core.defaultHandlerOverride = { ["http": "com.apple.Safari", "https": "com.apple.Safari", "mailto": "com.apple.mail"][$0] }
         }
@@ -777,7 +777,7 @@ final class SimRun {
                 w.wins[wid] = SimWin(id: wid, pid: pid, frame: CGRect(x: 320, y: 620, width: 300, height: 200), space: w.space1)
                 w.mainWin[pid] = wid
                 w.zOrder.append(pid)
-                w.agentColdLaunches[pid] = (w.now, w.clearlyNow(for: pid))
+                w.agentColdLaunches[pid] = (w.now, w.clearlyNow(for: pid, anyReach: true))
                 return pid
             }
             w.log("\(SimPid.name(pid)) starts (the agent's action opened it; clearly the agent's: \(w.lock.withLock { w.agentColdLaunches[pid].map { "\($0.clearly)" } ?? "?" }))")
@@ -990,9 +990,9 @@ final class SimRun {
             let working = w.userWorks(in: tpid)
             if !working {
                 w.agentBegins(tpid, raise: true)
-                w.lock.withLock { w.noteOpener(w.targetScope) }
+                w.lock.withLock { w.noteOpener(nil) }  // an AppleScript reaches any app (review of round 14, MEDIUM #3)
             }
-            defer { if !working { w.agentEnds(tpid); w.lock.withLock { w.noteOpener(w.targetScope) } } }
+            defer { if !working { w.agentEnds(tpid); w.lock.withLock { w.noteOpener(nil) } } }
             do {
                 _ = try await core.targetAppleScript(TargetAppleScriptParams(targetId: "tsim", source: "tell application \"Finder\" to get name"))
             } catch { w.log("the script: \((error as? CUError)?.message ?? "\(error)")") }

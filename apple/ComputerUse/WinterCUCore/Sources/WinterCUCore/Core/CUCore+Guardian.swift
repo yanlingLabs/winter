@@ -222,15 +222,44 @@ extension CUCore {
     /// open any app, and so does an act on a target whose bundle is unknown. Never an arbitrary app like Terminal.
     func openerScope(_ a: CUAction?, _ t: CUTarget) -> CUOpenerScope {
         guard let b = t.bundleId, !Self.opensAnyApp.contains(b) else { return .any }
-        var apps: Set<String> = [b]
+        // Finder always: Show/Reveal in Finder from Xcode, VS Code, a browser's downloads (review of round 14, MEDIUM #2).
+        var apps: Set<String> = [b, "com.apple.finder"]
         let menu: Bool = { if case .menu? = a { return true }; return false }()
-        if !isWebBrowser(t) || menu {
-            for scheme in menu ? ["http"] : ["http", "https", "mailto"] {
-                if let h = defaultHandler(scheme) { apps.insert(h) }
-            }
+        // The default web and mail handlers: a non-browser's links land there. A browser's own web links stay in it, but
+        // its mailto: opens the mail app; a menu command uses the same list (Help › Contact Support, Share › Email).
+        for scheme in isWebBrowser(t) && !menu ? ["mailto"] : ["http", "https", "mailto"] {
+            if let h = defaultHandler(scheme) { apps.insert(h) }
         }
         if menu { apps.insert("com.apple.helpviewer") }
+        // The pressed element's own link: its scheme's handler (zoommtg:, slack:, x-apple.systempreferences:, …).
+        if let ref = Self.actRef(a), let e = try? element(ref, in: t), let scheme = linkScheme(e), let h = defaultHandler(scheme) {
+            apps.insert(h)
+        }
         return .apps(apps)
+    }
+
+    /// The element an act names (its ref), when it names one.
+    static func actRef(_ a: CUAction?) -> Int? {
+        switch a {
+        case .click(let c)?: return c.ref
+        case .action(let x)?: return x.ref
+        case .key(let k)?: return k.into
+        default: return nil
+        }
+    }
+
+    /// The scheme of the link `e` is (or sits in, up to two levels): its `AXURL`'s.
+    func linkScheme(_ e: AXUIElement) -> String? {
+        var n: AXUIElement? = e
+        for _ in 0..<3 {
+            guard let x = n else { return nil }
+            if let v = ax.attribute(x, "AXURL") {
+                let url: URL? = CFGetTypeID(v) == CFURLGetTypeID() ? (v as! CFURL) as URL : (v as? String).flatMap(URL.init(string:))
+                if let s = url?.scheme?.lowercased(), !s.isEmpty { return s }
+            }
+            n = ax.element(x, kAXParentAttribute)
+        }
+        return nil
     }
 
     /// Apps whose acts can open any other app: Finder (a document opens in its app), the Dock, launchers.
@@ -239,9 +268,19 @@ extension CUCore {
         "com.raycast.macos", "com.obdev.LaunchBar",
     ]
 
-    /// The bundle id of the app that opens `scheme:` links by default (nil: none or unknown).
+    /// The bundle id of the app that opens `scheme:` links by default (nil: none or unknown). Cached a minute per scheme
+    /// (review of round 14, LOW: up to four LaunchServices lookups per opener act); a change of the default app is seen
+    /// within that.
     func defaultHandler(_ scheme: String) -> String? {
         if let o = defaultHandlerOverride { return o(scheme) }
+        let now = clock.nowSeconds()
+        if let c = defaultHandlerLock.withLock({ defaultHandlerCache[scheme] }), now - c.at < 60 { return c.bundle }
+        let found = lookUpDefaultHandler(scheme)
+        defaultHandlerLock.withLock { defaultHandlerCache[scheme] = (found, now) }
+        return found
+    }
+
+    private func lookUpDefaultHandler(_ scheme: String) -> String? {
         guard let url = URL(string: scheme == "mailto" ? "mailto:someone@example.invalid" : "\(scheme)://example.invalid"),
               let app = NSWorkspace.shared.urlForApplication(toOpen: url) else { return nil }
         return Bundle(url: app)?.bundleIdentifier
@@ -289,7 +328,7 @@ extension CUCore {
         // Round 10 (the user's ruling): not clearly the agent's — left in front, never adopted, said.
         let note = dialog
             ? "\(name) (a system dialog) came up after your action — it was left in front for the user to answer; avoid the action that raises it, or ask the user"
-            : "\(name) came forward around your action — the user's view may have moved"
+            : "\(name) came forward around your action — it may have been your action's doing or the user's; it was left in front (the user's view may have moved)"
         guardianLock.withLock {
             if !pendingGuardianNotes.contains(note) { pendingGuardianNotes.append(note) }
             pendingViewMovedBy.append(name)
@@ -463,26 +502,44 @@ extension CUCore {
         // blocked a looker for 2.5 s, and letters typed under it are never seen) — TYPING is: the focused element's text
         // changed since the agent last looked (`secureTypingBase`, refreshed at each of its acts' end), which marks the
         // user working in the app until it leaves the front (the ordinary I6 mark).
-        let secureOwner: Bool = {
+        // The user's ruling (round 14): KEEP the safe side — a bound front app under Secure Keyboard Entry whose text
+        // changes (their typing, or a command's streaming output: the two can't be told apart) is the user working, and
+        // the agent waits until the app leaves the front; the refusal says why.
+        enum SecureWork { case none, secureField, textChanging }
+        let secureWork: SecureWork = {
             guard secureInputOn, sys.frontmostPid() == t.pid, let owner = secureInputOwnerPid(),
                   owner == t.pid || sys.isContentProcess(owner, of: t.pid) else {
-                guardianLock.withLock { t.secureTypingBase = nil }
-                return false
+                guardianLock.withLock { t.secureTypingBase = nil; t.secureTextChanged = false }
+                return .none
             }
             let focused = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
-            if focused.flatMap({ ax.string($0, kAXSubroleAttribute) }) == kAXSecureTextFieldSubrole { return true }
+            if focused.flatMap({ ax.string($0, kAXSubroleAttribute) }) == kAXSecureTextFieldSubrole { return .secureField }
             let now = secureTypingState(t)
             let base = guardianLock.withLock { () -> (focus: AXIdentity?, chars: Int?)? in
                 let b = t.secureTypingBase
                 if b == nil || b?.focus != now.focus { t.secureTypingBase = now }
                 return b
             }
-            guard let base, base.focus == now.focus, let a = base.chars, let b = now.chars, a != b else { return false }
-            CULog.act.notice("act in \(t.appName, privacy: .public): its text changed since the agent's last act, under Secure Event Input — the user typing")
+            guard let base, base.focus == now.focus, let a = base.chars, let b = now.chars, a != b else {
+                // (Once seen, it holds while the app stays in front — the sticky I6 mark — and keeps its reason.)
+                return guardianLock.withLock { t.secureTextChanged } ? .textChanging : .none
+            }
+            CULog.act.notice("act in \(t.appName, privacy: .public): its text changed since the agent's last act, under Secure Event Input — the user typing (or its output: the same, by the user's ruling)")
+            guardianLock.withLock { t.secureTextChanged = true }
             userInteracted(t.pid)
-            return true
+            return .textChanging
         }()
-        guard secureOwner || userIsWorking(in: t.pid) else { return }
+        switch secureWork {
+        case .textChanging:
+            CULog.act.notice("act in \(t.appName, privacy: .public): refused — Secure Keyboard Entry, its text changing")
+            throw CUError.refused(.userWorking, "\(t.appName) is in front with Secure Keyboard Entry on and its text is changing — Winter waits until you switch away")
+        case .secureField:
+            CULog.act.notice("act in \(t.appName, privacy: .public): refused — a secure field of it has the keyboard")
+            throw CUError.refused(.userWorking, "\(t.appName) is in front with a password field focused (Secure Event Input) — Winter waits until you switch away")
+        case .none:
+            break
+        }
+        guard userIsWorking(in: t.pid) else { return }
         CULog.act.notice("act in \(t.appName, privacy: .public): refused — the user is working in it")
         throw CUError.refused(.userWorking, "the user is working in \(t.appName) right now — wait and retry, or ask them")
     }
@@ -913,6 +970,10 @@ extension CUCore {
         }) else { return }
         guard now - p.time <= 2, hypot(point.x - p.at.x, point.y - p.at.y) <= Self.clickSlop else {
             CULog.guardian.notice("the user dragged out of \(self.appName(p.pid), privacy: .public)'s window: nothing brought forward")
+            // A drag claims nothing either: its button-down's claim goes (the ordinary-target survey's seed 54 — a drag
+            // out of T's window later explained T's landing as "they clicked into its window", and the work mark refused
+            // the agent).
+            guardianLock.withLock { guardianCore.dropClaim(app: p.pid) }
             return
         }
         guard sys.frontmostPid() != p.pid else { return }

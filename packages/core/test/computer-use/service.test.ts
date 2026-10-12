@@ -75,7 +75,8 @@ function world(opts: WorldOpts = {}) {
     helper, policy, settings: () => settings, telemetry, recentApps: new RecentApps(home),
     audit: (l) => audits.push(l), interrupt: (sid) => interrupts.push(sid), log: (l) => logs.push(l),
     ...(opts.screenshotSink === undefined ? {} : { screenshotSink: opts.screenshotSink }),
-    ...(opts.dangerousAdded === undefined ? {} : { site: { dangerousDomainsAdded: () => opts.dangerousAdded } }),
+    ...(opts.dangerousAdded === undefined ? {} : { site: { dangerousDomainsAdded: (cwd?: string) => (cwd === "/proj" ? opts.dangerousAdded : []) } }),
+    sessionCwd: () => "/proj",
   });
   services.push(svc);
   const run = (code: string, o: { sessionId?: string; vision?: boolean; timeoutMs?: number; reset?: boolean; signal?: AbortSignal; model?: string } = {}): Promise<ScriptResult> =>
