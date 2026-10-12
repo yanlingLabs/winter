@@ -1,0 +1,48 @@
+# Guarded single-stream console candidate
+
+Status: reviewable no-VM implementation. The restricted RAW active-return audit is accepted separately at `2f8fbcf6`; this increment does not transfer that claim to a console-bearing or encrypted guest. No keys, guest format/unlock, host credential APIs, VM, host pressure generator or production activation ran. Historical patches0004–0006, their source checkout and signed artifacts remain unchanged.
+
+## Concrete topology and source inventory
+
+The actual upstream console has additional RAM consumers beyond its device callback: `process_tx.rs:90-103` holds a guest VolatileSlice through an output readiness wait; `process_rx.rs:95-117` supplies guest-backed pointers to host reads; `port.rs:143-161` spawns independent RX/TX workers; `device.rs:139-249` and `event_handler.rs` process control queues and start/notify ports. Upstream `Console::reset` calls port shutdown and joins. Wrapping only its event callback would leave those paths outside the drain barrier.
+
+The opt-in candidate therefore uses a new fixed single-port virtio-console implementation at native `src/devices/src/virtio/console/cowork_stream.rs`. It advertises VERSION_1 only, two queues of32 entries (RX/TX), and disables MULTIPORT, SIZE, EVENT_IDX, control queues, terminal mode changes and signal forwarding. The upstream console/port/control/I/O modules are never instantiated by this profile. It retains one PL011 telemetry console, balloon, bounded RNG and one RAW block device; all unproved fs/DAX/network/vsock/GPU/audio/input/hotplug paths remain gated.
+
+The C API `krun_set_cowork_bootstrap_stream(ctx,fd)` requires prior explicit guarded-block fixture opt-in and a pre-admitted connected unnamed AF_UNIX SOCK_STREAM descriptor>=3. It duplicates first with CLOEXEC, then validates the owned duplicate's type, local/peer family and all-zero name bytes, makes it nonblocking and prevents SIGPIPE. Darwin's unnamed sockaddr length16 is handled without accepting a named endpoint. There is no connect/path/address selection API, generic stdio, TTY or datagram support. The caller retains ownership of its original FD and must close the inherited original after handoff; nonblocking flags affect the shared open-file description. Context/device/worker each own their duplicates, with closure tested. No endpoint creation or inheritance protocol is supplied to a production broker yet.
+
+## RAM, I/O and lifetime contract
+
+The opaque `StreamQueues` leaf retains the private GuestMemory handle and owns both queue rings. Complete queue readiness/ring spans, checked head/producer progress, full descriptor chain/direction, overflow and single-region spans are validated. No DescriptorChain, guest slice/pointer or guest-backed I/O vector leaves the short leaf callback. Host stream functions receive only standard slices of owned buffers.
+
+`stream_reclaim_access.rs` is the exact native access implementation for this candidate; the historical `reclaim_access.rs` is untouched. Its `Lease::operation` holds the short admission state fence across bounded queue/copy/used-ring operations, serializing them against logical generation retirement. It contains no host I/O, trace, sleep, readiness or drain wait. Existing CPU-park-before-admission-close and zero-active-lease-before-mapping semantics are unchanged. New registration is fixed to block token0 and console token1; the shared budget is two devices,32 pins and8 MiB of pinned ranges.
+
+TX copies at most64 KiB into owned memory; individual host calls are at most16 KiB and preserve partial-write position. RX pins the entire reported destination chain (at most1 MiB) but allocates only up to16 KiB and copies successful owned input back under a fresh generation-checked lease. Permanent rings and outstanding request/destination pins remain reclaim exclusions. Completion during freeze defers and retains its pins. Stop, peer EOF, malformed spans or unhandled I/O failure produces a terminal access fault; the existing wake/exit77 path remains **UNCERTAIN**, not clean guest completion.
+
+The worker polls only its owned stream, RX/TX kick FDs and explicit stop FD, with a20 ms bounded retry for gate reopen; no RAM lease survives those waits. Backpressure is a nonblocking WouldBlock/readiness stall, not a claim that the OS write syscall was blocked. Payloads are potentially secret: no payload diagnostics, Debug formatting, argv/env forwarding or packet parsing exists. Pending owned buffer disposal uses volatile clearing. This is defense in depth for buffer lifetime; running guest/worker memory remains the accepted plaintext residual, and no general secret-memory guarantee is claimed.
+
+Console reset marks stopping and logically retires the generation; it never joins a running worker from MMIO. Existing short fenced copies can finish before retirement takes the state lock; further old-generation copies/ACKs fail. The stopped worker returns its entire ownership object, including rings, request pins and pending buffers, in the join packet. Actual thread completion is checked before join/release. A rapid reactivation owns its newly validated ring pins immediately and remains staged until the old owner is joined. The main event thread wakes on completion and uses5 ms lifecycle polling only while retirement/reactivation is pending, closing the notify-before-thread-finished race; it clones the device reference under a brief VMM lock and performs lifecycle work after releasing that lock.
+
+The existing block reset still synchronously joins its disk worker in MMIO and can trip the bounded CPU park timeout. This increment makes no production reset/recovery promise. General hotplug/teardown, nonfatal cancellation and multi-device lifecycle ownership require further review. Stream reset may consume or deliver already-started owned bytes before cancellation; it is not an authenticated exactly-once message boundary.
+
+## RNG bound admitted with the stream
+
+Only this new profile enables the bounded RNG path. It validates complete writable spans before producing any bytes, rejects chains above64 KiB or malformed/readonly/cross-region reports, uses a fixed4 KiB stack buffer, and processes at most32 heads per event turn before scheduling remaining work. It never allocates a guest-reported-length buffer. RNG remains a serialized main-event subscriber, so it cannot race the coordinator's mapping phase; no independent RNG DMA reader is added. A terminal RNG fault stops access and keeps exit77 UNCERTAIN. The old RAW/restricted paths retain their historical behavior and artifacts.
+
+## Exact candidate and tests
+
+`stream-candidate.json` pins the original227b2de6 revision, accepted base patches and new incremental0007. `prepare_stream.py` creates only `out/libkrun-stream-reclaim`, verifies lockfile/base/delta/full-source hashes, rejects unexpected files, proves the exact diff through a private temporary Git index and checks actual/shared stream and inherited core modules byte-for-byte. It never modifies the old RAW checkout or fetches dependencies.
+
+```sh
+python3 spikes/cowork-hvf/prepare_stream.py
+python3 spikes/cowork-hvf/test_stream.py
+```
+
+The test harness uses actual native code and real anonymous socketpairs/queues, without a hypervisor. It runs59 test executions covering58 distinct tests (one new access test appears in two focused filters) and a clean native libkrun check. Newly exercised cases include duplex transfer, owned RX wait through freeze/resume, actual TX backpressure/Stop, pin retention, malformed/oversized spans, stale generation, pending reactivation after old owner completion, terminal EOF/no ACK, FD type/owned duplication/CLOEXEC/closure, public opt-in rejection and fixed-buffer RNG validation. Test assertions never print payloads. Unrelated FD-close assertions run serially; actual worker/freeze/reset concurrency remains real inside the tests. Existing block/FRQ/bounce/access/admission gates are rerun on this source. The inherited control/barrier/planner/coordinator modules remain byte-identical to their accepted copies. A double-include C++ header smoke check confirms the new public symbol has C linkage.
+
+Durable metadata-only test receipts are under `results/2026-10-12-guarded-stream-*`; local source/test output stays ignored under out. No VM, guest driver boot, resource-return measurement or signed stream-worker sandbox compatibility test is claimed.
+
+## Host authority and next gates
+
+A memory-safe socket does not identify an authorized workspace/home/volume, authenticate a bootstrap peer, grant credentials or implement trusted runtime confinement. Future guest packet parsing stays in the worker/sandboxed helper, never the credential daemon. Before carrying keys, bind a sealed host launch capability and reviewed framed/generation/nonce protocol, a trusted guest receiver/permissions, raw guest terminal settings and exact inheritance closure; protect against stale bytes across reset and kernel/TTY transformations. This increment supplies none of that credential authority or guest key/format/unlock behavior.
+
+Root and independent review must inspect the actual source/test correspondence and lifetime/barrier contract before any new VM. Before the next encrypted experiment, the fixture block backend must deliberately stall **inside perform**, matching the native test pattern; the previous post-I/O completion holds and this readiness stall do not establish a genuinely blocked OS syscall. Crypto profile boot/resource return, authenticated disk recovery, storage key custody, other device admission, automatic resource management and full Cowork end-to-end integration remain open.

@@ -1,0 +1,1518 @@
+diff --git a/include/libkrun.h b/include/libkrun.h
+index 5c62ef0..97bf57e 100644
+--- a/include/libkrun.h
++++ b/include/libkrun.h
+@@ -1400,6 +1400,13 @@ int32_t krun_set_root_disk_remount(uint32_t ctx_id, const char *device, const ch
+  */
+ int32_t krun_start_enter(uint32_t ctx_id);
+ 
++/* TEST-ONLY: add one guarded single-port bootstrap/runtime stream to the raw-block fixture.
++ * fd must be a pre-admitted unnamed connected AF_UNIX SOCK_STREAM endpoint >=3; it is
++ * duplicated with CLOEXEC and made nonblocking. No connect/path/credential authority is granted.
++ * Call only after krun_enable_cowork_block_fixture_reclaim; no keys/packet policy is implemented.
++ */
++int32_t krun_set_cowork_bootstrap_stream(uint32_t ctx_id, int32_t fd);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/devices/src/lib.rs b/src/devices/src/lib.rs
+index 4fcbbfe..621e9e8 100644
+--- a/src/devices/src/lib.rs
++++ b/src/devices/src/lib.rs
+@@ -63,3 +63,4 @@ pub mod reclaim_access;
+ pub mod block_bounce;
+ 
+ #[cfg(feature="blk")]pub mod block_trace;
++#[cfg(feature="blk")]pub mod stream_io;
+diff --git a/src/devices/src/reclaim_access.rs b/src/devices/src/reclaim_access.rs
+index ade688e..7f08f50 100644
+--- a/src/devices/src/reclaim_access.rs
++++ b/src/devices/src/reclaim_access.rs
+@@ -156,6 +156,22 @@ impl Access {
+         }
+     }
+     /// Invalidate old completions only after all memory copies drain; reset owner supplies this call.
++    /// Nonblocking logical retirement: prior pins/leases remain accounted until their owners drop.
++    /// Stream copies/ACK use lease_operation(), so retirement is serialized against actual RAM touch.
++    pub fn retire_generation(&self, device: Device) -> Result<Device, Fault> {
++        let mut state = self.inner.state.lock().unwrap();
++        valid(&state, device)?;
++        if state.closed.is_some() {
++            return Err(Fault::Frozen);
++        }
++        let generation = device.generation.checked_add(1).ok_or(Fault::Overflow)?;
++        state.devices.insert(device.id, generation);
++        self.inner.wake.notify_all();
++        Ok(Device {
++            id: device.id,
++            generation,
++        })
++    }
+     pub fn reset_generation(&self, device: Device) -> Result<Device, Fault> {
+         let mut state = self.inner.state.lock().unwrap();
+         valid(&state, device)?;
+@@ -250,6 +266,10 @@ impl Access {
+     pub fn stopped(&self) -> bool {
+         self.inner.state.lock().unwrap().stopped
+     }
++    pub fn pinned_usage(&self) -> (usize, u64) {
++        let state = self.inner.state.lock().unwrap();
++        (state.pins.len(), state.pinned_bytes)
++    }
+     pub fn active_leases(&self) -> usize {
+         self.inner.state.lock().unwrap().active
+     }
+@@ -274,6 +294,23 @@ impl Lease {
+         }
+         valid(&self.inner.state.lock().unwrap(), device)
+     }
++    /// The only guarded-stream RAM leaf executes bounded copies under this short state fence.
++    /// Caller must never perform host I/O, trace, poll, sleep or wait in this operation.
++    pub fn operation<T>(
++        &self,
++        access: &Access,
++        device: Device,
++        operation: impl FnOnce() -> T,
++    ) -> Result<T, Fault> {
++        if !Arc::ptr_eq(&self.inner, &access.inner) || self.device != device {
++            return Err(Fault::Stale);
++        }
++        let state = self.inner.state.lock().unwrap();
++        valid(&state, device)?;
++        let result = operation();
++        drop(state);
++        Ok(result)
++    }
+     pub fn pin(&self, ranges: &[Range]) -> Result<Pin, Fault> {
+         let mut bytes = 0u64;
+         if ranges.is_empty() {
+@@ -576,4 +613,40 @@ mod tests {
+         );
+         assert!(frozen.complete_mutation().is_err());
+     }
++    #[test]
++    fn cowork_stream_retirement_waits_only_for_fenced_copy_and_preserves_old_pins() {
++        let (a, d) = access();
++        let lease = a.begin(d).unwrap();
++        let pin = lease
++            .pin(&[Range {
++                gpa: 0x1000,
++                len: 4096,
++            }])
++            .unwrap();
++        let copied = a.clone();
++        let (entered, started) = std::sync::mpsc::sync_channel(0);
++        let (release, go) = std::sync::mpsc::sync_channel(0);
++        let worker = thread::spawn(move || {
++            let result = lease.operation(&copied, d, || {
++                entered.send(()).unwrap();
++                go.recv_timeout(Duration::from_secs(1)).unwrap();
++            });
++            drop(lease);
++            result
++        });
++        started.recv_timeout(Duration::from_secs(1)).unwrap();
++        let retiring = a.clone();
++        let retired = thread::spawn(move || retiring.retire_generation(d));
++        assert!(!retired.is_finished());
++        release.send(()).unwrap();
++        worker.join().unwrap().unwrap();
++        let next = retired.join().unwrap().unwrap();
++        assert!(matches!(a.begin(d), Err(Fault::Stale)));
++        assert!(a.begin(next).is_ok());
++        let frozen = a.freeze(1, Duration::from_secs(1)).unwrap();
++        assert_eq!(frozen.exclusions().len(), 1);
++        frozen.resume().unwrap();
++        drop(pin);
++        assert_eq!(a.pinned_usage(), (0, 0));
++    }
+ }
+diff --git a/src/devices/src/stream_io.rs b/src/devices/src/stream_io.rs
+new file mode 100644
+index 0000000..7dde805
+--- /dev/null
++++ b/src/devices/src/stream_io.rs
+@@ -0,0 +1,193 @@
++//! Bounded owned stream I/O. No guest memory, packet interpretation or credential authority here.
++use crate::reclaim_access::Fault;
++use std::io::{self, ErrorKind};
++use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
++use std::sync::atomic::{AtomicBool, Ordering};
++use utils::eventfd::EventFd;
++pub const CHUNK: usize = 16 * 1024;
++pub const MAX_TX: usize = 64 * 1024;
++pub const MAX_CHAIN: usize = 1024 * 1024;
++pub struct ScopedStream {
++    fd: OwnedFd,
++}
++impl ScopedStream {
++    /// Only connected unnamed local socketpair endpoints, never stdio/TTY/path/connect.
++    pub fn admit(fd: RawFd) -> io::Result<Self> {
++        if fd < 3 {
++            return Err(io::Error::from(ErrorKind::InvalidInput));
++        }
++        let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
++        if duplicate < 0 {
++            return Err(io::Error::last_os_error());
++        }
++        let owned = unsafe { OwnedFd::from_raw_fd(duplicate) };
++        let fd = owned.as_raw_fd(); // Validate the owned duplicate, not a replaceable caller fd.
++        let mut kind = 0i32;
++        let mut length = std::mem::size_of_val(&kind) as libc::socklen_t;
++        if unsafe {
++            libc::getsockopt(
++                fd,
++                libc::SOL_SOCKET,
++                libc::SO_TYPE,
++                &mut kind as *mut _ as *mut _,
++                &mut length,
++            )
++        } != 0
++            || kind != libc::SOCK_STREAM
++        {
++            return Err(io::Error::from(ErrorKind::InvalidInput));
++        }
++        for peer in [false, true] {
++            let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
++            let mut size = std::mem::size_of_val(&address) as libc::socklen_t;
++            let rc = unsafe {
++                if peer {
++                    libc::getpeername(fd, &mut address as *mut _ as *mut _, &mut size)
++                } else {
++                    libc::getsockname(fd, &mut address as *mut _ as *mut _, &mut size)
++                }
++            };
++            let offset = std::mem::offset_of!(libc::sockaddr_un, sun_path);
++            if rc != 0
++                || address.ss_family as i32 != libc::AF_UNIX
++                || (size as usize) < offset
++                || (size as usize) > std::mem::size_of_val(&address)
++            {
++                return Err(io::Error::from(ErrorKind::InvalidInput));
++            }
++            // Darwin reports an unnamed sockaddr with length16; require zero name bytes, not length2.
++            let bytes = unsafe {
++                std::slice::from_raw_parts(&address as *const _ as *const u8, size as usize)
++            };
++            if bytes[offset..].iter().any(|byte| *byte != 0) {
++                return Err(io::Error::from(ErrorKind::InvalidInput));
++            }
++        }
++        let flags = unsafe { libc::fcntl(duplicate, libc::F_GETFL) };
++        if flags < 0
++            || unsafe { libc::fcntl(duplicate, libc::F_SETFL, flags | libc::O_NONBLOCK) } != 0
++        {
++            return Err(io::Error::last_os_error());
++        }
++        #[cfg(target_os = "macos")]
++        {
++            let no_sigpipe = 1i32;
++            if unsafe {
++                libc::setsockopt(
++                    duplicate,
++                    libc::SOL_SOCKET,
++                    libc::SO_NOSIGPIPE,
++                    &no_sigpipe as *const _ as *const _,
++                    std::mem::size_of_val(&no_sigpipe) as libc::socklen_t,
++                )
++            } != 0
++            {
++                return Err(io::Error::last_os_error());
++            }
++        }
++        Ok(Self { fd: owned })
++    }
++    pub fn as_raw_fd(&self) -> RawFd {
++        self.fd.as_raw_fd()
++    }
++    pub fn duplicate(&self) -> io::Result<Self> {
++        Self::admit(self.as_raw_fd())
++    }
++    pub fn read_owned(&self, target: &mut [u8]) -> io::Result<usize> {
++        if target.len() > CHUNK {
++            return Err(io::Error::from(ErrorKind::InvalidInput));
++        }
++        let result =
++            unsafe { libc::read(self.as_raw_fd(), target.as_mut_ptr().cast(), target.len()) };
++        if result < 0 {
++            Err(io::Error::last_os_error())
++        } else {
++            Ok(result as usize)
++        }
++    }
++    pub fn write_owned(&self, bytes: &[u8]) -> io::Result<usize> {
++        if bytes.len() > CHUNK {
++            return Err(io::Error::from(ErrorKind::InvalidInput));
++        }
++        #[cfg(target_os = "linux")]
++        let flags = libc::MSG_NOSIGNAL;
++        #[cfg(not(target_os = "linux"))]
++        let flags = 0;
++        let result =
++            unsafe { libc::send(self.as_raw_fd(), bytes.as_ptr().cast(), bytes.len(), flags) };
++        if result < 0 {
++            Err(io::Error::last_os_error())
++        } else {
++            Ok(result as usize)
++        }
++    }
++    /// Interruptible readiness wait touches only an owned host FD and cancellation descriptor.
++    pub fn wait(&self, writable: bool, stop_fd: &EventFd, stop: &AtomicBool) -> Result<(), Fault> {
++        use std::os::fd::AsRawFd;
++        loop {
++            if stop.load(Ordering::Acquire) {
++                return Err(Fault::Stopped);
++            }
++            let mut fds = [
++                libc::pollfd {
++                    fd: self.as_raw_fd(),
++                    events: if writable {
++                        libc::POLLOUT
++                    } else {
++                        libc::POLLIN
++                    },
++                    revents: 0,
++                },
++                libc::pollfd {
++                    fd: stop_fd.as_raw_fd(),
++                    events: libc::POLLIN,
++                    revents: 0,
++                },
++            ];
++            let result = unsafe { libc::poll(fds.as_mut_ptr(), 2, 100) };
++            if result < 0 {
++                if io::Error::last_os_error().kind() == ErrorKind::Interrupted {
++                    continue;
++                }
++                return Err(Fault::Stopped);
++            }
++            if fds[1].revents != 0 || stop.load(Ordering::Acquire) {
++                return Err(Fault::Stopped);
++            }
++            if fds[0].revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
++                return Err(Fault::Stopped);
++            }
++            if fds[0].revents != 0 {
++                return Ok(());
++            }
++        }
++    }
++}
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::os::unix::net::{UnixDatagram, UnixStream};
++    #[test]
++    fn cowork_stream_fd_kind_owned_dup_cloexec_and_closure() {
++        let (a, _b) = UnixStream::pair().unwrap();
++        let original = a.as_raw_fd();
++        let stream = ScopedStream::admit(original).unwrap();
++        let duplicate = stream.as_raw_fd();
++        assert!(duplicate != original);
++        assert!(unsafe { libc::fcntl(duplicate, libc::F_GETFD) } & libc::FD_CLOEXEC != 0);
++        drop(stream);
++        assert!(unsafe { libc::fcntl(duplicate, libc::F_GETFD) } < 0);
++        assert!(unsafe { libc::fcntl(original, libc::F_GETFD) } >= 0);
++        assert!(ScopedStream::admit(0).is_err());
++        let (a, _b) = UnixDatagram::pair().unwrap();
++        assert!(ScopedStream::admit(a.as_raw_fd()).is_err());
++    }
++    #[test]
++    fn cowork_stream_io_bounds_reject_without_guest_or_payload_logging() {
++        let (a, _b) = UnixStream::pair().unwrap();
++        let stream = ScopedStream::admit(a.as_raw_fd()).unwrap();
++        let mut bytes = vec![0; CHUNK + 1];
++        assert!(stream.read_owned(&mut bytes).is_err());
++        assert!(stream.write_owned(&bytes).is_err());
++    }
++}
+diff --git a/src/devices/src/virtio/console/cowork_stream.rs b/src/devices/src/virtio/console/cowork_stream.rs
+new file mode 100644
+index 0000000..40eaf38
+--- /dev/null
++++ b/src/devices/src/virtio/console/cowork_stream.rs
+@@ -0,0 +1,991 @@
++//! Guarded VERSION_1 single stream; upstream multiport/control/volatile I/O paths are not used.
++use crate::reclaim_access::{Access, Device, Fault, Pin, Range};
++use crate::stream_io::{ScopedStream, CHUNK, MAX_CHAIN, MAX_TX};
++use crate::virtio::queue::fixture_chain;
++use crate::virtio::{
++    ActivateError, ActivateResult, DeviceQueue, InterruptTransport, Queue, QueueConfig,
++    VirtioDevice, VmmExitObserver,
++};
++use std::io::ErrorKind;
++use std::os::fd::AsRawFd;
++use std::sync::{
++    atomic::{AtomicBool, Ordering},
++    Arc,
++};
++use std::thread::JoinHandle;
++use utils::eventfd::{EventFd, EFD_NONBLOCK};
++use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
++const QUEUES: [QueueConfig; 2] = [QueueConfig::new(32), QueueConfig::new(32)];
++struct Frame {
++    head: u16,
++    ranges: Vec<Range>,
++    capacity: usize,
++    data: Vec<u8>,
++    offset: usize,
++    _pin: Pin,
++}
++impl Drop for Frame {
++    fn drop(&mut self) {
++        for byte in &mut self.data {
++            unsafe { std::ptr::write_volatile(byte, 0) }
++        }
++        std::sync::atomic::compiler_fence(Ordering::SeqCst);
++    }
++}
++struct StreamQueues {
++    memory: GuestMemoryMmap,
++    rx: Queue,
++    tx: Queue,
++    access: Access,
++    device: Device,
++    _rings: Vec<Pin>,
++}
++impl StreamQueues {
++    fn new(
++        memory: GuestMemoryMmap,
++        queues: Vec<DeviceQueue>,
++        access: Access,
++        device: Device,
++    ) -> Result<(Self, Vec<Arc<EventFd>>), Fault> {
++        if queues.len() != 2 {
++            return Err(Fault::Limit);
++        }
++        let lease = access.begin(device)?;
++        let mut pins = Vec::new();
++        for q in &queues {
++            q.queue
++                .fixture_validate_report(&memory)
++                .map_err(|_| Fault::InvalidRange)?;
++            let ranges = q
++                .queue
++                .fixture_exclusions(&memory, false)
++                .map_err(|_| Fault::InvalidRange)?
++                .into_iter()
++                .map(|(gpa, len)| Range { gpa, len })
++                .collect::<Vec<_>>();
++            pins.push(lease.pin(&ranges)?);
++        }
++        let events = queues.iter().map(|q| q.event.clone()).collect();
++        let mut queues = queues.into_iter();
++        let rx = queues.next().unwrap().queue;
++        let tx = queues.next().unwrap().queue;
++        drop(lease);
++        Ok((
++            Self {
++                memory,
++                rx,
++                tx,
++                access,
++                device,
++                _rings: pins,
++            },
++            events,
++        ))
++    }
++    fn range(memory: &GuestMemoryMmap, r: Range) -> Result<(), Fault> {
++        let end = r.gpa.checked_add(r.len).ok_or(Fault::Overflow)?;
++        let region = memory
++            .find_region(GuestAddress(r.gpa))
++            .ok_or(Fault::InvalidRange)?;
++        if r.len == 0
++            || end
++                > region
++                    .start_addr()
++                    .raw_value()
++                    .checked_add(region.len())
++                    .ok_or(Fault::Overflow)?
++        {
++            return Err(Fault::InvalidRange);
++        }
++        Ok(())
++    }
++    fn capture(&mut self, rx: bool) -> Result<Option<Frame>, Fault> {
++        let lease = self.access.begin(self.device)?;
++        let memory = &self.memory;
++        let queue = if rx { &mut self.rx } else { &mut self.tx };
++        let result = lease.operation(
++            &self.access,
++            self.device,
++            || -> Result<Option<(u16, Vec<Range>, usize, Vec<u8>)>, Fault> {
++                let Some(head) = queue
++                    .fixture_checked_pop(memory)
++                    .map_err(|_| Fault::InvalidRange)?
++                else {
++                    return Ok(None);
++                };
++                let index = head.index;
++                let mut ranges = Vec::new();
++                let mut total = 0usize;
++                for d in fixture_chain(head).map_err(|_| Fault::InvalidRange)? {
++                    if d.is_write_only() != rx {
++                        return Err(Fault::InvalidRange);
++                    }
++                    if d.len == 0 {
++                        continue;
++                    }
++                    let range = Range {
++                        gpa: d.addr.raw_value(),
++                        len: u64::from(d.len),
++                    };
++                    Self::range(memory, range)?;
++                    total = total.checked_add(d.len as usize).ok_or(Fault::Overflow)?;
++                    if total > if rx { MAX_CHAIN } else { MAX_TX } {
++                        return Err(Fault::Limit);
++                    }
++                    ranges.push(range);
++                }
++                if total == 0 || ranges.len() > 256 {
++                    return Err(Fault::InvalidRange);
++                }
++                let capacity = if rx { total.min(CHUNK) } else { total };
++                let mut data = vec![0u8; capacity];
++                if !rx {
++                    let mut offset = 0;
++                    for r in &ranges {
++                        let n = r.len as usize;
++                        memory
++                            .read_slice(&mut data[offset..offset + n], GuestAddress(r.gpa))
++                            .map_err(|_| Fault::InvalidRange)?;
++                        offset += n;
++                    }
++                }
++                Ok(Some((index, ranges, capacity, data)))
++            },
++        )??;
++        let Some((head, ranges, capacity, mut data)) = result else {
++            return Ok(None);
++        };
++        let pin = match lease.pin(&ranges) {
++            Ok(pin) => pin,
++            Err(fault) => {
++                for byte in &mut data {
++                    unsafe { std::ptr::write_volatile(byte, 0) }
++                }
++                std::sync::atomic::compiler_fence(Ordering::SeqCst);
++                return Err(fault);
++            }
++        };
++        drop(lease);
++        Ok(Some(Frame {
++            head,
++            ranges,
++            capacity,
++            data,
++            offset: 0,
++            _pin: pin,
++        }))
++    }
++    fn complete(&mut self, rx: bool, frame: &Frame) -> Result<(), Fault> {
++        let lease = self.access.begin(self.device)?;
++        let memory = &self.memory;
++        let queue = if rx { &mut self.rx } else { &mut self.tx };
++        lease.operation(&self.access, self.device, || -> Result<(), Fault> {
++            queue
++                .fixture_validate_report(memory)
++                .map_err(|_| Fault::InvalidRange)?;
++            if rx {
++                if frame.offset > frame.capacity {
++                    return Err(Fault::Limit);
++                }
++                let mut copied = 0;
++                for r in &frame.ranges {
++                    Self::range(memory, *r)?;
++                    let n = (r.len as usize).min(frame.offset - copied);
++                    memory
++                        .write_slice(&frame.data[copied..copied + n], GuestAddress(r.gpa))
++                        .map_err(|_| Fault::InvalidRange)?;
++                    copied += n;
++                    if copied == frame.offset {
++                        break;
++                    }
++                }
++                if copied != frame.offset {
++                    return Err(Fault::InvalidRange);
++                }
++            }
++            queue
++                .add_used(memory, frame.head, frame.offset as u32)
++                .map_err(|_| Fault::InvalidRange)
++        })??;
++        drop(lease);
++        Ok(())
++    }
++}
++struct Worker {
++    queues: StreamQueues,
++    events: Vec<Arc<EventFd>>,
++    stream: ScopedStream,
++    stop: Arc<AtomicBool>,
++    stopfd: EventFd,
++    interrupt: InterruptTransport,
++    rx: Option<Frame>,
++    tx: Option<Frame>,
++}
++impl Worker {
++    fn run(&mut self) -> Result<(), Fault> {
++        loop {
++            if self.stop.load(Ordering::Acquire) || self.queues.access.stopped() {
++                return Err(Fault::Stopped);
++            }
++            for direction in [true, false] {
++                let slot = if direction {
++                    &mut self.rx
++                } else {
++                    &mut self.tx
++                };
++                if slot.is_none() {
++                    match self.queues.capture(direction) {
++                        Ok(frame) => *slot = frame,
++                        Err(Fault::Frozen) => {}
++                        Err(fault) => return Err(fault),
++                    }
++                }
++            }
++            if let Some(frame) = &mut self.tx {
++                if frame.offset < frame.capacity {
++                    match self.stream.write_owned(
++                        &frame.data[frame.offset..(frame.offset + CHUNK).min(frame.capacity)],
++                    ) {
++                        Ok(0) => return Err(Fault::Stopped),
++                        Ok(n) => frame.offset += n,
++                        Err(e)
++                            if e.kind() == ErrorKind::WouldBlock
++                                || e.kind() == ErrorKind::Interrupted => {}
++                        Err(_) => return Err(Fault::Stopped),
++                    }
++                }
++                if frame.offset == frame.capacity {
++                    match self.queues.complete(false, frame) {
++                        Ok(()) => {
++                            self.tx = None;
++                            self.interrupt.signal_used_queue();
++                        }
++                        Err(Fault::Frozen) => {}
++                        Err(fault) => return Err(fault),
++                    }
++                }
++            }
++            if let Some(frame) = &mut self.rx {
++                if frame.offset == 0 {
++                    match self.stream.read_owned(&mut frame.data) {
++                        Ok(0) => return Err(Fault::Stopped),
++                        Ok(n) => frame.offset = n,
++                        Err(e)
++                            if e.kind() == ErrorKind::WouldBlock
++                                || e.kind() == ErrorKind::Interrupted => {}
++                        Err(_) => return Err(Fault::Stopped),
++                    }
++                }
++                if frame.offset > 0 {
++                    match self.queues.complete(true, frame) {
++                        Ok(()) => {
++                            self.rx = None;
++                            self.interrupt.signal_used_queue();
++                        }
++                        Err(Fault::Frozen) => {}
++                        Err(fault) => return Err(fault),
++                    }
++                }
++            }
++            if self.stop.load(Ordering::Acquire) {
++                return Err(Fault::Stopped);
++            }
++            let mut want = 0;
++            if self.rx.as_ref().is_some_and(|f| f.offset == 0) {
++                want |= libc::POLLIN;
++            }
++            if self.tx.as_ref().is_some_and(|f| f.offset < f.capacity) {
++                want |= libc::POLLOUT;
++            }
++            let mut fds = [
++                libc::pollfd {
++                    fd: self.stream.as_raw_fd(),
++                    events: want,
++                    revents: 0,
++                },
++                libc::pollfd {
++                    fd: self.stopfd.as_raw_fd(),
++                    events: libc::POLLIN,
++                    revents: 0,
++                },
++                libc::pollfd {
++                    fd: self.events[0].as_raw_fd(),
++                    events: libc::POLLIN,
++                    revents: 0,
++                },
++                libc::pollfd {
++                    fd: self.events[1].as_raw_fd(),
++                    events: libc::POLLIN,
++                    revents: 0,
++                },
++            ];
++            let rc = unsafe { libc::poll(fds.as_mut_ptr(), 4, 20) };
++            if rc < 0 {
++                if std::io::Error::last_os_error().kind() == ErrorKind::Interrupted {
++                    continue;
++                }
++                return Err(Fault::Stopped);
++            }
++            if fds[1].revents != 0 || self.stop.load(Ordering::Acquire) {
++                return Err(Fault::Stopped);
++            }
++            if fds[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
++                return Err(Fault::Stopped);
++            }
++            for (index, event) in self.events.iter().enumerate() {
++                if fds[index + 2].revents != 0 {
++                    let _ = event.read();
++                }
++            }
++        }
++    }
++}
++struct Finished {
++    _ownership: Worker,
++    result: Result<(), Fault>,
++}
++struct Active {
++    thread: JoinHandle<Finished>,
++    stop: Arc<AtomicBool>,
++    stopfd: EventFd,
++}
++struct Pending {
++    queues: StreamQueues,
++    events: Vec<Arc<EventFd>>,
++    interrupt: InterruptTransport,
++}
++pub struct GuardedConsole {
++    access: Access,
++    device: Device,
++    stream: ScopedStream,
++    acked: u64,
++    activated: bool,
++    active: Option<Active>,
++    pending: Option<Pending>,
++    done: EventFd,
++}
++impl GuardedConsole {
++    pub fn new(access: Access, device: Device, stream: ScopedStream) -> Result<Self, Fault> {
++        Ok(Self {
++            access,
++            device,
++            stream,
++            acked: 0,
++            activated: false,
++            active: None,
++            pending: None,
++            done: EventFd::new(EFD_NONBLOCK).map_err(|_| Fault::Stopped)?,
++        })
++    }
++    pub fn fail_terminal(&self) {
++        self.access.stop();
++    }
++    pub fn lifecycle_pending(&self) -> bool {
++        self.pending.is_some()
++            || self
++                .active
++                .as_ref()
++                .is_some_and(|a| a.stop.load(Ordering::Acquire))
++    }
++    pub fn progress_lifecycle(&mut self) -> Result<(), Fault> {
++        if self.active.as_ref().is_some_and(|a| a.thread.is_finished()) {
++            let active = self.active.take().unwrap();
++            let stopping = active.stop.load(Ordering::Acquire);
++            let result = active.thread.join().map_err(|_| Fault::Stopped)?;
++            if !stopping && result.result.is_err() {
++                self.access.stop();
++                return Err(Fault::Stopped);
++            }
++        }
++        if self.active.is_none() {
++            if let Some(pending) = self.pending.take() {
++                let stop = Arc::new(AtomicBool::new(false));
++                let stopfd = EventFd::new(EFD_NONBLOCK).map_err(|_| Fault::Stopped)?;
++                let done = self.done.try_clone().map_err(|_| Fault::Stopped)?;
++                let access = self.access.clone();
++                let worker_stop = stop.clone();
++                let mut worker = Worker {
++                    queues: pending.queues,
++                    events: pending.events,
++                    stream: self.stream.duplicate().map_err(|_| Fault::Stopped)?,
++                    stop: worker_stop.clone(),
++                    stopfd: stopfd.try_clone().map_err(|_| Fault::Stopped)?,
++                    interrupt: pending.interrupt,
++                    rx: None,
++                    tx: None,
++                };
++                let thread = std::thread::Builder::new()
++                    .name("guarded stream".into())
++                    .spawn(move || {
++                        let result = worker.run();
++                        if result.is_err() && !worker_stop.load(Ordering::Acquire) {
++                            access.stop();
++                        }
++                        let _ = done.write(1);
++                        Finished {
++                            _ownership: worker,
++                            result,
++                        }
++                    })
++                    .map_err(|_| Fault::Stopped)?;
++                self.active = Some(Active {
++                    thread,
++                    stop,
++                    stopfd,
++                });
++            }
++        }
++        Ok(())
++    }
++}
++impl VirtioDevice for GuardedConsole {
++    fn avail_features(&self) -> u64 {
++        1u64 << 32
++    }
++    fn acked_features(&self) -> u64 {
++        self.acked
++    }
++    fn set_acked_features(&mut self, f: u64) {
++        self.acked = f & (1u64 << 32);
++    }
++    fn device_type(&self) -> u32 {
++        3
++    }
++    fn device_name(&self) -> &str {
++        "cowork-stream"
++    }
++    fn queue_config(&self) -> &[QueueConfig] {
++        &QUEUES
++    }
++    fn read_config(&self, offset: u64, data: &mut [u8]) {
++        let mut config = [0u8; 12];
++        config[4..8].copy_from_slice(&1u32.to_le_bytes());
++        for (i, target) in data.iter_mut().enumerate() {
++            *target = offset
++                .checked_add(i as u64)
++                .and_then(|position| usize::try_from(position).ok())
++                .and_then(|position| config.get(position))
++                .copied()
++                .unwrap_or(0);
++        }
++    }
++    fn write_config(&mut self, _: u64, _: &[u8]) {}
++    fn activate(
++        &mut self,
++        memory: GuestMemoryMmap,
++        interrupt: InterruptTransport,
++        queues: Vec<DeviceQueue>,
++    ) -> ActivateResult {
++        if self.activated || self.pending.is_some() {
++            self.access.stop();
++            return Err(ActivateError::BadActivate);
++        }
++        let (queues, events) = StreamQueues::new(memory, queues, self.access.clone(), self.device)
++            .map_err(|_| {
++                self.access.stop();
++                ActivateError::BadActivate
++            })?;
++        self.pending = Some(Pending {
++            queues,
++            events,
++            interrupt,
++        });
++        self.activated = true;
++        self.progress_lifecycle().map_err(|_| {
++            self.access.stop();
++            ActivateError::BadActivate
++        })?;
++        Ok(())
++    }
++    fn is_activated(&self) -> bool {
++        self.activated
++    }
++    fn reset(&mut self) -> bool {
++        if let Some(active) = &self.active {
++            active.stop.store(true, Ordering::Release);
++            let _ = active.stopfd.write(1);
++        }
++        self.pending = None;
++        self.activated = false;
++        match self.access.retire_generation(self.device) {
++            Ok(next) => self.device = next,
++            Err(_) => self.access.stop(),
++        };
++        let _ = self.done.write(1);
++        true
++    }
++}
++impl Drop for GuardedConsole {
++    fn drop(&mut self) {
++        if let Some(active) = &self.active {
++            active.stop.store(true, Ordering::Release);
++            let _ = active.stopfd.write(1);
++        }
++        let _ = self.access.retire_generation(self.device);
++    }
++}
++impl VmmExitObserver for GuardedConsole {
++    fn on_vmm_exit(&mut self) {
++        self.reset();
++    }
++}
++impl polly::event_manager::Subscriber for GuardedConsole {
++    fn interest_list(&self) -> Vec<utils::epoll::EpollEvent> {
++        vec![utils::epoll::EpollEvent::new(
++            utils::epoll::EventSet::IN,
++            self.done.as_raw_fd() as u64,
++        )]
++    }
++    fn process(
++        &mut self,
++        _: &utils::epoll::EpollEvent,
++        _: &mut polly::event_manager::EventManager,
++    ) {
++        let _ = self.done.read();
++        if self.progress_lifecycle().is_err() {
++            self.access.stop();
++        }
++    }
++}
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::virtio::Descriptor;
++    use std::io::{Read, Write};
++    use std::os::unix::net::UnixStream;
++    use std::time::{Duration, Instant};
++    fn wait(mut ready: impl FnMut() -> bool) {
++        let deadline = Instant::now() + Duration::from_secs(2);
++        while !ready() {
++            assert!(Instant::now() < deadline, "metadata completion deadline");
++            std::thread::sleep(Duration::from_millis(2));
++        }
++    }
++    fn fixture() -> (
++        Access,
++        Device,
++        StreamQueues,
++        Vec<Arc<EventFd>>,
++        GuestMemoryMmap,
++    ) {
++        let access = Access::new(2, 16, 4 * 1024 * 1024);
++        let token = access.register(1).unwrap();
++        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x20000)]).unwrap();
++        let mut queues = Vec::new();
++        for (index, base) in [0x1000u64, 0x7000].into_iter().enumerate() {
++            let mut queue = Queue::new(8);
++            queue.ready = true;
++            queue.size = 8;
++            queue.desc_table = GuestAddress(base);
++            queue.avail_ring = GuestAddress(base + 0x1000);
++            queue.used_ring = GuestAddress(base + 0x2000);
++            let descriptor = Descriptor {
++                addr: if index == 0 { 0x10000 } else { 0x14000 },
++                len: 16,
++                flags: if index == 0 { 2 } else { 0 },
++                next: 0,
++            };
++            memory.write_obj(descriptor, GuestAddress(base)).unwrap();
++            memory.write_obj(1u16, GuestAddress(base + 0x1002)).unwrap();
++            memory.write_obj(0u16, GuestAddress(base + 0x1004)).unwrap();
++            if index == 1 {
++                memory
++                    .write_slice(&[0x31; 16], GuestAddress(0x14000))
++                    .unwrap();
++            }
++            queues.push(DeviceQueue::new(
++                queue,
++                Arc::new(EventFd::new(EFD_NONBLOCK).unwrap()),
++            ));
++        }
++        let (queues, events) =
++            StreamQueues::new(memory.clone(), queues, access.clone(), token).unwrap();
++        (access, token, queues, events, memory)
++    }
++    fn interrupt() -> InterruptTransport {
++        InterruptTransport::new(
++            crate::legacy::DummyIrqChip::new().into(),
++            "guarded-stream-test".into(),
++        )
++        .unwrap()
++    }
++    #[test]
++    fn cowork_stream_actual_queue_socketpair_duplex_owned_io() {
++        let (access, _token, queues, events, memory) = fixture();
++        let (a, mut peer) = UnixStream::pair().unwrap();
++        let stream = ScopedStream::admit(a.as_raw_fd()).unwrap();
++        let stop = Arc::new(AtomicBool::new(false));
++        let stopfd = EventFd::new(EFD_NONBLOCK).unwrap();
++        let fd = stopfd.try_clone().unwrap();
++        let worker_stop = stop.clone();
++        let mut worker = Worker {
++            queues,
++            events,
++            stream,
++            stop: worker_stop,
++            stopfd: fd,
++            interrupt: interrupt(),
++            rx: None,
++            tx: None,
++        };
++        let thread = std::thread::spawn(move || worker.run());
++        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
++        peer.write_all(&[0x42; 16]).unwrap();
++        let mut received = [0; 16];
++        peer.read_exact(&mut received).unwrap();
++        assert!(received.iter().all(|byte| *byte == 0x31));
++        wait(|| {
++            memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap() == 1
++                && memory.read_obj::<u16>(GuestAddress(0x9002)).unwrap() == 1
++        });
++        let mut input = [0; 16];
++        memory
++            .read_slice(&mut input, GuestAddress(0x10000))
++            .unwrap();
++        assert!(input.iter().all(|byte| *byte == 0x42));
++        assert_eq!(access.active_leases(), 0);
++        stop.store(true, Ordering::Release);
++        stopfd.write(1).unwrap();
++        assert!(thread.join().unwrap().is_err());
++    }
++    #[test]
++    fn cowork_stream_frozen_pending_rx_tx_keep_pins_and_no_guest_ack() {
++        let (access, token, mut queues, _events, memory) = fixture();
++        let rx = queues.capture(true).unwrap().unwrap();
++        let tx = queues.capture(false).unwrap().unwrap();
++        assert_eq!(access.active_leases(), 0);
++        let frozen = access.freeze(1, Duration::from_secs(1)).unwrap();
++        assert!(frozen.exclusions().iter().any(|r| r.gpa == 0x10000));
++        assert!(frozen.exclusions().iter().any(|r| r.gpa == 0x14000));
++        assert_eq!(queues.complete(false, &tx), Err(Fault::Frozen));
++        assert_eq!(memory.read_obj::<u16>(GuestAddress(0x9002)).unwrap(), 0);
++        frozen.resume().unwrap();
++        access.retire_generation(token).unwrap();
++        assert_eq!(queues.complete(true, &rx), Err(Fault::Stale));
++        assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
++    }
++    #[test]
++    fn cowork_stream_reset_retires_but_holds_ownership_until_actual_thread_completion() {
++        let (access, token, queues, events, memory) = fixture();
++        let (a, peer) = UnixStream::pair().unwrap();
++        let stream = ScopedStream::admit(a.as_raw_fd()).unwrap();
++        let mut device = GuardedConsole::new(access.clone(), token, stream).unwrap();
++        let stop = Arc::new(AtomicBool::new(false));
++        let stopfd = EventFd::new(EFD_NONBLOCK).unwrap();
++        let (entered, inflight) = std::sync::mpsc::sync_channel(0);
++        let (release, waiting) = std::sync::mpsc::sync_channel(0);
++        let owned_stream = device.stream.duplicate().unwrap();
++        let thread = std::thread::spawn(move || {
++            entered.send(()).unwrap();
++            waiting.recv_timeout(Duration::from_secs(2)).unwrap();
++            Finished {
++                _ownership: Worker {
++                    queues,
++                    events,
++                    stream: owned_stream,
++                    stop: Arc::new(AtomicBool::new(true)),
++                    stopfd: EventFd::new(EFD_NONBLOCK).unwrap(),
++                    interrupt: interrupt(),
++                    rx: None,
++                    tx: None,
++                },
++                result: Err(Fault::Stopped),
++            }
++        });
++        inflight.recv_timeout(Duration::from_secs(1)).unwrap();
++        device.active = Some(Active {
++            thread,
++            stop: stop.clone(),
++            stopfd,
++        });
++        device.activated = true;
++        let before = Instant::now();
++        assert!(device.reset());
++        assert!(before.elapsed() < Duration::from_millis(100));
++        assert!(device.active.is_some());
++        assert!(device.lifecycle_pending());
++        let frozen = access.freeze(1, Duration::from_secs(1)).unwrap();
++        assert!(!frozen.exclusions().is_empty());
++        frozen.resume().unwrap();
++        assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
++        release.send(()).unwrap();
++        wait(|| device.active.as_ref().unwrap().thread.is_finished());
++        device.progress_lifecycle().unwrap();
++        assert!(device.active.is_none());
++        drop(peer);
++    }
++    #[test]
++    fn cowork_stream_actual_socket_backpressure_poll_is_stop_interruptible_without_ram_lease() {
++        let (access, _token, mut queues, _events, _) = fixture();
++        let frame = queues.capture(false).unwrap().unwrap();
++        let (a, _peer) = UnixStream::pair().unwrap();
++        let stream = ScopedStream::admit(a.as_raw_fd()).unwrap();
++        let small = 4096i32;
++        unsafe {
++            libc::setsockopt(
++                stream.as_raw_fd(),
++                libc::SOL_SOCKET,
++                libc::SO_SNDBUF,
++                &small as *const _ as *const _,
++                4,
++            )
++        };
++        let bytes = [0u8; CHUNK];
++        let mut full = false;
++        for _ in 0..256 {
++            match stream.write_owned(&bytes) {
++                Ok(_) => {}
++                Err(e) if e.kind() == ErrorKind::WouldBlock => {
++                    full = true;
++                    break;
++                }
++                Err(_) => panic!("metadata write failure"),
++            }
++        }
++        assert!(full);
++        assert_eq!(access.active_leases(), 0);
++        let stop = Arc::new(AtomicBool::new(false));
++        let stopfd = EventFd::new(EFD_NONBLOCK).unwrap();
++        let fd = stopfd.try_clone().unwrap();
++        let worker_stop = stop.clone();
++        let thread = std::thread::spawn(move || {
++            let _owned = frame;
++            stream.wait(true, &fd, &worker_stop)
++        });
++        let frozen = access.freeze(1, Duration::from_millis(100)).unwrap();
++        assert!(frozen.exclusions().iter().any(|r| r.gpa == 0x14000));
++        stop.store(true, Ordering::Release);
++        stopfd.write(1).unwrap();
++        assert_eq!(thread.join().unwrap(), Err(Fault::Stopped));
++        frozen.resume().unwrap();
++    }
++    #[test]
++    fn cowork_stream_malformed_and_oversized_spans_reject_before_payload_io() {
++        for option in 0..4 {
++            let (_access, _token, mut queues, _events, memory) = fixture();
++            let descriptor = Descriptor {
++                addr: if option == 0 { 0x1fff8 } else { 0x14000 },
++                len: if option == 1 { (MAX_TX + 1) as u32 } else { 16 },
++                flags: if option == 2 {
++                    2
++                } else if option == 3 {
++                    1
++                } else {
++                    0
++                },
++                next: 8,
++            };
++            memory.write_obj(descriptor, GuestAddress(0x7000)).unwrap();
++            assert!(queues.capture(false).is_err());
++            assert_eq!(memory.read_obj::<u16>(GuestAddress(0x9002)).unwrap(), 0);
++        }
++    }
++    #[test]
++    fn cowork_stream_actual_worker_rx_wait_survives_freeze_then_acks_after_resume() {
++        let (access, _token, queues, events, memory) = fixture();
++        memory.write_obj(0u16, GuestAddress(0x8002)).unwrap(); // No TX demand; RX owned wait alone.
++        let (a, mut peer) = UnixStream::pair().unwrap();
++        let stream = ScopedStream::admit(a.as_raw_fd()).unwrap();
++        let stop = Arc::new(AtomicBool::new(false));
++        let stopfd = EventFd::new(EFD_NONBLOCK).unwrap();
++        let mut worker = Worker {
++            queues,
++            events,
++            stream,
++            stop: stop.clone(),
++            stopfd: stopfd.try_clone().unwrap(),
++            interrupt: interrupt(),
++            rx: None,
++            tx: None,
++        };
++        let thread = std::thread::spawn(move || worker.run());
++        wait(|| access.pinned_usage().0 == 3);
++        assert_eq!(access.active_leases(), 0);
++        let frozen = access.freeze(1, Duration::from_secs(1)).unwrap();
++        peer.write_all(&[0x52; 16]).unwrap();
++        std::thread::sleep(Duration::from_millis(30));
++        assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
++        assert!(frozen.exclusions().iter().any(|r| r.gpa == 0x10000));
++        frozen.resume().unwrap();
++        wait(|| memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap() == 1);
++        stop.store(true, Ordering::Release);
++        stopfd.write(1).unwrap();
++        thread.join().unwrap().unwrap_err();
++    }
++    #[test]
++    fn cowork_stream_async_pending_reactivation_waits_old_owner_then_real_io() {
++        let (access, token, old_queues, events, _) = fixture();
++        let (a, mut peer) = UnixStream::pair().unwrap();
++        let mut device = GuardedConsole::new(
++            access.clone(),
++            token,
++            ScopedStream::admit(a.as_raw_fd()).unwrap(),
++        )
++        .unwrap();
++        let (release, go) = std::sync::mpsc::sync_channel(0);
++        let (old_ready, ready) = std::sync::mpsc::sync_channel(0);
++        let owned_stream = device.stream.duplicate().unwrap();
++        let old = std::thread::spawn(move || {
++            old_ready.send(()).unwrap();
++            go.recv_timeout(Duration::from_secs(1)).unwrap();
++            Finished {
++                _ownership: Worker {
++                    queues: old_queues,
++                    events,
++                    stream: owned_stream,
++                    stop: Arc::new(AtomicBool::new(true)),
++                    stopfd: EventFd::new(EFD_NONBLOCK).unwrap(),
++                    interrupt: interrupt(),
++                    rx: None,
++                    tx: None,
++                },
++                result: Err(Fault::Stopped),
++            }
++        });
++        ready.recv_timeout(Duration::from_secs(1)).unwrap();
++        device.active = Some(Active {
++            thread: old,
++            stop: Arc::new(AtomicBool::new(false)),
++            stopfd: EventFd::new(EFD_NONBLOCK).unwrap(),
++        });
++        device.activated = true;
++        device.reset();
++        let new_memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x20000)]).unwrap();
++        let mut new_queues = Vec::new();
++        for (index, base) in [0x1000u64, 0x7000].into_iter().enumerate() {
++            let mut queue = Queue::new(8);
++            queue.ready = true;
++            queue.size = 8;
++            queue.desc_table = GuestAddress(base);
++            queue.avail_ring = GuestAddress(base + 0x1000);
++            queue.used_ring = GuestAddress(base + 0x2000);
++            new_memory
++                .write_obj(
++                    Descriptor {
++                        addr: if index == 0 { 0x10000 } else { 0x14000 },
++                        len: 16,
++                        flags: if index == 0 { 2 } else { 0 },
++                        next: 0,
++                    },
++                    GuestAddress(base),
++                )
++                .unwrap();
++            new_memory
++                .write_obj(1u16, GuestAddress(base + 0x1002))
++                .unwrap();
++            new_memory
++                .write_obj(0u16, GuestAddress(base + 0x1004))
++                .unwrap();
++            if index == 1 {
++                new_memory
++                    .write_slice(&[0x71; 16], GuestAddress(0x14000))
++                    .unwrap();
++            }
++            new_queues.push(DeviceQueue::new(
++                queue,
++                Arc::new(EventFd::new(EFD_NONBLOCK).unwrap()),
++            ));
++        }
++        device
++            .activate(new_memory.clone(), interrupt(), new_queues)
++            .unwrap();
++        assert!(device.pending.is_some());
++        assert_eq!(access.pinned_usage().0, 4); // Old and new permanent rings both owned.
++        release.send(()).unwrap();
++        wait(|| device.active.as_ref().unwrap().thread.is_finished());
++        device.progress_lifecycle().unwrap();
++        assert!(device.pending.is_none());
++        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
++        peer.write_all(&[0x72; 16]).unwrap();
++        let mut received = [0; 16];
++        peer.read_exact(&mut received).unwrap();
++        assert!(received.iter().all(|byte| *byte == 0x71));
++        wait(|| new_memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap() == 1);
++        device.reset();
++        wait(|| device.active.as_ref().unwrap().thread.is_finished());
++        device.progress_lifecycle().unwrap();
++        assert!(device.active.is_none());
++        assert_eq!(access.pinned_usage().0, 0);
++    }
++    #[test]
++    fn cowork_stream_peer_eof_terminal_notifier_never_acks_guest() {
++        let (access, token, queues, events, memory) = fixture();
++        let (a, peer) = UnixStream::pair().unwrap();
++        let notices = Arc::new(std::sync::atomic::AtomicUsize::new(0));
++        let count = notices.clone();
++        access.set_terminal_notifier(Arc::new(move || {
++            count.fetch_add(1, Ordering::Release);
++        }));
++        let mut device = GuardedConsole::new(
++            access.clone(),
++            token,
++            ScopedStream::admit(a.as_raw_fd()).unwrap(),
++        )
++        .unwrap();
++        device.pending = Some(Pending {
++            queues,
++            events,
++            interrupt: interrupt(),
++        });
++        device.activated = true;
++        device.progress_lifecycle().unwrap();
++        drop(peer);
++        wait(|| access.stopped());
++        wait(|| device.active.as_ref().unwrap().thread.is_finished());
++        assert!(notices.load(Ordering::Acquire) > 0);
++        assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
++        assert!(device.progress_lifecycle().is_err());
++    }
++    #[test]
++    fn cowork_stream_actual_worker_tx_backpressure_keeps_pin_stop_has_zero_old_ack() {
++        let (access, _token, queues, events, memory) = fixture();
++        let (a, _peer) = UnixStream::pair().unwrap();
++        let stream = ScopedStream::admit(a.as_raw_fd()).unwrap();
++        let small = 4096i32;
++        unsafe {
++            libc::setsockopt(
++                stream.as_raw_fd(),
++                libc::SOL_SOCKET,
++                libc::SO_SNDBUF,
++                &small as *const _ as *const _,
++                4,
++            )
++        };
++        let bytes = [0u8; CHUNK];
++        let mut full = false;
++        for _ in 0..256 {
++            match stream.write_owned(&bytes) {
++                Ok(_) => {}
++                Err(e) if e.kind() == ErrorKind::WouldBlock => {
++                    full = true;
++                    break;
++                }
++                Err(_) => panic!("metadata IO error"),
++            }
++        }
++        assert!(full);
++        let stop = Arc::new(AtomicBool::new(false));
++        let stopfd = EventFd::new(EFD_NONBLOCK).unwrap();
++        let mut worker = Worker {
++            queues,
++            events,
++            stream,
++            stop: stop.clone(),
++            stopfd: stopfd.try_clone().unwrap(),
++            interrupt: interrupt(),
++            rx: None,
++            tx: None,
++        };
++        let thread = std::thread::spawn(move || worker.run());
++        wait(|| access.pinned_usage().0 == 4);
++        let frozen = access.freeze(1, Duration::from_secs(1)).unwrap();
++        assert_eq!(access.active_leases(), 0);
++        assert!(frozen.exclusions().iter().any(|r| r.gpa == 0x14000));
++        assert_eq!(memory.read_obj::<u16>(GuestAddress(0x9002)).unwrap(), 0);
++        stop.store(true, Ordering::Release);
++        stopfd.write(1).unwrap();
++        assert!(thread.join().unwrap().is_err());
++        frozen.resume().unwrap();
++        assert_eq!(memory.read_obj::<u16>(GuestAddress(0x9002)).unwrap(), 0);
++    }
++}
+diff --git a/src/devices/src/virtio/console/mod.rs b/src/devices/src/virtio/console/mod.rs
+index 33e4799..a2ee53b 100644
+--- a/src/devices/src/virtio/console/mod.rs
++++ b/src/devices/src/virtio/console/mod.rs
+@@ -47,3 +47,4 @@ pub enum ConsoleError {
+ }
+ 
+ type Result<T> = std::result::Result<T, ConsoleError>;
++#[cfg(feature="blk")]pub mod cowork_stream;
+diff --git a/src/devices/src/virtio/rng/device.rs b/src/devices/src/virtio/rng/device.rs
+index 2c468b5..04ce9f9 100644
+--- a/src/devices/src/virtio/rng/device.rs
++++ b/src/devices/src/virtio/rng/device.rs
+@@ -15,6 +15,7 @@ pub(crate) const REQ_INDEX: usize = 0;
+ pub(crate) const AVAIL_FEATURES: u64 = 1 << uapi::VIRTIO_F_VERSION_1 as u64;
+ 
+ pub struct Rng {
++    #[cfg(feature="blk")]cowork_access:Option<crate::reclaim_access::Access>,
+     pub(crate) queues: Option<Vec<DeviceQueue>>,
+     pub(crate) avail_features: u64,
+     pub(crate) acked_features: u64,
+@@ -29,6 +30,7 @@ impl Rng {
+ 
+     pub fn new() -> super::Result<Rng> {
+         Ok(Rng {
++            #[cfg(feature="blk")]cowork_access:None,
+             queues: None,
+             avail_features: AVAIL_FEATURES,
+             acked_features: 0,
+@@ -42,6 +44,7 @@ impl Rng {
+     }
+ 
+     pub fn process_req(&mut self) -> bool {
++        #[cfg(feature="blk")]if self.cowork_access.is_some(){return self.cowork_bounded_req();}
+         debug!("rng: process_req()");
+         let mem = match self.device_state {
+             DeviceState::Activated(ref mem, _) => mem,
+@@ -166,3 +169,31 @@ impl Rng {
+         Ok(out)
+     }
+ }
++
++#[cfg(feature="blk")]
++impl Rng {
++ pub fn enable_cowork_bounded(&mut self,access:crate::reclaim_access::Access){self.cowork_access=Some(access);}
++ fn cowork_bounded_req(&mut self)->bool{
++    let result=self.cowork_bounded_inner();match result{Ok(used)=>used,Err(_)=>{self.cowork_access.as_ref().unwrap().stop();false}}
++ }
++ fn cowork_bounded_inner(&mut self)->Result<bool,crate::reclaim_access::Fault>{
++    use crate::reclaim_access::Fault;use vm_memory::{GuestMemory,GuestMemoryRegion,Address};use crate::virtio::queue::fixture_chain;
++    let DeviceState::Activated(memory,_) = &self.device_state else{return Err(Fault::InvalidRange)};
++    let queue=&mut self.queues.as_mut().ok_or(Fault::InvalidRange)?[REQ_INDEX];let mut used=false;
++    for _ in 0..32{
++        let Some(head)=queue.queue.fixture_checked_pop(memory).map_err(|_|Fault::InvalidRange)?else{return Ok(used)};let index=head.index;let descriptors=fixture_chain(head).map_err(|_|Fault::InvalidRange)?;let mut total=0u32;
++        // Validate the COMPLETE writable spans before any entropy allocation/copy.
++        for descriptor in &descriptors{if !descriptor.is_write_only(){return Err(Fault::InvalidRange);}let end=descriptor.addr.raw_value().checked_add(u64::from(descriptor.len)).ok_or(Fault::Overflow)?;let region=memory.find_region(descriptor.addr).ok_or(Fault::InvalidRange)?;if end>region.start_addr().raw_value().checked_add(region.len()).ok_or(Fault::Overflow)?{return Err(Fault::InvalidRange);}total=total.checked_add(descriptor.len).ok_or(Fault::Overflow)?;if total>65536{return Err(Fault::Limit);}}
++        let mut buffer=[0u8;4096];
++        for descriptor in descriptors{let mut offset=0;while offset<descriptor.len as usize{let count=(descriptor.len as usize-offset).min(buffer.len());OsRng.try_fill_bytes(&mut buffer[..count]).map_err(|_|Fault::Stopped)?;memory.write_slice(&buffer[..count],descriptor.addr.checked_add(offset as u64).ok_or(Fault::Overflow)?).map_err(|_|Fault::InvalidRange)?;offset+=count;}}
++        queue.queue.add_used(memory,index,total).map_err(|_|Fault::InvalidRange)?;used=true;
++    }
++    if queue.queue.len(memory)>0{queue.event.write(1).map_err(|_|Fault::Stopped)?;}Ok(used)
++ }
++}
++
++#[cfg(all(test,feature="blk"))]mod cowork_rng_tests{
++ use super::*;use crate::virtio::{Queue,Descriptor};use vm_memory::{GuestAddress,Bytes};use std::sync::Arc;
++ fn fixture(length:u32,flags:u16)->(Rng,crate::reclaim_access::Access,GuestMemoryMmap){let memory=GuestMemoryMmap::from_ranges(&[(GuestAddress(0),0x40000)]).unwrap();let mut queue=Queue::new(8);queue.ready=true;queue.size=8;queue.desc_table=GuestAddress(0x1000);queue.avail_ring=GuestAddress(0x2000);queue.used_ring=GuestAddress(0x3000);memory.write_obj(Descriptor{addr:0x10000,len:length,flags,next:0},GuestAddress(0x1000)).unwrap();memory.write_obj(1u16,GuestAddress(0x2002)).unwrap();memory.write_obj(0u16,GuestAddress(0x2004)).unwrap();let access=crate::reclaim_access::Access::new(2,16,4*1024*1024);let mut rng=Rng::new().unwrap();rng.enable_cowork_bounded(access.clone());rng.device_state=DeviceState::Activated(memory.clone(),InterruptTransport::new(crate::legacy::DummyIrqChip::new().into(),"bounded-rng-test".into()).unwrap());rng.queues=Some(vec![DeviceQueue::new(queue,Arc::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap()))]);(rng,access,memory)}
++ #[test]fn cowork_rng_bounded_allocation_valid_large_chain_and_invalid_huge_readonly_span(){let(mut rng,access,memory)=fixture(65536,2);assert!(rng.process_req());assert!(!access.stopped());assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(),1);for(length,flags)in [(65537,2),(u32::MAX,2),(16,0)]{let(mut rng,access,memory)=fixture(length,flags);assert!(!rng.process_req());assert!(access.stopped());assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(),0);}}
++}
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index 6223134..5405b52 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -2871,6 +2871,8 @@ pub unsafe extern "C" fn krun_set_kernel_console(ctx_id: u32, console_id: *const
+ 
+ fn cowork_validate_profile(cfg:&ContextConfig)->Result<(),()> {
+     let r=&cfg.vmr;
++    #[cfg(feature="blk")]
++    if r.cowork_stream.is_some() && (!r.cowork_fixture_reclaim || !r.cowork_guarded_block){return Err(());}
+     if !r.cowork_fixture_reclaim{return Ok(());}
+     if cfg!(any(feature="init-blob",feature="net",feature="gpu",feature="snd",feature="input",feature="efi",feature="tee"))
+         || r.cowork_guarded_block!=cfg!(feature="blk")
+@@ -3106,7 +3108,11 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+     loop {
+         #[cfg(target_os = "macos")]
+         vmm::cowork_reclaim_tick(&_vmm);
+-        match event_manager.run() {
++        #[cfg(all(target_os="macos",feature="blk"))]
++        let lifecycle_pending=vmm::cowork_stream_tick(&_vmm);
++        #[cfg(not(all(target_os="macos",feature="blk")))]let lifecycle_pending=false;
++        // Only pending async retirement requires bounded lifecycle polling to close done-event races.
++        match if lifecycle_pending{event_manager.run_with_timeout(5)}else{event_manager.run()} {
+             Ok(_) => {}
+             Err(e) => {
+                 error!("Error in EventManager loop: {e:?}");
+@@ -3227,3 +3233,17 @@ pub extern "C" fn krun_enable_cowork_block_fixture_reclaim(ctx_id:u32)->i32 {
+  }
+ 
+ }
++
++/// Fixture-only inherited unnamed socketpair; transport safety grants no credential authority.
++#[no_mangle]
++pub extern "C" fn krun_set_cowork_bootstrap_stream(ctx_id:u32,fd:i32)->i32{
++ #[cfg(not(all(feature="blk",target_os="macos")))]{let _=(ctx_id,fd);return -libc::EINVAL;}
++ #[cfg(all(feature="blk",target_os="macos"))]
++ {let mut contexts=CTX_MAP.lock().unwrap();let Some(cfg)=contexts.get_mut(&ctx_id)else{return -libc::ENOENT;};if !cfg.vmr.cowork_fixture_reclaim || !cfg.vmr.cowork_guarded_block || cfg.vmr.cowork_stream.is_some(){return -libc::EINVAL;}
++ match devices::stream_io::ScopedStream::admit(fd){Ok(stream)=>{cfg.vmr.cowork_stream=Some(stream);0},Err(_)=>-libc::EINVAL}}
++}
++
++#[cfg(all(test,feature="blk",target_os="macos"))]mod cowork_stream_api_tests{
++ use super::*;use std::os::unix::net::{UnixStream,UnixDatagram};use std::os::fd::AsRawFd;
++ #[test]fn cowork_stream_public_opt_in_rejects_unadmitted_mode_stdio_and_duplicate_then_owns_cloexec(){let id=CTX_IDS.fetch_add(1,Ordering::SeqCst) as u32;CTX_MAP.lock().unwrap().insert(id,ContextConfig::default());let(a,_peer)=UnixStream::pair().unwrap();assert_eq!(krun_set_cowork_bootstrap_stream(id,a.as_raw_fd()),-libc::EINVAL);assert_eq!(krun_enable_cowork_block_fixture_reclaim(id),0);assert_eq!(krun_set_cowork_bootstrap_stream(id,1),-libc::EINVAL);let(datagram,_peer)=UnixDatagram::pair().unwrap();assert_eq!(krun_set_cowork_bootstrap_stream(id,datagram.as_raw_fd()),-libc::EINVAL);assert_eq!(krun_set_cowork_bootstrap_stream(id,a.as_raw_fd()),0);let fd=CTX_MAP.lock().unwrap().get(&id).unwrap().vmr.cowork_stream.as_ref().unwrap().as_raw_fd();assert!(fd!=a.as_raw_fd());assert!(unsafe{libc::fcntl(fd,libc::F_GETFD)}&libc::FD_CLOEXEC!=0);assert_eq!(krun_set_cowork_bootstrap_stream(id,a.as_raw_fd()),-libc::EINVAL);assert_eq!(krun_free_ctx(id),0);assert!(unsafe{libc::fcntl(fd,libc::F_GETFD)}<0);}
++}
+diff --git a/src/vmm/src/builder.rs b/src/vmm/src/builder.rs
+index ba063a5..dc6fda2 100644
+--- a/src/vmm/src/builder.rs
++++ b/src/vmm/src/builder.rs
+@@ -960,7 +960,7 @@ pub fn build_microvm(
+ 
+     #[cfg(all(target_os="macos",feature="blk"))]
+     let cowork_access=if vm_resources.cowork_guarded_block {
+-        let access=devices::reclaim_access::Access::new(1,16,8*1024*1024);
++        let access=devices::reclaim_access::Access::new(if vm_resources.cowork_stream.is_some(){2}else{1},if vm_resources.cowork_stream.is_some(){32}else{16},8*1024*1024);
+         let terminal_fd=exit_evt.try_clone().map_err(Error::EventFd).map_err(StartMicrovmError::Internal)?;
+         let terminal_code=exit_code.clone();
+         access.set_terminal_notifier(Arc::new(move||{crate::cowork_fixture::mark_stop();terminal_code.store(77,std::sync::atomic::Ordering::SeqCst);let _=terminal_fd.write(1);}));Some(access)
+@@ -974,6 +974,8 @@ pub fn build_microvm(
+         cowork_epoch: 0,
+         #[cfg(all(target_os="macos",feature="blk"))]
+         cowork_access,
++        #[cfg(all(target_os="macos",feature="blk"))]
++        cowork_stream:None,
+         #[cfg(target_os = "macos")]
+         cowork_balloon: None,
+         #[cfg(target_os = "macos")]
+@@ -1000,6 +1002,14 @@ pub fn build_microvm(
+     attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
+     #[cfg(not(feature = "tee"))]
+     attach_rng_device(&mut vmm, event_manager, intc.clone())?;
++    #[cfg(all(target_os="macos",feature="blk"))]
++    if let Some(stream)=&vm_resources.cowork_stream{
++        let access=vmm.cowork_access.as_ref().expect("guarded stream access").clone();let token=access.register(1).expect("guarded stream registration");
++        let console=Arc::new(Mutex::new(devices::virtio::console::cowork_stream::GuardedConsole::new(access.clone(),token,stream.duplicate().map_err(|e|StartMicrovmError::Internal(Error::EventFd(e)))?).expect("guarded stream")));
++        rng_guard_for_stream(&vmm,&access);
++        event_manager.add_subscriber(console.clone()).map_err(StartMicrovmError::RegisterEvent)?;vmm.exit_observers.push(console.clone());vmm.cowork_stream=Some(console.clone());
++        attach_mmio_device(&mut vmm,"cowork-bootstrap-stream".into(),intc.clone(),console).map_err(StartMicrovmError::RegisterConsoleDevice)?;
++    }
+     let mut console_id = 0;
+     if !vm_resources.disable_implicit_console {
+         attach_console_devices(
+@@ -2543,3 +2553,6 @@ pub mod tests {
+         let _ = format!("{err}{err:?}");
+     }
+ }
++
++#[cfg(all(target_os="macos",feature="blk"))]
++fn rng_guard_for_stream(vmm:&Vmm,access:&devices::reclaim_access::Access){vmm.cowork_rng.as_ref().unwrap().lock().unwrap().enable_cowork_bounded(access.clone());}
+diff --git a/src/vmm/src/lib.rs b/src/vmm/src/lib.rs
+index 4e5c812..627d93b 100644
+--- a/src/vmm/src/lib.rs
++++ b/src/vmm/src/lib.rs
+@@ -213,6 +213,8 @@ pub struct Vmm {
+     cowork_epoch: u64,
+     #[cfg(all(target_os="macos",feature="blk"))]
+     cowork_access: Option<devices::reclaim_access::Access>,
++    #[cfg(all(target_os="macos",feature="blk"))]
++    cowork_stream:Option<Arc<Mutex<devices::virtio::console::cowork_stream::GuardedConsole>>>,
+     #[cfg(target_os = "macos")]
+     cowork_balloon: Option<Arc<Mutex<devices::virtio::Balloon>>>,
+     #[cfg(target_os = "macos")]
+@@ -470,3 +472,9 @@ pub fn cowork_reclaim_tick(vmm:&Arc<Mutex<Vmm>>) {cowork_fixture::tick_unlocked(
+ 
+ #[cfg(all(target_os="macos",feature="blk"))]
+ pub fn cowork_checked_mapping_operation<T>(access:&devices::reclaim_access::Access,epoch:u64,operation:impl FnOnce()->T)->std::result::Result<T,()>{cowork_fixture::checked_mapping_operation(Some(access),epoch,operation)}
++
++#[cfg(all(target_os="macos",feature="blk"))]
++pub fn cowork_stream_tick(vmm:&Arc<Mutex<Vmm>>)->bool{
++ let stream={vmm.lock().unwrap().cowork_stream.clone()}; // No VMM guard held across lifecycle work.
++ if let Some(stream)=stream{let mut device=stream.lock().unwrap();if device.progress_lifecycle().is_err(){device.fail_terminal();cowork_fixture::mark_stop();}device.lifecycle_pending()}else{false}
++}
+diff --git a/src/vmm/src/resources.rs b/src/vmm/src/resources.rs
+index 8611354..fe21256 100644
+--- a/src/vmm/src/resources.rs
++++ b/src/vmm/src/resources.rs
+@@ -131,6 +131,7 @@ pub struct VmResources {
+     /// TEST-ONLY reduced-device active-reclaim opt-in.
+     pub cowork_fixture_reclaim: bool,
+     pub cowork_guarded_block: bool,
++    #[cfg(feature="blk")]pub cowork_stream:Option<devices::stream_io::ScopedStream>,
+     /// The vCpu and memory configuration for this microVM.
+     vm_config: VmConfig,
+     /// The firmware to be loaded into the microVM.

@@ -1,0 +1,60 @@
+{
+  "status": "no-vm-candidate-independent-review-required",
+  "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+  "source": "out/libkrun-stream-reclaim",
+  "basePatches": [
+    {
+      "patchFile": "patches/0004-proposed-guarded-block-reviewed-fixes.patch",
+      "patchSha256": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481"
+    },
+    {
+      "patchFile": "patches/0005-proposed-guarded-block-producer-progress.patch",
+      "patchSha256": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775"
+    },
+    {
+      "patchFile": "patches/0006-proposed-raw-block-trace.patch",
+      "patchSha256": "00e169fb7e5c527d348269cc8211afc99daa800622bce6140a4b2b42c204951d"
+    }
+  ],
+  "patchFile": "patches/0007-proposed-guarded-stream.patch",
+  "patchSha256": "4acf7d82622d98ca1265e6a57bcd167f6df1fd5efb6a63cc65a9f6b24f35e044",
+  "fullSourceDiffSha256": "0358d69bb472f5d7fb632d466298240c2025742fd47858f53be21bc344cb183b",
+  "moduleCorrespondence": {
+    "stream_reclaim_access.rs": "src/devices/src/reclaim_access.rs",
+    "stream_io.rs": "src/devices/src/stream_io.rs"
+  },
+  "features": [
+    "blk"
+  ],
+  "defaultFeatures": false,
+  "devices": [
+    "PL011",
+    "balloon",
+    "bounded RNG",
+    "one RAW block",
+    "one two-queue virtio-console"
+  ],
+  "streamAdmission": "Pre-admitted unnamed connected AF_UNIX SOCK_STREAM, descriptor>=3, owned CLOEXEC duplicate/nonblocking; no connect API",
+  "maxDevices": 2,
+  "maxPins": 32,
+  "maxPinnedBytes": 8388608,
+  "maxTxBytes": 65536,
+  "maxRxOwnedBytes": 16384,
+  "maxRxReportedChainBytes": 1048576,
+  "queueSize": 32,
+  "terminalFaultExitCode": 77,
+  "terminalFaultOutcome": "UNCERTAIN",
+  "vmStarted": false,
+  "payloadLogging": false,
+  "credentialAuthorityImplemented": false,
+  "keysOrUnlockImplemented": false,
+  "productionReady": false,
+  "fullResourceGatePassed": false,
+  "limitations": [
+    "No VM boot/console driver validation.",
+    "Existing block reset still joins in MMIO; no production reset/recovery claim.",
+    "Transport reset may deliver/consume already-started owned stream bytes; authenticated generation/framing/credential protocol remains separate.",
+    "Fixed roster only, no DAX/fs/network/vsock/GPU/audio/input/hotplug.",
+    "Before next encrypted run, block fixture must deliberately stall INSIDE perform; prior owned-completion holds are not blocked syscall proof."
+  ]
+}
