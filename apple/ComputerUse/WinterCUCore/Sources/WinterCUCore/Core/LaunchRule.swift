@@ -40,27 +40,32 @@ public struct CULaunchFacts: Hashable, Sendable, CaseIterable {
     public var systemUI: Bool
     /// A desktop visit is open.
     public var visit: Bool
+    /// Input of the user's since the start (a key or a click by the judgment), or their keys hidden now — then (2) leaves
+    /// it rather than undoes it (R18 L2: was computed outside the table).
+    public var inputSinceStart: Bool
 
     public init(afterAgentAct: Bool, userInputBetween: Bool, launcherBefore: Bool = false, withinReach: Bool,
-                quietBeforeStart: Bool, firstSighting: Bool, keysHidden: Bool, systemUI: Bool, visit: Bool) {
+                quietBeforeStart: Bool, firstSighting: Bool, keysHidden: Bool, systemUI: Bool, visit: Bool,
+                inputSinceStart: Bool = false) {
+        self.inputSinceStart = inputSinceStart
         self.afterAgentAct = afterAgentAct; self.userInputBetween = userInputBetween; self.launcherBefore = launcherBefore
         self.withinReach = withinReach
         self.quietBeforeStart = quietBeforeStart; self.firstSighting = firstSighting; self.keysHidden = keysHidden
         self.systemUI = systemUI; self.visit = visit
     }
 
-    /// Every combination of the facts (2^9): what a test walks.
+    /// Every combination of the facts (2^10): what a test walks.
     public static var allCases: [CULaunchFacts] {
-        (0..<512).map { b in
+        (0..<1024).map { b in
             CULaunchFacts(afterAgentAct: b & 1 != 0, userInputBetween: b & 2 != 0, launcherBefore: b & 256 != 0,
                           withinReach: b & 4 != 0, quietBeforeStart: b & 8 != 0, firstSighting: b & 16 != 0,
-                          keysHidden: b & 32 != 0, systemUI: b & 64 != 0, visit: b & 128 != 0)
+                          keysHidden: b & 32 != 0, systemUI: b & 64 != 0, visit: b & 128 != 0, inputSinceStart: b & 512 != 0)
         }
     }
 
     /// The facts by name, for the fact-flip test and the log.
     public static let names: [String] = ["afterAgentAct", "userInputBetween", "launcherBefore", "withinReach",
-                                         "quietBeforeStart", "firstSighting", "keysHidden", "systemUI", "visit"]
+                                         "quietBeforeStart", "firstSighting", "keysHidden", "systemUI", "visit", "inputSinceStart"]
     public subscript(_ name: String) -> Bool {
         get {
             switch name {
@@ -73,6 +78,7 @@ public struct CULaunchFacts: Hashable, Sendable, CaseIterable {
             case "keysHidden": return keysHidden
             case "systemUI": return systemUI
             case "visit": return visit
+            case "inputSinceStart": return inputSinceStart
             default: preconditionFailure("no fact \(name)")
             }
         }
@@ -87,6 +93,7 @@ public struct CULaunchFacts: Hashable, Sendable, CaseIterable {
             case "keysHidden": keysHidden = newValue
             case "systemUI": systemUI = newValue
             case "visit": visit = newValue
+            case "inputSinceStart": inputSinceStart = newValue
             default: preconditionFailure("no fact \(name)")
             }
         }
@@ -108,8 +115,8 @@ public enum CULaunchRule {
         Row(name: "a system dialog: left for the user to answer", when: { $0.systemUI }, verdict: .leftAndSaid),
         Row(name: "(1) their launch-capable input between the act and the start, or an interactive launcher before it: theirs",
             when: { $0.userInputBetween || $0.launcherBefore }, verdict: .theirs),
-        Row(name: "(2) within reach, quiet before the start, keys visible: clearly the agent's",
-            when: { $0.withinReach && $0.quietBeforeStart && !$0.keysHidden }, verdict: .undo),
+        Row(name: "(2) within reach, quiet before the start, keys visible, no input since: clearly the agent's",
+            when: { $0.withinReach && $0.quietBeforeStart && !$0.keysHidden && !$0.inputSinceStart }, verdict: .undo),
         Row(name: "(3) otherwise: left and said", when: { _ in true }, verdict: .leftAndSaid),
     ]
 

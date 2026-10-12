@@ -516,13 +516,14 @@ public struct CUFocusGuardianCore: Sendable {
         let act = openerTimes.last(where: { $0.at <= start && start - $0.at <= Self.causalWindow })?.at
         let launch = launches.values.filter { $0.since <= start && ($0.bundle == nil || $0.bundle == bundle) }.map(\.since).max()
         let o = [act, launch].compactMap { $0 }.max()
-        // (The key or click that launched it lands a moment before the process starts — a few ms of slack for the start
-        // as read back from the process's age.)
-        let s = start + Self.startSlack
-        let between = o.map { o in launchCapableTimes.contains { $0 > o && $0 <= s } } ?? false
-        let launcher = launcherTimes.contains { $0 <= s && start - $0 <= Self.causalWindow }
-        let reach = openerTimes.contains { $0.at <= start && start - $0.at <= Self.causalWindow && $0.scope.covers(bundle) }
-            || launches.values.contains { $0.since <= start && $0.bundle != nil && $0.bundle == bundle }
+        // (Input AT or after the start is not "between" — R18 L1, the controller's ruling: no slack.)
+        let between = o.map { o in launchCapableTimes.contains { $0 > o && $0 < start } } ?? false
+        // A launcher only AFTER the agent's latest act that reaches the app (else its latest act of any reach) and before
+        // the start (R18-a).
+        let inReach = openerTimes.last { $0.at <= start && start - $0.at <= Self.causalWindow && $0.scope.covers(bundle) }?.at
+        let launchAfter = inReach ?? o ?? -.infinity
+        let launcher = launcherTimes.contains { $0 > launchAfter && $0 < start && start - $0 <= Self.causalWindow }
+        let reach = inReach != nil || launches.values.contains { $0.since <= start && $0.bundle != nil && $0.bundle == bundle }
         let judgeable = now - start <= Self.keepFacts - Self.quietBeforeUndo
         let quiet = judgeable && !hardwareTimes.contains { $0 <= start && start - $0 <= Self.quietBeforeUndo }
             && !(hardwareAt.map { $0 <= start && start - $0 <= Self.quietBeforeUndo } ?? false)
@@ -530,8 +531,6 @@ public struct CUFocusGuardianCore: Sendable {
         return CULaunchStart(start: start, afterAgentAct: o != nil, userInputBetween: between, launcherBefore: launcher,
                              withinReach: reach, quietBeforeStart: quiet, keysHidden: hidden)
     }
-    /// The slack between the input that launched an app and its process start as read back.
-    static let startSlack: TimeInterval = 0.005
 
     /// THE LAUNCH RULE (PROTOCOL.md §4.12, ruled in round 16; R17-d) for the app in `q` coming to the front now — the
     /// decision table's verdict, every fact read from the world (round 18): the facts from its process start (kept from
@@ -549,7 +548,7 @@ public struct CUFocusGuardianCore: Sendable {
             f = c
         } else if let st = q.appStartedAt, st <= now {
             f = startFacts(st, bundle: q.appBundle, hardwareAt: q.hardwareAt.flatMap { $0 <= st ? $0 : nil },
-                           inputObservable: q.inputObservable, secureInput: false, now: now)
+                           inputObservable: q.inputObservable, secureInput: q.secureInput, now: now)  // (R18 L3)
         } else {
             return nil
         }
@@ -557,7 +556,8 @@ public struct CUFocusGuardianCore: Sendable {
         let facts = CULaunchFacts(afterAgentAct: f.afterAgentAct, userInputBetween: f.userInputBetween,
                                   launcherBefore: f.launcherBefore, withinReach: f.withinReach,
                                   quietBeforeStart: f.quietBeforeStart, firstSighting: first, keysHidden: f.keysHidden,
-                                  systemUI: q.appIsSystemUI, visit: visiting(now: now))
+                                  systemUI: q.appIsSystemUI, visit: visiting(now: now),
+                                  inputSinceStart: !noInputSinceStart(f.start, upTo: upTo ?? now, q: q))
         return (facts, CULaunchRule.decide(facts).verdict, f.start)
     }
 
@@ -946,7 +946,7 @@ public struct CUFocusGuardianCore: Sendable {
                 if let a = app, let i = input.targetedExplanation(a, from: from, now: upTo) {
                     return (.user("their seen, targeted switch into an app just launched after the agent's action"), .instant(i, keep: true))
                 }
-                if l.verdict == .undo, noInputSinceStart(l.start, upTo: upTo, q: q) {
+                if l.verdict == .undo {
                     return (.indirect("an app the agent's action launched came forward, with no input of the user's before or since its start"), nil)
                 }
                 return (.unexplained(q.appIsSystemUI ? "a system dialog came up after the agent's action"

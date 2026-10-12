@@ -102,45 +102,47 @@ final class Round18GuardianTests: XCTestCase {
         XCTAssertFalse(c.userIsWorking(in: t, front: t, now: 10.5), "the click's mark is spent: a later return to T is no work")
     }
 
-    /// R17-d (ii): an INTERACTIVE LAUNCHER within the causal window before the start — Return into Spotlight's panel (the
-    /// tap names the process it is delivered to), a click in the Dock that is not on a running app's tile (a tile that
-    /// launches, Launchpad), a double-click in a Finder window — makes the launch theirs, even BEFORE the agent's act.
-    func testAnInteractiveLaunchersInputBeforeTheStartMakesALaunchTheirs() {
+    /// R17-d (ii) as R18-a rules it (the review of round 18, H1 — this test asserted the over-approximation as correct): an
+    /// INTERACTIVE LAUNCHER makes the launch theirs only when its destination LAUNCHES — Return into Spotlight's panel, a
+    /// Dock tile of an app not running, a Finder double-click on an app or a document — and only AFTER the agent's act
+    /// and before the start. The Trash, a folder, an unreadable tile, a single click, or a launcher before the act: none.
+    func testOnlyALaunchingDestinationAfterTheActIsAnInteractiveLauncher() {
         let spotlight: pid_t = 333, dock: pid_t = 99, finder: pid_t = 77
-        // Return into Spotlight's panel at 9.95 — before the agent's act at 10.0, so (i) does not hold.
-        let sys = FakeSystem()
-        sys.bundles[spotlight] = "com.apple.Spotlight"
-        let viaSpotlight = launch(sys) { _ in }  // (the baseline: no input, outside the act's reach — left and said)
-        if case .unexplained = viaSpotlight {} else { XCTFail("no input at all: left and said — \(viaSpotlight)") }
+        let base = launch(FakeSystem()) { _ in }  // no input, outside the act's reach: left and said
+        if case .unexplained = base {} else { XCTFail("no input at all: left and said — \(base)") }
+        // Spotlight's Return (not via the tap's launch-capable path: the launcher fact alone).
+        for (at, theirs) in [(10.1, true), (9.95, false)] {
+            let sys = FakeSystem()
+            sys.bundles[spotlight] = "com.apple.Spotlight"
+            let v = launch(sys) { c in c.guardianLock.withLock { c.guardianCore.noteLauncherInput(now: at) } }
+            XCTAssertEqual(v.isUsers, theirs, "a launcher at \(at) (the act at 10.0): \(v)")
+        }
+        // The tap's Return into Spotlight's panel after the act: theirs.
         let s2 = FakeSystem()
         s2.bundles[spotlight] = "com.apple.Spotlight"
-        let returned = launch(s2) { $0.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: 36, targetPid: Int64(spotlight), now: 9.95) }
-        XCTAssertTrue(returned.isUsers, "Return in Spotlight before the start: theirs — \(returned)")
-        // The same Return into the app in front is no launcher (it is launch-capable, but before the act: not (i)).
-        let s3 = FakeSystem()
-        let inApp = launch(s3) { $0.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: 36, targetPid: 1, now: 9.95) }
-        XCTAssertFalse(inApp.isUsers, "Return into the app in front, before the act: not a launcher — \(inApp)")
-        // A click in the Dock, not on a running app's tile.
-        let s4 = FakeSystem()
-        let bar = FakeSystem.window(900, pid: dock, CGRect(x: 0, y: 950, width: 1600, height: 50), owner: "Dock", layer: 20)
-        s4.windows[900] = bar
-        s4.stack = [bar]
-        s4.dockTile = nil
-        let docked = launch(s4) { c in
-            c.guardianLock.withLock { c.guardianCore.noteHardwareAction(now: 7.0) }  // (long before: quiet stays as it was)
-            _ = c.onPhysicalClick(at: CGPoint(x: 800, y: 975), userData: 0, now: 9.95)
+        XCTAssertTrue(launch(s2) { $0.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, keycode: 36, targetPid: Int64(spotlight), now: 10.1) }.isUsers)
+        // The Dock where no running app's tile is: a launching tile, the Trash, an unreadable tile.
+        for (launches, theirs) in [(Optional(true), true), (Optional(false), false), (nil, false)] as [(Bool?, Bool)] {
+            let s4 = FakeSystem()
+            let bar = FakeSystem.window(900, pid: dock, CGRect(x: 0, y: 950, width: 1600, height: 50), owner: "Dock", layer: 20)
+            s4.windows[900] = bar
+            s4.stack = [bar]
+            s4.dockTile = nil
+            s4.dockLaunches = launches
+            let v = launch(s4) { c in _ = c.onPhysicalClick(at: CGPoint(x: 800, y: 975), userData: 0, now: 10.1) }
+            XCTAssertEqual(v.isUsers, theirs, "a Dock click (launches: \(String(describing: launches))): \(v)")
         }
-        XCTAssertTrue(docked.isUsers, "a click in the Dock that launches: theirs — \(docked)")
-        // A double-click in a Finder window (and a single click is none).
-        for count: Int64 in [1, 2] {
+        // Finder: a double-click on an app or document; on a folder; unreadable; a single click.
+        for (count, launches, theirs) in [(Int64(2), Optional(true), true), (2, Optional(false), false), (2, nil, false), (1, Optional(true), false)] as [(Int64, Bool?, Bool)] {
             let s5 = FakeSystem()
             s5.running.insert(finder)
             s5.bundles[finder] = "com.apple.finder"
+            s5.finderLaunches = launches
             let w = FakeSystem.window(70, pid: finder, CGRect(x: 0, y: 40, width: 400, height: 300))
             s5.windows[70] = w
             s5.stack = [w]
-            let v = launch(s5) { c in _ = c.onPhysicalClick(at: CGPoint(x: 100, y: 100), userData: 0, clickCount: count, now: 9.95) }
-            XCTAssertEqual(v.isUsers, count == 2, "a \(count == 2 ? "double-" : "single ")click in Finder before the start — \(v)")
+            let v = launch(s5) { c in _ = c.onPhysicalClick(at: CGPoint(x: 100, y: 100), userData: 0, clickCount: count, now: 10.1) }
+            XCTAssertEqual(v.isUsers, theirs, "a \(count)-click in Finder (launches: \(String(describing: launches))): \(v)")
         }
     }
 }

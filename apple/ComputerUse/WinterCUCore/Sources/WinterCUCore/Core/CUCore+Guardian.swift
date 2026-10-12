@@ -989,9 +989,11 @@ extension CUCore {
             // before the clicked one, which was then undone). Anything else in the Dock: an app switch of no known app.
             guard let app = sys.dockItemApp(at: point, dockPid: hit.pid), app != own else {
                 noteSwitchInput(now: now, .app)
-                // Not a running app's tile: a tile that launches its app, Launchpad (the Dock's own) — an interactive
-                // launcher (R17-d (ii)).
-                guardianLock.withLock { guardianCore.noteLauncherInput(now: now) }
+                // A tile that LAUNCHES (an app not running, Launchpad) — an interactive launcher (R17-d (ii)); the Trash, a
+                // stack, a minimized window, a separator, or a tile that can't be read are not (R18-a).
+                if sys.dockItemLaunches(at: point, dockPid: hit.pid) == true {
+                    guardianLock.withLock { guardianCore.noteLauncherInput(now: now) }
+                }
                 return nil
             }
             // The FRONT app's tile (R17-b, the controller's ruling): their place AT THE CLICK, as a click into its window
@@ -1011,8 +1013,10 @@ extension CUCore {
             return app
         }
         guard !flags.contains(.maskCommand) else { return nil }
-        // A double-click in a Finder window opens what it is on — an interactive launcher (R17-d (ii)).
-        if clickCount >= 2, hit.layer == 0, sys.bundleId(pid: hit.pid) == "com.apple.finder" {
+        // A double-click in a Finder window on an application or a document — an interactive launcher (R17-d (ii)); never
+        // on a folder, nor where it can't be read (R18-a).
+        if clickCount >= 2, hit.layer == 0, sys.bundleId(pid: hit.pid) == "com.apple.finder",
+           sys.finderItemLaunches(at: point, finderPid: hit.pid) == true {
             guardianLock.withLock { guardianCore.noteLauncherInput(now: now) }
         }
         // A click into an ordinary window of a bound target: the user is working in it (round 10) — hands off it until it

@@ -5,9 +5,11 @@ import XCTest
 /// case, and the ruling's properties over every combination of the facts.
 final class LaunchRuleTableTests: XCTestCase {
     private func facts(act: Bool = true, between: Bool = false, launcher: Bool = false, reach: Bool = false, quiet: Bool = false,
-                       first: Bool = true, hidden: Bool = false, system: Bool = false, visit: Bool = false) -> CULaunchFacts {
+                       first: Bool = true, hidden: Bool = false, system: Bool = false, visit: Bool = false,
+                       since: Bool = false) -> CULaunchFacts {
         CULaunchFacts(afterAgentAct: act, userInputBetween: between, launcherBefore: launcher, withinReach: reach,
-                      quietBeforeStart: quiet, firstSighting: first, keysHidden: hidden, systemUI: system, visit: visit)
+                      quietBeforeStart: quiet, firstSighting: first, keysHidden: hidden, systemUI: system, visit: visit,
+                      inputSinceStart: since)
     }
 
     /// One named case per row, in the table's order: each row is reachable and gives its verdict.
@@ -31,7 +33,7 @@ final class LaunchRuleTableTests: XCTestCase {
         }
     }
 
-    /// The ruling's properties over all 512 combinations.
+    /// The ruling's properties over all 1024 combinations.
     func testTheRulingHoldsForEveryCombination() {
         for f in CULaunchFacts.allCases {
             let v = CULaunchRule.decide(f).verdict
@@ -45,7 +47,7 @@ final class LaunchRuleTableTests: XCTestCase {
             // (2) undone only within reach, quiet, keys visible, no input between, never a system dialog: "any reach"
             // never widens undo.
             if v == .undo {
-                XCTAssertTrue(f.withinReach && f.quietBeforeStart && !f.keysHidden && !theirInput && !f.systemUI, "\(f)")
+                XCTAssertTrue(f.withinReach && f.quietBeforeStart && !f.keysHidden && !theirInput && !f.systemUI && !f.inputSinceStart, "\(f)")
             }
             if !f.withinReach { XCTAssertNotEqual(v, .undo, "\(f)") }
             // (3) everything else in the rule is left and said — never adopted, never 'ordinary'.
@@ -97,7 +99,7 @@ final class LaunchRuleTableTests: XCTestCase {
         let flips: [(fact: String, g: CUFocusGuardianCore, q: CUMoveQuery, now: TimeInterval)] = [
             ("afterAgentAct", { var g = CUFocusGuardianCore(); g.begin(view: CUGuardedView(app: 90, space: 1)); return g }(), query(), 10.4),
             ("userInputBetween", world { $0.noteLaunchCapableInput(now: 10.1) }, query(), 10.4),
-            ("launcherBefore", world { $0.noteLauncherInput(now: 9.9) }, query(), 10.4),
+            ("launcherBefore", world { $0.noteLauncherInput(now: 10.1) }, query(), 10.4),
             ("withinReach", { var g = CUFocusGuardianCore(); g.begin(view: CUGuardedView(app: 90, space: 1))
                               g.noteOpenerCause(now: 10.0, scope: .apps(["com.other"])); return g }(), query(), 10.4),
             ("quietBeforeStart", world { $0.noteHardwareAction(now: 9.0) }, query(), 10.4),
@@ -106,6 +108,7 @@ final class LaunchRuleTableTests: XCTestCase {
             ("keysHidden", world { $0.noteSecureInput(true, now: 9.5) }, query(), 10.4),
             ("systemUI", world(), query(systemUI: true), 10.4),
             ("visit", world { $0.beginVisit(app: 4242, now: 10.3) }, query(), 10.4),
+            ("inputSinceStart", world { $0.noteHardwareAction(now: 10.3) }, query(), 10.4),
         ]
         XCTAssertEqual(Set(flips.map(\.fact)), Set(CULaunchFacts.names), "every fact flipped")
         for f in flips {
@@ -117,6 +120,19 @@ final class LaunchRuleTableTests: XCTestCase {
             XCTAssertEqual(v.facts, expected, "\(f.fact): that fact alone flips")
             XCTAssertEqual(v.verdict, CULaunchRule.decide(expected).verdict, "\(f.fact): the table's verdict")
             XCTAssertNotEqual(v.verdict, b.verdict, "\(f.fact): the verdict changes")
+        }
+        // R18 L4: the same flips through the launch notice's SNAPSHOT of the start's facts (appLaunched), not only the
+        // facts read at the judgment.
+        for f in flips where !["firstSighting", "systemUI", "visit", "inputSinceStart"].contains(f.fact) {
+            var g = f.g
+            g.appLaunched(777, startedAt: 10.2, bundle: "com.example.new", now: 10.25)
+            guard let v = g.launchVerdict(CUMoveQuery(app: 777, space: 1, appBundle: "com.example.new"), now: f.now) else {
+                XCTFail("\(f.fact): no verdict from the snapshot"); continue
+            }
+            var expected = b.facts
+            expected[f.fact] = !expected[f.fact]
+            if f.fact == "afterAgentAct" { expected.withinReach = false }
+            XCTAssertEqual(v.facts, expected, "\(f.fact) through the snapshot")
         }
         // And no input observable at all hides the keys as Secure Event Input does.
         XCTAssertEqual(base.launchVerdict(query(observable: false), now: 10.4)?.facts.keysHidden, true)
@@ -132,7 +148,8 @@ final class LaunchRuleTableTests: XCTestCase {
         }
         if case .indirect = judged({ _ in }) {} else { XCTFail("(2): undone") }
         XCTAssertTrue(judged { $0.noteLaunchCapableInput(now: 10.1) }.isUsers, "(1): theirs")
-        XCTAssertTrue(judged { $0.noteLauncherInput(now: 9.9) }.isUsers, "(1), an interactive launcher: theirs")
+        XCTAssertTrue(judged { $0.noteLauncherInput(now: 10.1) }.isUsers, "(1), an interactive launcher: theirs")
+        XCTAssertFalse(judged { $0.noteLauncherInput(now: 9.9) }.isUsers, "a launcher BEFORE the act (R18-a): not theirs")
         if case .unexplained = judged({ $0.noteHardwareAction(now: 9.0) }) {} else { XCTFail("(3): left and said") }
         // An untargeted app switch (a click on a status item, a banner, a panel — no known app) after the start: it would
         // explain an untouched app's coming forward, but never adopts under the gate.
