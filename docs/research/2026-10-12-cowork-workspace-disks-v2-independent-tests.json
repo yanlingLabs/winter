@@ -1,0 +1,42 @@
+{
+  "sourceCommit": "9755f19acd2b4a75503caf9ecbb50f7c82a82569",
+  "originalBlockedCommit": "a4856143dffc33389fc24fcdb315657fa996c576",
+  "originalBlockerClosed": true,
+  "patchSha256": "f70c5b11586211c81b88a0acc27bdc357ed4437418bdffbf8cae0a2217c152ae",
+  "fullSourceDiffSha256": "1f10f599acb6a29455c0422011aaa851cd598e6a7fee7e3699eb0f6988cfc300",
+  "archiveSha256": "0d902f302ddc8935f2b993bbb8c96e26dd9f170281a32f791bc71ee8536bb6ca",
+  "executions": [
+    {
+      "binary": "out/libkrun-workspace-disks-v2/target/debug/deps/krun_devices-196ba91e2a52c433",
+      "sha256": "30fa8620df9b5a00bdd0d0e3346debc3fb63c37baf3dc46aab652c02cfb8bbde",
+      "exitCode": 0,
+      "summaries": [
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 0.06s"
+      ]
+    },
+    {
+      "binary": "out/libkrun-workspace-disks-v2/target/debug/deps/krun-fe8b317545a4d4ac",
+      "sha256": "9bde65d400b45bf1e319f718b9339cf85a038a7fc97a9c841670cb36856dc807",
+      "exitCode": 0,
+      "summaries": [
+        "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.18s"
+      ]
+    }
+  ],
+  "cAbiProbe": {
+    "cAbiIntakeVerified": true,
+    "ownedFdCleanupVerified": true,
+    "callerFdsRetained": true,
+    "vmStarted": false,
+    "workerStarted": false,
+    "productionReady": false
+  },
+  "oldCandidateAndEvidenceUnchanged": true,
+  "fullVmmUnitHarnessPassed": false,
+  "existingTestBinariesOnly": true,
+  "vmStarted": false,
+  "workerStarted": false,
+  "startEntrypointCalled": false,
+  "productionReady": false,
+  "twoDiskActiveReturnVerified": false
+}

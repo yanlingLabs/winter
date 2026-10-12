@@ -1,0 +1,28 @@
+
+running 8 tests
+test virtio::block::device::workspace_fd_tests::workspace_disks_actual_raw_io_survives_names_and_caller_fds_without_reopen ... ok
+test workspace_disks::tests::workspace_disks_aggregate_pin_budget_has_distinct_ids_and_retains_pins_on_stop ... ok
+test workspace_disks::tests::workspace_disks_duplicate_cloexec_and_close_only_owned_descriptors ... ok
+test workspace_disks::tests::workspace_disks_partial_failure_alias_stdio_and_closed_fd_leave_no_extra_handles ... ok
+test workspace_disks::tests::workspace_disks_reject_directory_and_socket_without_mutating_callers ... ok
+test workspace_disks::tests::workspace_disks_strict_identity_capacity_mode_links_access_and_append ... ok
+test workspace_raw_storage::tests::workspace_disks_fixed_capacity_refuses_oob_overflow_and_drift_without_growth_or_partial_write ... ok
+test workspace_raw_storage::tests::workspace_disks_positional_partial_interrupted_zero_error_and_overflow_paths ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 0.05s
+
+
+
+running 7 tests
+test cowork_workspace_disks_tests::actual_block_builder::workspace_disks_builder_tests::workspace_disks_partial_actual_block_construction_closes_all_new_handles_preserves_callers ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_actual_two_block_construction_has_stable_ids_and_no_volume_path ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_context_free_closes_duplicates_only_and_duplicate_setter_is_atomic ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_incompatible_profile_refuses_before_kernel_disk_or_vm_construction ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_metadata_drift_refuses_start_without_permission_repair ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_missing_context_null_invalid_second_and_alias_do_not_publish_or_close_callers ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_refuses_old_path_backed_and_hvc_configuration ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.03s
+
+
+{"cAbiIntakeVerified":true,"ownedFdCleanupVerified":true,"callerFdsRetained":true,"vmStarted":false,"workerStarted":false,"productionReady":false}

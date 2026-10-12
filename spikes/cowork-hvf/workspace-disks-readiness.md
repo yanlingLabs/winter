@@ -1,6 +1,6 @@
 # Admitted workspace disk pair: native backend slice
 
-Status: developer-only native source/build candidate, independent review required before any new VM. Base Winter commit `1856a1889fefc4a6a9ee84c882e045f9eaaaebb8`; pinned libkrun `227b2de6ed323fe180e02f871c5f325a90c13cc2`, patches 0004 through 0011 plus new isolated 0012. Historical candidates, result files, artifacts and preparers are unchanged. `workspace-disks-candidate.json` binds new source `out/libkrun-workspace-disks`, the incremental/full diff and exact module mirrors. No worker or VM was launched, and no production authority/readiness is supplied.
+Status: developer-only native source/build candidate. The original 0012 startup defect is corrected by 0013 at `9755f19a`, independently accepted in `docs/research/2026-10-12-cowork-workspace-disks-startup-independent-review.md`. No two-disk VM has run; exact worker/fixture admission remains required before one. The original 0012 details below are retained as historical evidence; use `workspace-disks-candidate-v2.json` and the v2 scripts for the corrected candidate. Base Winter commit `1856a1889fefc4a6a9ee84c882e045f9eaaaebb8`; pinned libkrun `227b2de6ed323fe180e02f871c5f325a90c13cc2`, patches 0004 through 0011 plus new isolated 0012. Historical candidates, result files, artifacts and preparers are unchanged. `workspace-disks-candidate.json` binds new source `out/libkrun-workspace-disks`, the incremental/full diff and exact module mirrors. No worker or VM was launched, and no production authority/readiness is supplied.
 
 ## API and ownership
 
