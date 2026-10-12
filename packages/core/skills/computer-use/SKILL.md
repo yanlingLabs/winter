@@ -369,3 +369,16 @@ const visits = await browsers.history({ browser: 'chrome', query: 'flight bookin
 if (visits.length > 0) await browsers.open(visits[0].url, { browser: 'chrome' });
 else print('nothing in the history matches');
 ```
+
+## 18. When the user has to act first: arm a wake trigger and end your turn
+
+The user must fill in and submit a form, approve something, or answer an email before you can go on, and it may take a while. Arm a trigger on the element they will use, then END YOUR TURN telling them what you are waiting for. When they do it, you get a `<computer-wake>` message and carry on. For a sign-in or a code they must enter now, use `waitForUser()` instead (section 16).
+
+```js
+const store = await browsers.tab({ url: 'https://dashboard.example.com/listing' });
+const submit = await refOf(store, 'Submit for review');
+const wake = await store.wakeWhen({ clicked: submit }, { note: 'publish the listing once it is submitted' });
+print('waiting for the user to submit - ' + wake.id);
+```
+
+Then reply: "Fill in the remaining fields and press Submit for review - I'll continue as soon as you do." In the wake, your refs are stale: bind the target again if your handle is gone and call `state()`. `wakes.list()` shows what is armed, and `wake.cancel()` stops one you no longer need. `NotAllowed` says when a condition is already true (nothing to wait for) or when the app was allowed for one call only.

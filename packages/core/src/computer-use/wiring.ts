@@ -17,7 +17,7 @@ import type { SessionStore } from "../sessions/store";
 import { isHumanTurnOrigin, runningTurnOrigin } from "../sessions/turn-origins";
 import {
   computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseEnabledFrom, computerUseHeadlessEnabledFrom, computerUseLegacyComputerFrom,
-  computerUseMirrorFrom, computerUsePrivateEventPathFrom, computerUseScreenshotMaxDimFrom, computerUseWebMcpFrom, loadSettings, saveSettings,
+  computerUseMirrorFrom, computerUsePrivateEventPathFrom, computerUseScreenshotMaxDimFrom, computerUseWakesFrom, computerUseWebMcpFrom, loadSettings, saveSettings,
   setComputerUseApp, setComputerUseFlags, type ComputerUseAccess, type ComputerUseFlagsPatch, type Settings,
 } from "../settings";
 import { AppAdapters, type AppAdapter } from "./adapters";
@@ -36,6 +36,10 @@ import { RecentApps } from "./recent-apps";
 import { ComputerV2Service } from "./service";
 import { AutomationTelemetry } from "./telemetry";
 import type { AutomationWorker, AutomationWorkerOptions } from "./worker-host";
+import type { MessagingDriverHandle } from "../agent/session-messaging";
+import { WakeStore } from "./wakes/persist";
+import { WakeRegistry, type WakeBackends } from "./wakes/registry";
+import type { WakeSessionState } from "./wakes/delivery";
 
 /** Test seams: a FAKE helper (transport, launcher, verifier), a scripted worker, the idle timeout. */
 export interface ComputerUseInjection {
@@ -54,6 +58,10 @@ export interface ComputerUseInjection {
   browserInstalled?: (bundleId: string) => boolean;
   /** Phase 4: the headless pool's engine seams (a fake helper on its pipe, no signature check) — tests only. */
   headless?: Partial<Pick<HeadlessPoolDeps, "resolve" | "spawn" | "verify" | "memoryOf" | "idleExitMs" | "enabledPollMs" | "timeouts">>;
+  /** Wake triggers (2026-10-12): FAKE backends in place of the real ones (the e2e drives a trigger through a real
+   *  daemon), and the registry's timing seams. Never set in production. */
+  wakeBackends?: WakeBackends;
+  wakeTimings?: { coalesceMs?: number; pollMs?: number; retryDelaysMs?: readonly number[]; armTimeoutMs?: number };
 }
 
 export interface ComputerUseRuntimeDeps {
@@ -76,6 +84,11 @@ export interface ComputerUseRuntimeDeps {
   savedAllowRules?(cwd?: string): readonly string[];
   /** Is the session running a main-thread turn now (a daemon restart's orphaned agent tabs stay open while it is)? */
   turnRunning?(sessionId: string): boolean;
+  /** Wake triggers: the session driver table (late-bound — built after this runtime), the door a wake goes in by. */
+  sessions?(): { get(sessionId: string): MessagingDriverHandle | undefined; ensure(sessionId: string): Promise<MessagingDriverHandle | undefined> } | undefined;
+  /** Wake triggers, Dispatch: is a turn of this child followed now; follow its wake turn (`DispatchChildren`). */
+  followedNow?(sessionId: string): boolean;
+  followWake?(sessionId: string, text: string): (() => void) | undefined;
   inject?: ComputerUseInjection;
   log?(line: string): void;
 }
@@ -90,6 +103,8 @@ export interface ComputerUseStatus {
   headlessEnabled: boolean;
   /** Phase 4: `computerUse.webmcp` (default true). */
   webmcp: boolean;
+  /** Wake triggers (2026-10-12): `computerUse.wakes` (default true). */
+  wakes: boolean;
   helper: { installed: boolean; running: boolean; version?: string; permissions?: HelperPermissions };
   /** Phase 2: the browsers ComputerV2 can drive (the built-in one, and every user's browser connected or installed). */
   browsers?: Array<{ id: string; name: string; connected: boolean; reason?: string }>;
@@ -115,6 +130,9 @@ export interface ComputerUseControl {
   appsList(): ComputerUseAppRow[];
   appsSet(p: { bundleId: string; name?: string; access?: ComputerUseAccess | null; grant?: "always" | null }): void;
   setSettings(p: ComputerUseFlagsPatch): void;
+  /** Wake triggers: how many the session has armed (the session list's mark), and the Mac's [Stop waiting]. */
+  wakesArmed?(sessionId: string): number;
+  wakesCancel?(sessionId: string, wakeId: string): boolean;
 }
 
 export interface ComputerUseRuntime {
@@ -132,6 +150,13 @@ export interface ComputerUseRuntime {
   browserLink: BrowserLink;
   /** Phase 4: Winter's headless browser (the `headless` backend). */
   headless: HeadlessPool;
+  /** Wake triggers (2026-10-12): the registry. `wakes.start()` runs the boot sweep once the session drivers exist;
+   *  `wakes.beginShutdown()` stops deliveries before the drivers drain. */
+  wakes: WakeRegistry;
+  /** The session was archived: its wake triggers end `disabled` FIRST — before the browser engine closes its agent
+   *  tabs, whose backend would otherwise report the closing tab as `lost` and wake the archived session — then the
+   *  engine closes them. (A deletion takes the same order in `service.endSession`.) */
+  sessionArchived(sessionId: string): void;
   stop(): void;
 }
 
@@ -192,8 +217,10 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
   const recentApps = new RecentApps(deps.home);
   const diffBases = new DiffBases();
   const adapters = new AppAdapters({ ...(deps.inject?.adapters === undefined ? {} : { extra: deps.inject.adapters }), log });
-  // Late-bound: the helper's notifications go to the service, which is built after the helper.
+  // Late-bound: the helper's notifications go to the service, which is built after the helper — and to the wake
+  // registry's backends (lane C's app backend routes the helper's `watchEvent`).
   let service: ComputerV2Service | undefined;
+  let wakes: WakeRegistry | undefined;
   const helper = new HelperClient({
     home: deps.home,
     profile: deps.profile,
@@ -201,8 +228,8 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     ...(deps.inject?.transport === undefined ? {} : { transport: deps.inject.transport }),
     ...(deps.inject?.launcher === undefined ? {} : { launcher: deps.inject.launcher }),
     ...(deps.inject?.verifier === undefined ? {} : { verifier: deps.inject.verifier }),
-    onNotification: (n) => service?.handleNotification(n),
-    onDisconnect: () => service?.helperDisconnected(),
+    onNotification: (n) => { service?.handleNotification(n); wakes?.handleNotification(n); },
+    onDisconnect: () => { service?.helperDisconnected(); wakes?.helperDisconnected(); },
     log,
   });
 
@@ -301,8 +328,38 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     log,
   });
 
+  // Wake triggers (2026-10-12): the registry, and the two backends it routes to by target kind — a tab binding → the
+  // browser engine's backend (lane B), an app target → the helper's (lane C). Each lane adds its production line in
+  // the marked spot below; a daemon without one says arming that kind is not available.
+  const wakeBackends: WakeBackends = { ...(deps.inject?.wakeBackends ?? {}) };
+  if (deps.inject?.wakeBackends === undefined) {
+    // [wake backend: tab — lane B] wakeBackends.tab = …;
+    // [wake backend: app — lane C] wakeBackends.app = …;
+  }
+  const sessionState = (sessionId: string): WakeSessionState => {
+    try { return deps.store.meta(sessionId).archived === true ? "archived" : "live"; } catch { return "gone"; }
+  };
+  wakes = new WakeRegistry({
+    backends: () => wakeBackends,
+    settings,
+    append: (sessionId, event) => { deps.hub.append(sessionId, event); },
+    sessionState,
+    sessions: () => deps.sessions?.(),
+    ...(deps.followedNow === undefined ? {} : { followedNow: deps.followedNow }),
+    ...(deps.followWake === undefined ? {} : { followWake: deps.followWake }),
+    store: new WakeStore(deps.home, log),
+    telemetry: (m) => telemetry.primitive(m),
+    ...(deps.audit === undefined ? {} : { audit: deps.audit }),
+    ...(deps.inject?.wakeTimings?.coalesceMs === undefined ? {} : { coalesceMs: deps.inject.wakeTimings.coalesceMs }),
+    ...(deps.inject?.wakeTimings?.pollMs === undefined ? {} : { pollMs: deps.inject.wakeTimings.pollMs }),
+    ...(deps.inject?.wakeTimings?.retryDelaysMs === undefined ? {} : { retryDelaysMs: deps.inject.wakeTimings.retryDelaysMs }),
+    ...(deps.inject?.wakeTimings?.armTimeoutMs === undefined ? {} : { armTimeoutMs: deps.inject.wakeTimings.armTimeoutMs }),
+    log,
+  });
+  const wakeRegistry = wakes;
+
   service = new ComputerV2Service({
-    helper, policy, settings, diffBases, recentApps, adapters, browsers,
+    helper, policy, settings, diffBases, recentApps, adapters, browsers, wakes: wakeRegistry,
     site: {
       ...(deps.dangerousDomainsAdded === undefined ? {} : { dangerousDomainsAdded: deps.dangerousDomainsAdded }),
       ...(deps.savedAllowRules === undefined ? {} : { savedAllowRules: deps.savedAllowRules }),
@@ -332,6 +389,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
         privateEventPath: computerUsePrivateEventPathFrom(s),
         headlessEnabled: computerUseHeadlessEnabledFrom(s),
         webmcp: computerUseWebMcpFrom(s),
+        wakes: computerUseWakesFrom(s),
         helper: helperStatus,
         browsers: browsers.listRows().map((r) => ({ id: r.id, name: r.name, connected: r.connected, ...(r.reason === undefined ? {} : { reason: r.reason }) })),
       };
@@ -387,7 +445,11 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     },
     setSettings(p) {
       writeSettings((s) => setComputerUseFlags(s, p));
+      // Turned off from the app: the armed triggers end now, not at the next poll.
+      if (p.wakes === false || p.enabled === false) wakeRegistry.checkSettings();
     },
+    wakesArmed: (sessionId) => wakeRegistry.countFor(sessionId),
+    wakesCancel: (sessionId, wakeId) => wakeRegistry.cancel(sessionId, wakeId, "user"),
   };
 
   return {
@@ -400,6 +462,11 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     backends,
     browserLink,
     headless,
+    wakes: wakeRegistry,
+    sessionArchived(sessionId) {
+      wakeRegistry.sessionEnded(sessionId);
+      browsers.sessionArchived(sessionId);
+    },
     observe(event) {
       diffBases.observe(event);
       adapters.observe(event);
@@ -415,6 +482,8 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       }
     },
     stop() {
+      // The armed triggers stay in `wakes.json` (the next boot's `restart`); their backends let go first.
+      wakeRegistry.stop();
       svc.stop();
       browserLink.stop();
       headless.stop();

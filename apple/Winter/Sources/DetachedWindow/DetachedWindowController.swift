@@ -135,7 +135,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // Read off the lease at each call: the window's feed changes when it moves between sessions.
         let sessionDirectory = SessionDirectory(lister: { [lease] in
             try await lease.feed.client.listSessions().map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals, approvalPolicy: $0.approvalPolicy, runtimeKind: $0.runtimeKind, providerId: $0.providerId)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals, approvalPolicy: $0.approvalPolicy, runtimeKind: $0.runtimeKind, providerId: $0.providerId, wakesArmed: $0.wakesArmed)
             }
         })
         directory = sessionDirectory
@@ -176,6 +176,16 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         adapter.onSubmit = { [weak self] text in self?.submit(text) }
         // The pill-themed composer's stop circle — the same interrupt Esc performs.
         adapter.onInterrupt = { [weak self] in self?.stopTurn() }
+        // ComputerV2 wake triggers: the "Waiting for you" pill's [Stop waiting], on this window's pinned session.
+        adapter.onStopWaiting = { [weak self] wakeId in
+            guard let self else { return "this window closed" }
+            do {
+                _ = try await self.feed.client.cancelWake(sessionId: self.sessionId, wakeId: wakeId)
+                return nil
+            } catch {
+                return wakeStopFailure(error)
+            }
+        }
         // A stop that nothing confirmed in time: this window is behind the stream, or lost the terminal.
         // Re-attach so it shows what the daemon says.
         adapter.onStopStalled = { [weak self] in self?.resyncSession() }

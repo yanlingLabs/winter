@@ -62,6 +62,7 @@ import { parsePlanResponse } from "./plan-response";
 import { ShellCardQueue, approvalPromptLine, approvalResolvedHow } from "./shell-cards";
 import { legacyFilesDoctorLine, sdkHomeDoctorSection } from "./doctor-legacy-files";
 import { makeEventBridge, type EventBridge } from "./tui/event-bridge";
+import { COMPUTER_WAKE_CLIENT_NAME, endedWords, stoppedWords, waitingWords, type ArmedWakeFacts } from "./wake-words";
 
 const AQUA = "\x1b[38;2;53;214;232m";
 
@@ -707,6 +708,9 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
 
   // WS-27: which link cards this plain shell may decline (see `HeadlessElicitationGate`).
   const elicitationGate = new HeadlessElicitationGate();
+  // ComputerV2 wake triggers: this session's armed triggers, and the endings the next wake message reports.
+  const wakeFacts = new Map<string, ArmedWakeFacts>();
+  const wakeNews: string[] = [];
   const declineCard = (card: HeadlessCardEvent): void => {
     if (card.elicitationId === undefined) return;
     declineElicitationHeadless({ elicitationId: card.elicitationId, serverName: card.serverName ?? "an MCP server", host: card.host ?? "" }, sessionId, {
@@ -751,6 +755,25 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
       if (!turnRunning) { turnStartMs = Date.now(); streamedChars = 0; }
       turnRunning = true;
       refreshBlock(); // show the status line immediately rather than waiting up to 120ms for the first tick
+    } else if ((e.type === "wake_armed" || e.type === "wake_ended") && e.sessionId === sessionId && e.threadId === "main") {
+      // ComputerV2 wake triggers: Winter waits for the user (and stops waiting) — a note each, from the pair.
+      if (e.type === "wake_armed") {
+        // The pair reaches an attached client twice (its session's fan-out and the global broadcast): said once.
+        if (!wakeFacts.has(e.wakeId)) {
+          const facts = { condition: e.condition, targetLabel: e.targetLabel, ...(e.elementLabel === undefined ? {} : { elementLabel: e.elementLabel }) };
+          wakeFacts.set(e.wakeId, facts);
+          emit(`${DIM}⏳ waiting for ${waitingWords(facts)}${RESET}\n`);
+        }
+      } else {
+        const facts = wakeFacts.get(e.wakeId);
+        wakeFacts.delete(e.wakeId);
+        // `woken` says whether a wake message carries this ending — never the reason (a silent expiry is not news).
+        if (facts !== undefined && e.woken === true) wakeNews.push(endedWords(facts, e.reason));
+        else if (facts !== undefined) emit(`${DIM}⏹ stopped waiting for ${waitingWords(facts)} (${stoppedWords(e.reason)})${RESET}\n`);
+      }
+    } else if (e.type === "user_message" && e.clientName === COMPUTER_WAKE_CLIENT_NAME && e.sessionId === sessionId && e.threadId === "main") {
+      // The daemon's wake: never shown as the user's words (its text is the model's) — what happened, as a note.
+      emit(`${DIM}↻ ${wakeNews.length === 0 ? "a wake trigger ended — Winter continues" : `Winter continued: ${wakeNews.splice(0).join("; ")}`}${RESET}\n`);
     } else if (e.type === "assistant_message") {
       if (sa.action === "close_then_print_full") { emit("\n"); emit(`${AQUA}${e.text}${RESET}\n`); }
       else if (sa.action === "print_full") emit(`${AQUA}${e.text}${RESET}\n`);
@@ -2382,7 +2405,9 @@ if (import.meta.main) {
     const sessionId = process.argv[3];
     if (!sessionId) { console.error("usage: winter watch <sessionId>"); process.exit(1); }
     const c = await connect("cli-watch", (e) => {
-      if (e.type === "user_message") console.log(`${AQUA}❯${RESET} [${e.clientName}] ${e.text}`);
+      // A ComputerV2 wake message's text is the MODEL's (its own note among it): never printed — a note instead.
+      if (e.type === "user_message" && e.clientName === COMPUTER_WAKE_CLIENT_NAME) console.log(`${DIM}↻ [${e.clientName}] a wake trigger ended — Winter continues${RESET}`);
+      else if (e.type === "user_message") console.log(`${AQUA}❯${RESET} [${e.clientName}] ${e.text}`);
       else console.log(`${DIM}· ${e.type}${"clientName" in e ? ` (${e.clientName})` : ""}${RESET}`);
     });
     // Plan-immunity Task 2: CLIENT-side mode gate, same reasoning as `case "send"` above (product-

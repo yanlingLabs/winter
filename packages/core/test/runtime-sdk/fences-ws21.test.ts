@@ -140,6 +140,25 @@ describe("writes: <home>/cache/** — rules ✓, sandbox real path, floor write-
   });
 });
 
+describe("writes: <home>/computer-use/** (ComputerV2's own records: wakes.json, recent-apps.json) — sandbox real path, floor write-shaped only", () => {
+  test("the sandbox denies the write; the escape floor refuses a write there but never a read, and only the directory itself", () => {
+    expect(sandboxConfigFor(H).filesystem!.denyWrite).toContain(`${H}/computer-use`);
+    expect(homeFencedDirs(H)).toContain(`${H}/computer-use`);
+    // Reads stay unrestricted.
+    expect(escapeFloorHit(`cat ${H}/computer-use/recent-apps.json`, H)).toBeUndefined();
+    expect(escapeFloorHit("cat ~/.winter/computer-use/wakes.json", H)).toBeUndefined();
+    expect(escapeFloorHit(`ls ${H}/computer-use`, H)).toBeUndefined();
+    // A write there is refused — a forged wakes.json would put daemon-worded text into another session's turn.
+    expect(escapeFloorHit(`echo '{}' > ${H}/computer-use/wakes.json`, H)).toBeDefined();
+    expect(escapeFloorHit("cp forged.json ~/.winter/computer-use/wakes.json", H)).toBeDefined();
+    expect(escapeFloorHit(`rm -rf ${H}/computer-use`, H)).toBeDefined();
+    expect(escapeFloorHit(`rm -rf ${H}/computer-use*`, H)).toBeDefined(); // a glob after it still counts
+    // A path that merely starts the same is another path.
+    expect(escapeFloorHit(`echo hi > ${H}/computer-use-notes.txt`, H)).toBeUndefined();
+    expect(escapeFloorHit(`cat ${H}/computer-use-notes.txt`, H)).toBeUndefined();
+  });
+});
+
 describe("writes: claude-resume-* roots — rule glob, not writable by the sandbox, floor write-shaped, hook ✓", () => {
   const staging = join(tmpdir(), `${RESUME_STAGING_PREFIX}8f2a`);
   test("deny rule glob", () => {

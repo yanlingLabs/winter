@@ -453,6 +453,15 @@ final class FieldStateAdapter: ObservableObject {
         return "queued: " + session.state.queuedSteers.joined(separator: "; ")
     }
 
+    /// ComputerV2 wake triggers (2026-10-12): what Winter is waiting for the user to do in this session — the
+    /// "Waiting for you" pill above the composer, one line per armed trigger. Empty when nothing is armed.
+    var armedWakes: [ArmedWake] { session.state.armedWakes }
+
+    /// The pill's [Stop waiting] (`computerUse.wakes.cancel`) for one trigger: `nil` once the daemon took it, else the
+    /// sentence the pill shows (and the button is live again). OPTIONAL, defaulting `nil`, like `onInterrupt`: a
+    /// surface that does not wire it shows the pill with no button.
+    var onStopWaiting: (@MainActor (String) async -> String?)?
+
     // MARK: - Composer draft
 
     /// v1's composer text (`appState.composerDisplayText` / `appState.updateComposerText`),

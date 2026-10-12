@@ -519,6 +519,8 @@ test("the Bash sandbox names real DIRECTORIES — plus, since R.3 I-4, the any-d
   expect(sb.filesystem!.denyWrite).toEqual([
     "/h/run", "/h/runtimes", "/h/cache", "/h/plugins", "/h/permissions", "/h/trust.json", "/h/agents",
     "/h/sdk/settings.json", "/h/sdk/.winter.json", "/h/sdk/agents", "/h/sdk/plugins",
+    // ComputerV2 wake triggers (2026-10-12): the daemon's computer-use records (the restart file `wakes.json`).
+    "/h/computer-use",
     "/h/permissions.local.json", "/h/settings.json", "/h/settings.local.json",
     // review I7: the protected user tier (a separate list — the write TOOLS get a card, not this deny),
     // for the shared runtime home and the store home this build loads from. R.1: on a run-home build the

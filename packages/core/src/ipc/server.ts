@@ -7,7 +7,7 @@ import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
   HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE,
-  ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams,
+  ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams, ComputerUseWakesCancelParams,
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
   SessionHistoryParams,
@@ -2184,7 +2184,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // runtime-state door wired (`opts.records`) or the session has no record at all (engine-era,
           // or a phone-owned row `sync.push` materialised).
           const providerId = opts.records?.get(s.sessionId)?.providerId;
-          const rowFields = { ...(runtimeKind === undefined ? {} : { runtimeKind }), ...(providerId === undefined ? {} : { providerId }) };
+          // ComputerV2 wake triggers (2026-10-12): the "waiting for you" mark — how many triggers the session has armed.
+          const wakesArmed = opts.computerUse?.wakesArmed?.(s.sessionId) ?? 0;
+          const rowFields = { ...(runtimeKind === undefined ? {} : { runtimeKind }), ...(providerId === undefined ? {} : { providerId }), ...(wakesArmed > 0 ? { wakesArmed } : {}) };
           if (!participatesInActivity(s.mode)) return { ...s, signals, ...rowFields };
           const dirs = opts.store.dirs(s.sessionId);
           return { ...s, activity: deriveActivity(s, s.sessionId, now), dirs, cwd: dirs[0]?.path, signals, ...rowFields };
@@ -2239,7 +2241,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // LIVE (hub.fanOut calls the same deliver).
         const isRemote = socket.data.authedRole === "remote";
         // Per client: the remote policy also drops repeats of an unchanged thinking-pill title.
-        const remoteFilter = isRemote ? createRemoteStreamFilter() : undefined;
+        // A ComputerV2 wake message's phone line is read from the session's log (`sessions/wake-phone-line.ts`).
+        const remoteFilter = isRemote ? createRemoteStreamFilter({ log: (sid) => opts.store.read(sid, 0) }) : undefined;
         const hubClient: HubClient = {
           clientName: socket.data.clientName,
           // T5: carried so the hub's detach hook can classify this harness by the daemon's OWN
@@ -3421,7 +3424,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.computerUseRequestPermission:
       case METHODS.computerUseAppsList:
       case METHODS.computerUseAppsSet:
-      case METHODS.computerUseSetSettings: {
+      case METHODS.computerUseSetSettings:
+      case METHODS.computerUseWakesCancel: {
         if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, `${method} is available to local clients only`);
         const control = opts.computerUse;
         if (control === undefined) throw new RpcFailure(ERR.INTERNAL, `${method} is not available on this server`);
@@ -3443,12 +3447,18 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
               control.appsSet({ bundleId: p.bundleId, ...(p.name === undefined ? {} : { name: p.name }), ...(p.access === undefined ? {} : { access: p.access }), ...(p.grant === undefined ? {} : { grant: p.grant }) });
               return { ok: true };
             }
+            case METHODS.computerUseWakesCancel: {
+              // The user's [Stop waiting] on the session's pill: the trigger ends `cancelled`, and nobody is woken.
+              const p = parseParams(ComputerUseWakesCancelParams, params);
+              return { ok: true, cancelled: control.wakesCancel?.(p.sessionId, p.wakeId) ?? false };
+            }
             default: {
               const p = parseParams(ComputerUseSetSettingsParams, params);
               control.setSettings({
                 ...(p.enabled === undefined ? {} : { enabled: p.enabled }), ...(p.allowAllApps === undefined ? {} : { allowAllApps: p.allowAllApps }),
                 ...(p.mirror === undefined ? {} : { mirror: p.mirror }), ...(p.privateEventPath === undefined ? {} : { privateEventPath: p.privateEventPath }),
                 ...(p.headlessEnabled === undefined ? {} : { headlessEnabled: p.headlessEnabled }), ...(p.webmcp === undefined ? {} : { webmcp: p.webmcp }),
+                ...(p.wakes === undefined ? {} : { wakes: p.wakes }),
               });
               return { ok: true };
             }

@@ -740,12 +740,14 @@ extension WinterClient {
     /// `runtimeKind` — read from the runtime-state record, absent independently of it (an older
     /// daemon, a record-less session, or a daemon with no runtime-state door wired at all). Neither
     /// field is ever fabricated from the other.
-    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?, activity: String?, archived: Bool?, signals: SessionSignals?, approvalPolicy: String?, runtimeKind: String?, providerId: String?)] {
+    /// ComputerV2 wake triggers (2026-10-12): `wakesArmed` appended LAST, the same purely-additive precedent — how many
+    /// triggers the session has armed now (the list's "waiting for you" mark); `nil` for none or an older daemon.
+    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?, activity: String?, archived: Bool?, signals: SessionSignals?, approvalPolicy: String?, runtimeKind: String?, providerId: String?, wakesArmed: Int?)] {
         let r = try await request("session.list", params: nil)
         return (r["sessions"]?.arrayValue ?? []).compactMap { s in
             guard let id = s["sessionId"]?.stringValue, let scope = s["scope"]?.stringValue,
                   let created = s["createdAt"]?.intValue, let last = s["lastSeq"]?.intValue else { return nil }
-            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]), s["activity"]?.stringValue, s["archived"]?.boolValue, decodeSessionSignals(s["signals"]), s["approvalPolicy"]?.stringValue, s["runtimeKind"]?.stringValue, s["providerId"]?.stringValue)
+            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]), s["activity"]?.stringValue, s["archived"]?.boolValue, decodeSessionSignals(s["signals"]), s["approvalPolicy"]?.stringValue, s["runtimeKind"]?.stringValue, s["providerId"]?.stringValue, s["wakesArmed"]?.intValue)
         }
     }
 
@@ -791,6 +793,12 @@ extension WinterClient {
     /// `nil` (the key omitted) for no images — an older daemon never sees it.
     private func imagesParam(_ images: [SessionEvent.UserMessageImageRef]) -> JSONValue? {
         images.isEmpty ? nil : .array(images.map { .object(["n": .number(Double($0.n)), "path": .string($0.path)]) })
+    }
+
+    /// ComputerV2 wake triggers (2026-10-12): the session pill's [Stop waiting] — ends one trigger the session's model
+    /// armed (`computerUse.wakes.cancel`, local role only). `false` when it had already ended.
+    public func cancelWake(sessionId: String, wakeId: String) async throws -> Bool {
+        try await request("computerUse.wakes.cancel", params: obj(["sessionId": .string(sessionId), "wakeId": .string(wakeId)]))["cancelled"]?.boolValue ?? false
     }
 
     public func interrupt(sessionId: String) async throws -> Bool {
