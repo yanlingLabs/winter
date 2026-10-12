@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, spyOn } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, linkSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, linkSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertDaemonPathAccess, readDaemonTextFile, daemonChildSpawnWithFloor } from "../../src/runtime-sdk/daemon-path-fence";
@@ -23,7 +23,7 @@ describe("Core protected storage checks at actual host use points", () => {
     for (const path of [volume, db, join(coordination, "cowork-admission.sqlite")]) writeFileSync(path, "private fixture bytes");
     unregister = registerHostStorageFences(home, { participatingHomes: [other], coordinationDir: coordination, coworkStorageActive: true });
   });
-  afterEach(() => unregister());
+  afterEach(() => { try { unregister(); } finally { rmSync(root, { recursive: true, force: true }); } });
   test("direct paths, parent symlinks, hard links and case variants use one canonical fence; ordinary/shared reads work", () => {
     symlinkSync(other, join(project, "alias")); linkSync(volume, join(project, "volume.ts"));
     for (const path of [volume, db, join(coordination, "cowork-admission.sqlite"), join(project, "alias/runtimes/runtime-state.db"), join(project, "volume.ts"), volume.toUpperCase()]) {
