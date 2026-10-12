@@ -455,6 +455,10 @@ struct Exchange: Equatable {
     /// the user bubble wears the sender's header (and the summary, when it carried one) instead of
     /// showing the wrapper's XML. `nil` for everything a person typed.
     var promptEnvelope: AgentMessageEnvelope? = nil { didSet { stamp = ChangeStamp.next() } }
+    /// ComputerV2 wake triggers (2026-10-12): a daemon note on this exchange — "Winter continued: you clicked
+    /// “Submit for review” in Chrome" — set when a `computer-wake` message opened it (or was folded into it). Built
+    /// from the `wake_armed`/`wake_ended` pair, never from the message, whose text is for the model. `nil` otherwise.
+    var notice: String? = nil { didSet { stamp = ChangeStamp.next() } }
     /// EVERY `assistant_message` this exchange's turn emitted, in arrival order (mac-chat-parity
     /// Task 1). The engine emits one PER ROUND, whenever the round produced text
     /// (`if (textBuf.length > 0)`, `packages/core/src/agent/engine.ts`) — this was a single
@@ -521,7 +525,7 @@ struct Exchange: Equatable {
     static func == (a: Exchange, b: Exchange) -> Bool {
         if a.stamp == b.stamp { return true }
         guard a.aborted == b.aborted, a.replies.count == b.replies.count, a.activity.count == b.activity.count else { return false }
-        guard a.prompt == b.prompt, a.promptEnvelope == b.promptEnvelope, a.replies == b.replies else { return false }
+        guard a.prompt == b.prompt, a.promptEnvelope == b.promptEnvelope, a.notice == b.notice, a.replies == b.replies else { return false }
         return a.activity.withUnsafeBufferPointer { left in
             b.activity.withUnsafeBufferPointer { right in
                 var i = left.count - 1
@@ -611,6 +615,13 @@ struct OrbSessionState: Equatable {
     /// turn the queued text was riding on ends — absorbed (`turnCompleted`) or died
     /// (`agentError`) — since a queued steer never survives past the turn it was queued for.
     var queuedSteers: [String] = []
+    /// ComputerV2 wake triggers (2026-10-12): the triggers this session's model has armed and that have not ended
+    /// (`wake_armed` adds, `wake_ended` removes) — the "Waiting for you" pill. Persisted events, so a replay
+    /// rebuilds it exactly.
+    var armedWakes: [ArmedWake] = []
+    /// What the ended triggers that wake the session did ("you clicked “Submit for review” in Chrome") — said by the
+    /// next `computer-wake` message's notice, then cleared.
+    var pendingWakeNews: [String] = []
     /// The tool calls the bash safety reviewer is judging right now (`tool_review_progress`: `started`
     /// adds a `callId`, `ended` removes it). Transient state — never replayed — so it is also cleared
     /// when the call's result arrives, when the turn ends or errors, and when the connection drops: a
@@ -812,6 +823,32 @@ enum SessionReducer {
         case .harnessDetached(let v):
             if let i = s.attachedClients.firstIndex(of: v.clientName) {
                 s.attachedClients.remove(at: i) // remove-first-match, see `attachedClients`'s doc
+            }
+        case .wakeArmed(let v) where v.threadId == mainThread:
+            s.armedWakes.removeAll { $0.wakeId == v.wakeId }
+            s.armedWakes.append(ArmedWake(wakeId: v.wakeId, condition: v.condition, targetLabel: v.targetLabel,
+                                          elementLabel: v.elementLabel, expiresAt: v.expiresAt))
+        case .wakeEnded(let v) where v.threadId == mainThread:
+            if let i = s.armedWakes.firstIndex(where: { $0.wakeId == v.wakeId }) {
+                let wake = s.armedWakes.remove(at: i)
+                // Held for the wake message's notice only when one will carry it (`woken` — never judged from the
+                // reason: a silent expiry is not news, and must never be glued onto a later wake's notice).
+                if v.woken { s.pendingWakeNews.append(WakeWords.endedWords(wake, reason: v.reason)) }
+            }
+        case .userMessage(let v) where v.threadId == mainThread && v.clientName == WakeWords.computerWakeClientName:
+            // ComputerV2 wake triggers: the daemon WAKES the session (`computer-wake`) — never a user bubble. Its text is
+            // the model's `<computer-wake>` block; what the user sees is a note built from the pair. Folded into a
+            // running turn (a steer) it notes the running exchange; otherwise it opens a prompt-less exchange, like
+            // Dispatch's own wake.
+            let note = s.pendingWakeNews.isEmpty ? "A wake trigger ended — Winter continues" : "Winter continued: " + s.pendingWakeNews.joined(separator: "; ")
+            s.pendingWakeNews = []
+            if s.turnRunning, let last = s.exchanges.indices.last {
+                s.exchanges[last].notice = s.exchanges[last].notice.map { "\($0)\n\(note)" } ?? note
+            } else {
+                var opened = Exchange(prompt: "", reply: "")
+                opened.notice = note
+                s.exchanges.append(opened)
+                s.lastTurnOriginClientName = v.clientName
             }
         case .userMessage(let v) where v.threadId == mainThread && v.clientName == dispatchWakeClientName:
             // Dispatch's children (`packages/core/src/agent/dispatch-children.ts`): the daemon WAKES the

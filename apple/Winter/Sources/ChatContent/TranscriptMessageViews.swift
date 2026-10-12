@@ -811,6 +811,26 @@ struct TranscriptActivityRow: View {
 
 /// The "⏹ stopped" line shown when an exchange's turn ended via Esc-interrupt
 /// (`Exchange.aborted`) — v1 parity companion to the activity rows, same quiet-meta token.
+/// ComputerV2 wake triggers (2026-10-12): the daemon's note that Winter carried on because the user did what a wake
+/// trigger waited for ("Winter continued: you clicked “Submit for review” in Chrome"). Quiet meta, like the stopped
+/// line — the daemon talking, never a bubble.
+struct TranscriptWakeNoticeRow: View {
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "bell")
+                .imageScale(.small)
+            Text(text)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(Typography.caption())
+        .foregroundStyle(Theme.textMuted)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct TranscriptStoppedRow: View {
     var body: some View {
         HStack(spacing: 6) {

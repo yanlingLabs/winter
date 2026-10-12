@@ -100,6 +100,10 @@ struct TranscriptView: View {
             if !exchange.prompt.isEmpty || exchange.promptEnvelope != nil {
                 cells.append((base, .prompt(text: exchange.prompt, envelope: exchange.promptEnvelope)))
             }
+            // ComputerV2 wake triggers: the daemon's note that Winter continued (never a user bubble).
+            if let notice = exchange.notice {
+                cells.append((base + TranscriptCellSpec.noticeOffset, .notice(notice)))
+            }
             let finalReply = streamingText == nil ? layout.finalReply : nil
             for (offset, entry) in layout.entries.enumerated() {
                 let id = base + TranscriptCellSpec.firstEntryOffset + offset
@@ -453,6 +457,8 @@ private enum TranscriptCellContent: Equatable {
     case reply(text: String, showsCopy: Bool)
     case streaming(String)
     case stopped
+    /// A daemon note on the exchange — Winter continued after a wake trigger (`Exchange.notice`).
+    case notice(String)
 }
 
 private struct TranscriptCellSpec: Identifiable {
@@ -461,6 +467,7 @@ private struct TranscriptCellSpec: Identifiable {
     /// reducer keeps 200 activity items).
     static let idStride = 100_000
     static let firstEntryOffset = 1
+    static let noticeOffset = 99_997
     static let stoppedOffset = 99_998
     static let streamingOffset = 99_999
 
@@ -544,6 +551,8 @@ private struct TranscriptCell: View {
             TranscriptAssistantMessage(text: text, isStreaming: true, role: .assistant)
         case .stopped:
             TranscriptStoppedRow()
+        case .notice(let text):
+            TranscriptWakeNoticeRow(text: text)
         }
     }
 

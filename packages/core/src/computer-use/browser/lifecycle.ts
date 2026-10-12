@@ -10,7 +10,10 @@
 //   - the session deleted or archived: its remaining agent tabs close;
 //   - after a daemon restart, at the browser's next hello: agent tabs of sessions with no running turn close
 //     (a `handoff` does not survive the restart; a kept tab is no longer an agent tab);
-//   - the daemon stopping, or the computer-use runtime idling out, closes nothing.
+//   - the daemon stopping, or the computer-use runtime idling out, closes nothing;
+//   - a tab a WAKE TRIGGER waits on (`wakeWhen`, armed) is not closed at a turn end: the user acts there, and the
+//     trigger's ending wakes the session. Once it ends, the ordinary rule applies at the NEXT turn end (the wake turn's,
+//     unless the agent marks it). Deleting or archiving the session still closes it.
 // Tabs the user already had open are never closed (they are released at turn end). Tabs in Winter's own browser are
 // never closed by this rule: they live in the session's panel strip and go with the session.
 //
@@ -31,13 +34,15 @@ export interface AgentTabFacts {
   handoff?: boolean;
   /** For `restart-orphan`: its session is running a turn now. */
   turnRunning?: boolean;
+  /** A wake trigger is armed on it (`turn-ended` keeps it open). */
+  waiting?: boolean;
 }
 
 export function shouldCloseAgentTab(f: AgentTabFacts): boolean {
   if (f.family === "winter") return false;
   if (f.kept) return false;
   switch (f.event) {
-    case "turn-ended": return f.handoff !== true;
+    case "turn-ended": return f.handoff !== true && f.waiting !== true;
     case "session-deleted":
     case "session-archived":
       return true;

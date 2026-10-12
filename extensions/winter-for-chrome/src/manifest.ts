@@ -11,7 +11,7 @@
 // debuggee, for out-of-process iframes) since Chrome 125, and an open native-messaging port keeping an MV3 service
 // worker alive since Chrome 105.
 
-export const EXTENSION_VERSION = "1.1.0";
+export const EXTENSION_VERSION = "1.2.0";
 export const MINIMUM_CHROME_VERSION = "125";
 
 /** Exactly these (spine §6.5); a test pins the list. No `cookies`, no content scripts. */

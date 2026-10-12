@@ -59,6 +59,9 @@ export interface PrimitiveMetric {
   headlessEngine?: string;
   headlessVersion?: string;
   exitReason?: string;
+  /** Wake triggers (2026-10-12): on a `wakeWhen` line, what was armed (its condition kind and backend); on the
+   *  registry's `wake.end` line, how it ended and how long it was armed — never a label, a note or a value. */
+  wake?: { kind: string; backend?: "tab" | "app"; outcome?: string; armedMs?: number };
 }
 
 export const AUTOMATION_METRICS_MAX_BYTES = 8 * 1024 * 1024;

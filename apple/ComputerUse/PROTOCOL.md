@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.16.0` (the contents of [`VERSION`](VERSION))
+Helper version: `1.17.0` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
@@ -84,7 +84,7 @@ anchor, and drops the connection if it does not match.
 
 | Client | May call after `hello` | Receives |
 | --- | --- | --- |
-| `daemon` | every method except `view.*` | `escPressed`, `targetLost`, `permissionsChanged` |
+| `daemon` | every method except `view.*` | `escPressed`, `targetLost`, `permissionsChanged`, `desktopVisited`, `watchEvent` |
 | `app` | `status`, `view.subscribe`, `view.unsubscribe` | `view.bound`, `view.released`, `view.frame`, `view.cursor` for the sessions it subscribed to |
 
 Any other call is refused `not_allowed` with `data.reason: "client"`. Only `daemon` connections own sessions
@@ -746,6 +746,95 @@ decides nothing between that change's answers; a ⌘-Tab or ⌃-arrow under Secu
 into a touched app is undone (the tap sees nothing). Unmeasured: hardware-origin modifiers under Secure Event Input
 (run107 measured posted ones).
 
+### 4.13 Watches (wake triggers)
+
+User rulings 2026-10-12: the agent can arm a trigger — "wake me when the user clicks Submit", "when “Sent” appears" —
+and end its turn; the daemon wakes the session when it happens. On an app, the helper does the watching: the daemon arms
+a WATCH on a bound target and the helper sends ONE `watchEvent` (§7.1) when it fires or can no longer fire. A watch never
+acts: it only looks.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `watch.arm` (1.17.0) | `{targetId, watchId, condition, expiresAt?}` | `{element?: {role, name}, targetLabel}` |
+| `watch.cancel` (1.17.0) | `{watchId}` | `{}` — idempotent: an unknown or ended watch is no error |
+
+- `watchId` is the daemon's own id for the trigger (at most 64 characters); every `watchEvent` names it. `expiresAt`
+  (epoch ms) is the daemon's: it expires the trigger itself; the helper only drops the watch silently 10 s after it, as a
+  backstop (with none, after 8 h).
+- `condition` is exactly one of: `{kind: "clicked", ref}` — the user clicks the element (or something inside it);
+  `{kind: "appeared", text}` — the text comes to be shown in the window; `{kind: "gone", ref}` / `{kind: "gone", text}` —
+  the element, or the text, is no longer shown; `{kind: "changed", ref, settleMs?}` — the user changes the field's value,
+  fired once it has stayed the same `settleMs` (default 1,500, at most 60,000); `{kind: "titled", title}` — the window's
+  title comes to contain the text. A `ref` is a `target.snapshot` ref; a text or title is 1…500 characters, matched as
+  `target.waitFor` matches (names and non-secure values, case and diacritics folded, the first 1,500 elements read).
+  `submitted` and `navigated` are for browser tabs only: refused `invalid_params`.
+- **Arming** checks, in this order, and arms nothing when one fails: the params' shape — `watchId`, `targetId`, the
+  condition (`invalid_params`); a `watchId` already armed (`invalid_params`); more than 64 watches in the helper
+  (`busy`); the Accessibility grant (`permission_missing`); the target bound (`target_lost`) and alive (`target_lost`);
+  never Winter (`refused`, `winter_itself`); the window exposes accessibility (a capture-only bind: `unsupported`,
+  `data.reason: "no_accessibility"`); never System Settings' Privacy & Security (`refused`, `privacy_pane`); the ref's
+  element exists (`stale_ref`); never a password or payment field, nor anything inside one (`refused`, `secure_field`);
+  a STATE condition (`appeared`, `gone`, `titled`) that already holds (`not_allowed`, `reason: "already_met"` — the
+  controller's ruling: only a false→true transition after arming fires); last, the arming daemon connection still open
+  and the request not given up (`cancelled` — an arm that would outlive its connection arms nothing). An engine that is
+  going away answers `unsupported` with `data.reason: "engine_gone"`; an older helper answers `unsupported` ("unknown
+  method"). A refused arm keeps nothing.
+- **The answer**: `element` — the watched element as `target.snapshot` names it: its role words and its title, else its
+  description, else its placeholder; `targetLabel` — "<App> — <window title>" (the title as the state header prints it:
+  app window titles are not redacted). Both are screen text: the daemon fences them for the model.
+- **A watch lives on its own** (the controller's ruling: better than keeping the target bound). It holds the target's
+  pid, window and element itself (and reads the window through its own element and ref cache, never touching the
+  target's refs), so `target.release`, `session.ended` (a script's reset, a worker restart, the worker's idle end) never
+  end it. It ends on `watch.cancel`, on its one `watchEvent`, when the
+  daemon connection that armed it closes (silently — the daemon reads its connection closing as the helper gone and ends
+  each trigger itself), or at its backstop (silently). An armed watch keeps the helper running (§8.1).
+- **What fires it** — only what the USER did, never Winter's own input:
+  - `clicked`: a HARDWARE LEFT mouse-down (the controller's ruling: no other button) on the element or inside it. The
+    helper's own listen-only session tap for the left mouse-down alone (no other button, no keys, no moves) runs only
+    while a `clicked` or `changed` watch is armed — the same public API as the work watcher (§4.12), covered by the
+    Accessibility grant: no other permission, no prompt. A click outside every watched window (as last read) is judged
+    with no window-server query; one in the watched app's window (the window under the point) is the element's when it
+    lies in the element's frame read in the last 1.5 s; else the app's own hit test (`AXUIElementCopyElementAtPosition`)
+    is asked directly — never queued behind the app's work — and asked again while the app is busy; an element GONE
+    right after a click in its window (the click closed its sheet) counts, unless a fresh frame of it puts the click
+    elsewhere. An event with a source process (the helper's own stamped ones, another process's synthetic ones) never
+    counts — except, on a live-test instance only, the live suite's test click (§9). A hardware click is the user's by
+    its source alone: Winter's own input in flight never drops one. The point is dropped once judged; nothing of it is
+    logged or sent.
+  - `changed`: the user's input must explain the change. Keys can't be seen without Input Monitoring (never asked for),
+    so a change counts as the user's when the field (or something inside it) holds the keyboard focus while its app is
+    frontmost, or when their hardware click went to the field within the last 30 s (to its window within 3 s). A change
+    no input of theirs explains becomes the new baseline; one back to the arming value is no change; a field that goes
+    away while a change of theirs is settling fires.
+  - `appeared`, `gone`, `titled`: any false→true transition — "Upload complete" appearing after the user's action, a
+    build finishing — that Winter's own input did not cause.
+  - **Winter's own input**: a change that lands while a request that can send input to that app is in flight —
+    `target.act`, `target.applescript`, `target.foreground`, `target.useWindow` on any target of that app; `target.bind`
+    and `apps.openDocument` for EVERY app (their app is known only once they answer) — or within 500 ms after it, is
+    Winter's: a state transition becomes the baseline (it must go and come back to fire), a `changed` value too, and a
+    `gone` element removed by it is lost. A change is dated by the FIRST notification of its burst (a look after the
+    grace judges what landed after it as the user's); a look no notification asked for (the fallback, a settle) judges
+    the whole interval since the last look.
+- **When it looks**: an `AXObserver` per watched app (creations, destructions, values, titles, layout, focus, window
+  creation — no moved or resized notifications), debounced 250 ms and at most 1 s apart while notifications keep coming;
+  a text watch (`appeared`, `gone` with a text) reads the window's tree at most once per 2 s (the looks in between wait
+  for the 2 s to end, keeping their date), a `titled` one reads the title alone; a fallback look every 10 s; a `changed`
+  field's settle. Every look reads the window afresh on the app's own queue. Timers carry leeway, and while any watch is
+  armed the helper holds off App Nap (a user-initiated activity that still allows idle system sleep). Measured (2026-10-12,
+  a screen-free fixture of 300+ elements, one watch of each kind): idle, the watching engine 0.13–0.27 % of one core and
+  +0.3 wake-ups/s, the watched app 0.4–0.5 % (the text watches' fallback reads); a storm of 10 changes a second, the
+  engine 0.6 % and ~5 wake-ups/s, the text watch reading its tree 14–16 times in 30 s.
+- **Lost** (`watchEvent` `outcome: "lost"`), with the helper's `reason`: "the app quit"; "the window closed" (a window
+  that reads as gone is looked at again 1.5 s later — a full-screen or Space transition); "the element is gone (the
+  window changed under it)"; "the element went away while Winter was acting in the app"; "Winter Computer Use lost its
+  Accessibility permission".
+- **The user can see that Winter waits** (the spine's rule): while a watch is armed and its app is frontmost with the
+  watched window its front window on the active Space, the helper draws a ring around the element (clipped to the
+  window) and a pill with a FIXED sentence that names only the element's own label — "Winter continues when you click
+  “Submit”", "… when you change “Name”", "… when “Uploading” goes away"; the window-wide kinds name nothing ("Winter
+  continues when this window changes") — never the text the model waits for, never its note. Click-through, never key,
+  never activating, `sharingType = .none` (never in a capture); followed every 0.5 s while shown, gone with the watch.
+
 ## 5. Errors
 
 Every error is a JSON-RPC error object whose `data.code` is the code to branch on; `message` is one
@@ -838,6 +927,7 @@ Notifications are `{"jsonrpc":"2.0","method":…,"params":…}` lines with no `i
 | `targetLost` | `{targetId, reason: "app_quit" \| "window_closed" \| "helper_restart" \| "unknown"}` | a bound target's app quit or its window closed (§5's reasons; the helper itself sends `app_quit` and `window_closed` here) |
 | `permissionsChanged` | `{permissions: {accessibility, screenRecording}}` | a grant changed (each change once) |
 | `desktopVisited` | `{visitId, sessionId, callId?, targetId, app, why, actions, ms, returned, userMoved?}` | a desktop visit CLOSED (§4.10), whatever its outcome — the work done, a failed primitive, a cancelled request, a window that never came on screen; `callId` is the request that opened it |
+| `watchEvent` (1.17.0) | `{watchId, outcome: "fired" \| "lost", at, detail?, reason?}` | a watch ended (§4.13), once: `at` is epoch ms; `fired` carries `detail` ("clicked", "appeared", "gone", "changed", "title now “…”" — screen text the daemon fences), `lost` its `reason` |
 
 They go to every ready `daemon` connection, never to Winter.app.
 
@@ -894,8 +984,8 @@ A paused or off-screen target is never released for it, and an unchanged frame i
   path (dist: inside Winter.app; dev: `dist/dev/`) and verifies it by code signature after `hello`.
 - One helper per home: a helper that finds a live listener on the socket refuses to start; a stale socket
   file is replaced.
-- **Idle quit:** after 10 minutes with no bound target and no active script, the helper quits (if a request is
-  still in flight, the countdown starts over). Open connections do not keep it running; the daemon relaunches
+- **Idle quit:** after 10 minutes with no bound target, no active script and no armed watch (§4.13), the helper quits
+  (if a request is still in flight, the countdown starts over). Open connections do not keep it running; the daemon relaunches
   it on its next call.
 - `SIGTERM` quits the same way. On quit the socket file is removed (if it is still the helper's) and every
   connection closed.
@@ -907,6 +997,7 @@ A paused or off-screen target is never released for it, and an unchanged frame i
 - A `daemon` connection that sends a request with `params.sessionId` owns that session. When the last
   connection that owned a session closes, the helper cancels that connection's in-flight requests, waits for
   them to wind down (at most 2 s), and runs `session.ended` for the session.
+- A `daemon` connection closing also ends the watches it armed (§4.13), silently.
 - An `app` connection closing ends only its subscriptions.
 - The daemon keeps one persistent connection; a closed connection means the helper is gone.
 
@@ -927,11 +1018,12 @@ None of this exists in a dev or release binary; `scripts/release.ts` scans the s
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `test.activate` | `{pid, asUser?}` | `{frontmostSet, raised, frontmost}` — puts the suite's own "user's app" in front; `asUser` (1.9.9): first records what the USER's switch would leave (hardware input, a switch for that app, claimed), so the guardian treats it as theirs |
+| `test.activate` | `{pid, asUser?, window?}` | `{frontmostSet, raised, frontmost}` — puts the suite's own "user's app" in front; `asUser` (1.9.9): first records what the USER's switch would leave (hardware input, a switch for that app, claimed), so the guardian treats it as theirs | — `window` (1.17.0): the title of the app's window to raise and make main instead of its front one
 | `test.userInput` | `{pid}` | `{}` — (1.9.9) records the user's work in that app (I6), as their click into its window would |
 | `test.capture` | `{windowId, source: "skylight"\|"stream", path, rect?: [x, y, w, h]}` | `{width, height, frameAgeMs?}` — writes one PNG (inside the instance's home only) of a window: the off-Space still path (`skylight`) or the latest frame of the test stream (`stream`); `rect` in the window's points |
 | `test.stream` | `{windowId, on, fps?}` | `{running}` — starts/stops a desktop-independent ScreenCaptureKit stream on that window (the freshness measurement) |
 | `test.automation` | `{pid?, bundleId?}` | `{status: "granted" \| "would_ask" \| "denied" \| "not_running" \| "unknown", code}` — may this helper already send the app Apple Events; asked with `AEDeterminePermissionToAutomateTarget(…, askUserIfNeeded: false)`, so it NEVER raises macOS's Automation question (the suite runs an AppleScript-backed scenario only on `granted`) |
+| `test.userClick` | `{pid, name, stamp?}` | `{clicked}` — (1.17.0) the USER's click for the wake-trigger rows: a real left click posted at the HID level (the pointer moves there and is put back) at the centre of the first element of that app whose title or description is `name`, stamped `CUWatchTestStamp` — the one synthetic input a live-test instance's watches count as the user's (nothing else counts it, and no other helper has the route); `stamp: "winter"` stamps it as the helper's own instead (the converse row: a watch must ignore it). Its element search never runs on the main actor |
 
 ## 10. Compatibility and versioning
 
@@ -998,33 +1090,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.14.0 | No wire change — round 15. The review of round 14: a COLD launch is judged with any opener's reach, and an app whose process started within 1.5 s after an opener act (or while a launch of the agent's was pending) is never the user's own launch and never adopted — undone when clearly the agent's, else left in front and said; an act reaches Finder and the mail handler always, a non-browser's web handlers, the pressed link's own scheme handler, a menu command the same list plus the Help viewer, an AppleScript any app; a bind of a running app names its bundle; a press's effect counts a new window of the app anywhere; the Secure Event Input base is refreshed however an act ends; an unshown paste succeeds only when what changed holds the pasted text's letters and digits, and "held it already" only when the caret moved by its length; an agent popup survives acts that open nothing for 5 s; default handlers cached a minute; Floor F walks a slow window again at most every 5 s; a drag's button-down claims nothing. The live run's one failure (round 14's one-press rule): a navigation key aimed INTO a button or other press-acted control goes to where the focus is — no focusing press, never refused (End into a web button scrolls the page again); Space, or Return on anything but a check box or radio, is one press through the click's own press path; Return into a check box is refused. The user's ruling (round 14): under Secure Keyboard Entry a front bound app whose text changes is the user working until it leaves the front, refused "<App> is in front with Secure Keyboard Entry on and its text is changing — Winter waits until you switch away". |
 | 1 | 1.15.0 | No wire change — round 16. The live run's I6 regression: an act already in flight checks the user's work mark before every focus placement, every key and every paste — nothing moves the focus inside a bound app once the user works in it (a type act's focus placement took them from Name back to Email 242 ms after their click). Only a NAVIGATION key (the arrows, Home/End, Page Up/Down, Tab, Escape, at most with ⇧) aimed at a press-acted control goes to where the focus is, said; any other key is refused. With the keyboard focus outside the control's page, the page gets it by a click on a blank spot (never the control's press), and End, Home, Page Up/Down are done over accessibility when it still has none (a background WKWebView). THE LAUNCH RULE written in §4.12: the user's input between the agent's act and a launch makes it theirs; within reach and clearly the agent's, undone; else left and said; a left app the user types or clicks in is their place; "any reach" only gates never-adopt, and only the first sighting. Finder in reach only for a reveal; a web link's handler never in a browser. The launch rule as a decision table (`CULaunchRule`; the never-adopt gate reads it). Secure Event Input on at ANY moment of the 2.5 s quiet window is never quiet (the guardian keeps its readings). A launch left in front is never adopted later as the user's launch. A key the focus blip's reroute sends to the user's place is no work in the target in front (it stole the front mid-burst; the user's keys never reached it). |
 | 1 | 1.16.0 | No wire change — round 17. I6 IN FLIGHT at one chokepoint (the review of round 16, H1): once the user works in the bound app, no accessibility write or action on its elements and no key down, button down, scroll or pointer move the act posts to it is sent — whatever path the act took (a caret-placing selection write after a web wait, an accessibility insert after the focus placement, setValue's writes, the selection holds, the End/Home fallback); the act ends `refused` `user_working`, a burst keeping its "typed N of M"; the up of a down already sent still goes. An AppleScript's send hook asks before EVERY Apple Event. A menu command checks again, right before its press, that the bound window is the one it would act on (H2). The focus blip's reroute marks the user's work itself when it lets their key through into the target (it was guessed from the front app). A navigation key aimed at a press-acted control is never sent to a focus just shown to be outside the control's page (refused `focus_not_placed`), and goes once per call; the accessibility fallback's "scrolled into view" is verified; a blank spot is proven blank over every node of the page. Secure Event Input is read on every session-tap event (R17-a). A click on the front app's Dock tile is their place at the click (R17-b). A late launch notice re-arms no "the user's launch". ROUND 17b (the independent review of round 17, same version): a drag stops at its next step once the user works in the app (every rung's pointer check asks the work mark; its moves are guarded like a start; the button released where it stopped) and a click stopped between its down and up still releases; the guard is STICKY for the rest of the act (stopped once, or the user's work mark landed since the act began), the AppleScript hook for the rest of its run; Secure Event Input polled at 4 Hz while the guardian runs and never read for a synthetic event; a blank spot by the app's own hit test at each candidate (no walk of the page); the reroute's work mark from hardware keys only; a navigation-key refusal with no focus reported says the app doesn't say where its focus is; the scroll-into-view check settles for 300 ms. |
-
-
-**Pending** (the leftovers lane; no wire change — the controller folds it into the next helper version's row):
-- Floor F knows the "Allow remote debugging?" dialog in EVERY UI language: by the browser's own words for it, read
-  from its locale packs (the open data-pack format, versions 4 and 5) under the resource ids whose English text is
-  the dialog's title or first sentence — found again in each version, so renumbered ids follow — in every locale it
-  ships, every installed version's folder, read once per version and ahead of need (off the act's path); the
-  English rule stays one input. Fail closed: when no lexicon can be read and the browser does not show English, any
-  dialog of it Winter can't tell apart is refused (`remote_debugging`, its own sentence: "… shows a dialog Winter
-  can't tell apart from its "Allow remote debugging?" prompt … — ask the user to answer or close the dialog");
-  a slow page's window is no dialog for that rule.
-  The lexicon knows which locale folders gave words: a browser showing a language outside them (or one that can't
-  be read) is read fail-closed too; a capture-only bind fails closed on a dialog-like window (above the normal
-  level, or an untitled normal window) of such a browser; the words are read ahead from the moment a Chromium
-  browser is bound.
-- Web selects (a pop-up button, or a combo box whose value can't be set, inside a page): a click on the select's
-  hidden text input presses the select; `setValue` opens it, clicks the matching option (exact, then a unique
-  prefix, then a unique "contains") and checks the shown value — EQUAL to the option's text, never one containing it — a page's own `<select>` is chosen in place, never
-  opened; no match is `invalid_params` naming the options. A click on a web check box's or radio's wrapper, label or
-  inner text presses that one control (verified by its value) — a label only when it is the control's own (its title
-  element, or linked); a hidden input stands for a select only when it is the select's own zero-size stand-in in the
-  same container.
-- Tab, Space and ⌘A into web content, and a key aimed into a sheet or panel, say in `detail` when nothing visibly
-  changed (the focus, the check box, the selection; no new sheet or window, no selected row or text changed; a Tab
-  the field took itself is said as that); a click with no effect on a web button
-  named like a file picker names `key("return", { into })`.
-- An off-desktop `target.screenshot` within 1.5 s of an act waits (bounded, ~700 ms) for a picture that differs from
-  the one before the act; otherwise its `detail` adds that it may predate the last action and names
-  `screenshot({ live: true, reason })`; the wait stops on the call's cancel.
-- A value over 8,000 characters says that `state({within})` shows its first 8,000.
+| 1 | 1.17.0 | Additive — wake triggers on apps (§4.13): `watch.arm` and `watch.cancel`, the `watchEvent` notification (§7.1). A watch holds its own window and element, so a release or a session's end never ends it; it ends on `watch.cancel`, its one event, the arming daemon connection closing (silently) or a backstop past `expiresAt`. Only the user's action fires one: `clicked` on a hardware LEFT mouse-down on the element (the helper's own listen-only tap for the left mouse-down alone, running only while a click or change watch is armed — no new permission; never dropped for Winter's own input); `changed` when the field is focused in the frontmost app or the user clicked it; the state kinds on a false→true transition; a state or `changed` change never within Winter's own input to the app (in flight, or 500 ms after — dated by its notification burst's first time). A state condition already true at arming is `not_allowed` (`already_met`). The ring and the pill while the watched window is in front; an armed watch holds off the idle quit (§8.1); the live-test-only `test.userClick` (§9). The daemon arms only on a helper ≥ 1.17.0 (`HELPER_WATCH_VERSION`). <br><br>Also (the leftovers lane, no wire change): Floor F knows the "Allow remote debugging?" dialog in EVERY UI language: by the browser's own words for it, read from its locale packs (the open data-pack format, versions 4 and 5) under the resource ids whose English text is the dialog's title or first sentence — found again in each version, so renumbered ids follow — in every locale it ships, every installed version's folder, read once per version and ahead of need (off the act's path); the English rule stays one input. Fail closed: when no lexicon can be read and the browser does not show English, any dialog of it Winter can't tell apart is refused (`remote_debugging`, its own sentence: "… shows a dialog Winter can't tell apart from its "Allow remote debugging?" prompt … — ask the user to answer or close the dialog"); a slow page's window is no dialog for that rule. The lexicon knows which locale folders gave words: a browser showing a language outside them (or one that can't be read) is read fail-closed too; a capture-only bind fails closed on a dialog-like window (above the normal level, or an untitled normal window) of such a browser; the words are read ahead from the moment a Chromium browser is bound. Web selects (a pop-up button, or a combo box whose value can't be set, inside a page): a click on the select's hidden text input presses the select; `setValue` opens it, clicks the matching option (exact, then a unique prefix, then a unique "contains") and checks the shown value — EQUAL to the option's text, never one containing it — a page's own `<select>` is chosen in place, never opened; no match is `invalid_params` naming the options. A click on a web check box's or radio's wrapper, label or inner text presses that one control (verified by its value) — a label only when it is the control's own (its title element, or linked); a hidden input stands for a select only when it is the select's own zero-size stand-in in the same container. Tab, Space and ⌘A into web content, and a key aimed into a sheet or panel, say in `detail` when nothing visibly changed (the focus, the check box, the selection; no new sheet or window, no selected row or text changed; a Tab the field took itself is said as that); a click with no effect on a web button named like a file picker names `key("return", { into })`. An off-desktop `target.screenshot` within 1.5 s of an act waits (bounded, ~700 ms) for a picture that differs from the one before the act; otherwise its `detail` adds that it may predate the last action and names `screenshot({ live: true, reason })`; the wait stops on the call's cancel. A value over 8,000 characters says that `state({within})` shows its first 8,000. |

@@ -28,6 +28,17 @@ public enum BrowserLinkProtocol {
     /// The link's own connection, separate from every other harness the app runs.
     public static let clientName = "browser-link"
 
+    /// `BROWSER_LINK_FEATURES` — what this side can do beyond the protocol number, named at attach (the app in its
+    /// params, the daemon in its answer). A side never uses a feature the other did not name. A repo test keeps this
+    /// equal to the daemon's list (`BrowserLinkParityTests`).
+    ///
+    /// `watchOnly` (ComputerV2 wake triggers): `tab.ensure` may carry `watchOnly: true` — a WATCH-ONLY hold, under which
+    /// the app sets none of its native-UI holds (`BrowserNativeUIPolicy`): the tab's dialogs, permission prompts, file
+    /// choosers, downloads, context menus, keys and focus stay the user's while a wake trigger waits on it. A
+    /// `tab.ensure` without it takes the full hold back; one with it drops back. It still counts toward the held-tab
+    /// ceiling.
+    public static let features = ["watchOnly"]
+
     public enum Method {
         public static let attach = "browserLink.attach"
         public static let result = "browserLink.result"

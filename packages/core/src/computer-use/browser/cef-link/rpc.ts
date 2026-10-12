@@ -11,7 +11,7 @@
 // browser reads "Winter isn't running".
 import { randomBytes } from "node:crypto";
 import {
-  BrowserLinkAttachParams, BrowserLinkDownloadParams, BrowserLinkEventsParams, BrowserLinkResultParams, BrowserLinkTabGoneParams, METHODS,
+  BROWSER_LINK_FEATURES, BrowserLinkAttachParams, BrowserLinkDownloadParams, BrowserLinkEventsParams, BrowserLinkResultParams, BrowserLinkTabGoneParams, METHODS,
 } from "@yanlinglabs/winter-protocol";
 import type { BrowserBackendRegistry } from "../registry";
 import { BROWSER_LINK_PROTOCOL, CefTransport, type CefTransportOptions, type LinkPeer } from "./cef-transport";
@@ -80,7 +80,7 @@ export class BrowserLink {
     }
   }
 
-  private attach(conn: object, peer: LinkPeer, p: { protocol: number; appVersion: string; pid: number }): { linkId: string; protocol: number } {
+  private attach(conn: object, peer: LinkPeer, p: { protocol: number; appVersion: string; pid: number; features?: string[] | undefined }): { linkId: string; protocol: number; features: string[] } {
     if (p.protocol !== BROWSER_LINK_PROTOCOL) {
       this.deps.registry.noteUnavailable({
         family: "winter", name: "Winter (built-in)",
@@ -97,10 +97,13 @@ export class BrowserLink {
     }
     const linkId = `bl_${randomBytes(6).toString("hex")}`;
     const transport = new CefTransport(linkId, peer, this.deps);
+    // The features both sides name are the ones used.
+    const ours: readonly string[] = BROWSER_LINK_FEATURES;
+    transport.appFeatures = new Set((p.features ?? []).filter((f) => ours.includes(f)));
     const reg = this.deps.registry.register(transport, { family: "winter", name: "Winter (built-in)", instanceKey: "winter" });
     this.current = { linkId, conn, peer, transport, unregister: reg.unregister };
-    this.deps.log?.(`computer-use: Winter's browser link attached (app ${p.appVersion.slice(0, 40)}, pid ${p.pid})`);
-    return { linkId, protocol: BROWSER_LINK_PROTOCOL };
+    this.deps.log?.(`computer-use: Winter's browser link attached (app ${p.appVersion.slice(0, 40)}, pid ${p.pid}${transport.appFeatures.size > 0 ? `, ${[...transport.appFeatures].join(", ")}` : ""})`);
+    return { linkId, protocol: BROWSER_LINK_PROTOCOL, features: [...ours] };
   }
 
   /** The live link, if `conn` is it and `linkId` names it — anything else is a stale or foreign link, dropped. */
