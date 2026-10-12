@@ -387,7 +387,9 @@ export class HostCodeExecutionService {
     if (this.refreshing)
       throw new HostCodeUnavailable("floor-refresh-in-progress");
     const floor = hostStorageFloorDescriptor(home);
-    const required = input.ownedBridge === true && hasFloor(floor);
+    const required = input.ownedBridge === true;
+    if (required && !hasFloor(floor))
+      throw new HostCodeUnavailable("owned-bridge-floor-unavailable");
     if (required && (!this.adapter || (this.adapter.requiresNativeOutput && !this.lifecycle?.createOutputTransport)))
       throw new HostCodeUnavailable("owned-bridge-capability-unavailable");
     if (required && (!binding || !this.adapter))

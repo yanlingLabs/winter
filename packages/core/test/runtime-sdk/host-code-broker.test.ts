@@ -56,6 +56,7 @@ function deferred<T>() {
 }
 function fixture({
   active = true,
+  ownedBridge = true,
   withBinding = true,
   authorize = async () => true,
   stop = async () => {},
@@ -129,7 +130,7 @@ function fixture({
     options = withBinding ? withHostCodeBinding(base, binding) : base;
   const enroll = (opts = options) =>
     service.enroll({
-      ownedBridge: true,
+      ...(ownedBridge ? { ownedBridge: true as const } : {}),
       options: opts,
       sessionId: "logical",
       backendSessionId: "backend",
@@ -224,8 +225,19 @@ test("explicit owned bridge requires binding while ordinary Code needs no broker
   ).not.toThrow();
   expect(() => f.service.assertReady(source)).toThrow("foreign-service-home");
 });
+test("explicit owned bridge refuses inactive storage before launch rather than becoming an ordinary unprotected child", async () => {
+  const f = fixture({ active: false, ownedBridge: true });
+  expect(() => f.enroll()).toThrow("owned-bridge-floor-unavailable");
+  expect(f.applied).toHaveLength(0);
+  expect(f.spawned).toBeUndefined();
+  // No failed-enrollment live/retired entry may later disappear through ordinary activation.
+  mkdirSync(join(home, "cowork"));
+  const remove = await f.service.refreshForStorage(home, { coordinationDir: coordination, coworkStorageActive: true });
+  try { const bridge = f.enroll(); expect(bridge.protectedStorage).toBe(true); f.spawnGeneration(bridge); expect(f.applied).toHaveLength(1); bridge.dispose(); }
+  finally { remove(); f.exited.resolve(0); }
+});
 test("inactive unregistered Code preserves resolved spawn posture", () => {
-  const f = fixture({ active: false, withBinding: false }),
+  const f = fixture({ active: false, ownedBridge: false, withBinding: false }),
     g = f.enroll();
   f.spawnGeneration(g);
   expect(f.applied).toHaveLength(0);
@@ -441,7 +453,7 @@ test("terminal call and disposed generation cannot replay", async () => {
   f.exited.resolve(0);
 });
 test("ordinary live children do not require stop/descendant receipts for storage activation", async () => {
-  const f = fixture({ active: false, stop: () => new Promise<void>(() => {}) }), g = f.enroll();
+  const f = fixture({ active: false, ownedBridge: false, stop: () => new Promise<void>(() => {}) }), g = f.enroll();
   f.spawnGeneration(g); mkdirSync(join(home, "cowork"));
   const start = Date.now();
   const remove = await f.service.refreshForStorage(home, { coordinationDir: coordination, coworkStorageActive: true }, 25);
@@ -457,13 +469,14 @@ test("activation stays blocked when a logical host policy consumer cannot acknow
   } finally { removeConsumer(); }
 });
 test("ordinary retired children never impose first-activation restart debt", async () => {
-  const f = fixture({ active: false }), g = f.enroll(); f.spawnGeneration(g); g.dispose(); f.exited.resolve(0);
+  const f = fixture({ active: false, ownedBridge: false }), g = f.enroll(); f.spawnGeneration(g); g.dispose(); f.exited.resolve(0);
   await Promise.resolve(); await Promise.resolve(); mkdirSync(join(home, "cowork"));
   const remove = await f.service.refreshForStorage(home, { coordinationDir: coordination, coworkStorageActive: true }, 100);
   try { expect(hostStorageFloorDescriptor(home).denyWritePaths.length).toBeGreaterThan(0); } finally { remove(); }
 });
 test("ordinary router queries use SDK policy without automatic Cowork broker enrollment", () => {
-  const f = fixture(), g = f.enroll();
+  const f = fixture({ ownedBridge: false }), g = f.enroll();
+  expect(g.protectedStorage).toBe(false);
   expect(() => f.service.assertQueryOptions({} as Options)).not.toThrow();
   expect(() => f.service.assertQueryOptions({ ...g.options })).not.toThrow(); g.dispose();
 });
@@ -940,7 +953,7 @@ test("matching cwd outside initial roots does not bypass a current host denial",
 });
 
 test("unprotected Code ignores broker observation limits and adds no hook authority", async () => {
-  const f = fixture({ active: false, withBinding: false }), g = f.enroll();
+  const f = fixture({ active: false, ownedBridge: false, withBinding: false }), g = f.enroll();
   expect(g.protectedStorage).toBe(false); expect(g.options.hooks).toBeUndefined();
   const oversized = JSON.stringify({ prompt: "x".repeat(262145) });
   for (let i = 0; i < 17000; i++) g.observe({ type: "tool_call", sessionId: "logical", callId: "same-call", threadId: "main", name: "Agent", argsJson: i === 0 ? oversized : "[]" } as NewSessionEvent);
