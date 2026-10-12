@@ -305,6 +305,16 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// U's Secure Keyboard Entry: Secure Event Input is on while U is in front.
     var secureEntry = false
     var secure: Bool { secureEntry && front == SimPid.user }
+    /// When Secure Event Input last went off (R17-a, the user's ruling: on at ANY moment of the 2.5 s quiet window is
+    /// never quiet — the contract 82f8caece wrote; the oracle read it only at the instant).
+    var secureEndedAt: Double = -.infinity
+    var wasSecure = false
+    /// Called wherever `secure` can change (U's front, Secure Keyboard Entry): records when it went off.
+    func noteSecureChange() {
+        let s = secure
+        if wasSecure, !s { secureEndedAt = now }
+        wasSecure = s
+    }
     var held: CGEventFlags = []
     /// The app the banner on screen is about, how long the AppleScript running takes, and when an indirect effect of
     /// the agent's came forward (for the report it owes).
@@ -738,7 +748,11 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         let bundle = pid.flatMap { bundles[$0] }
         let last = openers.last { o in anyReach || (o.scope.map { s in bundle.map(s.contains) ?? false } ?? true) }?.at ?? -.infinity
         let quiet = now - lastObservableHardwareAt, opener = now - last
-        return secure ? .no : (quiet > 2_600 && opener <= 1_400) ? .yes : (quiet < 2_400 || opener > 1_600) ? .no : .edge
+        // Secure Event Input on at any moment of the 2.5 s window: never quiet (R17-a) — at its edge, either answer.
+        let sinceSecure = secure ? 0 : now - secureEndedAt
+        if sinceSecure <= 2_400 { return .no }
+        let base: Touch = (quiet > 2_600 && opener <= 1_400) ? .yes : (quiet < 2_400 || opener > 1_600) ? .no : .edge
+        return sinceSecure <= 2_600 && base == .yes ? .edge : base
     }
 
     func untouchedCause(_ pid: pid_t, indirect: Bool, why: String, newPlace n: SPlace) -> SimCause {
@@ -965,8 +979,11 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
                 default: return false
                 }
             }
-            if hasLeft(cause) { leftApps.insert(n.app) } else { leftApps.remove(n.app) }
-            if case .untouched(_, .leftAlone, _, _) = cause { leftOnly.insert(n.app) } else { leftOnly.remove(n.app) }
+            // (R17-c, the controller's ruling: a desktop visit's return to an app left in front keeps it left — their typing
+            // there still makes it their place.)
+            let visitBack: Bool = { if case .engine(.visitReturn) = cause { return true }; return false }()
+            if hasLeft(cause) || (visitBack && leftApps.contains(n.app)) { leftApps.insert(n.app) } else { leftApps.remove(n.app) }
+            if case .untouched(_, .leftAlone, _, _) = cause { leftOnly.insert(n.app) } else if !visitBack { leftOnly.remove(n.app) }
             let oldFront = front, oldSpace = space
             if let p = pendingWork, n.app == p.app, now <= p.until { userWorkingIn = p.app; pendingWork = nil }
             if let w = userWorkingIn, n.app != w { userWorkingIn = nil }  // they left the app they were working in
@@ -982,6 +999,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             zOrder.insert(n.app, at: 0)
             FocusSPI.frontPid = n.app
             core?.secureInputOverride = secure
+            noteSecureChange()
             if space != oldSpace { onDesktop?() }
             guard n.app != oldFront || space != oldSpace else { nextWiden = nil; return }
             if case .engine(.consented(let h)) = cause, space1 != oldSpace1 {

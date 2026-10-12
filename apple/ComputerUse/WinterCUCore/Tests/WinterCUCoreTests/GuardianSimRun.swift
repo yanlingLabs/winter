@@ -583,6 +583,7 @@ final class SimRun {
             w.lock.withLock {
                 w.secureEntry = on
                 core.secureInputOverride = w.secure
+                w.noteSecureChange()
             }
             w.log("Terminal's Secure Keyboard Entry \(on ? "on" : "off")")
         case .userLaunch(let after):
