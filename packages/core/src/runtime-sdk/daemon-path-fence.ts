@@ -7,8 +7,9 @@ import { hostStorageFloorDescriptor, trackDaemonChildFloor, type HostStorageFloo
 
 /** Core retains credentials and cannot itself enter the tool sandbox. Apply the SAME host-owned
  * fence immediately before opening a model-selected path or dispatching it to a host consumer.
- * Directory scans/server roots include ancestors; an exact file read does not hide ordinary
- * files in a broad granted root. This is defense in depth, not same-user disk confidentiality. */
+ * Explicit scan checks include ancestors; exact file/root checks retain ordinary files in a
+ * broad granted root. LSP children separately inherit a kernel floor for descendant accesses.
+ * This is defense in depth, not same-user disk confidentiality. */
 export function assertDaemonPathAccess(home: string | undefined, path: string, cwd: string, access: "read" | "write" | "scan" = "read"): void {
   if (!home) return; // legacy standalone tool fixtures; every daemon consumer supplies its home
   const fence = homeFenceFor(home);
