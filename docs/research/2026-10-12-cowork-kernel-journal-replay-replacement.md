@@ -53,3 +53,8 @@ ARM64: `a3e3b4b0811e098113a7e0bfb042c5097f9f5ee43dc297fe9aff32aa71341a4f`.
 The revised independently admitted parent hash is
 `04966aa34daedaf6184d27141568bbc01b6a22c3bc85b0a453d6dd7bea0887aa`.
 Earlier artifacts and receipts remain retained. No privileged execution occurred.
+
+A dedicated build-only Linux workflow now compiles the reviewed helpers and uploads
+the exact receipt/artifacts for inspection. It runs only unprivileged admission
+checks, supplies no kernel-fixture opt-in, performs no sudo/mount/loop operation,
+and does not treat a successful build as permission to execute the artifacts.
