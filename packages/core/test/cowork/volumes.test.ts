@@ -7,7 +7,7 @@ import { CoworkVolumes, CoworkVolumeError, RAW_VOLUME_MIN_BYTES, RAW_VOLUME_MAX_
 import { BACKUP_EXCLUSION_MAX_BYTES, hasStickyBackupExclusion, isStickyBackupExclusion } from "../../src/cowork/volume-fs";
 import { timeMachineVolumeBackup, type CoworkVolumeBackup } from "../../src/cowork/volume-backup";
 import { CoworkRepository } from "../../src/cowork/repository";
-import { downgradeCoworkRuntimeStateToV7, downgradeRuntimeStateToV6, openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
+import { downgradeCoworkRuntimeStateToV7, downgradeRuntimeStateToV6, openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, type RuntimeStateDb } from "../../src/runtime-state/db";
 
 const homes: string[] = [], databases: RuntimeStateDb[] = [];
 afterEach(() => { databases.splice(0).forEach(db => db.close()); homes.splice(0).forEach(home => rmSync(home, { recursive: true, force: true })); });
@@ -125,15 +125,15 @@ test("backup path replacement during exclusion refuses; recorded old inode remai
   f = fixture(backup); f.store.plan(f.request, capacities); refusal(() => f.store.materialize(f.request), "recovery_required");
   expect(statSync(`${f.image()}-saved`).size).toBe(0); expect(readFileSync(f.image()).toString()).toBe("injected replacement");
 });
-test("v9 upgrades an old host-only v7 home; empty downgrade preserves native state and populated volumes refuse", () => {
+test("current schema upgrades an old host-only v7 home; empty downgrade preserves native state and populated volumes refuse", () => {
   const emptyHome = mkdtempSync(join(tmpdir(), "winter-volume-schema-")); homes.push(emptyHome);
   let db = openRuntimeStateDb(emptyHome); db.close();
-  expect(downgradeCoworkRuntimeStateToV7(emptyHome)).toEqual({ from: 9, to: 7 });
-  db = openRuntimeStateDb(emptyHome); expect(db.schemaVersion()).toBe(9); expect(db.db.query("SELECT count(*) AS n FROM cowork_volumes").get()).toEqual({ n: 0 }); db.close();
-  expect(downgradeRuntimeStateToV6(emptyHome)).toEqual({ from: 9, to: 6 });
+  expect(downgradeCoworkRuntimeStateToV7(emptyHome)).toEqual({ from: RUNTIME_STATE_SCHEMA_VERSION, to: 7 });
+  db = openRuntimeStateDb(emptyHome); expect(db.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION); expect(db.db.query("SELECT count(*) AS n FROM cowork_volumes").get()).toEqual({ n: 0 }); db.close();
+  expect(downgradeRuntimeStateToV6(emptyHome)).toEqual({ from: RUNTIME_STATE_SCHEMA_VERSION, to: 6 });
   const f = fixture(); allocate(f);
-  expect(() => downgradeCoworkRuntimeStateToV7(f.home)).toThrow("Cowork authority"); expect(() => downgradeRuntimeStateToV6(f.home)).toThrow("Cowork authority"); expect(f.db.schemaVersion()).toBe(9); expect(statSync(f.image()).size).toBe(RAW_VOLUME_MIN_BYTES);
-  const incompatible = new Database(join(emptyHome, "runtimes", "runtime-state.db")); incompatible.run("PRAGMA user_version=10"); incompatible.close();
+  expect(() => downgradeCoworkRuntimeStateToV7(f.home)).toThrow("Cowork authority"); expect(() => downgradeRuntimeStateToV6(f.home)).toThrow("Cowork authority"); expect(f.db.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION); expect(statSync(f.image()).size).toBe(RAW_VOLUME_MIN_BYTES);
+  const incompatible = new Database(join(emptyHome, "runtimes", "runtime-state.db")); incompatible.run(`PRAGMA user_version=${RUNTIME_STATE_SCHEMA_VERSION + 1}`); incompatible.close();
   expect(() => openRuntimeStateDb(emptyHome)).toThrow("newer-schema");
 });
 test("real tmutil adapter excludes only disposable images, with sticky metadata preserved on rename", () => {
@@ -162,7 +162,7 @@ test("v8 authority upgrades without reidentifying a workspace, and a genuinely e
   const f = fixture(), homeId = new CoworkRepository(f.db).homeIdentity();
   f.db.db.run("DROP TABLE cowork_volumes"); f.db.db.run("DROP TABLE cowork_volume_directories"); f.db.db.run("PRAGMA user_version=8");
   const upgraded = openRuntimeStateDb(f.home); databases.push(upgraded);
-  expect(upgraded.schemaVersion()).toBe(9); expect(new CoworkRepository(upgraded).homeIdentity()).toBe(homeId);
+  expect(upgraded.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION); expect(new CoworkRepository(upgraded).homeIdentity()).toBe(homeId);
   expect(new CoworkRepository(upgraded).get(f.request.workspaceId).workspaceId).toBe(f.request.workspaceId);
   const emptyHome = mkdtempSync(join(tmpdir(), "winter-v8-volume-rollback-")); homes.push(emptyHome);
   const empty = openRuntimeStateDb(emptyHome); empty.db.run("DROP TABLE cowork_volumes"); empty.db.run("DROP TABLE cowork_volume_directories"); empty.db.run("PRAGMA user_version=8"); empty.close();

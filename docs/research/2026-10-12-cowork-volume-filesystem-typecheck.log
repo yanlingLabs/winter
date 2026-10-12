@@ -1,0 +1,3 @@
+
+> winter-monorepo@ typecheck:core <workspace>/.worktrees/volume-filesystems
+> tsc --noEmit -p packages/core

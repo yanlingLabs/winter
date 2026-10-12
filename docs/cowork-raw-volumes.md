@@ -1,7 +1,9 @@
 # First-version raw Cowork backing images
 
 Status: host storage primitive implemented on `cowork/v1-raw-volumes`; production
-native backend wiring, filesystem formatting and guest readiness remain blocked.
+native backend wiring, protected native bootstrap wiring and actual guest readiness remain blocked.
+Schema 10 journals format-once intent/readiness as described below; native receipt
+authenticity and immutable Linux device bootstrap remain required.
 Separate encryption remains deferred under [the accepted storage
 boundary](cowork-storage-security.md). These files are plaintext and permission
 checks do not provide confidentiality against arbitrary same-user programs.
@@ -93,12 +95,45 @@ disks. The verifier must account for all native attachments/controllers; PID dea
 heartbeat expiry or resource-ledger release never releases the disks. An unknown
 stop preserves ownership. No conversation/Git/memory locking service is added.
 
-`allocated` always has `filesystemState=unformatted`. No ext4 signature, guest
-mount, ready-source acknowledgment or guest-start success is invented. The next
-integration must build a real native descriptor-consumer, safe immutable guest
-bootstrap formatting protocol and verified filesystem/guest readiness transition,
-then connect these to authenticated worker launch/stop and active RAM return.
-Until those gates pass, normal production provisioning stays disabled.
+Schema 9 allocated only unformatted images. Schema 10 adds expected ext4 UUID,
+one-shot format eligibility and a bounded protected bootstrap journal to the same
+canonical rows. It preserves owner/stop records and existing file identities;
+migrated schema9 volumes enter `recovery-required` without a UUID or format grant.
+New plan records mint a UUID. Unknown/restored/mismatched files never gain virgin
+provenance. Ordinary writable `open` before consumed bootstrap intent burns virgin
+eligibility rather than permitting a later destructive interpretation.
+
+The trusted controller orders allocation → claim → `prepareFilesystems` → pinned
+FD transfer → bootstrap effect → `confirmFilesystems`. Preparation requires the
+mandatory `CoworkVolumeFilesystemAuthority`, checked identities/exclusions,
+current owner and bootstrap authority. A top-level IMMEDIATE commit consumes
+virgin eligibility and binds both exact targets to one random operation nonce
+BEFORE any formatter receives descriptors. New volumes transition
+`unformatted → formatting → ready`; ready volumes transition
+`ready → probing → ready` with a fresh operation nonce, never format. In-flight
+or uncertain operations cannot be resubmitted; `failFilesystems` narrows to
+`recovery-required` and retains ownership. Native stop may release the owner
+through its existing rules but does not restore format eligibility. Recovery is
+an explicit future workflow, never ambiguous destructive retry.
+
+Confirmation requires the exact home/workspace/volume/creation/purpose/file
+identity/geometry/expected UUID and controller/worker/incarnation/lease/image
+scope, a closed ext4/UUID/flush/probe receipt and positive protected native
+verification. Guest JSON, ext4 signatures alone, manifests and PID observations
+are insufficient. Both rows become ready atomically. `filesystemsReady` requires
+current-owner confirmed receipts and revalidates metadata/exclusion/current
+authority; a new incarnation must probe existing data before admission. Caller
+transactions refuse these transitions before effects. No duplicate owner or
+stop ledger was added.
+
+The `spikes/cowork-filesystem-bootstrap` Linux-only fixture performs actual ext4
+formatting/probing ONLY on newly created disposable regular files when explicitly
+opted in. Mac protocol tests never run a formatter; actual Linux execution was
+not available locally. The closed protocol/fixture is preparation, not an
+immutable production block-device/bootstrap adapter or native receipt producer.
+No guest mount, ready-source ACK or guest-start success is invented. Until the
+actual authenticated native/bootstrap/guest gates pass, product provisioning and
+creation remain disabled.
 
 Before production, relocation/restore must have an explicit user-visible recovery
 flow. A copied home or restored directory has different device/inode identities

@@ -97,3 +97,33 @@ export function migrateCoworkVolumeSchema(db: Database): void {
     );
   `);
 }
+
+
+/** v10 preserves old ownership/identity but never invents virgin formatting provenance. */
+export function migrateCoworkFilesystemSchema(db: Database): void {
+  // Tests can rewind user_version without rebuilding their already-current tables.
+  if (db.query("PRAGMA table_info(cowork_volumes)").all().some((row: any) => row.name === "filesystem_uuid")) return;
+  db.exec(`ALTER TABLE cowork_volumes RENAME TO cowork_volumes_v9;
+    CREATE TABLE cowork_volumes (
+      volume_id TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES cowork_home_identity(home_id),
+      workspace_id TEXT NOT NULL REFERENCES cowork_workspaces(workspace_id), creation_id TEXT NOT NULL UNIQUE,
+      purpose TEXT NOT NULL CHECK(purpose IN ('data','environment')), format TEXT NOT NULL CHECK(format='raw-ext4-v1'),
+      format_version INTEGER NOT NULL CHECK(format_version=1), capacity_bytes INTEGER NOT NULL CHECK(capacity_bytes>=16777216 AND capacity_bytes<=274877906944 AND capacity_bytes%4096=0),
+      sector_bytes INTEGER NOT NULL CHECK(sector_bytes=512), filesystem_block_bytes INTEGER NOT NULL CHECK(filesystem_block_bytes=4096),
+      state TEXT NOT NULL CHECK(state IN ('planned','creating','allocated')),
+      filesystem_state TEXT NOT NULL CHECK(filesystem_state IN ('unformatted','formatting','probing','ready','recovery-required')),
+      filesystem_uuid TEXT, format_eligible INTEGER NOT NULL DEFAULT 0 CHECK(format_eligible IN (0,1)), filesystem_journal_json TEXT,
+      device TEXT, inode TEXT, uid INTEGER, mode INTEGER,
+      owner_json TEXT, last_stop_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      CHECK(format_eligible=0 OR (filesystem_state='unformatted' AND filesystem_uuid IS NOT NULL)),
+      CHECK(filesystem_state NOT IN ('formatting','probing','ready') OR (filesystem_uuid IS NOT NULL AND filesystem_journal_json IS NOT NULL)),
+      UNIQUE(workspace_id,purpose),
+      CHECK((device IS NULL)=(inode IS NULL)), CHECK((device IS NULL)=(uid IS NULL)), CHECK((device IS NULL)=(mode IS NULL)),
+      CHECK(mode IS NULL OR mode=384), CHECK(state!='planned' OR device IS NULL), CHECK(state!='allocated' OR device IS NOT NULL), CHECK(owner_json IS NULL OR state='allocated')
+    );
+
+    INSERT INTO cowork_volumes(volume_id,home_id,workspace_id,creation_id,purpose,format,format_version,capacity_bytes,sector_bytes,filesystem_block_bytes,state,filesystem_state,device,inode,uid,mode,owner_json,last_stop_id,created_at,updated_at)
+      SELECT volume_id,home_id,workspace_id,creation_id,purpose,format,format_version,capacity_bytes,sector_bytes,filesystem_block_bytes,state,'recovery-required',device,inode,uid,mode,owner_json,last_stop_id,created_at,updated_at FROM cowork_volumes_v9;
+    DROP TABLE cowork_volumes_v9;
+  `);
+}

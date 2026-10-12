@@ -1,0 +1,23 @@
+name: Cowork disposable Linux filesystem bootstrap
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'spikes/cowork-filesystem-bootstrap/**'
+      - '.github/workflows/cowork-filesystem-bootstrap.yml'
+permissions:
+  contents: read
+jobs:
+  disposable-files:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require Linux system ext4 tools
+        run: command -v mke2fs && command -v e2fsck && command -v blkid
+      - name: Format and probe new disposable regular files only
+        env:
+          WINTER_RUN_LINUX_FILESYSTEM_FIXTURE: '1'
+        run: python3 -I -S spikes/cowork-filesystem-bootstrap/test_bootstrap.py
