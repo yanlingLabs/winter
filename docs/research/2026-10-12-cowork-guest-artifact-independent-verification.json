@@ -1,0 +1,106 @@
+{
+  "commit": "cf1c3bfe",
+  "builds": {
+    "candidate-a": {
+      "verification": {
+        "cpioVerified": true,
+        "entries": 7281,
+        "uid": 0,
+        "gid": 0,
+        "regularModes": [
+          "0444",
+          "0555"
+        ],
+        "directoryMode": "0555",
+        "deviceNodes": 0,
+        "startupPresent": false
+      },
+      "hashes": {
+        "manifest": "2a14c91bd7c6cabf331dfa4fbb879a7a12939455526ad346f7d993844279d114",
+        "cpio": "83abcaf8807966b8ae293c10bae4059ffc450076d68d7eb871fd5faf40e522e3",
+        "gzip": "37a5deb69bae2fbbdf534fa142b8efdcf75975fad5044160d7fdaf24ecfdd853",
+        "runtime": "4eee5d4ce741b5e6aab0e8345f067d4fb9c08cdbb1c5b0a0aef22d36b3000c08"
+      }
+    },
+    "candidate-b": {
+      "verification": {
+        "cpioVerified": true,
+        "entries": 7281,
+        "uid": 0,
+        "gid": 0,
+        "regularModes": [
+          "0444",
+          "0555"
+        ],
+        "directoryMode": "0555",
+        "deviceNodes": 0,
+        "startupPresent": false
+      },
+      "hashes": {
+        "manifest": "2a14c91bd7c6cabf331dfa4fbb879a7a12939455526ad346f7d993844279d114",
+        "cpio": "83abcaf8807966b8ae293c10bae4059ffc450076d68d7eb871fd5faf40e522e3",
+        "gzip": "37a5deb69bae2fbbdf534fa142b8efdcf75975fad5044160d7fdaf24ecfdd853",
+        "runtime": "4eee5d4ce741b5e6aab0e8345f067d4fb9c08cdbb1c5b0a0aef22d36b3000c08"
+      }
+    }
+  },
+  "environmentNoFollow": {
+    "bin": {
+      "packedType": "directory",
+      "hostNoFollowOpen": true
+    },
+    "lib": {
+      "packedType": "directory",
+      "hostNoFollowOpen": true
+    },
+    "lib64": {
+      "packedType": "absent",
+      "hostNoFollowOpen": "absent-allowed-by-launcher"
+    },
+    "usr": {
+      "packedType": "directory",
+      "hostNoFollowOpen": true
+    }
+  },
+  "repeatedHashesEqual": true,
+  "verifiedPackages": 84,
+  "authenticatedReleases": [
+    {
+      "archive": "bookworm",
+      "inReleaseSha256": "77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa",
+      "indexSha256": "2ddb1737692e8c45c53e8d57c0ce4cd21c78c5703b830c3226b1423566a06c00",
+      "indexExpandedBytes": 49434864,
+      "validSignatures": [
+        "[GNUPG:] VALIDSIG 4CB50190207B4758A3F73A796ED0E7B82643E131 2026-07-11 1783765031 0 4 0 1 8 01 B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8"
+      ]
+    },
+    {
+      "archive": "security",
+      "inReleaseSha256": "af6f0df56cc8fb5e8ee8b9431cee886b7f7cb352f21b268fface12799d0de815",
+      "indexSha256": "05f7c9ca3a1ab904b7bb41d147a738504ebe9b9d1efa35ea63e4fa4fe4e899e7",
+      "indexExpandedBytes": 2297359,
+      "validSignatures": [
+        "[GNUPG:] VALIDSIG ED541312A33F1128F10B1C6C54404762BBB6E853 2026-10-10 1791659965 0 4 0 1 8 01 AC530D520F2F3269F5E98313A48449044AAD5C5D",
+        "[GNUPG:] VALIDSIG B0CAB9266E8C3929798B3EEEBDE6D2B9216EC7A8 2026-10-10 1791659965 0 4 0 1 8 01 05AB90340C0C5E797F44A8C8254CF3B5AEC0A8F0"
+      ]
+    }
+  ],
+  "helperBindings": {
+    "file-worker.c": {
+      "sourceSha256": "cfedc4067f76847a95f33cca69e5e8da2b19109eb9af39a94f9456bd8bb1e474",
+      "binarySha256": "8fc771e368d0023ac4a15c598e746ca4ebf01d8be7c4fcb56a01645ecc7260f2"
+    },
+    "linux-tool-compartment.c": {
+      "sourceSha256": "22ae11806a84df88479720960c6fdbfe3b4e976bd40c6e89b62ddc9f9a02d409",
+      "binarySha256": "8e25216ed26f59da65c8ac01de758631e7cc7e871994175da74ceb9cdb3bc2d1"
+    },
+    "process-worker.c": {
+      "sourceSha256": "674485959146485930743b9694caecf70bca3a97ff638b41c0dd2fe677e7035e",
+      "binarySha256": "ea0cec51eafa0b8e320b8629d0e8009d9d50e83061f7e01f7dea490998baf156"
+    }
+  },
+  "independentlyReparsedELFs": 627,
+  "allRecordedNeededProvidersAndVersionsPresent": true,
+  "sdkSourceFilesMatchFrozenGit": true,
+  "builderSourceMatchesFrozenGit": true
+}

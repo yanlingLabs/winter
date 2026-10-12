@@ -127,8 +127,13 @@ public struct CUStateFormatter: Sendable {
         guard let v = n.value, !v.isEmpty, v != n.name else { return nil }
         guard v.count > valueCap else { return quote(v) }
         // A long value is cut, and says how long it is and where it reads whole (round 13's dogfood item 14).
-        let whole = valueCap < Self.wholeValueCap ? " — state({within:\(n.ref)}) shows it whole" : ""
+        let whole = valueCap < Self.wholeValueCap ? " — " + Self.wholeHint(ref: n.ref, count: v.count) : ""
         return quote(cut(v)) + " (\(v.count) characters\(whole))"
+    }
+
+    /// Where a cut value reads at length: whole, or — past `wholeValueCap` — its first `wholeValueCap` characters.
+    static func wholeHint(ref: Int, count: Int) -> String {
+        count <= wholeValueCap ? "state({within:\(ref)}) shows it whole" : "state({within:\(ref)}) shows its first \(wholeValueCap)"
     }
 
     /// The value cap of a `state({ within })` read: one element's field, read back whole up to this many characters.
