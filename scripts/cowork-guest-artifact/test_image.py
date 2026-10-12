@@ -1,9 +1,43 @@
-import io, json, struct, tempfile, unittest
+import io, json, lzma, struct, tarfile, tempfile, unittest
+from unittest.mock import patch
 from pathlib import Path
-from image import Tree, elf, ar_members, add_deb
-from packages import version_compare, closure, verify_release, HERE
+from image import Tree, elf, ar_members, add_deb, control_fields
+from packages import version_compare, closure, verify_release, HERE, bounded_file, download, xz_chunks, index_paragraphs, sha
 
 class ImageTests(unittest.TestCase):
+    def test_cached_size_refuses_before_read_or_hash(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'cache';path.write_bytes(b'123456789')
+            with patch.object(Path,'read_bytes',side_effect=AssertionError('unbounded read forbidden')):
+                with self.assertRaises(ValueError):download('https://invalid.test',path,'0'*64,maximum=8)
+                with self.assertRaises(ValueError):bounded_file(path,32,expected_size=8)
+    def test_cached_small_file_and_index_stream_preserve_bytes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'cache';path.write_bytes(b'small')
+            self.assertEqual(download('https://invalid.test',path,sha(b'small'),size=5),b'small')
+        index=b'Package: test\nVersion: 1\nArchitecture: arm64\n\n'
+        self.assertEqual(list(index_paragraphs(lzma.compress(index,preset=0))),[{'Package':'test','Version':'1','Architecture':'arm64'}])
+    def test_xz_output_and_dictionary_limits_refuse_without_large_output(self):
+        packed=lzma.compress(b'x'*1024,preset=0)
+        with self.assertRaises(ValueError):list(xz_chunks(packed,128))
+        with self.assertRaises(lzma.LZMAError):list(xz_chunks(packed,2048,memory_limit=1))
+    def test_index_lines_and_records_refuse_with_small_configured_bounds(self):
+        packed=lzma.compress(b'Package: '+b'x'*65+b'\nVersion: 1\n\n',preset=0)
+        with self.assertRaises(ValueError):list(index_paragraphs(packed,line_limit=64))
+        with self.assertRaises(ValueError):list(index_paragraphs(packed,paragraph_limit=64))
+    def test_control_field_and_total_metadata_are_capped(self):
+        buffer=io.BytesIO()
+        with tarfile.open(fileobj=buffer,mode='w') as archive:
+            entry=tarfile.TarInfo('control');entry.size=65;archive.addfile(entry,io.BytesIO(b'x'*65))
+        packed=lzma.compress(buffer.getvalue(),preset=0)
+        with self.assertRaises(ValueError):control_fields('control.tar.xz',packed,field_limit=64)
+        with self.assertRaises(ValueError):control_fields('control.tar.xz',packed,maximum=128)
+    def test_control_stream_reads_small_regular_identity(self):
+        data=b'Package: fixture\nVersion: 1\nArchitecture: arm64\n'
+        buffer=io.BytesIO()
+        with tarfile.open(fileobj=buffer,mode='w') as archive:
+            entry=tarfile.TarInfo('./control');entry.size=len(data);archive.addfile(entry,io.BytesIO(data))
+        self.assertEqual(control_fields('control.tar.xz',lzma.compress(buffer.getvalue(),preset=0))['Package'],'fixture')
     def test_traversal_and_non_directory_ancestors_refuse(self):
         tree=Tree()
         for name in ['../escape','/absolute','safe/../../escape','zero\0byte']:

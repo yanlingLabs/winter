@@ -1,19 +1,72 @@
 """Pinned Debian downloads only. Never installs packages or executes maintainer scripts."""
-import argparse, functools, hashlib, json, lzma, os, re, subprocess, tempfile, urllib.request
+import argparse, codecs, hashlib, json, lzma, os, re, stat, subprocess, tempfile, urllib.request
 from pathlib import Path, PurePosixPath
 HERE=Path(__file__).resolve().parent
 
 def sha(data): return hashlib.sha256(data).hexdigest()
+def bounded_read(stream, maximum):
+    result=bytearray()
+    while True:
+        block=stream.read(min(64*1024, maximum-len(result)+1))
+        if not block: return bytes(result)
+        if len(result)+len(block)>maximum: raise ValueError('read bound')
+        result.extend(block)
+
+def bounded_file(path, maximum, expected_size=None):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size>maximum or (expected_size is not None and info.st_size!=expected_size):raise ValueError('cached file size/type bound')
+        with os.fdopen(fd,'rb') as stream:
+            fd=None;return bounded_read(stream, min(maximum,expected_size) if expected_size is not None else maximum)
+    finally:
+        if fd is not None:os.close(fd)
+
 def download(url, path, digest, size=None, maximum=64*1024*1024):
-    if path.exists(): data=path.read_bytes()
+    if size is not None and (size<0 or size>maximum):raise ValueError('declared download bound')
+    if path.exists(): data=bounded_file(path,maximum,size)
     else:
         if not url.startswith('https://'): raise ValueError('HTTPS required')
-        with urllib.request.urlopen(url, timeout=40) as response: data=response.read(maximum+1)
-        if len(data)>maximum: raise ValueError('download bound')
+        with urllib.request.urlopen(url, timeout=40) as response:data=bounded_read(response,min(maximum,size) if size is not None else maximum)
         if sha(data)!=digest or (size is not None and len(data)!=size): raise ValueError('download integrity')
         path.write_bytes(data)
     if sha(data)!=digest or (size is not None and len(data)!=size): raise ValueError('cache integrity')
     return data
+
+def xz_chunks(data, maximum, memory_limit=64*1024*1024):
+    decoder=lzma.LZMADecompressor(memlimit=memory_limit);at=0;expanded=0
+    while not decoder.eof:
+        incoming=data[at:at+64*1024] if decoder.needs_input else b''
+        if decoder.needs_input:
+            if not incoming:raise ValueError('truncated XZ')
+            at+=len(incoming)
+        block=decoder.decompress(incoming,max_length=min(64*1024,maximum-expanded+1))
+        if expanded+len(block)>maximum:raise ValueError('XZ expansion bound')
+        expanded+=len(block)
+        if block:yield block
+    if decoder.unused_data or at!=len(data):raise ValueError('XZ trailing data')
+
+def index_paragraphs(compressed, maximum=128*1024*1024, line_limit=128*1024, paragraph_limit=256*1024):
+    decoder=codecs.getincrementaldecoder('utf-8')();pending='';lines=[];length=0
+    def field_line(line):
+        nonlocal lines,length
+        if len(line)>line_limit:raise ValueError('index line bound')
+        if not line:
+            value='\n'.join(lines);lines=[];length=0
+            return next(paragraphs(value),None) if value else None
+        length+=len(line)+1
+        if length>paragraph_limit:raise ValueError('index paragraph bound')
+        lines.append(line)
+    for block in xz_chunks(compressed,maximum):
+        pending+=decoder.decode(block)
+        while '\n' in pending:
+            line,pending=pending.split('\n',1);entry=field_line(line)
+            if entry:yield entry
+        if len(pending)>line_limit:raise ValueError('index line bound')
+    pending+=decoder.decode(b'',final=True)
+    if pending:field_line(pending)
+    entry=field_line('')
+    if entry:yield entry
 
 def paragraphs(text):
     for chunk in text.strip().split('\n\n'):
@@ -28,7 +81,7 @@ def verify_release(data, pins, cache):
         home=Path(folder); os.chmod(home,0o700)
         for key in pins['keys']:
             path=HERE/key['file']
-            if sha(path.read_bytes())!=key['sha256']: raise ValueError('key digest')
+            if sha(bounded_file(path,64*1024))!=key['sha256']: raise ValueError('key digest')
             result=subprocess.run(['gpg','--no-options','--batch','--no-autostart','--homedir',str(home),'--with-colons','--show-keys',str(path)],capture_output=True,text=True,check=True)
             primary=result.stdout.split('fpr:::::::::',1)[1].split(':',1)[0]
             if primary!=key['fingerprint']: raise ValueError('key fingerprint')
@@ -105,10 +158,8 @@ def main():
         row=next(line.split() for line in records.splitlines() if line.strip().endswith(' '+target))
         digest,size=row[0],int(row[1])
         compressed=download(archive['url']+'/dists/'+archive['suite']+'/'+target,cache/(archive['id']+'-Packages.xz'),digest,size)
-        expanded=lzma.decompress(compressed)
-        if len(expanded)>128*1024*1024: raise ValueError('index expansion bound')
         releases.append({'archive':archive['id'],'url':archive['url'],'inReleaseSha256':sha(data),'indexSha256':sha(compressed),'signers':signers})
-        for entry in paragraphs(expanded.decode()):
+        for entry in index_paragraphs(compressed):
             if entry.get('Architecture') not in ['arm64','all']: continue
             entry['archive']=archive['id']; entry['baseUrl']=archive['url']
             prior=index.get(entry['Package'])
