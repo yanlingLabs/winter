@@ -13,11 +13,15 @@ static uint64_t monotonic_ms(void){struct timespec now;if(clock_gettime(CLOCK_MO
 static int observe_detached(const char *device,const struct stat *expected_block,const struct stat *source,uint64_t bytes){
     uint64_t started=monotonic_ms();if(!started)return -1;int pending_reported=0,last_error=0;
     for(unsigned attempts=0;attempts<64;attempts++){
+        uint64_t before=monotonic_ms();if(!before||before-started>=3000){errno=ETIMEDOUT;return -1;}
         int fd=open(device,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
         if(fd<0){last_error=errno;if(errno!=ENXIO)return -1;}
         else{
+            uint64_t opened=monotonic_ms();if(!opened||opened-started>=3000){close(fd);errno=ETIMEDOUT;return -1;}
             struct stat current;if(fstat(fd,&current)||!S_ISBLK(current.st_mode)||current.st_rdev!=expected_block->st_rdev){close(fd);errno=ESTALE;return -1;}
+            uint64_t checked=monotonic_ms();if(!checked||checked-started>=3000){close(fd);errno=ETIMEDOUT;return -1;}
             struct loop_info64 status={0};errno=0;int result=ioctl(fd,LOOP_GET_STATUS64,&status),error=errno;close(fd);
+            uint64_t observed=monotonic_ms();if(!observed||observed-started>=3000){errno=ETIMEDOUT;return -1;}
             if(result==-1&&error==ENXIO){replay_diagnostic(41,ENXIO);return 0;}
             if(result==-1){errno=error;return -1;}
             /* A different backing association is never ours to touch or wait out. */
