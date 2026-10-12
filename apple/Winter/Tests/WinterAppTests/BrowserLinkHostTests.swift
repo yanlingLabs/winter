@@ -797,7 +797,7 @@ final class BrowserLinkEndToEndTests: XCTestCase {
             guard let id = message["id"] as? Int, let method = message["method"] as? String else { return }
             switch method {
             case "browserLink.attach":
-                feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{"linkId":"L1","protocol":1}}"#)
+                feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{"linkId":"L1","protocol":\#(BrowserLinkProtocol.version)}}"#)
             default:
                 feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{}}"#)
             }
