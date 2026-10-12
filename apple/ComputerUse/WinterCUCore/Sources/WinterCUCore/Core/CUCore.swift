@@ -630,6 +630,8 @@ public final class CUCore: @unchecked Sendable {
     var guardianNoted: ((String) -> Void)?
     /// Whether a bound app is a web browser, as a test says (live: its Info.plist declares http/https).
     var isWebBrowserOverride: ((CUTarget) -> Bool)?
+    /// Floor F's words for a browser's dialogs, as a test says (live: the browser's own locale packs — `remoteDebuggingWords`).
+    var remoteDebuggingWordsOverride: ((CUTarget) -> CURemoteDebuggingWords)?
     /// Tests: the default handler of a URL scheme (`defaultHandler`), instead of LaunchServices.
     var defaultHandlerOverride: ((String) -> String?)?
     /// `defaultHandler`'s cache: per scheme, the handler and when it was looked up.
