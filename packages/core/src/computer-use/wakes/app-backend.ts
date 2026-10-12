@@ -19,6 +19,7 @@
 //
 // Every sentence this backend throws is the daemon's own — app names and the model's own words only, never a window
 // title or an element's name (those come back in `WakeArmed` and the event's `detail`, which the registry fences).
+import { familyForBundleId } from "../browser/families";
 import { AutomationFailure } from "../errors";
 import type { HelperClient } from "../helper-client";
 import {
@@ -38,6 +39,8 @@ export interface AppWakeBackendDeps {
   persistentlyAllowed(sessionId: string, bundleId: string): boolean;
   now?(): number;
   log?(line: string): void;
+  /** How long `watch.arm` may take (default 15 s). */
+  armTimeoutMs?: number;
 }
 
 /** What a lost helper connection says to the model. */
@@ -71,6 +74,12 @@ export class AppWakeBackend implements WakeBackend {
     if (TAB_ONLY_WAKE_KINDS.has(req.condition.kind)) {
       throw new AutomationFailure("NotAllowed", `${req.condition.kind === "submitted" ? "submitted" : "navigated and url"} are for browser tabs only — an app can't be watched for it`);
     }
+    // A browser Winter drives tab by tab is watched on its TABS (the ruling, review L4): its page is the tab backend's,
+    // with its own floors. Safari, which has no tab backend, stays an app.
+    const family = familyForBundleId(t.bundleId);
+    if (family !== undefined && family.bundleIds.length > 0) {
+      throw new AutomationFailure("NotAllowed", `${t.name} is a browser Winter drives tab by tab — wait on the tab instead: bind it with browsers.tab(…) and call tab.wakeWhen(…)`);
+    }
     if (!this.deps.persistentlyAllowed(req.sessionId, t.bundleId)) {
       throw new AutomationFailure("NotAllowed", `${t.name} was allowed for one call only — a wake trigger needs it allowed for this session`);
     }
@@ -91,9 +100,12 @@ export class AppWakeBackend implements WakeBackend {
     try {
       r = await this.deps.helper.request<WatchArmResult>("watch.arm", {
         targetId: req.targetId, watchId: req.wakeId, condition, expiresAt: req.expiresAt,
-      }, { timeoutMs: ARM_TIMEOUT_MS });
+      }, { timeoutMs: this.deps.armTimeoutMs ?? ARM_TIMEOUT_MS });
     } catch (err) {
       if (this.armed.get(req.wakeId) === entry) this.armed.delete(req.wakeId);
+      // Whatever went wrong — a timeout above all, when the helper may have armed it after all — its watch goes too
+      // (`watch.cancel` is idempotent): nothing is left watching with no trigger to end (review M1).
+      this.deps.helper.tell("watch.cancel", { watchId: req.wakeId });
       throw failure(err, t, req.condition);
     }
     if (this.armed.get(req.wakeId) !== entry) {
@@ -231,7 +243,12 @@ function failure(err: unknown, t: AppWakeTarget, c: WakeCondition): Error {
         case "auth_dialog": return new AutomationFailure("Refused", "that is a system authentication dialog — ask the user to handle it");
         default: return new AutomationFailure("Refused", `${t.name} can't be watched for that${reason ? ` (${reason})` : ""}`);
       }
-    case "unsupported": return new AutomationFailure("NotAllowed", `${t.name}'s window exposes no accessibility here, so Winter can't watch it — ask the user to show the window once on its desktop, then bind it again`);
+    case "unsupported":
+      // Three things answer `unsupported`: a window with no accessibility (the one the model can act on), a helper too
+      // old to know `watch.arm`, and a helper whose engine is going away (review L6).
+      if (reason === "no_accessibility") return new AutomationFailure("NotAllowed", `${t.name}'s window exposes no accessibility here, so Winter can't watch it — ask the user to show the window once on its desktop, then bind it again`);
+      if (/^unknown method/i.test(err.message)) return new AutomationFailure("HelperUnavailable", `Winter Computer Use is too old to wait on an app (it needs ${HELPER_WATCH_VERSION} or later) — update Winter`);
+      return new AutomationFailure("HelperUnavailable", "Winter Computer Use could not arm the trigger (it may be quitting) — try again", true);
     case "permission_missing": return new AutomationFailure("PermissionMissing", `Winter Computer Use needs the ${err.data.permission === "screenRecording" ? "Screen Recording" : "Accessibility"} permission — ask the user to grant it in Settings → Computer Use`);
     case "busy": return new AutomationFailure("TargetBusy", `${t.name} is busy, or Winter Computer Use holds too many watches — try again in a moment`);
     case "cancelled": return new AutomationFailure("Cancelled", "the call was cancelled");

@@ -110,8 +110,12 @@ describe("AppWakeBackend: arming", () => {
       [new FakeHelperError("refused", "the Window Title “Secret” said this", { reason: "secure_field" }), { kind: "changed", ref: "3", settleMs: 1500 },
         { kind: "Refused", message: "that is a password or payment field — Winter never watches one; ask the user to tell you when they are done" }],
       [new FakeHelperError("stale_ref", "[3] is gone", { ref: 3 }), { kind: "clicked", ref: "3" }, { kind: "StaleRef", message: "[3] is gone — call state()" }],
-      [new FakeHelperError("unsupported", "no AX in “Secret Doc”"), { kind: "titled", title: "x" },
+      [new FakeHelperError("unsupported", "no AX in “Secret Doc”", { reason: "no_accessibility" }), { kind: "titled", title: "x" },
         { kind: "NotAllowed", message: "Notes's window exposes no accessibility here, so Winter can't watch it — ask the user to show the window once on its desktop, then bind it again" }],
+      [new FakeHelperError("unsupported", "unknown method watch.arm"), { kind: "titled", title: "x" },
+        { kind: "HelperUnavailable", message: "Winter Computer Use is too old to wait on an app (it needs 1.17.0 or later) — update Winter" }],
+      [new FakeHelperError("unsupported", "the automation engine is gone", { reason: "engine_gone" }), { kind: "titled", title: "x" },
+        { kind: "HelperUnavailable", message: "Winter Computer Use could not arm the trigger (it may be quitting) — try again" }],
       [new FakeHelperError("target_lost", "gone", { reason: "window_closed" }), { kind: "titled", title: "x" },
         { kind: "TargetLost", message: "Notes's window closed — call apps.open or useWindow to pick another, then arm the trigger" }],
       [new FakeHelperError("busy", "too many"), { kind: "titled", title: "x" },
@@ -125,6 +129,33 @@ describe("AppWakeBackend: arming", () => {
       expect(got.message).not.toContain("Secret");
     }
     expect(r.backend.armedCount).toBe(0);
+    // Every refused arm also cancels the helper's watch (idempotent there): nothing is left watching (review M1).
+    expect(r.fake.calls("watch.cancel").length).toBe(cases.length);
+  });
+
+  test("an arm that times out cancels the helper's watch — it may have been armed after all", async () => {
+    const r = rig();
+    await bound(r);
+    const slow = new AppWakeBackend({
+      helper: r.helper, target: () => NOTES, persistentlyAllowed: () => true, armTimeoutMs: 30,
+    });
+    r.fake.handlers["watch.arm"] = (params) => new Promise((resolve) => setTimeout(() => { r.fake.watches.add(String(params.watchId)); resolve({ targetLabel: "Notes" }); }, 120));
+    expect((await refusal(slow.arm(req({ kind: "clicked", ref: "12" }), r.onEvent))).kind).toBe("HelperUnavailable");
+    await new Promise((res) => setTimeout(res, 200));
+    expect(r.fake.calls("watch.cancel")).toEqual([{ watchId: "wk_0123456789ab" }]);
+    expect(slow.armedCount).toBe(0);
+  });
+
+  test("a Chromium-family browser is watched on its tabs, never as an app; Safari stays an app", async () => {
+    for (const bundleId of ["com.google.Chrome", "com.microsoft.edgemac", "com.brave.Browser", "company.thebrowser.Browser"]) {
+      const r = rig({ target: { bundleId, name: "Browser", pid: 9 } });
+      const f = await refusal(r.backend.arm(req({ kind: "titled", title: "Done" }), r.onEvent));
+      expect(f).toEqual({ kind: "NotAllowed", message: "Browser is a browser Winter drives tab by tab — wait on the tab instead: bind it with browsers.tab(…) and call tab.wakeWhen(…)" });
+      expect(r.fake.calls("watch.arm")).toEqual([]);
+    }
+    const safari = rig({ target: { bundleId: "com.apple.Safari", name: "Safari", pid: 9 }, allowed: true });
+    // (Not allowed by this rig's policy for Safari: the refusal is the grant's, not the browser's.)
+    expect((await refusal(safari.backend.arm(req({ kind: "titled", title: "Done" }), safari.onEvent))).message).toContain("allowed for one call only");
   });
 
   test("the already-met sentences, per kind", () => {
