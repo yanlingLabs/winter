@@ -108,9 +108,10 @@ final class CUTarget: @unchecked Sendable {
     var webArea: AXUIElement?
     var webAreaWindowTitle: String?
     var noWebAreaUntil: Double?
-    /// Floor F's dialog scan: the app's window-server windows when it last ran, and its answer — scanned again only when
-    /// they change (the dialog is a window of its own). Pid-queue only.
-    var remoteDebuggingScan: (windows: Set<UInt32>, shown: Bool)?
+    /// Floor F's dialog scan: the app's window-server windows when it last ran, and its answer (`unreadable`: a dialog
+    /// in words Winter could not read, refused fail-closed) — scanned again only when they change (the dialog is a window
+    /// of its own). Pid-queue only.
+    var remoteDebuggingScan: (windows: Set<UInt32>, shown: Bool, unreadable: Bool)?
     /// Floor F: the windows whose walk ran out of time, and when (walked again only after a while). Pid-queue only.
     var remoteDebuggingSlowWalks: [UInt32: Double] = [:]
     /// The element whose press, sent from another desktop, showed no effect — the desktop visit was offered for it.
@@ -152,6 +153,11 @@ final class CUTarget: @unchecked Sendable {
         let changedAt = before.map { $0.digest == digest ? $0.changedAtMs : ms } ?? ms
         _lastOffScreenShot = (digest, ms, changedAt)
         return before
+    }
+    /// The last off-screen picture's digest and time, read without noting a new one.
+    var lastOffScreenShot: (digest: Int, atMs: Double, changedAtMs: Double)? {
+        lock.lock(); defer { lock.unlock() }
+        return _lastOffScreenShot
     }
 
     /// The region and budget of the last off-screen or live shot of the window: a desktop visit's return takes the

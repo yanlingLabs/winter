@@ -377,11 +377,13 @@ extension CUCore {
 
     func perform(_ p: TargetActParams, on t: CUTarget, token: CUCancellation.Token) throws -> ActOutcome {
         switch p.action {
-        case .click(let a): return try click(a, p, t, token)
-        case .setValue(let a): return try setValue(a, p, t, token)
+        case .click(let a): return pickerHinted(try click(a, p, t, token), a, t)
+        case .setValue(let a):
+            if let o = try setValueOfWebSelect(a, p, t, token) { return o }
+            return try setValue(a, p, t, token)
         case .type(let a): return try type(a, p, t, token)
         case .paste(let a): return try paste(a, p, t, token)
-        case .key(let a): return try key(a, p, t, token)
+        case .key(let a): return try keyChecked(a, t) { try key(a, p, t, token) }
         case .scroll(let a): return try scroll(a, p, t, token)
         case .drag(let a): return try drag(a, p, t, token)
         case .select(let a): return try select(a, p, t, token)
@@ -514,7 +516,7 @@ extension CUCore {
 
     // MARK: click
 
-    private func click(_ a: CUClickAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+    func click(_ a: CUClickAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
         let button = a.button ?? .left
         let count = a.count ?? 1
         guard (1...3).contains(count) else { throw CUError.invalidParams("count must be 1, 2 or 3") }
@@ -523,6 +525,12 @@ extension CUCore {
             guard a.point == nil else { throw CUError.invalidParams("click takes a ref or a point, not both") }
             let e = try element(ref, in: t)
             let info = ElementInfo(e, ax)
+            // A web select's own hidden input, or a check box's wrapper or label: the control it stands for is pressed
+            // (through this same click, every gate kept) — the dogfood's Material select and check boxes.
+            if button == .left, count == 1, flags.isEmpty, let to = clickRedirect(e, ref: ref, t) {
+                CULog.act.notice("click in \(t.appName, privacy: .public): [\(ref, privacy: .public)] stands for [\(to.ref, privacy: .public)] — that one pressed")
+                return try click(CUClickAction(ref: to.ref), p, t, token).noting(to.note)
+            }
             // A page's hidden text input (zero-size or off the window, standing in for a document drawn on a
             // canvas): there is nothing there to click — said, with what does work, instead of "scroll to it".
             if hiddenInputWords(e, t) != nil {
@@ -625,7 +633,7 @@ extension CUCore {
                 // An editable web element that stays outside the window even after `AXScrollToVisible` is a page's
                 // parked stand-in for its document (review of round 13, LOW — the hidden-input rule no longer counts
                 // one merely above or below the window): said so, with what works.
-                if isWebContent(e), editableElement(e), ax.string(e, kAXRoleAttribute) != kAXComboBoxRole {
+                if isWebContent(e), editableElement(e), !Self.webSelectRoles.contains(ax.string(e, kAXRoleAttribute) ?? "") {
                     throw CUError.unsupported("[\(ref)] is the page's hidden text input (it types into the document): it has no place on screen to click, even scrolled to — type or paste into it with type(text, { into: \(ref) }) or paste(text, { into: \(ref) }); to put the caret somewhere in the document, click the document's text where you want it")
                 }
                 throw CUError.unsupported("[\(ref)] is outside the window and could not be scrolled into view — scroll to it first")
