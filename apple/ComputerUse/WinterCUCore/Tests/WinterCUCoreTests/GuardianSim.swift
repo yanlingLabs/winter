@@ -367,14 +367,14 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// The world's answer: is the user working in `pid` now?
     func userWorks(in pid: pid_t) -> Bool {
         lock.withLock {
-            if let p = pendingWork, front == p.app, now <= p.until { userWorkingIn = p.app; pendingWork = nil }
+            if let p = pendingWork, front == p.app, now <= p.until { userWorkingIn = p.app; workBegan(p.app); pendingWork = nil }
             return userWorkingIn == pid && front == pid
         }
     }
     func userInteracted(_ app: pid_t) {
         lock.withLock {
             guard SimPid.agentTargets.contains(app) else { return }
-            if front == app { userWorkingIn = app; pendingWork = nil } else { pendingWork = (app, now + 500) }
+            if front == app { userWorkingIn = app; workBegan(app); pendingWork = nil } else { pendingWork = (app, now + 500) }
         }
     }
     /// The world's own record of the agent: operations running per app, the last thing it did to each app (a cause, or
@@ -422,6 +422,11 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// working in T, nothing of it may reach T — no key or click posted to it, no accessibility write or action on its
     /// elements (round 17, the review of round 16's H1: I6 was checked only at an act's start).
     var actOnT = false
+    /// The user started working in T during the running act (the world's own moment). Sticky for the rest of the act —
+    /// leaving T afterwards does not reopen it (the review of round 17, M1).
+    var actWorkSeen = false
+    /// T became the app the user works in (called wherever the world's mark is set).
+    func workBegan(_ app: pid_t) { if app == SimPid.target, actOnT { actWorkSeen = true } }
     var stepsRetiredAtStart = 0
     var targetForwardDuringOp = false
     var ctx: [SimCtx] = []
@@ -985,7 +990,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             if hasLeft(cause) || (visitBack && leftApps.contains(n.app)) { leftApps.insert(n.app) } else { leftApps.remove(n.app) }
             if case .untouched(_, .leftAlone, _, _) = cause { leftOnly.insert(n.app) } else if !visitBack { leftOnly.remove(n.app) }
             let oldFront = front, oldSpace = space
-            if let p = pendingWork, n.app == p.app, now <= p.until { userWorkingIn = p.app; pendingWork = nil }
+            if let p = pendingWork, n.app == p.app, now <= p.until { userWorkingIn = p.app; workBegan(p.app); pendingWork = nil }
             if let w = userWorkingIn, n.app != w { userWorkingIn = nil }  // they left the app they were working in
             if n.space == 400 { focusDisplay = 2 } else { focusDisplay = 1; space1 = n.space }
             if let w = appWindow(n.app, onSpace: n.space), mainWin[n.app] != w.id {

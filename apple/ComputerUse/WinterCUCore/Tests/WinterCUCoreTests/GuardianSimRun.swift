@@ -277,7 +277,9 @@ final class SimRun {
             return w.lock.withLock { w.wins[id]?.pid } == SimPid.target
         }
         let inFlightCheck = { (what: String) in
-            guard w.lock.withLock({ w.actOnT }), w.userWorks(in: SimPid.target) else { return }
+            // (Sticky: once they started working in T during the act, it holds after they leave T too — the review of
+            // round 17, M1.)
+            guard w.lock.withLock({ w.actOnT }), w.userWorks(in: SimPid.target) || w.lock.withLock({ w.actWorkSeen }) else { return }
             w.lock.withLock { w.fail("I6 (in flight): the agent's \(what) reached T after the user started working in it") }
         }
         ax.onPerform = { what in
@@ -971,7 +973,7 @@ final class SimRun {
             let working = w.userWorks(in: tpid)
             if !working { w.agentBegins(tpid) }
             defer { if !working { w.agentEnds(tpid) } }
-            w.lock.withLock { w.actOnT = !working }
+            w.lock.withLock { w.actOnT = !working; w.actWorkSeen = false }
             defer { w.lock.withLock { w.actOnT = false } }
             let opener = CUCore.actCanOpenApps(action) && !working
             if opener { w.lock.withLock { w.noteOpener(w.targetScope) } }
