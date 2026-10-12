@@ -22,7 +22,7 @@ export interface CoworkProviderRequest {
   version: 1; operation: "begin" | "next" | "cancel"; invocationId: string;
   scope: CoworkProviderScope; sequence: number; turn?: Omit<TurnRequest, "signal">;
 }
-export type CoworkProviderResponse = { version: 1; invocationId: string; sequence: number; kind: "accepted" | "event" | "pending" | "closed" | "refused"; event?: ProviderEvent; code?: "authority_denied" | "provider_unavailable" | "effects_uncertain" | "limit" };
+export type CoworkProviderResponse = { version: 1; invocationId: string; sequence: number; kind: "accepted" | "event" | "pending" | "closed" | "refused"; event?: ProviderEvent; code?: "authority_denied" | "provider_unavailable" | "effects_uncertain" | "limit" | "capacity_busy" };
 export interface CoworkProviderBrokerDeps {
   secrets: SecretStore;
   /** Revalidates canonical owner/boot/task delegation/grant and host selected account/model/destination. */
@@ -62,11 +62,13 @@ export class CoworkProviderBroker {
     this.deps.assertCurrent(admission);
     const store = credentialStoreOverSecretStore(this.deps.secrets), seen = new Set<string>(), secretStrings = new Set<string>();
     for (const header of Object.values(admission.connection.headers ?? {})) if (header) secretStrings.add(header);
-    const slot = JSON.stringify(admission.authRef); let closed = false, turn: Turn | undefined, usedGeneration = -1;
+    const slot = JSON.stringify(admission.authRef); let closed = false; const turns = new Map<string, Turn>();
     const remember = (material: CredentialMaterial | null): void => {
       if (!material) return;
       for (const [key, entry] of Object.entries(material)) if (["key", "token", "accessToken", "refreshToken", "idToken", "secretAccessKey", "sessionToken", "privateKeyPem"].includes(key) && typeof entry === "string" && entry) secretStrings.add(entry);
     };
+    const context = (): ProviderContext => {
+    let usedGeneration = -1;
     const read = async (): Promise<CredentialMaterial | null> => {
       this.deps.assertCurrent(admission); const material = await store.get(admission.authRef); this.deps.assertCurrent(admission); remember(material);
       const fingerprint = JSON.stringify(material); let state = this.materials.get(slot);
@@ -86,9 +88,11 @@ export class CoworkProviderBroker {
       } } : {}),
     };
     const ctx: ProviderContext = { connection: admission.connection, authRef: admission.authRef, credentials, stallTimeoutMs: 60_000, log: event => this.deps.log?.({ kind: "cowork_provider_activity", providerId: admission.resolved.providerId, model: admission.resolved.modelKey, ...(typeof event.bytes === "number" && Number.isFinite(event.bytes) ? { bytes: event.bytes } : {}) }) };
+    return ctx;
+    };
     const release = (current: Turn): void => {
       clearTimeout(current.deadline); if (current.idle) clearTimeout(current.idle);
-      if (turn === current && !current.pending) { current.ended = true; turn = undefined; this.active--; }
+      if (turns.get(current.id) === current && !current.pending) { current.ended = true; turns.delete(current.id); this.active--; }
     };
     const retire = (current: Turn): Promise<void> => {
       if (current.retiring) return current.retiring;
@@ -107,24 +111,36 @@ export class CoworkProviderBroker {
     const idle = (current: Turn): void => { if (current.idle) clearTimeout(current.idle); current.idle = setTimeout(() => stop(current), COWORK_PROVIDER_LIMITS.idleMs); current.idle.unref?.(); };
     const reply = (request: CoworkProviderRequest, kind: CoworkProviderResponse["kind"], fields: Partial<CoworkProviderResponse> = {}): CoworkProviderResponse => ({ version: 1, invocationId: uuid(request?.invocationId) ? request.invocationId : "00000000-0000-0000-0000-000000000000", sequence: Number.isSafeInteger(request?.sequence) && request.sequence >= 0 ? request.sequence : 0, kind, ...fields });
     return {
-      close: () => { closed = true; if (turn) stop(turn); },
+      close: () => { closed = true; for (const current of turns.values()) stop(current); },
       handle: async request => {
         try {
           if (closed || !request || request.version !== 1 || !uuid(request.invocationId) || !Number.isSafeInteger(request.sequence) || request.sequence < 0 || SCOPE_FIELDS.some(key => safeScope(request.scope)[key] !== admission.scope[key]) || Object.keys(request).some(key => !["version", "operation", "invocationId", "scope", "sequence", "turn"].includes(key))) throw new Error("authority_denied");
           this.deps.assertCurrent(admission);
+          // Cancellation is scoped/idempotent, not a provider effect. Fence delayed
+          // begin frames too; independent channel exchanges can arrive out of order.
+          if (request.operation === "cancel") {
+            if (request.turn !== undefined || request.sequence < 1) throw new Error("authority_denied");
+            const current = turns.get(request.invocationId);
+            if (current) stop(current);
+            else if (!seen.has(request.invocationId)) {
+              if (seen.size >= 4096) throw new Error("limit");
+              seen.add(request.invocationId);
+            }
+            return reply(request, "closed", { code: "effects_uncertain" });
+          }
           if (request.operation === "begin") {
-            if (request.sequence !== 0 || turn || this.active >= COWORK_PROVIDER_LIMITS.activeTurns || seen.has(request.invocationId) || seen.size >= 4096) throw new Error("authority_denied");
+            if (request.sequence !== 0 || seen.has(request.invocationId) || seen.size >= 4096) throw new Error("authority_denied");
+            if (turns.size >= COWORK_PROVIDER_LIMITS.activeTurns || this.active >= COWORK_PROVIDER_LIMITS.activeTurns) throw new Error("capacity_busy");
             const payload = snapshot(request.turn, COWORK_PROVIDER_LIMITS.requestBytes);
             if (!payload || Object.keys(payload).some(key => !TURN_FIELDS.has(key)) || payload.model !== admission.resolved.providerModelId || !Array.isArray(payload.messages) || payload.messages.length > 512 || payload.tools !== undefined && (!Array.isArray(payload.tools) || payload.tools.length > 128) || payload.maxOutputTokens !== undefined && (!Number.isSafeInteger(payload.maxOutputTokens) || payload.maxOutputTokens < 1 || payload.maxOutputTokens > 32_768)) throw new Error("authority_denied");
-            const controller = new AbortController(); const iterator = admission.resolved.adapter.streamTurn({ ...payload, signal: controller.signal }, ctx)[Symbol.asyncIterator]();
+            const controller = new AbortController(); const iterator = admission.resolved.adapter.streamTurn({ ...payload, signal: controller.signal }, context())[Symbol.asyncIterator]();
             if (typeof iterator.return !== "function") throw new Error("provider_unavailable");
             const current: Turn = { id: request.invocationId, controller, iterator, next: 1, bytes: 0, events: 0, failed: false, ended: false, deadline: setTimeout(() => stop(current), COWORK_PROVIDER_LIMITS.turnMs) }; current.deadline.unref?.();
-            turn = current; this.active++; seen.add(current.id); idle(current); return reply(request, "accepted");
+            turns.set(current.id, current); this.active++; seen.add(current.id); idle(current); return reply(request, "accepted");
           }
-          const current = turn;
-          if (!current || current.id !== request.invocationId || request.turn !== undefined || request.sequence !== current.next || current.failed || current.retiring || (current.pulling && request.operation !== "cancel")) throw new Error("authority_denied");
+          const current = turns.get(request.invocationId);
+          if (!current || current.id !== request.invocationId || request.turn !== undefined || request.sequence !== current.next || current.failed || current.retiring || current.pulling) throw new Error("authority_denied");
           current.next++;
-          if (request.operation === "cancel") { stop(current); return reply(request, "closed", { code: "effects_uncertain" }); }
           if (request.operation !== "next") throw new Error("authority_denied");
           if (current.idle) clearTimeout(current.idle); current.pulling = true;
           const pending = current.pending ?? current.iterator.next(); current.pending = pending;
@@ -161,8 +177,8 @@ export class CoworkProviderBroker {
             throw error;
           }
         } catch (error) {
-          if (turn) stop(turn);
-          const code = error instanceof Error && ["authority_denied", "effects_uncertain", "limit"].includes(error.message) ? error.message as "authority_denied" | "effects_uncertain" | "limit" : "provider_unavailable";
+          const failed = request && turns.get(request.invocationId); if (failed) stop(failed);
+          const code = error instanceof Error && ["authority_denied", "effects_uncertain", "limit", "capacity_busy"].includes(error.message) ? error.message as "authority_denied" | "effects_uncertain" | "limit" | "capacity_busy" : "provider_unavailable";
           return reply(request, "refused", { code });
         }
       },
