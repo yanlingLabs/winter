@@ -11,9 +11,15 @@ import { CanonicalPublicationJournal } from "../../../src/cowork/git/journal";
 import { CoworkRepository } from "../../../src/cowork/repository";
 import { openRuntimeStateDb } from "../../../src/runtime-state/db";
 import { GitPublicationError, type PublicationGrant, type PublicationJournal, type PublicationReceipt, type PublicationRequest, type PublicationStatus, type PublicationTransport, type Publisher } from "../../../src/cowork/git/types";
+import { GitFixtureLifetime } from "./fixture-lifetime";
 
-const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+const roots: string[] = [], lifetimes: GitFixtureLifetime[] = [];
+afterEach(async () => {
+  // A failed/timed-out test may still own Git/publication work. Cancel and settle
+  // that work before removing its cwd/quarantine, including late continuations.
+  await Promise.all(lifetimes.splice(0).map(lifetime => lifetime.close()));
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 const actor: Publisher = { principalId: "fixture-user", sessionId: "fixture-session", taskId: "fixture-task" };
 class Journal implements PublicationJournal {
   receipts = new Map<string, PublicationReceipt>();
@@ -24,7 +30,8 @@ async function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "winter-cowork-git-"))); roots.push(root);
   const home = join(root, "home"), guest = join(root, "guest"), remote = join(root, "remote.git"), quarantineRoot = join(root, "quarantine");
   for (const dir of [home, guest, quarantineRoot]) mkdirSync(dir, { mode: 0o700 });
-  const executor = new IsolatedGitExecutor();
+  const lifetime = new GitFixtureLifetime(); lifetimes.push(lifetime);
+  const executor = lifetime.executor(new IsolatedGitExecutor());
   const git = async (cwd: string, ...args: string[]) => { const result = await executor.run({ cwd, home, args }); if (result.code !== 0) throw new Error(`fixture git failed: ${args[0]}`); return result.stdout.trim(); };
   await git(guest, "init", "--initial-branch=main", "--template="); await git(root, "init", "--bare", "--template=", remote);
   await git(guest, "config", "user.name", "Fixture"); await git(guest, "config", "user.email", "fixture@example.invalid");
@@ -58,23 +65,40 @@ async function fixture() {
   const options: BrokerOptions = { quarantineRoot, isolatedFixture: true, git: executor, journal, transport, authority: { authorize: async () => { checks++; if (!authorized) throw new Error("token-fixture-secret denied"); return { ...grant }; } } };
   const request: PublicationRequest = { requestId: "request-one", workspaceId: "workspace-one", sourceId: "source-one", sourceRevision: 1, publicationRevision: 1, ref, oldOid: null, newOid: head, bundle: await makeBundle(ref) };
   return { root, home, guest, remote, quarantineRoot, git, executor, journal, options, request, base, head, ref, makeBundle,
-    broker: () => new CoworkGitPublicationBroker(options), checks: () => checks, pushes: () => pushes,
+    broker: () => new class extends CoworkGitPublicationBroker {
+      override publish(publisher: Publisher, request: PublicationRequest, signal?: AbortSignal): Promise<PublicationReceipt> {
+        return lifetime.track(() => super.publish(publisher, request, signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal));
+      }
+    }(options), checks: () => checks, pushes: () => pushes,
     revoke: () => authorized = false, setGrant: (value: PublicationGrant) => grant = value, grant: () => grant,
     protect: (value: typeof protection) => protection = value, setDefault: (value: string) => defaultRef = value,
     beforeObserve: (fn: () => Promise<void>) => beforeObserve = fn, beforePush: (fn: () => Promise<void>) => beforePush = fn, failPush: (value: typeof failPush) => failPush = value,
   };
 }
-async function refused(promise: Promise<unknown>, code: string) { await expect(promise).rejects.toMatchObject({ code, message: code }); }
+async function refused(promise: Promise<unknown>, code: string) {
+  // Await through normal promise rejection handling; keep the failure owned by
+  // this test rather than relying on a matcher pumping an outstanding Git job.
+  let error: unknown;
+  try { await promise; } catch (caught) { error = caught; }
+  expect(error).toBeInstanceOf(GitPublicationError);
+  expect(error).toMatchObject({ code, message: code });
+}
 
-test("creates and advances a feature ref using verified host graph and exact CAS; replay is reauthorized", async () => {
+test("creates a feature ref using verified host graph and exact CAS; replay is reauthorized", async () => {
   const f = await fixture(), broker = f.broker();
   const first = await broker.publish(actor, f.request); expect(first.status).toBe("applied"); expect(f.checks()).toBe(2);
   expect(await f.git(f.root, "--git-dir", f.remote, "rev-parse", f.ref)).toBe(f.head);
   expect(await broker.publish(actor, f.request)).toEqual(first); expect(f.pushes()).toBe(1); expect(readdirSync(f.quarantineRoot)).toEqual([]);
+  f.revoke(); await refused(broker.publish(actor, f.request), "authority_denied");
+});
+test("advances an existing feature ref using verified host graph and exact CAS", async () => {
+  const f = await fixture(), broker = f.broker();
+  await f.git(f.guest, "push", f.remote, `${f.head}:${f.ref}`);
   writeFileSync(join(f.guest, "work.txt"), "task two\n"); await f.git(f.guest, "commit", "-am", "next task");
   const next = { ...f.request, requestId: "next", oldOid: f.head, newOid: await f.git(f.guest, "rev-parse", "HEAD"), bundle: await f.makeBundle(f.ref) };
   expect((await broker.publish(actor, next)).status).toBe("applied");
-  f.revoke(); await refused(broker.publish(actor, f.request), "authority_denied");
+  expect(await f.git(f.root, "--git-dir", f.remote, "rev-parse", f.ref)).toBe(next.newOid);
+  expect(f.pushes()).toBe(1); expect(readdirSync(f.quarantineRoot)).toEqual([]);
 });
 test("production entry remains blocked before host auth/service integration", async () => {
   const f = await fixture(); f.options.isolatedFixture = false; const broker = f.broker();

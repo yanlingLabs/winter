@@ -43,7 +43,9 @@ function harness(): Harness {
     home, store, registry,
   } as Harness;
   h.session = {
-    sessionId: "s_dispatch", mode: "dispatch", cwd: home, roots: [home],
+    // Discovery authenticates a real caller record; an arbitrary context ID is
+    // deliberately refused rather than inheriting host Dispatch authority.
+    sessionId: store.createSession("global", { cwd: home, mode: "dispatch" }), mode: "dispatch", cwd: home, roots: [home],
   };
   const derive = makeActivityDeriver({
     attachedCount: () => 0,
@@ -117,7 +119,7 @@ describe("sessionsCapability: callTool", () => {
     h.store.setBackgrounded(two, true);
 
     const viaRegistry = await h.registry.execute(LIST_SESSIONS_TOOL, {}, {
-      cwd: h.home, roots: [h.home], sessionId: "s_dispatch", mode: "dispatch",
+      cwd: h.home, roots: [h.home], sessionId: h.session.sessionId, mode: "dispatch",
     });
     const viaCapability = await h.instance.callTool(LIST_SESSIONS_TOOL, {});
 
@@ -126,6 +128,18 @@ describe("sessionsCapability: callTool", () => {
     expect(viaCapability.content).toEqual([{ type: "text", text: viaRegistry.output }]);
     expect(viaRegistry.output).toContain(one);
     expect(viaRegistry.output).toContain(two);
+  });
+
+  test("a missing caller record cannot list host sessions through either door", async () => {
+    const h = harness(), target = h.store.createSession("global", { cwd: h.home, mode: "code" });
+    h.store.setBackgrounded(target, true);
+    const missing = { ...h.session, sessionId: "s_missing" };
+    const viaRegistry = await h.registry.execute(LIST_SESSIONS_TOOL, {}, missing);
+    const server = sessionsCapability(missing, h.deps);
+    const viaCapability = await (server.instance as WinterMcpServerInstance).callTool(LIST_SESSIONS_TOOL, {});
+    expect(viaRegistry.isError).toBe(false);
+    expect(viaRegistry.output).not.toContain(target);
+    expect(viaCapability.content).toEqual([{ type: "text", text: viaRegistry.output }]);
   });
 
   test("session_spawn answers with its placeholder — the engine bridge is Task 13's", async () => {
@@ -145,7 +159,7 @@ describe("sessionsCapability: callTool", () => {
   test("invalid arguments are an isError result with the registry's own wording", async () => {
     const h = harness();
     const viaRegistry = await h.registry.execute(LIST_SESSIONS_TOOL, { query: 42 }, {
-      cwd: h.home, roots: [h.home], sessionId: "s_dispatch", mode: "dispatch",
+      cwd: h.home, roots: [h.home], sessionId: h.session.sessionId, mode: "dispatch",
     });
     const viaCapability = await h.instance.callTool(LIST_SESSIONS_TOOL, { query: 42 });
     expect(viaRegistry.isError).toBe(true);
