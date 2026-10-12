@@ -410,7 +410,7 @@ final class OffDesktopActTests: XCTestCase {
         catch let e as CUError { XCTAssertEqual(e.code, "needs_desktop_visit", e.message) }
         // What it did shows only now: the dialog's content near it.
         let dialog = fakeElement(95_038)
-        ax.add(dialog, role: kAXGroupRole, title: "New item", frame: CGRect(x: 300, y: 300, width: 300, height: 200),
+        ax.add(dialog, role: kAXGroupRole, subrole: "AXApplicationDialog", title: "New item", frame: CGRect(x: 300, y: 300, width: 300, height: 200),
                extra: [kAXParentAttribute: webArea])
         ax.put(webArea, [kAXChildrenAttribute: ax.elements(webArea, kAXChildrenAttribute) + [dialog]])
         var w = sys.windows[77]!
@@ -418,9 +418,42 @@ final class OffDesktopActTests: XCTestCase {
         sys.windows[77] = w
         sys.stack = [w]
         let done = try await act(.click(CUClickAction(ref: r)))
-        XCTAssertTrue(done.detail?.contains("took effect (seen now, on its desktop)") == true, done.detail ?? "-")
+        XCTAssertTrue(done.detail?.contains("took effect (its own state changed, seen now on its desktop)") == true, done.detail ?? "-")
+        XCTAssertTrue(done.detail?.contains("check state()") == true, done.detail ?? "-")
         XCTAssertEqual(ax.performed.count, 1, "pressed once")
         XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "not clicked again")
+    }
+
+    /// Review of round 13, HIGH #1: an ANCESTOR took the press — the mark's evidence is the named element's own, so in
+    /// the visit nothing reads as "took effect": the layout moving (the window on screen now), a neighbour appearing or
+    /// the title changing is no effect of the press — it is clicked where it is, once.
+    func testWhenAnAncestorTookThePressTheVisitStillClicksTheNamedElement() async throws {
+        world()
+        let tile = fakeElement(95_040)
+        let row = fakeElement(95_041)
+        ax.add(row, role: kAXGroupRole, title: "Row", frame: CGRect(x: 110, y: 440, width: 400, height: 60),
+               extra: [kAXParentAttribute: webArea, kAXChildrenAttribute: [tile]])
+        ax.setActions(row, [kAXPressAction])
+        ax.add(tile, role: kAXGroupRole, title: "Plan", frame: CGRect(x: 120, y: 450, width: 120, height: 30),
+               extra: [kAXParentAttribute: row])
+        ax.refuses.insert("\(token(tile)):AXPress")
+        let r = ref(tile)
+        do { _ = try await act(.click(CUClickAction(ref: r))); XCTFail("expected needs_desktop_visit") }
+        catch let e as CUError { XCTAssertEqual(e.code, "needs_desktop_visit", e.message) }
+        XCTAssertTrue(ax.performed.contains("\(token(row)):AXPress"), "the ancestor took the press: \(ax.performed)")
+        // The visit: the window is on screen, the layout moved, the title changed, a neighbour appeared.
+        var to = CGPoint(x: 140, y: 470)
+        ax.put(tile, [kAXPositionAttribute: AXValueCreate(.cgPoint, &to)!, kAXTitleAttribute: "Plan (2)"])
+        let extra = fakeElement(95_042)
+        ax.add(extra, role: kAXGroupRole, title: "Banner", frame: CGRect(x: 0, y: 0, width: 10, height: 10), extra: [kAXParentAttribute: webArea])
+        ax.put(webArea, [kAXChildrenAttribute: ax.elements(webArea, kAXChildrenAttribute) + [extra]])
+        var w = sys.windows[77]!
+        w.onScreen = true
+        sys.windows[77] = w
+        sys.stack = [w]
+        let done = try? await act(.click(CUClickAction(ref: r)))
+        XCTAssertFalse(done?.detail?.contains("took effect") ?? false, done?.detail ?? "-")
+        XCTAssertEqual(poster.entries.filter { $0.type == .leftMouseDown }.count, 1, "clicked where it is, once")
     }
 
     /// No visit is offered for an element already in its pressed state (a selected tab) or a command whose effect is not

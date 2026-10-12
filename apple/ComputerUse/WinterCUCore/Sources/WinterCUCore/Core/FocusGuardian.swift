@@ -93,6 +93,23 @@ public enum CUMoveOwner: Equatable, Sendable {
 }
 
 /// One look at the user's front app and desktop that a path asks the rule about.
+/// What an opener act of the agent's can open or bring forward (round 14's queue item 1): any app (Finder, a launcher,
+/// an AppleScript's or a launch's unknown reach), or only these bundles — the app acted in, and for an app that is not a
+/// web browser the default handlers of web and mail links (a link it opens lands there), and for a menu command the
+/// Help viewer too. An app outside it coming forward is a third party's or the user's: never undone.
+public enum CUOpenerScope: Equatable, Sendable {
+    case any
+    case apps(Set<String>)
+
+    /// Whether an app with this bundle id can be what the act opened (an unknown bundle: only `.any`).
+    public func covers(_ bundle: String?) -> Bool {
+        switch self {
+        case .any: return true
+        case .apps(let s): return bundle.map(s.contains) ?? false
+        }
+    }
+}
+
 public struct CUMoveQuery: Equatable, Sendable {
     /// The front app and the active Space now.
     public var app: pid_t?
@@ -102,7 +119,7 @@ public struct CUMoveQuery: Equatable, Sendable {
     public var since: TimeInterval?
     /// Where the caller's own operation began: the user's place when the guard is not running.
     public var from: CUGuardedView?
-    /// The front app's process start and bundle id — read only while the agent has a launch pending.
+    /// The front app's process start and bundle id (the bundle: whether an opener act of the agent's could have opened it).
     public var appStartedAt: TimeInterval?
     public var appBundle: String?
     /// Whether switch-capable input can be seen at all (the session tap runs).
@@ -380,6 +397,9 @@ public struct CUFocusGuardianCore: Sendable {
         launches[k]?.bundle = bundle
     }
 
+    /// The bundle a pending launch is for, when known.
+    public func launchBundle(_ token: Int) -> String? { launches[token]?.bundle }
+
     public mutating func endLaunch(_ token: Int, pid: pid_t?, now: TimeInterval) {
         launches[token] = nil
         if let pid { noteAfterglow(pid, raise: true, now: now); agentLaunched.insert(pid) }
@@ -472,7 +492,7 @@ public struct CUFocusGuardianCore: Sendable {
         // (Only while the facts from the start are still kept: a notice heard later judges nothing clearly — review of
         // round 11, LOW #10.)
         let judgeable = now - start <= Self.keepFacts - Self.quietBeforeUndo
-        coldLaunches[pid] = (start, judgeable && inputObservable && !secureInput && clearlyAt(start, hardwareAt: nil))
+        coldLaunches[pid] = (start, judgeable && inputObservable && !secureInput && clearlyAt(start, hardwareAt: nil, bundle: bundle))
     }
     /// The untouched launches heard of, by process: its start, and whether it was clearly the agent's then.
     private var coldLaunches: [pid_t: (start: TimeInterval, clearly: Bool)] = [:]
@@ -486,7 +506,7 @@ public struct CUFocusGuardianCore: Sendable {
         guard q.inputObservable, !q.secureInput, let a = q.app, !everFront.contains(a), !agentLaunched.contains(a) else { return nil }
         if let c = coldLaunches[a] { return c.clearly ? c.start : nil }
         guard let s = q.appStartedAt, s <= upTo, upTo - s <= Self.keepFacts - Self.quietBeforeUndo,
-              clearlyAt(s, hardwareAt: q.hardwareAt.flatMap { $0 <= s ? $0 : nil }) else { return nil }
+              clearlyAt(s, hardwareAt: q.hardwareAt.flatMap { $0 <= s ? $0 : nil }, bundle: q.appBundle) else { return nil }
         return s
     }
 
@@ -494,15 +514,18 @@ public struct CUFocusGuardianCore: Sendable {
     /// The agent's last action that can open or bring forward ANOTHER app (a press or click, Return or Space, a menu
     /// command, an open, an AppleScript, a launch — never a read, typing plain text, a scroll or a hover): round 10's
     /// "clearly the agent's" needs one within the causal window.
+    /// `scope`: WHICH apps it can open (round 14's queue item 1 — a third party's activations, another agent session's
+    /// `open <url>` in Safari and its Terminal, were undone after a click in Chrome): an app outside every opener's scope
+    /// coming forward is never clearly the agent's.
     public private(set) var lastOpenerCause: TimeInterval = -.infinity
-    public mutating func noteOpenerCause(now: TimeInterval) {
+    public mutating func noteOpenerCause(now: TimeInterval, scope: CUOpenerScope = .any) {
         lastOpenerCause = max(lastOpenerCause, now)
-        openerTimes.append(now)
-        openerTimes.removeAll { now - $0 > Self.launchFirstWindow }
+        openerTimes.append((now, scope))
+        openerTimes.removeAll { now - $0.at > Self.launchFirstWindow }
     }
     /// Every opener act, in time order: a state re-judged later counts only those from before it was first seen (review
     /// of round 10, MEDIUM #8 — the last one alone, read as of now, let an act from after it count).
-    private var openerTimes: [TimeInterval] = []
+    private var openerTimes: [(at: TimeInterval, scope: CUOpenerScope)] = []
     /// No input of the user's within this before an untouched app came forward (round 10, the user's ruling: ~2 s;
     /// a little more, since their own open — Spotlight, a launcher, a link — lands up to 2 s after their last key).
     static let quietBeforeUndo: TimeInterval = 2.5
@@ -512,7 +535,7 @@ public struct CUFocusGuardianCore: Sendable {
     /// within the causal window, and Secure Event Input is not hiding their keys.
     func clearlyTheAgents(upTo: TimeInterval, q: CUMoveQuery) -> Bool {
         guard q.inputObservable, !q.secureInput else { return false }
-        if clearlyAt(upTo, hardwareAt: q.hardwareAt) { return true }
+        if clearlyAt(upTo, hardwareAt: q.hardwareAt, bundle: q.appBundle) { return true }
         // An app the agent's action cold-launched, coming forward for the first time with no key or click of the user's
         // since its process started (review of round 10, HIGH #1: a launch outlasts the causal window).
         guard let s = agentsColdLaunch(q, upTo: upTo) else { return false }
@@ -521,13 +544,16 @@ public struct CUFocusGuardianCore: Sendable {
         return true
     }
 
-    /// No key or click of the user's in the `quietBeforeUndo` up to `t`, and an opener act of the agent's within the
-    /// causal window up to `t` or a launch of the agent's begun by `t` and still pending — the facts from before `t` only.
-    func clearlyAt(_ t: TimeInterval, hardwareAt: TimeInterval?) -> Bool {
+    /// No key or click of the user's in the `quietBeforeUndo` up to `t`, and an opener act of the agent's that can open
+    /// `bundle` (the app that came forward; nil: unknown — only an act that can open any app covers it) within the causal
+    /// window up to `t`, or a launch of the agent's begun by `t` and still pending — the facts from before `t` only.
+    func clearlyAt(_ t: TimeInterval, hardwareAt: TimeInterval?, bundle: String? = nil) -> Bool {
         if hardwareTimes.contains(where: { $0 <= t && t - $0 <= Self.quietBeforeUndo }) { return false }
         if let h = hardwareAt, h <= t, t - h <= Self.quietBeforeUndo { return false }
-        if openerTimes.contains(where: { $0 <= t && t - $0 <= Self.causalWindow }) { return true }
-        return launches.values.contains { $0.since <= t }
+        if openerTimes.contains(where: { $0.at <= t && t - $0.at <= Self.causalWindow && $0.scope.covers(bundle) }) { return true }
+        // A launch pending: what it launches (once its bundle is known — round 14: an open or a launch reaches the app it
+        // opens, never any app).
+        return launches.values.contains { $0.since <= t && ($0.bundle == nil || $0.bundle == bundle) }
     }
 
     public mutating func noteHardwareAction(now: TimeInterval) {
@@ -643,6 +669,13 @@ public struct CUFocusGuardianCore: Sendable {
             }
             // Back at their place: a claim of a click elsewhere is gone (they moved on from it).
             if previous != current, let c = claim, c.app != app { claim = nil }
+            // Back at their place BY THEIR CLICK into it while it is held in front (a consented foreground): they chose it
+            // — a hold's end gives nothing back over it (round 14, the opt-in survey's seed 11: an app left in front came
+            // between, their click into the held app read as "already there", and the hold's end gave back the place
+            // from before it).
+            if previous != current, let c = claim, c.app == app, now <= c.until, exemptions[app]?.previous != nil {
+                forgetExemptPrevious()
+            }
             // Back at their place DURING a desktop visit (no restore runs then, and the visit takes them elsewhere): their
             // own move — the visit's end leaves them there (the model-based test: their ⌘-Tab back during the visit, and
             // its end took them to the dialog that was in front when it began).

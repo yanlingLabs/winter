@@ -113,11 +113,16 @@ struct SimPlan {
     var seed: UInt64
     var flagsSeen = true
     var steps: [SimStep]
+    /// T's bundle: Finder by default (its acts can open any app); another one makes T's acts open only T, the default
+    /// browser (S, Safari) and the mail app — X (Terminal) is then outside every act's reach (round 14's queue item 1).
+    var targetBundle = "com.apple.finder"
 
     /// Hand-authored: steps at fixed times (their random details from `seed`).
-    static func scripted(seed: UInt64, flagsSeen: Bool = true, _ steps: [(Double, SimKind)]) -> SimPlan {
+    static func scripted(seed: UInt64, flagsSeen: Bool = true, targetBundle: String = "com.apple.finder",
+                         _ steps: [(Double, SimKind)]) -> SimPlan {
         var r = SimRNG(seed)
-        return SimPlan(seed: seed, flagsSeen: flagsSeen, steps: steps.map { SimStep(at: $0.0, kind: $0.1, seed: r.next()) })
+        return SimPlan(seed: seed, flagsSeen: flagsSeen, steps: steps.map { SimStep(at: $0.0, kind: $0.1, seed: r.next()) },
+                       targetBundle: targetBundle)
     }
 
     static func generate(seed: UInt64, count: Int) -> SimPlan {
@@ -288,9 +293,18 @@ final class SimRun {
         core = CUCore(events: nil, clock: clock, skyLight: focusSkyLight(), poster: poster, ax: ax, sys: world,
                       pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
         world.core = core
-        target = CUTarget(id: "tsim", sessionId: "s", pid: SimPid.target, bundleId: "com.apple.finder", appName: "Finder",
+        target = CUTarget(id: "tsim", sessionId: "s", pid: SimPid.target, bundleId: plan.targetBundle, appName: "Finder",
                           isChromium: false, mirror: false, windowID: 77, windowTitle: "Docs")
         core.registerForTesting(target, windowElement: tWindow)
+        if plan.targetBundle != "com.apple.finder" {
+            // T is an ordinary app (round 14's queue item 1): its acts open T, the default browser (S) and the mail app
+            // only; X is Terminal — a third party's app, outside every act's reach.
+            world.bundles[SimPid.safari] = "com.apple.Safari"
+            world.bundles[SimPid.third] = "com.apple.Terminal"
+            world.targetScope = [plan.targetBundle, "com.apple.Safari", "com.apple.mail"]
+            core.isWebBrowserOverride = { _ in false }
+            core.defaultHandlerOverride = { ["http": "com.apple.Safari", "https": "com.apple.Safari", "mailto": "com.apple.mail"][$0] }
+        }
         target.refs.beginGeneration()
         visited = CUTarget(id: "t2sim", sessionId: "s2", pid: SimPid.visited, bundleId: "sim.visited", appName: "Visited",
                            isChromium: false, mirror: false, windowID: 61, windowTitle: "Far", privatePath: true)
@@ -763,7 +777,7 @@ final class SimRun {
                 w.wins[wid] = SimWin(id: wid, pid: pid, frame: CGRect(x: 320, y: 620, width: 300, height: 200), space: w.space1)
                 w.mainWin[pid] = wid
                 w.zOrder.append(pid)
-                w.agentColdLaunches[pid] = (w.now, w.clearlyNow())
+                w.agentColdLaunches[pid] = (w.now, w.clearlyNow(for: pid))
                 return pid
             }
             w.log("\(SimPid.name(pid)) starts (the agent's action opened it; clearly the agent's: \(w.lock.withLock { w.agentColdLaunches[pid].map { "\($0.clearly)" } ?? "?" }))")
@@ -931,8 +945,8 @@ final class SimRun {
             if !working { w.agentBegins(tpid) }
             defer { if !working { w.agentEnds(tpid) } }
             let opener = CUCore.actCanOpenApps(action) && !working
-            if opener { w.lock.withLock { w.lastOpenerAt = w.now } }
-            defer { if opener { w.lock.withLock { w.lastOpenerAt = w.now } } }
+            if opener { w.lock.withLock { w.noteOpener(w.targetScope) } }
+            defer { if opener { w.lock.withLock { w.noteOpener(w.targetScope) } } }
             do {
                 _ = try await core.targetAct(TargetActParams(targetId: "tsim", sessionId: "s", callId: id, action: action, access: .full,
                                                              allowForeground: false, privatePath: true))
@@ -976,9 +990,9 @@ final class SimRun {
             let working = w.userWorks(in: tpid)
             if !working {
                 w.agentBegins(tpid, raise: true)
-                w.lock.withLock { w.lastOpenerAt = w.now }
+                w.lock.withLock { w.noteOpener(w.targetScope) }
             }
-            defer { if !working { w.agentEnds(tpid); w.lock.withLock { w.lastOpenerAt = w.now } } }
+            defer { if !working { w.agentEnds(tpid); w.lock.withLock { w.noteOpener(w.targetScope) } } }
             do {
                 _ = try await core.targetAppleScript(TargetAppleScriptParams(targetId: "tsim", source: "tell application \"Finder\" to get name"))
             } catch { w.log("the script: \((error as? CUError)?.message ?? "\(error)")") }
@@ -988,7 +1002,7 @@ final class SimRun {
             let wid = UInt32(8000 + pid)
             let bundle = "sim.launched.\(pid)"
             w.agentBegins(pid, raise: true)
-            w.lock.withLock { w.lastOpenerAt = w.now }  // a launch can open apps (the engine notes its start and end)
+            w.lock.withLock { w.noteOpener([bundle]) }  // a launch opens the app it launches (round 14: never any app)
             w.lock.withLock {
                 w.running.insert(pid)
                 w.bundles[pid] = bundle
@@ -1018,7 +1032,7 @@ final class SimRun {
             do {
                 _ = try await core.targetBind(TargetBindParams(sessionId: "s", app: bundle, mirror: false))
             } catch { w.log("the bind: \((error as? CUError)?.message ?? "\(error)")") }
-            w.agentEnds(pid); w.lock.withLock { w.lastOpenerAt = w.now }
+            w.agentEnds(pid); w.lock.withLock { w.noteOpener([bundle]) }
         case .agentBusy(let n, let gap):
             for k in 0..<n {
                 if w.violation != nil { break }
@@ -1046,7 +1060,7 @@ final class SimRun {
         let kind = (await execute(plan)).violation.map { String($0.prefix(3)) }
         let deadline = Date().addingTimeInterval(120)
         func fails(_ steps: [SimStep]) async -> Bool {
-            guard let v = (await execute(SimPlan(seed: plan.seed, flagsSeen: plan.flagsSeen, steps: steps))).violation else { return false }
+            guard let v = (await execute(SimPlan(seed: plan.seed, flagsSeen: plan.flagsSeen, steps: steps, targetBundle: plan.targetBundle))).violation else { return false }
             return String(v.prefix(3)) == kind
         }
         var cur = plan.steps

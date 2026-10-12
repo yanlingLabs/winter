@@ -368,6 +368,15 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     var lastObservableHardwareAt: Double = -.infinity
     /// The agent's last action that can open apps (a click, a press, an AppleScript, a launch, an open): round 10.
     var lastOpenerAt: Double = -.infinity
+    /// Every such action and WHICH apps (bundle ids) it can open — nil: any (round 14's queue item 1).
+    var openers: [(at: Double, scope: Set<String>?)] = []
+    /// What an act on T (or an AppleScript to it) can open: nil (any) while T is Finder; else T, the default browser and
+    /// mail app (`SimPlan.targetBundle`).
+    var targetScope: Set<String>?
+    func noteOpener(_ scope: Set<String>?) {
+        lastOpenerAt = now
+        openers.append((now, scope))
+    }
     var visiting = false
     var visitStartedAt: Double = -.infinity
     /// The app in front when the visit began (the visit's way back is the agent's too).
@@ -686,8 +695,11 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// An app the agent never touched coming forward now: the contract's rule on the world's facts (I1 and its indirect
     /// effects, round 9).
     /// "Clearly the agent's" now, from the world's own record (round 10's rule).
-    func clearlyNow() -> Touch {
-        let quiet = now - lastObservableHardwareAt, opener = now - lastOpenerAt
+    func clearlyNow(for pid: pid_t?) -> Touch {
+        // Only an action that can open THIS app counts (round 14's queue item 1: a third party's app is never the agent's).
+        let bundle = pid.flatMap { bundles[$0] }
+        let last = openers.last { o in o.scope.map { s in bundle.map(s.contains) ?? false } ?? true }?.at ?? -.infinity
+        let quiet = now - lastObservableHardwareAt, opener = now - last
         return secure ? .no : (quiet > 2_600 && opener <= 1_400) ? .yes : (quiet < 2_400 || opener > 1_600) ? .no : .edge
     }
 
@@ -739,7 +751,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         // last 2.5 s, an action of the agent's that can open apps within 1.5 s, no Secure Event Input; otherwise, with the
         // agent active, left in front (never adopted — only their switch input does that), said.
         let left = SimCause.untouched(pid, .leftAlone, indirect: indirect, why + " (not clearly the agent's)")
-        let clearly = clearlyNow()
+        let clearly = clearlyNow(for: pid)
         switch agentRecent(at: now) {
         case .no:
             base = clearly == .yes ? notTheirs : adopt

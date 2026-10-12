@@ -245,6 +245,24 @@ final class BackgroundPasteTests: XCTestCase {
         _ = open
     }
 
+    /// Review of round 13, LOW: the shortcut ARRIVES as keys — with the focus in the sheet (round 14: no `into` needed),
+    /// the app's menu item is never pressed.
+    func testAShortcutWithTheFocusInASheetArrivesAsKeys() async throws {
+        world()
+        let open = anotherWindowKey()
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window])  // the bound window is key in its app
+        let sheet = fakeElement(97_032), list = fakeElement(97_033)
+        ax.put(window, [kAXChildrenAttribute: ax.elements(window, kAXChildrenAttribute) + [sheet]])
+        ax.add(sheet, role: kAXSheetRole, frame: CGRect(x: 100, y: 40, width: 600, height: 400),
+               extra: [kAXParentAttribute: window, kAXChildrenAttribute: [list]])
+        ax.add(list, role: kAXListRole, frame: CGRect(x: 120, y: 80, width: 560, height: 300), extra: [kAXParentAttribute: sheet])
+        ax.focus(pid: pid, on: list)
+        _ = try? await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c", action: .key(CUKeyAction(combo: "cmd+l")),
+                                                      access: .full, allowForeground: false, privatePath: true))
+        XCTAssertFalse(ax.performed.contains { $0.hasSuffix(":AXPress") }, "never the menu item: \(ax.performed)"); _ = open
+        XCTAssertTrue(poster.keyDowns.contains { $0.flags.contains(.maskCommand) }, "the ⌘L went as keys")
+    }
+
     /// Round 13 (dogfood): a click on a file row in an open panel (a sheet) selects it over accessibility — a click into a
     /// background sheet only made it key, and Open stayed disabled.
     func testAClickOnARowInASheetSelectsItOverAccessibility() async throws {

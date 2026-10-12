@@ -102,6 +102,9 @@ final class StateFormatterTests: XCTestCase {
         let long = String(repeating: "a", count: 250)
         XCTAssertEqual(f.line(CUNode(ref: 5, role: "AXTextField", value: long)),
                        "[5] text field value=\"\(String(repeating: "a", count: 200))…\" (250 characters — state({within:5}) shows it whole)")
+        // find() says so too (round 14's queue, item 2).
+        XCTAssertEqual(CUFinder.summary(CUNode(ref: 5, role: "AXTextField", value: long)).value,
+                       "\(String(repeating: "a", count: 200))… (250 characters — state({within:5}) shows it whole)")
         // Round 13's dogfood item 14: a `within` read shows it whole.
         var whole = f
         whole.valueCap = CUStateFormatter.wholeValueCap

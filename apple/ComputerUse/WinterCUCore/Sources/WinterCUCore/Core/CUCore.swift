@@ -621,6 +621,8 @@ public final class CUCore: @unchecked Sendable {
     var guardianNoted: ((String) -> Void)?
     /// Whether a bound app is a web browser, as a test says (live: its Info.plist declares http/https).
     var isWebBrowserOverride: ((CUTarget) -> Bool)?
+    /// Tests: the default handler of a URL scheme (`defaultHandler`), instead of LaunchServices.
+    var defaultHandlerOverride: ((String) -> String?)?
     /// The bind whose launch a resolver is naming (`noteGuardianLaunchBundle`).
     @TaskLocal static var bindLaunchToken: Int?
     /// Sessions with a script running, the latest private-path setting seen, and the pending end of the tail.

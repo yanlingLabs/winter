@@ -195,7 +195,8 @@ final class WebPressTests: XCTestCase {
         }
         let r = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
             action: .hover(CUHoverAction(ref: ref(button), ms: 50)), access: .click, allowForeground: false, privatePath: false))
-        XCTAssertTrue(r.detail?.contains("state() shows what appeared") ?? false, r.detail ?? "")
+        // Round 14: said as it is — what appeared, never "nothing appeared".
+        XCTAssertTrue(r.detail?.contains("1 new element(s) appeared in the page; state() shows them") ?? false, r.detail ?? "")
         XCTAssertFalse(r.detail?.contains("nothing new appeared") ?? true)
     }
 

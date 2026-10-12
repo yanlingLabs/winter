@@ -32,6 +32,7 @@ interface WorldOpts {
   privateEventPath?: boolean;
   /** The live suite's screenshot sink (test seam). */
   screenshotSink?: (shot: { sessionId: string; primitive: string; mime: string; base64: string }) => void;
+  dangerousAdded?: string[];
   attended?: boolean;
   answer?: (e: Extract<NewSessionEvent, { type: "approval_requested" }>, broker: ApprovalBroker) => void;
 }
@@ -74,6 +75,7 @@ function world(opts: WorldOpts = {}) {
     helper, policy, settings: () => settings, telemetry, recentApps: new RecentApps(home),
     audit: (l) => audits.push(l), interrupt: (sid) => interrupts.push(sid), log: (l) => logs.push(l),
     ...(opts.screenshotSink === undefined ? {} : { screenshotSink: opts.screenshotSink }),
+    ...(opts.dangerousAdded === undefined ? {} : { site: { dangerousDomainsAdded: () => opts.dangerousAdded } }),
   });
   services.push(svc);
   const run = (code: string, o: { sessionId?: string; vision?: boolean; timeoutMs?: number; reset?: boolean; signal?: AbortSignal; model?: string } = {}): Promise<ScriptResult> =>
@@ -189,6 +191,17 @@ describe("ComputerV2: binding, state and the diff base", () => {
   macOnly("a rerouted link is an ACT in its opener: a click-only browser opens nothing", async () => {
     const w = world({ apps: { "com.apple.Safari": { access: "click" } } });
     w.fake.handlers["target.act"] = () => ({ rung: 1, linkOpen: "https://news.example.org/a" });
+    w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.apple.Safari", name: "Safari", path: "/Applications/Safari.app" });
+    w.fake.handlers["apps.openDocument"] = () => ({ app: { name: "Safari", bundleId: "com.apple.Safari", pid: 77 }, windowID: 5 });
+    await w.run("const notes = await apps.open('Notes')");
+    const r = await w.run("await notes.click(14)");
+    expect(r.isError).toBe(true);
+    expect(w.fake.calls("apps.openDocument").length).toBe(0);
+  }, 30_000);
+
+  macOnly("a rerouted link to a domain the USER added to the dangerous list is refused too (no browser engine)", async () => {
+    const w = world({ dangerousAdded: ["evil.example"] });
+    w.fake.handlers["target.act"] = () => ({ rung: 1, linkOpen: "https://www.evil.example/x" });
     w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.apple.Safari", name: "Safari", path: "/Applications/Safari.app" });
     w.fake.handlers["apps.openDocument"] = () => ({ app: { name: "Safari", bundleId: "com.apple.Safari", pid: 77 }, windowID: 5 });
     await w.run("const notes = await apps.open('Notes')");
