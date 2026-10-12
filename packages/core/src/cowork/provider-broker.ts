@@ -65,7 +65,12 @@ export class CoworkProviderBroker {
     const slot = JSON.stringify(admission.authRef); let closed = false, watermark = 0; const turns = new Map<string, Turn>();
     const consume = (ordinal: number): void => {
       if (ordinal <= watermark || consumed.has(ordinal)) throw new Error("authority_denied");
-      if (ordinal > watermark + COWORK_PROVIDER_LIMITS.invocationWindow) throw new Error("authority_denied");
+      // Lost begin + best-effort cancel cannot pin a gap forever. Older ordinals
+      // expire permanently; exact active turns remain in their independent map.
+      if (ordinal > watermark + COWORK_PROVIDER_LIMITS.invocationWindow) {
+        watermark = ordinal - COWORK_PROVIDER_LIMITS.invocationWindow;
+        for (const prior of consumed) if (prior <= watermark) consumed.delete(prior);
+      }
       consumed.add(ordinal);
       while (consumed.delete(watermark + 1)) watermark++;
     };
