@@ -108,10 +108,18 @@ separately. Cowork remains unavailable until its required gates pass.
 
 ## Work in progress
 
+The composed host storage primitive now includes schema 9 raw volumes through
+`ca0d5316`. It records sparse image identity, sticky backup exclusion and durable
+writable ownership; outer transaction rollback and transaction-completion FD
+cleanup have regressions. Root composition checks passed 60 tests/305 assertions
+and Core typecheck. These images remain explicitly unformatted: native descriptor
+transfer, filesystem bootstrap and authenticated worker stop evidence are still
+required. See [raw volume scope](cowork-raw-volumes.md).
+
 | Area | Current work | Required before completion |
 | --- | --- | --- |
-| Canonical host state | Schema 8 repository, receipts/outbox, typed workspace metadata RPCs, remote allowlist mirrors and bounded cursor pages | Native controller acknowledgments, source provisioning, authority service wiring, lifecycle/recovery and paired-client scope adapter |
-| Host storage protection | Retained-home fences and Core/SDK authority consumer; synthetic native key-broker and host-output fixtures | Owner/mode/file-identity checks and backup exclusions; embedded/daemon file and spawn coverage; Workflow wiring; preserve ordinary Code behavior; stop owned host effects on daemon loss |
+| Canonical host state | Schema 9 repository and raw volume records, receipts/outbox, typed workspace metadata RPCs, remote allowlist mirrors and bounded cursor pages | Native controller acknowledgments, source provisioning, authority service wiring, lifecycle/recovery and paired-client scope adapter |
+| Host storage protection | Retained-home fences, accepted Core/SDK path consumer, raw image owner/mode/identity and backup checks; deferred synthetic key-broker | Native descriptor consumer and stop proof; installed SDK integration; Workflow wiring; stop owned host effects on daemon loss |
 | Native VM integration | VZ research foundations; reviewed Linux/HVF live reclaim with one RAW disk | Persistent RAW storage and remaining asynchronous devices, production signed worker admission, cancellation/ownership, direct shares, automatic resources and concurrent latency |
 | Guest execution | Merged remote transport; confined text file and foreground-process helpers; protected-store bootstrap seam | Immutable runtime/supervisor, native ownership and termination adapters, complete process/extension routes, run-home/instructions and cold VM parent/child restoration |
 | Network and credentials | Native egress and bounded Git publication foundations, isolated package receipts | Guest parser outside credential daemon; brokered sockets and providers/MCP; GitHub auth/private clone/service wiring; native resource bounds and revocation draining |
