@@ -839,7 +839,10 @@ export class HeadlessPool implements CdpTransport {
     };
     t.presentation = p;
     try {
-      if (control) await this.drain(t);
+      if (control) {
+        await this.drain(t);
+        await this.yieldToPerson(t);
+      }
       if (t.presentation !== p) throw new AutomationFailure("TargetBusy", "the tab's presentation changed meanwhile — try again");
       const r = await this.command(t.proc, "headless.present", {
         tabId: t.tabKey, nonce, viewerRequirement: this.deps.viewerRequirement?.() ?? "", control, scale: 1,
@@ -889,12 +892,31 @@ export class HeadlessPool implements CdpTransport {
     });
   }
 
+  /**
+   * Before the person gets control: what the agent's attachment turned on that a person would trip over goes — the
+   * file chooser it intercepts (the page's file input then opens Winter's picker), its emulated focus and viewport — and
+   * the engine is told the tab "stopped", so it attaches afresh (turning them back on) at its next command after the
+   * hand-back. Best effort: a tab the agent never attached has nothing to undo.
+   */
+  private async yieldToPerson(t: PoolTab): Promise<void> {
+    const undo: Array<[string, Record<string, unknown>]> = [
+      ["Page.setInterceptFileChooserDialog", { enabled: false }], ["Emulation.setFocusEmulationEnabled", { enabled: false }], ["Emulation.clearDeviceMetricsOverride", {}],
+    ];
+    for (const [method, params] of undo) {
+      try { await this.command(t.proc, "cdp.send", { tabId: t.tabKey, method, params }, 2_000); } catch { /* not attached: nothing to undo */ }
+    }
+    for (const l of [...this.goneListeners]) {
+      try { l(t.tabKey, "stopped"); } catch { /* a listener never breaks the pool */ }
+    }
+  }
+
   /** The person takes over a shown tab: the agent's commands in flight finish, then control is theirs. */
   private async grantControl(t: PoolTab): Promise<void> {
     const p = t.presentation;
     if (p === undefined || p.control) return;
     await this.drain(t);
     if (t.presentation !== p) return;
+    await this.yieldToPerson(t);
     try {
       await this.command(t.proc, "headless.control", { tabId: t.tabKey, control: true });
       p.control = true;

@@ -218,6 +218,14 @@ final class HeadlessLayoutTests: XCTestCase {
                                             exists: { _ in false }))
     }
 
+    func testTheUploadsRootIsBesideTheCacheRootTheDaemonMakesAndNowhereElse() {
+        XCTAssertEqual(HeadlessArguments.parse(["h", "--winter-cache-root=/Users/u/.winter-dev/cache/headless-cef/ab12"])?.uploadsRoot,
+                       "/Users/u/.winter-dev/cache/headless-uploads")
+        // Any other layout: no uploads root, so every file-chooser answer is refused.
+        XCTAssertNil(HeadlessArguments.parse(["h", "--winter-cache-root=/tmp/x"])?.uploadsRoot)
+        XCTAssertNil(HeadlessArguments.parse(["h", "--winter-cache-root=/Users/u/.winter/cache/headless-cef"])?.uploadsRoot)
+    }
+
     func testTheArgumentsNeedAnAbsoluteCacheRootAndPassOnlyDiagnostics() {
         XCTAssertNil(HeadlessArguments.parse(["h"]))
         XCTAssertNil(HeadlessArguments.parse(["h", "--winter-cache-root=relative"]))

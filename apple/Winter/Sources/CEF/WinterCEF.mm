@@ -4926,11 +4926,60 @@ bool g_headless = false;
 void (^g_headless_paint_observer)(int, int, IOSurfaceRef) = nil;
 void (^g_headless_popup_observer)(int, int, int, int, int, int) = nil;
 void (^g_headless_cursor_observer)(int, int) = nil;
+/// Version 2 of a presentation (`WinterPresentWire.h`): where the IME composition is drawn, the page's dialogs and file
+/// choosers. Main (CEF UI) thread only.
+void (^g_headless_ime_observer)(int, int, int, NSArray<NSValue *> *) = nil;
+void (^g_headless_dialog_opened_observer)(int, int, NSString *, NSString *) = nil;
+void (^g_headless_dialog_closed_observer)(int) = nil;
+BOOL (^g_headless_file_chooser_handler)(int, int, int, NSArray<NSString *> *) = nil;
+/// The dialog each headless browser holds now (type 0 alert, 1 confirm, 2 prompt, 3 beforeunload), by browser id.
+struct HeadlessDialogInfo {
+  int type;
+  std::string message;
+  std::string defaultText;
+};
+std::map<int, HeadlessDialogInfo> &HeadlessDialogs() {
+  static auto *dialogs = new std::map<int, HeadlessDialogInfo>();
+  return *dialogs;
+}
+/// File choosers a presentation's viewer answers, by request id: the callback and its browser.
+struct HeadlessFileChooser {
+  int browserId;
+  CefRefPtr<CefFileDialogCallback> callback;
+};
+std::map<int, HeadlessFileChooser> &HeadlessFileChoosers() {
+  static auto *choosers = new std::map<int, HeadlessFileChooser>();
+  return *choosers;
+}
+int g_headless_next_file_chooser = 0;
+/// The headless browsers a presentation's person holds now (`WinterCEFHeadlessSetUserControl`): they may take focus — the
+/// page's input method events need a focused widget — which an automated tab otherwise refuses.
+std::set<int> &HeadlessUserControlled() {
+  static auto *ids = new std::set<int>();
+  return *ids;
+}
 /// The device scale a presented browser renders at, by browser id (absent: 1).
 std::map<int, double> &HeadlessScales() {
   static auto *scales = new std::map<int, double>();
   return *scales;
 }
+
+/// A browser's device scale as applied, and when it last changed. Two changes in quick succession (a presentation ending
+/// at one scale and the next starting at another a few milliseconds later) left the browser painting NOTHING — measured:
+/// no `OnAcceleratedPaint` at all afterwards, whatever was asked of it — so a change is applied at most once per
+/// `kHeadlessScaleSettle`; a later wish waits for the rest of it, and only the last one is applied.
+struct HeadlessScaleState {
+  double applied = 1.0;
+  double wanted = 1.0;
+  CFAbsoluteTime changedAt = 0;
+  bool scheduled = false;
+};
+std::map<int, HeadlessScaleState> &HeadlessScaleStates() {
+  static auto *states = new std::map<int, HeadlessScaleState>();
+  return *states;
+}
+const CFTimeInterval kHeadlessScaleSettle = 0.3;
+
 
 class WinterHeadlessRenderHandler : public CefRenderHandler {
  public:
@@ -4971,6 +5020,16 @@ class WinterHeadlessRenderHandler : public CefRenderHandler {
 
   void OnPopupShow(CefRefPtr<CefBrowser> browser, bool show) override {
     if (g_headless_popup_observer && browser) g_headless_popup_observer(browser->GetIdentifier(), show ? 1 : 0, 0, 0, 0, 0);
+  }
+
+  /// Where the IME composition's characters are drawn (view CSS pixels), for a presentation's candidate window.
+  void OnImeCompositionRangeChanged(CefRefPtr<CefBrowser> browser,
+                                    const CefRange &selected_range,
+                                    const RectList &character_bounds) override {
+    if (!g_headless_ime_observer || !browser) return;
+    NSMutableArray<NSValue *> *rects = [NSMutableArray arrayWithCapacity:character_bounds.size()];
+    for (const CefRect &r : character_bounds) [rects addObject:[NSValue valueWithRect:NSMakeRect(r.x, r.y, r.width, r.height)]];
+    g_headless_ime_observer(browser->GetIdentifier(), static_cast<int>(selected_range.from), static_cast<int>(selected_range.to), rects);
   }
 
   void OnPopupSize(CefRefPtr<CefBrowser> browser, const CefRect &rect) override {
@@ -5130,9 +5189,83 @@ class WinterHeadlessClient : public WinterClient {
     return true;  // handled: nothing to set it on here
   }
 
+  /// An automated tab refuses focus (the base) — except while a presentation's person holds it: their IME needs it.
+  bool OnSetFocus(CefRefPtr<CefBrowser> browser, FocusSource source) override {
+    if (browser && HeadlessUserControlled().count(browser->GetIdentifier()) > 0) return false;
+    return WinterClient::OnSetFocus(browser, source);
+  }
+
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
-    if (browser) HeadlessScales().erase(browser->GetIdentifier());
+    if (browser) {
+      HeadlessUserControlled().erase(browser->GetIdentifier());
+      HeadlessScales().erase(browser->GetIdentifier());
+      HeadlessScaleStates().erase(browser->GetIdentifier());
+      DialogGone(browser);
+      WinterCEFHeadlessCancelFileChoosers(browser->GetIdentifier());
+    }
     WinterClient::OnBeforeClose(browser);
+  }
+
+  /// Held for the engine as before (the base) — and, for a presentation, recorded and said, so the person in control
+  /// can answer it in Winter's panel (`WinterCEFHeadlessSetDialogObservers`).
+  bool OnJSDialog(CefRefPtr<CefBrowser> browser,
+                  const CefString &origin_url,
+                  JSDialogType dialog_type,
+                  const CefString &message_text,
+                  const CefString &default_prompt_text,
+                  CefRefPtr<CefJSDialogCallback> callback,
+                  bool &suppress_message) override {
+    const bool held = WinterClient::OnJSDialog(browser, origin_url, dialog_type, message_text, default_prompt_text, callback, suppress_message);
+    if (held && browser) {
+      DialogHeld(browser, dialog_type == JSDIALOGTYPE_ALERT ? 0 : dialog_type == JSDIALOGTYPE_CONFIRM ? 1 : 2, message_text, default_prompt_text);
+    }
+    return held;
+  }
+
+  bool OnBeforeUnloadDialog(CefRefPtr<CefBrowser> browser,
+                            const CefString &message_text,
+                            bool is_reload,
+                            CefRefPtr<CefJSDialogCallback> callback) override {
+    const bool held = WinterClient::OnBeforeUnloadDialog(browser, message_text, is_reload, callback);
+    if (held && browser) DialogHeld(browser, 3, message_text, CefString());
+    return held;
+  }
+
+  void OnResetDialogState(CefRefPtr<CefBrowser> browser) override {
+    WinterClient::OnResetDialogState(browser);
+    DialogGone(browser);
+  }
+
+  void OnDialogClosed(CefRefPtr<CefBrowser> browser) override {
+    WinterClient::OnDialogClosed(browser);
+    DialogGone(browser);
+  }
+
+  /// A presentation's person in control answers a file chooser in Winter's panel (`WinterCEFHeadlessSetFileChooser
+  /// Handler`); anywhere else it is cancelled as before (the base: `upload()` intercepts the chooser over DevTools first).
+  bool OnFileDialog(CefRefPtr<CefBrowser> browser,
+                    FileDialogMode mode,
+                    const CefString &title,
+                    const CefString &default_file_path,
+                    const std::vector<CefString> &accept_filters,
+                    const std::vector<CefString> &accept_extensions,
+                    const std::vector<CefString> &accept_descriptions,
+                    CefRefPtr<CefFileDialogCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (g_headless_file_chooser_handler && browser && callback) {
+      const int requestId = ++g_headless_next_file_chooser;
+      NSMutableArray<NSString *> *accept = [NSMutableArray arrayWithCapacity:accept_filters.size()];
+      for (const CefString &filter : accept_filters) [accept addObject:StringOf(filter)];
+      const int m = mode == FILE_DIALOG_OPEN_MULTIPLE ? 1 : mode == FILE_DIALOG_OPEN_FOLDER ? 2 : mode == FILE_DIALOG_SAVE ? 3 : 0;
+      HeadlessFileChoosers()[requestId] = {browser->GetIdentifier(), callback};
+      if (g_headless_file_chooser_handler(browser->GetIdentifier(), requestId, m, accept)) {
+        Log("file-chooser for a presentation's viewer (request %d)", requestId);
+        return true;
+      }
+      HeadlessFileChoosers().erase(requestId);
+    }
+    return WinterClient::OnFileDialog(browser, mode, title, default_file_path, accept_filters, accept_extensions,
+                                      accept_descriptions, callback);
   }
 
   /// A navigation (and each of its redirects) the local-network rule refuses is cancelled before it is sent. The
@@ -5236,6 +5369,18 @@ class WinterHeadlessClient : public WinterClient {
   }
 
  private:
+  void DialogHeld(CefRefPtr<CefBrowser> browser, int type, const CefString &message, const CefString &defaultText) {
+    const int id = browser->GetIdentifier();
+    HeadlessDialogs()[id] = {type, message.ToString(), defaultText.ToString()};
+    if (g_headless_dialog_opened_observer) g_headless_dialog_opened_observer(id, type, StringOf(message), StringOf(defaultText));
+  }
+
+  void DialogGone(CefRefPtr<CefBrowser> browser) {
+    if (!browser) return;
+    const int id = browser->GetIdentifier();
+    if (HeadlessDialogs().erase(id) > 0 && g_headless_dialog_closed_observer) g_headless_dialog_closed_observer(id);
+  }
+
   CefRefPtr<CefRenderHandler> render_;
 };
 
@@ -5549,16 +5694,158 @@ void WinterCEFHeadlessSetCursorObserver(void (^observer)(int browserId, int curs
   g_headless_cursor_observer = [observer copy];
 }
 
+void WinterCEFHeadlessSetImeObserver(void (^observer)(int browserId, int rangeStart, int rangeEnd, NSArray<NSValue *> *rects)) {
+  g_headless_ime_observer = [observer copy];
+}
+
+void WinterCEFHeadlessSetDialogObservers(void (^opened)(int browserId, int type, NSString *message, NSString *defaultText),
+                                         void (^closed)(int browserId)) {
+  g_headless_dialog_opened_observer = [opened copy];
+  g_headless_dialog_closed_observer = [closed copy];
+}
+
+BOOL WinterCEFHeadlessCurrentDialog(NSView *key, int *type, NSString **message, NSString **defaultText) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return NO;
+  auto it = HeadlessDialogs().find(browser->GetIdentifier());
+  if (it == HeadlessDialogs().end()) return NO;
+  if (type) *type = it->second.type;
+  if (message) *message = [NSString stringWithUTF8String:it->second.message.c_str()] ?: @"";
+  if (defaultText) *defaultText = [NSString stringWithUTF8String:it->second.defaultText.c_str()] ?: @"";
+  return YES;
+}
+
+void WinterCEFHeadlessSetFileChooserHandler(BOOL (^handler)(int browserId, int requestId, int mode, NSArray<NSString *> *accept)) {
+  g_headless_file_chooser_handler = [handler copy];
+}
+
+void WinterCEFHeadlessResolveFileChooser(int requestId, NSArray<NSString *> *paths) {
+  auto it = HeadlessFileChoosers().find(requestId);
+  if (it == HeadlessFileChoosers().end()) return;
+  CefRefPtr<CefFileDialogCallback> callback = it->second.callback;
+  HeadlessFileChoosers().erase(it);
+  if (!callback) return;
+  if (paths.count == 0) {
+    callback->Cancel();
+    Log("file-chooser cancelled by the viewer (request %d)", requestId);
+    return;
+  }
+  std::vector<CefString> files;
+  for (NSString *path in paths) files.push_back(CefString(path.UTF8String));
+  callback->Continue(files);
+  Log("file-chooser answered by the viewer (request %d, %zu file(s))", requestId, files.size());
+}
+
+void WinterCEFHeadlessSetUserControl(NSView *key, BOOL control) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  if (control) HeadlessUserControlled().insert(browser->GetIdentifier());
+  else HeadlessUserControlled().erase(browser->GetIdentifier());
+}
+
+void WinterCEFHeadlessCancelFileChoosers(int browserId) {
+  for (auto it = HeadlessFileChoosers().begin(); it != HeadlessFileChoosers().end();) {
+    if (browserId == 0 || it->second.browserId == browserId) {
+      if (it->second.callback) it->second.callback->Cancel();
+      it = HeadlessFileChoosers().erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void WinterCEFHeadlessIme(NSView *key, int kind, NSString *text, int selectionStart, int selectionEnd, int replacementStart,
+                          int replacementEnd) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  const CefString value((text ?: @"").UTF8String);
+  const CefRange replacement = replacementStart >= 0 && replacementEnd >= replacementStart
+      ? CefRange(static_cast<uint32_t>(replacementStart), static_cast<uint32_t>(replacementEnd)) : CefRange::InvalidRange();
+  switch (kind) {
+    case 1: {  // set composition: one plain underline under the marked text
+      std::vector<CefCompositionUnderline> underlines;
+      CefCompositionUnderline line;
+      line.range = CefRange(0, static_cast<uint32_t>(text.length));
+      line.color = 0xFF000000;
+      line.background_color = 0;
+      line.thick = 0;
+      line.style = CEF_CUS_SOLID;
+      underlines.push_back(line);
+      const CefRange selection = selectionStart >= 0 && selectionEnd >= selectionStart
+          ? CefRange(static_cast<uint32_t>(selectionStart), static_cast<uint32_t>(selectionEnd))
+          : CefRange(static_cast<uint32_t>(text.length), static_cast<uint32_t>(text.length));
+      host->ImeSetComposition(value, underlines, replacement, selection);
+      break;
+    }
+    case 2: host->ImeCommitText(value, replacement, 0); break;
+    case 3: host->ImeFinishComposingText(false); break;
+    case 4: host->ImeCancelComposition(); break;
+    default: break;
+  }
+}
+
+void WinterCEFHeadlessEdit(NSView *key, int command, NSString *text) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  CefRefPtr<CefFrame> frame = browser->GetFocusedFrame();
+  if (!frame) frame = browser->GetMainFrame();
+  switch (command) {
+    case 1: if (frame) frame->Copy(); break;
+    case 2: if (frame) frame->Cut(); break;
+    // A paste is the TEXT Winter.app read from the pasteboard on the user's ⌘V, put in at the caret: this process never
+    // reads the pasteboard itself.
+    case 3: if (text.length > 0) browser->GetHost()->ImeCommitText(CefString(text.UTF8String), CefRange::InvalidRange(), 0); break;
+    case 4: if (frame) frame->SelectAll(); break;
+    case 5: if (frame) frame->Undo(); break;
+    case 6: if (frame) frame->Redo(); break;
+    case 7: if (frame) frame->Delete(); break;
+    default: break;
+  }
+}
+
+
+void ApplyHeadlessScale(CefRefPtr<CefBrowser> browser, HeadlessScaleState &state) {
+  const int id = browser->GetIdentifier();
+  state.applied = state.wanted;
+  state.changedAt = CFAbsoluteTimeGetCurrent();
+  if (state.applied > 1.0) HeadlessScales()[id] = state.applied; else HeadlessScales().erase(id);
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  host->NotifyScreenInfoChanged();
+  host->WasResized();
+  host->Invalidate(PET_VIEW);
+}
+
 void WinterCEFHeadlessSetPresentation(NSView *key, double scale, int frameRate) {
   CefRefPtr<CefBrowser> browser = BrowserForParent(key);
   if (!browser) return;
   const int id = browser->GetIdentifier();
-  if (scale > 1.0) HeadlessScales()[id] = scale; else HeadlessScales().erase(id);
   CefRefPtr<CefBrowserHost> host = browser->GetHost();
-  host->NotifyScreenInfoChanged();
-  host->WasResized();
   host->SetWindowlessFrameRate(frameRate > 0 ? frameRate : kHeadlessFrameRate);
+  HeadlessScaleState &state = HeadlessScaleStates()[id];
+  state.wanted = scale > 1.0 ? scale : 1.0;
+  if (state.wanted == state.applied) {
+    host->Invalidate(PET_VIEW);
+    return;
+  }
+  const CFTimeInterval wait = state.changedAt + kHeadlessScaleSettle - CFAbsoluteTimeGetCurrent();
+  if (wait <= 0) {
+    ApplyHeadlessScale(browser, state);
+    return;
+  }
   host->Invalidate(PET_VIEW);
+  if (state.scheduled) return;
+  state.scheduled = true;
+  __weak NSView *weakKey = key;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    auto it = HeadlessScaleStates().find(id);
+    if (it == HeadlessScaleStates().end()) return;
+    it->second.scheduled = false;
+    NSView *k = weakKey;
+    CefRefPtr<CefBrowser> current = k == nil ? nullptr : BrowserForParent(k);
+    if (!current || current->GetIdentifier() != id || it->second.wanted == it->second.applied) return;
+    ApplyHeadlessScale(current, it->second);
+  });
 }
 
 void WinterCEFHeadlessSendInput(NSView *key, int kind, int x, int y, int dx, int dy, int button, int clickCount,

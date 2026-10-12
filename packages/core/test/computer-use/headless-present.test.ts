@@ -189,17 +189,23 @@ describe("watch and take over from the panel", () => {
   test("the turn's end closes a tab the person holds only once they let it go", async () => {
     const r = rig();
     const gone: string[] = [];
-    r.pool.onTabGone((k) => gone.push(k));
+    r.pool.onTabGone((k, why) => gone.push(`${k}:${why}`));
     const t = await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
     await r.pool.panelAction("s1", t.tabKey, "watch");
     await r.pool.panelAction("s1", t.tabKey, "takeOver");
+    // Taking over undid what the agent's attachment turned on, and told the engine the tab "stopped" (it attaches
+    // afresh after the hand-back).
+    expect(gone).toEqual([`${t.tabKey}:stopped`]);
+    const undo = r.commands().filter((c) => c.op === "cdp.send").map((c) => c.params.method);
+    expect(undo).toEqual(["Page.setInterceptFileChooserDialog", "Emulation.setFocusEmulationEnabled", "Emulation.clearDeviceMetricsOverride"]);
+    gone.length = 0;
     await r.pool.closeTab(t.tabKey);
     expect(r.commands().some((c) => c.op === "tab.close")).toBe(false);
     expect(await r.pool.listTabs({ sessionId: "s1" })).toEqual([]); // no longer the agent's to find
     expect(r.pool.tabCount("s1")).toBe(1); // still counted while it lives
     await r.pool.panelAction("s1", t.tabKey, "handBack");
     await until("the close", () => r.commands().some((c) => c.op === "tab.close" && c.params.tabId === t.tabKey));
-    expect(gone).toEqual([t.tabKey]);
+    expect(gone).toEqual([`${t.tabKey}:closed`]);
     expect(r.panel.hidden.map((h) => h.reason)).toEqual(["closed"]);
     expect(r.pool.tabCount()).toBe(0);
   });

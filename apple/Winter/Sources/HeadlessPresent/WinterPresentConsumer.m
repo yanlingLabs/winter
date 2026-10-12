@@ -286,11 +286,8 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
       dialog.type = m->type;
       dialog.message = PresentText(m->message, m->messageLength, WinterPresentTextMax);
       dialog.defaultText = PresentText(m->defaultText, m->defaultLength, WinterPresentDialogDefaultMax);
-      if ([delegate respondsToSelector:@selector(presentConsumer:dialog:)]) {
-        [delegate presentConsumer:self dialog:dialog];
-      } else {
-        [self replyToDialog:m->dialogId accept:NO text:nil];  // nobody here can answer it: the page is not left waiting
-      }
+      // A viewer that can't show it leaves it held: the agent can still answer it after the hand-back.
+      if ([delegate respondsToSelector:@selector(presentConsumer:dialog:)]) [delegate presentConsumer:self dialog:dialog];
       break;
     }
     case WinterPresentMsgDialogDone: {

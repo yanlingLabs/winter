@@ -34,6 +34,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// What the presentation measured so far: frames, dropped, copy time percentiles (ms), input events.
 @property(nonatomic, readonly) NSDictionary<NSString *, NSNumber *> *stats;
 
+/// Where a viewer's file-chooser answers must lie (`<home>/cache/headless-uploads`, from the helper's cache root): a
+/// path anywhere else is refused. Set once at start; until it is, every answer is refused.
++ (void)setUploadsRoot:(NSString *)root;
+
+/// Is `path` a regular file inside `root` (both resolved, no link followed at the end), as a viewer's answer must be?
++ (BOOL)path:(NSString *)path isUploadInside:(NSString *)root;
+
 @end
 
 NS_ASSUME_NONNULL_END

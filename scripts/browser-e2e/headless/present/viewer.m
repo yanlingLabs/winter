@@ -8,11 +8,20 @@
 //   {"cmd":"press"}               a key press ('k'): the proof page toggles a marker's colour on each one; the frame
 //                                 whose probe pixel first shows the new colour closes that press's input→pixel time
 //   {"cmd":"click","x":..,"y":..} a left click at CSS pixels
-//   {"cmd":"key","code":..,"native":..}  a non-character key (an arrow, Return)
+//   {"cmd":"key","code":..,"native":..,"fn":..,"char":..}  a non-character key (an arrow, Return): `fn` the character
+//                                 AppKit reports on its key events (NSDownArrowFunctionKey 0xF701, …; Return 13) —
+//                                 without it a key-up reads as another press to an open <select> list — and `char` a
+//                                 character event between down and up
 //   {"cmd":"type","text":".."}     characters
 //   {"cmd":"lag","ms":N}          hold every frame N ms before reading it (a slow viewer: the producer must drop)
 //   {"cmd":"scale","value":S}     render at S device pixels per CSS pixel (a new pool generation)
 //   {"cmd":"stats"}               print what was measured
+//   version 2 (only while the viewer holds control; the producer drops them otherwise):
+//   {"cmd":"ime","kind":"set"|"commit"|"finish"|"cancel","text":".."}  the input method's composition
+//   {"cmd":"edit","command":N,"text":".."}  an edit command (WinterPresentEdit*; a paste carries its text)
+//   {"cmd":"answerDialogs","accept":true,"text":".."}  answer every page dialog from now on (shown as "dialog" events)
+//   {"cmd":"files","paths":[..]}   answer the next file chooser (or the one waiting) with these paths ([] cancels)
+// Events it prints besides: control, imeBounds, dialog, dialogDone, fileChooser.
 //   {"cmd":"bye"}                 stop presenting and exit; {"cmd":"die"}: exit at once, no goodbye
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -61,6 +70,10 @@ static void Emit(NSDictionary *object) {
   uint32_t _lastColour;
   NSString *_endReason;
   uint64_t _welcomedAt, _firstFrameAt;
+  // Version 2.
+  NSDictionary *_dialogAnswer;           // nil: dialogs are only reported
+  NSArray<NSString *> *_filesAnswer;     // nil: no answer ready
+  WinterPresentFileChooser *_pendingChooser;
 }
 
 - (instancetype)initWithProbeX:(int)x y:(int)y {
@@ -167,6 +180,36 @@ static void Emit(NSDictionary *object) {
   Emit(@{@"event" : @"ended", @"reason" : reason});
 }
 
+- (void)presentConsumer:(WinterPresentConsumer *)consumer control:(BOOL)control {
+  Emit(@{@"event" : @"control", @"control" : @(control)});
+}
+
+- (void)presentConsumer:(WinterPresentConsumer *)consumer imeRange:(NSRange)range characterBounds:(NSArray<NSValue *> *)rects {
+  Emit(@{@"event" : @"imeBounds", @"start" : @(range.location == NSNotFound ? -1 : (long)range.location), @"count" : @(rects.count)});
+}
+
+- (void)presentConsumer:(WinterPresentConsumer *)consumer dialog:(WinterPresentDialog *)dialog {
+  Emit(@{@"event" : @"dialog", @"dialogId" : @(dialog.dialogId), @"type" : @(dialog.type), @"message" : dialog.message,
+         @"defaultText" : dialog.defaultText});
+  if (_dialogAnswer != nil) {
+    [consumer replyToDialog:dialog.dialogId accept:[_dialogAnswer[@"accept"] boolValue] text:_dialogAnswer[@"text"]];
+  }
+}
+
+- (void)presentConsumer:(WinterPresentConsumer *)consumer dialogDone:(uint32_t)dialogId {
+  Emit(@{@"event" : @"dialogDone", @"dialogId" : @(dialogId)});
+}
+
+- (void)presentConsumer:(WinterPresentConsumer *)consumer fileChooser:(WinterPresentFileChooser *)chooser {
+  Emit(@{@"event" : @"fileChooser", @"requestId" : @(chooser.requestId), @"mode" : @(chooser.mode), @"accept" : chooser.accept});
+  if (_filesAnswer != nil) {
+    [consumer replyToFileChooser:chooser.requestId paths:_filesAnswer];
+    _filesAnswer = nil;
+  } else {
+    _pendingChooser = chooser;
+  }
+}
+
 - (WinterPresentInputMsg)input:(uint32_t)kind {
   WinterPresentInputMsg m = {};
   m.kind = kind;
@@ -208,6 +251,8 @@ static void Emit(NSDictionary *object) {
     WinterPresentInputMsg down = [self input:WinterPresentInputKeyDown];
     down.windowsKeyCode = [c[@"code"] intValue];
     down.nativeKeyCode = [c[@"native"] intValue];
+    // A function key's own character, as AppKit reports it on the key event (NSDownArrowFunctionKey, …).
+    if ([c[@"fn"] isKindOfClass:[NSNumber class]]) down.character = down.unmodifiedCharacter = [c[@"fn"] unsignedShortValue];
     [self.consumer sendInput:down];
     if ([c[@"char"] isKindOfClass:[NSNumber class]]) {
       WinterPresentInputMsg ch = down;
@@ -246,6 +291,24 @@ static void Emit(NSDictionary *object) {
     WinterPresentInputMsg f = [self input:WinterPresentInputFocus];
     f.x = 1;
     [self.consumer sendInput:f];
+  } else if ([cmd isEqualToString:@"ime"]) {
+    NSString *kind = c[@"kind"], *text = c[@"text"] ?: @"";
+    if ([kind isEqualToString:@"set"]) [self.consumer setComposition:text selection:NSMakeRange(text.length, 0) replacement:NSMakeRange(NSNotFound, 0)];
+    else if ([kind isEqualToString:@"commit"]) [self.consumer commitText:text replacement:NSMakeRange(NSNotFound, 0)];
+    else if ([kind isEqualToString:@"finish"]) [self.consumer finishComposing];
+    else if ([kind isEqualToString:@"cancel"]) [self.consumer cancelComposition];
+  } else if ([cmd isEqualToString:@"edit"]) {
+    [self.consumer sendEdit:[c[@"command"] unsignedIntValue] text:c[@"text"]];
+  } else if ([cmd isEqualToString:@"answerDialogs"]) {
+    _dialogAnswer = c;
+  } else if ([cmd isEqualToString:@"files"]) {
+    NSArray<NSString *> *paths = [c[@"paths"] isKindOfClass:[NSArray class]] ? c[@"paths"] : @[];
+    if (_pendingChooser != nil) {
+      [self.consumer replyToFileChooser:_pendingChooser.requestId paths:paths];
+      _pendingChooser = nil;
+    } else {
+      _filesAnswer = paths;
+    }
   } else if ([cmd isEqualToString:@"lag"]) {
     _lagMs = [c[@"ms"] intValue];
   } else if ([cmd isEqualToString:@"scale"]) {

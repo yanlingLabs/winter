@@ -910,6 +910,46 @@ void WinterCEFHeadlessSetCursorObserver(void (^observer)(int browserId, int curs
 /// helper's own rate): nothing of the page is reloaded — it sees a device-pixel-ratio change, as on a new display.
 void WinterCEFHeadlessSetPresentation(NSView *key, double scale, int frameRate);
 
+// ---- Presentation, version 2: IME, edit commands, page dialogs and file choosers for the person in control ----------
+
+/// Where the IME composition of each headless browser is drawn: its range in the field and one rect per composed
+/// character (view CSS pixels). `nil` stops it.
+void WinterCEFHeadlessSetImeObserver(void (^observer)(int browserId, int rangeStart, int rangeEnd, NSArray<NSValue *> *rects));
+
+/// The IME edits a composition in `key`'s browser: `kind` 1 set (`text` marked, selection inside it), 2 commit (`text`
+/// inserted), 3 finish (keep the marked text), 4 cancel. Ranges of -1 mean none. Main thread.
+void WinterCEFHeadlessIme(NSView *key, int kind, NSString *text, int selectionStart, int selectionEnd,
+                          int replacementStart, int replacementEnd);
+
+/// An edit command in `key`'s browser's focused frame: 1 copy, 2 cut, 3 paste (`text` put in at the caret — this
+/// process never reads the pasteboard), 4 select all, 5 undo, 6 redo, 7 delete. Main thread.
+void WinterCEFHeadlessEdit(NSView *key, int command, NSString *text);
+
+/// A headless browser's page dialog was held (type 0 alert, 1 confirm, 2 prompt, 3 beforeunload) — still answered by
+/// DevTools or `WinterCEFResolveHeldDialog` — and when it went away (answered, dismissed, the page moved on). `nil`
+/// stops them.
+void WinterCEFHeadlessSetDialogObservers(void (^opened)(int browserId, int type, NSString *message, NSString *defaultText),
+                                         void (^closed)(int browserId));
+
+/// The dialog `key`'s browser holds now, if any.
+BOOL WinterCEFHeadlessCurrentDialog(NSView *key, int *type, NSString **message,
+                                    NSString **defaultText);
+
+/// A headless browser's page asks for files: the handler answers YES to answer it later
+/// (`WinterCEFHeadlessResolveFileChooser`), NO to leave it to the default (cancelled). `mode` 0 open, 1 open multiple,
+/// 2 folder, 3 save; `accept` the page's filters. `nil` stops it.
+void WinterCEFHeadlessSetFileChooserHandler(BOOL (^handler)(int browserId, int requestId, int mode, NSArray<NSString *> *accept));
+
+/// Answer a file chooser the handler took: the files, or nil / empty to cancel. Once; later answers are ignored.
+void WinterCEFHeadlessResolveFileChooser(int requestId, NSArray<NSString *> *paths);
+
+/// A presentation's person holds `key`'s browser (YES) or no longer does: while they do, it may take focus (an
+/// automated tab otherwise refuses it), which the page's IME events need.
+void WinterCEFHeadlessSetUserControl(NSView *key, BOOL control);
+
+/// Cancel every file chooser still waiting for an answer in browser `browserId` (0: in every browser).
+void WinterCEFHeadlessCancelFileChoosers(int browserId);
+
 /// One HUMAN input event for `key`'s browser, through CEF's own host input (never DevTools): `kind` as
 /// `WinterPresentInput*` (Sources/HeadlessPresent/WinterPresentWire.h), coordinates in CSS pixels of the view,
 /// `modifiers` CEF's EVENTFLAG_* bits. Main thread.

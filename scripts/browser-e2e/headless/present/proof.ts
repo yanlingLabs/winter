@@ -17,9 +17,15 @@
 //
 // The page also runs a CSS animation, so frames keep coming at the presentation's 60 a second.
 //
+// Wire version 2, with the person in control: a page dialog shown to them and answered there once; an IME composition
+// and a paste (its text from the viewer) into a field; a file chooser answered with a copy inside the uploads folder,
+// and an answer naming a file anywhere else refused; and the control messages.
+//
 //   bun scripts/browser-e2e/headless/present/proof.ts --app "<Winter Headless Dev.app>" [--cycles 8] [--report <file>]
+//     [--skip dialog,ime,files]   leave out version 2's steps (to tell which one a failure follows)
+//     [--helper-log]              print the helper's stderr when something failed
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
@@ -34,7 +40,10 @@ const cycles = Number(arg("--cycles") ?? "8");
 const exe = join(app, "Contents", "MacOS", app.split("/").pop()!.replace(/\.app$/, ""));
 const repo = join(import.meta.dir, "..", "..", "..", "..");
 const work = mkdtempSync(join(tmpdir(), "winter-present-proof-"));
-const cacheRoot = join(work, "cache");
+// The daemon's layout (`<home>/cache/headless-cef/<random>`): the helper takes file-chooser answers only from
+// `<home>/cache/headless-uploads`, beside it.
+const cacheRoot = join(work, "home", "cache", "headless-cef", "run");
+const uploads = join(work, "home", "cache", "headless-uploads");
 
 // ── the viewer: built and ad-hoc signed here; accepted by its cdhash ─────────────────────────────────────────────────
 const viewerBin = join(work, "viewer");
@@ -60,10 +69,18 @@ const sentinel = (port: number): string => `<!doctype html><title>sentinel</titl
 #spin{position:absolute;left:20px;top:200px;width:60px;height:60px;background:#3366ff;animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}</style>
 <div id=m></div><div id=spin></div>
-<div id=f><input id=a placeholder=agent><input id=b placeholder=user><select id=s><option>one</option><option>two</option><option>three</option></select></div>
+<div id=f><input id=a placeholder=agent><input id=b placeholder=user><select id=s><option>one</option><option>two</option><option>three</option></select>
+<input id=c placeholder=ime><input id=file type=file accept=".txt,text/plain"></div>
 <pre id=state style="position:absolute;left:20px;top:300px"></pre>
 <script>
-const S = { id: crypto.randomUUID(), origin: performance.timeOrigin, ticks: 0, keys: 0, wsOpen: 0, wsMessages: 0, uploads: 0, uploadDone: "", visibilityChanges: 0, hidden: document.hidden };
+const S = { id: crypto.randomUUID(), origin: performance.timeOrigin, ticks: 0, keys: 0, wsOpen: 0, wsMessages: 0, uploads: 0, uploadDone: "", visibilityChanges: 0, hidden: document.hidden, files: "", fileChanges: 0 };
+S.selectLog = [];
+for (const t of ["mousedown", "keydown", "change", "focus"]) document.getElementById("s").addEventListener(t, (e) => { S.selectLog.push(t + (e.key ? ":" + e.key : "") + "=" + document.getElementById("s").value); });
+document.getElementById("file").addEventListener("change", (e) => {
+  S.fileChanges++;
+  const f = e.target.files[0];
+  if (f) f.text().then((t) => { S.files = f.name + ":" + f.size + ":" + t; });
+});
 document.addEventListener("visibilitychange", () => { S.visibilityChanges++; S.hidden = document.hidden; });
 const tick = (() => { let n = 0; return () => ++n; })();
 let parity = 0;
@@ -82,7 +99,7 @@ history.pushState({ n: 1 }, "", "#one");
 history.pushState({ n: 2 }, "", "#two");
 setInterval(() => {
   S.ticks = tick();
-  document.body.dataset.sentinel = JSON.stringify({ ...S, history: history.length, a: document.getElementById("a").value, b: document.getElementById("b").value, s: document.getElementById("s").value });
+  document.body.dataset.sentinel = JSON.stringify({ ...S, history: history.length, a: document.getElementById("a").value, b: document.getElementById("b").value, s: document.getElementById("s").value, c: document.getElementById("c").value });
 }, 100);
 </script>`;
 let serverPort = 0;
@@ -252,7 +269,9 @@ try {
   await command("cdp.subscribe", { tabId: "w-1", events: ["Page.frameNavigated", "Page.javascriptDialogOpening", "Page.javascriptDialogClosed"] });
   await cdp("Page.enable");
   await cdp("Runtime.enable");
-  for (let i = 0; i < 100 && !(await sentinelState()).id; i++) { world = undefined; await Bun.sleep(100); }
+  // The page may still be loading (a world made in the first document goes with it): asked again until it answers.
+  const settled = async (): Promise<boolean> => { try { return typeof (await sentinelState()).id === "string"; } catch { return false; } };
+  for (let i = 0; i < 100 && !(await settled()); i++) { world = undefined; await Bun.sleep(100); }
   // The agent types into its field, as an agent would.
   const aBox = await cdp("Runtime.evaluate", { expression: "JSON.stringify(document.getElementById('a').getBoundingClientRect())", contextId: world, returnByValue: true }) as { result?: { value?: string } };
   const ab = JSON.parse(aBox.result?.value ?? "{}") as { x: number; y: number; width: number; height: number };
@@ -278,7 +297,7 @@ try {
     await command("headless.control", { tabId: "w-1", control: true });
     viewer.send({ cmd: "click", x: bBox.x + 10, y: bBox.y + bBox.height / 2 });
     await Bun.sleep(150);
-    viewer.send({ cmd: "key", code: 35, native: 119 });  // End: the caret after what is there
+    viewer.send({ cmd: "key", code: 35, native: 119, fn: 0xf72b });  // End (NSEndFunctionKey): the caret after what is there
     await Bun.sleep(50);
     viewer.send({ cmd: "type", text: String(c) });
     userText += String(c);
@@ -293,6 +312,10 @@ try {
     viewer.send({ cmd: "bye" });
     await viewer.exited();
     (report.cycles as unknown[]).push({ cycle: c, viewer: vs, producer: ps });
+    if (c === 1) {
+      const said = viewer.events.filter((e) => e.event === "control").map((e) => e.control);
+      check("version 2: the viewer is told when it gets control and when it loses it", JSON.stringify(said) === "[true,false]", JSON.stringify(said));
+    }
     // The marker toggled 10 times per cycle: the user's keys ALSO reached the page as text ("k") — they are the
     // user's own input into their focused field.
     userText += "kkkkkkkkkk";
@@ -373,9 +396,9 @@ try {
     await Bun.sleep(300);
     viewer.send({ cmd: "click", x: sBox.x + 10, y: sBox.y + sBox.height / 2 });
     await Bun.sleep(700);
-    viewer.send({ cmd: "key", code: 40, native: 125 });  // ArrowDown
+    viewer.send({ cmd: "key", code: 40, native: 125, fn: 0xf701 });  // ArrowDown (NSDownArrowFunctionKey, as AppKit reports it)
     await Bun.sleep(200);
-    viewer.send({ cmd: "key", code: 13, native: 36, char: 13 });  // Return
+    viewer.send({ cmd: "key", code: 13, native: 36, fn: 13, char: 13 });  // Return
     await Bun.sleep(500);
     const vs = await viewer.stats();
     const ps = await command("headless.unpresent", { tabId: "w-1" });
@@ -383,8 +406,85 @@ try {
     await viewer.exited();
     const after = await sentinelState();
     check("a <select> opened and chosen through the presentation", after.s === "two" && Number(vs.frames) > 0,
-      `select reads "${String(after.s)}"; viewer ${String(vs.frames)} frame(s), ${String(vs.pools)} pool(s), ${String(vs.staleFrames)} stale; producer ${JSON.stringify(ps)}`);
+      `select reads "${String(after.s)}" (${JSON.stringify(after.selectLog)}); viewer ${String(vs.frames)} frame(s), ${String(vs.pools)} pool(s), ${String(vs.staleFrames)} stale; producer ${JSON.stringify(ps)}`);
     await oracle("a select popup", { b: userText, s: "two" });
+  }
+
+  const rect = async (id: string): Promise<{ x: number; y: number; width: number; height: number }> =>
+    JSON.parse(((await cdp("Runtime.evaluate", { expression: `JSON.stringify(document.getElementById(${JSON.stringify(id)}).getBoundingClientRect())`, contextId: world, returnByValue: true })) as { result?: { value?: string } }).result?.value ?? "{}") as { x: number; y: number; width: number; height: number };
+  const endPresentation = async (viewer: ViewerProc): Promise<void> => {
+    await command("headless.unpresent", { tabId: "w-1" });
+    viewer.send({ cmd: "bye" });
+    await viewer.exited();
+  };
+
+  const skip = (arg("--skip") ?? "").split(",");
+  // ── version 2: a page dialog shown to the person in control, answered there once ──
+  if (!skip.includes("dialog")) {
+    const { viewer } = await present(true);
+    await viewer.until("welcome");
+    viewer.send({ cmd: "answerDialogs", accept: true, text: "from the person" });
+    await cdp("Runtime.evaluate", { expression: "setTimeout(() => { window.p2 = prompt('your name?', 'nobody'); window.p2n = (window.p2n || 0) + 1; }, 0); 1", contextId: world, returnByValue: true });
+    const shown = await viewer.until("dialog", 5_000).catch(() => undefined);
+    await Bun.sleep(500);
+    const done = viewer.events.some((e) => e.event === "dialogDone");
+    await endPresentation(viewer);
+    const a = await cdp("Runtime.evaluate", { expression: "JSON.stringify([window.p2, window.p2n])", contextId: world, returnByValue: true }) as { result?: { value?: string } };
+    check("a page dialog is shown to the person in control and answered there, once",
+      shown?.type === 2 && shown?.message === "your name?" && shown?.defaultText === "nobody" && a.result?.value === '["from the person",1]',
+      `shown ${JSON.stringify(shown ?? null)}; [answer, answers] ${a.result?.value}; withdrawn after: ${done}`);
+    await oracle("a dialog answered by the person", { b: userText, s: "two" });
+  }
+
+  // ── version 2: IME composition and a paste, into the person's field ──
+  if (!skip.includes("ime")) {
+    const cBox = await rect("c");
+    const { viewer } = await present(true);
+    await viewer.until("welcome");
+    viewer.send({ cmd: "click", x: cBox.x + 10, y: cBox.y + cBox.height / 2 });
+    await Bun.sleep(250);
+    const focused = ((await cdp("Runtime.evaluate", { expression: "document.activeElement && document.activeElement.id", contextId: world, returnByValue: true })) as { result?: { value?: string } }).result?.value;
+    viewer.send({ cmd: "ime", kind: "set", text: "かな" });
+    await Bun.sleep(200);
+    const composing = (await sentinelState()).c;
+    viewer.send({ cmd: "ime", kind: "commit", text: "仮名" });
+    await Bun.sleep(200);
+    viewer.send({ cmd: "edit", command: 3, text: "+pasted" });  // WinterPresentEditPaste
+    await Bun.sleep(400);
+    const bounds = viewer.events.filter((e) => e.event === "imeBounds").length;
+    await endPresentation(viewer);
+    const now = await sentinelState();
+    check("an IME composition and a paste reach the person's field (the paste's text from the viewer: the helper never reads the pasteboard)",
+      now.c === "仮名+pasted" && composing === "かな", `focused #${String(focused)}; while composing "${String(composing)}", then "${String(now.c)}"; ${bounds} composition bound message(s)`);
+    report.ime = { composing, final: now.c, bounds };
+  }
+
+  // ── version 2: a file chooser answered in the panel with a copy in the uploads folder; anywhere else refused ──
+  if (!skip.includes("files")) {
+    mkdirSync(join(uploads, "u1"), { recursive: true, mode: 0o700 });
+    const staged = join(uploads, "u1", "hello.txt");
+    writeFileSync(staged, "hello from the person", { mode: 0o600 });
+    const fBox = await rect("file");
+    const { viewer } = await present(true);
+    await viewer.until("welcome");
+    viewer.send({ cmd: "files", paths: [staged] });
+    viewer.send({ cmd: "click", x: fBox.x + 8, y: fBox.y + fBox.height / 2 });
+    const asked = await viewer.until("fileChooser", 5_000).catch(() => undefined);
+    await Bun.sleep(600);
+    const first = await sentinelState();
+    viewer.send({ cmd: "files", paths: ["/etc/hosts"] });
+    viewer.send({ cmd: "click", x: fBox.x + 8, y: fBox.y + fBox.height / 2 });
+    for (const end = Date.now() + 5_000; Date.now() < end && viewer.events.filter((e) => e.event === "fileChooser").length < 2;) await Bun.sleep(50);
+    await Bun.sleep(600);
+    const second = await sentinelState();
+    const asks = viewer.events.filter((e) => e.event === "fileChooser").length;
+    await endPresentation(viewer);
+    check("a file chooser is asked of the person in the panel and answered with a copy in the uploads folder",
+      asked !== undefined && Number(asked.mode) === 0 && (asked.accept as string[]).includes(".txt") && first.files === "hello.txt:21:hello from the person",
+      `asked ${JSON.stringify(asked ?? null)}; the page read "${String(first.files)}"`);
+    check("an answer naming a file outside the uploads folder is refused: the page gets nothing",
+      asks === 2 && second.fileChanges === first.fileChanges && second.files === first.files, `${asks} chooser(s) asked; ${String(second.fileChanges)} change(s)`);
+    await oracle("a file chooser", { b: userText, s: "two" });
   }
 
   // ── a viewer that dies without a word ──
@@ -400,8 +500,10 @@ try {
     await oracle("a dead viewer", { b: userText, s: "two" });
     const again = await present(false);
     await again.viewer.until("welcome");
-    await Bun.sleep(400);
-    const vs = await again.viewer.stats();
+    const t0 = performance.now();
+    let vs = await again.viewer.stats();
+    for (const end = Date.now() + 5_000; Date.now() < end && Number(vs.frames) === 0;) { await Bun.sleep(100); vs = await again.viewer.stats(); }
+    report.againFirstFrameMs = performance.now() - t0;
     const ps = await command("headless.unpresent", { tabId: "w-1" });
     again.viewer.send({ cmd: "bye" });
     await again.viewer.exited();
@@ -464,6 +566,7 @@ try {
   if (reportFile !== undefined) writeFileSync(reportFile, `${JSON.stringify({ results, report }, null, 2)}\n`);
   if (!process.argv.includes("--keep")) rmSync(work, { recursive: true, force: true });
   const failed = results.filter(([, ok]) => !ok).length;
+  if (failed > 0 && process.argv.includes("--helper-log")) console.log(`--- the helper's stderr ---\n${stderr.slice(-20_000)}`);
   console.log(`${results.length - failed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

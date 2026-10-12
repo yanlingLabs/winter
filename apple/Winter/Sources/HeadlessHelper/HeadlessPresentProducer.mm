@@ -6,14 +6,19 @@
 #include <mach/mach_time.h>
 #include <mach/notify.h>
 #include <servers/bootstrap.h>
+#include <sys/stat.h>
 
 #import "WinterCEF.h"
 #import "WinterPresentAuth.h"
 #import "WinterPresentWire.h"
 
+// Where a viewer's file-chooser answers must lie (`+setUploadsRoot:`).
+static NSString *g_uploadsRoot;
 // One device and queue for the helper, made on the first presentation.
 static id<MTLDevice> g_device;
 static id<MTLCommandQueue> g_queue;
+// Every paint CEF reported for a browser (presented or not), for diagnostics. Main thread only.
+static NSMutableDictionary<NSNumber *, NSNumber *> *g_paintsSeen;
 // The live presentations, by browser id. Main thread only.
 static NSMutableDictionary<NSNumber *, WinterHeadlessPresenter *> *g_presenters;
 
@@ -21,6 +26,10 @@ static NSMutableDictionary<NSNumber *, WinterHeadlessPresenter *> *g_presenters;
 - (void)paintType:(int)type surface:(IOSurfaceRef)surface;
 - (void)popupKind:(int)kind x:(int)x y:(int)y width:(int)width height:(int)height;
 - (void)cursor:(int)type;
+- (void)imeRangeStart:(int)start end:(int)end rects:(NSArray<NSValue *> *)rects;
+- (void)dialogOpenedType:(int)type message:(NSString *)message defaultText:(NSString *)defaultText;
+- (void)dialogClosed;
+- (BOOL)fileChooser:(int)requestId mode:(int)mode accept:(NSArray<NSString *> *)accept;
 @end
 
 static BOOL EnsureMetal(void) {
@@ -35,7 +44,9 @@ static void InstallObservers(void) {
   if (installed) return;
   installed = YES;
   g_presenters = [NSMutableDictionary dictionary];
+  g_paintsSeen = [NSMutableDictionary dictionary];
   WinterCEFHeadlessSetPaintObserver(^(int browserId, int type, IOSurfaceRef surface) {
+    g_paintsSeen[@(browserId)] = @(g_paintsSeen[@(browserId)].unsignedLongLongValue + 1);
     [g_presenters[@(browserId)] paintType:type surface:surface];
   });
   WinterCEFHeadlessSetPopupObserver(^(int browserId, int kind, int x, int y, int width, int height) {
@@ -44,6 +55,24 @@ static void InstallObservers(void) {
   WinterCEFHeadlessSetCursorObserver(^(int browserId, int cursorType) {
     [g_presenters[@(browserId)] cursor:cursorType];
   });
+  // Version 2: only a presenter whose viewer holds control acts on these (each checks).
+  WinterCEFHeadlessSetImeObserver(^(int browserId, int start, int end, NSArray<NSValue *> *rects) {
+    [g_presenters[@(browserId)] imeRangeStart:start end:end rects:rects];
+  });
+  WinterCEFHeadlessSetDialogObservers(
+      ^(int browserId, int type, NSString *message, NSString *defaultText) {
+        [g_presenters[@(browserId)] dialogOpenedType:type message:message defaultText:defaultText];
+      },
+      ^(int browserId) { [g_presenters[@(browserId)] dialogClosed]; });
+  WinterCEFHeadlessSetFileChooserHandler(^BOOL(int browserId, int requestId, int mode, NSArray<NSString *> *accept) {
+    WinterHeadlessPresenter *presenter = g_presenters[@(browserId)];
+    return presenter != nil && [presenter fileChooser:requestId mode:mode accept:accept];
+  });
+}
+
+/// `length` UTF-16 units of `units` (at most `max`), as a string.
+static NSString *WireText(const uint16_t *units, uint32_t length, uint32_t max) {
+  return [NSString stringWithCharacters:(const unichar *)units length:MIN(length, max)];
 }
 
 static double Ms(uint64_t ticks) {
@@ -80,11 +109,19 @@ static double Percentile(NSArray<NSNumber *> *values, double p) {
   id<MTLTexture> _textures[WinterPresentPoolSlots];
   BOOL _leased[WinterPresentPoolSlots];
 
+  // Version 2: the dialog shown to the viewer (0: none) and the file choosers it was asked.
+  uint32_t _dialogId, _nextDialogId;
+  NSMutableSet<NSNumber *> *_fileRequests;
+
   BOOL _popupVisible;
   int _popupX, _popupY, _popupWidth, _popupHeight;  // CSS pixels
   id<MTLTexture> _popup;                            // the popup's last frame, owned
 
   uint64_t _sequence, _frames, _dropped, _droppedSinceFrame, _inputs, _lastInputSequence;
+  // The first frame after the viewer was accepted (or after a scale change), awaited: a page with nothing moving paints
+  // only when asked, so the view is asked again until a frame comes (`-kickAfter:`).
+  BOOL _awaitingFrame;
+  NSUInteger _kicks;
   NSMutableArray<NSNumber *> *_copyMs;
 }
 
@@ -106,8 +143,25 @@ static double Percentile(NSArray<NSNumber *> *values, double p) {
     _started = [started copy];
     _ended = [ended copy];
     _copyMs = [NSMutableArray array];
+    _fileRequests = [NSMutableSet set];
   }
   return self;
+}
+
++ (void)setUploadsRoot:(NSString *)root {
+  g_uploadsRoot = [root copy];
+}
+
++ (BOOL)path:(NSString *)path isUploadInside:(NSString *)root {
+  if (root.length == 0 || ![path isAbsolutePath]) return NO;
+  char resolvedRoot[PATH_MAX], resolvedPath[PATH_MAX];
+  if (realpath(root.fileSystemRepresentation, resolvedRoot) == NULL) return NO;
+  if (realpath(path.fileSystemRepresentation, resolvedPath) == NULL) return NO;
+  // The file itself must not be a link (its parents resolved above).
+  struct stat st;
+  if (lstat(path.fileSystemRepresentation, &st) != 0 || !S_ISREG(st.st_mode)) return NO;
+  const size_t n = strlen(resolvedRoot);
+  return strncmp(resolvedPath, resolvedRoot, n) == 0 && resolvedPath[n] == '/';
 }
 
 - (void)dealloc {
@@ -149,7 +203,26 @@ static double Percentile(NSArray<NSNumber *> *values, double p) {
   if (_control == control) return;
   _control = control;
   // The user's keys reach the page only while the browser has focus: given with control, taken back with it.
-  if (_viewer != MACH_PORT_NULL) WinterCEFHeadlessSendInput(_key, WinterPresentInputFocus, control ? 1 : 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  if (_viewer != MACH_PORT_NULL) {
+    WinterCEFHeadlessSetUserControl(_key, control);
+    WinterCEFHeadlessSendInput(_key, WinterPresentInputFocus, control ? 1 : 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  }
+  if (_viewer == MACH_PORT_NULL) return;
+  WinterPresentControlMsg m = {};
+  m.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+  m.header.msgh_size = sizeof(m);
+  m.header.msgh_remote_port = _viewer;
+  m.header.msgh_id = WinterPresentMsgControl;
+  m.control = control ? 1 : 0;
+  mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m), 0, MACH_PORT_NULL, 100, MACH_PORT_NULL);
+  if (control) {
+    // A dialog the page already holds is the person's to answer now.
+    [self offerHeldDialog];
+  } else {
+    // Control goes back to the agent: what the viewer was asked and has not answered is withdrawn.
+    [self withdrawDialog];
+    [self cancelFileChoosers];
+  }
 }
 
 /// How many Mach port names this process holds now (a presentation that leaks a right shows here).
@@ -167,6 +240,8 @@ static NSUInteger TaskPortCount(void) {
   return @{
     @"taskPorts" : @(TaskPortCount()),
     @"frames" : @(_frames),
+    @"kicks" : @(_kicks),
+    @"paintsSeen" : g_paintsSeen[@(_browserId)] ?: @0,
     @"dropped" : @(_dropped),
     @"generations" : @(_generation),
     @"inputs" : @(_inputs),
@@ -236,16 +311,195 @@ static NSUInteger TaskPortCount(void) {
       if (m->scale >= 1.0 && m->scale <= 4.0 && m->scale != _scale) {
         _scale = m->scale;
         WinterCEFHeadlessSetPresentation(_key, _scale, 60);
+        [self awaitFrame];
       }
       break;
     }
     case WinterPresentMsgBye:
       [self endSaying:-1 reason:@"the viewer stopped"];
       break;
+    case WinterPresentMsgIme: {
+      if (!_control || header->msgh_size < offsetof(WinterPresentImeMsg, text)) break;
+      const WinterPresentImeMsg *m = (const WinterPresentImeMsg *)header;
+      const uint32_t fits = (uint32_t)((header->msgh_size - offsetof(WinterPresentImeMsg, text)) / sizeof(uint16_t));
+      if (m->kind < WinterPresentImeSetComposition || m->kind > WinterPresentImeCancel) break;
+      _inputs++;
+      _lastInputSequence = m->sequence;
+      WinterCEFHeadlessIme(_key, (int)m->kind, WireText(m->text, MIN(m->length, fits), WinterPresentTextMax), m->selectionStart,
+                           m->selectionEnd, m->replacementStart, m->replacementEnd);
+      break;
+    }
+    case WinterPresentMsgEdit: {
+      if (!_control || header->msgh_size < offsetof(WinterPresentEditMsg, text)) break;
+      const WinterPresentEditMsg *m = (const WinterPresentEditMsg *)header;
+      if (m->command < WinterPresentEditCopy || m->command > WinterPresentEditDelete) break;
+      const uint32_t fits = (uint32_t)((header->msgh_size - offsetof(WinterPresentEditMsg, text)) / sizeof(uint16_t));
+      _inputs++;
+      _lastInputSequence = m->sequence;
+      WinterCEFHeadlessEdit(_key, (int)m->command,
+                            m->command == WinterPresentEditPaste ? WireText(m->text, MIN(m->length, fits), WinterPresentTextMax) : nil);
+      break;
+    }
+    case WinterPresentMsgDialogReply: {
+      if (!_control || header->msgh_size < offsetof(WinterPresentDialogReplyMsg, text)) break;
+      const WinterPresentDialogReplyMsg *m = (const WinterPresentDialogReplyMsg *)header;
+      if (_dialogId == 0 || m->dialogId != _dialogId) break;  // not the dialog the viewer was shown (any more)
+      const uint32_t fits = (uint32_t)((header->msgh_size - offsetof(WinterPresentDialogReplyMsg, text)) / sizeof(uint16_t));
+      NSString *text = WireText(m->text, MIN(m->length, fits), WinterPresentTextMax);
+      _dialogId = 0;
+      WinterCEFResolveHeldDialog(_key, m->accept != 0 ? WinterCEFHeldDialogActionAccept : WinterCEFHeldDialogActionDismiss, text.UTF8String);
+      break;
+    }
+    case WinterPresentMsgFileReply: {
+      if (header->msgh_size < offsetof(WinterPresentFileReplyMsg, paths)) break;
+      const WinterPresentFileReplyMsg *m = (const WinterPresentFileReplyMsg *)header;
+      if (![_fileRequests containsObject:@(m->requestId)]) break;
+      [_fileRequests removeObject:@(m->requestId)];
+      const uint32_t fits = (uint32_t)(header->msgh_size - offsetof(WinterPresentFileReplyMsg, paths));
+      const uint32_t length = MIN(MIN(m->length, fits), (uint32_t)WinterPresentFilePathsMax);
+      NSMutableArray<NSString *> *paths = [NSMutableArray array];
+      BOOL refused = NO;
+      if (_control && m->accept != 0) {
+        uint32_t at = 0;
+        while (at < length) {
+          const char *start = m->paths + at;
+          const size_t n = strnlen(start, length - at);
+          if (n == length - at) break;  // not NUL-terminated within the message: dropped
+          NSString *path = [NSString stringWithUTF8String:start];
+          if (path == nil || ![WinterHeadlessPresenter path:path isUploadInside:g_uploadsRoot]) {
+            refused = YES;
+          } else {
+            [paths addObject:path];
+          }
+          at += (uint32_t)n + 1;
+        }
+      }
+      if (refused) NSLog(@"WinterHeadless: a file-chooser answer named a file outside the uploads folder — refused");
+      // Anything refused cancels the whole answer: the page gets the person's choice or nothing.
+      WinterCEFHeadlessResolveFileChooser((int)m->requestId, refused ? nil : paths);
+      break;
+    }
     default:
       break;
   }
   mach_msg_destroy(header);
+}
+
+// MARK: - The first frame
+
+/// A frame is owed (the viewer was just accepted, or the scale changed): until one comes, the view is asked again every
+/// 250 ms, 40 times at most.
+- (void)awaitFrame {
+  _awaitingFrame = YES;
+  [self kickAfter:0];
+}
+
+- (void)kickAfter:(NSUInteger)attempt {
+  __weak WinterHeadlessPresenter *weak = self;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+    WinterHeadlessPresenter *strong = weak;
+    if (strong == nil || strong->_stopped || strong->_viewer == MACH_PORT_NULL || !strong->_awaitingFrame || attempt >= 40) return;
+    strong->_kicks++;
+    WinterCEFHeadlessSetPresentation(strong->_key, strong->_scale, 60);
+    [strong kickAfter:attempt + 1];
+  });
+}
+
+// MARK: - Version 2: IME bounds, dialogs, file choosers
+
+- (void)imeRangeStart:(int)start end:(int)end rects:(NSArray<NSValue *> *)rects {
+  if (_viewer == MACH_PORT_NULL || !_control) return;
+  WinterPresentImeBoundsMsg m = {};
+  const uint32_t count = (uint32_t)MIN(rects.count, (NSUInteger)WinterPresentImeRectsMax);
+  m.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+  m.header.msgh_size = (mach_msg_size_t)(offsetof(WinterPresentImeBoundsMsg, rects) + count * sizeof(WinterPresentRect));
+  m.header.msgh_remote_port = _viewer;
+  m.header.msgh_id = WinterPresentMsgImeBounds;
+  m.rangeStart = start;
+  m.rangeEnd = end;
+  m.count = count;
+  for (uint32_t i = 0; i < count; i++) {
+    const NSRect r = rects[i].rectValue;
+    m.rects[i] = (WinterPresentRect){(int32_t)r.origin.x, (int32_t)r.origin.y, (int32_t)r.size.width, (int32_t)r.size.height};
+  }
+  mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, m.header.msgh_size, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+- (void)dialogOpenedType:(int)type message:(NSString *)message defaultText:(NSString *)defaultText {
+  if (_viewer == MACH_PORT_NULL || !_control) return;
+  [self sendDialogType:type message:message defaultText:defaultText];
+}
+
+/// The page's held dialog, if any, offered to the viewer (control was just given).
+- (void)offerHeldDialog {
+  int type = 0;
+  NSString *message = nil, *defaultText = nil;
+  if (_dialogId != 0 || !WinterCEFHeadlessCurrentDialog(_key, &type, &message, &defaultText)) return;
+  [self sendDialogType:type message:message ?: @"" defaultText:defaultText ?: @""];
+}
+
+- (void)sendDialogType:(int)type message:(NSString *)message defaultText:(NSString *)defaultText {
+  WinterPresentDialogMsg m;
+  memset(&m, 0, sizeof(m));
+  m.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+  m.header.msgh_size = sizeof(m);
+  m.header.msgh_remote_port = _viewer;
+  m.header.msgh_id = WinterPresentMsgDialog;
+  m.dialogId = ++_nextDialogId;
+  m.type = (uint32_t)type;
+  const NSUInteger messageLength = MIN(message.length, (NSUInteger)WinterPresentTextMax);
+  [message getCharacters:(unichar *)m.message range:NSMakeRange(0, messageLength)];
+  m.messageLength = (uint32_t)messageLength;
+  const NSUInteger defaultLength = MIN(defaultText.length, (NSUInteger)WinterPresentDialogDefaultMax);
+  [defaultText getCharacters:(unichar *)m.defaultText range:NSMakeRange(0, defaultLength)];
+  m.defaultLength = (uint32_t)defaultLength;
+  if (mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m), 0, MACH_PORT_NULL, 100, MACH_PORT_NULL) == KERN_SUCCESS) {
+    _dialogId = m.dialogId;
+  }
+}
+
+- (void)dialogClosed {
+  [self withdrawDialog];
+}
+
+/// The dialog the viewer was shown went away without its answer (or control went back to the agent): withdrawn.
+- (void)withdrawDialog {
+  if (_dialogId == 0) return;
+  const uint32_t dialogId = _dialogId;
+  _dialogId = 0;
+  if (_viewer == MACH_PORT_NULL) return;
+  WinterPresentDialogDoneMsg m = {};
+  m.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+  m.header.msgh_size = sizeof(m);
+  m.header.msgh_remote_port = _viewer;
+  m.header.msgh_id = WinterPresentMsgDialogDone;
+  m.dialogId = dialogId;
+  mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m), 0, MACH_PORT_NULL, 100, MACH_PORT_NULL);
+}
+
+- (BOOL)fileChooser:(int)requestId mode:(int)mode accept:(NSArray<NSString *> *)accept {
+  if (_viewer == MACH_PORT_NULL || !_control) return NO;
+  WinterPresentFileChooserMsg m;
+  memset(&m, 0, sizeof(m));
+  m.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+  m.header.msgh_size = sizeof(m);
+  m.header.msgh_remote_port = _viewer;
+  m.header.msgh_id = WinterPresentMsgFileChooser;
+  m.requestId = (uint32_t)requestId;
+  m.mode = (uint32_t)mode;
+  NSData *list = [[accept componentsJoinedByString:@","] dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+  const NSUInteger n = MIN(list.length, (NSUInteger)WinterPresentFileAcceptMax);
+  memcpy(m.accept, list.bytes, n);
+  m.acceptLength = (uint32_t)n;
+  if (mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m), 0, MACH_PORT_NULL, 100, MACH_PORT_NULL) != KERN_SUCCESS) return NO;
+  [_fileRequests addObject:@(requestId)];
+  return YES;
+}
+
+/// Every file chooser the viewer was asked and has not answered is cancelled (the page is not left waiting).
+- (void)cancelFileChoosers {
+  for (NSNumber *requestId in _fileRequests) WinterCEFHeadlessResolveFileChooser(requestId.intValue, nil);
+  [_fileRequests removeAllObjects];
 }
 
 - (void)hello:(mach_msg_header_t *)header token:(audit_token_t)token {
@@ -278,7 +532,12 @@ static NSUInteger TaskPortCount(void) {
   mach_msg(&welcome.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(welcome), 0, MACH_PORT_NULL, 100, MACH_PORT_NULL);
   // Render for the viewer from now on: its scale, a viewer's frame rate, a fresh frame now.
   WinterCEFHeadlessSetPresentation(_key, _scale, 60);
-  if (_control) WinterCEFHeadlessSendInput(_key, WinterPresentInputFocus, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  [self awaitFrame];
+  if (_control) {
+    WinterCEFHeadlessSetUserControl(_key, YES);
+    WinterCEFHeadlessSendInput(_key, WinterPresentInputFocus, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    [self offerHeldDialog];  // a dialog the page already holds is the person's to answer
+  }
   if (_started != nil) {
     void (^started)(void) = _started;
     _started = nil;
@@ -420,6 +679,7 @@ static NSUInteger TaskPortCount(void) {
   if (kr == KERN_SUCCESS) {
     _leased[slot] = YES;
     _frames++;
+    _awaitingFrame = NO;
     _droppedSinceFrame = 0;
   } else {  // the viewer's queue is full: the frame is dropped, the slot stays free
     _dropped++;
@@ -523,8 +783,13 @@ static NSUInteger TaskPortCount(void) {
   }
   [self releasePool];
   _popup = nil;
+  // Nothing the viewer was asked stays waiting on it: a held dialog stays held (the agent can answer it), file choosers
+  // are cancelled.
+  _dialogId = 0;
+  [self cancelFileChoosers];
   // Back to the tab's own rendering: scale 1, the helper's own frame rate; the user's focus taken back.
   if (_control) WinterCEFHeadlessSendInput(_key, WinterPresentInputFocus, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  WinterCEFHeadlessSetUserControl(_key, NO);
   WinterCEFHeadlessSetPresentation(_key, 1.0, 0);
   [g_presenters removeObjectForKey:@(_browserId)];
   _started = nil;

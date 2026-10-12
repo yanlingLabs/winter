@@ -65,6 +65,10 @@ let chromiumArgv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?> = {
 // The local-network rule, before any browser can exist (unset, CEF would refuse every request).
 WinterCEFHeadlessSetRequestRule(headlessRequestRefused)
 
+// A presentation's file-chooser answers must lie in `<home>/cache/headless-uploads`, beside this run's own cache root
+// (`<home>/cache/headless-cef/<random>`); with any other layout, every answer is refused.
+if let uploads = arguments.uploadsRoot { WinterHeadlessPresenter.setUploadsRoot(uploads) }
+
 guard WinterCEFInitializeHeadless(Int32(chromiumArguments.count), chromiumArgv, layout.frameworkDir,
                                   layout.mainBundle, layout.subprocessPath, arguments.cacheRoot) else {
     fail("CEF did not start: \(String(cString: WinterCEFLastError()))", code: 4)
