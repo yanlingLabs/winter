@@ -500,6 +500,14 @@ final class SimRun {
             core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: clock.nowSeconds())
             // A click on that app's Dock tile: input for THAT app, claimed (the contract).
             let i = w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, target: a, claim: true, dest: a))
+            // R17-b (the controller's ruling): a click on the FRONT app's Dock tile makes that app their place AT THE CLICK,
+            // strictly — a replacement, never a union (as a click into its window does).
+            w.lock.withLock {
+                guard a == w.front, !w.visiting else { return }
+                let cur = SPlace(app: w.front, space: w.space)
+                w.cands = [SimCand(place: cur, expected: cur, held: nil)]
+                w.log("  (a click on the front app's Dock tile: \(cur) is their place now)")
+            }
             w.lock.withLock { w.dockTileApp = a }
             _ = core.onPhysicalClick(at: CGPoint(x: 800, y: 975), userData: 0, now: clock.nowSeconds())
             w.lock.withLock { w.dockTileApp = nil }
