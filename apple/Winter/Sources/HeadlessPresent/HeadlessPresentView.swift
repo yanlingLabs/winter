@@ -30,7 +30,9 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
     private var mouseOnPage = false
     /// Buttons pressed on the page and not yet released (a drag keeps reaching the page).
     private var pressed: Set<Int32> = []
-    private var lastPoint = CGPoint.zero
+    /// The window's occlusion observer: a window nobody can see draws nothing (its layer would hold the renderer's
+    /// queue waiting for a drawable).
+    private var occlusionObserver: NSObjectProtocol?
 
     // The key-down state machine (cefclient's `HandleKeyEventBefore/AfterTextInputClient`).
     private var handlingKeyDown = false
@@ -134,6 +136,14 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if let occlusionObserver { NotificationCenter.default.removeObserver(occlusionObserver) }
+        occlusionObserver = nil
+        if let window {
+            occlusionObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updateViewport() }
+            }
+        }
         updateViewport()
         if window != nil, let presentation, presentation.view === self {
             presentation.view = self // a prompt waiting for a window can show now
@@ -145,8 +155,11 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
         let backing = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         metalLayer.contentsScale = backing
         let fit = pageRect
+        // Off screen (no window, a miniaturised or fully covered one): nothing is drawn — the renderer keeps copying
+        // frames, and draws the newest as soon as the window can be seen again.
+        let visible = window?.occlusionState.contains(.visible) == true
         presentation.renderer.setViewport(.init(
-            drawableSize: CGSize(width: (bounds.width * backing).rounded(), height: (bounds.height * backing).rounded()),
+            drawableSize: visible ? CGSize(width: (bounds.width * backing).rounded(), height: (bounds.height * backing).rounded()) : .zero,
             fit: CGRect(x: fit.minX * backing, y: fit.minY * backing, width: fit.width * backing, height: fit.height * backing),
             clear: letterboxColor()))
         let fitScale = HeadlessPresentGeometry.fitScale(fit: fit, content: cssSize)
@@ -229,7 +242,6 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
     private func move(_ event: NSEvent, button: HeadlessPresentKeys.MouseButton = .none) {
         guard let presentation, presentation.acceptsInput else { return }
         let point = viewPoint(event)
-        lastPoint = point
         let dragging = !pressed.isEmpty
         guard let css = HeadlessPresentGeometry.cssPoint(point, fit: pageRect, content: cssSize, clamp: dragging) else {
             leavePage(event)
@@ -310,7 +322,7 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
         compositionUpdated = false
         unmarkCalled = false
         markedReplacement = NSRange(location: NSNotFound, length: 0)
-        if inputContext?.handleEvent(event) != true { interpretKeyEvents([event]) }
+        interpretKeyEvents([event])
         handlingKeyDown = false
 
         // After: what the key amounted to.

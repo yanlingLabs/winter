@@ -92,10 +92,10 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
 
     /// Look the service up and say HELLO. nil on success, else why not.
     func connect() -> String? {
-        let consumer = self.consumer
+        let consumer = ConsumerRef(consumer)
         return queue.sync { () -> String? in
             var error: NSString?
-            if consumer.connectWithError(&error) { return nil }
+            if consumer.consumer.connectWithError(&error) { return nil }
             return (error as String?) ?? "the presentation could not be reached"
         }
     }
@@ -107,8 +107,8 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
         teardownPrompts()
         scaleWork?.cancel()
         renderer.reset()
-        let consumer = self.consumer
-        queue.async { consumer.close() }
+        let consumer = ConsumerRef(consumer)
+        queue.async { consumer.consumer.close() }
     }
 
     // MARK: - From the consumer (main thread)
@@ -233,8 +233,8 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
         let work = DispatchWorkItem { [weak self] in
             guard let self, !self.closed, self.phase == .live, scale != self.sentScale else { return }
             self.sentScale = scale
-            let consumer = self.consumer
-            self.queue.async { consumer.setScale(scale) }
+            let consumer = ConsumerRef(self.consumer)
+            self.queue.async { consumer.consumer.setScale(scale) }
         }
         scaleWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.scaleDebounce, execute: work)
@@ -342,9 +342,9 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
 
     /// The chosen files copied where the helper may read them (off the main thread), then the copies' paths.
     private func copyAndReply(requestId: UInt32, urls: [URL]) {
-        let consumer = self.consumer
+        let consumer = ConsumerRef(self.consumer)
         guard let root = uploadsRoot else {
-            consumer.reply(toFileChooser: requestId, paths: nil)
+            consumer.consumer.reply(toFileChooser: requestId, paths: nil)
             showNotice(HeadlessPresentUploads.Failure.notTheUploadsFolder.message)
             return
         }
@@ -355,9 +355,9 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
                 MainActor.assumeIsolated {
                     switch result {
                     case .success(let paths):
-                        consumer.reply(toFileChooser: requestId, paths: paths)
+                        consumer.consumer.reply(toFileChooser: requestId, paths: paths)
                     case .failure(let failure):
-                        consumer.reply(toFileChooser: requestId, paths: nil)
+                        consumer.consumer.reply(toFileChooser: requestId, paths: nil)
                         self?.showNotice(failure.message)
                     }
                 }
@@ -378,6 +378,13 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
             active.panel.cancel(nil)
         }
     }
+}
+
+/// The consumer handed to another queue. Every call made through it is one the consumer allows from any thread, or
+/// is made on the presentation's own queue.
+private struct ConsumerRef: @unchecked Sendable {
+    let consumer: WinterPresentConsumer
+    init(_ consumer: WinterPresentConsumer) { self.consumer = consumer }
 }
 
 /// The consumer's delegate. Not main-actor: the consumer calls it on the presentation's queue. Frames go straight to
