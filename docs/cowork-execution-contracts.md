@@ -22,23 +22,20 @@ Sanitize inherited descriptors, `/proc` visibility, Unix sockets, launch environ
 
 ## Host storage authority, fences and migration
 
-The user's subsequent [encrypted-at-rest decision](cowork-storage-security.md)
-sets the confidentiality bar for private VM disks. Keys belong only to a signed
-storage/key helper, not `winter-core`. Keep the canonical runtime-state DB;
-integrity-protect the broker/worker-consumed manifest, workspace/volume identity
-and key version. Plaintext records alone cannot authorize launch or key release.
-Path floors and IPC restrictions are defense in depth, not a universal boundary
-against same-user delegated services. Preserve ordinary Code escape behavior
-under its existing approval policy; the rejected alternative was blocking all
-escapes while Cowork storage exists. Ciphertext deletion/corruption remains a
-detectable denial of service, and plaintext shared files/authorized copies are
-outside the disk guarantee.
+The user's 2026-10-12 [first-version storage decision](cowork-storage-security.md)
+defers per-workspace encryption. Private images are plaintext, with owner/mode
+and file-identity checks, explicit format/version and backup exclusion. FileVault
+protects the host volume offline when enabled; approved escaped commands and
+other same-user processes may read images. Keep canonical host authority and
+authenticated worker admission. Path controls are required for enrolled Winter
+tools, not a universal same-user confidentiality boundary. Do not reintroduce
+an outer native Code floor or block normal approved escapes.
 
 Canonical Workspace, Project, Source, trust, publication-policy and Delegation records live in new versioned tables in `<WINTER_HOME>/runtimes/runtime-state.db`, with its normal protected SQLite sidecars. `cowork/workspaces/<id>/manifest.json` is a versioned storage/export descriptor, not a second authority store: record workspace/volume identity, relative owned storage locations, image/runtime digests and checkpoint/export generation. A manifest or imported export can never grant access, trust a source or change policy. Validate it against the host database and owned storage roots before attaching anything; a mismatch is recovery-required. Schema upgrades preserve authority, and unsupported downgrades refuse rather than recreate empty permissive state.
 
 Extend the existing single host-fence definition to include every participating Winter home's Cowork tree and the fixed coordination directory. Derive the Mac shell sandbox denial, Write/Edit/Notebook/path rules and escape floor from that definition; do not maintain separate drifting lists. Winter-mediated raw writes, rename/replacement, deletion and chmod are denied under every policy, including auto/accept-edits/bypass. Winter-mediated Read/Glob/Grep and sandboxed-shell reads of manifests, authority/control records and volume files are also denied; approved metadata/artifact/export services provide bounded views. This describes covered routes, not an assertion that arbitrary delegated same-user services cannot access their files. Apply read fences separately from write fences, while preserving authorized reads of shared content. Approved user/host broker operations are separate from agent file tools. Include other dev/custom homes, and reject or exclude control storage from selected source roots. Owner-only file modes alone do not constrain same-user host agents. [Current fence composition](../packages/core/src/runtime-sdk/home-fence.ts#L32), [sandbox source list](../packages/core/src/runtime-sdk/mode-options.ts#L915)
 
-Accepted native-host policy, updated 2026-10-12: native Code and third-party tools receive no persistent pre-applied Cowork floor. Sandboxed Bash places Cowork backing/control/socket roots in its existing sandbox denyRead/denyWrite arrays, using one profile and each tool's normal sandbox semantics. Never inject disable-sandbox, no-sandbox, GPU or LSP compatibility overrides. Approved escapes retain normal approval behavior and no Seatbelt; their Cowork denial is static and write-shaped, protecting direct writes, aliases and ancestor replacement/move for integrity. It is not confidentiality against scripts, computed paths, other applications or arbitrary same-user execution. Existing Core/SDK file path checks deny sensitive controls and volumes while retaining approved shared-artifact reads. Real outer floors remain only on intentionally Winter-owned Cowork workers/bridges; encrypted private disks and native key custody provide the selected at-rest boundary.
+Accepted native-host policy, updated 2026-10-12: native Code and third-party tools receive no persistent pre-applied Cowork floor. Sandboxed Bash places Cowork backing/control/socket roots in its existing sandbox denyRead/denyWrite arrays, using one profile and each tool's normal sandbox semantics. Never inject disable-sandbox, no-sandbox, GPU or LSP compatibility overrides. Approved escapes retain normal approval behavior and no Seatbelt; their Cowork denial is static and write-shaped, protecting direct writes, aliases and ancestor replacement/move for integrity. It is not confidentiality against scripts, computed paths, other applications or arbitrary same-user execution. Existing Core/SDK file path checks deny sensitive controls and volumes while retaining approved shared-artifact reads. Real outer floors remain only on intentionally Winter-owned Cowork workers/bridges; private images remain plaintext for the first version, with the explicitly accepted same-user and copied-image residual.
 
 Storage activation requires policy acknowledgments, not artificial descendant debt from ordinary host children. Compare the effective path descriptor with the last completed acknowledgment: an unchanged repeated registration or new workspace beneath stable roots must leave ordinary running Code intact. Fresh filesystem membership before registration is not an acknowledgment; a new participating-home root still requires refresh. Path-policy idempotence does not replace separate workspace/source/approval authority updates. The installed SDK cannot live-refresh captured sandbox settings: hold Code queues, let the current turn finish and recreate the logical incarnation/run home with unchanged session/backend identity and regenerated sandbox/path policy, then replay held work. This does not require a daemon restart or claim third-party descendants stopped. Existing embedded Workers must close before new storage is admitted; show activation pending/blocked if closure or policy refresh is uncertain. Chat/Dispatch remain refused under active storage until complete file/context coverage is independently accepted. New SDK live-policy controls require their own acknowledgment and propagation tests before replacing this fallback.
 
@@ -49,12 +46,13 @@ Migration C explicitly excludes Cowork topology from host-cwd canonicalization, 
 
 The [host data and protocol contract](cowork-host-protocol.md) specifies canonical records and the local/remote operations that can change them. No raw file import or synced session event is an authority-writing substitute for those methods.
 
-Migration and backup also preserve encrypted bytes, integrity metadata and
-opaque key identities. A copied home does not copy Keychain authority. Restore
-requires available keys or an explicitly authorized wrapped-key recovery path;
-missing keys leave a locked/recovery-required workspace. No silent plaintext
-export, plaintext temporary volume or decrypted host mount is an acceptable
-migration shortcut.
+First-version migrations preserve plaintext volume bytes, explicit format and
+identity records, owner-only permissions and backup exclusions. Private images
+are excluded from automatic Time Machine backup; shared instructions/memory/
+outputs remain eligible for normal user backups. Explicit exports require a
+consistent quiescent generation and disclose that exported images are plaintext.
+Future encrypted formats must preserve ciphertext/key identity and enforce their
+own key-recovery rules; they are not first-version prerequisites.
 
 ## Approval policies
 

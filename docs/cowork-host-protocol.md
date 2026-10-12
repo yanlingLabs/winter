@@ -6,19 +6,19 @@ Status: proposed specification, 2026-10-11. This is the gate-3/4 planning contra
 
 Workspace, Project, Source, Delegation, trust/policy and durable transition/outbox records live in new versioned tables in `<WINTER_HOME>/runtimes/runtime-state.db`. Extend the existing runtime/session/lease/mailbox store; do not create an independently authoritative JSON manifest or session-index copy. The schema version must reject incompatible older writers. The admission ledger is the explicit cross-home exception described below. [Existing durable records](../packages/core/src/runtime-state/db.ts#L35)
 
-The subsequent [private-storage decision](cowork-storage-security.md) requires
-ciphertext for direct reads of private VM disks and integrity-protected records
-consumed by the key/launch broker or worker. It does not require encryption of
-ordinary grants/source IDs/policy or a helper-backed runtime-state database.
-Keep this canonical DB and its transaction/outbox invariants. Plaintext records
-alone cannot release keys or admit launches: require an authenticated daemon
-request plus the broker's sealed workspace/volume identity and key-version state.
-Storage descriptors carry only opaque key/format references, never key material.
+The current [first-version storage decision](cowork-storage-security.md) defers
+separate workspace encryption. Private images are plaintext. Keep canonical DB
+transaction/outbox authority and authenticated worker admission; imported
+manifests or descriptors cannot authorize a launch. Volume records explicitly
+name the format/version, file identity, owner/mode and backup policy. Key references
+are absent for `raw-ext4-v1`; a future encrypted-format conversion adds opaque key
+references under its own reviewed custody and recovery protocol, never raw keys.
 
 | Record | Required fields and invariants |
 | --- | --- |
 | `HomeIdentity` | Host-only immutable `homeId` in versioned runtime-state DB metadata, canonical location and schema version; distinct from daemon instance/PID. Relocation preserves it. Copying a home cannot create a second valid owner; a separately authorized clone/import needs a new home identity and explicit provenance/identity reconciliation, otherwise it is refused. |
 | `Workspace` | `workspaceId`, ownership kind (`standalone` or `project`), owner session/project ID, title, retained/archive/delete state, `configRevision`, `grantRevision`, `instructionRevision`, canonical `policyId`, image/environment/runtime digests, owned storage references, verified backing status and last durable checkpoint. Durable identity is separate from guest incarnation, disk lease epoch and current VM power. |
+| `Volume` | Host-only `volumeId`, `workspaceId`, purpose (`data` or `environment`), explicit `formatId`/`formatVersion` (first version `raw-ext4-v1`), geometry, owned relative location, recorded device/inode/owner/mode, backup exclusion, current ownership/generation and recovery state. First-version key reference is absent. Unknown formats refuse; future encryption is an explicit journaled conversion, never reinterpretation or replacement of existing data. |
 | `Project` | `projectId`, exactly one `workspaceId`, title/archive state, a reference to its workspace's canonical policy record (default approval policy, capability ceiling, publication policy and revisions), never a second mutable copy. Defaults initialize new conversations; a later default-policy edit does not silently change existing conversations. Ceiling/source restrictions still revalidate existing work. |
 | `WorkspacePolicy` | `policyId`, `workspaceId`, default approval policy, capability ceiling, publication policy and independent revisions. Shared by the owning Project view or standalone workspace; authoritative values exist once. The ordinary initial default is auto for both ownership kinds. |
 | `ProjectMembership` | `sessionId`, `projectId`, `workspaceId`, joined time and active/archive/delete state. A conversation's workspace binding is immutable. Creating a Project conversation adds membership; archiving/deleting updates membership without deleting workspace data. Moving an existing conversation to another workspace requires a separately designed migration and is unsupported here. |

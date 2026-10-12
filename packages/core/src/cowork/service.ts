@@ -12,7 +12,7 @@ export interface CoworkHostPorts {
   grants: CoworkGrantResolver;
   selection(principal: CoworkPrincipal, selectionId: string): SourceSelection | undefined;
   creationCeiling(principal: CoworkPrincipal): CapabilityCeiling | undefined;
-  /** Must fail closed until native, crypto and active resource-return gates pass. Fixture backend
+  /** Must fail closed until native isolation, storage and active resource-return gates pass. Fixture backend
    * permits isolated tests; this port does not launch a worker or mark any source ready. */
   requireProvisioning(principal: CoworkPrincipal): void;
 }

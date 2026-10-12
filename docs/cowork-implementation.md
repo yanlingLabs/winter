@@ -7,12 +7,14 @@ separately. Cowork remains unavailable until its required gates pass.
 ## Current decisions and verified groundwork
 
 - The later accepted architecture uses one sandboxed native worker per workspace,
-  orchestrated by the daemon. Project conversations share that worker/VM. Private
-  disks must be encrypted before activation; keys stay outside Core/Bun. The
+  orchestrated by the daemon. Project conversations share that worker/VM. Separate
+  private-disk encryption is deferred for the first version by the user on
+  2026-10-12. Images are plaintext; VM isolation and host credential protection
+  stay required. The
   [storage contract](cowork-storage-security.md) states the direct-backing-read
-  guarantee, authenticated-API/plaintext-copy limits and proposed native launch
+  residual, backup/format requirements and authenticated native launch
   capability. Ordinary canonical control records remain in the runtime-state DB;
-  integrity protects broker-consumed workspace/volume/key-version records.
+  authenticated launch validates worker-consumed workspace/volume identity.
 
 - The specification and offline probe have independent review acceptance. The
   [measurement record](research/2026-10-11-cowork-gate1-results.md) records the
@@ -90,8 +92,8 @@ separately. Cowork remains unavailable until its required gates pass.
 | Area | Current work | Required before completion |
 | --- | --- | --- |
 | Canonical host state | Schema 8 repository, receipts/outbox, typed workspace metadata RPCs, remote allowlist mirrors and bounded cursor pages | Native controller acknowledgments, source provisioning, authority service wiring, lifecycle/recovery and paired-client scope adapter |
-| Host storage protection | Retained-home fences and Core/SDK authority consumer; synthetic native key-broker and host-output fixtures | Actual encrypted disks and durable sealed records; embedded/daemon file and spawn coverage; Workflow wiring; preserve ordinary Code behavior; stop owned host effects on daemon loss |
-| Native VM integration | VZ research foundations; reviewed Linux/HVF live reclaim with one RAW disk | Encrypted storage and remaining asynchronous devices, production signed worker admission, cancellation/ownership, direct shares, automatic resources and concurrent latency |
+| Host storage protection | Retained-home fences and Core/SDK authority consumer; synthetic native key-broker and host-output fixtures | Owner/mode/file-identity checks and backup exclusions; embedded/daemon file and spawn coverage; Workflow wiring; preserve ordinary Code behavior; stop owned host effects on daemon loss |
+| Native VM integration | VZ research foundations; reviewed Linux/HVF live reclaim with one RAW disk | Persistent RAW storage and remaining asynchronous devices, production signed worker admission, cancellation/ownership, direct shares, automatic resources and concurrent latency |
 | Guest execution | Merged remote transport; confined text file and foreground-process helpers; protected-store bootstrap seam | Immutable runtime/supervisor, native ownership and termination adapters, complete process/extension routes, run-home/instructions and cold VM parent/child restoration |
 | Network and credentials | Native egress and bounded Git publication foundations, isolated package receipts | Guest parser outside credential daemon; brokered sockets and providers/MCP; GitHub auth/private clone/service wiring; native resource bounds and revocation draining |
 | Workspace behavior | Durable source/policy metadata transitions and replay-safe mutations | Real source admission and live add/remove/revoke, context refresh and trust, artifact/export/backup retention, same-Project messaging |

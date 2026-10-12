@@ -1,5 +1,10 @@
 # Synthetic native launch/key fixture
 
+Per-workspace encryption was deferred from the first version by user choice on
+2026-10-12. This fixture and its crypto work are preserved for that later feature;
+it is not a prerequisite for first-version RAW workspace execution. General
+native process ownership lessons remain applicable.
+
 Implemented fixture, production launch remains blocked. Swift6.2/macOS26; no
 external dependency, actual Keychain item/API, VM, daemon or live home access.
 SwiftPM builds ad-hoc fixture code signatures automatically; these are not

@@ -1,11 +1,71 @@
-# Cowork private storage confidentiality
+# Cowork private storage
 
-Status: product decision recorded 2026-10-11; implementation and validation open.
-The independent reviewer relayed the user's choice, **"Encrypt at rest"**, for
-private VM data. The alternatives were a documented fence-only boundary or
-blocking Code escapes while Cowork storage exists. Neither was selected.
+Status: first-version scope changed directly by the user on 2026-10-12.
+**Separate per-workspace encryption is deferred for the first version.** This
+supersedes the earlier encryption-before-activation requirement. The accepted
+tradeoff is weaker protection against direct same-user reads and copied images.
+VM isolation, selected-folder boundaries, host credential custody and active RAM
+return remain required.
 
-## Required boundary
+## First-version boundary and gates
+
+Private data/environment images contain plaintext guest filesystems. FileVault,
+when enabled on the host volume, protects offline access to that volume; it does
+not protect a copied image, an unencrypted backup destination, or reads by an
+already authorized process on the unlocked Mac. Check and report host protection
+rather than claiming FileVault is enabled on every installation. The product and
+escape approval copy must say that images are plaintext and approved escaped
+commands run as the user and may read them. Selected folders, shared instructions,
+memory, outputs and host transcripts also remain plaintext.
+[Apple's FileVault boundary](https://support.apple.com/guide/security/sec4c6dc1b6e/web)
+
+Create workspace/volume directories as 0700 and images as 0600. Every admission
+and image open checks current owner, exact modes, no-follow file identity and
+recorded device/inode; refuse drift instead of silently repairing permissions.
+One confirmed worker owns a writable volume. Uncertain termination retains that
+ownership. Manifest/imported descriptors cannot grant authority: validate against
+canonical host records and the authenticated launch request, binding workspace,
+volume, incarnation and runtime image. Preserve existing data on recovery errors.
+
+The first-version merge gates include protected Cowork/image/socket paths in the
+ONE existing Bash sandbox's denyRead/denyWrite lists, Read/Glob/Grep and write-tool
+path checks, and write-shaped escape denials. These guard enrolled Winter routes;
+they do not constrain arbitrary same-user processes or approved escaped reads.
+Keep ordinary Code, hooks, LSP and third-party tool behavior, with no extra outer
+floor or injected sandbox-disabling flags. Purpose-built worker/bridge sandboxes
+and guest tool compartments remain enforced boundaries.
+
+Exclude private images and their backing-store paths from automatic Time Machine
+backup at creation, and verify the exclusion before activation. Use the supported
+exclusion mechanism; tests inject disposable paths and never change the user's
+backup settings. Offer an explicit quiescent export/restore path instead of
+claiming a live sparse-image copy is consistent. Shared instructions, memory and
+outputs remain eligible for the user's normal backups; they are plaintext and
+backup protection depends on the destination. Preserve that choice on relocation.
+[Apple backup encryption guidance](https://support.apple.com/guide/mac-help/mh21241/mac)
+
+Each volume record has an explicit format/version (initially `raw-ext4-v1`),
+identity, purpose and geometry. Unknown formats refuse. A later encrypted format
+requires an explicit recorded conversion with recovery/rollback and adequate disk
+space; never reinterpret an existing raw image or silently replace its data.
+No crypto kernel, storage-key broker, LUKS unlock, key rotation or encrypted-volume
+benchmark blocks the first version. Preserve their existing research and fixtures
+for the deferred work below.
+
+The stream channel's first-version purpose is guest control/runtime transport,
+with an authenticated workspace/incarnation binding and bounded framing. There is
+no guest disk-key delivery in this version. Its lifetime follows admitted control
+sessions; one-shot key-delivery rules apply only to the deferred encrypted boot
+path, not ordinary control messages. Provider/GitHub/MCP credentials stay in host
+brokers; plaintext disk images are not permission to persist those secrets there.
+
+## Deferred encrypted-storage design
+
+The remainder records the earlier design and its future acceptance requirements.
+It is preserved research, not a first-version activation gate or implemented
+confidentiality claim.
+
+## Deferred confidentiality boundary
 
 Private writable VM data and environment images are encrypted at rest. Reading
 their host backing files as the same macOS user must yield ciphertext. Keys
@@ -154,7 +214,7 @@ mechanism, with identity reconciliation and no plaintext key export. A missing
 key or unreachable old owner remains visible recovery state. The existing
 single-writer and uncertain-termination rules still apply to encrypted volumes.
 
-Before enabling Cowork, prove real encrypted read/write/cold restore, key absence
+Before enabling the later encrypted-volume format, prove real encrypted read/write/cold restore, key absence
 from Core/tool memory inputs and serialized state, direct same-user ciphertext
 reads, helper authentication, denied generic decryption, tamper/missing-key
 refusals, crash consistency, and export/backup recovery. Use disposable keys,
