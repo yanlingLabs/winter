@@ -172,8 +172,9 @@ export interface RtOps {
   watchLocate: { arg: { id: RtId }; result: RtWatchLocate };
   /** Arm a watch in this world (`id`: the element itself; else the spec's locator). */
   watchArm: { arg: { spec: WatchSpec; id?: RtId }; result: WatchArmResult };
-  /** The long poll: events after `ack`, waiting at most `maxMs` for one. */
-  watchWait: { arg: { ack: number; maxMs: number; world?: string }; result: WatchWaitResult };
+  /** The long poll: events after `ack`, waiting at most `maxMs` for one; `live`: the watches the daemon keeps (any
+   *  other in this world is dropped). */
+  watchWait: { arg: { ack: number; maxMs: number; world?: string; live?: string[] }; result: WatchWaitResult };
   watchDisarm: { arg: { watchId: string }; result: boolean };
 }
 export type RtOp = keyof RtOps;

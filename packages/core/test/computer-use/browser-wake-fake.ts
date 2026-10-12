@@ -5,7 +5,7 @@
 // them apart). Semantics follow `page-runtime/watch.ts`: input conditions report each event; state conditions report a
 // false→true transition; `initial` refuse / baseline / fire.
 import type { RtNode } from "../../src/computer-use/browser/page-runtime/protocol";
-import type { WatchArmResult, WatchEvent, WatchSpec, WatchWaitResult } from "../../src/computer-use/browser/page-runtime/watch";
+import { watchUrlKey, watchUrlShape, type WatchArmResult, type WatchEvent, type WatchSpec, type WatchWaitResult } from "../../src/computer-use/browser/page-runtime/watch";
 import { TransportError, type TransportWatchEvent } from "../../src/computer-use/browser/transport";
 import type { FakeCdpTransport, FakeTab } from "./browser-fake-transport";
 
@@ -32,6 +32,8 @@ export class FakeWakes {
   private readonly lastOwn = new Map<string, number>();
   /** Every watcher op the fake saw (what a test asks of the page). */
   readonly ops: Array<{ op: string; frameId: string; arg: unknown }> = [];
+  /** Watcher ops that throw (the page refusing them: a call that never reached it). */
+  readonly failOps = new Set<string>();
 
   constructor(private readonly transport: FakeCdpTransport) {}
 
@@ -62,6 +64,17 @@ export class FakeWakes {
     this.transport.connected = false;
     for (const [tabKey, m] of this.extWatches) for (const id of m.keys()) this.tell(tabKey, { watchId: id, outcome: "lost", at: Date.now(), reason: "disconnected" });
     this.extWatches.clear();
+  }
+
+  /** The extension's own move of a replaced tab's watches (`WatchBook.moveTab`): its watches follow the new id. */
+  moveExt(oldKey: string, newKey: string): void {
+    const m = this.extWatches.get(oldKey);
+    if (m === undefined) return;
+    this.extWatches.delete(oldKey);
+    this.extWatches.set(newKey, m);
+    const tab = this.transport.tabs.get(newKey);
+    if (tab === undefined) return;
+    for (const spec of m.values()) this.arm(this.world(tab, "top", `ext:${newKey}:${tab.doc}`, true), tab, { ...spec, initial: "baseline" }, undefined);
   }
 
   /** How many watches the extension keeps now (none for an old build). */
@@ -118,13 +131,17 @@ export class FakeWakes {
     }
   }
 
-  private push(world: World, w: FakeWatch, outcome: WatchEvent["outcome"], o: { at?: number; title?: string; reason?: "gone" | "doc" } = {}): void {
+  private push(world: World, w: FakeWatch, outcome: WatchEvent["outcome"], o: { at?: number; cause?: number; title?: string; reason?: "gone" | "doc" } = {}): void {
     const tab = this.transport.tabs.get(world.tabKey)!;
-    const ev: WatchEvent = { seq: ++world.seq, watchId: w.spec.watchId, outcome, at: o.at ?? Date.now(), url: tab.page.url, ...(o.title === undefined ? {} : { title: o.title }), ...(o.reason === undefined ? {} : { reason: o.reason }) };
+    const ev: WatchEvent = {
+      seq: ++world.seq, watchId: w.spec.watchId, outcome, at: o.at ?? Date.now(), url: tab.page.url, ...(o.cause === undefined ? {} : { cause: o.cause }),
+      ...(o.title === undefined ? {} : { title: o.title }), ...(o.reason === undefined ? {} : { reason: o.reason }),
+    };
     if (world.ext) {
       const stamp = this.lastOwn.get(world.tabKey);
-      const own = stamp !== undefined && ev.at >= stamp - 50 && ev.at - stamp <= 500;
-      this.tell(world.tabKey, { watchId: ev.watchId, outcome, at: ev.at, url: ev.url, ...(ev.title === undefined ? {} : { title: ev.title }), ...(ev.reason === undefined ? {} : { reason: ev.reason }), ...(own ? { own } : {}) });
+      const ownAt = (at: number): boolean => stamp !== undefined && at >= stamp - 50 && at - stamp <= 500;
+      const own = ownAt(ev.at) || (ev.cause !== undefined && ownAt(ev.cause));
+      this.tell(world.tabKey, { watchId: ev.watchId, outcome, at: ev.at, ...(ev.cause === undefined ? {} : { cause: ev.cause }), url: ev.url, ...(ev.title === undefined ? {} : { title: ev.title }), ...(ev.reason === undefined ? {} : { reason: ev.reason }), ...(own ? { own } : {}) });
       return;
     }
     world.queue.push(ev);
@@ -158,6 +175,7 @@ export class FakeWakes {
 
   op(tab: FakeTab, frameId: string, op: string, arg: Record<string, any> | null, ctx: string): unknown {
     this.ops.push({ op, frameId, arg });
+    if (this.failOps.has(op)) throw new Error(`fake wakes: ${op} did not reach the page`);
     const key = `winter:${tab.tabKey}:${ctx}`;
     switch (op) {
       case "watchLocate": {
@@ -176,6 +194,8 @@ export class FakeWakes {
       }
       case "watchWait": {
         const world = this.world(tab, frameId, key, false);
+        // The watches the daemon keeps: any other in this world goes (as the real watcher does).
+        if (Array.isArray(arg?.live)) for (const id of [...world.watches.keys()]) if (!(arg.live as string[]).includes(id)) world.watches.delete(id);
         const ack = arg?.world === world.key ? Number(arg?.ack ?? 0) : 0;
         world.queue = world.queue.filter((e) => e.seq > ack);
         const answer = (): WatchWaitResult => ({ world: world.key, events: world.queue.slice(0, 50), alive: [...world.watches.keys()] });
@@ -205,7 +225,7 @@ export class FakeWakes {
 
   /** The USER acts in the page (a trusted event that is not Winter's): a click (with the press before it), a press
    *  only, a form submitted, a field changed (its value set first, the change settled). */
-  user(tabKey: string, ev: { type: "click" | "press" | "submit" | "change"; id?: number; frameId?: string; value?: string; at?: number }): void {
+  user(tabKey: string, ev: { type: "click" | "press" | "submit" | "change"; id?: number; frameId?: string; value?: string; at?: number; cause?: number }): void {
     const frameId = ev.frameId ?? "top";
     const tab = this.transport.tabs.get(tabKey)!;
     const at = ev.at ?? Date.now();
@@ -216,11 +236,12 @@ export class FakeWakes {
         if (ev.type === "press" || ev.type === "click") {
           if (s.kind === "clicked" && ev.id !== undefined && this.within(tab, frameId, w.id, ev.id)) this.push(world, w, ev.type === "click" ? "fired" : "pressed", { at });
         } else if (ev.type === "submit") {
-          if (s.kind === "submitted" && (s.anyForm === true || (ev.id !== undefined && w.id === ev.id))) this.push(world, w, "fired", { at });
+          // The real watcher reports the trusted input that made it the user's (`cause`, by default just before).
+          if (s.kind === "submitted" && (s.anyForm === true || (ev.id !== undefined && w.id === ev.id))) this.push(world, w, "fired", { at, cause: ev.cause ?? at - 20 });
         } else if (ev.type === "change") {
           if (s.kind === "changed" && ev.id !== undefined && w.id === ev.id) {
             const v = tab.values.get(`${frameId}:${String(ev.id)}`) ?? "";
-            if (v !== w.value) { w.value = v; this.push(world, w, "fired", { at }); }
+            if (v !== w.value) { w.value = v; this.push(world, w, "fired", { at, cause: ev.cause ?? at - 20 }); }
           }
         }
       }
@@ -264,7 +285,10 @@ export class FakeWakes {
   private extUrl(tabKey: string, url: string): void {
     const own = Date.now() - (this.lastOwn.get(tabKey) ?? -Infinity) <= 500;
     for (const spec of this.extWatches.get(tabKey)?.values() ?? []) {
-      if (spec.kind === "navigated") this.tell(tabKey, { watchId: spec.watchId, outcome: "url", at: Date.now(), url, ...(own ? { own } : {}) });
+      // As Winter for Chrome reports it: the shape, the key, and its own match of the words — never the whole address.
+      if (spec.kind === "navigated") {
+        this.tell(tabKey, { watchId: spec.watchId, outcome: "url", at: Date.now(), url: watchUrlShape(url), key: watchUrlKey(url), ...(spec.url === undefined ? {} : { match: url.includes(spec.url) }), ...(own ? { own } : {}) });
+      }
     }
   }
 

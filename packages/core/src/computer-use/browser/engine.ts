@@ -29,7 +29,7 @@ import type { TabRunScope } from "./tab-scope";
 import { redactText, redactUrl } from "./page-runtime/redact";
 import { cssSelectorRefusal } from "./page-runtime/rules";
 import { escapeInvisible } from "./page-runtime/webmcp";
-import { pickerSentence, shownUrl, SITE_TOOL_STOP_GRACE_MS, TabDriver, transportFailure, transportHasCdp3, USER_TAB_FULL_PAGE } from "./tab-driver";
+import { HOLD_CEILING_SENTENCE, pickerSentence, shownUrl, SITE_TOOL_STOP_GRACE_MS, TabDriver, transportFailure, transportHasCdp3, USER_TAB_FULL_PAGE } from "./tab-driver";
 import { HttpReader } from "./http-read";
 import { TransportError, type BackendId, type BrowserFamily, type CdpTransport, type TransportTab } from "./transport";
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
@@ -165,6 +165,11 @@ export const USER_TAB_NAVIGATION = "this is the user's own tab — navigating it
 const RECENTLY_CLOSED_MS = 30_000;
 export const HOLDS_GLOBAL = 16;
 
+/** The hold budget is full and wake triggers' waits are (part of) what fills it. */
+export function wakeHoldsFull(waiting: number, scope: "session" | "all"): string {
+  return `${scope === "session" ? `this session holds ${HOLDS_PER_SESSION} tabs` : `${HOLDS_GLOBAL} tabs are held in all`} and ${waiting} of them wait for the user — too many tabs are waiting; stop waiting on one with wakes.cancel(id), or close some with tab.close()`;
+}
+
 /** How long a failed headless navigation waits for the browser's local-network notice (it can trail the answer). */
 const HEADLESS_REFUSAL_GRACE_MS = 400;
 
@@ -291,6 +296,8 @@ export class BrowserEngine {
         case "browsers.read": return await this.reader.read(scope, checkTabUrl(args.url, "browsers.read()"), args, { approvals: this.approvals, site: this.deps.site ?? {}, cwd: this.cwdOf(scope.sessionId) });
         default: throw bad(`unknown primitive ${primitive}`);
       }
+    } catch (err) {
+      throw this.holdsNameWakes(err);
     } finally {
       scope.metric.engineMs = this.now() - t0;
     }
@@ -340,10 +347,18 @@ export class BrowserEngine {
         if (act) driver.endOwnInput();
       }
     } catch (err) {
-      throw this.lostIfGone(scope.sessionId, b, err);
+      throw this.holdsNameWakes(this.lostIfGone(scope.sessionId, b, err));
     } finally {
       scope.metric.engineMs = this.now() - t0;
     }
+  }
+
+  /** Winter.app's ceiling on held built-in tabs, reached while wake triggers hold some of them: the sentence names
+   *  `wakes.cancel` too (a waiting tab is held until its trigger ends). */
+  private holdsNameWakes(err: unknown): unknown {
+    if (!(err instanceof AutomationFailure) || err.kind !== "TargetBusy" || err.message !== HOLD_CEILING_SENTENCE) return err;
+    const waiting = [...this.drivers.values()].filter((d) => this.familyOf(d.backend) === "winter" && d.wakeHolders.size > 0).length;
+    return waiting === 0 ? err : new AutomationFailure("TargetBusy", `${HOLD_CEILING_SENTENCE}, or stop waiting on one with wakes.cancel(id) (${waiting} built-in tab${waiting === 1 ? " waits" : "s wait"} for the user)`);
   }
 
   /** A run ended: its "once" site approvals go, and a user browser bound on an "Allow once" answer is released. */
@@ -535,6 +550,37 @@ export class BrowserEngine {
     try { return this.deps.ownAppInputAt?.(bundleId, at) === true; } catch { return false; }
   }
 
+  /** A wake trigger that keeps `driver` held (the debugger path) counts against the hold budgets — the session's
+   *  `HOLDS_PER_SESSION` and `HOLDS_GLOBAL` in all, waiting tabs only (`arming`: the holder being armed, not counted):
+   *  the refusal's sentence, or undefined when there is room (or the tab is held for another wake of the session). */
+  wakeHoldRefusal(sessionId: string, driver: TabDriver, arming: string): string | undefined {
+    if (this.isHeadless(driver.backend)) return undefined;
+    const holds = (d: TabDriver): string[] => [...d.wakeHolders].filter(([h]) => h !== arming).map(([, sid]) => sid);
+    const waiting = [...this.drivers.values()].filter((d) => !this.isHeadless(d.backend) && holds(d).length > 0);
+    const mine = waiting.filter((d) => holds(d).includes(sessionId));
+    if (mine.includes(driver)) return undefined;
+    if (mine.length >= HOLDS_PER_SESSION) return `${mine.length} tabs already wait for the user in this session (at most ${HOLDS_PER_SESSION}) — too many tabs are waiting; cancel one with wakes.cancel(id)`;
+    if (!waiting.includes(driver) && waiting.length >= HOLDS_GLOBAL) return `${waiting.length} tabs already wait for the user (at most ${HOLDS_GLOBAL} in all) — too many tabs are waiting; cancel one with wakes.cancel(id)`;
+    return undefined;
+  }
+
+  /**
+   * A wake trigger on this tab ended (fired, lost, cancelled, expired): an AGENT tab gets the `handoff` mark — one more
+   * turn — when its session is running a turn now (or that can't be told), so the turn that is ending does not close
+   * it under the wake it is about to deliver; the ordinary rule then applies at the wake turn's end. (Ended between
+   * turns, the next turn end IS the wake turn's.)
+   */
+  wakeEnded(backend: BackendId, tabKey: string): void {
+    const key = tabKeyOf(backend, tabKey);
+    for (const [sid, s] of this.sessions) {
+      const a = s.agentTabs.get(key);
+      if (a === undefined) continue;
+      let running = true;
+      try { if (this.deps.turnRunning !== undefined) running = this.deps.turnRunning(sid) === true; } catch { running = true; }
+      if (running) a.handoff = true;
+    }
+  }
+
   /** The backends for `computerUse.status` and `browsers.list()`. */
   listRows(): BrowserListRow[] {
     const rows = new Map<string, BrowserListRow>();
@@ -662,8 +708,16 @@ export class BrowserEngine {
       return run === undefined || run === scope.runId;
     });
     const lru = (list: TabDriver[]): TabDriver | undefined => free(list).reduce<TabDriver | undefined>((a, d) => (a === undefined || d.lastUsed < a.lastUsed ? d : a), undefined);
-    const victim = mine.length >= HOLDS_PER_SESSION ? lru(mine) : held.length >= HOLDS_GLOBAL ? lru(held) : undefined;
-    if (victim === undefined) return;
+    const over = mine.length >= HOLDS_PER_SESSION ? mine : held.length >= HOLDS_GLOBAL ? held : undefined;
+    if (over === undefined) return;
+    const victim = lru(over);
+    if (victim === undefined) {
+      // Never past the cap for good: tabs wake triggers wait on stay held until their triggers end, so the hold is
+      // refused, naming the way out. (Tabs a primitive is using right now are past it only for that moment.)
+      const waiting = over.filter((d) => d.wakeHolders.size > 0).length;
+      if (waiting > 0) throw new AutomationFailure("TargetBusy", wakeHoldsFull(waiting, over === mine ? "session" : "all"));
+      return;
+    }
     const cap = mine.length >= HOLDS_PER_SESSION ? `${HOLDS_PER_SESSION} in this session` : `${HOLDS_GLOBAL} in all`;
     scope.builder.daemonLine(`let go of ${victim.backend}:${victim.tabKey} (the least recently used of more than ${cap} held tabs) — it stays open; using it again takes it back`);
     for (const sid of [...victim.holders]) void victim.release(sid);
@@ -725,6 +779,8 @@ export class BrowserEngine {
         s.agentTabs.set(newK, a);
       }
     }
+    // A wake trigger's record of the tab (`hostOf`) follows it too.
+    for (const [k, v] of this.wakeTabs) if (v.backend === backend && v.tabKey === oldKey) this.wakeTabs.set(k, { backend, tabKey: newKey });
     this.deps.log?.(`computer-use: ${backend} tab ${oldKey} came back as ${newKey} after a navigation`);
     return true;
   }

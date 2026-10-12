@@ -224,6 +224,20 @@ export class TabDriver {
   wakesArmed = 0;
   /** Wake holders (`wake:<id>` → its session): the debugger path keeps the tab held while armed. */
   readonly wakeHolders = new Map<string, string>();
+  /** WATCH-ONLY (wake triggers): while only `wake:` holders hold the tab, the attachment changes nothing the user sees
+   *  or does — no file-chooser interception, no focus emulation, no emulated screen size, no agent overlay, and (the
+   *  built-in browser, link feature `watchOnly`) none of Winter.app's native-UI holds. A primitive's hold turns them
+   *  back on; the tab drops back to watch-only when only wake holders remain. */
+  private watchMode = false;
+  private modeChain: Promise<void> = Promise.resolve();
+  /** A release (or the drop to watch-only) held back because it would dismiss a page dialog the user raised around a
+   *  wake trigger firing (`keepsDialogHeld`); done once the dialog closes. */
+  private deferredLeave = false;
+  /** When the open page dialog opened, and whether Winter's own input was in flight then. */
+  private dialogAt = 0;
+  private dialogOwn = false;
+  /** When a wake trigger on this tab last fired on the user's own action (the backend says). */
+  private userFiredAt = -Infinity;
   private ownInputDepth = 0;
   private ownInputStart = 0;
   private readonly ownInputWindows: Array<[number, number]> = [];
@@ -319,9 +333,13 @@ export class TabDriver {
     if (this.gone !== undefined) throw this.lost();
     if (this.releasing !== undefined) await this.releasing;
     this.holders.add(sessionId);
-    this.lastUsed = this.now();
-    if (this.attached) return;
+    this.deferredLeave = false;
+    if (!isWakeHolder(sessionId)) this.lastUsed = this.now();
+    if (this.attached) { await this.syncMode(); return; }
     this.attaching ??= (async () => {
+      // Only wake holders: attached watch-only from the start (an idle detach recovered, a wake armed on a tab its
+      // session does not hold now).
+      this.watchMode = this.watchOnlyWanted;
       // Taken back after a hand-off: what the page logged while the user had it is replayed by the browser on
       // Runtime.enable / Log.enable, and is not Winter's to read.
       const handedOff = this.handedOffAt;
@@ -332,7 +350,7 @@ export class TabDriver {
       try {
         let info: { viewport: [number, number]; dpr: number } | undefined;
         for (let attempt = 0; info === undefined; attempt++) {
-          try { info = await this.transport.attach(this.tabKey, { sessionId }); } catch (err) {
+          try { info = await this.transport.attach(this.tabKey, { sessionId: this.sessionOf(sessionId), ...(this.watchMode ? { watchOnly: true } : {}) }); } catch (err) {
             if (err instanceof TransportError && err.code === "tab_gone") {
               const moved = movedTo(err);
               if (moved !== undefined && attempt === 0 && this.onRekey?.(moved) === true) continue;
@@ -348,9 +366,11 @@ export class TabDriver {
         const events = transportHasCdp3(this.transport) ? TAB_EVENTS : TAB_EVENTS.filter((e) => !PHASE3_TAB_EVENTS.has(e));
         try { await this.transport.subscribe(this.tabKey, events); } catch (err) { throw transportFailure(err, this.browserName); }
         await this.enableDomains(undefined);
-        // Background tabs behave as focused (focus events, :focus, caret) — never by raising anything.
-        await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
-        if (this.viewportWish !== undefined) await this.applyViewport(this.viewportWish).catch(() => undefined);
+        if (!this.watchMode) {
+          // Background tabs behave as focused (focus events, :focus, caret) — never by raising anything.
+          await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
+          if (this.viewportWish !== undefined) await this.applyViewport(this.viewportWish).catch(() => undefined);
+        }
         await this.loadTopFrame();
         this.attached = true;
         this.handedOffAt = undefined;
@@ -394,7 +414,8 @@ export class TabDriver {
     await this.send("Network.enable", { ...NETWORK_BUFFERS }, session).catch(() => undefined);
     // The browser's own page messages (failed loads, CSP, interventions) for console().
     if (transportHasCdp3(this.transport)) await this.send("Log.enable", {}, session).catch(() => undefined);
-    await this.send("Page.setInterceptFileChooserDialog", { enabled: true }, session).catch(() => undefined);
+    // Watch-only: the user's own file chooser opens as the browser opens it.
+    if (!this.watchMode) await this.send("Page.setInterceptFileChooserDialog", { enabled: true }, session).catch(() => undefined);
     await this.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, session).catch(() => undefined);
   }
 
@@ -405,8 +426,18 @@ export class TabDriver {
    */
   async release(sessionId: string): Promise<void> {
     this.holders.delete(sessionId);
-    if (this.holders.size > 0 || !this.attached) return;
+    if (!this.attached) return;
+    // Only wake holders left: the tab drops back to watch-only.
+    if (this.holders.size > 0) { await this.syncMode(); return; }
+    if (this.keepsDialogHeld()) { this.deferredLeave = true; return; }
+    await this.detachNow();
+  }
+
+  private async detachNow(): Promise<void> {
+    if (!this.attached || this.holders.size > 0) return;
     this.attached = false;
+    this.watchMode = false;
+    this.deferredLeave = false;
     this.overlay(false);
     this.resetDocumentState(false);
     this.releasing = (async () => {
@@ -428,6 +459,97 @@ export class TabDriver {
     await this.releasing;
   }
 
+  // ── watch-only (wake triggers) ────────────────────────────────────────────────────────────────
+
+  /** Only wake triggers hold the tab: the attachment must change nothing the user sees or does. */
+  private get watchOnlyWanted(): boolean {
+    return this.holders.size > 0 && [...this.holders].every(isWakeHolder);
+  }
+
+  /** The session a holder stands for (a wake holder's is the session that armed it) — what a hold is made for. */
+  private sessionOf(holder: string): string {
+    return isWakeHolder(holder) ? this.wakeHolders.get(holder) ?? holder : holder;
+  }
+
+  /** Is the tab attached watch-only now (tests, the backend)? */
+  get isWatchOnly(): boolean { return this.attached && this.watchMode; }
+
+  /** Bring the attachment's mode in line with its holders (serialized): watch-only while only wake holders hold it, a
+   *  primitive's full hold otherwise. The drop to watch-only waits while it would dismiss a page dialog the user raised
+   *  around a wake firing (`keepsDialogHeld`). */
+  private syncMode(): Promise<void> {
+    const run = async (): Promise<void> => {
+      for (let i = 0; i < 4; i++) {
+        if (!this.attached || this.gone !== undefined || this.holders.size === 0) return;
+        const want = this.watchOnlyWanted;
+        if (want === this.watchMode) return;
+        if (want) {
+          if (this.keepsDialogHeld()) { this.deferredLeave = true; return; }
+          await this.enterWatch();
+        } else {
+          await this.leaveWatch();
+        }
+      }
+    };
+    const p = this.modeChain.then(run, run);
+    this.modeChain = p.catch(() => undefined);
+    return p;
+  }
+
+  private async enterWatch(): Promise<void> {
+    this.watchMode = true;
+    this.deferredLeave = false;
+    this.overlay(false);
+    const holder = [...this.holders][0]!;
+    // The built-in browser first: Winter.app's native-UI holds come off (the page's dialogs, prompts, file choosers,
+    // downloads, context menus, keys and focus are the user's again).
+    if (this.transport.watchOnlyHolds === true) {
+      try { await this.transport.attach(this.tabKey, { sessionId: this.sessionOf(holder), watchOnly: true }); } catch { /* the tab or the link went */ }
+    }
+    for (const s of [...this.runtimeOn]) await this.send("Page.setInterceptFileChooserDialog", { enabled: false }, s === "" ? undefined : s).catch(() => undefined);
+    await this.send("Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => undefined);
+    if (this.emulating) {
+      await this.send("Emulation.clearDeviceMetricsOverride").catch(() => undefined);
+      this.emulating = false;
+    }
+  }
+
+  private async leaveWatch(): Promise<void> {
+    this.watchMode = false;
+    const holder = [...this.holders].find((h) => !isWakeHolder(h)) ?? [...this.holders][0]!;
+    if (this.transport.watchOnlyHolds === true) {
+      try { await this.transport.attach(this.tabKey, { sessionId: this.sessionOf(holder) }); } catch (err) { throw transportFailure(err, this.browserName); }
+    }
+    for (const s of [...this.runtimeOn]) await this.send("Page.setInterceptFileChooserDialog", { enabled: true }, s === "" ? undefined : s).catch(() => undefined);
+    await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
+    if (this.viewportWish !== undefined) await this.applyViewport(this.viewportWish).catch(() => undefined);
+  }
+
+  /**
+   * Would letting go of the hold now (a full detach, or the drop to watch-only) dismiss a page dialog the USER raised?
+   * The built-in browser holds a dialog unseen while it holds the tab, and taking its native-UI holds off dismisses it
+   * as Cancel. So a dialog that opened outside Winter's own input, around a wake trigger firing on the user's action
+   * (their submit's confirm(), say), is kept: the session it wakes reads it in state() and answers it — the wake path
+   * never cancels it. Any other dialog goes as it always did.
+   */
+  private keepsDialogHeld(): boolean {
+    if (this.transport.family !== "winter" || this.watchMode || this.dialog === undefined || this.dialogOwn) return false;
+    return Math.abs(this.dialogAt - this.userFiredAt) <= WAKE_DIALOG_KEEP_MS;
+  }
+
+  /** The backend: a wake trigger on this tab fired on the user's own action at `at`. */
+  noteUserFired(at: number): void {
+    this.userFiredAt = Math.max(this.userFiredAt, at);
+  }
+
+  /** A held-back release or drop to watch-only, once the dialog that held it back closed. */
+  private settleDeferred(): void {
+    if (!this.deferredLeave) return;
+    this.deferredLeave = false;
+    if (this.holders.size === 0) void this.detachNow();
+    else void this.syncMode();
+  }
+
   /** When the tab was handed to the user (`handOff`), until Winter attaches again. */
   private handedOffAt: number | undefined;
 
@@ -440,7 +562,7 @@ export class TabDriver {
   async handOff(): Promise<void> {
     this.handedOffAt = this.now();
     this.holders.clear();
-    await this.release("");
+    await this.detachNow();
   }
 
   /** The tab's top-level frame (a download capture tells its document from a frame's). */
@@ -530,6 +652,8 @@ export class TabDriver {
           break;
         }
         const okRef = this.nextRef++;
+        this.dialogAt = this.now();
+        this.dialogOwn = this.ownInputNow;
         this.dialog = {
           type, message: typeof p.message === "string" ? p.message : "", okRef,
           ...(type === "alert" ? {} : { cancelRef: this.nextRef++ }),
@@ -540,6 +664,8 @@ export class TabDriver {
       }
       case "Page.javascriptDialogClosed":
         this.dialog = undefined;
+        // A release held back for it goes now.
+        if (session === undefined) this.settleDeferred();
         break;
       case "Page.fileChooserOpened":
         this.fileChooser = { frameId: String(p.frameId ?? ""), mode: String(p.mode ?? "selectSingle") };
@@ -617,7 +743,7 @@ export class TabDriver {
       case "Inspector.detached":
         // The tab's debugger was let go (idle, or the target swapped) while the tab lives: attach again on the next
         // primitive; its world, and so every ref, will be new.
-        if (session === undefined) { this.attached = false; this.detaches++; this.holders.clear(); this.resetDocumentState(true); }
+        if (session === undefined) { this.attached = false; this.watchMode = false; this.deferredLeave = false; this.detaches++; this.holders.clear(); this.resetDocumentState(true); }
         break;
       default:
         break;
@@ -641,6 +767,8 @@ export class TabDriver {
       // The tab's browser was stopped or its debugger let go (the app parked it; the extension idled out): the tab
       // itself may live on — the next primitive attaches again; its document (and so every ref) is new.
       this.attached = false;
+      this.watchMode = false;
+      this.deferredLeave = false;
       this.detaches++;
       this.holders.clear();
       this.resetDocumentState(true);
@@ -788,13 +916,13 @@ export class TabDriver {
   }
 
   /** One page-runtime op in `rec`'s current document. */
-  private async callIn<T>(rec: FrameRec, op: string, arg: unknown, opts: { byValue?: boolean; expectRt?: string; timeoutMs?: number; staleMessage?: string } = {}): Promise<T> {
+  private async callIn<T>(rec: FrameRec, op: string, arg: unknown, opts: { byValue?: boolean; expectRt?: string; timeoutMs?: number; staleMessage?: string; dialogRace?: boolean } = {}): Promise<T> {
     await this.ensureRuntime(rec);
     if (opts.expectRt !== undefined && rec.rtId !== opts.expectRt) throw new AutomationFailure("StaleRef", opts.staleMessage ?? "that element is gone (the page changed) — call state()");
     const res = await this.send<{ result?: { value?: unknown; objectId?: string }; exceptionDetails?: { text?: string; exception?: { description?: string } } }>("Runtime.callFunctionOn", {
       functionDeclaration: PAGE_RUNTIME_CALL, executionContextId: rec.ctx, arguments: [{ value: op }, { value: arg ?? null }],
       returnByValue: opts.byValue !== false, awaitPromise: true,
-    }, rec.ctxSession, opts.timeoutMs);
+    }, rec.ctxSession, opts.timeoutMs, opts.dialogRace === false ? { dialogRace: false } : {});
     if (res.exceptionDetails !== undefined) {
       const msg = res.exceptionDetails.exception?.description ?? res.exceptionDetails.text ?? "error";
       const m = /stale:(\d+)/.exec(msg);
@@ -1848,13 +1976,15 @@ export class TabDriver {
     }
   }
 
-  /** The long poll: the watch events of `frame`'s world after `ack`. A page dialog only delays it. */
-  async wakeWait(frame: WakeFrame, ack: number, maxMs: number, world?: string): Promise<WatchWaitResult> {
+  /** The long poll: the watch events of `frame`'s world after `ack`. A page dialog only delays it. `live`: the watches
+   *  the daemon keeps — the watcher drops any other (one cancelled while its disarm could not reach the page). */
+  async wakeWait(frame: WakeFrame, ack: number, maxMs: number, world?: string, live?: readonly string[]): Promise<WatchWaitResult> {
     const rec = this.wakeRec(frame);
     let res: { result?: { value?: unknown }; exceptionDetails?: { text?: string; exception?: { description?: string } } };
     try {
       res = await this.send("Runtime.callFunctionOn", {
-        functionDeclaration: PAGE_RUNTIME_CALL, executionContextId: rec.ctx, arguments: [{ value: "watchWait" }, { value: { ack, maxMs, ...(world === undefined ? {} : { world }) } }],
+        functionDeclaration: PAGE_RUNTIME_CALL, executionContextId: rec.ctx,
+        arguments: [{ value: "watchWait" }, { value: { ack, maxMs, ...(world === undefined ? {} : { world }), ...(live === undefined ? {} : { live: [...live] }) } }],
         returnByValue: true, awaitPromise: true,
       }, rec.ctxSession, maxMs + 15_000, { dialogRace: false });
     } catch (err) {
@@ -1876,7 +2006,8 @@ export class TabDriver {
   async wakeDisarm(frame: WakeFrame, watchId: string): Promise<void> {
     try {
       const rec = this.wakeRec(frame);
-      await this.callIn(rec, "watchDisarm", { watchId }, { expectRt: frame.rtId, timeoutMs: 5_000 });
+      // Sent even while a page dialog is open (it lands once the dialog closes); the next poll's `live` list is the belt.
+      await this.callIn(rec, "watchDisarm", { watchId }, { expectRt: frame.rtId, timeoutMs: 5_000, dialogRace: false });
     } catch { /* the world (or the tab) went: the watch went with it */ }
   }
 
@@ -1953,6 +2084,12 @@ export class WakeWorldGone extends Error {
 
 /** Winter's own input to a tab, for the wake triggers' rule (only the user's action counts). */
 const OWN_INPUT_METHOD = /^(?:Input\.|Page\.navigate$|Page\.reload$|Page\.navigateToHistoryEntry$)/;
+
+/** A wake trigger's holder (`wake:<id>`), never a session's. */
+export function isWakeHolder(holder: string): boolean { return holder.startsWith("wake:"); }
+
+/** A page dialog that opened this close to a wake firing on the user's action is taken for theirs (`keepsDialogHeld`). */
+export const WAKE_DIALOG_KEEP_MS = 10_000;
 
 /** A full-page screenshot's document height at most this (CSS px). */
 export const FULL_PAGE_MAX_CSS = 10_000;

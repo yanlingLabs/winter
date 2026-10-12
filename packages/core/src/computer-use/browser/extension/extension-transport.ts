@@ -67,8 +67,9 @@ export class ExtensionTransport implements CdpTransport {
   private readonly doneListeners = new Set<(tabKey: string, done: boolean) => void>();
   private readonly downloadListeners = new Set<(tabKey: string, d: TransportDownload) => void>();
   private readonly watchListeners = new Set<(tabKey: string, e: TransportWatchEvent) => void>();
-  /** 1.2.0: the watches this extension keeps for the engine (`tabKey|watchId`) — lost all at once if the link drops. */
-  private readonly watching = new Set<string>();
+  /** 1.2.0: the watches this extension keeps for the engine (watch id → its tab now: a tab the browser replaced moves
+   *  its watches to the new id) — lost all at once if the link drops. */
+  private readonly watching = new Map<string, string>();
   /** Phase 3: what this extension build said it can do. */
   readonly features: ReadonlySet<string>;
 
@@ -128,12 +129,13 @@ export class ExtensionTransport implements CdpTransport {
         const r = await this.request("watch.arm", { tabKey, spec }, t.command);
         const result = parseArmResult(r);
         if (result === undefined) throw malformed("watch.arm");
-        if (result.ok) this.watching.add(`${tabKey}|${spec.watchId}`);
+        if (result.ok) this.watching.set(spec.watchId, tabKey);
         return result;
       };
       this.unwatch = async (tabKey, watchId) => {
-        this.watching.delete(`${tabKey}|${watchId}`);
-        await this.request("watch.cancel", { tabKey, watchId }, t.command);
+        const at = this.watching.get(watchId) ?? tabKey;
+        this.watching.delete(watchId);
+        await this.request("watch.cancel", { tabKey: at, watchId }, t.command);
       };
       this.onWatchEvent = (l) => { this.watchListeners.add(l); return () => { this.watchListeners.delete(l); }; };
     }
@@ -295,8 +297,10 @@ export class ExtensionTransport implements CdpTransport {
       }
       case "watch.event": {
         const e = parseWatchEvent(params);
-        if (e === undefined || !this.watching.has(`${tabKey}|${e.watchId}`)) return true;
-        if (e.outcome === "lost") this.watching.delete(`${tabKey}|${e.watchId}`);
+        if (e === undefined || !this.watching.has(e.watchId)) return true;
+        // The extension says which tab the watch is on now (its tab may have been replaced under a new id).
+        this.watching.set(e.watchId, tabKey);
+        if (e.outcome === "lost") this.watching.delete(e.watchId);
         for (const l of this.watchListeners) this.safely(() => l(tabKey, e));
         return true;
       }
@@ -318,10 +322,9 @@ export class ExtensionTransport implements CdpTransport {
     // Every watch the extension kept for the engine ends with the link (the extension takes its watchers down too).
     const watches = [...this.watching];
     this.watching.clear();
-    for (const key of watches) {
-      const i = key.indexOf("|");
-      const e: TransportWatchEvent = { watchId: key.slice(i + 1), outcome: "lost", at: Date.now(), reason: "disconnected" };
-      for (const l of this.watchListeners) this.safely(() => l(key.slice(0, i), e));
+    for (const [watchId, tabKey] of watches) {
+      const e: TransportWatchEvent = { watchId, outcome: "lost", at: Date.now(), reason: "disconnected" };
+      for (const l of this.watchListeners) this.safely(() => l(tabKey, e));
     }
   }
 
@@ -375,12 +378,13 @@ function parseTab(raw: unknown): TransportTab | undefined {
 const WATCH_OUTCOMES = new Set(["fired", "pressed", "lost", "url"]);
 /** One `watch.event` (its strings capped; what the page said is only ever a URL or a title, redacted by the engine). */
 function parseWatchEvent(raw: Record<string, unknown>): TransportWatchEvent | undefined {
-  const { watchId, outcome, at, url, title, reason, own } = raw;
+  const { watchId, outcome, at, cause, url, key, match, title, reason, own } = raw;
   if (typeof watchId !== "string" || !/^wk_[0-9a-f]{12}$/.test(watchId) || typeof outcome !== "string" || !WATCH_OUTCOMES.has(outcome)) return undefined;
   if (typeof at !== "number" || !Number.isFinite(at)) return undefined;
   return {
-    watchId, outcome: outcome as TransportWatchEvent["outcome"], at,
-    ...(typeof url === "string" ? { url: url.slice(0, 4096) } : {}), ...(typeof title === "string" ? { title: title.slice(0, 300) } : {}),
+    watchId, outcome: outcome as TransportWatchEvent["outcome"], at, ...(typeof cause === "number" && Number.isFinite(cause) ? { cause } : {}),
+    ...(typeof url === "string" ? { url: url.slice(0, 4096) } : {}), ...(typeof key === "string" ? { key: key.slice(0, 64) } : {}),
+    ...(typeof match === "boolean" ? { match } : {}), ...(typeof title === "string" ? { title: title.slice(0, 300) } : {}),
     ...(typeof reason === "string" ? { reason: reason.slice(0, 40) } : {}), ...(own === true ? { own: true } : {}),
   };
 }

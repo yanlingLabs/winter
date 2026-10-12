@@ -168,6 +168,11 @@ export class FakeTab {
   beforeUnload = false;
   pendingNav?: string;
   holders = new Set<string>();
+  /** Wake triggers: each hold the built-in browser's fake was asked for ("full", or "watch" — `watchOnly`), and what the
+   *  engine turned on in the tab: file-chooser interception per CDP session ("" = the tab's own), focus emulation. */
+  readonly holdModes: Array<"full" | "watch"> = [];
+  readonly intercept = new Map<string, boolean>();
+  focusEmulation = false;
   /** Phase 4: the site tool calls in flight in this tab's page (`cancelSiteTool` aborts one). */
   readonly siteCalls = new SiteToolCalls();
   /** Phase 3: CDP sessions with Fetch interception on, the requests paused, the body streams handed out. */
@@ -205,6 +210,8 @@ export class FakeCdpTransport implements CdpTransport {
   commandDelay?: (method: string, session?: string) => number;
   /** Called with every command the fake accepts, before it is answered. */
   onSend?: (method: string, params: Record<string, unknown>, session?: string) => void;
+  /** A navigation's commit comes this long after it STARTED (`Page.frameStartedLoading` at once, as a browser says). */
+  slowCommitMs?: number;
 
   /** Phase 3's optional members — a user's browser (Winter for Chrome 1.1) has them; the built-in fake starts without
    *  (a test adds or deletes them to play another build). */
@@ -236,6 +243,8 @@ export class FakeCdpTransport implements CdpTransport {
   armDownloads?: CdpTransport["armDownloads"];
   /** Wake triggers: the page watcher's ops, and (`withWatch()`) Winter for Chrome 1.2.0's debugger-free watch. */
   readonly wakes: FakeWakes = new FakeWakes(this);
+  /** The built-in browser's link feature `watchOnly` (a test deletes it to play an older Winter.app). */
+  watchOnlyHolds?: boolean;
   watch?: CdpTransport["watch"];
   unwatch?: CdpTransport["unwatch"];
   onWatchEvent?: CdpTransport["onWatchEvent"];
@@ -322,6 +331,7 @@ export class FakeCdpTransport implements CdpTransport {
   private readonly doneListeners = new Set<(tabKey: string, done: boolean) => void>();
 
   constructor(readonly backend: string, readonly family: BrowserFamily) {
+    if (family === "winter") this.watchOnlyHolds = true;
     // Both the built-in browser's link (protocol 2) and Winter for Chrome 1.1 can present a tab and mute one.
     this.present = async (tabKey, o) => { this.tab(tabKey); this.presented.push(`${tabKey}@${o.sessionId}`); };
     this.setMuted = async (tabKey, muted) => { this.tab(tabKey).muted = muted; };
@@ -386,11 +396,12 @@ export class FakeCdpTransport implements CdpTransport {
       ...(t.lastAccessed === undefined ? {} : { lastAccessed: t.lastAccessed }), ...(t.group === undefined ? {} : { group: t.group }),
     }));
   }
-  async attach(tabKey: string, opts: { sessionId: string }): Promise<{ viewport: [number, number]; dpr: number }> {
+  async attach(tabKey: string, opts: { sessionId: string; watchOnly?: boolean }): Promise<{ viewport: [number, number]; dpr: number }> {
     const t = this.tab(tabKey);
     if (Date.now() < t.betweenUntil) throw new TransportError("tab_gone", "the tab is between documents");
     t.attached = true;
     t.holders.add(opts.sessionId);
+    if (this.watchOnlyHolds === true) t.holdModes.push(opts.watchOnly === true ? "watch" : "full");
     return { viewport: [1200, 800], dpr: 2 };
   }
   async detach(tabKey: string): Promise<void> {
@@ -402,6 +413,8 @@ export class FakeCdpTransport implements CdpTransport {
     t.endedContexts.clear();
     t.runtimeOn.clear();
     t.winterObjects.clear();
+    t.intercept.clear();
+    t.focusEmulation = false;
   }
   async subscribe(tabKey: string, events: readonly string[]): Promise<void> {
     const bad = events.find((e) => !CDP_ALLOWED_EVENTS.includes(e));
@@ -509,7 +522,7 @@ export class FakeCdpTransport implements CdpTransport {
     this.emit(t, "Page.javascriptDialogOpening", { url: t.page.url, message, type, hasBrowserHandler: false });
   }
 
-  private commit(t: FakeTab, url: string): void {
+  private commit(t: FakeTab, url: string, started = false): void {
     for (const [k, c] of [...t.contexts]) {
       if (c.frameId === "top" || c.session === undefined) {
         t.contexts.delete(k);
@@ -521,7 +534,7 @@ export class FakeCdpTransport implements CdpTransport {
     t.page = this.page(url);
     t.values.clear();
     t.dialog = undefined;
-    this.emit(t, "Page.frameStartedLoading", { frameId: "top" });
+    if (!started) this.emit(t, "Page.frameStartedLoading", { frameId: "top" });
     this.emit(t, "Page.frameNavigated", { frame: { id: "top", url, loaderId: `L${t.doc}` }, type: "Navigation" });
     this.emit(t, "Page.lifecycleEvent", { frameId: "top", loaderId: `L${t.doc}`, name: "DOMContentLoaded", timestamp: 1 });
     this.emit(t, "Page.domContentEventFired", { timestamp: 1 });
@@ -606,8 +619,10 @@ export class FakeCdpTransport implements CdpTransport {
         if (b === undefined || t.networkBuffers.resource === 0) throw new TransportError("cdp_error", "No resource with given identifier found", { cdpCode: -32000, cdpMessage: "No resource with given identifier found" });
         return r(b.body.length > CDP_RESPONSE_BODY_MAX_CHARS ? { body: b.body.slice(0, CDP_RESPONSE_BODY_MAX_CHARS), base64Encoded: b.base64Encoded, truncated: true } : { ...b });
       }
+      case "Page.setInterceptFileChooserDialog": t.intercept.set(session ?? "", params.enabled === true); return r({});
+      case "Emulation.setFocusEmulationEnabled": t.focusEmulation = params.enabled === true; return r({});
       case "Page.enable": case "Page.setLifecycleEventsEnabled": case "Log.enable": case "Log.disable":
-      case "Page.setInterceptFileChooserDialog": case "Emulation.setFocusEmulationEnabled": case "Runtime.releaseObject":
+      case "Runtime.releaseObject":
       case "Page.disable": case "Network.disable":
         return r({});
       case "Target.getTargetInfo":
@@ -767,6 +782,9 @@ export class FakeCdpTransport implements CdpTransport {
           t.pendingNav = url;
           t.dialog = { type: "beforeunload", message: "" };
           queueMicrotask(() => this.emit(t, "Page.javascriptDialogOpening", { url: t.page.url, message: "", type: "beforeunload", hasBrowserHandler: false }));
+        } else if (this.slowCommitMs !== undefined) {
+          queueMicrotask(() => this.emit(t, "Page.frameStartedLoading", { frameId: "top" }));
+          setTimeout(() => { if (!t.closed) this.commit(t, url, true); }, this.slowCommitMs);
         } else queueMicrotask(() => this.commit(t, url));
         return r({ frameId: "top", loaderId: `L${t.doc + 1}` });
       }

@@ -1202,7 +1202,10 @@ type Any = Record<string, unknown>;
         if (el !== undefined && (inPaymentFrame || isSecure(el))) throw new Error("secure_field");
         return wakeWatcher({ op: "arm", sink: "queue", spec: w.spec, ...(el === undefined ? {} : { element: el }) });
       }
-      case "watchWait": return wakeWatcher({ op: "wait", ack: Number(a?.ack ?? 0), maxMs: Number(a?.maxMs ?? 0), ...(typeof a?.world === "string" ? { world: a.world } : {}) });
+      case "watchWait": return wakeWatcher({
+        op: "wait", ack: Number(a?.ack ?? 0), maxMs: Number(a?.maxMs ?? 0), ...(typeof a?.world === "string" ? { world: a.world } : {}),
+        ...(Array.isArray(a?.live) ? { live: (a.live as unknown[]).filter((x): x is string => typeof x === "string") } : {}),
+      });
       case "watchDisarm": return wakeWatcher({ op: "disarm", watchId: String(a?.watchId ?? "") });
       default: throw new Error(`unknown op ${op}`);
     }

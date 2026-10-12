@@ -4,8 +4,10 @@
 // The real watcher in a real browser: `scripts/browser-e2e/` (opt-in).
 import { describe, expect, test } from "bun:test";
 import { shouldCloseAgentTab } from "../../src/computer-use/browser/lifecycle";
-import { SECURE_FIELD_SENTENCE, TabDriver } from "../../src/computer-use/browser/tab-driver";
-import { BrowserWakeBackend, WAKE_HEADLESS, WAKE_IN_FRAME_NOTE, WAKE_OLD_EXTENSION_NOTE, wakePill } from "../../src/computer-use/browser/wake/backend";
+import { HOLD_CEILING_SENTENCE, SECURE_FIELD_SENTENCE, TabDriver } from "../../src/computer-use/browser/tab-driver";
+import { HOLDS_PER_SESSION } from "../../src/computer-use/browser/engine";
+import { TransportError } from "../../src/computer-use/browser/transport";
+import { BrowserWakeBackend, WAKE_HEADLESS, WAKE_IN_FRAME_NOTE, WAKE_OLD_EXTENSION_NOTE, WAKE_UPDATE_WINTER, wakePill, wakeUrlShape } from "../../src/computer-use/browser/wake/backend";
 import type { FakePage } from "./browser-fake-transport";
 import { AutomationFailure } from "../../src/computer-use/errors";
 import type { TabHandle } from "../../src/computer-use/worker/bridge";
@@ -31,9 +33,9 @@ function page(url: string, extra: Partial<FakePage> = {}): FakePage {
   };
 }
 
-function setup(o: HarnessOpts = {}) {
+function setup(o: HarnessOpts & { skew?: { ms: number } } = {}) {
   const h = harness(o);
-  const backend = new BrowserWakeBackend(h.engine, { pollMs: 40, recoverMs: 1_500 });
+  const backend = new BrowserWakeBackend(h.engine, { pollMs: 40, recoverMs: 1_500, closedGraceMs: 150, ...(o.skew === undefined ? {} : { now: () => Date.now() + o.skew!.ms }) });
   const events: WakeBackendEvent[] = [];
   const r = h.run();
   const arm = (targetId: string, condition: WakeCondition, id = wakeId(), sessionId = "s1") =>
@@ -186,13 +188,15 @@ describe("the debugger path — Winter's built-in browser", () => {
     await sleep(500);
     s.h.winter.navigateTo(keyOf(tab), "https://app.example/done?token=abc123&x=1");
     expect(await s.until(() => s.events.length > 0)).toBe(true);
-    expect(s.events[0]).toMatchObject({ wakeId: any, outcome: "fired", detail: "now at https://app.example/done?token=<redacted>&x=1" });
-    // { url }: a same-document move to it counts.
+    // The origin and path only: a GET form's typed values (the query) never appear.
+    expect(s.events[0]).toMatchObject({ wakeId: any, outcome: "fired", detail: "now at https://app.example/done?…" });
+    expect(JSON.stringify(s.events)).not.toContain("abc123");
+    // { url }: a same-document move to it counts — the detail names the model's own words.
     const want = wakeId();
     await s.arm(tab.targetId, { kind: "navigated", url: "#review" }, want);
     s.h.winter.wakes.sameDocument(keyOf(tab), "https://app.example/done#review");
     expect(await s.until(() => s.events.length > 1)).toBe(true);
-    expect(s.events[1]).toMatchObject({ wakeId: want, outcome: "fired" });
+    expect(s.events[1]).toMatchObject({ wakeId: want, outcome: "fired", detail: "now at https://app.example/done#… — matched “#review”" });
   });
 
   test("a ref condition's document going away is lost — unless the user's own press of that element came just before (then fired)", async () => {
@@ -273,6 +277,300 @@ describe("the debugger path — Winter's built-in browser", () => {
     const e = await failure(s.h.engine.primitive(s.r.scope, tab.targetId, "waitForUser", { reason: "sign in" }));
     expect(e.kind).toBe("TargetBusy");
     expect(e.message).toMatch(/a wake trigger is armed on this tab/);
+  });
+});
+
+describe("WATCH-ONLY: a waiting tab changes nothing the user sees or does", () => {
+  const interceptOn = (t: { intercept: Map<string, boolean> }): boolean => [...t.intercept.values()].some((v) => v);
+
+  test("built-in: after the turn ends, the hold sent is watch-only, no interception, no focus emulation, no emulated size, no overlay — a primitive takes the full hold back and it drops back after", async () => {
+    const s = setup();
+    const tab = await s.winterTab();
+    const t = s.h.winter.tabs.get(keyOf(tab))!;
+    await s.h.engine.primitive(s.r.scope, tab.targetId, "viewport", { size: { width: 600, height: 500 } });
+    await s.h.engine.primitive(s.r.scope, tab.targetId, "click", { target: Number(await s.refOf(tab.targetId, "Email")) });
+    await s.arm(tab.targetId, { kind: "clicked", ref: await s.refOf(tab.targetId, "Submit for review") });
+    // While the arming run holds it: the primitive's full hold, as ever.
+    expect(t.holdModes.at(-1)).toBe("full");
+    expect(interceptOn(t) && t.focusEmulation && t.emulated !== undefined).toBe(true);
+    s.r.end();
+    s.h.engine.turnEnded("s1");
+    expect(await s.until(() => t.holdModes.at(-1) === "watch")).toBe(true);
+    await sleep(30);
+    expect(t.attached).toBe(true);
+    expect(interceptOn(t)).toBe(false);
+    expect(t.focusEmulation).toBe(false);
+    expect(t.emulated).toBeUndefined();
+    expect(s.h.winter.overlays.at(-1)).toMatchObject({ tabKey: keyOf(tab), active: false });
+    // Another run uses the tab: the full hold, its interception and its size back…
+    const r2 = s.h.run();
+    const again = await s.h.engine.global(r2.scope, "browsers.tab", { tab: tab.id }) as TabHandle;
+    await s.h.engine.primitive(r2.scope, again.targetId, "state", { emit: false });
+    expect(t.holdModes.at(-1)).toBe("full");
+    expect(interceptOn(t) && t.focusEmulation).toBe(true);
+    expect(t.emulated).toMatchObject({ width: 600, height: 500 });
+    // …and its turn's end drops it back to watch-only (the wait goes on).
+    r2.end();
+    s.h.engine.turnEnded("s1");
+    expect(await s.until(() => t.holdModes.at(-1) === "watch" && !interceptOn(t))).toBe(true);
+    expect(s.backend.armedIds().length).toBe(1);
+  });
+
+  test("built-in: an idle detach recovered while only the wake holds it attaches watch-only from the start", async () => {
+    const s = setup();
+    const tab = await s.winterTab();
+    const t = s.h.winter.tabs.get(keyOf(tab))!;
+    await s.arm(tab.targetId, { kind: "clicked", ref: await s.refOf(tab.targetId, "Submit for review") });
+    s.r.end();
+    s.h.engine.turnEnded("s1");
+    expect(await s.until(() => t.holdModes.at(-1) === "watch")).toBe(true);
+    const sent = t.holdModes.length;
+    s.h.winter.detachIdle(keyOf(tab));
+    expect(await s.until(() => t.attached && t.holdModes.length > sent)).toBe(true);
+    expect(t.holdModes.slice(sent)).toEqual(["watch"]);
+    expect(interceptOn(t)).toBe(false);
+    expect(t.focusEmulation).toBe(false);
+  });
+
+  test("built-in: a Winter.app without the watchOnly feature never holds a tab for a wake (NotAllowed, update Winter)", async () => {
+    const s = setup();
+    delete s.h.winter.watchOnlyHolds;
+    const tab = await s.winterTab();
+    const e = await failure(s.arm(tab.targetId, { kind: "titled", title: "Ready" }));
+    expect([e.kind, e.message]).toEqual(["NotAllowed", WAKE_UPDATE_WINTER]);
+    expect(s.backend.armedIds()).toEqual([]);
+  });
+
+  test("an older Winter for Chrome (debugger kept): after the turn ends, no interception and no focus emulation on the user's tab", async () => {
+    const s = setup();
+    const tab = await s.userTab();
+    const t = s.h.chrome.tabs.get("7")!;
+    await s.arm(tab.targetId, { kind: "submitted" });
+    expect(interceptOn(t)).toBe(true);
+    s.r.end();
+    s.h.engine.turnEnded("s1");
+    expect(await s.until(() => !interceptOn(t))).toBe(true);
+    expect(t.attached).toBe(true);
+    expect(t.focusEmulation).toBe(false);
+  });
+
+  test("a confirm() the user's submit raises is never cancelled by the wake: no dialog answer is sent, the hold stays until the dialog closes, then goes", async () => {
+    const s = setup();
+    const tab = await s.winterTab();
+    const t = s.h.winter.tabs.get(keyOf(tab))!;
+    await s.arm(tab.targetId, { kind: "submitted" });
+    // The user submits while the arming run still holds the tab (full hold: the app holds the dialog unseen).
+    const at = Date.now() + 1_000;
+    s.h.winter.wakes.user(keyOf(tab), { type: "submit", at });
+    s.h.winter.openDialog(keyOf(tab), "confirm", "Submit your listing for review?");
+    expect(await s.until(() => s.events.length > 0)).toBe(true);
+    expect(s.events[0]).toMatchObject({ outcome: "fired", detail: "submitted the form" });
+    s.r.end();
+    s.h.engine.turnEnded("s1");
+    await sleep(80);
+    // Letting go now would dismiss it as Cancel: the hold stays (full), nothing answered it.
+    expect(t.attached).toBe(true);
+    expect(t.holdModes.at(-1)).toBe("full");
+    expect(s.h.winter.sent.some((x) => x.method === "Page.handleJavaScriptDialog")).toBe(false);
+    // The woken session (or the user) answers it: the held-back release goes then.
+    s.h.winter.pageEvent(keyOf(tab), "Page.javascriptDialogClosed", { result: true, userInput: "" });
+    expect(await s.until(() => !t.attached)).toBe(true);
+    expect(s.h.winter.sent.some((x) => x.method === "Page.handleJavaScriptDialog")).toBe(false);
+  });
+
+  test("a dialog raised during a watch-only wait is the user's to answer: the wake ending detaches with no answer sent (watch-only holds none)", async () => {
+    const s = setup();
+    const tab = await s.winterTab();
+    const t = s.h.winter.tabs.get(keyOf(tab))!;
+    await s.arm(tab.targetId, { kind: "submitted" });
+    s.r.end();
+    s.h.engine.turnEnded("s1");
+    expect(await s.until(() => t.holdModes.at(-1) === "watch")).toBe(true);
+    s.h.winter.wakes.user(keyOf(tab), { type: "submit", at: Date.now() + 1_000 });
+    s.h.winter.openDialog(keyOf(tab), "confirm", "Sure?");
+    expect(await s.until(() => s.events.length > 0 && !t.attached)).toBe(true);
+    expect(s.h.winter.sent.some((x) => x.method === "Page.handleJavaScriptDialog")).toBe(false);
+  });
+
+  test("the poller polls around a page dialog (never parked on it): the user's click while one is open still fires", async () => {
+    const s = setup();
+    const tab = await s.winterTab();
+    await s.arm(tab.targetId, { kind: "clicked", ref: await s.refOf(tab.targetId, "Submit for review") });
+    s.r.end();
+    s.h.engine.turnEnded("s1");
+    s.h.winter.openDialog(keyOf(tab), "alert", "Saved");
+    await sleep(100);
+    s.h.winter.wakes.user(keyOf(tab), { type: "click", id: 2, at: Date.now() + 1_000 });
+    expect(await s.until(() => s.events.length > 0, 1_500)).toBe(true);
+    expect(s.events[0]).toMatchObject({ outcome: "fired", detail: "clicked" });
+  });
+
+  test("a cancel while a page dialog is open still takes the watch (its ring and pill) off the page", async () => {
+    const s = setup();
+    const tab = await s.winterTab();
+    const id = wakeId();
+    await s.arm(tab.targetId, { kind: "clicked", ref: await s.refOf(tab.targetId, "Submit for review") }, id);
+    s.h.winter.openDialog(keyOf(tab), "alert", "Hello");
+    s.backend.disarm(id);
+    expect(await s.until(() => s.h.winter.wakes.pills(keyOf(tab)).length === 0)).toBe(true);
+  });
+
+  test("a watch whose disarm never reached the page goes at the next poll of its frame (each poll names the watches kept)", async () => {
+    const s = setup();
+    const tab = await s.winterTab();
+    const gone = wakeId(), kept = wakeId();
+    await s.arm(tab.targetId, { kind: "titled", title: "Ready" }, gone);
+    await s.arm(tab.targetId, { kind: "clicked", ref: await s.refOf(tab.targetId, "Submit for review") }, kept);
+    s.h.winter.wakes.failOps.add("watchDisarm");
+    s.backend.disarm(gone);
+    expect(await s.until(() => s.h.winter.wakes.pills(keyOf(tab)).length === 1)).toBe(true);
+    expect(s.h.winter.wakes.pills(keyOf(tab))).toEqual(["Winter continues when you click “Submit for review”"]);
+  });
+});
+
+describe("only the user's action counts — timing", () => {
+  test("a submit whose qualifying input was Winter's own (a page's requestSubmit() just after Winter typed) never fires; the user's own does", async () => {
+    const s = setup();
+    const tab = await s.winterTab();
+    await s.arm(tab.targetId, { kind: "submitted" });
+    const t0 = Date.now();
+    await s.h.engine.primitive(s.r.scope, tab.targetId, "click", { target: Number(await s.refOf(tab.targetId, "Email")) });
+    const ownEnd = Date.now();
+    // The page submits by itself 700 ms after Winter's input ended (past the grace), on the strength of Winter's input.
+    s.h.winter.wakes.user(keyOf(tab), { type: "submit", at: ownEnd + 700, cause: Math.max(t0, ownEnd - 5) });
+    await sleep(120);
+    expect(s.events).toEqual([]);
+    s.h.winter.wakes.user(keyOf(tab), { type: "submit", at: ownEnd + 2_000, cause: ownEnd + 1_980 });
+    expect(await s.until(() => s.events.length > 0)).toBe(true);
+    expect(s.events[0]).toMatchObject({ outcome: "fired", detail: "submitted the form" });
+  });
+
+  test("Winter's own navigation is decided when it STARTS: a goto whose commit lands after the grace is still the baseline", async () => {
+    const s = setup();
+    const tab = await s.winterTab();
+    await s.arm(tab.targetId, { kind: "navigated" });
+    s.h.winter.slowCommitMs = 1_200;
+    // Winter's goto starts the navigation, and its run ends (stopped) long before the slow commit lands.
+    const going = s.h.engine.primitive(s.r.scope, tab.targetId, "goto", { url: "https://app.example/step2" }).catch(() => undefined);
+    await sleep(80);
+    s.r.end();
+    await going;
+    await sleep(1_700);
+    expect(s.h.winter.tabs.get(keyOf(tab))!.page.url).toBe("https://app.example/step2");
+    expect(s.events).toEqual([]);
+    // The page's own navigation afterwards fires.
+    delete s.h.winter.slowCommitMs;
+    s.h.winter.navigateTo(keyOf(tab), "https://app.example/done");
+    expect(await s.until(() => s.events.length > 0)).toBe(true);
+    expect(s.events[0]).toMatchObject({ outcome: "fired", detail: "now at https://app.example/done" });
+  });
+
+  test("the press window runs from the user's press to when the page went — not to when the backend learned of it", async () => {
+    const skew = { ms: 0 };
+    const s = setup({ skew });
+    const tab = await s.winterTab();
+    await s.arm(tab.targetId, { kind: "clicked", ref: await s.refOf(tab.targetId, "Submit for review") });
+    s.h.winter.wakes.user(keyOf(tab), { type: "press", id: 2 });
+    await sleep(80);
+    s.h.winter.navigateTo(keyOf(tab), "https://app.example/submitted");
+    // The backend learns of the loss "10 s" later (a slow recovery): the press still made it the user's.
+    skew.ms = 10_000;
+    expect(await s.until(() => s.events.length > 0)).toBe(true);
+    expect(s.events[0]).toMatchObject({ outcome: "fired", detail: "clicked" });
+  });
+});
+
+describe("hold budgets", () => {
+  test(`a waiting tab's hold counts: past ${HOLDS_PER_SESSION} waiting tabs a new wait is refused TargetBusy naming wakes.cancel, and so is another tab's hold`, async () => {
+    const s = setup();
+    const tabs: TabHandle[] = [];
+    for (let i = 0; i <= HOLDS_PER_SESSION; i++) tabs.push(await s.winterTab(`https://t${i}.example/`));
+    for (let i = 0; i < HOLDS_PER_SESSION; i++) await s.arm(tabs[i]!.targetId, { kind: "titled", title: "Ready" });
+    const e = await failure(s.arm(tabs[HOLDS_PER_SESSION]!.targetId, { kind: "titled", title: "Ready" }));
+    expect(e.kind).toBe("TargetBusy");
+    expect(e.message).toMatch(/too many tabs are waiting; cancel one with wakes\.cancel\(id\)/);
+    s.r.end();
+    s.h.engine.turnEnded("s1");
+    await sleep(50);
+    // A later run: the waiting tabs stay held, so a hold on another tab is refused — never past the cap in silence.
+    const r2 = s.h.run();
+    const other = await s.h.engine.global(r2.scope, "browsers.tab", { tab: tabs[HOLDS_PER_SESSION]!.id }).catch((err: unknown) => err) as AutomationFailure;
+    const e2 = other instanceof AutomationFailure ? other : await failure(s.h.engine.primitive(r2.scope, (other as TabHandle).targetId, "state", { emit: false }));
+    expect(e2.kind).toBe("TargetBusy");
+    expect(e2.message).toMatch(/wait for the user — too many tabs are waiting; stop waiting on one with wakes\.cancel\(id\)/);
+    expect([...s.h.winter.tabs.values()].filter((t) => t.attached).length).toBe(HOLDS_PER_SESSION);
+  });
+
+  test("Winter.app's ceiling on held tabs, reached while tabs wait: its sentence names wakes.cancel too", async () => {
+    const s = setup();
+    const t1 = await s.winterTab("https://a.example/");
+    await s.arm(t1.targetId, { kind: "titled", title: "Ready" });
+    const t2 = await s.winterTab("https://b.example/");
+    s.r.end();
+    s.h.engine.turnEnded("s1");
+    await sleep(30);
+    const attach = s.h.winter.attach.bind(s.h.winter);
+    s.h.winter.attach = async (tabKey, o) => {
+      if (tabKey === keyOf(t2)) throw new TransportError("not_allowed", "Winter's built-in browser already holds 24 tabs for automation — release one first", { holdCeiling: true });
+      return attach(tabKey, o);
+    };
+    const r2 = s.h.run();
+    const e = await failure(s.h.engine.primitive(r2.scope, t2.targetId, "state", { emit: false }));
+    expect(e.kind).toBe("TargetBusy");
+    expect(e.message.startsWith(HOLD_CEILING_SENTENCE)).toBe(true);
+    expect(e.message).toContain("or stop waiting on one with wakes.cancel(id) (1 built-in tab waits for the user)");
+  });
+});
+
+describe("rekey, leaks", () => {
+  test("a user's tab the browser replaced under a new id: the watch follows it (events on the new id count; the cancel names it)", async () => {
+    const s = setup();
+    s.h.chrome.withWatch();
+    s.h.chrome.pages["https://shop.example/"] = page("https://shop.example/");
+    const tab = await s.h.engine.global(s.r.scope, "browsers.open", { url: "https://shop.example/", browser: "chrome" }) as TabHandle;
+    const id = wakeId();
+    await s.arm(tab.targetId, { kind: "submitted" }, id);
+    // Winter's own navigation of it comes back under a new key (the extension moved the watch with it).
+    s.h.chrome.tabs.get(keyOf(tab))!.navigateFallback = { newKey: "900" };
+    await s.h.engine.primitive(s.r.scope, tab.targetId, "goto", { url: "https://shop.example/cart" }).catch(() => undefined);
+    s.h.chrome.wakes.moveExt(keyOf(tab), "900");
+    s.h.chrome.wakes.user("900", { type: "submit", at: Date.now() + 1_000 });
+    expect(await s.until(() => s.events.length > 0)).toBe(true);
+    expect(s.events[0]).toMatchObject({ wakeId: id, outcome: "fired", detail: "submitted the form" });
+    // Its cancel reached the extension under the new id.
+    expect(await s.until(() => s.h.chrome.wakes.extCount() === 0)).toBe(true);
+  });
+
+  test("a tab that really closed: lost after the rekey's grace", async () => {
+    const s = setup();
+    s.h.chrome.withWatch();
+    const tab = await s.userTab();
+    await s.arm(tab.targetId, { kind: "submitted" });
+    s.h.chrome.goneTab("7", "closed");
+    expect(await s.until(() => s.events.length > 0)).toBe(true);
+    expect(s.events[0]).toMatchObject({ outcome: "lost", reason: "the tab was closed" });
+  });
+
+  test("the debugger path's navigation listener goes with the tab's last watch", async () => {
+    const s = setup();
+    const tab = await s.winterTab();
+    const d = s.h.engine.wakeTarget("s1", tab.targetId).driver;
+    const before = d.listeners.size;
+    const a = wakeId(), b = wakeId();
+    await s.arm(tab.targetId, { kind: "navigated" }, a);
+    await s.arm(tab.targetId, { kind: "titled", title: "Ready" }, b);
+    expect(d.listeners.size).toBe(before + 1);
+    s.backend.disarm(a);
+    expect(d.listeners.size).toBe(before + 1);
+    s.backend.disarm(b);
+    expect(d.listeners.size).toBe(before);
+  });
+
+  test("wakeUrlShape: origin and path only, redacted, with ?… and #… where a query and a fragment were", () => {
+    expect(wakeUrlShape("https://shop.example/search?q=my+secret+order&page=2#top")).toBe("https://shop.example/search?…#…");
+    expect(wakeUrlShape("https://shop.example/")).toBe("https://shop.example/");
+    expect(wakeUrlShape("data:text/html,hi")).toBe("about:blank");
+    expect(wakeUrlShape("not a url")).toBe("another page");
   });
 });
 
@@ -394,7 +692,7 @@ describe("Winter for Chrome 1.2.0: no debugger while it waits", () => {
     expect(await s.until(() => s.events.length === 3)).toBe(true);
     const by = (id: string) => s.events.find((e) => e.wakeId === id)!;
     expect(by(ref)).toMatchObject({ outcome: "lost", reason: "the page changed" });
-    expect(by(nav)).toMatchObject({ outcome: "fired", detail: "now at https://u.example/thanks" });
+    expect(by(nav)).toMatchObject({ outcome: "fired", detail: "now at https://u.example/thanks — matched “/thanks”" });
     expect(by(appeared)).toMatchObject({ outcome: "fired", detail: "appeared" });
     const last = wakeId();
     await s.arm(tab.targetId, { kind: "titled", title: "Shipped" }, last);
@@ -419,21 +717,84 @@ describe("Winter for Chrome 1.2.0: no debugger while it waits", () => {
 });
 
 describe("agent tabs and the lifecycle", () => {
-  test("an agent tab a trigger waits on is not closed at a turn end; once the trigger ended, the next turn end closes it", async () => {
-    const s = setup();
+  test("an agent tab a trigger waits on is not closed at a turn end; once the trigger ended between turns, the next turn end (the wake turn's) closes it", async () => {
+    let running = true;
+    const s = setup({ engineDeps: { turnRunning: () => running } });
     s.h.chrome.withWatch();
     s.h.chrome.pages["https://shop.example/"] = page("https://shop.example/");
     const tab = await s.h.engine.global(s.r.scope, "browsers.open", { url: "https://shop.example/", browser: "chrome" }) as TabHandle;
     const id = wakeId();
     await s.arm(tab.targetId, { kind: "titled", title: "Paid" }, id);
     s.r.end();
+    running = false;
     s.h.engine.turnEnded("s1");
     await sleep(20);
     expect(s.h.chrome.tabs.get(keyOf(tab))!.closed).toBe(false);
     s.backend.disarm(id);
+    running = true;
     s.h.engine.turnEnded("s1");
     await sleep(20);
     expect(s.h.chrome.tabs.get(keyOf(tab))!.closed).toBe(true);
+  });
+
+  test("HIGH 2: the user acts before the arming turn ends — the tab is NOT closed at that turn end (handoff mark), and closes at the following one", async () => {
+    let running = true;
+    const s = setup({ engineDeps: { turnRunning: () => running } });
+    s.h.chrome.withWatch();
+    s.h.chrome.pages["https://shop.example/"] = page("https://shop.example/");
+    const tab = await s.h.engine.global(s.r.scope, "browsers.open", { url: "https://shop.example/", browser: "chrome" }) as TabHandle;
+    await s.arm(tab.targetId, { kind: "clicked", ref: await s.refOf(tab.targetId, "Submit for review") });
+    // The user clicks while the arming turn is still running: the trigger ends (fired) mid-turn.
+    s.h.chrome.wakes.user(keyOf(tab), { type: "click", id: 2, at: Date.now() + 1_000 });
+    expect(await s.until(() => s.events.length > 0)).toBe(true);
+    s.r.end();
+    s.h.engine.turnEnded("s1");
+    await sleep(20);
+    expect(s.h.chrome.tabs.get(keyOf(tab))!.closed).toBe(false);
+    // The wake turn's end: the ordinary rule.
+    s.h.engine.turnEnded("s1");
+    await sleep(20);
+    expect(s.h.chrome.tabs.get(keyOf(tab))!.closed).toBe(true);
+  });
+
+  test("HIGH 2: …and the wake turn may still keep it with handoff() — the turn after closes it then", async () => {
+    let running = true;
+    const s = setup({ engineDeps: { turnRunning: () => running } });
+    s.h.chrome.withWatch();
+    s.h.chrome.pages["https://shop.example/"] = page("https://shop.example/");
+    const tab = await s.h.engine.global(s.r.scope, "browsers.open", { url: "https://shop.example/", browser: "chrome" }) as TabHandle;
+    await s.arm(tab.targetId, { kind: "clicked", ref: await s.refOf(tab.targetId, "Submit for review") });
+    s.h.chrome.wakes.user(keyOf(tab), { type: "click", id: 2, at: Date.now() + 1_000 });
+    expect(await s.until(() => s.events.length > 0)).toBe(true);
+    s.r.end();
+    s.h.engine.turnEnded("s1");
+    const r2 = s.h.run();
+    const again = await s.h.engine.global(r2.scope, "browsers.tab", { tab: tab.id }) as TabHandle;
+    await s.h.engine.primitive(r2.scope, again.targetId, "handoff", {});
+    r2.end();
+    s.h.engine.turnEnded("s1");
+    await sleep(20);
+    expect(s.h.chrome.tabs.get(keyOf(tab))!.closed).toBe(false);
+    s.h.engine.turnEnded("s1");
+    await sleep(20);
+    expect(s.h.chrome.tabs.get(keyOf(tab))!.closed).toBe(true);
+    void running;
+  });
+
+  test("waiting counts ANY session's trigger: a peer's wait on an agent tab keeps it open at its own session's turn end", async () => {
+    const s = setup({ engineDeps: { turnRunning: () => false } });
+    s.h.chrome.withWatch();
+    s.h.chrome.pages["https://shop.example/"] = page("https://shop.example/");
+    const tab = await s.h.engine.global(s.r.scope, "browsers.open", { url: "https://shop.example/", browser: "chrome" }) as TabHandle;
+    s.r.end();
+    // Session s2 binds the same tab and arms on it.
+    const peer = s.h.run("s2");
+    const bound = await s.h.engine.global(peer.scope, "browsers.tab", { tab: tab.id }) as TabHandle;
+    await s.arm(bound.targetId, { kind: "titled", title: "Paid" }, wakeId(), "s2");
+    peer.end();
+    s.h.engine.turnEnded("s1");
+    await sleep(20);
+    expect(s.h.chrome.tabs.get(keyOf(tab))!.closed).toBe(false);
   });
 
   test("shouldCloseAgentTab: waiting keeps a tab past a turn end only", () => {
