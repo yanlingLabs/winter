@@ -22,9 +22,9 @@ export interface EmbeddedProtectionCapability {
   capability: string;
   coverage: EmbeddedProtectionCoverage;
 }
-/** Source advertisements are not independent acceptance. Remains zero until the complete
- * context/cache boundary passes review; package pins remain a separate release requirement. */
-export const ACCEPTED_EMBEDDED_CONTEXT_VERSION: number = 0;
+/** Independently accepted nine-family context/cache contract at SDK 1971f9a6 (Claude45).
+ * Namespace/version/family checks still apply; package pins remain a separate release requirement. */
+export const ACCEPTED_EMBEDDED_CONTEXT_VERSION: number = 1;
 const REQUIRED_SOURCE_FAMILIES = ["instructions-imports-memory", "rules", "output-styles", "settings-mcp", "skills", "agent-definitions", "plugin-components-manifests-installed", "commands", "workflow-source"];
 const REQUIRED_FILE_TOOLS = ["Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep"];
 export function embeddedFileProtectionSupported(value: EmbeddedProtectionCapability | undefined): boolean {
