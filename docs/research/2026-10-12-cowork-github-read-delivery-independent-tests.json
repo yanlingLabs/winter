@@ -1,0 +1,6 @@
+{
+  "commit": "0d575df0b626ee86807e2ad406a27ea900e8a22a",
+  "exitCode": 0,
+  "command": "bun test test/cowork/git/read-authority.test.ts test/cowork/git/read-transport.test.ts",
+  "scope": "17 baseline plus six independent probes; synchronous result-copy ordering observed with temporary restored Buffer.from wrapper"
+}

@@ -160,8 +160,11 @@ composed through `55eb17ee`, including both asynchronous picker ownership fixes.
 Independent 171 Core/API tests and 21 Swift tests passed; two actual Debug app
 builds succeeded. Preparation does not enable creation, durable grants or shares.
 See [selection acceptance](research/2026-10-12-cowork-macos-selection-independent-review.md).
-Git read transport at `a242e538` reuses PR17 and performs real authenticated fixture
-clone/fetch without forwarding credentials. The composed Git/repository suite
+Git read transport through `0d575df0` reuses PR17 and performs real authenticated fixture
+clone/fetch without forwarding credentials. Independent review found and corrected
+mutable request-buffer aliasing and authority changes before result delivery; the
+final synchronous authorization/result cut passed 23 independent tests/96 assertions.
+See [delivery review](research/2026-10-12-cowork-github-read-delivery-independent-review.md). The composed Git/repository suite
 passed 86 tests/432 assertions. It remains fixture-only until the isolated parser
 helper, durable repository grants and guest source acknowledgments are connected.
 Provider proxy/broker and the Git parser helper are progressing independently.

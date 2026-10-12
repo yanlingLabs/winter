@@ -1,0 +1,6 @@
+{
+  "commit": "05f38ffea44db1204b23f714fa347e235ed2e44c",
+  "exitCode": 1,
+  "command": "bun test test/cowork/git/read-authority.test.ts --test-name-pattern REVIEW queued stop",
+  "scope": "disposable canonical DB, synchronous mock snapshot queues a stopped transition in final recheck; injected HTTP response only"
+}

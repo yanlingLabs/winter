@@ -1,0 +1,7 @@
+{
+  "commit": "05f38ffea44db1204b23f714fa347e235ed2e44c",
+  "exitCode": 0,
+  "command": "bun test test/cowork/git/read-authority.test.ts test/cowork/git/read-transport.test.ts",
+  "independentProbes": "original three unchanged plus two synchronous-contract variants with stopped-state assertions, appended only to disposable frozen checkout",
+  "dependencies": "output-integration installed packages; reviewed local protocol override"
+}

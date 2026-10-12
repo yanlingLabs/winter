@@ -1,0 +1,196 @@
+bun test v1.3.14 (0d9b296a)
+
+test/cowork/git/read-authority.test.ts:
+(pass) canonical preparation authority is revision/incarnation/repository-bound and leaves source preparing [24.12ms]
+(pass) account/source revocation during async resolution cannot revive readiness or accept late ACK [21.01ms]
+(pass) runtime reads require actual ready ACK, active binding, explicit source scope and effective capability [10.42ms]
+(pass) restoring scope contents at a later revision does not restore prior read authority [13.24ms]
+(pass) read completion does not invent a guest ACK; SecretStore await rechecks canonical revocation [11.26ms]
+76 |   let calls = 0;
+77 |   f.resolver.sourceScope = async () => {
+78 |     if (++calls === 2) dbs[dbs.length - 1]!.db.query("UPDATE cowork_workspaces SET power='stopped' WHERE workspace_id=?").run(f.caller.workspaceId);
+79 |     return { revision: 1, sourceIds: [f.source.sourceId] };
+80 |   };
+81 |   await expect(f.readAuthority.authorize({ ...f.caller, sessionId: "session" }, f.request)).rejects.toMatchObject({ code: "authority_denied" });
+                                                                                                         ^
+error: 
+
+Expected promise that rejects
+Received promise that resolved: Promise { <resolved> }
+
+      at <anonymous> (<frozen-checkout>/packages/core/test/cowork/git/read-authority.test.ts:81:101)
+(fail) REVIEW final scope await cannot authorize a stopped workspace [9.43ms]
+90 |     return { revision: 1, sourceIds: [f.source.sourceId] };
+91 |   };
+92 |   const pkt = (s: string) => Buffer.from((Buffer.byteLength(s)+4).toString(16).padStart(4,"0")+s);
+93 |   const bytes = Buffer.concat([pkt("# service=git-upload-pack\n"),Buffer.from("0000"),pkt("1".repeat(40)+" HEAD\0multi_ack\n"),Buffer.from("0000")]);
+94 |   const transport = new CoworkGitHubReadTransport(f.readAuthority,{get:async()=>"fixture-only-token"},async()=>new Response(bytes,{headers:{"content-type":"application/x-git-upload-pack-advertisement"}}),{recheckMs:1000},{isolatedFixture:true});
+95 |   await expect(transport.read({ ...f.caller, sessionId: "session" }, f.request)).rejects.toMatchObject({code:"authority_denied"});
+                                                                                              ^
+error: 
+
+Expected promise that rejects
+Received promise that resolved: Promise { <resolved> }
+
+      at <anonymous> (<frozen-checkout>/packages/core/test/cowork/git/read-authority.test.ts:95:90)
+(fail) REVIEW final transport recheck refuses stop during final scope await [10.19ms]
+102 |   const transport = new CoworkGitHubReadTransport(f.readAuthority,{get:async()=>{body.fill(88);return "fixture-only-token";}},async(_url,init)=>{
+103 |     observed=Buffer.from(init.body as Uint8Array);
+104 |     return new Response(pkt("NAK\n"),{headers:{"content-type":"application/x-git-upload-pack-result"}});
+105 |   },{recheckMs:1000},{isolatedFixture:true});
+106 |   await transport.read(f.caller,{...f.request,operation:"upload-pack",body});
+107 |   expect(observed).toEqual(original);
+                         ^
+error: expect(received).toEqual(expected)
+
+  {
+    "data": [
+-     48,
+-     48,
+-     51,
+-     50,
+-     119,
+-     97,
+-     110,
+-     116,
+-     32,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     49,
+-     10,
+-     48,
+-     48,
+-     48,
+-     48,
+-     48,
+-     48,
+-     48,
+-     57,
+-     100,
+-     111,
+-     110,
+-     101,
+-     10,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
++     88,
+    ],
+    "type": "Buffer",
+  }
+
+- Expected  - 63
++ Received  + 63
+
+      at <anonymous> (<frozen-checkout>/packages/core/test/cowork/git/read-authority.test.ts:107:20)
+(fail) REVIEW upload body owns a snapshot even when caller supplies Buffer [9.51ms]
+
+test/cowork/git/read-transport.test.ts:
+(pass) production read entry refuses before credential/packet/network work until sandboxed parser admission exists [0.17ms]
+(pass) only canonical host metadata determines destination/auth; guest URLs/headers are never forwarded [0.45ms]
+(pass) redirects/status/type/encoding, credential reflection and credential-bearing exceptions fail safely [0.52ms]
+(pass) body/packet/object expansion bounds reject before guest delivery [3.41ms]
+(pass) mid-stream revoke closes the admitted read without delivering partial bytes [1.42ms]
+(pass) stalled revision change, cancellation, duration and concurrent admission are bounded [18.54ms]
+(pass) real Git clone + incremental fetch through private fake upstream keep credentials/helpers out of guest [191.50ms]
+
+ 12 pass
+ 3 fail
+ 82 expect() calls
+Ran 15 tests across 2 files. [496.00ms]
