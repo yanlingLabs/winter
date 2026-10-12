@@ -5,6 +5,9 @@ from build import OUT
 from block_receipts import summary
 from run_block import disk_integrity
 class Receipts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        OUT.mkdir(parents=True, exist_ok=True)
     def test_missing_trace_and_progress_cannot_pass(self):
         result=summary([]);self.assertFalse(result['blockReceiptsPassed']);self.assertFalse(result['activeReturnVerified']);self.assertFalse(result['productionReady'])
     def test_trace_overflow_rejects(self):

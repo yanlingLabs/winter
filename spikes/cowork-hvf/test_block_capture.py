@@ -17,6 +17,9 @@ class Unreapable:
     def kill(self):self.kills+=1
 
 class Capture(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        OUT.mkdir(parents=True, exist_ok=True)
     def run_child(self,program,limits):
         with tempfile.TemporaryDirectory(prefix='capture-test-',dir=OUT) as directory:
             child=subprocess.Popen([sys.executable,'-c',program],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,bufsize=0)
