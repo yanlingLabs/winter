@@ -87,6 +87,8 @@ final class GuardianModelTests: XCTestCase {
         // Round 11's sweep of seeds 1000–1079 (each failed on round 10's engine too; 10 more of its failures are gone):
         (1018, "I4: settled at U, should be X@200 — an untouched U sent back as the agent's indirect effect after the user moved"),
         (1022, "I2: the engine's place T@200, the user's T@100 — the same app on two desktops"),
+        // Round 16: pinned per the review of round 15 (LOW) — still failing there.
+        (1062, "I1: S came forward as the user clicked into it, 4 ms later — the engine took the click as theirs and said nothing"),
     ]
 
     /// The standing second check (round 14): T an ORDINARY app (its acts reach T, Finder, the default browser and the mail

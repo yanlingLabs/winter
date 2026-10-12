@@ -955,7 +955,9 @@ final class SimRun {
                 let e = error as? CUError
                 w.log("the act: \(e?.message ?? "\(error)")")
                 let refusedForWork = e?.code == "refused" && e?.data?["reason"] == .string("user_working")
-                if refusedForWork, !working {
+                // (Refused mid-act is right when they started working in it DURING the act — round 16, P1: an act in flight checks
+                // the work mark before every focus placement and key. Never when they don't work in it at the refusal either.)
+                if refusedForWork, !working, !w.userWorks(in: tpid) {
                     w.lock.withLock { w.fail("I6: the act was refused as \"the user is working in it\", but they are not (only switched there, or left it)") }
                 } else if refusedForWork {
                     w.lock.withLock { w.stats.handsOff += 1 }

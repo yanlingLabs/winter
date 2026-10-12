@@ -149,7 +149,7 @@ indirect enum SimCause: CustomStringConvertible {
 enum SimClickWhat: String { case field = "a field", link = "a link (an AX link)", opener = "a button that opens Safari" }
 
 /// What becomes of an app the agent never touched coming forward.
-enum SimUntouched: String { case adopt = "the user's place (I1)", undone = "undone (the agent's indirect effect)", leftAlone = "left in front (a system dialog), not their place" }
+enum SimUntouched: String { case adopt = "the user's place (I1)", undone = "undone (the agent's indirect effect)", leftAlone = "left in front, not their place" }
 
 /// One input of the user's that can switch apps or desktops, and where they meant to go with it.
 struct SimSwitch {
