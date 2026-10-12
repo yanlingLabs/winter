@@ -698,6 +698,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // Host Code/Chat/Dispatch only. Future Cowork drivers need their own workspace/guest
       // policy lifecycle and must never be swept by this native-host callback.
       if (mode !== "code" && mode !== "chat" && mode !== "dispatch") return;
+      if ((mode === "chat" || mode === "dispatch") && deps.runtime?.protectedEmbeddedPathsAvailable?.() === true) return; // Worker host awaits live acknowledgments
       let refreshed = false;
       const work = async () => {
         if (mode === "code") await session.idle(); // let an approved build/tool turn finish

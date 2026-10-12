@@ -321,7 +321,7 @@ export class HostCodeExecutionService {
   private refreshing = false;
   /** Last completed consumer acknowledgment, not a fresh filesystem-derived before snapshot. */
   private acknowledgedStoragePolicy: string | undefined;
-  private readonly embeddedSpawns = new WeakSet<SpawnClaudeCodeProcess>();
+  private readonly embeddedSpawns = new WeakMap<SpawnClaudeCodeProcess, () => boolean>();
   private readonly retiredProtectedFloors = new Set<string>();
   private retiredFloorOverflow = false;
   constructor(
@@ -352,20 +352,20 @@ export class HostCodeExecutionService {
     this.assertReady(this.home);
     if (!hasFloor(hostStorageFloorDescriptor(this.home))) return;
     const spawn = options?.spawnClaudeCodeProcess;
-    if (spawn && this.embeddedSpawns.has(spawn))
+    if (spawn && this.embeddedSpawns.has(spawn) && this.embeddedSpawns.get(spawn)!() !== true)
       throw new HostCodeUnavailable("embedded-host-floor-unavailable");
 
   }
-  trustEmbeddedSpawn(spawn: SpawnClaudeCodeProcess): SpawnClaudeCodeProcess {
+  trustEmbeddedSpawn(spawn: SpawnClaudeCodeProcess, protectedPathsAvailable: () => boolean = () => false): SpawnClaudeCodeProcess {
     // Capture only a guarded closure. A topology chosen while storage was inactive cannot
     // become an unfloored embedded launch after coordinator registration changes.
     const guarded: SpawnClaudeCodeProcess = (options) => {
       if (this.refreshing) throw new HostCodeUnavailable("floor-refresh-in-progress");
-      if ((options as { requireHostFloor?: boolean }).requireHostFloor || options.command === "/usr/bin/sandbox-exec" || this.protectedStorageActive())
+      if ((options as { requireHostFloor?: boolean }).requireHostFloor || options.command === "/usr/bin/sandbox-exec" || (this.protectedStorageActive() && protectedPathsAvailable() !== true))
         throw new HostCodeUnavailable("embedded-host-floor-unavailable");
       return spawn(options);
     };
-    this.embeddedSpawns.add(guarded);
+    this.embeddedSpawns.set(guarded, protectedPathsAvailable);
     return guarded;
   }
   assertAuthority(authority: HostCodeAuthority | undefined): void {
