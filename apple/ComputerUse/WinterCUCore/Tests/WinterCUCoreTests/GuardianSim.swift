@@ -696,22 +696,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl), !reroutes { userInteracted(receiver) }
         // Their typing in an app left in front: it is their place now — no restore may pull them out of it (the ruling,
         // round 16: STRICT, every answer moves there).
-        if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl), keycode != 53 {
-            lock.withLock {
-                guard leftApps.contains(front), !visiting else { return }
-                let cur = SPlace(app: front, space: space)
-                // (Strict once the engine can have heard of the app's coming forward; a key that beats the hearing is a race
-                // the engine can't see — then either place is right.)
-                let heard = !unheard.contains { now <= $0.until }
-                if leftOnly.contains(front), heard {
-                    cands = Set(cands.map { c in c.expected == cur ? SimCand(place: cur, expected: cur, held: nil) : c })
-                } else {
-                    cands.formUnion(cands.filter { $0.expected == cur }.map { _ in SimCand(place: cur, expected: cur, held: nil) })
-                }
-                leftApps.remove(front)
-                log("  (their typing in \(SimPid.name(front)), left in front: their place now)")
-            }
-        }
+        if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl), keycode != 53 { usedLeftApp("typing") }
         // The process the key goes to, as the real tap reads it (`kCGEventTargetUnixProcessID`; review of round 12, LOW —
         // the engine's receiver check was never exercised): the front app, or Spotlight's panel for the keys typed into it
         // (R17-d (ii)).
@@ -723,10 +708,41 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         core?.noteTapEvent(type: CGEventType(rawValue: raw)!, sourcePid: 0, userData: 0, now: now / 1000)
     }
 
+    /// The user USED the app left in front — typing in it, or scrolling in its window (round 18, the controller's ruling:
+    /// a scroll is work per I6, so it counts as using it too): it is their place now.
+    func usedLeftApp(_ how: String) {
+        lock.withLock {
+            guard leftApps.contains(front), !visiting else { return }
+            let cur = SPlace(app: front, space: space)
+            // (Strict once the engine can have heard of the app's coming forward; input that beats the hearing is a race
+            // the engine can't see — then either place is right.)
+            let heard = !unheard.contains { now <= $0.until }
+            if leftOnly.contains(front), heard {
+                cands = Set(cands.map { c in c.expected == cur ? SimCand(place: cur, expected: cur, held: nil) : c })
+            } else {
+                cands.formUnion(cands.filter { $0.expected == cur }.map { _ in SimCand(place: cur, expected: cur, held: nil) })
+            }
+            leftApps.remove(front)
+            log("  (their \(how) in \(SimPid.name(front)), left in front: their place now)")
+        }
+    }
+
+    /// A scroll: over the front app's main window when it is on screen (round 18 — the tap reads where the pointer is), else
+    /// over the empty desktop. In the front app's own window: work in it (I6 — an agent target's), and USE of an app left in
+    /// front (the controller's ruling).
     func scrollTap() {
         hardware(observable: true)
+        let (at, inFront) = lock.withLock { () -> (CGPoint, pid_t?) in
+            guard let m = mainWin[front], let w = wins[m], onScreen(w), w.layer == 0 else { return (CGPoint(x: 300, y: 860), nil) }
+            let p = CGPoint(x: w.frame.midX, y: w.frame.midY)
+            return (p, clickTarget(at: p)?.pid == front ? front : nil)
+        }
         core?.noteTapEvent(type: CGEventType(rawValue: 29)!, sourcePid: 0, userData: 0, now: now / 1000)
-        core?.noteTapEvent(type: .scrollWheel, sourcePid: 0, userData: 0, now: now / 1000)
+        if let a = inFront {
+            userInteracted(a)
+            usedLeftApp("scrolling")
+        }
+        core?.noteTapEvent(type: .scrollWheel, sourcePid: 0, userData: 0, location: at, now: now / 1000)
     }
 
     @discardableResult
