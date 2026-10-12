@@ -301,7 +301,7 @@ final class SimRun {
             // only; X is Terminal — a third party's app, outside every act's reach.
             world.bundles[SimPid.safari] = "com.apple.Safari"
             world.bundles[SimPid.third] = "com.apple.Terminal"
-            world.targetScope = [plan.targetBundle, "com.apple.finder", "com.apple.Safari", "com.apple.mail"]
+            world.targetScope = [plan.targetBundle, "com.apple.Safari", "com.apple.mail"]
             core.isWebBrowserOverride = { _ in false }
             core.defaultHandlerOverride = { ["http": "com.apple.Safari", "https": "com.apple.Safari", "mailto": "com.apple.mail"][$0] }
         }
@@ -589,6 +589,7 @@ final class SimRun {
                     w.mainWin[pid] = wid
                     w.zOrder.append(pid)
                     w.userLaunches[pid] = w.now
+                    w.noteLaunchStart(pid)
                     return pid
                 }
                 w.log("the user's app \(SimPid.name(pid)) starts")
@@ -777,7 +778,9 @@ final class SimRun {
                 w.wins[wid] = SimWin(id: wid, pid: pid, frame: CGRect(x: 320, y: 620, width: 300, height: 200), space: w.space1)
                 w.mainWin[pid] = wid
                 w.zOrder.append(pid)
-                w.agentColdLaunches[pid] = (w.now, w.clearlyNow(for: pid, anyReach: true))
+                // (Undone only within the act's reach — the ruling, round 16.)
+                w.agentColdLaunches[pid] = (w.now, w.clearlyNow(for: pid))
+                w.noteLaunchStart(pid)
                 return pid
             }
             w.log("\(SimPid.name(pid)) starts (the agent's action opened it; clearly the agent's: \(w.lock.withLock { w.agentColdLaunches[pid].map { "\($0.clearly)" } ?? "?" }))")

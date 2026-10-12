@@ -315,6 +315,20 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// process start, and whether it was clearly the agent's then (the world's own record: no input of the user's in the
     /// 2.5 s before it, an opener act within 1.5 s before it, no Secure Event Input).
     var agentColdLaunches: [pid_t: (start: Double, clearly: Touch)] = [:]
+    /// Per launched process: whether input of the user's the tap saw came between the agent's last opener act before its
+    /// start (any reach) and the start — the ruling's (1), round 16: then it is THEIRS.
+    var inputAfterOpener: [pid_t: Bool] = [:]
+    /// Whether an opener act (any reach) came within the causal window before `start`.
+    func openerBefore(_ start: Double) -> Double? {
+        guard let o = openers.last(where: { $0.at <= start })?.at, start - o <= 1_500 else { return nil }
+        return o
+    }
+    func noteLaunchStart(_ pid: pid_t) {
+        if let o = openerBefore(now) { inputAfterOpener[pid] = lastObservableHardwareAt > o } else { inputAfterOpener[pid] = nil }
+    }
+    /// The apps the world left in front (an untouched app judged left): the user's own typing in one makes it their place.
+    var leftApps: Set<pid_t> = []
+    var leftOnly: Set<pid_t> = []
     var backgroundOpens = 0
     /// An untouched app's coming forward the engine must SAY (sent back, or a system dialog left in front): owed from
     /// the change, due once its notification found it still in front.
@@ -385,7 +399,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// The engine judges a change when it HEARS of it (NSWorkspace, up to ~0.4 s here): facts that arrive in between (the
     /// agent's next cause, the user's input) can rightly change its answer for an app the agent never touched — the other
     /// answer, added if such a fact arrives before the change is heard.
-    enum LateFact { case agentCause, hardware }
+    enum LateFact { case agentCause, hardware, switchInput }
     var widen: (episode: Int, until: Double, fact: LateFact, alt: Set<SimCand>, why: String)?
     /// Changes the engine has not heard of yet: a restore issued meanwhile may go to the place from before them.
     var unheard: [(until: Double, places: Set<SPlace>, from: SPlace)] = []
@@ -629,6 +643,24 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         // it (round 10's I6), wherever the key lands (Spotlight's panel too: the engine can't tell).
         let receiver = lock.withLock { front }
         if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl) { userInteracted(receiver) }
+        // Their typing in an app left in front: it is their place now — no restore may pull them out of it (the ruling,
+        // round 16: STRICT, every answer moves there).
+        if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl), keycode != 53 {
+            lock.withLock {
+                guard leftApps.contains(front), !visiting else { return }
+                let cur = SPlace(app: front, space: space)
+                // (Strict once the engine can have heard of the app's coming forward; a key that beats the hearing is a race
+                // the engine can't see — then either place is right.)
+                let heard = !unheard.contains { now <= $0.until }
+                if leftOnly.contains(front), heard {
+                    cands = Set(cands.map { c in c.expected == cur ? SimCand(place: cur, expected: cur, held: nil) : c })
+                } else {
+                    cands.formUnion(cands.filter { $0.expected == cur }.map { _ in SimCand(place: cur, expected: cur, held: nil) })
+                }
+                leftApps.remove(front)
+                log("  (their typing in \(SimPid.name(front)), left in front: their place now)")
+            }
+        }
         // The process the key goes to, as the real tap reads it (`kCGEventTargetUnixProcessID`; review of round 12, LOW —
         // the engine's receiver check was never exercised): the front app. The sim has no panel process of its own, so a
         // Spotlight key is given to the front app too — the stricter case (the engine counts it as work there).
@@ -649,6 +681,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     @discardableResult
     func addSwitch(_ s: SimSwitch) -> Int {
         lock.withLock {
+            lateFact(.switchInput)
             switches.append(s)
             return switches.count - 1
         }
@@ -738,6 +771,8 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
                 ? .either([back, adopt], "a switch input of the user's it may have been") : back
             return since < -30 ? sentBack : .either([sentBack, notAdopted], "input of the user's right at the process start")
         }()
+        // (1) input of the user's between the opener act and the start: THEIRS — adopted (the ruling, round 16).
+        if inputAfterOpener[pid] == true, !visiting { return adopt }
         switch c.clearly {
         case .no: return widenedLeft(neverAdopted, adopt: adopt)
         case .yes: return clearlyCase
@@ -749,7 +784,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// a few ms after the app came forward) can make it theirs — the same race the other verdicts already widen for.
     func widenedLeft(_ c: SimCause, adopt: SimCause) -> SimCause {
         if case .untouched(_, .leftAlone, _, _) = c {
-            nextWiden = (.hardware, adopt, "input of the user's arrived before the engine heard of an app's coming forward")
+            nextWiden = (.switchInput, adopt, "a switch input of the user's arrived before the engine heard of an app's coming forward")
         }
         return c
     }
@@ -768,7 +803,8 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             let left = SimCause.untouched(pid, .leftAlone, indirect: indirect, why + " (started right after the agent's action)")
             let start = startedAt[pid] ?? l
             let gap = start - (openers.last { $0.at <= start }?.at ?? -.infinity)
-            if gap > 1_600 { return adopt }
+            // (1) their input between the agent's act and the start (their Spotlight keys, a Dock click): theirs.
+            if gap > 1_600 || inputAfterOpener[pid] == true { return adopt }
             let base: SimCause = gap <= 1_400 ? left : .either([adopt, left], "at the edge of the causal window before the process start")
             // (A switch input of theirs that fits explains it as theirs — the engine's I1 asks that first.)
             if competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop) != nil {
@@ -916,6 +952,17 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// The front app or desktop changes to `n`, for `cause`.
     func change(to n: SPlace, cause: SimCause, why: String) {
         lock.withLock {
+            // An app left in front: the user's own typing in it will make it their place — STRICTLY when "left" is the one
+            // right answer, as one of several otherwise (the engine may have taken another, an undo not landed yet).
+            func hasLeft(_ c: SimCause) -> Bool {
+                switch c {
+                case .untouched(_, .leftAlone, _, _): return true
+                case .either(let cs, _): return cs.contains(where: hasLeft)
+                default: return false
+                }
+            }
+            if hasLeft(cause) { leftApps.insert(n.app) } else { leftApps.remove(n.app) }
+            if case .untouched(_, .leftAlone, _, _) = cause { leftOnly.insert(n.app) } else { leftOnly.remove(n.app) }
             let oldFront = front, oldSpace = space
             if let p = pendingWork, n.app == p.app, now <= p.until { userWorkingIn = p.app; pendingWork = nil }
             if let w = userWorkingIn, n.app != w { userWorkingIn = nil }  // they left the app they were working in

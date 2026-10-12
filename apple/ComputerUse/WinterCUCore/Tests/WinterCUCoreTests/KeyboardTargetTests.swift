@@ -264,6 +264,37 @@ final class KeyboardTargetTests: XCTestCase {
     /// Round 14 (the Material probe): Space or Return INTO a control a press acts on (a check box, a button) is ONE
     /// press — never a press to place the focus and then the key (a check box toggled twice, a button pressed twice);
     /// another key into it is refused with the way.
+    /// Round 16, P1 (the live hands-off regression): a type act checked I6 at its start; the user then clicked into Name;
+    /// the act's focus placement must NOT take them back to Email — and a burst in flight stops before its next key.
+    func testAnActInFlightNeverMovesTheFocusOnceTheUserWorks() async throws {
+        safari(fieldOwner: pid)
+        sys.front = pid  // the app in front: the user works in it
+        core.testUserInput(pid: pid, switching: false)  // their click into another field of it
+        XCTAssertThrowsError(try core.placeFocus(field, target, ref: ref(field))) { e in
+            XCTAssertEqual((e as? CUError)?.data?["reason"], .string("user_working"))
+        }
+        XCTAssertTrue(ax.performed.isEmpty, "no press to place the focus: \(ax.performed)")
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "no focusing click")
+    }
+
+    func testABurstInFlightStopsBeforeItsNextKeyOnceTheUserWorks() async throws {
+        safari(fieldOwner: pid)
+        var downs = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            downs += 1
+            if downs == 2 { sys.front = pid; core.testUserInput(pid: pid, switching: false) }  // they start working after two keys
+        }
+        do {
+            _ = try await act(.type(CUTypeAction(text: "\t\tabcd")))  // keys (a tab: never an insert)
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("user_working"), e.message)
+            XCTAssertTrue(e.message.hasPrefix("typed 2 of 6 characters"), e.message)
+        }
+        XCTAssertEqual(poster.keyDowns.count, 2, "nothing after they started working")
+    }
+
     func testSpaceIntoACheckBoxIsOnePressNeverTwo() async throws {
         safari(fieldOwner: pid)
         let cb = fakeElement(93_090)
@@ -280,7 +311,7 @@ final class KeyboardTargetTests: XCTestCase {
                 _ = try await act(.key(CUKeyAction(combo: combo, into: ref(cb))))
                 XCTFail("\(combo): refused")
             } catch let e as CUError {
-                XCTAssertTrue(e.message.contains(combo == "return" ? "Return does not toggle" : "takes no text"), e.message)
+                XCTAssertTrue(e.message.contains(combo == "return" ? "Return does not toggle" : "would press it"), e.message)
             }
         }
         XCTAssertEqual(ax.performed.filter { $0.hasSuffix(":AXPress") }.count, 1, "still one press")
@@ -298,6 +329,53 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertTrue(ax.performed.filter { $0.hasSuffix(":AXPress") }.isEmpty, "the button never pressed: \(ax.performed)")
         XCTAssertTrue(poster.keyDowns.contains { $0.keycode == Int64(kVK_End) }, "End sent")
         XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "no focusing click either")
+    }
+
+    /// Review of round 15, HIGH #2: only a NAVIGATION key aimed at a button goes to where the focus is; any other key
+    /// would act on whatever has it (Delete deletes in the focused field, ⇧Return submits a form) — refused, nothing sent.
+    func testANonNavigationKeyIntoAButtonIsRefused() async throws {
+        safari(fieldOwner: pid)
+        let button = fakeElement(93_092)
+        ax.add(button, role: kAXButtonRole, title: "Remove", frame: CGRect(x: 20, y: 160, width: 120, height: 30),
+               extra: [kAXParentAttribute: ax.element(field, kAXParentAttribute)!])
+        ax.setActions(button, [kAXPressAction])
+        for (combo, rep) in [("delete", 1), ("forwarddelete", 1), ("shift+return", 1), ("alt+left", 1), ("a", 1), ("return", 2), ("cmd+down", 1)] {
+            do {
+                _ = try await act(.key(CUKeyAction(combo: combo, into: ref(button), repeat: rep)))
+                XCTFail("\(combo) ×\(rep): refused")
+            } catch let e as CUError {
+                XCTAssertTrue(e.message.contains("would press it"), "\(combo): \(e.message)")
+            }
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty, "nothing sent")
+        XCTAssertTrue(ax.performed.filter { $0.hasSuffix(":AXPress") }.isEmpty, "nothing pressed")
+    }
+
+    /// Round 16, P2 (the live "scroll by keys" failure in a WKWebView): End aimed at a button while the keyboard focus is
+    /// OUTSIDE its page — the page gets the focus by a click on a blank spot of it (never the button's press), then End.
+    func testANavigationKeyGivesThePageTheFocusByABlankSpotFirst() async throws {
+        safari(fieldOwner: pid)
+        let web = ax.element(field, kAXParentAttribute)!
+        let button = fakeElement(93_093)
+        ax.add(button, role: kAXButtonRole, title: "Web Button", frame: CGRect(x: 20, y: 160, width: 120, height: 30),
+               extra: [kAXParentAttribute: web])
+        ax.setActions(button, [kAXPressAction])
+        ax.put(web, [kAXChildrenAttribute: [field, button]])
+        _ = searchHasFocus()  // the focus outside the page (the browser's own field)
+        let r = try await act(.key(CUKeyAction(combo: "end", into: ref(button))))
+        let downs = poster.entries.filter { $0.type == .leftMouseDown }
+        // (A click, and one more when the fake's focus never shows it landed — a real page takes the first.)
+        XCTAssertFalse(downs.isEmpty, "a click to give the page the focus")
+        for d in downs {
+            XCTAssertFalse(CGRect(x: 20, y: 160, width: 120, height: 30).contains(d.location), "never on the button: \(d.location)")
+            XCTAssertFalse(CGRect(x: 20, y: 60, width: 300, height: 24).contains(d.location), "nor on a field: \(d.location)")
+        }
+        XCTAssertTrue(ax.performed.filter { $0.hasSuffix(":AXPress") }.isEmpty, "the button never pressed: \(ax.performed)")
+        // The fake page never shows the focus arriving (a background WKWebView did the same, run138): End is done to the
+        // page over accessibility instead — its last element brought into view.
+        XCTAssertTrue(r.detail?.contains("the page had no keyboard focus, so end was done over accessibility") ?? false, r.detail ?? "")
+        XCTAssertTrue(ax.performed.contains("\(token(button)):AXScrollToVisible"), "\(ax.performed)")
+        XCTAssertTrue(poster.keyDowns.isEmpty, "no key into whatever has the focus")
     }
 
     /// Review of round 13, MEDIUM #5: a paste the field took but shows otherwise (a formatting input, a rich target, a

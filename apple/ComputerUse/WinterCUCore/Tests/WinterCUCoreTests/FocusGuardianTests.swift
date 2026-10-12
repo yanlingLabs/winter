@@ -209,10 +209,10 @@ final class FocusGuardianTests: XCTestCase {
         // agent's launch is pending, is clearly the agent's — round 11.)
         g.noteHardwareAction(now: 10.45)
         g.appLaunched(800, startedAt: 10.5, bundle: "com.example.new", now: 10.55)  // NSWorkspace: launched — nothing named yet
-        // (Review of round 14, HIGH #1: started while a launch of the agent's was pending with no bundle named yet — never
-        // adopted as theirs; left in front and said.)
-        let first = g.judge(CUMoveQuery(app: 800, space: 100, appStartedAt: 10.5, appBundle: "com.example.new"), now: 11)
-        if case .unexplained = first {} else { XCTFail("left in front and said, never adopted: \(first)") }
+        // (The ruling, round 16: input of the user's between the agent's launch beginning and this process start — their
+        // click at 10.45 — makes it theirs.)
+        XCTAssertTrue(g.judge(CUMoveQuery(app: 800, space: 100, appStartedAt: 10.5, appBundle: "com.example.new"), now: 11).isUsers,
+                      "their input after the agent's act: theirs")
         g.setLaunchBundle(launch, "com.example.new")
         g.appLaunched(801, startedAt: 10.6, bundle: "com.example.new", now: 10.65)  // the agent's own: not recorded as theirs
         XCTAssertFalse(g.judge(CUMoveQuery(app: 801, space: 100, appStartedAt: 10.6, appBundle: "com.example.new"), now: 11.1).isUsers)
