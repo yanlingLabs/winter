@@ -62,8 +62,9 @@ ext4/4096/256-byte inodes/UUID and exactly those features, `lazy_itable_init=1`,
 pinned descriptor. Lazy inode initialization is authorized only for canonical new
 sparse zero-guaranteed creation. The durable v2 zero-provenance contract requires
 `noinit_itable` at every eventual mount: trusted mounting must refuse omission.
-There is no mount here, so the receipt declares a required contract, not observed
-mount enforcement. Imported/migrated/legacy images cannot acquire this contract.
+The normal format/probe path does not mount, so its receipt declares a required
+contract, not observed mount enforcement. The separately admitted protocol-3
+kernel recovery adapter below supplies its own mount/release evidence. Imported/migrated/legacy images cannot acquire this contract.
 Legacy v1 minimal-feature history remains readable with an explicit compatibility
 error, never reinterpretation or automatic feature upgrade/reformat.
 The formatter's single `-F` is confined to proven new
@@ -78,8 +79,7 @@ probe can report pending journal replay without forcing e2fsck; Core refuses
 ready confirmation with `journal_recovery_required` while that flag is present.
 Full read-only checking also reports it and cannot silently clear recovery debt.
 A separately approved immutable recovery/mount path must replay the journal, then
-a fresh clean observation can confirm readiness. No mount or journal replay is
-performed here. Earlier v2 receipts without the explicit field preserve format
+a fresh clean observation can confirm readiness. The normal probe performs no mount or journal replay. Earlier v2 receipts without the explicit field preserve format
 history only; current confirmation/readiness requires a fresh explicit state
 observation. Unknown features and error state remain refusals. The Linux-only
 debugfs case sets the real recovery bit on a disposable regular file and checks
@@ -105,3 +105,92 @@ remain disabled.
 
 Sources: [mke2fs options](https://man7.org/linux/man-pages/man8/mke2fs.8.html),
 [ext4 superblock layout](https://docs.kernel.org/filesystems/ext4/super.html).
+
+## Protocol 3 journal-only follow-up
+
+Current plans require protocol 3, per-target readyOperationId and optional priorReplay
+owner/operation debt. Normal known-ready targets may carry replay-journal-then-probe,
+with host-issued writable permission and actual old-writer stop proof on uncertain
+retry. Both targets preflight read-only before any write. Clean targets never invoke
+fsck; clean+needs_recovery requires a separately admitted immutable kernel replay
+adapter. It mounts the exact owned block FD in a private namespace with fixed
+nosuid/nodev/noexec/noatime and errors=remount-ro,noinit_itable options, syncfs,
+normal unmount, then a fresh clean probe. Receipts bind journalReplay:"kernel-mount"
+or "none" and consistent journalReplayed. No e2fsck preen, interactive override,
+full repair or reformat is used.
+
+The previous -Ejournal_only +DEVNULL test failed in
+[CI38256511895/job114835873624](https://github.com/yanlinglabs/winter/actions/runs/38256511895/job/114835873624).
+That evidence/source remains historical; no -p/-y workaround is accepted.
+
+The fixture-only regular-file adapter configures an unused loop atomically from
+its pinned image FD. CLR_FD/autoclear is insufficient: the helper normal-unmounts,
+closes its opener, and observes ENXIO; the Python owner repeats the kernel status
+check after actual helper reap. Timeout or uncertainty retains helper, descriptors
+and files without kill-based proof or retry. The standalone block helper also
+retains a mounted namespace on syncfs/unmount failure.
+
+Build and review exact source/artifacts BEFORE privileged execution:
+
+```sh
+python3 -I -S spikes/cowork-filesystem-bootstrap/build_kernel_replay.py --out out/kernel-replay-reviewed
+```
+
+Independently admit the source commit, complete receipt SHA and no-effect parent
+SHA before privilege. The receipt includes test_bootstrap.py because the runner
+dynamically executes it, plus the stager itself. The supported Root boundary is
+this **literal stdlib-only hash gate**, rather than executing a mutable checkout
+Python file under sudo and checking it later. Fill the two REVIEWED values only
+from independent review; calculating a fresh digest is not approval.
+
+```sh
+sudo /usr/bin/python3 -I -S -B -c '
+import hashlib,os,stat,sys
+source,digest,*arguments=sys.argv[1:]
+fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+try:
+    identity=os.fstat(fd)
+    if not stat.S_ISREG(identity.st_mode) or identity.st_nlink!=1 or identity.st_size>4194304:raise SystemExit("parent identity refused")
+    data=os.pread(fd,4194305,0)
+finally:os.close(fd)
+if len(data)!=identity.st_size or hashlib.sha256(data).hexdigest()!=digest:raise SystemExit("unreviewed parent refused")
+sys.argv=[source,*arguments]
+exec(compile(data,"<reviewed-no-effect-parent>","exec"),{"__name__":"__main__","__file__":source})
+' spikes/cowork-filesystem-bootstrap/stage_kernel_replay.py "$REVIEWED_PARENT_SHA256" --source spikes/cowork-filesystem-bootstrap --artifacts out/kernel-replay-reviewed --receipt out/kernel-replay-reviewed/build.json --approved-receipt-sha256 "$REVIEWED_RECEIPT_SHA256"
+```
+
+The hash-admitted parent imports only isolated system stdlib. It reads and checks
+all source/artifact bytes before repository execution, stages exact Root-owned
+readonly copies beneath fixed `/tmp` (never inherited TMPDIR), verifies root-owned
+non-symlink `/` and `/tmp` ancestry with no unprotected writable parent, verifies
+the entire staged closure, then starts its isolated
+-I-S-B runner with a clean environment. No original checkout source executes in
+the privileged fixture. Direct privileged runner invocation is unsupported and
+refuses before repository imports. Source staging performs no mount/loop effect;
+it is distinct from still-required execution-scope admission. Staged source trees
+stay for audit and do not auto-delete uncertain filesystem fixture state.
+
+
+The Root Linux runner must already provide ext4, loop-control/unused loop devices,
+mount namespaces, standard Python, cc/static libc and debugfs. No installation,
+modprobe, Docker or host/guest share is introduced. Normal nonprivileged CI keeps
+running test_bootstrap.py; the kernel fixture is separately refused/skipped until
+explicit review. The stronger fixture constructs a committed nonempty JBD2
+transaction via debugfs, requires original data unchanged before replay, and then
+requires actual journal payload in the target block plus a clean exact probe.
+This is constructed-journal coverage, not a real power-loss/crash proof. A corrupt
+journal case requires failure and retains its files. Neither has run locally.
+and Linux CI. Previous v2 evidence remains historical, not a protocol-3 execution pass.
+The fixture remains regular-file-only and cannot authenticate production native grants.
+
+## Retained-helper diagnostics
+
+The second reviewed kernel run [38268479494/job114876585334](https://github.com/yanlinglabs/winter/actions/runs/38268479494/job/114876585334) retained both helpers after the unchanged20-second parent wait. It did not establish which retain branch ran. Original failed evidence remains preserved; no cleanup or kernel success is inferred.
+
+Helpers now emit bounded fixed scalar `replayStage`/`errno` records before potential kernel I/O and at retained failures. Stages1–12 identify device/header admission, namespace/private mount, mountpoint, mount, mounted-open, syncfs, normal unmount, device flush, removal and completion. Fixture stages32–43 identify source admission, loop control/lookup/open/configure/association, detach request/close/observation, backing flush and completion. Association mismatch adds only numeric expected/observed device/inode/offset/capacity/flags. No paths, volume content or credentials are diagnostic output.
+
+A20-second timeout still retains the actual helper and descriptors. Python attaches and prints at most4096actualbytes per output channel using pread, so it neither races the live helper's shared file position nor erases its diagnostic evidence. Truncation is explicit; diagnostics cannot certify exit/cleanup or turn a lifetime timeout into the corruption test's required failed-kernel outcome.
+
+After one CLR_FD request and closing the owner opener, the helper uses a3-second/64-attempt observation budget. It checks that budget before an attempt, before status I/O and after the result; ENXIO obtained after the budget expires is refused. Kernel open/stat/ioctl/close calls cannot be interrupted by this budget, so it is not a guaranteed3-second wall-time return. The outer20-second process timeout retains the live/uncertain helper and files. A known identical backing association or transient open-ENXIO is pending, not proof. Only actual LOOP_GET_STATUS64 ENXIO on the exact block device permits success. A foreign backing/device, unknown error or exhausted observation bound retains ownership. No mount/replay/clear request repeats, and elapsed time never acknowledges cleanup. The parent still requires actual helper reap and its independent post-reap kernel status.
+
+This is a source correction and improved diagnosis, not a confirmed explanation or passing rerun of the failed job. Workflow artifact/source pins remain unchanged and therefore refuse this new closure before effects until independent review explicitly admits replacement artifacts.
