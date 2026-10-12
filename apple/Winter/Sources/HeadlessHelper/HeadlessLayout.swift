@@ -37,18 +37,20 @@ struct HeadlessLayout: Equatable {
 struct HeadlessArguments: Equatable {
     /// A directory of this run's own for CEF's root cache (the daemon makes it, 0700, and removes it).
     let cacheRoot: String
-    /// Chromium switches the daemon passed through (diagnostics only: `--enable-logging=stderr`, `--v=1`).
+    /// Chromium switches the daemon passed through (diagnostics only: `--enable-logging=stderr`, `--v=1`, `--vmodule=…`,
+    /// and a NetLog capture, `--log-net-log=<file>` with `--net-log-capture-mode=…`).
     let passthrough: [String]
 
     /// Always on, whatever the daemon passes:
     ///  * `--use-mock-keychain` — never the user's Keychain: an in-memory stand-in, so no "Safe Storage" item is
     ///    read or created and no Keychain prompt can appear;
     ///  * `--mute-audio` — nobody hears a headless tab;
-    ///  * `--disable-features=MediaRouter,DialMediaRouteProvider,WebRtcHideLocalIpsWithMdns` — no cast discovery, so
-    ///    no "accept incoming network connections?" dialog; and no mDNS responder for WebRTC: measured, a page's
+    ///  * `--disable-features=MediaRouter,DialMediaRouteProvider,…` — no cast discovery, so no "accept incoming network
+    ///    connections?" dialog; `WebRtcHideLocalIpsWithMdns` — no mDNS responder for WebRTC: measured, a page's
     ///    `RTCPeerConnection` made the network service bind the mDNS port (5353, multicast on the LAN) even with WebRTC
     ///    held to proxied TCP (`webrtc.ip_handling_policy`, set per session context), which gathers no host address
-    ///    to hide;
+    ///    to hide; and the rest, `backgroundRequestSwitches` below;
+    ///  * `backgroundRequestSwitches` — **no request a page did not cause** (each one's measurement is on it);
     ///  * `--enable-features=WebMCP` — a site's own agent tools (`document.modelContext`);
     ///  * `--host-resolver-rules=…` — every local-network NAME resolves to "not found"
     ///    (`HeadlessNetworkRule.hostResolverRulesSwitch`), whatever asks: a WebSocket too;
@@ -57,10 +59,48 @@ struct HeadlessArguments: Equatable {
     static let fixedSwitches = [
         "--use-mock-keychain",
         "--mute-audio",
-        "--disable-features=MediaRouter,DialMediaRouteProvider,WebRtcHideLocalIpsWithMdns",
+        "--disable-features=" + disabledFeatures.joined(separator: ","),
         "--enable-features=WebMCP",
         HeadlessNetworkRule.hostResolverRulesSwitch,
         HeadlessNetworkRule.proxyPacSwitch,
+    ] + backgroundRequestSwitches
+
+    /// The features off (WinterCEF adds its own to the same list).
+    static let disabledFeatures = [
+        "MediaRouter", "DialMediaRouteProvider", // cast discovery
+        "WebRtcHideLocalIpsWithMdns", // WebRTC's mDNS responder (the mDNS port)
+        "NetworkTimeServiceQuerying", // the network-time query at start (clients2.google.com/time)
+        "AutofillServerCommunication", // each page's form signatures sent to Google's autofill server
+        "AimEnabled", // the AI Mode eligibility request at start (www.google.com/async/folae), every trigger of it
+        "OptimizationHints", "Translate", // not seen in a run; off as a belt (hint fetches on navigation, translate)
+    ]
+
+    /// **No request a page did not cause.** Measured with a NetLog of a 60 s idle run and of a browsing run: each switch
+    /// here stopped the request it names, and with all of them nothing left the Mac that no page asked for (what is
+    /// left is the host resolver's IPv6 route check — a UDP connect that sends no packet). `disabledFeatures` holds
+    /// the feature half.
+    ///    * `--disable-component-update` — the component updater: an update check 60 s after start, then about ten
+    ///      downloads (update.googleapis.com, edgedl.me.gvt1.com) in EVERY run, the cache root being fresh. No security
+    ///      property is lost with it, measured: no Certificate Transparency check happens in this build (no
+    ///      `CERT_CT_COMPLIANCE_CHECKED` in the NetLog of TLS connections), and no CRLSet ever arrived (its folder
+    ///      stayed empty through a 150 s run);
+    ///    * `--no-first-run` — every run is a first run (a fresh cache root): without it, the RLZ ping 90 s after start
+    ///      (clients1.google.com/tools/pso/ping);
+    ///    * `--gaia-url=https://127.0.0.1:4/` — the sign-in cookie check at start (`ListAccounts`) has no switch of its
+    ///      own (sign-in is already disallowed in CEF; `--allow-browser-signin=false`, `--disable-sync` and the
+    ///      cookie-jar features were tried and did not stop it): Google's sign-in origin is moved to the PAC belt's dead
+    ///      port on this Mac, so its attempts fail at once and none leaves the Mac;
+    ///    * `--disable-background-networking` — Safe Browsing's list update about 85 s after start
+    ///      (safebrowsing.googleapis.com, answered 400: this build has no API key, so no list ever loads — nothing a
+    ///      page relies on is lost), and the other periodic fetches it governs;
+    ///    * `--disable-domain-reliability` — not seen in a run, off as a belt: error beacons about Google's own domains.
+    /// Each was checked by leaving it out of an otherwise full set: its request came back.
+    static let backgroundRequestSwitches = [
+        "--disable-component-update",
+        "--no-first-run",
+        "--gaia-url=https://127.0.0.1:4/",
+        "--disable-background-networking",
+        "--disable-domain-reliability",
     ]
 
     static func parse(_ arguments: [String]) -> HeadlessArguments? {
@@ -71,7 +111,8 @@ struct HeadlessArguments: Equatable {
                 cacheRoot = String(argument.dropFirst("--winter-cache-root=".count))
             } else if argument.hasPrefix("--winter-") {
                 continue
-            } else if argument.hasPrefix("--enable-logging") || argument.hasPrefix("--v=") || argument.hasPrefix("--vmodule=") {
+            } else if argument.hasPrefix("--enable-logging") || argument.hasPrefix("--v=") || argument.hasPrefix("--vmodule=")
+                        || argument.hasPrefix("--log-net-log=") || argument.hasPrefix("--net-log-capture-mode=") {
                 passthrough.append(argument)
             }
         }

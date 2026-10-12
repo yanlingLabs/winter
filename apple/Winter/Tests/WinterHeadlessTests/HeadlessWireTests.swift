@@ -188,9 +188,9 @@ final class HeadlessLayoutTests: XCTestCase {
         XCTAssertNil(HeadlessArguments.parse(["h", "--winter-cache-root=relative"]))
         let parsed = HeadlessArguments.parse(["h", "--winter-cache-root=/tmp/x", "--enable-logging=stderr", "--remote-debugging-port=9222",
                                               "--no-sandbox", "--v=1", "--no-proxy-server", "--proxy-server=direct://",
-                                              "--host-resolver-rules=MAP * 10.0.0.1"])
+                                              "--host-resolver-rules=MAP * 10.0.0.1", "--log-net-log=/tmp/x/net.json"])
         XCTAssertEqual(parsed?.cacheRoot, "/tmp/x")
-        XCTAssertEqual(parsed?.passthrough, ["--enable-logging=stderr", "--v=1"])
+        XCTAssertEqual(parsed?.passthrough, ["--enable-logging=stderr", "--v=1", "--log-net-log=/tmp/x/net.json"])
         let argv = parsed?.chromiumArguments(program: "h") ?? []
         XCTAssertFalse(argv.contains { $0.hasPrefix("--remote-debugging") }, "never a debugging port")
         XCTAssertFalse(argv.contains("--no-sandbox"))
@@ -199,7 +199,16 @@ final class HeadlessLayoutTests: XCTestCase {
         XCTAssertTrue(argv.contains("--mute-audio"))
         XCTAssertTrue(argv.contains(HeadlessNetworkRule.hostResolverRulesSwitch))
         XCTAssertTrue(argv.contains(HeadlessNetworkRule.proxyPacSwitch))
-        XCTAssertTrue(argv.contains("--disable-features=MediaRouter,DialMediaRouteProvider,WebRtcHideLocalIpsWithMdns"), "no cast discovery, no WebRTC mDNS")
+        let disabled = Set((argv.first { $0.hasPrefix("--disable-features=") } ?? "").dropFirst("--disable-features=".count).split(separator: ",").map(String.init))
+        for feature in ["MediaRouter", "DialMediaRouteProvider", "WebRtcHideLocalIpsWithMdns", "NetworkTimeServiceQuerying",
+                        "AutofillServerCommunication", "AimEnabled"] {
+            XCTAssertTrue(disabled.contains(feature), feature)
+        }
+        XCTAssertEqual(argv.filter { $0.hasPrefix("--disable-features=") }.count, 1, "one list (a second would replace the first)")
+        for sw in ["--disable-component-update", "--no-first-run", "--gaia-url=https://127.0.0.1:4/", "--disable-background-networking",
+                   "--disable-domain-reliability"] {
+            XCTAssertTrue(argv.contains(sw), sw)
+        }
         XCTAssertFalse(argv.contains { $0.hasPrefix("--no-proxy") || $0.hasPrefix("--proxy-server") }, "the PAC belt can't be replaced")
         XCTAssertEqual(argv.filter { $0.hasPrefix("--host-resolver-rules=") }, [HeadlessNetworkRule.hostResolverRulesSwitch])
     }

@@ -12,14 +12,17 @@
 // candidate, and given a private remote candidate (and a TURN server on a private address) sends nothing. The private
 // address is one on NO subnet of this Mac's (`offSubnetPrivateAddress`): even if a belt failed, a packet to it would
 // leave by the default route, never onto the local network; and the WebRTC page runs only once the helper said the
-// policy took (`webrtc: disabled`), so a failure cannot announce an mDNS name.
+// policy took (`webrtc: disabled`), so a failure cannot announce an mDNS name. Last, the browser's own NetLog of the
+// whole run (`--log-net-log`, which the helper passes through): no URL, no name looked up and no address connected to
+// that is not the run's own — the fixture, example.com, the refused hosts (which reach only the dead proxy) or this Mac.
 //
 //   bun scripts/browser-e2e/headless/smoke.ts --app "<path to Winter Headless Dev.app>" [--out <dir>] [--keep]
+//       [--idle <seconds>]   sit that long with the first page open, before the rest (the NetLog check covers it)
 //
 // Writes its screenshot into --out (default: a temp dir). Nothing is written outside temp dirs.
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
@@ -49,6 +52,41 @@ function offSubnetPrivateAddress(nets = Object.values(networkInterfaces()).flat(
   return undefined;
 }
 const lanAddress = offSubnetPrivateAddress();
+
+/** What a NetLog says the browser did on the network: the URLs it requested, the names it resolved, the remote
+ *  addresses it connected to (TCP) or sent a datagram to (UDP), and each name's resolved addresses. */
+function netlogTraffic(file: string): { events: number; urls: string[]; resolved: string[]; connected: string[]; addressesOf(host: string): string[] } {
+  let text = "";
+  try { text = readFileSync(file, "utf8").trim(); } catch { return { events: 0, urls: [], resolved: [], connected: [], addressesOf: () => [] }; }
+  if (!text.endsWith("}")) text = `${text.replace(/,\s*$/, "")}]}`; // a capture cut short
+  const log = JSON.parse(text) as { constants: { logEventTypes: Record<string, number> }; events: Array<{ type: number; source: { id: number }; params?: Record<string, unknown> }> };
+  const type = (name: string): number => log.constants.logEventTypes[name] ?? -1;
+  const nameOf = (raw: unknown): string => String(raw).replace(/^[a-z]+:\/\//, "").replace(/:\d+$/, "").replace(/^\[(.*)\]$/, "$1").toLowerCase();
+  const addressOf = (raw: unknown): string => String(raw).replace(/:\d+$/, "").replace(/^\[(.*)\]$/, "$1");
+  const urls = new Set<string>(); const resolved = new Set<string>(); const connected = new Set<string>();
+  const jobHost = new Map<number, string>(); const results = new Map<string, Set<string>>();
+  const udpSent = new Set<number>(); const udpTarget = new Map<number, string>();
+  for (const e of log.events) {
+    const p = e.params ?? {};
+    if (e.type === type("URL_REQUEST_START_JOB") && typeof p.url === "string") urls.add(p.url);
+    if ((e.type === type("HOST_RESOLVER_MANAGER_JOB") || e.type === type("HOST_RESOLVER_MANAGER_REQUEST")) && p.host !== undefined) {
+      resolved.add(nameOf(p.host));
+      jobHost.set(e.source.id, nameOf(p.host));
+    }
+    if (Array.isArray(p.address_list) && jobHost.has(e.source.id)) {
+      const host = jobHost.get(e.source.id)!;
+      for (const a of p.address_list) (results.get(host) ?? results.set(host, new Set()).get(host)!).add(addressOf(a));
+    }
+    if ((e.type === type("TCP_CONNECT_ATTEMPT") || e.type === type("TCP_CONNECT")) && (p.address ?? p.remote_address) !== undefined) connected.add(addressOf(p.address ?? p.remote_address));
+    if (e.type === type("UDP_CONNECT") && p.address !== undefined) udpTarget.set(e.source.id, addressOf(p.address));
+    if (e.type === type("UDP_BYTES_SENT")) udpSent.add(e.source.id);
+  }
+  for (const id of udpSent) { const a = udpTarget.get(id); if (a !== undefined) connected.add(a); }
+  return { events: log.events.length, urls: [...urls], resolved: [...resolved], connected: [...connected], addressesOf: (host) => [...(results.get(host) ?? [])] };
+}
+const hostOf = (url: string): string => { try { return new URL(url).hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase(); } catch { return url; } };
+const isLoopback = (host: string): boolean => host === "localhost" || host === "::1" || /^127\./.test(host);
+const testedRefusedHosts: string[] = [];
 
 // A page's own RTCPeerConnection (what a fingerprinting script makes): it gathers candidates, then is given a remote
 // one on `lan` (and, with `turn`, a TURN server there) and reports what it gathered and sent.
@@ -91,7 +129,11 @@ const frame = Bun.serve({
   fetch: () => new Response("<!doctype html><title>frame</title><p id=f>inside the frame</p>", { headers: { "content-type": "text/html" } }),
 });
 // Refused hosts nobody can answer (a random label under the private-use `.internal`).
-const nowhere = (what: string): string => `http://${what}-${Math.random().toString(36).slice(2, 10)}.internal/`;
+const nowhere = (what: string): string => {
+  const host = `${what}-${Math.random().toString(36).slice(2, 10)}.internal`;
+  testedRefusedHosts.push(host);
+  return `http://${host}/`;
+};
 const requested: string[] = [];
 // A loopback listener that only counts connections: does a page's <link rel=preconnect> open a socket?
 let preconnects = 0;
@@ -163,6 +205,10 @@ async function frontmost(): Promise<string> {
 const before = await frontmost();
 const started = Date.now();
 const helperArgs = process.argv.flatMap((a, i) => (process.argv[i - 1] === "--helper-arg" ? [a] : []));
+// A NetLog of the whole run (the helper passes `--log-net-log` through): what did the browser itself ask for?
+const netlog = helperArgs.find((a) => a.startsWith("--log-net-log="))?.slice("--log-net-log=".length) ?? join(mkdtempSync(join(tmpdir(), "winter-headless-netlog-")), "net.json");
+if (!helperArgs.some((a) => a.startsWith("--log-net-log="))) helperArgs.push(`--log-net-log=${netlog}`);
+const idleSeconds = Number(arg("--idle") ?? "0");
 const proc = spawn(exe, [`--winter-cache-root=${cacheRoot}`, ...helperArgs], { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"], env: { ...process.env } });
 const toHelper = proc.stdio[3] as Writable;
 const fromHelper = proc.stdio[4] as Readable;
@@ -238,6 +284,10 @@ try {
     await Bun.sleep(100);
   }
   check("the page loaded", frameId !== "");
+  if (idleSeconds > 0) {
+    console.log(`INFO idle for ${idleSeconds} s with the page open (the NetLog check below covers it)`);
+    await Bun.sleep(idleSeconds * 1000);
+  }
 
   const world = await cdp("Page.createIsolatedWorld", { frameId, worldName: "winter" }) as { executionContextId?: number };
   check("a winter world", typeof world.executionContextId === "number");
@@ -391,11 +441,13 @@ try {
     return /net::ERR_[A-Z_]+/.exec(line() ?? "")?.[0] ?? "no net error logged";
   };
   const DEAD_PROXY = "net::ERR_PROXY_CONNECTION_FAILED";
+  // Hosts this run asks for that the belts send nowhere (the NetLog check below allows a request naming them).
   const nameHost = nowhere("socket").replace(/^http:\/\//, "").replace(/\/$/, "");
   const refusedSocket = await socketTo(`ws://${nameHost}:${sockets.port}/`);
   const nameError = await netErrorFor(nameHost);
   check("a WebSocket to a local-network name fails, never resolved (the PAC belt first, the resolver belt behind it)", refusedSocket.startsWith("error") && nameError === DEAD_PROXY, `${refusedSocket}, ${nameError}`);
   const label = `winterpac${Math.random().toString(36).slice(2, 10)}`;
+  testedRefusedHosts.push(label);
   const labelSocket = await socketTo(`ws://${label}:${sockets.port}/`);
   const labelError = await netErrorFor(label);
   const pacInEffect = labelSocket.startsWith("error") && labelError === DEAD_PROXY;
@@ -405,6 +457,7 @@ try {
   } else if (!pacInEffect) {
     check("a WebSocket to a private IP literal goes to the dead proxy", false, "not tried: the PAC belt is not in effect");
   } else {
+    testedRefusedHosts.push(lanAddress);
     const literalSocket = await socketTo(`ws://${lanAddress}:${sockets.port}/`);
     const literalError = await netErrorFor(lanAddress);
     check("a WebSocket to a private IP literal goes to the dead proxy", literalSocket.startsWith("error") && literalError === DEAD_PROXY, `${lanAddress} (on no subnet of this Mac's): ${literalSocket}, ${literalError}`);
@@ -501,6 +554,17 @@ try {
   await exited;
   clearTimeout(timeout);
   check("the helper exits when its pipe closes", exitCode === 0, `exit ${exitCode}`);
+  // No request a page did not cause: every URL the browser requested, every name it resolved and every address it
+  // connected to (or sent a UDP datagram to) is this run's own — the fixture on this Mac, the public check's
+  // example.com, the refused hosts (which only reach the dead proxy on this Mac) — or this Mac itself.
+  const net = netlogTraffic(netlog);
+  const pageHosts = new Set(["127.0.0.1", "localhost", "example.com", ...testedRefusedHosts]);
+  const strayUrls = net.urls.filter((u) => !pageHosts.has(hostOf(u)));
+  const strayNames = net.resolved.filter((h) => !pageHosts.has(h) && !isLoopback(h));
+  const allowedAddresses = new Set(net.addressesOf("example.com"));
+  const strayAddresses = net.connected.filter((a) => !isLoopback(a) && !allowedAddresses.has(a));
+  check("the browser made no request a page did not cause (its NetLog)", net.events > 0 && strayUrls.length + strayNames.length + strayAddresses.length === 0,
+    net.events === 0 ? `no NetLog at ${netlog}` : [...strayUrls.map((u) => u.replace(/\?.*/, "")), ...strayNames, ...strayAddresses].slice(0, 8).join(" | ") || `${net.urls.length} URL(s), ${net.resolved.length} name(s), ${net.connected.length} address(es), all the run's own`);
   page.stop(true);
   frame.stop(true);
   counter.close();
