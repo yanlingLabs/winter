@@ -30,9 +30,22 @@ def capture(source,artifacts,receipt_path,approved_digest):
     entries.update({name:checked_bytes(artifacts,name,receipt['artifacts'][name]) for name in ARTIFACTS});entries['build.json']=wire
     return entries
 
-def stage(entries,parent=None):
+def trusted_staging_ancestry(directory=None):
+    # Linux /tmp is fixed, never TMPDIR or a caller-owned ancestor. Sticky /tmp
+    # prevents another uid renaming our Root-owned child; / itself cannot be writable.
+    for name in ('/','/tmp'):
+        info=os.lstat(name)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid!=0:raise ValueError('untrusted staging ancestry')
+        writable=stat.S_IMODE(info.st_mode)&0o022
+        if writable and (name=='/' or not info.st_mode&stat.S_ISVTX):raise ValueError('untrusted staging ancestry')
+    if directory is not None:
+        directory=Path(directory)
+        if directory.parent!=Path('/tmp') or not directory.name.startswith('winter-replay-reviewed-'):raise ValueError('untrusted staging ancestry')
+
+def stage(entries):
     if os.geteuid()!=0:raise ValueError('Root-owned staging required')
-    directory=Path(tempfile.mkdtemp(prefix='winter-replay-reviewed-',dir=parent));directory.chmod(0o700)
+    trusted_staging_ancestry()
+    directory=Path(tempfile.mkdtemp(prefix='winter-replay-reviewed-',dir='/tmp'));directory.chmod(0o700)
     # No input code runs during capture or staging, including failure. A partial
     # staged tree stays for audit; the parent never enters a fixture after refusal.
     for name in (*SOURCES,*ARTIFACTS,'build.json'):
@@ -47,6 +60,7 @@ def stage(entries,parent=None):
     directory.chmod(0o500);verify_staged(directory,hashlib.sha256(entries['build.json']).hexdigest());return directory
 
 def verify_staged(directory,approved_digest):
+    trusted_staging_ancestry(directory)
     directory=Path(directory);root=os.lstat(directory)
     if not stat.S_ISDIR(root.st_mode) or root.st_uid!=0 or stat.S_IMODE(root.st_mode)!=0o500:raise ValueError('immutable staged root required')
     if set(os.listdir(directory))!=set((*SOURCES,*ARTIFACTS,'build.json')):raise ValueError('staged closure inventory')

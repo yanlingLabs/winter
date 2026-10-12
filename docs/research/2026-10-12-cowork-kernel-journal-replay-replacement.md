@@ -27,3 +27,29 @@ A no-launch builder produces both immutable native helpers and a closed source/a
 The production signed bootstrap/native device producer remains a separate gate. This fixture port cannot grant host/native authority or enable Cowork by configuration, a guest receipt or its artifact receipt alone.
 
 The earlier771c source review identified missing dynamic-source coverage and import-before-validation, plus partial formatting for a mixed pair with no replay port. This follow-up closes those source/effect admission gaps. Old receipts remain preserved; their incomplete closure is rejected. New x86-64/ARM64 cross-build receipts are separate. No privileged execution is implied by these checks.
+
+
+## Fixed staging ancestry correction
+
+Independent re-review found that immutable staged leaves under an untrusted
+TMPDIR could be renamed and substituted through their parent. The parent now
+uses only direct children of fixed `/tmp`, checks both `/` and `/tmp` are real
+root-owned directories, refuses writable `/`, and requires sticky protection for
+any writable `/tmp`. The same ancestry check precedes every staged verification
+and runner launch; arbitrary staging parents are refused. No inherited TMPDIR is
+consulted. Root-owned stage directories and files retain their existing modes and
+whole-closure hash verification.
+
+Ten no-effect staging tests pass, including ignored hostile TMPDIR, unsafe owner,
+nonsticky writable parent, symlink parent, and an actual rename/substitution inside
+a disposable user-owned parent that never reaches runner execution. This is not
+privileged staging evidence.
+
+Both unchanged C helpers were cross-compiled again with warnings as errors; new
+receipts under `out/kernel-replay-fixed-parent-review` validate the new Python
+closure. x64 receipt SHA256:
+`71041d761f1bf8f82c2c273445068743169720288a87604b0e231cf5dd073a91`;
+ARM64: `a3e3b4b0811e098113a7e0bfb042c5097f9f5ee43dc297fe9aff32aa71341a4f`.
+The revised independently admitted parent hash is
+`04966aa34daedaf6184d27141568bbc01b6a22c3bc85b0a453d6dd7bea0887aa`.
+Earlier artifacts and receipts remain retained. No privileged execution occurred.

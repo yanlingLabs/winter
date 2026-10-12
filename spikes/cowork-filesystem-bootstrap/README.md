@@ -161,7 +161,9 @@ exec(compile(data,"<reviewed-no-effect-parent>","exec"),{"__name__":"__main__","
 
 The hash-admitted parent imports only isolated system stdlib. It reads and checks
 all source/artifact bytes before repository execution, stages exact Root-owned
-readonly copies, verifies the entire staged closure, then starts its isolated
+readonly copies beneath fixed `/tmp` (never inherited TMPDIR), verifies root-owned
+non-symlink `/` and `/tmp` ancestry with no unprotected writable parent, verifies
+the entire staged closure, then starts its isolated
 -I-S-B runner with a clean environment. No original checkout source executes in
 the privileged fixture. Direct privileged runner invocation is unsupported and
 refuses before repository imports. Source staging performs no mount/loop effect;
