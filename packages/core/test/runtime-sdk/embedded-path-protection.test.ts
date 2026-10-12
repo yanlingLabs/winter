@@ -34,7 +34,9 @@ test("partial capability never enables protected context execution", () => {
   expect(embeddedFileProtectionSupported(partial)).toBe(true);
   expect(embeddedContextProtectionSupported(partial)).toBe(false);
   expect(embeddedContextProtectionSupported(undefined)).toBe(false);
-  expect(embeddedContextProtectionSupported(complete)).toBe(false); // metadata alone is not review acceptance
+  expect(embeddedContextProtectionSupported(complete)).toBe(true); // reviewed v1 contract
+  expect(embeddedContextProtectionSupported(complete, 0)).toBe(false); // unaccepted contracts remain refused
+  expect(embeddedContextProtectionSupported({ ...complete, coverage: { ...complete.coverage, sourceReaderFamilies: ["rules"] } })).toBe(false);
   expect(embeddedContextProtectionSupported(complete, 1)).toBe(true);
   activate(); const host = createEmbeddedSessionHost({ home, hostPathProtectionCapability: partial });
   expect(host.supportsProtectedPaths?.()).toBe(false);

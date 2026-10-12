@@ -691,8 +691,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
   const advisorProviders = new Map<string, string>();
   const log = deps.log ?? ((): void => {});
   const unregisterStoragePolicyConsumer = registerHostStoragePolicyConsumer(async () => {
-    // The linked SDK has no live sandbox-settings control. Rebuild the run home/Options at the
-    // next incarnation, preserving backend/session identity and held user messages in the log.
+    // Native Code rebuilds run home/Options at the next incarnation while retaining queued work.
+    // Covered embedded Workers use their separately acknowledged live policy control.
     await Promise.all([...drivers.values()].map(async session => {
       const mode = deps.store.meta(session.sessionId).mode ?? "code";
       // Host Code/Chat/Dispatch only. Future Cowork drivers need their own workspace/guest

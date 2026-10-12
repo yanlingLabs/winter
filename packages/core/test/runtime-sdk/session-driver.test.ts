@@ -230,6 +230,24 @@ describe("createWinterSessionDrivers — the table", () => {
     } finally { unregister?.(); t.close(); }
   });
 
+  for (const mode of ["chat", "dispatch"] as const) test(`reviewed live protection retains an ongoing ${mode} incarnation during activation`, async () => {
+    const t = table({}, { protectedEmbeddedPathsAvailable: () => true }), coordination = mkdtempSync(join(tmpdir(), "winter-reviewed-live-coordination-")); let unregister: (() => void) | undefined;
+    try {
+      const cwd = join(t.home, "fixture-source"); mkdirSync(cwd);
+      const session = await t.drivers.create(t.store.createSession("t", { mode, model: "winter-test/echo", cwd }));
+      await session.send("running", "fixture"); await Bun.sleep(0);
+      const existing = t.q(), backend = session.backendSessionId;
+      mkdirSync(join(t.home, "cowork"));
+      unregister = await new HostCodeExecutionService(t.home, null).refreshForStorage(t.home, { coordinationDir: coordination, coworkStorageActive: true });
+      expect(session.handoffPending).toBe(false); expect(t.queries).toHaveLength(1);
+      expect(session.backendSessionId).toBe(backend); expect(t.runHomes.built).toHaveLength(1);
+      existing.emit(result()); await session.idle();
+      await session.send("after activation", "fixture"); await Bun.sleep(0);
+      expect(t.q()).toBe(existing); expect(existing.pushed).toEqual(["running", "after activation"]);
+      existing.emit(result()); await session.idle(); await t.drivers.endAll();
+    } finally { unregister?.(); t.close(); rmSync(coordination, { recursive: true, force: true }); }
+  });
+
   test("create: the record (leg winter, backend uuid), one child, tracked; the driver is in the table", async () => {
     const t = table();
     try {
