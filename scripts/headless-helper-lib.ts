@@ -4,12 +4,12 @@
 //
 // Winter Headless is a background-only app the daemon SPAWNS (never through LaunchServices) and checks against its
 // stated requirement before sending it anything (`processSatisfiesRequirement`). It holds no grants and needs no
-// entitlements: hardened runtime, no entitlements at all. Two layouts:
-//   - dist (Release): nested at Winter.app/Contents/Helpers/Winter Headless.app, it BORROWS Winter.app's Chromium —
-//     it must carry no Contents/Frameworks of its own;
-//   - dev (`bun run dev:headless`): self-contained in dist/dev/, its own copy of the CEF framework and the five
-//     "Winter Helper" bundles in its Contents/Frameworks (signed by the build with the same team, which the hardened
-//     runtime's library validation requires).
+// entitlements: hardened runtime, no entitlements at all. It carries Winter's ONE Chromium (the user's ruling): the CEF
+// framework and the five "Winter Helper" bundles in its own Contents/Frameworks, signed inside-out by its build. Two
+// places it lives:
+//   - dist (Release): nested at Winter.app/Contents/Helpers/Winter Headless.app, where Winter.app's own CEF runs from
+//     its Chromium too — Winter.app's own Contents/Frameworks holds no second copy;
+//   - dev (`bun run dev:headless`): standing alone in dist/dev/.
 import { join } from "node:path";
 
 export const HEADLESS = {
@@ -30,8 +30,8 @@ export function headlessExecutable(appPath: string, flavor: HeadlessFlavor): str
   return join(appPath, "Contents", "MacOS", HEADLESS[flavor].name);
 }
 
-/** xcodebuild for the dev helper: Debug, the dev identity, self-contained. Signed by the build (the nested framework
- *  and helper bundles need the team's signature), then re-signed with the stated requirement (`headlessSignArgs`).
+/** xcodebuild for the dev helper: Debug, the dev identity. Signed by the build (the nested framework and helper bundles
+ *  need the team's signature), then re-signed with the stated requirement (`headlessSignArgs`).
  *  The identity goes in through `WINTER_HEADLESS_DEBUG_BUNDLE_ID`, a setting only the helper's target reads: a
  *  command-line `PRODUCT_BUNDLE_IDENTIFIER` would also rename every target it builds (the five "Winter Helper"
  *  bundles), so a nested-code check against the helper's requirement would pass for them all by accident. */
@@ -43,7 +43,6 @@ export function headlessBuildArgs(i: { derivedDataPath: string }): string[] {
     "-destination", "platform=macOS",
     "-derivedDataPath", i.derivedDataPath,
     `WINTER_HEADLESS_DEBUG_BUNDLE_ID=${HEADLESS.dev.identifier}`,
-    "WINTER_HEADLESS_SELF_CONTAINED=YES",
     "build",
   ];
 }
@@ -74,11 +73,11 @@ export interface SignedHeadlessFacts {
   infoPlist: Record<string, unknown>;
   /** Whether the bundle has a Contents/Frameworks of its own. */
   hasFrameworks: boolean;
-  /** A self-contained build's nested "Winter Helper" bundles: name → their signed identifier. */
+  /** The nested "Winter Helper" bundles in its Contents/Frameworks: name → their signed identifier. */
   nestedIdentifiers?: Record<string, string | undefined>;
 }
 
-/** The five CEF subprocess bundles a self-contained build carries. */
+/** The five CEF subprocess bundles the helper carries. */
 export const HEADLESS_NESTED_HELPERS = ["Winter Helper", "Winter Helper (Alerts)", "Winter Helper (GPU)", "Winter Helper (Plugin)", "Winter Helper (Renderer)"] as const;
 
 /** The identifier, team and hardened-runtime flag out of `codesign -dvv`. */
@@ -107,9 +106,8 @@ export function checkSignedHeadless(flavor: HeadlessFlavor, teamId: string, vers
   if (plist.CFBundleName !== want.name) failures.push(`Info.plist CFBundleName is ${String(plist.CFBundleName)}, expected ${want.name}`);
   if (plist.LSBackgroundOnly !== true) failures.push("Info.plist LSBackgroundOnly is not true (it must have no Dock tile and no menu bar)");
   if (plist.CFBundleShortVersionString !== version) failures.push(`Info.plist CFBundleShortVersionString is ${String(plist.CFBundleShortVersionString)}, expected ${version}`);
-  if (flavor === "dist" && facts.hasFrameworks) failures.push("it carries its own Contents/Frameworks — a release borrows Winter.app's Chromium (never a second copy)");
-  if (flavor === "dev" && !facts.hasFrameworks) failures.push("it has no Contents/Frameworks — the dev helper is self-contained (WINTER_HEADLESS_SELF_CONTAINED=YES did not reach the build)");
-  if (flavor === "dev" && facts.nestedIdentifiers !== undefined) {
+  if (!facts.hasFrameworks) failures.push("it has no Contents/Frameworks — Winter's one Chromium (the CEF framework and the five Winter Helper bundles) lives there");
+  if (facts.nestedIdentifiers !== undefined) {
     for (const name of HEADLESS_NESTED_HELPERS) {
       const id = facts.nestedIdentifiers[name];
       if (id === undefined) failures.push(`the nested ${name}.app is missing or unsigned`);

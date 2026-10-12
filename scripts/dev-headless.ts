@@ -5,9 +5,8 @@
  *   bun run dev:headless               build and sign into dist/dev/Winter Headless Dev.app
  *   bun run dev:headless --out <dir>   build and sign into <dir> instead (dist/dev is never touched — a proof build)
  *
- * Self-contained: the dev helper carries its own copy of the CEF framework and the five "Winter Helper" bundles in its
- * Contents/Frameworks (the build's `WINTER_HEADLESS_SELF_CONTAINED=YES`; an APFS clone where the volume allows it), so
- * it runs with no Winter.app around it. The build signs the nested code with the team identity (the hardened runtime's
+ * Like every Winter Headless, it carries Winter's one Chromium — the CEF framework and the five "Winter Helper" bundles —
+ * in its own Contents/Frameworks (an APFS clone where the volume allows it), so it runs with no Winter.app around it. The build signs the nested code with the team identity (the hardened runtime's
  * library validation needs the framework from the same team); this script then re-signs the OUTER bundle with a STATED
  * designated requirement — `identifier "com.winter.headless.dev" and anchor apple generic and certificate
  * leaf[subject.OU] = "<team>"` — the hardened runtime and no entitlements, which is exactly what the daemon checks the

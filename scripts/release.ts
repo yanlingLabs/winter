@@ -118,7 +118,7 @@ import {
   BROWSER_HOST, browserHostExecutable, checkSignedBrowserHost, checkSignedHelper, HELPER, HELPER_EMBED_RELATIVE, helperExecutable, helperRequirement, LSREGISTER,
   readHelperVersion,
 } from "./computer-helper-lib";
-import { checkSignedHeadless, HEADLESS, HEADLESS_EMBED_RELATIVE, headlessRequirement } from "./headless-helper-lib";
+import { checkSignedHeadless, HEADLESS, HEADLESS_EMBED_RELATIVE, HEADLESS_NESTED_HELPERS, headlessRequirement, signedFacts as headlessSignedFacts } from "./headless-helper-lib";
 import { winterSourceOf } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 import { buildWinter } from "./build-winter";
@@ -887,9 +887,9 @@ assertSigned(browserHostPath, "winter-browser-host");
 // Beyond assertSigned's team + timestamp, a release proves: the identifier com.winter.headless; the stated designated
 // requirement (identifier + team OU); the hardened runtime; NO entitlements at all (it holds no grants, and the
 // hardened runtime's library validation is what lets it load only Winter's own CEF framework); LSBackgroundOnly (no
-// Dock tile, no menu bar); this release's version; and NO Contents/Frameworks of its own — it borrows Winter.app's
-// Chromium, never ships a second copy. `checkSignedHeadless` is the same check `dev:headless` and
-// `verify:headless-helper` run.
+// Dock tile, no menu bar); this release's version; and Winter's one Chromium in its own Contents/Frameworks — the CEF
+// framework and the five Winter Helper bundles, each keeping its own identifier. `checkSignedHeadless` is the same
+// check `dev:headless` and `verify:headless-helper` run.
 const headlessApp = join(app, HEADLESS_EMBED_RELATIVE);
 assertSigned(headlessApp, "Winter Headless");
 {
@@ -900,12 +900,16 @@ assertSigned(headlessApp, "Winter Headless");
     entitlementsXml: probe(`codesign -d --entitlements - --xml "${headlessApp}" 2>/dev/null`).stdout,
     infoPlist: plist.ok ? (JSON.parse(plist.stdout) as Record<string, unknown>) : {},
     hasFrameworks: existsSync(join(headlessApp, "Contents", "Frameworks")),
+    nestedIdentifiers: Object.fromEntries(HEADLESS_NESTED_HELPERS.map((name) => {
+      const nested = join(headlessApp, "Contents", "Frameworks", `${name}.app`);
+      return [name, existsSync(nested) ? headlessSignedFacts(probe(`codesign -dvv "${nested}" 2>&1`).stdout).identifier : undefined];
+    })),
   });
   const stated = headlessRequirement(HEADLESS.dist.identifier, TEAM_ID);
   const satisfied = probe(`codesign --verify --strict -R='${stated}' "${headlessApp}" 2>&1`);
   if (!satisfied.ok) failures.push(`the signature does not satisfy its own stated requirement: ${satisfied.stdout.trim()}`);
   if (failures.length > 0) fail(`Winter Headless is not signed the way the daemon needs:\n  ${failures.join("\n  ")}`);
-  console.log(`Winter Headless verified: ${HEADLESS.dist.identifier}, designated => ${stated}, hardened runtime, no entitlements, background-only, version ${version}, borrowing Winter.app's Chromium.`);
+  console.log(`Winter Headless verified: ${HEADLESS.dist.identifier}, designated => ${stated}, hardened runtime, no entitlements, background-only, version ${version}, Winter's one Chromium inside.`);
 }
 // "Start from nothing" pinned where it SHIPS, across every component this repo signs — not just
 // where entitlements are declared. project.yml can hand CODE_SIGN_ENTITLEMENTS to the wrong

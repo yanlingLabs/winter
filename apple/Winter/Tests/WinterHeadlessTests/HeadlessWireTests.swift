@@ -146,20 +146,20 @@ final class HeadlessWireTests: XCTestCase {
 final class HeadlessLayoutTests: XCTestCase {
     private func existing(_ paths: [String]) -> (String) -> Bool { { paths.contains($0) } }
 
-    func testNestedInWinterAppItBorrowsWintersChromiumAndNamesWinterAsTheMainBundle() {
+    func testNestedInWinterAppItCarriesWintersOneChromiumAndNamesWinterAsTheMainBundle() {
         let winter = "/Applications/Winter.app"
+        let helper = "\(winter)/Contents/Helpers/Winter Headless.app"
         let files = [
-            "\(winter)/Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework",
-            "\(winter)/Contents/Frameworks/Winter Helper.app/Contents/MacOS/Winter Helper",
+            "\(helper)/Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework",
+            "\(helper)/Contents/Frameworks/Winter Helper.app/Contents/MacOS/Winter Helper",
         ]
-        let layout = HeadlessLayout.resolve(bundleURL: URL(fileURLWithPath: "\(winter)/Contents/Helpers/Winter Headless.app"),
-                                            exists: existing(files))
+        let layout = HeadlessLayout.resolve(bundleURL: URL(fileURLWithPath: helper), exists: existing(files))
         XCTAssertEqual(layout, HeadlessLayout(mainBundle: winter,
-                                              frameworkDir: "\(winter)/Contents/Frameworks/Chromium Embedded Framework.framework",
-                                              subprocessPath: "\(winter)/Contents/Frameworks/Winter Helper.app/Contents/MacOS/Winter Helper"))
+                                              frameworkDir: "\(helper)/Contents/Frameworks/Chromium Embedded Framework.framework",
+                                              subprocessPath: "\(helper)/Contents/Frameworks/Winter Helper.app/Contents/MacOS/Winter Helper"))
     }
 
-    func testSelfContainedItIsItsOwnMainBundle() {
+    func testStandingAloneItIsItsOwnMainBundle() {
         let app = "/tmp/dist/dev/Winter Headless Dev.app"
         let files = [
             "\(app)/Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework",
@@ -168,9 +168,24 @@ final class HeadlessLayoutTests: XCTestCase {
         XCTAssertEqual(HeadlessLayout.resolve(bundleURL: URL(fileURLWithPath: app), exists: existing(files))?.mainBundle, app)
     }
 
+    /// Never Winter.app's own Frameworks: the one Chromium is the helper's (a copy there would be a second one).
+    func testItNeverBorrowsFromTheEnclosingApp() {
+        let winter = "/Applications/Winter.app"
+        let files = [
+            "\(winter)/Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework",
+            "\(winter)/Contents/Frameworks/Winter Helper.app/Contents/MacOS/Winter Helper",
+        ]
+        XCTAssertNil(HeadlessLayout.resolve(bundleURL: URL(fileURLWithPath: "\(winter)/Contents/Helpers/Winter Headless.app"), exists: existing(files)))
+    }
+
     func testNoChromiumAnywhereIsNoLayout() {
         XCTAssertNil(HeadlessLayout.resolve(bundleURL: URL(fileURLWithPath: "/Applications/Winter.app/Contents/Helpers/Winter Headless.app"),
                                             exists: { _ in false }))
+    }
+
+    func testTheOutermostAppOnThePath() {
+        XCTAssertEqual(HeadlessLayout.outermostApp(of: URL(fileURLWithPath: "/A/Winter.app/Contents/Helpers/Winter Headless.app")).path, "/A/Winter.app")
+        XCTAssertEqual(HeadlessLayout.outermostApp(of: URL(fileURLWithPath: "/tmp/x/Winter Headless Dev.app")).path, "/tmp/x/Winter Headless Dev.app")
     }
 
     func testTheArgumentsNeedAnAbsoluteCacheRootAndPassOnlyDiagnostics() {
