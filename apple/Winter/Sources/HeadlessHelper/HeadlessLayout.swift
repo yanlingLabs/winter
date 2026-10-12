@@ -80,8 +80,9 @@ struct HeadlessArguments: Equatable {
     /// asked for except the COMPONENT UPDATER, which stays on purpose: it is how the browser's Chrome Root Store is kept
     /// current (its PKI metadata component: measured, the root store this build compiled in is version 35, and the
     /// browser verifies with version 40 once the component installs, ~60 s after start) and how the CRLSet arrives (its
-    /// download seen ~65 s in, in one two-minute run, not in another). It costs an update check and
-    /// about ten downloads per run (update.googleapis.com, edgedl.me.gvt1.com), the cache root being fresh. (What else is
+    /// download seen ~65 s in, in one two-minute run, not in another). The daemon keeps the components
+    /// across runs (`browser/headless/components.ts`), so after the first run it costs one update check
+    /// (update.googleapis.com) and no download. (What else is
     /// left is the host resolver's IPv6 route check — a UDP connect that sends no packet.) `disabledFeatures` holds the
     /// feature half.
     ///    * `--no-first-run` — every run is a first run (a fresh cache root): without it, the RLZ ping 90 s after start

@@ -15,16 +15,20 @@
 //                               renderer: everything else, tabs.live included, is still answered)
 //   http://hang.test/         — it answers, then — from that tab's first cdp.send on — answers nothing at all (the
 //                               helper's own main thread stuck)
+//   http://component.test/    — it answers, then installs a component in its cache root (as Chromium's updater does)
+//                               beside a run's own data (Default/Cookies)
 //   http://notice.test/       — it answers, then reports a refused popup twice and a refused local-network request
 //                               once (plus a notice of an unknown kind, and one for an unknown tab)
 // It exits 0 on EOF, like the real helper.
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 const argValue = (name: string): string | undefined => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
 const mode = argValue("fake-mode") ?? "normal";
 const logFile = argValue("fake-log");
 const cacheRoot = argValue("winter-cache-root");
-if (logFile !== undefined) appendFileSync(logFile, `${JSON.stringify({ op: "started", params: { cacheRoot } })}\n`);
+const entries = (() => { try { return cacheRoot === undefined ? [] : readdirSync(cacheRoot).sort(); } catch { return []; } })();
+if (logFile !== undefined) appendFileSync(logFile, `${JSON.stringify({ op: "started", params: { cacheRoot, entries } })}\n`);
 const linkId = "h-fake";
 // The real helper runs until its pipe closes; so does this.
 const keepAlive = setInterval(() => {}, 1 << 30);
@@ -74,6 +78,13 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
       const t = tabs.get(tabId)!;
       reply(cmdId, { url: t.url, title: `title of ${t.url}`, loading: false, sessionId: t.sessionId, viewport: [1280, 800], dpr: 1 });
       if (t.url === "http://crash.test/") setTimeout(() => process.exit(1), 20);
+      if (t.url === "http://component.test/" && cacheRoot !== undefined) {
+        // What Chromium's component updater installs (a version folder with a manifest), beside a run's own data.
+        mkdirSync(join(cacheRoot, "PKIMetadata", "1798"), { recursive: true });
+        writeFileSync(join(cacheRoot, "PKIMetadata", "1798", "manifest.json"), '{"name":"pkiMetadata","version":"1798"}');
+        mkdirSync(join(cacheRoot, "Default"), { recursive: true });
+        writeFileSync(join(cacheRoot, "Default", "Cookies"), "a session's cookies");
+      }
       if (t.url === "http://renderer.test/") setTimeout(() => { tabs.delete(tabId); send("browserLink.tabGone", { linkId, tabId, reason: "crashed" }); }, 20);
       if (t.url === "http://notice.test/") {
         setTimeout(() => {
