@@ -1,8 +1,9 @@
 import CoreGraphics
 import Foundation
-import WinterComputerUseShell
+@testable import WinterComputerUseShell
 import WinterCUCore
 import WinterCUPresentation
+import ApplicationServices
 import XCTest
 
 /// The watches as the daemon reaches them (PROTOCOL.md §4.13), recorded.
@@ -167,4 +168,14 @@ final class WatchShellTests: XCTestCase {
 actor ClickLog {
     var params: [TestUserClickParams] = []
     func add(_ p: TestUserClickParams) { params.append(p) }
+}
+
+final class TestActivatorPickTests: XCTestCase {
+    func testANamedWindowIsTheOneRaisedNotTheAppsFrontOne() {
+        let web = AXUIElementCreateApplication(91_001), form = AXUIElementCreateApplication(91_002)
+        let titles: (AXUIElement) -> String? = { CFEqual($0, web) ? "Fixture Web" : "Fixture Form" }
+        XCTAssertTrue(CFEqual(TestActivator.pick([web, form], title: "Fixture Form", titleOf: titles)!, form))
+        XCTAssertTrue(CFEqual(TestActivator.pick([web, form], title: nil, titleOf: titles)!, web), "no name: the front one, as before")
+        XCTAssertNil(TestActivator.pick([web, form], title: "Nope", titleOf: titles))
+    }
 }

@@ -66,7 +66,8 @@ export function wakeFiredChecks(ctx: VerifyContext): Check[] {
       w?.message === undefined ? "no wake message" : msg.slice(0, 300)),
     check("the wake names the trigger and says the user clicked", typeof id === "string" && msg.includes(id) && /fired/.test(msg) && /clicked/.test(msg), msg.slice(0, 300)),
     check("what came from the screen is fenced in the wake", /<screen-data id="[^"]+">/.test(msg), msg.slice(0, 300)),
-    check("the ring and the pill went with the trigger", w?.ringGone === true, "still on screen after the wake"),
+    check("the ring and the pill went with the trigger", w?.ringGone === true,
+      (w?.ringWindows ?? 0) === 0 ? "never drawn, so not judged" : "still on screen after the wake"),
   ];
 }
 
@@ -93,7 +94,7 @@ const submit = await pick(form, "Submit", "button");
 const w = await form.wakeWhen({ clicked: submit.ref }, { note: "cu-live: continue once Submit is clicked" });
 report({ armed: w.id });
 `,
-    wake: { userClicks: "Submit", withinMs: WAKE_WITHIN_MS },
+    wake: { userClicks: "Submit", window: "Fixture Form", withinMs: WAKE_WITHIN_MS },
     verify: wakeFiredChecks,
   },
   {
@@ -106,7 +107,7 @@ const submit = await pick(form, "Submit", "button");
 var WAKE_CONVERSE = await form.wakeWhen({ clicked: submit.ref });
 report({ armed: WAKE_CONVERSE.id });
 `,
-    wake: { userClicks: "Submit", stamp: "winter", withinMs: NO_WAKE_MS, cleanup: "await WAKE_CONVERSE.cancel();\nreport({ cancelled: true });" },
+    wake: { userClicks: "Submit", window: "Fixture Form", stamp: "winter", withinMs: NO_WAKE_MS, cleanup: "await WAKE_CONVERSE.cancel();\nreport({ cancelled: true });" },
     verify: noWakeChecks,
   },
 ];

@@ -136,7 +136,7 @@ export interface Scenario {
    * Winter's own instead); then it waits up to `withinMs` for the session's `computer-wake` turn (`VerifyContext.wake`),
    * and runs `cleanup` (ComputerV2 code, after the prelude) as one more turn in the same session.
    */
-  wake?: { userClicks?: string; stamp?: "user" | "winter"; withinMs: number; cleanup?: string };
+  wake?: { userClicks?: string; window?: string; stamp?: "user" | "winter"; withinMs: number; cleanup?: string };
   verify(ctx: VerifyContext): Check[];
 }
 

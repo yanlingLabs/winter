@@ -965,6 +965,14 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         const before = helperWindows();
         obs.switchedAt = Date.now();
         await bringToFront(f.mainPid!, "the fixture (the user's switch, to click)", undefined, true);
+        // …and to the WATCHED window (the ring is drawn only while it is the app's front window — the first live run
+        // raised the fixture's front window, another one, and saw no ring).
+        if (plan.window !== undefined) {
+          const raised = helperCall(built, socket, home, "test.activate", { pid: f.mainPid!, asUser: true, window: plan.window });
+          if (raised.error !== undefined || (raised.result as { raised?: unknown } | undefined)?.raised !== true) {
+            throw new Error(`could not bring the ${plan.window} window forward: ${JSON.stringify(raised.error ?? raised.result).slice(0, 160)}`);
+          }
+        }
         await watchFor(1_500);
         ring = [...helperWindows()].filter((id) => !before.has(id));
         obs.ringWindows = ring.length;

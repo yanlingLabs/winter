@@ -600,6 +600,35 @@ final class WatcherEngineTests: XCTestCase {
         XCTAssertEqual(holds, [true, false])
     }
 
+    // The live run (2026-10-12): the user brought the fixture forward with ANOTHER of its windows in front — no ring, as
+    // the rule says. Once the watched window comes to the front within the app (no app activation, only the app's own
+    // focused-window notification), the ring is drawn; when the watch fires, it goes.
+    func testTheRingFollowsTheWatchedWindowComingForwardAndGoesWhenTheWatchFires() async throws {
+        shown = nil
+        _ = try await arm("wk_a", .init(kind: "clicked", ref: 3))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(sink.shown.allSatisfy(\.isEmpty), "another window of the app is in front: nothing drawn")
+        shown = CUWatchShown(watchId: "wk_a", kind: "clicked", label: "Send", elementFrame: CGRect(x: 1, y: 2, width: 3, height: 4),
+                             windowFrame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        notifier.onNotification?(42)  // the app's focused window changed
+        clock.now += 300
+        timers.fire(ms: CUWatcher.debounceMs)
+        await eventually("drawn") { sink.shown.last?.count == 1 }
+        tap.handler?(CGPoint(x: 2, y: 3), 0, 0)
+        await eventually("fired") { sink.events.count == 1 }
+        await eventually("gone with the watch") { sink.shown.last?.isEmpty == true }
+    }
+
+    func testTheRingGoesWhenTheWatchIsLost() async throws {
+        shown = CUWatchShown(watchId: "wk_l", kind: "titled", label: nil, elementFrame: nil, windowFrame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        _ = try await arm("wk_l", .init(kind: "titled", title: "x"))
+        await eventually("drawn") { sink.shown.last?.count == 1 }
+        observation = CUWatchObservation(windowAlive: false)
+        await watcher.evaluate(pid: 42)
+        await eventually("gone") { sink.shown.last?.isEmpty == true }
+        XCTAssertEqual(sink.events.first?.outcome, .lost)
+    }
+
     func testTheConnectionClosingDropsItsWatchesSilently() async throws {
         _ = try await arm("wk_1", .init(kind: "clicked", ref: 3), connection: 1)
         _ = try await arm("wk_2", .init(kind: "titled", title: "x"), connection: 2)

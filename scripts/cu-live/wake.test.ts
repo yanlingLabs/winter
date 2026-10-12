@@ -33,11 +33,12 @@ describe("the wake group", () => {
       expect(s.session).toBe("fresh");
       expect(s.name.startsWith("wake: ")).toBe(true);
     }
-    expect(WAKE_SCENARIOS[0]!.wake).toEqual({ userClicks: "Submit", withinMs: WAKE_WITHIN_MS });
+    // The user brings the WATCHED window forward, not just the app: the ring is drawn only while it is the front one.
+    expect(WAKE_SCENARIOS[0]!.wake).toEqual({ userClicks: "Submit", window: "Fixture Form", withinMs: WAKE_WITHIN_MS });
     expect(WAKE_SCENARIOS[0]!.code).toContain("wakeWhen({ clicked: submit.ref }");
     // The converse: a REAL click carrying Winter's own mark (never an accessibility press, which sends no mouse event),
     // then a cleanup turn that cancels the trigger.
-    expect(WAKE_SCENARIOS[1]!.wake).toEqual({ userClicks: "Submit", stamp: "winter", withinMs: NO_WAKE_MS, cleanup: "await WAKE_CONVERSE.cancel();\nreport({ cancelled: true });" });
+    expect(WAKE_SCENARIOS[1]!.wake).toEqual({ userClicks: "Submit", window: "Fixture Form", stamp: "winter", withinMs: NO_WAKE_MS, cleanup: "await WAKE_CONVERSE.cancel();\nreport({ cancelled: true });" });
     expect(WAKE_SCENARIOS[1]!.code).not.toContain(".click(");
     compiles(scriptOf({ code: WAKE_SCENARIOS[1]!.wake!.cleanup! }));
     expect(USER_CLICK_METHOD).toBe("test.userClick");

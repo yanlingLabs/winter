@@ -58,6 +58,10 @@ public final class RPCDispatcher: @unchecked Sendable {
             routes["test.activate"] = { [core] params, _ in
                 let p = try RPCDispatcher.decode(TestActivateParams.self, params)
                 if p.asUser == true { core.testUserInput(pid: p.pid, switching: true) }
+                // A named window (1.17.0): that one raised and made main, not just the app's front one.
+                if let window = p.window, activator == nil {
+                    return AnyEncodable(await MainActor.run { TestActivator.activate(pid: p.pid, window: window) })
+                }
                 return AnyEncodable(await activate(p.pid))
             }
             routes["test.userInput"] = { [core] params, _ in
