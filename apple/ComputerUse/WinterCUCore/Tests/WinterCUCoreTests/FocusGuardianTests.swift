@@ -208,9 +208,10 @@ final class FocusGuardianTests: XCTestCase {
         // (The user's own starts come with their click — a Dock tile: a launch with no input of theirs before it, while the
         // agent's launch is pending, is clearly the agent's — round 11.)
         g.noteHardwareAction(now: 10.45)
+        g.noteLaunchCapableInput(now: 10.45)  // a click can launch an app (R17-d (i), the controller's ruling)
         g.appLaunched(800, startedAt: 10.5, bundle: "com.example.new", now: 10.55)  // NSWorkspace: launched — nothing named yet
-        // (The ruling, round 16: input of the user's between the agent's launch beginning and this process start — their
-        // click at 10.45 — makes it theirs.)
+        // (The ruling, round 16, as R17-d (i) narrowed it: LAUNCH-CAPABLE input of the user's between the agent's launch
+        // beginning and this process start — their click at 10.45 — makes it theirs.)
         XCTAssertTrue(g.judge(CUMoveQuery(app: 800, space: 100, appStartedAt: 10.5, appBundle: "com.example.new"), now: 11).isUsers,
                       "their input after the agent's act: theirs")
         g.setLaunchBundle(launch, "com.example.new")
