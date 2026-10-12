@@ -24,6 +24,13 @@ export interface WakeObservation {
   message?: string;
   clientName?: string;
   ms?: number;
+  /** The scenario's cleanup turn ran and reported `cancelled: true`. */
+  cleanedUp?: boolean;
+  /** When the user switched to the fixture, when their click was done, and when the observation ended (the focus and
+   *  pointer checks across the wake turn). */
+  switchedAt?: number;
+  clickEndAt?: number;
+  endAt?: number;
 }
 
 /** The live-test helper's route for the user's click (PROTOCOL.md §9). */
@@ -65,10 +72,15 @@ export function wakeFiredChecks(ctx: VerifyContext): Check[] {
 
 export function noWakeChecks(ctx: VerifyContext): Check[] {
   const id = armedId(ctx);
+  const w = ctx.wake;
   return [
-    check("armed, clicked by Winter itself, cancelled", !ctx.isError && typeof id === "string" && WAKE_ID.test(id) && ctx.facts.cancelled === true, ctx.output.slice(-300)),
-    check("Winter's own click landed on Submit (the fixture's own log)", eventsSince(ctx.events, ctx.since, "button").some((e) => e.id === "submit"), "no button submit event"),
-    check("Winter's own click never woke the session", ctx.wake !== undefined && ctx.wake.message === undefined, (ctx.wake?.message ?? "").slice(0, 300)),
+    check("the trigger was armed on Submit", !ctx.isError && typeof id === "string" && WAKE_ID.test(id), ctx.output.slice(-300)),
+    check("the ring and the pill were drawn while the fixture was in front", (w?.ringWindows ?? 0) >= 2, `${w?.ringWindows ?? 0} new helper window(s) on screen`),
+    check("a real click carrying Winter's own mark reached Submit (the fixture's own log)", w?.clicked === true
+      && eventsSince(ctx.events, ctx.since, "button").some((e) => e.id === "submit"), w?.clicked === true ? "no button submit event" : "the helper found no Submit to click"),
+    check("Winter's own click never woke the session", w !== undefined && w.message === undefined, (w?.message ?? "").slice(0, 300)),
+    check("the trigger was cancelled afterwards, and its ring went with it", w?.cleanedUp === true && w.ringGone === true,
+      `cleanup ${w?.cleanedUp === true ? "ran" : "failed"}, ring ${w?.ringGone === true ? "gone" : "still on screen"}`),
   ];
 }
 
@@ -85,17 +97,16 @@ report({ armed: w.id });
     verify: wakeFiredChecks,
   },
   {
-    name: "wake: Winter's own click on Submit never wakes the session", group: "wake", session: "fresh",
+    // A REAL click that reaches the tap, carrying Winter's own mark (review L7: an accessibility press sends no mouse
+    // event at all, so it proved nothing): the watch must ignore it. The cleanup turn cancels the trigger.
+    name: "wake: a click carrying Winter's own mark never wakes the session", group: "wake", session: "fresh",
     code: `
 const form = await win("Fixture Form");
 const submit = await pick(form, "Submit", "button");
-const w = await form.wakeWhen({ clicked: submit.ref });
-await form.click(submit.ref);
-await sleep(1500);
-await w.cancel();
-report({ armed: w.id, cancelled: true });
+var WAKE_CONVERSE = await form.wakeWhen({ clicked: submit.ref });
+report({ armed: WAKE_CONVERSE.id });
 `,
-    wake: { withinMs: NO_WAKE_MS },
+    wake: { userClicks: "Submit", stamp: "winter", withinMs: NO_WAKE_MS, cleanup: "await WAKE_CONVERSE.cancel();\nreport({ cancelled: true });" },
     verify: noWakeChecks,
   },
 ];

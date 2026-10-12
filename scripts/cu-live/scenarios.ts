@@ -132,10 +132,11 @@ export interface Scenario {
   /**
    * WAKE TRIGGERS (`wake.ts`): after the action's turn (and its 3 s watch), the runner — when `userClicks` names an
    * element — brings the fixture to the front as the USER, counts the helper's new on-screen windows (the ring and the
-   * pill), and has the live-test helper click that element for the user (`test.userClick`); then it waits up to
-   * `withinMs` for the session's `computer-wake` turn (`VerifyContext.wake`).
+   * pill), and has the live-test helper click that element for the user (`test.userClick`; `stamp: "winter"` marks it as
+   * Winter's own instead); then it waits up to `withinMs` for the session's `computer-wake` turn (`VerifyContext.wake`),
+   * and runs `cleanup` (ComputerV2 code, after the prelude) as one more turn in the same session.
    */
-  wake?: { userClicks?: string; withinMs: number };
+  wake?: { userClicks?: string; stamp?: "user" | "winter"; withinMs: number; cleanup?: string };
   verify(ctx: VerifyContext): Check[];
 }
 

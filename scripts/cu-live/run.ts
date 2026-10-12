@@ -943,41 +943,60 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     // ── scenarios ──────────────────────────────────────────────────────────────────────────────────────────────
     /**
      * A `wake` scenario's second half (`wake.ts`): the USER brings the fixture forward and clicks the named element (the
-     * live-test helper's `test.userClick` — a real, stamped click its watches count as the user's), the helper's new
-     * on-screen windows are counted while the trigger waits (its ring and pill), and the session's `computer-wake` turn
-     * is waited for (and its end, so the next scenario starts on an idle session). Window ids and on-screen flags only.
+     * live-test helper's `test.userClick` — a real click, stamped as the user's, or with `stamp: "winter"` as Winter's own),
+     * the helper's new on-screen windows are counted while the trigger waits (its ring and pill), and the session's
+     * `computer-wake` turn is waited for (and its end, so the next scenario starts on an idle session); then the
+     * scenario's cleanup turn, if any. Real input and a permission prompt are checked throughout — before the pointer
+     * moves above all — and every time the runner acts or waits; the times are kept for the focus and pointer checks
+     * that stay open across the wake turn. Window ids and on-screen flags only.
      */
     const observeWake = async (wc: DaemonClient, sid: string, plan: NonNullable<Scenario["wake"]>): Promise<WakeObservation> => {
       const helperWindows = (): Set<number> => onScreenIds(sh(built.tool, ["windows", HELPER_OWNER]).stdout);
+      const watchFor = async (ms: number): Promise<void> => {
+        const until = Date.now() + ms;
+        while (Date.now() < until) { abortIfInput(); await sleep(50); }
+      };
       const from = wc.events.length;
       const obs: WakeObservation = {};
       let ring: number[] = [];
       let clickedAt = Date.now();
+      abortIfInput();
       if (plan.userClicks !== undefined) {
         const before = helperWindows();
+        obs.switchedAt = Date.now();
         await bringToFront(f.mainPid!, "the fixture (the user's switch, to click)", undefined, true);
-        await sleep(1_500);
+        await watchFor(1_500);
         ring = [...helperWindows()].filter((id) => !before.has(id));
         obs.ringWindows = ring.length;
-        const r = helperCall(built, socket, home, USER_CLICK_METHOD, { pid: f.mainPid!, name: plan.userClicks });
+        abortIfInput();  // never move the pointer over a person's hand
+        const r = helperCall(built, socket, home, USER_CLICK_METHOD, { pid: f.mainPid!, name: plan.userClicks, ...(plan.stamp === undefined ? {} : { stamp: plan.stamp }) });
         if (r.error !== undefined) throw new Error(`${USER_CLICK_METHOD} failed: ${JSON.stringify(r.error).slice(0, 160)}`);
         obs.clicked = (r.result as { clicked?: unknown } | undefined)?.clicked === true;
         clickedAt = Date.now();
+        obs.clickEndAt = clickedAt;
       }
       const woke = await wc.waitFor((e) => e.type === "user_message" && e.sessionId === sid
-        && (e as { clientName?: string }).clientName === COMPUTER_WAKE_CLIENT_NAME, plan.withinMs, from).catch(() => undefined);
+        && (e as { clientName?: string }).clientName === COMPUTER_WAKE_CLIENT_NAME, plan.withinMs, from, () => abortIfInput()).catch((err: unknown) => {
+        rethrowIfStopping(err);
+        return undefined;
+      });
       if (woke !== undefined) {
         obs.message = String((woke as { text?: unknown }).text ?? "");
         obs.clientName = COMPUTER_WAKE_CLIENT_NAME;
         obs.ms = Date.now() - clickedAt;
         await wc.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid && (e as { threadId?: string }).threadId === "main"
-          && wc.events.indexOf(e) > wc.events.indexOf(woke), 90_000, from).catch(() => undefined);
+          && wc.events.indexOf(e) > wc.events.indexOf(woke), 90_000, from, () => abortIfInput()).catch((err: unknown) => { rethrowIfStopping(err); return undefined; });
+      }
+      if (plan.cleanup !== undefined) {
+        const c = await runTurn(wc, sid, computerV2Message(scriptOf({ code: plan.cleanup }), 30_000), 90_000);
+        obs.cleanedUp = !c.isError && markerFacts(c.output).cancelled === true;
       }
       if (plan.userClicks !== undefined) {
-        await sleep(800);
+        await watchFor(800);
         const now = helperWindows();
         obs.ringGone = ring.length > 0 && ring.every((id) => !now.has(id));
       }
+      obs.endAt = Date.now();
       return obs;
     };
 
@@ -1098,6 +1117,14 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           ...(wake === undefined ? {} : { wake }),
         });
         if (s.session === "ask") checks.push(...cardChecks(turn.cards, s.foregroundCard === true));
+        // A wake row's windows stay open across the wake turn (review L7): the user's switch to the fixture held, and
+        // nothing moved the pointer once their click was done.
+        if (wake?.switchedAt !== undefined && wake.endAt !== undefined) {
+          checks.push(userSwitchHeld(monitor!.items, wake.switchedAt, f.mainPid, wake.endAt));
+          const after = pointerMoves(monitor!.items, (wake.clickEndAt ?? wake.switchedAt) + 300, wake.endAt);
+          checks.push(check("nothing moved the pointer during the wake turn", after.length === 0,
+            after.length > 0 ? `pointer moved at +${after.map((t) => t - (wake.clickEndAt ?? 0)).join(", +")} ms after the click` : undefined));
+        }
         const leaked = events.filter((e) => e.role === "user" && (e.ev === "user.key" || e.ev === "user.mouse") && e.t >= since && e.t <= t1);
         checks.push(check("the real pointer stayed put and your app got no keys or clicks (no rung-4 fallback)", moved.length === 0 && leaked.length === 0,
           [moved.length > 0 ? `pointer moved at +${moved.map((t) => t - since).join(", +")} ms` : "", leaked.length > 0 ? `your app got ${leaked.map((e) => e.ev).join(", ")}` : ""].filter(Boolean).join("; ")));
