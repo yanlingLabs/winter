@@ -66,6 +66,9 @@ Introduce one daemon-side `assertRemoteMayUseWorkspace` gate, analogous to the e
 | New methods | Request/result outline | Paired-client decision |
 | --- | --- | --- |
 | `workspace.list`, `workspace.get` | Paged safe records, source counts/states, VM/operation state, revisions | Allow; omit backing paths/bookmarks and other homes |
+| `workspace.capabilities.get` | Safe projection of preparation, provisioning and execution support; unsupported facilities remain false | Local-only initially; no authority inferred from display capabilities |
+| `workspace.selection.prepareFolder` | Bounded Mac bookmark, label/access and request ID; opaque prepared selection and expiry | Local-only authenticated user/control principal; never paired/plugin/runtime |
+| `workspace.selection.revoke` | Opaque selection and request ID, scoped to issuing principal/connection | Local-only; replay cannot recreate or renew a grant |
 | `workspace.create` | Ownership, title, initial source selections; returns preparing workspace/operation | Allow repository-only creation within admitted account/repository authority; folder creation local-only |
 | `workspace.update` | Title/display properties with expected revision; never arbitrary policy/storage patch | Allow |
 | `workspace.archive`, `workspace.restore` | ID/revision; return pending/effective lifecycle | Allow; restore never restores revoked grants or deleted backing |
@@ -87,6 +90,8 @@ Introduce one daemon-side `assertRemoteMayUseWorkspace` gate, analogous to the e
 | `workspace.file.list`, `workspace.file.stat`, `workspace.file.read`, `workspace.file.readRange` | Location ID/relative path, size/range bounds, explicit wake permission when needed | Allow within admitted workspace; no raw Mac paths, no hidden reads of SDK/control stores |
 | `workspace.export.create`, `workspace.export.status`, `workspace.export.read` | Generation-bound export job and bounded artifact/chunk handles | Allow user-facing export without raw authority DB/bookmarks or selected external-folder contents; host destination path/export-import authority stays local |
 | `workspace.watch`, `workspace.watch.renew`, `workspace.watch.detach` | Authorized workspace IDs/revisions; peer-bound subscription ID, lease and bounded snapshot/change frames | Allow; explicit Gateway subscription handling, snapshot/refetch on reconnect, no reliance on `$system` replay |
+
+Folder preparations are ephemeral and do not count as workspace sources. They bind the authenticated local principal and issuing connection, expire on a monotonic deadline, and release held descriptors/scope on revocation, disconnect or stop. A bookmark is location evidence, not proof of a UI gesture or signed-client identity. Re-resolve and revalidate the current protected roots, access and held directory identity before consumption. Exact request replay preserves identity/expiry; an expired or revoked preparation is not minted again. Durable source creation still needs canonical grant consumption and actual native provisioning; preparation alone never marks a source ready. The implemented preparation scope is recorded in [Mac selection acceptance](research/2026-10-12-cowork-macos-selection-independent-review.md).
 
 New GitHub sign-in/token setup and local host-capability grants are separate Mac user surfaces; repository selection does not imply account-wide publication authority. An export reader receives only its admitted artifact, not arbitrary backing-file access. Local import/migration and full-authority backup are not remotely exposed by these methods.
 
