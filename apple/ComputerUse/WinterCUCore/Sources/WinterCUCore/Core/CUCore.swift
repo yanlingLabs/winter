@@ -1253,7 +1253,8 @@ public final class CUCore: @unchecked Sendable {
     /// drawing there), cropped to `region` and fitted to the budget like a ScreenCaptureKit capture. Nil when
     /// there is none, or it is blank (a window macOS has not drawn).
     func offScreenShot(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget) async throws -> CUCapturedImage? {
-        try offScreenStill(t, region, budget)
+        // Right after an act: waits, bounded, for the act's picture — on the target's queue (never a cooperative thread).
+        try await queues.run(t.pid) { [self] in try offScreenAfterAct(t, region, budget) }
     }
 
     /// `offScreenShot`, synchronously (a visit's return takes one on the pid queue).
@@ -1284,8 +1285,9 @@ public final class CUCore: @unchecked Sendable {
         let previous = t.noteOffScreenShot(digest: digest, at: now)
         let where_ = elsewhere ? "on another desktop (another Space or full screen)" : "while it is not on screen (minimized or hidden)"
         let check = "to see what is really there, read it (state() or find() text, or something the app counts, such as a word count)"
-        return Self.freshnessLabel(app: t.appName, where_: where_, check: check, previous: previous, digest: digest, now: now,
-                                   actedMs: t.lastActionMs, appActivityMs: monitor.lastNotificationMs(pid: t.pid))
+        let label = Self.freshnessLabel(app: t.appName, where_: where_, check: check, previous: previous, digest: digest, now: now,
+                                        actedMs: t.lastActionMs, appActivityMs: monitor.lastNotificationMs(pid: t.pid))
+        return Self.afterActFreshness(label, app: t.appName, previous: previous, digest: digest, now: now, actedMs: t.lastActionMs)
     }
 
     /// FNV-1a over every byte. Pure.

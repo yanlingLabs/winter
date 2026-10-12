@@ -154,6 +154,11 @@ final class CUTarget: @unchecked Sendable {
         _lastOffScreenShot = (digest, ms, changedAt)
         return before
     }
+    /// The last off-screen picture's digest and time, read without noting a new one.
+    var lastOffScreenShot: (digest: Int, atMs: Double, changedAtMs: Double)? {
+        lock.lock(); defer { lock.unlock() }
+        return _lastOffScreenShot
+    }
 
     /// The region and budget of the last off-screen or live shot of the window: a desktop visit's return takes the
     /// window's next baseline picture the same way, so the digests compare.
