@@ -117,6 +117,29 @@ final class Round14Tests: XCTestCase {
         if case .unexplained = v {} else { XCTFail("left in front and said: \(v)") }
     }
 
+    /// The same through the REAL bind path (review of round 15, LOW: the test above set the bundle by hand): the default
+    /// `resolveBindApp` of a RUNNING app (Finder — a lookup only: nothing is launched, opened or activated) names its
+    /// bundle on the bind's pending launch. A third party's Terminal coming forward meanwhile is left; Finder is in reach.
+    func testABindOfARunningAppThroughTheRealResolverReachesOnlyIt() async throws {
+        guard case .running = try CUApps.resolve("com.apple.finder") else { throw XCTSkip("Finder is not running") }
+        let (c, _) = core(bundle: nil, browser: false)
+        c.guardianLock.withLock { c.guardianCore.begin(view: CUGuardedView(app: 1, space: 100)) }
+        let token = c.beginGuardianLaunch()
+        let app = try await CUCore.$bindLaunchToken.withValue(token) { try await c.resolveBindApp("com.apple.finder", c) }
+        XCTAssertFalse(app.launched, "a running app: nothing launched")
+        let now = c.clock.nowSeconds() + 0.3
+        let terminal = c.guardianLock.withLock {
+            c.guardianCore.judge(CUMoveQuery(app: 77, space: 100, appBundle: "com.apple.Terminal"), now: now)
+        }
+        XCTAssertFalse(terminal.undoes, "\(terminal)")
+        if case .unexplained = terminal {} else { XCTFail("left in front and said: \(terminal)") }
+        let finder = c.guardianLock.withLock {
+            c.guardianCore.judge(CUMoveQuery(app: 78, space: 100, appBundle: "com.apple.finder"), now: now + 0.1)
+        }
+        if case .indirect = finder {} else { XCTFail("the bound app is in the pending launch's reach: \(finder)") }
+        c.endGuardianLaunch(token, pid: nil)
+    }
+
     // MARK: the scope of an act
 
     private func core(bundle: String?, browser: Bool) -> (CUCore, CUTarget) {
