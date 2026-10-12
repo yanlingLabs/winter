@@ -163,3 +163,64 @@ test("v8 authority upgrades without reidentifying a workspace, and a genuinely e
   const empty = openRuntimeStateDb(emptyHome); empty.db.run("DROP TABLE cowork_volumes"); empty.db.run("DROP TABLE cowork_volume_directories"); empty.db.run("PRAGMA user_version=8"); empty.close();
   expect(downgradeCoworkRuntimeStateToV7(emptyHome)).toEqual({ from: 8, to: 7 });
 });
+
+
+test("outer claim/open rollback cannot publish an uncommitted owner or writable descriptor", () => {
+  const f = fixture(); allocate(f);
+  let admissionCalls = 0, escaped: ReturnType<CoworkVolumes["open"]> | undefined;
+  const lifecycle = new CoworkVolumes(f.db, f.home, {
+    authorize: (...args) => { admissionCalls++; return authority.authorize(...args); },
+    verifyStopped: (...args) => authority.verifyStopped(...args),
+  }, f.backup);
+  expect(() => f.db.transaction(() => {
+    refusal(() => lifecycle.claim(f.request), "invalid_request");
+    // Verify open itself refuses before effects even if the caller handles claim's refusal.
+    refusal(() => { escaped = lifecycle.open(f.request, "data"); }, "invalid_request");
+    expect(lifecycle.records(f.request.workspaceId).every(v => v.owner === null)).toBe(true);
+    throw new Error("fixture-outer-rollback");
+  })).toThrow("fixture-outer-rollback");
+  expect(admissionCalls).toBe(0); expect(escaped).toBeUndefined();
+  expect(lifecycle.records(f.request.workspaceId).every(v => v.owner === null)).toBe(true);
+  lifecycle.claim(f.request);
+  const first = lifecycle.open(f.request, "data");
+  const next = { ...f.request, owner: { ...f.request.owner, workerInstanceId: "worker-two", incarnationId: "incarnation-two", leaseEpoch: 2 } };
+  try {
+    refusal(() => lifecycle.claim(next), "volume_busy");
+    writeSync(first.fd, Buffer.from("committed-one"), 0, 13, 4096);
+    expect(readFileSync(f.image()).subarray(4096, 4109).toString()).toBe("committed-one");
+  } finally { first.close(); }
+  lifecycle.release(f.request, { confirmationId: "native-stop-one", proof: stopProof });
+  lifecycle.claim(next); const second = lifecycle.open(next, "data"); second.close();
+});
+
+test("outer release/claim/open rollback cannot restore one owner beside another writable descriptor", () => {
+  const f = fixture(); allocate(f); f.store.claim(f.request);
+  let admissionCalls = 0, stopCalls = 0, escaped: ReturnType<CoworkVolumes["open"]> | undefined;
+  const lifecycle = new CoworkVolumes(f.db, f.home, {
+    authorize: (...args) => { admissionCalls++; return authority.authorize(...args); },
+    verifyStopped: (...args) => { stopCalls++; return authority.verifyStopped(...args); },
+  }, f.backup);
+  const next = { ...f.request, owner: { ...f.request.owner, workerInstanceId: "worker-two", incarnationId: "incarnation-two", leaseEpoch: 2 } };
+  expect(() => f.db.transaction(() => {
+    refusal(() => lifecycle.release(f.request, { confirmationId: "native-stop-one", proof: stopProof }), "invalid_request");
+    refusal(() => lifecycle.claim(next), "invalid_request");
+    refusal(() => { escaped = lifecycle.open(next, "data"); }, "invalid_request");
+    // A previously committed matching owner must not obtain a descriptor inside an outer transaction either.
+    refusal(() => { escaped = lifecycle.open(f.request, "data"); }, "invalid_request");
+    throw new Error("fixture-outer-rollback");
+  })).toThrow("fixture-outer-rollback");
+  expect(admissionCalls).toBe(0); expect(stopCalls).toBe(0); expect(escaped).toBeUndefined();
+  expect(lifecycle.records(f.request.workspaceId).map(v => v.owner)).toEqual([f.request.owner, f.request.owner]);
+  const first = lifecycle.open(f.request, "data");
+  try {
+    writeSync(first.fd, Buffer.from("retained-one"), 0, 12, 4096);
+    refusal(() => lifecycle.claim(next), "volume_busy");
+  } finally { first.close(); }
+  lifecycle.release(f.request, { confirmationId: "native-stop-one", proof: stopProof });
+  lifecycle.claim(next); const second = lifecycle.open(next, "data");
+  try {
+    writeSync(second.fd, Buffer.from("committed-two"), 0, 13, 8192);
+    expect(readFileSync(f.image()).subarray(4096, 4108).toString()).toBe("retained-one");
+    expect(readFileSync(f.image()).subarray(8192, 8205).toString()).toBe("committed-two");
+  } finally { second.close(); }
+});

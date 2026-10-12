@@ -232,8 +232,10 @@ export class CoworkVolumes {
     return this.records(request.workspaceId);
   }
   /** Claim both images atomically before native launch. File validation/exclusion is repeated on every
-   * claim/open. Owner persists across close, daemon death and uncertain worker termination. */
+   * claim/open. Owner persists across close, daemon death and uncertain worker termination.
+   * Caller-owned transactions refuse before effects: a nested savepoint is not a durable claim. */
   claim(input: CoworkVolumeRequest): CoworkVolumeRecord[] {
+    if (this.rs.db.inTransaction) fail("invalid_request");
     return this.rs.transaction(() => {
       const { request, homeId } = this.admit("claim", input), volumes = this.records(request.workspaceId);
       if (volumes.length !== 2) fail("recovery_required");
@@ -258,6 +260,7 @@ export class CoworkVolumes {
   /** Returns a pinned O_CLOEXEC descriptor, never a raw-path grant. Native controller must transfer it
    * explicitly to its authenticated worker. Descriptor closure does not prove worker termination. */
   open(input: CoworkVolumeRequest, purpose: VolumePurpose): { volume: CoworkVolumeRecord; fd: number; close(): void } {
+    if (this.rs.db.inTransaction) fail("invalid_request");
     return this.rs.transaction(() => {
       const { request, homeId } = this.admit("open", input), volume = this.records(request.workspaceId).find(v => v.purpose === purpose);
       if (!volume) fail("not_found");
@@ -270,6 +273,7 @@ export class CoworkVolumes {
     }, { mode: "immediate" });
   }
   release(input: CoworkVolumeRequest, stop: CoworkVolumeStop): void {
+    if (this.rs.db.inTransaction) fail("invalid_request");
     this.rs.transaction(() => {
       const { request } = this.admit("release", input), volumes = this.records(request.workspaceId);
       token(stop.confirmationId);
