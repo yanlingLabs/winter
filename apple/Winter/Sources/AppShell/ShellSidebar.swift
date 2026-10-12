@@ -1613,6 +1613,10 @@ struct ShellSidebar: View {
                 // No Spacer after it: the title box itself takes the free width (a Spacer would
                 // split it and start the fade half a row early).
                 FadingTitleText(text: sessionDisplayTitle(row.title), font: Typography.body())
+                // ComputerV2 wake triggers: Winter is waiting for the user in this session.
+                if (row.wakesArmed ?? 0) > 0 {
+                    WakeWaitingMark()
+                }
                 if let style = recentsActivityDotStyle(row.activity) {
                     Circle()
                         .fill(activityChipColor(style))

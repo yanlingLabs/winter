@@ -60,6 +60,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     case panelCommand(PanelCommand)
     case providerLoginProgress(ProviderLoginProgress)
     case providerLoginFinished(ProviderLoginFinished)
+    case wakeArmed(WakeArmed)
+    case wakeEnded(WakeEnded)
 
     public struct SessionCreated: Codable, Equatable, Sendable {
         public let seq: Int
@@ -904,6 +906,35 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let resultSummary: String?
     }
 
+    /// ComputerV2 wake triggers (2026-10-12): the session's model armed a trigger on a bound app or tab
+    /// (`wakeWhen`) — Winter waits for the USER to click, submit, … PERSISTED, and broadcast to every harness like
+    /// `session_titled` (the session list's mark). `condition` is the kind (`clicked`, `submitted`, `navigated`,
+    /// `appeared`, `gone`, `changed`, `titled`) as a plain String, validated on the TS side; the two labels are what
+    /// the user sees (screen-derived, ≤ 200, never the model's note). `expiresAt`: epoch ms.
+    public struct WakeArmed: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let wakeId: String
+        public let condition: String
+        public let targetLabel: String
+        public let elementLabel: String?
+        public let expiresAt: Int
+    }
+
+    /// ComputerV2 wake triggers: a trigger ended — `fired`, `lost`, `expired`, `cancelled`, `restart` or
+    /// `disabled` (a plain String). `at`: epoch ms.
+    public struct WakeEnded: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let wakeId: String
+        public let reason: String
+        public let at: Int
+    }
+
     /// CC-parity phase 3 (Workflows, Track D Task D1): the wire counterpart of WorkflowRuntime's
     /// internal `WorkflowRuntimeEvent` (core's `workflows/runtime.ts`) — the daemon's `onEvent`
     /// bridge maps its `started`/`progress`/`completed`/`failed` variants onto these 4 events so an
@@ -1151,6 +1182,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case panel_command
         case provider_login_progress
         case provider_login_finished
+        case wake_armed
+        case wake_ended
     }
 
     private enum TypeKey: String, CodingKey { case type }
@@ -1217,6 +1250,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case .panel_command:        self = .panelCommand(try PanelCommand(from: decoder))
         case .provider_login_progress: self = .providerLoginProgress(try ProviderLoginProgress(from: decoder))
         case .provider_login_finished: self = .providerLoginFinished(try ProviderLoginFinished(from: decoder))
+        case .wake_armed:           self = .wakeArmed(try WakeArmed(from: decoder))
+        case .wake_ended:           self = .wakeEnded(try WakeEnded(from: decoder))
         }
     }
 
@@ -1410,6 +1445,14 @@ public enum SessionEvent: Codable, Equatable, Sendable {
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)
             try c.encode(Discriminator.child_update.rawValue, forKey: .type)
+        case .wakeArmed(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.wake_armed.rawValue, forKey: .type)
+        case .wakeEnded(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.wake_ended.rawValue, forKey: .type)
         case .workflowStarted(let v):
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)

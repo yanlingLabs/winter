@@ -106,6 +106,9 @@ struct ModeLandingView: View {
         SessionListRow(title: sessionDisplayTitle(row.title),
                        date: sessionListDate(row.createdAt),
                        action: { nav.navigate(to: .session(row.sessionId)) }) {
+            if (row.wakesArmed ?? 0) > 0 {
+                WakeWaitingMark(showsLabel: true)
+            }
             if landingRowShowsResumeAffordance(tab) {
                 resumeAffordance
             } else {

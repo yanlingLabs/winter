@@ -269,6 +269,12 @@ struct WindowContentView<Accessory: View>: View {
             // flow would just move the hard edge up by their height.
             .modifier(ComposerClusterPlacement(floats: topBleed > 0, height: $composerClusterHeight) {
                 VStack(spacing: 10) {
+                    // ComputerV2 wake triggers (2026-10-12): Winter is waiting for the user — always in sight
+                    // while a trigger is armed, with the way to stop it.
+                    if !adapter.armedWakes.isEmpty {
+                        WakeWaitingPills(wakes: adapter.armedWakes, onStop: adapter.onStopWaiting)
+                            .frame(maxWidth: newChatCardWidth)
+                    }
                     // The task list FLOATS just above the composer (2026-09-17), as its own card at
                     // the composer's width.
                     if !adapter.pinnedTasks.isEmpty {

@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 84, "expected 84 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 87, "expected 87 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 
@@ -20,6 +20,27 @@ final class RoundTripTests: XCTestCase {
             let obj = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
             XCTAssertNotNil(obj?["type"] as? String, "re-encoded JSON lost the type discriminator for \(url.lastPathComponent)")
         }
+    }
+
+    /// ComputerV2 wake triggers (2026-10-12): the pair decodes field for field, the element label present and absent.
+    func testWakeTriggerPairDecodes() throws {
+        func load(_ name: String) throws -> SessionEvent {
+            let url = try XCTUnwrap(Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Fixtures"))
+            return try JSONDecoder().decode(SessionEvent.self, from: Data(contentsOf: url))
+        }
+        guard case .wakeArmed(let armed) = try load("wake_armed") else { return XCTFail("wake_armed did not decode as .wakeArmed") }
+        XCTAssertEqual(armed.wakeId, "wk_1a2b3c4d5e6f")
+        XCTAssertEqual(armed.condition, "clicked")
+        XCTAssertEqual(armed.targetLabel, "Chrome — Developer Dashboard")
+        XCTAssertEqual(armed.elementLabel, "button “Submit for review”")
+        XCTAssertEqual(armed.expiresAt, 1781273600000)
+        guard case .wakeArmed(let page) = try load("wake_armed_page") else { return XCTFail("wake_armed_page did not decode") }
+        XCTAssertNil(page.elementLabel)
+        XCTAssertEqual(page.condition, "navigated")
+        guard case .wakeEnded(let ended) = try load("wake_ended") else { return XCTFail("wake_ended did not decode as .wakeEnded") }
+        XCTAssertEqual(ended.reason, "fired")
+        XCTAssertEqual(ended.at, 1781270460000)
+        XCTAssertFalse(SessionEvent.wakeEnded(ended).isTransient)
     }
 
     func testUnknownDiscriminatorFailsLoudly() throws {
