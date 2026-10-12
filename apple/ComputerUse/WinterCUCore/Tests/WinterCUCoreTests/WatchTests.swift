@@ -547,6 +547,18 @@ final class WatcherLiveSeamTests: XCTestCase {
         XCTAssertEqual(watcher.armedCount, 0)
     }
 
+    func testATitleWatchReadsTheTitleAloneNeverTheTree() async throws {
+        var reads = 0
+        watcher.liveState?.treeRead = { _ in reads += 1; return [] }
+        _ = try await arm("wk_t", .init(kind: "titled", title: "Sent"))
+        await watcher.evaluate(pid: pid)
+        XCTAssertTrue(sink.events.isEmpty)
+        ax.put(window, [kAXTitleAttribute: "Inbox — Message Sent"])
+        await watcher.evaluate(pid: pid)
+        XCTAssertEqual(sink.events.map(\.detail), ["title now \u{201C}Inbox — Message Sent\u{201D}"])
+        XCTAssertEqual(reads, 0)
+    }
+
     func testTheAppQuittingLosesTheWatch() async throws {
         _ = try await arm("wk_q", .init(kind: "titled", title: "Done"))
         sys.running = []

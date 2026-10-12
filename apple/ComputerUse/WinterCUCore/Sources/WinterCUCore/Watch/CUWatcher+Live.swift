@@ -111,6 +111,8 @@ extension CUCore {
                 ready.elementInfo = Self.watchElementInfo(e, ax: ax)
                 if case .changed = condition { ready.valueDigest = CUWatchText.digest(Self.watchValue(e, ax: ax)) }
                 if case .goneRef = condition { ready.met = !ax.isAlive(e) }
+            } else if case .titled = condition {
+                ready.met = Self.watchStateMet(condition, roots: [], title: title)
             } else {
                 ready.met = Self.watchStateMet(condition, roots: state.read(window, refs: refs, clock: clock), title: title)
             }
@@ -143,10 +145,14 @@ extension CUCore {
                     o.valueDigest = CUWatchText.digest(Self.watchValue(e, ax: ax))
                     o.userEvidence = sys.frontmostPid() == s.pid && Self.watchFocusInside(e, pid: s.pid, ax: ax)
                 }
-            case .appeared, .goneText, .titled:
+            case .titled:
+                // The title alone: no tree read (an hours-long watch on a large page stays cheap).
+                let title = ax.string(reading.window, kAXTitleAttribute) ?? ""
+                o.met = Self.watchStateMet(s.condition, roots: [], title: title)
+                o.title = title
+            case .appeared, .goneText:
                 let title = ax.string(reading.window, kAXTitleAttribute) ?? ""
                 o.met = Self.watchStateMet(s.condition, roots: state.read(reading.window, refs: reading.refs, clock: clock), title: title)
-                o.title = title
             }
             return o
         }
