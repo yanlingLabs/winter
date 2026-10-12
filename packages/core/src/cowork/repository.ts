@@ -101,9 +101,18 @@ export class CoworkRepository {
     const changed = this.run("UPDATE cowork_operations SET status=?,updated_at=? WHERE workspace_id=? AND operation_id=? AND status='pending'", status, this.now(), workspaceId, operationId);
     if (changed.changes) this.publish(workspaceId, operationId, "workspace_operation_changed", { operationId, status, terminal: true, ...(supersededBy ? { supersededBy } : {}) });
   }
+  /** Exact immutable receipt lookup only; caller must reauthorize live workspace/grants. */
+  replay<T>(context: MutationContext, method: string, scope: string): MutationReceipt<T> | undefined {
+    if (context.requestDigestInput === undefined) throw new CoworkError("invalid_request");
+    id(context.principalId); id(context.requestId); method = id(context.method ?? method); id(scope);
+    const previous = this.one("SELECT request_digest,result_json FROM cowork_operations WHERE principal_id=? AND method=? AND scope=? AND request_id=?", context.principalId, method, scope, context.requestId);
+    if (!previous) return undefined;
+    if (previous.request_digest !== digest({ input: context.requestDigestInput, expectedRevision: context.expectedRevision ?? null })) throw new CoworkError("request_conflict");
+    return JSON.parse(previous.result_json) as MutationReceipt<T>;
+  }
   private mutate<T>(context: MutationContext, method: string, scope: string, input: unknown, body: () => { workspaceId: string; value: T; kind: string; payload?: unknown; changedSources?: string[]; applied?: boolean }): MutationReceipt<T> {
     id(context.principalId); id(context.requestId); method = id(context.method ?? method);
-    const requestDigest = digest({ input, expectedRevision: context.expectedRevision ?? null });
+    const requestDigest = digest({ input: context.requestDigestInput ?? input, expectedRevision: context.expectedRevision ?? null });
     return this.rs.transaction(() => {
       const previous = this.one("SELECT request_digest,result_json FROM cowork_operations WHERE principal_id=? AND method=? AND scope=? AND request_id=?", context.principalId, method, scope, context.requestId);
       if (previous) {
@@ -143,6 +152,7 @@ export class CoworkRepository {
       this.run("INSERT INTO cowork_policies VALUES(?,?,?,?,?,1,1,1)", workspaceId, this.mint("policy"), normalized.defaultPolicy, "github-only-feature-branches", canonical(normalized.ceiling));
       if (input.ownership === "project") this.run("INSERT INTO cowork_projects VALUES(?,?,?)", ownerId, workspaceId, at);
       const sources = normalized.sources.map(value => this.insertSource(workspaceId, value));
+      context.bindSources?.(sources);
       return { workspaceId, value: { workspace: this.get(workspaceId), sources, policy: this.policy(workspaceId), automaticPublication: this.githubOnly(workspaceId) }, kind: "workspace_created", payload: { ownership: input.ownership }, changedSources: sources.map(value => value.sourceId) };
     });
   }
@@ -150,7 +160,7 @@ export class CoworkRepository {
     const normalized = selection(input);
     return this.mutate(context, "workspace.source.add", id(workspaceId), normalized, () => {
       if (this.sources(workspaceId).filter(value => value.state !== "detached").length >= 100) throw new CoworkError("invalid_request");
-      const value = this.insertSource(workspaceId, normalized); this.advance(workspaceId, true);
+      const value = this.insertSource(workspaceId, normalized); context.bindSources?.([value]); this.advance(workspaceId, true);
       return { workspaceId, value, kind: "workspace_sources_changed", payload: { sourceId: value.sourceId, state: value.state }, changedSources: [value.sourceId] };
     });
   }
@@ -164,6 +174,8 @@ export class CoworkRepository {
         if (others.length < 1 || (targetUsableOrPreparing && !others.some(value => value.state === "ready" || value.state === "preparing"))) throw new CoworkError("last_source_required");
       }
       const desired = revoke ? current.desired : "removed";
+      // Narrow durable authority in the same transaction as desired source state/outbox.
+      this.run("UPDATE cowork_folder_grants SET state='revoked',bookmark=X'',root_path='',revision=revision+1,updated_at=? WHERE workspace_id=? AND source_id=? AND state='active'", this.now(), workspaceId, sourceId);
       this.run("UPDATE cowork_sources SET desired=?,state=?,revision=revision+1,ack_revision=NULL,ack_incarnation_id=NULL,reason=?,restart_required=1,trust='revoked',updated_at=? WHERE source_id=?", desired, desired === "removed" ? "removing" : "unavailable", revoke ? "access_revoked" : null, this.now(), sourceId);
       this.advance(workspaceId, true);
       return { workspaceId, value: this.source(workspaceId, sourceId), kind: "workspace_sources_changed", payload: { sourceId, revoked: revoke }, changedSources: [sourceId] };

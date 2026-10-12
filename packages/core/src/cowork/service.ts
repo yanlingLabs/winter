@@ -106,6 +106,24 @@ export class CoworkWorkspaceService {
     this.authority.requireSelection(principal, selected);
     return selected;
   }
+  private requireReplaySources(principal: CoworkPrincipal, workspaceId: string, sources: readonly WorkspaceSource[]): void {
+    assertRemoteMayUseWorkspace(this.records, this.authority, principal, workspaceId);
+    for (const recorded of sources) {
+      const current = this.records.source(workspaceId, recorded.sourceId);
+      if (current.desired !== "present" || current.trust === "revoked" || ["removing", "detached"].includes(current.state)) throw new CoworkError("authority_denied");
+      this.authority.requireSelection(principal, current);
+    }
+  }
+  private consumption(principal: CoworkPrincipal, connection: CoworkConnection, ids: readonly { selectionId: string; kind: string }[]) {
+    // Ephemeral cleanup is after COMMIT: nested caller transactions cannot own this boundary.
+    if (this.records.rs.db.inTransaction) throw new CoworkError("authority_denied");
+    const pending = ids.map(value => value.kind === "folder" && this.host.selections
+      ? this.host.selections.prepareConsumption(principal, connection.connectionId, value.selectionId) : undefined);
+    return {
+      bind: (sources: readonly WorkspaceSource[]) => { if (sources.length !== pending.length) throw new CoworkError("authority_denied"); sources.forEach((source, index) => pending[index]?.bind(source)); },
+      committed: () => pending.forEach(value => value?.committed()),
+    };
+  }
   private context(principal: CoworkPrincipal, method: CoworkMethod, request: { requestId: string; expectedRevision?: number }, allowOversizedRecovery = false, admitMutation?: MutationContext["admitMutation"]): MutationContext {
     return { principalId: principal.id, method, requestId: request.requestId, expectedRevision: request.expectedRevision, admitMutation,
       validateReceipt: receipt => {
@@ -147,6 +165,7 @@ export class CoworkWorkspaceService {
   call<M extends CoworkMethod>(connection: CoworkConnection, method: M, raw: unknown): CoworkResult<M> {
     const principal = this.host.principal(connection);
     if (!principal || principal.kind === "runtime" || !["harness", "admin", "remote"].includes(connection.role) || (connection.role === "remote" ? principal.kind !== "paired-user" : principal.kind !== "local-user")) throw new CoworkError("authority_denied");
+    if (this.records.rs.db.inTransaction && ["workspace.create", "project.create", "workspace.source.addFolder", "workspace.source.addRepository"].includes(method)) throw new CoworkError("authority_denied");
     try {
       const result = this.execute(principal, method, raw, connection);
       this.checkedResponse(method, result);
@@ -193,6 +212,12 @@ export class CoworkWorkspaceService {
       }
       case "workspace.create": case "project.create": {
         const p = method === "workspace.create" ? COWORK_RPC[method].params.parse(raw) : { ...COWORK_RPC[method].params.parse(raw), ownership: "project" as const };
+        const context = this.context(principal, method, p); context.requestDigestInput = p;
+        const previous = this.records.replay<ReturnType<CoworkRepository["create"]>["value"]>(context, method, "new");
+        if (previous) {
+          this.requireReplaySources(principal, previous.workspaceId, previous.value.sources);
+          return { ...previous, value: WorkspaceDto.parse({ ...projectWorkspace(previous.value.workspace), detailState: "complete", sources: previous.value.sources.map(projectSource), policy: previous.value.policy, automaticPublication: previous.value.automaticPublication }) };
+        }
         this.host.requireProvisioning(principal);
         // Persisted peer ownership/creation admission is a later gate. Never create an inaccessible
         // workspace and retroactively mutate a connection's grant set after the DB commit.
@@ -200,7 +225,9 @@ export class CoworkWorkspaceService {
         const ceiling = this.host.creationCeiling(principal);
         if (!ceiling) throw new CoworkError("authority_denied");
         const sources = p.selections.map(value => this.select(principal, value.selectionId, value.kind, connection));
-        const receipt = this.records.create(this.context(principal, method, p), { ownership: p.ownership, title: p.title, sources, ceiling });
+        const consumption = this.consumption(principal, connection, p.selections); context.bindSources = consumption.bind;
+        const receipt = this.records.create(context, { ownership: p.ownership, title: p.title, sources, ceiling });
+        consumption.committed();
         return { ...receipt, value: WorkspaceDto.parse({ ...projectWorkspace(receipt.value.workspace), detailState: "complete", sources: receipt.value.sources.map(projectSource), policy: receipt.value.policy, automaticPublication: receipt.value.automaticPublication }) };
       }
       case "workspace.update": case "project.update": {
@@ -239,9 +266,14 @@ export class CoworkWorkspaceService {
         const p = COWORK_RPC[method].params.parse(raw);
         // Paired additions require both current workspace membership and admitted repository authority.
         assertRemoteMayUseWorkspace(this.records, this.authority, principal, p.workspaceId, method === "workspace.source.addFolder" ? "admin" : "member");
+        const context = this.context(principal, method, p); context.requestDigestInput = p;
+        const previous = this.records.replay<WorkspaceSource>(context, method, p.workspaceId);
+        if (previous) { this.requireReplaySources(principal, p.workspaceId, [previous.value]); return { ...previous, value: projectSource(previous.value) }; }
         this.host.requireProvisioning(principal);
         const selected = this.select(principal, p.selectionId, method === "workspace.source.addFolder" ? "folder" : "githubRepository", connection);
-        const receipt = this.records.addSource(this.context(principal, method, p), p.workspaceId, selected);
+        const consumption = this.consumption(principal, connection, [{ selectionId: p.selectionId, kind: selected.kind }]); context.bindSources = consumption.bind;
+        const receipt = this.records.addSource(context, p.workspaceId, selected);
+        consumption.committed();
         return { ...receipt, value: projectSource(receipt.value) };
       }
       case "workspace.source.remove": case "workspace.source.revoke": {
