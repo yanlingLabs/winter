@@ -1450,6 +1450,7 @@ export async function startDaemon(opts: {
     // on what "this session's working directories" means.
     office: {
       office: {
+        home: winterHome,
         dispatch: (cmd) => panelCommands.dispatch(cmd),
         harnesses: (sid) => hub.attachedHarnesses(sid),
         dirsOf: (sid) => store.dirs(sid),
@@ -1462,7 +1463,7 @@ export async function startDaemon(opts: {
     // the `web` server left earlier, with the 2026-09-18 ruling.
     // Fix wave (review F7): the `lsp` tool over the SAME `let lspManager` holder the registry
     // door and `settings-apply.ts`'s hot `lsp.enabled` flip reassign — read per call.
-    lsp: { lsp: () => lspManager ?? undefined },
+    lsp: { home: winterHome, lsp: () => lspManager ?? undefined },
     // P8c integration round 2: the `external` capability server's real source
     // (`capabilities/external.ts`'s own header names the design). `sharedRegistry` is the SAME
     // `ToolRegistry` `tool.register` (ipc/server.ts) writes `plugin__<pluginId>__<name>` rows into
@@ -1873,7 +1874,7 @@ export async function startDaemon(opts: {
   };
   const hookFacade = new HookFacade({
     registry: hookRegistry,
-    runner: new HookRunner(),
+    runner: new HookRunner({ home: winterHome }),
     hooksEnabled: winterHooksEnabled,
     cwdForSession: (sid) => { try { return store.meta(sid).cwd ?? undefined; } catch { return undefined; } },
   });
@@ -2459,7 +2460,7 @@ export async function startDaemon(opts: {
       writeDiff(winterHome, sid, diffId, header, patch);
     // Minor 5e (fix wave): `lspEnabledFrom` — the ONE reader, see this const's own doc comment.
     if (settings ? lspEnabledFrom(settings) : true) {
-      lspManager = new LspManager({ idleShutdownMs: lspCfg?.idleShutdownMs });
+      lspManager = new LspManager({ home: winterHome, idleShutdownMs: lspCfg?.idleShutdownMs });
     }
     // MEDIUM (fix wave, pre-merge review, finding 3): the same live `() => settings` closure this
     // file uses everywhere else — `doEnsureProject` reads it on every `ensureProject` call, never a
@@ -2676,7 +2677,7 @@ export async function startDaemon(opts: {
         computerUse = undefined;
       },
       computerInFlight: () => computerUse?.inFlight() ?? false,
-      buildLspManager: (s) => new LspManager({ idleShutdownMs: s?.lsp?.idleShutdownMs }),
+      buildLspManager: (s) => new LspManager({ home: winterHome, idleShutdownMs: s?.lsp?.idleShutdownMs }),
       registerLsp: (mgr) => {
         // Fix wave (review F7): the `lsp` CAPABILITY server reads this holder per call, so
         // reassigning it IS the hot re-enable — the next `lsp` call on any session finds the new

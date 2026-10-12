@@ -1,5 +1,6 @@
+import { assertDaemonPathAccess, readDaemonTextFile } from "../../runtime-sdk/daemon-path-fence";
 import { z } from "zod";
-import { readFileSync, readdirSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import type { ToolDefinition, ToolRegistry } from "./registry";
 import { resolveWithinAny } from "../paths";
 import { LspManager, languageForPath, type LspLanguage } from "../lsp/manager";
@@ -93,9 +94,9 @@ function readRootsOf(roots: string[], tmpDir?: string): string[] {
   return tmpDir ? [...roots, tmpDir] : roots;
 }
 
-function oneLinePreview(absPath: string, line0: number): string | undefined {
+function oneLinePreview(absPath: string, line0: number, home?: string): string | undefined {
   try {
-    const lines = readFileSync(absPath, "utf8").split("\n");
+    const lines = readDaemonTextFile(home, absPath).split("\n");
     const raw = lines[line0];
     if (raw === undefined) return undefined;
     const trimmed = raw.trim();
@@ -122,13 +123,13 @@ function formatDiagnostics(diags: LspDiagnostic[]): string {
 // original brief's formatting spec). `readRoots` re-applies the SAME fence the tool's own
 // `file_path` arg is held to (see FENCE DISCIPLINE above) — a location outside it is still listed,
 // just never read.
-function formatDefinition(locs: LspLocation[], readRoots: string[], emptyMessage = "no definition found"): string {
+function formatDefinition(locs: LspLocation[], readRoots: string[], emptyMessage = "no definition found", home?: string): string {
   if (locs.length === 0) return emptyMessage;
   const lines = locs.slice(0, DEFINITIONS_CAP).map((loc) => {
     const base = `${loc.path}:${loc.line + 1}:${loc.character + 1}`;
     let safe: string | undefined;
     try { safe = resolveWithinAny(readRoots, loc.path); } catch { /* outside the fence: no preview, location still shown */ }
-    const prev = safe ? oneLinePreview(safe, loc.line) : undefined;
+    const prev = safe ? oneLinePreview(safe, loc.line, home) : undefined;
     return prev ? `${base}  ${prev}` : base;
   });
   const extra = locs.length - DEFINITIONS_CAP;
@@ -171,6 +172,8 @@ async function withNotSupported(fn: () => Promise<string>): Promise<string> {
 }
 
 export interface LspToolDeps {
+  /** Trusted daemon home; never derived from tool arguments. */
+  home?: string;
   /** The daemon's ONE `LspManager`, or a GETTER over its live holder (fix wave, review F7): the
    *  `lsp` capability server is built per session and read per call, so `settings.lsp.enabled`
    *  flipping off mid-session makes the NEXT call refuse ("not available") with no rebuild — the
@@ -229,12 +232,14 @@ export function lspToolDefs(deps: LspToolDeps): ToolDefinition[] {
   function resolvePathAndLanguage(sessionId: string, filePath: string): { abs: string; cwd: string; language: LspLanguage; readRoots: string[] } {
     const readRoots = readRootsOf(rootsOf(sessionId), tmpDirOf?.(sessionId));
     const abs = resolveWithinAny(readRoots, filePath); // throws BEFORE clientFor on an outside-roots path
+    assertDaemonPathAccess(deps.home, abs, "/");
     const language = languageForPath(abs);
     if (!language) {
       throw new Error(`unsupported file extension for LSP: "${filePath}" (supported: ${SUPPORTED_EXTENSIONS.join(", ")})`);
     }
     const cwd = cwdOf(sessionId);
     if (!cwd) throw new Error("no working directory for this session");
+    assertDaemonPathAccess(deps.home, cwd, "/");
     return { abs, cwd, language, readRoots };
   }
 
@@ -261,6 +266,7 @@ export function lspToolDefs(deps: LspToolDeps): ToolDefinition[] {
       if (action === "workspace_symbols") {
         const cwd = cwdOf(sessionId);
         if (!cwd) throw new Error("no working directory for this session");
+        assertDaemonPathAccess(deps.home, cwd, "/");
         const language = detectWorkspaceLanguage(cwd);
         const client = await manager().clientFor(cwd, language); // re-acquired fresh every call — see CALLER CONTRACT above
         return withNotSupported(() => client.workspaceSymbols(symbol!));
@@ -268,7 +274,7 @@ export function lspToolDefs(deps: LspToolDeps): ToolDefinition[] {
 
       const { abs, cwd, language, readRoots } = resolvePathAndLanguage(sessionId, file_path!);
       const client = await manager().clientFor(cwd, language);
-      const text = readFileSync(abs, "utf8"); // the client opens the doc before querying — servers only answer for open docs
+      const text = readDaemonTextFile(deps.home, abs); // the client opens the doc before querying — servers only answer for open docs
 
       switch (action) {
         case "diagnostics": {
@@ -277,12 +283,12 @@ export function lspToolDefs(deps: LspToolDeps): ToolDefinition[] {
         }
         case "definition": {
           const locs = await client.definition(toFileUri(abs), text, line! - 1, character! - 1); // 1-based tool args -> 0-based client
-          return formatDefinition(locs, readRoots);
+          return formatDefinition(locs, readRoots, "no definition found", deps.home);
         }
         case "implementation": {
           return withNotSupported(async () => {
             const locs = await client.implementation(toFileUri(abs), text, line! - 1, character! - 1);
-            return formatDefinition(locs, readRoots, "no implementation found");
+            return formatDefinition(locs, readRoots, "no implementation found", deps.home);
           });
         }
         case "references": {

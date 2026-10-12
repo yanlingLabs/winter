@@ -36,6 +36,7 @@ import { lspToolDefs } from "../agent/tools/lsp";
 import { capabilityServer, type CapabilitySession } from "./server";
 
 export interface LspCapabilityDeps {
+  home?: string;
   /** The daemon's single `LspManager` holder, read per call. `undefined` ⇒ `settings.lsp.enabled`
    *  is false (or the manager was torn down): the tool refuses with "not available". */
   lsp(): LspManager | undefined;
@@ -46,6 +47,7 @@ export function lspCapability(session: CapabilitySession, deps: LspCapabilityDep
     {
       key: "lsp",
       defs: lspToolDefs({
+        home: deps.home,
         lsp: () => deps.lsp(),
         cwdOf: () => session.cwd,
         rootsOf: () => session.roots,

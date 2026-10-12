@@ -35,6 +35,10 @@ export function registerHostStorageFences(home: string, options: HostStorageFenc
   const previous = registered.get(key);
   const registration = { ...options, participatingHomes: [...(options.participatingHomes ?? [])] };
   registered.set(key, registration);
+  try { assertDaemonChildFloorsCoverStorage(); } catch (error) {
+    if (previous) registered.set(key, previous); else registered.delete(key);
+    throw error;
+  }
   return () => {
     if (registered.get(key) !== registration) return;
     if (previous) registered.set(key, previous); else registered.delete(key);
@@ -138,4 +142,34 @@ export function hostStorageFloorDescriptor(home: string, options?: HostStorageFe
   }
   return {denyReadPaths:[...new Set(paths)],denyWritePaths:write,denyReadRegexes:[...new Set(regexes)],denyWriteRegexes:[],
     denyLinkPaths:[...write],protectAncestorsOf:[...write]};
+}
+
+/** Parent close proves only that parent exited: hooks/LSP servers can leave descendants behind.
+ * Retain each inherited floor for the daemon lifetime, including retired direct children. Stable
+ * roots cover new workspaces without transition. A newly protected root with weaker historical
+ * children needs a fresh daemon or a future native descendant-drain receipt; never kill-as-proof. */
+const daemonChildFloors = new Map<string, { home: string; floor: HostStorageFloorDescriptor; live: Set<() => void> }>();
+export function trackDaemonChildFloor(home: string, floor: HostStorageFloorDescriptor, stop: () => void): () => void {
+  const key = JSON.stringify([resolve(home), floor]);
+  let record = daemonChildFloors.get(key);
+  if (!record) {
+    record = { home: resolve(home), floor, live: new Set() };
+    daemonChildFloors.set(key, record);
+  }
+  record.live.add(stop);
+  return () => { record!.live.delete(stop); };
+}
+function assertDaemonChildFloorsCoverStorage(): void {
+  for (const record of daemonChildFloors.values()) {
+    const required = hostStorageFloorDescriptor(record.home);
+    // Equal or stronger inherited floors remain sufficient. Removing a fixture registration
+    // does not invent a new protection requirement; adding new roots never inherits a receipt.
+    const covered = (Object.keys(required) as Array<keyof HostStorageFloorDescriptor>)
+      .every(key => required[key].every(entry => record.floor[key].includes(entry)));
+    if (covered) continue;
+    for (const stop of record.live) { try { stop(); } catch { /* a stop request is not proof */ } }
+    const error = new Error("Daemon child descendants are unconfirmed for newly protected storage; restart with storage registration before child launch");
+    Object.assign(error, { code: "winter_leg_unavailable", reason: "daemon-child-descendants-unconfirmed" });
+    throw error;
+  }
 }

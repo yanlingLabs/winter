@@ -1,3 +1,4 @@
+import type { DaemonChildFloorApplier } from "../../runtime-sdk/daemon-path-fence";
 import { LspClient } from "./client";
 
 // ---------------------------------------------------------------------------------------------
@@ -43,6 +44,10 @@ const DEFAULT_SCHEDULER: LspScheduler = {
 };
 
 export interface LspManagerCfg {
+  /** Daemon-owned home binds child process floors independently of session/tool input. */
+  home?: string;
+  /** Trusted integration-test adapter; daemon uses the installed SDK API. */
+  applyFloor?: DaemonChildFloorApplier;
   /** Inactivity before an idle client is stop()'d and evicted. Default 300_000 (5 min). */
   idleShutdownMs?: number;
   /** Per-language command override — the ONLY way tests inject the fake server instead of a real
@@ -122,7 +127,7 @@ export class LspManager {
   // next clientFor() after a rejection gets a fresh attempt rather than replaying the failure.
   private readonly inFlight = new Map<string, Promise<LspClient>>();
 
-  constructor(cfg: LspManagerCfg = {}) {
+  constructor(private readonly cfg: LspManagerCfg = {}) {
     this.idleShutdownMs = cfg.idleShutdownMs ?? 300_000;
     this.serverCommands = { ...DEFAULT_SERVER_COMMANDS, ...cfg.serverCommands };
     this.scheduler = cfg.scheduler ?? DEFAULT_SCHEDULER;
@@ -212,6 +217,8 @@ export class LspManager {
     const cmd = this.serverCommands[language];
     const tuning = DIAG_TUNING[language];
     const client = new LspClient({
+      home: this.cfg.home,
+      applyFloor: this.cfg.applyFloor,
       command: cmd.command,
       args: cmd.args,
       rootUri: pathToFileUri(workspaceRoot),

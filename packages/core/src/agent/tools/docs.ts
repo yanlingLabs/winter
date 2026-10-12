@@ -1,3 +1,4 @@
+import { assertDaemonPathAccess } from "../../runtime-sdk/daemon-path-fence";
 import { z } from "zod";
 import { OFFICE_DEADLINES_MS, officeCommandArgs, type OfficeCommandAction } from "../../panel/office-commands";
 import type { ToolDefinition, ToolRegistry } from "./registry";
@@ -348,6 +349,8 @@ async function settleOrAbort(
 // ================================================================================================
 
 export interface DocsToolDeps {
+  /** Trusted daemon home; never derived from tool arguments. */
+  home?: string;
   /** `PanelCommandRegistry.dispatch` — identical contract `sheets.ts`/`slides.ts`'s own deps document. */
   dispatch(cmd: {
     sessionId: string;
@@ -593,6 +596,8 @@ export function docsToolDefs(deps: DocsToolDeps): ToolDefinition[] {
         throw new Error(`path is outside the allowed directories: ${a.path}. Winter's office tools `
           + "are limited to the session's working directories.");
       }
+
+      assertDaemonPathAccess(deps.home, resolvedPath, "/", a.verb === "info" || a.verb === "read" ? "read" : "write");
 
       // Rung 3 — reach (the only TRANSIENT rung, checked last).
       const reach = officeReach(deps, sessionId);

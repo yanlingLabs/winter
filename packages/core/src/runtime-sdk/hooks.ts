@@ -1,3 +1,4 @@
+import { assertDaemonPathAccess, readDaemonTextFile } from "./daemon-path-fence";
 // Phase 8c Lane 3, Tasks 3.2-3.4 — the Winter-leg `Options.hooks` wiring, gated on the P8c-7
 // measurement (`test/runtime-sdk/hooks-measure.e2e.test.ts`: measured = YES — a real spawned
 // `winter` child round-trips `PreToolUse`/`PostToolUse` callbacks through the wrapper's stdio
@@ -1441,6 +1442,7 @@ function fileDiffPreToolUseHook(deps: SessionHooksDeps, pending: Map<string, Pen
     pending.delete(pre.tool_use_id);
     try {
       const abs = resolveWithinAny(readRootsOf(deps.roots, deps.tmpDir), rawPath);
+      assertDaemonPathAccess(deps.home, abs, "/");
       let before = "";
       try {
         const st = statSync(abs);
@@ -1449,7 +1451,7 @@ function fileDiffPreToolUseHook(deps: SessionHooksDeps, pending: Map<string, Pen
         // the cap is still read as "utf8" and diffed as text (same as the retired engine's
         // `diff-report.ts`/`fs-write.ts` never special-cased binary content either); a genuinely
         // binary target just produces a noisy/garbled patch rather than a wrong one.
-        before = readFileSync(abs, "utf8");
+        before = readDaemonTextFile(deps.home, abs);
       } catch {
         before = ""; // missing/unreadable → "" (new-file Write, or a target that never resolves)
       }
@@ -1478,7 +1480,7 @@ function fileDiffPostToolUseHook(deps: SessionHooksDeps, pending: Map<string, Pe
     if (!snapshot || !deps.home) return allow();
     try {
       const abs = resolveWithinAny(readRootsOf(deps.roots, deps.tmpDir), snapshot.path);
-      const after = readFileSync(abs, "utf8");
+      const after = readDaemonTextFile(deps.home, abs);
       const { patch, added, removed } = computeLineDiff(snapshot.before, after);
       if (added === 0 && removed === 0) return allow(); // no-op — no chip, no patch file
       const diffId = mintDiffId();
@@ -1505,6 +1507,7 @@ function diagnosticsPostToolUseHook(deps: SessionHooksDeps): HookCallback {
     if (!AUTO_DIAG_TOOL_NAMES.has(post.tool_name)) return allow();
     const suffix = await autoDiagnosticsSuffix({
       lsp: mgr,
+      home: deps.home,
       toolName: post.tool_name,
       toolInput: post.tool_input,
       cwd: post.cwd,
