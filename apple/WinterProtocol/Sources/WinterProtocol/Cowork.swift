@@ -109,6 +109,9 @@ public struct CoworkReceipt<Value: Codable & Equatable & Sendable>: Codable, Equ
 }
 public struct CoworkOperation: Codable, Equatable, Sendable {
     public let operationId: String, workspaceId: String, revision: Int, status: String, terminal: Bool
+    public init(operationId: String, workspaceId: String, revision: Int, status: String, terminal: Bool) {
+        self.operationId = operationId; self.workspaceId = workspaceId; self.revision = revision; self.status = status; self.terminal = terminal
+    }
 }
 public struct CoworkSelection: Codable, Equatable, Sendable {
     public let selectionId: String, kind: CoworkSourceKind

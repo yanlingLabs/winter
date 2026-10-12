@@ -286,6 +286,9 @@ final class ShellSessionHost: ObservableObject {
     /// `nil` (additive, defaulted) in every test that doesn't drive a roster verb or the create flow.
     private let managementClient: WinterClient?
 
+    /// Safe metadata management on the existing non-attaching connection. No execution door.
+    let coworkWorkspaces: CoworkWorkspaceModel?
+
     /// app-shell T4: per-session in-flight/refusal bookkeeping for roster verbs issued from a
     /// LANDING list — keyed by sessionId, unlike `attachment.adapter`'s single-session fields
     /// (`activityChangeInFlight`/`activityRefusal`), because a landing can have several rows'
@@ -373,6 +376,7 @@ final class ShellSessionHost: ObservableObject {
         self.directory = directory
         self.hub = hub
         self.managementClient = managementClient
+        self.coworkWorkspaces = managementClient.map { CoworkWorkspaceModel(client: $0) }
         self.outputsWatcher = outputsWatcher
         let previousOnChange = outputsWatcher?.onChange
         outputsWatcher?.onChange = { [weak self] sessionId, files in
