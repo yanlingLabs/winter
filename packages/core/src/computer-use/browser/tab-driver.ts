@@ -236,6 +236,13 @@ export class TabDriver {
   /** When the open page dialog opened, and whether Winter's own input was in flight then. */
   private dialogAt = 0;
   private dialogOwn = false;
+  /** The open dialog is kept held for the session a wake trigger woke over it (`keepDialog`), until it closes. */
+  private dialogKept = false;
+  /** A held-back release with no holder left goes after this long anyway (a dialog nobody answers). */
+  private deferredTimer?: ReturnType<typeof setTimeout>;
+  /** Wake triggers: told when the drop to watch-only is held back by a page dialog the user raised that the built-in
+   *  browser holds unseen — the page is paused on it, and only a woken session can read and answer it. */
+  readonly pausedListeners = new Set<() => void>();
   /** When a wake trigger on this tab last fired on the user's own action (the backend says). */
   private userFiredAt = -Infinity;
   private ownInputDepth = 0;
@@ -333,7 +340,7 @@ export class TabDriver {
     if (this.gone !== undefined) throw this.lost();
     if (this.releasing !== undefined) await this.releasing;
     this.holders.add(sessionId);
-    this.deferredLeave = false;
+    this.clearDeferred();
     if (!isWakeHolder(sessionId)) this.lastUsed = this.now();
     if (this.attached) { await this.syncMode(); return; }
     this.attaching ??= (async () => {
@@ -429,7 +436,7 @@ export class TabDriver {
     if (!this.attached) return;
     // Only wake holders left: the tab drops back to watch-only.
     if (this.holders.size > 0) { await this.syncMode(); return; }
-    if (this.keepsDialogHeld()) { this.deferredLeave = true; return; }
+    if (this.keepsDialogHeld()) { this.deferLeave(); return; }
     await this.detachNow();
   }
 
@@ -437,7 +444,7 @@ export class TabDriver {
     if (!this.attached || this.holders.size > 0) return;
     this.attached = false;
     this.watchMode = false;
-    this.deferredLeave = false;
+    this.clearDeferred();
     this.overlay(false);
     this.resetDocumentState(false);
     this.releasing = (async () => {
@@ -484,7 +491,13 @@ export class TabDriver {
         const want = this.watchOnlyWanted;
         if (want === this.watchMode) return;
         if (want) {
-          if (this.keepsDialogHeld()) { this.deferredLeave = true; return; }
+          if (this.keepsDialogHeld()) {
+            this.deferLeave();
+            // The page is paused on a dialog Winter's browser holds unseen: the waits on it can't go on — their
+            // backend wakes the session over it (and keeps it held for that session).
+            for (const l of [...this.pausedListeners]) { try { l(); } catch { /* a listener never breaks the driver */ } }
+            return;
+          }
           await this.enterWatch();
         } else {
           await this.leaveWatch();
@@ -498,7 +511,7 @@ export class TabDriver {
 
   private async enterWatch(): Promise<void> {
     this.watchMode = true;
-    this.deferredLeave = false;
+    this.clearDeferred();
     this.overlay(false);
     const holder = [...this.holders][0]!;
     // The built-in browser first: Winter.app's native-UI holds come off (the page's dialogs, prompts, file choosers,
@@ -527,14 +540,37 @@ export class TabDriver {
 
   /**
    * Would letting go of the hold now (a full detach, or the drop to watch-only) dismiss a page dialog the USER raised?
-   * The built-in browser holds a dialog unseen while it holds the tab, and taking its native-UI holds off dismisses it
-   * as Cancel. So a dialog that opened outside Winter's own input, around a wake trigger firing on the user's action
-   * (their submit's confirm(), say), is kept: the session it wakes reads it in state() and answers it — the wake path
-   * never cancels it. Any other dialog goes as it always did.
+   * The built-in browser holds a dialog unseen while it fully holds the tab, and taking its native-UI holds off
+   * dismisses it as Cancel. So a dialog that opened outside Winter's own input is kept while a wake trigger waits on the
+   * tab (the user acted there while the arming run still held it: their submit's confirm(), say — its wake's report is
+   * stuck behind the paused page), for the session a trigger woke over it (`keepDialog`), and around a trigger firing on
+   * the user's action: that session reads it in state() and answers it — the wake path never cancels it. Any other
+   * dialog goes as it always did (a cancelled wait's included).
    */
   private keepsDialogHeld(): boolean {
     if (this.transport.family !== "winter" || this.watchMode || this.dialog === undefined || this.dialogOwn) return false;
-    return Math.abs(this.dialogAt - this.userFiredAt) <= WAKE_DIALOG_KEEP_MS;
+    return this.wakeHolders.size > 0 || this.dialogKept || Math.abs(this.dialogAt - this.userFiredAt) <= WAKE_DIALOG_KEEP_MS;
+  }
+
+  /** The backend woke a session over the open dialog: it stays held for that session until it closes. */
+  keepDialog(): void { if (this.dialog !== undefined) this.dialogKept = true; }
+
+  /** Is the open dialog one the built-in browser holds unseen (a full hold) that the user raised? */
+  get dialogHeldUnseen(): { type: string } | undefined {
+    if (this.transport.family !== "winter" || !this.attached || this.watchMode || this.dialog === undefined || this.dialogOwn) return undefined;
+    return { type: this.dialog.type };
+  }
+
+  private deferLeave(): void {
+    this.deferredLeave = true;
+    if (this.holders.size > 0 || this.deferredTimer !== undefined) return;
+    // Nobody holds it any more: a dialog nobody answers is let go (dismissed) after a while all the same.
+    this.deferredTimer = setTimeout(() => { this.deferredTimer = undefined; if (this.deferredLeave && this.holders.size === 0) void this.detachNow(); }, WAKE_DIALOG_HOLD_MAX_MS);
+  }
+
+  private clearDeferred(): void {
+    this.deferredLeave = false;
+    if (this.deferredTimer !== undefined) { clearTimeout(this.deferredTimer); this.deferredTimer = undefined; }
   }
 
   /** The backend: a wake trigger on this tab fired on the user's own action at `at`. */
@@ -544,8 +580,9 @@ export class TabDriver {
 
   /** A held-back release or drop to watch-only, once the dialog that held it back closed. */
   private settleDeferred(): void {
+    this.dialogKept = false;
     if (!this.deferredLeave) return;
-    this.deferredLeave = false;
+    this.clearDeferred();
     if (this.holders.size === 0) void this.detachNow();
     else void this.syncMode();
   }
@@ -654,6 +691,7 @@ export class TabDriver {
         const okRef = this.nextRef++;
         this.dialogAt = this.now();
         this.dialogOwn = this.ownInputNow;
+        this.dialogKept = false;
         this.dialog = {
           type, message: typeof p.message === "string" ? p.message : "", okRef,
           ...(type === "alert" ? {} : { cancelRef: this.nextRef++ }),
@@ -743,7 +781,7 @@ export class TabDriver {
       case "Inspector.detached":
         // The tab's debugger was let go (idle, or the target swapped) while the tab lives: attach again on the next
         // primitive; its world, and so every ref, will be new.
-        if (session === undefined) { this.attached = false; this.watchMode = false; this.deferredLeave = false; this.detaches++; this.holders.clear(); this.resetDocumentState(true); }
+        if (session === undefined) { this.attached = false; this.watchMode = false; this.clearDeferred(); this.detaches++; this.holders.clear(); this.resetDocumentState(true); }
         break;
       default:
         break;
@@ -768,7 +806,7 @@ export class TabDriver {
       // itself may live on — the next primitive attaches again; its document (and so every ref) is new.
       this.attached = false;
       this.watchMode = false;
-      this.deferredLeave = false;
+      this.clearDeferred();
       this.detaches++;
       this.holders.clear();
       this.resetDocumentState(true);
@@ -2090,6 +2128,8 @@ export function isWakeHolder(holder: string): boolean { return holder.startsWith
 
 /** A page dialog that opened this close to a wake firing on the user's action is taken for theirs (`keepsDialogHeld`). */
 export const WAKE_DIALOG_KEEP_MS = 10_000;
+/** A kept dialog nobody holds the tab for any more is let go (dismissed) after this long. */
+export const WAKE_DIALOG_HOLD_MAX_MS = 10 * 60_000;
 
 /** A full-page screenshot's document height at most this (CSS px). */
 export const FULL_PAGE_MAX_CSS = 10_000;

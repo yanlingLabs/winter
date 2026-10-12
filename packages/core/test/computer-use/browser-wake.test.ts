@@ -354,28 +354,69 @@ describe("WATCH-ONLY: a waiting tab changes nothing the user sees or does", () =
     expect(t.focusEmulation).toBe(false);
   });
 
-  test("a confirm() the user's submit raises is never cancelled by the wake: no dialog answer is sent, the hold stays until the dialog closes, then goes", async () => {
+  test("a confirm() the user's submit raises while the arming run still holds the tab: never cancelled — the full hold stays (no watch-only hold, which would dismiss it), the wait ends lost saying so, and the woken session answers it", async () => {
     const s = setup();
     const tab = await s.winterTab();
     const t = s.h.winter.tabs.get(keyOf(tab))!;
-    await s.arm(tab.targetId, { kind: "submitted" });
-    // The user submits while the arming run still holds the tab (full hold: the app holds the dialog unseen).
-    const at = Date.now() + 1_000;
-    s.h.winter.wakes.user(keyOf(tab), { type: "submit", at });
+    const id = wakeId();
+    await s.arm(tab.targetId, { kind: "submitted" }, id);
+    // The user submits while the arming run still holds the tab (full hold: the app holds the dialog unseen) — the
+    // page pauses on the dialog, and the wait's own report is stuck behind it.
+    s.h.winter.wakes.user(keyOf(tab), { type: "submit", at: Date.now() + 1_000 });
     s.h.winter.openDialog(keyOf(tab), "confirm", "Submit your listing for review?");
+    await sleep(120);
+    expect(s.events).toEqual([]);
+    const modes = t.holdModes.length;
+    s.r.end();
+    s.h.engine.turnEnded("s1");
+    // The wait ends lost, naming the dialog — its session is woken to read and answer it.
     expect(await s.until(() => s.events.length > 0)).toBe(true);
-    expect(s.events[0]).toMatchObject({ outcome: "fired", detail: "submitted the form" });
+    expect(s.events[0]).toMatchObject({ wakeId: id, outcome: "lost" });
+    expect(s.events[0]!.reason).toMatch(/opened a confirm dialog and is paused on it .* dialog\(\) .* answerDialog\(\)/);
+    await sleep(80);
+    // Never a watch-only hold (Winter.app would dismiss the held dialog as Cancel), never an answer from Winter.
+    expect(t.holdModes.slice(modes)).not.toContain("watch");
+    expect(t.attached).toBe(true);
+    expect(s.h.winter.sent.some((x) => x.method === "Page.handleJavaScriptDialog")).toBe(false);
+    // The woken session reads it and answers it as the user said: then the tab is let go.
+    const r2 = s.h.run();
+    const again = await s.h.engine.global(r2.scope, "browsers.tab", { tab: tab.id }) as TabHandle;
+    expect(await s.h.engine.primitive(r2.scope, again.targetId, "dialog", {})).toMatchObject({ type: "confirm" });
+    await s.h.engine.primitive(r2.scope, again.targetId, "answerDialog", { accept: true });
+    r2.end();
+    s.h.engine.turnEnded("s1");
+    expect(await s.until(() => !t.attached)).toBe(true);
+  });
+
+  test("…a cancelled wait does not keep such a dialog (it goes as Winter lets the tab go, as without a wait)", async () => {
+    const s = setup();
+    const tab = await s.winterTab();
+    const t = s.h.winter.tabs.get(keyOf(tab))!;
+    const id = wakeId();
+    await s.arm(tab.targetId, { kind: "submitted" }, id);
+    s.h.winter.openDialog(keyOf(tab), "alert", "Saved");
+    s.backend.disarm(id);
+    s.r.end();
+    s.h.engine.turnEnded("s1");
+    expect(await s.until(() => !t.attached)).toBe(true);
+    expect(s.events).toEqual([]);
+  });
+
+  test("a confirm() raised just as a wait fired on the user's action (its report got out first) is kept for the woken session too", async () => {
+    const s = setup();
+    const tab = await s.winterTab();
+    const t = s.h.winter.tabs.get(keyOf(tab))!;
+    await s.arm(tab.targetId, { kind: "clicked", ref: await s.refOf(tab.targetId, "Submit for review") });
+    s.h.winter.wakes.user(keyOf(tab), { type: "click", id: 2, at: Date.now() + 1_000 });
+    expect(await s.until(() => s.events.length > 0)).toBe(true);
+    s.h.winter.openDialog(keyOf(tab), "confirm", "Sure?");
     s.r.end();
     s.h.engine.turnEnded("s1");
     await sleep(80);
-    // Letting go now would dismiss it as Cancel: the hold stays (full), nothing answered it.
     expect(t.attached).toBe(true);
-    expect(t.holdModes.at(-1)).toBe("full");
     expect(s.h.winter.sent.some((x) => x.method === "Page.handleJavaScriptDialog")).toBe(false);
-    // The woken session (or the user) answers it: the held-back release goes then.
-    s.h.winter.pageEvent(keyOf(tab), "Page.javascriptDialogClosed", { result: true, userInput: "" });
+    s.h.winter.closeDialog(keyOf(tab), true);
     expect(await s.until(() => !t.attached)).toBe(true);
-    expect(s.h.winter.sent.some((x) => x.method === "Page.handleJavaScriptDialog")).toBe(false);
   });
 
   test("a dialog raised during a watch-only wait is the user's to answer: the wake ending detaches with no answer sent (watch-only holds none)", async () => {
@@ -388,18 +429,28 @@ describe("WATCH-ONLY: a waiting tab changes nothing the user sees or does", () =
     expect(await s.until(() => t.holdModes.at(-1) === "watch")).toBe(true);
     s.h.winter.wakes.user(keyOf(tab), { type: "submit", at: Date.now() + 1_000 });
     s.h.winter.openDialog(keyOf(tab), "confirm", "Sure?");
+    await sleep(100);
+    // The browser shows it (watch-only): the user answers it, and only then does the page — and the report — go on.
+    expect(s.events).toEqual([]);
+    s.h.winter.closeDialog(keyOf(tab), true);
     expect(await s.until(() => s.events.length > 0 && !t.attached)).toBe(true);
+    expect(s.events[0]).toMatchObject({ outcome: "fired", detail: "submitted the form" });
     expect(s.h.winter.sent.some((x) => x.method === "Page.handleJavaScriptDialog")).toBe(false);
   });
 
-  test("the poller polls around a page dialog (never parked on it): the user's click while one is open still fires", async () => {
+  test("the poller polls around a page dialog (never parked on it): even when the dialog's closing event is lost, the user's click after it fires", async () => {
     const s = setup();
     const tab = await s.winterTab();
     await s.arm(tab.targetId, { kind: "clicked", ref: await s.refOf(tab.targetId, "Submit for review") });
     s.r.end();
     s.h.engine.turnEnded("s1");
+    expect(await s.until(() => s.h.winter.tabs.get(keyOf(tab))!.holdModes.at(-1) === "watch")).toBe(true);
     s.h.winter.openDialog(keyOf(tab), "alert", "Saved");
     await sleep(100);
+    // The user answers it in the browser, and the browser's "closed" never reaches the engine (its record goes stale).
+    s.h.winter.closeDialog(keyOf(tab), true, { silently: true });
+    // Several poll rounds go by (the page answers again) before the user clicks.
+    await sleep(300);
     s.h.winter.wakes.user(keyOf(tab), { type: "click", id: 2, at: Date.now() + 1_000 });
     expect(await s.until(() => s.events.length > 0, 1_500)).toBe(true);
     expect(s.events[0]).toMatchObject({ outcome: "fired", detail: "clicked" });

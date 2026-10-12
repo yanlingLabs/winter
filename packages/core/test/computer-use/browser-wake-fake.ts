@@ -199,9 +199,15 @@ export class FakeWakes {
         const ack = arg?.world === world.key ? Number(arg?.ack ?? 0) : 0;
         world.queue = world.queue.filter((e) => e.seq > ack);
         const answer = (): WatchWaitResult => ({ world: world.key, events: world.queue.slice(0, 50), alive: [...world.watches.keys()] });
-        if (world.queue.length > 0) return Promise.resolve(answer());
+        // As a real page: while a dialog is open the page is paused, and its answer waits for the dialog to close.
+        const afterDialog = (r: WatchWaitResult): Promise<WatchWaitResult> => new Promise((resolve) => {
+          // A dialog the same user action raised (in the same task) is open before the answer could leave.
+          const check = (): void => { if (tab.dialog === undefined || tab.closed) resolve(tab.dialog === undefined ? answer() : r); else setTimeout(check, 20); };
+          setTimeout(check, 0);
+        });
+        if (world.queue.length > 0) return afterDialog(answer());
         return new Promise<WatchWaitResult>((resolve) => {
-          const done = (): void => { world.waiters.delete(done); clearTimeout(timer); resolve(answer()); };
+          const done = (): void => { world.waiters.delete(done); clearTimeout(timer); resolve(afterDialog(answer())); };
           const timer = setTimeout(done, Math.min(25_000, Number(arg?.maxMs ?? 0)));
           world.waiters.add(done);
         });

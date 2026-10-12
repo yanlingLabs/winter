@@ -515,6 +515,14 @@ export class FakeCdpTransport implements CdpTransport {
     this.commit(t, url);
   }
 
+  /** The USER answers the open dialog in the browser (no CDP command): it closes. `silently`: the browser's closing
+   *  event is lost (the engine's record of the dialog goes stale). */
+  closeDialog(tabKey: string, accept: boolean, o: { silently?: boolean } = {}): void {
+    const t = this.tab(tabKey);
+    t.dialog = undefined;
+    if (o.silently !== true) this.emit(t, "Page.javascriptDialogClosed", { result: accept, userInput: "" });
+  }
+
   /** A JavaScript dialog opens. */
   openDialog(tabKey: string, type: string, message: string): void {
     const t = this.tab(tabKey);

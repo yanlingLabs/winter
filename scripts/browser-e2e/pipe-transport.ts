@@ -189,8 +189,12 @@ export class PipeTransport implements CdpTransport {
     return out;
   }
 
-  async attach(tabKey: string): Promise<{ viewport: [number, number]; dpr: number }> {
+  /** Wake triggers: every attach asked for, and whether it was watch-only (what Winter.app would have been told). */
+  readonly attaches: Array<{ tabKey: string; watchOnly: boolean }> = [];
+
+  async attach(tabKey: string, opts?: { sessionId: string; watchOnly?: boolean }): Promise<{ viewport: [number, number]; dpr: number }> {
     const t = this.tab(tabKey);
+    this.attaches.push({ tabKey, watchOnly: opts?.watchOnly === true });
     if (t.session === undefined) {
       const r = await this.raw<{ sessionId: string }>("Target.attachToTarget", { targetId: t.targetId, flatten: true });
       t.session = r.sessionId;

@@ -16,7 +16,10 @@
 //    browser none of Winter.app's native-UI holds (link feature `watchOnly`: the page's dialogs, permission prompts, file
 //    choosers, downloads, context menus, keys and focus are the user's). A primitive on the tab takes the full hold back;
 //    the tab drops back after. A Winter.app without the feature never holds a built-in tab for a wake (refused, "update
-//    Winter"). A page dialog is never answered or dismissed by the wake path, and the poller polls around one.
+//    Winter"). A page dialog is never answered or dismissed by the wake path, and the poller polls around one; a
+//    dialog the user raised while the arming run still held the tab fully (the built-in browser holds it unseen, and the
+//    page — the wait's own report with it — is paused on it) is kept held, and each wait on the tab ends `lost` saying
+//    so, waking its session to read and answer it.
 //
 // The trigger outlives the script's binding: a reset, a worker restart, the worker's idle end and a turn end (the user's
 // tab released, the built-in tab's hold let go) leave it armed — it keeps the tab's driver, never the binding. Only these
@@ -541,7 +544,20 @@ export class BrowserWakeBackend implements WakeBackend {
       }
     };
     driver.listeners.add(l);
-    hook.off = () => { driver.listeners.delete(l); };
+    // The page paused on a dialog the built-in browser holds unseen, as its full hold went (the user acted while the
+    // arming run still held the tab): no wait on it can go on, and only a session can read and answer that dialog —
+    // each wait ends `lost`, waking its session, and the dialog stays held for it (never answered or dismissed here).
+    const paused = (): void => {
+      const shown = driver.dialogHeldUnseen;
+      if (shown === undefined) return;
+      for (const a of [...this.armed.values()]) {
+        if (a.driver !== driver || a.path !== "cdp" || a.ended) continue;
+        driver.keepDialog();
+        this.lose(a, wakeDialogReason(shown.type));
+      }
+    };
+    driver.pausedListeners.add(paused);
+    hook.off = () => { driver.listeners.delete(l); driver.pausedListeners.delete(paused); };
     this.navHooks.set(driver, hook);
   }
 
@@ -674,6 +690,12 @@ export class BrowserWakeBackend implements WakeBackend {
       todo = todo.filter((a) => !a.ended);
     }
   }
+}
+
+/** A wait ended because the page paused on a dialog only the woken session can see (Winter's browser holds it). */
+export function wakeDialogReason(type: string): string {
+  const kind = ["alert", "confirm", "prompt", "beforeunload"].includes(type) ? type : "dialog";
+  return `the page opened a ${kind} dialog and is paused on it — the user may have acted already; Winter's browser keeps the dialog for you: read it with dialog() and answer it with answerDialog() as the user wants (ask them)`;
 }
 
 function goneReason(reason: string): string {

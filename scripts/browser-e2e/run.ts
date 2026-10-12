@@ -983,6 +983,39 @@ if (!HEADLESS) await check("wake: WATCH-ONLY — after the turn ends a waiting t
   expect(!driver.isAttached, "the wake let the tab go");
 });
 
+if (!HEADLESS) await check("wake: the user's submit raises a confirm() while the arming run still holds the tab — the tab never drops to watch-only under it (which would dismiss it in Winter's browser), the wait ends lost naming the dialog, and the dialog stays for its answer", async () => {
+  const sc = scope("rw13");
+  const { t, key, state } = await wakeTab(sc);
+  const driver = engine.wakeTarget("e2e", t.targetId).driver;
+  const sub = await armWake(t.targetId, { kind: "submitted", ref: String(refOf(state, /form "Approval"/)) });
+  await transport.asUser(key, async (send) => {
+    await send("Page.enable");
+    const r = await send("Runtime.evaluate", { expression: "(() => { const b = document.getElementById('csub').getBoundingClientRect(); return [b.x + b.width / 2, b.y + b.height / 2]; })()", returnByValue: true });
+    const [x, y] = (r.result as { value: [number, number] }).value;
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+    const released = send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 }).catch(() => undefined);
+    for (let i = 0; i < 30 && driver.dialog === undefined; i++) await new Promise((r2) => setTimeout(r2, 100));
+    expect(driver.dialog?.type === "confirm", "the engine sees the dialog", JSON.stringify(driver.dialog));
+    const attachesBefore = transport.attaches.length;
+    const sentBefore = transport.sent.length;
+    // The arming run and its turn end while the page is paused on it.
+    sc.end();
+    engine.turnEnded("e2e");
+    const e = await wakeEvent(sub.id);
+    expect(e.outcome === "lost" && /opened a confirm dialog and is paused on it/.test(e.reason ?? ""), "the wait ended lost, naming the dialog", JSON.stringify(e));
+    await new Promise((r2) => setTimeout(r2, 300));
+    expect(!transport.attaches.slice(attachesBefore).some((a) => a.watchOnly), "never a watch-only hold while it was open", JSON.stringify(transport.attaches.slice(attachesBefore)));
+    expect(!transport.sent.slice(sentBefore).includes("Page.handleJavaScriptDialog"), "nothing of Winter's answered it");
+    expect(driver.isAttached, "the tab stays held for the woken session");
+    // Still open: the user's own answer is taken.
+    await send("Page.handleJavaScriptDialog", { accept: true });
+    await released;
+  });
+  expect(String(await userReads(key, "document.getElementById('cstatus').textContent")) === "confirmed", "the user's own answer stood — never cancelled");
+  for (let i = 0; i < 30 && driver.isAttached; i++) await new Promise((r2) => setTimeout(r2, 100));
+  expect(!driver.isAttached, "once it closed, the tab was let go");
+});
+
 if (!HEADLESS) await check("wake: a press on the element dragged off it, then the page navigating away, is no click (lost, never fired)", async () => {
   const sc = scope("rw12");
   const { t, key, state } = await wakeTab(sc);
