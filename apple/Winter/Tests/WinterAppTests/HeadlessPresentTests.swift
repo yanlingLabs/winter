@@ -293,6 +293,26 @@ final class HeadlessPresentUploadsTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: elsewhere.path))
     }
 
+    func testTheTwoSidesMaySpellOneHomeTwoWays() throws {
+        let base = try scratch()
+        let home = base.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("cache"), withIntermediateDirectories: true)
+        let linkedHome = base.appendingPathComponent("linked-home")
+        try FileManager.default.createSymbolicLink(at: linkedHome, withDestinationURL: home)
+        // The app's root through the link, the daemon's folder through the real path (the folder not made yet).
+        XCTAssertTrue(U.isInside(home.appendingPathComponent("cache/headless-uploads").path,
+                                 root: linkedHome.appendingPathComponent("cache/headless-uploads").path))
+        XCTAssertTrue(U.isInside(linkedHome.appendingPathComponent("cache/headless-uploads").path,
+                                 root: home.appendingPathComponent("cache/headless-uploads").path))
+        // A link inside the folder that leads out of it is outside.
+        let uploads = home.appendingPathComponent("cache/headless-uploads")
+        try FileManager.default.createDirectory(at: uploads, withIntermediateDirectories: true)
+        let away = base.appendingPathComponent("away")
+        try FileManager.default.createDirectory(at: away, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: uploads.appendingPathComponent("out"), withDestinationURL: away)
+        XCTAssertFalse(U.isInside(uploads.appendingPathComponent("out").path, root: uploads.path))
+    }
+
     func testAnUploadsFolderThatIsALinkIsRefused() throws {
         let base = try scratch()
         let real = base.appendingPathComponent("real")

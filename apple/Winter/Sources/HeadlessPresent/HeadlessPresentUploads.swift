@@ -41,12 +41,14 @@ enum HeadlessPresentUploads {
 
     // MARK: - The folder
 
-    /// Is `uploadDir` Winter's uploads folder (or inside it)? Both are compared as standardized absolute paths —
-    /// `..` and `.` removed — so a daemon that named a path outside it is refused before anything is written.
+    /// Is `uploadDir` Winter's uploads folder (or inside it)? Both are compared standardized (`..` and `.` removed)
+    /// and with their links resolved — the existing part of each path, as the downloads check beside the browser
+    /// link does — so the daemon and the app may spell one home two ways (a linked home, `/private/var` against
+    /// `/var`) and still agree, while a path that leads outside the folder is refused before anything is written.
     static func isInside(_ uploadDir: String, root: String) -> Bool {
         guard uploadDir.hasPrefix("/"), root.hasPrefix("/") else { return false }
-        let dir = URL(fileURLWithPath: uploadDir).standardizedFileURL.path
-        let base = URL(fileURLWithPath: root).standardizedFileURL.path
+        let dir = URL(fileURLWithPath: uploadDir).standardizedFileURL.resolvingSymlinksInPath().path
+        let base = URL(fileURLWithPath: root).standardizedFileURL.resolvingSymlinksInPath().path
         return dir == base || dir.hasPrefix(base.hasSuffix("/") ? base : base + "/")
     }
 
