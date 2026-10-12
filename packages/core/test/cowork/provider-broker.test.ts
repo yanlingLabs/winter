@@ -95,3 +95,17 @@ test("concurrent pulls refuse and oversized events never enter the private outpu
   expect((await lease.handle(frame(id, "next", 2))).kind).toBe("refused"); expect(nexts).toBe(1); deliver({ done: false, value: { type: "text_delta", text: "late" } }); expect((await pending).kind).toBe("refused"); lease.close();
   const overflow = fixture(async function* () { yield { type: "native_state", items: ["x".repeat(256 * 1024)] }; }); const oversized = new CoworkProviderBroker({ secrets, assertCurrent: () => {} }).open(overflow), overflowId = randomUUID(); await oversized.handle(frame(overflowId, "begin", 0, { turn: payload })); const result = await oversized.handle(frame(overflowId, "next", 1)); expect(result.code).toBe("limit"); expect(result.event).toBeUndefined(); oversized.close();
 });
+
+test("iterator finalizer that yields rather than ends retains admission instead of inventing cleanup", async () => {
+  const admission = fixture(() => ({ [Symbol.asyncIterator]: () => ({ next: async () => ({ done: false, value: { type: "text_delta", text: "partial" } as ProviderEvent }), return: async () => ({ done: false, value: { type: "text_delta", text: "cleanup still yielding" } as ProviderEvent }) }) }));
+  const lease = new CoworkProviderBroker({ secrets, assertCurrent: () => {} }).open(admission), id = randomUUID(); await lease.handle(frame(id, "begin", 0, { turn: payload })); await lease.handle(frame(id, "next", 1));
+  expect((await lease.handle(frame(id, "cancel", 2))).code).toBe("effects_uncertain"); await Bun.sleep(0); expect((await lease.handle(frame(randomUUID(), "begin", 0, { turn: payload }))).kind).toBe("refused"); lease.close();
+});
+
+test("malformed decoded input refuses with bounded identity instead of throwing packet data", async () => {
+  const admission = fixture(async function* () { throw new Error("never invoked"); }); const lease = new CoworkProviderBroker({ secrets, assertCurrent: () => {} }).open(admission);
+  for (const invalid of [null, {}, { version: 1, invocationId: "x".repeat(5000), sequence: -1 }]) {
+    const response = await lease.handle(invalid as CoworkProviderRequest); expect(response.kind).toBe("refused"); expect(response.invocationId.length).toBe(36); expect(response.sequence).toBe(0);
+  }
+  lease.close();
+});

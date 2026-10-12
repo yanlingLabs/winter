@@ -65,12 +65,17 @@ COWORK_PROVIDER_PROXY_CANDIDATE=<clean-sdk-candidate> \
   packages/core/test/cowork/provider-broker.integration.test.ts
 ```
 
-Current evidence: two real adapter/SDK roundtrips (38 assertions) and focused
-broker/proxy tests pass. The broker tests now include one shared refresh with a
-revoked waiting channel, an actual slow-model pending poll, concurrent-pull denial
-and oversized-event refusal. Proxy polling preserves one invocation/turn payload.
-Partial-output probes and final broader regression/typecheck results are follow-up
-validation, not yet claimed here. An unset candidate skips
+Final focused evidence: **13 Core tests, zero failures, 109 assertions**, including
+both real two-turn cases and actual Responses partial-output failure without replay.
+The broker tests include one shared refresh with a revoked waiting channel, an
+actual five-second pending poll for a valid slow model, concurrent-pull/oversize
+refusal, malformed input and nonterminal finalizer retention. SDK proxy tests
+measure the actual six-second ignored-transport deadline and response byte bounds.
+**166 SDK proxy/posture/bridge/session-provider/credential regressions, zero
+failures, 513 assertions** pass. Core typecheck and both SDK typecheck projects
+pass using each worktree's own frozen dependency installation. Lockfiles, scripts,
+SDK pins and release versions were not changed. Another 28 existing Core
+host-credential/provider regressions pass (120 assertions). An unset candidate skips
 the cross-repository test explicitly; the installed SDK consumer pin stays unchanged.
 
 Production authentication/demultiplexing in a signed sandboxed native helper,
