@@ -11,6 +11,7 @@ import { AutomationFailure } from "../../src/computer-use/errors";
 import {
   headlessCacheRoot, headlessPidPath, HeadlessPool, HEADLESS_TABS_GLOBAL, HEADLESS_TABS_PER_SESSION, HEADLESS_WEDGED_AFTER_TIMEOUTS, sweepHeadless, type HeadlessPoolDeps,
 } from "../../src/computer-use/browser/headless/pool";
+import { headlessComponentsDir } from "../../src/computer-use/browser/headless/components";
 import { headlessHelperEnv, spawnEngineProcess, WinterHeadlessProcess, type EngineChild } from "../../src/computer-use/browser/headless/winter-engine";
 import type { PrimitiveMetric } from "../../src/computer-use/telemetry";
 import { TransportError } from "../../src/computer-use/browser/transport";
@@ -242,6 +243,22 @@ describe("the helper's life", () => {
     expect(r.pool.connected).toBe(true);
     await r.pool.createTab({ sessionId: "s1", url: "https://b.example/" });
     expect(r.spawned).toBe(2);
+  });
+
+  test("only the browser's components outlive a run: the next run starts with them, never with the last run's own data", async () => {
+    const r = rig({ idleExitMs: 100 });
+    const t = await r.pool.createTab({ sessionId: "s1", url: "http://component.test/" });
+    const first = r.commands().find((c) => c.op === "started")!.params as { entries: string[] };
+    expect(first.entries).toEqual([]);
+    await r.pool.closeTab(t.tabKey);
+    await until("the idle exit", () => !r.pool.running);
+    const store = headlessComponentsDir(r.home);
+    expect(readdirSync(store)).toEqual(["PKIMetadata"]);
+    expect(readdirSync(headlessCacheRoot(r.home))).toEqual([]);
+    await r.pool.createTab({ sessionId: "s2", url: "https://b.example/" });
+    const second = r.commands().filter((c) => c.op === "started")[1]!.params as { cacheRoot: string; entries: string[] };
+    expect(second.entries).toEqual(["PKIMetadata"]); // no Default/ (the run's cookies), no Local State
+    expect(readFileSync(join(second.cacheRoot, "PKIMetadata", "1798", "manifest.json"), "utf8")).toContain("pkiMetadata");
   });
 
   test("turned off in Settings while running: the helper stops and its tabs read closed", async () => {
