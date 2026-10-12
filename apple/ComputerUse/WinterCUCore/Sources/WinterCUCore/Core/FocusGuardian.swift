@@ -482,6 +482,7 @@ public struct CUFocusGuardianCore: Sendable {
     /// activation is the user's.
     public mutating func appLaunched(_ pid: pid_t, startedAt: TimeInterval? = nil, bundle: String? = nil, now: TimeInterval,
                                      inputObservable: Bool = true, secureInput: Bool = false) {
+        noteSecureInput(secureInput, now: now)
         guard !isTouched(pid, startedAt: startedAt, bundle: bundle, now: now) else { return }
         othersLaunches = othersLaunches.filter { now - $0.value <= Self.launchFirstWindow }
         othersLaunches[pid] = now
@@ -527,10 +528,13 @@ public struct CUFocusGuardianCore: Sendable {
         let act = openerTimes.last(where: { $0.at <= s && s - $0.at <= Self.causalWindow })?.at
         let launch = launches.values.filter { $0.since <= s && ($0.bundle == nil || $0.bundle == q.appBundle) }.map(\.since).max()
         guard let o = [act, launch].compactMap({ $0 }).max() else { return false }
-        // (1): input of the user's between the act and the start — their own launch.
-        if hardwareTimes.contains(where: { $0 > o && $0 <= s }) { return false }
-        if let h = q.hardwareAt, h > o, h <= s { return false }
-        return true
+        // (1): input of the user's between the act and the start — their own launch. Read off the decision table
+        // (`CULaunchRule`): the never-adopt gate is every verdict but "theirs" and "ordinary".
+        let between = hardwareTimes.contains(where: { $0 > o && $0 <= s }) || (q.hardwareAt.map { $0 > o && $0 <= s } ?? false)
+        let facts = CULaunchFacts(afterAgentAct: true, userInputBetween: between, withinReach: false, quietBeforeStart: false,
+                                  firstSighting: true, keysHidden: q.secureInput || !q.inputObservable, systemUI: false, visit: false)
+        let v = CULaunchRule.decide(facts).verdict
+        return v == .leftAndSaid || v == .undo
     }
 
     /// When each app was first seen in front (`openerBeforeStart`'s first sighting).
@@ -589,6 +593,10 @@ public struct CUFocusGuardianCore: Sendable {
     /// window up to `t`, or a launch of the agent's begun by `t` and still pending — the facts from before `t` only.
     func clearlyAt(_ t: TimeInterval, hardwareAt: TimeInterval?, bundle: String? = nil, anyReach: Bool = false) -> Bool {
         if hardwareTimes.contains(where: { $0 <= t && t - $0 <= Self.quietBeforeUndo }) { return false }
+        // Secure Event Input on at any moment of the quiet window hid the user's keys then: never quiet (seed 1051 — they
+        // typed in their Terminal under Secure Keyboard Entry, a moment before the app came forward; it was off by the
+        // judgment, so the judgment's own reading alone said nothing was hidden).
+        if secureInputMaybeOn(from: t - Self.quietBeforeUndo, to: t) { return false }
         if let h = hardwareAt, h <= t, t - h <= Self.quietBeforeUndo { return false }
         if openerTimes.contains(where: { $0.at <= t && t - $0.at <= Self.causalWindow && (anyReach || $0.scope.covers(bundle)) }) { return true }
         // A launch pending: what it launches (once its bundle is known — round 14: an open or a launch reaches the app it
@@ -599,6 +607,23 @@ public struct CUFocusGuardianCore: Sendable {
     public mutating func noteHardwareAction(now: TimeInterval) {
         hardwareTimes.append(now)
         hardwareTimes.removeAll { now - $0 > Self.keepFacts }
+    }
+
+    /// A reading of Secure Event Input (every judgment's, every launch heard of): while it is on, the tap sees none of
+    /// the user's keys.
+    public mutating func noteSecureInput(_ on: Bool, now: TimeInterval) {
+        secureReadings.append((now, on))
+        // (The latest reading from before what is kept stays: it says how the kept span began.)
+        while secureReadings.count > 1, now - secureReadings[1].at > Self.keepFacts { secureReadings.removeFirst() }
+        if secureReadings.count > 512 { secureReadings.removeFirst(secureReadings.count - 512) }
+    }
+    /// Secure Event Input readings in time order.
+    private var secureReadings: [(at: TimeInterval, on: Bool)] = []
+    /// Whether Secure Event Input may have been on at some moment of [from, to]: a reading of it on within, or the latest
+    /// reading before `from` on (it stayed on until a reading said otherwise).
+    func secureInputMaybeOn(from: TimeInterval, to: TimeInterval) -> Bool {
+        if secureReadings.contains(where: { $0.on && $0.at >= from && $0.at <= to }) { return true }
+        return secureReadings.last(where: { $0.at < from })?.on ?? false
     }
 
     /// Whether input of the user's came after the agent's last cause on any app and by `upTo` (I1's refinement).
@@ -677,6 +702,7 @@ public struct CUFocusGuardianCore: Sendable {
     /// 8. Otherwise the agent's — undone.
     /// A user's verdict moves their place there (I2), uses up their claim, and during a visit means they moved.
     public mutating func judge(_ q: CUMoveQuery, now: TimeInterval) -> CUMoveOwner {
+        noteSecureInput(q.secureInput, now: now)
         let place = active ? view : (q.from ?? view)
         lastFresh = false
         lastRepeatOffender = false
@@ -789,7 +815,12 @@ public struct CUFocusGuardianCore: Sendable {
         case .visit, .theirPlace, .unexplained:
             break
         }
-        if let a = q.app, owner.isUsers || owner.undoes { othersLaunches[a] = nil }  // its first activation, judged
+        // Its first activation, judged — a LEFT one too (the launch rule's (3), never adopted: a later judgment of the
+        // same app is no first activation — seed 1049, the visit's return to a left app read as 'the first activation of
+        // an app the user launched' once round 16 judged the never-adopt gate on the first sighting only).
+        if let a = q.app, owner.isUsers || owner.undoes || { if case .unexplained = owner { return true }; return false }() {
+            othersLaunches[a] = nil
+        }
         if let a = q.app {
             if case .unexplained = owner { leftInFront.insert(a) } else if owner.isUsers || owner.undoes { leftInFront.remove(a) }
         }
