@@ -402,7 +402,15 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     func userInteracted(_ app: pid_t) {
         lock.withLock {
             guard SimPid.agentTargets.contains(app) else { return }
-            if front == app { userWorkingIn = app; workBegan(app); pendingWork = nil } else { pendingWork = (app, now + 500) }
+            // (A pending click into ANOTHER target stays pending: the user's key into the app in front, between their click
+            // into T and T's activation, does not take the click back — §4.12 I6, a click counts once its own activation
+            // lands; round 18, found by the in-flight exercise's mid-act click, seed 1.)
+            if front == app {
+                userWorkingIn = app; workBegan(app)
+                if pendingWork?.app == app { pendingWork = nil }
+            } else {
+                pendingWork = (app, now + 500)
+            }
         }
     }
     /// The world's own record of the agent: operations running per app, the last thing it did to each app (a cause, or
