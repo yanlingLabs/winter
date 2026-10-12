@@ -715,32 +715,43 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             // switch input of theirs explains it.
             if indirect, case .untouched(_, .adopt, _, _) = generic {
                 let left = SimCause.untouched(pid, .leftAlone, indirect: true, why + " (the agent's indirect effect — never adopted)")
-                return competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop) != nil
-                    ? .either([left, generic], "a switch input of the user's it may have been") : left
+                return widenedLeft(competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop) != nil
+                    ? .either([left, generic], "a switch input of the user's it may have been") : left, adopt: generic)
             }
             return generic
         }
         let adopt = SimCause.untouched(pid, .adopt, indirect: indirect, why)
-        let clearlyCase: SimCause = {
-            if visiting || secure { return generic }
-            let since = lastObservableHardwareAt - c.start
-            if since > 30 { return generic }
-            let back = SimCause.untouched(pid, .undone, indirect: true, why + " (the agent's action started it)")
-            let sentBack: SimCause = competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop) != nil
-                ? .either([back, adopt], "a switch input of the user's it may have been") : back
-            return since < -30 ? sentBack : .either([sentBack, generic], "input of the user's right at the process start")
-        }()
         // Not clearly the agent's: never ADOPTED either (review of round 14, HIGH #1 and MEDIUM #3 — the world's own log
         // says the agent's action started it): left in front and said, or the user's when a switch input of theirs explains it.
         let left = SimCause.untouched(pid, .leftAlone, indirect: indirect, why + " (the agent's action started it — never adopted)")
         let neverAdopted: SimCause = visiting ? generic
             : competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop) != nil
                 ? .either([left, adopt], "a switch input of the user's it may have been") : left
+        // (Where the generic rule would adopt it — input of the user's since the process start — it is left instead.)
+        let notAdopted: SimCause = { if case .untouched(_, .adopt, _, _) = generic { return neverAdopted }; return generic }()
+        let clearlyCase: SimCause = {
+            if visiting || secure { return notAdopted }
+            let since = lastObservableHardwareAt - c.start
+            if since > 30 { return notAdopted }
+            let back = SimCause.untouched(pid, .undone, indirect: true, why + " (the agent's action started it)")
+            let sentBack: SimCause = competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop) != nil
+                ? .either([back, adopt], "a switch input of the user's it may have been") : back
+            return since < -30 ? sentBack : .either([sentBack, notAdopted], "input of the user's right at the process start")
+        }()
         switch c.clearly {
-        case .no: return neverAdopted
+        case .no: return widenedLeft(neverAdopted, adopt: adopt)
         case .yes: return clearlyCase
         case .edge: return .either([neverAdopted, clearlyCase], "at the edge of 'clearly the agent's' at the process start")
         }
+    }
+
+    /// A verdict of "left in front": input of the user's arriving before the engine heard of the change (a ⌘-Tab released
+    /// a few ms after the app came forward) can make it theirs — the same race the other verdicts already widen for.
+    func widenedLeft(_ c: SimCause, adopt: SimCause) -> SimCause {
+        if case .untouched(_, .leftAlone, _, _) = c {
+            nextWiden = (.hardware, adopt, "input of the user's arrived before the engine heard of an app's coming forward")
+        }
+        return c
     }
 
     func untouchedCauseNow(_ pid: pid_t, indirect: Bool, why: String, newPlace n: SPlace) -> SimCause {
@@ -763,7 +774,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             if competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop) != nil {
                 return .either([base, adopt], "a switch input of the user's it may have been")
             }
-            return base
+            return widenedLeft(base, adopt: adopt)
         }
         // During a desktop visit an app coming forward is the visit's (left in front until it ends) — unless a switch input
         // of the user's since the visit began explains it.

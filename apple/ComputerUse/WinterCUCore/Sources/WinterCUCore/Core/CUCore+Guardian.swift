@@ -970,6 +970,10 @@ extension CUCore {
         }) else { return }
         guard now - p.time <= 2, hypot(point.x - p.at.x, point.y - p.at.y) <= Self.clickSlop else {
             CULog.guardian.notice("the user dragged out of \(self.appName(p.pid), privacy: .public)'s window: nothing brought forward")
+            // A drag claims nothing either: its button-down's claim goes (the ordinary-target survey's seed 54 — a drag
+            // out of T's window later explained T's landing as "they clicked into its window", and the work mark refused
+            // the agent).
+            guardianLock.withLock { guardianCore.dropClaim(app: p.pid) }
             return
         }
         guard sys.frontmostPid() != p.pid else { return }

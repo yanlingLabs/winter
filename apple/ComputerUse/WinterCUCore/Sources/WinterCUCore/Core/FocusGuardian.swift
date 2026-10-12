@@ -612,6 +612,11 @@ public struct CUFocusGuardianCore: Sendable {
         claim = (app, now + Self.clickClaimWindow)
     }
 
+    /// The user's button-down on `app`'s window turned out to be a drag: no claim of a click on it.
+    public mutating func dropClaim(app: pid_t) {
+        if claim?.app == app { claim = nil }
+    }
+
     /// The user physically clicked into a window of the app ALREADY in front (a bound target's — held in front for a
     /// script, or in front by a change not judged theirs yet): no activation will come, and they are working in it — their
     /// place now (found by the model-based test: the hold's end gave the front back over their click into the held app).
