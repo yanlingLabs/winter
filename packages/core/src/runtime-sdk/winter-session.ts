@@ -498,6 +498,8 @@ export class WinterSessionEnded extends Error {
 interface Incarnation extends WinterIncarnation {
   queue: HostPromptQueue;
   projector: Projector;
+  /** Live child lineage for progress only; never authority and never reused by another incarnation. */
+  childParents: Map<string, string>;
   query: Query;
   done: Promise<void>;
   hostCode?: HostCodeGeneration;
@@ -1109,7 +1111,7 @@ class WinterSessionImpl implements WinterSession {
           /* best-effort only */
         }
       }
-      const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve(), runHome, mcpServers: sessionMcpServersOf(options), allowedTools: Array.isArray(options.tools) ? [...options.tools] : undefined, folds: runtimeFolds(runtimeVersionOf(options)), hostCode };
+      const inc: Incarnation = { ...shape, queue, projector, childParents: new Map(), query, attachment: undefined, sawInit: false, done: Promise.resolve(), runHome, mcpServers: sessionMcpServersOf(options), allowedTools: Array.isArray(options.tools) ? [...options.tools] : undefined, folds: runtimeFolds(runtimeVersionOf(options)), hostCode };
       this.inc = inc;
       this.pendingMcpServerNames = [];
       this.gen = generation;
@@ -1456,14 +1458,27 @@ class WinterSessionImpl implements WinterSession {
     if (sink === undefined) return;
     const threadId = (e as { threadId?: string }).threadId;
     if (threadId === undefined || threadId === MAIN_THREAD) return;
+    const parents = this.inc?.childParents;
     try {
+      let progress: string | undefined = threadId;
       if (e.type === "thread_started") {
-        const t = e as { threadId: string; agentType: string; prompt: string; description?: string };
+        const t = e as { threadId: string; parentThreadId: string; agentType: string; prompt: string; description?: string };
+        parents?.set(t.threadId, t.parentThreadId);
         sink.started({ threadId: t.threadId, agentType: t.agentType, prompt: t.prompt, ...(t.description === undefined ? {} : { description: t.description }) });
+        progress = t.parentThreadId;
       } else if (e.type === "thread_completed") {
+        progress = parents?.get(threadId);
+        parents?.delete(threadId);
         sink.completed(threadId, (e as { stopReason: string }).stopReason);
-      } else {
-        sink.progress(threadId);
+      }
+      // A parent waiting for its grandchild is still making progress. Newer SDKs preserve
+      // the immediate child's wire thread instead of flattening nested frames onto a parent.
+      // Visit each known ancestor once; malformed cycles cannot hold the daemon event loop.
+      const visited = new Set<string>();
+      while (progress !== undefined && progress !== MAIN_THREAD && !visited.has(progress)) {
+        visited.add(progress);
+        sink.progress(progress);
+        progress = parents?.get(progress);
       }
     } catch (err) {
       this.log(`child roster relay failed for ${this.sessionId} (${e.type}): ${err instanceof Error ? err.name : "unknown"}`);
