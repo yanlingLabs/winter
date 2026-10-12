@@ -179,6 +179,8 @@ export interface WinterRuntimeSdk {
    */
   spawnHookFor(mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable | EmbeddedRuntimeUnavailable | HostCodeUnavailable | HostStorageFenceUnavailable;
   readonly codeExecution?: HostCodeExecutionService;
+  /** Complete, versioned file/context coverage; Read/Write-only capability is insufficient. */
+  protectedEmbeddedPathsAvailable?(): boolean;
   /**
    * P8c-12: the router's selection for a NEW session (or a resumed one's `persisted` record, which
    * the router returns BY IDENTITY — "the persisted selection wins", never re-decided). Builds
@@ -396,6 +398,7 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
   return {
     sdk,
     codeExecution,
+    protectedEmbeddedPathsAvailable: () => deps.embedded?.supportsProtectedPaths?.() === true,
     // Task 12. `deps.directoryStore` is 8a's SQLite store when the spine opened and undefined when
     // it did not — in which case the sweep is this process's live sessions alone, which is the same
     // "degraded, never dead" posture the rest of this file takes.
@@ -414,7 +417,7 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
       }
       if (runsEmbedded(mode)) {
         try {
-          if (codeExecution.protectedStorageActive()) return new EmbeddedRuntimeUnavailable(
+          if (codeExecution.protectedStorageActive() && deps.embedded?.supportsProtectedPaths?.() !== true) return new EmbeddedRuntimeUnavailable(
             "protected Cowork storage requires complete file/context policy coverage; embedded chat and dispatch remain unavailable until that coverage is verified",
           );
         } catch (error) {
@@ -427,7 +430,7 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
         // and it keeps the refusal at the one topology site rather than a boot flag someone must read.
         const versionRefusal = embeddedVersionCheck();
         if (versionRefusal !== undefined) return versionRefusal;
-        return { pathToClaudeCodeExecutable: "winter-embedded", spawnClaudeCodeProcess: codeExecution.trustEmbeddedSpawn((options) => embedded.spawn(options)), runtimeVersion: REQUIRED_WINTER_AGENT_SDK };
+        return { pathToClaudeCodeExecutable: "winter-embedded", spawnClaudeCodeProcess: codeExecution.trustEmbeddedSpawn((options) => embedded.spawn(options), () => embedded.supportsProtectedPaths?.() === true), runtimeVersion: REQUIRED_WINTER_AGENT_SDK };
       }
       const resolution = resolveWinterExecutable({
         setting: winterOptionsFromSettings(deps.settings()).winterExecutable,
