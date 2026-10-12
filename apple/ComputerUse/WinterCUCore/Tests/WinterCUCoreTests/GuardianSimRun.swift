@@ -539,7 +539,16 @@ final class SimRun {
                 w.release(.maskCommand)
                 let seen: Bool? = secureNow ? w.flagsSeenUnderSecure : nil
                 // The switcher switches at the release: a Tab seen counts from there when the release is seen (the contract).
-                if let t = tabSwitch { w.lock.withLock { if seen != false { w.switches[t].at = w.now }; w.switches[t].pending = false } }
+                if let t = tabSwitch {
+                    w.lock.withLock {
+                        if seen != false { w.switches[t].at = w.now }
+                        w.switches[t].pending = false
+                        // (Released, the seen ⌘-Tab is switch input from now on — R17-d's targeted switch: an app that came
+                        // forward a moment before and is heard of after it may be taken as its landing, §4.12's "what can't
+                        // be attributed".)
+                        w.lateFact(.switchInput)
+                    }
+                }
                 let at = tabSeen && !secure ? tabAt : w.now
                 // A release with no Tab seen explains only a change heard within 0.7 s of it (the contract).
                 let i = tabSwitch ?? w.addSwitch(SimSwitch(at: at, app: true, desktop: false, dest: a, secureFlags: seen,
@@ -609,7 +618,9 @@ final class SimRun {
             for k in 0..<3 { w.schedule(after: 60 + Double(k) * 50, "a Spotlight key") { w.key(.keyDown, to: SimPid.spotlight); w.key(.keyUp, to: SimPid.spotlight) } }
             w.schedule(after: 260, "Return") { [unowned self] in
                 w.key(.keyDown, keycode: 36, to: SimPid.spotlight)
-                w.lock.withLock { w.launcherInputs.append(w.now) }
+                // (Only a Return the tap SAW — under Secure Event Input it sees no key, and nothing can tell the launch was
+                // theirs: every right answer is kept, the contract's frozen-reference rule.)
+                w.lock.withLock { if !w.secure { w.launcherInputs.append(w.now) } }
                 let pid = w.lock.withLock { () -> pid_t in
                     self.userLaunchSeq += 1
                     let pid = 950 + self.userLaunchSeq
