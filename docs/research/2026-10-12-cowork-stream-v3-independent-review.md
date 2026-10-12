@@ -1,0 +1,37 @@
+# Guarded stream v3: independent source acceptance
+
+Date: 2026-10-12. **Scoped acceptance: no blocker found in frozen v3 for building a bounded, nonsecret real-stream fixture.** The two prior source concerns and the MMIO test-order defect are resolved in the selected implementation. This is no-VM transport-source acceptance, not completed signed-worker containment, guest-driver validation, key transport, encrypted storage or active resource-return acceptance.
+
+Reviewed Winter commit `c9488ee9`, incremental patch `0009-proposed-guarded-stream-closed-factory.patch`, SHA-256 `ae46b3d1732cf6e00b3cb451334be04b222093cd78418b91b706d2a33a4f35c4`, composed native diff `7ad027f83b8b51a5e0ec62da2546ad01b2dc5c111937be63874d5bd2278d03bd`. Native paths below are relative to `spikes/cowork-hvf/out/libkrun-stream-reclaim-v3`.
+
+## Factory, call path and descriptor ownership
+
+`src/libkrun/src/lib.rs:3239–3242` always refuses the old caller-FD setter and does not consume its descriptor. The selected create API at `:3245–3270` checks context existence, guarded-block/reclaim prerequisites and duplicate creation before allocating endpoints. It retains the device object in context state and uses `into_raw_fd` only for the opposite peer. No production worker caller is implemented by this increment; the C API and its internal builder/device path are the reviewed use points.
+
+`src/devices/src/stream_io.rs:17–32` creates the pair internally and immediately assigns both endpoints to OwnedFd values. Normalization sets CLOEXEC or duplicates a descriptor below 3 with F_DUPFD_CLOEXEC, letting the original owner close. Error propagation during either normalization or configuration drops every newly owned endpoint. The injected configuration-failure test exercises this actual ownership path. No leaked descriptor or partially installed context was found in the inspected failure branches.
+
+Device configuration at `stream_io.rs:47–68` establishes nonblocking mode and Darwin SO_NOSIGPIPE before publication. The caller receives a distinct peer endpoint and may change its flags without changing the device endpoint's state. The device raw accessor is crate-private; internal duplicates at `:73–82` are CLOEXEC and remain encapsulated. The chosen source no longer contains the private Darwin MSG_NBIO constant/use. Public per-call flags remain defense in depth rather than the sole capacity-wait guarantee.
+
+The public API tests prove prerequisite/duplicate/missing-context refusal, endpoint direction through a private-to-peer transfer, caller ownership of the peer after context destruction, EOF once the context's private endpoint is gone, and old-setter refusal. The adversarial helper uses the actual factory, mutates only the public peer and its alias, checks unchanged private flags, fills the send buffer until WouldBlock and survives peer closure with SIGPIPE at its default disposition. It uses no private flag.
+
+## MMIO, pin ownership and lifecycle
+
+The concrete GuardedConsole error branch in `src/devices/src/virtio/mmio.rs:318–329` handles BadActivate without unwinding through the device mutex, marks the terminal fault and sets FAILED. V3's tests now write statuses 1/3/11 before configuring queues, assert each actual queue field and ready readback, and only then write DRIVER_OK. Separate nonready and ready/cross-region tests pass. The ready case demonstrates that the old endpoint-only Queue.is_valid accepts the adjacent-region table while the guarded full-span validation refuses it; the tests also verify Stop, notifier code 77, wake, no poisoned mutex, no activation and no retained pins.
+
+The factory migration changes construction in console tests, not the previously reviewed guest-memory leaf or reset implementation. The inspected worker continues to copy under short generation-checked leases, release them before host I/O/poll, retain permanent rings and in-flight request pins, and reacquire admission before RX copyback/used ACK. Reset retains the old worker's complete ownership until actual completion/join; staged activation retains its new ring pins while waiting. The real EventManager notify-before-finished, short-TX/freeze/reset, stale-generation and RX bound tests still pass using the selected factory.
+
+`src/devices/src/reclaim_access.rs`, `src/utils/src/macos/epoll.rs` and `src/polly/src/event_manager.rs` were independently compared byte-for-byte with v2 and are unchanged. The scoped lifecycle wait retains the corrected absolute deadline across EINTR and the actual libkrun loop's finite retry path. This does not extend the old generic three-second shim's timing claim, nor does it turn the existing synchronous block reset into a nonblocking reset.
+
+## Explicit gates for the next fixture
+
+The factory's no-fork precondition remains a caller obligation. Before any secret-bearing use, the actual signed native worker must prove its purpose-built sandbox is active **before** pair creation, denies host fork/exec, permits the required pair/descriptor/thread operations, and preserves library validation/no-debugger requirements. CLOEXEC protects exec inheritance only. This source does not prevent a fork before CLOEXEC is installed or hostile native code inside the same process from manipulating descriptors. A reviewed nonsecret fixture should establish that caller ordering and actual sandbox compatibility rather than inferring them from these library tests.
+
+Guest validation remains unperformed. The pinned crypto config contains `CONFIG_HVC_DRIVER=y` and `CONFIG_VIRTIO_CONSOLE=y` at `spikes/cowork-hvf/kernel/resolved-6.18.35.config:2289,2293`; configuration is not a boot result. The real fixture must discover the intended virtio console, establish raw terminal behavior, demonstrate bounded binary duplex exchange/short writes/backpressure and Stop, and retain heartbeat/data checks through active reclaim on this exact device profile. Keep PL011 telemetry separate from stream bytes. Host descriptor inheritance/closure and owned worker termination must be recorded by the fixture.
+
+No new key-release authority follows from byte transport. Sealed workspace/home/volume launch binding, authenticated framing/nonces/generations, a protected guest receiver, stale buffered bytes across reset and the no-Core-keys rule remain separate work. Exit 77 is UNCERTAIN. General in-process VMM destruction is not covered by the reset/join guarantee, and block reset still joins synchronously. Before an encrypted experiment, the previously required deliberate block stall inside `perform` remains distinct from a completion hold or stream readiness stall.
+
+## Independent verification
+
+Ran `python3 spikes/cowork-hvf/test_stream_v3.py`: **73 test executions / 70 distinct tests passed**, followed by a successful native `cargo check`. The count includes the two defined bounded helper-child executions and the repeated access filter. Preparation checked exact patch/base/composed source hashes and root/native correspondence. Patch and composed-diff hashes were rechecked after the run and remained unchanged.
+
+The recorded fresh-clone/header-smoke evidence was inspected, not independently recreated; this review does not relabel it as a separate run. No VM, key fixture, pressure workload, live Winter home or Keychain operation occurred. No implementation file was edited, committed or pushed. The ignored harness receipt and this report are the intentional output artifacts. Historical 0007/v2 evidence remains preserved and is not the selected VM candidate.
