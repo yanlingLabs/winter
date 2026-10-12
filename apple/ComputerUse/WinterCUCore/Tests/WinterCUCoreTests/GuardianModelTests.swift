@@ -20,6 +20,9 @@ import XCTest
 /// Where the contract leaves more than one right answer (the engine can't see the difference by design), every one is
 /// kept and the engine is held to the one it takes; the share is reported. A failure prints the seed and a minimized list
 /// of steps.
+/// THE FROZEN REFERENCE (the user's process ruling, round 17): this oracle — GuardianSim*, GuardianSimRun, these
+/// expectation lists — and its world's fakes (FakeAX, RecordingPoster, the fakes' user key) change only in commits of their
+/// own, each citing a ruling, never together with engine code; the ratchet below holds the whole surveyed ranges.
 final class GuardianModelTests: XCTestCase {
     static let seeds = Int(ProcessInfo.processInfo.environment["WINTER_CU_SIM_SEEDS"] ?? "") ?? 20
     static let steps = Int(ProcessInfo.processInfo.environment["WINTER_CU_SIM_STEPS"] ?? "") ?? 250
