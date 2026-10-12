@@ -546,18 +546,21 @@ the change, run108; the world allows 120 ms, a stress sweep 400 ms) and Secure E
   action and was sent back — avoid that …") — ONLY when clearly the agent's (round 10, the user's ruling): no input of
   the user's the tap saw in the last 2.5 s (whatever the agent did in between), an action of the agent's that can open
   apps within 1.5 s (a click, a press, a menu command, Return/Space/Enter, a typed newline, an AppleScript, an open, a
-  launch — never a read, plain typing, a scroll or a hover) and can open THAT app (1.13.0, round 14: an act in an app can
-  open the app itself; in an app that is not a web browser, the default handlers of web and mail links too; a menu
-  command, the Help viewer and the default browser too; an act in Finder, the Dock or a launcher, an open or a launch,
-  any app — an app outside every such act's reach is a third party's or the user's, never the agent's: another agent
-  session's `open <url>` in Safari and its Terminal were undone after a click in Chrome), and no Secure Event Input. In every other case it is left
-  in front, never adopted as their place, and said ("<App> came forward around your action — the user's view may have
-  moved"). Never undone: the first activation of an app after a launch the agent did not make (the user's own slow
-  launch — told by the launch notice, or by its process having started within 60 s, not by the agent, never seen in
-  front) — unless that launch was CLEARLY the agent's at its process start (1.10.0: no input of the user's in the 2.5 s
-  before the start, an action of the agent's that can open apps within 1.5 s before it — a link it pressed opening an
-  app that was not running): then its first activation is the agent's indirect effect, undone when no input of the
-  user's came since the start, else left and said — and a system dialog's process (never the user's own launch, however
+  launch — never a read, plain typing, a scroll or a hover) and, for an app already RUNNING, can open THAT app (1.13.0,
+  round 14; widened in 1.14.0: an act in an app can open the app itself and Finder; the default handler of mail links,
+  and in an app that is not a web browser those of web links too; a menu command the same, plus the Help viewer; the
+  pressed element's own link's scheme handler (zoommtg:, x-apple.systempreferences:, …); an act in Finder, the Dock or a
+  launcher, an AppleScript, an open or a launch of an unnamed app, any app — a RUNNING app outside every such act's reach
+  is a third party's or the user's, never the agent's: another agent session's `open <url>` in Safari and its Terminal
+  were undone after a click in Chrome), and no Secure Event Input. In every other case it is left in front, never adopted
+  as their place, and said ("<App> came forward around your action — it may have been your action's doing or the user's;
+  it was left in front"). A COLD launch is judged with any opener's reach (1.14.0, review of round 14, HIGH #1). Never
+  undone: the first activation of an app after a launch the agent did not make (the user's own slow launch — told by the
+  launch notice, or by its process having started within 60 s, not by the agent, never seen in front) — unless an opener
+  act of the agent's (any reach) or a pending launch of it came within 1.5 s before the process start: then it is never
+  the user's own launch and never adopted (1.14.0) — CLEARLY the agent's at its process start (1.10.0: no input of the
+  user's in the 2.5 s before the start), its first activation is the agent's indirect effect, undone when no input of the
+  user's came since the start; else left and said — and a system dialog's process (never the user's own launch, however
   it started) (UserNotificationCenter, CoreServicesUIAgent, SecurityAgent — any app that is
   not a regular one): left in front for the user to answer, and said ("… (a system dialog) came up after your action —
   it was left in front for the user to answer …"). A background open is the agent's from BEFORE it starts (a launch of

@@ -107,6 +107,9 @@ extension CUCore {
     /// not a dialog); or nothing it can tell (out of time).
     enum WebAreaWalk { case present, absent, large, unknown }
 
+    /// How soon a window whose walk ran out of time is walked again.
+    static let slowWalkAgainMs: Double = 5_000
+
     func webAreaWalk(_ w: AXUIElement, maxNodes: Int = 200, maxMs: Double = 30) -> WebAreaWalk {
         let deadline = clock.nowMs() + maxMs
         var queue = [w]
@@ -134,10 +137,20 @@ extension CUCore {
             // (A walk out of time can't tell: the window stays a candidate, its text checked — and the answer is not
             // cached. More nodes than a dialog has: a page, no candidate — review of round 13, MEDIUM #8.)
             else {
-                switch webAreaWalk(w) {
-                case .absent: candidates.append(w)
-                case .unknown: candidates.append(w); complete = false
-                case .present, .large: break
+                // (A window whose walk ran out of time is walked again at most every 5 s — meanwhile it stays a candidate,
+                // its text checked: review of round 14, LOW #9.)
+                let id = ax.windowID(w)
+                let now = clock.nowMs()
+                if let id, let at = t.remoteDebuggingSlowWalks[id], now - at < Self.slowWalkAgainMs {
+                    candidates.append(w); complete = false
+                } else {
+                    switch webAreaWalk(w) {
+                    case .absent: candidates.append(w)
+                    case .unknown:
+                        candidates.append(w); complete = false
+                        if let id { t.remoteDebuggingSlowWalks[id] = now }
+                    case .present, .large: break
+                    }
                 }
             }
             candidates.append(contentsOf: ax.elements(w, kAXChildrenAttribute).filter { ax.string($0, kAXRoleAttribute) == kAXSheetRole })

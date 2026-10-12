@@ -222,15 +222,44 @@ extension CUCore {
     /// open any app, and so does an act on a target whose bundle is unknown. Never an arbitrary app like Terminal.
     func openerScope(_ a: CUAction?, _ t: CUTarget) -> CUOpenerScope {
         guard let b = t.bundleId, !Self.opensAnyApp.contains(b) else { return .any }
-        var apps: Set<String> = [b]
+        // Finder always: Show/Reveal in Finder from Xcode, VS Code, a browser's downloads (review of round 14, MEDIUM #2).
+        var apps: Set<String> = [b, "com.apple.finder"]
         let menu: Bool = { if case .menu? = a { return true }; return false }()
-        if !isWebBrowser(t) || menu {
-            for scheme in menu ? ["http"] : ["http", "https", "mailto"] {
-                if let h = defaultHandler(scheme) { apps.insert(h) }
-            }
+        // The default web and mail handlers: a non-browser's links land there. A browser's own web links stay in it, but
+        // its mailto: opens the mail app; a menu command uses the same list (Help › Contact Support, Share › Email).
+        for scheme in isWebBrowser(t) && !menu ? ["mailto"] : ["http", "https", "mailto"] {
+            if let h = defaultHandler(scheme) { apps.insert(h) }
         }
         if menu { apps.insert("com.apple.helpviewer") }
+        // The pressed element's own link: its scheme's handler (zoommtg:, slack:, x-apple.systempreferences:, …).
+        if let ref = Self.actRef(a), let e = try? element(ref, in: t), let scheme = linkScheme(e), let h = defaultHandler(scheme) {
+            apps.insert(h)
+        }
         return .apps(apps)
+    }
+
+    /// The element an act names (its ref), when it names one.
+    static func actRef(_ a: CUAction?) -> Int? {
+        switch a {
+        case .click(let c)?: return c.ref
+        case .action(let x)?: return x.ref
+        case .key(let k)?: return k.into
+        default: return nil
+        }
+    }
+
+    /// The scheme of the link `e` is (or sits in, up to two levels): its `AXURL`'s.
+    func linkScheme(_ e: AXUIElement) -> String? {
+        var n: AXUIElement? = e
+        for _ in 0..<3 {
+            guard let x = n else { return nil }
+            if let v = ax.attribute(x, "AXURL") {
+                let url: URL? = CFGetTypeID(v) == CFURLGetTypeID() ? (v as! CFURL) as URL : (v as? String).flatMap(URL.init(string:))
+                if let s = url?.scheme?.lowercased(), !s.isEmpty { return s }
+            }
+            n = ax.element(x, kAXParentAttribute)
+        }
+        return nil
     }
 
     /// Apps whose acts can open any other app: Finder (a document opens in its app), the Dock, launchers.
@@ -239,9 +268,19 @@ extension CUCore {
         "com.raycast.macos", "com.obdev.LaunchBar",
     ]
 
-    /// The bundle id of the app that opens `scheme:` links by default (nil: none or unknown).
+    /// The bundle id of the app that opens `scheme:` links by default (nil: none or unknown). Cached a minute per scheme
+    /// (review of round 14, LOW: up to four LaunchServices lookups per opener act); a change of the default app is seen
+    /// within that.
     func defaultHandler(_ scheme: String) -> String? {
         if let o = defaultHandlerOverride { return o(scheme) }
+        let now = clock.nowSeconds()
+        if let c = defaultHandlerLock.withLock({ defaultHandlerCache[scheme] }), now - c.at < 60 { return c.bundle }
+        let found = lookUpDefaultHandler(scheme)
+        defaultHandlerLock.withLock { defaultHandlerCache[scheme] = (found, now) }
+        return found
+    }
+
+    private func lookUpDefaultHandler(_ scheme: String) -> String? {
         guard let url = URL(string: scheme == "mailto" ? "mailto:someone@example.invalid" : "\(scheme)://example.invalid"),
               let app = NSWorkspace.shared.urlForApplication(toOpen: url) else { return nil }
         return Bundle(url: app)?.bundleIdentifier
@@ -289,7 +328,7 @@ extension CUCore {
         // Round 10 (the user's ruling): not clearly the agent's — left in front, never adopted, said.
         let note = dialog
             ? "\(name) (a system dialog) came up after your action — it was left in front for the user to answer; avoid the action that raises it, or ask the user"
-            : "\(name) came forward around your action — the user's view may have moved"
+            : "\(name) came forward around your action — it may have been your action's doing or the user's; it was left in front (the user's view may have moved)"
         guardianLock.withLock {
             if !pendingGuardianNotes.contains(note) { pendingGuardianNotes.append(note) }
             pendingViewMovedBy.append(name)

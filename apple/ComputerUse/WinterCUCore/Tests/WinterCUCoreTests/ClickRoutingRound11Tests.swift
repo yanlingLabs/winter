@@ -201,8 +201,13 @@ final class ClickRoutingRound11Tests: XCTestCase {
         sys.stack = [far, doc] + sys.stack
         core.noteAgentPopups(target, before: [78, 77])
         XCTAssertEqual(target.agentPopups, [79], "only the popup over the bound window")
+        // Review of round 14, LOW #5: an act that opens nothing (typing to filter the menu) keeps it while it is on screen…
         core.noteAgentPopups(target, before: [], opens: false)
-        XCTAssertTrue(target.agentPopups.isEmpty, "the next act starts afresh")
+        XCTAssertEqual(target.agentPopups, [79], "kept across an act that opens nothing")
+        // …for a few seconds after the act that opened it.
+        target.agentPopupsAtMs = -.infinity
+        core.noteAgentPopups(target, before: [], opens: false)
+        XCTAssertTrue(target.agentPopups.isEmpty, "dropped once the time has passed")
     }
 
     /// An empty accessibility answer (a timeout) falls back to the capture-only rule — never "every window takes it".

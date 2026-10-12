@@ -78,8 +78,10 @@ extension CUCore {
         if case .key(let k) = p.action, (try? CUKeyChord.parse(k.combo))?.isEscape == true {
             await MainActor.run { [weak self] in self?.events?.willSendEscape() }
         }
+        // What it typed is the agent's (Secure Event Input's typing evidence) — refreshed however the act ends, a failed one
+        // included (review of round 14, LOW #3).
+        defer { refreshSecureTypingBase(t) }
         let acted = try await actWithVisits(p, t, token)
-        refreshSecureTypingBase(t)  // what it typed is the agent's (Secure Event Input's typing evidence)
         var outcome = acted.0
         let inVisit = acted.1
         // A link the daemon opens itself (its own door: the opener's access and consent).
@@ -915,7 +917,10 @@ extension CUCore {
     /// Controls a press acts on: giving one the keyboard focus by a press already acts on it.
     static let pressActsRoles: Set<String> = [
         "AXCheckBox", "AXRadioButton", "AXSwitch", "AXToggle", "AXButton", "AXLink", "AXMenuButton", "AXPopUpButton",
+        "AXDisclosureTriangle", "AXMenuItem",
     ]
+    /// The ones Space toggles and Return does not.
+    static let toggleRoles: Set<String> = ["AXCheckBox", "AXRadioButton", "AXSwitch", "AXToggle"]
 
     /// Roles that take a click: the hit test climbs from the deepest element at the point to the first of these
     /// (or anything listing press / open / show menu).
@@ -1005,10 +1010,20 @@ extension CUCore {
     /// press, a key, a selection — short), only a window tied to the bound window (a menu or popover over it, a sheet
     /// inside it), and only for the NEXT act: each act starts the list afresh.
     func noteAgentPopups(_ t: CUTarget, before: Set<UInt32>, opens: Bool = true) {
-        guard opens, let bound = sys.window(id: t.windowID)?.frame else { t.agentPopups = []; return }
-        let fresh = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 && $0.id != t.windowID && !before.contains($0.id) }
-        t.agentPopups = Set(fresh.filter { w in w.frame.intersects(bound) && (w.layer != 0 || bound.contains(w.frame)) }.map(\.id))
+        guard let bound = sys.window(id: t.windowID)?.frame else { t.agentPopups = []; return }
+        let now = clock.nowMs()
+        let mine = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 && $0.id != t.windowID }
+        // Kept across the acts that open nothing (type to filter a menu, then click its item — review of round 14, LOW
+        // #5) while they stay on screen, for a few seconds after the act that opened them.
+        let carried = now - t.agentPopupsAtMs <= Self.agentPopupKeepMs ? t.agentPopups.intersection(mine.map(\.id)) : []
+        guard opens else { t.agentPopups = carried; return }
+        let fresh = Set(mine.filter { w in !before.contains(w.id) && w.frame.intersects(bound) && (w.layer != 0 || bound.contains(w.frame)) }.map(\.id))
+        if !fresh.isEmpty { t.agentPopupsAtMs = now }
+        t.agentPopups = fresh.union(carried)
     }
+
+    /// How long a popup the agent opened stays its own across acts that open nothing.
+    static let agentPopupKeepMs: Double = 5_000
 
     /// The acts that can open a popup of the bound window (a menu, a popover, a page's dropdown).
     static func actCanOpenPopups(_ a: CUAction) -> Bool {
@@ -2062,6 +2077,7 @@ extension CUCore {
         // before and after, now holding what was pasted. A web or canvas editor that shows only zero-width filler
         // (whatever it holds) can't be read back: no waiting for proof that never comes — "unconfirmed".
         let before = focus.flatMap { ax.string($0, kAXValueAttribute) }
+        let rangeBefore = focus.flatMap { selectionRange($0) }
         let confirmable = focus.map { readsBack($0, t, value: before) } ?? false
         let expect = CUPasteSequence.plain(text: text, format: format)
         let rendered = CUPasteSequence.rendered(text: text, format: format)
@@ -2101,10 +2117,20 @@ extension CUCore {
         // item 12 — a Material page's field took no ⌘V from the background) — `Uncertain`: the paste was sent and may
         // still land late, never retried, the model checks state() first.
         func notShown(late: Bool) throws -> String {
-            let now = CUEditEvidence.normalized(focus.flatMap { ax.string($0, kAXValueAttribute) } ?? "")
+            let raw = focus.flatMap { ax.string($0, kAXValueAttribute) } ?? ""
+            let now = CUEditEvidence.normalized(raw)
             let was = CUEditEvidence.normalized(before ?? "")
-            if now != was { return "the field changed, but does not show the text exactly as sent (it may have reformatted it) — check state()" }
-            if !now.isEmpty, now == CUEditEvidence.normalized(expect) || now == CUEditEvidence.normalized(rendered) {
+            // Changed, AND what changed holds the pasted text — its letters and digits, as sent or rendered, from its first
+            // line (a formatting input adds punctuation, a block editor splits paragraphs): done, said. A field that changed
+            // without it (a counter, an autosave, someone else's edit) is no proof (review of round 14, LOW #4).
+            if now != was, Self.holdsPasted(now, was: was, texts: [expect, rendered]) {
+                return "the field changed, but does not show the text exactly as sent (it may have reformatted it) — check state()"
+            }
+            // Holding exactly that text already: done only when the caret or selection moved by the pasted length (the
+            // paste replaced the same text); otherwise nothing proves the paste landed.
+            if now == was, !now.isEmpty, now == CUEditEvidence.normalized(expect) || now == CUEditEvidence.normalized(rendered),
+               let r0 = rangeBefore, let r1 = focus.flatMap({ selectionRange($0) }),
+               r1.location == r0.location + (expect as NSString).length || (r0.length > 0 && r1.length == 0 && r1.location == r0.location + r0.length) {
                 return "the field shows the text (it held it already)"
             }
             CULog.act.notice("paste in \(t.appName, privacy: .public): the field does not show the pasted text — uncertain")
@@ -2130,6 +2156,20 @@ extension CUCore {
         return o
     }
 
+    /// Whether `now` holds the pasted text where `was` did not: the letters and digits of its first line (up to 32),
+    /// as sent or as rendered, occur more often than before. Pure.
+    static func holdsPasted(_ now: String, was: String, texts: [String]) -> Bool {
+        func fold(_ s: String) -> String { String(s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(Character.init)) }
+        let n = fold(now), w = fold(was)
+        for t in texts {
+            let first = t.split(whereSeparator: \.isNewline).first.map(String.init) ?? t
+            let key = String(fold(first).prefix(32))
+            guard !key.isEmpty else { continue }
+            if CUEditEvidence.occurrences(of: key, in: n) > CUEditEvidence.occurrences(of: key, in: w) { return true }
+        }
+        return false
+    }
+
     // MARK: keys
 
     private func key(_ a: CUKeyAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
@@ -2144,25 +2184,41 @@ extension CUCore {
             let info = ElementInfo(el, ax)
             if Self.producesText(chord), info.secure { throw secureRefusal() }
             // A control that a PRESS acts on (a check box, a radio, a button, a link…) without the focus: placing the
-            // focus presses it, and the key would press it again — a check box toggled twice, a button pressed twice
-            // (round 14, the Material probe: key("space", { into }) on a check box "ok" and nothing changed). Space or
-            // Return is that press: done once, as a press. Any other key: refused, with the way.
+            // focus presses it. Space — or Return on anything but a check box or radio — IS that press: done once,
+            // through the click's own press (its enabled check, link door, effect check and desktop visit), never a
+            // focusing press and then the key (round 14, the Material probe: a check box toggled twice). A navigation
+            // key (End, Home, Page Up/Down, the arrows, Tab) goes to where the focus is — the page scrolls or moves as it
+            // does natively — never after a focusing press (round 14's live run: End into a button was refused and the
+            // page did not scroll). A key that types is refused.
+            var pressActs = false
             if Self.pressActsRoles.contains(info.role ?? ""), focusRelation(el, t) != .onIt {
-                let isPress = chord.modifiers.isEmpty && rep == 1
-                    && [.named(.space), .named(.returnKey), .named(.keypadEnter)].contains(chord.key)
-                guard isPress else {
-                    throw CUError.unsupported("putting the keyboard focus on [\(into)] would press it (\(Self.elementLabel(into, info))) — click(\(into)) presses it; send other keys once it has the focus")
+                pressActs = true
+                let plain = chord.modifiers.isEmpty && rep == 1
+                let toggle = Self.toggleRoles.contains(info.role ?? "")
+                let space = plain && chord.key == .named(.space)
+                let ret = plain && [.named(.returnKey), .named(.keypadEnter)].contains(chord.key)
+                if space || (ret && !toggle) {
+                    CULog.act.notice("key in \(t.appName, privacy: .public): \(a.combo, privacy: .public) into a control a press acts on — one press, through the click's press")
+                    return try click(CUClickAction(ref: into), p, t, token)
+                        .noting("\(a.combo) into \(Self.elementLabel(into, info)) is that one press — never a focusing press and then the key (that would press it twice)")
                 }
-                announceTarget(t, info, pressing: true)
-                do { try ax.perform(el, kAXPressAction) } catch let error where Self.deliveryUncertain(error) { throw busyAfterSend(t) }
-                CULog.act.notice("key in \(t.appName, privacy: .public): \(a.combo, privacy: .public) into a control a press acts on — pressed once, not focused by a press and sent the key")
-                return ActOutcome(rung: .accessibility, detail: "\(Self.elementLabel(into, info)) was pressed once — what \(a.combo) does to it — rather than given the focus by a press and sent the key (that would press it twice)")
+                if ret && toggle {
+                    throw CUError.unsupported("Return does not toggle \(Self.elementLabel(into, info)) — key(\"space\", { into: \(into) }) or click(\(into)) does")
+                }
+                if Self.producesText(chord) {
+                    throw CUError.unsupported("\(Self.elementLabel(into, info)) takes no text, and putting the keyboard focus on it would press it — click(\(into)) presses it")
+                }
+                CULog.act.notice("key in \(t.appName, privacy: .public): \(a.combo, privacy: .public) aimed at a control a press acts on — sent to where the focus is, no focusing press")
             }
-            announceTarget(t, info, pressing: false)
-            try placeFocus(el, t, ref: into)
-            t.noteTargeted(el, at: clock.nowMs())
-            g.explicit = el
-            e = el
+            if pressActs {
+                e = reportedFocus(t)
+            } else {
+                announceTarget(t, info, pressing: false)
+                try placeFocus(el, t, ref: into)
+                t.noteTargeted(el, at: clock.nowMs())
+                g.explicit = el
+                e = el
+            }
         } else {
             e = reportedFocus(t)
         }
@@ -3134,6 +3190,15 @@ extension CUCore {
         var focused: AXIdentity?
         var value: String?
         var alive: Bool
+        /// The app's other standard windows (away from the bound one): one that APPEARS counts (Preferences opened by a
+        /// menu command, a document an AXOpen opened — review of round 14, LOW #2); one that closes does not (the user's).
+        var elsewhere: Set<UInt32> = []
+    }
+
+    /// Whether a press changed something: the bound window's state, or a new window of the app anywhere.
+    static func pressChanged(_ before: PressEvidence, _ after: PressEvidence) -> Bool {
+        before.windows != after.windows || before.focused != after.focused || before.value != after.value
+            || before.alive != after.alive || !after.elsewhere.subtracting(before.elsewhere).isEmpty
     }
 
     /// Only what belongs to the BOUND window (review of round 13, LOW): the app's windows over it (a sheet, a panel, a
@@ -3141,13 +3206,13 @@ extension CUCore {
     /// effect of the press.
     func pressEvidence(_ e: AXUIElement, _ t: CUTarget) -> PressEvidence {
         let bound = sys.window(id: t.windowID)?.frame
-        let windows = sys.windows(pid: t.pid).filter { w in
-            w.layer == 0 && (w.id == t.windowID || bound.map { $0.intersects(w.frame) } ?? true)
-        }
+        let all = sys.windows(pid: t.pid).filter { $0.layer == 0 }
+        let windows = all.filter { w in w.id == t.windowID || bound.map { $0.intersects(w.frame) } ?? true }
+        let elsewhere = Set(all.map(\.id)).subtracting(windows.map(\.id))
         let focus = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
         let inBound = focus.map { f in ax.element(f, kAXWindowAttribute).flatMap { ax.windowID($0) }.map { $0 == t.windowID } ?? true } ?? false
         return PressEvidence(windows: Set(windows.map(\.id)), focused: inBound ? focus.map { AXIdentity(element: $0) } : nil,
-                             value: ax.string(e, kAXValueAttribute), alive: ax.isAlive(e))
+                             value: ax.string(e, kAXValueAttribute), alive: ax.isAlive(e), elsewhere: elsewhere)
     }
 
     /// An action the app REFUSED (unsupported, not implemented) that changed something anyway, watched for up to
@@ -3155,18 +3220,18 @@ extension CUCore {
     func refusedYetActed(_ e: AXUIElement, _ t: CUTarget, before: PressEvidence, what: String) -> String? {
         let deadline = clock.nowMs() + pressSettleMs
         var after = pressEvidence(e, t)
-        while after == before, clock.nowMs() < deadline {
+        while !Self.pressChanged(before, after), clock.nowMs() < deadline {
             clock.pause(ms: 50)
             after = pressEvidence(e, t)
         }
-        guard after != before else { return nil }
+        guard Self.pressChanged(before, after) else { return nil }
         CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public): refused, yet something changed — taken as done")
         return "\(t.appName) answered \(what) with “not supported”, but it took effect (\(Self.pressChangeWords(before, after))) — check state() before doing it again"
     }
 
     static func pressChangeWords(_ before: PressEvidence, _ after: PressEvidence) -> String {
         if before.alive && !after.alive { return "the element is gone" }
-        if before.windows != after.windows { return "a window opened or closed" }
+        if before.windows != after.windows || !after.elsewhere.subtracting(before.elsewhere).isEmpty { return "a window opened or closed" }
         if before.value != after.value { return "its value changed" }
         return "the focus moved"
     }
@@ -3187,17 +3252,17 @@ extension CUCore {
     func judgeErroredPress(_ e: AXUIElement, _ t: CUTarget, before: PressEvidence, code: Int, what: String) throws -> String {
         let deadline = clock.nowMs() + pressSettleMs
         var after = pressEvidence(e, t)
-        while after == before, clock.nowMs() < deadline {
+        while !Self.pressChanged(before, after), clock.nowMs() < deadline {
             clock.pause(ms: 50)
             after = pressEvidence(e, t)
         }
-        guard after != before else {
+        guard Self.pressChanged(before, after) else {
             CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public): AXError \(code, privacy: .public), and nothing visibly changed")
             throw CUError.uncertain("\(t.appName) answered \(what) with an error (AXError \(code)) but may have acted — check state() before retrying",
                                     axError: code)
         }
         var changed: [String] = []
-        if !after.windows.subtracting(before.windows).isEmpty { changed.append("a new window opened") }
+        if !after.windows.subtracting(before.windows).isEmpty || !after.elsewhere.subtracting(before.elsewhere).isEmpty { changed.append("a new window opened") }
         if !before.windows.subtracting(after.windows).isEmpty { changed.append("a window closed") }
         if after.value != before.value { changed.append("its value changed") }
         if after.focused != before.focused { changed.append("the focus moved") }

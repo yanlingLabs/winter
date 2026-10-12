@@ -41,8 +41,10 @@ final class GuardianRound11Tests: XCTestCase {
         XCTAssertFalse(o.undoes, "\(o)")
     }
 
-    /// Their own launch (a key 1 s before the start — Spotlight's Return), even right after an opener act: theirs.
-    func testTheirOwnLaunchStaysTheirsAfterAnOpenerAct() {
+    /// Their own launch (a key 1 s before the start — Spotlight's Return) right after an opener act of the agent's: the
+    /// engine can't tell it from the agent's own cold launch — left in front and said, NEVER adopted (review of round 14,
+    /// HIGH #1; round 11 had it theirs).
+    func testALaunchRightAfterAnOpenerActIsLeftAndSaid() {
         var g = CUFocusGuardianCore()
         g.begin(view: CUGuardedView(app: 1, space: 100))
         g.noteHardwareAction(now: 19.4)
@@ -50,7 +52,8 @@ final class GuardianRound11Tests: XCTestCase {
         g.noteOpenerCause(now: 20)
         g.appLaunched(903, startedAt: 20.4, now: 20.45)
         let o = g.judge(CUMoveQuery(app: 903, space: 100, appStartedAt: 20.4, hardwareAt: 19.4), now: 23)
-        XCTAssertTrue(o.isUsers, "\(o)")
+        if case .unexplained = o {} else { XCTFail("left in front and said: \(o)") }
+        XCTAssertEqual(g.view.app, 1, "never adopted")
     }
 
     /// A system dialog started on demand (SecurityAgent, CoreServicesUIAgent): never the user's own launch — left for

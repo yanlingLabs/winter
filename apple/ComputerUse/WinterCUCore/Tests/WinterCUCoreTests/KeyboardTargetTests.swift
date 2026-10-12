@@ -273,13 +273,31 @@ final class KeyboardTargetTests: XCTestCase {
         let r = try await act(.key(CUKeyAction(combo: "space", into: ref(cb))))
         XCTAssertEqual(ax.performed.filter { $0.hasSuffix(":AXPress") }.count, 1, "one press: \(ax.performed)")
         XCTAssertTrue(poster.keyDowns.isEmpty, "no key sent after it")
-        XCTAssertTrue(r.detail?.contains("pressed once") ?? false, r.detail ?? "")
-        do {
-            _ = try await act(.key(CUKeyAction(combo: "tab", into: ref(cb))))
-            XCTFail("refused")
-        } catch let e as CUError {
-            XCTAssertTrue(e.message.contains("would press it"), e.message)
+        XCTAssertTrue(r.detail?.contains("is that one press") ?? false, r.detail ?? "")
+        // Return does not toggle a check box (natively it doesn't); a key that types is refused.
+        for combo in ["return", "a"] {
+            do {
+                _ = try await act(.key(CUKeyAction(combo: combo, into: ref(cb))))
+                XCTFail("\(combo): refused")
+            } catch let e as CUError {
+                XCTAssertTrue(e.message.contains(combo == "return" ? "Return does not toggle" : "takes no text"), e.message)
+            }
         }
+        XCTAssertEqual(ax.performed.filter { $0.hasSuffix(":AXPress") }.count, 1, "still one press")
+    }
+
+    /// Round 14's live run (a regression of the one-press rule): End aimed INTO a web button scrolls the page as before —
+    /// sent to where the focus is, never refused, and never after a focusing press of the button.
+    func testANavigationKeyIntoAButtonGoesToTheFocusWithoutPressingIt() async throws {
+        safari(fieldOwner: pid)
+        let button = fakeElement(93_091)
+        ax.add(button, role: kAXButtonRole, title: "Web Button", frame: CGRect(x: 20, y: 160, width: 120, height: 30),
+               extra: [kAXParentAttribute: ax.element(field, kAXParentAttribute)!])
+        ax.setActions(button, [kAXPressAction])
+        _ = try await act(.key(CUKeyAction(combo: "end", into: ref(button))))
+        XCTAssertTrue(ax.performed.filter { $0.hasSuffix(":AXPress") }.isEmpty, "the button never pressed: \(ax.performed)")
+        XCTAssertTrue(poster.keyDowns.contains { $0.keycode == Int64(kVK_End) }, "End sent")
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "no focusing click either")
     }
 
     /// Review of round 13, MEDIUM #5: a paste the field took but shows otherwise (a formatting input, a rich target, a
@@ -295,6 +313,25 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertEqual(CUPasteSequence.rendered(text: "**Note:** see [the doc](https://example.org)", format: .markdown), "Note: see the doc")
         let ev = CUEditEvidence(readValue: { "Note: see the doc" }, nowMs: { 0 }, sleepMs: { _ in })
         XCTAssertTrue(ev.wait(before: "", expect: "**Note:** see [the doc](https://example.org)", also: "Note: see the doc", capMs: 0))
+    }
+
+    /// Review of round 14, LOW #4: a field that changed WITHOUT the pasted text (a counter, an autosave) proves nothing —
+    /// Uncertain; the letters and digits of the pasted text decide.
+    func testAFieldThatChangedWithoutThePasteIsUncertain() async throws {
+        safari(fieldOwner: pid)
+        ax.put(field, [kAXValueAttribute: "draft"])
+        poster.onPost = { [unowned self] e in
+            if e.type == .keyDown, e.flags.contains(.maskCommand) { ax.put(field, [kAXValueAttribute: "draft (saved)"]) }
+        }
+        do {
+            _ = try await act(.paste(CUPasteAction(text: "the report is done", into: ref(field))))
+            XCTFail("Uncertain")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["uncertain"], .bool(true), e.message)
+        }
+        XCTAssertTrue(CUCore.holdsPasted("(555) 123-4567", was: "", texts: ["5551234567"]), "a formatting input")
+        XCTAssertTrue(CUCore.holdsPasted("Note: see the doc", was: "", texts: ["**Note:** see [the doc](x)", "Note: see the doc"]))
+        XCTAssertFalse(CUCore.holdsPasted("draft (saved)", was: "draft", texts: ["the report is done"]))
     }
 
     /// Review of round 13, MEDIUM #4: the guards come before the scroll — a focus click refused (the app in front with
