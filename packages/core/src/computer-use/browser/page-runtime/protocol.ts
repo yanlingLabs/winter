@@ -13,8 +13,11 @@ export interface RtNode {
   id: RtId;
   role: string;
   name?: string;
-  /** The value as shown — already `<redacted>` for a secure field or a token-looking value. */
+  /** The value as shown — already `<redacted>` for a secure field or a token-looking value; cut at the read's value
+   *  cap (200 characters, a `within` read's 8,000), with no ellipsis: `valueLength` says it was cut. */
   value?: string;
+  /** The value's full length in characters, when `value` was cut. */
+  valueLength?: number;
   /** Show `value=…` even when empty (a text field's empty value is a fact the model needs). */
   showEmptyValue?: true;
   secure?: true;
@@ -52,7 +55,8 @@ export interface RtSnapshot {
 export type RtPoint =
   /** `picker`: the element (or the control a label forwards to) opens a native menu, picker or chooser window when
    *  pressed (the engine refuses pointer input). */
-  | { ok: true; x: number; y: number; picker?: string }
+  /** `chooser`: a press there may make the page open a file chooser (a button near a file input). */
+  | { ok: true; x: number; y: number; picker?: string; check?: RtCheckFacts; chooser?: true }
   | { ok: false; reason: "gone" | "hidden" | "disabled" | "offscreen" }
   | { ok: false; reason: "covered"; by: { id: RtId; role: string; name?: string } };
 
@@ -78,7 +82,14 @@ export interface RtInspect {
 }
 /** Phase 3: what a link or a media element points at (`download(ref)`). */
 export type RtLink = { kind: "link"; url: string; download?: string } | { kind: "media"; url: string } | { kind: "other" };
-export interface RtFound { id: RtId; role: string; name?: string; value?: string; states?: string[] }
+export interface RtFound { id: RtId; role: string; name?: string; value?: string; valueLength?: number; states?: string[] }
+/** A combo box that pops up a list (an ARIA select — not a <select>, not a text field): whether its list is open, what
+ *  it shows, and the list's options (ids in the same frame). `combo: false`: not such a combo box. */
+export type RtComboOptions =
+  | { combo: false }
+  | { combo: true; open: boolean; value?: string; options: Array<{ id: RtId; text: string; selected?: true; disabled?: true }> };
+/** A press's target for a check box, radio or switch: its kind and state before the press (the engine checks it took). */
+export interface RtCheckFacts { kind: "checkbox" | "radio"; checked: boolean }
 
 /** `waitFor`'s conditions the runtime can check by itself (refs are the engine's: it passes their ids). */
 export interface RtCondition { text?: string; title?: string; url?: string; goneText?: string; ids?: RtId[]; goneIds?: RtId[] }
@@ -110,7 +121,8 @@ export type RtSiteToolAnswer =
 /** The ops, by name → argument → answer. */
 export interface RtOps {
   hello: { arg: null; result: { id: string; url: string; title: string; readyState: string } };
-  snapshot: { arg: { within?: RtId; maxNodes?: number }; result: RtSnapshot };
+  /** `valueCap`: values are cut at this many characters (default 200; 8,000 in a `within` read). */
+  snapshot: { arg: { within?: RtId; maxNodes?: number; valueCap?: number }; result: RtSnapshot };
   find: { arg: RtFindQuery; result: RtFound[] };
   text: { arg: { markdown?: boolean; within?: RtId }; result: string };
   /** The id of the element `this` (an element-bound call). */
@@ -150,8 +162,13 @@ export interface RtOps {
   assets: { arg: { kinds: string[]; max: number }; result: Array<{ kind: string; url: string }> };
   /** The link or media URL an element stands for. */
   linkOf: { arg: { id: RtId }; result: RtLink };
-  /** Is it a check box, radio or switch, and is it checked? */
-  checkState: { arg: { id: RtId }; result: { checkable: boolean; checked?: boolean } };
+  /** Is it a check box, radio or switch (or a wrapper or label of one), and is it checked? `control`: press that
+   *  element instead (the native control a wrapper with no role of its own holds); `kind`: radio or check box/switch. */
+  checkState: { arg: { id: RtId }; result: { checkable: boolean; checked?: boolean; control?: RtId; kind?: "checkbox" | "radio" } };
+  /** A combo box's list: open or not, what it shows, its options. */
+  comboOptions: { arg: { id: RtId }; result: RtComboOptions };
+  /** Where the keyboard focus is (the element's id, role words and name), and the focused text field's selection. */
+  focusInfo: { arg: null; result: { id?: RtId; role?: string; name?: string; selection?: { start: number; end: number; length: number } } };
   // ── Phase 4 (WebMCP) ──
   /** The page's own agent tools (`document.modelContext`), top frame only; `null` when the page has no such API. */
   siteTools: { arg: { describe?: boolean }; result: RtSiteTools | null };

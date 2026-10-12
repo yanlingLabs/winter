@@ -25,7 +25,7 @@ public enum CUFinder {
         let value: String? = n.isSecure ? "<redacted>" : n.value.flatMap { v in
             if v.isEmpty || v == n.name { return nil }
             guard v.count > formatter.valueCap else { return v }
-            return formatter.cut(v) + " (\(v.count) characters — state({within:\(n.ref)}) shows it whole)"
+            return formatter.cut(v) + " (\(v.count) characters — \(CUStateFormatter.wholeHint(ref: n.ref, count: v.count)))"
         }
         let words = n.states.words
         return CUElementSummary(ref: n.ref, role: n.roleWords, name: n.name.flatMap { $0.isEmpty ? nil : formatter.cut($0) },

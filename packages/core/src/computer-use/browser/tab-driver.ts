@@ -18,8 +18,9 @@ import { buttonOf, keyEvents, keyForChar, modifiersOf, parseCombo, type KeyPress
 import { PAGE_RUNTIME_SOURCE } from "./page-runtime/bundle.generated";
 import { redactText, redactUrl } from "./page-runtime/redact";
 import { pickerAdvice } from "./page-runtime/rules";
+import { ambiguousOptionSentence, comboShows, matchOption, noOptionSentence, pressTookEffect, WHOLE_VALUE_CAP } from "./page-runtime/widgets";
 import {
-  PAGE_RUNTIME_CALL, type RtCheck, type RtClassify, type RtCondition, type RtFindQuery, type RtFound, type RtHit, type RtInspect, type RtLink, type RtNode, type RtPoint, type RtSiteToolAnswer, type RtSiteTools, type RtSnapshot,
+  PAGE_RUNTIME_CALL, type RtCheck, type RtCheckFacts, type RtClassify, type RtComboOptions, type RtCondition, type RtFindQuery, type RtFound, type RtHit, type RtInspect, type RtLink, type RtNode, type RtPoint, type RtSiteToolAnswer, type RtSiteTools, type RtSnapshot,
 } from "./page-runtime/protocol";
 import { fitsBudget, imageSize, outputSize, scaleFor, toCss, type CssRect, type ShotFrame } from "./scale";
 import { diffState, fullState, makeSnapshot, printedState, type TabDialogLine, type TabHeader, type TabNode, type TabSnapshot } from "./state-format";
@@ -154,7 +155,7 @@ export class TabDriver {
   /** The model's own goto/close on an agent tab: a `beforeunload` dialog it raises is accepted. */
   agentNavigating = false;
   dialog?: Dialog;
-  fileChooser?: { frameId: string; mode: string };
+  fileChooser?: { frameId: string; mode: string; backendNodeId?: number; ref?: number };
 
   private attached = false;
   /** Times the tab's document was replaced underneath the engine or its debugger let go while the tab lived (an idle
@@ -538,7 +539,7 @@ export class TabDriver {
         this.dialog = undefined;
         break;
       case "Page.fileChooserOpened":
-        this.fileChooser = { frameId: String(p.frameId ?? ""), mode: String(p.mode ?? "selectSingle") };
+        this.fileChooser = { frameId: String(p.frameId ?? ""), mode: String(p.mode ?? "selectSingle"), ...(typeof p.backendNodeId === "number" ? { backendNodeId: p.backendNodeId } : {}) };
         break;
       case "Runtime.executionContextCreated": {
         const c = (p.context ?? {}) as { id: number; name?: string; uniqueId?: string; auxData?: { frameId?: string } };
@@ -891,7 +892,7 @@ export class TabDriver {
     const budget = { frames: 0 };
     if (within !== undefined) {
       const { rec, id, rtId } = this.resolve(within);
-      const snap = await this.callIn<RtSnapshot>(rec, "snapshot", { within: id }, { expectRt: rtId });
+      const snap = await this.callIn<RtSnapshot>(rec, "snapshot", { within: id, valueCap: WHOLE_VALUE_CAP }, { expectRt: rtId });
       const focus: { ref?: number } = {};
       const roots = await this.convert(rec, snap.roots, budget, 0, focus);
       return { roots, ...(snap.unread === undefined ? {} : { unread: snap.unread }) };
@@ -919,6 +920,7 @@ export class TabDriver {
       const t: TabNode = {
         ref: this.refFor(rtId, n.id), role: n.role, states: n.states ?? [], children: [],
         ...(n.name === undefined ? {} : { name: n.name }), ...(n.value === undefined ? {} : { value: n.value }),
+        ...(n.valueLength === undefined ? {} : { valueLength: n.valueLength }),
         ...(n.showEmptyValue === true ? { showEmptyValue: true } : {}), ...(n.secure === true ? { secure: true } : {}),
         ...(n.level === undefined ? {} : { level: n.level }), ...(n.href === undefined ? {} : { href: n.href }),
         ...(n.origin === undefined ? {} : { origin: n.origin }), ...(n.items === undefined ? {} : { items: n.items }),
@@ -951,7 +953,7 @@ export class TabDriver {
 
   private header(settle?: { settled: boolean; ms: number }, focusedRef?: number, unread?: number, scoped = false): TabHeader {
     const notes: string[] = [];
-    if (this.fileChooser !== undefined) notes.push("the page asked for a file — use upload(ref, paths) on its file input");
+    if (this.fileChooser !== undefined) notes.push(`the page asked for a file — use upload(${this.fileChooser.ref === undefined ? "ref" : `[${this.fileChooser.ref}]`}, paths) on its file input`);
     for (const name of this.takeUncaughtDownloads()) {
       notes.push(this.browserName === "Winter's headless browser"
         ? `the page started a download of "${redactText(name)}" — it was not saved (Winter's headless browser doesn't download files)`
@@ -987,8 +989,10 @@ export class TabDriver {
     if (tools !== undefined && tools.total > 0) header.siteTools = tools;
     // A whole-tab, non-full state folds what is out of view first; `full` is everything the read saw (its cap said).
     // What the print shows is kept with the snapshot: a later diff surfaces what it had folded.
-    const printed = printedState(header, tree.roots, o.within === undefined && o.full !== true, undefined, o.full === true);
-    const snap = makeSnapshot(id, tree.roots, o.within, printed.shown);
+    // A read within one element shows its values whole up to 8,000 characters.
+    const valueCap = o.within === undefined ? undefined : WHOLE_VALUE_CAP;
+    const printed = printedState(header, tree.roots, o.within === undefined && o.full !== true, undefined, o.full === true, valueCap);
+    const snap = makeSnapshot(id, tree.roots, o.within, printed.shown, valueCap);
     if (toolsSig !== undefined) snap.siteTools = toolsSig;
     let text = printed.text;
     let isDiff = false;
@@ -1016,13 +1020,18 @@ export class TabDriver {
     return { text, snapshotId: id, isDiff, ...(settle === undefined ? {} : { settled: settle.settled, waitedMs: settle.ms }) };
   }
 
-  async find(q: RtFindQuery): Promise<Array<{ ref: number; role: string; name?: string; value?: string; states?: string[] }>> {
+  async find(q: RtFindQuery): Promise<Array<{ ref: number; role: string; name?: string; value?: string; valueLength?: number; states?: string[] }>> {
     this.requireNoDialog("find()");
     const top = this.top();
-    const out: Array<{ ref: number; role: string; name?: string; value?: string; states?: string[] }> = [];
+    const out: Array<{ ref: number; role: string; name?: string; value?: string; valueLength?: number; states?: string[] }> = [];
     const visit = async (rec: FrameRec, depth: number): Promise<void> => {
       const found = await this.callFresh<RtFound[]>(rec, "find", q);
-      for (const f of found) if (out.length < 50) out.push({ ref: this.refFor(rec.rtId!, f.id), role: f.role, ...(f.name === undefined ? {} : { name: f.name }), ...(f.value === undefined ? {} : { value: f.value }), ...(f.states === undefined ? {} : { states: f.states }) });
+      for (const f of found) {
+        if (out.length < 50) {
+          out.push({ ref: this.refFor(rec.rtId!, f.id), role: f.role, ...(f.name === undefined ? {} : { name: f.name }), ...(f.value === undefined ? {} : { value: f.value }),
+            ...(f.valueLength === undefined ? {} : { valueLength: f.valueLength }), ...(f.states === undefined ? {} : { states: f.states }) });
+        }
+      }
       if (depth >= MAX_FRAME_DEPTH) return;
       for (const c of [...this.frames.values()].filter((x) => x.parentId === rec.frameId)) {
         try { await visit(c, depth + 1); } catch { /* an unreadable frame */ }
@@ -1258,7 +1267,7 @@ export class TabDriver {
   /** A ref → where to click in the top frame's viewport (CSS px), after the actionability check; `picker` names the
    *  native window pressing it would open (the engine refuses that). `guardMenu`: a right-click follows — the
    *  element's frame stops the browser's own context menu from opening (unless the page shows its own). */
-  async pointForRef(ref: number, o: { guardMenu?: boolean } = {}): Promise<{ x: number; y: number; picker?: string }> {
+  async pointForRef(ref: number, o: { guardMenu?: boolean } = {}): Promise<{ x: number; y: number; picker?: string; check?: RtCheckFacts; chooser?: true }> {
     const { rec, id, rtId } = this.resolve(ref);
     const guard = o.guardMenu === true ? { guardMenu: true } : {};
     const p = await this.callIn<RtPoint>(rec, "point", { id, scroll: true, ...guard }, { expectRt: rtId });
@@ -1274,7 +1283,7 @@ export class TabDriver {
         }
       }
     }
-    const picker = p.picker === undefined ? {} : { picker: p.picker };
+    const picker = { ...(p.picker === undefined ? {} : { picker: p.picker }), ...(p.check === undefined ? {} : { check: p.check }), ...(p.chooser === true ? { chooser: true as const } : {}) };
     if (rec.parentId === undefined) return { x: p.x, y: p.y, ...picker };
     // In a child frame: every ancestor brings this point into its view, then the frame paints where it now is
     // before the click (an out-of-process frame is hit-tested by where it last painted).
@@ -1456,9 +1465,74 @@ export class TabDriver {
     return await this.callIn<RtLink>(rec, "linkOf", { id }, { expectRt: rtId });
   }
 
-  async checkState(ref: number): Promise<{ checkable: boolean; checked?: boolean }> {
+  /** Is `ref` a check box, radio or switch (or a label or role-less wrapper of one), and is it checked? `control`: the
+   *  ref to press instead (the native control a role-less wrapper holds). */
+  async checkState(ref: number): Promise<{ checkable: boolean; checked?: boolean; control?: number; kind?: "checkbox" | "radio" }> {
     const { rec, id, rtId } = this.resolve(ref);
-    return await this.callIn<{ checkable: boolean; checked?: boolean }>(rec, "checkState", { id }, { expectRt: rtId });
+    const r = await this.callIn<{ checkable: boolean; checked?: boolean; control?: number; kind?: "checkbox" | "radio" }>(rec, "checkState", { id }, { expectRt: rtId });
+    return { checkable: r.checkable, ...(r.checked === undefined ? {} : { checked: r.checked }), ...(r.kind === undefined ? {} : { kind: r.kind }),
+      ...(r.control === undefined ? {} : { control: this.refFor(rtId, r.control) }) };
+  }
+
+  /** After a press on a check box: its state, read until it took (a page may apply it a moment later) or `ms` passed.
+   *  Undefined when it can no longer be read (the press replaced the element). */
+  async checkAfterPress(ref: number, kind: "checkbox" | "radio", before: boolean, ms = 600, signal?: AbortSignal): Promise<boolean | undefined> {
+    const t0 = this.now();
+    for (;;) {
+      let now: boolean | undefined;
+      try { now = (await this.checkState(ref)).checked; } catch { return undefined; }
+      if (now === undefined) return undefined;
+      if (pressTookEffect(kind, before, now) || this.now() - t0 >= ms || signal?.aborted === true) return now;
+      await sleep(60);
+    }
+  }
+
+  /** Where the keyboard focus is now (a ref and its label), and a focused field's selection — what a key just did. */
+  async focusNow(): Promise<{ ref?: number; label?: string; selection?: { start: number; end: number; length: number } }> {
+    let rec = this.top();
+    let c = await this.callFresh<RtClassify>(rec, "classify", {});
+    for (let depth = 0; c.kind === "frame" && depth < MAX_FRAME_DEPTH; depth++) {
+      await this.ensureOwners(rec);
+      const child = this.childFrameFor(rec, c.id);
+      if (child === undefined) break;
+      rec = child;
+      c = await this.callFresh<RtClassify>(rec, "classify", {});
+    }
+    const f = await this.callFresh<{ id?: number; role?: string; name?: string; selection?: { start: number; end: number; length: number } }>(rec, "focusInfo", null);
+    if (f.id === undefined || rec.rtId === undefined) return {};
+    const ref = this.refFor(rec.rtId, f.id);
+    return { ref, label: `[${ref}] ${f.role ?? "element"}${f.name === undefined ? "" : ` "${f.name}"`}`, ...(f.selection === undefined ? {} : { selection: f.selection }) };
+  }
+
+  /** The file input a file chooser the page opened belongs to, as a ref (`Page.fileChooserOpened`'s `backendNodeId`,
+   *  resolved in its frame's winter world) — undefined when none is open or it can't be placed. */
+  async fileChooserInput(): Promise<number | undefined> {
+    const fc = this.fileChooser;
+    if (fc?.backendNodeId === undefined) return undefined;
+    const rec = this.frames.get(fc.frameId) ?? this.top();
+    try {
+      await this.ensureRuntime(rec);
+      if (rec.ctx === undefined || rec.rtId === undefined) return undefined;
+      const node = await this.send<{ object: { objectId?: string } }>("DOM.resolveNode", { backendNodeId: fc.backendNodeId, executionContextId: rec.ctx }, rec.ctxSession);
+      const objectId = node.object.objectId;
+      if (objectId === undefined) return undefined;
+      try {
+        const res = await this.send<{ result?: { value?: unknown } }>("Runtime.callFunctionOn", {
+          functionDeclaration: PAGE_RUNTIME_CALL, objectId, arguments: [{ value: "owner" }, { value: null }], returnByValue: true,
+        }, rec.ctxSession);
+        if (typeof res.result?.value !== "number") return undefined;
+        const ref = this.refFor(rec.rtId, res.result.value);
+        if (this.fileChooser === fc) fc.ref = ref;
+        return ref;
+      } finally {
+        void this.send("Runtime.releaseObject", { objectId }, rec.ctxSession).catch(() => undefined);
+      }
+    } catch { return undefined; }
+  }
+
+  /** Wait (bounded) for the page to open a file chooser — a press on a button whose handler clicks a file input. */
+  async waitFileChooser(ms: number, signal?: AbortSignal): Promise<boolean> {
+    return await this.waitUntil(() => this.fileChooser !== undefined, ms, signal);
   }
 
   /** An element's box in the top frame's viewport (CSS px), brought into view first (for a screenshot of it).
@@ -1638,16 +1712,61 @@ export class TabDriver {
     return r.handled;
   }
 
-  async setValue(ref: number, value: string): Promise<string> {
+  /** `o.live`: called before each press (the run's liveness check); `o.signal`: the run's. */
+  async setValue(ref: number, value: string, o: { live?: () => void; signal?: AbortSignal } = {}): Promise<string> {
     const { rec, id, rtId } = this.resolve(ref);
     const r = await this.callIn<{ ok: true; shown: string } | { ok: false; reason: string; control?: number }>(rec, "setValue", { id, value }, { expectRt: rtId });
     if (!r.ok) {
       if (r.reason === "secure_field") throw new AutomationFailure("Refused", SECURE_FIELD_SENTENCE);
       if (r.reason === "gone") throw stale(ref);
       if (r.reason === "text") throw textLeafError(ref, "setValue", r.control === undefined ? undefined : this.refFor(rtId, r.control));
+      if (r.reason === "combobox") return await this.chooseOption(ref, value, o);
       throw new Error(`[${ref}]: ${r.reason}`);
     }
     return r.shown;
+  }
+
+  /** `setValue` on a combo box that pops up a list (an ARIA select): open it with a press where the page takes one,
+   *  wait for its list (often drawn in an overlay elsewhere in the document), press the option the value names, and
+   *  check the combo box now shows it. A list Winter opened is closed again (Escape) when nothing in it matches. */
+  private async chooseOption(ref: number, value: string, o: { live?: () => void; signal?: AbortSignal }): Promise<string> {
+    const { rec, id, rtId } = this.resolve(ref);
+    const read = async (): Promise<RtComboOptions> => await this.callIn<RtComboOptions>(rec, "comboOptions", { id }, { expectRt: rtId });
+    const poll = async (until: (c: RtComboOptions) => boolean, ms: number): Promise<RtComboOptions> => {
+      const t0 = this.now();
+      for (;;) {
+        const c = await read();
+        if (until(c) || this.now() - t0 >= ms || o.signal?.aborted === true) return c;
+        await sleep(60);
+      }
+    };
+    let info = await read();
+    if (!info.combo) throw new Error(`[${ref}]: that element takes no value — click it, or type into a text field`);
+    let opened = false;
+    if (!info.open) {
+      const at = await this.pointForRef(ref);
+      if (at.picker !== undefined) throw new AutomationFailure("Refused", pickerSentence(ref, at.picker));
+      o.live?.();
+      await this.click(at, {});
+      opened = true;
+      info = await poll((c) => c.combo && c.open, 1_500);
+      if (!info.combo || !info.open) throw new Error(`[${ref}]: pressing the combo box did not open its list — state() shows what it did`);
+    }
+    const close = async (): Promise<void> => { if (opened) await this.press(parseCombo("escape"), 1).catch(() => undefined); };
+    const m = matchOption(info.options, value);
+    if ("none" in m) { await close(); throw new Error(`[${ref}]: ${noOptionSentence(value, info.options)}`); }
+    if ("ambiguous" in m) { await close(); throw new Error(`[${ref}]: ${ambiguousOptionSentence(value, m.ambiguous)}`); }
+    const want = m.option;
+    if (want.disabled === true) { await close(); throw new Error(`[${ref}]: the option "${want.text}" is disabled`); }
+    if (info.options.find((x) => x.selected === true) === want && comboShows(info.value, want.text)) { await close(); return want.text; }
+    const at = await this.pointForRef(this.refFor(rtId, want.id));
+    o.live?.();
+    await this.click(at, {});
+    const after = await poll((c) => c.combo && comboShows(c.value, want.text), 1_000);
+    if (!after.combo || !comboShows(after.value, want.text)) {
+      throw new Error(`[${ref}]: pressed the option "${want.text}" but the combo box shows ${after.combo && after.value !== undefined ? `"${after.value}"` : "nothing"} — state() shows what happened`);
+    }
+    return want.text;
   }
 
   async select(ref: number, text: string, o: { before?: string; after?: string; caret?: "start" | "end" }): Promise<void> {

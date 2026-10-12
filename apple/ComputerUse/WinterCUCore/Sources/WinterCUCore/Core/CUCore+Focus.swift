@@ -114,7 +114,8 @@ extension CUCore {
         guard isWebContent(e), editableElement(e) else { return nil }
         // A combo box is a control (a Material select reads as one), never a document's stand-in (round 13's dogfood
         // item 10: one scrolled below the window read as "the page's hidden text input" and nothing could open it).
-        guard ax.string(e, kAXRoleAttribute) != kAXComboBoxRole else { return nil }
+        // (Chromium reads a select-only combo box as a pop-up button: the same.)
+        guard !Self.webSelectRoles.contains(ax.string(e, kAXRoleAttribute) ?? "") else { return nil }
         let frame = ax.frame(e)
         let window = sys.window(id: t.windowID)?.frame
         let tiny = frame.map { $0.width < 2 || $0.height < 2 } ?? true
@@ -122,6 +123,10 @@ extension CUCore {
         // field of a long page scrolled out of view, scrolled to like any other.
         let outside = frame.flatMap { f in window.map { w in !w.intersects(f) && (f.maxX <= w.minX || f.minX >= w.maxX) } } ?? false
         guard tiny || outside else { return nil }
+        // A select's own hidden input (a Material select's): named by the select it belongs to.
+        if let select = selectBeside(e) {
+            return "the hidden text input of the select \(Self.elementLabel(t.refs.ref(for: AXIdentity(element: select)), ElementInfo(select, ax)))"
+        }
         return "the page's hidden text input (it types into the document)"
     }
 
