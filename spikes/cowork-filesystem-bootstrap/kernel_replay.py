@@ -5,7 +5,20 @@ Timeout retains the actual helper and file descriptors; never kill=>cleanup.
 import errno,fcntl,hashlib,json,os,stat,subprocess,sys,tempfile,time
 LOOP_GET_STATUS64=0x4c05
 retained=[]
-class ReplayUncertain(Exception):pass
+class ReplayUncertain(Exception):
+    def __init__(self,code,diagnostics=None):
+        self.code=code;self.diagnostics=diagnostics;super().__init__(code)
+
+def captured_output(out,err):
+    # pread avoids racing the helper's shared output-file position. Preserve bounded
+    # actual bytes; they are diagnostic evidence, never exit/detach proof.
+    captured={}
+    for name,stream in [('stdout',out),('stderr',err)]:
+        try:
+            data=os.pread(stream.fileno(),4097,0);captured[name]=data[:4096].decode('ascii',errors='backslashreplace');captured[name+'Truncated']=len(data)>4096
+        except (OSError,ValueError):captured[name+'Unavailable']=True
+    return captured
+
 
 def detached_loop(number):
     if type(number) is not int or not 0<=number<=65535:raise ReplayUncertain('loop_identity')
@@ -44,7 +57,11 @@ class FixtureKernelReplay:
             if hashlib.sha256(os.pread(executable,identity.st_size,0)).hexdigest()!=self.digest:raise ReplayUncertain('replay_artifact_changed')
             child=subprocess.Popen([f'/proc/self/fd/{executable}','--image-fd',str(image),'--uuid',target['expectedFilesystemUUID'],'--capacity',str(target['capacityBytes'])],pass_fds=(image,executable),stdin=subprocess.DEVNULL,stdout=out,stderr=err,env={'LANG':'C','LC_ALL':'C','PATH':'/nonexistent','HOME':'/nonexistent'},close_fds=True)
             try:code=child.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:raise ReplayUncertain('kernel_replay_lifetime_retained') from None
+            except subprocess.TimeoutExpired:
+                diagnostics=captured_output(out,err)
+                try:print(json.dumps({'kernelReplayTimeout':True,'cleanupConfirmed':False,'diagnostics':diagnostics}),file=sys.stderr,flush=True)
+                except (OSError,ValueError):pass # diagnostics failure cannot erase retained lifetime
+                raise ReplayUncertain('kernel_replay_lifetime_retained',diagnostics) from None
             out.seek(0);wire=out.read(4097);err.seek(0)
             if len(wire)>4096 or len(err.read(4097))>4096:raise ReplayUncertain('replay_capture_bound')
             records=[json.loads(line) for line in wire.splitlines()]
@@ -55,7 +72,11 @@ class FixtureKernelReplay:
             detached_loop(initial['loopMinor']) # fresh kernel observation AFTER actual reap
             if code!=0:raise ReplayUncertain('kernel_replay_failed_metadata_may_have_changed')
             return 'kernel-mount'
-        except BaseException:
+        except BaseException as failure:
+            if isinstance(failure,ReplayUncertain) and failure.diagnostics is None:
+                failure.diagnostics=captured_output(out,err)
+                try:print(json.dumps({'kernelReplayFailure':failure.code,'cleanupConfirmed':False,'diagnostics':failure.diagnostics}),file=sys.stderr,flush=True)
+                except (OSError,ValueError):pass
             # Even a reaped helper with a missing/malformed detach proof retains files/FDs.
             retained.append((child,image,executable,out,err));raise
         else:pass

@@ -182,3 +182,15 @@ This is constructed-journal coverage, not a real power-loss/crash proof. A corru
 journal case requires failure and retains its files. Neither has run locally.
 and Linux CI. Previous v2 evidence remains historical, not a protocol-3 execution pass.
 The fixture remains regular-file-only and cannot authenticate production native grants.
+
+## Retained-helper diagnostics
+
+The second reviewed kernel run [38268479494/job114876585334](https://github.com/yanlinglabs/winter/actions/runs/38268479494/job/114876585334) retained both helpers after the unchanged20-second parent wait. It did not establish which retain branch ran. Original failed evidence remains preserved; no cleanup or kernel success is inferred.
+
+Helpers now emit bounded fixed scalar `replayStage`/`errno` records before potential kernel I/O and at retained failures. Stages1–12 identify device/header admission, namespace/private mount, mountpoint, mount, mounted-open, syncfs, normal unmount, device flush, removal and completion. Fixture stages32–43 identify source admission, loop control/lookup/open/configure/association, detach request/close/observation, backing flush and completion. Association mismatch adds only numeric expected/observed device/inode/offset/capacity/flags. No paths, volume content or credentials are diagnostic output.
+
+A20-second timeout still retains the actual helper and descriptors. Python attaches and prints at most4096actualbytes per output channel using pread, so it neither races the live helper's shared file position nor erases its diagnostic evidence. Truncation is explicit; diagnostics cannot certify exit/cleanup or turn a lifetime timeout into the corruption test's required failed-kernel outcome.
+
+After one CLR_FD request and closing the owner opener, the helper may make bounded read-only status observations for at most3seconds/64attempts. A known identical backing association or transient open-ENXIO is pending, not proof. Only actual LOOP_GET_STATUS64 ENXIO on the exact block device permits success. A foreign backing/device, unknown error or exhausted observation bound retains ownership. No mount/replay/clear request repeats, and elapsed time never acknowledges cleanup. The parent still requires actual helper reap and its independent post-reap kernel status.
+
+This is a source correction and improved diagnosis, not a confirmed explanation or passing rerun of the failed job. Workflow artifact/source pins remain unchanged and therefore refuse this new closure before effects until independent review explicitly admits replacement artifacts.

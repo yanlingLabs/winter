@@ -45,15 +45,27 @@ class NoEffectTests(unittest.TestCase):
             image=os.open(Path(directory)/'image',os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600)
             artifact=os.open(Path(directory)/'artifact',os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600);os.write(artifact,b'fixture')
             port=replay.FixtureKernelReplay.__new__(replay.FixtureKernelReplay);port.artifact_fd=artifact;port.digest=hashlib.sha256(b'fixture').hexdigest()
-            child=Mock();child.wait.side_effect=subprocess.TimeoutExpired('fixed-helper',1);before=len(replay.retained)
+            child=Mock();before=len(replay.retained)
+            def timeout(*_args,**_kwargs):
+                record=replay.subprocess.Popen.call_args.kwargs
+                os.pwrite(record['stdout'].fileno(),b'{"loopMinor":3}\n',0)
+                os.pwrite(record['stderr'].fileno(),b'{"retainedStage":41,"errno":110}\n',0)
+                raise subprocess.TimeoutExpired('fixed-helper',1)
+            child.wait.side_effect=timeout
             try:
                 with patch.object(replay.sys,'platform','linux'),patch.object(replay.os,'geteuid',return_value=0),patch.object(replay.subprocess,'Popen',return_value=child):
-                    with self.assertRaisesRegex(replay.ReplayUncertain,'lifetime_retained'):port(image,{'expectedFilesystemUUID':str(uuid.uuid4()),'capacityBytes':16777216},time.monotonic()+1)
+                    with self.assertRaisesRegex(replay.ReplayUncertain,'lifetime_retained') as refusal:port(image,{'expectedFilesystemUUID':str(uuid.uuid4()),'capacityBytes':16777216},time.monotonic()+1)
                 self.assertEqual(len(replay.retained),before+1);record=replay.retained[-1];self.assertIs(record[0],child)
+                self.assertEqual(refusal.exception.diagnostics['stdout'],'{\"loopMinor\":3}\n');self.assertEqual(refusal.exception.diagnostics['stderr'],'{\"retainedStage\":41,\"errno\":110}\n')
                 os.fstat(record[1]);os.fstat(record[2]);child.kill.assert_not_called();child.terminate.assert_not_called()
             finally:
                 for record in replay.retained[before:]:os.close(record[1]);os.close(record[2]);record[3].close();record[4].close()
                 del replay.retained[before:];os.close(image);os.close(artifact)
+    def test_timeout_output_snapshot_is_bounded_and_does_not_move_writer_position(self):
+        with tempfile.TemporaryFile() as out,tempfile.TemporaryFile() as err:
+            out.write(b'x'*5000);err.write(b'{"replayStage":8,"errno":0}\n');out.flush();err.flush();positions=(out.tell(),err.tell())
+            snapshot=replay.captured_output(out,err)
+            self.assertEqual(len(snapshot['stdout']),4096);self.assertTrue(snapshot['stdoutTruncated']);self.assertFalse(snapshot['stderrTruncated']);self.assertEqual((out.tell(),err.tell()),positions)
     def test_dirty_plan_without_kernel_port_refuses_without_writable_helper(self):
         spec=importlib.util.spec_from_file_location('protocol',ROOT/'test_bootstrap.py');protocol=importlib.util.module_from_spec(spec);spec.loader.exec_module(protocol)
         with protocol.Pair() as pair:
