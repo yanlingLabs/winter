@@ -1,7 +1,7 @@
 """Deterministic readonly guest root/cpio. No mount, chown, install, init or guest execution."""
-import argparse, hashlib, io, json, os, posixpath, shutil, stat, struct, subprocess, tarfile
+import argparse, hashlib, io, json, os, posixpath, shutil, stat, struct, subprocess, tarfile, zlib
 from pathlib import Path, PurePosixPath
-from packages import sha
+from packages import sha, bounded_file, bounded_read, xz_chunks
 HERE=Path(__file__).resolve().parent
 
 class Tree:
@@ -78,29 +78,74 @@ def ar_members(data):
         members[name]=data[offset:offset+size];offset+=size+(size%2)
     return members
 
+class ChunkReader:
+    def __init__(self,chunks):self.chunks=iter(chunks);self.pending=b''
+    def read(self,size):
+        if size<0:raise ValueError('unbounded metadata read')
+        while len(self.pending)<size:
+            try:self.pending+=next(self.chunks)
+            except StopIteration:break
+        result,self.pending=self.pending[:size],self.pending[size:]
+        return result
+
+def metadata_chunks(name,data,maximum):
+    if name.endswith('.xz'):yield from xz_chunks(data,maximum);return
+    if name.endswith('.gz'):
+        decoder=zlib.decompressobj(16+zlib.MAX_WBITS);at=0;expanded=0
+        while not decoder.eof:
+            incoming=decoder.unconsumed_tail
+            if not incoming:
+                incoming=data[at:at+64*1024];at+=len(incoming)
+                if not incoming:raise ValueError('truncated gzip metadata')
+            block=decoder.decompress(incoming,min(64*1024,maximum-expanded+1))
+            if expanded+len(block)>maximum:raise ValueError('metadata expansion bound')
+            expanded+=len(block)
+            if block:yield block
+        if decoder.unused_data or at!=len(data):raise ValueError('gzip metadata trailing data')
+        return
+    if name.endswith('.tar'):
+        if len(data)>maximum:raise ValueError('metadata expansion bound')
+        for at in range(0,len(data),64*1024):yield data[at:at+64*1024]
+        return
+    raise ValueError('unsupported metadata compression')
+
+def control_fields(name,data,maximum=2*1024*1024,field_limit=64*1024):
+    # Cap decompression before tar/PAX processing and iterate headers without getmembers().
+    reader=ChunkReader(metadata_chunks(name,data,maximum))
+    with tarfile.open(fileobj=reader,mode='r|') as archive:
+        for count,member in enumerate(archive,1):
+            if count>128:raise ValueError('control entry count bound')
+            if member.name.removeprefix('./')!='control':continue
+            if not member.isfile() or member.size>field_limit:raise ValueError('control file bound')
+            stream=archive.extractfile(member)
+            if stream is None:raise ValueError('control file missing')
+            text=bounded_read(stream,min(field_limit,member.size)).decode()
+            if len(text.encode())!=member.size:raise ValueError('control file size')
+            from packages import paragraphs
+            return next(paragraphs(text))
+    raise ValueError('control file missing')
+
 def add_deb(tree,entry,path):
-    data=path.read_bytes()
+    data=bounded_file(path,64*1024*1024,int(entry['Size']))
     if sha(data)!=entry['SHA256'] or len(data)!=int(entry['Size']): raise ValueError('deb digest')
     members=ar_members(data)
     if members.get('debian-binary')!=b'2.0\n': raise ValueError('deb format')
-    control=next(value for name,value in members.items() if name.startswith('control.tar.'))
-    with tarfile.open(fileobj=io.BytesIO(control),mode='r:*') as archive:
-        text=archive.extractfile(next(m for m in archive.getmembers() if m.name.lstrip('./')=='control')).read().decode()
-        from packages import paragraphs
-        fields=next(paragraphs(text))
-        for key in ['Package','Version','Architecture']:
-            if fields[key]!=entry[key]: raise ValueError('control/index identity')
-    payload=next(value for name,value in members.items() if name.startswith('data.tar.'))
+    control_name,control=next((name,value) for name,value in members.items() if name.startswith('control.tar'))
+    fields=control_fields(control_name,control)
+    for key in ['Package','Version','Architecture']:
+        if fields[key]!=entry[key]:raise ValueError('control/index identity')
+    payload_name,payload=next((name,value) for name,value in members.items() if name.startswith('data.tar'))
     expanded=0; hardlinks=0
-    with tarfile.open(fileobj=io.BytesIO(payload),mode='r:*') as archive:
-        for member in archive:
+    with tarfile.open(fileobj=ChunkReader(metadata_chunks(payload_name,payload,1024*1024*1024)),mode='r|') as archive:
+        for count,member in enumerate(archive,1):
+            if count>32768:raise ValueError('payload entry count bound')
             name=member.name.removeprefix('./').rstrip('/')
             if name in ['','.']: continue
             expanded+=member.size
             if member.size>128*1024*1024 or expanded>1024*1024*1024: raise ValueError('package expansion bound')
             origin='deb:'+entry['Package']+'='+entry['Version']
             if member.isdir(): tree.add(name,'directory',origin=origin)
-            elif member.isfile(): tree.add(name,'file',archive.extractfile(member).read(),bool(member.mode&0o111),origin)
+            elif member.isfile(): tree.add(name,'file',bounded_read(archive.extractfile(member),member.size),bool(member.mode&0o111),origin)
             elif member.issym(): tree.add(name,'symlink',member.linkname.encode(),origin=origin)
             elif member.islnk():
                 hardlinks+=1
