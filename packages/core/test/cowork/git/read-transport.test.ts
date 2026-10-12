@@ -112,3 +112,16 @@ test("Buffer input is an owned snapshot; caller mutation during secret lookup ca
   await t.read(caller, { ...request, operation: "upload-pack", body: original });
   expect(posted).toEqual(expected); expect(original).not.toEqual(Buffer.from(expected));
 });
+
+
+test("revocation at response EOF refuses before admitting a parser", async () => {
+  let current = true, parses = 0;
+  const upstream = { status: 200, redirected: false, url: "", headers: new Headers({ "content-type": "application/x-git-upload-pack-advertisement" }), body: { getReader() {
+    let sent = false;
+    return { async read() { if (!sent) { sent = true; return { done: false, value: advertisement }; } current = false; return { done: true }; }, async cancel() {} };
+  } } } as unknown as Response;
+  const t = new CoworkGitHubReadTransport({ authorize: () => { if (!current) throw new Error("revoked"); return { ...grant }; } }, { get: async () => sentinel }, async () => upstream, {},
+    { isolatedFixture: true, parser: { admission: "native-confined", async validate() { parses++; } } });
+  await expect(t.read(caller, request)).rejects.toMatchObject({ code: "authority_denied" });
+  expect(parses).toBe(0);
+});

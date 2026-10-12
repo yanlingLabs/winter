@@ -118,6 +118,7 @@ export class CoworkGitHubReadTransport {
       const resultBytes = bytes.subarray(0, total);
       // A credential-bearing upstream error must never become guest bytes or logs.
       if (resultBytes.includes(Buffer.from(token)) || resultBytes.includes(Buffer.from(auth))) throw new GitReadError("invalid_response");
+      recheck(); // EOF is an await boundary too: revoked work cannot start a parser.
       if (this.activation.parser) await bounded(this.activation.parser.validate(advertise ? "advertisement" : "response", resultBytes, this.limits, controller.signal));
       else if (advertise) validateReadAdvertisement(resultBytes); else await bounded(validateUploadPackResponse(resultBytes, this.limits, controller.signal));
       recheck();
