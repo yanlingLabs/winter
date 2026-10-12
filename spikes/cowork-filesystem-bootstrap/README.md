@@ -105,3 +105,17 @@ remain disabled.
 
 Sources: [mke2fs options](https://man7.org/linux/man-pages/man8/mke2fs.8.html),
 [ext4 superblock layout](https://docs.kernel.org/filesystems/ext4/super.html).
+
+## Protocol 3 journal-only follow-up
+
+Current plans require protocol 3, per-target readyOperationId and optional priorReplay
+owner/operation debt. Normal known-ready targets may carry replay-journal-then-probe,
+with host-issued writable permission and actual old-writer stop proof on uncertain
+retry. Both targets preflight read-only before any write. Clean targets never invoke
+fsck; clean+needs_recovery alone invokes e2fsck -E journal_only and then a fresh clean
+probe. Receipts explicitly report journalReplayed. Full repair/autoreformat is absent.
+
+Current Mac validation: 9 no-effect/protocol tests pass, 10 Linux cases skip. The new
+actual format/write/set-needs_recovery/replay/preserved-bytes case awaits root review
+and Linux CI. Previous v2 evidence remains historical, not a protocol-3 execution pass.
+The fixture remains regular-file-only and cannot authenticate production native grants.

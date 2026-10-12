@@ -180,3 +180,16 @@ path swaps, lost exclusion, cold owner continuity, stop proof, both outer
 transaction rollback reproductions, failed-open descriptor cleanup, backup helper
 transaction boundaries, post-preflight revalidation, bounded plist decoding and
 schema rollback.
+
+### Protocol 3 normal journal recovery
+
+Known v2/v3 ready history can authorize a normal `replay-journal-then-probe`
+operation through separate native writable authority. The canonical JSON journal
+holds replay debt before handoff. Both disks preflight read-only before any effect;
+only clean state plus needs_recovery invokes immutable `e2fsck -E journal_only`,
+then fsync and a fresh clean probe/receipt carrying actual journalReplayed state.
+No full repair, preen or reformat occurs. Uncertain attempts keep ownership/debt
+and last-ready history; retry requires actual old-writer termination proof and a
+new current owner/write grant. SQL schema stays 10. Legacy receipts are history,
+not current v3 readiness. See the scoped
+[journal-only implementation evidence](research/2026-10-12-cowork-filesystem-journal-only-replay.md).

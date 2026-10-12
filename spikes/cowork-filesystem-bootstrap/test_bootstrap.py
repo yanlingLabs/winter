@@ -24,11 +24,11 @@ class Pair:
     def __enter__(self):
         self.root = tempfile.TemporaryDirectory(prefix="winter-filesystem-bootstrap-")
         self.fds = []
-        self.plan = {"protocolVersion": 2, "virginZeroProvenance": "new-sparse-creation", "ext4Features": list(bootstrap.EXT4_FEATURES), "requiredMountOptions": list(bootstrap.REQUIRED_MOUNT_OPTIONS), "checkMode": "normal", "operationId": "filesystem_" + str(uuid.uuid4()), "homeId": "fixture-home", "workspaceId": "fixture-workspace", "owner": {"controllerInstanceId": "fixture-controller", "workerInstanceId": "fixture-worker", "incarnationId": "fixture-incarnation", "leaseEpoch": 1, "runtimeImageDigest": "b" * 64}, "volumes": []}
+        self.plan = {"protocolVersion": 3, "priorReplay": None, "virginZeroProvenance": "new-sparse-creation", "ext4Features": list(bootstrap.EXT4_FEATURES), "requiredMountOptions": list(bootstrap.REQUIRED_MOUNT_OPTIONS), "checkMode": "normal", "operationId": "filesystem_" + str(uuid.uuid4()), "homeId": "fixture-home", "workspaceId": "fixture-workspace", "owner": {"controllerInstanceId": "fixture-controller", "workerInstanceId": "fixture-worker", "incarnationId": "fixture-incarnation", "leaseEpoch": 1, "runtimeImageDigest": "b" * 64}, "volumes": []}
         for purpose in ("data", "environment"):
             fd = os.open(Path(self.root.name) / (purpose + ".ext4"), os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_CLOEXEC, 0o600)
             self.fds.append(fd); os.ftruncate(fd, self.data_capacity if purpose == "data" else bootstrap.MIN_BYTES); os.fsync(fd); st = os.fstat(fd)
-            self.plan["volumes"].append({"volumeId": "volume_" + str(uuid.uuid4()), "creationId": "creation_" + str(uuid.uuid4()), "purpose": purpose, "identity": {"device": str(st.st_dev), "inode": str(st.st_ino), "uid": st.st_uid, "mode": stat.S_IMODE(st.st_mode)}, "capacityBytes": st.st_size, "sectorBytes": 512, "filesystemBlockBytes": 4096, "expectedFilesystemUUID": str(uuid.uuid4()), "action": "format-new"})
+            self.plan["volumes"].append({"volumeId": "volume_" + str(uuid.uuid4()), "creationId": "creation_" + str(uuid.uuid4()), "purpose": purpose, "identity": {"device": str(st.st_dev), "inode": str(st.st_ino), "uid": st.st_uid, "mode": stat.S_IMODE(st.st_mode)}, "capacityBytes": st.st_size, "sectorBytes": 512, "filesystemBlockBytes": 4096, "expectedFilesystemUUID": str(uuid.uuid4()), "action": "format-new", "readyOperationId": None})
         return self
     def __exit__(self, *_):
         for fd in self.fds: os.close(fd)
@@ -100,6 +100,40 @@ class ProtocolTests(unittest.TestCase):
                 features, transient = bootstrap.probe(99, target, 1, {"ext4Features": bootstrap.EXT4_FEATURES, "checkMode": mode})
             self.assertEqual(features, bootstrap.EXT4_FEATURES); self.assertEqual(transient, ["needs_recovery"])
             self.assertEqual("e2fsck" in called, mode == "full-read-only")
+    def test_replay_preflights_both_then_only_journal_and_fresh_clean_receipt(self):
+        with Pair() as pair:
+            plan = copy.deepcopy(pair.plan)
+            for target in plan["volumes"]: target["action"] = "replay-journal-then-probe"; target["readyOperationId"] = "prior-ready"
+            transient = {pair.fds[0]: ["needs_recovery"], pair.fds[1]: []}; events = []
+            def probe(fd, *_args):
+                events.append(("probe", fd)); return bootstrap.EXT4_FEATURES, list(transient[fd])
+            def tool(name, args, fd, *_args, **kwargs):
+                events.append((name, fd)); self.assertEqual(args, ["-E", "journal_only"])
+                self.assertEqual(kwargs["accepted"], (0, 1)); transient[fd] = []; return 0, ""
+            token = object(); receiver = bootstrap.FixtureBootstrap(lambda p, proof: p == plan and proof is token)
+            with patch.object(bootstrap.sys, "platform", "linux"), patch.object(bootstrap, "probe", side_effect=probe), patch.object(bootstrap, "run_tool", side_effect=tool):
+                result = receiver.execute(plan, pair.fds, token)
+            self.assertEqual(events[:3], [("probe", pair.fds[0]), ("probe", pair.fds[1]), ("e2fsck", pair.fds[0])])
+            self.assertEqual([v["journalReplayed"] for v in result["volumes"]], [True, False]); self.assertTrue(all(not v["transientFilesystemFeatures"] for v in result["volumes"]))
+    def test_second_preflight_failure_prevents_any_journal_write(self):
+        with Pair() as pair:
+            plan = copy.deepcopy(pair.plan)
+            for target in plan["volumes"]: target["action"] = "replay-journal-then-probe"; target["readyOperationId"] = "prior-ready"
+            def probe(fd, *_args):
+                if fd == pair.fds[1]: raise bootstrap.Refused("filesystem_mismatch")
+                return bootstrap.EXT4_FEATURES, ["needs_recovery"]
+            token = object(); receiver = bootstrap.FixtureBootstrap(lambda p, proof: p == plan and proof is token)
+            with patch.object(bootstrap.sys, "platform", "linux"), patch.object(bootstrap, "probe", side_effect=probe), patch.object(bootstrap, "run_tool") as tool, self.assertRaisesRegex(bootstrap.Refused, "filesystem_mismatch"):
+                receiver.execute(plan, pair.fds, token)
+            tool.assert_not_called()
+    def test_clean_replay_permission_runs_probe_only_and_reports_no_replay(self):
+        with Pair() as pair:
+            plan = copy.deepcopy(pair.plan)
+            for target in plan["volumes"]: target["action"] = "replay-journal-then-probe"; target["readyOperationId"] = "prior-ready"
+            token = object(); receiver = bootstrap.FixtureBootstrap(lambda p, proof: p == plan and proof is token)
+            with patch.object(bootstrap.sys, "platform", "linux"), patch.object(bootstrap, "probe", return_value=(bootstrap.EXT4_FEATURES, [])), patch.object(bootstrap, "run_tool") as tool:
+                result = receiver.execute(plan, pair.fds, token)
+            tool.assert_not_called(); self.assertTrue(all(not v["journalReplayed"] for v in result["volumes"]))
     def test_unknown_features_and_error_state_still_refuse_normal_header_probe(self):
         expected_uuid = "11111111-1111-4111-8111-111111111111"
         target = {"expectedFilesystemUUID": expected_uuid, "capacityBytes": bootstrap.MIN_BYTES}
@@ -125,7 +159,7 @@ class LinuxFilesystemTests(unittest.TestCase):
             before = pair.digests()
             with self.assertRaisesRegex(bootstrap.Refused, "one_shot_consumed"): receiver.execute(pair.plan, pair.fds, proof)
             probe = copy.deepcopy(pair.plan); probe["operationId"] = "filesystem_" + str(uuid.uuid4())
-            for target in probe["volumes"]: target["action"] = "probe-existing"
+            for target in probe["volumes"]: target["action"] = "probe-existing"; target["readyOperationId"] = pair.plan["operationId"]
             cold, cold_proof = self.receiver(probe); second = cold.execute(probe, pair.fds, cold_proof)
             self.assertEqual([v["filesystemUUID"] for v in second["volumes"]], [v["filesystemUUID"] for v in observed["volumes"]]); self.assertEqual(pair.digests(), before)
             # Even a fresh receiver/new nonce cannot reformat an already formatted image.
@@ -144,7 +178,7 @@ class LinuxFilesystemTests(unittest.TestCase):
                 self.assertIn("dumpe2fs", seen); self.assertNotIn("e2fsck", seen)
                 before = pair.digests(); full = copy.deepcopy(pair.plan)
                 full["operationId"] = "filesystem_" + str(uuid.uuid4()); full["checkMode"] = "full-read-only"
-                for target in full["volumes"]: target["action"] = "probe-existing"
+                for target in full["volumes"]: target["action"] = "probe-existing"; target["readyOperationId"] = pair.plan["operationId"]
                 checker, token = self.receiver(full); observed = checker.execute(full, pair.fds, token)
                 self.assertIn("e2fsck", seen); self.assertTrue(all(v["fullReadOnlyCheck"] for v in observed["volumes"])); self.assertEqual(pair.digests(), before)
             finally: bootstrap.run_tool = original
@@ -152,7 +186,7 @@ class LinuxFilesystemTests(unittest.TestCase):
         with Pair() as pair:
             receiver, proof = self.receiver(pair.plan); receiver.execute(pair.plan, pair.fds, proof); before = pair.digests()
             probe = copy.deepcopy(pair.plan); probe["operationId"] = "filesystem_" + str(uuid.uuid4())
-            for target in probe["volumes"]: target["action"] = "probe-existing"
+            for target in probe["volumes"]: target["action"] = "probe-existing"; target["readyOperationId"] = pair.plan["operationId"]
             interrupted, token = self.receiver(probe); original = bootstrap.run_tool; seen = []
             def fail_header(name, *args, **kwargs):
                 seen.append(name)
@@ -172,7 +206,7 @@ class LinuxFilesystemTests(unittest.TestCase):
             bootstrap.run_tool("debugfs", ["-w", "-R", "feature needs_recovery"], pair.fds[0], time.monotonic() + 20)
             self.assertTrue(struct.unpack_from("<I", os.pread(pair.fds[0], 1024, 1024), 0x60)[0] & 4)
             before = pair.digests(); probe = copy.deepcopy(pair.plan); probe["operationId"] = "filesystem_" + str(uuid.uuid4())
-            for target in probe["volumes"]: target["action"] = "probe-existing"
+            for target in probe["volumes"]: target["action"] = "probe-existing"; target["readyOperationId"] = pair.plan["operationId"]
             called = []; original = bootstrap.run_tool
             def traced(name, *args, **kwargs): called.append(name); return original(name, *args, **kwargs)
             bootstrap.run_tool = traced
@@ -183,6 +217,23 @@ class LinuxFilesystemTests(unittest.TestCase):
             self.assertEqual(observed["volumes"][1]["transientFilesystemFeatures"], [])
             self.assertEqual(observed["volumes"][0]["filesystemFeatures"], bootstrap.EXT4_FEATURES)
             self.assertNotIn("e2fsck", called); self.assertEqual(pair.digests(), before)
+    def test_actual_journal_only_replay_preserves_file_and_reports_fresh_clean_state(self):
+        with Pair() as pair:
+            receiver, proof = self.receiver(pair.plan); receiver.execute(pair.plan, pair.fds, proof)
+            content = Path(pair.root.name) / "seed"; content.write_bytes(b"retained user bytes\n")
+            bootstrap.run_tool("debugfs", ["-w", "-R", f"write {content} /retained"], pair.fds[0], time.monotonic() + 20)
+            bootstrap.run_tool("debugfs", ["-w", "-R", "feature needs_recovery"], pair.fds[0], time.monotonic() + 20)
+            probe = copy.deepcopy(pair.plan); probe["operationId"] = "filesystem_" + str(uuid.uuid4())
+            for target in probe["volumes"]: target["action"] = "replay-journal-then-probe"; target["readyOperationId"] = pair.plan["operationId"]
+            seen = []; original = bootstrap.run_tool
+            def traced(name, args, *rest, **kw): seen.append((name, args)); return original(name, args, *rest, **kw)
+            with patch.object(bootstrap, "run_tool", side_effect=traced):
+                checker, token = self.receiver(probe); result = checker.execute(probe, pair.fds, token)
+            self.assertEqual([v["journalReplayed"] for v in result["volumes"]], [True, False])
+            self.assertTrue(all(not v["transientFilesystemFeatures"] for v in result["volumes"]))
+            self.assertEqual([args for name, args in seen if name == "e2fsck"], [["-E", "journal_only"]]); self.assertFalse(any(name == "mke2fs" for name, _ in seen))
+            _, text = bootstrap.run_tool("debugfs", ["-R", "cat /retained"], pair.fds[0], time.monotonic() + 20)
+            self.assertEqual(text, "retained user bytes\n")
     def test_sparse_multigroup_image_has_exact_features_and_lazy_zero_inode_table(self):
         # At 4096 bytes/block a block group covers128MiB; use256MiB for an unused
         # second inode table. Environment remains16MiB. No mount or loop device.
@@ -212,7 +263,7 @@ class LinuxFilesystemTests(unittest.TestCase):
         with Pair() as pair:
             receiver, proof = self.receiver(pair.plan); receiver.execute(pair.plan, pair.fds, proof); before = pair.digests()
             wrong = copy.deepcopy(pair.plan); wrong["operationId"] = "filesystem_" + str(uuid.uuid4())
-            for target in wrong["volumes"]: target["action"] = "probe-existing"
+            for target in wrong["volumes"]: target["action"] = "probe-existing"; target["readyOperationId"] = pair.plan["operationId"]
             wrong["volumes"][0]["expectedFilesystemUUID"] = str(uuid.uuid4()); prober, token = self.receiver(wrong)
             with self.assertRaisesRegex(bootstrap.Refused, "filesystem_mismatch"): prober.execute(wrong, pair.fds, token)
             self.assertEqual(pair.digests(), before)

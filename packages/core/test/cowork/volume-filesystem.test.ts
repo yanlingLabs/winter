@@ -18,12 +18,12 @@ function fixture(port = true, checkpoint?: (phase: string) => void) {
   const excluded = new Set<string>(), key = (fd: number) => { const st = fstatSync(fd); return `${st.dev}:${st.ino}`; };
   const backup = { excludeItem: (_: string, fd: number) => { excluded.add(key(fd)); }, verifyItemExcluded: (_: string, fd: number) => excluded.has(key(fd)), verifyDescriptorExcluded: (fd: number) => excluded.has(key(fd)) };
   const authority = { authorize: (_: unknown, r: CoworkVolumeRequest) => r.proof === request.proof, verifyStopped: () => true };
-  const sealedProof = {}, native: CoworkVolumeFilesystemAuthority = { authorize: r => r.proof === request.proof, verifyReceipt: (_r, _plan, _receipt, proof) => proof === sealedProof };
+  const sealedProof = {}, native: CoworkVolumeFilesystemAuthority = { authorize: r => r.proof === request.proof, authorizeJournalReplay: r => r.proof === request.proof, verifyPreviousReplayStopped: () => true, verifyReceipt: (_r, _plan, _receipt, proof) => proof === sealedProof };
   const store = new CoworkVolumes(db, home, authority, backup, checkpoint, port ? native : undefined);
   store.allocate(request, { data: RAW_VOLUME_MIN_BYTES, environment: RAW_VOLUME_MIN_BYTES }); store.claim(request);
   return { home, db, store, request, native, sealedProof, reopen: (nextDb = db) => new CoworkVolumes(nextDb, home, authority, backup, undefined, native) };
 }
-const receipt = (plan: VolumeFilesystemPlan): VolumeFilesystemReceipt => ({ ...plan, volumes: plan.volumes.map(v => ({ ...v, filesystemFeatures: [...plan.ext4Features], transientFilesystemFeatures: [], fullReadOnlyCheck: plan.checkMode === "full-read-only", filesystemType: "ext4", filesystemUUID: v.expectedFilesystemUUID, flushConfirmed: true, checked: true })) });
+const receipt = (plan: VolumeFilesystemPlan): VolumeFilesystemReceipt => ({ ...plan, volumes: plan.volumes.map(v => ({ ...v, journalReplayed: false, filesystemFeatures: [...plan.ext4Features], transientFilesystemFeatures: [], fullReadOnlyCheck: plan.checkMode === "full-read-only", filesystemType: "ext4", filesystemUUID: v.expectedFilesystemUUID, flushConfirmed: true, checked: true })) });
 
 test("formatting is a consumed pair intent; mandatory protected receipt alone confirms both ready", () => {
   const f = fixture(), plan = f.store.prepareFilesystems(f.request);
@@ -58,7 +58,7 @@ test("new owner must probe ready volumes; stale old receipt never acknowledges f
   const f = fixture(), initial = f.store.prepareFilesystems(f.request); f.store.confirmFilesystems(f.request, receipt(initial), f.sealedProof);
   f.store.release(f.request, { confirmationId: "confirmed-stop", proof: {} }); const next = { ...f.request, owner: { ...f.request.owner, workerInstanceId: "new-worker", incarnationId: "new-boot", leaseEpoch: 2 } }; f.store.claim(next);
   expect(f.store.filesystemsReady(next)).toBe(false); const probe = f.store.prepareFilesystems(next);
-  expect(probe.volumes.map(v => v.action)).toEqual(["probe-existing", "probe-existing"]); expect(probe.volumes.map(v => v.expectedFilesystemUUID)).toEqual(initial.volumes.map(v => v.expectedFilesystemUUID));
+  expect(probe.volumes.map(v => v.action)).toEqual(["replay-journal-then-probe", "replay-journal-then-probe"]); expect(probe.volumes.map(v => v.expectedFilesystemUUID)).toEqual(initial.volumes.map(v => v.expectedFilesystemUUID));
   expect(() => f.store.confirmFilesystems(next, receipt(initial), f.sealedProof)).toThrow("recovery_required");
   f.store.confirmFilesystems(next, receipt(probe), f.sealedProof); expect(f.store.filesystemsReady(next)).toBe(true);
 });
@@ -108,21 +108,22 @@ test("current bootstrap authority denial cannot consume a virgin intent", () => 
 
 test("failed or interrupted ready probe keeps confirmed history and safely reprobes with a fresh nonce", () => {
   const f = fixture(), formatted = f.store.prepareFilesystems(f.request); f.store.confirmFilesystems(f.request, receipt(formatted), f.sealedProof);
-  const firstProbe = f.store.prepareFilesystems(f.request); expect(f.store.filesystemsReady(f.request)).toBe(false);
-  const cold = f.reopen(); const secondProbe = cold.prepareFilesystems(f.request);
+  const firstProbe = f.store.prepareFilesystems(f.request, "full-read-only"); expect(f.store.filesystemsReady(f.request)).toBe(false);
+  const cold = f.reopen(); const secondProbe = cold.prepareFilesystems(f.request, "full-read-only");
   expect(secondProbe.operationId).not.toBe(firstProbe.operationId); expect(secondProbe.volumes.map(v => v.action)).toEqual(["probe-existing", "probe-existing"]);
   expect(() => cold.confirmFilesystems(f.request, receipt(firstProbe), f.sealedProof)).toThrow("recovery_required");
   cold.failFilesystems(f.request, secondProbe.operationId);
   const afterFailure = cold.records(f.request.workspaceId);
   expect(afterFailure.every(v => v.filesystemState === "ready" && !v.formatEligible && v.owner !== null && !v.filesystemJournal?.receipt && v.filesystemJournal?.previousReady?.plan.operationId === formatted.operationId)).toBe(true);
   expect(cold.filesystemsReady(f.request)).toBe(false);
-  const retry = cold.prepareFilesystems(f.request); expect(retry.volumes.map(v => v.action)).toEqual(["probe-existing", "probe-existing"]);
+  const retry = cold.prepareFilesystems(f.request, "full-read-only"); expect(retry.volumes.map(v => v.action)).toEqual(["probe-existing", "probe-existing"]);
   cold.confirmFilesystems(f.request, receipt(retry), f.sealedProof); expect(cold.filesystemsReady(f.request)).toBe(true);
 });
 test("v1 formatted history stays readable but cannot inherit sparse zero provenance or new features", () => {
   const f = fixture(), v2 = f.store.prepareFilesystems(f.request), oldReceipt: any = receipt(v2), oldPlan: any = structuredClone(v2);
-  for (const value of [oldPlan, oldReceipt]) { value.protocolVersion = 1; delete value.ext4Features; delete value.requiredMountOptions; delete value.checkMode; delete value.virginZeroProvenance; }
-  for (const target of oldReceipt.volumes) { delete target.filesystemFeatures; delete target.transientFilesystemFeatures; delete target.fullReadOnlyCheck; }
+  for (const value of [oldPlan, oldReceipt]) { value.protocolVersion = 1; delete value.ext4Features; delete value.requiredMountOptions; delete value.checkMode; delete value.virginZeroProvenance; delete value.priorReplay; }
+  for (const target of oldPlan.volumes) delete target.readyOperationId;
+  for (const target of oldReceipt.volumes) { delete target.readyOperationId; delete target.journalReplayed; delete target.filesystemFeatures; delete target.transientFilesystemFeatures; delete target.fullReadOnlyCheck; }
   f.db.db.run("UPDATE cowork_volumes SET filesystem_state='ready',filesystem_journal_json=?", [JSON.stringify({ plan: oldPlan, receipt: oldReceipt })]);
   const before = f.store.records(f.request.workspaceId); expect(f.store.filesystemsReady(f.request)).toBe(false);
   expect(() => f.store.prepareFilesystems(f.request)).toThrow("filesystem_compatibility_required"); expect(f.store.records(f.request.workspaceId)).toEqual(before);
@@ -130,7 +131,7 @@ test("v1 formatted history stays readable but cannot inherit sparse zero provena
 });
 test("required exact feature and mount contract is enforced on protected receipts", () => {
   const f = fixture(), plan = f.store.prepareFilesystems(f.request);
-  expect(plan.protocolVersion).toBe(2); expect(plan.requiredMountOptions).toEqual(["noinit_itable"]); expect(plan.virginZeroProvenance).toBe("new-sparse-creation");
+  expect(plan.protocolVersion).toBe(3); expect(plan.requiredMountOptions).toEqual(["noinit_itable"]); expect(plan.virginZeroProvenance).toBe("new-sparse-creation");
   for (const mutation of ["missing-feature", "extra-feature", "mount", "zero", "check"] as const) {
     const bad = structuredClone(receipt(plan));
     if (mutation === "missing-feature") bad.volumes[0]!.filesystemFeatures.pop();
@@ -157,21 +158,24 @@ test("retained history cannot lend another disk its zero-provenance or mount con
   expect(() => f.store.prepareFilesystems(f.request)).toThrow("recovery_required");
 });
 
-test("transient recovery observations never confirm ready and preserve a fresh explicit check route", () => {
+test("transient recovery cannot confirm ready; uncertain writer needs verified stop and new owner", () => {
   const f = fixture(), initial = f.store.prepareFilesystems(f.request); f.store.confirmFilesystems(f.request, receipt(initial), f.sealedProof);
   const normal = f.store.prepareFilesystems(f.request), pending = receipt(normal); pending.volumes[0]!.transientFilesystemFeatures = ["needs_recovery"];
   expect(() => f.store.confirmFilesystems(f.request, pending, f.sealedProof)).toThrow("journal_recovery_required");
-  expect(f.store.filesystemsReady(f.request)).toBe(false);
-  expect(f.store.records(f.request.workspaceId).every(v => v.filesystemState === "probing" && v.owner !== null && !v.formatEligible)).toBe(true);
   f.store.failFilesystems(f.request, normal.operationId);
-  const full = f.store.prepareFilesystems(f.request, "full-read-only"), checked = receipt(full); checked.volumes[0]!.transientFilesystemFeatures = ["needs_recovery"];
-  expect(full.volumes.every(v => v.action === "probe-existing")).toBe(true);
-  expect(() => f.store.confirmFilesystems(f.request, checked, f.sealedProof)).toThrow("journal_recovery_required");
-  expect(f.store.filesystemsReady(f.request)).toBe(false); f.store.failFilesystems(f.request, full.operationId);
-  // Stand-in for a later approved native replay; only a fresh clean observation can acknowledge.
-  const clean = f.store.prepareFilesystems(f.request);
-  expect(() => f.store.confirmFilesystems(f.request, receipt(full), f.sealedProof)).toThrow("recovery_required");
-  f.store.confirmFilesystems(f.request, receipt(clean), f.sealedProof); expect(f.store.filesystemsReady(f.request)).toBe(true);
+  expect(f.store.records(f.request.workspaceId).every(v => v.owner !== null && v.filesystemState === "probing" && !!v.filesystemJournal?.replayDebt)).toBe(true);
+  expect(() => f.store.prepareFilesystems(f.request)).toThrow("stop_unconfirmed");
+  f.store.release(f.request, { confirmationId: "actual-stop", proof: {} });
+  const next = { ...f.request, owner: { ...f.request.owner, incarnationId: "new-boot", workerInstanceId: "new-worker", leaseEpoch: 2 } }; f.store.claim(next);
+  f.native.verifyPreviousReplayStopped = () => false;
+  expect(() => f.store.prepareFilesystems(next)).toThrow("stop_unconfirmed");
+  f.native.verifyPreviousReplayStopped = () => true;
+  const retry = f.store.prepareFilesystems(next); expect(retry.priorReplay?.operationId).toBe(normal.operationId);
+  expect(retry.volumes.every(v => v.action === "replay-journal-then-probe")).toBe(true);
+  const clean = receipt(retry); clean.volumes[0]!.journalReplayed = true;
+  expect(() => f.store.confirmFilesystems(next, receipt(normal), f.sealedProof)).toThrow("recovery_required");
+  f.store.confirmFilesystems(next, clean, f.sealedProof); expect(f.store.filesystemsReady(next)).toBe(true);
+  expect(f.store.records(next.workspaceId).every(v => !v.filesystemJournal?.replayDebt)).toBe(true);
 });
 test("unknown, duplicate or missing transient state cannot masquerade as a current clean receipt", () => {
   const f = fixture(), plan = f.store.prepareFilesystems(f.request);
@@ -182,12 +186,41 @@ test("unknown, duplicate or missing transient state cannot masquerade as a curre
   const missing: any = receipt(plan); delete missing.volumes[0].transientFilesystemFeatures;
   expect(() => f.store.confirmFilesystems(f.request, missing, f.sealedProof)).toThrow("authority_denied");
 });
-test("earlier v2 receipts keep confirmed format history but require a fresh explicit state observation", () => {
-  const f = fixture(), plan = f.store.prepareFilesystems(f.request), old: any = receipt(plan);
-  for (const target of old.volumes) delete target.transientFilesystemFeatures;
+test("earlier v2 history stays readable and upgrades only through a current protected v3 plan", () => {
+  const f = fixture(), plan: any = f.store.prepareFilesystems(f.request), old: any = receipt(plan);
+  for (const value of [plan, old]) { value.protocolVersion = 2; delete value.priorReplay; for (const v of value.volumes) delete v.readyOperationId; }
+  for (const target of old.volumes) { delete target.transientFilesystemFeatures; delete target.journalReplayed; }
   f.db.db.run("UPDATE cowork_volumes SET filesystem_state='ready',filesystem_journal_json=?", [JSON.stringify({ plan, receipt: old })]);
-  expect(f.store.records(f.request.workspaceId).every(v => v.filesystemState === "ready")).toBe(true);
-  expect(f.store.filesystemsReady(f.request)).toBe(false);
-  const probe = f.store.prepareFilesystems(f.request); expect(probe.volumes.every(v => v.action === "probe-existing")).toBe(true);
+  expect(f.store.records(f.request.workspaceId).every(v => v.filesystemState === "ready")).toBe(true); expect(f.store.filesystemsReady(f.request)).toBe(false);
+  const probe = f.store.prepareFilesystems(f.request); expect(probe.volumes.every(v => v.action === "replay-journal-then-probe" && v.readyOperationId === plan.operationId)).toBe(true);
   f.store.confirmFilesystems(f.request, receipt(probe), f.sealedProof); expect(f.store.filesystemsReady(f.request)).toBe(true);
+});
+test("missing or denied journal writable authority cannot consume a ready intent", () => {
+  const f = fixture(), made = f.store.prepareFilesystems(f.request); f.store.confirmFilesystems(f.request, receipt(made), f.sealedProof);
+  const before = f.store.records(f.request.workspaceId); delete f.native.authorizeJournalReplay;
+  expect(() => f.store.prepareFilesystems(f.request)).toThrow("authority_denied"); expect(f.store.records(f.request.workspaceId)).toEqual(before);
+  const readonly = f.store.prepareFilesystems(f.request, "full-read-only"); expect(readonly.volumes.every(v => v.action === "probe-existing")).toBe(true);
+  const forged = receipt(readonly); forged.volumes[0]!.journalReplayed = true;
+  expect(() => f.store.confirmFilesystems(f.request, forged, f.sealedProof)).toThrow("authority_denied");
+});
+test("missing durable replay debt or forged ready anchor fails closed", () => {
+  const f = fixture(), initial = f.store.prepareFilesystems(f.request); f.store.confirmFilesystems(f.request, receipt(initial), f.sealedProof);
+  const probe = f.store.prepareFilesystems(f.request), rows = f.store.records(f.request.workspaceId);
+  const journal = structuredClone(rows[0]!.filesystemJournal!); delete journal.replayDebt;
+  f.db.db.run("UPDATE cowork_volumes SET filesystem_journal_json=?", [JSON.stringify(journal)]);
+  expect(() => f.store.records(f.request.workspaceId)).toThrow("recovery_required");
+  const restored = structuredClone(rows[0]!.filesystemJournal!);
+  (restored.plan as VolumeFilesystemPlan).volumes[0]!.readyOperationId = "forged-ready";
+  f.db.db.run("UPDATE cowork_volumes SET filesystem_journal_json=?", [JSON.stringify(restored)]);
+  const forged = receipt(restored.plan as VolumeFilesystemPlan);
+  expect(() => f.store.confirmFilesystems(f.request, forged, f.sealedProof)).toThrow("recovery_required");
+  expect(probe.volumes[0]!.readyOperationId).toBe(initial.operationId);
+});
+test("replayed observation requires clean transient state and cannot be claimed for fresh format", () => {
+  const f = fixture(), initial = f.store.prepareFilesystems(f.request), bad = receipt(initial); bad.volumes[0]!.journalReplayed = true;
+  expect(() => f.store.confirmFilesystems(f.request, bad, f.sealedProof)).toThrow("authority_denied");
+  f.store.confirmFilesystems(f.request, receipt(initial), f.sealedProof);
+  const plan = f.store.prepareFilesystems(f.request), pending = receipt(plan); pending.volumes[0]!.journalReplayed = true; pending.volumes[0]!.transientFilesystemFeatures = ["needs_recovery"];
+  expect(() => f.store.confirmFilesystems(f.request, pending, f.sealedProof)).toThrow("journal_recovery_required");
+  expect(f.store.filesystemsReady(f.request)).toBe(false);
 });

@@ -3,7 +3,7 @@ import { closeSync, fstatSync, fsyncSync, ftruncateSync, realpathSync } from "no
 import { join, resolve } from "node:path";
 import type { RuntimeStateDb } from "../runtime-state/db";
 import { AT_FDCWD, closeFd, createFileAt, mkdirAt, openDirAt, openImageAt } from "./volume-fs";
-import { COWORK_EXT4_FEATURES, COWORK_EXT4_MOUNT_OPTIONS, filesystemUUID, validFilesystemPlan, matchesFilesystemReceipt, readyFilesystemHistory, filesystemReceiptNeedsRecovery, type FilesystemCheckMode, type RecordedFilesystemPlan, type CoworkVolumeFilesystemAuthority, type VolumeFilesystemState, type VolumeFilesystemJournal, type VolumeFilesystemPlan, type VolumeFilesystemReceipt } from "./volume-filesystem";
+import { COWORK_EXT4_FEATURES, COWORK_EXT4_MOUNT_OPTIONS, filesystemUUID, validFilesystemPlan, matchesFilesystemReceipt, readyFilesystemHistory, filesystemReceiptNeedsRecovery, validReplayDebt, sameReplayDebt, type FilesystemCheckMode, type RecordedFilesystemPlan, type CoworkVolumeFilesystemAuthority, type VolumeFilesystemState, type VolumeFilesystemJournal, type VolumeFilesystemPlan, type VolumeFilesystemReceipt } from "./volume-filesystem";
 import { timeMachineVolumeBackup, type CoworkVolumeBackup } from "./volume-backup";
 
 export const RAW_VOLUME_FORMAT = "raw-ext4-v1" as const;
@@ -57,7 +57,21 @@ function record(row: Row): CoworkVolumeRecord {
   geometry(row.capacity_bytes);
   if ((row.filesystem_uuid !== null && !filesystemUUID(row.filesystem_uuid)) || ![0, 1].includes(row.format_eligible) || (row.format_eligible === 1 && (row.filesystem_state !== "unformatted" || !row.filesystem_uuid))) fail("recovery_required");
   let journal: VolumeFilesystemJournal | null = null;
-  try { if (row.filesystem_journal_json !== null && (typeof row.filesystem_journal_json !== "string" || Buffer.byteLength(row.filesystem_journal_json) > 16384)) fail("recovery_required"); journal = row.filesystem_journal_json === null ? null : JSON.parse(row.filesystem_journal_json); if (journal && !validFilesystemPlan(journal.plan)) fail("recovery_required"); } catch { fail("recovery_required"); }
+  try {
+    if (row.filesystem_journal_json !== null && (typeof row.filesystem_journal_json !== "string" || Buffer.byteLength(row.filesystem_journal_json) > 16384)) fail("recovery_required");
+    journal = row.filesystem_journal_json === null ? null : JSON.parse(row.filesystem_journal_json);
+    if (journal) {
+      if (!validFilesystemPlan(journal.plan) || Object.keys(journal).some(k => !["plan", "receipt", "previousReady", "replayDebt"].includes(k))) fail("recovery_required");
+      if (journal.plan.protocolVersion === 3) {
+        const currentDebt = { operationId: journal.plan.operationId, owner: journal.plan.owner };
+        const replay = journal.plan.volumes.some(v => v.action === "replay-journal-then-probe");
+        if (journal.receipt) { if (journal.replayDebt !== undefined) fail("recovery_required"); }
+        else if (replay) { if (!validReplayDebt(journal.replayDebt) || !sameReplayDebt(journal.replayDebt, currentDebt)) fail("recovery_required"); }
+        else if (journal.plan.priorReplay) { if (!validReplayDebt(journal.replayDebt) || !sameReplayDebt(journal.replayDebt, journal.plan.priorReplay)) fail("recovery_required"); }
+        else if (journal.replayDebt !== undefined) fail("recovery_required");
+      } else if (journal.replayDebt !== undefined) fail("recovery_required");
+    }
+  } catch { fail("recovery_required"); }
   if (["formatting", "probing", "ready"].includes(row.filesystem_state) && (!journal || !row.filesystem_uuid)) fail("recovery_required");
   if (row.filesystem_state === "ready" && !readyFilesystemHistory(journal)) fail("recovery_required");
   const observed = row.device === null ? null : { device: row.device, inode: row.inode, uid: row.uid, mode: row.mode };
@@ -348,11 +362,18 @@ export class CoworkVolumes {
         if ((this.handles.get(request.workspaceId) ?? 0) !== 0 || this.filesystemAuthority!.authorize(request, homeId, volumes, checkMode) !== true) fail("authority_denied");
         // A read-only probe can be retried without destroying confirmed format history.
         // Legacy minimal-feature receipts cannot acquire the v2 sparse/noinit_itable contract.
-        if (volumes.some(v => ["ready", "probing"].includes(v.filesystemState) && readyFilesystemHistory(v.filesystemJournal)?.plan.protocolVersion !== 2)) fail("filesystem_compatibility_required");
+        if (volumes.some(v => ["ready", "probing"].includes(v.filesystemState) && (!readyFilesystemHistory(v.filesystemJournal) || readyFilesystemHistory(v.filesystemJournal)!.plan.protocolVersion === 1))) fail("filesystem_compatibility_required");
         if (volumes.some(v => !v.filesystemUUID || !(["ready", "probing"].includes(v.filesystemState) || (v.filesystemState === "unformatted" && v.formatEligible)))) fail("recovery_required");
-        const intent: VolumeFilesystemPlan = { protocolVersion: 2, virginZeroProvenance: "new-sparse-creation", ext4Features: [...COWORK_EXT4_FEATURES], requiredMountOptions: [...COWORK_EXT4_MOUNT_OPTIONS], checkMode, operationId: `filesystem_${randomUUID()}`, homeId, workspaceId: request.workspaceId, owner: request.owner,
-          volumes: volumes.map(v => ({ volumeId: v.volumeId, creationId: v.creationId, purpose: v.purpose, identity: v.identity!, capacityBytes: v.capacityBytes, sectorBytes: v.sectorBytes, filesystemBlockBytes: v.filesystemBlockBytes, expectedFilesystemUUID: v.filesystemUUID!, action: ["ready", "probing"].includes(v.filesystemState) ? "probe-existing" : "format-new" })) };
-        for (const v of volumes) this.run("UPDATE cowork_volumes SET filesystem_state=?,format_eligible=0,filesystem_journal_json=?,updated_at=? WHERE volume_id=?", ["ready", "probing"].includes(v.filesystemState) ? "probing" : "formatting", JSON.stringify({ plan: intent, ...(readyFilesystemHistory(v.filesystemJournal) ? { previousReady: readyFilesystemHistory(v.filesystemJournal) } : {}) }), new Date().toISOString(), v.volumeId);
+        const debts = volumes.map(v => v.filesystemJournal?.replayDebt ?? null);
+        if (!sameReplayDebt(debts[0], debts[1])) fail("recovery_required");
+        const priorReplay = debts[0]!;
+        if (priorReplay && (sameOwner(priorReplay.owner, request.owner) || this.filesystemAuthority!.verifyPreviousReplayStopped?.(request, homeId, priorReplay, volumes) !== true)) fail("stop_unconfirmed");
+        const intent: VolumeFilesystemPlan = { protocolVersion: 3, priorReplay, virginZeroProvenance: "new-sparse-creation", ext4Features: [...COWORK_EXT4_FEATURES], requiredMountOptions: [...COWORK_EXT4_MOUNT_OPTIONS], checkMode, operationId: `filesystem_${randomUUID()}`, homeId, workspaceId: request.workspaceId, owner: request.owner,
+          volumes: volumes.map(v => ({ volumeId: v.volumeId, creationId: v.creationId, purpose: v.purpose, identity: v.identity!, capacityBytes: v.capacityBytes, sectorBytes: v.sectorBytes, filesystemBlockBytes: v.filesystemBlockBytes, expectedFilesystemUUID: v.filesystemUUID!, action: ["ready", "probing"].includes(v.filesystemState) ? (checkMode === "normal" ? "replay-journal-then-probe" : "probe-existing") : "format-new", readyOperationId: readyFilesystemHistory(v.filesystemJournal)?.plan.operationId ?? null })) };
+        const replay = intent.volumes.some(v => v.action === "replay-journal-then-probe");
+        if (replay && this.filesystemAuthority!.authorizeJournalReplay?.(request, intent, volumes) !== true) fail("authority_denied");
+        const replayDebt = replay ? { operationId: intent.operationId, owner: intent.owner } : priorReplay;
+        for (const v of volumes) this.run("UPDATE cowork_volumes SET filesystem_state=?,format_eligible=0,filesystem_journal_json=?,updated_at=? WHERE volume_id=?", ["ready", "probing"].includes(v.filesystemState) ? "probing" : "formatting", JSON.stringify({ plan: intent, ...(replayDebt ? { replayDebt } : {}), ...(readyFilesystemHistory(v.filesystemJournal) ? { previousReady: readyFilesystemHistory(v.filesystemJournal) } : {}) }), new Date().toISOString(), v.volumeId);
         return intent;
       }, { mode: "immediate" });
     } finally { checked.forEach(v => v.close()); }
@@ -366,6 +387,7 @@ export class CoworkVolumes {
     // Bind recorded plan to current canonical rows as well as its trusted receipt.
     if (plan.volumes.length !== 2 || plan.volumes.some((target, index) => {
       const volume = volumes[index]!;
+      if (plan.protocolVersion === 3 && volume.filesystemState !== "ready" && target.action !== "format-new" && (!volume.filesystemJournal?.previousReady || (!("readyOperationId" in target) || target.readyOperationId !== volume.filesystemJournal.previousReady.plan.operationId))) return true;
       return target.volumeId !== volume.volumeId || target.creationId !== volume.creationId || target.purpose !== volume.purpose || target.expectedFilesystemUUID !== volume.filesystemUUID || target.capacityBytes !== volume.capacityBytes || target.sectorBytes !== volume.sectorBytes || target.filesystemBlockBytes !== volume.filesystemBlockBytes || volume.homeId !== plan.homeId || !volume.identity || !sameIdentity(target.identity, volume.identity);
     })) fail("recovery_required");
     return plan;
@@ -379,9 +401,11 @@ export class CoworkVolumes {
       return this.rs.transaction(() => {
         const { request, homeId } = this.admit("open", input), volumes = this.records(request.workspaceId), plan = this.currentFilesystemPlan(request, volumes, receipt.operationId);
         volumes.forEach(v => this.revalidateChecked(v, checked));
-        if (plan.protocolVersion !== 2) fail("filesystem_compatibility_required");
-        if (volumes.some((v, index) => !["formatting", "probing"].includes(v.filesystemState) || plan.volumes[index]!.action !== (v.filesystemState === "formatting" ? "format-new" : "probe-existing"))) fail("recovery_required");
+        if (plan.protocolVersion !== 3) fail("filesystem_compatibility_required");
+        if (volumes.some((v, index) => !["formatting", "probing"].includes(v.filesystemState) || (v.filesystemState === "formatting" ? plan.volumes[index]!.action !== "format-new" : plan.volumes[index]!.action === "format-new"))) fail("recovery_required");
         if (plan.homeId !== homeId || !matchesFilesystemReceipt(plan, receipt) || this.filesystemAuthority!.authorize(request, homeId, volumes, plan.checkMode) !== true || this.filesystemAuthority!.verifyReceipt(request, plan, receipt, proof) !== true) fail("authority_denied");
+        if (plan.volumes.some(v => v.action === "replay-journal-then-probe") && this.filesystemAuthority!.authorizeJournalReplay?.(request, plan, volumes) !== true) fail("authority_denied");
+        if (plan.priorReplay && this.filesystemAuthority!.verifyPreviousReplayStopped?.(request, homeId, plan.priorReplay, volumes) !== true) fail("stop_unconfirmed");
         if (filesystemReceiptNeedsRecovery(receipt)) fail("journal_recovery_required");
         for (const v of volumes) this.run("UPDATE cowork_volumes SET filesystem_state='ready',filesystem_journal_json=?,updated_at=? WHERE volume_id=?", JSON.stringify({ plan, receipt }), new Date().toISOString(), v.volumeId);
         return this.records(request.workspaceId);
@@ -397,7 +421,7 @@ export class CoworkVolumes {
       if (volumes.some(v => !["formatting", "probing"].includes(v.filesystemState))) fail("recovery_required");
       for (const [index, volume] of volumes.entries()) {
         const wasFormat = plan.volumes[index]!.action === "format-new";
-        const state = wasFormat ? "recovery-required" : readyFilesystemHistory(volume.filesystemJournal) ? "ready" : "probing";
+        const state = wasFormat ? "recovery-required" : volume.filesystemJournal?.replayDebt ? "probing" : readyFilesystemHistory(volume.filesystemJournal) ? "ready" : "probing";
         this.run("UPDATE cowork_volumes SET filesystem_state=?,format_eligible=0,updated_at=? WHERE volume_id=?", state, new Date().toISOString(), volume.volumeId);
       }
     }, { mode: "immediate" });
@@ -406,9 +430,9 @@ export class CoworkVolumes {
   filesystemsReady(input: CoworkVolumeRequest): boolean {
     if (this.rs.db.inTransaction || !this.filesystemAuthority) return false;
     const { request, homeId } = this.admit("open", input), volumes = this.records(request.workspaceId);
-    if (volumes.length !== 2 || volumes.some(v => v.filesystemState !== "ready" || v.filesystemJournal?.plan.protocolVersion !== 2 || !sameOwner(v.owner, request.owner) || !sameOwner(v.filesystemJournal?.plan.owner ?? null, request.owner))) return false;
+    if (volumes.length !== 2 || volumes.some(v => v.filesystemState !== "ready" || v.filesystemJournal?.plan.protocolVersion !== 3 || !sameOwner(v.owner, request.owner) || !sameOwner(v.filesystemJournal?.plan.owner ?? null, request.owner))) return false;
     const plan = this.currentFilesystemPlan(request, volumes, volumes[0]!.filesystemJournal!.plan.operationId), receipt = volumes[0]!.filesystemJournal?.receipt;
-    if (plan.protocolVersion !== 2 || !receipt || plan.homeId !== homeId || !matchesFilesystemReceipt(plan, receipt) || filesystemReceiptNeedsRecovery(receipt) || volumes.some(v => JSON.stringify(v.filesystemJournal?.receipt) !== JSON.stringify(receipt))) return false;
+    if (plan.protocolVersion !== 3 || !receipt || plan.homeId !== homeId || !matchesFilesystemReceipt(plan, receipt) || filesystemReceiptNeedsRecovery(receipt) || volumes.some(v => JSON.stringify(v.filesystemJournal?.receipt) !== JSON.stringify(receipt))) return false;
     const checked = this.prepareChecked(volumes);
     try { return this.rs.transaction(() => {
       const admitted = this.admit("open", input), current = this.records(request.workspaceId);
