@@ -134,9 +134,40 @@ Build and review exact source/artifacts BEFORE privileged execution:
 
 ```sh
 python3 -I -S spikes/cowork-filesystem-bootstrap/build_kernel_replay.py --out out/kernel-replay-reviewed
-# Independent source/artifact admission required here; no automatic privileged CI job.
-sudo env WINTER_RUN_KERNEL_REPLAY_FIXTURE=1 WINTER_KERNEL_REPLAY_RECEIPT="$PWD/out/kernel-replay-reviewed/build.json" python3 -I -S spikes/cowork-filesystem-bootstrap/test_kernel_replay.py
 ```
+
+Independently admit the source commit, complete receipt SHA and no-effect parent
+SHA before privilege. The receipt includes test_bootstrap.py because the runner
+dynamically executes it, plus the stager itself. The supported Root boundary is
+this **literal stdlib-only hash gate**, rather than executing a mutable checkout
+Python file under sudo and checking it later. Fill the two REVIEWED values only
+from independent review; calculating a fresh digest is not approval.
+
+```sh
+sudo /usr/bin/python3 -I -S -B -c '
+import hashlib,os,stat,sys
+source,digest,*arguments=sys.argv[1:]
+fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+try:
+    identity=os.fstat(fd)
+    if not stat.S_ISREG(identity.st_mode) or identity.st_nlink!=1 or identity.st_size>4194304:raise SystemExit("parent identity refused")
+    data=os.pread(fd,4194305,0)
+finally:os.close(fd)
+if len(data)!=identity.st_size or hashlib.sha256(data).hexdigest()!=digest:raise SystemExit("unreviewed parent refused")
+sys.argv=[source,*arguments]
+exec(compile(data,"<reviewed-no-effect-parent>","exec"),{"__name__":"__main__","__file__":source})
+' spikes/cowork-filesystem-bootstrap/stage_kernel_replay.py "$REVIEWED_PARENT_SHA256" --source spikes/cowork-filesystem-bootstrap --artifacts out/kernel-replay-reviewed --receipt out/kernel-replay-reviewed/build.json --approved-receipt-sha256 "$REVIEWED_RECEIPT_SHA256"
+```
+
+The hash-admitted parent imports only isolated system stdlib. It reads and checks
+all source/artifact bytes before repository execution, stages exact Root-owned
+readonly copies, verifies the entire staged closure, then starts its isolated
+-I-S-B runner with a clean environment. No original checkout source executes in
+the privileged fixture. Direct privileged runner invocation is unsupported and
+refuses before repository imports. Source staging performs no mount/loop effect;
+it is distinct from still-required execution-scope admission. Staged source trees
+stay for audit and do not auto-delete uncertain filesystem fixture state.
+
 
 The Root Linux runner must already provide ext4, loop-control/unused loop devices,
 mount namespaces, standard Python, cc/static libc and debugfs. No installation,

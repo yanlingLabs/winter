@@ -2,7 +2,7 @@
 import argparse,hashlib,json,subprocess,sys
 from pathlib import Path
 ROOT=Path(__file__).parent.resolve()
-SOURCES=['kernel-journal-replay.c','fixture-loop-replay.c','kernel_replay.py','bootstrap.py','test_kernel_replay.py','build_kernel_replay.py']
+SOURCES=['kernel-journal-replay.c','fixture-loop-replay.c','kernel_replay.py','bootstrap.py','test_kernel_replay.py','test_bootstrap.py','build_kernel_replay.py','stage_kernel_replay.py']
 def digest(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 def validate(receipt,artifacts):
     if set(receipt)!= {'formatVersion','sources','artifacts','compiler'} or receipt['formatVersion']!=1 or set(receipt['sources'])!=set(SOURCES) or set(receipt['artifacts'])!={'kernel-journal-replay','fixture-loop-replay'}:raise ValueError('closed reviewed receipt')

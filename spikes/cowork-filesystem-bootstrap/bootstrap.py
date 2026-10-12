@@ -186,6 +186,14 @@ class FixtureBootstrap:
                 all_zero(fd, target["capacityBytes"], min(deadline, time.monotonic() + 5)); preflight.append(([], []))
             else:
                 preflight.append(probe(fd, target, deadline, plan))
+        # Admit the complete replay route set before formatting OR replaying either disk.
+        # Missing/closed adapter cannot turn a mixed pair into a partial format.
+        replay_targets = [(fd, target) for index, (fd, target) in enumerate(zip(descriptors, plan["volumes"])) if target["action"] == "replay-journal-then-probe" and preflight[index][1]]
+        replay_adapter = self.journal_replay
+        if replay_targets:
+            require(callable(replay_adapter), "kernel_replay_adapter_required")
+            if hasattr(replay_adapter, "check_admission"):
+                for fd, target in replay_targets: replay_adapter.check_admission(fd, target, deadline)
         observed = []
         for index, (fd, target) in enumerate(zip(descriptors, plan["volumes"])):
             check_fixture_fd(fd, target)
@@ -195,8 +203,8 @@ class FixtureBootstrap:
             elif target["action"] == "replay-journal-then-probe" and preflight[index][1]:
                 # Root-admitted kernel mount replay only, after BOTH readonly preflights.
                 # This may modify metadata on failure; consumed operation/debt never clears.
-                require(callable(self.journal_replay), "kernel_replay_adapter_required")
-                require(self.journal_replay(fd, target, deadline) == "kernel-mount", "kernel_replay_receipt")
+                require(callable(replay_adapter), "kernel_replay_adapter_required")
+                require(replay_adapter(fd, target, deadline) == "kernel-mount", "kernel_replay_receipt")
                 journal_replayed = True
             os.fsync(fd)
             check_fixture_fd(fd, target)

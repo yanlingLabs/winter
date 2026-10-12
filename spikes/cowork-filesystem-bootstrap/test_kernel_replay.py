@@ -6,6 +6,24 @@ from pathlib import Path
 from unittest.mock import patch, Mock
 from types import SimpleNamespace
 ROOT=Path(__file__).parent
+# Defense in depth for direct invocation. The supported privilege boundary remains
+# the independently admitted no-effect parent, which validates BEFORE this runner
+# executes. No repository import occurs until the Root staged closure is checked.
+if os.getenv('WINTER_RUN_KERNEL_REPLAY_FIXTURE')=='1':
+    approved=os.getenv('WINTER_KERNEL_REPLAY_APPROVED_RECEIPT_SHA','');staged=os.getenv('WINTER_KERNEL_REPLAY_STAGED_ROOT','')
+    closure=('kernel-journal-replay.c','fixture-loop-replay.c','kernel_replay.py','bootstrap.py','test_kernel_replay.py','test_bootstrap.py','build_kernel_replay.py','stage_kernel_replay.py')
+    if not staged or Path(staged).resolve()!=ROOT.resolve() or os.geteuid()!=0 or not sys.flags.isolated or not sys.flags.no_site or not sys.dont_write_bytecode:raise RuntimeError('admitted immutable staged runner required before imports')
+    root=os.lstat(ROOT)
+    if root.st_uid!=0 or root.st_mode&0o777!=0o500:raise RuntimeError('immutable source root required')
+    wire=(ROOT/'build.json').read_bytes()
+    if hashlib.sha256(wire).hexdigest()!=approved:raise RuntimeError('approved receipt required before imports')
+    record=json.loads(wire)
+    if set(record)!= {'formatVersion','sources','artifacts','compiler'} or record['formatVersion']!=1 or set(record['sources'])!=set(closure) or set(record['artifacts'])!={'kernel-journal-replay','fixture-loop-replay'}:raise RuntimeError('full source closure required before imports')
+    for name in (*closure,'kernel-journal-replay','fixture-loop-replay','build.json'):
+        leaf=ROOT/name;identity=os.lstat(leaf)
+        if not __import__('stat').S_ISREG(identity.st_mode) or identity.st_uid!=0 or identity.st_nlink!=1 or identity.st_mode&0o222 or identity.st_size>4*1024*1024:raise RuntimeError('immutable source leaf required')
+        expected=approved if name=='build.json' else (record['sources'].get(name) or record['artifacts'][name])
+        if hashlib.sha256(leaf.read_bytes()).hexdigest()!=expected:raise RuntimeError('staged source changed before imports')
 def load(name):
     spec=importlib.util.spec_from_file_location(name,ROOT/(name+'.py'));module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
 bootstrap=load('bootstrap');replay=load('kernel_replay');build=load('build_kernel_replay')

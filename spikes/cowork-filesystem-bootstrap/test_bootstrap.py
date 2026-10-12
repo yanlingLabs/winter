@@ -125,6 +125,27 @@ class ProtocolTests(unittest.TestCase):
             with patch.object(bootstrap.sys, "platform", "linux"), patch.object(bootstrap, "probe", side_effect=probe), patch.object(bootstrap, "run_tool") as tool, self.assertRaisesRegex(bootstrap.Refused, "filesystem_mismatch"):
                 receiver.execute(plan, pair.fds, token)
             tool.assert_not_called()
+    def test_mixed_format_and_dirty_replay_requires_adapter_before_either_write(self):
+        with Pair() as pair:
+            plan=copy.deepcopy(pair.plan);plan['volumes'][1].update(action='replay-journal-then-probe',readyOperationId='old-ready')
+            token=object();receiver=bootstrap.FixtureBootstrap(lambda p,t:p==plan and t is token);events=[]
+            def scan(*_):events.append('virgin-preflight')
+            def probe(*_):events.append('replay-preflight');return bootstrap.EXT4_FEATURES,['needs_recovery']
+            with patch.object(bootstrap.sys,'platform','linux'),patch.object(bootstrap,'all_zero',side_effect=scan),patch.object(bootstrap,'probe',side_effect=probe),patch.object(bootstrap,'run_tool') as tools:
+                before=pair.digests()
+                with self.assertRaisesRegex(bootstrap.Refused,'kernel_replay_adapter_required'):receiver.execute(plan,pair.fds,token)
+                self.assertEqual(events,['virgin-preflight','replay-preflight']);tools.assert_not_called();self.assertEqual(pair.digests(),before)
+                with self.assertRaisesRegex(bootstrap.Refused,'one_shot_consumed'):receiver.execute(plan,pair.fds,token)
+    def test_rejected_adapter_admission_precedes_mixed_format_write(self):
+        with Pair() as pair:
+            plan=copy.deepcopy(pair.plan);plan['volumes'][1].update(action='replay-journal-then-probe',readyOperationId='old-ready')
+            class Denied:
+                def check_admission(self,*_):raise bootstrap.Refused('admission_lost')
+                def __call__(self,*_):raise AssertionError('must not execute')
+            token=object();receiver=bootstrap.FixtureBootstrap(lambda p,t:p==plan and t is token,Denied())
+            with patch.object(bootstrap.sys,'platform','linux'),patch.object(bootstrap,'all_zero'),patch.object(bootstrap,'probe',return_value=(bootstrap.EXT4_FEATURES,['needs_recovery'])),patch.object(bootstrap,'run_tool') as tools:
+                with self.assertRaisesRegex(bootstrap.Refused,'admission_lost'):receiver.execute(plan,pair.fds,token)
+            tools.assert_not_called()
     def test_clean_replay_permission_runs_probe_only_and_reports_no_replay(self):
         with Pair() as pair:
             plan = copy.deepcopy(pair.plan)

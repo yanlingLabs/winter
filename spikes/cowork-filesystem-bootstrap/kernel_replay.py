@@ -29,6 +29,11 @@ class FixtureKernelReplay:
         if not stat.S_ISREG(identity.st_mode) or identity.st_uid!=0 or identity.st_nlink!=1 or identity.st_size>4*1024*1024 or identity.st_mode&0o222 or flags&os.O_ACCMODE!=os.O_RDONLY:raise ReplayUncertain('immutable_replay_artifact')
         if hashlib.sha256(os.pread(artifact_fd,identity.st_size,0)).hexdigest()!=digest:raise ReplayUncertain('replay_artifact_hash')
         self.artifact_fd=os.dup(artifact_fd);self.digest=digest
+    def check_admission(self,fd,target,deadline):
+        if sys.platform!='linux' or os.geteuid()!=0 or len(retained)>=16 or deadline<=time.monotonic():raise ReplayUncertain('replay_unavailable')
+        artifact=os.fstat(self.artifact_fd);source=os.fstat(fd);source_flags=fcntl.fcntl(fd,fcntl.F_GETFL);artifact_flags=fcntl.fcntl(self.artifact_fd,fcntl.F_GETFL)
+        if not stat.S_ISREG(source.st_mode) or source.st_uid!=0 or source.st_nlink!=1 or stat.S_IMODE(source.st_mode)!=0o600 or source.st_size!=target['capacityBytes'] or source_flags&os.O_ACCMODE!=os.O_RDWR or source_flags&os.O_APPEND:raise ReplayUncertain('replay_source_identity')
+        if not stat.S_ISREG(artifact.st_mode) or artifact_flags&os.O_ACCMODE!=os.O_RDONLY or artifact.st_uid!=0 or artifact.st_nlink!=1 or artifact.st_mode&0o222 or artifact.st_size>4*1024*1024 or hashlib.sha256(os.pread(self.artifact_fd,artifact.st_size,0)).hexdigest()!=self.digest:raise ReplayUncertain('replay_artifact_changed')
     def __call__(self,fd,target,deadline):
         if sys.platform!='linux' or os.geteuid()!=0 or len(retained)>=16:raise ReplayUncertain('replay_unavailable')
         remaining=min(20,deadline-time.monotonic())
