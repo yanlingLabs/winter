@@ -127,7 +127,8 @@ export function formatCoworkResult(route: CoworkCliRoute, result: CoworkCliResul
   }
   if ("entries" in result) return [`Policy ${result.policy.policyId}; revision: ${result.policy.revision}; default: ${result.policy.defaultPolicy}; publication: ${result.policy.publication}; network: ${result.policy.network}`, `Capability counts: ${JSON.stringify(result.policy.capabilityCounts)}`, ...result.entries.map(entry => `${entry.kind}: ${visible(entry.name)}`), ...(result.nextCursor ? [`Next cursor: ${result.nextCursor}`] : [])];
   if ("sources" in result) return [...(result.sources.length ? result.sources.map(source => `${source.sourceId}: ${visible(source.label)} · ${source.state} · ${source.desired} · ${source.access}`) : ["(no sources on this page)"]), ...(result.nextCursor ? [`Next cursor: ${result.nextCursor}`] : [])];
-  return [`${result.sourceId}: ${visible(result.label)} · ${result.state} · ${result.desired} · ${result.access}; source revision: ${result.revision}`];
+  if ("sourceId" in result) return [`${result.sourceId}: ${visible(result.label)} · ${result.state} · ${result.desired} · ${result.access}; source revision: ${result.revision}`];
+  throw new Error("Unsupported Cowork result");
 }
 
 export function coworkErrorMessage(error: unknown): string {
