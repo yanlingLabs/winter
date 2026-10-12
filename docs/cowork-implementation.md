@@ -77,8 +77,13 @@ separately. Cowork remains unavailable until its required gates pass.
   sandbox-disabling flags are never injected. Activation refreshes captured
   policy while preserving queued work and session/backend identity; unchanged
   acknowledged paths leave running Code intact. No daemon restart is required.
-  Core source review is accepted; platform parity and full SDK/embedded coverage
-  are still pending. Protected Chat/Dispatch refusal is interim only.
+  Core source review, platform parity and the nine-family SDK context contract
+  are accepted. Core enables context contract version 1 only when the actual
+  installed namespace advertises every required capability. The old pinned SDK
+  still refuses protected embedding; no package release or pin update is implied.
+  Actual candidate Workers passed hostile import/rule/skill checks and live policy
+  updates without restart. Pre-existing commands retain their earlier sandbox
+  profiles, an explicit activation-window residual in the storage contract.
 - The guarded stream v3 source and signed-worker setup are independently reviewed.
   A real RAW-plus-stream run now has separate root/Astra byte, disk, pin and
   mapping audits: three live footprint drops of 238.406/236.281/236.063 MiB while
@@ -95,8 +100,11 @@ separately. Cowork remains unavailable until its required gates pass.
 - The native Code compatibility matrix is accepted: Swift build/test, actual
   SourceKit indexing, Chromium, Playwright and local Xcode package resolution
   match main in sandboxed/escaped modes, except intended protected sandbox reads.
-  Native/embedded context-reader coverage has a candidate implementation under
-  independent review; it is not yet accepted activation coverage.
+  Native/embedded context-reader coverage is independently accepted at SDK
+  `1971f9a6`; Core accepts it at `6c35a3a8`. The additional durable cron-prompt
+  guard is pushed at `bbab87d9`, with focused tests and both typechecks passing;
+  full CI for that newer head remains pending. See the
+  [embedded acceptance evidence](research/2026-10-12-cowork-embedded-context-acceptance.md).
 
 ## Work in progress
 
