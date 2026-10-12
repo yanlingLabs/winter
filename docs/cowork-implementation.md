@@ -100,8 +100,8 @@ separately. Cowork remains unavailable until its required gates pass.
   replacements pass the separate audit. The original normal aggregate remains
   false because a memory sample split one disk ACK log line; the exact raw-byte
   reconstruction is separate. A second guest-close run acknowledges control while
-  stalled and exits 77 with effects uncertain. Telemetry serialization is being
-  fixed; no live MMIO reset/host disconnect or full resource gate is claimed.
+  stalled and exits 77 with effects uncertain. That run exposed the telemetry
+  defect corrected below; no live MMIO reset/host disconnect or full resource gate is claimed.
   See the [frozen audit](https://github.com/yanlingLabs/winter/blob/86e9cfb7/docs/research/2026-10-12-cowork-generic-fixture-independent-postrun-review.md).
 - The separate sampler-channel correction has a clean passing live aggregate at
   build `477d204b`, with zero malformed or reconstructed telemetry. Independent
