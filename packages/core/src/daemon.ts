@@ -379,7 +379,7 @@ export async function startDaemon(opts: {
   agentProvider?: { provider: Provider; model: string; live?: () => { model: string; reasoningEffort?: string; providerId?: string }; refresh?: (next: Settings, secrets: SecretStore, settingsPath?: string) => Promise<boolean>; quota?: SubscriptionQuotaSource } | null;
   /** TEST ONLY (WS-23 review round 1): extra deps for the embedded-session host — a fixture Worker entry,
    *  or the `onLifecycle` observer a test uses to prove no two engines ever overlap on one session. */
-  embeddedHost?: Omit<EmbeddedSessionHostDeps, "log">;
+  embeddedHost?: Omit<EmbeddedSessionHostDeps, "log" | "home">;
   /**
    * Phase 9c Migration B (WS-16 §18) — TEST SEAM for the boot hook below. Passing this object AT
    * ALL is what turns migration on for a caller that ALSO supplies its own `secrets`: without it, a
@@ -1524,7 +1524,7 @@ export async function startDaemon(opts: {
   // Worker each (`runtime-sdk/embedded.ts`). Owned HERE rather than by the runtime handle, because
   // `stop()` must drain it after `runtimeSdk.dispose()` and before the stores close (a Worker's last
   // frames still pass through the session store and `runtime-state.db` on the way out).
-  const embeddedSessions = createEmbeddedSessionHost({ ...(opts.embeddedHost ?? {}), log: (line) => console.error(`runtime-sdk: ${line}`) });
+  const embeddedSessions = createEmbeddedSessionHost({ ...(opts.embeddedHost ?? {}), home: winterHome, log: (line) => console.error(`runtime-sdk: ${line}`) });
   // The version lock, said ONCE at boot: every embedded session re-checks it at `spawnHookFor` and
   // refuses typed (`embedded_runtime_unavailable`); this line is where an operator finds out why.
   {

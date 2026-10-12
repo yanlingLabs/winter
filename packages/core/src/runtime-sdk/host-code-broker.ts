@@ -358,6 +358,8 @@ export class HostCodeExecutionService {
     this.assertReady(this.home);
     if (!hasFloor(hostStorageFloorDescriptor(this.home))) return;
     const spawn = options?.spawnClaudeCodeProcess;
+    if (spawn && this.embeddedSpawns.has(spawn))
+      throw new HostCodeUnavailable("embedded-host-floor-unavailable");
     if (
       !spawn ||
       (!this.enrolledSpawns.has(spawn) && !this.embeddedSpawns.has(spawn))
@@ -365,8 +367,16 @@ export class HostCodeExecutionService {
       throw new HostCodeUnavailable("query-generation-not-enrolled");
   }
   trustEmbeddedSpawn(spawn: SpawnClaudeCodeProcess): SpawnClaudeCodeProcess {
-    this.embeddedSpawns.add(spawn);
-    return spawn;
+    // Capture only a guarded closure. A topology chosen while storage was inactive cannot
+    // become an unfloored embedded launch after coordinator registration changes.
+    const guarded: SpawnClaudeCodeProcess = (options) => {
+      if (this.refreshing) throw new HostCodeUnavailable("floor-refresh-in-progress");
+      if ((options as { requireHostFloor?: boolean }).requireHostFloor || options.command === "/usr/bin/sandbox-exec" || this.protectedStorageActive())
+        throw new HostCodeUnavailable("embedded-host-floor-unavailable");
+      return spawn(options);
+    };
+    this.embeddedSpawns.add(guarded);
+    return guarded;
   }
   assertAuthority(authority: HostCodeAuthority | undefined): void {
     this.assertReady(this.home);

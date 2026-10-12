@@ -246,6 +246,30 @@ function recordingEmbeddedHost(): EmbeddedSessionHost & { spawned: unknown[] } {
 }
 
 describe("spawnHookFor — P8b-1's one topology site", () => {
+  test("active Cowork refuses embedded topology and a previously captured spawn closure before old host code is called", async () => {
+    const embedded = recordingEmbeddedHost();
+    const { handle } = await build({ embedded });
+    const captured = handle.spawnHookFor("chat") as { spawnClaudeCodeProcess: (o: unknown) => unknown };
+    mkdirSync(join(home, "cowork"));
+    const coordination = mkdtempSync(join(tmpdir(), "winter-embedded-topology-coordination-"));
+    const unregister = registerHostStorageFences(home, { coordinationDir: coordination, coworkStorageActive: true });
+    try {
+      for (const mode of ["chat", "dispatch"] as const) {
+        expect(handle.spawnHookFor(mode)).toBeInstanceOf(EmbeddedRuntimeUnavailable);
+      }
+      expect(() => captured.spawnClaudeCodeProcess({ command: "winter-embedded", args: [], cwd: home, env: {} })).toThrow("embedded-host-floor-unavailable");
+      expect(embedded.spawned).toHaveLength(0);
+    } finally { unregister(); rmSync(coordination, { recursive: true, force: true }); }
+  });
+
+  test("captured embedded spawn refuses an explicit host floor requirement even when storage is inactive", async () => {
+    const embedded = recordingEmbeddedHost();
+    const { handle } = await build({ embedded });
+    const hook = handle.spawnHookFor("dispatch") as { spawnClaudeCodeProcess: (o: unknown) => unknown };
+    expect(() => hook.spawnClaudeCodeProcess({ command: "winter-embedded", args: [], cwd: home, env: {}, requireHostFloor: true })).toThrow("embedded-host-floor-unavailable");
+    expect(embedded.spawned).toHaveLength(0);
+  });
+
   test("an explicit WINTER_RUNTIME_EXECUTABLE that is missing on disk ⇒ the typed refusal, never a throw and never a fallback", async () => {
     // P9a fix wave (M1 class): "nothing configured" is no longer a refusal in a tree where the
     // platform package is installed (the ladder's last rung finds it), so the deterministic refusal
