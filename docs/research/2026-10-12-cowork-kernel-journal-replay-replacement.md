@@ -1,5 +1,7 @@
 # Kernel replay replaces the failed journal-only command
 
+Current execution status: the separately admitted [Linux fixture run 38275461677](https://github.com/yanlingLabs/winter/actions/runs/38275461677) passed seven tests at `b9f58579`, including actual committed-data replay with a fresh clean probe and the specific corrupted-journal refusal. The local validation and unexecuted notes below describe earlier candidates. Mac VM execution, the production native device/bootstrap path and Cowork activation remain unverified.
+
 The prior e2fsck `-Ejournal_only`/DEVNULL test failed in [run38256511895, job114835873624](https://github.com/yanlinglabs/winter/actions/runs/38256511895/job/114835873624). Its source and original evidence remain preserved in9d6a3a70/2d1b031d and the historical journal-only report. This correction does not add preen, automatic yes, forced interactive mode, full repair, journal recreation or reformatting.
 
 ## Implemented replacement
@@ -10,13 +12,13 @@ The prior e2fsck `-Ejournal_only`/DEVNULL test failed in [run38256511895, job114
 
 The fixture-only loop driver admits a Root-owned, owner-only, singly-linked regular image descriptor. It opens an independent description of that exact object before flock: dup alone would share the caller's lock and admit concurrent helpers. An unused loop is atomically configured; a race refuses rather than adopting or retrying another device. Backing device/inode, offset, capacity and RW state are checked. No caller-selected device path is used. After replay, CLR_FD is treated only as a request: the driver closes its opener and checks fresh ENXIO, and Python repeats actual kernel status after helper reap before permitting file cleanup. Failed/uncertain metadata operations retain files and descriptors, even when a failed mount detached cleanly. The fixture never uses lazy/forced unmount. [Linux loop implementation](https://github.com/torvalds/linux/blob/v6.18/drivers/block/loop.c), [ext4 mount options](https://github.com/torvalds/linux/blob/v6.18/fs/ext4/super.c).
 
-## Stronger fixture, still not executed
+## Constructed-journal fixture
 
 `test_kernel_replay.py` prepares a real formatted image, a retained file block and a debugfs-generated committed nonempty JBD2 transaction targeting that block. It verifies the journal magic/nonzero start and original data still unchanged before replay, then requires the committed payload in the actual target block and a fresh exact clean observation. The test uses the tool's actual committed transaction/checksum generation, not just a needs_recovery toggle. A separate corrupted-journal case requires failure and preserves its files for audit. This is constructed-journal coverage; it is not a real power-loss/crash reconstruction claim. [e2fsprogs journal writer](https://github.com/tytso/e2fsprogs/blob/v1.47.3/debugfs/do_journal.c).
 
 A no-launch builder produces both immutable native helpers and a closed source/artifact receipt. The independently hash-admitted stdlib-only parent validates the approved receipt and complete source/artifact closure before any repository code runs with privilege. This includes dynamically imported test_bootstrap.py. It stages exact Root-owned readonly copies and verifies them before starting the isolated -I-S-B runner. The README supplies a literal stdlib hash gate for admitting the parent itself. Direct privileged checkout-runner invocation is refused before its repository imports. The ordinary nonprivileged workflow continues running existing file-format/probe tests; kernel tests remain explicitly skipped without Root/isolated-Python/receipt admission. No privileged workflow/push was added. Root must independently review exact source, artifacts and isolated Linux execution scope before the README commands run.
 
-## Local evidence
+## Initial local evidence
 
 - Core filesystem/raw-volume suites:62tests/469assertions pass. New cases reject missing, unsupported and inconsistent replay methods; canonical debt/readiness regressions remain covered.
 - Core typecheck passes. Schema/migrations unchanged.
