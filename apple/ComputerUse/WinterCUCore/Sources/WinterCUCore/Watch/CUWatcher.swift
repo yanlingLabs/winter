@@ -182,6 +182,10 @@ public final class CUWatcher: @unchecked Sendable {
 
     /// A watch ended, or an arm was refused after its probe: the live seams drop what they keep for it.
     var forget: (String) -> Void = { _ in }
+    /// Called with `true` when the first watch is armed and `false` when the last one goes (the live seams hold off App
+    /// Nap meanwhile: an LSUIElement helper with no window on screen is napped, and a napped helper's timers — the
+    /// debounce, the fallback — were seen to slip by tens of seconds while a watch waited).
+    var keepResponsive: (Bool) -> Void = { _ in }
     /// The live seams' own state (`CUWatcher.live`).
     let liveStateLock = NSLock()
     var _liveState: CUWatchLiveState?
@@ -638,6 +642,7 @@ public final class CUWatcher: @unchecked Sendable {
                 fallbackTimer = scheduler.after(ms: Self.fallbackMs) { [weak self] in self?.fallbackFired() }
             }
             if count != lastSentCount {
+                if (lastSentCount ?? 0 > 0) != (count > 0) { keepResponsive(count > 0) }
                 lastSentCount = count
                 onArmedCount?(count)
             }

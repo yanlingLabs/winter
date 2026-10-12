@@ -576,6 +576,17 @@ final class WatcherEngineTests: XCTestCase {
         XCTAssertEqual(reads, 2)
     }
 
+    func testTheHelperIsKeptResponsiveExactlyWhileAWatchIsArmed() async throws {
+        var holds: [Bool] = []
+        watcher.keepResponsive = { holds.append($0) }
+        _ = try await arm("wk_1", .init(kind: "clicked", ref: 3))
+        _ = try await arm("wk_2", .init(kind: "titled", title: "x"))
+        watcher.cancel(watchId: "wk_1")
+        XCTAssertEqual(holds, [true])
+        watcher.cancel(watchId: "wk_2")
+        XCTAssertEqual(holds, [true, false])
+    }
+
     func testTheConnectionClosingDropsItsWatchesSilently() async throws {
         _ = try await arm("wk_1", .init(kind: "clicked", ref: 3), connection: 1)
         _ = try await arm("wk_2", .init(kind: "titled", title: "x"), connection: 2)

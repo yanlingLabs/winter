@@ -36,6 +36,7 @@ extension CUWatcher {
         watcher.liveState = state
         watcher.forget = { [state] id in state.drop(id) }
         guard workspace else { return watcher }
+        watcher.keepResponsive = { [state] on in state.keepResponsive(on) }
         let center = NSWorkspace.shared.notificationCenter
         state.observers.append(center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil) {
             [weak watcher] _ in watcher?.appActivated()
@@ -71,6 +72,20 @@ final class CUWatchLiveState: @unchecked Sendable {
     func read(_ window: AXUIElement, refs: CURefCache<AXIdentity>, clock: CUClock) -> [CUNode] {
         if let treeRead { return treeRead(window) }
         return CUCore.watchRead(window, refs: refs, clock: clock)
+    }
+
+    /// The App Nap hold while any watch is armed (`CUWatcher.keepResponsive`): user-initiated, idle system sleep allowed.
+    private var activity: NSObjectProtocol?
+    func keepResponsive(_ on: Bool) {
+        lock.withLock {
+            if on, activity == nil {
+                activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                                 reason: "Winter waits on the user (wake triggers)")
+            } else if !on, let a = activity {
+                ProcessInfo.processInfo.endActivity(a)
+                activity = nil
+            }
+        }
     }
 
     func set(_ id: String, _ r: Reading) { lock.withLock { readings[id] = r } }
