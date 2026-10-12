@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 /** Reverse dependency order also permits removing an unused additive schema on explicit rollback. */
-export const COWORK_TABLES = ["cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
+export const COWORK_TABLES = ["cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
 
 /** Host authority only. A guest manifest or rebuilt session index never populates these tables. */
 export function migrateCoworkSchema(db: Database): void {
@@ -68,6 +68,32 @@ export function migrateCoworkSchema(db: Database): void {
       change_id TEXT NOT NULL REFERENCES cowork_outbox(change_id), session_id TEXT NOT NULL,
       state TEXT NOT NULL CHECK(state IN ('pending','delivered')), event_seq INTEGER,
       PRIMARY KEY(change_id,session_id)
+    );
+  `);
+}
+
+/** v9 storage records are canonical. A raw image is never authority or evidence of ext4 readiness. */
+export function migrateCoworkVolumeSchema(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cowork_volume_directories (
+      relative_path TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('planned','created')),
+      device TEXT, inode TEXT, uid INTEGER, mode INTEGER,
+      CHECK((device IS NULL)=(inode IS NULL)), CHECK((device IS NULL)=(uid IS NULL)), CHECK((device IS NULL)=(mode IS NULL)),
+      CHECK((state='created')=(device IS NOT NULL)), CHECK(mode IS NULL OR mode=448)
+    );
+    CREATE TABLE IF NOT EXISTS cowork_volumes (
+      volume_id TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES cowork_home_identity(home_id),
+      workspace_id TEXT NOT NULL REFERENCES cowork_workspaces(workspace_id), creation_id TEXT NOT NULL UNIQUE,
+      purpose TEXT NOT NULL CHECK(purpose IN ('data','environment')), format TEXT NOT NULL CHECK(format='raw-ext4-v1'),
+      format_version INTEGER NOT NULL CHECK(format_version=1), capacity_bytes INTEGER NOT NULL CHECK(capacity_bytes>=16777216 AND capacity_bytes<=274877906944 AND capacity_bytes%4096=0),
+      sector_bytes INTEGER NOT NULL CHECK(sector_bytes=512), filesystem_block_bytes INTEGER NOT NULL CHECK(filesystem_block_bytes=4096),
+      state TEXT NOT NULL CHECK(state IN ('planned','creating','allocated')),
+      filesystem_state TEXT NOT NULL CHECK(filesystem_state='unformatted'),
+      device TEXT, inode TEXT, uid INTEGER, mode INTEGER,
+      owner_json TEXT, last_stop_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      UNIQUE(workspace_id,purpose),
+      CHECK((device IS NULL)=(inode IS NULL)), CHECK((device IS NULL)=(uid IS NULL)), CHECK((device IS NULL)=(mode IS NULL)),
+      CHECK(mode IS NULL OR mode=384), CHECK(state!='planned' OR device IS NULL), CHECK(state!='allocated' OR device IS NOT NULL), CHECK(owner_json IS NULL OR state='allocated')
     );
   `);
 }

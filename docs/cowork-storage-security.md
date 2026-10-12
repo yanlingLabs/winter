@@ -27,6 +27,12 @@ ownership. Manifest/imported descriptors cannot grant authority: validate agains
 canonical host records and the authenticated launch request, binding workspace,
 volume, incarnation and runtime image. Preserve existing data on recovery errors.
 
+The first-version [raw backing-image primitive](cowork-raw-volumes.md) now records
+volume geometry, creation/file identity and durable native-owner bindings in
+runtime-state schema 9 and verifies sticky backup exclusions. It allocates only
+unformatted sparse files; authenticated production worker wiring, filesystem
+formatting and guest readiness remain open. It does not enable provisioning.
+
 The first-version merge gates include protected Cowork/image/socket paths in the
 ONE existing Bash sandbox's denyRead/denyWrite lists, Read/Glob/Grep and write-tool
 path checks, and write-shaped escape denials. These guard enrolled Winter routes;
