@@ -86,7 +86,7 @@ test("schema9 migration preserves identity and owner but never invents virgin or
   for (const row of raw) f.db.db.run(`INSERT INTO cowork_volumes(${keys.join(",")}) VALUES(${keys.map(() => "?").join(",")})`, keys.map(k => row[k]));
   f.db.db.run("PRAGMA user_version=9"); f.db.close(); dbs.splice(dbs.indexOf(f.db), 1);
   const upgraded = openRuntimeStateDb(f.home); dbs.push(upgraded); const reopened = f.reopen(upgraded), after = reopened.records(f.request.workspaceId);
-  expect(upgraded.schemaVersion()).toBe(10); expect(after.map(v => [v.volumeId, v.creationId, v.identity, v.owner])).toEqual(before.map(v => [v.volumeId, v.creationId, v.identity, v.owner]));
+  expect(upgraded.schemaVersion()).toBe(11); expect(after.map(v => [v.volumeId, v.creationId, v.identity, v.owner])).toEqual(before.map(v => [v.volumeId, v.creationId, v.identity, v.owner]));
   expect(after.every(v => v.filesystemState === "recovery-required" && v.filesystemUUID === null && !v.formatEligible)).toBe(true);
   expect(() => reopened.prepareFilesystems(f.request)).toThrow("recovery_required"); expect(upgraded.integrity().ok).toBe(true);
 });

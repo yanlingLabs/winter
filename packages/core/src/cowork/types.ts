@@ -36,6 +36,10 @@ export interface MutationContext {
   admitMutation?: () => void;
   /** Pure host response validation inside the mutation transaction; never RPC data. */
   validateReceipt?: (receipt: MutationReceipt<unknown>) => void;
+  /** Host-only closed request identity, allowing source replay after ephemeral selection expiry. */
+  requestDigestInput?: unknown;
+  /** Pure/descriptor-checked host binding inside the source transaction; never RPC parameters. */
+  bindSources?: (sources: readonly WorkspaceSource[]) => void;
   principalId: string; requestId: string; expectedRevision?: number;
 }
 export interface MutationReceipt<T> { operationId: string; workspaceId: string; revision: number; value: T }

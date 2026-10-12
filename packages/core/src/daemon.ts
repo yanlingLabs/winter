@@ -2910,7 +2910,7 @@ export async function startDaemon(opts: {
     : undefined;
   const liveEffort = liveSelection ? () => liveSelection().reasoningEffort ?? "" : undefined;
 
-  const coworkService = runtime ? new CoworkWorkspaceService(new CoworkRepository(runtime.db), opts.coworkHost ?? createMacCoworkHost(winterHome)) : undefined;
+  const coworkService = runtime ? new CoworkWorkspaceService(new CoworkRepository(runtime.db), opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db)) : undefined;
   const server: IpcServer = startIpcServer({
     socketPath: dirs.socketPath,
     serverVersion: CORE_VERSION,
