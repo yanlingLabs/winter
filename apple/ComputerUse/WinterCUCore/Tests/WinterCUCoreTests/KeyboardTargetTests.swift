@@ -475,6 +475,32 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertTrue(poster.keyDowns.isEmpty, "no key into whatever has the focus")
     }
 
+    /// Round 17 (the review of round 16, MEDIUM): the accessibility fallback's "last element scrolled into view" is
+    /// verified — an element that still reads outside what the page shows is said to be unconfirmed.
+    func testTheFallbacksScrollIntoViewIsVerifiedNotAssumed() async throws {
+        safari(fieldOwner: pid)
+        let web = ax.element(field, kAXParentAttribute)!
+        let button = fakeElement(93_096), footer = fakeElement(93_097)
+        ax.add(button, role: kAXButtonRole, title: "Web Button", frame: CGRect(x: 20, y: 160, width: 120, height: 30),
+               extra: [kAXParentAttribute: web])
+        ax.setActions(button, [kAXPressAction])
+        ax.add(footer, role: "AXGroup", frame: CGRect(x: 0, y: 5_000, width: 900, height: 40), extra: [kAXParentAttribute: web])
+        ax.put(web, [kAXChildrenAttribute: [field, button, footer]])
+        _ = searchHasFocus()
+        // The page ignores the request: the footer stays far below.
+        let r = try await act(.key(CUKeyAction(combo: "end", into: ref(button))))
+        XCTAssertTrue(ax.performed.contains("\(token(footer)):AXScrollToVisible"), "\(ax.performed)")
+        XCTAssertTrue(r.detail?.contains("not confirmed") ?? false, r.detail ?? "")
+        // It moves into view: said so.
+        ax.onPerform = { [unowned self] what in
+            guard what == "\(token(footer)):AXScrollToVisible" else { return }
+            var p = CGPoint(x: 0, y: 500)
+            ax.put(footer, [kAXPositionAttribute: AXValueCreate(.cgPoint, &p)!])
+        }
+        let again = try await act(.key(CUKeyAction(combo: "end", into: ref(button))))
+        XCTAssertTrue(again.detail?.contains("its last element scrolled into view") ?? false, again.detail ?? "")
+    }
+
     /// Round 17 (the review of round 16, MEDIUM): ↓ aimed at a web link in Mail moved the message list — the key went to
     /// a focus the act had just shown is outside the control's page. Now refused, nothing sent (End and its kin still have
     /// the accessibility fallback above).

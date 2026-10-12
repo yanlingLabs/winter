@@ -938,7 +938,13 @@ extension CUCore {
                 n = next
             }
             guard !CFEqual(n, area), (try? ax.perform(n, "AXScrollToVisible")) != nil else { return nil }
-            return "its \(k == .end ? "last" : "first") element scrolled into view"
+            // Verified, never assumed (round 17, the review of round 16): the element's frame read again against what the
+            // page shows (its scroll area, else the page, within the window).
+            let shown = [scroller.flatMap { ax.frame($0) } ?? ax.frame(area), sys.window(id: t.windowID)?.frame].compactMap { $0 }
+                .reduce(nil as CGRect?) { acc, r in acc.map { $0.intersection(r) } ?? r }
+            let which = k == .end ? "last" : "first"
+            if let f = ax.frame(n), let shown, !shown.isNull, shown.intersects(f) { return "its \(which) element scrolled into view" }
+            return "its \(which) element was asked into view — not confirmed (it still reads outside what the page shows)"
         default:
             return nil
         }
