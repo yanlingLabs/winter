@@ -56,7 +56,7 @@ const sameScope = (a: Readonly<GuestRuntimeScope>, b: Readonly<GuestRuntimeScope
 function freezeCeiling(value: CapabilityCeiling): GuestRuntimeCapabilities {
   return Object.freeze({ ...value, toolClasses: Object.freeze([...value.toolClasses]), hostServices: Object.freeze([...value.hostServices]), connectors: Object.freeze([...value.connectors]) });
 }
-interface Lifetime { launch: Readonly<GuestRuntimeLaunch>; phase: "opening" | "running" | "retained"; stop?: (force: boolean) => void }
+interface Lifetime { launch: Readonly<GuestRuntimeLaunch>; phase: "opening" | "running" | "retained"; stop?: (force: boolean) => void; cancel?: (force: boolean) => void }
 
 /** Host-side conversation transport executor. No local spawn or generic argv/env fallback.
  * The map prevents duplicate admission in this realm; cross-process/disk exclusion belongs to
@@ -103,9 +103,27 @@ export class CoworkGuestRuntimeSupervisor {
       this.assertCurrent(launch); lifetime.phase = "running";
     } catch (error) { lifetime.phase = "retained"; try { lifetime.stop?.(true); } catch {} throw error; }
     let failed = false, ended = false, pending = 0, inputLine = 0;
+    let nativeStopped = false, primaryOpened = false, primaryYielded = false, primaryClosed = false;
+    const maybeRelease = (): void => {
+      // Native/store termination does not consume already-buffered protocol frames. The exact
+      // lifetime stays admitted until its primary consumer closes (or an unopened stream is fenced).
+      if (nativeStopped && primaryClosed && this.lifetimes.get(sessionId) === lifetime) {
+        failed = true; this.lifetimes.delete(sessionId);
+      }
+    };
+    const primaryDone = (): void => { primaryClosed = true; maybeRelease(); };
+    const cancel = (force: boolean): void => {
+      failed = true; lifetime.phase = "retained";
+      // A delivered chunk may still be in the SDK parser/permission handler. Keep its
+      // admission until iterator completion/return; do not revoke native ownership by timeout.
+      if (!primaryYielded) primaryDone();
+      try { channel.stop(force); } catch {}
+    };
+    lifetime.cancel = cancel;
     let sends = Promise.resolve();
-    const fail = (): void => { failed = true; lifetime.phase = "retained"; try { channel.stop(true); } catch {} };
+    const fail = (): void => cancel(true);
     const thisCheck = (): void => {
+      if (this.lifetimes.get(sessionId) !== lifetime) throw new CoworkError("recovery_required");
       if (channel.protocolVersion !== 1 || !sameScope(launch.scope, channel.scope) || channel.launchId !== launch.launchId) throw new CoworkError("authority_denied");
       this.assertCurrent(launch);
     };
@@ -123,9 +141,12 @@ export class CoworkGuestRuntimeSupervisor {
       }
       return bytes;
     };
-    const bounded = (stream: AsyncIterable<string>, primary = false): AsyncIterable<string> => (async function* () {
+    const bounded = (stream: AsyncIterable<string>, primary = false): AsyncIterable<string> => {
+      const body = async function* () {
       let line = 0;
       try {
+        if (failed) throw new CoworkError("recovery_required");
+        thisCheck();
         for await (const chunk of stream) {
           // No prefetch queue: downstream iteration applies stream backpressure to the port.
           if (failed) throw new CoworkError("recovery_required");
@@ -135,16 +156,31 @@ export class CoworkGuestRuntimeSupervisor {
             line += Buffer.byteLength(part, "utf8"); if (line > GUEST_RUNTIME_TRANSPORT_LIMITS.frameBytes) throw new CoworkError("response_too_large");
             if (part.endsWith("\n")) line = 0;
           }
+          if (primary) primaryYielded = true;
           yield chunk;
         }
         // Lost primary stream closes new admission and asks the native owner to drain.
         // EOF never settles runtime exit or releases protected ownership.
         if (primary && lifetime.phase === "running") { failed = true; lifetime.phase = "retained"; try { channel.stop(false); } catch {} }
       } catch (error) { fail(); throw error; }
-    })();
+      finally { if (primary) primaryDone(); }
+      };
+      return { [Symbol.asyncIterator]() {
+        if (primary) {
+          if (primaryOpened) throw new CoworkError("recovery_required");
+          primaryOpened = true;
+        }
+        const iterator = body();
+        return {
+          next: () => iterator.next(),
+          async return() { if (primary) cancel(false); try { return await iterator.return(); } finally { if (primary) primaryDone(); } },
+          async throw(error: unknown) { if (primary) cancel(true); try { return await iterator.throw(error); } finally { if (primary) primaryDone(); } },
+        };
+      } };
+    };
     const exited = channel.runtimeExited.then(value => { lifetime.phase = "retained"; return value; }, error => { fail(); throw error; });
     void Promise.all([exited, channel.termination]).then(([, proof]) => {
-      if (proof && typeof proof === "object" && proof.outcome === "confirmed-stopped" && proof.storeOwnerReleased === true && proof.launchId === launch.launchId && sameScope(launch.scope, proof.scope)) this.lifetimes.delete(sessionId);
+      if (proof && typeof proof === "object" && proof.outcome === "confirmed-stopped" && proof.storeOwnerReleased === true && proof.launchId === launch.launchId && sameScope(launch.scope, proof.scope)) { nativeStopped = true; maybeRelease(); }
       else lifetime.phase = "retained";
     }, () => { lifetime.phase = "retained"; });
     return { pid: null, stdout: bounded(channel.stdout, true), ...(channel.stderr ? { stderr: bounded(channel.stderr) } : {}), exited,
@@ -155,10 +191,10 @@ export class CoworkGuestRuntimeSupervisor {
         check(); ended = true;
         sends = sends.then(() => { if (failed) return; thisCheck(); return channel.endInput(); }).catch(() => { fail(); });
       } },
-      kill: signal => { lifetime.phase = "retained"; failed = true; try { channel.stop(signal === "SIGKILL"); } catch {} },
+      kill: signal => cancel(signal === "SIGKILL"),
     };
   }
   /** Shutdown blocks new starts and requests drain; no timeout/EOF/kill-based release. */
-  stop(): void { this.stopped = true; for (const value of this.lifetimes.values()) { value.phase = "retained"; try { value.stop?.(false); } catch {} } }
+  stop(): void { this.stopped = true; for (const value of this.lifetimes.values()) { value.phase = "retained"; try { if (value.cancel) value.cancel(false); else value.stop?.(false); } catch {} } }
   retained(): readonly Readonly<GuestRuntimeScope>[] { return [...this.lifetimes.values()].map(value => value.launch.scope); }
 }

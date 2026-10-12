@@ -89,7 +89,9 @@ test("exact independent proof enables cold continuation with stable backend/stor
   const f = fixture(), wires: ReturnType<typeof channel>[] = [], launches: Readonly<GuestRuntimeLaunch>[] = [];
   const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) { launches.push(launch); const wire = channel(launch); wires.push(wire); return wire.port; } } });
   const first = host.spawn("conversation"); wires[0]!.exit.resolve({ code: 0, signal: null }); await first.exited;
-  expect(() => host.spawn("conversation")).toThrow("recovery_required"); wires[0]!.release(); await Bun.sleep(0);
+  expect(() => host.spawn("conversation")).toThrow("recovery_required"); wires[0]!.release(); wires[0]!.stdout.end();
+  for await (const _ of first.stdout) {}
+  await Bun.sleep(0);
   f.resume(); host.spawn("conversation");
   expect(launches[1]!.runtime.resume).toBe("backend-stable"); expect(launches[1]!.runtime.storeHome).toBe(launches[0]!.runtime.storeHome);
   expect(launches[1]!.launchId).not.toBe(launches[0]!.launchId); expect(launches[1]!.scope.sessionId).toBe("conversation"); host.stop();
@@ -202,4 +204,81 @@ test("malformed native teardown receipt remains held without an unhandled error"
   const proc = host.spawn("conversation"); wire.exit.resolve({ code: 0, signal: null }); await proc.exited;
   wire.proof.resolve(null as unknown as GuestRuntimeTermination); await Bun.sleep(0);
   expect(() => host.spawn("conversation")).toThrow("recovery_required");
+});
+
+test("actual SDK buffered permission/result holds the original lifetime through exit-before-drain", async () => {
+  const f=fixture();f.resume();const wires: ReturnType<typeof channel>[]=[];
+  const host=new CoworkGuestRuntimeSupervisor({...f.deps,runtimeCapability:capability,port:{open(launch){const wire=channel(launch);wires.push(wire);return wire.port;}}});
+  let handled=0;
+  const q=query({prompt:"old prompt",options:{model:"winter-test/echo",sessionId:"backend-stable",cwd:f.home,persistSession:false,canUseTool:async()=>{handled++;return {behavior:"deny",message:"synthetic review refusal"};},spawnClaudeCodeProcess:()=>host.spawn("conversation")}});
+  const old=wires[0]!;
+  old.stdout.write(JSON.stringify({type:"init",protocolVersion:"1.0",sessionId:"backend-stable",permissionMode:"default",cwd:"/workspace/folders/grant/repo/subdir",model:"winter-test/echo",tools:[]})+"\n");
+  old.stdout.write(JSON.stringify({type:"control_request",requestId:"old-control",subtype:"permission",payload:{requestId:"old-control",toolName:"Bash",input:{command:"true"},toolUseId:"old-tool",suggestions:[]}})+"\n");
+  old.stdout.write(JSON.stringify({type:"data",message:{type:"result",subtype:"success",is_error:false,result:"old buffered result"}})+"\n");
+  old.stdout.end();old.stderr.end();old.exit.resolve({code:0,signal:null});old.release();await Bun.sleep(0);
+  expect(host.retained()).toHaveLength(1);expect(() => host.spawn("conversation")).toThrow("recovery_required");
+  const frames=[];for await(const frame of q)frames.push(frame);
+  expect(handled).toBe(1);expect(JSON.stringify(frames)).toContain("old buffered result");
+  await Bun.sleep(0);expect(host.retained()).toHaveLength(0);host.spawn("conversation");expect(host.retained()).toHaveLength(1);host.stop();
+});
+
+test("unconsumed cancellation fences old query bytes before a replacement and late old callbacks cannot remove it", async () => {
+  const f = fixture(); f.resume(); const wires: ReturnType<typeof channel>[] = []; let handled = 0;
+  const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) { const wire = channel(launch); wires.push(wire); return wire.port; } } });
+  let original!: ReturnType<typeof host.spawn>;
+  const q = query({ prompt: "abandoned", options: { model: "winter-test/echo", sessionId: "backend-stable", cwd: f.home, persistSession: false,
+    canUseTool: async () => { handled++; return { behavior: "deny", message: "unreachable" }; },
+    spawnClaudeCodeProcess: () => { original = host.spawn("conversation"); return original; },
+  } });
+  const old = wires[0]!;
+  old.stdout.write(JSON.stringify({ type: "init", protocolVersion: "1.0", sessionId: "backend-stable", permissionMode: "default", cwd: "/workspace/folders/grant/repo/subdir", model: "winter-test/echo", tools: [] }) + "\n");
+  old.stdout.write(JSON.stringify({ type: "control_request", requestId: "old-control", subtype: "permission", payload: { toolName: "Bash", input: { command: "true" }, toolUseId: "old-tool", suggestions: [] } }) + "\n");
+  old.stdout.end(); old.stderr.end(); original.kill(); old.exit.resolve({ code: 0, signal: null }); old.release(); await Bun.sleep(0);
+  expect(host.retained()).toHaveLength(0); const replacement = host.spawn("conversation");
+  const seen: unknown[] = []; await expect((async () => { for await (const frame of q) seen.push(frame); })()).rejects.toThrow();
+  expect(handled).toBe(0); expect(seen).toEqual([]); expect(host.retained()).toHaveLength(1);
+  expect(() => original.stdin.write("late old write\n")).toThrow("recovery_required"); original.kill("SIGKILL"); await Bun.sleep(0);
+  expect(host.retained()).toHaveLength(1); expect(wires[1]!.stops).toEqual([]); replacement.kill(); host.stop();
+});
+test("primary iterator return before first next fences output but still requires native store proof", async () => {
+  const f = fixture(); const wires: ReturnType<typeof channel>[] = [];
+  const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) { const wire = channel(launch); wires.push(wire); return wire.port; } } });
+  const proc = host.spawn("conversation"), iterator = proc.stdout[Symbol.asyncIterator](); await iterator.return!();
+  expect(() => proc.stdin.write("after close\n")).toThrow("recovery_required"); expect(() => host.spawn("conversation")).toThrow("recovery_required");
+  wires[0]!.exit.resolve({ code: 0, signal: null }); wires[0]!.release(); await Bun.sleep(0); host.spawn("conversation");
+  await iterator.return!(); proc.kill(); await Bun.sleep(0); expect(host.retained()).toHaveLength(1); expect(wires[1]!.stops).toEqual([]); host.stop();
+});
+test("started consumer cancellation keeps admitted buffered chunks held until return", async () => {
+  const f = fixture(); let wire!: ReturnType<typeof channel>;
+  const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) { wire = channel(launch); return wire.port; } } });
+  const proc = host.spawn("conversation"), iterator = proc.stdout[Symbol.asyncIterator](); wire.stdout.write("buffered frame\n"); await iterator.next();
+  wire.exit.resolve({ code: 0, signal: null }); wire.release(); await Bun.sleep(0); proc.kill();
+  expect(() => host.spawn("conversation")).toThrow("recovery_required"); await iterator.return!(); await Bun.sleep(0); expect(host.retained()).toEqual([]);
+});
+
+test("canceling an opened but unconsumed primary stream fences it without requiring a first next", async () => {
+  const f = fixture(); const wires: ReturnType<typeof channel>[] = [];
+  const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) { const wire = channel(launch); wires.push(wire); return wire.port; } } });
+  const proc = host.spawn("conversation"), iterator = proc.stdout[Symbol.asyncIterator](); proc.kill();
+  wires[0]!.exit.resolve({ code: 0, signal: null }); wires[0]!.release(); await Bun.sleep(0); host.spawn("conversation");
+  await expect(iterator.next()).rejects.toThrow("recovery_required"); expect(host.retained()).toHaveLength(1); expect(wires[1]!.stops).toEqual([]); host.stop();
+});
+test("old pending input acknowledgments cannot send queued callbacks to or delete a replacement", async () => {
+  const f = fixture(), held = deferred<void>(), wires: ReturnType<typeof channel>[] = [];
+  const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) {
+    const wire = channel(launch); if (!wires.length) wire.port.send = async chunk => { wire.inputs.push(chunk); await held.promise; }; wires.push(wire); return wire.port;
+  } } });
+  const proc = host.spawn("conversation"); proc.stdin.write("old one\n"); proc.stdin.write("old two\n"); await Bun.sleep(0);
+  proc.kill(); wires[0]!.exit.resolve({ code: 0, signal: null }); wires[0]!.release(); await Bun.sleep(0); host.spawn("conversation");
+  held.resolve(); await Bun.sleep(0); expect(wires[0]!.inputs).toEqual(["old one\n"]); expect(wires[1]!.inputs).toEqual([]);
+  expect(host.retained()).toHaveLength(1); expect(wires[1]!.stops).toEqual([]); host.stop();
+});
+test("primary iterator throw fences delivery but never substitutes for native store proof", async () => {
+  const f = fixture(); const wires: ReturnType<typeof channel>[] = [];
+  const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) { const wire = channel(launch); wires.push(wire); return wire.port; } } });
+  const proc = host.spawn("conversation"), iterator = proc.stdout[Symbol.asyncIterator]();
+  await expect(iterator.throw!(new Error("consumer failed"))).rejects.toThrow("consumer failed");
+  expect(() => host.spawn("conversation")).toThrow("recovery_required");
+  wires[0]!.exit.resolve({ code: 0, signal: null }); wires[0]!.release(); await Bun.sleep(0); host.spawn("conversation");
+  await expect(iterator.throw!(new Error("late throw"))).rejects.toThrow("late throw"); expect(wires[1]!.stops).toEqual([]); expect(host.retained()).toHaveLength(1); host.stop();
 });
