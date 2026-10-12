@@ -1190,9 +1190,8 @@ private struct PendingApprovalBody: View {
             if let defaultAllowAt, !isInFlight {
                 TimelineView(.explicit(defaultAllowRedraws(defaultAllowAt))) { context in
                     Text(defaultAllowCountdownText(defaultAllowAt: defaultAllowAt, now: context.date))
-                        .font(Typography.caption(.medium))
+                        .font(Typography.captionDigits(.medium))
                         .foregroundStyle(.secondary)
-                        .monospacedDigit()
                 }
             }
 
