@@ -41,7 +41,8 @@ const anthropicFrames = (first: boolean, model: string): Record<string, unknown>
 ];
 afterEach(() => { /* Every test owns and restores its fetch spy and Worker in finally. */ });
 
-for (const providerId of ["openai", "anthropic"]) integration(`real ${providerId} adapter -> framed helper -> actual SDK session provider fold, two-turn store continuation`, async () => {
+for (const scenario of [{ providerId: "openai", partial: false }, { providerId: "anthropic", partial: false }, { providerId: "openai", partial: true }]) integration(`real ${scenario.providerId} adapter -> framed helper -> SDK fold (${scenario.partial ? "partial failure without replay" : "two-turn store continuation"})`, async () => {
+  const { providerId, partial } = scenario;
   const { sdk, runtime, catalog: catalogModule, session, state } = await imports();
   const catalog = catalogModule.loadCatalog(); const row = catalog.models.find((value: any) => value.providerId === providerId && value.status !== "blocked" && value.status !== "deprecated"); expect(row).toBeDefined();
   const registry = runtime.createRegistry(catalog); for (const adapter of runtime.createShippedAdapters(catalog)) registry.register(adapter);
@@ -51,7 +52,9 @@ for (const providerId of ["openai", "anthropic"]) integration(`real ${providerId
   const fetch = spyOn(globalThis, "fetch").mockImplementation((async (input: Parameters<typeof globalThis.fetch>[0], init?: Parameters<typeof globalThis.fetch>[1]) => {
     const url = String(input); expect(url).toBe(providerId === "openai" ? "https://api.openai.com/v1/responses" : "https://api.anthropic.com/v1/messages");
     const headers = new Headers(init?.headers); expect(headers.get(providerId === "openai" ? "authorization" : "x-api-key")).toBe(providerId === "openai" ? `Bearer ${KEY}` : KEY);
-    bodies.push(JSON.parse(String(init?.body))); const first = requests++ === 0; return sse(providerId === "openai" ? responseFrames(first) : anthropicFrames(first, resolved.providerModelId));
+    bodies.push(JSON.parse(String(init?.body))); const first = requests++ === 0;
+    if (partial) return sse([{ type: "response.created", response: { id: "partial" } }, { type: "response.output_text.delta", delta: "Partial actual output" }, { type: "response.failed", response: { error: { message: KEY, code: "server_error" } } }]);
+    return sse(providerId === "openai" ? responseFrames(first) : anthropicFrames(first, resolved.providerModelId));
   }) as typeof globalThis.fetch);
   const broker = new CoworkProviderBroker({ secrets, assertCurrent: () => {}, log: value => logs.push(value) }); const lease = broker.open({ scope, resolved, authRef: { kind: "keychain", account: "fixture-only-slot" }, connection: { providerId } });
   const helper = new Worker(new URL("./fixtures/provider-frame-helper.ts", import.meta.url).href); const waiting = new Map<string, { resolve(value: Uint8Array): void; reject(error: Error): void }>();
@@ -68,7 +71,11 @@ for (const providerId of ["openai", "anthropic"]) integration(`real ${providerId
     } });
     const wiring = session.buildSessionProvider({ config: { sessionId: scope.backendSessionId, model: resolved.modelKey, cwd: directory, winterHome: directory, permissionMode: "auto", provider: { providerId, authRef: { kind: "none" } } }, env: {}, catalog, guestProvider: client, readKeychainSecret: async () => { throw new Error("guest keychain access forbidden"); } });
     const provider = wiring.buildProvider(resolved); const sinks: unknown[] = []; const messages: any[] = [{ role: "user", content: "Read the fixture then report" }]; const tools = [{ name: "Read", description: "Fixture Read", inputSchema: { type: "object", properties: { file_path: { type: "string" } } } }];
-    const turn = await provider.generate({ messages, tools, sink: { onStreamEvent: (value: unknown) => sinks.push(value), onRateLimit: (value: unknown) => sinks.push(value), onRetry: (value: unknown) => sinks.push(value), onAuthStatus: (value: unknown) => sinks.push(value), onReasoningSummary: (value: unknown) => sinks.push(value), onReasoningProgress: (value: unknown) => sinks.push(value) } });
+    const pending = provider.generate({ messages, tools, sink: { onStreamEvent: (value: unknown) => sinks.push(value), onRateLimit: (value: unknown) => sinks.push(value), onRetry: (value: unknown) => sinks.push(value), onAuthStatus: (value: unknown) => sinks.push(value), onReasoningSummary: (value: unknown) => sinks.push(value), onReasoningProgress: (value: unknown) => sinks.push(value) } });
+    if (partial) {
+      await expect(pending).rejects.toThrow("host provider request failed"); expect(requests).toBe(1); expect(JSON.stringify(sinks)).toContain("Partial actual output"); expect(JSON.stringify({ frames, logs, sinks })).not.toContain(KEY); client.close(); return;
+    }
+    const turn = await pending;
     expect(turn.kind).toBe("tool_use"); expect(turn.calls).toEqual([{ id: "read-call", name: "Read", input: { file_path: "fixture.txt" } }]);
     if (providerId === "openai") { expect(JSON.stringify(turn.nativeState)).toContain("fixture-provider-opaque-continuation"); expect(turn.thinking.summary).toBe("Readable summary"); expect(turn.nativeState.family).toBe("openai"); }
     else { expect(turn.thinking.blocks).toContainEqual({ type: "thinking", thinking: "Signed fixture reasoning", signature: "fixture-real-provider-signature" }); }
