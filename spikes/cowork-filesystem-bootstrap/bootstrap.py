@@ -162,9 +162,10 @@ class FixtureBootstrap:
     Production must authenticate the exact native envelope and immutable bootstrap
     digest before admitting any descriptor. This fixture cannot supply that evidence.
     """
-    def __init__(self, authenticate):
+    def __init__(self, authenticate, journal_replay=None):
         require(callable(authenticate), "mandatory_authenticator")
         self.authenticate = authenticate
+        self.journal_replay = journal_replay
         self.consumed = set()
 
     def execute(self, incoming, descriptors, proof):
@@ -192,14 +193,15 @@ class FixtureBootstrap:
             if target["action"] == "format-new":
                 run_tool("mke2fs", ["-q", "-t", "ext4", "-b", "4096", "-I", "256", "-U", target["expectedFilesystemUUID"], "-O", "none," + ",".join(EXT4_FEATURES), "-E", "lazy_itable_init=1,lazy_journal_init=0,nodiscard", "-F"], fd, deadline)
             elif target["action"] == "replay-journal-then-probe" and preflight[index][1]:
-                # Only journal replay, never preen/full repair, and only after BOTH readonly
-                # preflights passed exact identity/UUID/geometry/features/clean-state checks.
-                run_tool("e2fsck", ["-E", "journal_only"], fd, deadline, accepted=(0, 1))
+                # Root-admitted kernel mount replay only, after BOTH readonly preflights.
+                # This may modify metadata on failure; consumed operation/debt never clears.
+                require(callable(self.journal_replay), "kernel_replay_adapter_required")
+                require(self.journal_replay(fd, target, deadline) == "kernel-mount", "kernel_replay_receipt")
                 journal_replayed = True
             os.fsync(fd)
             check_fixture_fd(fd, target)
             features, transient = probe(fd, target, deadline, plan)
             if journal_replayed:
                 require(not transient, "journal_recovery_incomplete")
-            observed.append({**target, "journalReplayed": journal_replayed, "filesystemFeatures": features, "transientFilesystemFeatures": transient, "fullReadOnlyCheck": plan["checkMode"] == "full-read-only", "filesystemType": "ext4", "filesystemUUID": target["expectedFilesystemUUID"], "flushConfirmed": True, "checked": True})
+            observed.append({**target, "journalReplayed": journal_replayed, "journalReplay": "kernel-mount" if journal_replayed else "none", "filesystemFeatures": features, "transientFilesystemFeatures": transient, "fullReadOnlyCheck": plan["checkMode"] == "full-read-only", "filesystemType": "ext4", "filesystemUUID": target["expectedFilesystemUUID"], "flushConfirmed": True, "checked": True})
         return {**plan, "volumes": observed}

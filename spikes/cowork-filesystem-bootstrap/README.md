@@ -112,10 +112,40 @@ Current plans require protocol 3, per-target readyOperationId and optional prior
 owner/operation debt. Normal known-ready targets may carry replay-journal-then-probe,
 with host-issued writable permission and actual old-writer stop proof on uncertain
 retry. Both targets preflight read-only before any write. Clean targets never invoke
-fsck; clean+needs_recovery alone invokes e2fsck -E journal_only and then a fresh clean
-probe. Receipts explicitly report journalReplayed. Full repair/autoreformat is absent.
+fsck; clean+needs_recovery requires a separately admitted immutable kernel replay
+adapter. It mounts the exact owned block FD in a private namespace with fixed
+nosuid/nodev/noexec/noatime and errors=remount-ro,noinit_itable options, syncfs,
+normal unmount, then a fresh clean probe. Receipts bind journalReplay:"kernel-mount"
+or "none" and consistent journalReplayed. No e2fsck preen, interactive override,
+full repair or reformat is used.
 
-Current Mac validation: 9 no-effect/protocol tests pass, 10 Linux cases skip. The new
-actual format/write/set-needs_recovery/replay/preserved-bytes case awaits root review
+The previous -Ejournal_only +DEVNULL test failed in
+[CI38256511895/job114835873624](https://github.com/yanlinglabs/winter/actions/runs/38256511895/job/114835873624).
+That evidence/source remains historical; no -p/-y workaround is accepted.
+
+The fixture-only regular-file adapter configures an unused loop atomically from
+its pinned image FD. CLR_FD/autoclear is insufficient: the helper normal-unmounts,
+closes its opener, and observes ENXIO; the Python owner repeats the kernel status
+check after actual helper reap. Timeout or uncertainty retains helper, descriptors
+and files without kill-based proof or retry. The standalone block helper also
+retains a mounted namespace on syncfs/unmount failure.
+
+Build and review exact source/artifacts BEFORE privileged execution:
+
+```sh
+python3 -I -S spikes/cowork-filesystem-bootstrap/build_kernel_replay.py --out out/kernel-replay-reviewed
+# Independent source/artifact admission required here; no automatic privileged CI job.
+sudo env WINTER_RUN_KERNEL_REPLAY_FIXTURE=1 WINTER_KERNEL_REPLAY_RECEIPT="$PWD/out/kernel-replay-reviewed/build.json" python3 -I -S spikes/cowork-filesystem-bootstrap/test_kernel_replay.py
+```
+
+The Root Linux runner must already provide ext4, loop-control/unused loop devices,
+mount namespaces, standard Python, cc/static libc and debugfs. No installation,
+modprobe, Docker or host/guest share is introduced. Normal nonprivileged CI keeps
+running test_bootstrap.py; the kernel fixture is separately refused/skipped until
+explicit review. The stronger fixture constructs a committed nonempty JBD2
+transaction via debugfs, requires original data unchanged before replay, and then
+requires actual journal payload in the target block plus a clean exact probe.
+This is constructed-journal coverage, not a real power-loss/crash proof. A corrupt
+journal case requires failure and retains its files. Neither has run locally.
 and Linux CI. Previous v2 evidence remains historical, not a protocol-3 execution pass.
 The fixture remains regular-file-only and cannot authenticate production native grants.

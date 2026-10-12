@@ -23,7 +23,7 @@ function fixture(port = true, checkpoint?: (phase: string) => void) {
   store.allocate(request, { data: RAW_VOLUME_MIN_BYTES, environment: RAW_VOLUME_MIN_BYTES }); store.claim(request);
   return { home, db, store, request, native, sealedProof, reopen: (nextDb = db) => new CoworkVolumes(nextDb, home, authority, backup, undefined, native) };
 }
-const receipt = (plan: VolumeFilesystemPlan): VolumeFilesystemReceipt => ({ ...plan, volumes: plan.volumes.map(v => ({ ...v, journalReplayed: false, filesystemFeatures: [...plan.ext4Features], transientFilesystemFeatures: [], fullReadOnlyCheck: plan.checkMode === "full-read-only", filesystemType: "ext4", filesystemUUID: v.expectedFilesystemUUID, flushConfirmed: true, checked: true })) });
+const receipt = (plan: VolumeFilesystemPlan): VolumeFilesystemReceipt => ({ ...plan, volumes: plan.volumes.map(v => ({ ...v, journalReplayed: false, journalReplay: "none", filesystemFeatures: [...plan.ext4Features], transientFilesystemFeatures: [], fullReadOnlyCheck: plan.checkMode === "full-read-only", filesystemType: "ext4", filesystemUUID: v.expectedFilesystemUUID, flushConfirmed: true, checked: true })) });
 
 test("formatting is a consumed pair intent; mandatory protected receipt alone confirms both ready", () => {
   const f = fixture(), plan = f.store.prepareFilesystems(f.request);
@@ -123,7 +123,7 @@ test("v1 formatted history stays readable but cannot inherit sparse zero provena
   const f = fixture(), v2 = f.store.prepareFilesystems(f.request), oldReceipt: any = receipt(v2), oldPlan: any = structuredClone(v2);
   for (const value of [oldPlan, oldReceipt]) { value.protocolVersion = 1; delete value.ext4Features; delete value.requiredMountOptions; delete value.checkMode; delete value.virginZeroProvenance; delete value.priorReplay; }
   for (const target of oldPlan.volumes) delete target.readyOperationId;
-  for (const target of oldReceipt.volumes) { delete target.readyOperationId; delete target.journalReplayed; delete target.filesystemFeatures; delete target.transientFilesystemFeatures; delete target.fullReadOnlyCheck; }
+  for (const target of oldReceipt.volumes) { delete target.readyOperationId; delete target.journalReplayed; delete target.journalReplay; delete target.filesystemFeatures; delete target.transientFilesystemFeatures; delete target.fullReadOnlyCheck; }
   f.db.db.run("UPDATE cowork_volumes SET filesystem_state='ready',filesystem_journal_json=?", [JSON.stringify({ plan: oldPlan, receipt: oldReceipt })]);
   const before = f.store.records(f.request.workspaceId); expect(f.store.filesystemsReady(f.request)).toBe(false);
   expect(() => f.store.prepareFilesystems(f.request)).toThrow("filesystem_compatibility_required"); expect(f.store.records(f.request.workspaceId)).toEqual(before);
@@ -172,7 +172,7 @@ test("transient recovery cannot confirm ready; uncertain writer needs verified s
   f.native.verifyPreviousReplayStopped = () => true;
   const retry = f.store.prepareFilesystems(next); expect(retry.priorReplay?.operationId).toBe(normal.operationId);
   expect(retry.volumes.every(v => v.action === "replay-journal-then-probe")).toBe(true);
-  const clean = receipt(retry); clean.volumes[0]!.journalReplayed = true;
+  const clean = receipt(retry); clean.volumes[0]!.journalReplayed = true; clean.volumes[0]!.journalReplay = "kernel-mount";
   expect(() => f.store.confirmFilesystems(next, receipt(normal), f.sealedProof)).toThrow("recovery_required");
   f.store.confirmFilesystems(next, clean, f.sealedProof); expect(f.store.filesystemsReady(next)).toBe(true);
   expect(f.store.records(next.workspaceId).every(v => !v.filesystemJournal?.replayDebt)).toBe(true);
@@ -189,7 +189,7 @@ test("unknown, duplicate or missing transient state cannot masquerade as a curre
 test("earlier v2 history stays readable and upgrades only through a current protected v3 plan", () => {
   const f = fixture(), plan: any = f.store.prepareFilesystems(f.request), old: any = receipt(plan);
   for (const value of [plan, old]) { value.protocolVersion = 2; delete value.priorReplay; for (const v of value.volumes) delete v.readyOperationId; }
-  for (const target of old.volumes) { delete target.transientFilesystemFeatures; delete target.journalReplayed; }
+  for (const target of old.volumes) { delete target.transientFilesystemFeatures; delete target.journalReplayed; delete target.journalReplay; }
   f.db.db.run("UPDATE cowork_volumes SET filesystem_state='ready',filesystem_journal_json=?", [JSON.stringify({ plan, receipt: old })]);
   expect(f.store.records(f.request.workspaceId).every(v => v.filesystemState === "ready")).toBe(true); expect(f.store.filesystemsReady(f.request)).toBe(false);
   const probe = f.store.prepareFilesystems(f.request); expect(probe.volumes.every(v => v.action === "replay-journal-then-probe" && v.readyOperationId === plan.operationId)).toBe(true);
@@ -220,7 +220,7 @@ test("replayed observation requires clean transient state and cannot be claimed 
   const f = fixture(), initial = f.store.prepareFilesystems(f.request), bad = receipt(initial); bad.volumes[0]!.journalReplayed = true;
   expect(() => f.store.confirmFilesystems(f.request, bad, f.sealedProof)).toThrow("authority_denied");
   f.store.confirmFilesystems(f.request, receipt(initial), f.sealedProof);
-  const plan = f.store.prepareFilesystems(f.request), pending = receipt(plan); pending.volumes[0]!.journalReplayed = true; pending.volumes[0]!.transientFilesystemFeatures = ["needs_recovery"];
+  const plan = f.store.prepareFilesystems(f.request), pending = receipt(plan); pending.volumes[0]!.journalReplayed = true; pending.volumes[0]!.journalReplay = "kernel-mount"; pending.volumes[0]!.transientFilesystemFeatures = ["needs_recovery"];
   expect(() => f.store.confirmFilesystems(f.request, pending, f.sealedProof)).toThrow("journal_recovery_required");
   expect(f.store.filesystemsReady(f.request)).toBe(false);
 });
@@ -236,4 +236,12 @@ for (const kind of ["empty", "null", "stale", "dirty", "clean-probing"] as const
   expect(() => f.store.prepareFilesystems(f.request)).toThrow("recovery_required");
   const rows = f.db.db.query("SELECT owner_json,filesystem_state,filesystem_journal_json FROM cowork_volumes WHERE workspace_id=?").all(f.request.workspaceId) as any[];
   expect(rows.every(row => row.owner_json !== null && row.filesystem_state === "probing" && row.filesystem_journal_json === JSON.stringify(corrupted))).toBe(true);
+});
+
+for (const method of [undefined, "e2fsck", "journal_only", "kernel-mount"]) test(`current receipt cannot claim unbound replay method ${method}`, () => {
+  const f = fixture(), plan = f.store.prepareFilesystems(f.request), observed = receipt(plan);
+  if (method === undefined) delete (observed.volumes[0] as any).journalReplay;
+  else (observed.volumes[0] as any).journalReplay = method;
+  expect(() => f.store.confirmFilesystems(f.request, observed, f.sealedProof)).toThrow("authority_denied");
+  expect(f.store.filesystemsReady(f.request)).toBe(false);
 });

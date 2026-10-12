@@ -25,7 +25,7 @@ interface V2Plan extends Scope, Contract { protocolVersion: 2; volumes: LegacyTa
 interface LegacyPlan extends Scope { protocolVersion: 1; volumes: LegacyTarget[] }
 type Observation<T> = T & { filesystemType: "ext4"; filesystemUUID: string; flushConfirmed: true; checked: true };
 export interface VolumeFilesystemReceipt extends Omit<VolumeFilesystemPlan, "volumes"> {
-  volumes: (Observation<VolumeFilesystemTarget> & { filesystemFeatures: string[]; transientFilesystemFeatures: string[]; fullReadOnlyCheck: boolean; journalReplayed: boolean })[];
+  volumes: (Observation<VolumeFilesystemTarget> & { filesystemFeatures: string[]; transientFilesystemFeatures: string[]; fullReadOnlyCheck: boolean; journalReplayed: boolean; journalReplay: "none" | "kernel-mount" })[];
 }
 interface V2Receipt extends Omit<V2Plan, "volumes"> { volumes: (Observation<LegacyTarget> & { filesystemFeatures: string[]; transientFilesystemFeatures?: string[]; fullReadOnlyCheck: boolean })[] }
 interface LegacyReceipt extends Omit<LegacyPlan, "volumes"> { volumes: Observation<LegacyTarget>[] }
@@ -76,11 +76,11 @@ export function matchesFilesystemReceipt(plan: RecordedFilesystemPlan, receipt: 
   return plan.volumes.every((expected, index) => {
     const actual: unknown = receipt.volumes[index];
     const keys = Object.keys(expected).join(" ") + " filesystemType filesystemUUID flushConfirmed checked" + (plan.protocolVersion >= 2 ? " filesystemFeatures fullReadOnlyCheck" : "");
-    const legacy = closed(actual, keys), transient = closed(actual, keys + " transientFilesystemFeatures"), replay = closed(actual, keys + " transientFilesystemFeatures journalReplayed");
+    const legacy = closed(actual, keys), transient = closed(actual, keys + " transientFilesystemFeatures"), replay = closed(actual, keys + " transientFilesystemFeatures journalReplayed journalReplay");
     if (!(plan.protocolVersion === 1 ? legacy : plan.protocolVersion === 2 ? transient || (allowLegacyV2Observation && legacy) : replay)) return false;
     const observed = actual as Record<string, any>;
     if ((transient || replay) && !(sameList(observed.transientFilesystemFeatures, []) || sameList(observed.transientFilesystemFeatures, COWORK_EXT4_TRANSIENT_FEATURES))) return false;
-    if (replay && (typeof observed.journalReplayed !== "boolean" || (observed.journalReplayed && expected.action !== "replay-journal-then-probe"))) return false;
+    if (replay && (typeof observed.journalReplayed !== "boolean" || observed.journalReplay !== (observed.journalReplayed ? "kernel-mount" : "none") || (observed.journalReplayed && expected.action !== "replay-journal-then-probe"))) return false;
     return Object.keys(expected).every(key => key === "identity" ? exact(observed.identity, { ...expected.identity }) : observed[key] === expected[key as keyof typeof expected]) && observed.filesystemType === "ext4" && observed.filesystemUUID === expected.expectedFilesystemUUID && observed.flushConfirmed === true && observed.checked === true && (plan.protocolVersion === 1 || (sameList(observed.filesystemFeatures, plan.ext4Features) && observed.fullReadOnlyCheck === (plan.checkMode === "full-read-only")));
   });
 }
