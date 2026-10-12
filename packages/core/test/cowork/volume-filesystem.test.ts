@@ -224,3 +224,16 @@ test("replayed observation requires clean transient state and cannot be claimed 
   expect(() => f.store.confirmFilesystems(f.request, pending, f.sealedProof)).toThrow("journal_recovery_required");
   expect(f.store.filesystemsReady(f.request)).toBe(false);
 });
+for (const kind of ["empty", "null", "stale", "dirty", "clean-probing"] as const) test(`current ${kind} receipt cannot suppress replay debt through previousReady fallback`, () => {
+  const f = fixture(), initial = f.store.prepareFilesystems(f.request); f.store.confirmFilesystems(f.request, receipt(initial), f.sealedProof);
+  const replay = f.store.prepareFilesystems(f.request), current = f.store.records(f.request.workspaceId)[0]!.filesystemJournal!;
+  f.native.verifyPreviousReplayStopped = () => false;
+  const corrupted: any = structuredClone(current); delete corrupted.replayDebt;
+  corrupted.receipt = kind === "empty" ? {} : kind === "null" ? null : kind === "stale" ? receipt(initial) : receipt(replay);
+  if (kind === "dirty") corrupted.receipt.volumes[0].transientFilesystemFeatures = ["needs_recovery"];
+  f.db.db.run("UPDATE cowork_volumes SET filesystem_journal_json=?", [JSON.stringify(corrupted)]);
+  expect(() => f.store.records(f.request.workspaceId)).toThrow("recovery_required");
+  expect(() => f.store.prepareFilesystems(f.request)).toThrow("recovery_required");
+  const rows = f.db.db.query("SELECT owner_json,filesystem_state,filesystem_journal_json FROM cowork_volumes WHERE workspace_id=?").all(f.request.workspaceId) as any[];
+  expect(rows.every(row => row.owner_json !== null && row.filesystem_state === "probing" && row.filesystem_journal_json === JSON.stringify(corrupted))).toBe(true);
+});

@@ -62,6 +62,9 @@ function record(row: Row): CoworkVolumeRecord {
     journal = row.filesystem_journal_json === null ? null : JSON.parse(row.filesystem_journal_json);
     if (journal) {
       if (!validFilesystemPlan(journal.plan) || Object.keys(journal).some(k => !["plan", "receipt", "previousReady", "replayDebt"].includes(k))) fail("recovery_required");
+      // Confirmation stores a matching clean receipt and ready state atomically. Mere
+      // truthiness cannot erase replay debt or trigger fallback to previousReady.
+      if (Object.hasOwn(journal, "receipt") && (row.filesystem_state !== "ready" || !journal.receipt || !matchesFilesystemReceipt(journal.plan, journal.receipt, true) || filesystemReceiptNeedsRecovery(journal.receipt))) fail("recovery_required");
       if (journal.plan.protocolVersion === 3) {
         const currentDebt = { operationId: journal.plan.operationId, owner: journal.plan.owner };
         const replay = journal.plan.volumes.some(v => v.action === "replay-journal-then-probe");
