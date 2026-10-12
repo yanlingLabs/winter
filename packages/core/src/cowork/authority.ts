@@ -1,5 +1,6 @@
 import type { CoworkRepository } from "./repository";
 import { CoworkError, type CapabilityCeiling, type SourceSelection, type WorkspaceSource } from "./types";
+import { mayContactCoworkPeer } from "./messaging-authority";
 
 /** Created from the authenticated host connection/runtime, never deserialized from RPC params. */
 export type CoworkPrincipal =
@@ -61,7 +62,7 @@ export class CoworkAuthority {
   }
   requirePeer(principal: CoworkPrincipal, targetSessionId: string): void {
     if (principal.kind !== "runtime") throw new CoworkError("authority_denied");
-    const sender = this.records.binding(principal.sessionId), target = this.records.binding(targetSessionId);
-    if (sender.workspaceId !== principal.workspaceId || sender.workspaceId !== target.workspaceId || !sender.projectId || sender.projectId !== target.projectId || sender.state !== "active" || target.state !== "active" || this.records.get(sender.workspaceId).state !== "retained") throw new CoworkError("authority_denied");
+    const sender = this.records.binding(principal.sessionId);
+    if (sender.workspaceId !== principal.workspaceId || !mayContactCoworkPeer(this.records, principal.sessionId, targetSessionId, "send")) throw new CoworkError("authority_denied");
   }
 }
