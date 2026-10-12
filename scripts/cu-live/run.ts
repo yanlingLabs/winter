@@ -54,6 +54,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { METHODS, type SessionEvent } from "../../packages/protocol/src/index";
+import { COMPUTER_WAKE_CLIENT_NAME } from "../../packages/core/src/computer-use/wakes/types";
+import { onScreenIds, USER_CLICK_METHOD, WAKE_SCENARIOS, type WakeObservation } from "./wake";
 import { resolvePlatformPackageWinter } from "../../packages/core/src/runtime-sdk/executable";
 import { buildAll, FIXTURE_MAIN, OUT_DIR, REPO_ROOT, type Built } from "./build";
 import { describeFreshnessPlan, freshnessTable } from "./freshness";
@@ -939,6 +941,46 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     abortIfInput();
 
     // ── scenarios ──────────────────────────────────────────────────────────────────────────────────────────────
+    /**
+     * A `wake` scenario's second half (`wake.ts`): the USER brings the fixture forward and clicks the named element (the
+     * live-test helper's `test.userClick` — a real, stamped click its watches count as the user's), the helper's new
+     * on-screen windows are counted while the trigger waits (its ring and pill), and the session's `computer-wake` turn
+     * is waited for (and its end, so the next scenario starts on an idle session). Window ids and on-screen flags only.
+     */
+    const observeWake = async (wc: DaemonClient, sid: string, plan: NonNullable<Scenario["wake"]>): Promise<WakeObservation> => {
+      const helperWindows = (): Set<number> => onScreenIds(sh(built.tool, ["windows", HELPER_OWNER]).stdout);
+      const from = wc.events.length;
+      const obs: WakeObservation = {};
+      let ring: number[] = [];
+      let clickedAt = Date.now();
+      if (plan.userClicks !== undefined) {
+        const before = helperWindows();
+        await bringToFront(f.mainPid!, "the fixture (the user's switch, to click)", undefined, true);
+        await sleep(1_500);
+        ring = [...helperWindows()].filter((id) => !before.has(id));
+        obs.ringWindows = ring.length;
+        const r = helperCall(built, socket, home, USER_CLICK_METHOD, { pid: f.mainPid!, name: plan.userClicks });
+        if (r.error !== undefined) throw new Error(`${USER_CLICK_METHOD} failed: ${JSON.stringify(r.error).slice(0, 160)}`);
+        obs.clicked = (r.result as { clicked?: unknown } | undefined)?.clicked === true;
+        clickedAt = Date.now();
+      }
+      const woke = await wc.waitFor((e) => e.type === "user_message" && e.sessionId === sid
+        && (e as { clientName?: string }).clientName === COMPUTER_WAKE_CLIENT_NAME, plan.withinMs, from).catch(() => undefined);
+      if (woke !== undefined) {
+        obs.message = String((woke as { text?: unknown }).text ?? "");
+        obs.clientName = COMPUTER_WAKE_CLIENT_NAME;
+        obs.ms = Date.now() - clickedAt;
+        await wc.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid && (e as { threadId?: string }).threadId === "main"
+          && wc.events.indexOf(e) > wc.events.indexOf(woke), 90_000, from).catch(() => undefined);
+      }
+      if (plan.userClicks !== undefined) {
+        await sleep(800);
+        const now = helperWindows();
+        obs.ringGone = ring.length > 0 && ring.every((id) => !now.has(id));
+      }
+      return obs;
+    };
+
     /** One scenario: its before-commands, the ComputerV2 call, the 3 s watch, then every check. */
     const runScenario = async (s: Scenario): Promise<{ result: ScenarioResult; facts: Record<string, unknown>; output: string; since: number; end: number }> => {
       const t0 = Date.now();
@@ -1041,6 +1083,8 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         const moved = pointerMoves(monitor!.items, since, t1);
         inputWatchFrom = t1;
         while (Date.now() < t1 + WATCH_AFTER_MS) { abortIfInput(); await sleep(50); }
+        // WAKE TRIGGERS: the user's click (as the user, by the live-test helper) and the session's wake, after the watch.
+        const wake = s.wake === undefined ? undefined : await observeWake(where.client, where.sid, s.wake);
         end = Date.now();
         output = turn.output;
         facts = markerFacts(turn.output);
@@ -1051,6 +1095,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           ...(state === undefined ? {} : { state }), probe: probe!.items.filter((p) => p.t >= since), metrics: readMetrics(home, since),
           shots: shotsSince(built.tool, home, since),
           ...(rig === undefined ? {} : { prompt: rig.observation }),
+          ...(wake === undefined ? {} : { wake }),
         });
         if (s.session === "ask") checks.push(...cardChecks(turn.cards, s.foregroundCard === true));
         const leaked = events.filter((e) => e.role === "user" && (e.ev === "user.key" || e.ev === "user.mouse") && e.t >= since && e.t <= t1);
@@ -1095,7 +1140,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     // for working out what a scenario sees. Nothing else runs.
     const scenarios: Scenario[] = o.script !== undefined
       ? [{ name: `script ${o.script}`, group: "script", code: readFileSync(o.script, "utf8"), verify: (ctx) => [check("ran", !ctx.isError, ctx.output.slice(-300))] }]
-      : [...SCENARIOS, ...adapterScenarios({ door: (m, p) => helperCall(built, socket, home, m, p), ...(o.realApps && realApps !== undefined ? { realDir: realApps.dir } : {}) }), ...(o.realApps && realApps !== undefined ? REAL_APP_SCENARIOS.map((r) => withRealDir(r, realApps!.dir)) : [])].filter((s) => o.only === undefined || o.only.toLowerCase().split("|").some((part) => s.name.toLowerCase().includes(part)));
+      : [...SCENARIOS, ...WAKE_SCENARIOS, ...adapterScenarios({ door: (m, p) => helperCall(built, socket, home, m, p), ...(o.realApps && realApps !== undefined ? { realDir: realApps.dir } : {}) }), ...(o.realApps && realApps !== undefined ? REAL_APP_SCENARIOS.map((r) => withRealDir(r, realApps!.dir)) : [])].filter((s) => o.only === undefined || o.only.toLowerCase().split("|").some((part) => s.name.toLowerCase().includes(part)));
     for (const s of scenarios) {
       const r = await runScenario(s);
       if (o.script !== undefined) log(`script output:\n${r.output}`);
