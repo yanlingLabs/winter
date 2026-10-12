@@ -58,7 +58,12 @@ export const CoworkPolicyValue = z.discriminatedUnion("detailState", [
   z.object({ detailState: z.literal("summary"), detailReason: z.literal("response_limit"), policySummary: CoworkPolicySummary, detailMethod: z.literal("workspace.policy.get") }).strict(),
 ]);
 export const CoworkPolicyReceipt = receipt(CoworkPolicyValue);
+export const CoworkCapabilities = z.object({ folderPreparation: z.boolean(), repositoryPreparation: z.literal(false), provisioning: z.literal(false), execution: z.literal(false) }).strict();
+export const CoworkPreparedFolder = z.object({ selectionId: Id, kind: z.literal("folder"), label: Label, access: z.enum(["read-only", "read-write"]), state: z.literal("prepared"), expiresAt: z.string() }).strict();
 export const COWORK_RPC = {
+  "workspace.capabilities.get": { params: z.object({}).strict(), result: CoworkCapabilities },
+  "workspace.selection.prepareFolder": { params: z.object({ requestId: Id, bookmarkBase64: z.string().min(4).max(87384).regex(/^[A-Za-z0-9+/]+={0,2}$/), label: Label, access: z.enum(["read-only", "read-write"]) }).strict(), result: CoworkPreparedFolder },
+  "workspace.selection.revoke": { params: z.object({ selectionId: Id }).strict(), result: z.object({ revoked: z.literal(true) }).strict() },
   "workspace.list": { params: Page, result: z.object({ workspaces: z.array(CoworkWorkspace).max(100), nextCursor: Id.nullable() }) },
   "workspace.get": { params: WorkspaceId, result: CoworkWorkspace },
   "workspace.create": { params: NewWorkspace, result: CoworkWorkspaceReceipt },
@@ -88,6 +93,7 @@ export type CoworkWorkspace = z.infer<typeof CoworkWorkspace>;
 export type CoworkSource = z.infer<typeof CoworkSource>;
 export type CoworkWorkspacePolicy = z.infer<typeof CoworkWorkspacePolicy>;
 export const COWORK_METHODS = {
+  workspaceCapabilitiesGet: "workspace.capabilities.get", workspaceSelectionPrepareFolder: "workspace.selection.prepareFolder", workspaceSelectionRevoke: "workspace.selection.revoke",
   workspaceList: "workspace.list", workspaceGet: "workspace.get", workspaceCreate: "workspace.create", workspaceUpdate: "workspace.update",
   projectList: "project.list", projectGet: "project.get", projectCreate: "project.create", projectUpdate: "project.update",
   workspaceSourceList: "workspace.source.list", workspaceSourceGet: "workspace.source.get", workspaceSourceAddFolder: "workspace.source.addFolder",

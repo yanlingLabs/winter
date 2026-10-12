@@ -3,22 +3,16 @@ import SwiftUI
 import WinterKit
 import WinterProtocol
 
-/// Selection issuance is a separate local authority operation, never a path-based RPC.
-/// Nil in the current production composition until the host issuer/provisioner is admitted.
-struct CoworkSelectionIssuer {
-    let folder: @MainActor (URL) async throws -> CoworkSelection
-    let repository: @MainActor () async throws -> CoworkSelection?
-}
-
 struct CoworkWorkspaceView: View {
     @ObservedObject var model: CoworkWorkspaceModel
-    var issuer: CoworkSelectionIssuer? = nil
+    @State private var selectionGeneration = UUID()
     @State private var projectsOnly = false
     @State private var showingCreate = false
     @State private var title = ""
     @State private var project = false
     @State private var selections: [CoworkSelection] = []
     @State private var selectionLabels: [String] = []
+    @State private var preparedIds: [String] = []
     @State private var selectionError: String?
     @State private var selecting = false
     @State private var rename = ""
@@ -51,8 +45,8 @@ struct CoworkWorkspaceView: View {
                     Button("Refresh", systemImage: "arrow.clockwise") { Task { await model.refresh() } }
                     Spacer()
                     Button("New", systemImage: "plus") {
-                        title = ""; selections = []; selectionLabels = []; selectionError = nil; showingCreate = true
-                    }.disabled(issuer == nil).help("Creation requires host-authorized sources and an available Cowork backend.")
+                        invalidatePreparation(); title = ""; selections = []; selectionLabels = []; preparedIds = []; selectionError = nil; showingCreate = true
+                    }.disabled(!model.capabilities.folderPreparation).help("Creation requires host-authorized sources and an available Cowork backend.")
                 }
             }.padding().frame(minWidth: 230, idealWidth: 270, maxWidth: 300)
             Divider()
@@ -61,8 +55,8 @@ struct CoworkWorkspaceView: View {
                     Text("Cowork workspaces").font(.title2.bold())
                     Label("Conversations are not available yet", systemImage: "info.circle")
                     Text("You can inspect and manage recorded workspace sources here. Cowork execution is waiting for the backend to be ready.").foregroundStyle(.secondary)
-                    if issuer == nil {
-                        Text("Creating workspaces and adding sources requires the Mac host selection service, which is not available yet.")
+                    if !model.capabilities.provisioning {
+                        Text("Creating workspaces and adding sources is waiting for storage and folder sharing to be available.")
                             .font(.callout).foregroundStyle(.secondary)
                     }
                     if model.busy { ProgressView("Updating workspaces…") }
@@ -87,15 +81,15 @@ struct CoworkWorkspaceView: View {
                         HStack {
                             Text("Sources").font(.headline)
                             Spacer()
-                            Button("Add folder…") { pickFolder(creating: false) }.disabled(issuer == nil || selecting)
-                            Button("Add repository…") { pickRepository(creating: false) }.disabled(issuer == nil || selecting)
+                            Button("Add folder…") { pickFolder(creating: false) }.disabled(!model.capabilities.provisioning || selecting)
+                            Button("Add repository…") {}.disabled(true).help("GitHub source authorization is not available yet.").disabled(!model.capabilities.provisioning || selecting)
                         }
                         ForEach(model.sources, id: \.sourceId) { source in
                             VStack(alignment: .leading, spacing: 5) {
                                 Label(source.label, systemImage: source.kind == .folder ? "folder" : "chevron.left.forwardslash.chevron.right")
                                 Text("\(source.state) · \(source.access) · \(source.trust)").font(.caption)
                                 if source.reason == "access_revoked" { Text("Access was revoked. Dependent work is blocked.").foregroundStyle(.orange) }
-                                if source.restartRequired { Text("A workspace restart is required before this change takes effect.").font(.caption) }
+                                if source.restartRequired { Text("A workspace restart is required to finish applying this change. Removed or revoked access is already blocked.").font(.caption) }
                                 HStack {
                                     Button("Remove") { sourceToRemove = source; revoke = false }
                                         .disabled(source.desired == "removed" || model.sources.filter { $0.desired == "present" }.count <= 1)
@@ -113,7 +107,11 @@ struct CoworkWorkspaceView: View {
         .navigationTitle("Cowork")
         .disabled(model.busy)
         .task { await model.refresh() }
-        .onChange(of: model.selected) { _, value in rename = value?.title ?? "" }
+        .onChange(of: model.selected) { _, value in
+            rename = value?.title ?? ""; invalidatePreparation()
+        }
+        .onChange(of: showingCreate) { _, shown in if !shown { invalidatePreparation() } }
+        .onDisappear { invalidatePreparation() }
         .confirmationDialog(revoke ? "Revoke access to this source?" : "Remove this source?", isPresented: Binding(get: { sourceToRemove != nil }, set: { if !$0 { sourceToRemove = nil } })) {
             if let source = sourceToRemove {
                 Button(revoke ? "Revoke access" : "Remove source", role: .destructive) {
@@ -122,7 +120,7 @@ struct CoworkWorkspaceView: View {
                 }
             }
         } message: {
-            Text(revoke ? "Access will be revoked even if this is the last source. The workspace will retain an unavailable source and dependent work will be blocked." : "The source will stop being available after the backend acknowledges removal. Workspace data is retained.")
+            Text(revoke ? "Access will be revoked even if this is the last source. The workspace will retain an unavailable source and dependent work will be blocked." : "Dependent work is blocked immediately. The backend still needs to acknowledge detachment; workspace data is retained.")
         }
         .sheet(isPresented: $showingCreate) { creation }
     }
@@ -133,11 +131,12 @@ struct CoworkWorkspaceView: View {
             TextField("Title", text: $title)
             Toggle("Reusable Project workspace", isOn: $project)
             Text("Choose at least one host-authorized source.").foregroundStyle(.secondary)
+            if !model.capabilities.provisioning { Text("Workspace creation is waiting for storage and folder sharing. Selecting a folder does not start a workspace.").foregroundStyle(.secondary) }
             ForEach(Array(selectionLabels.enumerated()), id: \.offset) { _, label in Text(label) }
             HStack {
                 Button("Choose folder…") { pickFolder(creating: true) }
-                Button("Choose repository…") { pickRepository(creating: true) }
-            }.disabled(selecting || issuer == nil || selections.count >= 100)
+                Button("Choose repository…") {}.disabled(true).help("GitHub source authorization is not available yet.")
+            }.disabled(selecting || !model.capabilities.folderPreparation || selections.count >= 100)
             if selecting { ProgressView("Authorizing source…") }
             if let selectionError { Text(selectionError).foregroundStyle(.red) }
             if let error = model.error { Text(error).foregroundStyle(.red) }
@@ -150,31 +149,41 @@ struct CoworkWorkspaceView: View {
                         if model.lastMutationRecorded { showingCreate = false }
                     }
                 }.keyboardShortcut(.defaultAction)
-                    .disabled(issuer == nil || selecting || model.busy || !CoworkWorkspaceModel.validTitle(title) || selections.isEmpty)
+                    .disabled(!model.capabilities.provisioning || selecting || model.busy || !CoworkWorkspaceModel.validTitle(title) || selections.isEmpty)
             }
         }.padding(24).frame(width: 440).interactiveDismissDisabled(model.busy || selecting)
     }
+
+    private func invalidatePreparation() {
+        selectionGeneration = UUID(); selecting = false
+        let ids = preparedIds; preparedIds = []
+        Task { for id in ids { await model.revokePreparation(id) } }
+    }
     private func pickFolder(creating: Bool) {
-        guard let issuer, !selecting else { return }
+        guard model.capabilities.folderPreparation, !selecting else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose a Cowork source folder"; panel.canChooseDirectories = true
         panel.canChooseFiles = false; panel.allowsMultipleSelection = false; panel.canCreateDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        authorize(creating: creating, label: url.lastPathComponent) { try await issuer.folder(url) }
-    }
-    private func pickRepository(creating: Bool) {
-        guard let issuer, !selecting else { return }
-        authorize(creating: creating, label: "GitHub repository") { try await issuer.repository() }
-    }
-    private func authorize(creating: Bool, label: String, issue: @escaping @MainActor () async throws -> CoworkSelection?) {
+        let context = CoworkPreparationContext(generation: selectionGeneration, workspaceId: model.selected?.workspaceId, revision: model.selected?.configRevision, creating: creating)
         selecting = true; selectionError = nil
         Task { @MainActor in
-            defer { selecting = false }
+            defer { if selectionGeneration == context.generation { selecting = false } }
             do {
-                guard let selection = try await issue() else { return }
-                if creating { selections.append(selection); selectionLabels.append(label) }
-                else { await model.add(selection) }
-            } catch { selectionError = error.localizedDescription }
+                let prepared = try await model.prepareFolder(url)
+                guard context.canApply(generation: selectionGeneration, workspaceId: model.selected?.workspaceId, revision: model.selected?.configRevision, creationPresented: showingCreate) else {
+                    await model.revokePreparation(prepared.selectionId); return
+                }
+                if creating {
+                    selections.append(prepared.selection); preparedIds.append(prepared.selectionId)
+                    selectionLabels.append(prepared.label + " — selected")
+                } else {
+                    defer { Task { await model.revokePreparation(prepared.selectionId) } }
+                    if let id = context.workspaceId, let revision = context.revision {
+                        await model.add(prepared.selection, workspaceId: id, expectedRevision: revision)
+                    }
+                }
+            } catch { if selectionGeneration == context.generation { selectionError = error.localizedDescription } }
         }
     }
 }

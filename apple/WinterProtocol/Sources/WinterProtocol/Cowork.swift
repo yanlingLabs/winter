@@ -203,3 +203,27 @@ extension CoworkRequest where Result == CoworkReceipt<CoworkPolicyValue> {
 extension CoworkRequest where Result == CoworkOperation {
     public static func operation(workspaceId: String, operationId: String) -> Self { Self("workspace.operation.get", ["workspaceId": .string(workspaceId), "operationId": .string(operationId)]) }
 }
+
+/// Mac-local preparation capabilities. Selection is independent of storage/share admission.
+public struct CoworkCapabilities: Codable, Equatable, Sendable {
+    public let folderPreparation: Bool, repositoryPreparation: Bool, provisioning: Bool, execution: Bool
+    public init(folderPreparation: Bool = false) {
+        self.folderPreparation = folderPreparation; repositoryPreparation = false; provisioning = false; execution = false
+    }
+}
+public struct CoworkPreparedFolder: Codable, Equatable, Sendable {
+    public let selectionId: String, kind: CoworkSourceKind, label: String, access: String, state: String, expiresAt: String
+    public var selection: CoworkSelection { .init(selectionId: selectionId, kind: kind) }
+}
+public struct CoworkSelectionRevocation: Codable, Equatable, Sendable { public let revoked: Bool }
+extension CoworkRequest where Result == CoworkCapabilities {
+    public static func capabilities() -> Self { Self("workspace.capabilities.get", [:]) }
+}
+extension CoworkRequest where Result == CoworkPreparedFolder {
+    public static func prepareFolder(bookmark: Data, label: String, access: String, requestId: String = UUID().uuidString) -> Self {
+        Self("workspace.selection.prepareFolder", ["requestId": .string(requestId), "bookmarkBase64": .string(bookmark.base64EncodedString()), "label": .string(label), "access": .string(access)])
+    }
+}
+extension CoworkRequest where Result == CoworkSelectionRevocation {
+    public static func revokeSelection(_ selectionId: String) -> Self { Self("workspace.selection.revoke", ["selectionId": .string(selectionId)]) }
+}

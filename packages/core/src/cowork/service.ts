@@ -4,13 +4,16 @@ import { CoworkAuthority, intersectCeilings, type CoworkGrantResolver, type Cowo
 import { CoworkRepository } from "./repository";
 import { CoworkError, type CapabilityCeiling, type MutationContext, type MutationReceipt, type SourceSelection, type WorkspaceSource, type WorkspacePolicy, type Workspace } from "./types";
 
+import type { CoworkFolderSelections } from "./folder-selections";
+
 export interface CoworkConnection { role: string; connectionId: number }
 /** Host-only injection. Never construct from method parameters or clientName. A gateway token
  * alone does not identify a paired peer or its workspace scope. Resolve current grants each call. */
 export interface CoworkHostPorts {
   principal(connection: CoworkConnection): CoworkPrincipal | undefined;
   grants: CoworkGrantResolver;
-  selection(principal: CoworkPrincipal, selectionId: string): SourceSelection | undefined;
+  selections?: CoworkFolderSelections;
+  selection(principal: CoworkPrincipal, selectionId: string, connection: CoworkConnection): SourceSelection | undefined;
   creationCeiling(principal: CoworkPrincipal): CapabilityCeiling | undefined;
   /** Must fail closed until native isolation, storage and active resource-return gates pass. Fixture backend
    * permits isolated tests; this port does not launch a worker or mark any source ready. */
@@ -97,8 +100,8 @@ export class CoworkWorkspaceService {
     this.checkedResponse("workspace.list", { workspaces: [reserved], nextCursor: value.workspaceId });
     this.checkedResponse("project.list", { projects: [{ projectId: value.ownerId, workspace: reserved }], nextCursor: value.workspaceId });
   }
-  private select(principal: CoworkPrincipal, selectionId: string, kind: SourceSelection["kind"]): SourceSelection {
-    const selected = this.host.selection(principal, selectionId);
+  private select(principal: CoworkPrincipal, selectionId: string, kind: SourceSelection["kind"], connection: CoworkConnection): SourceSelection {
+    const selected = this.host.selection(principal, selectionId, connection);
     if (!selected || selected.kind !== kind) throw new CoworkError("authority_denied");
     this.authority.requireSelection(principal, selected);
     return selected;
@@ -145,7 +148,7 @@ export class CoworkWorkspaceService {
     const principal = this.host.principal(connection);
     if (!principal || principal.kind === "runtime" || !["harness", "admin", "remote"].includes(connection.role) || (connection.role === "remote" ? principal.kind !== "paired-user" : principal.kind !== "local-user")) throw new CoworkError("authority_denied");
     try {
-      const result = this.execute(principal, method, raw);
+      const result = this.execute(principal, method, raw, connection);
       this.checkedResponse(method, result);
       return result as CoworkResult<M>;
     } catch (error) {
@@ -160,8 +163,27 @@ export class CoworkWorkspaceService {
     // Conservative inner budget leaves room for paired JSON escaping/base64 and outer envelope.
     if (Buffer.byteLength(JSON.stringify(result), "utf8") > RESPONSE_BUDGET) throw new CoworkError("response_too_large");
   }
-  private execute(principal: CoworkPrincipal, method: CoworkMethod, raw: unknown): unknown {
+  closeConnection(connectionId: number): void { this.host.selections?.closeConnection(connectionId); }
+  close(): void { this.host.selections?.close(); }
+  private execute(principal: CoworkPrincipal, method: CoworkMethod, raw: unknown, connection: CoworkConnection): unknown {
     switch (method) {
+      case "workspace.capabilities.get": {
+        COWORK_RPC[method].params.parse(raw);
+        if (principal.kind !== "local-user" || connection.role === "remote") throw new CoworkError("authority_denied");
+        return { folderPreparation: !!this.host.selections, repositoryPreparation: false, provisioning: false, execution: false };
+      }
+      case "workspace.selection.prepareFolder": {
+        const p = COWORK_RPC[method].params.parse(raw);
+        if (principal.kind !== "local-user" || connection.role === "remote") throw new CoworkError("authority_denied");
+        if (!this.host.selections) throw new CoworkError("unsupported_topology");
+        return this.host.selections.prepare(principal, connection.connectionId, p.bookmarkBase64, p.label, p.access, p.requestId);
+      }
+      case "workspace.selection.revoke": {
+        const p = COWORK_RPC[method].params.parse(raw);
+        if (principal.kind !== "local-user" || connection.role === "remote") throw new CoworkError("authority_denied");
+        if (!this.host.selections) throw new CoworkError("unsupported_topology");
+        this.host.selections.revoke(principal, connection.connectionId, p.selectionId); return { revoked: true };
+      }
       case "workspace.list": return this.page(principal, COWORK_RPC[method].params.parse(raw), false);
       case "project.list": return this.page(principal, COWORK_RPC[method].params.parse(raw), true);
       case "workspace.get": return this.readSnapshot(principal, COWORK_RPC[method].params.parse(raw).workspaceId);
@@ -177,7 +199,7 @@ export class CoworkWorkspaceService {
         if (principal.kind !== "local-user") throw new CoworkError("unsupported_topology");
         const ceiling = this.host.creationCeiling(principal);
         if (!ceiling) throw new CoworkError("authority_denied");
-        const sources = p.selections.map(value => this.select(principal, value.selectionId, value.kind));
+        const sources = p.selections.map(value => this.select(principal, value.selectionId, value.kind, connection));
         const receipt = this.records.create(this.context(principal, method, p), { ownership: p.ownership, title: p.title, sources, ceiling });
         return { ...receipt, value: WorkspaceDto.parse({ ...projectWorkspace(receipt.value.workspace), detailState: "complete", sources: receipt.value.sources.map(projectSource), policy: receipt.value.policy, automaticPublication: receipt.value.automaticPublication }) };
       }
@@ -218,7 +240,7 @@ export class CoworkWorkspaceService {
         // Paired additions require both current workspace membership and admitted repository authority.
         assertRemoteMayUseWorkspace(this.records, this.authority, principal, p.workspaceId, method === "workspace.source.addFolder" ? "admin" : "member");
         this.host.requireProvisioning(principal);
-        const selected = this.select(principal, p.selectionId, method === "workspace.source.addFolder" ? "folder" : "githubRepository");
+        const selected = this.select(principal, p.selectionId, method === "workspace.source.addFolder" ? "folder" : "githubRepository", connection);
         const receipt = this.records.addSource(this.context(principal, method, p), p.workspaceId, selected);
         return { ...receipt, value: projectSource(receipt.value) };
       }

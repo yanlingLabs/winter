@@ -5,6 +5,7 @@ import WinterProtocol
 /// Workspace metadata only. Execution readiness is never inferred from a source or power state.
 @MainActor public final class CoworkWorkspaceModel: ObservableObject {
     public typealias Call = @MainActor (String, SessionEvent.JSONValue) async throws -> SessionEvent.JSONValue
+    @Published public private(set) var capabilities = CoworkCapabilities()
     @Published public private(set) var workspaces: [CoworkWorkspace] = []
     @Published public private(set) var selected: CoworkWorkspace?
     @Published public private(set) var sources: [CoworkSource] = []
@@ -58,6 +59,8 @@ import WinterProtocol
     public func refresh() async {
         guard !busy else { return }; busy = true; error = nil; defer { busy = false }
         do {
+            // Older daemons retain metadata support but never implicitly gain preparation authority.
+            capabilities = (try? await send(CoworkRequest<CoworkCapabilities>.capabilities())) ?? CoworkCapabilities()
             try await list()
             if let id = selectedId {
                 selected = nil; sources = []; policy = nil
@@ -124,6 +127,10 @@ import WinterProtocol
     }
     public func add(_ selection: CoworkSelection) async {
         guard let value = selected else { return }
+        await add(selection, workspaceId: value.workspaceId, expectedRevision: value.configRevision)
+    }
+    public func add(_ selection: CoworkSelection, workspaceId: String, expectedRevision: Int) async {
+        guard let value = selected, value.workspaceId == workspaceId, value.configRevision == expectedRevision else { return }
         await mutate(intent(["add", value.workspaceId, String(value.configRevision), selection.kind.rawValue, selection.selectionId])) { id in
             let r = try await self.send(CoworkRequest<CoworkReceipt<CoworkSource>>.addSource(workspaceId: value.workspaceId, requestId: id, expectedRevision: value.configRevision, selectionId: selection.selectionId, kind: selection.kind))
             return (r.operationId, r.workspaceId, r.revision)
@@ -132,5 +139,37 @@ import WinterProtocol
     private enum ModelError: LocalizedError {
         case invalidPagination
         var errorDescription: String? { "Workspace details changed or returned invalid pages. Refresh to try again." }
+    }
+}
+
+#if os(macOS)
+extension CoworkWorkspaceModel {
+    /// Called only after the native user picker. A URL string is never sent as authority.
+    public func prepareFolder(_ url: URL, access: String = "read-write") async throws -> CoworkPreparedFolder {
+        guard capabilities.folderPreparation, url.isFileURL else { throw NSError(domain: "Cowork folder selection unavailable", code: 1) }
+        let started = url.startAccessingSecurityScopedResource()
+        defer { if started { url.stopAccessingSecurityScopedResource() } }
+        // An implicit picker bookmark can cross processes; do not create an app-scoped explicit
+        // security bookmark and pretend it delegates this app's scope to the daemon.
+        let bookmark = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        return try await send(CoworkRequest<CoworkPreparedFolder>.prepareFolder(bookmark: bookmark, label: url.lastPathComponent, access: access))
+    }
+    public func revokePreparation(_ selectionId: String) async {
+        _ = try? await send(CoworkRequest<CoworkSelectionRevocation>.revokeSelection(selectionId))
+    }
+}
+#endif
+
+/// Binds an awaited local picker/preparation to its initiating surface. Dismissal, a new sheet,
+/// navigation or revision changes invalidate it; the caller must release a late preparation.
+public struct CoworkPreparationContext: Equatable, Sendable {
+    public let generation: UUID, workspaceId: String?, revision: Int?, creating: Bool
+    public init(generation: UUID, workspaceId: String?, revision: Int?, creating: Bool) {
+        self.generation = generation; self.workspaceId = workspaceId; self.revision = revision; self.creating = creating
+    }
+    public func canApply(generation: UUID, workspaceId: String?, revision: Int?, creationPresented: Bool) -> Bool {
+        guard self.generation == generation else { return false }
+        if creating { return creationPresented }
+        return self.workspaceId != nil && self.workspaceId == workspaceId && self.revision == revision
     }
 }

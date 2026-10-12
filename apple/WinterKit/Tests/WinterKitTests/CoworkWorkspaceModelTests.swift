@@ -22,6 +22,9 @@ import WinterProtocol
         func call(_ method: String, _ params: SessionEvent.JSONValue) throws -> SessionEvent.JSONValue {
             calls.append((method, params))
             switch method {
+            case "workspace.capabilities.get": return try json(["folderPreparation": true, "repositoryPreparation": false, "provisioning": false, "execution": false])
+            case "workspace.selection.prepareFolder": return try json(["selectionId": "prepared", "kind": "folder", "label": "Disposable", "access": "read-write", "state": "prepared", "expiresAt": "2099-01-01T00:00:00Z"])
+            case "workspace.selection.revoke": return try json(["revoked": true])
             case "workspace.list": return try json(["workspaces": [workspace], "nextCursor": repeatCursor ? "repeated" : NSNull()])
             case "workspace.get":
                 if failDetail { throw NSError(domain: "fixture", code: 1) }
@@ -132,6 +135,49 @@ import WinterProtocol
         resume?.resume(); await first.value
         XCTAssertEqual(host.calls.filter { $0.0 == "project.create" }.count, 1)
         XCTAssertFalse(model.busy)
+    }
+    func testPreparedSourceCannotAttachAfterWorkspaceRevisionChanges() async {
+        let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }
+        await model.select("workspace"); await model.rename("Updated")
+        await model.add(.init(selectionId: "late-selection", kind: .folder), workspaceId: "workspace", expectedRevision: 1)
+        await model.add(.init(selectionId: "late-selection", kind: .folder), workspaceId: "other-workspace", expectedRevision: 2)
+        XCTAssertFalse(host.calls.contains { $0.0 == "workspace.source.addFolder" })
+    }
+    func testPreparationContextRefusesNavigationDismissalAndLaterCreation() {
+        let generation = UUID()
+        let adding = CoworkPreparationContext(generation: generation, workspaceId: "workspace", revision: 1, creating: false)
+        XCTAssertTrue(adding.canApply(generation: generation, workspaceId: "workspace", revision: 1, creationPresented: false))
+        XCTAssertFalse(adding.canApply(generation: generation, workspaceId: "other", revision: 1, creationPresented: false))
+        XCTAssertFalse(adding.canApply(generation: generation, workspaceId: "workspace", revision: 2, creationPresented: false))
+        XCTAssertFalse(adding.canApply(generation: UUID(), workspaceId: "workspace", revision: 1, creationPresented: false))
+        let creating = CoworkPreparationContext(generation: generation, workspaceId: nil, revision: nil, creating: true)
+        XCTAssertFalse(creating.canApply(generation: generation, workspaceId: nil, revision: nil, creationPresented: false))
+        XCTAssertFalse(creating.canApply(generation: UUID(), workspaceId: nil, revision: nil, creationPresented: true))
+    }
+    func testMacPickerProducerSendsBookmarkWithoutRawPathAndCanRevoke() async throws {
+        let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }
+        await model.refresh()
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let prepared = try await model.prepareFolder(url)
+        XCTAssertEqual(prepared.state, "prepared"); XCTAssertFalse(model.capabilities.provisioning); XCTAssertFalse(model.capabilities.execution)
+        let params = try XCTUnwrap(host.params("workspace.selection.prepareFolder").first)
+        let bookmark = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(params["bookmarkBase64"] as? String)))
+        var stale = false
+        let resolved = try URL(resolvingBookmarkData: bookmark, options: [.withoutUI, .withoutMounting], relativeTo: nil, bookmarkDataIsStale: &stale)
+        XCTAssertFalse(stale); XCTAssertEqual(resolved.resolvingSymlinksInPath().path, url.resolvingSymlinksInPath().path)
+        XCTAssertNil(params["path"]); await model.revokePreparation(prepared.selectionId)
+        XCTAssertEqual(try host.params("workspace.selection.revoke").first?["selectionId"] as? String, "prepared")
+    }
+    func testOlderDaemonKeepsMetadataButCannotPrepareFolders() async {
+        let host = Host(); let model = CoworkWorkspaceModel { method, params in
+            if method == "workspace.capabilities.get" { throw NSError(domain: "unsupported-method", code: 1) }
+            return try host.call(method, params)
+        }
+        await model.refresh()
+        XCTAssertNil(model.error); XCTAssertEqual(model.workspaces.count, 1)
+        XCTAssertFalse(model.capabilities.folderPreparation)
     }
     func testInvalidCreationNeverCallsDaemon() async {
         let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }

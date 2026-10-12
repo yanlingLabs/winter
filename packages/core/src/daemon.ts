@@ -1,5 +1,6 @@
+import { createMacCoworkHost } from "./cowork/mac-host";
 import { CoworkRepository } from "./cowork/repository";
-import { CoworkWorkspaceService, disabledCoworkHost, type CoworkHostPorts } from "./cowork/service";
+import { CoworkWorkspaceService, type CoworkHostPorts } from "./cowork/service";
 import { join } from "node:path";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -2909,10 +2910,11 @@ export async function startDaemon(opts: {
     : undefined;
   const liveEffort = liveSelection ? () => liveSelection().reasoningEffort ?? "" : undefined;
 
+  const coworkService = runtime ? new CoworkWorkspaceService(new CoworkRepository(runtime.db), opts.coworkHost ?? createMacCoworkHost(winterHome)) : undefined;
   const server: IpcServer = startIpcServer({
     socketPath: dirs.socketPath,
     serverVersion: CORE_VERSION,
-    cowork: runtime ? new CoworkWorkspaceService(new CoworkRepository(runtime.db), opts.coworkHost ?? disabledCoworkHost) : undefined,
+    cowork: coworkService,
     tokens: authority,
     store,
     hub,
@@ -3131,7 +3133,7 @@ export async function startDaemon(opts: {
       sessionMessaging?.beginShutdown(); // no SendMessage resumes a session into a daemon that is going away
       computerUseRuntime.stop(); // no automation worker outlives the daemon; the helper connection closes
       browserHostServer.stop(); // Winter for Chrome's connections close (its transports read disconnected); browser.sock goes
-      server.stop(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();
+      server.stop(); coworkService?.close(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
       for (const w of sdkWatchers) w.stop();
       routineScheduler.stop(); routineStore.close(); // no orphan tick timer past drain

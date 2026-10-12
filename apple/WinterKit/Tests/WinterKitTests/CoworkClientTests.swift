@@ -3,6 +3,16 @@ import WinterProtocol
 @testable import WinterKit
 
 final class CoworkClientTests: XCTestCase {
+    func testFolderPreparationInventoryRemainsMacLocal() throws {
+        for method in ["workspace.capabilities.get", "workspace.selection.prepareFolder", "workspace.selection.revoke"] {
+            XCTAssertFalse(Gateway.remoteAllowedMethods.contains(method))
+        }
+        let request = CoworkRequest<CoworkPreparedFolder>.prepareFolder(bookmark: Data([1, 2, 3]), label: "Fixture", access: "read-only", requestId: "attempt")
+        XCTAssertEqual(request.method, "workspace.selection.prepareFolder")
+        let params = try JSONSerialization.jsonObject(with: JSONEncoder().encode(request.params)) as! [String: String]
+        XCTAssertEqual(params["requestId"], "attempt"); XCTAssertEqual(params["bookmarkBase64"], "AQID")
+        XCTAssertNil(params["path"])
+    }
     func testTypedOperationCallAndHostRefusalSurviveRPC() async throws {
         let transport = ScriptedTransport()
         let client = WinterClient(makeTransport: { transport }, token: "fixture-token", clientName: "cowork-fixture")

@@ -1943,6 +1943,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       close(socket) {
         if (!socket.data) return; // rejected at cap before data was set (sentinel null)
         connections--;
+        opts.cowork?.closeConnection(socket.data.connId);
         if (socket.data.helloTimer) clearTimeout(socket.data.helloTimer);
         if (socket.data.hubClient) hub.detach(socket.data.hubClient);
         harnessConns.delete(socket.data);
@@ -5098,7 +5099,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // would run against a store its owner closes right after this returns — see `pendingReaps`).
       for (const cancel of pendingReaps) cancel();
       pendingReaps.clear();
-      enforcement.stop(); mcpOAuthDoors?.dispose(); server.stop(true);
+      enforcement.stop(); mcpOAuthDoors?.dispose(); server.stop(true); opts.cowork?.close();
     },
   };
 }

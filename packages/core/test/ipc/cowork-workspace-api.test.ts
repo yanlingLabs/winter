@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { COWORK_REMOTE_METHODS, COWORK_RPC, ConnWriter, LineDecoder, PROTOCOL_VERSION, encodeLine, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";
+import { CoworkFolderSelections } from "../../src/cowork/folder-selections";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { runtimeStateOnline } from "../../src/runtime-state/wiring";
-import type { CoworkHostPorts } from "../../src/cowork/service";
+import { CoworkWorkspaceService, type CoworkHostPorts } from "../../src/cowork/service";
 import { CoworkError, type SourceSelection } from "../../src/cowork/types";
 
 class Client {
@@ -38,13 +39,14 @@ const folder: Extract<SourceSelection, { kind: "folder" }> = { kind: "folder", l
 const repo: Extract<SourceSelection, { kind: "githubRepository" }> = { kind: "githubRepository", label: "Fixture Repository", access: "read-write", detail: { repositoryId: "repo-fixture", authorityRef: "private-account-reference", initialRef: "main" } };
 let daemon: RunningDaemon | undefined; const homes: string[] = [], clients: Client[] = [];
 afterEach(async () => { clients.splice(0).forEach(client => client.close()); if (daemon) { await daemon.stop(); daemon = undefined; } homes.splice(0).forEach(home => rmSync(home, { recursive: true, force: true })); });
-async function boot(fixture = true) {
+async function boot(fixture = true, selections?: CoworkFolderSelections) {
   const home = mkdtempSync(join(tmpdir(), "winter-cowork-api-")); homes.push(home);
   const scopes = new Set<string>(), repos = new Set([repo.detail.authorityRef]); let revoked = false, admit = fixture;
   const ports: CoworkHostPorts = {
+    selections,
     principal: connection => connection.role === "remote" ? { kind: "paired-user", id: "paired-fixture", workspaceIds: new Set(scopes), repositoryAuthorities: new Set(repos) } : { kind: "local-user", id: "local-fixture" },
     grants: { folder: grant => grant === folder.detail.grantRef ? { rootIdentity: folder.detail.rootIdentity, writable: true, revoked } : undefined, repository: (authority, repository) => authority === repo.detail.authorityRef && repository === repo.detail.repositoryId ? { readable: true, writable: true, revoked } : undefined },
-    selection: (_principal, selection) => selection === "folder-choice" ? folder : selection === "repo-choice" ? repo : undefined,
+    selection: (principal, selection, connection) => selection === "folder-choice" ? folder : selection === "repo-choice" ? repo : selections?.selection(principal, connection.connectionId, selection),
     creationCeiling: () => ceiling,
     requireProvisioning: () => { if (!admit) throw new CoworkError("unsupported_topology"); },
   };
@@ -410,4 +412,35 @@ describe("Cowork workspace API through a real isolated daemon and Unix RPC", () 
     expect(fixture.records.get(workspaceId).configRevision).toBe(1);
     expect((await fixture.local.request("project.list")).error).toBeUndefined();
   });
+});
+
+
+test("Mac selection RPCs enforce local authenticated roles, protected roots and disconnect cleanup", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cowork-selection-rpc-")); homes.push(base);
+  const source = join(base, "source"), control = join(base, "control"); mkdirSync(source); mkdirSync(control);
+  let target = source, scopes = 0;
+  const selections = new CoworkFolderSelections({ protectedRoots: () => [control], resolver: () => {
+    scopes++; let closed = false;
+    return { path: target, close() { if (!closed) { scopes--; closed = true; } } };
+  } });
+  const b = await boot(true, selections);
+  const service = new CoworkWorkspaceService(b.records, b.ports);
+  expect(() => service.call({ role: "plugin", connectionId: 99 }, "workspace.selection.prepareFolder", {})).toThrow("authority_denied");
+  expect(() => service.call({ role: "runtime", connectionId: 99 }, "workspace.selection.prepareFolder", {})).toThrow("authority_denied");
+  expect(scopes).toBe(0);
+  expect((await b.local.request("workspace.capabilities.get")).result).toEqual({ folderPreparation: true, repositoryPreparation: false, provisioning: false, execution: false });
+  const params = { requestId: "selection-request", bookmarkBase64: Buffer.from("fixture").toString("base64"), label: "Disposable", access: "read-only" };
+  for (const method of ["workspace.capabilities.get", "workspace.selection.prepareFolder", "workspace.selection.revoke"]) expect((await b.remote.request(method, params)).error).toBeDefined();
+  expect((await b.local.request("workspace.selection.prepareFolder", { ...params, path: source })).error.data.code).toBe("invalid_request");
+  target = control;
+  expect((await b.local.request("workspace.selection.prepareFolder", params)).error.data.code).toBe("authority_denied"); expect(scopes).toBe(0);
+  target = source;
+  const reply = await b.local.request("workspace.selection.prepareFolder", params);
+  expect(reply.error).toBeUndefined(); expect(reply.result.state).toBe("prepared"); expect(scopes).toBe(1);
+  expect((await b.local.request("workspace.selection.prepareFolder", params)).result).toEqual(reply.result); expect(scopes).toBe(1);
+  const peer = await Client.connect(join(b.home, "run/core.sock"), daemon!.tokens.harness); clients.push(peer);
+  expect((await peer.request("workspace.selection.revoke", { selectionId: reply.result.selectionId })).error.data.code).toBe("authority_denied");
+  b.local.close();
+  for (let tries = 0; tries < 20 && scopes !== 0; tries++) await Bun.sleep(5);
+  expect(scopes).toBe(0);
 });
