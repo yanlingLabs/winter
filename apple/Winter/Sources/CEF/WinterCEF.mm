@@ -3511,7 +3511,8 @@ class WinterApp : public CefApp, public CefBrowserProcessHandler {
     // Append rather than assign: a bare AppendSwitchWithValue would silently drop any value CEF or
     // a future caller had already put there.
     static const char kSwitch[] = "disable-features";
-    static const char kFeatures[] = "SoftNavigationDetection,SoftNavigationHeuristics";
+    // `AimEnabled`: see the background calls below.
+    static const char kFeatures[] = "SoftNavigationDetection,SoftNavigationHeuristics,AimEnabled";
     std::string value = kFeatures;
     if (command_line->HasSwitch(kSwitch)) {
       const std::string existing = command_line->GetSwitchValue(kSwitch).ToString();
@@ -3520,13 +3521,29 @@ class WinterApp : public CefApp, public CefBrowserProcessHandler {
       }
     }
     command_line->AppendSwitchWithValue(kSwitch, value);
-    Log("disable-features=%s (upstream ReadAnythingSoftNavigationObserver null-deref)", value.c_str());
+    Log("disable-features=%s (SoftNavigation*: the upstream ReadAnythingSoftNavigationObserver null-deref; AimEnabled: a "
+        "background call)", value.c_str());
     // WebMCP (ComputerV2 Phase 4): a site's own agent tools, `document.modelContext` — off by default in this Chromium
     // (an origin trial). Process-wide and fixed at launch, so always on; the daemon's `computerUse.webmcp` decides
     // whether Winter reads or calls them. Appended like the switch above.
     static const char kEnable[] = "enable-features";
     const std::string enabled = command_line->HasSwitch(kEnable) ? command_line->GetSwitchValue(kEnable).ToString() : "";
     command_line->AppendSwitchWithValue(kEnable, enabled.empty() ? "WebMCP" : enabled + ",WebMCP");
+    // **The browser's own background calls that serve nothing in Winter** (the user's ruling): each one is a request to
+    // Google no page made, and none feeds anything Winter's browsers can show. Measured: a first-run NetLog of Winter
+    // Dev's panel before and after (AI Mode's request and the RLZ ping gone, every other call unchanged; domain
+    // reliability seen in neither), and each one alone on Winter Headless — same Chromium, same app class — by
+    // leaving it out (its request came back):
+    //  * `AimEnabled` (in the list above) — Chrome's AI Mode eligibility request at start (www.google.com/async/folae),
+    //    for an AI Mode entry in Chrome's own address bar, which no Winter browser has;
+    //  * `--no-first-run` — the RLZ ping 90 s after a first run (clients1.google.com/tools/pso/ping), search
+    //    attribution only; the first-run UI it also skips does not exist in an Alloy-style browser;
+    //  * `--disable-domain-reliability` — error beacons about Google's own sites, for Google's monitoring.
+    // KEPT, on purpose: the component updater (the root store, the CRLSet, DRM and the data sites rely on), Google
+    // sign-in and the network-time query. Winter Headless, which runs this same app class, goes further with its own
+    // switches (`HeadlessArguments`).
+    command_line->AppendSwitch("no-first-run");
+    command_line->AppendSwitch("disable-domain-reliability");
   }
 
   void OnContextInitialized() override {
