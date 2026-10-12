@@ -62,8 +62,9 @@ ext4/4096/256-byte inodes/UUID and exactly those features, `lazy_itable_init=1`,
 pinned descriptor. Lazy inode initialization is authorized only for canonical new
 sparse zero-guaranteed creation. The durable v2 zero-provenance contract requires
 `noinit_itable` at every eventual mount: trusted mounting must refuse omission.
-There is no mount here, so the receipt declares a required contract, not observed
-mount enforcement. Imported/migrated/legacy images cannot acquire this contract.
+The normal format/probe path does not mount, so its receipt declares a required
+contract, not observed mount enforcement. The separately admitted protocol-3
+kernel recovery adapter below supplies its own mount/release evidence. Imported/migrated/legacy images cannot acquire this contract.
 Legacy v1 minimal-feature history remains readable with an explicit compatibility
 error, never reinterpretation or automatic feature upgrade/reformat.
 The formatter's single `-F` is confined to proven new
@@ -78,8 +79,7 @@ probe can report pending journal replay without forcing e2fsck; Core refuses
 ready confirmation with `journal_recovery_required` while that flag is present.
 Full read-only checking also reports it and cannot silently clear recovery debt.
 A separately approved immutable recovery/mount path must replay the journal, then
-a fresh clean observation can confirm readiness. No mount or journal replay is
-performed here. Earlier v2 receipts without the explicit field preserve format
+a fresh clean observation can confirm readiness. The normal probe performs no mount or journal replay. Earlier v2 receipts without the explicit field preserve format
 history only; current confirmation/readiness requires a fresh explicit state
 observation. Unknown features and error state remain refusals. The Linux-only
 debugfs case sets the real recovery bit on a disposable regular file and checks
