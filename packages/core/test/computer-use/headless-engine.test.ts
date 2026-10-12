@@ -311,6 +311,20 @@ describe("waitForUser() on a headless tab (lane H3): shown in Winter's panel, th
     r.end();
   });
 
+  test("a wait the script cancels (Esc, an interrupt, its timeout) leaves the tab the person's, with Hand back — never a Done that answers nothing", async () => {
+    const { h, handedBack, over } = handoff({ answer: (s) => (s.startsWith("Winter's headless browser — ") ? "handoff_show" : undefined) });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const waiting = h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "sign in" });
+    for (let i = 0; i < 50 && h.cards.length < 2; i++) await new Promise((res) => setTimeout(res, 5));
+    expect(h.cards).toHaveLength(2);
+    r.abort.abort();
+    await failure(waiting);
+    expect(over).toEqual([keyOf(tab)]);
+    expect(handedBack).toEqual([]);
+    r.end();
+  });
+
   test("Winter's panel can't show it (the app gone or too old): BrowserUnavailable with why, before any card", async () => {
     const { h } = handoff({ missing: "Winter isn't running — ask the user to open Winter", answer: () => "handoff_show" });
     const r = h.run();

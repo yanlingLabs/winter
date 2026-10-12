@@ -1709,31 +1709,39 @@ export class BrowserEngine {
     }
     if (ask.optionId !== "handoff_done") {
       const key = tabKeyOf(b.backend, b.tabKey);
-      try { await transport.present(b.tabKey, { sessionId: sid }); } catch (err) { throw transportFailure(err, name); }
-      scope.builder.daemonLine(winter ? `showed the tab to the user in Winter's window`
-        : headless ? "showed the headless tab to the user in Winter's panel (the same live page — they have it until they press Done)"
-          : `brought the tab forward in ${name} for the user`);
-      const left = Math.max(1_000, total - (this.now() - t0));
-      let wait: { approved: boolean; optionId?: string; by?: string };
       try {
-        wait = await scope.userCard(`Waiting for you on ${host} in ${name} — press Done when you have finished.`, HANDOFF_WAIT_OPTIONS, left,
-          (answer) => { this.handoffAnswers.set(key, answer); });
-      } finally {
-        this.handoffAnswers.delete(key);
-        // The browser's own waiting mark goes (Winter for Chrome's badge and pill).
-        if (!winter) transport.overlay(b.tabKey, { active: false });
-      }
-      scope.live();
-      if (wait.by === "tab-gone") throw new AutomationFailure("TargetLost", "the tab was closed while Winter waited for the user");
-      if (!wait.approved) {
-        // A headless tab stays shown, the user's, until they hand it back in the panel (the agent's commands on it are
-        // TargetBusy meanwhile).
+        try { await transport.present(b.tabKey, { sessionId: sid }); } catch (err) { throw transportFailure(err, name); }
+        scope.builder.daemonLine(winter ? `showed the tab to the user in Winter's window`
+          : headless ? "showed the headless tab to the user in Winter's panel (the same live page — they have it until they press Done)"
+            : `brought the tab forward in ${name} for the user`);
+        const left = Math.max(1_000, total - (this.now() - t0));
+        let wait: { approved: boolean; optionId?: string; by?: string };
+        try {
+          wait = await scope.userCard(`Waiting for you on ${host} in ${name} — press Done when you have finished.`, HANDOFF_WAIT_OPTIONS, left,
+            (answer) => { this.handoffAnswers.set(key, answer); });
+        } finally {
+          this.handoffAnswers.delete(key);
+          // The browser's own waiting mark goes (Winter for Chrome's badge and pill).
+          if (!winter) transport.overlay(b.tabKey, { active: false });
+        }
+        scope.live();
+        if (wait.by === "tab-gone") throw new AutomationFailure("TargetLost", "the tab was closed while Winter waited for the user");
+        if (!wait.approved) {
+          // A headless tab stays shown, the user's, until they hand it back in the panel (the agent's commands on it are
+          // TargetBusy meanwhile).
+          if (headless) this.deps.headlessHandoffOver?.(b.tabKey);
+          scope.builder.daemonLine(`the user ${wait.by === "timeout" ? "did not finish in time" : "stopped the wait"} — the tab stays with them`);
+          return { done: false };
+        }
+        // Done: a headless tab's control comes back and the panel's view goes, before the agent takes the tab again.
+        if (headless) await this.deps.headlessHandBack?.(b.tabKey);
+      } catch (err) {
+        // The wait ended by any other road — the script cancelled (Esc, an interrupt, its timeout), the tab gone, the
+        // show failing: nobody waits on the tab any more. A headless tab the person holds stays theirs, its panel offering
+        // Hand back — never a Done that would answer nothing and leave the tab held for good.
         if (headless) this.deps.headlessHandoffOver?.(b.tabKey);
-        scope.builder.daemonLine(`the user ${wait.by === "timeout" ? "did not finish in time" : "stopped the wait"} — the tab stays with them`);
-        return { done: false };
+        throw err;
       }
-      // Done: a headless tab's control comes back and the panel's view goes, before the agent takes the tab again.
-      if (headless) await this.deps.headlessHandBack?.(b.tabKey);
     }
     // Done: the tab is taken again — a fresh look (every earlier ref is stale).
     await driver.ensureAttached(sid);
