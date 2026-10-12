@@ -38,7 +38,8 @@ int winter_kernel_journal_replay(int fd,const unsigned char uuid[16],uint64_t ca
 }
 #ifndef WINTER_REPLAY_LIBRARY
 static int parse_uuid(const char *text,unsigned char uuid[16]){
-    if(strlen(text)!=36)return -1;int at=0;
+    if(strlen(text)!=36)return -1;
+    int at=0;
     for(int i=0;i<36;){if(i==8||i==13||i==18||i==23){if(text[i++]!='-')return -1;continue;}char byte[3]={text[i],text[i+1],0},*end;for(int j=0;j<2;j++)if(!strchr("0123456789abcdef",byte[j]))return -1;uuid[at++]=(unsigned char)strtoul(byte,&end,16);if(*end)return -1;i+=2;}return at==16?0:-1;
 }
 int main(int argc,char **argv){

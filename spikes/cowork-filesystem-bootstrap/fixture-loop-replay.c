@@ -7,7 +7,8 @@
 #include <sys/sysmacros.h>
 static void retain(void){fputs("{\"ownership\":\"retained\",\"metadataMayHaveChanged\":true}\n",stderr);fflush(stderr);for(;;)pause();}
 static int uuid_value(const char *text,unsigned char out[16]){
-    if(strlen(text)!=36)return -1;int at=0;for(int i=0;i<36;){if(i==8||i==13||i==18||i==23){if(text[i++]!='-')return -1;continue;}char byte[3]={text[i],text[i+1],0};for(int j=0;j<2;j++)if(!strchr("0123456789abcdef",byte[j]))return -1;out[at++]=(unsigned char)strtoul(byte,NULL,16);i+=2;}return at==16?0:-1;
+    if(strlen(text)!=36)return -1;
+    int at=0;for(int i=0;i<36;){if(i==8||i==13||i==18||i==23){if(text[i++]!='-')return -1;continue;}char byte[3]={text[i],text[i+1],0};for(int j=0;j<2;j++)if(!strchr("0123456789abcdef",byte[j]))return -1;out[at++]=(unsigned char)strtoul(byte,NULL,16);i+=2;}return at==16?0:-1;
 }
 int main(int argc,char **argv){
     if(geteuid()!=0||argc!=7||strcmp(argv[1],"--image-fd")||strcmp(argv[3],"--uuid")||strcmp(argv[5],"--capacity"))return 64;
