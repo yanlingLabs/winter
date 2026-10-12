@@ -176,3 +176,20 @@ the existing synthetic key-delivery fixture. Neither opens a VM, Keychain,
 live Winter home or daemon. See Apple's [wait manual](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/wait.2.html)
 for `WNOHANG`, `ECHILD`, `EINTR`, and status semantics. These fixture results
 remain separate from production storage custody and encrypted volume I/O.
+
+Receive operations now retain one monotonic deadline across interrupted polls
+and reads. Budgets must be 1–10,000 ms and buffers 1–4,096 bytes. A clock failure,
+invalid poll descriptor or error refuses; EOF still terminates the bounded frame.
+The private channels have one reader per endpoint. Readiness does not protect
+against another thread consuming the bytes first, nor make arbitrary blocking
+descriptors safe for concurrent consumers. This change does not bound the existing
+write/send calls or establish a whole-launch deadline.
+
+Datagram reception uses `recvmsg` and rejects returned `MSG_TRUNC`/`MSG_CTRUNC`.
+The regression first reproduced a 5-byte datagram being accepted as a 4-byte
+prefix by the previous `recv(..., MSG_TRUNC)` call on this Mac. Apple's
+[receive manual](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/recvmsg.2.html)
+documents truncation as an output flag on `msghdr`; the rejected packet is consumed
+and never decoded. Tests also check that an exactly sized next packet succeeds.
+The frozen format/lifecycle receipts describe their original binaries and remain
+unchanged; they are not evidence for these later receive changes.

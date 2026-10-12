@@ -14,6 +14,7 @@ kb_wait_result kb_wait_owned(kb_owned_child *child, int milliseconds, int reap_m
 void kb_owned_destroy(kb_owned_child *child);
 /* Deterministic syscall doubles, with no real PID/signal operations. */
 int kb_fixture_wait_scenario(int scenario);
+int kb_fixture_read_deadline_scenario(int scenario);
 int kb_fixture_spawn_policy_refused(void);
 int kb_recv_packet(int fd, void *bytes, size_t capacity, int milliseconds);
 int kb_send_packet(int fd, const void *bytes, size_t length);

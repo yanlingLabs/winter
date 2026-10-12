@@ -184,14 +184,81 @@ int kb_fixture_spawn_policy_refused(void) {
     if(sigaction(SIGCHLD,&saved,NULL))passed=0;
     return passed;
 }
-static int ready(int fd,int milliseconds){struct pollfd p={fd,POLLIN,0};int rc;do{rc=poll(&p,1,milliseconds);}while(rc<0 && errno==EINTR);return rc>0?0:-1;}
-int kb_recv_packet(int fd,void *bytes,size_t capacity,int milliseconds){if(ready(fd,milliseconds))return -1;ssize_t size=recv(fd,bytes,capacity,MSG_TRUNC);return size>0 && (size_t)size<=capacity?(int)size:-1;}
+typedef struct {
+    void *context;
+    int64_t (*clock)(void *);
+    int (*poll)(void *,struct pollfd *,int);
+} read_wait_ops;
+typedef struct { int64_t start,end; } read_deadline;
+static int read_poll(void *unused,struct pollfd *p,int milliseconds) { (void)unused;return poll(p,1,milliseconds); }
+static const read_wait_ops real_read_ops={NULL,wait_clock,read_poll};
+static int read_deadline_start(int milliseconds,read_deadline *deadline,const read_wait_ops *ops) {
+    if(milliseconds<=0 || milliseconds>10000){errno=EINVAL;return -1;}
+    deadline->start=ops->clock(ops->context);
+    if(deadline->start<0){errno=EIO;return -1;}
+    deadline->end=deadline->start+milliseconds;return 0;
+}
+/* One absolute deadline per frame, including every interrupted poll and read.
+ * The caller owns the only reader; readiness is not an ownership primitive. */
+static int ready_until(int fd,const read_deadline *deadline,const read_wait_ops *ops) {
+    for(;;) {
+        int64_t now=ops->clock(ops->context);
+        if(now<deadline->start){errno=EIO;return -1;}
+        if(now>=deadline->end){errno=ETIMEDOUT;return -1;}
+        struct pollfd p={fd,POLLIN,0};
+        int rc=ops->poll(ops->context,&p,(int)(deadline->end-now));
+        if(rc<0){if(errno==EINTR)continue;return -1;}
+        if(rc==0){errno=ETIMEDOUT;return -1;}
+        if(p.revents&POLLNVAL){errno=EBADF;return -1;}
+        if(p.revents&POLLERR){errno=EIO;return -1;}
+        if(p.revents&(POLLIN|POLLHUP))return 0;
+        errno=EIO;return -1;
+    }
+}
+int kb_recv_packet(int fd,void *bytes,size_t capacity,int milliseconds){
+    read_deadline deadline;if(!capacity || capacity>4096 || read_deadline_start(milliseconds,&deadline,&real_read_ops))return -1;
+    for(;;){if(ready_until(fd,&deadline,&real_read_ops))return -1;
+        struct iovec part={bytes,capacity};struct msghdr message={0};message.msg_iov=&part;message.msg_iovlen=1;
+        ssize_t size=recvmsg(fd,&message,0);
+        if(size<0 && (errno==EINTR || errno==EAGAIN))continue;
+        if(size>=0 && (message.msg_flags&(MSG_TRUNC|MSG_CTRUNC))){errno=EMSGSIZE;return -1;}
+        return size>0 && (size_t)size<=capacity?(int)size:-1;}
+}
 int kb_send_packet(int fd,const void *bytes,size_t length){return send(fd,bytes,length,0)==(ssize_t)length?0:-1;}
 int kb_peer_pid(int fd,pid_t *pid){socklen_t size=sizeof(*pid);return getsockopt(fd,SOL_LOCAL,LOCAL_PEERPID,pid,&size)==0 && size==sizeof(*pid)?0:-1;}
 int kb_write_all(int fd,const void *bytes,size_t length){const char *p=bytes;while(length){ssize_t n=write(fd,p,length);if(n<0 && errno==EINTR)continue;if(n<=0)return -1;p+=n;length-=(size_t)n;}return 0;}
-static int64_t now_ms(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (int64_t)t.tv_sec*1000+t.tv_nsec/1000000;}
-int kb_read_bounded(int fd,void *bytes,size_t capacity,int milliseconds){size_t total=0;int64_t end=now_ms()+milliseconds;while(total<capacity){int64_t remaining=end-now_ms();if(remaining<=0 || ready(fd,(int)remaining))return -1;ssize_t n=read(fd,(char *)bytes+total,capacity-total);if(n<0 && errno==EINTR)continue;if(n<0)return -1;if(n==0)return (int)total;total+=(size_t)n;}return -1;}
-int kb_read_line(int fd,void *bytes,size_t capacity,int milliseconds){size_t total=0;int64_t end=now_ms()+milliseconds;while(total<capacity){int64_t remaining=end-now_ms();if(remaining<=0 || ready(fd,(int)remaining))return -1;char byte;ssize_t n=read(fd,&byte,1);if(n<0 && errno==EINTR)continue;if(n!=1)return -1;if(byte=='\n')return (int)total;((char *)bytes)[total++]=byte;}return -1;}
+int kb_read_bounded(int fd,void *bytes,size_t capacity,int milliseconds){
+    read_deadline deadline;if(!capacity || capacity>4096 || read_deadline_start(milliseconds,&deadline,&real_read_ops))return -1;
+    size_t total=0;while(total<capacity){if(ready_until(fd,&deadline,&real_read_ops))return -1;
+        ssize_t n=read(fd,(char *)bytes+total,capacity-total);if(n<0 && (errno==EINTR || errno==EAGAIN))continue;
+        if(n<0)return -1;if(n==0)return (int)total;total+=(size_t)n;}
+    errno=EMSGSIZE;return -1;
+}
+int kb_read_line(int fd,void *bytes,size_t capacity,int milliseconds){
+    read_deadline deadline;if(!capacity || capacity>4096 || read_deadline_start(milliseconds,&deadline,&real_read_ops))return -1;
+    size_t total=0;while(total<capacity){if(ready_until(fd,&deadline,&real_read_ops))return -1;
+        char byte;ssize_t n=read(fd,&byte,1);if(n<0 && (errno==EINTR || errno==EAGAIN))continue;
+        if(n!=1)return -1;if(byte=='\n')return (int)total;((char *)bytes)[total++]=byte;}
+    errno=EMSGSIZE;return -1;
+}
+typedef struct { int scenario,calls,timeouts[4];int64_t time; } fake_read_wait;
+static int64_t fake_read_clock(void *context){fake_read_wait *f=context;return f->scenario==2 && f->calls ? -1:f->time;}
+static int fake_read_poll(void *context,struct pollfd *p,int milliseconds){
+    fake_read_wait *f=context;if(f->calls>=4){errno=EIO;return -1;}f->timeouts[f->calls++]=milliseconds;f->time+=4;
+    if(f->scenario==0 || f->calls<3){errno=EINTR;return -1;}
+    p->revents=f->scenario==3?POLLNVAL:f->scenario==4?POLLERR:POLLIN;return 1;
+}
+int kb_fixture_read_deadline_scenario(int scenario){
+    if(scenario<0 || scenario>4)return 0;
+    fake_read_wait f={.scenario=scenario};read_wait_ops ops={&f,fake_read_clock,fake_read_poll};read_deadline deadline;
+    if(read_deadline_start(10,&deadline,&ops))return 0;
+    int rc=ready_until(-1,&deadline,&ops),error=errno;
+    if(f.timeouts[0]!=10 || (f.calls>1 && f.timeouts[1]!=6) || (f.calls>2 && f.timeouts[2]!=2))return 0;
+    if(scenario==0)return rc==-1 && error==ETIMEDOUT && f.calls==3;
+    if(scenario==1)return rc==0 && f.calls==3;
+    if(scenario==2)return rc==-1 && error==EIO && f.calls==1;
+    return rc==-1 && error==(scenario==3?EBADF:EIO) && f.calls==3;
+}
 int kb_fixture_sandbox(void){
     // Deprecated Seatbelt API is a fixture enforcement probe, not a supported
     // production signing/entitlement or complete VMM worker policy.
