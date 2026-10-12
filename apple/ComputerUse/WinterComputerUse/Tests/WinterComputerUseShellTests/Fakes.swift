@@ -319,10 +319,15 @@ extension FakeIdleScheduler: ViewClock {}
     let dispatcher: RPCDispatcher
     var notifications: [HelperNotification] = []
 
-    init(prompts: CUDesktopPrompting? = nil) {
+    let rings = FakeWatchRings()
+
+    init(prompts: CUDesktopPrompting? = nil, watches: WatchService? = nil, liveTest: Bool = false,
+         userClicker: (@Sendable (TestUserClickParams) async -> TestUserClickResult)? = nil) {
         viewHub = ViewHub(capture: capture, geometry: geometry, snapshotter: snapshotter, clock: clock)
-        coordinator = HelperCoordinator(presentation: presentation, escapeTap: tap, viewHub: viewHub, prompts: prompts ?? FakePrompter())
-        dispatcher = RPCDispatcher(core: core, coordinator: coordinator, viewHub: viewHub, inFlight: inFlight)
+        coordinator = HelperCoordinator(presentation: presentation, escapeTap: tap, viewHub: viewHub, prompts: prompts ?? FakePrompter(),
+                                        watchRings: rings)
+        dispatcher = RPCDispatcher(core: core, coordinator: coordinator, viewHub: viewHub, inFlight: inFlight, liveTest: liveTest,
+                                   watches: watches, userClicker: userClicker)
         coordinator.notify = { [weak self] in self?.notifications.append($0) }
         let sink = sink
         let decode = { (line: Data) in try! JSONDecoder().decode(JSONValue.self, from: line) }
@@ -439,4 +444,10 @@ final class LineClient {
     func answer(_ promptId: String, _ a: CUDesktopPromptAnswer) {
         answers.removeValue(forKey: promptId)?(a)
     }
+}
+
+/// The wake triggers' rings, recorded.
+@MainActor final class FakeWatchRings: CUWatchRingPresenting {
+    var shown: [[CUWatchRing]] = []
+    func show(_ rings: [CUWatchRing]) { shown.append(rings) }
 }
