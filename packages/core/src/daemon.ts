@@ -1875,7 +1875,7 @@ export async function startDaemon(opts: {
   };
   const hookFacade = new HookFacade({
     registry: hookRegistry,
-    runner: new HookRunner({ home: winterHome }),
+    runner: new HookRunner(),
     hooksEnabled: winterHooksEnabled,
     cwdForSession: (sid) => { try { return store.meta(sid).cwd ?? undefined; } catch { return undefined; } },
   });
@@ -2462,7 +2462,7 @@ export async function startDaemon(opts: {
       writeDiff(winterHome, sid, diffId, header, patch);
     // Minor 5e (fix wave): `lspEnabledFrom` — the ONE reader, see this const's own doc comment.
     if (settings ? lspEnabledFrom(settings) : true) {
-      lspManager = new LspManager({ home: winterHome, idleShutdownMs: lspCfg?.idleShutdownMs });
+      lspManager = new LspManager({ idleShutdownMs: lspCfg?.idleShutdownMs });
     }
     // MEDIUM (fix wave, pre-merge review, finding 3): the same live `() => settings` closure this
     // file uses everywhere else — `doEnsureProject` reads it on every `ensureProject` call, never a
@@ -2679,7 +2679,7 @@ export async function startDaemon(opts: {
         computerUse = undefined;
       },
       computerInFlight: () => computerUse?.inFlight() ?? false,
-      buildLspManager: (s) => new LspManager({ home: winterHome, idleShutdownMs: s?.lsp?.idleShutdownMs }),
+      buildLspManager: (s) => new LspManager({ idleShutdownMs: s?.lsp?.idleShutdownMs }),
       registerLsp: (mgr) => {
         // Fix wave (review F7): the `lsp` CAPABILITY server reads this holder per call, so
         // reassigning it IS the hot re-enable — the next `lsp` call on any session finds the new

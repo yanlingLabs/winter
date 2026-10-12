@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, spyOn } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, linkSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertDaemonPathAccess, readDaemonTextFile, daemonChildSpawnWithFloor } from "../../src/runtime-sdk/daemon-path-fence";
+import { assertDaemonPathAccess, readDaemonTextFile } from "../../src/runtime-sdk/daemon-path-fence";
 import { registerHostStorageFences } from "../../src/runtime-sdk/host-storage-fence";
 import { lspToolDefs } from "../../src/agent/tools/lsp";
 import { ToolRegistry } from "../../src/agent/tools/registry";
@@ -18,15 +18,15 @@ describe("Core protected storage checks at actual host use points", () => {
   beforeEach(() => {
     root = realpathSync(mkdtempSync(join(tmpdir(), "winter-daemon-path-fence-")));
     home = join(root, "home"); other = join(root, "other"); coordination = join(root, "coordination"); project = join(root, "project");
-    for (const dir of [join(home, "cowork"), join(other, "cowork/workspaces/w/shared"), join(other, "runtimes"), coordination, project]) mkdirSync(dir, { recursive: true });
+    for (const dir of [join(home, "cowork"), join(other, "cowork/workspaces/w/shared"), join(other, "runtimes"), join(other, "run"), coordination, project]) mkdirSync(dir, { recursive: true });
     volume = join(other, "cowork/workspaces/w/data.ext4"); db = join(other, "runtimes/runtime-state.db");
-    for (const path of [volume, db, join(coordination, "cowork-admission.sqlite")]) writeFileSync(path, "private fixture bytes");
+    for (const path of [volume, db, join(other, "run/control.txt"), join(coordination, "cowork-admission.sqlite")]) writeFileSync(path, "private fixture bytes");
     unregister = registerHostStorageFences(home, { participatingHomes: [other], coordinationDir: coordination, coworkStorageActive: true });
   });
   afterEach(() => { try { unregister(); } finally { rmSync(root, { recursive: true, force: true }); } });
   test("direct paths, parent symlinks, hard links and case variants use one canonical fence; ordinary/shared reads work", () => {
     symlinkSync(other, join(project, "alias")); linkSync(volume, join(project, "volume.ts"));
-    for (const path of [volume, db, join(coordination, "cowork-admission.sqlite"), join(project, "alias/runtimes/runtime-state.db"), join(project, "volume.ts"), volume.toUpperCase()]) {
+    for (const path of [volume, db, join(other, "run/control.txt"), join(coordination, "cowork-admission.sqlite"), join(project, "alias/runtimes/runtime-state.db"), join(project, "volume.ts"), volume.toUpperCase()]) {
       expect(() => assertDaemonPathAccess(home, path, project)).toThrow("protected Winter storage");
     }
     const ordinary = join(project, "ordinary.ts"), shared = join(other, "cowork/workspaces/w/shared/output.md");
@@ -82,10 +82,5 @@ describe("Core protected storage checks at actual host use points", () => {
     writeFileSync(db, "updated private fixture bytes");
     for (const group of hooks.PostToolUse ?? []) if (group.matcher === "Edit") for (const hook of group.hooks) await hook({ ...input, hook_event_name: "PostToolUse", tool_response: "ok" } as never, "private", { signal: new AbortController().signal });
     expect(takeFileDiff("s", "private")).toBeUndefined();
-  });
-  test("active child floors have no unprotected fallback when SDK capability is unavailable", () => {
-    const options = { command: "/bin/sh", args: ["-c", "true"], cwd: project, env: {} };
-    try { expect(daemonChildSpawnWithFloor(home, options).command).toBe("/usr/bin/sandbox-exec"); }
-    catch (error) { expect(String(error)).toContain("floor unavailable"); }
   });
 });

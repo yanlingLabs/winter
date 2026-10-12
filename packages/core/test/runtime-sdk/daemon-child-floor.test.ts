@@ -7,8 +7,7 @@ async function run(mode: string, candidate?: string): Promise<void> {
   const child = Bun.spawn([process.execPath, "run", "--preload", preload, fixture, mode, ...(candidate ? [candidate] : [])], { stdout: "pipe", stderr: "pipe", env: process.env });
   const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
   expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
-  expect(stdout).toBe("daemon child floor verified\n");
+  expect(stdout).toBe("daemon child policy verified\n");
 }
-test("retired direct hook exit does not admit newly protected roots without descendant proof", () => run("retired"));
-// Explicit candidate input keeps a source checkout from being mistaken for the installed/released SDK.
-test.skipIf(process.platform !== "darwin" || !process.env.WINTER_TEST_FLOOR_SDK)("native HookRunner/LSP floors protect volumes, preserve ordinary writes and cover new workspaces", () => run("kernel", process.env.WINTER_TEST_FLOOR_SDK));
+test("ordinary retired hook history never creates artificial Cowork activation debt", () => run("retired"));
+test("ordinary HookRunner/LSP behavior has no outer floor with active storage", () => run("ordinary"));

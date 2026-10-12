@@ -1841,27 +1841,6 @@ describe("TaskStop on a folding child clears the CHILD's pending pushes too (age
   });
 });
 
-test("protected broker refusal retains the complete projected batch before asynchronous end", async () => {
-  let q!: FakeQuery, disposedAfter: string[] = [], h!: Harness;
-  const runtime = {
-    sdk: { query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: Options }) => (q = new FakeQuery(prompt, options)) as unknown as Query },
-    trackQuery() {}, untrack() {},
-    codeExecution: { enroll: ({ options }: { options: Options }) => ({ options, generationId: "protected", protectedStorage: true,
-      observe(event: NewSessionEvent) { if (event.type === "tool_call") throw new Error("fixture admission refusal"); },
-      noteHook() {}, async completeHook() {}, dispose() { disposedAfter = h.types(); },
-    }) },
-  } as unknown as WinterRuntimeSdk;
-  h = harness({ runtime, mode: "code" });
-  await h.session.open(); q.emit(init(q.options, ["Bash"])); await h.settled(); await h.session.send("probe", "fixture");
-  q.emit({ type: "assistant", uuid: "same-batch", session_id: "be-x", message: { content: [
-    { type: "tool_use", id: "refused-call", name: "Bash", input: { command: "fixture" } }, { type: "text", text: "the rest of this projected batch" },
-  ] } });
-  await h.settled();
-  expect(h.events.some(event => event.type === "tool_call" && event.callId === "refused-call")).toBe(true);
-  expect(h.events.some(event => "text" in event && event.text === "the rest of this projected batch")).toBe(true);
-  expect(h.events.some(event => event.type === "agent_error" && event.code === "host_execution_refused")).toBe(true);
-  expect(disposedAfter).toContain("tool_call"); expect(disposedAfter).toContain("assistant_message"); await h.session.done;
-});
 test("unprotected Code receives no extra hook and never consults Cowork observation", async () => {
   let q!: FakeQuery, observed = 0;
   const runtime = {

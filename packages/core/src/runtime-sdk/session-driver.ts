@@ -1,3 +1,4 @@
+import { registerHostStoragePolicyConsumer } from "./host-storage-fence";
 // P8b Task 16 — THE DRIVER TABLE: `sessionId → WinterSession`, and everything a Winter session needs
 // assembled before a `winter` child can run it.
 //
@@ -65,7 +66,7 @@ import { renderNoCredentialHint } from "./handoff";
 import { neutralSelectionRefusal, refusalDetailCategoryFor } from "./refusal-copy";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachWinterSession } from "./messaging";
-import { buildWinterOptions, bypassAllowedAtSpawn, permissionModeFor, codePermissionsFor, KNOWN_RUNTIME_BUILTINS } from "./mode-options";
+import { buildWinterOptions, bypassAllowedAtSpawn, permissionModeFor } from "./mode-options";
 import { providerFor, rowForTag, testProviderNameFor, toolsRefusedFor } from "./provider-selection";
 import { splitTag, UNSTATED_TAG, isModelTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
 import { winterSessions } from "./sessions";
@@ -108,12 +109,8 @@ import { keychainService } from "../profile";
 import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { createHostCredentialBroker, sessionCredentialAllowlist, type ProviderRefresher } from "./host-credentials";
 import { SESSION_REPLACED } from "./session-replaced";
-import { withHostCodeBinding, type HostCodeAuthority } from "./host-code-broker";
-import { CanonicalHostCodeAuthority, installedHostCodePolicyAdapter, type CanonicalHostCodePolicy } from "./host-code-authority";
+import { type HostCodeAuthority } from "./host-code-broker";
 import { buildCoreBrand } from "./brand";
-import { projectWalk } from "./project-walk";
-import { authorityFileRevision } from "../authority-revision";
-import { sdkSettingsPath, sdkGlobalConfigPath } from "../agent/paths";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
@@ -693,6 +690,26 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    *  `evictSessionsForCredential`. */
   const advisorProviders = new Map<string, string>();
   const log = deps.log ?? ((): void => {});
+  const unregisterStoragePolicyConsumer = registerHostStoragePolicyConsumer(async () => {
+    // The linked SDK has no live sandbox-settings control. Rebuild the run home/Options at the
+    // next incarnation, preserving backend/session identity and held user messages in the log.
+    await Promise.all([...drivers.values()].map(async session => {
+      const mode = deps.store.meta(session.sessionId).mode ?? "code";
+      // Host Code/Chat/Dispatch only. Future Cowork drivers need their own workspace/guest
+      // policy lifecycle and must never be swept by this native-host callback.
+      if (mode !== "code" && mode !== "chat" && mode !== "dispatch") return;
+      let refreshed = false;
+      const work = async () => {
+        if (mode === "code") await session.idle(); // let an approved build/tool turn finish
+        await session.end();
+        await session.done; // logical incarnation closure, not escaped descendant proof
+        refreshed = true;
+      };
+      const held = session.beginHandoff ? await session.beginHandoff(work) : (await work(), { heldTurns: 0 });
+      if (!refreshed) throw new WinterLegRefusal("winter_leg_unavailable", "host storage policy refresh remains pending");
+      if (mode === "code" && held.heldTurns > 0) await session.open(); // replay held work on refreshed Options/run home
+    }));
+  });
   const sdkVersion = WINTER_PEER_VERSIONS.winterAgentSdk;
   // WS-25 §7: ONE broker for the whole table — its generation registry and its refresh single-flights are
   // per item, not per session, so two sessions asking for the same Console bearer share one `ant` run.
@@ -935,10 +952,6 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const settings = deps.settings();
       const hook = runtime.spawnHookFor(mode);
       if (hook instanceof Error) throw new WinterLegRefusal(hook.code, hook.message);
-      const hostCodeAuthority = mode === "code" ? deps.hostCodeAuthorityFor?.(sessionId, backendSessionId) : undefined;
-      const needsHostAuthority = mode === "code" && runtime.codeExecution?.protectedStorageActive() === true;
-      const policyAdapter = needsHostAuthority && hostCodeAuthority === undefined ? installedHostCodePolicyAdapter() : undefined;
-      if (needsHostAuthority && hostCodeAuthority === undefined && policyAdapter === undefined) runtime.codeExecution?.assertAuthority(undefined);
       // Both credential probes, together: the provider inventory (`CredentialPresence`) and the ONE
       // tool key whose presence changes the tool SURFACE (0.0.17 — see `WinterOptionsInput`'s
       // `exaKeyPresent`). Independent Keychain reads, so they are issued in parallel, and re-issued at
@@ -1294,145 +1307,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
           }),
         );
       try {
-        let authority = hostCodeAuthority;
-        if (needsHostAuthority && !authority && policyAdapter) {
-          const prepared = structuredClone(runHome?.effectiveSettings ?? {});
-          const settingsRules = runHome
-            ? policyAdapter.settingsSeed(
-                {
-                  effective: prepared,
-                  provenance: {},
-                  sources: [
-                    {
-                      source: "user",
-                      settings: prepared,
-                      path: join(runHome.dir, "settings.json"),
-                    },
-                  ],
-                  perSource: [
-                    {
-                      source: "user",
-                      settings: prepared,
-                      values: prepared,
-                      path: join(runHome.dir, "settings.json"),
-                      loaded: true,
-                    },
-                  ],
-                },
-                {
-                  cwd,
-                  home: runHome.dir,
-                  allowDangerouslySkipPermissions:
-                    options.allowDangerouslySkipPermissions,
-                  disableBypassPermissionsMode:
-                    options.permissions?.disableBypassPermissionsMode,
-                },
-              )
-            : undefined;
-          // Saved allow rules are regenerated from live authoritative sources; a removed grant must
-          // not survive in the launch-time flattened settings copy. Deny/ask entries remain restrictive.
-          const seed = settingsRules as
-            | { entries?: Array<{ behavior?: string }> }
-            | undefined;
-          const preparedRules = seed
-            ? {
-                ...seed,
-                entries: seed.entries?.filter(
-                  (entry) => entry.behavior !== "allow",
-                ),
-              }
-            : undefined;
-          const definitions = structuredClone(
-            options.agents ??
-              mergedAgentDefinitions(home, cwd, deps.projectAgentDefinitions),
-          );
-          authority = new CanonicalHostCodeAuthority({
-            adapter: policyAdapter,
-            getPolicy: (): CanonicalHostCodePolicy => {
-              const current = deps.store.meta(sessionId),
-                trusted = deps.isTrusted?.(cwd) ?? false;
-              return {
-                config: {
-                  permissionMode: permissionModeFor(current.approvalPolicy),
-                  permissions: codePermissionsFor({
-                    home,
-                    policy: current.approvalPolicy,
-                    userAllow: sdkAllowRules(home),
-                    userDeny: sdkDenyRules(home),
-                    persistedAllow: deps.persistedAllowRules?.(cwd),
-                  }),
-                  allowedTools: options.allowedTools,
-                  disallowedTools: options.disallowedTools,
-                  allowDangerouslySkipPermissions: bypassAllowedAtSpawn(
-                    current.approvalPolicy,
-                  ),
-                  additionalDirectories: [...extraDirs],
-                  sandbox: options.sandbox,
-                },
-                settingsRules: preparedRules,
-                sessionRoot: cwd,
-                home: options.env?.HOME ?? home,
-                winterHome: runHome?.dir ?? home,
-                storeHome: runHome?.sdkHome ?? sdkHomeFor(home),
-                trustedWorkspace: trusted,
-                brand: buildCoreBrand(undefined, home),
-                outputsDir: deps.outDirOf(sessionId),
-                additionalDirectories: [...extraDirs],
-                tools: KNOWN_RUNTIME_BUILTINS,
-                preparedDefinitions: definitions,
-                env: { ...options.env },
-                authorityRevision: {
-                  approvalPolicy: current.approvalPolicy,
-                  trusted,
-                  sessionEpoch: deps.store.hostAuthorityRevision(sessionId),
-                  hostEpoch: deps.hostAuthorityRevision?.(),
-                  fileEpochs: [
-                    join(home, "settings.json"), sdkSettingsPath(home), sdkGlobalConfigPath(home),
-                    ...projectWalk(cwd, trusted ? projectScopeRootFor(cwd) : null, options.env?.HOME ?? home).flatMap(dir => [join(dir, ".winter", "settings.json"), join(dir, ".winter", "settings.local.json"), join(dir, ".winter", "permissions.local.json")]),
-                  ].map(authorityFileRevision),
-                },
-              };
-            },
-          });
-        }
-        if (mode === "code" && authority) {
-          const currentAuthority = authority;
-          withHostCodeBinding(options, {
-            home,
-            sessionId,
-            backendSessionId,
-            allowedCwds: [cwd, ...extraDirs],
-            tempDir: deps.tmpDirOf(sessionId),
-            outDir: deps.outDirOf(sessionId),
-            policyRevision: () => currentAuthority.policyRevision(),
-            authorize: (call, currentCwd, signal) =>
-              currentAuthority.authorize(call, currentCwd, signal),
-            ...(currentAuthority.buildHookContext
-              ? {
-                  buildHookContext: (call, currentCwd) =>
-                    currentAuthority.buildHookContext!(call, currentCwd),
-                }
-              : {}),
-            ...(currentAuthority.recordPromptResult
-              ? {
-                  recordPromptResult: (receipt) =>
-                    currentAuthority.recordPromptResult!(receipt),
-                }
-              : {}),
-            ...(currentAuthority.forgetCall
-              ? { forgetCall: (callId) => currentAuthority.forgetCall!(callId) }
-              : {}),
-            ...(currentAuthority.dispose
-              ? { dispose: () => currentAuthority.dispose!() }
-              : {}),
-            ...(currentAuthority.immutableWorkflowWorker
-              ? {
-                  immutableWorkflowWorker: (runId, call) =>
-                    currentAuthority.immutableWorkflowWorker!(runId, call),
-                }
-              : {}),
-          });
-        }
+        // Native Code keeps its canonical SDK settings/permissions/hooks. A Cowork storage
+        // registration is never authority to add an outer floor or host process broker.
         return runHome === undefined ? options : withRunHome(options, runHome);
       } catch (error) {
         if (runHome) await disposeFailedRunHome(runHome, log);
@@ -1870,6 +1746,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       await Promise.all([...drivers.entries()].map(([sessionId, s]) => s.end().catch(() => {}).finally(() => clearSession(sessionId))));
     },
     beginShutdown() {
+      unregisterStoragePolicyConsumer();
       shuttingDown = true;
     },
   };
