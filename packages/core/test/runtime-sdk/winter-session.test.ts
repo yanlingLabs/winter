@@ -839,6 +839,81 @@ describe("startWinterSession — one incarnation", () => {
     }
   });
 
+  test("nested child progress keeps its waiting ancestors alive but not an unrelated child", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-nested-stall-"));
+    const rs = openRuntimeStateDb(home);
+    let next = 1, now = 0;
+    const pending = new Map<number, { fn: () => void; at: number }>();
+    const timers = {
+      set(fn: () => void, ms: number): unknown { const id = next++; pending.set(id, { fn, at: now + ms }); return id; },
+      clear(handle: unknown): void { pending.delete(handle as number); },
+    };
+    const advance = (ms: number) => {
+      const target = now + ms;
+      while (true) {
+        const due = [...pending].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0];
+        if (due === undefined) break;
+        pending.delete(due[0]); now = due[1].at; due[1].fn();
+      }
+      now = target;
+    };
+    let h: Harness | undefined;
+    try {
+      const registry = createPersistedChildren({ store: new RuntimeChildren(rs), profiles: new ChildProfiles(home), providerId: () => "openai", timers, now: () => now, stallTimeoutMs: () => 1000 });
+      h = harness({ children: childrenSinkFor(registry, "s_x", () => {}) });
+      await h.session.open(); h.q().emit(init(h.q().options)); await h.session.send("nested work", "cli");
+      h.q().emit({ type: "assistant", message: { content: [
+        { type: "tool_use", id: "parent", name: "Agent", input: { prompt: "delegate" } },
+        { type: "tool_use", id: "unrelated", name: "Agent", input: { prompt: "go quiet" } },
+      ] } });
+      h.q().emit({ type: "assistant", parent_tool_use_id: "parent", message: { content: [
+        { type: "tool_use", id: "grandchild", name: "Agent", input: { prompt: "work" } },
+      ] } });
+      await h.settled();
+      expect(seen(h, "thread_started").find((e) => "threadId" in e && e.threadId === "grandchild")).toMatchObject({ parentThreadId: "parent" });
+      for (let window = 0; window < 10; window++) {
+        advance(900);
+        // Both persisted content and transient deltas carry the GRANDCHILD's immediate id.
+        h.q().emit(window % 2 === 0
+          ? { type: "assistant", parent_tool_use_id: "grandchild", message: { content: [{ type: "text", text: `work ${window}` }] } }
+          : { type: "stream_event", parent_tool_use_id: "grandchild", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: `work ${window}` } }, uuid: `nested-${window}`, session_id: "be-x" });
+        await h.settled();
+        expect(registry.get("parent", "s_x")?.status).toBe("running");
+        expect(registry.get("grandchild", "s_x")?.status).toBe("running");
+      }
+      expect(now).toBe(9000);
+      expect(registry.get("unrelated", "s_x")?.status).toBe("timeout");
+      expect(pending.size).toBe(2);
+      h.q().emit({ type: "user", parent_tool_use_id: "parent", message: { content: [{ type: "tool_result", tool_use_id: "grandchild", content: "done" }] } });
+      await h.settled();
+      expect(registry.get("grandchild", "s_x")?.status).toBe("completed");
+      // A completed child's late frame cannot keep its former ancestor alive.
+      advance(900);
+      h.q().emit({ type: "assistant", parent_tool_use_id: "grandchild", message: { content: [{ type: "text", text: "late" }] } });
+      await h.settled();
+      advance(200);
+      expect(registry.get("parent", "s_x")?.status).toBe("timeout");
+      expect(pending.size).toBe(0);
+    } finally {
+      await h?.session.end(); rs.close(); rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("malformed child lineage cycles relay progress once per thread without hanging", async () => {
+    const progress: string[] = [];
+    const h = harness({ children: { started() {}, completed() {}, progress: (id) => { progress.push(id); } } });
+    try {
+      await h.session.open(); h.q().emit(init(h.q().options)); await h.session.send("cycle", "cli");
+      for (const [id, parent] of [["outer", "inner"], ["inner", "outer"]]) {
+        h.q().emit({ type: "assistant", parent_tool_use_id: parent, message: { content: [{ type: "tool_use", id, name: "Agent", input: { prompt: "malformed lineage" } }] } });
+      }
+      await h.settled(); progress.length = 0;
+      h.q().emit({ type: "stream_event", parent_tool_use_id: "inner", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "progress" } }, uuid: "cycle-delta", session_id: "be-x" });
+      await h.settled();
+      expect(progress).toEqual(["inner", "outer"]);
+    } finally { await h.session.end(); }
+  });
+
   // WS-23 (reasoning-state, decision 5): `compact` reaches a LIVE child's `Query.compact` (the SDK's
   // `compact` control) -- what the handoff calls before a provider switch the target cannot hold -- and
   // stays a typed refusal with no live child to ask.
