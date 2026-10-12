@@ -120,9 +120,59 @@ explicit review and never silent re-provisioning. Swift/Data/CryptoKit
 wiping is best-effort for explicit fixture buffers; this fixture does not
 prove eradication of every internal key copy or denial of debugger access.
 
-Native lifecycle follow-up remains open: `kb_wait_owned` kills on timeout and
-then uses blocking `waitpid(..., 0)`, and `OwnedChild.waitStatus` marks the child
-reaped even when the wait returns a negative result. The successful 1.323 s
-fixture receipt remains valid, but timeout cleanup/teardown is not proved
-strictly bounded or production-ready. This format increment does not change
-that pre-existing lifecycle behavior; it requires separate review and repair.
+Native lifecycle now uses opaque spawn-owned handles, with serialized
+`WNOHANG` probes before `SIGCONT`/`SIGKILL`. Construction refuses a non-default
+`SIGCHLD` disposition or `SA_NOCLDWAIT`; each signal checks that policy again.
+Normal waits use a monotonic 2,000 ms deadline and a separate 250 ms post-kill
+reap window. Initializer failure/deinit uses an immediate termination attempt
+with the same 250 ms reap window. No teardown path uses blocking
+`waitpid(..., 0)`. Interrupted waits do not restart either deadline.
+
+A successful native reap records `confirmedExit` and the exact status;
+a timeout still throws even if the killed child was successfully reaped.
+`ECHILD` records `lostOwnership`, while other unconfirmed results record
+`terminationUncertain`. Neither is represented as reaped or gone. Subsequent
+resume/wait/deinit cannot signal either state. An in-process ledger retains
+the native handle and nonsecret debt record, including failed construction or
+deinit. Its 16 slots count active admissions plus debt; exhausted capacity
+refuses admission and never evicts debt. There is no incoming PID, generic
+kill/decrypt RPC, or automatic debt-reconciliation mechanism.
+
+This fixture must remain the sole reaper of its children. The default-signal
+precondition is enforced, but an unrelated thread calling `waitpid(-1, ...)`
+or changing the signal policy concurrently cannot be prohibited by this
+library. Under that contract an unreaped child reserves its PID, including
+a zombie, until this owner confirms the reap. `ECHILD`/failed ownership
+probes refuse signals. These Darwin PID operations do not provide atomic
+pidfd-style protection against a competing external reaper; embedding them
+in a process with a global child reaper is unsupported. Ledger debt is
+process-local, not durable custody or a production worker-admission receipt.
+Long-term debt recovery and production integration still require review.
+
+The deadline limits the polling and post-kill **attempt**. OS scheduling or
+syscall stalls can exceed its elapsed wall-clock budget. The successful
+no-key `/bin/sleep` fixture measured 2.0022 s for its 2,000 ms timeout, confirmed
+status 137 after `SIGKILL`, and zero debt; its whole process took 2.464 s.
+The updated 32/96-byte delivery fixture exited 0 in 1.076 s, including
+swapped-image cleanup and zero unresolved ownership debt. All 29 Swift tests
+passed, including 15 injected native wait/error scenarios and Swift ownership,
+capacity and deinit cases. The original format receipt remains unchanged;
+[new lifecycle evidence](results/2026-10-12-lifecycle.json) records the new
+binaries and the original absent `/usr/bin/sleep` path erratum.
+
+Reproduce the bounded process probes using the newly built artifacts:
+
+```sh
+swift test --package-path apple/Cowork/WinterCoworkKeyBroker --jobs 2
+python3 apple/Cowork/WinterCoworkKeyBroker/scripts/verify-lifecycle.py \
+  --artifacts apple/Cowork/WinterCoworkKeyBroker/.build/debug \
+  --output /tmp/winter-key-lifecycle-receipt.json
+```
+
+The Python runner creates disposable 0700 homes and temporary directories,
+passes a closed environment, records failures before parsing receipts, and
+stops without retrying. It runs only the fixed no-key timeout fixture and
+the existing synthetic key-delivery fixture. Neither opens a VM, Keychain,
+live Winter home or daemon. See Apple's [wait manual](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/wait.2.html)
+for `WNOHANG`, `ECHILD`, `EINTR`, and status semantics. These fixture results
+remain separate from production storage custody and encrypted volume I/O.

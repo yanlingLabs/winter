@@ -58,24 +58,6 @@ public struct FixedFixtureImage {
               let dictionary=information as? [String:Any],dictionary[kSecCodeInfoUnique as String] as? Data == codeHash else { throw BrokerFailure.imageMismatch }
     }
 }
-public final class OwnedChild {
-    public let pid: Int32
-    private var reaped=false
-    /// Optional fixture hook creates a deterministic path-swap race AFTER the
-    /// check. The executed-image check must still refuse before key delivery.
-    public init(image: FixedFixtureImage, mode: String, input: OwnedFD, output: OwnedFD, beforeSpawn: (() throws -> Void)? = nil) throws {
-        try image.validatePath();try beforeSpawn?()
-        var child:Int32=0
-        guard kb_spawn_suspended(image.path,mode,input.value,output.value,&child)==0,child>0 else { throw BrokerFailure.processFailure }
-        pid=child
-        do { try image.validateExecuted(pid) }
-        catch { _=kill(pid,SIGKILL);_=kb_wait_owned(pid,2000);reaped=true;throw error }
-    }
-    public func resume() throws { guard !reaped,kb_resume(pid)==0 else { throw BrokerFailure.processFailure } }
-    public func waitStatus() throws -> Int32 { guard !reaped else { throw BrokerFailure.processFailure };let status=kb_wait_owned(pid,2000);reaped=true;guard status>=0 else { throw BrokerFailure.processFailure };return status }
-    public func wait() throws { guard try waitStatus()==0 else { throw BrokerFailure.processFailure } }
-    deinit { if !reaped { _=kill(pid,SIGKILL);_=kb_wait_owned(pid,2000) } }
-}
 public struct WorkerBootstrap: Codable {
     public let frameVersion: UInt32
     public let keyByteCount: UInt16
