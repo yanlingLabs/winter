@@ -106,7 +106,7 @@ class KernelTests(unittest.TestCase):
         self.assertEqual(features,bootstrap.EXT4_FEATURES);self.assertEqual(transient,[])
     def test_corrupt_journal_refuses_without_claiming_unchanged_metadata(self):
         _,_,journal=self.committed_transaction();os.pwrite(self.fd,b'BAD!',journal*4096);os.fsync(self.fd)
-        with self.assertRaises(replay.ReplayUncertain):self.port(self.fd,self.target,self.deadline)
+        with self.assertRaisesRegex(replay.ReplayUncertain,'kernel_replay_failed_metadata_may_have_changed'):self.port(self.fd,self.target,self.deadline)
         # No automatic retry/deletion. This keeps the failed fixture for recovery/audit,
         # even if the helper independently detached its loop before reporting failure.
 if __name__=='__main__':unittest.main(verbosity=2)
