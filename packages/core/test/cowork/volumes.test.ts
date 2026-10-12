@@ -224,3 +224,40 @@ test("outer release/claim/open rollback cannot restore one owner beside another 
     expect(readFileSync(f.image()).subarray(8192, 8205).toString()).toBe("committed-two");
   } finally { second.close(); }
 });
+
+test("failed transaction completion closes an opened descriptor without retaining a local handle", () => {
+  const f = fixture(); allocate(f); f.store.claim(f.request);
+  let armed = true, observedFd: number | undefined;
+  const failingDb: RuntimeStateDb = {
+    ...f.db,
+    transaction: (fn, options) => f.db.transaction(() => {
+      const result = fn();
+      if (armed) throw new Error("fixture-transaction-completion-failed");
+      return result;
+    }, options),
+  };
+  const lifecycle = new CoworkVolumes(failingDb, f.home, authority, {
+    excludeItem: (...args) => f.backup.excludeItem(...args),
+    verifyItemExcluded: (path, fd) => { observedFd = fd; return f.backup.verifyItemExcluded(path, fd); },
+  });
+  let descriptorClosed = false;
+  try {
+    expect(() => lifecycle.open(f.request, "data")).toThrow("fixture-transaction-completion-failed");
+    expect(observedFd).toBeDefined();
+    try { fstatSync(observedFd!); } catch (error) { descriptorClosed = (error as NodeJS.ErrnoException).code === "EBADF"; }
+    expect(lifecycle.records(f.request.workspaceId).map(v => v.owner)).toEqual([f.request.owner, f.request.owner]);
+    armed = false;
+    let releaseError: unknown;
+    try { lifecycle.release(f.request, { confirmationId: "native-stop-after-failure", proof: stopProof }); }
+    catch (error) { releaseError = error; }
+    expect({ descriptorClosed, releaseError }).toEqual({ descriptorClosed: true, releaseError: undefined });
+  } finally {
+    // Keep the intentionally failing pre-fix run from leaking its real disposable descriptor.
+    if (!descriptorClosed && observedFd !== undefined) closeSync(observedFd);
+  }
+  const next = { ...f.request, owner: { ...f.request.owner, workerInstanceId: "worker-two", incarnationId: "incarnation-two", leaseEpoch: 2 } };
+  lifecycle.claim(next); const handle = lifecycle.open(next, "data");
+  try { writeSync(handle.fd, Buffer.from("next-after-failure"), 0, 18, 4096); }
+  finally { handle.close(); handle.close(); }
+  expect(readFileSync(f.image()).subarray(4096, 4114).toString()).toBe("next-after-failure");
+});

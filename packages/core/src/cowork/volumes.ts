@@ -261,16 +261,25 @@ export class CoworkVolumes {
    * explicitly to its authenticated worker. Descriptor closure does not prove worker termination. */
   open(input: CoworkVolumeRequest, purpose: VolumePurpose): { volume: CoworkVolumeRecord; fd: number; close(): void } {
     if (this.rs.db.inTransaction) fail("invalid_request");
-    return this.rs.transaction(() => {
-      const { request, homeId } = this.admit("open", input), volume = this.records(request.workspaceId).find(v => v.purpose === purpose);
-      if (!volume) fail("not_found");
-      if (volume.homeId !== homeId || volume.state !== "allocated" || !sameOwner(volume.owner, request.owner)) fail("volume_busy");
-      const handle = this.openChecked(volume); let closed = false;
-      this.handles.set(volume.workspaceId, (this.handles.get(volume.workspaceId) ?? 0) + 1);
-      return { volume, fd: handle.fd, close: () => {
-        if (!closed) { closed = true; handle.close(); this.handles.set(volume.workspaceId, (this.handles.get(volume.workspaceId) ?? 1) - 1); }
-      } };
-    }, { mode: "immediate" });
+    const pending: { handle?: { fd: number; close(): void } } = {};
+    let opened: { volume: CoworkVolumeRecord; handle: { fd: number; close(): void } };
+    try {
+      opened = this.rs.transaction(() => {
+        const { request, homeId } = this.admit("open", input), volume = this.records(request.workspaceId).find(v => v.purpose === purpose);
+        if (!volume) fail("not_found");
+        if (volume.homeId !== homeId || volume.state !== "allocated" || !sameOwner(volume.owner, request.owner)) fail("volume_busy");
+        const handle = this.openChecked(volume); pending.handle = handle;
+        return { volume, handle };
+      }, { mode: "immediate" });
+    } catch (error) {
+      // COMMIT may fail after the callback opened an image. No descriptor or local handle survives.
+      pending.handle?.close(); throw error;
+    }
+    const { volume, handle } = opened; let closed = false;
+    this.handles.set(volume.workspaceId, (this.handles.get(volume.workspaceId) ?? 0) + 1);
+    return { volume, fd: handle.fd, close: () => {
+      if (!closed) { closed = true; handle.close(); this.handles.set(volume.workspaceId, (this.handles.get(volume.workspaceId) ?? 1) - 1); }
+    } };
   }
   release(input: CoworkVolumeRequest, stop: CoworkVolumeStop): void {
     if (this.rs.db.inTransaction) fail("invalid_request");

@@ -74,7 +74,9 @@ primitive currently refuses replacement entirely.
 `open(request,purpose)` requires that exact owner and returns a pinned descriptor
 with an idempotent `close`, never a raw-path grant. The descriptor is deliberately
 close-on-exec; the native controller must transfer it explicitly on its admitted
-worker channel. Closing a handle does not free ownership. Both disks remain bound
+worker channel. If transaction completion fails after opening an image, the pending
+descriptor is closed; local handle accounting is published only after successful
+completion. Closing a handle does not free ownership. Both disks remain bound
 to controller instance, worker instance, incarnation, lease epoch and runtime image
 digest across Core restarts. `release` requires the same owner, no local outstanding
 handles and positive protected native stop verification for that owner and both
