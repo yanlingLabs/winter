@@ -35,7 +35,8 @@ source and `read` + `git.read`; host preparation may read a preparing source. A
 missing session ID is **host preparation authority**, never a guest-selected
 option. The daemon/native channel must inject the caller from its authenticated
 owner records and host source operation. `GitHubReadGrantResolver` must resolve
-protected current records; account grant revisions advance on changes and restored
+synchronous protected current repository/account/task-scope snapshots (network/refresh
+runs outside authorization). No await follows the final canonical snapshot. Account grant revisions advance on changes and restored
 contents. SecretStore slot names come only from those host records. Every auth await,
 body read and final completion rechecks the grant; a periodic single-flight check
 also cancels stalled streams. Host revocation handlers call `revoke` immediately.

@@ -47,7 +47,7 @@ export class CoworkGitHubReadTransport {
     // Reject before copying so an oversized request cannot allocate another oversized buffer.
     if (requestInput.body !== undefined && !(requestInput.body instanceof Uint8Array)) throw new GitReadError("invalid_request");
     if (requestInput.body && requestInput.body.length > this.limits.requestBytes) throw new GitReadError("budget_exceeded");
-    const caller = { ...callerInput }, request = { ...requestInput, body: requestInput.body?.slice() };
+    const caller = { ...callerInput }, request = { ...requestInput, body: requestInput.body === undefined ? undefined : Uint8Array.from(requestInput.body) };
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(request.sourceId) || !Number.isSafeInteger(request.sourceRevision) || request.sourceRevision < 1
       || !Number.isSafeInteger(request.grantRevision) || request.grantRevision < 1
       || !["advertise", "upload-pack"].includes(request.operation) || (request.operation === "advertise" && request.body !== undefined)

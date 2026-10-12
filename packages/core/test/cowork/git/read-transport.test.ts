@@ -99,3 +99,13 @@ test("real Git clone + incremental fetch through private fake upstream keep cred
   const config = readFileSync(join(guest, ".git/config"), "utf8"); expect(config).not.toContain(sentinel); expect(config).not.toContain("credential"); expect(config).not.toContain("fixture-slot"); expect(await Bun.file(join(root, "helper-ran")).exists()).toBe(false); expect(privateCalls).toBeGreaterThanOrEqual(4); expect(gatewayCalls).toBe(privateCalls);
   expect((await fetch(`http://127.0.0.1:${gateway.port}/source.git/info/refs?service=git-receive-pack`)).status).toBe(403);
 }, 15_000);
+
+test("Buffer input is an owned snapshot; caller mutation during secret lookup cannot alter validated POST", async () => {
+  const original = Buffer.concat([pkt(`want ${"1".repeat(40)}\n`), Buffer.from("0000"), pkt("done\n")]);
+  const expected = Uint8Array.from(original); let posted: Uint8Array | undefined;
+  const t = new CoworkGitHubReadTransport({ authorize: async () => ({ ...grant }) }, { get: async () => { original.fill(0x58); return sentinel; } }, async (_url, init) => {
+    posted = init.body as Uint8Array; return response(pkt("NAK\n"), "result");
+  }, {}, { isolatedFixture: true });
+  await t.read(caller, { ...request, operation: "upload-pack", body: original });
+  expect(posted).toEqual(expected); expect(original).not.toEqual(Buffer.from(expected));
+});
