@@ -4,7 +4,7 @@ import { chmodSync, closeSync, constants, fstatSync, ftruncateSync, linkSync, mk
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CoworkVolumes, CoworkVolumeError, RAW_VOLUME_MIN_BYTES, RAW_VOLUME_MAX_BYTES, type CoworkVolumeAuthority, type CoworkVolumeRequest, type VolumeFailure } from "../../src/cowork/volumes";
-import { hasStickyBackupExclusion } from "../../src/cowork/volume-fs";
+import { BACKUP_EXCLUSION_MAX_BYTES, hasStickyBackupExclusion, isStickyBackupExclusion } from "../../src/cowork/volume-fs";
 import { timeMachineVolumeBackup, type CoworkVolumeBackup } from "../../src/cowork/volume-backup";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { downgradeCoworkRuntimeStateToV7, downgradeRuntimeStateToV6, openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
@@ -20,7 +20,12 @@ function fixture(backup?: CoworkVolumeBackup, checkpoint?: (phase: string) => vo
   const repository = new CoworkRepository(db); repository.homeIdentity();
   const made = repository.create({ principalId: "fixture-user", requestId: "create" }, { ownership: "project", title: "Fixture", sources: [{ kind: "folder", label: "Fixture", access: "read-write", detail: { grantRef: "fixture-grant", rootIdentity: "fixture-root" } }], ceiling: { toolClasses: [], hostServices: [], connectors: [], network: "none" } });
   const excluded = new Set<string>();
-  const fakeBackup: CoworkVolumeBackup = { excludeItem: (_path, fd) => { const st = fstatSync(fd); excluded.add(`${st.dev}:${st.ino}`); }, verifyItemExcluded: (_path, fd) => { const st = fstatSync(fd); return excluded.has(`${st.dev}:${st.ino}`); } };
+  const descriptorExcluded = (fd: number) => { const st = fstatSync(fd); return excluded.has(`${st.dev}:${st.ino}`); };
+  const fakeBackup: CoworkVolumeBackup = {
+    excludeItem: (_path, fd) => { expect(db.db.inTransaction).toBe(false); const st = fstatSync(fd); excluded.add(`${st.dev}:${st.ino}`); },
+    verifyItemExcluded: (_path, fd) => { expect(db.db.inTransaction).toBe(false); return descriptorExcluded(fd); },
+    verifyDescriptorExcluded: descriptorExcluded,
+  };
   const request: CoworkVolumeRequest = { workspaceId: made.workspaceId, proof, owner: { controllerInstanceId: "controller-one", workerInstanceId: "worker-one", incarnationId: "incarnation-one", leaseEpoch: 1, runtimeImageDigest: "a".repeat(64) } };
   const store = new CoworkVolumes(db, home, authority, backup ?? fakeBackup, checkpoint);
   return { home, db, request, store, backup: backup ?? fakeBackup, excluded, image: (name = "data.ext4") => join(home, "cowork", "workspaces", request.workspaceId, name) };
@@ -92,7 +97,7 @@ test("unknown existing images are preserved when exclusive creation refuses", ()
 });
 test("lost exclusion blocks future open; partial allocation retries its pinned virgin inode", () => {
   let fails = true;
-  const backup: CoworkVolumeBackup = { excludeItem: () => {}, verifyItemExcluded: () => !fails };
+  const backup: CoworkVolumeBackup = { excludeItem: () => {}, verifyItemExcluded: () => !fails, verifyDescriptorExcluded: () => !fails };
   const f = fixture(backup); f.store.plan(f.request, capacities);
   refusal(() => f.store.materialize(f.request), "backup_exclusion_unavailable");
   const first = f.store.records(f.request.workspaceId).find(v => v.purpose === "data")!;
@@ -116,7 +121,7 @@ for (const phase of ["creation-intent", "image-created", "backup-excluded", "ima
 });
 test("backup path replacement during exclusion refuses; recorded old inode remains preserved", () => {
   let f: ReturnType<typeof fixture>;
-  const backup: CoworkVolumeBackup = { excludeItem: path => { renameSync(path, `${path}-saved`); writeFileSync(path, "injected replacement", { mode: 0o600 }); }, verifyItemExcluded: () => true };
+  const backup: CoworkVolumeBackup = { excludeItem: path => { renameSync(path, `${path}-saved`); writeFileSync(path, "injected replacement", { mode: 0o600 }); }, verifyItemExcluded: () => true, verifyDescriptorExcluded: () => true };
   f = fixture(backup); f.store.plan(f.request, capacities); refusal(() => f.store.materialize(f.request), "recovery_required");
   expect(statSync(`${f.image()}-saved`).size).toBe(0); expect(readFileSync(f.image()).toString()).toBe("injected replacement");
 });
@@ -239,6 +244,7 @@ test("failed transaction completion closes an opened descriptor without retainin
   const lifecycle = new CoworkVolumes(failingDb, f.home, authority, {
     excludeItem: (...args) => f.backup.excludeItem(...args),
     verifyItemExcluded: (path, fd) => { observedFd = fd; return f.backup.verifyItemExcluded(path, fd); },
+    verifyDescriptorExcluded: fd => f.backup.verifyDescriptorExcluded(fd),
   });
   let descriptorClosed = false;
   try {
@@ -260,4 +266,62 @@ test("failed transaction completion closes an opened descriptor without retainin
   try { writeSync(handle.fd, Buffer.from("next-after-failure"), 0, 18, 4096); }
   finally { handle.close(); handle.close(); }
   expect(readFileSync(f.image()).subarray(4096, 4114).toString()).toBe("next-after-failure");
+});
+
+test("named backup helpers stay outside writer transactions while pinned checks run inside", () => {
+  const f = fixture();
+  let itemChecks = 0, lockedDescriptorChecks = 0;
+  const lifecycle = new CoworkVolumes(f.db, f.home, authority, {
+    excludeItem: (path, fd) => { expect(f.db.db.inTransaction).toBe(false); f.backup.excludeItem(path, fd); },
+    verifyItemExcluded: (path, fd) => { expect(f.db.db.inTransaction).toBe(false); itemChecks++; return f.backup.verifyItemExcluded(path, fd); },
+    verifyDescriptorExcluded: fd => { if (f.db.db.inTransaction) lockedDescriptorChecks++; return f.backup.verifyDescriptorExcluded(fd); },
+  });
+  lifecycle.allocate(f.request, capacities); lifecycle.plan(f.request, capacities);
+  lifecycle.claim(f.request); const handle = lifecycle.open(f.request, "data"); handle.close();
+  lifecycle.release(f.request, { confirmationId: "native-stop-outside-backup", proof: stopProof });
+  expect(itemChecks).toBeGreaterThan(0); expect(lockedDescriptorChecks).toBeGreaterThan(0);
+  refusal(() => f.db.transaction(() => lifecycle.plan(f.request, capacities)), "invalid_request");
+});
+
+for (const drift of ["exclusion", "replacement", "owner"] as const) test(`open revalidates ${drift} after external backup check and closes its pending descriptor`, () => {
+  const f = fixture(); allocate(f); f.store.claim(f.request);
+  let observedFd: number | undefined;
+  const racedDb: RuntimeStateDb = {
+    ...f.db,
+    transaction: (fn, options) => {
+      if (drift === "exclusion") f.excluded.clear();
+      if (drift === "replacement") { renameSync(f.image(), `${f.image()}-saved`); writeFileSync(f.image(), "preserved-replacement", { mode: 0o600 }); }
+      if (drift === "owner") f.db.db.run("UPDATE cowork_volumes SET owner_json=? WHERE workspace_id=?", [JSON.stringify({ ...f.request.owner, workerInstanceId: "worker-two" }), f.request.workspaceId]);
+      return f.db.transaction(fn, options);
+    },
+  };
+  const lifecycle = new CoworkVolumes(racedDb, f.home, authority, {
+    excludeItem: (...args) => f.backup.excludeItem(...args),
+    verifyItemExcluded: (path, fd) => { observedFd = fd; return f.backup.verifyItemExcluded(path, fd); },
+    verifyDescriptorExcluded: fd => f.backup.verifyDescriptorExcluded(fd),
+  });
+  refusal(() => lifecycle.open(f.request, "data"), drift === "exclusion" ? "backup_exclusion_unavailable" : drift === "owner" ? "volume_busy" : "recovery_required");
+  expect(observedFd).toBeDefined();
+  try { fstatSync(observedFd!); throw new Error("descriptor-leaked"); }
+  catch (error) { expect((error as NodeJS.ErrnoException).code).toBe("EBADF"); }
+  if (drift === "replacement") expect(readFileSync(f.image()).toString()).toBe("preserved-replacement");
+  if (drift !== "owner") expect(lifecycle.records(f.request.workspaceId).map(v => v.owner)).toEqual([f.request.owner, f.request.owner]);
+});
+
+function markerPlist(text: string, unicode = false, offsetBytes = 1, lengthBytes = 1): Buffer {
+  const encoded = unicode ? Buffer.from(text, "utf16le").swap16() : Buffer.from(text, "ascii");
+  const count = Buffer.alloc(lengthBytes); count.writeUIntBE(text.length, 0, lengthBytes);
+  const object = Buffer.concat([Buffer.from([unicode ? 0x6f : 0x5f, 0x10 | Math.log2(lengthBytes)]), count, encoded]);
+  const offsets = Buffer.alloc(offsetBytes); offsets.writeUIntBE(8, 0, offsetBytes);
+  const trailer = Buffer.alloc(32); trailer[6] = offsetBytes; trailer[7] = 1;
+  trailer.writeBigUInt64BE(1n, 8); trailer.writeBigUInt64BE(BigInt(8 + object.length), 24);
+  return Buffer.concat([Buffer.from("bplist00"), object, offsets, trailer]);
+}
+test("sticky exclusion parses bounded plist strings across equivalent binary encodings", () => {
+  const text = "com.apple.backupd";
+  for (const unicode of [false, true]) for (const offsetBytes of [1, 2, 4]) for (const lengthBytes of [1, 2, 4]) expect(isStickyBackupExclusion(markerPlist(text, unicode, offsetBytes, lengthBytes))).toBe(true);
+  for (const other of ["", "com.apple.backup", `${text}\0`, `${text}x`, "com.apple.backup\0"]) expect(isStickyBackupExclusion(markerPlist(other))).toBe(false);
+  const valid = markerPlist(text), malformed = Buffer.from(valid); malformed.writeBigUInt64BE(999n, malformed.length - 8);
+  const notString = Buffer.from(valid); notString[8] = 0x4f;
+  for (const value of [Buffer.alloc(0), valid.subarray(0, valid.length - 1), malformed, notString, Buffer.alloc(BACKUP_EXCLUSION_MAX_BYTES + 1), Buffer.from(`<plist><string>${text}</string></plist>`)]) expect(isStickyBackupExclusion(value)).toBe(false);
 });
