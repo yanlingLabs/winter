@@ -25,6 +25,17 @@ function selection(value: SourceSelection): SourceSelection {
   if (value.kind === "githubRepository") return { kind: value.kind, label, access, detail: { repositoryId: id(value.detail.repositoryId), authorityRef: id(value.detail.authorityRef), initialRef: text(value.detail.initialRef) } };
   throw new CoworkError("invalid_request");
 }
+type CreationInput = { ownership: "standalone" | "project"; title: string; sources: SourceSelection[]; ceiling: CapabilityCeiling; defaultPolicy?: ApprovalPolicy };
+function normalizedCreation(input: CreationInput) {
+  if (!["standalone", "project"].includes(input.ownership) || !Array.isArray(input.sources) || input.sources.length < 1 || input.sources.length > 100) throw new CoworkError("invalid_request");
+  const normalized = { ...input, title: text(input.title, 200), sources: input.sources.map(selection), ceiling: ceiling(input.ceiling), defaultPolicy: input.defaultPolicy ?? "auto" };
+  if (!POLICIES.has(normalized.defaultPolicy)) throw new CoworkError("invalid_request");
+  return normalized;
+}
+function requestDigest(context: MutationContext, input: unknown): string {
+  const value = digest({ input: context.requestDigestInput ?? input, expectedRevision: context.expectedRevision ?? null });
+  return context.requestDigestInput === undefined ? value : `v2:${value}`;
+}
 function workspace(row: Row): Workspace {
   return { workspaceId: row.workspace_id, ownership: row.ownership, ownerId: row.owner_id, title: row.title, state: row.state, configRevision: row.config_revision, grantRevision: row.grant_revision, instructionRevision: row.instruction_revision, incarnationId: row.incarnation_id, leaseEpoch: row.lease_epoch, power: row.power, createdAt: row.created_at, updatedAt: row.updated_at };
 }
@@ -102,21 +113,34 @@ export class CoworkRepository {
     if (changed.changes) this.publish(workspaceId, operationId, "workspace_operation_changed", { operationId, status, terminal: true, ...(supersededBy ? { supersededBy } : {}) });
   }
   /** Exact immutable receipt lookup only; caller must reauthorize live workspace/grants. */
-  replay<T>(context: MutationContext, method: string, scope: string): MutationReceipt<T> | undefined {
+  replay<T>(context: MutationContext, method: string, scope: string, legacyInput?: () => unknown): MutationReceipt<T> | undefined {
     if (context.requestDigestInput === undefined) throw new CoworkError("invalid_request");
     id(context.principalId); id(context.requestId); method = id(context.method ?? method); id(scope);
     const previous = this.one("SELECT request_digest,result_json FROM cowork_operations WHERE principal_id=? AND method=? AND scope=? AND request_id=?", context.principalId, method, scope, context.requestId);
     if (!previous) return undefined;
-    if (previous.request_digest !== digest({ input: context.requestDigestInput, expectedRevision: context.expectedRevision ?? null })) throw new CoworkError("request_conflict");
+    // v2 binds the closed client request. Legacy receipts bind resolved, normalized host input;
+    // verify that input only through a fresh selection/authority resolver, never infer opaque IDs.
+    let expected: string;
+    if (/^[a-f0-9]{64}$/.test(previous.request_digest)) {
+      if (!legacyInput) throw new CoworkError("authority_denied");
+      expected = digest({ input: legacyInput(), expectedRevision: context.expectedRevision ?? null });
+    } else expected = requestDigest(context, context.requestDigestInput);
+    if (previous.request_digest !== expected) throw new CoworkError("request_conflict");
     return JSON.parse(previous.result_json) as MutationReceipt<T>;
+  }
+  replayCreation(context: MutationContext, resolve: () => CreationInput): ReturnType<CoworkRepository["create"]> | undefined {
+    return this.replay(context, "workspace.create", "new", () => normalizedCreation(resolve()));
+  }
+  replaySourceAddition(context: MutationContext, workspaceId: string, resolve: () => SourceSelection): MutationReceipt<WorkspaceSource> | undefined {
+    return this.replay(context, "workspace.source.add", id(workspaceId), () => selection(resolve()));
   }
   private mutate<T>(context: MutationContext, method: string, scope: string, input: unknown, body: () => { workspaceId: string; value: T; kind: string; payload?: unknown; changedSources?: string[]; applied?: boolean }): MutationReceipt<T> {
     id(context.principalId); id(context.requestId); method = id(context.method ?? method);
-    const requestDigest = digest({ input: context.requestDigestInput ?? input, expectedRevision: context.expectedRevision ?? null });
+    const currentDigest = requestDigest(context, input);
     return this.rs.transaction(() => {
       const previous = this.one("SELECT request_digest,result_json FROM cowork_operations WHERE principal_id=? AND method=? AND scope=? AND request_id=?", context.principalId, method, scope, context.requestId);
       if (previous) {
-        if (previous.request_digest !== requestDigest) throw new CoworkError("request_conflict");
+        if (previous.request_digest !== currentDigest) throw new CoworkError("request_conflict");
         return JSON.parse(previous.result_json) as MutationReceipt<T>;
       }
       if (scope !== "new") {
@@ -129,7 +153,7 @@ export class CoworkRepository {
       const result = body(), current = this.get(result.workspaceId), operationId = this.mint("operation"), at = this.now();
       const receipt: MutationReceipt<T> = { operationId, workspaceId: current.workspaceId, revision: current.configRevision, value: result.value };
       context.validateReceipt?.(receipt);
-      this.run("INSERT INTO cowork_operations VALUES(?,?,?,?,?,?,?,?,?,?,?)", operationId, context.principalId, method, scope, context.requestId, requestDigest, current.workspaceId, result.applied ? "applied" : "pending", canonical(receipt), at, at);
+      this.run("INSERT INTO cowork_operations VALUES(?,?,?,?,?,?,?,?,?,?,?)", operationId, context.principalId, method, scope, context.requestId, currentDigest, current.workspaceId, result.applied ? "applied" : "pending", canonical(receipt), at, at);
       for (const sourceId of result.changedSources ?? []) {
         const previousOperation = this.one("SELECT operation_id FROM cowork_sources WHERE workspace_id=? AND source_id=?", current.workspaceId, sourceId)?.operation_id;
         if (previousOperation) this.concludeOperation(current.workspaceId, previousOperation, "superseded", operationId);
@@ -142,10 +166,8 @@ export class CoworkRepository {
   private advance(workspaceId: string, authority = false): void {
     this.run("UPDATE cowork_workspaces SET config_revision=config_revision+1,grant_revision=grant_revision+?,updated_at=? WHERE workspace_id=?", authority ? 1 : 0, this.now(), workspaceId);
   }
-  create(context: MutationContext, input: { ownership: "standalone" | "project"; title: string; sources: SourceSelection[]; ceiling: CapabilityCeiling; defaultPolicy?: ApprovalPolicy }): MutationReceipt<{ workspace: Workspace; sources: WorkspaceSource[]; policy: WorkspacePolicy; automaticPublication: boolean }> {
-    if (!["standalone", "project"].includes(input.ownership) || !Array.isArray(input.sources) || input.sources.length < 1 || input.sources.length > 100) throw new CoworkError("invalid_request");
-    const normalized = { ...input, title: text(input.title, 200), sources: input.sources.map(selection), ceiling: ceiling(input.ceiling), defaultPolicy: input.defaultPolicy ?? "auto" };
-    if (!POLICIES.has(normalized.defaultPolicy)) throw new CoworkError("invalid_request");
+  create(context: MutationContext, input: CreationInput): MutationReceipt<{ workspace: Workspace; sources: WorkspaceSource[]; policy: WorkspacePolicy; automaticPublication: boolean }> {
+    const normalized = normalizedCreation(input);
     return this.mutate(context, "workspace.create", "new", normalized, () => {
       const workspaceId = this.mint("workspace"), ownerId = this.mint(input.ownership === "project" ? "project" : "session"), at = this.now();
       this.run("INSERT INTO cowork_workspaces VALUES(?,?,?,?,'retained',1,1,1,NULL,0,'stopped',?,?)", workspaceId, input.ownership, ownerId, normalized.title, at, at);

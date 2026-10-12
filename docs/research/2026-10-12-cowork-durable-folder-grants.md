@@ -1,6 +1,8 @@
 # Durable Mac folder grant implementation — 2026-10-12
 
-Implemented on `cowork/durable-folder-grants`, isolated worktree `.worktrees/durable-folder-grants`, from output integration `4b104b62f533ee068b8b9e38f1568e5ce283e023`. This report describes source implementation and disposable host tests. It is not native provisioning, worker admission, TCC acceptance or production startup evidence. The parent explicitly assigned exclusive schema11 migration ownership for this slice.
+Initial frozen implementation `6b0425ee3d1d88405dded30d0f58f0d6903e5c82` on `cowork/durable-folder-grants`, isolated worktree `.worktrees/durable-folder-grants`, from output integration `4b104b62f533ee068b8b9e38f1568e5ce283e023`. This report describes source implementation and disposable host tests. It is not native provisioning, worker admission, TCC acceptance or production startup evidence. The parent explicitly assigned exclusive schema11 migration ownership for this slice.
+
+The initial validation below is retained as historical author evidence. Independent review found legacy receipt compatibility and a brittle global descriptor-count assertion; [the correction and current validation](2026-10-12-cowork-durable-folder-grants-replay-correction.md) supersede those two parts.
 
 ## Implemented behavior
 

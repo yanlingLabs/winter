@@ -213,7 +213,11 @@ export class CoworkWorkspaceService {
       case "workspace.create": case "project.create": {
         const p = method === "workspace.create" ? COWORK_RPC[method].params.parse(raw) : { ...COWORK_RPC[method].params.parse(raw), ownership: "project" as const };
         const context = this.context(principal, method, p); context.requestDigestInput = p;
-        const previous = this.records.replay<ReturnType<CoworkRepository["create"]>["value"]>(context, method, "new");
+        const previous = this.records.replayCreation(context, () => {
+          const ceiling = this.host.creationCeiling(principal);
+          if (!ceiling) throw new CoworkError("authority_denied");
+          return { ownership: p.ownership, title: p.title, sources: p.selections.map(value => this.select(principal, value.selectionId, value.kind, connection)), ceiling };
+        });
         if (previous) {
           this.requireReplaySources(principal, previous.workspaceId, previous.value.sources);
           return { ...previous, value: WorkspaceDto.parse({ ...projectWorkspace(previous.value.workspace), detailState: "complete", sources: previous.value.sources.map(projectSource), policy: previous.value.policy, automaticPublication: previous.value.automaticPublication }) };
@@ -267,7 +271,7 @@ export class CoworkWorkspaceService {
         // Paired additions require both current workspace membership and admitted repository authority.
         assertRemoteMayUseWorkspace(this.records, this.authority, principal, p.workspaceId, method === "workspace.source.addFolder" ? "admin" : "member");
         const context = this.context(principal, method, p); context.requestDigestInput = p;
-        const previous = this.records.replay<WorkspaceSource>(context, method, p.workspaceId);
+        const previous = this.records.replaySourceAddition(context, p.workspaceId, () => this.select(principal, p.selectionId, method === "workspace.source.addFolder" ? "folder" : "githubRepository", connection));
         if (previous) { this.requireReplaySources(principal, p.workspaceId, [previous.value]); return { ...previous, value: projectSource(previous.value) }; }
         this.host.requireProvisioning(principal);
         const selected = this.select(principal, p.selectionId, method === "workspace.source.addFolder" ? "folder" : "githubRepository", connection);

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, fstatSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CoworkFolderGrants } from "../../src/cowork/folder-grants";
@@ -38,9 +38,13 @@ function fixture(limit=4096){
 function create(f:ReturnType<typeof fixture>){const p=f.prepare(),request=f.request(p.selectionId);const made=f.service.call(connection,"workspace.create",request);const source=f.records.sources(made.workspaceId)[0]!;return {p,request,made,source};}
 
 test("source acceptance atomically binds private grant and releases ephemeral descriptor after commit",()=>{
-  const f=fixture(),baseline=readdirSync("/dev/fd").length,{p,made,source}=create(f);
+  const f=fixture(),p=f.prepare();
+  // Observe this preparation's owned FD; unrelated process-wide FD closes/reuse are irrelevant.
+  const fd=(f.selections as any).entries.get(p.selectionId).fd as number, pinned=fstatSync(fd,{bigint:true});
+  const made=f.service.call(connection,"workspace.create",f.request(p.selectionId)),source=f.records.sources(made.workspaceId)[0]!;
+  const stillPinned=()=>{try{const current=fstatSync(fd,{bigint:true});return current.dev===pinned.dev&&current.ino===pinned.ino;}catch{return false;}};
   expect(f.db.schemaVersion()).toBe(11);expect(source.state).toBe("preparing");expect(source.trust).toBe("untrusted");
-  expect(f.scopes()).toBe(0);expect(readdirSync("/dev/fd").length).toBe(baseline);
+  expect(f.scopes()).toBe(0);expect(stillPinned()).toBe(false);
   if(source.kind!=="folder")throw new Error("folder");
   const grant=f.grants.get(source.detail.grantRef)!;
   expect([grant.workspaceId,grant.sourceId,grant.principalId,grant.selectionId,grant.homeId]).toEqual([made.workspaceId,source.sourceId,principal.id,p.selectionId,f.records.homeIdentity()]);
@@ -152,4 +156,53 @@ test("multi-source consumption rolls back every grant when the second binding ex
   expect(()=>f.service.call(connection,"workspace.create",request)).toThrow("authority_denied");
   expect(bound).toBe(1);expect(f.scopes()).toBe(2);
   expect(f.records.list()).toEqual([]);expect(f.db.db.query("SELECT count(*) AS n FROM cowork_folder_grants").get()).toEqual({n:0});expect(f.db.db.query("SELECT count(*) AS n FROM cowork_operations").get()).toEqual({n:0});
+});
+
+function legacyRepositoryFixture() {
+  const f=fixture(),source={kind:"githubRepository" as const,label:"Repo",access:"read-write" as const,detail:{repositoryId:"repo",authorityRef:"auth",initialRef:"main"}},ceiling={toolClasses:["read"],hostServices:[],connectors:[],network:"none" as const};
+  const createRequest={requestId:"old-create",ownership:"project" as const,title:"Old",selections:[{selectionId:"repo-selection",kind:"githubRepository" as const}]};
+  const created=f.records.create({principalId:principal.id,method:"workspace.create",requestId:"old-create"},{ownership:"project",title:"Old",sources:[source],ceiling});
+  const addRequest={workspaceId:created.workspaceId,requestId:"old-add",expectedRevision:1,selectionId:"repo-selection"};
+  const added=f.records.addSource({principalId:principal.id,method:"workspace.source.addRepository",requestId:"old-add",expectedRevision:1},created.workspaceId,source);
+  f.db.db.run("DROP TABLE cowork_folder_grants");f.db.db.run("PRAGMA user_version=10");f.restart();
+  f.ports.selection=(_principal,id)=>id==="repo-selection"?source:undefined;
+  f.ports.creationCeiling=()=>ceiling;
+  f.ports.grants.repository=()=>({readable:true,writable:true,revoked:false});
+  // Previous successful effects may be retried while new provisioning is independently disabled.
+  f.ports.requireProvisioning=()=>{throw new CoworkError("unsupported_topology");};
+  return {f,source,created,added,createRequest,addRequest};
+}
+test("schema10 exact create/add retry validates original normalized host payload and current authority",()=>{
+  const {f,source,created,added,createRequest,addRequest}=legacyRepositoryFixture();
+  const before=f.db.db.query("SELECT count(*) AS n FROM cowork_operations").get();
+  expect(f.service.call(connection,"workspace.create",createRequest).operationId).toBe(created.operationId);
+  expect(f.service.call(connection,"workspace.source.addRepository",addRequest).operationId).toBe(added.operationId);
+  expect(f.db.db.query("SELECT count(*) AS n FROM cowork_operations").get()).toEqual(before);expect(f.records.list()).toHaveLength(1);expect(f.records.sources(created.workspaceId)).toHaveLength(2);
+  expect(()=>f.service.call(connection,"workspace.create",{...createRequest,title:"Changed"})).toThrow("request_conflict");
+  f.ports.selection=()=>({...source,detail:{...source.detail,initialRef:"other"}});
+  expect(()=>f.service.call(connection,"workspace.source.addRepository",addRequest)).toThrow("request_conflict");
+});
+test("legacy replay refuses lost selection, changed ceiling and revoked current grant without inference",()=>{
+  const {f,created,createRequest,addRequest}=legacyRepositoryFixture();
+  f.ports.selection=()=>undefined;
+  expect(()=>f.service.call(connection,"workspace.create",createRequest)).toThrow("authority_denied");expect(()=>f.service.call(connection,"workspace.source.addRepository",addRequest)).toThrow("authority_denied");
+  expect(f.records.get(created.workspaceId).configRevision).toBe(2);expect(f.db.db.query("SELECT count(*) AS n FROM cowork_operations").get()).toEqual({n:2});
+  const other=legacyRepositoryFixture();other.f.ports.creationCeiling=()=>({toolClasses:[],hostServices:[],connectors:[],network:"none"});
+  expect(()=>other.f.service.call(connection,"workspace.create",other.createRequest)).toThrow("request_conflict");
+  other.f.ports.grants.repository=()=>({readable:true,writable:true,revoked:true});
+  expect(()=>other.f.service.call(connection,"workspace.source.addRepository",other.addRequest)).toThrow("authority_denied");
+});
+test("new source request digest is explicitly versioned and retries do not need old transient selections",()=>{
+  const f=fixture(),{made,request}=create(f);
+  const row=f.db.db.query("SELECT request_digest FROM cowork_operations WHERE operation_id=?").get(made.operationId) as {request_digest:string};
+  expect(row.request_digest).toMatch(/^v2:[a-f0-9]{64}$/);
+  f.ports.selection=()=>{throw new Error("must not resolve consumed selection");};
+  expect(f.service.call(connection,"workspace.create",request)).toEqual(made);
+});
+test("legacy folder retry after preparation loss refuses without inventing selection or durable grant",()=>{
+  const f=fixture(),p=f.prepare(),selected=f.selections.selection(principal,1,p.selectionId)!,request=f.request(p.selectionId,"old-folder");
+  const old=f.records.create({principalId:principal.id,method:"workspace.create",requestId:request.requestId},{ownership:request.ownership,title:request.title,sources:[selected],ceiling:f.ports.creationCeiling(principal)!});
+  f.db.db.run("DROP TABLE cowork_folder_grants");f.db.db.run("PRAGMA user_version=10");f.restart();
+  expect(()=>f.service.call(connection,"workspace.create",request)).toThrow("authority_denied");
+  expect(f.records.get(old.workspaceId).configRevision).toBe(1);expect(f.records.list()).toHaveLength(1);expect(f.db.db.query("SELECT count(*) AS n FROM cowork_folder_grants").get()).toEqual({n:0});
 });
