@@ -28,6 +28,115 @@ enum HeadlessNetworkRule {
         return "--host-resolver-rules=" + rules.joined(separator: ",")
     }
 
+    /// Where the PAC belt sends a refused host: a proxy that is never there. A privileged port on this Mac, so no
+    /// ordinary process can listen in its place, and not one Chromium refuses as unsafe — every connection to it
+    /// fails at once (connection refused), and nothing reaches the network.
+    static let deadProxy = "PROXY 127.0.0.1:4"
+
+    /// **The PAC belt**: the SAME rule as a proxy auto-config script, which Chromium's network service asks about every
+    /// request it makes — the ones no CEF handler sees too (a WebSocket, WebTransport, a Reporting API upload, a fetch
+    /// a certificate names) — before it opens a socket. A refused host goes to `deadProxy` and fails; everything else
+    /// is `DIRECT`, as it would be with no proxy. Plain JavaScript over the host string: no DNS, ever — it calls none of
+    /// the PAC helpers, since `isInNet` and `dnsResolve` resolve a name. Chromium hands the script an IPv6 host
+    /// without its brackets; it accepts both.
+    static var pacScript: String {
+        let suffixes = "[" + localNameSuffixes.map { "\"\($0)\"" }.joined(separator: ",") + "]"
+        return """
+        var SUFFIXES = \(suffixes);
+        var DEAD = "\(deadProxy)";
+        function v4(h) {
+          var p = h.split(".");
+          if (p.length !== 4) return null;
+          var out = [];
+          for (var i = 0; i < 4; i++) {
+            if (!/^[0-9]{1,3}$/.test(p[i])) return null;
+            var n = parseInt(p[i], 10);
+            if (n > 255) return null;
+            out.push(n);
+          }
+          return out;
+        }
+        function private4(v) {
+          var a = v[0], b = v[1];
+          if (a === 127) return false;
+          return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
+            || (a === 100 && b >= 64 && b <= 127) || a === 0 || a >= 224;
+        }
+        function v6(raw) {
+          var text = raw.split("%")[0];
+          if (text === "" || !/^[0-9a-f:.]+$/.test(text)) return null;
+          var tail = null;
+          if (text.indexOf(".") >= 0) {
+            var c = text.lastIndexOf(":");
+            if (c < 0) return null;
+            tail = v4(text.slice(c + 1));
+            if (tail === null) return null;
+            text = text.slice(0, c + 1) + "0:0";
+          }
+          var halves = text.split("::");
+          if (halves.length > 2) return null;
+          function groups(part) {
+            if (part === "") return [];
+            var out = [], g = part.split(":");
+            for (var i = 0; i < g.length; i++) {
+              if (!/^[0-9a-f]{1,4}$/.test(g[i])) return null;
+              out.push(parseInt(g[i], 16));
+            }
+            return out;
+          }
+          var head = groups(halves[0]);
+          var rest = halves.length === 2 ? groups(halves[1]) : [];
+          if (head === null || rest === null) return null;
+          var missing = 8 - head.length - rest.length;
+          if (halves.length === 2 ? missing < 1 : missing !== 0) return null;
+          var all = head.slice();
+          for (var j = 0; j < (halves.length === 2 ? missing : 0); j++) all.push(0);
+          all = all.concat(rest);
+          var bytes = [];
+          for (var k = 0; k < 8; k++) { bytes.push(all[k] >> 8); bytes.push(all[k] & 255); }
+          if (tail !== null) { bytes[12] = tail[0]; bytes[13] = tail[1]; bytes[14] = tail[2]; bytes[15] = tail[3]; }
+          return bytes;
+        }
+        function zero(b, from, to) { for (var i = from; i < to; i++) if (b[i] !== 0) return false; return true; }
+        function private6(b) {
+          var v = [b[12], b[13], b[14], b[15]];
+          if (zero(b, 0, 15) && b[15] === 1) return false;
+          if (zero(b, 0, 16)) return true;
+          if (zero(b, 0, 10) && b[10] === 255 && b[11] === 255) return private4(v);
+          if (zero(b, 0, 12)) return private4(v);
+          if (zero(b, 0, 8) && b[8] === 255 && b[9] === 255 && zero(b, 10, 12)) return private4(v);
+          if (b[0] === 0 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b && zero(b, 4, 12)) return private4(v);
+          var first = (b[0] << 8) | b[1];
+          return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80 || (first & 0xffc0) === 0xfec0
+            || (first & 0xff00) === 0xff00;
+        }
+        function refused(host) {
+          var h = String(host).toLowerCase();
+          if (h.charAt(h.length - 1) === ".") h = h.slice(0, -1);
+          if (h === "") return false;
+          if (h.charAt(0) === "[") {
+            if (h.charAt(h.length - 1) !== "]") return true;
+            h = h.slice(1, -1);
+          }
+          if (h.indexOf(":") >= 0) { var b = v6(h); return b === null ? true : private6(b); }
+          var v = v4(h);
+          if (v !== null) return private4(v);
+          if (h === "localhost" || h.slice(-10) === ".localhost") return false;
+          for (var i = 0; i < SUFFIXES.length; i++) {
+            var s = SUFFIXES[i];
+            if (h.length >= s.length && h.slice(-s.length) === s) return true;
+          }
+          return h.indexOf(".") < 0;
+        }
+        function FindProxyForURL(url, host) { return refused(host) ? DEAD : "DIRECT"; }
+        """
+    }
+
+    /// `--proxy-pac-url=data:…`: the PAC belt, inline (nothing fetched; base64, so no comma or space in the switch).
+    static var proxyPacSwitch: String {
+        "--proxy-pac-url=data:application/x-ns-proxy-autoconfig;base64," + Data(pacScript.utf8).base64EncodedString()
+    }
+
     /// Must a request to `url` be refused? A network URL whose host cannot be read is refused (fail closed); a
     /// non-network scheme is not.
     static func refuses(_ url: String) -> Bool {

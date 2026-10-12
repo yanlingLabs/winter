@@ -187,7 +187,8 @@ final class HeadlessLayoutTests: XCTestCase {
         XCTAssertNil(HeadlessArguments.parse(["h"]))
         XCTAssertNil(HeadlessArguments.parse(["h", "--winter-cache-root=relative"]))
         let parsed = HeadlessArguments.parse(["h", "--winter-cache-root=/tmp/x", "--enable-logging=stderr", "--remote-debugging-port=9222",
-                                              "--no-sandbox", "--v=1"])
+                                              "--no-sandbox", "--v=1", "--no-proxy-server", "--proxy-server=direct://",
+                                              "--host-resolver-rules=MAP * 10.0.0.1"])
         XCTAssertEqual(parsed?.cacheRoot, "/tmp/x")
         XCTAssertEqual(parsed?.passthrough, ["--enable-logging=stderr", "--v=1"])
         let argv = parsed?.chromiumArguments(program: "h") ?? []
@@ -197,5 +198,9 @@ final class HeadlessLayoutTests: XCTestCase {
         XCTAssertTrue(argv.contains("--enable-features=WebMCP"))
         XCTAssertTrue(argv.contains("--mute-audio"))
         XCTAssertTrue(argv.contains(HeadlessNetworkRule.hostResolverRulesSwitch))
+        XCTAssertTrue(argv.contains(HeadlessNetworkRule.proxyPacSwitch))
+        XCTAssertTrue(argv.contains("--disable-features=MediaRouter,DialMediaRouteProvider,WebRtcHideLocalIpsWithMdns"), "no cast discovery, no WebRTC mDNS")
+        XCTAssertFalse(argv.contains { $0.hasPrefix("--no-proxy") || $0.hasPrefix("--proxy-server") }, "the PAC belt can't be replaced")
+        XCTAssertEqual(argv.filter { $0.hasPrefix("--host-resolver-rules=") }, [HeadlessNetworkRule.hostResolverRulesSwitch])
     }
 }

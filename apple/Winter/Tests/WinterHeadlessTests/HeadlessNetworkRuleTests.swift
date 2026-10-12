@@ -1,3 +1,4 @@
+import JavaScriptCore
 import XCTest
 
 /// The local-network rule inside the browser (`HeadlessNetworkRule`) answers every row of the fixture the daemon's own
@@ -31,6 +32,67 @@ final class HeadlessNetworkRuleTests: XCTestCase {
             XCTAssertTrue(rules.contains("MAP *\(suffix). ~NOTFOUND"), suffix)
         }
         XCTAssertFalse(belt.contains("localhost"), "this Mac's own names are never mapped")
+    }
+
+    /// The PAC belt answers every row of the fixture the way the rule does — evaluated by a real JavaScript engine,
+    /// with each host spelled as Chromium hands it to a PAC script (an IPv6 host without its brackets) and as a URL
+    /// spells it.
+    func testThePACBeltAnswersEveryRowOfTheSharedFixture() throws {
+        let f = try fixture()
+        let pac = try pacContext()
+        func answer(_ host: String) -> String {
+            pac.objectForKeyedSubscript("FindProxyForURL").call(withArguments: ["http://\(host)/", host]).toString()
+        }
+        for (rows, refused) in [(f.refused, true), (f.allowed, false)] {
+            for url in rows {
+                let host = try XCTUnwrap(HeadlessNetworkRule.schemeAndHost(url)?.1, url)
+                let bare = host.hasPrefix("[") ? String(host.dropFirst().dropLast()) : host
+                for spelling in Set([host, bare, host.lowercased()]) {
+                    XCTAssertEqual(answer(spelling), refused ? HeadlessNetworkRule.deadProxy : "DIRECT", "\(url) as \(spelling)")
+                }
+            }
+        }
+        XCTAssertNil(pac.exception, pac.exception?.toString() ?? "")
+    }
+
+    func testThePACBeltSendsPublicHostsDirectAndNeverResolvesAName() throws {
+        let pac = try pacContext()
+        // Every PAC helper that resolves a name, or reads this Mac's addresses, throws if it is ever called.
+        for helper in ["dnsResolve", "dnsResolveEx", "isInNet", "isInNetEx", "isResolvable", "isResolvableEx", "myIpAddress",
+                       "myIpAddressEx", "dnsDomainIs", "isPlainHostName", "shExpMatch", "localHostOrDomainIs"] {
+            pac.evaluateScript("var \(helper) = function () { throw new Error('\(helper) called'); };")
+        }
+        for host in ["example.com", "www.example.co.uk", "8.8.8.8", "2606:4700:4700::1111", "[2001:db8::1]", "xn--bcher-kva.example",
+                     "localhost", "app.localhost", "127.0.0.1", "::1"] {
+            let r = pac.objectForKeyedSubscript("FindProxyForURL").call(withArguments: ["https://\(host)/", host]).toString()
+            XCTAssertEqual(r, "DIRECT", host)
+        }
+        for host in ["printer.local", "router", "192.168.0.1", "fe80::1", "fe80::1%en0", "[fd00::1]", "::ffff:10.0.0.1", "not:an:address"] {
+            let r = pac.objectForKeyedSubscript("FindProxyForURL").call(withArguments: ["https://\(host)/", host]).toString()
+            XCTAssertEqual(r, HeadlessNetworkRule.deadProxy, host)
+        }
+        XCTAssertNil(pac.exception, pac.exception?.toString() ?? "")
+        for helper in ["dnsResolve", "isInNet", "myIpAddress", "isResolvable"] {
+            XCTAssertFalse(HeadlessNetworkRule.pacScript.contains(helper), "the script never calls \(helper)")
+        }
+    }
+
+    func testThePACSwitchCarriesTheScriptInlineAndItsSuffixesAreTheFixtures() throws {
+        let sw = HeadlessNetworkRule.proxyPacSwitch
+        let prefix = "--proxy-pac-url=data:application/x-ns-proxy-autoconfig;base64,"
+        XCTAssertTrue(sw.hasPrefix(prefix), sw)
+        let decoded = try XCTUnwrap(Data(base64Encoded: String(sw.dropFirst(prefix.count))).flatMap { String(data: $0, encoding: .utf8) })
+        XCTAssertEqual(decoded, HeadlessNetworkRule.pacScript)
+        XCTAssertFalse(sw.contains(" ") || sw.dropFirst(prefix.count).contains(","), "one argument: no space, and no comma past the data URL's own")
+        for suffix in try fixture().localNameSuffixes { XCTAssertTrue(decoded.contains("\"\(suffix)\""), suffix) }
+        XCTAssertTrue(decoded.contains("var DEAD = \"PROXY 127.0.0.1:4\";"))
+    }
+
+    private func pacContext() throws -> JSContext {
+        let context = try XCTUnwrap(JSContext())
+        context.evaluateScript(HeadlessNetworkRule.pacScript)
+        XCTAssertNil(context.exception, context.exception?.toString() ?? "")
+        return context
     }
 
     func testWebSocketsAreJudgedAndOtherSchemesOpenNothing() {

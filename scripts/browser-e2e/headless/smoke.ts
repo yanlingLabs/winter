@@ -6,7 +6,13 @@
 // to a refused host before anything is sent, saying so (`headless.notice`), that a refused popup is said too, and that
 // the resolver belt fails a WebSocket to a local-network name (one to this Mac still opens). The
 // refused hosts are random `.internal` names: nothing could answer them, and nothing on the LAN is ever reached even if
-// the rule failed.
+// the rule failed. The PAC belt: a WebSocket to a single-label name and to a private IP literal fails at the dead
+// proxy (`net::ERR_PROXY_CONNECTION_FAILED` in the page's console), while this Mac, a public site and fetch still work —
+// and what the PAC costs a request (200 fetches to this Mac, timed). WebRTC: a page's RTCPeerConnection gathers no
+// candidate, and given a private remote candidate (and a TURN server on a private address) sends nothing. The private
+// address is one on NO subnet of this Mac's (`offSubnetPrivateAddress`): even if a belt failed, a packet to it would
+// leave by the default route, never onto the local network; and the WebRTC page runs only once the helper said the
+// policy took (`webrtc: disabled`), so a failure cannot announce an mDNS name.
 //
 //   bun scripts/browser-e2e/headless/smoke.ts --app "<path to Winter Headless Dev.app>" [--out <dir>] [--keep]
 //
@@ -14,7 +20,7 @@
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
@@ -31,6 +37,52 @@ if (app === undefined) {
 const exe = join(app, "Contents", "MacOS", app.split("/").pop()!.replace(/\.app$/, ""));
 const out = arg("--out") ?? mkdtempSync(join(tmpdir(), "winter-headless-smoke-"));
 const cacheRoot = mkdtempSync(join(tmpdir(), "winter-headless-cache-"));
+
+/** A private (RFC 1918) IPv4 address on no subnet of this Mac's: refused by the rule, yet off the local network. */
+function offSubnetPrivateAddress(nets = Object.values(networkInterfaces()).flat()): string | undefined {
+  const toInt = (a: string): number => a.split(".").reduce((n, part) => n * 256 + Number(part), 0);
+  const v4 = nets.filter((n): n is NonNullable<typeof n> => n !== undefined && n.family === "IPv4");
+  for (const candidate of ["10.255.255.254", "172.31.255.254", "192.168.255.254"]) {
+    const c = toInt(candidate);
+    if (!v4.some((n) => ((toInt(n.address) & toInt(n.netmask)) >>> 0) === ((c & toInt(n.netmask)) >>> 0))) return candidate;
+  }
+  return undefined;
+}
+const lanAddress = offSubnetPrivateAddress();
+
+// A page's own RTCPeerConnection (what a fingerprinting script makes): it gathers candidates, then is given a remote
+// one on `lan` (and, with `turn`, a TURN server there) and reports what it gathered and sent.
+const webrtcPage = (lan: string, turn: boolean): string => `<!doctype html><title>webrtc</title><p id=r>pending</p><script>
+(async () => {
+  const out = document.getElementById("r");
+  try {
+    const candidates = [];
+    const pc = new RTCPeerConnection({ iceServers: ${turn ? `[{ urls: ["turn:${lan}:3478?transport=tcp", "turn:${lan}:3478?transport=udp"], username: "u", credential: "p" }]` : "[]"} });
+    pc.createDataChannel("x");
+    pc.onicecandidate = (e) => { if (e.candidate && e.candidate.candidate) candidates.push(e.candidate.candidate); };
+    await pc.setLocalDescription(await pc.createOffer());
+    const complete = await new Promise((done) => {
+      if (pc.iceGatheringState === "complete") return done(true);
+      pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === "complete") done(true); };
+      setTimeout(() => done(false), 8000);
+    });
+    const answerer = new RTCPeerConnection({ iceServers: [] });
+    await answerer.setRemoteDescription(pc.localDescription);
+    await answerer.setLocalDescription(await answerer.createAnswer());
+    await pc.setRemoteDescription(answerer.localDescription);
+    await pc.addIceCandidate({ candidate: "candidate:1 1 udp 2122260223 ${lan} 54321 typ host", sdpMid: "0", sdpMLineIndex: 0 });
+    await pc.addIceCandidate({ candidate: "candidate:2 1 tcp 1518280447 ${lan} 443 typ host tcptype passive", sdpMid: "0", sdpMLineIndex: 0 });
+    await new Promise((r) => setTimeout(r, 3000));
+    const locals = [];
+    let pairs = 0, bytesSent = 0, requestsSent = 0;
+    (await pc.getStats()).forEach((s) => {
+      if (s.type === "local-candidate") locals.push([s.candidateType, s.protocol, s.address || s.ip || "", s.port, s.networkType || ""].join(" "));
+      if (s.type === "candidate-pair") { pairs++; bytesSent += s.bytesSent || 0; requestsSent += s.requestsSent || 0; }
+    });
+    out.textContent = JSON.stringify({ complete, candidates, locals, pairs, bytesSent, requestsSent, ice: pc.iceConnectionState });
+  } catch (e) { out.textContent = "error " + e; }
+})();
+</script>`;
 
 // ── a local fixture: a page with a button, a counter and a cross-site iframe ──────────────────────────────────────
 const frame = Bun.serve({
@@ -66,6 +118,24 @@ const page = Bun.serve({
         <script>fetch('/redirect-internal').then(() => 'fetched', (e) => 'fetch failed: ' + e.name).then((t) => { document.getElementById('r').textContent = t; });</script>`,
       { headers: { "content-type": "text/html" } });
     }
+    if (path === "/public") {
+      return new Response(`<!doctype html><title>public</title><p id=r>pending</p><script>
+        fetch("https://example.com/", { mode: "no-cors", cache: "no-store" }).then(() => "ok", (e) => "failed: " + e.message)
+          .then((t) => { document.getElementById("r").textContent = t; });
+      </script>`, { headers: { "content-type": "text/html" } });
+    }
+    if (path === "/ping") return new Response("pong", { headers: { "content-type": "text/plain" } });
+    if (path === "/timing") {
+      // 200 fetches to this Mac, one after another, three times: what a request costs the browser now.
+      return new Response(`<!doctype html><title>timing</title><p id=r>pending</p><script>
+        (async () => { const runs = []; for (let k = 0; k < 3; k++) { const t0 = performance.now();
+          for (let i = 0; i < 200; i++) await (await fetch('/ping?' + k + '-' + i, { cache: 'no-store' })).text();
+          runs.push((performance.now() - t0) / 200); }
+          document.getElementById('r').textContent = JSON.stringify(runs.map((ms) => Math.round(ms * 1000) / 1000)); })();
+      </script>`, { headers: { "content-type": "text/html" } });
+    }
+    if (path === "/webrtc" && lanAddress !== undefined) return new Response(webrtcPage(lanAddress, false), { headers: { "content-type": "text/html" } });
+    if (path === "/webrtc-turn" && lanAddress !== undefined) return new Response(webrtcPage(lanAddress, true), { headers: { "content-type": "text/html" } });
     if (path === "/preconnect") return new Response(`<!doctype html><title>preconnect</title><link rel=preconnect href="http://127.0.0.1:${counterPort}"><link rel=dns-prefetch href="${nowhere("prefetch")}"><p>hint</p>`, { headers: { "content-type": "text/html" } });
     return new Response(
     `<!doctype html><title>Winter Headless smoke</title>
@@ -156,7 +226,7 @@ try {
   const ensured = await command("tab.ensure", { sessionId: "s_smoke", tabId: "w-1", url });
   check("tab.ensure creates a windowless tab", Array.isArray(ensured.viewport), JSON.stringify(ensured.viewport));
 
-  await command("cdp.subscribe", { tabId: "w-1", events: ["Page.loadEventFired", "Runtime.executionContextCreated", "Page.frameNavigated", "Target.attachedToTarget", "Page.javascriptDialogOpening", "Page.javascriptDialogClosed", "Page.fileChooserOpened"] });
+  await command("cdp.subscribe", { tabId: "w-1", events: ["Page.loadEventFired", "Runtime.executionContextCreated", "Page.frameNavigated", "Target.attachedToTarget", "Page.javascriptDialogOpening", "Page.javascriptDialogClosed", "Page.fileChooserOpened", "Log.entryAdded"] });
   await cdp("Page.enable");
   await cdp("Runtime.enable");
   // Wait for the page to finish loading (poll the frame tree's URL).
@@ -311,14 +381,110 @@ try {
     }) as { result?: { value?: unknown } };
     return String(r.result?.value);
   };
-  const refusedSocket = await socketTo(nowhere("socket").replace("http:", "ws:").replace(/\/$/, `:${sockets.port}/`));
-  check("a WebSocket to a local-network name fails to resolve", refusedSocket.startsWith("error"), refusedSocket);
+  // What the page's console says a failed load or socket failed with (`net::ERR_…`): the PAC belt's dead proxy reads
+  // `net::ERR_PROXY_CONNECTION_FAILED`, the resolver belt `net::ERR_NAME_NOT_RESOLVED`.
+  await cdp("Log.enable");
+  const consoleLines = (): string[] => flat().filter((e) => e.method === "Log.entryAdded").map((e) => String((e.params.entry as { text?: unknown } | undefined)?.text ?? ""));
+  const netErrorFor = async (needle: string): Promise<string> => {
+    const line = (): string | undefined => consoleLines().find((t) => t.includes(needle) && /net::ERR_[A-Z_]+/.test(t));
+    await eventually(`a console line naming ${needle}`, () => line() !== undefined, 4_000);
+    return /net::ERR_[A-Z_]+/.exec(line() ?? "")?.[0] ?? "no net error logged";
+  };
+  const DEAD_PROXY = "net::ERR_PROXY_CONNECTION_FAILED";
+  const nameHost = nowhere("socket").replace(/^http:\/\//, "").replace(/\/$/, "");
+  const refusedSocket = await socketTo(`ws://${nameHost}:${sockets.port}/`);
+  const nameError = await netErrorFor(nameHost);
+  check("a WebSocket to a local-network name fails, never resolved (the PAC belt first, the resolver belt behind it)", refusedSocket.startsWith("error") && nameError === DEAD_PROXY, `${refusedSocket}, ${nameError}`);
+  const label = `winterpac${Math.random().toString(36).slice(2, 10)}`;
+  const labelSocket = await socketTo(`ws://${label}:${sockets.port}/`);
+  const labelError = await netErrorFor(label);
+  const pacInEffect = labelSocket.startsWith("error") && labelError === DEAD_PROXY;
+  check("a WebSocket to a single-label name goes to the dead proxy (the PAC belt)", pacInEffect, `${labelSocket}, ${labelError}`);
+  if (lanAddress === undefined) {
+    check("a WebSocket to a private IP literal goes to the dead proxy", false, "every candidate private range is a subnet of this Mac's — nothing safe to try");
+  } else if (!pacInEffect) {
+    check("a WebSocket to a private IP literal goes to the dead proxy", false, "not tried: the PAC belt is not in effect");
+  } else {
+    const literalSocket = await socketTo(`ws://${lanAddress}:${sockets.port}/`);
+    const literalError = await netErrorFor(lanAddress);
+    check("a WebSocket to a private IP literal goes to the dead proxy", literalSocket.startsWith("error") && literalError === DEAD_PROXY, `${lanAddress} (on no subnet of this Mac's): ${literalSocket}, ${literalError}`);
+  }
   const loopbackSocket = await socketTo(`ws://127.0.0.1:${sockets.port}/`);
   check("a WebSocket to this Mac still opens", loopbackSocket === "open" && socketOpens > 0, `${loopbackSocket}, ${socketOpens} accepted`);
+  const localhostSocket = await socketTo(`ws://localhost:${sockets.port}/`);
+  check("a WebSocket to localhost still opens", localhostSocket === "open", localhostSocket);
+
+  // A page and its fetches, on this Mac: what a request costs with the PAC asked about each one.
+  const readPage = async (path: string, done: (text: string) => boolean, ms: number): Promise<string> => {
+    await cdp("Page.navigate", { url: `${url}${path}` });
+    let world: number | undefined;
+    let text = "";
+    for (const end = Date.now() + ms; Date.now() < end && !done(text);) {
+      await Bun.sleep(100);
+      if (!(await topUrl()).endsWith(`/${path}`)) continue;
+      if (world === undefined) {
+        const tree = await cdp("Page.getFrameTree") as { frameTree?: { frame?: { id?: string } } };
+        world = ((await cdp("Page.createIsolatedWorld", { frameId: tree.frameTree?.frame?.id, worldName: "winter" })) as { executionContextId?: number }).executionContextId;
+      }
+      text = String(((await cdp("Runtime.evaluate", { expression: "document.getElementById('r').textContent", contextId: world, returnByValue: true })) as { result?: { value?: unknown } }).result?.value ?? "");
+    }
+    return text;
+  };
+  const timing = await readPage("timing", (t) => t.startsWith("["), 60_000);
+  const perFetch = (JSON.parse(timing.startsWith("[") ? timing : "[]") as number[]);
+  check("fetch to this Mac still works (200 in a row, three times)", perFetch.length === 3, timing);
+  console.log(`INFO TIMING a fetch to this Mac, mean ms over 200 (three runs): ${perFetch.join(", ")}`);
+
+  // A public site (needs the internet): never sent to the dead proxy.
+  const publicFetch = await readPage("public", (t) => t !== "pending" && t !== "", 20_000);
+  const publicError = publicFetch === "ok" ? "" : await netErrorFor("example.com");
+  check("a public site is never sent to the dead proxy", publicFetch === "ok" || publicError !== DEAD_PROXY, publicFetch === "ok" ? "fetched https://example.com/" : `offline? ${publicFetch} ${publicError}`);
+
+  // The helper's process tree, and which of its processes hold the mDNS port (5353): something multicast on the LAN —
+  // a WebRTC host candidate's name, a `.local` lookup — which is what raises macOS's Local Network prompt.
+  const helperTree = (): number[] => [proc.pid!, ...Bun.spawnSync(["/bin/ps", "-A", "-o", "pid=,ppid="], { stdout: "pipe", env: { ...process.env, LC_ALL: "C" } }).stdout.toString()
+    .split("\n").map((l) => /^\s*(\d+)\s+(\d+)\s*$/.exec(l)).filter((m): m is RegExpExecArray => m !== null && Number(m[2]) === proc.pid).map((m) => Number(m[1]))];
+  const mdnsHolders = (): string[] => {
+    const out = Bun.spawnSync(["/usr/sbin/lsof", "-nP", "-a", "-p", helperTree().join(","), "-i", "UDP:5353"], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim();
+    const pids = [...new Set(out.split("\n").slice(1).map((l) => Number(l.trim().split(/\s+/)[1])).filter((n) => n > 0))];
+    return pids.map((pid) => {
+      const args = Bun.spawnSync(["/bin/ps", "-o", "args=", "-p", String(pid)], { stdout: "pipe" }).stdout.toString();
+      return `${pid} ${/--type=\S+/.exec(args)?.[0] ?? "?"} ${/--utility-sub-type=\S+/.exec(args)?.[0] ?? ""}`.trim();
+    });
+  };
+  const mdnsBeforeWebRTC = mdnsHolders();
+
+  // WebRTC held to proxied TCP: a page's RTCPeerConnection gathers nothing and sends nothing to a private address.
+  const webrtcPolicy = /webrtc: ([^)]+)\)/.exec(stderr)?.[1] ?? "not logged";
+  type Rtc = { complete?: boolean; candidates?: string[]; locals?: string[]; pairs?: number; bytesSent?: number; requestsSent?: number; ice?: string };
+  if (lanAddress === undefined || webrtcPolicy !== "disabled") {
+    check("WebRTC: a page's RTCPeerConnection gathers no candidate and sends nothing to a private address", false,
+      lanAddress === undefined ? "no private address off this Mac's subnets to try" : `not tried: the helper said the policy came to "${webrtcPolicy}"`);
+  } else {
+    const raw = await readPage("webrtc", (t) => t !== "pending" && t !== "", 20_000);
+    const rtc = (raw.startsWith("{") ? JSON.parse(raw) : {}) as Rtc;
+    // Measured: the only local candidates left are TCP placeholders on the unspecified address (`0.0.0.0`/`::`, port 9),
+    // which no page is told of and nothing pairs with — no interface's address is gathered, no UDP socket exists.
+    const unbound = (l: string): boolean => / (0\.0\.0\.0|::) /.test(l);
+    check("WebRTC: a page's RTCPeerConnection gathers no candidate and sends nothing to a private address",
+      raw.startsWith("{") && (rtc.candidates?.length ?? 1) === 0 && (rtc.locals ?? ["?"]).every(unbound) && rtc.pairs === 0
+        && (rtc.requestsSent ?? 1) === 0 && (rtc.bytesSent ?? 1) === 0,
+      `policy ${webrtcPolicy}; ${raw.slice(0, 300)}`);
+    if (pacInEffect) {
+      const rawTurn = await readPage("webrtc-turn", (t) => t !== "pending" && t !== "", 20_000);
+      const turn = (rawTurn.startsWith("{") ? JSON.parse(rawTurn) : {}) as Rtc;
+      check("WebRTC: a TURN server on a private address gives no relay candidate", rawTurn.startsWith("{") && (turn.candidates?.length ?? 1) === 0
+        && (turn.locals ?? ["?"]).every(unbound) && turn.pairs === 0 && (turn.requestsSent ?? 1) === 0, rawTurn.slice(0, 300));
+    }
+  }
+
+  const mdnsAfterWebRTC = mdnsHolders();
+  check("no process of the helper's tree has the mDNS port open", mdnsBeforeWebRTC.length === 0 && mdnsAfterWebRTC.length === 0,
+    `before the WebRTC pages: ${mdnsBeforeWebRTC.join(" | ") || "none"}; after: ${mdnsAfterWebRTC.join(" | ") || "none"}`);
 
   await cdp("Page.navigate", { url: `${url}preconnect` });
   await Bun.sleep(1_500);
-  const prediction = /network prediction: ([^)]+)\)/.exec(stderr)?.[1] ?? "not logged";
+  const prediction = /network prediction: ([^,)]+)/.exec(stderr)?.[1] ?? "not logged";
   console.log(`INFO <link rel=preconnect> to a loopback listener: ${preconnects} connection(s); the browser's network prediction preference: ${prediction}`);
 
   const front = await frontmost();

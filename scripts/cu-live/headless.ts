@@ -16,7 +16,8 @@
  *   --load              the cold start on a LOADED Mac: one `yes > /dev/null` per core while the helper starts
  *   --prompt-probes     ALSO the pages that ask (on a click, so with a user gesture) for the camera, microphone, screen
  *                       capture, location, notifications and a passkey (WebAuthn), that fetch a LAN address and an mDNS
- *                       name, and a public site that asks for a client certificate (client.badssl.com — needs the
+ *                       name, open a WebSocket and WebTransport to a LAN address, make an RTCPeerConnection given a LAN
+ *                       candidate (a fingerprinting script's), and a public site that asks for a client certificate (client.badssl.com — needs the
  *                       internet). They may raise a macOS prompt (TCC, Local Network) — the question these probes ask,
  *                       so only with the user at the Mac: a denial is remembered for the identity macOS blames. NOTE:
  *                       spawned from a terminal, a prompt is attributed to the terminal's process chain, not to Winter
@@ -313,6 +314,40 @@ const out = (k, v) => { const li = document.createElement("li"); li.textContent 
 for (const [k, u] of [["lan", "http://192.168.1.1/"], ["mdns", "http://winter-probe-printer.local/"]]) {
   fetch(u, { mode: "no-cors", signal: AbortSignal.timeout(4000) }).then(() => out(k, "reached"), (e) => out(k, e.name));
 }
+// What no request handler sees: a WebSocket and WebTransport to a LAN address (the PAC belt's).
+for (const [k, u] of [["websocket", "ws://192.168.1.1/"], ["websocket-label", "ws://router/"]]) {
+  try { const ws = new WebSocket(u); ws.onopen = () => { out(k, "open"); ws.close(); }; ws.onerror = () => out(k, "error"); } catch (e) { out(k, e.name); }
+}
+if (typeof WebTransport === "function") {
+  try { new WebTransport("https://192.168.1.1:4433/").ready.then(() => out("webtransport", "open"), (e) => out("webtransport", e.name)); } catch (e) { out("webtransport", e.name); }
+} else out("webtransport", "no API");
+</script>`;
+
+/** A page's own RTCPeerConnection, as a fingerprinting script makes one: it gathers candidates (a host candidate would
+ *  announce an mDNS name on the LAN) and is given a remote candidate on a LAN address (a STUN check would go there). */
+export const WEBRTC_PROBE = `<!doctype html><meta charset=utf-8><title>WebRTC probe</title><h1>WebRTC probe</h1><ul id=out></ul>
+<script>
+const out = (k, v) => { const li = document.createElement("li"); li.textContent = k + ": " + v; document.getElementById("out").append(li); };
+(async () => {
+  try {
+    const found = [];
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    pc.createDataChannel("probe");
+    pc.onicecandidate = (e) => { if (e.candidate && e.candidate.candidate) found.push(e.candidate.candidate); };
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise((done) => { pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === "complete") done(); }; setTimeout(done, 5000); });
+    out("candidates", found.length);
+    const other = new RTCPeerConnection({ iceServers: [] });
+    await other.setRemoteDescription(pc.localDescription);
+    await other.setLocalDescription(await other.createAnswer());
+    await pc.setRemoteDescription(other.localDescription);
+    await pc.addIceCandidate({ candidate: "candidate:1 1 udp 2122260223 192.168.1.1 54321 typ host", sdpMid: "0", sdpMLineIndex: 0 });
+    await new Promise((r) => setTimeout(r, 3000));
+    let pairs = 0, requests = 0;
+    (await pc.getStats()).forEach((s) => { if (s.type === "candidate-pair") { pairs++; requests += s.requestsSent || 0; } });
+    out("pairs", pairs + ", " + requests + " check(s) sent");
+  } catch (e) { out("webrtc", e.name); }
+})();
 </script>`;
 
 /** By hand with the user before merge (it needs a Release-signed Winter.app and the daemon). */
@@ -423,6 +458,7 @@ async function main(): Promise<void> {
       if (url.pathname === "/slow") return html("<!doctype html><title>Slow</title><h1>waiting</h1>");
       if (url.pathname === "/probe/permissions") return html(PERMISSIONS_PROBE);
       if (url.pathname === "/probe/lan") return html(LAN_PROBE);
+      if (url.pathname === "/probe/webrtc") return html(WEBRTC_PROBE);
       return new Response("not found", { status: 404 });
     },
   });
@@ -706,8 +742,8 @@ async function main(): Promise<void> {
 
     // ── the opt-in prompt probes ──
     if (o.promptProbes) {
-      log("--prompt-probes: these pages ask for the camera, microphone, location and notifications, and fetch a LAN address and an mDNS name — a macOS prompt, if one appears, is the finding (answer Don't Allow)");
-      await scenario("probes: permission requests (with a gesture), a passkey, LAN fetches and a client certificate raise no prompt", "probes", async () => {
+      log("--prompt-probes: these pages ask for the camera, microphone, location and notifications, fetch a LAN address and an mDNS name, open a WebSocket and WebTransport to the LAN and make an RTCPeerConnection with a LAN candidate — a macOS prompt, if one appears, is the finding (answer Don't Allow)");
+      await scenario("probes: permission requests (with a gesture), a passkey, LAN fetches, sockets and WebRTC, and a client certificate raise no prompt", "probes", async () => {
         const p = scope("s_probe");
         const t0 = Date.now();
         const perms = await p.open(`${BASE}/probe/permissions`);
@@ -716,6 +752,7 @@ async function main(): Promise<void> {
         if (!Number.isInteger(ask)) throw new Error(`no Ask button in the probe page: ${state.slice(0, 300)}`);
         await p.p(perms, "click", { target: ask });
         const lan = await p.open(`${BASE}/probe/lan`);
+        const rtc = await p.open(`${BASE}/probe/webrtc`);
         let cert = "";
         try {
           const ct = await p.open(CLIENT_CERT_PROBE_URL);
@@ -725,13 +762,14 @@ async function main(): Promise<void> {
           cert = `could not load (${err instanceof Error ? err.message.slice(0, 160) : "error"})`;
         }
         await Bun.sleep(6_000);
-        const [xp, xl] = await Promise.all([p.p(perms, "text", { emit: false }) as Promise<string>, p.p(lan, "text", { emit: false }) as Promise<string>]);
+        const [xp, xl, xr] = await Promise.all([p.p(perms, "text", { emit: false }) as Promise<string>, p.p(lan, "text", { emit: false }) as Promise<string>,
+          p.p(rtc, "text", { emit: false }) as Promise<string>]);
         p.end();
         engine.turnEnded("s_probe");
         const prompt = promptAppeared(monitor.items, t0, Date.now());
         return {
           checks: [check("no permission prompt came to the front", prompt === undefined, prompt === undefined ? "" : `${prompt.front} at +${prompt.t - t0} ms`)],
-          note: `the pages read: ${xp.replace(/\s+/g, " ").slice(0, 400)} | ${xl.replace(/\s+/g, " ").slice(0, 300)} | the client-certificate site: ${cert}`,
+          note: `the pages read: ${xp.replace(/\s+/g, " ").slice(0, 400)} | ${xl.replace(/\s+/g, " ").slice(0, 300)} | ${xr.replace(/\s+/g, " ").slice(0, 200)} | the client-certificate site: ${cert}`,
         };
       });
     }

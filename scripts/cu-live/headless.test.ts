@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { MonitorSample } from "./lib";
 import {
   attributeFrontChanges, CLIENT_CERT_PROBE_URL, cookieUser, HEADLESS_CHECKS, HEADLESS_LIVE_BY_HAND, heavySvg, helperNames, LAN_PROBE, mediaPage, mib,
-  parseApplicationType, parseHeadlessOptions, PERMISSIONS_PROBE, processesInside, processTree, siteHome, siteLogin, wavTone, WINDOW_LIST_JXA, windowsOf,
+  parseApplicationType, parseHeadlessOptions, PERMISSIONS_PROBE, processesInside, processTree, siteHome, siteLogin, wavTone, WEBRTC_PROBE, WINDOW_LIST_JXA, windowsOf,
 } from "./headless";
 
 const APP = "/tmp/x/Winter Headless Dev.app";
@@ -163,7 +163,7 @@ describe("the fixtures", () => {
     expect(siteHome("bob")).toContain("signed in as bob");
     expect(siteHome(undefined)).toContain("signed out");
     expect(siteLogin("bob")).toContain('localStorage.setItem("who", "bob")');
-    for (const html of [siteHome("bob"), siteLogin("bob"), PERMISSIONS_PROBE, LAN_PROBE]) for (const s of scriptsOf(html)) compiles(s);
+    for (const html of [siteHome("bob"), siteLogin("bob"), PERMISSIONS_PROBE, LAN_PROBE, WEBRTC_PROBE]) for (const s of scriptsOf(html)) compiles(s);
   });
 
   test("the probes ask for each permission and fetch a LAN address and an mDNS name", () => {
@@ -172,6 +172,9 @@ describe("the fixtures", () => {
     expect(CLIENT_CERT_PROBE_URL.startsWith("https://")).toBe(true);
     expect(LAN_PROBE).toContain("http://192.168.1.1/");
     expect(LAN_PROBE).toMatch(/\.local\//);
+    expect(LAN_PROBE).toContain("ws://192.168.1.1/");
+    expect(LAN_PROBE).toContain("new WebTransport(\"https://192.168.1.1:4433/\")");
+    for (const part of ["new RTCPeerConnection", "createDataChannel", "addIceCandidate", "192.168.1.1 54321 typ host", "getStats"]) expect(WEBRTC_PROBE).toContain(part);
   });
 
   test("the first start is listed for the user, by hand", () => {

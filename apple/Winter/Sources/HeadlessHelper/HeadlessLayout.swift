@@ -44,17 +44,23 @@ struct HeadlessArguments: Equatable {
     ///  * `--use-mock-keychain` — never the user's Keychain: an in-memory stand-in, so no "Safe Storage" item is
     ///    read or created and no Keychain prompt can appear;
     ///  * `--mute-audio` — nobody hears a headless tab;
-    ///  * `--disable-features=MediaRouter,DialMediaRouteProvider` — no cast discovery, so no "accept incoming
-    ///    network connections?" dialog;
+    ///  * `--disable-features=MediaRouter,DialMediaRouteProvider,WebRtcHideLocalIpsWithMdns` — no cast discovery, so
+    ///    no "accept incoming network connections?" dialog; and no mDNS responder for WebRTC: measured, a page's
+    ///    `RTCPeerConnection` made the network service bind the mDNS port (5353, multicast on the LAN) even with WebRTC
+    ///    held to proxied TCP (`webrtc.ip_handling_policy`, set per session context), which gathers no host address
+    ///    to hide;
     ///  * `--enable-features=WebMCP` — a site's own agent tools (`document.modelContext`);
     ///  * `--host-resolver-rules=…` — every local-network NAME resolves to "not found"
-    ///    (`HeadlessNetworkRule.hostResolverRulesSwitch`), whatever asks: a WebSocket too.
+    ///    (`HeadlessNetworkRule.hostResolverRulesSwitch`), whatever asks: a WebSocket too;
+    ///  * `--proxy-pac-url=data:…` — every request the network service makes to a refused host, an IP literal or a
+    ///    single-label name included, goes to a proxy that is never there (`HeadlessNetworkRule.proxyPacSwitch`).
     static let fixedSwitches = [
         "--use-mock-keychain",
         "--mute-audio",
-        "--disable-features=MediaRouter,DialMediaRouteProvider",
+        "--disable-features=MediaRouter,DialMediaRouteProvider,WebRtcHideLocalIpsWithMdns",
         "--enable-features=WebMCP",
         HeadlessNetworkRule.hostResolverRulesSwitch,
+        HeadlessNetworkRule.proxyPacSwitch,
     ]
 
     static func parse(_ arguments: [String]) -> HeadlessArguments? {

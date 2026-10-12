@@ -5047,6 +5047,8 @@ CefRefPtr<WinterHeadlessRequestGuard> &HeadlessRequestGuard() {
 ///    never a key used (below).
 ///  * External protocols (`OnProtocolExecution`) — never handed to another app (`WinterHeadlessRequestGuard`).
 ///  * Printing — `printing.enabled` off in every session's context: `window.print()` does nothing.
+///  * WebRTC — `webrtc.ip_handling_policy` `disable_non_proxied_udp` in every session's context: no UDP, so no
+///    host candidate, no mDNS announcement and no STUN check to an address a page names (below).
 ///  * Focus, fullscreen, keys (`OnSetFocus`, fullscreen, unhandled keys) — refused, exited, swallowed (base, flags).
 ///  * Native pickers that are windows of their own (a colour panel, an eye dropper) — cannot reach the screen: the
 ///    helper's window guard refuses to order any window in (`WinterHeadlessApplication`). `<select>` and date pickers
@@ -5186,6 +5188,8 @@ struct HeadlessContext {
   std::string printing = "pending";
   /// What turning the browser's own predictive connections off came to (the same answers as `printing`).
   std::string prediction = "pending";
+  /// What holding WebRTC to proxied TCP came to (the same answers as `printing`).
+  std::string webrtc = "pending";
   NSMutableArray<WinterCEFHeadlessPendingBrowser *> *pending = nil;
 };
 
@@ -5258,9 +5262,25 @@ void HeadlessContextInitialized(const std::string &sessionId, CefRefPtr<CefReque
         error = reason.ToString();
         return ok;
       });
+  // WebRTC held to proxied TCP (`disable_non_proxied_udp`): no UDP socket at all, so no host candidate is gathered
+  // and no STUN check is ever sent to an address a page names — none of it is a request the guard or the resolver
+  // belt sees. What TCP WebRTC still makes goes through the proxy resolution, where the PAC belt refuses the local
+  // network. (Its mDNS responder, which binds the mDNS port even so, is off by switch: `HeadlessArguments`.)
+  const CefString webrtc("webrtc.ip_handling_policy");
+  record.webrtc = DisablePrinting(
+      [&] { return context->HasPreference(webrtc); },
+      [&] { return context->CanSetPreference(webrtc); },
+      [&](std::string &error) {
+        CefRefPtr<CefValue> value = CefValue::Create();
+        value->SetString("disable_non_proxied_udp");
+        CefString reason;
+        const bool ok = context->SetPreference(webrtc, value, reason);
+        error = reason.ToString();
+        return ok;
+      });
   record.initialized = true;
-  Log("headless context initialized (printing: %s, network prediction: %s)", record.printing.c_str(),
-      record.prediction.c_str());
+  Log("headless context initialized (printing: %s, network prediction: %s, webrtc: %s)", record.printing.c_str(),
+      record.prediction.c_str(), record.webrtc.c_str());
   NSArray<WinterCEFHeadlessPendingBrowser *> *pending = [record.pending copy];
   record.pending = nil;
   for (WinterCEFHeadlessPendingBrowser *request in pending) {
