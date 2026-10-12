@@ -39,6 +39,10 @@ final class GuardianModelTests: XCTestCase {
         // WINTER_CU_SIM_FIRST_SEED: a sweep of seeds first…first+seeds−1 (a long run in parallel processes).
         let first = Int(ProcessInfo.processInfo.environment["WINTER_CU_SIM_FIRST_SEED"] ?? "") ?? 1
         for seed in only.map({ [$0] }) ?? Array(first..<(first + Self.seeds)) {
+            // (The ratchet runner's own probes — a child that crashes, a child that hangs, on that seed: test-only hooks.)
+            let env = ProcessInfo.processInfo.environment
+            if env["WINTER_CU_SIM_CRASH_SEED"] == "\(seed)" { abort() }
+            if env["WINTER_CU_SIM_HANG_SEED"] == "\(seed)" { while true { sleep(60) } }
             var plan = SimPlan.generate(seed: UInt64(seed), count: Self.steps)
             if let b = Self.targetBundle { plan.targetBundle = b }
             let run = await SimRun.execute(plan)
@@ -82,7 +86,8 @@ final class GuardianModelTests: XCTestCase {
     }
 
     /// Seeds KNOWN to fail (round 11's first item), pinned so CI meets them: each must still fail (an expected failure,
-    /// shown as such), and a seed that passes is reported, to come off the list.
+    /// shown as such), and a seed that passes is reported, to come off the list. Each is pinned to its violation CLASS —
+    /// the invariant its `what` begins with (round 18): failing another way is a new failure.
     static let knownFailing: [(seed: Int, what: String)] = [
         (338, "I3: a user key reached T with no reroute while T was in the background (a blip ending during a theft)"),
         (508, "I2: the engine's place U, the user's P — Secure Event Input with the modifiers unseen"),
@@ -106,6 +111,11 @@ final class GuardianModelTests: XCTestCase {
         for (seed, what) in Self.knownFailing where !Self.ratchetRange.contains(seed) {
             let r = await SimRun.execute(SimPlan.generate(seed: UInt64(seed), count: Self.steps))
             if let v = r.violation {
+                // (Pinned to its violation class, round 18: failing another way is a new failure.)
+                if Self.violationClass(v) != Self.violationClass(what) {
+                    XCTFail("seed \(seed) is known to fail with \(Self.violationClass(what) ?? "?"), but now fails with: \(v)")
+                    continue
+                }
                 XCTExpectFailure("KNOWN, round 12: seed \(seed) — \(what)", strict: true) { XCTFail("seed \(seed): \(v)") }
             } else {
                 XCTFail("seed \(seed) passes now — take it off GuardianModelTests.knownFailing")
@@ -122,27 +132,50 @@ final class GuardianModelTests: XCTestCase {
     static let ratchetRange = 1000...1079
     static let ordinaryRatchetRange = 1...60
 
+    /// The default random test's own seeds (1–20, what `testTheInvariantsHoldOverRandomInterleavings` runs by default):
+    /// a checked range of the ratchet too (round 18).
+    static let defaultRatchetRange = 1...20
+
     func testTheRatchetTheWholeSurveyedRangesPassButForTheKnownFailing() throws {
         // (A seed takes ~8 s, mostly waiting: the ranges run as child processes of this bundle, in parallel.)
-        for (target, range, known) in [(nil, Self.ratchetRange, Set(Self.knownFailing.map(\.seed))),
-                                       ("sim.editor", Self.ordinaryRatchetRange, Self.ordinaryTargetKnownFailing)] as [(String?, ClosedRange<Int>, Set<Int>)] {
+        let known = Dictionary(Self.knownFailing.map { ($0.seed, $0.what) }, uniquingKeysWith: { a, _ in a })
+        let ordinary = Dictionary(Self.ordinaryTargetKnownFailing.map { ($0, "") }, uniquingKeysWith: { a, _ in a })
+        for (target, range, known) in [(nil, Self.ratchetRange, known), (nil, Self.defaultRatchetRange, known),
+                                       ("sim.editor", Self.ordinaryRatchetRange, ordinary)] as [(String?, ClosedRange<Int>, [Int: String])] {
             let what = target.map { "with an ordinary target (\($0))" } ?? "with Finder as the target"
             let failing = try Self.surveyInChildren(target: target, seeds: range)
-            for (seed, v) in failing.sorted(by: { $0.key < $1.key }) where !known.contains(seed) {
-                XCTFail("RATCHET: seed \(seed) \(what) fails and is not known-failing — a regression: \(v)")
+            for (seed, v) in failing.sorted(by: { $0.key < $1.key }) {
+                guard let pinned = known[seed] else {
+                    XCTFail("RATCHET: seed \(seed) \(what) fails and is not known-failing — a regression: \(v)")
+                    continue
+                }
+                // Pinned to its violation CLASS (round 18): a known-failing seed failing another way is a new failure.
+                if !pinned.isEmpty, Self.violationClass(v) != Self.violationClass(pinned) {
+                    XCTFail("RATCHET: seed \(seed) \(what) is known to fail with \(Self.violationClass(pinned) ?? "?"), but now fails with: \(v)")
+                }
             }
-            for seed in known.filter(range.contains).sorted() where failing[seed] == nil {
+            for seed in known.keys.filter(range.contains).sorted() where failing[seed] == nil {
                 XCTFail("RATCHET: seed \(seed) \(what) passes now — take it off its known-failing list (the list only shrinks)")
             }
         }
     }
 
+    /// A violation's class: the invariant it names ("I1" … "I6"), as the oracle words it ("I2: the engine takes …").
+    static func violationClass(_ v: String) -> String? {
+        let head = v.prefix { $0 != ":" }
+        return head.hasPrefix("I") && head.count <= 3 ? String(head) : nil
+    }
+
+    /// A child of the survey that has not finished by then is HUNG: killed, and the survey fails naming its seeds.
+    static let childDeadline = TimeInterval(ProcessInfo.processInfo.environment["WINTER_CU_SIM_CHILD_DEADLINE"] ?? "") ?? 900
+
     /// Runs the random test's survey over `seeds` in child processes of this test bundle (`chunk` seeds each, all at once);
     /// returns the failing seeds and their violations. Every child must report its survey line — a child that crashed or
     /// was cut short is a failure, never a pass.
-    static func surveyInChildren(target: String?, seeds: ClosedRange<Int>, chunk: Int = 6) throws -> [Int: String] {
+    static func surveyInChildren(target: String?, seeds: ClosedRange<Int>, chunk: Int = 6, deadline: TimeInterval = childDeadline,
+                                 extraEnv: [String: String] = [:]) throws -> [Int: String] {
         let bundle = Bundle(for: GuardianModelTests.self).bundlePath
-        var children: [(process: Process, out: Pipe)] = []
+        var children: [(process: Process, out: Pipe, err: Pipe, seeds: ClosedRange<Int>)] = []
         for start in stride(from: seeds.lowerBound, through: seeds.upperBound, by: chunk) {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
@@ -154,30 +187,50 @@ final class GuardianModelTests: XCTestCase {
             env["WINTER_CU_SIM_STEPS"] = "\(steps)"
             env["WINTER_CU_SIM_TARGET"] = target
             env["WINTER_CU_SIM_ONLY_SEED"] = nil
+            for (k, v) in extraEnv { env[k] = v }
             p.environment = env
-            let out = Pipe()
+            let out = Pipe(), err = Pipe()
             p.standardOutput = out
-            p.standardError = FileHandle.nullDevice
+            p.standardError = err
             try p.run()
-            children.append((p, out))
+            children.append((p, out, err, start...min(start + chunk - 1, seeds.upperBound)))
         }
         let lock = NSLock()
         var texts: [String] = []
+        var broken: [String] = []
         let group = DispatchGroup()
         for c in children {
             group.enter()
+            // A per-child deadline: a hung child is killed, and the survey fails naming its seeds.
+            let hung = DispatchWorkItem { lock.withLock { broken.append("seeds \(c.seeds) HUNG (no end within \(Int(deadline)) s)") }; c.process.terminate() }
+            DispatchQueue.global().asyncAfter(deadline: .now() + deadline, execute: hung)
             DispatchQueue.global().async {
+                // (stderr read alongside, so a chatty child never blocks on a full pipe.)
+                var errData = Data()
+                let errDone = DispatchSemaphore(value: 0)
+                DispatchQueue.global().async { errData = c.err.fileHandleForReading.readDataToEndOfFile(); errDone.signal() }
                 let data = c.out.fileHandleForReading.readDataToEndOfFile()
                 c.process.waitUntilExit()
-                lock.withLock { texts.append(String(decoding: data, as: UTF8.self)) }
+                errDone.wait()
+                hung.cancel()
+                let text = String(decoding: data, as: UTF8.self)
+                lock.withLock {
+                    texts.append(text)
+                    // Every child must report its own survey line and exit cleanly; one that crashed or was cut short is a
+                    // failure — with its stderr kept, for the report.
+                    let reported = text.split(separator: "\n").contains { $0.hasPrefix("SURVEY: ") }
+                    if !reported || c.process.terminationReason != .exit || c.process.terminationStatus != 0 {
+                        let tail = String(decoding: errData.suffix(2_000), as: UTF8.self)
+                        broken.append("seeds \(c.seeds) ended \(c.process.terminationReason == .exit ? "with status \(c.process.terminationStatus)" : "by signal \(c.process.terminationStatus)")\(reported ? "" : " without reporting") — stderr: \(tail)")
+                    }
+                }
                 group.leave()
             }
         }
         group.wait()
         let lines = texts.flatMap { $0.split(separator: "\n").map(String.init) }
-        let reported = lines.filter { $0.hasPrefix("SURVEY: ") }.count
-        guard reported == children.count else {
-            throw CUError.unsupported("the survey of seeds \(seeds) ran \(children.count) children, but only \(reported) reported")
+        guard broken.isEmpty else {
+            throw CUError.unsupported("the survey of seeds \(seeds): \(broken.sorted().joined(separator: "; "))")
         }
         var failing: [Int: String] = [:]
         for l in lines where l.hasPrefix("SURVEY seed ") {
@@ -186,6 +239,22 @@ final class GuardianModelTests: XCTestCase {
             failing[seed] = String(rest[rest.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
         }
         return failing
+    }
+
+    /// The ratchet's runner itself (the review of round 17's probe): a child that crashes mid-chunk fails the survey — never
+    /// a pass — and so does a child that hangs (killed at its deadline, naming its seeds).
+    func testTheSurveyRunnerFailsOnACrashedChild() throws {
+        XCTAssertThrowsError(try Self.surveyInChildren(target: nil, seeds: 1000...1002, chunk: 3,
+                                                       extraEnv: ["WINTER_CU_SIM_CRASH_SEED": "1001"])) { e in
+            XCTAssertTrue("\(e)".contains("1000...1002"), "names the crashed child's seeds: \(e)")
+        }
+    }
+
+    func testTheSurveyRunnerFailsOnAHungChild() throws {
+        XCTAssertThrowsError(try Self.surveyInChildren(target: nil, seeds: 1000...1001, chunk: 1, deadline: 20,
+                                                       extraEnv: ["WINTER_CU_SIM_HANG_SEED": "1001"])) { e in
+            XCTAssertTrue("\(e)".contains("1001...1001 HUNG"), "names the hung child's seed: \(e)")
+        }
     }
 
     // MARK: the reviewer's findings, as plans (each over a dozen seeds: the world's own timing varies)
