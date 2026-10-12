@@ -1,0 +1,187 @@
+{
+  "scope": "Bounded Linux/HVF RAW block plus single-port console fixture; guest TX readiness-stall coverage remains unobserved",
+  "buildSha256": "b4e5b6908ecfa6eb220f478c4d0c27e59e28900c4d697ef9527d30b52e93d139",
+  "guestBootId": "53504cdc-6a4b-49b6-8b40-f7a2e742474c",
+  "singleFixtureVm": true,
+  "exitVerified": true,
+  "traceAndSourcesFrozen": true,
+  "epochsAudited": 18,
+  "replacementSequencesAudited": 299,
+  "completedBlockRequests": 1589,
+  "commands": {
+    "Read": 770,
+    "Write": 769,
+    "Flush": 50
+  },
+  "frozenOutstandingRequestPins": [
+    {
+      "epoch": 2,
+      "request": 4,
+      "pin": 13
+    },
+    {
+      "epoch": 3,
+      "request": 77,
+      "pin": 566
+    },
+    {
+      "epoch": 4,
+      "request": 77,
+      "pin": 566
+    },
+    {
+      "epoch": 5,
+      "request": 200,
+      "pin": 1425
+    },
+    {
+      "epoch": 6,
+      "request": 200,
+      "pin": 1425
+    },
+    {
+      "epoch": 7,
+      "request": 308,
+      "pin": 2213
+    },
+    {
+      "epoch": 8,
+      "request": 425,
+      "pin": 2990
+    },
+    {
+      "epoch": 9,
+      "request": 503,
+      "pin": 3528
+    },
+    {
+      "epoch": 10,
+      "request": 715,
+      "pin": 4910
+    },
+    {
+      "epoch": 11,
+      "request": 715,
+      "pin": 4910
+    },
+    {
+      "epoch": 12,
+      "request": 815,
+      "pin": 5553
+    },
+    {
+      "epoch": 13,
+      "request": 934,
+      "pin": 6332
+    },
+    {
+      "epoch": 14,
+      "request": 1229,
+      "pin": 8258
+    },
+    {
+      "epoch": 15,
+      "request": 1229,
+      "pin": 8258
+    },
+    {
+      "epoch": 16,
+      "request": 1323,
+      "pin": 8861
+    },
+    {
+      "epoch": 17,
+      "request": 1401,
+      "pin": 9388
+    },
+    {
+      "epoch": 18,
+      "request": 1479,
+      "pin": 9882
+    }
+  ],
+  "hostDiskWordsIndependentlyChecked": 1048576,
+  "cycles": [
+    {
+      "cycle": 1,
+      "touchedBytes": 433865712,
+      "postFreeBytes": 183878568,
+      "returnedBytes": 249987144,
+      "returnedMiB": 238.406,
+      "heartbeats": 10,
+      "completedCommandsWhileFree": {
+        "Write": 190,
+        "Read": 189,
+        "Flush": 12
+      },
+      "bothIoThreadsProgressed": true,
+      "bothStreamDirectionsProgressed": true
+    },
+    {
+      "cycle": 2,
+      "touchedBytes": 436094032,
+      "postFreeBytes": 188335016,
+      "returnedBytes": 247759016,
+      "returnedMiB": 236.281,
+      "heartbeats": 10,
+      "completedCommandsWhileFree": {
+        "Read": 189,
+        "Write": 189,
+        "Flush": 12
+      },
+      "bothIoThreadsProgressed": true,
+      "bothStreamDirectionsProgressed": true
+    },
+    {
+      "cycle": 3,
+      "touchedBytes": 436372560,
+      "postFreeBytes": 188842920,
+      "returnedBytes": 247529640,
+      "returnedMiB": 236.063,
+      "heartbeats": 10,
+      "completedCommandsWhileFree": {
+        "Write": 189,
+        "Read": 189,
+        "Flush": 12
+      },
+      "bothIoThreadsProgressed": true,
+      "bothStreamDirectionsProgressed": true
+    }
+  ],
+  "rawSha256": {
+    "stdout.log": "01c607934e0646744c3f25a5aab64a8926ee58ebe71037e915b196009f3d0027",
+    "stderr.log": "bfe1c029719d03101d5ad79290e244d036f45ec320326c03c487da8276527238",
+    "events.jsonl": "8f9629f46c4c374673bada85dbe8825bbed71593aeb494b89ba9055f3293175f",
+    "result.json": "b2dbef3696fa8a4f64358e0fdd0ea49fb781ff799918df43795f9b6aabbc3124",
+    "fixture.raw": "c3340c402dd4f575398d017f5920e165392cf7e47c33f08362791060ea9f5652",
+    "stream-guest-to-host.bin": "a84d47334e22b3c9e3dc53f4bd833a387f55c361272d458818c963facd56fc8b",
+    "stream-host-to-guest.bin": "5880f8652ed396a46e3986112e9efef0a4a28e2904d1b4d4034f8f8aeb205c0c"
+  },
+  "activeReturnVerified": true,
+  "ownedIoIntervalOverlapObserved": false,
+  "blockedSyscallOverlapVerified": false,
+  "completionHoldMillis": 25,
+  "fullResourceGatePassed": false,
+  "encryption": false,
+  "newCryptoKernelTested": false,
+  "productionReady": false,
+  "limitations": [
+    "Original aggregate fixture remains failed for unobserved guest-TX EAGAIN; narrow positive data/reclaim observations are separate.",
+    "HVC write syscall latency/native TX capacity waits were not directly instrumented.",
+    "RAW frozen request observations occur during deliberate post-I/O completion holds; no blocked OS syscall proof.",
+    "No fs/network/vsock/GPU, production guest runtime, automatic resource management or live MMIO reset demonstrated.",
+    "Private image encryption is deferred from v1; no encryption tested here."
+  ],
+  "originalFixtureChecksPassed": false,
+  "originalFixtureFailure": "guest TX readiness stall absent",
+  "duplexPayloadVerified": true,
+  "streamFrozenPinObservations": 38,
+  "guestToHostBytes": 12451840,
+  "hostToGuestCapturedBytes": 10948608,
+  "hostToGuestConsumedBytes": 10158080,
+  "hostToGuestUnconsumedSuffixBytes": 790528,
+  "hostWriteWouldBlockCount": 115,
+  "guestTxEagainObserved": false,
+  "streamStopVerified": false,
+  "authenticatedProtocolImplemented": false
+}

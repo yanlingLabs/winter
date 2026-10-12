@@ -1,0 +1,66 @@
+{
+  "fixture": "stream-fixture-v3-o32btt1i",
+  "buildSha256": "b4e5b6908ecfa6eb220f478c4d0c27e59e28900c4d697ef9527d30b52e93d139",
+  "vmLaunchedByAudit": false,
+  "originalArtifactsUnchanged": {
+    "result.json": "b2dbef3696fa8a4f64358e0fdd0ea49fb781ff799918df43795f9b6aabbc3124",
+    "events.jsonl": "8f9629f46c4c374673bada85dbe8825bbed71593aeb494b89ba9055f3293175f",
+    "stdout.log": "01c607934e0646744c3f25a5aab64a8926ee58ebe71037e915b196009f3d0027",
+    "stderr.log": "bfe1c029719d03101d5ad79290e244d036f45ec320326c03c487da8276527238"
+  },
+  "captures": {
+    "stream-guest-to-host.bin": {
+      "bytes": 12451840,
+      "sha256": "a84d47334e22b3c9e3dc53f4bd833a387f55c361272d458818c963facd56fc8b",
+      "everyBytePassed": true
+    },
+    "stream-host-to-guest.bin": {
+      "bytes": 10948608,
+      "sha256": "5880f8652ed396a46e3986112e9efef0a4a28e2904d1b4d4034f8f8aeb205c0c",
+      "everyBytePassed": true
+    }
+  },
+  "guestTxBytes": 12451840,
+  "guestRxBytes": 10158080,
+  "hostSentUnconsumedSuffixBytes": 790528,
+  "rawLogEventCorrespondencePassed": true,
+  "rawTelemetryRows": 9936,
+  "epochCount": 18,
+  "mappingTriples": 299,
+  "streamFrozenPinObservations": 38,
+  "allFrozenPinsExcludedAndMappingsDisjoint": true,
+  "mappingAckOrderPassed": true,
+  "rawRequestsWithSuccessfulOrderedAck": 1589,
+  "freedWindows": [
+    {
+      "cycle": 1,
+      "streamProgressRows": 11,
+      "heartbeats": 10,
+      "replacementSpans": 65,
+      "cumulativeReplacementBytes": 262144000
+    },
+    {
+      "cycle": 2,
+      "streamProgressRows": 11,
+      "heartbeats": 10,
+      "replacementSpans": 66,
+      "cumulativeReplacementBytes": 260046848
+    },
+    {
+      "cycle": 3,
+      "streamProgressRows": 11,
+      "heartbeats": 10,
+      "replacementSpans": 66,
+      "cumulativeReplacementBytes": 255852544
+    }
+  ],
+  "upstreamKernelSourceHashesVerified": true,
+  "measuredKernelSourceBuildEquivalenceVerified": false,
+  "originalFixtureChecksPassed": false,
+  "originalStreamAuditErrors": [
+    "guest TX readiness stall absent"
+  ],
+  "diskAndFootprintAuditScope": "Root independently audits final disk and footprint; not reclassified here",
+  "productionReady": false,
+  "fullResourceGatePassed": false
+}

@@ -1,0 +1,16 @@
+{
+  "stream-host-to-guest.bin": {
+    "artifact": "2026-10-12-stream-host-to-guest.bin.gz",
+    "rawBytes": 10948608,
+    "rawSha256": "5880f8652ed396a46e3986112e9efef0a4a28e2904d1b4d4034f8f8aeb205c0c",
+    "gzipBytes": 147270,
+    "gzipSha256": "0ecf7d177adac2bd5d1db965c371fc1607877a99196e1f2b95167ecce48f5d7f"
+  },
+  "stream-guest-to-host.bin": {
+    "artifact": "2026-10-12-stream-guest-to-host.bin.gz",
+    "rawBytes": 12451840,
+    "rawSha256": "a84d47334e22b3c9e3dc53f4bd833a387f55c361272d458818c963facd56fc8b",
+    "gzipBytes": 167460,
+    "gzipSha256": "7b889413084ada511f45d6b40af4c146abe3c6c0022a618bf6159b578cd25b7d"
+  }
+}
