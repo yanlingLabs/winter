@@ -14,7 +14,9 @@
 // leave by the default route, never onto the local network; and the WebRTC page runs only once the helper said the
 // policy took (`webrtc: disabled`), so a failure cannot announce an mDNS name. Last, the browser's own NetLog of the
 // whole run (`--log-net-log`, which the helper passes through): no URL, no name looked up and no address connected to
-// that is not the run's own — the fixture, example.com, the refused hosts (which reach only the dead proxy) or this Mac.
+// that is not the run's own — the fixture, example.com, the refused hosts (which reach only the dead proxy) or this Mac —
+// but the component updater's, kept on purpose for the root store (about 60 s after start: a run with --idle). Last,
+// Google's sign-in page loads as an ordinary page (the `--gaia-url` redirect is only the browser's own sign-in).
 //
 //   bun scripts/browser-e2e/headless/smoke.ts --app "<path to Winter Headless Dev.app>" [--out <dir>] [--keep]
 //       [--idle <seconds>]   sit that long with the first page open, before the rest (the NetLog check covers it)
@@ -55,18 +57,21 @@ const lanAddress = offSubnetPrivateAddress();
 
 /** What a NetLog says the browser did on the network: the URLs it requested, the names it resolved, the remote
  *  addresses it connected to (TCP) or sent a datagram to (UDP), and each name's resolved addresses. */
-function netlogTraffic(file: string): { events: number; urls: string[]; resolved: string[]; connected: string[]; addressesOf(host: string): string[] } {
+function netlogTraffic(file: string, beforeMs = Infinity): { events: number; urls: string[]; resolved: string[]; connected: string[]; addressesOf(host: string): string[] } {
   let text = "";
   try { text = readFileSync(file, "utf8").trim(); } catch { return { events: 0, urls: [], resolved: [], connected: [], addressesOf: () => [] }; }
   if (!text.endsWith("}")) text = `${text.replace(/,\s*$/, "")}]}`; // a capture cut short
-  const log = JSON.parse(text) as { constants: { logEventTypes: Record<string, number> }; events: Array<{ type: number; source: { id: number }; params?: Record<string, unknown> }> };
+  let log: { constants: { logEventTypes: Record<string, number>; timeTickOffset?: string | number }; events: Array<{ type: number; time?: string; source: { id: number }; params?: Record<string, unknown> }> };
+  try { log = JSON.parse(text) as typeof log; } catch { return { events: 0, urls: [], resolved: [], connected: [], addressesOf: () => [] }; } // cut mid-event
   const type = (name: string): number => log.constants.logEventTypes[name] ?? -1;
   const nameOf = (raw: unknown): string => String(raw).replace(/^[a-z]+:\/\//, "").replace(/:\d+$/, "").replace(/^\[(.*)\]$/, "$1").toLowerCase();
   const addressOf = (raw: unknown): string => String(raw).replace(/:\d+$/, "").replace(/^\[(.*)\]$/, "$1");
   const urls = new Set<string>(); const resolved = new Set<string>(); const connected = new Set<string>();
   const jobHost = new Map<number, string>(); const results = new Map<string, Set<string>>();
   const udpSent = new Set<number>(); const udpTarget = new Map<number, string>();
+  const offset = Number(log.constants.timeTickOffset ?? 0);
   for (const e of log.events) {
+    if (offset + Number(e.time ?? 0) >= beforeMs) continue; // after the cutoff: a page's own (below)
     const p = e.params ?? {};
     if (e.type === type("URL_REQUEST_START_JOB") && typeof p.url === "string") urls.add(p.url);
     if ((e.type === type("HOST_RESOLVER_MANAGER_JOB") || e.type === type("HOST_RESOLVER_MANAGER_REQUEST")) && p.host !== undefined) {
@@ -87,6 +92,8 @@ function netlogTraffic(file: string): { events: number; urls: string[]; resolved
 const hostOf = (url: string): string => { try { return new URL(url).hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase(); } catch { return url; } };
 const isLoopback = (host: string): boolean => host === "localhost" || host === "::1" || /^127\./.test(host);
 const testedRefusedHosts: string[] = [];
+/** When the run's last step (a third-party page, whose own requests are many) began: the NetLog check reads up to it. */
+let netlogCutoff = Infinity;
 
 // A page's own RTCPeerConnection (what a fingerprinting script makes): it gathers candidates, then is given a remote
 // one on `lan` (and, with `turn`, a TURN server there) and reports what it gathered and sent.
@@ -206,8 +213,9 @@ const before = await frontmost();
 const started = Date.now();
 const helperArgs = process.argv.flatMap((a, i) => (process.argv[i - 1] === "--helper-arg" ? [a] : []));
 // A NetLog of the whole run (the helper passes `--log-net-log` through): what did the browser itself ask for?
+const helperArgsGiven = helperArgs.some((a) => a.startsWith("--log-net-log="));
 const netlog = helperArgs.find((a) => a.startsWith("--log-net-log="))?.slice("--log-net-log=".length) ?? join(mkdtempSync(join(tmpdir(), "winter-headless-netlog-")), "net.json");
-if (!helperArgs.some((a) => a.startsWith("--log-net-log="))) helperArgs.push(`--log-net-log=${netlog}`);
+if (!helperArgsGiven) helperArgs.push(`--log-net-log=${netlog}`);
 const idleSeconds = Number(arg("--idle") ?? "0");
 const proc = spawn(exe, [`--winter-cache-root=${cacheRoot}`, ...helperArgs], { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"], env: { ...process.env } });
 const toHelper = proc.stdio[3] as Writable;
@@ -543,6 +551,27 @@ try {
   const front = await frontmost();
   check("the frontmost app never changed", front === before, `${before} → ${front}`);
 
+  // Google's sign-in page as a PAGE (needs the internet): it loads like any other, its origin unchanged — the
+  // `--gaia-url` redirect moves only the browser's own sign-in machinery (its `ListAccounts` check) to the dead port.
+  // Last, so its many requests (the NetLog check stops here) never mix with the browser's own.
+  netlogCutoff = Date.now();
+  await cdp("Page.navigate", { url: "https://accounts.google.com/" });
+  let gaia = { url: "", title: "" };
+  for (const end = Date.now() + 20_000; Date.now() < end;) {
+    await Bun.sleep(250);
+    const top = await topUrl();
+    if (!top.startsWith("https://accounts.google.com/")) { gaia = { url: top, title: "" }; continue; }
+    const tree = await cdp("Page.getFrameTree") as { frameTree?: { frame?: { id?: string } } };
+    const w = ((await cdp("Page.createIsolatedWorld", { frameId: tree.frameTree?.frame?.id, worldName: "winter" })) as { executionContextId?: number }).executionContextId;
+    const title = String(((await cdp("Runtime.evaluate", { expression: "document.title", contextId: w, returnByValue: true })) as { result?: { value?: unknown } }).result?.value ?? "");
+    gaia = { url: top, title };
+    if (title.length > 0) break;
+  }
+  const gaiaError = gaia.title.length > 0 ? "" : await netErrorFor("accounts.google.com");
+  check("a page navigation to accounts.google.com loads as an ordinary page (the GAIA redirect is the browser's own sign-in only)",
+    (gaia.url.startsWith("https://accounts.google.com/") && gaia.title.length > 0) || (gaiaError !== "no net error logged" && !/PROXY|REFUSED/.test(gaiaError)),
+    gaia.title.length > 0 ? `${gaia.url.replace(/\?.*/, "")} — "${gaia.title}"` : `offline? ${gaia.url} ${gaiaError}`);
+
   await command("tab.close", { tabId: "w-1" });
   const disposed = await command("context.dispose", { sessionId: "s_smoke" });
   check("context.dispose", typeof disposed.closed === "number");
@@ -557,14 +586,21 @@ try {
   // No request a page did not cause: every URL the browser requested, every name it resolved and every address it
   // connected to (or sent a UDP datagram to) is this run's own — the fixture on this Mac, the public check's
   // example.com, the refused hosts (which only reach the dead proxy on this Mac) — or this Mac itself.
-  const net = netlogTraffic(netlog);
+  const net = netlogTraffic(netlog, netlogCutoff);
   const pageHosts = new Set(["127.0.0.1", "localhost", "example.com", ...testedRefusedHosts]);
-  const strayUrls = net.urls.filter((u) => !pageHosts.has(hostOf(u)));
-  const strayNames = net.resolved.filter((h) => !pageHosts.has(h) && !isLoopback(h));
-  const allowedAddresses = new Set(net.addressesOf("example.com"));
+  // The ONE exception, on purpose: the component updater keeps the browser's root store current (HeadlessLayout's
+  // `backgroundRequestSwitches`) — its check and its downloads, about 60 s after start (a run with `--idle`).
+  const updater = (h: string): boolean => h === "update.googleapis.com" || /(^|\.)gvt1\.com$/.test(h);
+  const allowed = (h: string): boolean => pageHosts.has(h) || updater(h) || isLoopback(h);
+  const strayUrls = net.urls.filter((u) => !allowed(hostOf(u)));
+  const strayNames = net.resolved.filter((h) => !allowed(h));
+  const allowedAddresses = new Set(net.resolved.filter(allowed).flatMap((h) => net.addressesOf(h)));
   const strayAddresses = net.connected.filter((a) => !isLoopback(a) && !allowedAddresses.has(a));
-  check("the browser made no request a page did not cause (its NetLog)", net.events > 0 && strayUrls.length + strayNames.length + strayAddresses.length === 0,
-    net.events === 0 ? `no NetLog at ${netlog}` : [...strayUrls.map((u) => u.replace(/\?.*/, "")), ...strayNames, ...strayAddresses].slice(0, 8).join(" | ") || `${net.urls.length} URL(s), ${net.resolved.length} name(s), ${net.connected.length} address(es), all the run's own`);
+  const updaterUrls = net.urls.filter((u) => updater(hostOf(u))).length;
+  check("the browser made no request a page did not cause (its NetLog; the component updater excepted)", net.events > 0 && strayUrls.length + strayNames.length + strayAddresses.length === 0,
+    net.events === 0 ? `no NetLog at ${netlog}` : [...strayUrls.map((u) => u.replace(/\?.*/, "")), ...strayNames, ...strayAddresses].slice(0, 8).join(" | ")
+      || `${net.urls.length} URL(s), ${net.resolved.length} name(s), ${net.connected.length} address(es), all the run's own${updaterUrls > 0 ? ` (${updaterUrls} of them the component updater's)` : ""}`);
+  if (!process.argv.includes("--keep") && !helperArgsGiven) rmSync(join(netlog, ".."), { recursive: true, force: true });
   page.stop(true);
   frame.stop(true);
   counter.close();

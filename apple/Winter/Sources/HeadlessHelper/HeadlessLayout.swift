@@ -75,15 +75,15 @@ struct HeadlessArguments: Equatable {
         "OptimizationHints", "Translate", // not seen in a run; off as a belt (hint fetches on navigation, translate)
     ]
 
-    /// **No request a page did not cause.** Measured with a NetLog of a 60 s idle run and of a browsing run: each switch
-    /// here stopped the request it names, and with all of them nothing left the Mac that no page asked for (what is
-    /// left is the host resolver's IPv6 route check — a UDP connect that sends no packet). `disabledFeatures` holds
-    /// the feature half.
-    ///    * `--disable-component-update` — the component updater: an update check 60 s after start, then about ten
-    ///      downloads (update.googleapis.com, edgedl.me.gvt1.com) in EVERY run, the cache root being fresh. No security
-    ///      property is lost with it, measured: no Certificate Transparency check happens in this build (no
-    ///      `CERT_CT_COMPLIANCE_CHECKED` in the NetLog of TLS connections), and no CRLSet ever arrived (its folder
-    ///      stayed empty through a 150 s run);
+    /// **No request a page did not cause — but one.** Measured with a NetLog of a two-minute idle run and of a browsing
+    /// run: each switch here stopped the request it names, and with all of them nothing leaves the Mac that no page
+    /// asked for except the COMPONENT UPDATER, which stays on purpose: it is how the browser's Chrome Root Store is kept
+    /// current (its PKI metadata component: measured, the root store this build compiled in is version 35, and the
+    /// browser verifies with version 40 once the component installs, ~60 s after start) and how the CRLSet arrives (its
+    /// download seen ~65 s in, in one two-minute run, not in another). It costs an update check and
+    /// about ten downloads per run (update.googleapis.com, edgedl.me.gvt1.com), the cache root being fresh. (What else is
+    /// left is the host resolver's IPv6 route check — a UDP connect that sends no packet.) `disabledFeatures` holds the
+    /// feature half.
     ///    * `--no-first-run` — every run is a first run (a fresh cache root): without it, the RLZ ping 90 s after start
     ///      (clients1.google.com/tools/pso/ping);
     ///    * `--gaia-url=https://127.0.0.1:4/` — the sign-in cookie check at start (`ListAccounts`) has no switch of its
@@ -96,7 +96,6 @@ struct HeadlessArguments: Equatable {
     ///    * `--disable-domain-reliability` — not seen in a run, off as a belt: error beacons about Google's own domains.
     /// Each was checked by leaving it out of an otherwise full set: its request came back.
     static let backgroundRequestSwitches = [
-        "--disable-component-update",
         "--no-first-run",
         "--gaia-url=https://127.0.0.1:4/",
         "--disable-background-networking",

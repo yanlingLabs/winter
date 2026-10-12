@@ -205,10 +205,10 @@ final class HeadlessLayoutTests: XCTestCase {
             XCTAssertTrue(disabled.contains(feature), feature)
         }
         XCTAssertEqual(argv.filter { $0.hasPrefix("--disable-features=") }.count, 1, "one list (a second would replace the first)")
-        for sw in ["--disable-component-update", "--no-first-run", "--gaia-url=https://127.0.0.1:4/", "--disable-background-networking",
-                   "--disable-domain-reliability"] {
+        for sw in ["--no-first-run", "--gaia-url=https://127.0.0.1:4/", "--disable-background-networking", "--disable-domain-reliability"] {
             XCTAssertTrue(argv.contains(sw), sw)
         }
+        XCTAssertFalse(argv.contains("--disable-component-update"), "the component updater keeps the root store current")
         XCTAssertFalse(argv.contains { $0.hasPrefix("--no-proxy") || $0.hasPrefix("--proxy-server") }, "the PAC belt can't be replaced")
         XCTAssertEqual(argv.filter { $0.hasPrefix("--host-resolver-rules=") }, [HeadlessNetworkRule.hostResolverRulesSwitch])
     }
