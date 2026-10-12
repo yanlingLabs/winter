@@ -217,7 +217,7 @@ user's from then on.
 | `tab.gone` | `{ tabKey, reason: "closed" \| "crashed" }` | the tab closed (once per tab), or its renderer crashed |
 | `debugger.detached` | `{ tabKey, reason: "canceled_by_user" \| "target_closed" \| "idle" }` | the user dismissed the browser's debugging bar; the page went where the debugger cannot follow; or 5 minutes without a command |
 | `stop.pressed` | `{ tabKey }` | the user clicked the extension's toolbar button while Winter was driving that tab (one per driven tab) |
-| `watch.event` | `{ tabKey, watchId, outcome: "fired" \| "pressed" \| "lost" \| "url", at, url?, title?, reason?, own? }` | feature `watch` (1.2.0): what a watch saw (§5.5) |
+| `watch.event` | `{ tabKey, watchId, outcome: "fired" \| "pressed" \| "lost" \| "url", at, cause?, url?, key?, match?, title?, reason?, own? }` | feature `watch` (1.2.0): what a watch saw (§5.5) |
 
 The daemon reads `canceled_by_user` as the user taking the tab back ("the user stopped Winter from controlling this tab",
 a lost tab). For `idle` and `target_closed` the tab is still open: the transport hands the engine the debugger's own
@@ -282,7 +282,9 @@ its role and name, the secure-field floor (a password, one-time-code or payment 
 provider's frame, is never watched), and a LOCATOR (`performance.timeOrigin` of its document, its path from `<html>`
 through open shadow roots, and its steady identifying attributes). `spec` is the daemon's `WatchSpec`
 (`packages/core/src/computer-use/browser/page-runtime/watch.ts`): `{ watchId: "wk_<12 hex>", kind, locator?, text?,
-title?, anyForm?, settleMs?, pill, expiresAt }`.
+title?, url?, anyForm?, settleMs?, pill, expiresAt }` (`url`: a `navigated` watch's words, which the EXTENSION matches).
+An element inside a child frame is kept on the engine's debugger path instead (the extension never injects into a
+subframe).
 
 - **Injection:** the page watcher — `wakeWatcher`, the daemon's own source bundled in, the same function the engine's
   page runtime runs in the winter world — with `chrome.scripting.executeScript({ world: "ISOLATED" })` into the
@@ -291,20 +293,38 @@ title?, anyForm?, settleMs?, pill, expiresAt }`.
   `met`. The extension injects it again into each new document of the tab (`tabs.onUpdated` `status: "complete"`):
   `initial: "fire"` (a new document that shows it is the transition), or `"baseline"` when the navigation came within
   500 ms of the extension's own debugger input or navigation. A watch of an element whose document went answers `doc`
-  there: the extension drops it and sends `watch.event { outcome: "lost", reason: "doc" }`.
+  there: the extension drops it and sends `watch.event { outcome: "lost", reason: "doc" }`, `at` the time that load
+  began (`status: "loading"`). `"loading"` alone never loses one — Chrome says it for a same-document change too (a
+  pushState, a new fragment: measured, Chrome for Testing 156) — but an element's watch is never left silent: a load
+  that does not complete is looked at 10 s after it began, a new document that takes no script (a browser page, a store
+  page) loses it at once (`reason: "doc"`), and a tab whose watcher has not been heard from for 65 s (its heartbeat
+  comes every 20 s, every minute in a throttled background tab; a renderer that crashed sends none) is injected again
+  — where no script runs any more, its element watches are lost. A tab the browser replaces under a new id to navigate
+  it (§5.3) takes its watches along (the new id's next document: `"baseline"`).
 - **Reports:** the watcher sends the extension a runtime message from that world (`winter.wake.event`; the page cannot —
   there is no `externally_connectable`); the extension relays it, from frame 0 of a tab it keeps that watch for, with
   only these fields: `outcome` `fired` (the user's trusted event, or a false→true transition of a state condition),
   `pressed` (a trusted press of the watched element or form — a navigation right after it is the user's own), `lost`
-  (`reason` `gone`: the element went and could not be found again); `at` (the page's clock); `url` (the top document's,
-  ≤ 4,096 characters); `title` (a title watch, ≤ 300); and `own: true` when the extension's own debugger sent the tab
-  any `Input.*`, `Page.navigate`, `Page.reload` or `Page.navigateToHistoryEntry` in flight at `at` or within 500 ms
-  before. A `navigated` watch has no page part beyond its pill: the extension sends `outcome: "url"` with the tab's new
-  URL on every `tabs.onUpdated` URL change (a same-document one too). Never a value the user typed, never coordinates.
+  (`reason` `gone`: the element went and could not be found again; `at` when it went); `at` (the page's clock); `cause`
+  (`fired` of a submit or a change: when the user's trusted pointer or key event on the submitter, in the form or in the
+  field landed — within about a second before; a page script's own `requestSubmit()` or `execCommand()` has none and
+  fires nothing; Enter counts as a press only in a text-like field or on a submit button, a click only on its `click` or
+  its release over the element); `url` (the top document's ORIGIN AND PATH, "?…" where it had a query and "#…" where it
+  had a fragment — never the rest, ≤ 4,096 characters); `title` (a title watch, ≤ 300); and `own: true` when the
+  extension's own debugger sent the tab any `Input.*`, `Page.navigate`, `Page.reload` or `Page.navigateToHistoryEntry`
+  in flight at `at` (or at `cause`) or within 500 ms before. A `navigated` watch has no page part beyond its pill: the
+  extension sends `outcome: "url"` on every `tabs.onUpdated` URL change (a same-document one too) with the new
+  address's shape as `url`, `key` (a 16-hex digest of the WHOLE address, `watchUrlKey`: another key is another
+  address) and, for a watch with words, `match` (whether the whole address contains them — matched here, so the query
+  never leaves). Never a value the user typed, never coordinates.
+- **Residual:** a page whose own capture listener on the window, registered before the watcher's, stops an event's
+  propagation (`stopImmediatePropagation`) keeps the watcher from seeing it; the wait then ends by its expiry or the
+  model's cancel.
 - **What the user sees:** while armed, a pill at the page's bottom left with the daemon's fixed words ("Winter continues
   when you click “Submit for review”" — only the element's own label) and a ring around the element, in a closed shadow
   root under one `<winter-wake-overlay>` element that takes no pointer event (the engine leaves it out of its tree walk
-  and hit tests).
+  and hit tests). Watches of one page in different worlds (this extension's and the engine's debugger path's) share ONE
+  pill list: each overlay host names its watches (`data-pills`) and only the first draws them all.
 - **Ending:** `watch.cancel`; the tab closing; the link to Winter dropping (every watcher is taken down, and the daemon
   reads each watch as lost); and the watcher itself, at its 20-second heartbeat (`winter.wake.alive`), takes down any
   watch the extension no longer knows (a service-worker restart), and removes itself a little after its `expiresAt`.

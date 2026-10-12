@@ -6,6 +6,7 @@ import { wakeWatcher } from "../../../packages/core/src/computer-use/browser/pag
 import { forbiddenHits } from "../scripts/build";
 import { ExtensionController, ExtensionError } from "../src/controller";
 import { EXTENSION_FEATURES } from "../src/protocol";
+import { LOAD_STALL_MS, WATCH_SILENCE_MS } from "../src/watches";
 import { FakeChrome, flush, ManualClock } from "./fake-chrome";
 
 let chrome: FakeChrome;
@@ -14,6 +15,7 @@ let c: ExtensionController;
 /** What the page's watcher answers to each injection (by watch id); the args each injection carried. */
 let answers: Map<string, unknown>;
 let injected: Array<Record<string, any>>;
+let clock: ManualClock;
 
 const TAB = 101;
 const doc = 1_700_000_000_123.5;
@@ -34,7 +36,8 @@ beforeEach(async () => {
     if (a.op === "disarm") return true;
     return answers.get(a.spec?.watchId) ?? { ok: true, installed: "new", doc };
   };
-  c = new ExtensionController(chrome, { notify: (method, params) => notes.push({ method, params }), clock: new ManualClock(), launchHintMs: 10 });
+  clock = new ManualClock();
+  c = new ExtensionController(chrome, { notify: (method, params) => notes.push({ method, params }), clock, launchHintMs: 10 });
   c.noteLaunch("install");
   await c.start();
 });
@@ -139,6 +142,87 @@ describe("new documents", () => {
     await flush();
     expect(injected.filter((a) => a.op === "arm").map((a) => a.spec.initial)).toEqual(["baseline", "baseline"]);
     expect(notes.filter((n) => n.method === "watch.event").at(-1)!.params).toMatchObject({ outcome: "url", own: true });
+  });
+});
+
+describe("the address", () => {
+  test("a navigated watch hears of an address change as its site and path, a digest, and whether it holds Winter's words — never its query or fragment", async () => {
+    await c.handle("watch.arm", { tabKey: String(TAB), spec: spec({ watchId: "wk_00000000000a", kind: "navigated", locator: undefined, url: "step=2", pill: "Winter continues when you go to another page" }) });
+    for (const l of chrome.tabsOnUpdated.listeners) l(TAB, { status: "loading", url: "https://user.example/search?q=my+secret+order&step=2#top" });
+    const e = notes.filter((n) => n.method === "watch.event").at(-1)!.params;
+    expect(e).toMatchObject({ outcome: "url", url: "https://user.example/search?…#…", match: true });
+    expect(typeof e.key).toBe("string");
+    expect(JSON.stringify(notes)).not.toContain("secret");
+    for (const l of chrome.tabsOnUpdated.listeners) l(TAB, { status: "loading", url: "https://user.example/search?q=other" });
+    const f = notes.filter((n) => n.method === "watch.event").at(-1)!.params;
+    expect(f).toMatchObject({ url: "https://user.example/search?…", match: false });
+    expect(f.key).not.toBe(e.key);
+  });
+});
+
+describe("never silent, never lost on a same-document change", () => {
+  const loadingThenComplete = (url?: string): void => {
+    for (const l of chrome.tabsOnUpdated.listeners) l(TAB, { status: "loading", ...(url === undefined ? {} : { url }) });
+    for (const l of chrome.tabsOnUpdated.listeners) l(TAB, { status: "complete" });
+  };
+
+  test("a pushState or a new fragment says \"loading\" too (measured): the element's watch is asked again and stays", async () => {
+    await c.handle("watch.arm", { tabKey: String(TAB), spec: spec() });
+    answers.set("wk_0123456789ab", { ok: true, installed: "alive", doc });
+    loadingThenComplete("https://user.example/doc#review");
+    await flush();
+    expect(notes.filter((n) => n.method === "watch.event")).toEqual([]);
+    expect(c.watchCount()).toBe(1);
+  });
+
+  test("a new document that takes no script (a browser page, a store page): an element's watch is lost at once, dated when the load began; a page condition waits for the next load", async () => {
+    await c.handle("watch.arm", { tabKey: String(TAB), spec: spec() });
+    await c.handle("watch.arm", { tabKey: String(TAB), spec: spec({ watchId: "wk_00000000000b", kind: "appeared", text: "Order placed", locator: undefined }) });
+    chrome.scriptThrows.add(TAB);
+    const before = Date.now();
+    loadingThenComplete("https://chromewebstore.google.com/");
+    await flush();
+    const lost = notes.filter((n) => n.method === "watch.event").map((n) => n.params);
+    expect(lost).toEqual([{ tabKey: String(TAB), watchId: "wk_0123456789ab", outcome: "lost", at: expect.any(Number), reason: "doc" }]);
+    expect(lost[0]!.at as number).toBeGreaterThanOrEqual(before);
+    expect(c.watchCount()).toBe(1);
+  });
+
+  test("a load that never completes is looked at anyway after 10 s: the element's document went — lost", async () => {
+    await c.handle("watch.arm", { tabKey: String(TAB), spec: spec() });
+    for (const l of chrome.tabsOnUpdated.listeners) l(TAB, { status: "loading", url: "https://user.example/slow" });
+    answers.set("wk_0123456789ab", { ok: false, reason: "doc" });
+    await flush();
+    expect(notes.filter((n) => n.method === "watch.event")).toEqual([]);
+    await clock.advance(LOAD_STALL_MS);
+    expect(notes.filter((n) => n.method === "watch.event").map((n) => n.params)).toMatchObject([{ watchId: "wk_0123456789ab", outcome: "lost", reason: "doc" }]);
+  });
+
+  test("a watcher not heard from for a minute (a renderer that crashed) is looked at: no page there any more — lost; one that answers keeps its watch", async () => {
+    await c.handle("watch.arm", { tabKey: String(TAB), spec: spec() });
+    answers.set("wk_0123456789ab", { ok: true, installed: "alive", doc });
+    await clock.advance(WATCH_SILENCE_MS);
+    expect(notes.filter((n) => n.method === "watch.event")).toEqual([]);
+    expect(c.watchCount()).toBe(1);
+    // Its heartbeat holds the next look off.
+    await clock.advance(WATCH_SILENCE_MS - 1_000);
+    fromPage({ type: "winter.wake.alive", watchIds: ["wk_0123456789ab"] });
+    chrome.scriptThrows.add(TAB);
+    await clock.advance(WATCH_SILENCE_MS - 1_000);
+    expect(notes.filter((n) => n.method === "watch.event")).toEqual([]);
+    await clock.advance(2_000);
+    expect(notes.filter((n) => n.method === "watch.event").map((n) => n.params)).toMatchObject([{ watchId: "wk_0123456789ab", outcome: "lost", reason: "doc" }]);
+    expect(c.watchCount()).toBe(0);
+  });
+
+  test("a submit or a change carries the time of the input that made it the user's; this extension's own input then makes it `own`", async () => {
+    await c.handle("debugger.attach", { tabKey: String(TAB) });
+    await c.handle("watch.arm", { tabKey: String(TAB), spec: spec({ kind: "submitted", locator: undefined, anyForm: true }) });
+    await c.handle("cdp.send", { tabKey: String(TAB), method: "Input.insertText", params: { text: "draft" } });
+    const typed = Date.now();
+    fromPage({ type: "winter.wake.event", watchId: "wk_0123456789ab", outcome: "fired", at: typed + 5_000, cause: typed, url: "https://user.example/doc" });
+    fromPage({ type: "winter.wake.event", watchId: "wk_0123456789ab", outcome: "fired", at: typed + 5_000, cause: typed + 4_990, url: "https://user.example/doc" });
+    expect(notes.filter((n) => n.method === "watch.event").map((n) => [n.params.cause, n.params.own])).toEqual([[typed, true], [typed + 4_990, undefined]]);
   });
 });
 

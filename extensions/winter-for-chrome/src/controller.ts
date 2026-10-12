@@ -136,7 +136,7 @@ export class ExtensionController {
       clock: this.clock,
       ...(opts.log === undefined ? {} : { log: opts.log }),
     });
-    this.watches = new WatchBook(chrome, { notify: (method, params) => this.opts.notify(method, params), ...(opts.log === undefined ? {} : { log: opts.log }) });
+    this.watches = new WatchBook(chrome, { notify: (method, params) => this.opts.notify(method, params), clock: this.clock, ...(opts.log === undefined ? {} : { log: opts.log }) });
   }
 
   /** A watcher's runtime message (`winter.wake.event` / `winter.wake.alive`); false when it is not one. */
@@ -735,6 +735,8 @@ export class ExtensionController {
     const sessionId = this.book.sessionOfTab(oldId);
     await this.book.dropTab(oldId);
     if (sessionId !== undefined) await this.book.addTab(newId, sessionId);
+    // A wake trigger's watches follow the tab (they are re-injected into its new document).
+    this.watches.moveTab(oldId, newId);
     this.forgetAttached(oldId, a);
     try { await this.chrome.debugger.detach({ tabId: oldId }); } catch { /* went with the old tab */ }
     this.gone(oldId, "closed");

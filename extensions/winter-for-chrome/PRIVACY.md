@@ -42,10 +42,17 @@ something in your browser. Depending on the task, it may:
   being sent, a field being changed, a text or a title appearing or going away, or the page moving to another address.
   While it watches, the page shows a small pill saying what Winter is waiting for ("Winter continues when you click
   “Submit”") and a ring around that element. When it happens, the extension tells Winter only which watch it was, when it
-  happened, and the page's address (and, for a title, the title) — never what you typed, where you clicked, or the rest of
-  the page. The watching ends when it happens, when Winter or you stop waiting, when the tab closes, or when the
-  connection to Winter drops. It does not use the debugging interface: the little code that watches runs in the
-  extension's own isolated context in that one tab, so the browser shows no debugging notice while Winter waits.
+  happened, and where the page is: its site and path, never the part of the address after "?" or "#", where a page can
+  carry what you typed into a form (and, for a title, the title). To tell whether the page moved on to the address
+  Winter waits for, the extension compares the whole address itself and passes on only the answer and a short digest
+  that tells one address from another. It never passes on what you typed, where you clicked, or the rest of the page.
+  The watching ends when it happens, when Winter or you stop waiting, when the tab closes, or when the connection to
+  Winter drops. For an element of the page itself, or for the page as a whole, it does not use the debugging
+  interface: the little code that watches runs in the extension's own isolated context in that one tab, so the browser
+  shows no debugging notice while Winter waits. For an element inside a frame embedded in the page, Winter keeps the
+  debugging interface attached to the tab while it waits (the browser shows its notice), changing nothing else in the
+  page: your file pickers, dialogs and focus stay yours. A page's own script can keep the watcher from seeing your click
+  (by stopping the browser from passing it on); Winter then simply stops waiting when the wait runs out.
 
 To do this it uses the browser's debugging interface (`chrome.debugger`), attached only to a tab Winter is working in and
 detached when Winter is done with it, after five minutes without use, or as soon as the connection to Winter drops.
