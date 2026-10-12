@@ -37,6 +37,7 @@ import { ComputerV2Service } from "./service";
 import { AutomationTelemetry } from "./telemetry";
 import type { AutomationWorker, AutomationWorkerOptions } from "./worker-host";
 import type { MessagingDriverHandle } from "../agent/session-messaging";
+import { BrowserWakeBackend } from "./browser/wake/backend";
 import { AppWakeBackend } from "./wakes/app-backend";
 import { WakeStore } from "./wakes/persist";
 import { WakeRegistry, type WakeBackends } from "./wakes/registry";
@@ -326,18 +327,22 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     headlessSessionEnded: (sessionId) => headless.disposeSession(sessionId),
     headlessReason: () => headless.reason,
     headlessLocalNetworkRefusedAt: (tabKey) => headless.localNetworkRefusedAt(tabKey),
-    // [wake own input — lane B] ownAppInputAt: (bundleId, at) => service?.ownAppInputAt(bundleId, at) === true,
+    // Wake triggers: the helper's input to a browser bound as an APP reaches its page as trusted DOM events — Winter's
+    // own, never the user's action on a tab trigger (the service records it per app, from every session).
+    ownAppInputAt: (bundleId, at) => service?.ownAppInputAt(bundleId, at) === true,
     log,
   });
 
   // Wake triggers (2026-10-12): the registry, and the two backends it routes to by target kind — a tab binding → the
-  // browser engine's backend (lane B), an app target → the helper's (lane C). Each lane adds its production line in
-  // the marked spot below; a daemon without one says arming that kind is not available.
+  // browser engine's backend, an app target → the helper's. A test daemon may inject fakes in their place.
   const wakeBackends: WakeBackends = { ...(deps.inject?.wakeBackends ?? {}) };
   if (deps.inject?.wakeBackends === undefined) {
-    // [wake backend: tab — lane B] wakeBackends.tab = …;
-    // The helper's watches (lane C). Its hooks — the helper's `watchEvent`, the connection's loss, the daemon's stop —
-    // reach it through the registry, which fans the helper callbacks above and its own `stop()` out to each backend.
+    // The tab watches, over the engine's tabs (the page runtime's watcher, or Winter for Chrome's own). The registry
+    // calls its `stop()` first at daemon stop — before `svc.stop()` stops the engine — so its watches end quietly
+    // rather than as `lost` while their links close.
+    wakeBackends.tab = new BrowserWakeBackend(browsers, { log });
+    // The helper's watches. Its hooks — the helper's `watchEvent`, the connection's loss, the daemon's stop — reach it
+    // through the registry, which fans the helper callbacks above and its own `stop()` out to each backend.
     wakeBackends.app = new AppWakeBackend({
       helper,
       target: (sessionId, targetId) => service?.appTarget(sessionId, targetId),
