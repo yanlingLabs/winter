@@ -12,12 +12,21 @@ do {
     case "authorized", "replay": break
     case "cross-workspace":
         let id=request.identity
-        let other=try VolumeIdentity(homeId:id.homeId,homePath:id.homePath,homeDevice:id.homeDevice,homeInode:id.homeInode,workspaceId:UUID().uuidString.lowercased(),volumeId:id.volumeId,creationId:id.creationId,keyVersion:id.keyVersion,purpose:id.purpose)
+        let other=try VolumeIdentity(homeId:id.homeId,homePath:id.homePath,homeDevice:id.homeDevice,homeInode:id.homeInode,workspaceId:UUID().uuidString.lowercased(),volumeId:id.volumeId,creationId:id.creationId,keyVersion:id.keyVersion,keyFormat:id.keyFormat,purpose:id.purpose)
         request=LaunchRequest(nonce:request.nonce,identity:other)
     case "cross-home", "cross-volume", "cross-creation", "cross-version":
         let id=request.identity,mode=CommandLine.arguments.last!
-        let other=try VolumeIdentity(homeId:mode=="cross-home" ? UUID().uuidString.lowercased():id.homeId,homePath:id.homePath,homeDevice:id.homeDevice,homeInode:id.homeInode,workspaceId:id.workspaceId,volumeId:mode=="cross-volume" ? UUID().uuidString.lowercased():id.volumeId,creationId:mode=="cross-creation" ? UUID().uuidString.lowercased():id.creationId,keyVersion:mode=="cross-version" ? id.keyVersion+1:id.keyVersion,purpose:id.purpose)
+        let other=try VolumeIdentity(homeId:mode=="cross-home" ? UUID().uuidString.lowercased():id.homeId,homePath:id.homePath,homeDevice:id.homeDevice,homeInode:id.homeInode,workspaceId:id.workspaceId,volumeId:mode=="cross-volume" ? UUID().uuidString.lowercased():id.volumeId,creationId:mode=="cross-creation" ? UUID().uuidString.lowercased():id.creationId,keyVersion:mode=="cross-version" ? id.keyVersion+1:id.keyVersion,keyFormat:id.keyFormat,purpose:id.purpose)
         request=LaunchRequest(nonce:request.nonce,identity:other)
+    case "cross-format":
+        let id=request.identity
+        let format:VolumeKeyFormat=id.keyFormat == .fixtureRaw256V1 ? .luks2AES256XTSHMACSHA256V1:.fixtureRaw256V1
+        let other=try VolumeIdentity(homeId:id.homeId,homePath:id.homePath,homeDevice:id.homeDevice,homeInode:id.homeInode,workspaceId:id.workspaceId,volumeId:id.volumeId,creationId:id.creationId,keyVersion:id.keyVersion,keyFormat:format,purpose:id.purpose)
+        request=LaunchRequest(nonce:request.nonce,identity:other)
+    case "unknown-key-format":
+        var object=try JSONSerialization.jsonObject(with:bootstrap) as! [String:Any]
+        var identity=object["identity"] as! [String:Any];identity["keyFormat"]="unknown-format-v1";object["identity"]=identity
+        try submit(JSONSerialization.data(withJSONObject:object));exit(0)
     case "forged-pid":
         var object=try JSONSerialization.jsonObject(with:bootstrap) as! [String:Any];object["pid"]=getpid();try submit(JSONSerialization.data(withJSONObject:object));exit(0)
     case "forged-executable":

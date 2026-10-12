@@ -80,7 +80,8 @@ transport remain implementation decisions requiring evidence.
 A tiny separately signed native broker is the proposed sole Keychain wrapping-key
 custodian. Each private volume receives a random data-encryption key (DEK),
 wrapped under the broker's key-encryption key (KEK). Canonical home, workspace,
-volume, creation, purpose, format and wrapping-version identities are authenticated
+volume, creation, purpose, explicit format ID, exact key length/layout and
+wrapping-version identities are authenticated
 as associated data; they do not determine the disk key. In particular, home path,
 device and inode changes after an approved move or restore must not change the
 DEK. An explicitly authorized relocation preserves the logical home ID and
@@ -109,13 +110,33 @@ protocol is an implementation gate, not solved by the proposed process diagram.
 Worker compromise may expose its own live workspace/key, never another's key or
 the broker master. Keep library validation and refuse debugger/unsandboxed paths.
 
-The first block-format candidate is guest LUKS2 with authenticated dm-integrity,
-using an immutable bootstrap and pinned kernel/userspace. It is not yet selected
-or validated; existing probe kernels disable `CONFIG_MD` and require a new
-profile. Authenticated LUKS2 support has compatibility/maturity constraints, and
-sector integrity does not prevent replay of previously valid ciphertext.
+The selected **bounded fixture candidate**, following the 2026-10-12 independent
+review, is guest LUKS2 `aes/xts-random` + `hmac(sha256)` with authenticated
+dm-integrity sectors and journal mode. Its 96-byte native random volume material
+is AES data key32, AES tweak key32 and HMAC key 32; the AES halves must differ.
+It is not a passphrase or a derivation from an existing 32-byte key. The synthetic
+native broker supports the explicit versioned 96-byte profile alongside its
+retained 32-byte fixture profile, wraps all bytes under the 32-byte KEK with full
+identity AAD, and uses a strict version 2 worker frame. Unknown formats/lengths,
+old frames, cross-format relocation and duplicate provisioning refuse. This is
+volatile synthetic custody/descriptor evidence, not production Keychain custody
+or encrypted I/O. Existing anonymous 32-byte serialized identities/frames are
+rejected rather than silently assigned a new meaning; durable migration is open.
+
+The crypto-capable comparison kernel and neutral cryptsetup 2.8.8 toolset have
+been built; the kernel remains unbooted. Immutable guest bootstrap, exact
+header/geometry/generation authentication without TOCTOU, real encrypted
+read/write/crash/recovery behavior and crypto I/O during active reclaim remain
+gates. Authenticated LUKS2 support is experimental, and sector integrity does
+not prevent replay of previously valid ciphertext. The review's conservative
+1 TiB key-generation exposure budget is a proposal, **not an adopted production
+limit**; lifetime accounting and replacement-volume migration still require
+review and implementation. Relocation and KEK rotation preserve exact DEK bytes,
+format and any future consumed budget; they are not fresh disk-key generations.
+[Independent candidate review](research/2026-10-12-cowork-encryption-format-review.md),
+[synthetic native broker](../apple/Cowork/WinterCoworkKeyBroker/README.md).
 [dm-crypt](https://www.kernel.org/doc/html/latest/admin-guide/device-mapper/dm-crypt.html),
-[cryptsetup authenticated-encryption status](https://gitlab.com/cryptsetup/cryptsetup/-/blob/master/docs/v2.8.0-ReleaseNotes)
+[cryptsetup authenticated-encryption status](https://gitlab.com/cryptsetup/cryptsetup/-/raw/v2.8.8/man/cryptsetup.8.adoc)
 
 ## Helper, recovery and acceptance
 
