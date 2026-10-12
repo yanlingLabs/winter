@@ -62,8 +62,28 @@ separately. Cowork remains unavailable until its required gates pass.
   [host output](cowork-host-output.md) and [loading](host-output-loading.md).
 - The synthetic native key-broker fixture generates random volume keys and wraps
   them under a broker key. Approved identity rebinding and wrapping-key rotation
-  preserve the volume key. It does not implement durable Keychain custody,
-  production caller authorization or encrypted volumes.
+  preserve the volume key. Its closed 32/96-byte formats and actual scoped delivery
+  have evidence. Bounded child teardown distinguishes confirmed exit from retained
+  ownership debt; receive deadlines survive EINTR and truncated datagrams refuse.
+  The current receive-change build passed 33 Swift tests and a separate synthetic
+  delivery/timeout rerun. Frozen earlier receipts remain distinct. It does not
+  implement durable Keychain custody, production caller authorization or encrypted
+  volumes. See the [native fixture](../apple/Cowork/WinterCoworkKeyBroker/README.md).
+- The accepted native-host policy adds paths to the existing Bash sandbox and
+  file checks, without applying an outer floor to ordinary Code, hooks or LSP.
+  Approved escapes remain unwrapped with write-shaped integrity checks; tool
+  sandbox-disabling flags are never injected. Activation refreshes captured
+  policy while preserving queued work and session/backend identity; unchanged
+  acknowledged paths leave running Code intact. No daemon restart is required.
+  Core source review is accepted; platform parity and full SDK/embedded coverage
+  are still pending. Protected Chat/Dispatch refusal is interim only.
+- The guarded stream v3 source is independently accepted for a nonsecret Linux
+  fixture. Its closed factory exposes only the peer endpoint; native tests cover
+  queue pins, partial I/O, EventManager retirement and malformed activation. A
+  statically linked hardened worker passed host-only sandbox checks, including
+  fork/exec denial before factory creation. Guest HVC duplex/backpressure and
+  reclaim with the stream have not run. No key-release authority follows from
+  this transport evidence. See [draft native evidence](https://github.com/yanlingLabs/winter/pull/19).
 
 ## Work in progress
 
