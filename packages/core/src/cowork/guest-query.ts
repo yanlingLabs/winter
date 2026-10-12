@@ -29,13 +29,7 @@ export function buildCoworkGuestQueryOptions(
       Object.keys(callbacks).some(key => !["canUseTool", "abortController", "stderr"].includes(key)) ||
       typeof callbacks.canUseTool !== "function" || !(callbacks.abortController instanceof AbortController) ||
       (callbacks.stderr !== undefined && typeof callbacks.stderr !== "function")) throw new CoworkError("invalid_request");
-  const prepared = supervisor.prepareQuery(sessionId), { runtime, capabilities, limits } = prepared.launch;
-  // Only the existing confined file/foreground-shell slice is represented. Other
-  // tool classes and host services need their own reviewed guest routing first.
-  const classes = new Set(capabilities.toolClasses), tools: string[] = [];
-  if (classes.has("read")) tools.push("Read");
-  if (classes.has("write")) { if (classes.has("read")) tools.push("Edit"); tools.push("Write"); }
-  if (classes.has("execute")) tools.push("Bash");
+  const prepared = supervisor.prepareQuery(sessionId), { runtime, limits } = prepared.launch;
   const canUseTool = callbacks.canUseTool, abortController = callbacks.abortController, stderr = callbacks.stderr;
   return Object.freeze({
     executionPosture: runtime.executionPosture,
@@ -47,10 +41,10 @@ export function buildCoworkGuestQueryOptions(
       if (abortController.signal.aborted) throw new CoworkError("authority_denied");
       return prepared.spawn();
     },
-    env: Object.freeze({}), settingSources: fixedList([]), tools: fixedList(tools),
+    env: Object.freeze({}), settingSources: fixedList([]), tools: fixedList([...runtime.tools]),
     // allowedTools pre-approves calls. Keep approval decisions in the explicitly
     // supplied bridge instead of deriving pre-approval from the visibility ceiling.
-    allowedTools: fixedList([]), plugins: fixedList([]), skills: fixedList([]),
+    allowedTools: fixedList([...runtime.allowedTools]), plugins: fixedList([]), skills: fixedList([]),
     mcpServers: Object.freeze({}), strictMcpConfig: true,
     permissions: Object.freeze({ disableBypassPermissionsMode: runtime.permissionMode !== "bypassPermissions" }),
     allowDangerouslySkipPermissions: runtime.permissionMode === "bypassPermissions",

@@ -18,7 +18,7 @@ export interface GuestRuntimeLaunch {
   readonly scope: Readonly<GuestRuntimeScope>; readonly launchId: string;
   readonly source: Readonly<{ sourceId: string; locationId: string; revision: number; access: SourceAccess }>;
   readonly capabilities: GuestRuntimeCapabilities;
-  readonly runtime: Readonly<{ executionPosture: "confined-guest"; sessionId: string; model: string; cwd: string; winterHome: string; storeHome: string; persistSession: true; permissionMode: PermissionMode; resume?: string }>;
+  readonly runtime: Readonly<{ executionPosture: "confined-guest"; sessionId: string; model: string; cwd: string; winterHome: string; storeHome: string; persistSession: true; permissionMode: PermissionMode; tools: readonly string[]; allowedTools: readonly []; resume?: string }>;
 }
 export interface GuestRuntimeTermination {
   scope: Readonly<GuestRuntimeScope>; launchId: string; outcome: "confirmed-stopped" | "uncertain";
@@ -62,6 +62,15 @@ const sameScope = (a: Readonly<GuestRuntimeScope>, b: Readonly<GuestRuntimeScope
 function freezeCeiling(value: CapabilityCeiling): GuestRuntimeCapabilities {
   return Object.freeze({ ...value, toolClasses: Object.freeze([...value.toolClasses]), hostServices: Object.freeze([...value.hostServices]), connectors: Object.freeze([...value.connectors]) });
 }
+function confinedToolVisibility(toolClasses: readonly string[]): readonly string[] {
+  // Visibility is derived once from captured host authority. No pre-approval is
+  // inferred from it, and unimplemented guest tool families remain unavailable.
+  const classes = new Set(toolClasses), tools: string[] = [];
+  if (classes.has("read")) tools.push("Read");
+  if (classes.has("write")) { if (classes.has("read")) tools.push("Edit"); tools.push("Write"); }
+  if (classes.has("execute")) tools.push("Bash");
+  return Object.freeze(tools);
+}
 interface Admission { launch: Readonly<GuestRuntimeLaunch>; binding: ConversationBinding; source: WorkspaceSource }
 interface Lifetime { launch: Readonly<GuestRuntimeLaunch>; phase: "opening" | "running" | "retained"; stop?: (force: boolean) => void; cancel?: (force: boolean) => void }
 
@@ -84,11 +93,13 @@ export class CoworkGuestRuntimeSupervisor {
     const relativeCwd = relativeCoworkPath(binding.relativeCwd);
     const sourceRoot = source.kind === "folder" ? `/workspace/folders/${safeSegment(source.detail.grantRef)}` : `/workspace/repos/${safeSegment(source.detail.repositoryId)}`;
     const cwd = `${sourceRoot}${relativeCwd === "." ? "" : `/${relativeCwd}`}`;
+    const capturedCapabilities = freezeCeiling(capabilities);
     const launch: Readonly<GuestRuntimeLaunch> = Object.freeze({ protocolVersion: 1, limits: GUEST_RUNTIME_TRANSPORT_LIMITS, launchId: randomUUID(),
       scope: Object.freeze({ ...epoch, homeId: this.deps.records.homeIdentity(), bootId, sessionId, backendSessionId: safeSegment(identity.backendSessionId), bindingRevision: binding.revision, policyRevision: policy.revision, instructionRevision: workspace.instructionRevision }),
-      source: Object.freeze({ sourceId: source.sourceId, locationId: source.locationId, revision: source.revision, access: source.access }), capabilities: freezeCeiling(capabilities),
+      source: Object.freeze({ sourceId: source.sourceId, locationId: source.locationId, revision: source.revision, access: source.access }), capabilities: capturedCapabilities,
       runtime: Object.freeze({ executionPosture: "confined-guest", sessionId: identity.backendSessionId, model: identity.model, cwd,
-        winterHome: `/run/winter/conversations/${safeSegment(sessionId)}`, storeHome: store, persistSession: true, permissionMode: permissionModeFor(binding.policy), ...(identity.resume ? { resume: identity.backendSessionId } : {}) }),
+        winterHome: `/run/winter/conversations/${safeSegment(sessionId)}`, storeHome: store, persistSession: true, permissionMode: permissionModeFor(binding.policy),
+        tools: confinedToolVisibility(capturedCapabilities.toolClasses), allowedTools: Object.freeze([] as const), ...(identity.resume ? { resume: identity.backendSessionId } : {}) }),
     });
     return { launch, binding, source };
   }

@@ -97,9 +97,15 @@ test("guest query options derive only from canonical launch; no host config or p
   expect(JSON.stringify(options)).not.toContain(f.home);
 });
 
-test("guest options expose only the confined tools within the current capability ceiling", () => {
+test("read-only ceiling reaches the canonical port descriptor and query as exact Read visibility with no pre-approval", () => {
   const f = fixture(["read"]), options = buildCoworkGuestQueryOptions(f.supervisor, "conversation", f.callbacks);
   expect(options.tools).toEqual(["Read"]); expect(options.allowedTools).toEqual([]);
+  options.spawnClaudeCodeProcess!({ command: "ignored", args: [], cwd: f.home, env: {} });
+  const runtime = f.wires[0]!.launch.runtime;
+  expect(runtime.tools).toEqual(["Read"]); expect(runtime.allowedTools).toEqual([]);
+  expect(Object.isFrozen(runtime.tools)).toBe(true); expect(Object.isFrozen(runtime.allowedTools)).toBe(true);
+  expect(() => (runtime.tools as string[]).push("Bash")).toThrow();
+  expect(() => Reflect.apply(Array.prototype.push, runtime.allowedTools, ["Read"])).toThrow();
 });
 
 test("canonical auto policy maps to SDK default and keeps unresolved reviewer decisions in the host approval bridge", async () => {
@@ -107,13 +113,26 @@ test("canonical auto policy maps to SDK default and keeps unresolved reviewer de
   const options = buildCoworkGuestQueryOptions(f.supervisor, "conversation", f.callbacks);
   expect(options.permissionMode).toBe("default"); expect(options.allowedTools).toEqual([]);
   const h = compose(f), wire = f.wires[0]!;
-  expect(wire.launch.runtime.permissionMode).toBe("default");
+  expect(wire.launch.runtime).toMatchObject({ permissionMode: "default", tools: ["Read", "Edit", "Write", "Bash"], allowedTools: [] });
   wire.init(); wire.permission("auto-reviewer", "auto-permission", { decisionReason: REVIEWER_ESCALATION_REASON });
   await until(() => h.approvals.list("conversation").length === 1);
   h.approvals.resolve("conversation", "auto-reviewer", false, "fixture-user", "deny");
   await until(() => wire.inputs.some(chunk => chunk.includes("auto-permission")));
   const response = wire.inputs.map(chunk => JSON.parse(chunk)).find(frame => frame.requestId === "auto-permission");
   expect(response).toMatchObject({ ok: true, payload: { behavior: "deny" } });
+  wire.send(result()); wire.finish(); wire.release(); await h.consume;
+});
+
+test("plan policy reaches the canonical descriptor and SDK query as plan without granting a requested Bash call", async () => {
+  const f = fixture(["read", "write", "execute"], "plan"), options = buildCoworkGuestQueryOptions(f.supervisor, "conversation", f.callbacks);
+  expect(options.permissionMode).toBe("plan"); expect(options.allowedTools).toEqual([]);
+  const h = compose(f), wire = f.wires[0]!;
+  expect(wire.launch.runtime).toMatchObject({ permissionMode: "plan", tools: ["Read", "Edit", "Write", "Bash"], allowedTools: [] });
+  wire.init(); wire.permission("plan-bash", "plan-permission");
+  await until(() => wire.inputs.some(chunk => chunk.includes("plan-permission")));
+  const response = wire.inputs.map(chunk => JSON.parse(chunk)).find(frame => frame.requestId === "plan-permission");
+  expect(response).toMatchObject({ ok: true, payload: { behavior: "deny" } });
+  expect(h.approvals.list("conversation")).toEqual([]); expect(h.events.some(event => event.type === "approval_requested")).toBe(false);
   wire.send(result()); wire.finish(); wire.release(); await h.consume;
 });
 
