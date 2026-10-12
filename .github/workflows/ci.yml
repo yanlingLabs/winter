@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, cowork/output-integration]
   workflow_dispatch:
 
 # A new push to a PR cancels the previous run for that PR.
