@@ -91,6 +91,19 @@ bootstrap formatting protocol and verified filesystem/guest readiness transition
 then connect these to authenticated worker launch/stop and active RAM return.
 Until those gates pass, normal production provisioning stays disabled.
 
+Before production, relocation/restore must have an explicit user-visible recovery
+flow. A copied home or restored directory has different device/inode identities
+and cannot pass ordinary admission. Recovery must verify the canonical home
+relocation authority, confirmed stopped ownership, owner/mode/geometry and retained
+data before recording replacement identities and re-applying item exclusions.
+Missing images after a backup restore are data loss, not an empty successful
+resume: offer restoration from a consistent export, or an explicitly approved new
+empty volume with the loss stated. Never silently re-adopt or recreate an image.
+The current primitive deliberately reports recovery required; that is not a
+complete migration experience. Physical free-space admission and disk-pressure
+refusal/pause must also precede guest writes; sparse logical capacity is not a
+reservation of available Mac storage.
+
 Schema 9 upgrades old host-only stores additively. Older builds refuse the version;
 the existing explicit stopped-daemon rollback to v7/v6 accepts v8 and v9 only when
 all Cowork tables are empty. Populated directories, volumes, ownership, home IDs
