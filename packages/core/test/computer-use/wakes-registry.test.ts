@@ -302,6 +302,27 @@ describe("restart (spine §5)", () => {
     await until(() => !existsSync(join(home, "computer-use", "wakes.json")));
   });
 
+  test("the stop: each backend's own stop runs first; a LOSS reported while stopping is the next boot's `restart`, never a wake now", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-wakes-"));
+    homes.push(home);
+    const before = world({ home });
+    const order: string[] = [];
+    (before.backends.tab as unknown as { stop: () => void }).stop = () => { order.push("tab.stop"); };
+    const a = await before.arm();
+    before.reg.beginShutdown();
+    before.backends.tab.lose(a.wakeId, "the link closed"); // the stop itself
+    expect(ofType(before.events, "wake_ended")).toEqual([]);
+    before.reg.stop();
+    expect(order).toEqual(["tab.stop"]);
+    await Bun.sleep(60);
+    expect(before.wakeTexts().length).toBe(0);
+    const after = world({ home });
+    after.reg.start();
+    expect(ofType(after.events, "wake_ended").map((e) => [e.wakeId, e.reason])).toEqual([[a.wakeId, "restart"]]);
+    await until(() => after.wakeTexts().length === 1);
+    expect(after.wakeTexts()[0]).toContain("Winter restarted");
+  });
+
   test("a wake that fired while the daemon was stopping is delivered as `fired` at the next boot", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-wakes-"));
     homes.push(home);

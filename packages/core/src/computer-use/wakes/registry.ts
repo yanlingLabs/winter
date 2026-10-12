@@ -22,10 +22,13 @@ import { WakeDelivery, type WakeDeliveryDeps, type WakeNews, type WakeSessionSta
 import { WakeStore, type WakeRecord } from "./persist";
 import { WAKE_LIMITS, type WakeArmed, type WakeBackend, type WakeBackendEvent, type WakeCondition, type WakeEndReason } from "./types";
 
-/** What a backend may also want from the helper connection (lane C's app backend): its notifications and its loss. */
+/** What a backend may also want: the helper connection's notifications and its loss (lane C's app backend), and the
+ *  daemon's stop — called FIRST, before the browser engine and the helper connection are torn down (lane B's browser
+ *  backend: its watches end quietly instead of reporting `lost` as their links close). */
 export interface WakeBackendHelperHooks {
   handleNotification?(n: HelperNotification): void;
   helperDisconnected?(): void;
+  stop?(): void | Promise<void>;
 }
 export type WakeBackendKind = "tab" | "app";
 /** The two backends, by target kind. Either may be absent (this daemon cannot watch that kind: arming says so). */
@@ -330,10 +333,18 @@ export class WakeRegistry {
    *  `restart`), and no timer outlives it. */
   stop(): void {
     this.draining = true;
-    this.stopped = true;
     this.cancelPoll?.();
     this.cancelPoll = undefined;
     const b = this.deps.backends();
+    // The backends' own stop first (before the engine and the helper go): a loss they report meanwhile is the next
+    // boot's `restart` (`backendEvent`), never a wake now.
+    for (const backend of [b.tab, b.app]) {
+      try {
+        const done = backend?.stop?.();
+        if (done instanceof Promise) done.catch(() => { /* best effort */ });
+      } catch { /* best effort */ }
+    }
+    this.stopped = true;
     for (const t of this.triggers.values()) {
       t.cancelTimer();
       try { b[t.backend]?.disarm(t.wakeId); } catch { /* never throws by contract */ }
@@ -370,6 +381,14 @@ export class WakeRegistry {
 
   private backendEvent(t: Trigger, e: WakeBackendEvent): void {
     if (this.triggers.get(t.wakeId) !== t) return;
+    // A loss reported while the daemon stops is the stop itself (a link closing, a backend letting go): the trigger is
+    // left as it is in `wakes.json` — the next boot's `restart` — and nobody is woken now. (A real `fired` still ends
+    // it and is told at the next boot.)
+    if (this.draining && e.outcome === "lost") {
+      this.triggers.delete(t.wakeId);
+      t.cancelTimer();
+      return;
+    }
     const at = typeof e.at === "number" && Number.isFinite(e.at) && e.at > 0 ? Math.floor(e.at) : this.now();
     if (e.outcome === "fired") this.end(t, "fired", { at, ...(typeof e.detail === "string" && e.detail.trim() ? { detail: wakeLabel(e.detail, 300) } : {}) });
     else if (e.outcome === "lost") this.end(t, "lost", { at, ...(typeof e.reason === "string" && e.reason.trim() ? { reason: wakeLabel(e.reason, 300) } : {}) });

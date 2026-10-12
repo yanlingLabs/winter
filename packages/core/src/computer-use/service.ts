@@ -651,6 +651,7 @@ export class ComputerV2Service {
       await this.ensureLock(ctx, t);
       audit = { app: t.name };
     } else {
+      // The tab's site (a host) for the audit line — the engine's `hostOf` (lane B), when this build has it.
       const host = (this.deps.browsers as { hostOf?(sessionId: string, targetId: string): string | undefined } | undefined)?.hostOf?.(ctx.sessionId, targetId);
       if (host !== undefined) audit = { site: host };
     }

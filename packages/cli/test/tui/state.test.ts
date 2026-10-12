@@ -584,6 +584,23 @@ describe("state.ts — user messages", () => {
     s = reduce(s, { type: "user_message", threadId: "main", text: "<child_update>\nsession: s_1\n</child_update>", clientName: "dispatch-wake" }, T0);
     expect(s.committed).toEqual([{ kind: "note", text: "↻ child session update" }]);
   });
+
+  test("ComputerV2 wake triggers: armed → a note; the wake message (computer-wake) → what happened, from the pair — never the model's text", () => {
+    let s = initialState();
+    s = reduce(s, { type: "wake_armed", threadId: "main", wakeId: "wk_000000000001", condition: "clicked", targetLabel: "Chrome — Dashboard", elementLabel: "“Submit for review”", expiresAt: 1 }, T0);
+    expect(s.committed).toEqual([{ kind: "note", text: "⏳ waiting for you to click “Submit for review” in Chrome — Dashboard" }]);
+    s = reduce(s, { type: "wake_ended", threadId: "main", wakeId: "wk_000000000001", reason: "fired", at: 2 }, T0);
+    expect(s.committed.length).toBe(1); // said with the wake message
+    s = reduce(s, { type: "user_message", threadId: "main", text: "<computer-wake>\n…\n</computer-wake>", clientName: "computer-wake" }, T0);
+    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "↻ Winter continued: you clicked “Submit for review” in Chrome — Dashboard" });
+    expect(s.committed.some((b) => b.kind === "user")).toBe(false);
+    expect(s.wakeNews).toBeUndefined();
+    // An ending that wakes nobody is said at once.
+    s = reduce(s, { type: "wake_armed", threadId: "main", wakeId: "wk_000000000002", condition: "appeared", targetLabel: "Mail — Inbox", elementLabel: "“Sent”", expiresAt: 1 }, T0);
+    s = reduce(s, { type: "wake_ended", threadId: "main", wakeId: "wk_000000000002", reason: "cancelled", at: 3 }, T0);
+    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "⏹ stopped waiting for “Sent” to appear in Mail — Inbox (cancelled)" });
+    expect(s.wakes).toEqual({});
+  });
 });
 
 describe("state.ts — note one-liners match main.ts's wording (bg-task/worktree/directory/agent_error)", () => {
