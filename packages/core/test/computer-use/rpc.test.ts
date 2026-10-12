@@ -19,6 +19,7 @@ import {
   loadSettings, setComputerUseApp, setComputerUseFlags, Settings,
 } from "../../src/settings";
 import { FakeHelper } from "./fake-helper";
+import { FakeWakeBackend } from "./wake-fakes";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -54,7 +55,7 @@ class TestClient {
   close(): void { this.socket.end(); }
 }
 
-const CU_METHODS = [METHODS.computerUseStatus, METHODS.computerUseRequestPermission, METHODS.computerUseAppsList, METHODS.computerUseAppsSet, METHODS.computerUseSetSettings];
+const CU_METHODS = [METHODS.computerUseStatus, METHODS.computerUseRequestPermission, METHODS.computerUseAppsList, METHODS.computerUseAppsSet, METHODS.computerUseSetSettings, METHODS.computerUseWakesCancel];
 
 describe("computerUse.* (local-only RPCs)", () => {
   let stop: (() => void) | undefined;
@@ -69,16 +70,17 @@ describe("computerUse.* (local-only RPCs)", () => {
     const hub = new SessionHub(store);
     const fake = new FakeHelper();
     fake.running = false;
+    const wakeBackend = new FakeWakeBackend();
     const runtime = createComputerUseRuntime({
       home, profile: "dev", settings: () => live, settingsPath, approvals: new ApprovalBroker(), hub, store,
-      launchAllowed: true, inject: { transport: fake.transport, launcher: fake.launcher, verifier: fake.verifier, browserInstalled: () => false, headless: { resolve: () => ({ missing: "Winter's headless browser is missing — reinstall Winter" }) } },
+      launchAllowed: true, inject: { transport: fake.transport, launcher: fake.launcher, verifier: fake.verifier, browserInstalled: () => false, headless: { resolve: () => ({ missing: "Winter's headless browser is missing — reinstall Winter" }) }, wakeBackends: { app: wakeBackend } },
     });
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
     const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, computerUse: runtime.control });
     stop = () => { server.stop(); runtime.stop(); store.close(); };
-    return { home, settingsPath, socketPath, tokens, fake, runtime, setLive: (s: Settings | null) => { live = s; } };
+    return { home, settingsPath, socketPath, tokens, fake, runtime, store, wakeBackend, setLive: (s: Settings | null) => { live = s; } };
   }
 
   test("status: the settings and the helper — never launches it to answer", async () => {
@@ -277,13 +279,35 @@ describe("computerUse.* (local-only RPCs)", () => {
     c.close();
   });
 
+  test("wake triggers: computerUse.wakes.cancel ends one (the user's [Stop waiting]); setSettings({ wakes: false }) ends them all at once", async () => {
+    const { socketPath, tokens, runtime, settingsPath, setLive, store, wakeBackend: backend } = await boot();
+    const sid = store.createSession("global");
+    const arm = () => runtime.wakes.arm({ sessionId: sid, targetId: "t1", backend: "app", condition: { kind: "clicked", ref: "3" }, timeoutMs: 60_000 });
+    const a = await arm();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "app");
+    expect((await c.request(METHODS.computerUseWakesCancel, { sessionId: sid, wakeId: a.wakeId })).result).toEqual({ ok: true, cancelled: true });
+    expect((await c.request(METHODS.computerUseWakesCancel, { sessionId: sid, wakeId: a.wakeId })).result).toEqual({ ok: true, cancelled: false });
+    expect((await c.request(METHODS.computerUseWakesCancel, { sessionId: sid, wakeId: "nope" })).error.code).toBe(ERR.INVALID_PARAMS);
+    expect(backend.disarmed).toEqual([a.wakeId]);
+    const b = await arm();
+    expect((await c.request(METHODS.computerUseSetSettings, { wakes: false })).result).toEqual({ ok: true });
+    expect(runtime.wakes.countFor(sid)).toBe(0);
+    expect(backend.disarmed).toContain(b.wakeId);
+    expect(loadSettings(settingsPath)?.computerUse?.wakes).toBe(false);
+    expect((await c.request(METHODS.computerUseStatus, {})).result.wakes).toBe(false);
+    setLive(loadSettings(settingsPath));
+    c.close();
+  });
+
   test("local role only: never remote, refused for any other role", async () => {
     for (const m of CU_METHODS) expect(REMOTE_ALLOWED_METHODS.has(m)).toBe(false);
     const { socketPath, tokens } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(tokens.remote, "phone", "remote");
     for (const m of CU_METHODS) {
-      const r = await c.request(m, m === METHODS.computerUseRequestPermission ? { kind: "accessibility" } : m === METHODS.computerUseAppsSet ? { bundleId: "a.b" } : {});
+      const r = await c.request(m, m === METHODS.computerUseRequestPermission ? { kind: "accessibility" } : m === METHODS.computerUseAppsSet ? { bundleId: "a.b" }
+        : m === METHODS.computerUseWakesCancel ? { sessionId: "s_x", wakeId: "wk_000000000001" } : {});
       expect(r.error).toBeDefined();
     }
     c.close();

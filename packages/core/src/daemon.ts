@@ -120,6 +120,7 @@ import { createSinkCallStore, sinksFor } from "./runtime-sdk/sinks";
 import { sessionHooksFor } from "./runtime-sdk/hooks";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
 import { createComputerUseRuntime, type ComputerUseInjection } from "./computer-use/wiring";
+import type { WakeRegistry } from "./computer-use/wakes/registry";
 import { BrowserHostServer, type BrowserHostVerifier } from "./computer-use/browser/extension/host-server";
 import { BROWSER_HOST_SOCKET_NAME } from "./computer-use/browser/extension/protocol";
 import type { BackendRegistry } from "./computer-use/browser/transport";
@@ -227,6 +228,9 @@ export interface RunningDaemon {
   /** Dispatch's children tracker (`agent/dispatch-children.ts`) — the SAME instance the `sessions`
    *  capability server's `session_spawn` and every driver's turn-settled hook reach. */
   dispatchChildren: DispatchChildren | undefined;
+  /** ComputerV2 wake triggers (2026-10-12): the registry — the SAME instance the service arms through and the
+   *  `computerUse.wakes.cancel` RPC reaches (a test reads its counts off this, never a mirror). */
+  wakes: WakeRegistry;
   /**
    * P8b Task 15: THE LIVE settings holder — the same binding the settings-watcher swaps, not a boot
    * snapshot. Reading it twice around a `settings.json` write is how a test proves a key is hot
@@ -3104,6 +3108,7 @@ export async function startDaemon(opts: {
     buildSessionCapabilities,
     winter: winterDrivers,
     dispatchChildren,
+    wakes: computerUseRuntime.wakes,
     // The HOLDER, read through a closure — never `settings` captured by value, which would freeze
     // this at boot and make every hot-reload assertion above it a lie.
     settings: () => settings,

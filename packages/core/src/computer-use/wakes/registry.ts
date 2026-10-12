@@ -205,7 +205,9 @@ export class WakeRegistry {
     // Armed while the daemon began stopping, the setting turned off or the session went: given straight back.
     if (this.stopped || this.draining || !this.enabled() || this.deps.sessionState(input.sessionId) !== "live") {
       try { backend.disarm(wakeId); } catch { /* never throws by contract */ }
-      throw new AutomationFailure(this.enabled() ? "HelperUnavailable" : "NotAllowed", this.enabled() ? "Winter is shutting down — the wake trigger was not kept" : "wake triggers were turned off — the trigger was not kept");
+      if (this.stopped || this.draining) throw new AutomationFailure("HelperUnavailable", "Winter is shutting down — the wake trigger was not kept");
+      if (!this.enabled()) throw new AutomationFailure("NotAllowed", "wake triggers were turned off — the trigger was not kept");
+      throw new AutomationFailure("NotAllowed", "this session was archived or deleted — the wake trigger was not kept");
     }
     const labels = this.labelsFor(input.condition, armed);
     const t: Trigger = {
