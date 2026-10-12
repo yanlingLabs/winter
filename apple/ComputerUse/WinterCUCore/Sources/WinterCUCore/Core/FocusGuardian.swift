@@ -1107,6 +1107,11 @@ public struct CUFocusGuardianCore: Sendable {
         // Its target stays touched for the causal window after it (a late switch of its making is still the agent's) —
         // never the user's own app, which is their place to come back to.
         if let now, let a = visitApp { noteAfterglow(a, raise: true, now: now) }
+        // The visit's end found they did NOT move: their switch input during it was the visit's to decide, and it decided —
+        // none of it explains a change heard after the end (round 18b, ordinary seed 35: their ⌃-arrow into the visited
+        // desktop, judged the visit's, then explained the same state again when its notification came 1 ms after the end,
+        // and the visit's way back was undone as a theft).
+        if !saw, let now { input.discard(from: visitStartedAt, through: now) }
         visitApp = nil
         visitUser = nil
         visitUntil = 0
@@ -1563,6 +1568,13 @@ struct CUSwitchInput {
         let h = hold.map { String(format: "hold %.3f%@%@", $0.since, $0.control ? "⌃" : "⌘", $0.chord ? " chord" : "") } ?? ""
         let l = lastControlHold.map { String(format: "⌃ released %.3f", $0.end) } ?? ""
         return [sec.isEmpty ? "" : "seconds \(sec)", h, l].filter { !$0.isEmpty }.joined(separator: "; ")
+    }
+
+    /// Instants in [from, through] dropped (a visit's end decided what they explained).
+    mutating func discard(from: TimeInterval, through: TimeInterval) {
+        instants.removeAll { $0.at >= from && $0.at <= through }
+        seconds.removeAll { $0.at >= from && $0.at <= through }
+        if let h = lastControlHold, h.since >= from { lastControlHold = nil }
     }
 
     /// Every instant up to `now` used (tests).

@@ -114,6 +114,20 @@ final class Round18GuardianTests: XCTestCase {
                        "momentum")
     }
 
+    /// Round 18b (ordinary seed 35): a desktop visit whose end found the user did NOT move keeps their switch input
+    /// during it — it was the visit's to decide; heard again after the end, the same state is never adopted on it.
+    func testAVisitsNoMoveEndUsesUpTheSwitchInputDuringIt() {
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 100))
+        g.beginVisit(app: 6000, user: 1, now: 10.0)
+        g.noteSwitch(now: 10.2, .desktop)  // their ⌃-arrow into the visited desktop
+        let during = g.judge(CUMoveQuery(app: 6000, space: 300), now: 10.25)
+        guard case .visit = during else { return XCTFail("during the visit: the visit's — \(during)") }
+        XCTAssertFalse(g.endVisit(now: 10.3), "the visit's end: they did not move")
+        let after = g.judge(CUMoveQuery(app: 6000, space: 300), now: 10.31)
+        XCTAssertFalse(after.isUsers, "the same state heard after the end is not adopted on the visit's input — \(after)")
+    }
+
     /// I6's pending click mark (round 18, found by the model-based test's mid-act click — round 17's H1 exercised): a click
     /// into T's window while another app is in front is work once T's own activation lands. Another app's activation heard
     /// before T's, with no switch input of theirs since the click, is the landing of input from BEFORE it — the mark
