@@ -111,20 +111,29 @@ virgin eligibility and binds both exact targets to one random operation nonce
 BEFORE any formatter receives descriptors. New volumes transition
 `unformatted → formatting → ready`; ready volumes transition
 `ready → probing → ready` with a fresh operation nonce, never format. In-flight
-or uncertain operations cannot be resubmitted; `failFilesystems` narrows to
-`recovery-required` and retains ownership. Native stop may release the owner
+or uncertain FORMAT operations cannot be resubmitted. Read-only probe failure
+preserves one confirmed ready history while current-owner probe is unconfirmed;
+a new probe nonce can retry without authorizing formatting. `failFilesystems`
+marks format-new uncertainty `recovery-required` and retains ownership. Native stop may release the owner
 through its existing rules but does not restore format eligibility. Recovery is
 an explicit future workflow, never ambiguous destructive retry.
 
 Confirmation requires the exact home/workspace/volume/creation/purpose/file
 identity/geometry/expected UUID and controller/worker/incarnation/lease/image
-scope, a closed ext4/UUID/flush/probe receipt and positive protected native
+scope, a closed ext4/UUID/features/flush/probe receipt and positive protected native
 verification. Guest JSON, ext4 signatures alone, manifests and PID observations
 are insufficient. Both rows become ready atomically. `filesystemsReady` requires
 current-owner confirmed receipts and revalidates metadata/exclusion/current
 authority; a new incarnation must probe existing data before admission. Caller
 transactions refuse these transitions before effects. No duplicate owner or
-stop ledger was added.
+stop ledger was added. Protocol v2 pins supported ext4 features and required
+`noinit_itable` mounting only for durable fresh-sparse zero provenance; lazy inode
+initialization is enabled for those new images. Normal probes validate headers,
+UUID and features with blkid/dumpe2fs; full read-only e2fsck is an explicit trusted
+repair/uncertain-shutdown mode. Legacy v1 history is preserved but cannot inherit
+v2 feature/zero/mount authority: it reports `filesystem_compatibility_required`.
+DISCARD/punch-hole/compaction and physical free-space guards remain a separate
+native v1 gate; this journal and formatter do not implement them.
 
 The `spikes/cowork-filesystem-bootstrap` Linux-only fixture performs actual ext4
 formatting/probing ONLY on newly created disposable regular files when explicitly

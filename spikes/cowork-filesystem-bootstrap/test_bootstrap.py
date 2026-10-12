@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import struct
 import sys
 import tempfile
 import time
@@ -17,26 +18,33 @@ bootstrap = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bootstrap)
 
 class Pair:
+    def __init__(self, data_capacity=16 * 1024 * 1024):
+        self.data_capacity = data_capacity
     def __enter__(self):
         self.root = tempfile.TemporaryDirectory(prefix="winter-filesystem-bootstrap-")
         self.fds = []
-        self.plan = {"protocolVersion": 1, "operationId": "filesystem_" + str(uuid.uuid4()), "homeId": "fixture-home", "workspaceId": "fixture-workspace", "owner": {"controllerInstanceId": "fixture-controller", "workerInstanceId": "fixture-worker", "incarnationId": "fixture-incarnation", "leaseEpoch": 1, "runtimeImageDigest": "b" * 64}, "volumes": []}
+        self.plan = {"protocolVersion": 2, "virginZeroProvenance": "new-sparse-creation", "ext4Features": list(bootstrap.EXT4_FEATURES), "requiredMountOptions": list(bootstrap.REQUIRED_MOUNT_OPTIONS), "checkMode": "normal", "operationId": "filesystem_" + str(uuid.uuid4()), "homeId": "fixture-home", "workspaceId": "fixture-workspace", "owner": {"controllerInstanceId": "fixture-controller", "workerInstanceId": "fixture-worker", "incarnationId": "fixture-incarnation", "leaseEpoch": 1, "runtimeImageDigest": "b" * 64}, "volumes": []}
         for purpose in ("data", "environment"):
             fd = os.open(Path(self.root.name) / (purpose + ".ext4"), os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_CLOEXEC, 0o600)
-            self.fds.append(fd); os.ftruncate(fd, bootstrap.MIN_BYTES); os.fsync(fd); st = os.fstat(fd)
+            self.fds.append(fd); os.ftruncate(fd, self.data_capacity if purpose == "data" else bootstrap.MIN_BYTES); os.fsync(fd); st = os.fstat(fd)
             self.plan["volumes"].append({"volumeId": "volume_" + str(uuid.uuid4()), "creationId": "creation_" + str(uuid.uuid4()), "purpose": purpose, "identity": {"device": str(st.st_dev), "inode": str(st.st_ino), "uid": st.st_uid, "mode": stat.S_IMODE(st.st_mode)}, "capacityBytes": st.st_size, "sectorBytes": 512, "filesystemBlockBytes": 4096, "expectedFilesystemUUID": str(uuid.uuid4()), "action": "format-new"})
         return self
     def __exit__(self, *_):
         for fd in self.fds: os.close(fd)
         self.root.cleanup()
     def digests(self):
-        return [hashlib.sha256(os.pread(fd, bootstrap.MIN_BYTES, 0)).hexdigest() for fd in self.fds]
+        hashes = []
+        for fd in self.fds:
+            digest = hashlib.sha256()
+            for offset in range(0, os.fstat(fd).st_size, 1024 * 1024): digest.update(os.pread(fd, 1024 * 1024, offset))
+            hashes.append(digest.hexdigest())
+        return hashes
 
 class ProtocolTests(unittest.TestCase):
     def test_closed_plan_and_independent_volume_uuid(self):
         with Pair() as pair:
             self.assertEqual(bootstrap.validate_plan(pair.plan), pair.plan)
-            for mutation in ("version", "extra", "owner", "order", "uuid", "capacity", "shared", "extension"):
+            for mutation in ("version", "extra", "owner", "order", "uuid", "capacity", "shared", "extension", "features", "mount", "zero"):
                 bad = copy.deepcopy(pair.plan)
                 if mutation == "version": bad["protocolVersion"] = True
                 elif mutation == "extra": bad["payload"] = "forbidden"
@@ -45,6 +53,9 @@ class ProtocolTests(unittest.TestCase):
                 elif mutation == "uuid": bad["volumes"][0]["expectedFilesystemUUID"] = "not-a-uuid"
                 elif mutation == "capacity": bad["volumes"][0]["capacityBytes"] += 1
                 elif mutation == "shared": bad["volumes"][1]["volumeId"] = bad["volumes"][0]["volumeId"]
+                elif mutation == "features": bad["ext4Features"] = ["extent"]
+                elif mutation == "mount": bad["requiredMountOptions"] = []
+                elif mutation == "zero": bad["virginZeroProvenance"] = "unknown-import"
                 elif mutation == "extension": bad["volumes"][0]["identity"]["rawPath"] = "/dev/forbidden"
                 with self.subTest(mutation=mutation), self.assertRaises(bootstrap.Refused): bootstrap.validate_plan(bad)
     def test_fd_identity_capacity_mode_and_nonzero_refusal(self):
@@ -83,7 +94,7 @@ class LinuxFilesystemTests(unittest.TestCase):
             receiver, proof = self.receiver(pair.plan)
             observed = receiver.execute(pair.plan, pair.fds, proof)
             self.assertEqual([v["filesystemType"] for v in observed["volumes"]], ["ext4", "ext4"])
-            self.assertTrue(all(v["flushConfirmed"] and v["checked"] for v in observed["volumes"]))
+            self.assertTrue(all(v["flushConfirmed"] and v["checked"] and v["filesystemFeatures"] == bootstrap.EXT4_FEATURES and not v["fullReadOnlyCheck"] for v in observed["volumes"]))
             before = pair.digests()
             with self.assertRaisesRegex(bootstrap.Refused, "one_shot_consumed"): receiver.execute(pair.plan, pair.fds, proof)
             probe = copy.deepcopy(pair.plan); probe["operationId"] = "filesystem_" + str(uuid.uuid4())
@@ -95,6 +106,57 @@ class LinuxFilesystemTests(unittest.TestCase):
             fresh, new_proof = self.receiver(retry)
             with self.assertRaisesRegex(bootstrap.Refused, "not_virgin"): fresh.execute(retry, pair.fds, new_proof)
             self.assertEqual(pair.digests(), before)
+    def test_normal_probe_avoids_fsck_and_explicit_full_check_preserves_bytes(self):
+        with Pair() as pair:
+            seen = []; original = bootstrap.run_tool
+            def traced(name, *args, **kwargs):
+                seen.append(name); return original(name, *args, **kwargs)
+            bootstrap.run_tool = traced
+            try:
+                receiver, proof = self.receiver(pair.plan); receiver.execute(pair.plan, pair.fds, proof)
+                self.assertIn("dumpe2fs", seen); self.assertNotIn("e2fsck", seen)
+                before = pair.digests(); full = copy.deepcopy(pair.plan)
+                full["operationId"] = "filesystem_" + str(uuid.uuid4()); full["checkMode"] = "full-read-only"
+                for target in full["volumes"]: target["action"] = "probe-existing"
+                checker, token = self.receiver(full); observed = checker.execute(full, pair.fds, token)
+                self.assertIn("e2fsck", seen); self.assertTrue(all(v["fullReadOnlyCheck"] for v in observed["volumes"])); self.assertEqual(pair.digests(), before)
+            finally: bootstrap.run_tool = original
+    def test_interrupted_read_only_probe_retries_new_nonce_without_format_or_data_change(self):
+        with Pair() as pair:
+            receiver, proof = self.receiver(pair.plan); receiver.execute(pair.plan, pair.fds, proof); before = pair.digests()
+            probe = copy.deepcopy(pair.plan); probe["operationId"] = "filesystem_" + str(uuid.uuid4())
+            for target in probe["volumes"]: target["action"] = "probe-existing"
+            interrupted, token = self.receiver(probe); original = bootstrap.run_tool; seen = []
+            def fail_header(name, *args, **kwargs):
+                seen.append(name)
+                if name == "dumpe2fs": raise bootstrap.Refused("injected_read_only_interruption")
+                return original(name, *args, **kwargs)
+            bootstrap.run_tool = fail_header
+            try:
+                with self.assertRaisesRegex(bootstrap.Refused, "injected_read_only_interruption"): interrupted.execute(probe, pair.fds, token)
+            finally: bootstrap.run_tool = original
+            self.assertNotIn("mke2fs", seen); self.assertEqual(pair.digests(), before)
+            retry = copy.deepcopy(probe); retry["operationId"] = "filesystem_" + str(uuid.uuid4())
+            next_receiver, next_proof = self.receiver(retry); observed = next_receiver.execute(retry, pair.fds, next_proof)
+            self.assertTrue(all(v["action"] == "probe-existing" for v in observed["volumes"])); self.assertEqual(pair.digests(), before)
+    def test_sparse_multigroup_image_has_exact_features_and_lazy_zero_inode_table(self):
+        # At 4096 bytes/block a block group covers128MiB; use256MiB for an unused
+        # second inode table. Environment remains16MiB. No mount or loop device.
+        with Pair(data_capacity=256 * 1024 * 1024) as pair:
+            receiver, proof = self.receiver(pair.plan); observed = receiver.execute(pair.plan, pair.fds, proof)
+            self.assertEqual(observed["volumes"][0]["filesystemFeatures"], bootstrap.EXT4_FEATURES)
+            self.assertEqual(observed["requiredMountOptions"], ["noinit_itable"])
+            fd = pair.fds[0]; sb = os.pread(fd, 1024, 1024)
+            # Feature masks independently verify the actual bytes, not just receipt labels.
+            self.assertEqual(struct.unpack_from("<III", sb, 0x5C), (0x24, 0x2C2, 0x46B))
+            desc_size = struct.unpack_from("<H", sb, 0xFE)[0]; self.assertEqual(desc_size, 64)
+            group1 = os.pread(fd, desc_size, 4096 + desc_size)
+            self.assertFalse(struct.unpack_from("<H", group1, 0x12)[0] & 4)  # not INODE_ZEROED
+            inode_table = struct.unpack_from("<I", group1, 8)[0] | (struct.unpack_from("<I", group1, 0x28)[0] << 32)
+            inode_bytes = struct.unpack_from("<I", sb, 0x28)[0] * struct.unpack_from("<H", sb, 0x58)[0]
+            self.assertGreater(inode_table, 0); self.assertGreater(inode_bytes, 0)
+            self.assertFalse(any(os.pread(fd, inode_bytes, inode_table * 4096)))
+            self.assertLess(os.fstat(fd).st_blocks * 512, os.fstat(fd).st_size // 2)
     def test_unknown_second_disk_preflights_pair_before_first_write(self):
         with Pair() as pair:
             os.pwrite(pair.fds[1], b"UNKNOWN NONSECRET DATA", bootstrap.MIN_BYTES - 40); before = pair.digests()

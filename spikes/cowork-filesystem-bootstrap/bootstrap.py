@@ -16,6 +16,8 @@ import tempfile
 import time
 import uuid
 
+EXT4_FEATURES = sorted("64bit dir_index dir_nlink extent extra_isize filetype flex_bg has_journal huge_file large_file metadata_csum sparse_super".split())
+REQUIRED_MOUNT_OPTIONS = ["noinit_itable"]
 MAX_PLAN_BYTES = 16_384
 MIN_BYTES = 16 * 1024 * 1024
 MAX_BYTES = 256 * 1024**3
@@ -36,10 +38,13 @@ def integer(value, minimum, maximum):
     return type(value) is int and minimum <= value <= maximum
 
 def validate_plan(plan):
-    keys(plan, "protocolVersion operationId homeId workspaceId owner volumes")
-    require(type(plan["protocolVersion"]) is int and plan["protocolVersion"] == 1, "version")
+    keys(plan, "protocolVersion operationId homeId workspaceId owner volumes virginZeroProvenance ext4Features requiredMountOptions checkMode")
+    require(type(plan["protocolVersion"]) is int and plan["protocolVersion"] == 2, "version")
     for field in ("operationId", "homeId", "workspaceId"):
         require(type(plan[field]) is str and TOKEN.fullmatch(plan[field]), "scope")
+    require(plan["virginZeroProvenance"] == "new-sparse-creation", "zero_provenance")
+    require(plan["ext4Features"] == EXT4_FEATURES and plan["requiredMountOptions"] == REQUIRED_MOUNT_OPTIONS, "filesystem_contract")
+    require(plan["checkMode"] in ("normal", "full-read-only"), "check_mode")
     owner = plan["owner"]
     keys(owner, "controllerInstanceId workerInstanceId incarnationId leaseEpoch runtimeImageDigest")
     for field in ("controllerInstanceId", "workerInstanceId", "incarnationId"):
@@ -109,8 +114,9 @@ def run_tool(name, args, fd, deadline, accepted=(0,)):
         require(result.returncode in accepted, "linux_tool_refused")
         return result.returncode, output.decode("ascii", errors="strict")
 
-def probe(fd, target, deadline):
-    # e2fsck -n is non-repairing; give all probe children a separately read-only descriptor.
+def probe(fd, target, deadline, plan):
+    # Every probe helper gets a separately read-only descriptor. Normal launch is a
+    # bounded header/feature check; full e2fsck requires explicit trusted checkMode.
     read_fd = os.open(f"/proc/self/fd/{fd}", os.O_RDONLY | os.O_CLOEXEC)
     try:
         _, text = run_tool("blkid", ["-p", "-o", "export"], read_fd, deadline)
@@ -120,7 +126,17 @@ def probe(fd, target, deadline):
         require(len(sb) == 1024 and struct.unpack_from("<H", sb, 0x38)[0] == 0xEF53, "superblock")
         blocks = struct.unpack_from("<I", sb, 4)[0] | (struct.unpack_from("<I", sb, 0x150)[0] << 32)
         require(struct.unpack_from("<I", sb, 0x18)[0] == 2 and blocks * 4096 == target["capacityBytes"] and str(uuid.UUID(bytes=sb[0x68:0x78])) == target["expectedFilesystemUUID"], "filesystem_geometry")
-        run_tool("e2fsck", ["-f", "-n"], read_fd, deadline)
+        _, header = run_tool("dumpe2fs", ["-h"], read_fd, deadline)
+        properties = dict(line.split(":", 1) for line in header.splitlines() if ":" in line)
+        properties = {key.strip(): value.strip() for key, value in properties.items()}
+        features = sorted(properties.get("Filesystem features", "").split())
+        require(features == plan["ext4Features"], "filesystem_features")
+        require(properties.get("Filesystem UUID") == target["expectedFilesystemUUID"] and properties.get("Block size") == "4096" and properties.get("Block count") == str(target["capacityBytes"] // 4096), "header_geometry")
+        if plan["checkMode"] == "full-read-only":
+            run_tool("e2fsck", ["-f", "-n"], read_fd, deadline)
+        else:
+            require(properties.get("Filesystem state") == "clean", "explicit_full_check_required")
+        return features
     finally:
         os.close(read_fd)
 
@@ -151,14 +167,14 @@ class FixtureBootstrap:
             if target["action"] == "format-new":
                 all_zero(fd, target["capacityBytes"], min(deadline, time.monotonic() + 5))
             else:
-                probe(fd, target, deadline)
+                probe(fd, target, deadline, plan)
         observed = []
         for fd, target in zip(descriptors, plan["volumes"]):
             check_fixture_fd(fd, target)
             if target["action"] == "format-new":
-                run_tool("mke2fs", ["-q", "-t", "ext4", "-b", "4096", "-U", target["expectedFilesystemUUID"], "-O", "none,has_journal,extent,filetype,sparse_super,large_file", "-E", "lazy_itable_init=0,lazy_journal_init=0,nodiscard", "-F"], fd, deadline)
+                run_tool("mke2fs", ["-q", "-t", "ext4", "-b", "4096", "-I", "256", "-U", target["expectedFilesystemUUID"], "-O", "none," + ",".join(EXT4_FEATURES), "-E", "lazy_itable_init=1,lazy_journal_init=0,nodiscard", "-F"], fd, deadline)
             os.fsync(fd)
             check_fixture_fd(fd, target)
-            probe(fd, target, deadline)
-            observed.append({**target, "filesystemType": "ext4", "filesystemUUID": target["expectedFilesystemUUID"], "flushConfirmed": True, "checked": True})
+            features = probe(fd, target, deadline, plan)
+            observed.append({**target, "filesystemFeatures": features, "fullReadOnlyCheck": plan["checkMode"] == "full-read-only", "filesystemType": "ext4", "filesystemUUID": target["expectedFilesystemUUID"], "flushConfirmed": True, "checked": True})
         return {**plan, "volumes": observed}

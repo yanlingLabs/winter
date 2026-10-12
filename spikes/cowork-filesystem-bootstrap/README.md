@@ -15,7 +15,7 @@ python3 -I -S spikes/cowork-filesystem-bootstrap/test_bootstrap.py
 ```
 
 Run the actual Linux oracle only on an isolated disposable Linux runner with
-system `mke2fs`, `e2fsck` and `blkid` already installed:
+system `mke2fs`, `e2fsck`, `dumpe2fs` and `blkid` already installed:
 
 ```sh
 WINTER_RUN_LINUX_FILESYSTEM_FIXTURE=1 python3 -I -S spikes/cowork-filesystem-bootstrap/test_bootstrap.py
@@ -24,9 +24,10 @@ WINTER_RUN_LINUX_FILESYSTEM_FIXTURE=1 python3 -I -S spikes/cowork-filesystem-boo
 The dedicated `cowork-filesystem-bootstrap.yml` workflow prepares that oracle on
 Ubuntu 24.04. It has read-only repository permissions, no persistent checkout
 credentials, no package installation and a five-minute job cap. Current local
-results cover only four Mac protocol cases; five actual Linux cases are skipped,
-not counted as formatting passes. No Linux worker was available and none was
-started for this slice.
+results cover only four Mac protocol cases; eight actual Linux cases are skipped,
+not counted as formatting passes. The earlier v1 fixture at `85d5198e` passed its five Linux cases in CI; that
+evidence remains unchanged. This corrected v2 fixture has not run on Linux;
+no local Linux worker, Docker or VM was started.
 
 The closed plan has protocol version, operation nonce, home/workspace, exact
 controller/worker/incarnation/lease/runtime-image digest and exactly two ordered
@@ -46,17 +47,39 @@ foreign data or an existing filesystem refuses, including data near the end.
 service budget; helpers use the remaining budget capped at 20 seconds and are
 killed/reaped by `subprocess.run` on timeout. Blocking kernel I/O such as fsync is
 not made cancellable by Python; independent native worker recovery remains
-required. The fixture creates only two 16 MiB images; this does not validate scan
+required. Most cases create two 16 MiB images; one lazy-inode-table case creates
+new 256 MiB data + 16 MiB environment images to inspect a second block group. These cases do not validate scan
 performance or physical disk admission at production capacities.
 
-mke2fs gets a fixed argv, explicit ext4/4096/UUID/features and disabled lazy inode
-and journal initialization, a clean environment/config and `/proc/self/fd/N` for
-the pinned inherited descriptor. Its single `-F` is confined to these proven new
+Protocol v2 pins exactly `64bit,dir_index,dir_nlink,extent,extra_isize,filetype,
+flex_bg,has_journal,huge_file,large_file,metadata_csum,sparse_super`. Receipts report
+the observed set; unknown/extra/missing features refuse. mke2fs gets fixed argv,
+ext4/4096/256-byte inodes/UUID and exactly those features, `lazy_itable_init=1`,
+`lazy_journal_init=0`, a clean config/environment and `/proc/self/fd/N` for the
+pinned descriptor. Lazy inode initialization is authorized only for canonical new
+sparse zero-guaranteed creation. The durable v2 zero-provenance contract requires
+`noinit_itable` at every eventual mount: trusted mounting must refuse omission.
+There is no mount here, so the receipt declares a required contract, not observed
+mount enforcement. Imported/migrated/legacy images cannot acquire this contract.
+Legacy v1 minimal-feature history remains readable with an explicit compatibility
+error, never reinterpretation or automatic feature upgrade/reformat.
+The formatter's single `-F` is confined to proven new
 regular files, never a raw-device force option. fsync precedes readiness probes.
-Read-only `blkid -p`, ext4 superblock UUID/block-count/block-size checks and
-`e2fsck -f -n` must all succeed; no repair or UUID rewrite occurs. Receipts bind
+Normal read-only probe uses `blkid -p`, ext4 superblock UUID/block-count/block-size
+and `dumpe2fs -h` feature/geometry/clean-state checks. It does not run e2fsck.
+Only explicit trusted `checkMode=full-read-only` (repair/uncertain shutdown) invokes
+`e2fsck -f -n`; no repair or UUID rewrite occurs. Receipts bind
 the original plan and exact observed ext4/UUID/geometry plus flush confirmation.
-They are observations, not native authenticity proof.
+They are observations, not native authenticity proof. Failed/interrupted probe-only work
+retains one previous confirmed receipt while current-owner readiness is false;
+a fresh nonce safely retries read-only probing. Format uncertainty still requires
+recovery and can never reissue format authority.
+
+DISCARD/punch-hole or explicit compaction, plus a physical free-space/admission
+and runtime write guard, remain a separate required native v1 gate. This change
+neither implements native reclaim of disk blocks nor claims sparse logical size
+is physical capacity reservation. The large inode-table test checks actual bytes,
+feature masks, lazy group flags and allocation; it is not native DISCARD proof.
 
 Before production, pin these dependencies and immutable bootstrap bytes into the
 trusted image; implement the authenticated host-to-worker-to-bootstrap envelope,

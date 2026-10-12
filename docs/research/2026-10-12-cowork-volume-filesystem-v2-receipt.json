@@ -1,0 +1,31 @@
+{
+  "baseCommit": "ad016d349c90bd917f6c27cd1565b67f40e0ef86",
+  "sourceSha256": {
+    "packages/core/src/cowork/volume-filesystem.ts": "0b1dfaa372bdf900f50a9ab7f07c9bc43ed1d604c4e6a06414b3ceaf19964d55",
+    "packages/core/src/cowork/volumes.ts": "6aa6cc4583f1746fc4ce439f68b059dc2bacc9be1434ce3fbeaa010209306c00",
+    "packages/core/test/cowork/volume-filesystem.test.ts": "390918a1f78031d21071e668e9329cd4d7492b0cd57703d00e1d8de36b7b008f",
+    "spikes/cowork-filesystem-bootstrap/bootstrap.py": "1a657eda908eaf39cca922851c697497e4b3fad9f4fcc998b7188bef4a8baaf0",
+    "spikes/cowork-filesystem-bootstrap/test_bootstrap.py": "e9b69a1315e9335d14abf969f434f53034a090bed150a29722905dd674f2c084"
+  },
+  "unchangedWorkflowSha256": "0ac49c8af9e272c5ee4ad394625a754e3162c51931799936fb0499dcc098b93f",
+  "hostTests": {
+    "passed": 87,
+    "failed": 0,
+    "assertions": 600,
+    "suites": 5
+  },
+  "coreTypecheck": "pass",
+  "diffCheck": "pass",
+  "macProtocolTests": {
+    "passed": 4,
+    "linuxSkipped": 8
+  },
+  "protocolVersion": 2,
+  "sqlSchemaVersion": 10,
+  "actualV2LinuxFormattingRun": false,
+  "noVM": true,
+  "productionEnabled": false,
+  "nativeDiskCompactionImplemented": false,
+  "nativePhysicalSpaceGuardImplemented": false,
+  "reviewPending": true
+}
