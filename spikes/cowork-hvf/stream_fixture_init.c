@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <termios.h>
+#include "stream_frame_deadline.h"
 #include <time.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -85,20 +86,24 @@ static unsigned char stream_byte(size_t offset,unsigned char salt){return (unsig
 static void *stream_work(void *argument){
     unsigned tx=(unsigned)(uintptr_t)argument;unsigned char *buffer=malloc(STREAM_FRAME);if(!buffer)fail("stream owned buffer");
     unsigned frames=0;size_t bytes=0;unsigned waits=0,short_ops=0;
-    /* Intentional guest RX delay forces bounded host->guest readiness backpressure. */
+    /* Initial RX pacing only: it ends before the host first injects verified raw bytes. */
     if(!tx)sleep(2);
     for(unsigned frame=0;frame<STREAM_FRAMES && !atomic_load(&stream_stop);frame++){
         if(tx)for(size_t i=0;i<STREAM_FRAME;i++)buffer[i]=stream_byte(bytes+i,0xa7);
-        size_t done=0;struct timespec begin;clock_gettime(CLOCK_MONOTONIC,&begin);
+        size_t done=0;struct timespec deadline;if(clock_gettime(CLOCK_MONOTONIC,&deadline))fail("stream clock");deadline.tv_sec+=10;
         while(done<STREAM_FRAME){
-            ssize_t n=tx?write(stream_fd,buffer+done,STREAM_FRAME-done):read(stream_fd,buffer+done,STREAM_FRAME-done);
+            struct timespec now;if(clock_gettime(CLOCK_MONOTONIC,&now))fail("stream clock");
+            if(stream_frame_expired(now,deadline))fail("bounded frame deadline");
+            ssize_t n=tx?write(stream_fd,buffer+done,STREAM_FRAME-done):read(stream_fd,buffer+done,STREAM_FRAME-done);int io_errno=errno;
+            if(clock_gettime(CLOCK_MONOTONIC,&now))fail("stream clock");
+            if(stream_frame_expired(now,deadline))fail("bounded frame deadline");
             if(n>0){if((size_t)n<STREAM_FRAME-done)short_ops++;done+=(size_t)n;continue;}
             if(n==0)fail("stream unexpected EOF");
-            if(errno!=EAGAIN && errno!=EINTR)fail("stream raw IO");
+            if(io_errno!=EAGAIN && io_errno!=EINTR)fail("stream raw IO");
             struct pollfd ready={.fd=stream_fd,.events=tx?POLLOUT:POLLIN};int rc=poll(&ready,1,100);waits++;
             if(rc<0 && errno!=EINTR)fail("stream poll");
             if(rc>0 && ready.revents&(POLLERR|POLLHUP|POLLNVAL))fail("stream terminal poll");
-            struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);if(now.tv_sec-begin.tv_sec>=10)fail("bounded frame deadline");
+
         }
         if(!tx)for(size_t i=0;i<STREAM_FRAME;i++)if(buffer[i]!=stream_byte(bytes+i,0x5c))fail("every-byte host to guest oracle");
         bytes+=done;frames++;

@@ -12,7 +12,7 @@ def main():
         prior=json.loads((artifacts/'build.json').read_text())
         if prior['candidate']!=json.loads((ROOT/'stream-candidate-v3.json').read_text()):raise RuntimeError('Candidate changed; full build required')
         for name,pin in prior['artifacts'].items():verify(artifacts/name,pin)
-        for name in ['stream_fixture_worker.c','stream_fixture_init.c']:verify(ROOT/name,prior['fixtureSources'][name])
+        for name in ['stream_fixture_worker.c','stream_fixture_init.c','stream_frame_deadline.h']:verify(ROOT/name,prior['fixtureSources'][name])
         write_receipt(artifacts,prior_sha,True);return
     env=os.environ.copy();env.update(PATH=str(OUT/'rust/bin')+':'+env['PATH'],CARGO_HOME=str(OUT/'cargo-home'),CARGO_NET_OFFLINE='true')
     checked([OUT/'rust/bin/cargo','rustc','--crate-type','staticlib','--manifest-path',source/'Cargo.toml','-p','libkrun','--locked','--offline','--no-default-features','--features','blk','--jobs','2','--','--print','native-static-libs'],env=env)
@@ -31,6 +31,6 @@ def write_receipt(artifacts,prior_sha,receipt_only):
     pin=json.loads((ROOT/'stream-candidate-v3.json').read_text())
     receipt={'pins':PINS,'candidate':pin,'productionReady':False,'vmStarted':False,'identity':'dev.cowork.hvf.stream-fixture-worker','nativeOwnedCompletionHoldMillis':25,'encryption':False,'nonsecretOnly':True,'sandboxBeforeFactory':True,'hardenedRuntime':True,'nativeLinkage':'staticlib','debuggerEntitlement':False,'kernelProfile':'previously-measured-Apple-kernel-with-HVC/virtio-console','priorBuildSha256':prior_sha,'receiptOnly':receipt_only,'artifactRebuilt':not receipt_only}
     receipt['artifacts']={name:digest(artifacts/name) for name in ['libkrun.a','cowork-hvf-stream-worker','init','initramfs.cpio','kernel']}
-    receipt['fixtureSources']={name:digest(ROOT/name) for name in ['stream_fixture_worker.c','stream_fixture_init.c','build_stream_fixture.py','run_stream_fixture.py','block_capture.py','block_receipts.py','stream_fixture_oracle.py','run_block.py','reclaim_receipts.py','build.py','prepare_stream_v3.py','stream_io_v3.rs','stream_reclaim_access.rs','worker.entitlements','pins.json','stream-candidate-v3.json']}
+    receipt['fixtureSources']={name:digest(ROOT/name) for name in ['stream_fixture_worker.c','stream_fixture_init.c','stream_frame_deadline.h','build_stream_fixture.py','run_stream_fixture.py','stream_lifecycle.py','stream_capture_v2.py','block_capture.py','block_receipts.py','stream_fixture_oracle.py','run_block.py','reclaim_receipts.py','build.py','prepare_stream_v3.py','stream_io_v3.rs','stream_reclaim_access.rs','worker.entitlements','pins.json','stream-candidate-v3.json']}
     (artifacts/'build.json').write_text(json.dumps(receipt,indent=2)+'\n');print(json.dumps(receipt))
 if __name__=='__main__':main()

@@ -3,11 +3,11 @@ import argparse,fcntl,json,os,plistlib,re,shutil,socket,stat,subprocess,tempfile
 from pathlib import Path
 from build import ROOT,OUT,digest
 from block_receipts import summary
-from block_capture import capture_owned_child
-from stream_fixture_oracle import PeerOracle,receive_peer,audit as stream_audit
+from stream_lifecycle import supervise
+from stream_fixture_oracle import audit as stream_audit
 from run_block import disk_integrity,processes
 
-LAUNCH_DEPENDENCIES=frozenset(['run_stream_fixture.py','stream_fixture_oracle.py','run_block.py','block_capture.py','block_receipts.py','reclaim_receipts.py','build.py'])
+LAUNCH_DEPENDENCIES=frozenset(['run_stream_fixture.py','stream_lifecycle.py','stream_capture_v2.py','stream_fixture_oracle.py','run_block.py','block_capture.py','block_receipts.py','reclaim_receipts.py','build.py'])
 
 def verify_signed_worker(worker):
     subprocess.run(['/usr/bin/codesign','--verify','--strict',str(worker)],check=True)
@@ -49,29 +49,10 @@ def main():
         command=[str(fixture/'cowork-hvf-stream-worker'),'--run-stream-fixture' if args.run_stream_fixture else '--sandbox-check',str(fixture),str(fixture/'kernel'),str(fixture/'initramfs.cpio'),str(disk)]
         parent_control,worker_control=socket.socketpair(socket.AF_UNIX,socket.SOCK_DGRAM)
         command.append(str(worker_control.fileno()))
-        child=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={'PATH':'/usr/bin:/bin','HOME':str(fixture),'TMPDIR':str(fixture)},bufsize=0,start_new_session=True,pass_fds=(worker_control.fileno(),))
-        worker_control.close()
-        (fixture/'pid.json').write_text(json.dumps({'pid':child.pid,'command':command})+'\n')
-        peer=None;oracle=None;transfer_error=None
-        try:
-            peer=receive_peer(parent_control);parent_control.send(b'A')
-        except (OSError,RuntimeError) as error:transfer_error=str(error)
-        finally:parent_control.close()
-        capture_start=time.monotonic()
-        if peer is not None and args.run_stream_fixture:
-            oracle=PeerOracle(peer,fixture,capture_start);oracle.begin()
-        rows,capture=capture_owned_child(child,fixture)
-        raw_result=oracle.finish() if oracle else None
-        if oracle:
-            rows.extend(oracle.events);rows.sort(key=lambda row:row['hostElapsedSeconds'])
-        if peer is not None and not args.run_stream_fixture:
-            try:
-                peer.settimeout(1);sandbox_eof=peer.recv(1)==b''
-            except OSError:sandbox_eof=False
-            finally:peer.close()
-        else:sandbox_eof=None
+        rows,capture,raw_result,sandbox_eof=supervise(command,fixture,args.run_stream_fixture,parent_control,worker_control)
+        transfer_error=capture.get('lifecycleError')
         code=capture['exitCode'];timed_out=capture['timedOut']
-        if not capture['exitVerified']:
+        if not capture['ownersQuiescent']:
             result={'fixture':fixture.name,'vmStarted':args.run_stream_fixture,**capture,'diskAuditSkipped':True,'diskSha256':None,'streamOracle':raw_result,'peerTransferError':transfer_error,'buildSha256':digest(artifacts/'build.json'),'candidate':candidate,'productionReady':False,'fullResourceGatePassed':False,'encryption':False,'activeReturnVerified':False}
             (fixture/'events.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows));(fixture/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2));raise SystemExit(1)
         after=disk.lstat();same=stat.S_ISREG(after.st_mode) and after.st_nlink==1 and after.st_dev==identity.st_dev and after.st_ino==identity.st_ino and after.st_size==64*1024*1024
@@ -90,7 +71,7 @@ def main():
             result['fixtureChecksPassed']=result['streamAudit']['streamChecksPassed'] and inventory_ok and guest_ok and result['diskIntegrity']['passed'] and result['audit']['blockReceiptsPassed'] and result['audit']['reclaim']['receiptOrderingPassed'] and all(w['heartbeatsDuringWindow']>=8 for w in result['audit']['reclaim']['afterGuestFree']) and not any(r.get('kind') in ['guest_failure','reclaim_failure','block_trace_overflow'] for r in rows)
 
         result['signing']=signing
-        result['rawCaptureHashes']={name:digest(fixture/name) for name in ['stream-host-to-guest.bin','stream-guest-to-host.bin']} if raw_result and raw_result.get('threadJoined') else None
+        result['rawCaptureHashes']={name:digest(fixture/name) for name in ['stream-host-to-guest.bin','stream-guest-to-host.bin']} if raw_result and raw_result.get('threadStarted') and raw_result.get('threadJoined') else None
         result['streamSandbox']=next((r for r in rows if r.get('kind')=='stream_sandbox'),None)
         result['activeReturnVerified']=False
         result['streamStopVerified']=False  # Normal poweroff/EOF is not an MMIO reset/Stop proof.

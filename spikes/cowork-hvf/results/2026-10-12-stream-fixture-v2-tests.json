@@ -1,0 +1,16 @@
+{
+  "vmStarted": false,
+  "buildSha256": "390213327256cdd23390b9ae84fe1da8c8ca9aaf180083c5fb3b1a6691ead1c6",
+  "heldPriorBuildSha256": "b5a4f8b0b53dc856c5bb787e0d8f5aa21494ea1d1f02830baf8f75681823d2f9",
+  "oracleTestsPassed": 9,
+  "lifecycleDeadlineTestsPassed": 10,
+  "testSourceSha256": {
+    "test_stream_fixture.py": "c2fc7308c03024fcbf9eacd721a41a6f4ea61b599a04caa27c7f1f24e83675e7",
+    "test_stream_lifecycle.py": "da3afadc11bf2636a0634a289118af81639b72712a47f59aa5f624790e987581"
+  },
+  "frozenRawCaptureSha256": "bc4648193e2e06a3871bc9ec07fbdc58037eb5d9eea3606abd3cf17e50a8b89a",
+  "sandboxPassed": true,
+  "productionReady": false,
+  "activeReturnVerified": false,
+  "nativeSourceChanged": false
+}

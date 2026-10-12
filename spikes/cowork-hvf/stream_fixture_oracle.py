@@ -87,13 +87,25 @@ class PeerOracle:
                         next_progress+=FRAME
         except (OSError,ValueError,RuntimeError) as error:self.result['error']=str(error)
         finally:self.peer.close()
-    def finish(self):
-        # After worker exit, allow queued raw bytes/EOF to drain before cancellation.
-        self.thread.join(self.limits.join_seconds)
-        self.stop.set();self.thread.join(self.limits.join_seconds)
-        self.result.update(threadJoined=not self.thread.is_alive(),limits=vars(self.limits),eventRows=len(self.events))
-        # Never inspect/hash raw captures while an uncertain thread still owns them.
-        return self.result
+    def finish(self,cancel=False):
+        started=self.thread.ident is not None
+        if started:
+            if not cancel:
+                try:self.thread.join(self.limits.join_seconds)
+                except BaseException as error:self.result['error']=type(error).__name__
+            self.stop.set()
+            # Wakes select/recv on failure or interruption; no payload is inspected here.
+            if self.thread.is_alive():
+                try:self.peer.shutdown(socket.SHUT_RDWR)
+                except OSError:pass
+            try:self.thread.join(self.limits.join_seconds)
+            except BaseException as error:self.result['error']=type(error).__name__
+        else:
+            self.stop.set();self.peer.close()
+        joined=not started or not self.thread.is_alive()
+        self.result.update(threadStarted=started,threadJoined=joined,limits=vars(self.limits),eventRows=len(self.events) if joined else None)
+        # Never inspect/hash raw captures or mutable events while a writer is uncertain.
+        return dict(self.result)
 
 def audit(rows,oracle):
     errors=[];windows=[]
