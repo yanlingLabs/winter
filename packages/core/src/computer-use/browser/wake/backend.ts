@@ -695,7 +695,7 @@ export class BrowserWakeBackend implements WakeBackend {
 /** A wait ended because the page paused on a dialog only the woken session can see (Winter's browser holds it). */
 export function wakeDialogReason(type: string): string {
   const kind = ["alert", "confirm", "prompt", "beforeunload"].includes(type) ? type : "dialog";
-  return `the page opened a ${kind} dialog and is paused on it — the user may have acted already; Winter's browser keeps the dialog for you: read it with dialog() and answer it with answerDialog() as the user wants (ask them)`;
+  return `the page opened ${kind === "alert" ? "an" : "a"} ${kind} dialog and is paused on it — the user may have acted already; Winter's browser keeps the dialog for you: read it with dialog() and answer it with answerDialog() as the user wants (ask them)`;
 }
 
 function goneReason(reason: string): string {
