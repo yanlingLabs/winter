@@ -13,6 +13,7 @@ import type { PrimitiveMetric } from "../../src/computer-use/telemetry";
 import { renderWakeMessage, type WakeNews } from "../../src/computer-use/wakes/delivery";
 import { WakeStore } from "../../src/computer-use/wakes/persist";
 import { WakeRegistry, wakeLabel, type WakeArmInput } from "../../src/computer-use/wakes/registry";
+import { cutUtf16, wellFormed } from "../../src/computer-use/wakes/text";
 import { WAKE_LIMITS, COMPUTER_WAKE_CLIENT_NAME } from "../../src/computer-use/wakes/types";
 import type { Settings } from "../../src/settings";
 import { alreadyTrue, FakeWakeBackend } from "./wake-fakes";
@@ -42,7 +43,7 @@ afterEach(() => {
   for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true });
 });
 
-interface WorldOpts { home?: string; settings?: Settings; archived?: Set<string>; gone?: Set<string>; followed?: Set<string> }
+interface WorldOpts { home?: string; settings?: Settings; archived?: Set<string>; gone?: Set<string>; followed?: Set<string>; retryDelaysMs?: readonly number[]; armTimeoutMs?: number }
 
 function world(opts: WorldOpts = {}) {
   const home = opts.home ?? mkdtempSync(join(tmpdir(), "winter-wakes-"));
@@ -68,8 +69,9 @@ function world(opts: WorldOpts = {}) {
     telemetry: (m) => metrics.push(m),
     audit: (l) => audits.push(l),
     coalesceMs: 30,
-    retryDelaysMs: [20, 20],
+    retryDelaysMs: opts.retryDelaysMs ?? [20, 20],
     pollMs: 30,
+    ...(opts.armTimeoutMs === undefined ? {} : { armTimeoutMs: opts.armTimeoutMs }),
     log: (l) => logs.push(l),
   });
   registries.push(reg);
@@ -85,6 +87,8 @@ const until = async (pred: () => boolean, ms = 2_000): Promise<void> => {
   while (!pred()) { if (Date.now() - t0 > ms) throw new Error("timed out"); await Bun.sleep(5); }
 };
 const ofType = <T extends string>(events: Array<{ type: string }>, type: T) => events.filter((e) => e.type === type) as Array<Record<string, unknown>>;
+/** A strict decoder's verdict: no lone surrogate anywhere (Foundation's `JSONDecoder` refuses one). */
+const strictUtf16 = (s: string): string => new TextDecoder("utf-16le", { fatal: true }).decode(Buffer.from(s, "utf16le"));
 
 describe("arming", () => {
   test("arm: the backend is asked with the pinned request, wake_armed is appended (labels, never the note), the record is persisted 0600", async () => {
@@ -138,6 +142,61 @@ describe("arming", () => {
     expect(wakeLabel("a\nb\u202Ec\u0007d")).toBe("a b c d");
     expect(wakeLabel("x".repeat(300)).length).toBe(200);
   });
+
+  test("a cut never splits a surrogate pair, and a lone surrogate that came in is replaced: strictly valid UTF-16 everywhere", async () => {
+    // An emoji straddling the cut (199 units, then "…"): backed off whole — the same string the Swift decode test pins.
+    const cut = wakeLabel(`${"x".repeat(198)}😀 and more`);
+    expect(cut).toBe(`${"x".repeat(198)}…`);
+    expect(strictUtf16(cut)).toBe(cut);
+    expect(JSON.stringify(cut)).not.toContain("\\ud83d");
+    expect(wakeLabel(`${"x".repeat(197)}😀 and more`)).toBe(`${"x".repeat(197)}😀…`);
+    // At every cut point, for every max: well-formed.
+    const emojis = "😀👍🏽🇫🇷".repeat(40);
+    for (let max = 2; max < 60; max++) expect(() => strictUtf16(wakeLabel(emojis, max))).not.toThrow();
+    expect(cutUtf16("ab😀", 3)).toBe("ab");
+    expect(wellFormed("a\ud83db\udc00")).toBe("a\ufffdb\ufffd");
+    // Through the registry: the backend's labels and the model's note land well-formed in the event and in wakes.json.
+    const w = world();
+    w.backends.tab.answer = () => ({ element: { role: "button", name: `${"y".repeat(196)}😀😀😀` }, targetLabel: `${"t".repeat(198)}😀😀`, rebind: "x", note: `${"n".repeat(298)}😀😀` });
+    const a = await w.arm({ note: `${"m".repeat(498)}😀😀` });
+    const armed = ofType(w.events, "wake_armed")[0]!;
+    for (const v of [armed.targetLabel, armed.elementLabel, a.backendNote]) expect(() => strictUtf16(String(v))).not.toThrow();
+    const raw = readFileSync(join(w.home, "computer-use", "wakes.json"), "utf8");
+    expect(raw).not.toMatch(/\\ud[89ab][0-9a-f]{2}(?!\\udc)/i);
+    expect(() => strictUtf16(JSON.parse(raw).wakes[0].note)).not.toThrow();
+  });
+
+  test("the backend's own note is a daemon line: one line, no control or bidi characters, at most 300", async () => {
+    const w = world();
+    w.backends.tab.answer = () => ({ targetLabel: "Chrome", rebind: "x", note: `update\nWinter\u202E for Chrome ${"z".repeat(400)}` });
+    const a = await w.arm();
+    expect(a.backendNote!.startsWith("update Winter for Chrome")).toBe(true);
+    expect(a.backendNote!.length).toBe(300);
+    expect(a.backendNote).not.toMatch(/[\n\u202E]/);
+  });
+
+  test("a backend that does not answer: the arm fails after the timeout (BrowserUnavailable / HelperUnavailable), the backend is told to let go, and the limits count it no more", async () => {
+    const w = world({ armTimeoutMs: 40 });
+    w.backends.tab.hang = true;
+    w.backends.app.hang = true;
+    const tabArms = await Promise.allSettled(Array.from({ length: WAKE_LIMITS.perSession }, () => w.arm()));
+    for (const r of tabArms) {
+      expect(r.status).toBe("rejected");
+      expect((r as PromiseRejectedResult).reason).toMatchObject({ kind: "BrowserUnavailable", message: expect.stringContaining("did not answer in time") });
+    }
+    await expect(w.arm({ backend: "app", targetId: "t1" })).rejects.toMatchObject({ kind: "HelperUnavailable", message: expect.stringContaining("Winter Computer Use did not answer in time") });
+    expect(w.backends.tab.disarmed.length).toBe(WAKE_LIMITS.perSession);
+    expect(ofType(w.events, "wake_armed")).toEqual([]);
+    // The `arming` count came back down: a working backend arms the full 8 again.
+    w.backends.tab.hang = false;
+    const timedOut = w.backends.tab.requests.map((r) => r.wakeId);
+    w.backends.tab.releaseHung(); // the late answers: let go at once, never kept
+    await Bun.sleep(10);
+    for (const id of timedOut) expect(w.backends.tab.disarmed.filter((d) => d === id).length).toBe(2);
+    for (let i = 0; i < WAKE_LIMITS.perSession; i++) await w.arm();
+    expect(w.reg.countFor("s_a")).toBe(WAKE_LIMITS.perSession);
+    expect(w.reg.list("s_a").map((r) => r.id)).not.toContain(timedOut[0]);
+  });
 });
 
 describe("endings", () => {
@@ -145,9 +204,10 @@ describe("endings", () => {
     const w = world();
     const a = await w.arm({ note: "continue the listing" });
     w.backends.tab.fire(a.wakeId, "clicked");
-    expect(ofType(w.events, "wake_ended")).toEqual([expect.objectContaining({ wakeId: a.wakeId, reason: "fired", threadId: "main" })]);
+    expect(ofType(w.events, "wake_ended")).toEqual([expect.objectContaining({ wakeId: a.wakeId, reason: "fired", threadId: "main", woken: true })]);
     await until(() => w.wakeTexts().length === 1);
     const got = w.driverFor("s_a").got[0]!;
+    expect(got.text).not.toContain("may still be working"); // a TAB's wake: no I6 line
     expect(got).toMatchObject({ how: "send", clientName: COMPUTER_WAKE_CLIENT_NAME });
     expect(got.text).toStartWith("<computer-wake>\nA wake trigger you set has ended.\n");
     expect(got.text).toMatch(new RegExp(`- ${a.wakeId} fired at \\d\\d:\\d\\d: the user <screen-data id="([0-9a-f]{12})">clicked button “Submit for review” in Chrome — Developer Dashboard</screen-data id="\\1">\\.`));
@@ -191,7 +251,28 @@ describe("endings", () => {
     expect(text).toContain("2 wake triggers you set have ended.");
     expect(text).toContain(`- ${a.wakeId} fired at`);
     expect(text).toContain(`- ${b.wakeId} can no longer fire (`);
-    expect(text).toContain("): the app quit — it was waiting for <screen-data");
+    // The backend's loss reason is its own words (a helper's or a page watcher's): fenced, like every screen part.
+    expect(text).toMatch(/can no longer fire \(\d\d:\d\d\): <screen-data id="([0-9a-f]+)">the app quit<\/screen-data id="\1"> — it was waiting for <screen-data/);
+  });
+
+  test("an APP trigger fired on the user's click or change adds the I6 line (the app is theirs until they leave it); a state condition does not", async () => {
+    const w = world();
+    const click = await w.arm({ backend: "app", targetId: "t1", audit: { app: "Mail" } });
+    w.backends.app.fire(click.wakeId);
+    await until(() => w.wakeTexts().length === 1);
+    expect(w.wakeTexts()[0]).toContain("  The user may still be working in Mail — acts there are refused (user_working) until they leave it; tell them you're continuing, or wait.");
+    const change = await w.arm({ backend: "app", targetId: "t1", audit: { app: "Mail" }, condition: { kind: "changed", ref: "4", settleMs: 1_500 } });
+    w.backends.app.fire(change.wakeId);
+    await until(() => w.wakeTexts().length === 2);
+    expect(w.wakeTexts()[1]).toContain("may still be working in Mail");
+    const title = await w.arm({ backend: "app", targetId: "t1", audit: { app: "Mail" }, condition: { kind: "titled", title: "Sent" } });
+    w.backends.app.fire(title.wakeId);
+    await until(() => w.wakeTexts().length === 3);
+    expect(w.wakeTexts()[2]).not.toContain("may still be working");
+    const lost = await w.arm({ backend: "app", targetId: "t1", audit: { app: "Mail" } });
+    w.backends.app.lose(lost.wakeId, "the app quit");
+    await until(() => w.wakeTexts().length === 4);
+    expect(w.wakeTexts()[3]).not.toContain("may still be working");
   });
 
   test("lost wakes the session; cancel (model or user) and disabled never do", async () => {
@@ -204,8 +285,8 @@ describe("endings", () => {
     expect(w.reg.cancel("s_a", c.wakeId, "user")).toBe(false);
     expect(w.reg.cancel("s_other", (await w.arm()).wakeId, "model")).toBe(false); // not that session's
     expect(w.backends.tab.disarmed).toContain(c.wakeId);
-    const reasons = ofType(w.events, "wake_ended").map((e) => e.reason);
-    expect(reasons).toEqual(["lost", "cancelled"]);
+    const reasons = ofType(w.events, "wake_ended").map((e) => [e.reason, e.woken]);
+    expect(reasons).toEqual([["lost", true], ["cancelled", false]]);
     await Bun.sleep(80);
     expect(w.wakeTexts().length).toBe(1);
     expect(w.audits.at(-1)).toMatchObject({ outcome: "cancelled", by: "user" });
@@ -216,7 +297,8 @@ describe("endings", () => {
     const quiet = await w.arm({ timeoutMs: 1_000 });
     const loud = await w.arm({ timeoutMs: 1_000, notifyOnTimeout: true });
     await until(() => ofType(w.events, "wake_ended").length === 2, 3_000);
-    expect(ofType(w.events, "wake_ended").map((e) => [e.wakeId, e.reason])).toEqual([[quiet.wakeId, "expired"], [loud.wakeId, "expired"]]);
+    // `woken` tells the two apart — the reason alone cannot.
+    expect(ofType(w.events, "wake_ended").map((e) => [e.wakeId, e.reason, e.woken])).toEqual([[quiet.wakeId, "expired", false], [loud.wakeId, "expired", true]]);
     await until(() => w.wakeTexts().length === 1);
     expect(w.wakeTexts()[0]).toContain(`- ${loud.wakeId} expired at`);
     expect(w.wakeTexts()[0]).not.toContain(quiet.wakeId);
@@ -228,7 +310,7 @@ describe("endings", () => {
     const a = await w.arm();
     w.setSettings({ computerUse: { wakes: false } } as Settings);
     w.reg.checkSettings();
-    expect(ofType(w.events, "wake_ended")).toEqual([expect.objectContaining({ wakeId: a.wakeId, reason: "disabled" })]);
+    expect(ofType(w.events, "wake_ended")).toEqual([expect.objectContaining({ wakeId: a.wakeId, reason: "disabled", woken: false })]);
     w.setSettings({} as Settings);
     const b = await w.arm();
     w.setSettings({ computerUse: { enabled: false } } as Settings);
@@ -238,14 +320,33 @@ describe("endings", () => {
     expect(w.wakeTexts().length).toBe(0);
   });
 
-  test("the session archived or deleted: `disabled`, no wake; a deleted session's pair is not appended", async () => {
-    const w = world();
+  test("the session archived: `disabled`, no wake", async () => {
+    const archived = new Set<string>();
+    const w = world({ archived });
     const a = await w.arm();
+    archived.add("s_a");
     w.reg.sessionEnded("s_a");
-    expect(ofType(w.events, "wake_ended")).toEqual([expect.objectContaining({ wakeId: a.wakeId, reason: "disabled" })]);
+    expect(ofType(w.events, "wake_ended")).toEqual([expect.objectContaining({ wakeId: a.wakeId, reason: "disabled", woken: false })]);
     expect(w.backends.tab.disarmed).toContain(a.wakeId);
     await Bun.sleep(60);
     expect(w.wakeTexts().length).toBe(0);
+    expect(existsSync(join(w.home, "computer-use", "wakes.json"))).toBe(false);
+  });
+
+  test("the session DELETED: its trigger ends (disarmed, record gone), its pair is not appended to a log that is gone, nobody is woken", async () => {
+    const gone = new Set<string>();
+    const w = world({ gone });
+    const a = await w.arm();
+    expect(ofType(w.events, "wake_armed").length).toBe(1);
+    gone.add("s_a"); // the session's row and log are deleted
+    w.reg.sessionEnded("s_a");
+    expect(ofType(w.events, "wake_ended")).toEqual([]);
+    expect(w.backends.tab.disarmed).toContain(a.wakeId);
+    expect(w.reg.countFor("s_a")).toBe(0);
+    expect(w.logs.some((l) => l.includes("could not append wake_ended to s_a"))).toBe(true);
+    await Bun.sleep(60);
+    expect(w.wakeTexts().length).toBe(0);
+    expect(existsSync(join(w.home, "computer-use", "wakes.json"))).toBe(false);
   });
 
   test("an event that races the backend's own answer is handled once the trigger exists", async () => {
@@ -265,6 +366,29 @@ describe("endings", () => {
     await until(() => w.logs.some((l) => l.includes("left for the next boot")), 2_000);
     const file = JSON.parse(readFileSync(join(w.home, "computer-use", "wakes.json"), "utf8"));
     expect(file.wakes[0].ended).toMatchObject({ outcome: "fired" });
+  });
+
+  test("retries run out: only the batch that failed is left for the next boot — an ending queued while it was being delivered still goes out", async () => {
+    const w = world({ retryDelaysMs: [] });
+    const d = w.driverFor("s_a");
+    let started = false;
+    let failing = true;
+    const send = d.send.bind(d);
+    d.send = async (text: string, clientName?: string) => {
+      if (failing) { failing = false; started = true; await Bun.sleep(80); throw new Error("send failed"); }
+      return send(text, clientName);
+    };
+    const a = await w.arm();
+    const b = await w.arm({ condition: { kind: "titled", title: "Done" } });
+    w.backends.tab.fire(a.wakeId);
+    await until(() => started);
+    w.backends.tab.fire(b.wakeId); // ends while A's delivery is in flight
+    await until(() => w.wakeTexts().length === 1, 2_000);
+    expect(w.wakeTexts()[0]).toContain(`- ${b.wakeId} fired at`);
+    expect(w.wakeTexts()[0]).not.toContain(a.wakeId);
+    // A's record stays for the next boot; B's went with its delivery.
+    await until(() => JSON.parse(readFileSync(join(w.home, "computer-use", "wakes.json"), "utf8")).wakes.length === 1);
+    expect(JSON.parse(readFileSync(join(w.home, "computer-use", "wakes.json"), "utf8")).wakes[0]).toMatchObject({ wakeId: a.wakeId, ended: { outcome: "fired" } });
   });
 
   test("Dispatch: a trigger armed in a followed turn has its wake followed (the undo runs on a failed send)", async () => {
@@ -340,6 +464,90 @@ describe("restart (spine §5)", () => {
     expect(after.wakeTexts()[0]).toContain(`- ${a.wakeId} fired at`);
   });
 
+  test("a boot whose restart wake was NOT delivered: the next boot delivers it as it is — exactly one wake_ended, never the expired branch", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-wakes-"));
+    homes.push(home);
+    const before = world({ home });
+    const a = await before.arm({ timeoutMs: 1_000, note: "go on" });
+    before.reg.beginShutdown();
+    before.reg.stop();
+    // Boot 1: the restart is told to a session whose wake fails every time (retries run out).
+    const boot1 = world({ home, retryDelaysMs: [] });
+    boot1.driverFor("s_a").failSends = 1;
+    boot1.reg.start();
+    expect(ofType(boot1.events, "wake_ended").map((e) => [e.wakeId, e.reason, e.woken])).toEqual([[a.wakeId, "restart", true]]);
+    await until(() => boot1.logs.some((l) => l.includes("left for the next boot")), 2_000);
+    expect(JSON.parse(readFileSync(join(home, "computer-use", "wakes.json"), "utf8")).wakes[0]).toMatchObject({ wakeId: a.wakeId, ended: { outcome: "restart" } });
+    boot1.reg.beginShutdown();
+    boot1.reg.stop();
+    // Boot 2, after the trigger's own expiry: no second wake_ended, and the restart wake still goes out.
+    await Bun.sleep(1_050);
+    const boot2 = world({ home });
+    boot2.reg.start();
+    expect(ofType(boot2.events, "wake_ended")).toEqual([]);
+    await until(() => boot2.wakeTexts().length === 1);
+    expect(boot2.wakeTexts()[0]).toContain("Winter restarted, so this wait ended");
+    expect(boot2.wakeTexts()[0]).toContain(`- ${a.wakeId} (armed at`);
+    expect(boot2.wakeTexts()[0]).toContain("  Your note: go on");
+    await until(() => !existsSync(join(home, "computer-use", "wakes.json")));
+    // Across both boots: one ending.
+    expect([...ofType(boot1.events, "wake_ended"), ...ofType(boot2.events, "wake_ended")].length).toBe(1);
+  });
+
+  test("a trigger armed BEFORE the boot sweep never overwrites what the last daemon left, and is never ended `restart` by it", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-wakes-"));
+    homes.push(home);
+    const before = world({ home });
+    const old = await before.arm();
+    before.reg.beginShutdown();
+    before.reg.stop();
+    const after = world({ home });
+    const early = await after.arm({ sessionId: "s_b" }); // before start()
+    after.reg.start();
+    expect(ofType(after.events, "wake_ended").map((e) => [e.wakeId, e.reason])).toEqual([[old.wakeId, "restart"]]);
+    expect(after.reg.countFor("s_b")).toBe(1);
+    const onDisk = JSON.parse(readFileSync(join(home, "computer-use", "wakes.json"), "utf8")).wakes.map((r: { wakeId: string }) => r.wakeId);
+    expect(onDisk).toContain(early.wakeId);
+    await until(() => after.wakeTexts().length === 1);
+    expect(after.wakeTexts()[0]).toContain(old.wakeId);
+    expect(after.wakeTexts()[0]).not.toContain(early.wakeId);
+  });
+
+  test("wakes.json keeps the minimal record: no element role, no backend detail or loss reason (a boot-delivered wake reads without them)", async () => {
+    // An armed record: the labels, never the element's role.
+    const armedOnly = world();
+    await armedOnly.arm({ note: "n" });
+    const raw1 = JSON.parse(readFileSync(join(armedOnly.home, "computer-use", "wakes.json"), "utf8")).wakes[0];
+    expect(Object.keys(raw1).sort()).toEqual(["armedAt", "elementLabel", "expiresAt", "kind", "note", "rebind", "sessionId", "targetLabel", "wakeId"]);
+    // An ended record whose wake is owed: outcome and time only.
+    const w = world();
+    w.driverFor("s_a").failSends = 10;
+    const f = await w.arm();
+    w.backends.tab.fire(f.wakeId, "clicked the big button");
+    await until(() => w.logs.some((l) => l.includes("left for the next boot")), 2_000);
+    const rec = JSON.parse(readFileSync(join(w.home, "computer-use", "wakes.json"), "utf8")).wakes[0];
+    expect(rec.ended).toEqual({ outcome: "fired", at: expect.any(Number) });
+    expect(rec.elementRole).toBeUndefined();
+    const l = await w.arm();
+    w.backends.tab.lose(l.wakeId, "the tab was closed");
+    await until(() => JSON.parse(readFileSync(join(w.home, "computer-use", "wakes.json"), "utf8")).wakes.some((r: { wakeId: string; ended?: unknown }) => r.wakeId === l.wakeId && r.ended !== undefined), 2_000);
+    const lostRec = JSON.parse(readFileSync(join(w.home, "computer-use", "wakes.json"), "utf8")).wakes.find((r: { wakeId: string }) => r.wakeId === l.wakeId);
+    expect(lostRec.ended).toEqual({ outcome: "lost", at: expect.any(Number) });
+    expect(JSON.stringify(lostRec)).not.toContain("the tab was closed");
+    // The next boot delivers both, reading without the role, the detail and the reason.
+    w.reg.beginShutdown();
+    w.reg.stop();
+    const next = world({ home: w.home });
+    next.reg.start();
+    await until(() => next.wakeTexts().length === 1);
+    const text = next.wakeTexts()[0]!;
+    expect(text).toContain(`- ${f.wakeId} fired at`);
+    expect(text).toContain("clicked “Submit for review” in Chrome — Developer Dashboard");
+    expect(text).not.toContain("button “Submit");
+    expect(text).toContain(`- ${l.wakeId} can no longer fire (`);
+    expect(text).toContain("its target is gone");
+  });
+
   test("expired records: dropped silently, or woken when they asked; archived or deleted sessions' records dropped", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-wakes-"));
     homes.push(home);
@@ -352,7 +560,7 @@ describe("restart (spine §5)", () => {
     ] }));
     const after = world({ home, archived: new Set(["s_arch"]), gone: new Set(["s_gone"]) });
     after.reg.start();
-    expect(ofType(after.events, "wake_ended").map((e) => [e.wakeId, e.reason])).toEqual([["wk_000000000001", "expired"], ["wk_000000000002", "expired"]]);
+    expect(ofType(after.events, "wake_ended").map((e) => [e.wakeId, e.reason, e.woken])).toEqual([["wk_000000000001", "expired", false], ["wk_000000000002", "expired", true]]);
     await until(() => after.wakeTexts().length === 1);
     expect(after.wakeTexts()[0]).toContain("- wk_000000000002 expired at");
     expect(after.wakeTexts()[0]).not.toContain("wk_000000000001");

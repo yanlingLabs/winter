@@ -2981,7 +2981,8 @@ export async function startDaemon(opts: {
     // ComputerV2 (2026-10-08): Settings → Computer Use's local-only RPCs.
     computerUse: computerUseRuntime.control,
     browserLink: computerUseRuntime.browserLink,
-    onSessionArchived: (sid) => { computerUseRuntime.browsers.sessionArchived(sid); computerUseRuntime.wakes.sessionEnded(sid); },
+    // The session's wake triggers end before its agent tabs close (`ComputerUseRuntime.sessionArchived`).
+    onSessionArchived: (sid) => computerUseRuntime.sessionArchived(sid),
     // A client's `session.interrupt` is the user's stop (the Mac's stop button, a terminal's Esc, the phone).
     onUserInterrupt: (sid) => dispatchChildren?.noteStop(sid, { kind: "user" }),
     connectorPermissions,

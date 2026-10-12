@@ -473,12 +473,15 @@ export const WakeArmedEvent = ThreadBase.extend({
 
 /** ComputerV2 wake triggers: a trigger ended — `fired` / `lost` (its backend), `expired`, `cancelled` (the model or
  *  the user), `disabled` (the setting turned off, the session archived), `restart` (reported at the next boot).
- *  Appended for EVERY ending, whether or not the session is woken for it. `at`: epoch ms. */
+ *  Appended for EVERY ending, whether or not the session is woken for it. `at`: epoch ms. `woken` is true exactly when
+ *  a `computer-wake` message carries this ending — clients decide "Winter will continue" from it, NEVER from the
+ *  reason (an `expired` wakes only when the model asked; a silent one is just "stopped waiting"). */
 export const WakeEndedEvent = ThreadBase.extend({
   type: z.literal("wake_ended"),
   wakeId: z.string().regex(WAKE_ID_PATTERN),
   reason: WakeEndReason,
   at: z.number().int().nonnegative(),
+  woken: z.boolean(),
 });
 
 /** CC-parity phase 3 (Workflows, Track D Task D1): the wire counterpart of WorkflowRuntime's

@@ -84,7 +84,7 @@ export function computerV2Description(input: ComputerV2DescriptionInput): string
     "  waitForIdle(o?: { quietMs?: number; timeoutMs?: number }): Promise<Waited & { settled: boolean }>;",
     "  wakeWhen(c: { clicked: Ref } | { submitted: Ref | true } | { navigated: true } | { url: string } | { text: string } | { gone: Ref | string } | { changed: Ref } | { title: string }, o?: { note?: string; timeoutMs?: number; settleMs?: number; notifyOnTimeout?: boolean }): Promise<Wake>;   // exactly one condition; submitted, navigated, url: tabs only. A condition already true is NotAllowed",
     "}",
-    "interface Wake { readonly id: string; cancel(): Promise<void> }   // wk_…; cancel(): it ends, and nothing wakes you",
+    "interface Wake { readonly id: string; readonly expiresAt: number; cancel(): Promise<void> }   // wk_…; expiresAt: epoch ms; cancel(): it ends, and nothing wakes you",
     "interface App extends Target {",
     "  readonly name: string; readonly bundleId: string;",
     ...(v ? [

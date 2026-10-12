@@ -76,7 +76,7 @@ async function until<T>(probe: () => T | undefined | false, ms = 40_000, what = 
 const main = (log: SessionEvent[]): SessionEvent[] => log.filter((e) => (e as { threadId?: string }).threadId === "main");
 const count = (log: SessionEvent[], type: string): number => main(log).filter((e) => e.type === type).length;
 const wakeMessages = (log: SessionEvent[]) => main(log).filter((e) => e.type === "user_message" && (e as { clientName?: string }).clientName === "computer-wake") as Array<{ text: string; seq: number }>;
-const ended = (log: SessionEvent[]) => log.filter((e) => e.type === "wake_ended") as Array<{ wakeId: string; reason: string }>;
+const ended = (log: SessionEvent[]) => log.filter((e) => e.type === "wake_ended") as Array<{ wakeId: string; reason: string; woken: boolean }>;
 
 /** The ComputerV2 call's result text (the last one in the session). */
 function cv2Output(log: SessionEvent[]): string {
@@ -178,7 +178,9 @@ run("ComputerV2 wake triggers through a real daemon (fake helper, fake wake back
     // The wake message started a turn of its own (the session was idle), which ran to its end.
     expect(main(log(sid)).some((e) => e.type === "turn_started" && e.seq > wake.seq)).toBe(true);
     expect(main(log(sid)).some((e) => e.type === "turn_completed" && e.seq > wake.seq)).toBe(true);
-    expect(ended(log(sid))).toEqual([expect.objectContaining({ wakeId: armed.wakeId, reason: "fired" })]);
+    expect(ended(log(sid))).toEqual([expect.objectContaining({ wakeId: armed.wakeId, reason: "fired", woken: true })]);
+    // An app trigger fired on the user's click: the I6 line (the app is theirs until they leave it).
+    expect(wake.text).toContain("The user may still be working in Notes — acts there are refused (user_working)");
     expect((await client.call<{ sessions: Array<{ sessionId: string; wakesArmed?: number }> }>(METHODS.sessionList, {})).sessions.find((r) => r.sessionId === sid)?.wakesArmed).toBeUndefined();
   }, 120_000);
 
@@ -227,7 +229,8 @@ run("ComputerV2 wake triggers through a real daemon (fake helper, fake wake back
     await client.call(METHODS.sessionSend, { sessionId: sid, text: script(arm("await notes.wakeWhen({ text: 'A' }, { timeoutMs: 1000 })\nawait notes.wakeWhen({ text: 'B' }, { timeoutMs: 1500, notifyOnTimeout: true })")) });
     await turns(sid, 1, "the arming turn");
     await until(() => ended(log(sid)).length === 2 || undefined, 20_000, "both expiries");
-    expect(ended(log(sid)).map((e) => e.reason)).toEqual(["expired", "expired"]);
+    // `woken` tells the silent expiry from the one the model asked to hear about.
+    expect(ended(log(sid)).map((e) => [e.reason, e.woken])).toEqual([["expired", false], ["expired", true]]);
     const wake = await until(() => wakeMessages(log(sid))[0], 30_000, "the timeout wake");
     expect(wake.text).toContain("expired at");
     expect(wake.text).toContain("“B”");
@@ -314,7 +317,7 @@ run("ComputerV2 wake triggers through a real daemon (fake helper, fake wake back
     expect(wake.text).toContain("Winter restarted, so this wait ended — arm it again with wakeWhen() if you still need it.");
     expect(wake.text).toContain(`- ${armed.wakeId} (armed at`);
     expect(wake.text).toContain("Your note: ship it");
-    expect(ended(log(sid))).toEqual([expect.objectContaining({ wakeId: armed.wakeId, reason: "restart" })]);
+    expect(ended(log(sid))).toEqual([expect.objectContaining({ wakeId: armed.wakeId, reason: "restart", woken: true })]);
     await turns(sid, 2, "the restart wake turn");
   }, 180_000);
 });

@@ -25,9 +25,13 @@ export class FakeWakeBackend implements WakeBackend, WakeBackendHelperHooks {
   refuse: AutomationFailure | undefined;
   /** Fire the trigger before `arm` resolves (a backend whose event races its own answer). */
   fireDuringArm = false;
+  /** Arms that do not answer until `releaseHung()` (a backend that stopped answering). */
+  hang = false;
+  private readonly hung: Array<() => void> = [];
 
   async arm(req: WakeArmRequest, onEvent: (e: WakeBackendEvent) => void): Promise<WakeArmed> {
     this.requests.push(req);
+    if (this.hang) await new Promise<void>((resolve) => this.hung.push(resolve));
     if (this.refuse !== undefined) throw this.refuse;
     this.armed.set(req.wakeId, { req, onEvent });
     if (this.fireDuringArm) this.fire(req.wakeId, "clicked");
@@ -64,6 +68,15 @@ export class FakeWakeBackend implements WakeBackend, WakeBackendHelperHooks {
     a.onEvent({ wakeId: a.req.wakeId, outcome: "lost", at: Date.now(), reason });
     return a.req.wakeId;
   }
+
+  /** The session's tabs closed: every trigger of it still armed HERE reports `lost` (as a real tab backend does when the
+   *  engine closes the tab it watches). Returns the ids it reported. */
+  loseSession(sessionId: string, reason = "the tab was closed"): string[] {
+    return [...this.armed.values()].filter((a) => a.req.sessionId === sessionId).map((a) => this.lose(a.req.wakeId, reason));
+  }
+
+  /** Let every hung arm answer now (late: the registry may have given up on it). */
+  releaseHung(): void { for (const r of this.hung.splice(0)) r(); }
 }
 
 /** A backend's refusal of a STATE condition already true at arm (the controller's ruling, 2026-10-12). */

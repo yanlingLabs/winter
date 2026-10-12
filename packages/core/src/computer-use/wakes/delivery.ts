@@ -11,8 +11,9 @@
 // message. A failed delivery is retried a bounded number of times (Dispatch's wake delays), then left for the next boot.
 //
 // THE TEXT is pinned (spine §4): a `<computer-wake>` block, one line per trigger, every screen-derived part (the
-// element and target labels, a fired trigger's `detail`) inside the SAME random-tag fence ComputerV2 results use
-// (`result.ts`), with its one-line preamble. The model's own note and the daemon's own words stay outside it.
+// element and target labels, a fired trigger's `detail`, a lost one's reason in the backend's words) inside the SAME
+// random-tag fence ComputerV2 results use (`result.ts`), with its one-line preamble. The model's own note and the
+// daemon's own words stay outside it.
 import { COMPUTER_WAKE_CLIENT_NAME } from "@yanlinglabs/winter-protocol";
 import { deliverInto, type MessagingDriverHandle } from "../../agent/session-messaging";
 import { withReplacementRetry } from "../../runtime-sdk/session-replaced";
@@ -35,8 +36,12 @@ export interface WakeNews {
   elementRole?: string;
   /** fired: the backend's few words — screen-derived, fenced. */
   detail?: string;
-  /** lost: the backend's own reason, in its words. */
+  /** lost: the backend's own reason, in its words — screen- or backend-derived, fenced. */
   reason?: string;
+  /** An APP trigger: the app's name (the daemon's identity of the bound target, not screen text) — a fired `clicked`
+   *  or `changed` adds the line that the user may still be working there (I6, `user_working`). Memory only: a wake
+   *  delivered at the next boot reads without it. */
+  app?: string;
   /** The model's own reminder (never shown on the user's screen). */
   note?: string;
   /** Daemon-written: how to get the target back. */
@@ -106,11 +111,16 @@ function newsLines(n: WakeNews, fence: (s: string) => string, clock: (at: number
   let head: string;
   switch (n.outcome) {
     case "fired": head = `- ${n.wakeId} fired at ${clock(n.at)}: ${firedWords(n, fence)}.`; break;
-    case "lost": head = `- ${n.wakeId} can no longer fire (${clock(n.at)}): ${n.reason?.trim() || "its target is gone"} — it was waiting for ${waited}.`; break;
+    // The loss reason is the backend's words (a helper's or a page watcher's, possibly screen-derived): fenced.
+    case "lost": head = `- ${n.wakeId} can no longer fire (${clock(n.at)}): ${n.reason?.trim() ? fence(n.reason.trim()) : "its target is gone"} — it was waiting for ${waited}.`; break;
     case "expired": head = `- ${n.wakeId} expired at ${clock(n.at)}, after ${durationWords(n.at - n.armedAt)} — it was waiting for ${waited}.`; break;
     case "restart": head = `- ${n.wakeId} (armed at ${clock(n.armedAt)}) ended when Winter restarted — it was waiting for ${waited}.`; break;
   }
   const lines = [head];
+  // I6 (the helper's hands-off rule): the user just clicked or typed in that app, so it is theirs until they leave it.
+  if (n.outcome === "fired" && n.app !== undefined && n.app.length > 0 && (n.kind === "clicked" || n.kind === "changed")) {
+    lines.push(`  The user may still be working in ${n.app} — acts there are refused (user_working) until they leave it; tell them you're continuing, or wait.`);
+  }
   if (n.note !== undefined && n.note.length > 0) lines.push(`  Your note: ${n.note}`);
   if (n.rebind !== undefined && n.rebind.length > 0) {
     lines.push(n.outcome === "lost"
@@ -234,9 +244,12 @@ export class WakeDelivery {
       const delay = delays[p.attempt];
       if (delay === undefined) {
         this.log(`computer-use: waking ${sessionId} for ${batch.length} wake trigger(s) failed (${err instanceof Error ? err.message : "error"}) — left for the next boot`);
+        // Only THIS batch is given up (its records stay in `wakes.json` for the next boot). Endings that arrived while
+        // it was being delivered were never attempted: they get their own coalescing window and retries.
         p.attempt = 0;
-        p.news.splice(0);
-        this.pending.delete(sessionId);
+        p.news.splice(0, batch.length);
+        if (p.news.length === 0) { this.pending.delete(sessionId); return; }
+        if (p.cancel === undefined) this.arm(sessionId, p, this.deps.coalesceMs ?? WAKE_LIMITS.coalesceMs);
         return;
       }
       p.attempt++;

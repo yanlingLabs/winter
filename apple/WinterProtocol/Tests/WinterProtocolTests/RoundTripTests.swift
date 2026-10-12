@@ -32,7 +32,7 @@ final class RoundTripTests: XCTestCase {
         XCTAssertEqual(armed.wakeId, "wk_1a2b3c4d5e6f")
         XCTAssertEqual(armed.condition, "clicked")
         XCTAssertEqual(armed.targetLabel, "Chrome — Developer Dashboard")
-        XCTAssertEqual(armed.elementLabel, "button “Submit for review”")
+        XCTAssertEqual(armed.elementLabel, "“Submit for review”", "the producer's label: the quoted name, never the role")
         XCTAssertEqual(armed.expiresAt, 1781273600000)
         guard case .wakeArmed(let page) = try load("wake_armed_page") else { return XCTFail("wake_armed_page did not decode") }
         XCTAssertNil(page.elementLabel)
@@ -40,7 +40,29 @@ final class RoundTripTests: XCTestCase {
         guard case .wakeEnded(let ended) = try load("wake_ended") else { return XCTFail("wake_ended did not decode as .wakeEnded") }
         XCTAssertEqual(ended.reason, "fired")
         XCTAssertEqual(ended.at, 1781270460000)
+        XCTAssertTrue(ended.woken)
         XCTAssertFalse(SessionEvent.wakeEnded(ended).isTransient)
+    }
+
+    /// ComputerV2 wake triggers: a label the daemon cut at `WAKE_LABEL_MAX` with an emoji at the cut. The daemon backs
+    /// off a high surrogate before its "…" (`wakes/text.ts`), so the label stays WELL-FORMED and Foundation's strict
+    /// decoder takes it; a cut that split the pair would leave a lone `\ud83d` escape, which it refuses — the whole
+    /// event (and the pill) would be lost.
+    func testAWakeLabelCutAtAnEmojiDecodesAndALoneSurrogateWouldNot() throws {
+        func armed(_ elementLabelJSON: String) -> Data {
+            Data(#"{"type":"wake_armed","seq":1,"sessionId":"s","ts":0,"threadId":"main","wakeId":"wk_1a2b3c4d5e6f","condition":"clicked","targetLabel":"Chrome","elementLabel":\#(elementLabelJSON),"expiresAt":1}"#.utf8)
+        }
+        // What `wakeLabel` (max 200) makes of 198 × "x", an emoji, then more: the cut at 199 units would split the emoji,
+        // so it backs off before it, then "…" (the TS side's test pins the same string).
+        let kept = String(repeating: "x", count: 198) + "…"
+        guard case .wakeArmed(let ok) = try JSONDecoder().decode(SessionEvent.self, from: armed(#""\#(kept)""#)) else { return XCTFail("not wake_armed") }
+        XCTAssertEqual(ok.elementLabel, kept)
+        // 197 × "x" then the emoji: it fits whole before the cut and survives intact.
+        let whole = String(repeating: "x", count: 197) + "😀…"
+        guard case .wakeArmed(let ok2) = try JSONDecoder().decode(SessionEvent.self, from: armed(#""\#(whole)""#)) else { return XCTFail("not wake_armed") }
+        XCTAssertEqual(ok2.elementLabel, whole)
+        // What a split pair serializes to (`JSON.stringify` escapes a lone surrogate): refused.
+        XCTAssertThrowsError(try JSONDecoder().decode(SessionEvent.self, from: armed(#""\#(String(repeating: "x", count: 198))\ud83d…""#)))
     }
 
     func testUnknownDiscriminatorFailsLoudly() throws {

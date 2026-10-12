@@ -165,9 +165,10 @@ const fixtures: Record<string, unknown> = {
   // ComputerV2 wake triggers (2026-10-12): a NEW persisted SessionEvent variant PAIR, full switch-trap discipline. The
   // armed fixture carries the optional `elementLabel`; a second one omits it (a page-level condition), so the Swift
   // round-trip exercises the field present and absent.
-  "wake_armed": { ...base, threadId: "main", type: "wake_armed", wakeId: "wk_1a2b3c4d5e6f", condition: "clicked", targetLabel: "Chrome — Developer Dashboard", elementLabel: "button “Submit for review”", expiresAt: 1781273600000 },
+  // `elementLabel` as the producer emits it: the element's quoted NAME, never its role (`registry.ts`'s `labelsFor`).
+  "wake_armed": { ...base, threadId: "main", type: "wake_armed", wakeId: "wk_1a2b3c4d5e6f", condition: "clicked", targetLabel: "Chrome — Developer Dashboard", elementLabel: "“Submit for review”", expiresAt: 1781273600000 },
   "wake_armed_page": { ...base, threadId: "main", type: "wake_armed", wakeId: "wk_0f9e8d7c6b5a", condition: "navigated", targetLabel: "Safari — Checkout", expiresAt: 1781273600000 },
-  "wake_ended": { ...base, threadId: "main", type: "wake_ended", wakeId: "wk_1a2b3c4d5e6f", reason: "fired", at: 1781270460000 },
+  "wake_ended": { ...base, threadId: "main", type: "wake_ended", wakeId: "wk_1a2b3c4d5e6f", reason: "fired", at: 1781270460000, woken: true },
   // Dispatch relay (Phase 7): childSessionId is additive/optional on the four existing
   // approval/question shapes — dedicated with-fixtures so Swift round-trips carriers, mirroring
   // approval_requested_with_reviewer_reason's with/without pattern.

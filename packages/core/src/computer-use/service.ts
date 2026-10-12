@@ -1840,7 +1840,8 @@ export class ComputerV2Service {
     if (reason === "deleted") {
       this.savedScripts.clearSession(sessionId);
       this.ranWorker.delete(sessionId);
-      // A trigger's life is the SESSION's: the idle end and a daemon stop leave it armed; a deletion ends it.
+      // A trigger's life is the SESSION's: the idle end and a daemon stop leave it armed; a deletion ends it — BEFORE
+      // the browser engine closes the session's agent tabs below (their backend would report the closing tab `lost`).
       this.deps.wakes?.sessionEnded(sessionId);
     }
     this.deps.browsers?.sessionEnded(sessionId, reason);

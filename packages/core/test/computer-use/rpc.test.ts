@@ -71,16 +71,17 @@ describe("computerUse.* (local-only RPCs)", () => {
     const fake = new FakeHelper();
     fake.running = false;
     const wakeBackend = new FakeWakeBackend();
+    const tabBackend = new FakeWakeBackend();
     const runtime = createComputerUseRuntime({
       home, profile: "dev", settings: () => live, settingsPath, approvals: new ApprovalBroker(), hub, store,
-      launchAllowed: true, inject: { transport: fake.transport, launcher: fake.launcher, verifier: fake.verifier, browserInstalled: () => false, headless: { resolve: () => ({ missing: "Winter's headless browser is missing — reinstall Winter" }) }, wakeBackends: { app: wakeBackend } },
+      launchAllowed: true, inject: { transport: fake.transport, launcher: fake.launcher, verifier: fake.verifier, browserInstalled: () => false, headless: { resolve: () => ({ missing: "Winter's headless browser is missing — reinstall Winter" }) }, wakeBackends: { app: wakeBackend, tab: tabBackend } },
     });
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
     const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, computerUse: runtime.control });
     stop = () => { server.stop(); runtime.stop(); store.close(); };
-    return { home, settingsPath, socketPath, tokens, fake, runtime, store, wakeBackend, setLive: (s: Settings | null) => { live = s; } };
+    return { home, settingsPath, socketPath, tokens, fake, runtime, store, wakeBackend, tabBackend, setLive: (s: Settings | null) => { live = s; } };
   }
 
   test("status: the settings and the helper — never launches it to answer", async () => {
@@ -298,6 +299,31 @@ describe("computerUse.* (local-only RPCs)", () => {
     expect((await c.request(METHODS.computerUseStatus, {})).result.wakes).toBe(false);
     setLive(loadSettings(settingsPath));
     c.close();
+  });
+
+  test("archive and delete: a session's triggers end `disabled` BEFORE the browser engine closes its tabs — a tab backend reporting its closing tab as `lost` wakes nobody", async () => {
+    const { runtime, store, tabBackend: tab } = await boot();
+    // As a real tab backend does: the engine closing the tab it watches is reported `lost` (to a trigger still armed).
+    const engine = runtime.browsers;
+    const archiveTabs = engine.sessionArchived.bind(engine);
+    engine.sessionArchived = (sid: string) => { tab.loseSession(sid); archiveTabs(sid); };
+    const endTabs = engine.sessionEnded.bind(engine);
+    engine.sessionEnded = (sid: string, reason: "deleted" | "idle" | "stop") => { if (reason === "deleted") tab.loseSession(sid); endTabs(sid, reason); };
+    const arm = (sid: string) => runtime.wakes.arm({ sessionId: sid, targetId: "bt_000000000001", backend: "tab", condition: { kind: "clicked", ref: "3" }, timeoutMs: 60_000 });
+    const endings = (sid: string) => store.read(sid).filter((e) => e.type === "wake_ended");
+    // Archived (the daemon's `onSessionArchived`).
+    const archived = store.createSession("global");
+    const a = await arm(archived);
+    store.setArchived(archived, true);
+    runtime.sessionArchived(archived);
+    expect(endings(archived)).toEqual([expect.objectContaining({ wakeId: a.wakeId, reason: "disabled", woken: false })]);
+    expect(runtime.wakes.delivery.waiting(archived)).toBe(0);
+    // Deleted (the daemon's `onSessionDeleted` → `service.endSession`).
+    const deleted = store.createSession("global");
+    const d = await arm(deleted);
+    runtime.service.endSession(deleted);
+    expect(endings(deleted)).toEqual([expect.objectContaining({ wakeId: d.wakeId, reason: "disabled", woken: false })]);
+    expect(runtime.wakes.delivery.waiting(deleted)).toBe(0);
   });
 
   test("local role only: never remote, refused for any other role", async () => {

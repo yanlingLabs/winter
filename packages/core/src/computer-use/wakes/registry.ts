@@ -8,7 +8,8 @@
 //   - `disabled`         — `computerUse.wakes` or `computerUse.enabled` turned off, or the session archived or deleted;
 //   - `restart`          — the daemon stopped while it was armed (said at the next boot, from `wakes.json`).
 // Every ending appends `wake_ended` to the session's log (the Mac's pill); `fired`, `lost`, `restart` — and `expired`
-// with `notifyOnTimeout` — also WAKE the session (`delivery.ts`). `cancelled` and `disabled` never do.
+// with `notifyOnTimeout` — also WAKE the session (`delivery.ts`), and say so (`woken: true`, which is what clients read
+// — never the reason). `cancelled` and `disabled` never do.
 //
 // The registry routes nothing itself: the service names the backend (a tab binding → the browser engine's backend,
 // anything else → the helper's), and the backends — lanes B and C — implement `WakeBackend` (`types.ts`).
@@ -20,7 +21,10 @@ import type { HelperNotification } from "../protocol";
 import type { PrimitiveMetric } from "../telemetry";
 import { WakeDelivery, type WakeDeliveryDeps, type WakeNews, type WakeSessionState } from "./delivery";
 import { WakeStore, type WakeRecord } from "./persist";
-import { WAKE_LIMITS, type WakeArmed, type WakeBackend, type WakeBackendEvent, type WakeCondition, type WakeEndReason } from "./types";
+import { wakeLabel } from "./text";
+import { WAKE_LIMITS, type WakeArmed, type WakeArmRequest, type WakeBackend, type WakeBackendEvent, type WakeCondition, type WakeEndReason } from "./types";
+
+export { wakeLabel };
 
 /** What a backend may also want: the helper connection's notifications and its loss (lane C's app backend), and the
  *  daemon's stop — called FIRST, before the browser engine and the helper connection are torn down (lane B's browser
@@ -40,6 +44,11 @@ export interface WakeBackends {
 /** How often armed triggers re-read `computerUse.wakes`/`.enabled` (a write through the app's own toggle is checked at
  *  once; a hand-edited settings file within this). Runs only while something is armed. */
 export const WAKE_SETTINGS_POLL_MS = 10_000;
+
+/** How long a backend has to arm a trigger. A backend that has not answered by then is told to let go (`disarm`, which
+ *  is idempotent) and the arm fails `BrowserUnavailable` / `HelperUnavailable` — the script never hangs on it, and the
+ *  arm stops counting against the limits. */
+export const WAKE_ARM_TIMEOUT_MS = 20_000;
 
 export interface WakeArmInput {
   sessionId: string;
@@ -87,6 +96,8 @@ export interface WakeRegistryDeps {
   /** Timers (a test drives them): returns the canceller. */
   schedule?(fn: () => void, ms: number): () => void;
   pollMs?: number;
+  /** `WAKE_ARM_TIMEOUT_MS` unless a test shortens it. */
+  armTimeoutMs?: number;
   coalesceMs?: number;
   retryDelaysMs?: readonly number[];
   tag?(): string;
@@ -109,16 +120,10 @@ interface Trigger {
   elementRole?: string;
   rebind: string;
   followed: boolean;
+  /** An app trigger: the app's name (the I6 line of its wake). */
+  app?: string;
   audit?: { app?: string; site?: string };
   cancelTimer: () => void;
-}
-
-/** One line, no control or bidi characters, cut — a label from the screen goes into a log, a pill and a message. */
-export function wakeLabel(v: unknown, max: number = WAKE_LABEL_MAX): string {
-  if (typeof v !== "string") return "";
-  // eslint-disable-next-line no-control-regex
-  const one = v.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim();
-  return one.length > max ? `${one.slice(0, max - 1)}…` : one;
 }
 
 /** The label a condition's own text gets (a text, URL or title the model gave): quoted. */
@@ -193,14 +198,15 @@ export class WakeRegistry {
     // A backend may report its one event before `arm` resolves: held, and handled once the trigger exists.
     let trigger: Trigger | undefined;
     const early: WakeBackendEvent[] = [];
+    let abandoned = false;
     const onEvent = (e: WakeBackendEvent): void => {
-      if (e === null || typeof e !== "object" || e.wakeId !== wakeId) return;
+      if (abandoned || e === null || typeof e !== "object" || e.wakeId !== wakeId) return;
       if (trigger === undefined) { early.push(e); return; }
       this.backendEvent(trigger, e);
     };
     let armed: WakeArmed;
     try {
-      armed = await backend.arm({ wakeId, sessionId: input.sessionId, targetId: input.targetId, condition: input.condition, expiresAt }, onEvent);
+      armed = await this.armWithin(backend, input.backend, { wakeId, sessionId: input.sessionId, targetId: input.targetId, condition: input.condition, expiresAt }, onEvent, () => { abandoned = true; });
     } finally {
       const n = (this.arming.get(input.sessionId) ?? 1) - 1;
       if (n <= 0) this.arming.delete(input.sessionId); else this.arming.set(input.sessionId, n);
@@ -218,6 +224,7 @@ export class WakeRegistry {
       armedAt, expiresAt, notifyOnTimeout: input.notifyOnTimeout === true, ...labels,
       rebind: wakeLabel(armed?.rebind, 300),
       followed: this.deps.followedNow?.(input.sessionId) === true,
+      ...(input.backend === "app" && wakeLabel(input.audit?.app, 100).length > 0 ? { app: wakeLabel(input.audit?.app, 100) } : {}),
       ...(input.note === undefined || input.note.trim().length === 0 ? {} : { note: wakeLabel(input.note, WAKE_LIMITS.noteMaxChars) }),
       ...(input.audit === undefined ? {} : { audit: input.audit }),
       cancelTimer: () => {},
@@ -226,10 +233,11 @@ export class WakeRegistry {
     this.triggers.set(wakeId, t);
     t.cancelTimer = this.schedule(() => { if (this.triggers.get(wakeId) === t) this.end(t, "expired", { at: this.now() }); }, expiresAt - armedAt);
     this.deps.store.put(this.recordOf(t));
-    this.safeAppend(t.sessionId, {
+    const armedEvent: Extract<NewSessionEvent, { type: "wake_armed" }> = {
       type: "wake_armed", sessionId: t.sessionId, threadId: "main", wakeId, condition: t.condition.kind,
       targetLabel: t.targetLabel, ...(t.elementLabel === undefined ? {} : { elementLabel: t.elementLabel }), expiresAt,
-    } as NewSessionEvent);
+    };
+    this.safeAppend(t.sessionId, armedEvent);
     this.ensurePoll();
     if (early.length > 0) { const first = early[0]!; queueMicrotask(() => { if (this.triggers.get(wakeId) === t) this.backendEvent(t, first); }); }
     const backendNote = wakeLabel(armed?.note, 300);
@@ -292,10 +300,12 @@ export class WakeRegistry {
 
   /**
    * The boot sweep (spine §5), once the session drivers exist: what the last daemon left in `wakes.json`. A trigger
-   * still armed then ends `restart` and its session is woken once ("Winter restarted, so these waits ended"); one that
-   * had already ended — but whose message never went out (a wake during the stop) — is delivered as what it was; one
-   * past its expiry is dropped silently, or delivered as `expired` when it asked. Every record whose trigger was still
-   * armed gets its `wake_ended` (the Mac's pill clears).
+   * still armed then ends `restart` and its session is woken once ("Winter restarted, so these waits ended") — and its
+   * record says so at once (ended `restart`), so a boot whose wake never went out (a failed delivery, another stop)
+   * leaves it for the NEXT boot to deliver as it is, never to end twice or to take for an expiry; one that had already
+   * ended — but whose message never went out (a wake during the stop) — is delivered as what it was; one past its
+   * expiry is dropped silently, or delivered as `expired` when it asked. Every record whose trigger was still armed
+   * gets its `wake_ended` (the Mac's pill clears).
    */
   start(): void {
     if (this.started || this.stopped) return;
@@ -306,21 +316,24 @@ export class WakeRegistry {
     const drop: string[] = [];
     for (const r of records) {
       if (this.deps.sessionState(r.sessionId) !== "live") { drop.push(r.wakeId); continue; }
+      // Ended already (its `wake_ended` is on the log): the wake still owed, delivered as it is.
       if (r.ended !== undefined) {
-        this.delivery.enqueue(r.sessionId, this.newsOf(r, r.ended.outcome, r.ended.at, r.ended));
+        this.delivery.enqueue(r.sessionId, this.newsOf(r, r.ended.outcome, r.ended.at));
         continue;
       }
       if (r.expiresAt <= now) {
-        this.safeAppend(r.sessionId, { type: "wake_ended", sessionId: r.sessionId, threadId: "main", wakeId: r.wakeId, reason: "expired", at: r.expiresAt } as NewSessionEvent);
-        if (r.notifyOnTimeout === true) {
+        const woken = r.notifyOnTimeout === true;
+        this.appendEnded(r.sessionId, r.wakeId, "expired", r.expiresAt, woken);
+        if (woken) {
           this.deps.store.put({ ...r, ended: { outcome: "expired", at: r.expiresAt } });
           this.delivery.enqueue(r.sessionId, this.newsOf(r, "expired", r.expiresAt));
         } else drop.push(r.wakeId);
         continue;
       }
-      this.safeAppend(r.sessionId, { type: "wake_ended", sessionId: r.sessionId, threadId: "main", wakeId: r.wakeId, reason: "restart", at: now } as NewSessionEvent);
+      this.appendEnded(r.sessionId, r.wakeId, "restart", now, true);
       this.metricEnd(r.sessionId, r.kind, "restart", now - r.armedAt, undefined);
       this.deps.audit?.({ kind: "automation-wake", sessionId: r.sessionId, condition: r.kind, outcome: "restart" });
+      this.deps.store.put({ ...r, ended: { outcome: "restart", at: now } });
       this.delivery.enqueue(r.sessionId, this.newsOf(r, "restart", now));
     }
     if (drop.length > 0) this.deps.store.remove(drop);
@@ -400,36 +413,43 @@ export class WakeRegistry {
     t.cancelTimer();
     // Idempotent and a no-op after the trigger's own event (the backend's contract).
     try { this.deps.backends()[t.backend]?.disarm(t.wakeId); } catch { /* never throws by contract */ }
-    this.safeAppend(t.sessionId, { type: "wake_ended", sessionId: t.sessionId, threadId: "main", wakeId: t.wakeId, reason, at: info.at } as NewSessionEvent);
+    const wakes = reason === "fired" || reason === "lost" || (reason === "expired" && t.notifyOnTimeout);
+    this.appendEnded(t.sessionId, t.wakeId, reason, info.at, wakes);
     this.metricEnd(t.sessionId, t.condition.kind, reason, info.at - t.armedAt, t.backend);
     this.deps.audit?.({
       kind: "automation-wake", sessionId: t.sessionId, ...(t.audit?.app === undefined ? {} : { app: t.audit.app }), ...(t.audit?.site === undefined ? {} : { site: t.audit.site }),
       condition: t.condition.kind, outcome: reason, ...(info.by === undefined ? {} : { by: info.by }),
     });
-    const wakes = reason === "fired" || reason === "lost" || (reason === "expired" && t.notifyOnTimeout);
     if (!wakes) { this.deps.store.remove([t.wakeId]); this.stopPollIfIdle(); return; }
-    const ended = { outcome: reason, at: info.at, ...(info.detail === undefined ? {} : { detail: info.detail }), ...(info.reason === undefined ? {} : { reason: info.reason }) };
     const record = this.recordOf(t);
-    this.deps.store.put({ ...record, ended });
-    this.delivery.enqueue(t.sessionId, this.newsOf(record, reason, info.at, ended));
+    // The record keeps the outcome and its time only (`persist.ts`); this daemon's own message has the rest.
+    const owed = reason as "fired" | "lost" | "expired";
+    this.deps.store.put({ ...record, ended: { outcome: owed, at: info.at } });
+    this.delivery.enqueue(t.sessionId, this.newsOf(record, owed, info.at, {
+      ...(t.elementRole === undefined ? {} : { elementRole: t.elementRole }), ...(info.detail === undefined ? {} : { detail: info.detail }),
+      ...(info.reason === undefined ? {} : { reason: info.reason }), ...(t.app === undefined ? {} : { app: t.app }),
+    }));
     this.stopPollIfIdle();
   }
 
   private recordOf(t: Trigger): WakeRecord {
     return {
       sessionId: t.sessionId, wakeId: t.wakeId, kind: t.condition.kind, targetLabel: t.targetLabel,
-      ...(t.elementLabel === undefined ? {} : { elementLabel: t.elementLabel }), ...(t.elementRole === undefined ? {} : { elementRole: t.elementRole }),
+      ...(t.elementLabel === undefined ? {} : { elementLabel: t.elementLabel }),
       armedAt: t.armedAt, expiresAt: t.expiresAt, ...(t.note === undefined ? {} : { note: t.note }),
       ...(t.notifyOnTimeout ? { notifyOnTimeout: true as const } : {}), ...(t.rebind.length > 0 ? { rebind: t.rebind } : {}),
       ...(t.followed ? { followed: true as const } : {}),
     };
   }
 
-  private newsOf(r: WakeRecord, outcome: WakeNews["outcome"], at: number, ended?: { detail?: string; reason?: string }): WakeNews {
+  /** What one ending tells its session: the record, plus what only this daemon's memory holds (the element's role, the
+   *  backend's detail or loss reason, the app's name) — a wake delivered at the next boot reads without them. */
+  private newsOf(r: WakeRecord, outcome: WakeNews["outcome"], at: number, mem: { elementRole?: string; detail?: string; reason?: string; app?: string } = {}): WakeNews {
     return {
       wakeId: r.wakeId, outcome, at, armedAt: r.armedAt, kind: r.kind, targetLabel: r.targetLabel,
-      ...(r.elementLabel === undefined ? {} : { elementLabel: r.elementLabel }), ...(r.elementRole === undefined ? {} : { elementRole: r.elementRole }),
-      ...(ended?.detail === undefined ? {} : { detail: ended.detail }), ...(ended?.reason === undefined ? {} : { reason: ended.reason }),
+      ...(r.elementLabel === undefined ? {} : { elementLabel: r.elementLabel }), ...(mem.elementRole === undefined ? {} : { elementRole: mem.elementRole }),
+      ...(mem.detail === undefined ? {} : { detail: mem.detail }), ...(mem.reason === undefined ? {} : { reason: mem.reason }),
+      ...(mem.app === undefined ? {} : { app: mem.app }),
       ...(r.note === undefined ? {} : { note: r.note }), ...(r.rebind === undefined ? {} : { rebind: r.rebind }),
       ...(r.followed === true ? { followed: true } : {}),
     };
@@ -456,6 +476,48 @@ export class WakeRegistry {
     if (this.triggers.size > 0) return;
     this.cancelPoll?.();
     this.cancelPoll = undefined;
+  }
+
+  /** `wake_ended` — `woken` is true exactly when a wake message carries this ending (clients read it, never the
+   *  reason: an `expired` may or may not wake). */
+  private appendEnded(sessionId: string, wakeId: string, reason: WakeEndReason, at: number, woken: boolean): void {
+    const event: Extract<NewSessionEvent, { type: "wake_ended" }> = { type: "wake_ended", sessionId, threadId: "main", wakeId, reason, at, woken };
+    this.safeAppend(sessionId, event);
+  }
+
+  /** Arm on `backend`, within `armTimeoutMs`: a backend that has not answered by then is told to let go and the arm
+   *  fails; an answer that comes later is let go at once, and its events are ignored (`abandon`). */
+  private armWithin(backend: WakeBackend, kind: WakeBackendKind, req: WakeArmRequest, onEvent: (e: WakeBackendEvent) => void, abandon: () => void): Promise<WakeArmed> {
+    const ms = this.deps.armTimeoutMs ?? WAKE_ARM_TIMEOUT_MS;
+    return new Promise<WakeArmed>((resolve, reject) => {
+      let settled = false;
+      const letGo = (): void => { try { backend.disarm(req.wakeId); } catch { /* never throws by contract */ } };
+      const cancelTimer = this.schedule(() => {
+        if (settled) return;
+        settled = true;
+        abandon();
+        letGo();
+        reject(kind === "tab"
+          ? new AutomationFailure("BrowserUnavailable", "the browser did not answer in time — the wake trigger was not armed; try again, or ask the user to tell you when they are done")
+          : new AutomationFailure("HelperUnavailable", "Winter Computer Use did not answer in time — the wake trigger was not armed; try again, or ask the user to tell you when they are done"));
+      }, ms);
+      let pending: Promise<WakeArmed>;
+      try { pending = backend.arm(req, onEvent); } catch (err) { pending = Promise.reject(err); }
+      pending.then(
+        (armed) => {
+          if (settled) { letGo(); return; } // answered after the timeout: nobody keeps it
+          settled = true;
+          cancelTimer();
+          resolve(armed);
+        },
+        (err: unknown) => {
+          if (settled) return;
+          settled = true;
+          cancelTimer();
+          reject(err);
+        },
+      );
+    });
   }
 
   private safeAppend(sessionId: string, event: NewSessionEvent): void {

@@ -59,7 +59,7 @@ interface Target {                       // what apps and browser tabs share
   waitForIdle(o?: { quietMs?: number; timeoutMs?: number }): Promise<Waited & { settled: boolean }>;
   wakeWhen(c: { clicked: Ref } | { submitted: Ref | true } | { navigated: true } | { url: string } | { text: string } | { gone: Ref | string } | { changed: Ref } | { title: string }, o?: { note?: string; timeoutMs?: number; settleMs?: number; notifyOnTimeout?: boolean }): Promise<Wake>;   // exactly one condition; submitted, navigated, url: tabs only. A condition already true is NotAllowed
 }
-interface Wake { readonly id: string; cancel(): Promise<void> }   // wk_…; cancel(): it ends, and nothing wakes you
+interface Wake { readonly id: string; readonly expiresAt: number; cancel(): Promise<void> }   // wk_…; expiresAt: epoch ms; cancel(): it ends, and nothing wakes you
 interface App extends Target {
   readonly name: string; readonly bundleId: string;
   screenshot(o?: Quiet & { region?: [x: number, y: number, w: number, h: number]; live?: boolean; reason?: string }): Promise<Image>;
@@ -198,7 +198,7 @@ interface Target {                       // what apps and browser tabs share
   waitForIdle(o?: { quietMs?: number; timeoutMs?: number }): Promise<Waited & { settled: boolean }>;
   wakeWhen(c: { clicked: Ref } | { submitted: Ref | true } | { navigated: true } | { url: string } | { text: string } | { gone: Ref | string } | { changed: Ref } | { title: string }, o?: { note?: string; timeoutMs?: number; settleMs?: number; notifyOnTimeout?: boolean }): Promise<Wake>;   // exactly one condition; submitted, navigated, url: tabs only. A condition already true is NotAllowed
 }
-interface Wake { readonly id: string; cancel(): Promise<void> }   // wk_…; cancel(): it ends, and nothing wakes you
+interface Wake { readonly id: string; readonly expiresAt: number; cancel(): Promise<void> }   // wk_…; expiresAt: epoch ms; cancel(): it ends, and nothing wakes you
 interface App extends Target {
   readonly name: string; readonly bundleId: string;
   action(ref: Ref, name: string): Promise<void>;   // another accessibility action that state() lists for the element

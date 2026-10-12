@@ -7,6 +7,6 @@
   "wakeId": "wk_1a2b3c4d5e6f",
   "condition": "clicked",
   "targetLabel": "Chrome — Developer Dashboard",
-  "elementLabel": "button “Submit for review”",
+  "elementLabel": "“Submit for review”",
   "expiresAt": 1781273600000
 }

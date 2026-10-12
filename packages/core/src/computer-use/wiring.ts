@@ -61,7 +61,7 @@ export interface ComputerUseInjection {
   /** Wake triggers (2026-10-12): FAKE backends in place of the real ones (the e2e drives a trigger through a real
    *  daemon), and the registry's timing seams. Never set in production. */
   wakeBackends?: WakeBackends;
-  wakeTimings?: { coalesceMs?: number; pollMs?: number; retryDelaysMs?: readonly number[] };
+  wakeTimings?: { coalesceMs?: number; pollMs?: number; retryDelaysMs?: readonly number[]; armTimeoutMs?: number };
 }
 
 export interface ComputerUseRuntimeDeps {
@@ -153,6 +153,10 @@ export interface ComputerUseRuntime {
   /** Wake triggers (2026-10-12): the registry. `wakes.start()` runs the boot sweep once the session drivers exist;
    *  `wakes.beginShutdown()` stops deliveries before the drivers drain. */
   wakes: WakeRegistry;
+  /** The session was archived: its wake triggers end `disabled` FIRST — before the browser engine closes its agent
+   *  tabs, whose backend would otherwise report the closing tab as `lost` and wake the archived session — then the
+   *  engine closes them. (A deletion takes the same order in `service.endSession`.) */
+  sessionArchived(sessionId: string): void;
   stop(): void;
 }
 
@@ -349,6 +353,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     ...(deps.inject?.wakeTimings?.coalesceMs === undefined ? {} : { coalesceMs: deps.inject.wakeTimings.coalesceMs }),
     ...(deps.inject?.wakeTimings?.pollMs === undefined ? {} : { pollMs: deps.inject.wakeTimings.pollMs }),
     ...(deps.inject?.wakeTimings?.retryDelaysMs === undefined ? {} : { retryDelaysMs: deps.inject.wakeTimings.retryDelaysMs }),
+    ...(deps.inject?.wakeTimings?.armTimeoutMs === undefined ? {} : { armTimeoutMs: deps.inject.wakeTimings.armTimeoutMs }),
     log,
   });
   const wakeRegistry = wakes;
@@ -458,6 +463,10 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     browserLink,
     headless,
     wakes: wakeRegistry,
+    sessionArchived(sessionId) {
+      wakeRegistry.sessionEnded(sessionId);
+      browsers.sessionArchived(sessionId);
+    },
     observe(event) {
       diffBases.observe(event);
       adapters.observe(event);

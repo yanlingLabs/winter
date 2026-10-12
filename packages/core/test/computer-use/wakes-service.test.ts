@@ -28,13 +28,13 @@ afterEach(() => {
   for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true });
 });
 
-function world(opts: { policy?: SessionApprovalPolicy; answer?: string; idleMs?: number } = {}) {
+function world(opts: { policy?: SessionApprovalPolicy; answer?: string; idleMs?: number; settings?: Settings } = {}) {
   const home = mkdtempSync(join(tmpdir(), "winter-wakes-svc-"));
   homes.push(home);
   const fake = new FakeHelper();
   const approvals = new ApprovalBroker();
   const events: NewSessionEvent[] = [];
-  const settings = { computerUse: {} } as unknown as Settings;
+  const settings = opts.settings ?? ({ computerUse: {} } as unknown as Settings);
   const facts: SessionFacts = { policy: opts.policy ?? "bypass", mode: "code" };
   let svc!: ComputerV2Service;
   const helper = new HelperClient({
@@ -107,7 +107,7 @@ print(String(wake), typeof wake.cancel, wake.id.startsWith("wk_"))`);
     const id = w.wakes.list("s1")[0]!.id;
     const again = await w.run(`await wakes.cancel(${JSON.stringify(id)})\nawait wakes.cancel(${JSON.stringify(id)})`);
     expect(text(again)).toContain(`${id} is not armed in this session (it has already ended)`);
-    expect(w.events.filter((e) => e.type === "wake_ended").map((e) => (e as { reason: string }).reason)).toEqual(["cancelled", "cancelled"]);
+    expect(w.events.filter((e) => e.type === "wake_ended").map((e) => [(e as { reason: string }).reason, (e as { woken: boolean }).woken])).toEqual([["cancelled", false], ["cancelled", false]]);
   }, 30_000);
 
   macOnly("an app allowed only ONCE is refused (the binding goes with the call); a session grant arms", async () => {
@@ -127,6 +127,18 @@ print(String(wake), typeof wake.cancel, wake.id.startsWith("wk_"))`);
     const r = await plan.run("const notes = await apps.open('Notes', { emit: false })\nawait notes.wakeWhen({ text: 'Done' })");
     expect(r.isError).toBe(false);
     expect(plan.backends.app.requests.length).toBe(1);
+    // `dont-ask` never cards: it binds and arms on an app the user ALWAYS allowed…
+    const always = world({ policy: "dont-ask", settings: { computerUse: { apps: { "com.apple.Notes": { grant: "always" } } } } as unknown as Settings });
+    const ok = await always.run("const notes = await apps.open('Notes', { emit: false })\nawait notes.wakeWhen({ text: 'Done' })");
+    expect(ok.isError).toBe(false);
+    expect(always.backends.app.requests.length).toBe(1);
+    expect(always.events.some((e) => e.type === "approval_requested")).toBe(false);
+    // …and on one they did not, it arms nothing (no card either).
+    const never = world({ policy: "dont-ask" });
+    const no = await never.run("const notes = await apps.open('Notes', { emit: false })\nawait notes.wakeWhen({ text: 'Done' })");
+    expect(no.isError).toBe(true);
+    expect(never.backends.app.requests).toEqual([]);
+    expect(never.events.some((e) => e.type === "approval_requested")).toBe(false);
   }, 30_000);
 
   macOnly("tab-only conditions on an app, a second key, a bad ref, a long note: refused before any backend", async () => {

@@ -924,7 +924,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     }
 
     /// ComputerV2 wake triggers: a trigger ended — `fired`, `lost`, `expired`, `cancelled`, `restart` or
-    /// `disabled` (a plain String). `at`: epoch ms.
+    /// `disabled` (a plain String). `at`: epoch ms. `woken`: a `computer-wake` message carries this ending (Winter
+    /// continues) — what a client reads, never the reason (an `expired` wakes only when the model asked).
     public struct WakeEnded: Codable, Equatable, Sendable {
         public let seq: Int
         public let sessionId: String
@@ -933,6 +934,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let wakeId: String
         public let reason: String
         public let at: Int
+        public let woken: Bool
     }
 
     /// CC-parity phase 3 (Workflows, Track D Task D1): the wire counterpart of WorkflowRuntime's
