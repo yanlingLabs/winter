@@ -3511,8 +3511,9 @@ class WinterApp : public CefApp, public CefBrowserProcessHandler {
     // Append rather than assign: a bare AppendSwitchWithValue would silently drop any value CEF or
     // a future caller had already put there.
     static const char kSwitch[] = "disable-features";
-    // `AimEnabled`: see the background calls below.
-    static const char kFeatures[] = "SoftNavigationDetection,SoftNavigationHeuristics,AimEnabled";
+    // `AimEnabled`, `AutofillServerCommunication`: see the background calls below.
+    static const char kFeatures[] =
+        "SoftNavigationDetection,SoftNavigationHeuristics,AimEnabled,AutofillServerCommunication";
     std::string value = kFeatures;
     if (command_line->HasSwitch(kSwitch)) {
       const std::string existing = command_line->GetSwitchValue(kSwitch).ToString();
@@ -3521,8 +3522,8 @@ class WinterApp : public CefApp, public CefBrowserProcessHandler {
       }
     }
     command_line->AppendSwitchWithValue(kSwitch, value);
-    Log("disable-features=%s (SoftNavigation*: the upstream ReadAnythingSoftNavigationObserver null-deref; AimEnabled: a "
-        "background call)", value.c_str());
+    Log("disable-features=%s (SoftNavigation*: the upstream ReadAnythingSoftNavigationObserver null-deref; AimEnabled, "
+        "AutofillServerCommunication: background calls)", value.c_str());
     // WebMCP (ComputerV2 Phase 4): a site's own agent tools, `document.modelContext` — off by default in this Chromium
     // (an origin trial). Process-wide and fixed at launch, so always on; the daemon's `computerUse.webmcp` decides
     // whether Winter reads or calls them. Appended like the switch above.
@@ -3538,7 +3539,11 @@ class WinterApp : public CefApp, public CefBrowserProcessHandler {
     //    for an AI Mode entry in Chrome's own address bar, which no Winter browser has;
     //  * `--no-first-run` — the RLZ ping 90 s after a first run (clients1.google.com/tools/pso/ping), search
     //    attribution only; the first-run UI it also skips does not exist in an Alloy-style browser;
-    //  * `--disable-domain-reliability` — error beacons about Google's own sites, for Google's monitoring.
+    //  * `--disable-domain-reliability` — error beacons about Google's own sites, for Google's monitoring;
+    //  * `AutofillServerCommunication` (in the list above) — each form page's signatures and each submitted form's
+    //    field votes sent to Google's autofill server, which answers 400 in this build (no API key): no prediction
+    //    ever comes back. The panel's own form suggestions (the dropdown from what was typed before, kept in the
+    //    profile's `Web Data`) are local and stay.
     // KEPT, on purpose: the component updater (the root store, the CRLSet, DRM and the data sites rely on), Google
     // sign-in and the network-time query. Winter Headless, which runs this same app class, goes further with its own
     // switches (`HeadlessArguments`).
