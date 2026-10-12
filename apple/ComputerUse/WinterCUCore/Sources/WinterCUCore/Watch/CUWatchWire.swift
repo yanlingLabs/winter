@@ -127,9 +127,13 @@ public struct TestUserClickParams: Codable, Equatable, Sendable {
     public var pid: Int32
     /// The element's accessible title or description, exactly.
     public var name: String
-    public init(pid: Int32, name: String) {
+    /// `"winter"`: stamp it as Winter's OWN input (`CUEventStamp`) instead — the converse row: a watch must ignore it.
+    /// Absent or `"user"`: the live suite's user click (`CUWatchTestStamp`).
+    public var stamp: String?
+    public init(pid: Int32, name: String, stamp: String? = nil) {
         self.pid = pid
         self.name = name
+        self.stamp = stamp
     }
 }
 
@@ -143,4 +147,6 @@ public struct TestUserClickResult: Codable, Equatable, Sendable {
 public enum CUWatchTestStamp {
     /// "WAKETEST" as eight ASCII bytes.
     public static let value: Int64 = 0x5741_4B45_5445_5354
+    /// The mark on the helper's OWN events (`CUEventStamp`): a test click carrying it is Winter's, never the user's.
+    public static let winterOwn: Int64 = CUEventStamp.value
 }

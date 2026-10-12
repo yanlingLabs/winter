@@ -117,6 +117,13 @@ final class WatchShellTests: XCTestCase {
         XCTAssertFalse(noWatcher.dispatcher.methods.contains("test.userClick"))
     }
 
+    func testTheTestClickIsStampedAsTheUsersOrAsWintersOwn() {
+        XCTAssertEqual(TestUserClicker.stamp(TestUserClickParams(pid: 1, name: "x")), CUWatchTestStamp.value)
+        XCTAssertEqual(TestUserClicker.stamp(TestUserClickParams(pid: 1, name: "x", stamp: "user")), CUWatchTestStamp.value)
+        XCTAssertEqual(TestUserClicker.stamp(TestUserClickParams(pid: 1, name: "x", stamp: "winter")), CUWatchTestStamp.winterOwn)
+        XCTAssertNotEqual(CUWatchTestStamp.value, CUWatchTestStamp.winterOwn)
+    }
+
     func testAWatchEventIsTheDaemonsNotification() {
         let fired = HelperNotification.watchEvent(CUWatchEvent(watchId: "wk_1", outcome: .fired, at: 1_760_000_000_123.4, detail: "clicked"))
         XCTAssertEqual(fired.method, "watchEvent")

@@ -48,7 +48,8 @@ public final class RPCDispatcher: @unchecked Sendable {
             // The wake triggers' live scenario: a real, pointer-moving click stamped as the live suite's own, which a
             // live-test instance's watches count as the user's (`CUWatcher.countsTestInput`).
             if watches != nil {
-                let click = userClicker ?? { p in await MainActor.run { TestUserClicker.click(p) } }
+                // Off the main actor: its element search walks another app's accessibility tree (review L8).
+                let click = userClicker ?? { p in await Task.detached(priority: .userInitiated) { TestUserClicker.click(p) }.value }
                 routes["test.userClick"] = { params, _ in
                     AnyEncodable(await click(try RPCDispatcher.decode(TestUserClickParams.self, params)))
                 }

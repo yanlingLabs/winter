@@ -7,10 +7,16 @@ import WinterCUCore
 /// as the user's would, moving the pointer there and back — stamped `CUWatchTestStamp`. A live-test instance's watches
 /// (and only theirs: `CUWatcher.countsTestInput`) count that stamp as the user's own input; nothing else counts it. The
 /// suite's runner has no Accessibility grant of its own, and must never ask for one.
-@MainActor
+///
+/// Never on the main actor (review L8): the element search walks up to 3,000 accessibility nodes of another app.
 public enum TestUserClicker {
     /// The most elements searched for the name.
     static let maxNodes = 3_000
+
+    /// The stamp a click carries: the live suite's user click, or — `stamp: "winter"`, the converse row — Winter's own.
+    public static func stamp(_ p: TestUserClickParams) -> Int64 {
+        p.stamp == "winter" ? CUWatchTestStamp.winterOwn : CUWatchTestStamp.value
+    }
 
     public static func click(_ p: TestUserClickParams) -> TestUserClickResult {
         guard let point = center(of: p.name, pid: p.pid) else { return TestUserClickResult(clicked: false) }
@@ -19,7 +25,7 @@ public enum TestUserClicker {
             guard let e = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else {
                 return TestUserClickResult(clicked: false)
             }
-            e.setIntegerValueField(.eventSourceUserData, value: CUWatchTestStamp.value)
+            e.setIntegerValueField(.eventSourceUserData, value: stamp(p))
             e.post(tap: .cghidEventTap)
             usleep(30_000)
         }
