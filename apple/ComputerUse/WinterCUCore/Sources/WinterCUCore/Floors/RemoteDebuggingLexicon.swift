@@ -254,10 +254,23 @@ enum CURemoteDebuggingLexiconStore {
         return first.lowercased().hasPrefix("en")
     }
 
+    private static var warming = Set<String>()
+
+    /// Reads the lexicon of the browser at `appBundle` in the background, once per bundle path (a later `lexicon`
+    /// call finds it cached).
+    static func warm(appBundle: URL) {
+        lock.lock()
+        let first = warming.insert(appBundle.path).inserted
+        lock.unlock()
+        guard first else { return }
+        DispatchQueue.global(qos: .utility).async { _ = lexicon(appBundle: appBundle) }
+    }
+
     /// Forgets every lexicon (tests).
     static func reset() {
         lock.lock()
         cache.removeAll()
+        warming.removeAll()
         lock.unlock()
     }
 }

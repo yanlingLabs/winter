@@ -63,6 +63,13 @@ extension CUCore {
         return CURemoteDebuggingLexiconStore.showsEnglish(bundleId: t.bundleId) ? .englishOnly : .unreadable
     }
 
+    /// Reads the browser's words ahead, off the act's path (the first read of an installed version maps every locale
+    /// pack: about half a second), so a dialog that comes up later finds them ready. Once per bundle.
+    func warmRemoteDebuggingWords(_ t: CUTarget) {
+        guard remoteDebuggingWordsOverride == nil, let url = NSRunningApplication(processIdentifier: t.pid)?.bundleURL else { return }
+        CURemoteDebuggingLexiconStore.warm(appBundle: url)
+    }
+
     func floorCheckRemoteDebugging(_ p: TargetActParams, _ t: CUTarget) throws {
         // Every Chromium-based BROWSER (review of round 11, MEDIUM #8: Edge Canary, Brave Beta/Nightly, Opera GX, the
         // Vivaldi snapshot, Comet — a bundle list misses them) — never an Electron or CEF app, which has no remote-debugging
@@ -72,9 +79,10 @@ extension CUCore {
         let refusal = CUError.refused(.remoteDebugging, Self.remoteDebuggingSentence)
         // A capture-only bind (no accessibility) still sends point clicks: judged by the window server's titles.
         guard t.accessible else {
-            let titles = sys.windows(pid: t.pid).map(\.title)
+            let titles = sys.windows(pid: t.pid).map(\.title).filter { !$0.isEmpty }
+            let words = titles.isEmpty ? CURemoteDebuggingWords.englishOnly : remoteDebuggingWords(t)
             if Self.isInspectPageTitle(sys.window(id: t.windowID)?.title)
-                || titles.contains(where: { !$0.isEmpty && Self.isRemoteDebuggingDialogText($0, remoteDebuggingWords(t)) }) {
+                || titles.contains(where: { Self.isRemoteDebuggingDialogText($0, words) }) {
                 CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): an inspect page or the remote-debugging dialog (capture-only) — refused")
                 throw refusal
             }
@@ -196,8 +204,12 @@ extension CUCore {
             candidates.append(contentsOf: sheets)
             settled.append(contentsOf: sheets)
         }
-        // The browser's words are read only when there is a dialog to read (once per installed version).
-        guard !candidates.isEmpty else { return (false, complete, false) }
+        // The browser's words are read only when there is a dialog to read (once per installed version) — and read
+        // ahead, in the background, the first time there is none.
+        guard !candidates.isEmpty else {
+            warmRemoteDebuggingWords(t)
+            return (false, complete, false)
+        }
         let words = remoteDebuggingWords(t)
         for d in candidates {
             if Self.isRemoteDebuggingDialogText(ax.string(d, kAXTitleAttribute), words) { return (true, true, false) }
