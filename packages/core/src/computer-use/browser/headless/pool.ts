@@ -129,6 +129,9 @@ interface PoolTab {
    *  back after. */
   view?: { width: number; height: number };
   viewEpoch?: number;
+  /** How many times the person has held this tab (taken it over, or a hand-off), and when the latest hold began: what the
+   *  page logs and loads while they hold it is theirs, never the agent's. */
+  personHolds?: { count: number; since: number };
 }
 
 /** One headless tab shown in Winter's panel. */
@@ -138,6 +141,8 @@ interface Presentation {
   purpose: "handoff" | "watch" | "popup";
   /** The person holds control: the agent's commands are refused. */
   control: boolean;
+  /** The agent's attachment was undone for the person (`yieldToPerson`): the tab is theirs from here, control or not yet. */
+  yielded?: boolean;
   /** Control is being taken (the agent's commands in flight finishing): new ones are refused already. */
   taking: boolean;
   /** The viewer was accepted. */
@@ -932,12 +937,26 @@ export class HeadlessPool implements CdpTransport {
     const undo: Array<[string, Record<string, unknown>]> = [
       ["Page.setInterceptFileChooserDialog", { enabled: false }], ["Emulation.setFocusEmulationEnabled", { enabled: false }], ["Emulation.clearDeviceMetricsOverride", {}],
     ];
+    // From here the tab is the person's: what its page does is theirs (the engine follows it, records none of it).
+    if (t.presentation !== undefined) t.presentation.yielded = true;
+    t.personHolds = { count: (t.personHolds?.count ?? 0) + 1, since: this.now() };
     for (const [method, params] of undo) {
       try { await this.command(t.proc, "cdp.send", { tabId: t.tabKey, method, params }, 2_000); } catch { /* not attached: nothing to undo */ }
     }
     for (const l of [...this.goneListeners]) {
       try { l(t.tabKey, "stopped"); } catch { /* a listener never breaks the pool */ }
     }
+  }
+
+  /** Lane H3: does the person hold `tabKey` in Winter's panel now? */
+  held(tabKey: string): boolean {
+    const p = this.tabs.get(tabKey)?.presentation;
+    return p !== undefined && (p.control || p.yielded === true);
+  }
+
+  /** Lane H3: how many times the person has held `tabKey`, and when the latest hold began. */
+  holds(tabKey: string): { count: number; since: number } | undefined {
+    return this.tabs.get(tabKey)?.personHolds;
   }
 
   /** The person takes over a shown tab: the agent's commands in flight finish, then control is theirs. */
@@ -952,6 +971,7 @@ export class HeadlessPool implements CdpTransport {
       p.control = true;
     } finally {
       p.taking = false;
+      if (!p.control) p.yielded = false;
     }
     this.pushTabs(t.sessionId);
   }
@@ -961,6 +981,7 @@ export class HeadlessPool implements CdpTransport {
     const p = t.presentation;
     if (p === undefined) return;
     p.taking = false;
+    p.yielded = false;
     if (p.control) {
       p.control = false;
       try { await this.command(t.proc, "headless.control", { tabId: t.tabKey, control: false }); } catch { /* the presentation may be gone */ }
@@ -1099,6 +1120,9 @@ export class HeadlessPool implements CdpTransport {
   private notice(proc: WinterHeadlessProcess, tabKey: string, kind: HeadlessNoticeKind): void {
     const t = this.tabs.get(tabKey);
     if (t === undefined || t.proc !== proc) return;
+    // What the page tried while the person held it is theirs: never the agent's (no LAN refusal read into its next goto,
+    // no once-per-tab line spent).
+    if (this.held(tabKey)) return;
     if (kind === "local-network") t.localNetworkAt = this.now();
     if (t.noticed.has(kind)) return;
     t.noticed.add(kind);

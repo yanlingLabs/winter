@@ -27,6 +27,8 @@
 //   http://viewer-leaves.test/ — presented, its viewer is accepted and then leaves 150 ms later (`presentationEnded`)
 //   http://opens-window.test/ — presented, its page opens a window once its viewer is accepted (`headless.popupOpened`,
 //                               a tab of the fake's own minting at http://window.test/)
+//   http://notice-held.test/  — presented, its page tries the local network once its viewer is accepted (the person's
+//                               doing) and again when it is unpresented (the agent's time again)
 //   http://resizes.test/      — presented, its page is laid out in the panel's size once its viewer is accepted
 //                               (`headless.viewChanged` 704×900 at 2, then a scale alone, 704×900 at 1, and one that is
 //                               not a view at all), and in the agent's own again when it is unpresented (1280×800 at 1)
@@ -169,6 +171,7 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
             tabs.set(windowId, { sessionId: t.sessionId, url: "http://window.test/" });
             setTimeout(() => send("headless.popupOpened", { linkId, tabId: windowId, openerTabId: tabId, url: "http://window.test/" }), 20);
           }
+          if (t.url === "http://notice-held.test/") send("headless.notice", { linkId, tabId, kind: "local-network" });
           if (t.url === "http://resizes.test/") {
             send("headless.viewChanged", { linkId, tabId, cssWidth: 704, cssHeight: 900, scale: 2 });
             setTimeout(() => {
@@ -191,6 +194,7 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
       presented.delete(String(p.tabId));
       reply(cmdId, { frames: 0 });
       if (tabs.get(String(p.tabId))?.url === "http://resizes.test/") send("headless.viewChanged", { linkId, tabId: String(p.tabId), cssWidth: 1280, cssHeight: 800, scale: 1 });
+      if (tabs.get(String(p.tabId))?.url === "http://notice-held.test/") setTimeout(() => send("headless.notice", { linkId, tabId: String(p.tabId), kind: "local-network" }), 20);
       return;
     }
     case "headless.control":

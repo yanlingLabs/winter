@@ -277,6 +277,32 @@ describe("the panel's size (the page laid out in it while shown)", () => {
   });
 });
 
+describe("what the person does in a tab they hold is theirs", () => {
+  test("held while they have it (a hand-off, a take-over), counted per hold; what the page tried meanwhile is not the agent's", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "http://notice-held.test/" });
+    expect(r.pool.held(t.tabKey)).toBe(false);
+    expect(r.pool.holds(t.tabKey)).toBeUndefined();
+    await r.pool.present(t.tabKey, { sessionId: "s1" });
+    expect(r.pool.held(t.tabKey)).toBe(true);
+    expect(r.pool.holds(t.tabKey)?.count).toBe(1);
+    await new Promise((res) => setTimeout(res, 60)); // the page's refused local-network request, while the person has it
+    expect(r.pool.localNetworkRefusedAt(t.tabKey)).toBeUndefined();
+    await r.pool.handBack(t.tabKey);
+    expect(r.pool.held(t.tabKey)).toBe(false);
+    // The agent's time again: the page's next refusal is read as before.
+    await until("the agent-time refusal", () => r.pool.localNetworkRefusedAt(t.tabKey) !== undefined);
+    // Watched, then taken over: a second hold; handed back: control returns, the tab stays shown.
+    await r.pool.panelAction("s1", t.tabKey, "watch");
+    expect(r.pool.held(t.tabKey)).toBe(false);
+    await r.pool.panelAction("s1", t.tabKey, "takeOver");
+    expect(r.pool.held(t.tabKey)).toBe(true);
+    expect(r.pool.holds(t.tabKey)?.count).toBe(2);
+    await r.pool.panelAction("s1", t.tabKey, "handBack");
+    expect(r.pool.held(t.tabKey)).toBe(false);
+  });
+});
+
 describe("a window the person opens (a sign-in window)", () => {
   test("shown beside its opener with the person in control, never listed to the agent, closed when the person lets the opener go", async () => {
     const r = rig();

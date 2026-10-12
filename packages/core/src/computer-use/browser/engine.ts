@@ -116,6 +116,10 @@ export interface BrowserEngineDeps {
   /** Lane H3: the view a headless tab's page is laid out in, once it differs from the agent's own (a tab shown in Winter's
    *  panel follows the panel's size): how often it changed, its size, and whether a person is watching it now. */
   headlessView?(tabKey: string): { epoch: number; width: number; height: number; watched: boolean } | undefined;
+  /** Lane H3: does the person hold this headless tab in Winter's panel now (what its page does is theirs)? */
+  headlessHeld?(tabKey: string): boolean;
+  /** Lane H3: how many times the person has held this headless tab, and when the latest hold began. */
+  headlessHolds?(tabKey: string): { count: number; since: number } | undefined;
   now?(): number;
   log?(line: string): void;
   /** Phase 4: the plain-HTTP page reader `browsers.read` uses (default: one on the system resolver and `fetch`). */
@@ -322,14 +326,17 @@ export class BrowserEngine {
       this.makeRoomForHold(scope, driver);
       driver.busy++;
       try {
-        await driver.ensureAttached(scope.sessionId);
-        scope.live();
         if (this.isHeadless(b.backend)) {
           // Lane H3: the page was re-laid out in another size since the agent last looked (the panel's while the user
-          // watches, its own after): said once, and a Point of an earlier screenshot is refused from here on.
-          const resized = driver.syncView(this.deps.headlessView?.(b.tabKey));
-          if (resized !== undefined) scope.builder.daemonLine(resized);
+          // watches, its own after) — a Point of an earlier screenshot is refused from here on; and the person held the
+          // tab in between — what its page logged and loaded meanwhile was theirs. Each said once, once the agent has the
+          // tab again.
+          driver.syncView(this.deps.headlessView?.(b.tabKey));
+          driver.noteHolds(this.deps.headlessHolds?.(b.tabKey));
         }
+        await driver.ensureAttached(scope.sessionId);
+        scope.live();
+        for (const line of driver.takeNotes()) scope.builder.daemonLine(line);
         if (!BLOCKED_TAB_PRIMITIVES.has(primitive)) await this.siteFloor(scope, b, driver);
         return await this.run(scope, b, driver, primitive, args);
       } finally {
@@ -510,7 +517,8 @@ export class BrowserEngine {
       live.add(transport);
       if (this.hooked.has(transport)) continue;
       const off = [
-        transport.onEvent((e) => this.drivers.get(tabKeyOf(id, e.tabKey))?.onEvent(e)),
+        // A headless tab the person holds in Winter's panel: its page is followed, but what it does is theirs.
+        transport.onEvent((e) => this.drivers.get(tabKeyOf(id, e.tabKey))?.onEvent(e, { person: this.personHolds(id, e.tabKey) })),
         transport.onTabGone((tabKey, reason) => this.tabGone(id, tabKey, reason)),
         transport.onStop((tabKey) => this.stopPressed(id, tabKey)),
         // The hand-off's Done / Stop waiting in the browser itself (Winter for Chrome's toolbar popup).
@@ -689,6 +697,9 @@ export class BrowserEngine {
   }
 
   private isHeadless(backend: BackendId): boolean { return this.familyOf(backend) === "headless"; }
+  private personHolds(backend: BackendId, tabKey: string): boolean {
+    return this.deps.headlessHeld !== undefined && this.isHeadless(backend) && this.deps.headlessHeld(tabKey);
+  }
 
   private browserName(backend: BackendId): string {
     if (this.familyOf(backend) === "winter") return "Winter's browser";
@@ -1747,6 +1758,15 @@ export class BrowserEngine {
     await driver.ensureAttached(sid);
     scope.live();
     scope.builder.daemonLine(`the user finished on ${host}`);
+    // Whatever page the user left it on is the agent's to read only past the site floor, as for any bound tab: a listed
+    // host is carded (or blocked) now, never while the user had it.
+    try {
+      await this.siteFloor(scope, b, driver);
+    } catch (err) {
+      if (!(err instanceof AutomationFailure) || err.kind !== "NotAllowed") throw err;
+      scope.builder.daemonLine(err.message);
+      return { done: true };
+    }
     await this.printState(scope, b.targetId, driver, { full: true, settle: true });
     return { done: true };
   }

@@ -313,6 +313,8 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     headlessHandBack: (tabKey) => headless.handBack(tabKey),
     headlessHandoffOver: (tabKey) => headless.handoffOver(tabKey),
     headlessView: (tabKey) => headless.view(tabKey),
+    headlessHeld: (tabKey) => headless.held(tabKey),
+    headlessHolds: (tabKey) => headless.holds(tabKey),
     log,
   });
 
