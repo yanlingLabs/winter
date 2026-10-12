@@ -1,0 +1,76 @@
+{
+  "status": "no-vm-candidate-independent-review-required",
+  "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+  "source": "out/libkrun-stream-reclaim-v2",
+  "basePatches": [
+    {
+      "patchFile": "patches/0004-proposed-guarded-block-reviewed-fixes.patch",
+      "patchSha256": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481"
+    },
+    {
+      "patchFile": "patches/0005-proposed-guarded-block-producer-progress.patch",
+      "patchSha256": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775"
+    },
+    {
+      "patchFile": "patches/0006-proposed-raw-block-trace.patch",
+      "patchSha256": "00e169fb7e5c527d348269cc8211afc99daa800622bce6140a4b2b42c204951d"
+    },
+    {
+      "patchFile": "patches/0007-proposed-guarded-stream.patch",
+      "patchSha256": "4acf7d82622d98ca1265e6a57bcd167f6df1fd5efb6a63cc65a9f6b24f35e044"
+    }
+  ],
+  "patchFile": "patches/0008-proposed-guarded-stream-reviewed-fixes.patch",
+  "patchSha256": "43331eedec8e73f735830932b56c28cb3eb311f1c9bcbf3535f497063a369378",
+  "fullSourceDiffSha256": "2c54f1a224d8d17be652e160d823c05b1b6bb8fc9da00f305b944a6d5eaac31b",
+  "moduleCorrespondence": {
+    "stream_reclaim_access.rs": "src/devices/src/reclaim_access.rs",
+    "stream_io_v2.rs": "src/devices/src/stream_io.rs"
+  },
+  "features": [
+    "blk"
+  ],
+  "defaultFeatures": false,
+  "devices": [
+    "PL011",
+    "balloon",
+    "bounded RNG",
+    "one RAW block",
+    "one two-queue virtio-console"
+  ],
+  "streamAdmission": "Pre-admitted unnamed connected AF_UNIX SOCK_STREAM, descriptor>=3, owned CLOEXEC duplicate/nonblocking; no connect API; per-call MSG_DONTWAIT and MSG_NOSIGNAL survive caller alias flag changes; macOS additionally requires private DARWIN_MSG_NBIO=0x20000 in this feasibility candidate",
+  "maxDevices": 2,
+  "maxPins": 32,
+  "maxPinnedBytes": 8388608,
+  "maxTxBytes": 65536,
+  "maxRxOwnedBytes": 16384,
+  "maxRxReportedChainBytes": 1048576,
+  "queueSize": 32,
+  "terminalFaultExitCode": 77,
+  "terminalFaultOutcome": "UNCERTAIN",
+  "vmStarted": false,
+  "payloadLogging": false,
+  "credentialAuthorityImplemented": false,
+  "keysOrUnlockImplemented": false,
+  "productionReady": false,
+  "fullResourceGatePassed": false,
+  "limitations": [
+    "No VM boot/console driver validation.",
+    "Existing block reset still joins in MMIO; no production reset/recovery claim.",
+    "Transport reset may deliver/consume already-started owned stream bytes; authenticated generation/framing/credential protocol remains separate.",
+    "Fixed roster only, no DAX/fs/network/vsock/GPU/audio/input/hotplug.",
+    "Before next encrypted run, block fixture must deliberately stall INSIDE perform; prior owned-completion holds are not blocked syscall proof.",
+    "Historical generic macOS epoll wait remains unchanged; only guarded-console lifecycle uses the timeout-honoring entry point.",
+    "0007 requested 5 ms lifecycle retry was not honored by the old macOS shim and is not established timing evidence.",
+    "Public MSG_DONTWAIT alone did not prevent full-buffer AF_UNIX send from blocking after alias mutation on this host. Private Darwin MSG_NBIO is a measured feasibility dependency, not accepted production ABI."
+  ],
+  "priorCheckpoint": "176a502d1097fc809ddd486e6459b0cf87722925",
+  "priorFullSourceDiffSha256": "0358d69bb472f5d7fb632d466298240c2025742fd47858f53be21bc344cb183b",
+  "darwinPrivateABI": {
+    "flag": "MSG_NBIO",
+    "value": 131072,
+    "sourceRevision": "f6217f891ac0bb64f3d375211650a4c1ff8ca1ea",
+    "productionAccepted": false,
+    "requiredHostRegression": "cowork_stream_per_call_flags_survive_alias_mutation_with_sigpipe_default"
+  }
+}

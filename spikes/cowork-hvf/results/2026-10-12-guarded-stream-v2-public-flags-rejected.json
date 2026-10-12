@@ -1,0 +1,31 @@
+{
+  "vmStarted": false,
+  "payloadLogging": false,
+  "status": "rejected-public-flags-only",
+  "patchSha256": "0d5d3b3ac5a792b26b31c650d2358dcfdd9456f526f3bb8608c5c967b3ee4e0e",
+  "fullSourceDiffSha256": "a75434c39076d0fa387ef4c4e23f73eacb6af68c8db71c89673a77022e8b9d16",
+  "failure": "Full-buffer send did not return despite MSG_DONTWAIT|MSG_NOSIGNAL after caller alias cleared O_NONBLOCK. Owned parent watchdog killed the one child and try_wait confirmed reaped before panic.",
+  "boundedChildDeadlineSeconds": 3,
+  "boundedReapDeadlineSeconds": 2,
+  "childReapedBeforeFailure": true,
+  "productionAccepted": false,
+  "primarySource": {
+    "repository": "https://github.com/apple-oss-distributions/xnu",
+    "revision": "f6217f891ac0bb64f3d375211650a4c1ff8ca1ea",
+    "files": {
+      "bsd/kern/uipc_socket.c": {
+        "sha256": "68d5a0dfb22ad62bca963b3bc3b1c08ed28549f3c7679789a549eae428fa60bc",
+        "url": "https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/uipc_socket.c"
+      },
+      "bsd/sys/socket_private.h": {
+        "sha256": "45b839db2f60c04989b08b3fb5549a77a994ada3e3118f93b5df8aa6a10dc4b7",
+        "url": "https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/sys/socket_private.h"
+      }
+    }
+  },
+  "host": {
+    "kernel": "Darwin 25.6.0",
+    "macOSVersion": "26.6.1",
+    "macOSBuild": "25G76"
+  }
+}

@@ -1,0 +1,60 @@
+   Compiling krun-devices v0.1.0-1.19.6 (${REPOSITORY_ROOT}/spikes/cowork-hvf/out/libkrun-stream-reclaim-v2/src/devices)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.19s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-stream-reclaim-v2/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+running 22 tests
+test reclaim_access::tests::cowork_stream_retirement_waits_only_for_fenced_copy_and_preserves_old_pins ... ok
+test stream_io::adversarial_tests::cowork_stream_alias_mutation_sigpipe_child ... ok
+test stream_io::adversarial_tests::cowork_stream_named_and_unconnected_fds_refused ... ok
+test stream_io::adversarial_tests::cowork_stream_per_call_flags_survive_alias_mutation_with_sigpipe_default ... 
+running 1 test
+test stream_io::adversarial_tests::cowork_stream_alias_mutation_sigpipe_child ... 
+thread 'stream_io::adversarial_tests::cowork_stream_per_call_flags_survive_alias_mutation_with_sigpipe_default' panicked at src/devices/src/stream_io.rs:287:25:
+bounded alias child deadline
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_eintr_keeps_absolute_deadline ... 
+running 1 test
+test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_interrupted_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 112 filtered out; finished in 0.14s
+
+ok
+test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_interrupted_child ... ok
+test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_zero_and_positive_bound ... ok
+test stream_io::tests::cowork_stream_fd_kind_owned_dup_cloexec_and_closure ... ok
+test stream_io::tests::cowork_stream_io_bounds_reject_without_guest_or_payload_logging ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_event_manager_notify_before_finished_reset_completion ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_queue_socketpair_duplex_owned_io ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_short_tx_has_no_replay_across_freeze_or_reset ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_socket_backpressure_poll_is_stop_interruptible_without_ram_lease ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_worker_rx_wait_survives_freeze_then_acks_after_resume ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_worker_tx_backpressure_keeps_pin_stop_has_zero_old_ack ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_async_pending_reactivation_waits_old_owner_then_real_io ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_explicit_rx_owned_limit_report_limit_and_cross_region ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_frozen_pending_rx_tx_keep_pins_and_no_guest_ack ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_malformed_and_oversized_spans_reject_before_payload_io ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_peer_eof_terminal_notifier_never_acks_guest ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_reset_retires_but_holds_ownership_until_actual_thread_completion ... ok
+test virtio::mmio::cowork_stream_mmio_tests::cowork_stream_actual_mmio_bad_activate_fails_terminal_without_poison ... ok
+
+failures:
+
+failures:
+    stream_io::adversarial_tests::cowork_stream_per_call_flags_survive_alias_mutation_with_sigpipe_default
+
+test result: FAILED. 21 passed; 1 failed; 0 ignored; 0 measured; 91 filtered out; finished in 3.30s
+
+error: test failed, to rerun pass `-p krun-devices --lib`
+{"source": "${REPOSITORY_ROOT}/spikes/cowork-hvf/out/libkrun-stream-reclaim-v2", "patchSha256": "0d5d3b3ac5a792b26b31c650d2358dcfdd9456f526f3bb8608c5c967b3ee4e0e", "vmStarted": false, "payloadLogging": false}
+Traceback (most recent call last):
+  File "${REPOSITORY_ROOT}/spikes/cowork-hvf/test_stream_v2.py", line 15, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "${REPOSITORY_ROOT}/spikes/cowork-hvf/test_stream_v2.py", line 12, in main
+    command=[str(OUT/'rust/bin/cargo'),'test',*common,'-p',package,name,'--','--test-threads=1','--nocapture'];receipt['commands'].append(command);subprocess.run(command,check=True,env=env)
+                                                                                                                                                   ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py", line 578, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['${REPOSITORY_ROOT}/spikes/cowork-hvf/out/rust/bin/cargo', 'test', '--manifest-path', '${REPOSITORY_ROOT}/spikes/cowork-hvf/out/libkrun-stream-reclaim-v2/Cargo.toml', '--locked', '--offline', '--no-default-features', '--features', 'blk', '--jobs', '2', '-p', 'krun-devices', 'cowork_stream', '--', '--test-threads=1', '--nocapture']' returned non-zero exit status 101.
