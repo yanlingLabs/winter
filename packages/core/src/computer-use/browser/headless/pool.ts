@@ -24,6 +24,16 @@
 //     (`components.ts`) — never its cookies, cache or anything else.
 // A session's context (its cookies) outlives its tabs while the helper runs, and goes when the session's runtime ends
 // (`disposeSession`) or the helper exits.
+//
+// PRESENTATION (lane H3, the helper's feature `present` and the browser link's feature `headless`): a live headless
+// tab can be SHOWN in Winter.app's panel — the same page, drawn from the helper's own GPU frames; nothing is reloaded or
+// moved — for the `waitForUser` hand-off (`present`, the person in control) or for the person to watch (`watch`) and take
+// over (`takeOver`) from the panel. While the person holds CONTROL, every agent command on that tab (attach, send,
+// subscribe) is refused `capacity` ("the user has this tab", which the engine reads as `TargetBusy`); taking control
+// first stops new agent commands and lets the ones in flight finish (`HEADLESS_DRAIN_MS` at most). The CDP events keep
+// flowing, so the engine still follows the page. A presentation nobody connected to within `HEADLESS_PRESENT_START_MS`
+// (Winter.app not there, its viewer refused) is ended here. A tab the turn's end closes while the person holds it is
+// closed when they let it go.
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -31,11 +41,16 @@ import { processStartSeconds } from "../../../auth/credential-migration-lock";
 import { AutomationFailure } from "../../errors";
 import type { PrimitiveMetric } from "../../telemetry";
 import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS } from "../cdp-allowlist";
+import type { HeadlessShowParams, HeadlessTabRow } from "../cef-link/cef-transport";
+import type { HeadlessViewer } from "../cef-link/rpc";
 import { TransportError, type CdpEvent, type CdpTransport, type TransportTab } from "../transport";
 import { harvestHeadlessComponents, headlessComponentsDir, seedHeadlessComponents } from "./components";
 import { DEFAULT_HEADLESS_ENGINE, HEADLESS_ENGINES, type ResolvedEngine } from "./engines";
 import { processTreeFootprint } from "./memory";
-import { HEADLESS_PIPE_PROTOCOL, HEADLESS_TIMEOUTS, spawnEngineProcess, WinterHeadlessProcess, type HeadlessNoticeKind, type HeadlessOp, type SpawnEngine } from "./winter-engine";
+import {
+  HEADLESS_PIPE_PROTOCOL, HEADLESS_TIMEOUTS, spawnEngineProcess, WinterHeadlessProcess, type HeadlessNoticeKind, type HeadlessOp, type HeadlessPresentationEvent,
+  type SpawnEngine,
+} from "./winter-engine";
 
 /** The open-tab budget and the memory guard (the user's ruling). The guard reads the helper's processes' physical
  *  footprint summed (`memory.ts`). Measured (M-series, 2026-10-12): the helper with no tab ~220 MiB; 24 plain pages
@@ -46,6 +61,12 @@ export const HEADLESS_TABS_GLOBAL = 24;
 export const HEADLESS_MEMORY_LIMIT_BYTES = 3 * 1024 * 1024 * 1024;
 /** Over the limit while tabs are still closing: the guard waits this long for them before it reads again and decides. */
 export const HEADLESS_CLOSE_SETTLE_MS = 2_000;
+/** A presentation whose viewer has not been accepted this long after it was asked for is ended (nobody came). */
+export const HEADLESS_PRESENT_START_MS = 10_000;
+/** Taking control waits this long at most for the agent's commands in flight on the tab to finish. */
+export const HEADLESS_DRAIN_MS = 5_000;
+/** The model's sentence while the person holds a headless tab. */
+export const HEADLESS_USER_HAS_TAB = "the user has this tab in Winter's panel — it is theirs until they hand it back; work in another tab meanwhile";
 /** The helper exits after this long with no headless tab open anywhere. */
 export const HEADLESS_IDLE_EXIT_MS = 5 * 60_000;
 /** How often a running helper re-reads `computerUse.headless.enabled`. */
@@ -78,6 +99,13 @@ export interface HeadlessPoolDeps {
   memoryOf?(rootPid: number): number | undefined;
   /** How long the guard waits for closes in flight before it decides (`HEADLESS_CLOSE_SETTLE_MS`). */
   closeSettleMs?: number;
+  /** Presentation: Winter.app's panel as a viewer (the browser link's feature `headless`), or why there is none. */
+  viewer?(): HeadlessViewer | undefined;
+  viewerMissing?(): string | undefined;
+  /** The code requirement the viewer (Winter.app) must satisfy (`winterAppRequirementFor`). */
+  viewerRequirement?(): string;
+  presentStartMs?: number;
+  drainMs?: number;
   /** `headless.launch` / `headless.exit` metric lines. */
   metric?(m: PrimitiveMetric): void;
   now?(): number;
@@ -87,7 +115,31 @@ export interface HeadlessPoolDeps {
   log?(line: string): void;
 }
 
-interface PoolTab { tabKey: string; sessionId: string; proc: WinterHeadlessProcess; url: string; title: string; noticed: Set<HeadlessNoticeKind>; localNetworkAt?: number }
+interface PoolTab {
+  tabKey: string; sessionId: string; proc: WinterHeadlessProcess; url: string; title: string; noticed: Set<HeadlessNoticeKind>; localNetworkAt?: number;
+  /** The agent's commands on this tab in flight (attach, send, subscribe, detach) — a take-over waits for them. */
+  inflight: number;
+  /** Shown in Winter's panel. */
+  presentation?: Presentation;
+}
+
+/** One headless tab shown in Winter's panel. */
+interface Presentation {
+  nonce: string;
+  service: string;
+  purpose: "handoff" | "watch";
+  /** The person holds control: the agent's commands are refused. */
+  control: boolean;
+  /** Control is being taken (the agent's commands in flight finishing): new ones are refused already. */
+  taking: boolean;
+  /** The viewer was accepted. */
+  started: boolean;
+  startWaiters: Set<(started: boolean) => void>;
+  /** A `waitForUser` waits on this tab: the panel's Done / Stop waiting answer it. */
+  handoffPending: boolean;
+  /** The turn's end closed the tab while the person held it: closed when they let it go. */
+  closeWhenReleased: boolean;
+}
 
 type ExitReason = "idle" | "stop" | "crash" | "disabled" | "memory";
 
@@ -95,6 +147,9 @@ type ExitReason = "idle" | "stop" | "crash" | "disabled" | "memory";
 export function headlessPidPath(home: string): string { return join(home, "run", "headless.pid"); }
 /** `<home>/cache/headless-cef`: one random directory per helper run below it. */
 export function headlessCacheRoot(home: string): string { return join(home, "cache", "headless-cef"); }
+/** `<home>/cache/headless-uploads`: copies of files the person chose for a presented page's file chooser — the only folder
+ *  Winter Headless reads a chosen file from. Removed when the helper exits and at boot. */
+export function headlessUploadDir(home: string): string { return join(home, "cache", "headless-uploads"); }
 
 /**
  * The boot sweep: a helper the previous daemon left (named in the pid file, still alive, and started when the file
@@ -114,6 +169,7 @@ export function sweepHeadless(home: string, deps: { startOf?: (pid: number) => n
   } catch { /* no pid file, or unreadable: nothing to stop */ }
   try { rmSync(pidFile, { force: true }); } catch { /* best effort */ }
   try { rmSync(headlessCacheRoot(home), { recursive: true, force: true }); } catch { /* best effort */ }
+  try { rmSync(headlessUploadDir(home), { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
 export class HeadlessPool implements CdpTransport {
@@ -147,6 +203,10 @@ export class HeadlessPool implements CdpTransport {
   private ensuring = 0;
   /** A restart for memory in flight (shared by every new tab that finds the helper over the guard with no tab open). */
   private recycling: Promise<void> | undefined;
+  /** The hand-off's Done / Stop waiting from the panel (the engine's `waitForUser` listens). */
+  private readonly userDoneListeners = new Set<(tabKey: string, done: boolean) => void>();
+  /** Sessions whose tab list the panel should hear about (debounced). */
+  private readonly tabsPush = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(private readonly deps: HeadlessPoolDeps) {}
 
@@ -223,6 +283,7 @@ export class HeadlessPool implements CdpTransport {
     proc.onEvent((e) => this.event(proc, e));
     proc.onTabGone((tabKey, reason) => this.helperTabGone(proc, tabKey, reason));
     proc.onNotice((tabKey, kind) => this.notice(proc, tabKey, kind));
+    proc.onPresentation((e) => this.presentationEvent(proc, e));
     this.writePidFile(proc.pid);
     // The process this daemon just spawned must be Winter's own before anything is sent to it.
     if (this.deps.verify !== undefined && !this.deps.verify(proc.pid, r.requirement)) {
@@ -275,7 +336,9 @@ export class HeadlessPool implements CdpTransport {
     this.proc = undefined;
     this.clearTimers();
     const lost = [...this.tabs.values()].filter((t) => t.proc === proc);
-    for (const t of lost) this.tabs.delete(t.tabKey);
+    for (const t of lost) { this.tabs.delete(t.tabKey); this.forgetPresentation(t, "the headless browser stopped"); }
+    // Copies of files the person chose for a page live only as long as the browser that might upload them.
+    try { rmSync(headlessUploadDir(this.deps.home), { recursive: true, force: true }); } catch { /* the next boot sweeps it */ }
     // A crash, or the setting turned off: the tabs the model still holds read why.
     if (reason === "crash" || reason === "disabled") for (const t of lost) this.emitGone(t.tabKey, reason === "crash" ? "crashed" : "closed");
     if (reason === "crash") this.deps.log?.(`computer-use: Winter's headless browser exited unexpectedly (${signal ?? `exit ${code ?? "?"}`}); ${lost.length} tab(s) lost`);
@@ -392,6 +455,7 @@ export class HeadlessPool implements CdpTransport {
     const lost = suspects.map((k) => this.tabs.get(k)).filter((t): t is PoolTab => t !== undefined && t.proc === proc);
     for (const t of lost) {
       this.tabs.delete(t.tabKey);
+      this.forgetPresentation(t, "the page stopped answering");
       void this.closingWhile(proc.command("tab.close", { tabId: t.tabKey }, probeMs)).catch(() => { /* the helper closes it with its context at the latest */ });
       this.emitGone(t.tabKey, "crashed");
     }
@@ -418,7 +482,7 @@ export class HeadlessPool implements CdpTransport {
   /** The session's runtime ended (idle, deleted): its tabs are forgotten and its context (its cookies) disposed. */
   disposeSession(sessionId: string): void {
     const mine = [...this.tabs.values()].filter((t) => t.sessionId === sessionId);
-    for (const t of mine) { this.tabs.delete(t.tabKey); this.emitGone(t.tabKey, "closed"); }
+    for (const t of mine) { this.tabs.delete(t.tabKey); this.forgetPresentation(t, "the session ended"); this.emitGone(t.tabKey, "closed"); }
     const proc = this.proc;
     if (proc?.alive === true) {
       void this.closingWhile(this.command(proc, "context.dispose", { sessionId })).catch((err: unknown) => this.deps.log?.(`computer-use: disposing a headless context failed (${err instanceof Error ? err.message : "error"})`));
@@ -530,7 +594,8 @@ export class HeadlessPool implements CdpTransport {
       }
       const url = typeof r?.url === "string" ? r.url : opts.url;
       const title = typeof r?.title === "string" ? r.title : "";
-      this.tabs.set(tabKey, { tabKey, sessionId: opts.sessionId, proc, url, title, noticed: new Set() });
+      this.tabs.set(tabKey, { tabKey, sessionId: opts.sessionId, proc, url, title, noticed: new Set(), inflight: 0 });
+      this.pushTabs(opts.sessionId);
       return { tabKey, url, title, active: false, agent: true, sessionId: opts.sessionId };
     } finally {
       const left = (this.reserved.get(opts.sessionId) ?? 1) - 1;
@@ -542,7 +607,14 @@ export class HeadlessPool implements CdpTransport {
   async closeTab(tabKey: string): Promise<void> {
     const t = this.tabs.get(tabKey);
     if (t === undefined) return;
+    // The person holds it in Winter's panel: it closes when they let it go (`releaseControl`, `endPresentation`).
+    if (t.presentation?.control === true) {
+      t.presentation.closeWhenReleased = true;
+      return;
+    }
     this.tabs.delete(tabKey);
+    if (t.presentation !== undefined) void this.endPresentation(t, "closed");
+    this.pushTabs(t.sessionId);
     try {
       if (t.proc.alive) await this.closingWhile(this.command(t.proc, "tab.close", { tabId: tabKey }));
     } finally {
@@ -559,9 +631,17 @@ export class HeadlessPool implements CdpTransport {
 
   /** The open headless tabs — `[]`, and nothing started, while the helper is not running. */
   async listTabs(opts?: { sessionId?: string }): Promise<TransportTab[]> {
+    const mine = await this.liveTabs(opts?.sessionId);
+    // A tab the turn's end closed while the person held it is no longer the agent's to find.
+    return mine.filter((t) => t.presentation?.closeWhenReleased !== true)
+      .map((t) => ({ tabKey: t.tabKey, url: t.url, title: t.title, active: false, agent: true, sessionId: t.sessionId }));
+  }
+
+  /** The open tabs (of one session), their URL and title read fresh from the helper when it answers. */
+  private async liveTabs(sessionId?: string): Promise<PoolTab[]> {
     const proc = this.proc;
     if (proc?.alive !== true) return [];
-    const mine = [...this.tabs.values()].filter((t) => t.proc === proc && (opts?.sessionId === undefined || t.sessionId === opts.sessionId));
+    const mine = [...this.tabs.values()].filter((t) => t.proc === proc && (sessionId === undefined || t.sessionId === sessionId));
     if (mine.length === 0) return [];
     try {
       const r = await this.command(proc, "tabs.live", {}) as { tabs?: Array<{ tabId?: unknown; url?: unknown; title?: unknown }> };
@@ -572,7 +652,7 @@ export class HeadlessPool implements CdpTransport {
         if (typeof row.title === "string") t.title = row.title;
       }
     } catch { /* the last known url and title */ }
-    return mine.map((t) => ({ tabKey: t.tabKey, url: t.url, title: t.title, active: false, agent: true, sessionId: t.sessionId }));
+    return mine;
   }
 
   /** The tab, for a command — the setting read now (off stops the helper at once, not at its next poll). */
@@ -583,13 +663,29 @@ export class HeadlessPool implements CdpTransport {
     return t;
   }
 
+  /** The tab, for one of the AGENT's commands: refused while the person holds it (or is taking it). */
+  private agentTab(tabKey: string): PoolTab {
+    const t = this.live(tabKey);
+    if (t.presentation?.control === true || t.presentation?.taking === true) throw new TransportError("capacity", HEADLESS_USER_HAS_TAB, { userHasTab: true });
+    return t;
+  }
+
+  /** One agent command on `t`, counted while it is in flight (a take-over waits for it). */
+  private async agentCommand<T>(t: PoolTab, run: () => Promise<T>): Promise<T> {
+    t.inflight++;
+    try { return await run(); } finally {
+      t.inflight--;
+      if (t.inflight === 0) for (const w of [...this.drainWaiters]) w();
+    }
+  }
+
   /** When a page in this tab last tried to reach the local network and the helper refused it (undefined: never). */
   localNetworkRefusedAt(tabKey: string): number | undefined { return this.tabs.get(tabKey)?.localNetworkAt; }
 
   async attach(tabKey: string, opts: { sessionId: string }): Promise<{ viewport: [w: number, h: number]; dpr: number }> {
-    const t = this.live(tabKey);
+    const t = this.agentTab(tabKey);
     if (t.sessionId !== opts.sessionId) throw new TransportError("not_allowed", "that headless tab belongs to another session");
-    const r = await this.command(t.proc, "tab.ensure", { sessionId: t.sessionId, tabId: tabKey }, this.deps.timeouts?.ensure ?? HEADLESS_TIMEOUTS.ensure) as { viewport?: unknown; dpr?: unknown };
+    const r = await this.agentCommand(t, () => this.command(t.proc, "tab.ensure", { sessionId: t.sessionId, tabId: tabKey }, this.deps.timeouts?.ensure ?? HEADLESS_TIMEOUTS.ensure)) as { viewport?: unknown; dpr?: unknown };
     const vp = Array.isArray(r?.viewport) && r.viewport.length === 2 ? r.viewport : [0, 0];
     return { viewport: [Number(vp[0]) || 0, Number(vp[1]) || 0], dpr: typeof r?.dpr === "number" && r.dpr > 0 ? r.dpr : 1 };
   }
@@ -597,22 +693,283 @@ export class HeadlessPool implements CdpTransport {
   async detach(tabKey: string): Promise<void> {
     const t = this.tabs.get(tabKey);
     if (t === undefined || !t.proc.alive) return;
-    await this.command(t.proc, "tab.release", { tabId: tabKey });
+    await this.agentCommand(t, () => this.command(t.proc, "tab.release", { tabId: tabKey }));
   }
 
   async send<T = unknown>(tabKey: string, method: string, params: Record<string, unknown> = {}, opts: { cdpSessionId?: string; timeoutMs?: number } = {}): Promise<T> {
     if (!CDP_ALLOWED_METHODS.includes(method)) throw new TransportError("not_allowed", `${method} is not on the allowlist`);
-    const t = this.live(tabKey);
+    const t = this.agentTab(tabKey);
     const timeout = opts.timeoutMs ?? (method === "Page.captureScreenshot" ? (this.deps.timeouts?.screenshot ?? HEADLESS_TIMEOUTS.screenshot) : (this.deps.timeouts?.send ?? HEADLESS_TIMEOUTS.send));
-    const r = await this.command(t.proc, "cdp.send", { tabId: tabKey, method, params, ...(opts.cdpSessionId === undefined ? {} : { cdpSessionId: opts.cdpSessionId }) }, timeout) as { result?: unknown };
+    const r = await this.agentCommand(t, () => this.command(t.proc, "cdp.send", { tabId: tabKey, method, params, ...(opts.cdpSessionId === undefined ? {} : { cdpSessionId: opts.cdpSessionId }) }, timeout)) as { result?: unknown };
     return (r?.result ?? {}) as T;
   }
 
   async subscribe(tabKey: string, events: readonly string[]): Promise<void> {
     const bad = events.find((e) => !CDP_ALLOWED_EVENTS.includes(e));
     if (bad !== undefined) throw new TransportError("not_allowed", `${bad} is not an allowed event`);
+    const t = this.agentTab(tabKey);
+    await this.agentCommand(t, () => this.command(t.proc, "cdp.subscribe", { tabId: tabKey, events: [...events] }));
+  }
+
+  // ── presentation: a headless tab shown in Winter's panel (lane H3) ─────────────────────────────────────────────
+
+  /** Why a headless tab can't be shown in Winter's panel now (the model's sentence), or undefined when it can. */
+  presentMissing(): string | undefined {
+    const missing = this.deps.viewerMissing?.() ?? (this.deps.viewer === undefined ? "this Winter can't show a headless tab" : undefined);
+    if (missing !== undefined) return missing;
+    if (this.deps.viewer?.() === undefined) return "Winter isn't running — ask the user to open Winter";
+    const proc = this.proc;
+    if (proc?.alive === true && proc.version !== undefined && !proc.has("present")) return "Winter's headless browser is too old to show a tab — ask the user to update Winter";
+    return undefined;
+  }
+
+  /** The `waitForUser` hand-off (`CdpTransport.present`): the tab shown in Winter's panel with the person in control. */
+  async present(tabKey: string, opts: { sessionId: string }): Promise<void> {
     const t = this.live(tabKey);
-    await this.command(t.proc, "cdp.subscribe", { tabId: tabKey, events: [...events] });
+    if (t.sessionId !== opts.sessionId) throw new TransportError("not_allowed", "that headless tab belongs to another session");
+    if (t.presentation !== undefined && t.presentation.started && t.presentation.control) {
+      t.presentation.purpose = "handoff";
+      t.presentation.handoffPending = true;
+      return;
+    }
+    if (t.presentation !== undefined) await this.endPresentation(t, "shown again");
+    await this.startPresentation(t, "handoff", true);
+    if (t.presentation !== undefined) t.presentation.handoffPending = true;
+  }
+
+  /** The hand-off is over and the agent takes the tab back (after the person's Done): control returns, the panel's view
+   *  goes. */
+  async handBack(tabKey: string): Promise<void> {
+    const t = this.tabs.get(tabKey);
+    if (t?.presentation === undefined) return;
+    t.presentation.handoffPending = false;
+    await this.endPresentation(t, "done");
+  }
+
+  /** The hand-off's wait ended without the person's Done (Stop waiting, no answer): the tab stays with them — still
+   *  shown, still theirs — until they hand it back or close it in the panel. */
+  handoffOver(tabKey: string): void {
+    const p = this.tabs.get(tabKey)?.presentation;
+    if (p !== undefined) p.handoffPending = false;
+  }
+
+  /** The panel's Done / Stop waiting for a hand-off (the engine's `waitForUser` listens). */
+  onUserDone(listener: (tabKey: string, done: boolean) => void): () => void { this.userDoneListeners.add(listener); return () => { this.userDoneListeners.delete(listener); }; }
+
+  /** The person's action in the panel on one of a session's headless tabs (`browserLink.headless`). */
+  async panelAction(sessionId: string, tabKey: string, action: "watch" | "takeOver" | "handBack" | "done" | "stopWaiting" | "close"): Promise<void> {
+    const t = this.tabs.get(tabKey);
+    if (t === undefined || t.sessionId !== sessionId || !t.proc.alive) throw new AutomationFailure("TargetLost", "that headless tab is gone");
+    const p = t.presentation;
+    switch (action) {
+      case "watch":
+        if (p !== undefined) await this.endPresentation(t, "shown again");
+        await this.startPresentation(t, "watch", false);
+        return;
+      case "takeOver":
+        if (p === undefined) throw new AutomationFailure("NotAllowed", "the tab is not shown — watch it first");
+        await this.grantControl(t);
+        return;
+      case "handBack":
+        if (p === undefined) return;
+        if (p.handoffPending) { this.userDone(tabKey, true); return; }
+        await this.releaseControl(t);
+        return;
+      case "done":
+        // Answering a hand-off: the engine takes the tab back (`handBack`). Nobody waiting any more: the same, here.
+        if (p?.handoffPending === true) { this.userDone(tabKey, true); return; }
+        if (p !== undefined) await this.endPresentation(t, "done");
+        return;
+      case "stopWaiting":
+        if (p?.handoffPending === true) this.userDone(tabKey, false);
+        return;
+      case "close":
+        if (p === undefined) return;
+        if (p.handoffPending) this.userDone(tabKey, false);
+        await this.endPresentation(t, "closed in the panel", { hide: false });
+        return;
+    }
+  }
+
+  /** The session's headless tabs, for the panel's list. */
+  async panelTabs(sessionId: string): Promise<HeadlessTabRow[]> {
+    return (await this.liveTabs(sessionId)).map((t) => this.row(t));
+  }
+
+  private row(t: PoolTab): HeadlessTabRow {
+    return { tabId: t.tabKey, url: t.url, title: t.title, presented: t.presentation?.started === true, control: t.presentation?.control === true };
+  }
+
+  private userDone(tabKey: string, done: boolean): void {
+    for (const l of [...this.userDoneListeners]) {
+      try { l(tabKey, done); } catch { /* a listener never breaks the pool */ }
+    }
+  }
+
+  /** The panel hears the session's tab list (debounced; best effort). */
+  private pushTabs(sessionId: string): void {
+    if (this.deps.viewer === undefined || this.tabsPush.has(sessionId)) return;
+    const timer = setTimeout(() => {
+      this.tabsPush.delete(sessionId);
+      const viewer = this.deps.viewer?.();
+      if (viewer === undefined) return;
+      const rows = [...this.tabs.values()].filter((t) => t.sessionId === sessionId && t.presentation?.closeWhenReleased !== true).map((t) => this.row(t));
+      viewer.tabs({ sessionId, tabs: rows });
+    }, 100);
+    (timer as { unref?: () => void }).unref?.();
+    this.tabsPush.set(sessionId, timer);
+  }
+
+  /**
+   * Show `t` in the panel: the helper checks in a presentation service for it (accepting only Winter.app, by code
+   * signature, naming a fresh nonce), the app is told to connect to it, and the viewer's acceptance is awaited. Nobody
+   * accepted in time: the presentation is ended and the call fails, typed. `control`: the person holds the tab from the
+   * start (the agent's commands in flight finish first).
+   */
+  private async startPresentation(t: PoolTab, purpose: "handoff" | "watch", control: boolean): Promise<void> {
+    const missing = this.presentMissing();
+    if (missing !== undefined) throw new AutomationFailure("BrowserUnavailable", `Winter can't show the headless tab: ${missing}`);
+    const viewer = this.deps.viewer?.();
+    const engine = this.engineFor();
+    if (viewer === undefined || "missing" in engine) throw new AutomationFailure("BrowserUnavailable", "Winter can't show the headless tab right now");
+    if (!t.proc.has("present")) throw new AutomationFailure("BrowserUnavailable", "Winter's headless browser is too old to show a tab — ask the user to update Winter");
+    const nonce = randomBytes(8).toString("hex");
+    const p: Presentation = {
+      nonce, service: "", purpose, control: false, taking: control, started: false, startWaiters: new Set(), handoffPending: false, closeWhenReleased: false,
+    };
+    t.presentation = p;
+    try {
+      if (control) await this.drain(t);
+      if (t.presentation !== p) throw new AutomationFailure("TargetBusy", "the tab's presentation changed meanwhile — try again");
+      const r = await this.command(t.proc, "headless.present", {
+        tabId: t.tabKey, nonce, viewerRequirement: this.deps.viewerRequirement?.() ?? "", control, scale: 1,
+      }) as { service?: unknown };
+      if (typeof r?.service !== "string" || r.service.length === 0) throw new Error("the headless browser named no presentation service");
+      p.service = r.service;
+      p.control = control;
+      p.taking = false;
+      const show: HeadlessShowParams = {
+        sessionId: t.sessionId, tabId: t.tabKey, service: r.service, nonce, producerRequirement: engine.requirement, control, purpose,
+        url: t.url, title: t.title, uploadDir: headlessUploadDir(this.deps.home),
+      };
+      await viewer.show(show);
+      if (!(await this.waitStarted(p))) throw new Error("Winter's panel did not connect to it in time");
+      this.pushTabs(t.sessionId);
+    } catch (err) {
+      if (t.presentation === p) await this.endPresentation(t, "not shown");
+      if (err instanceof AutomationFailure) throw err;
+      throw new AutomationFailure("BrowserUnavailable", `Winter could not show the headless tab (${err instanceof Error ? err.message : "error"})`);
+    }
+  }
+
+  /** The viewer's acceptance (`headless.presentationStarted`), or false after `HEADLESS_PRESENT_START_MS`. */
+  private waitStarted(p: Presentation): Promise<boolean> {
+    if (p.started) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const done = (started: boolean): void => { clearTimeout(timer); p.startWaiters.delete(done); resolve(started); };
+      const timer = setTimeout(() => done(false), this.deps.presentStartMs ?? HEADLESS_PRESENT_START_MS);
+      p.startWaiters.add(done);
+    });
+  }
+
+  private readonly drainWaiters = new Set<() => void>();
+
+  /** No new agent command on `t` from now (`taking`), and the ones in flight finish — `HEADLESS_DRAIN_MS` at most. */
+  private async drain(t: PoolTab): Promise<void> {
+    if (t.presentation !== undefined) t.presentation.taking = true;
+    if (t.inflight === 0) return;
+    await new Promise<void>((resolve) => {
+      const done = (): void => {
+        if (t.inflight > 0 && !timedOut) return;
+        clearTimeout(timer); this.drainWaiters.delete(done); resolve();
+      };
+      let timedOut = false;
+      const timer = setTimeout(() => { timedOut = true; done(); }, this.deps.drainMs ?? HEADLESS_DRAIN_MS);
+      this.drainWaiters.add(done);
+    });
+  }
+
+  /** The person takes over a shown tab: the agent's commands in flight finish, then control is theirs. */
+  private async grantControl(t: PoolTab): Promise<void> {
+    const p = t.presentation;
+    if (p === undefined || p.control) return;
+    await this.drain(t);
+    if (t.presentation !== p) return;
+    try {
+      await this.command(t.proc, "headless.control", { tabId: t.tabKey, control: true });
+      p.control = true;
+    } finally {
+      p.taking = false;
+    }
+    this.pushTabs(t.sessionId);
+  }
+
+  /** Control goes back to the agent; the tab stays shown, watch only. A close the turn's end asked for happens now. */
+  private async releaseControl(t: PoolTab): Promise<void> {
+    const p = t.presentation;
+    if (p === undefined) return;
+    p.taking = false;
+    if (p.control) {
+      p.control = false;
+      try { await this.command(t.proc, "headless.control", { tabId: t.tabKey, control: false }); } catch { /* the presentation may be gone */ }
+    }
+    if (p.closeWhenReleased) { await this.endPresentation(t, "closed"); return; }
+    this.pushTabs(t.sessionId);
+  }
+
+  /** End `t`'s presentation: the helper stops it (the viewer is told), the panel's view goes, control returns to the
+   *  agent, and a close the turn's end asked for happens now. */
+  private async endPresentation(t: PoolTab, reason: string, o: { hide?: boolean } = {}): Promise<void> {
+    const p = t.presentation;
+    if (p === undefined) return;
+    t.presentation = undefined;
+    for (const w of [...p.startWaiters]) w(false);
+    if (t.proc.alive) {
+      try { await this.command(t.proc, "headless.unpresent", { tabId: t.tabKey }); } catch { /* it may have ended already */ }
+    }
+    if (o.hide !== false) {
+      try { await this.deps.viewer?.()?.hide({ sessionId: t.sessionId, tabId: t.tabKey, reason }); } catch { /* the panel may be gone */ }
+    }
+    if (p.closeWhenReleased && this.tabs.get(t.tabKey) === t) {
+      this.tabs.delete(t.tabKey);
+      if (t.proc.alive) void this.closingWhile(this.command(t.proc, "tab.close", { tabId: t.tabKey })).catch(() => undefined).finally(() => this.armIdle());
+      this.emitGone(t.tabKey, "closed");
+    }
+    this.pushTabs(t.sessionId);
+  }
+
+  /** A tab gone (closed, crashed, the helper stopped): its presentation is over; the panel's view goes. */
+  private forgetPresentation(t: PoolTab, reason: string): void {
+    const p = t.presentation;
+    if (p === undefined) return;
+    t.presentation = undefined;
+    for (const w of [...p.startWaiters]) w(false);
+    if (p.handoffPending) this.userDone(t.tabKey, false);
+    void Promise.resolve(this.deps.viewer?.()?.hide({ sessionId: t.sessionId, tabId: t.tabKey, reason })).catch(() => undefined);
+    this.pushTabs(t.sessionId);
+  }
+
+  /** The helper says a presentation's viewer was accepted, or that the viewer ended it. */
+  private presentationEvent(proc: WinterHeadlessProcess, e: HeadlessPresentationEvent): void {
+    const t = this.tabs.get(e.tabKey);
+    if (t === undefined || t.proc !== proc || t.presentation === undefined) return;
+    const p = t.presentation;
+    if (e.kind === "started") {
+      p.started = true;
+      for (const w of [...p.startWaiters]) w(true);
+      return;
+    }
+    // The viewer went away (the person closed it, Winter.app quit): the presentation is over and control returns to the
+    // agent. A hand-off it was answering reads as not done.
+    t.presentation = undefined;
+    for (const w of [...p.startWaiters]) w(false);
+    if (p.handoffPending) this.userDone(t.tabKey, false);
+    if (p.closeWhenReleased && this.tabs.get(t.tabKey) === t) {
+      this.tabs.delete(t.tabKey);
+      void this.closingWhile(this.command(proc, "tab.close", { tabId: t.tabKey })).catch(() => undefined).finally(() => this.armIdle());
+      this.emitGone(t.tabKey, "closed");
+    }
+    this.pushTabs(t.sessionId);
   }
 
   onEvent(listener: (e: CdpEvent) => void): () => void { this.eventListeners.add(listener); return () => { this.eventListeners.delete(listener); }; }
@@ -643,6 +1000,7 @@ export class HeadlessPool implements CdpTransport {
     const t = this.tabs.get(tabKey);
     if (t === undefined || t.proc !== proc) return;
     this.tabs.delete(tabKey);
+    this.forgetPresentation(t, reason === "closed" ? "the tab closed" : "the page crashed");
     this.emitGone(tabKey, reason === "stopped" ? "crashed" : reason);
     this.armIdle();
   }

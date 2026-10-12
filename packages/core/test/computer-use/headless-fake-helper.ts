@@ -5,7 +5,7 @@
 // descriptor alone let it end early).
 //
 // Its behaviour is chosen by its arguments (before the helper's own `--winter-cache-root=…`):
-//   --fake-mode=normal (default) | no-hello | bad-protocol
+//   --fake-mode=normal (default) | no-hello | bad-protocol | no-present (a helper from before the `present` feature)
 //   --fake-log=<file>    one JSON line per command it read (`{op, params}`), for the test to inspect
 // and by the URLs it is asked to open:
 //   http://crash.test/        — it answers, then exits 1 (a crash of the whole browser)
@@ -21,6 +21,11 @@
 //                               once (plus a notice of an unknown kind, and one for an unknown tab)
 //   http://slow-close.test/   — its tab.close is answered 300 ms late, with a `closed` line in the log just before (a
 //                               page whose renderer takes a while to go)
+//   http://slow-send.test/    — every cdp.send for it is answered 300 ms late, with an `answered` line in the log just
+//                               before (an agent command in flight)
+//   http://no-viewer.test/    — presented, its viewer never comes (no `headless.presentationStarted`)
+//   http://viewer-leaves.test/ — presented, its viewer is accepted and then leaves 150 ms later (`presentationEnded`)
+// Any other presented tab's viewer is accepted 20 ms after `headless.present` is answered.
 // It exits 0 on EOF, like the real helper.
 import { appendFileSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -43,7 +48,12 @@ const reply = (cmdId: string, result: unknown): void => send("browserLink.result
 const fail = (cmdId: string, code: string, message: string, data?: Record<string, unknown>): void =>
   send("browserLink.result", { linkId, cmdId, ok: false, error: { code, message, ...(data === undefined ? {} : { data }) } });
 
-if (mode !== "no-hello") send("headless.hello", { protocol: mode === "bad-protocol" ? 99 : 1, linkId, pid: process.pid, version: "0.0.0-fake" });
+if (mode !== "no-hello") {
+  send("headless.hello", { protocol: mode === "bad-protocol" ? 99 : 1, linkId, pid: process.pid, version: "0.0.0-fake", ...(mode === "no-present" ? {} : { features: ["present"] }) });
+}
+/** The live presentations, by tab: the nonce the daemon named. */
+const presented = new Map<string, string>();
+let services = 0;
 
 let buffer = "";
 void (async () => {
@@ -124,10 +134,46 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
       if (!tabs.has(String(p.tabId))) return fail(cmdId, "tab_gone", "the headless tab is gone");
       if (tabs.get(String(p.tabId))!.url === "http://wedge.test/") return; // never answered
       if (tabs.get(String(p.tabId))!.url === "http://hang.test/") { hung = true; return; } // nothing answered from now on
+      if (tabs.get(String(p.tabId))!.url === "http://slow-send.test/") {
+        setTimeout(() => {
+          if (logFile !== undefined) appendFileSync(logFile, `${JSON.stringify({ op: "answered", params: { method: p.method } })}\n`);
+          reply(cmdId, { result: {} });
+        }, 300);
+        return;
+      }
       if (p.method === "Runtime.evaluate") return reply(cmdId, { result: { result: { type: "number", value: 2 } } });
       return reply(cmdId, { result: {} });
     }
     case "cdp.subscribe": return reply(cmdId, {});
+    case "headless.present": {
+      if (mode === "no-present") return fail(cmdId, "not_allowed", "unknown op headless.present");
+      const tabId = String(p.tabId);
+      const t = tabs.get(tabId);
+      if (t === undefined) return fail(cmdId, "tab_gone", "the headless tab is gone");
+      if (typeof p.nonce !== "string" || !/^[0-9a-f]{16}$/.test(p.nonce) || typeof p.viewerRequirement !== "string" || p.viewerRequirement === "") {
+        return fail(cmdId, "not_allowed", "headless.present needs nonce (16 hex) and viewerRequirement");
+      }
+      presented.set(tabId, p.nonce);
+      reply(cmdId, { service: `com.winter.headless.present.${process.pid}.fake${++services}`, cssWidth: 1280, cssHeight: 800 });
+      if (t.url !== "http://no-viewer.test/") {
+        setTimeout(() => {
+          if (presented.get(tabId) !== p.nonce) return;
+          send("headless.presentationStarted", { linkId, tabId });
+          if (t.url === "http://viewer-leaves.test/") {
+            setTimeout(() => {
+              if (presented.get(tabId) !== p.nonce) return;
+              presented.delete(tabId);
+              send("headless.presentationEnded", { linkId, tabId, reason: "the viewer went away" });
+            }, 150);
+          }
+        }, 20);
+      }
+      return;
+    }
+    case "headless.unpresent": presented.delete(String(p.tabId)); return reply(cmdId, { frames: 0 });
+    case "headless.control":
+      if (!presented.has(String(p.tabId))) return fail(cmdId, "not_live", "the headless tab is not presented");
+      return reply(cmdId, {});
     case "context.dispose": {
       let closed = 0;
       for (const [k, t] of tabs) if (t.sessionId === p.sessionId) { tabs.delete(k); closed++; }

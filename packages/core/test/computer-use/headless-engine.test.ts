@@ -129,14 +129,13 @@ describe("the local network (refused; this Mac allowed)", () => {
 });
 
 describe("the tab lifecycle (closed at the turn's end, never handed over)", () => {
-  test("keep() is refused; waitForUser, download and unmuting are refused; mute() is fine", async () => {
+  test("keep() is refused; download and unmuting are refused; mute() is fine", async () => {
     const h = withHeadless();
     const r = h.run();
     const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
     const keep = await failure(h.engine.primitive(r.scope, tab.targetId, "keep", {}));
     expect((keep as AutomationFailure).kind).toBe("NotAllowed");
     expect(keep.message).toBe(HEADLESS_KEEP);
-    expect((await failure(h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "sign in" }))).message).toMatch(/^nobody can see a headless tab/);
     expect((await failure(h.engine.primitive(r.scope, tab.targetId, "download", { target: { url: "https://a.example/f.zip" } }))).message).toMatch(/^Winter's headless browser doesn't download files/);
     expect((await failure(h.engine.primitive(r.scope, tab.targetId, "mute", { on: false }))).message).toBe("a headless tab never plays sound");
     await h.engine.primitive(r.scope, tab.targetId, "mute", {});
@@ -246,6 +245,91 @@ describe("the engine option and the budget", () => {
     const r = h.run();
     for (let i = 0; i < 10; i++) await h.engine.global(r.scope, "browsers.open", { url: `https://a.example/${i}`, browser: "headless" });
     expect(r.text()).not.toContain("let go of");
+    r.end();
+  });
+});
+
+describe("waitForUser() on a headless tab (lane H3): shown in Winter's panel, the same live page", () => {
+  function handoff(o: { answer?: (summary: string) => string | false | undefined; missing?: string } = {}) {
+    const handedBack: string[] = [];
+    const over: string[] = [];
+    const h = withHeadless({
+      ...(o.answer === undefined ? {} : { answer: o.answer }),
+      engineDeps: {
+        headlessPresentMissing: () => o.missing,
+        headlessHandBack: async (k) => { handedBack.push(k); },
+        headlessHandoffOver: (k) => { over.push(k); },
+      },
+    });
+    return { h, handedBack, over };
+  }
+
+  test("Show me the tab → shown in the panel; Done → control handed back BEFORE the agent takes the tab again; its state printed", async () => {
+    const answers: string[] = [];
+    let handedBackBeforeAttach: boolean | undefined;
+    const { h, handedBack } = handoff({ answer: (s) => { answers.push(s); return s.startsWith("Winter's headless browser — ") ? "handoff_show" : "handoff_done"; } });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://accounts.example/login", browser: "headless" }) as TabHandle;
+    const key = keyOf(tab);
+    const attach = h.headless.attach.bind(h.headless);
+    h.headless.attach = async (k, a) => { if (handedBack.length > 0 && handedBackBeforeAttach === undefined) handedBackBeforeAttach = true; return attach(k, a); };
+    const out = await h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "sign in" });
+    expect(out).toEqual({ done: true });
+    // Only "Show me the tab": nothing of a headless tab can be done anywhere else.
+    expect(h.cards.map((c) => c.options?.map((x) => x.id))).toEqual([["handoff_show"], ["handoff_done"]]);
+    expect(answers[0]).toBe("Winter's headless browser — accounts.example: sign in. Winter waits while you do it.");
+    expect(h.headless.presented).toEqual([`${key}@s1`]);
+    expect(handedBack).toEqual([key]);
+    expect(handedBackBeforeAttach).toBe(true);
+    const text = r.text();
+    expect(text).toContain("showed the headless tab to the user in Winter's panel");
+    expect(text).toContain("the user finished on accounts.example");
+    r.end();
+  });
+
+  test("Done from the panel itself answers the wait", async () => {
+    const { h, handedBack } = handoff({ answer: (s) => (s.startsWith("Winter's headless browser — ") ? "handoff_show" : undefined) });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const waiting = h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "sign in" });
+    for (let i = 0; i < 50 && h.cards.length < 2; i++) await new Promise((res) => setTimeout(res, 5));
+    h.headless.pressDone(keyOf(tab), true);
+    expect(await waiting).toEqual({ done: true });
+    expect(handedBack).toEqual([keyOf(tab)]);
+    r.end();
+  });
+
+  test("Stop waiting: { done: false }, the tab stays with the person (the pool is told), nothing handed back", async () => {
+    const { h, handedBack, over } = handoff({ answer: (s) => (s.startsWith("Winter's headless browser — ") ? "handoff_show" : false) });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    expect(await h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "sign in" })).toEqual({ done: false });
+    expect(over).toEqual([keyOf(tab)]);
+    expect(handedBack).toEqual([]);
+    expect(r.text()).toContain("the tab stays with them");
+    r.end();
+  });
+
+  test("Winter's panel can't show it (the app gone or too old): BrowserUnavailable with why, before any card", async () => {
+    const { h } = handoff({ missing: "Winter isn't running — ask the user to open Winter", answer: () => "handoff_show" });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const e = await failure(h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "sign in" }));
+    expect((e as AutomationFailure).kind).toBe("BrowserUnavailable");
+    expect(e.message).toBe("waitForUser() shows a headless tab in Winter's panel, and Winter isn't running — ask the user to open Winter");
+    expect(h.cards).toEqual([]);
+    r.end();
+  });
+
+  test("the person holding the tab reads as TargetBusy with the pool's sentence", async () => {
+    const h = withHeadless();
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const send = h.headless.send.bind(h.headless);
+    h.headless.send = async (k, m, p, o) => { if (m === "Runtime.callFunctionOn" || m === "Runtime.evaluate") throw new TransportError("capacity", "the user has this tab in Winter's panel — it is theirs until they hand it back; work in another tab meanwhile", { userHasTab: true }); return send(k, m, p, o); };
+    const e = await failure(h.engine.primitive(r.scope, tab.targetId, "text", {}));
+    expect((e as AutomationFailure).kind).toBe("TargetBusy");
+    expect(e.message).toBe("the user has this tab in Winter's panel — it is theirs until they hand it back; work in another tab meanwhile");
     r.end();
   });
 });
