@@ -1,0 +1,17 @@
+{
+  "passed": true,
+  "vmStarted": false,
+  "cppDoubleIncludePassed": true,
+  "factoryAndDeprecatedSetterCLinkagePassed": true,
+  "headerSha256": "bbade149f383a4d4b74fb00f2d669d1ba07427112b71e3d2741dec64f7b66ccb",
+  "command": [
+    "clang++",
+    "-I",
+    "${REPOSITORY_ROOT}/spikes/cowork-hvf/out/libkrun-stream-reclaim-v3/include",
+    "-S",
+    "-emit-llvm",
+    "${REPOSITORY_ROOT}/spikes/cowork-hvf/out/stream-v3-header.cpp",
+    "-o",
+    "${REPOSITORY_ROOT}/spikes/cowork-hvf/out/stream-v3-header.ll"
+  ]
+}
