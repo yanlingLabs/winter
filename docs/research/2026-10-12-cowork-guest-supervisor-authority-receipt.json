@@ -1,0 +1,18 @@
+{
+  "parent": "f46f162711fe444650bb7fd900a00fce5905136d",
+  "sourceSha256": {
+    "packages/core/src/cowork/guest-runtime.ts": "6bbaad7ed3e78c58fb382be4bc639020b463cad36ae087e716f3cd1c91d884f3",
+    "packages/core/test/cowork/guest-runtime.test.ts": "9a8d199e9798d673ccea5fdbc5f34abc17d8104b5e2be53521a14974f4377b49"
+  },
+  "tests": {
+    "passed": 107,
+    "failed": 0,
+    "assertions": 1034,
+    "suites": 5,
+    "actualCandidateSDKRefusalOptIn": true
+  },
+  "noVM": true,
+  "noProductionEnablement": true,
+  "noSDKPinChange": true,
+  "independentReviewPending": true
+}
