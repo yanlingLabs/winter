@@ -22,7 +22,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: kernel-replay-linux-review
-          run-id: 38267412916
+          run-id: 38274911082
           github-token: ${{ github.token }}
           path: out/kernel-replay-approved
       - name: Require existing runner facilities without changing the host
@@ -46,4 +46,4 @@ jobs:
           if len(data)!=identity.st_size or hashlib.sha256(data).hexdigest()!=digest:raise SystemExit("unreviewed parent refused")
           sys.argv=[source,*arguments]
           exec(compile(data,"<reviewed-no-effect-parent>","exec"),{"__name__":"__main__","__file__":source})
-          ' spikes/cowork-filesystem-bootstrap/stage_kernel_replay.py 452218acb0e3cb9c1e9ac6c911ba1b3544a1e8e07d08e773aa77c7739e3ddd3b --source spikes/cowork-filesystem-bootstrap --artifacts out/kernel-replay-approved --receipt out/kernel-replay-approved/build.json --approved-receipt-sha256 9e0e0f1540ccd9e024d62e89192297a3aaa680dd870d8c77381a6b4be5d20188
+          ' spikes/cowork-filesystem-bootstrap/stage_kernel_replay.py 452218acb0e3cb9c1e9ac6c911ba1b3544a1e8e07d08e773aa77c7739e3ddd3b --source spikes/cowork-filesystem-bootstrap --artifacts out/kernel-replay-approved --receipt out/kernel-replay-approved/build.json --approved-receipt-sha256 d257f038a970ac3c7629a059ab6d9edaf3d3bc0eca23c4bbc395784b341389b5
