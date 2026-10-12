@@ -1,0 +1,23 @@
+bun test v1.3.14 (0d9b296a)
+
+test/cowork/git/read-transport.test.ts:
+125 |       cancel: async () => {},
+126 |     }) },
+127 |   }) as unknown as Response;
+128 |   const t = new CoworkGitHubReadTransport({authorize:()=>({...grant,revoked})},{get:async()=>sentinel},http,{recheckMs:1000},{isolatedFixture:true,parser});
+129 |   await expect(t.read(caller, request)).rejects.toMatchObject({code:"authority_denied"});
+130 |   expect(parserCalls).toBe(0);
+                            ^
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 1
+
+      at <anonymous> (<frozen-checkout>/packages/core/test/cowork/git/read-transport.test.ts:130:23)
+(fail) REVIEW current authority is required before response parser admission after EOF await [4.22ms]
+
+ 0 pass
+ 8 filtered out
+ 1 fail
+ 2 expect() calls
+Ran 1 test across 1 file. [228.00ms]

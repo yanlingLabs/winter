@@ -1,0 +1,6 @@
+{
+  "commit": "541a23a3df8ab9106d09400bda981ebc1a498a65",
+  "exitCode": 1,
+  "command": "bun test test/cowork/git/read-transport.test.ts --test-name-pattern REVIEW current authority",
+  "scope": "injected parser and HTTP only; Node fixture environment removed; no helper/VM/app launched"
+}

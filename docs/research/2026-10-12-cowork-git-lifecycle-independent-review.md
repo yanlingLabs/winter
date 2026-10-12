@@ -1,0 +1,13 @@
+# Independent Git helper lifecycle correction review
+
+Frozen source `9da17475d217f1998800a40d50ab9e0c27fd0901`. **Accepted as closure of the three previously recorded fixture-scope lifecycle gaps.** This is source review; root owns the focused command/helper execution. No VM or production activation is admitted.
+
+`OwnedGitReadCommandRunner` replaces both the static codesign wrapper and fixture build/tool wrapper. It bounds combined stdout/stderr, wall time, capacity and post-kill drain time, kills the owned process group with SIGKILL, and does not treat a kill attempt or drain deadline as an owned exit. A pending owner remains in the admission set after an uncertain stop; only an exit or no-launch error removes it. Reader failures and limit failures go through this owner rather than returning directly from `Promise.all`. The tests exercise real short-lived timeout/output-limit children, a mock missing-exit case and no-child spawn failure, including slot reuse only after confirmed exit.
+
+Parser profile generation now happens before capacity increment. Synchronous spawn failure decrements capacity; an asynchronous error with an existing PID retains ownership and waits for exit/drain. The admitted fixture hooks have explicit host-only fixture configuration. The new parser regression tries each no-child profile/spawn failure twice with capacity one, which meaningfully detects the earlier leak.
+
+One **residual process-tree limitation** remains: the auxiliary runner releases its slot on the leader's exit, and its kill function returns immediately after that exit. A surviving descendant holding inherited output descriptors therefore cannot be killed by the subsequent wall/drain path; draining merely closes the parent streams. The fixed trusted codesign/compiler fixtures ordinarily wait for their children, and the actual parser separately denies fork. This does not reopen the original direct-child gaps, but the auxiliary wrapper must not be described as proof that arbitrary descendants are gone. Group-wide ownership/teardown needs separate treatment if such commands are admitted.
+
+The fixed output-flood fixtures write only 512 bytes or about 70 KiB and then wait; the command timeout uses a small isolated process that ignores SIGTERM while the owner uses SIGKILL. These cases are relevant, bounded regressions and do not require host memory pressure. Parent-reported focused/helper test results are separate from this source-only verdict.
+
+No implementation, source pin, app, VM, live home or credentials were changed or used by this review. The separate held native VM fixture task was not retried.

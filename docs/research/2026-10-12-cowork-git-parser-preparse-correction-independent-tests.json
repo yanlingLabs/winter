@@ -1,0 +1,6 @@
+{
+  "commit": "402010b55a13520de7939c594f4cd2da567caede",
+  "exitCode": 0,
+  "command": "bun test test/cowork/git/read-transport.test.ts --test-name-pattern REVIEW current authority",
+  "scope": "independent regression unchanged; injected parser and HTTP only; Node fixture environment removed; no helper/VM/app launched"
+}
