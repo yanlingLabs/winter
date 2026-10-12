@@ -146,6 +146,8 @@ final class GuardianModelTests: XCTestCase {
                                        ("sim.editor", Self.ordinaryRatchetRange, ordinary)] as [(String?, ClosedRange<Int>, [Int: String])] {
             let what = target.map { "with an ordinary target (\($0))" } ?? "with Finder as the target"
             let failing = try Self.surveyInChildren(target: target, seeds: range)
+            // (R18 L6: the in-flight invariant had chances across the whole range — summed over its children.)
+            XCTAssertGreaterThan(Self.lastSurveyInFlightChances, 0, "RATCHET: \(what), seeds \(range): the user never began working in T during an act")
             for (seed, v) in failing.sorted(by: { $0.key < $1.key }) {
                 guard let pinned = known[seed] else {
                     XCTFail("RATCHET: seed \(seed) \(what) fails and is not known-failing — a regression: \(v)")
@@ -169,6 +171,9 @@ final class GuardianModelTests: XCTestCase {
     }
 
     /// A child of the survey that has not finished by then is HUNG: killed, and the survey fails naming its seeds.
+    /// The in-flight chances the last survey's children reported, summed (R18 L6).
+    nonisolated(unsafe) static var lastSurveyInFlightChances = 0
+
     static let childDeadline = TimeInterval(ProcessInfo.processInfo.environment["WINTER_CU_SIM_CHILD_DEADLINE"] ?? "") ?? 900
 
     /// Runs the random test's survey over `seeds` in child processes of this test bundle (`chunk` seeds each, all at once);
@@ -231,6 +236,10 @@ final class GuardianModelTests: XCTestCase {
         }
         group.wait()
         let lines = texts.flatMap { $0.split(separator: "\n").map(String.init) }
+        lastSurveyInFlightChances = lines.compactMap { l -> Int? in
+            guard let r = l.range(of: " times the user began working in T during an act") else { return nil }
+            return Int(l[..<r.lowerBound].split(separator: " ").last ?? "")
+        }.reduce(0, +)
         guard broken.isEmpty else {
             throw CUError.unsupported("the survey of seeds \(seeds): \(broken.sorted().joined(separator: "; "))")
         }
