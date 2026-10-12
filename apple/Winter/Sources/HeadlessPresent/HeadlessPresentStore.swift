@@ -75,9 +75,12 @@ final class HeadlessPresentStore: ObservableObject {
         case .tabs(let sessionId, let tabs):
             listGeneration[sessionId, default: 0] += 1
             tabsBySession[sessionId] = tabs
+            // Ids and counts only: never a page's address or title.
+            NSLog("[HeadlessPresent] %@ lists %ld headless tab(s), %ld shown", sessionId, tabs.count, tabs.filter(\.presented).count)
             reply(.empty)
         case .update(let sessionId, let tabId, let purpose):
             for p in presentations where p.sessionId == sessionId && p.tabId == tabId { p.purposeChanged(purpose) }
+            NSLog("[HeadlessPresent] %@ %@ is shown for %@ now", sessionId, tabId, purpose.rawValue)
             reply(.empty)
         }
     }
@@ -101,6 +104,8 @@ final class HeadlessPresentStore: ObservableObject {
         }
         presentation.onEnded = { [weak self] ended in self?.presentationEnded(ended) }
         presentations.append(presentation)
+        NSLog("[HeadlessPresent] %@ %@ shown (%@, %@)", show.sessionId, show.tabId, show.purpose.rawValue,
+              show.control ? "the person has control" : "watch-only")
         watchPending.remove(show.tabId)
         onShow?(show.sessionId)
         return .empty
@@ -122,6 +127,7 @@ final class HeadlessPresentStore: ObservableObject {
     }
 
     private func presentationEnded(_ presentation: HeadlessPresentation) {
+        NSLog("[HeadlessPresent] %@ %@ ended by the helper", presentation.sessionId, presentation.tabId)
         let id = presentation.id
         DispatchQueue.main.asyncAfter(deadline: .now() + endedLinger) { [weak self] in
             MainActor.assumeIsolated { self?.presentations.removeAll { $0.id == id } }
