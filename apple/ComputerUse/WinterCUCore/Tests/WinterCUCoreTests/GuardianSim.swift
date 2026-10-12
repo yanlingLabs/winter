@@ -408,6 +408,10 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     var actEpisode = 0
     var actStartFront: pid_t = 0
     var agentEventsAfterFront = 0
+    /// An act of the agent's on T is running (it began while the user was not working in T): from the moment they start
+    /// working in T, nothing of it may reach T — no key or click posted to it, no accessibility write or action on its
+    /// elements (round 17, the review of round 16's H1: I6 was checked only at an act's start).
+    var actOnT = false
     var stepsRetiredAtStart = 0
     var targetForwardDuringOp = false
     var ctx: [SimCtx] = []

@@ -268,9 +268,22 @@ final class SimRun {
             }
             for (pid, els) in apps { ax.put(ax.application(pid), [kAXWindowsAttribute: els]) }
         }
+        // I6 in flight (round 17, the review of round 16's H1): an act on T that began before the user worked in it must
+        // stop reaching T the moment they do — the world's own moment, whatever the engine knew.
+        let tTokens: Set<String> = ["\(SimPid.target)", "97002", "97030", "97031"]
+        let isT = { (token: Substring) -> Bool in
+            if tTokens.contains(String(token)) { return true }
+            guard let id = byToken[String(token)] else { return false }
+            return w.lock.withLock { w.wins[id]?.pid } == SimPid.target
+        }
+        let inFlightCheck = { (what: String) in
+            guard w.lock.withLock({ w.actOnT }), w.userWorks(in: SimPid.target) else { return }
+            w.lock.withLock { w.fail("I6 (in flight): the agent's \(what) reached T after the user started working in it") }
+        }
         ax.onPerform = { what in
             let parts = what.split(separator: ":")
             guard parts.count == 2 else { return }
+            if isT(parts[0]) { inFlightCheck("accessibility action \(parts[1])") }
             // A raise (a restore's or an act's: no cause either way — the engine counts the act itself); an action on an
             // agent target's element: an event of the agent's (the latest its last cause can be).
             if parts[1] == "AXRaise", let id = byToken[String(parts[0])] { w.raised(id) }
@@ -281,6 +294,7 @@ final class SimRun {
         ax.onSet = { what in
             let parts = what.split(separator: ":")
             guard parts.count == 2 else { return }
+            if isT(parts[0]) { inFlightCheck("accessibility write \(parts[1])") }
             if parts[1] == "AXFrontmost", let pid = pid_t(parts[0]) {
                 w.engineActivates(pid, how: "AXFrontmost", refusable: false)
             } else if parts[1] == "AXMain", let id = byToken[String(parts[0])] {
@@ -358,6 +372,7 @@ final class SimRun {
         core.focusEnforcerFactory = { _ in enforcer }
         poster.onPost = { e in
             guard e.type == .keyDown || e.type == .leftMouseDown else { return }
+            if e.pid == SimPid.target { inFlightCheck(e.type == .keyDown ? "key" : "click") }
             w.lock.withLock {
                 w.lastPostAt = w.now
                 // A change during this act that brought T forward (by itself, or by the user's own move): at most the one
@@ -947,6 +962,8 @@ final class SimRun {
             let working = w.userWorks(in: tpid)
             if !working { w.agentBegins(tpid) }
             defer { if !working { w.agentEnds(tpid) } }
+            w.lock.withLock { w.actOnT = !working }
+            defer { w.lock.withLock { w.actOnT = false } }
             let opener = CUCore.actCanOpenApps(action) && !working
             if opener { w.lock.withLock { w.noteOpener(w.targetScope) } }
             defer { if opener { w.lock.withLock { w.noteOpener(w.targetScope) } } }
