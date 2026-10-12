@@ -262,6 +262,45 @@ describe("watch and take over from the panel", () => {
   });
 });
 
+describe("the control lease holds until the helper has taken the person's control away", () => {
+  test("every agent command is refused for the whole hold, however often it is tried", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
+    await r.pool.attach(t.tabKey, { sessionId: "s1" });
+    await r.pool.panelAction("s1", t.tabKey, "watch");
+    await r.pool.panelAction("s1", t.tabKey, "takeOver");
+    for (let i = 0; i < 6; i++) {
+      expect(isUserHasTab(await failure(r.pool.attach(t.tabKey, { sessionId: "s1" })))).toBe(true);
+      expect(isUserHasTab(await failure(r.pool.send(t.tabKey, "Runtime.evaluate")))).toBe(true);
+      expect(isUserHasTab(await failure(r.pool.subscribe(t.tabKey, ["Page.loadEventFired"])))).toBe(true);
+      await new Promise((res) => setTimeout(res, 30));
+    }
+    await r.pool.panelAction("s1", t.tabKey, "handBack");
+    await r.pool.send(t.tabKey, "Page.enable");
+  });
+
+  test("giving the person control fails: the helper is told to take it back, and the agent is not left locked out", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "http://control-fails.test/" });
+    await r.pool.panelAction("s1", t.tabKey, "watch");
+    await failure(r.pool.panelAction("s1", t.tabKey, "takeOver"));
+    await until("control taken back at the helper", () => r.commands().some((c) => c.op === "control-seen" && c.params.control === false));
+    expect(r.pool.held(t.tabKey)).toBe(false);
+    await r.pool.send(t.tabKey, "Page.enable");
+  });
+
+  test("a helper that can't take control back ends the view: the panel never shows control the pool has let go", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "http://control-refused.test/" });
+    await r.pool.panelAction("s1", t.tabKey, "watch");
+    await r.pool.panelAction("s1", t.tabKey, "takeOver");
+    await r.pool.panelAction("s1", t.tabKey, "handBack");
+    expect(r.panel.hidden.map((h) => h.tabId)).toEqual([t.tabKey]);
+    expect(r.pool.held(t.tabKey)).toBe(false);
+    await r.pool.send(t.tabKey, "Page.enable");
+  });
+});
+
 describe("the panel's size (the page laid out in it while shown)", () => {
   test("a size the helper applied is counted and says whether the person watches; a scale alone is not; the agent's view comes back after", async () => {
     const r = rig();

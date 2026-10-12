@@ -27,6 +27,8 @@
 //   http://viewer-leaves.test/ — presented, its viewer is accepted and then leaves 150 ms later (`presentationEnded`)
 //   http://opens-window.test/ — presented, its page opens a window once its viewer is accepted (`headless.popupOpened`,
 //                               a tab of the fake's own minting at http://window.test/)
+//   http://control-fails.test/ — presented; giving the person control fails (as a helper that answered too late)
+//   http://control-refused.test/ — presented; taking control back is refused (the helper no longer has the presentation)
 //   http://notice-held.test/  — presented, its page tries the local network once its viewer is accepted (the person's
 //                               doing) and again when it is unpresented (the agent's time again)
 //   http://resizes.test/      — presented, its page is laid out in the panel's size once its viewer is accepted
@@ -197,9 +199,14 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
       if (tabs.get(String(p.tabId))?.url === "http://notice-held.test/") setTimeout(() => send("headless.notice", { linkId, tabId: String(p.tabId), kind: "local-network" }), 20);
       return;
     }
-    case "headless.control":
+    case "headless.control": {
       if (!presented.has(String(p.tabId))) return fail(cmdId, "not_live", "the headless tab is not presented");
+      const url = tabs.get(String(p.tabId))?.url;
+      if (logFile !== undefined) appendFileSync(logFile, `${JSON.stringify({ op: "control-seen", params: { tabId: p.tabId, control: p.control } })}\n`);
+      if (url === "http://control-fails.test/" && p.control === true) return fail(cmdId, "timeout", "the helper did not answer in time");
+      if (url === "http://control-refused.test/" && p.control === false) return fail(cmdId, "not_live", "the headless tab is not presented");
       return reply(cmdId, {});
+    }
     case "context.dispose": {
       let closed = 0;
       for (const [k, t] of tabs) if (t.sessionId === p.sessionId) { tabs.delete(k); closed++; }

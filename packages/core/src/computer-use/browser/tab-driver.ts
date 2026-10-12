@@ -310,6 +310,9 @@ export class TabDriver {
     this.lastUsed = this.now();
     if (this.attached) return;
     this.attaching ??= (async () => {
+      // Let go meanwhile (the backend said "stopped" — a headless tab's person taking it over, an app parking its
+      // browser): this attach is not the tab held, whatever of it succeeded.
+      const detachesAtStart = this.detaches;
       // Taken back after a hand-off: what the page logged while the user had it is replayed by the browser on
       // Runtime.enable / Log.enable, and is not Winter's to read.
       const handedOff = this.handedOffAt;
@@ -340,6 +343,7 @@ export class TabDriver {
         await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
         if (this.viewportWish !== undefined) await this.applyViewport(this.viewportWish).catch(() => undefined);
         await this.loadTopFrame();
+        if (this.detaches !== detachesAtStart) throw new AutomationFailure("TargetBusy", "the tab was let go while Winter was taking it — try again");
         this.attached = true;
         this.handedOffAt = undefined;
       } finally {

@@ -46,6 +46,7 @@ import type { HeadlessViewer } from "../cef-link/rpc";
 import { TransportError, type CdpEvent, type CdpTransport, type TransportTab } from "../transport";
 import { harvestHeadlessComponents, headlessComponentsDir, seedHeadlessComponents } from "./components";
 import { DEFAULT_HEADLESS_ENGINE, HEADLESS_ENGINES, type ResolvedEngine } from "./engines";
+import { HEADLESS_USER_HAS_TAB } from "./lease";
 import { processTreeFootprint } from "./memory";
 import {
   HEADLESS_AGENT_VIEW, HEADLESS_PIPE_PROTOCOL, HEADLESS_TIMEOUTS, spawnEngineProcess, WinterHeadlessProcess, type HeadlessNoticeKind, type HeadlessOp, type HeadlessPresentationEvent,
@@ -66,7 +67,7 @@ export const HEADLESS_PRESENT_START_MS = 10_000;
 /** Taking control waits this long at most for the agent's commands in flight on the tab to finish. */
 export const HEADLESS_DRAIN_MS = 5_000;
 /** The model's sentence while the person holds a headless tab. */
-export const HEADLESS_USER_HAS_TAB = "the user has this tab in Winter's panel — it is theirs until they hand it back; work in another tab meanwhile";
+export { HEADLESS_USER_HAS_TAB } from "./lease";
 /** The helper exits after this long with no headless tab open anywhere. */
 export const HEADLESS_IDLE_EXIT_MS = 5 * 60_000;
 /** How often a running helper re-reads `computerUse.headless.enabled`. */
@@ -680,7 +681,8 @@ export class HeadlessPool implements CdpTransport {
   /** The tab, for one of the AGENT's commands: refused while the person holds it (or is taking it). */
   private agentTab(tabKey: string): PoolTab {
     const t = this.live(tabKey);
-    if (t.presentation?.control === true || t.presentation?.taking === true) throw new TransportError("capacity", HEADLESS_USER_HAS_TAB, { userHasTab: true });
+    const p = t.presentation;
+    if (p !== undefined && (p.control || p.taking || p.yielded === true)) throw new TransportError("capacity", HEADLESS_USER_HAS_TAB, { userHasTab: true });
     return t;
   }
 
@@ -969,6 +971,11 @@ export class HeadlessPool implements CdpTransport {
     try {
       await this.command(t.proc, "headless.control", { tabId: t.tabKey, control: true });
       p.control = true;
+      this.deps.log?.(`computer-use: headless tab ${t.tabKey}: the person took control in Winter's panel`);
+    } catch (err) {
+      // The helper may have given the viewer control all the same: it never keeps it while the agent has the tab.
+      void this.command(t.proc, "headless.control", { tabId: t.tabKey, control: false }).catch(() => undefined);
+      throw err;
     } finally {
       p.taking = false;
       if (!p.control) p.yielded = false;
@@ -981,11 +988,20 @@ export class HeadlessPool implements CdpTransport {
     const p = t.presentation;
     if (p === undefined) return;
     p.taking = false;
-    p.yielded = false;
     if (p.control) {
+      // The lease lasts until the helper has taken the person's control away: never an agent read while the viewer can
+      // still type. A helper that can't (the presentation is gone there) ends it here too.
+      try {
+        await this.command(t.proc, "headless.control", { tabId: t.tabKey, control: false });
+      } catch {
+        if (t.presentation === p) await this.endPresentation(t, "the view ended");
+        return;
+      }
+      if (t.presentation !== p) return;
       p.control = false;
-      try { await this.command(t.proc, "headless.control", { tabId: t.tabKey, control: false }); } catch { /* the presentation may be gone */ }
+      this.deps.log?.(`computer-use: headless tab ${t.tabKey}: the person handed it back in Winter's panel`);
     }
+    p.yielded = false;
     await this.closeWindowsOf(t);
     if (p.closeWhenReleased) { await this.endPresentation(t, "closed"); return; }
     this.pushTabs(t.sessionId);
@@ -1032,6 +1048,7 @@ export class HeadlessPool implements CdpTransport {
     const p = t.presentation;
     if (p === undefined) return;
     t.presentation = undefined;
+    if (p.control || p.yielded === true) this.deps.log?.(`computer-use: headless tab ${t.tabKey}: control back with the agent (the view ended: ${reason})`);
     await this.closeWindowsOf(t);
     for (const w of [...p.startWaiters]) w(false);
     if (t.proc.alive) {
@@ -1053,6 +1070,7 @@ export class HeadlessPool implements CdpTransport {
     const p = t.presentation;
     if (p === undefined) return;
     t.presentation = undefined;
+    if (p.control || p.yielded === true) this.deps.log?.(`computer-use: headless tab ${t.tabKey}: control back with the agent (${reason})`);
     for (const w of [...p.startWaiters]) w(false);
     if (p.handoffPending) this.userDone(t.tabKey, false);
     void Promise.resolve(this.deps.viewer?.()?.hide({ sessionId: t.sessionId, tabId: t.tabKey, reason })).catch(() => undefined);
@@ -1074,6 +1092,7 @@ export class HeadlessPool implements CdpTransport {
     // The viewer went away (the person closed it, Winter.app quit): the presentation is over and control returns to the
     // agent. A hand-off it was answering reads as not done.
     t.presentation = undefined;
+    if (p.control || p.yielded === true) this.deps.log?.(`computer-use: headless tab ${t.tabKey}: control back with the agent (the viewer ended it: ${e.reason})`);
     for (const w of [...p.startWaiters]) w(false);
     if (p.handoffPending) this.userDone(t.tabKey, false);
     if (p.closeWhenReleased && this.tabs.get(t.tabKey) === t) {

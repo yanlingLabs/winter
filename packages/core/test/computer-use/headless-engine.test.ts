@@ -469,3 +469,62 @@ describe("what the person does in a headless tab they hold is theirs (lane H3)",
     r.end();
   });
 });
+
+describe("the control lease (lane H3): nothing of a tab the person holds is the agent's until they hand it back", () => {
+  const READS: Array<[string, Record<string, unknown>]> = [
+    ["state", {}], ["text", {}], ["find", { query: "Go" }], ["screenshot", { emit: false }], ["html", {}], ["console", {}], ["network", {}],
+  ];
+  const stopped = (h: ReturnType<typeof withHeadless>, key: string): void => {
+    for (const l of [...(h.headless as unknown as { gone: Set<(k: string, r: string) => void> }).gone]) l(key, "stopped");
+  };
+
+  test("every read, every time, for the whole hold — even one the driver could answer from what it already has", async () => {
+    let held = false;
+    const h = withHeadless({ engineDeps: { headlessHeld: () => held } });
+    h.headless.pages["https://a.example/"] = { url: "https://a.example/", title: "A", nodes: [{ id: 1, role: "main", children: [{ id: 2, role: "button", name: "Go" }] }] };
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const p = (primitive: string, args: Record<string, unknown> = {}) => h.engine.primitive(r.scope, tab.targetId, primitive, args);
+    for (const [primitive, args] of READS) await p(primitive, args);
+    // The person takes it over — and the backend, here, would still answer: the engine refuses on its own.
+    held = true;
+    const sentBefore = h.headless.sent.length;
+    for (let round = 0; round < 3; round++) {
+      for (const [primitive, args] of READS) {
+        const e = await failure(p(primitive, args));
+        expect({ primitive, kind: (e as AutomationFailure).kind, message: e.message }).toEqual({ primitive, kind: "TargetBusy", message: "the user has this tab in Winter's panel — it is theirs until they hand it back; work in another tab meanwhile" });
+      }
+    }
+    expect(h.headless.sent.length).toBe(sentBefore);
+    // Keeping it for the next turn still works during the hold.
+    await p("handoff", {});
+    // Handed back: the agent reads again.
+    held = false;
+    stopped(h, keyOf(tab));
+    for (const [primitive, args] of READS) await p(primitive, args);
+    r.end();
+  });
+
+  test("a hold that begins while the agent is attaching: that attach does not count, and the next read is refused", async () => {
+    let held = false;
+    const h = withHeadless({ engineDeps: { headlessHeld: () => held } });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const key = keyOf(tab);
+    const p = (primitive: string, args: Record<string, unknown> = {}) => h.engine.primitive(r.scope, tab.targetId, primitive, args);
+    stopped(h, key); // let go (idle): the next read attaches afresh
+    const attach = h.headless.attach.bind(h.headless);
+    h.headless.attach = async (k, a) => {
+      const got = await attach(k, a);
+      // The person takes it over just as the attach is answered: the pool lets the agent's attachment go.
+      held = true;
+      stopped(h, key);
+      return got;
+    };
+    const e = await failure(p("text"));
+    expect((e as AutomationFailure).kind).toBe("TargetBusy");
+    h.headless.attach = attach;
+    expect(((await failure(p("console"))) as AutomationFailure).kind).toBe("TargetBusy");
+    r.end();
+  });
+});

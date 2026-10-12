@@ -34,6 +34,7 @@ import { HttpReader } from "./http-read";
 import { TransportError, type BackendId, type BrowserFamily, type CdpTransport, type TransportTab } from "./transport";
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
 import { HEADLESS_ENGINES } from "./headless/engines";
+import { HEADLESS_USER_HAS_TAB, HELD_TAB_PRIMITIVES } from "./headless/lease";
 import { HEADLESS_LAN_REFUSAL, isPrivateNetworkUrl } from "./headless/private-network";
 import { BODY_DEFAULT_CHARS, BODY_MAX_CHARS, isTextMime, redactBody } from "./body-redact";
 import { bytesLabel, CONSOLE_LEVELS, consoleLine, requestLine } from "./devtools";
@@ -308,6 +309,10 @@ export class BrowserEngine {
         scope.metric.headlessEngine = "winter";
         const refusal = headlessRefusal(primitive, args);
         if (refusal !== undefined) throw new AutomationFailure("NotAllowed", refusal);
+        // The person holds the tab in Winter's panel: nothing of it is the agent's — no read from what the driver already
+        // has (console, network, a state diff), no command — until they hand it back. Letting go, keeping it and waiting
+        // for the person still work.
+        if (this.deps.headlessHeld?.(b.tabKey) === true && !HELD_TAB_PRIMITIVES.has(primitive)) throw new AutomationFailure("TargetBusy", HEADLESS_USER_HAS_TAB);
       }
       const act = !OBSERVE_PRIMITIVES.has(primitive);
       // A site's own tool (WebMCP) is called only while the setting allows it — said before any card.
