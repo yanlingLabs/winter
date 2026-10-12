@@ -220,7 +220,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
   const diffBases = new DiffBases();
   const adapters = new AppAdapters({ ...(deps.inject?.adapters === undefined ? {} : { extra: deps.inject.adapters }), log });
   // Late-bound: the helper's notifications go to the service, which is built after the helper — and to the wake
-  // registry's backends (lane C's app backend routes the helper's `watchEvent`).
+  // registry's backends (the app backend routes the helper's `watchEvent`).
   let service: ComputerV2Service | undefined;
   let wakes: WakeRegistry | undefined;
   const helper = new HelperClient({
