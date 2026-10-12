@@ -605,12 +605,19 @@ final class SimRun {
             }
         case .commandChord:
             w.press(.maskCommand)
-            w.schedule(after: 50, "⌘S") { w.userKey(flags: .maskCommand) }
+            let pressedSecure = w.lock.withLock { w.secure }
+            var keyUnseen = false
+            w.schedule(after: 50, "⌘S") { keyUnseen = w.lock.withLock { w.secure }; w.userKey(flags: .maskCommand) }
             w.schedule(after: 120, "⌘ released") {
                 let secure = w.lock.withLock { w.secure }
                 w.release(.maskCommand)
-                // Under Secure Event Input the tap saw the modifier but not the S: it looks like a ⌘-Tab's release.
-                if secure, w.flagsSeenUnderSecure {
+                // Under Secure Event Input the tap saw the modifier but not the S: it looks like a ⌘-Tab's release. (Round
+                // 18b, ordinary seed 52 — §4.12's switch input: "A ⌘ release with no key seen …: an app switch, explaining
+                // only a change heard within 0.7 s". What counts is whether the S was SEEN — Secure Event Input when it was
+                // typed — and whether the hold and its release were: the user's click into T between them had ended
+                // Secure Event Input by the release, and the oracle read the release's moment alone.)
+                let unseenChord = keyUnseen && (pressedSecure ? w.flagsSeenUnderSecure : true) && (secure ? w.flagsSeenUnderSecure : true)
+                if unseenChord {
                     w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, dest: nil, secureFlags: true, lifeMs: 700, keyboard: true))
                 }
             }
