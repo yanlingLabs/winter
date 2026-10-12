@@ -82,3 +82,14 @@ fixture("unsigned-executable-memory exception fails actual helper admission", as
   expect((await command(["/usr/bin/codesign", "--force", "--sign", "-", "--options", "runtime", "--identifier", "com.winter.core.test-weaker-node", "--entitlements", entitlements, node])).code).toBe(0);
   await expect(ConfinedGitReadParser.admit({ ...config, node, nodeRequirement: 'identifier "com.winter.core.test-weaker-node"' })).rejects.toMatchObject({ code: "integration_unavailable" });
 });
+
+fixture("profile and synchronous no-child spawn failures do not consume parser capacity", async () => {
+  let profiles = 0, spawns = 0;
+  const missingProfile = await ConfinedGitReadParser.admit({ ...config, concurrent: 1 }, { isolatedFixture: true, profile: () => { profiles++; throw new Error("fixture profile failed"); } });
+  const missingChild = await ConfinedGitReadParser.admit({ ...config, concurrent: 1 }, { isolatedFixture: true, spawn: () => { spawns++; throw new Error("fixture launch failed"); } });
+  for (let i = 0; i < 2; i++) {
+    await expect(missingProfile.validate("advertisement", advertisement, { ...DEFAULT_GIT_READ_LIMITS })).rejects.toMatchObject({ code: "integration_unavailable" });
+    await expect(missingChild.validate("advertisement", advertisement, { ...DEFAULT_GIT_READ_LIMITS })).rejects.toMatchObject({ code: "integration_unavailable" });
+  }
+  expect(profiles).toBe(2); expect(spawns).toBe(2);
+});

@@ -1,9 +1,10 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { dlopen, FFIType } from "bun:ffi";
 import { processSatisfiesRequirement } from "../../computer-use/helper-verify";
+import { OwnedGitReadCommandRunner } from "./read-owned-command";
 import { GitReadError, type GitReadLimits } from "./read-types";
 export type GitReadParseKind = "request" | "advertisement" | "response";
 export interface GitReadParser {
@@ -34,19 +35,18 @@ export function gitReadParserProfile(launcher: string, node: string, payload: st
 (deny network*)
 (allow file-write-data (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr"))`;
 }
+const codeChecks = new OwnedGitReadCommandRunner({ capacity: 2, wallMs: 5_000, outputBytes: 16_384, drainMs: 1_000 });
 async function codeCheck(args: string[]): Promise<string> {
-  const child = Bun.spawn(["/usr/bin/codesign", ...args], { env: { PATH: "/usr/bin:/bin", LC_ALL: "C" }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const timer = setTimeout(() => child.kill(), 5_000);
   try {
-    const read = async (stream: ReadableStream<Uint8Array>) => {
-      const reader = stream.getReader(); let output = "", size = 0;
-      while (true) { const part = await reader.read(); if (part.done) break; size += part.value.length; if (size > 16_384) { child.kill(); throw new GitReadError("integration_unavailable"); } output += Buffer.from(part.value).toString(); }
-      return output;
-    };
-    const [stdout, stderr, exit] = await Promise.all([read(child.stdout), read(child.stderr), child.exited]);
-    if (exit !== 0) throw new GitReadError("integration_unavailable"); return stdout + stderr;
-  } finally { clearTimeout(timer); }
+    const result = await codeChecks.run({ file: "/usr/bin/codesign", args, env: { PATH: "/usr/bin:/bin", LC_ALL: "C" } });
+    if (result.code !== 0) throw new GitReadError("integration_unavailable");
+    return result.stdout + result.stderr;
+  } catch { throw new GitReadError("integration_unavailable"); }
 }
+export interface GitReadParserLifecycleFixture {
+  isolatedFixture: true; profile?: typeof gitReadParserProfile; spawn?: typeof spawn;
+}
+
 function identity(path: string): string {
   const info = statSync(path); if (!info.isFile() || info.mode & 0o022) throw new GitReadError("integration_unavailable");
   return `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
@@ -66,8 +66,9 @@ export class ConfinedGitReadParser implements GitReadParser {
   private active = 0;
   private readonly identities: string[];
   readonly measurements = { peakObservedRssBytes: 0, memoryStops: 0, wallStops: 0, uncertainStops: 0 };
-  private constructor(private readonly config: Required<GitReadParserConfiguration>) { this.identities = [config.launcher, config.node, config.payload].map(identity); }
-  static async admit(config: GitReadParserConfiguration): Promise<ConfinedGitReadParser> {
+  private constructor(private readonly config: Required<GitReadParserConfiguration>, private readonly fixture?: GitReadParserLifecycleFixture) { this.identities = [config.launcher, config.node, config.payload].map(identity); }
+  static async admit(config: GitReadParserConfiguration, fixture?: GitReadParserLifecycleFixture): Promise<ConfinedGitReadParser> {
+    if (fixture && fixture.isolatedFixture !== true) throw new GitReadError("invalid_request");
     if (process.platform !== "darwin" || !config.launcherRequirement || !config.nodeRequirement || !/^[a-f0-9]{64}$/.test(config.payloadSha256)) throw new GitReadError("integration_unavailable");
     const owned = { ...config, wallMs: config.wallMs ?? 5_000, rssBytes: config.rssBytes ?? 268_435_456, sampleMs: config.sampleMs ?? 20, concurrent: config.concurrent ?? 4 };
     if (![owned.wallMs, owned.rssBytes, owned.sampleMs, owned.concurrent].every(n => Number.isSafeInteger(n) && n > 0)
@@ -82,7 +83,7 @@ export class ConfinedGitReadParser implements GitReadParser {
       if (!flags || !(parseInt(flags[1]!, 16) & 0x10000) || /com\.apple\.security\.(cs\.(allow-jit|allow-unsigned-executable-memory|disable-library-validation|allow-dyld-environment-variables)|get-task-allow)/.test(metadata)) throw new GitReadError("integration_unavailable");
     }
     if ([owned.launcher, owned.node, owned.payload].some((path, i) => identity(path) !== before[i])) throw new GitReadError("integration_unavailable");
-    return new ConfinedGitReadParser(owned);
+    return new ConfinedGitReadParser(owned, fixture);
   }
   async validate(kind: GitReadParseKind, input: Uint8Array, limits: GitReadLimits, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw new GitReadError("cancelled");
@@ -93,9 +94,14 @@ export class ConfinedGitReadParser implements GitReadParser {
     const bytes = Buffer.from(input); // Owned immutable copy, even when input is Buffer.
     const expectedDigest = createHash("sha256").update(bytes).digest();
     const header = Buffer.alloc(20); header.write("WGP1"); header[4] = ({ request: 1, advertisement: 2, response: 3 } as const)[kind]; header.writeUInt32BE(bytes.length, 8); header.writeUInt32BE(limits.objects, 12); header.writeUInt32BE(limits.expandedObjectBytes, 16);
+    let profile: string;
+    try { profile = (this.fixture?.profile ?? gitReadParserProfile)(this.config.launcher, this.config.node, this.config.payload); }
+    catch { throw new GitReadError("integration_unavailable"); }
     this.active++;
     await new Promise<void>((resolve, reject) => {
-      const child = spawn("/usr/bin/sandbox-exec", ["-p", gitReadParserProfile(this.config.launcher, this.config.node, this.config.payload), this.config.launcher, this.config.node, this.config.payload], { cwd: this.config.cwd, detached: true, env: { PATH: "/usr/bin:/bin", HOME: this.config.cwd, LC_ALL: "C" }, stdio: ["pipe", "pipe", "pipe"] });
+      let child: ChildProcessWithoutNullStreams;
+      try { child = (this.fixture?.spawn ?? spawn)("/usr/bin/sandbox-exec", ["-p", profile, this.config.launcher, this.config.node, this.config.payload], { cwd: this.config.cwd, detached: true, env: { PATH: "/usr/bin:/bin", HOME: this.config.cwd, LC_ALL: "C" }, stdio: ["pipe", "pipe", "pipe"] }) as typeof child; }
+      catch { this.active--; reject(new GitReadError("integration_unavailable")); return; }
       let output = Buffer.alloc(0), stderrBytes = 0, sent = false, exited = false, settled = false, failure: GitReadError | undefined;
       const finish = () => {
         if (settled) return; settled = true;
@@ -128,7 +134,10 @@ export class ConfinedGitReadParser implements GitReadParser {
       });
       child.stderr.on("data", (chunk: Buffer) => { stderrBytes += chunk.length; if (stderrBytes > 4_096) stop("invalid_response"); });
       child.stdin.on("error", () => stop("invalid_response"));
-      child.once("error", () => { if (!child.pid) { exited = true; this.active--; } stop("integration_unavailable"); finish(); });
+      child.once("error", () => {
+        if (!child.pid) { exited = true; this.active--; failure ??= new GitReadError("integration_unavailable"); finish(); }
+        else stop("integration_unavailable"); // Existing child: retain ownership and wait for exit/drain proof.
+      });
       child.once("exit", code => { exited = true; this.active--; if (code !== 0) failure ??= new GitReadError(code === 77 ? "integration_unavailable" : "budget_exceeded"); });
       child.once("close", () => finish());
       if (signal?.aborted) abort();

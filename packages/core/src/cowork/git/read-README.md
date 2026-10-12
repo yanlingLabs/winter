@@ -106,3 +106,20 @@ used official Node v26.7.0 darwin-arm64, archive SHA-256
 `7ee659a7768e641bbfd5360940660b8e8fd0052f77488f365562bac522fc15d4`,
 from [Node's release checksums](https://nodejs.org/dist/v26.7.0/SHASUMS256.txt).
 No production signing key, live Winter home, real account or VM is used.
+
+
+Static signature inspection and fixture build/sign commands now share
+`OwnedGitReadCommandRunner`. Signature jobs have a 5-second wall deadline and
+16 KiB combined stdout/stderr cap; fixture tools have 15 seconds and 64 KiB.
+Both use owned process groups, repeated forced termination attempts and a
+1-second drain deadline. Reader failure cannot return early through Promise.all:
+normal failure waits for the owned exit/pipe close; an unconfirmed drain fails
+while retaining its admission debt until the actual exit event. Closing pipes or
+sending a kill never proves termination. This is root-child ownership proof,
+not universal proof about escaped descendants of arbitrary executables; the
+production command remains fixed codesign and fixture inputs are trusted build
+commands. Synchronous profile construction occurs before a parser slot is claimed;
+a synchronous spawn exception releases its proven no-child claim. Regressions
+exercise real auxiliary timeouts/capped output and explicit unconfirmed-exit debt,
+as well as repeated parser profile/no-child setup failure. Production activation
+and authenticated channel/authority integration remain unchanged by these fixes.

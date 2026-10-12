@@ -1,11 +1,13 @@
+import { OwnedGitReadCommandRunner } from "../../../src/cowork/git/read-owned-command";
 import { expect } from "bun:test";
 import { chmodSync, copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { ConfinedGitReadParser, type GitReadParserConfiguration } from "../../../src/cowork/git/read-parser-helper";
+const fixtureCommands = new OwnedGitReadCommandRunner({ capacity: 2, wallMs: 15_000, outputBytes: 65_536, drainMs: 1_000 });
 export async function parserFixtureCommand(home: string, args: string[], cwd?: string): Promise<{ output: string; code: number }> {
-  const child = Bun.spawn(args, { cwd, env: { PATH: "/usr/bin:/bin", HOME: home, LC_ALL: "C" }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [a, b, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]); return { output: a + b, code };
+  const result = await fixtureCommands.run({ file: args[0]!, args: args.slice(1), cwd, env: { PATH: "/usr/bin:/bin", HOME: home, LC_ALL: "C" } });
+  return { output: result.stdout + result.stderr, code: result.code };
 }
 
 export async function buildGitReadParserFixture(root: string) {
