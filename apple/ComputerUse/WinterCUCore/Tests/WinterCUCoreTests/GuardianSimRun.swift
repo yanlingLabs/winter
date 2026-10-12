@@ -517,7 +517,22 @@ final class SimRun {
             guard let win = w.lock.withLock({ w.wins[id].flatMap { w.onScreen($0) ? $0 : nil } }) else { return }
             click(at: CGPoint(x: win.frame.midX, y: win.frame.midY + 20), drag: true, r: &r)
         case .clickDesktop: click(at: CGPoint(x: 300, y: 860), r: &r)
-        case .clickStatusItem: click(at: CGPoint(x: 1310, y: 10), r: &r)
+        case .clickStatusItem:
+            // (Round 18b, R18-a: now and then a click on the Dock's TRASH instead — a click in the Dock that launches
+            // nothing: an app switch of no known app, never an interactive launcher. Its own generator.)
+            var tr = SimRNG(step.seed ^ 0x7_2A5)
+            if tr.chance(0.4) {
+                w.hardware(observable: true)
+                w.launchCapable()
+                w.log("the user clicks the Trash in the Dock")
+                core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: clock.nowSeconds())
+                w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, dest: nil))
+                w.lock.withLock { w.dockLaunches = false }
+                _ = core.onPhysicalClick(at: CGPoint(x: 800, y: 975), userData: 0, now: clock.nowSeconds())
+                w.lock.withLock { w.dockLaunches = nil }
+            } else {
+                click(at: CGPoint(x: 1310, y: 10), r: &r)
+            }
         case .clickBanner:
             guard w.lock.withLock({ w.wins[701]?.shown == true }) else { return }
             click(at: CGPoint(x: 1450, y: 60), r: &r)
@@ -647,11 +662,29 @@ final class SimRun {
             // (The keys typed into Spotlight's panel go to ITS process — R17-d (ii): the interactive launcher is the world's own
             // fact, recorded where it launches.)
             for k in 0..<3 { w.schedule(after: 60 + Double(k) * 50, "a Spotlight key") { w.key(.keyDown, to: SimPid.spotlight); w.key(.keyUp, to: SimPid.spotlight) } }
-            w.schedule(after: 260, "Return") { [unowned self] in
-                w.key(.keyDown, keycode: 36, to: SimPid.spotlight)
-                // (Only a Return the tap SAW — under Secure Event Input it sees no key, and nothing can tell the launch was
-                // theirs: every right answer is kept, the contract's frozen-reference rule.)
-                w.lock.withLock { if !w.secure { w.launcherInputs.append(w.now) } }
+            // (Round 18b: from the Dock now and then — a click on the tile of an app not running, R18-a — instead of
+            // Spotlight's Return; and the process starts a moment AFTER the input that launched it, never at it (R18 L1).
+            // Its own generator, so the plans' draws stay.)
+            var lr = SimRNG(step.seed ^ 0x1A_0C4E)
+            let fromDock = lr.chance(0.35)
+            let startDelay = lr.double(20, 120)
+            w.schedule(after: 260, fromDock ? "a click on a Dock tile of an app not running" : "Return") { [unowned self] in
+                if fromDock {
+                    w.hardware(observable: true)
+                    w.launchCapable()
+                    w.log("the user clicks the Dock tile of an app that is not running")
+                    core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: clock.nowSeconds())
+                    w.lock.withLock { w.dockLaunches = true }
+                    _ = core.onPhysicalClick(at: CGPoint(x: 800, y: 975), userData: 0, now: clock.nowSeconds())
+                    w.lock.withLock { w.dockLaunches = nil }
+                    w.lock.withLock { w.launcherInputs.append(w.now) }
+                } else {
+                    w.key(.keyDown, keycode: 36, to: SimPid.spotlight)
+                    // (Only a Return the tap SAW — under Secure Event Input it sees no key, and nothing can tell the launch
+                    // was theirs: every right answer is kept, the contract's frozen-reference rule.)
+                    w.lock.withLock { if !w.secure { w.launcherInputs.append(w.now) } }
+                }
+                w.schedule(after: startDelay, "the launched app's process starts") { [unowned self] in
                 let pid = w.lock.withLock { () -> pid_t in
                     self.userLaunchSeq += 1
                     let pid = 950 + self.userLaunchSeq
@@ -675,6 +708,7 @@ final class SimRun {
                         w.change(to: n, cause: w.untouchedCause(pid, indirect: false, why: "the user's own launch", newPlace: n),
                                  why: "\(SimPid.name(pid)) comes forward (the user launched it)")
                     }
+                }
                 }
             }
         case .mainWindow(let a, let id):

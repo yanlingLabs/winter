@@ -352,11 +352,17 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     func noteLaunchStart(_ pid: pid_t) {
         // (R17-d (i), the controller's ruling: LAUNCH-CAPABLE input only — a click, Return/Enter, a chord with ⌘/⌃/⌥, a
         // function key; never plain typing, a key-up or a scroll.)
-        if let o = openerBefore(now) { inputAfterOpener[pid] = lastLaunchCapableAt > o } else { inputAfterOpener[pid] = nil }
+        // (R18 L1, the controller's ruling: input AT or after the start is not "between" — strictly before it.)
+        if let o = openerBefore(now) { inputAfterOpener[pid] = lastLaunchCapableAt > o && lastLaunchCapableAt < now } else { inputAfterOpener[pid] = nil }
         // (R17-d (ii), the controller's ruling: an INTERACTIVE LAUNCHER — a Return or click whose destination is
         // Spotlight, the Dock, Launchpad or a Finder double-click — within the causal window before the start: theirs.
-        // Read off the world's own record of the user's launcher input, written where it launches (`userLaunches`).)
-        launcherBefore[pid] = launcherInputs.contains { $0 <= now && now - $0 <= 1_500 }
+        // Read off the world's own record of the user's launcher input, written where it launches (`userLaunches`).
+        // R18-a, the controller's ruling: only a destination that LAUNCHES (recorded only there), and only AFTER the
+        // agent's latest opener act that reaches the app — else its latest act of any reach — and before the start.)
+        let bundle = bundles[pid]
+        let inReach = openers.last { $0.at < now && now - $0.at <= 1_500 && ($0.scope.map { s in bundle.map(s.contains) ?? false } ?? true) }?.at
+        let after = inReach ?? openerBefore(now) ?? -.infinity
+        launcherBefore[pid] = launcherInputs.contains { $0 > after && $0 < now && now - $0 <= 1_500 }
     }
     /// The user's interactive-launcher input (a Return in Spotlight), as the world made it: R17-d (ii).
     var launcherInputs: [Double] = []
@@ -1482,6 +1488,10 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     func runningPid(bundleId: String) -> pid_t? { lock.withLock { bundles.first { $0.value == bundleId }?.key } }
     /// The Dock tile under the pointer: the app the user is clicking in the Dock (the world knows its own Dock).
     var dockTileApp: pid_t?
+    /// What a click on the Dock where no RUNNING app's tile is would do (R18-a): true — a tile that launches its app (or
+    /// Launchpad); false — the Trash, a stack, a separator; nil — the tile can't be read.
+    var dockLaunches: Bool?
+    func dockItemLaunches(at point: CGPoint, dockPid: pid_t) -> Bool? { lock.withLock { dockLaunches } }
     func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? { lock.withLock { dockTileApp } }
 }
 
