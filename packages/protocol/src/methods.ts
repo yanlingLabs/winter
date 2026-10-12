@@ -487,9 +487,20 @@ export const ComputerUseStatusResult = z.object({
  *  `browserLink.detached`), `browserLink.result` (one per command; an unknown or late `cmdId` is dropped and still
  *  answered `{}`), `browserLink.events` (≤ 256 per batch, only subscribed allowlisted events, Network params stripped),
  *  `browserLink.tabGone`, and (protocol 2) `browserLink.download`. Daemon → app (notifications, no id):
- *  `browserLink.command`, `browserLink.detached`. */
-export const BrowserLinkAttachParams = z.object({ protocol: z.number().int(), appVersion: z.string().max(64), pid: z.number().int() });
-export const BrowserLinkAttachResult = z.object({ linkId: z.string(), protocol: z.number().int() });
+ *  `browserLink.command`, `browserLink.detached`.
+ *
+ *  FEATURES (the protocol stays 2): what each side can do beyond it, named at attach — the app in its params, the daemon
+ *  in its answer; a side never uses a feature the other did not name. `watchOnly` (ComputerV2 wake triggers): `tab.ensure`
+ *  takes `watchOnly: true` — a WATCH-ONLY hold, under which the app sets none of its native-UI holds (the page's dialogs,
+ *  permission prompts, file choosers, downloads, context menus, keys and focus stay the user's), while a wake trigger
+ *  waits on the tab for the user; a `tab.ensure` without it takes the tab's full hold back (a primitive), and one with
+ *  it drops back. It still counts toward the app's ceiling on held tabs. */
+export const BROWSER_LINK_FEATURES = ["watchOnly"] as const;
+export const BrowserLinkAttachParams = z.object({
+  protocol: z.number().int(), appVersion: z.string().max(64), pid: z.number().int(),
+  features: z.array(z.string().min(1).max(64)).max(16).optional(),
+});
+export const BrowserLinkAttachResult = z.object({ linkId: z.string(), protocol: z.number().int(), features: z.array(z.string()).optional() });
 export const BrowserLinkResultParams = z.union([
   z.object({ linkId: z.string().min(1), cmdId: z.string().min(1), ok: z.literal(true), result: z.unknown() }),
   z.object({
@@ -525,7 +536,7 @@ export const BrowserLinkDownloadParams = z.object({
 });
 export const BrowserLinkAckResult = z.object({});
 /** Daemon → app notifications. `op`: tab.ensure, tab.release, tab.close, tabs.live, cdp.send, cdp.subscribe, overlay;
- *  protocol 2: tab.present, tab.mute, tab.downloads, tab.download. */
+ *  protocol 2: tab.present, tab.mute, tab.downloads, tab.download. (Feature `watchOnly`: `tab.ensure`'s `watchOnly`.) */
 export const BrowserLinkCommandNotification = z.object({ linkId: z.string(), cmdId: z.string(), op: z.string(), params: z.record(z.string(), z.unknown()) });
 export const BrowserLinkDetachedNotification = z.object({ linkId: z.string(), reason: z.literal("replaced") });
 

@@ -17,7 +17,8 @@ import WinterKit
 ///    rules), refused `not_allowed` before CEF sees it;
 ///  * **what leaves** — only subscribed, allowlisted events, `Network.*` params stripped;
 ///  * **no native UI from a held tab** — `BrowserNativeUIPolicy` flags on the tab while it is held, and
-///    the JS dialog the tab holds answered when DevTools cannot;
+///    the JS dialog the tab holds answered when DevTools cannot; none of it for a WATCH-ONLY hold (feature
+///    `watchOnly`: a wake trigger waiting on the user there, who keeps the tab's native UI);
 ///  * **telling the daemon a held tab went away** by a route the daemon did not take (`tabGone`).
 @MainActor
 final class BrowserLinkHost: BrowserLinkHandler {
@@ -113,7 +114,7 @@ final class BrowserLinkHost: BrowserLinkHandler {
         }
         switch command.op {
         case .tabEnsure(let sessionId, let tabId, let url):
-            ensure(sessionId: sessionId, tabId: tabId, url: url, reply: reply)
+            ensure(sessionId: sessionId, tabId: tabId, url: url, watchOnly: command.watchOnly, reply: reply)
         case .tabRelease(let tabId):
             if release(tabId) { replan() }
             reply(.empty)
@@ -244,7 +245,10 @@ final class BrowserLinkHost: BrowserLinkHandler {
 
     // MARK: - tab.ensure
 
-    private func ensure(sessionId: String, tabId: String, url: String?, reply: BrowserLinkReplier) {
+    /// `watchOnly` (feature `watchOnly`, wake triggers): the hold sets none of the native-UI flags — the tab's dialogs,
+    /// prompts, file choosers, downloads, menus, keys and focus stay the user's while a wake trigger waits on it. It is a
+    /// hold all the same (it counts toward `maxHeldTabs`); a later `tab.ensure` without it takes the full hold back.
+    private func ensure(sessionId: String, tabId: String, url: String?, watchOnly: Bool = false, reply: BrowserLinkReplier) {
         let isNewHold = gates[tabId] == nil
         if isNewHold, gates.count >= Self.maxHeldTabs {
             reply(.failure(code: .notAllowed,
@@ -259,7 +263,7 @@ final class BrowserLinkHost: BrowserLinkHandler {
             reply(.failure(code: .notLive, message: "Winter could not make a browser for this tab"))
             return
         }
-        install(tabId: tabId, container: container)
+        install(tabId: tabId, container: container, watchOnly: watchOnly)
         if crashed.remove(tabId) != nil {
             driver.reload(container)
         }
@@ -267,9 +271,9 @@ final class BrowserLinkHost: BrowserLinkHandler {
                        reply: reply)
     }
 
-    private func install(tabId: String, container: PanelCEFContainerView) {
+    private func install(tabId: String, container: PanelCEFContainerView, watchOnly: Bool = false) {
         if gates[tabId] == nil { gates[tabId] = CDPTabGate() }
-        driver.setNativeUI(container, BrowserNativeUIPolicy.flags(held: true))
+        driver.setNativeUI(container, BrowserNativeUIPolicy.flags(held: !watchOnly))
         driver.setEventObserver(container) { [weak self] method, params, session in
             self?.event(tabId: tabId, method: method, params: params, cdpSessionId: session)
         }

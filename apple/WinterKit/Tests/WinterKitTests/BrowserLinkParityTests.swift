@@ -143,6 +143,23 @@ final class BrowserLinkParityTests: XCTestCase {
         XCTAssertEqual(Set(ops), Set(swift), "the daemon's BrowserLinkOp and WinterKit's ops drifted")
     }
 
+    /// Feature names: the app's `BrowserLinkProtocol.features` equals the daemon's `BROWSER_LINK_FEATURES`
+    /// (packages/protocol/src/methods.ts), read from the TypeScript source itself.
+    func testTheLinkFeaturesEqualTheDaemons() throws {
+        let url = Self.repoRoot.appendingPathComponent("packages/protocol/src/methods.ts")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let decl = try NSRegularExpression(pattern: #"export const BROWSER_LINK_FEATURES = \[([^\]]*)\] as const;"#)
+        let match = try XCTUnwrap(decl.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)),
+                                  "BROWSER_LINK_FEATURES not found in methods.ts")
+        let list = String(source[Range(match.range(at: 1), in: source)!])
+        let quoted = try NSRegularExpression(pattern: #""([^"]+)""#)
+        let features = quoted.matches(in: list, range: NSRange(list.startIndex..., in: list)).compactMap { m in
+            Range(m.range(at: 1), in: list).map { String(list[$0]) }
+        }
+        XCTAssertFalse(features.isEmpty)
+        XCTAssertEqual(features, BrowserLinkProtocol.features, "BrowserLinkProtocol.features drifted from BROWSER_LINK_FEATURES")
+    }
+
     func testTheLinkProtocolNumberEqualsTheDaemons() throws {
         let dir = Self.repoRoot.appendingPathComponent("\(Self.browserDir)/cef-link")
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
