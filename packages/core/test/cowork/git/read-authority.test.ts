@@ -26,31 +26,31 @@ test("canonical preparation authority is revision/incarnation/repository-bound a
   expect(grant.repositoryId).toBe(account.repositoryId); expect(grant.credentialRef).toBe(account.credentialRef);
   expect(f.records.source(f.caller.workspaceId, f.source.sourceId).state).toBe("preparing");
   expect(f.records.source(f.caller.workspaceId, f.source.sourceId).ackRevision).toBeNull();
-  for (const caller of [{ ...f.caller, workspaceId: "foreign" }, { ...f.caller, incarnationId: "old" }, { ...f.caller, leaseEpoch: 2 }]) await expect(f.readAuthority.authorize(caller, f.request)).rejects.toMatchObject({ code: "authority_denied" });
-  for (const request of [{ ...f.request, sourceRevision: 2 }, { ...f.request, grantRevision: 2 }]) await expect(f.readAuthority.authorize(f.caller, request)).rejects.toMatchObject({ code: "revision_conflict" });
-  f.resolver.repository = () => ({ ...account, repositoryId: "foreign" }); await expect(f.readAuthority.authorize(f.caller, f.request)).rejects.toMatchObject({ code: "authority_denied" });
+  for (const caller of [{ ...f.caller, workspaceId: "foreign" }, { ...f.caller, incarnationId: "old" }, { ...f.caller, leaseEpoch: 2 }]) await expect(Promise.resolve().then(() => f.readAuthority.authorize(caller, f.request))).rejects.toMatchObject({ code: "authority_denied" });
+  for (const request of [{ ...f.request, sourceRevision: 2 }, { ...f.request, grantRevision: 2 }]) await expect(Promise.resolve().then(() => f.readAuthority.authorize(f.caller, request))).rejects.toMatchObject({ code: "revision_conflict" });
+  f.resolver.repository = () => ({ ...account, repositoryId: "foreign" }); await expect(Promise.resolve().then(() => f.readAuthority.authorize(f.caller, f.request))).rejects.toMatchObject({ code: "authority_denied" });
 });
 test("account/source revocation during host resolution cannot revive readiness or accept late ACK", async () => {
   const f = setup(); f.resolver.repository = () => {
     f.records.removeSource({ principalId: "host", requestId: "revoke", expectedRevision: 1 }, f.caller.workspaceId, f.source.sourceId, true);
     return { ...account };
   };
-  await expect(f.readAuthority.authorize(f.caller, f.request)).rejects.toBeDefined();
+  await expect(Promise.resolve().then(() => f.readAuthority.authorize(f.caller, f.request))).rejects.toBeDefined();
   expect(() => f.records.acknowledgeSource(f.epoch, f.source.sourceId, f.source.revision, "ready")).toThrow("stale_acknowledgment");
   expect(f.records.source(f.caller.workspaceId, f.source.sourceId).state).toBe("unavailable");
-  const g = setup(); g.resolver.repository = () => ({ ...account, revoked: true }); await expect(g.readAuthority.authorize(g.caller, g.request)).rejects.toMatchObject({ code: "authority_denied" });
+  const g = setup(); g.resolver.repository = () => ({ ...account, revoked: true }); await expect(Promise.resolve().then(() => g.readAuthority.authorize(g.caller, g.request))).rejects.toMatchObject({ code: "authority_denied" });
 });
 test("runtime reads require actual ready ACK, active binding, explicit source scope and effective capability", async () => {
   const f = setup(), runtime = { ...f.caller, sessionId: "session" };
-  await expect(f.readAuthority.authorize(runtime, f.request)).rejects.toMatchObject({ code: "authority_denied" });
+  await expect(Promise.resolve().then(() => f.readAuthority.authorize(runtime, f.request))).rejects.toMatchObject({ code: "authority_denied" });
   f.records.acknowledgeSource(f.epoch, f.source.sourceId, f.source.revision, "ready");
   f.records.bindConversation({ principalId: "host", requestId: "bind", expectedRevision: 1 }, f.caller.workspaceId, { sessionId: runtime.sessionId, sourceId: f.source.sourceId });
   expect((await f.readAuthority.authorize(runtime, f.request)).scopeDigest).not.toBe((await f.readAuthority.authorize(f.caller, f.request)).scopeDigest);
-  f.resolver.sourceScope = () => undefined; await expect(f.readAuthority.authorize(runtime, f.request)).rejects.toMatchObject({ code: "authority_denied" });
-  f.resolver.sourceScope = () => ({ revision: 1, sourceIds: ["foreign"] }); await expect(f.readAuthority.authorize(runtime, f.request)).rejects.toMatchObject({ code: "authority_denied" });
+  f.resolver.sourceScope = () => undefined; await expect(Promise.resolve().then(() => f.readAuthority.authorize(runtime, f.request))).rejects.toMatchObject({ code: "authority_denied" });
+  f.resolver.sourceScope = () => ({ revision: 1, sourceIds: ["foreign"] }); await expect(Promise.resolve().then(() => f.readAuthority.authorize(runtime, f.request))).rejects.toMatchObject({ code: "authority_denied" });
   f.resolver.sourceScope = () => ({ revision: 2, sourceIds: null }); await f.readAuthority.authorize(runtime, f.request);
   f.records.updatePolicy({ principalId: "host", requestId: "restrict", expectedRevision: 2 }, f.caller.workspaceId, { ceiling: { toolClasses: ["read"], hostServices: [], connectors: [], network: "internet" } });
-  await expect(f.readAuthority.authorize(runtime, { ...f.request, grantRevision: f.records.get(f.caller.workspaceId).grantRevision })).rejects.toMatchObject({ code: "authority_denied" });
+  await expect(Promise.resolve().then(() => f.readAuthority.authorize(runtime, { ...f.request, grantRevision: f.records.get(f.caller.workspaceId).grantRevision }))).rejects.toMatchObject({ code: "authority_denied" });
 });
 test("restoring scope contents at a later revision does not restore prior read authority", async () => {
   const f = setup(); f.records.acknowledgeSource(f.epoch, f.source.sourceId, f.source.revision, "ready");
@@ -80,7 +80,7 @@ test("final synchronous scope cannot return stale workspace or mutable account a
       }
       return { revision: 1, sourceIds: [f.source.sourceId] };
     };
-    await expect(f.readAuthority.authorize({ ...f.caller, sessionId: "session" }, f.request)).rejects.toBeDefined();
+    await expect(Promise.resolve().then(() => f.readAuthority.authorize({ ...f.caller, sessionId: "session" }, f.request))).rejects.toBeDefined();
   }
 });
 
@@ -92,14 +92,14 @@ test("final scope resolution cannot return a stopped worker even with unchanged 
     if (++calls === 2) f.db.db.run("UPDATE cowork_workspaces SET power='stopped' WHERE workspace_id=?", [f.caller.workspaceId]);
     return { revision: 1, sourceIds: [f.source.sourceId] };
   };
-  await expect(f.readAuthority.authorize({ ...f.caller, sessionId: "session" }, f.request)).rejects.toMatchObject({ code: "authority_denied" });
+  await expect(Promise.resolve().then(() => f.readAuthority.authorize({ ...f.caller, sessionId: "session" }, f.request))).rejects.toMatchObject({ code: "authority_denied" });
 });
 test("task source scope changes at final snapshot cannot reuse its earlier grant", async () => {
   const f = setup(); let calls = 0;
   f.records.acknowledgeSource(f.epoch, f.source.sourceId, f.source.revision, "ready");
   f.records.bindConversation({ principalId: "host", requestId: "bind", expectedRevision: 1 }, f.caller.workspaceId, { sessionId: "session", sourceId: f.source.sourceId });
   f.resolver.sourceScope = () => ++calls === 1 ? { revision: 1, sourceIds: [f.source.sourceId] } : { revision: 2, sourceIds: [] };
-  await expect(f.readAuthority.authorize({ ...f.caller, sessionId: "session" }, f.request)).rejects.toMatchObject({ code: "authority_denied" });
+  await expect(Promise.resolve().then(() => f.readAuthority.authorize({ ...f.caller, sessionId: "session" }, f.request))).rejects.toMatchObject({ code: "authority_denied" });
 });
 
 test("final transport authority cut never releases bytes after the worker stops in final scope resolution", async () => {

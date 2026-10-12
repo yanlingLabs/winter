@@ -19,11 +19,11 @@ const response = (bytes: BodyInit | Uint8Array = advertisement, operation = "adv
 const roots: string[] = [], stops: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const stop of stops.splice(0)) await stop(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 function temp() { const root = mkdtempSync(join(tmpdir(), "winter-git-read-")); roots.push(root); return root; }
-function transport(http: GitReadHttp = async () => response(), limits = {}, resolve = async () => ({ ...grant })) { return new CoworkGitHubReadTransport({ authorize: resolve }, { get: async name => name === "fixture-slot" ? sentinel : null }, http, limits, { isolatedFixture: true }); }
+function transport(http: GitReadHttp = async () => response(), limits = {}, resolve = () => ({ ...grant })) { return new CoworkGitHubReadTransport({ authorize: resolve }, { get: async name => name === "fixture-slot" ? sentinel : null }, http, limits, { isolatedFixture: true }); }
 
 test("production read entry refuses before credential/packet/network work until sandboxed parser admission exists", async () => {
   let touched = false;
-  const t = new CoworkGitHubReadTransport({ authorize: async () => { touched = true; return grant; } }, { get: async () => { touched = true; return sentinel; } }, async () => { touched = true; return response(); });
+  const t = new CoworkGitHubReadTransport({ authorize: () => { touched = true; return grant; } }, { get: async () => { touched = true; return sentinel; } }, async () => { touched = true; return response(); });
   expect(t.availability()).toEqual({ available: false, reason: "integration_unavailable" });
   await expect(t.read(caller, request)).rejects.toMatchObject({ code: "integration_unavailable" }); expect(touched).toBe(false);
 });
@@ -35,7 +35,7 @@ test("only canonical host metadata determines destination/auth; guest URLs/heade
   });
   const output = await t.read(caller, { ...request, url: "https://evil.invalid", headers: { authorization: "evil" } } as GitReadRequest);
   expect(output.body).toEqual(advertisement); expect(Buffer.from(output.body).includes(Buffer.from(sentinel))).toBe(false); expect(calls).toBe(1);
-  for (const name of ["../evil", "repo/elsewhere", "https://evil", ".", "..", "a?query"]) await expect(transport(undefined, {}, async () => ({ ...grant, name })).read(caller, request)).rejects.toMatchObject({ code: "authority_denied" });
+  for (const name of ["../evil", "repo/elsewhere", "https://evil", ".", "..", "a?query"]) await expect(transport(undefined, {}, () => ({ ...grant, name })).read(caller, request)).rejects.toMatchObject({ code: "authority_denied" });
 });
 test("redirects/status/type/encoding, credential reflection and credential-bearing exceptions fail safely", async () => {
   for (const res of [new Response("", { status: 302, headers: { location: "https://evil.invalid" } }), new Response(sentinel, { status: 401 }), new Response(advertisement), new Response(advertisement, { headers: { "content-type": "application/x-git-upload-pack-advertisement", "content-encoding": "gzip" } })]) await expect(transport(async () => res).read(caller, request)).rejects.toMatchObject({ code: "upstream_failed" });
@@ -62,7 +62,7 @@ test("mid-stream revoke closes the admitted read without delivering partial byte
 });
 test("stalled revision change, cancellation, duration and concurrent admission are bounded", async () => {
   let revision = 1, started!: () => void; const entered = new Promise<void>(resolve => { started = resolve; });
-  const t = transport(async () => { started(); return response(new ReadableStream({})); }, { recheckMs: 5, durationMs: 100, concurrent: 1 }, async () => ({ ...grant, authorityRevision: revision }));
+  const t = transport(async () => { started(); return response(new ReadableStream({})); }, { recheckMs: 5, durationMs: 100, concurrent: 1 }, () => ({ ...grant, authorityRevision: revision }));
   const reading = t.read(caller, request); await entered; await expect(t.read(caller, request)).rejects.toMatchObject({ code: "busy" }); revision++; await expect(reading).rejects.toMatchObject({ code: "authority_denied" });
   const abort = new AbortController(); const waiting = transport(async () => new Promise<Response>(() => {})).read(caller, request, abort.signal); abort.abort(); await expect(waiting).rejects.toMatchObject({ code: "cancelled" });
   await expect(transport(async () => new Promise<Response>(() => {}), { durationMs: 10 }).read(caller, request)).rejects.toMatchObject({ code: "budget_exceeded" });
@@ -82,7 +82,7 @@ test("real Git clone + incremental fetch through private fake upstream keep cred
     if (req.method === "POST" && url.pathname === "/fixture-owner/fixture-repo.git/git-upload-pack") return response(await git(upstream, home, ["upload-pack", "--stateless-rpc", upstream], new Uint8Array(await req.arrayBuffer())), "result");
     return new Response("unsupported", { status: 404 });
   } }); stops.push(() => { fake.stop(true); });
-  const t = new CoworkGitHubReadTransport({ authorize: async () => ({ ...grant }) }, secretStore, async (url, init) => {
+  const t = new CoworkGitHubReadTransport({ authorize: () => ({ ...grant }) }, secretStore, async (url, init) => {
     expect(url.startsWith("https://github.com/fixture-owner/fixture-repo.git/")).toBe(true); const target = new URL(url); const res = await fetch(`http://127.0.0.1:${fake.port}${target.pathname}${target.search}`, init); return new Response(res.body, { status: res.status, headers: res.headers });
   }, {}, { isolatedFixture: true });
   const gateway = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
@@ -103,7 +103,7 @@ test("real Git clone + incremental fetch through private fake upstream keep cred
 test("Buffer input is an owned snapshot; caller mutation during secret lookup cannot alter validated POST", async () => {
   const original = Buffer.concat([pkt(`want ${"1".repeat(40)}\n`), Buffer.from("0000"), pkt("done\n")]);
   const expected = Uint8Array.from(original); let posted: Uint8Array | undefined;
-  const t = new CoworkGitHubReadTransport({ authorize: async () => ({ ...grant }) }, { get: async () => { original.fill(0x58); return sentinel; } }, async (_url, init) => {
+  const t = new CoworkGitHubReadTransport({ authorize: () => ({ ...grant }) }, { get: async () => { original.fill(0x58); return sentinel; } }, async (_url, init) => {
     posted = init.body as Uint8Array; return response(pkt("NAK\n"), "result");
   }, {}, { isolatedFixture: true });
   await t.read(caller, { ...request, operation: "upload-pack", body: original });

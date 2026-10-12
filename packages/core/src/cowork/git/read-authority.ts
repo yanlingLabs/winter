@@ -22,7 +22,7 @@ export function validateGitHubReadRepository(grant: GitHubReadRepository): void 
 /** Canonical host records; preparing permits checkout, without fabricating a ready ACK. */
 export class CurrentCoworkGitReadAuthority implements GitReadAuthority {
   constructor(private readonly records: CoworkRepository, private readonly authority: CoworkAuthority, private readonly grants: GitHubReadGrantResolver) {}
-  async authorize(caller: Readonly<GitReadCaller>, request: Readonly<GitReadRequest>): Promise<GitReadGrant> {
+  authorize(caller: Readonly<GitReadCaller>, request: Readonly<GitReadRequest>): GitReadGrant {
     try {
       const before = this.check(caller, request);
       const selected = this.records.source(caller.workspaceId, request.sourceId);

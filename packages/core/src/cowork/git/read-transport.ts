@@ -62,11 +62,11 @@ export class CoworkGitHubReadTransport {
     const cancel = () => stop("cancelled"); signal?.addEventListener("abort", cancel, { once: true });
     if (signal?.aborted) cancel();
     const timer = setTimeout(() => stop("budget_exceeded"), this.limits.durationMs);
-    let checking = false, grant: GitReadGrant | undefined;
-    const recheck = async () => {
+    let grant: GitReadGrant | undefined;
+    const recheck = () => {
       if (failure) throw failure;
       let fresh: GitReadGrant;
-      try { fresh = await this.authority.authorize(caller, request); } catch { throw new GitReadError("authority_denied"); }
+      try { fresh = this.authority.authorize(caller, request); } catch { throw new GitReadError("authority_denied"); }
       validateGitHubReadRepository(fresh);
       if (fresh.workspaceId !== caller.workspaceId || fresh.incarnationId !== caller.incarnationId || fresh.leaseEpoch !== caller.leaseEpoch
         || fresh.sourceId !== request.sourceId || fresh.sourceRevision !== request.sourceRevision || fresh.grantRevision !== request.grantRevision
@@ -75,21 +75,22 @@ export class CoworkGitHubReadTransport {
       return fresh;
     };
     const checkTimer = setInterval(() => {
-      if (!grant || checking || failure) return;
-      checking = true; void recheck().catch(() => stop("authority_denied")).finally(() => { checking = false; });
+      if (!grant || failure) return;
+      try { recheck(); } catch { stop("authority_denied"); }
     }, this.limits.recheckMs);
     // Bound all waits even if an injected port ignores cancellation.
     const aborted = new Promise<never>((_, reject) => {
       controller.signal.addEventListener("abort", () => reject(failure ?? new GitReadError("cancelled")), { once: true });
       if (controller.signal.aborted) reject(failure);
     });
+    void aborted.catch(() => {}); // A synchronous first authorization refusal may precede any raced await.
     const bounded = <T>(promise: Promise<T>): Promise<T> => Promise.race([promise, aborted]);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined, upstream: Response | undefined;
     try {
-      grant = await bounded(recheck());
+      grant = recheck();
       const token = await bounded(this.secrets.get(grant.credentialRef));
       if (!token || !/^[!-~]{1,4096}$/.test(token)) throw new GitReadError("authority_denied");
-      await bounded(recheck());
+      recheck();
       const advertise = request.operation === "advertise", contentType = `application/x-git-upload-pack-${advertise ? "advertisement" : "result"}`;
       const url = `https://github.com/${grant.owner}/${grant.name}.git/${advertise ? "info/refs?service=git-upload-pack" : "git-upload-pack"}`;
       const auth = Buffer.from(`x-access-token:${token}`).toString("base64");
@@ -106,13 +107,13 @@ export class CoworkGitHubReadTransport {
       while (true) {
         const part = await bounded(reader.read()); if (part.done) break;
         total += part.value.byteLength; if (total > budget) throw new GitReadError("budget_exceeded");
-        bytes.set(part.value, total - part.value.byteLength); await bounded(recheck());
+        bytes.set(part.value, total - part.value.byteLength); recheck();
       }
       const resultBytes = bytes.subarray(0, total);
       // A credential-bearing upstream error must never become guest bytes or logs.
       if (resultBytes.includes(Buffer.from(token)) || resultBytes.includes(Buffer.from(auth))) throw new GitReadError("invalid_response");
       if (advertise) validateReadAdvertisement(resultBytes); else await bounded(validateUploadPackResponse(resultBytes, this.limits, controller.signal));
-      await bounded(recheck());
+      recheck();
       return { contentType, body: Buffer.from(resultBytes) };
     } catch (error) { throw failure ?? (error instanceof GitReadError ? error : new GitReadError("upstream_failed")); }
     finally {

@@ -19,7 +19,7 @@ export interface GitReadGrant extends GitHubReadRepository {
   scopeDigest: string;
 }
 export interface GitReadAuthority {
-  authorize(caller: Readonly<GitReadCaller>, request: Readonly<GitReadRequest>): Promise<GitReadGrant>;
+  authorize(caller: Readonly<GitReadCaller>, request: Readonly<GitReadRequest>): GitReadGrant;
 }
 export interface GitReadResponse { contentType: string; body: Uint8Array }
 export interface GitReadLimits {
