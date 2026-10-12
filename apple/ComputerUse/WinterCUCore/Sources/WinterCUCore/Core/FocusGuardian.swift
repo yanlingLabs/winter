@@ -1225,12 +1225,17 @@ public struct CUFocusGuardianCore: Sendable {
     /// A click of theirs into a window of an app NOT in front: working in it once its own activation lands (within
     /// `workClickWindow` — the claim's own window: a slow app's activation lands up to 1.5 s after the click, review of
     /// round 10, MEDIUM #5) — a drag out of a background window activates nothing and is no work in it.
-    private var pendingWork: (app: pid_t, until: TimeInterval)?
+    private var pendingWork: (app: pid_t, until: TimeInterval, at: TimeInterval)?
     static let workClickWindow: TimeInterval = causalWindow
 
     /// Their click, key or scroll in `app`'s window (the caller attributes it), with `front` in front.
     public mutating func userInteracted(_ app: pid_t, front: pid_t?, now: TimeInterval) {
-        if front == app { userWorkingApp = app; pendingWork = nil } else { pendingWork = (app, now + Self.workClickWindow) }
+        if front == app {
+            userWorkingApp = app
+            if pendingWork?.app == app { pendingWork = nil }
+        } else {
+            pendingWork = (app, now + Self.workClickWindow, now)
+        }
     }
 
     /// Whether the user is working in `app`, with `front` in front now: once it is no longer in front, never again until
@@ -1246,9 +1251,19 @@ public struct CUFocusGuardianCore: Sendable {
     /// only when that app is IN FRONT NOW and the agent has no live cause on it (a blip, a visit, a hold, rung 4, an open:
     /// its own activation, heard late or not, never ends the user's work — review of round 12, MEDIUM #2).
     public mutating func otherAppActivated(_ pid: pid_t, front: pid_t?, now: TimeInterval) {
+        // The CLICKED app's own activation, heard once another app is in front already: it landed, and they had moved on
+        // before it was heard — the click's mark is spent, never promoted later (round 18 — found with the attempt below:
+        // their click into T landed, their earlier Dock click's S landed after it, T was heard late, and a ⌘-Tab back to T
+        // within the click's window took the stale mark for work).
+        if let p = pendingWork, p.app == pid, front != pid { pendingWork = nil }
         guard front == pid, !isTouched(pid, now: now), exemptions[pid] == nil, !(visiting(now: now) && pid == visitApp) else { return }
         if let w = userWorkingApp, w != pid { userWorkingApp = nil }
-        if let p = pendingWork, p.app != pid { pendingWork = nil }
+        // A PENDING click mark (its app's activation not landed yet) ends only when a switch input of theirs came AFTER the
+        // click: an activation heard before the clicked app's own, with none since, is the landing of input from before the
+        // click (round 18 — found by the model-based test's mid-act click: their ⌘-Tab to U released, then their click into
+        // T; U landed 3 ms after the click and took T's mark back, and the agent's next act went into T while they worked
+        // in it). Input with no switch at all (a key into the app in front) ends nothing pending elsewhere either.
+        if let p = pendingWork, p.app != pid, input.lastAt > p.at { pendingWork = nil }
     }
 
     /// The clicked app came forward in time: they are working in it.

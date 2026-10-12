@@ -78,6 +78,30 @@ final class Round18GuardianTests: XCTestCase {
         }
     }
 
+    /// I6's pending click mark (round 18, found by the model-based test's mid-act click — round 17's H1 exercised): a click
+    /// into T's window while another app is in front is work once T's own activation lands. Another app's activation heard
+    /// before T's, with no switch input of theirs since the click, is the landing of input from BEFORE it — the mark
+    /// stays; a switch input after the click ends it; and T's own activation heard once another app is in front spends it.
+    func testAPendingClickMarkFollowsTheOrderOfTheUsersInput() {
+        let u: pid_t = 1, t: pid_t = 5252, s: pid_t = 710
+        func core() -> CUFocusGuardianCore {
+            var g = CUFocusGuardianCore()
+            g.begin(view: CUGuardedView(app: u, space: 100))
+            g.userInteracted(t, front: u, now: 10.0)  // their click into T's window, U in front
+            return g
+        }
+        var a = core()
+        a.otherAppActivated(s, front: s, now: 10.005)  // S lands — their Dock click from before the click into T
+        XCTAssertTrue(a.userIsWorking(in: t, front: t, now: 10.01), "T lands after: working in T")
+        var b = core()
+        b.noteSwitch(now: 10.003, .app)  // a switch input of theirs after the click
+        b.otherAppActivated(s, front: s, now: 10.005)
+        XCTAssertFalse(b.userIsWorking(in: t, front: t, now: 10.01), "they switched on after the click: no work in T")
+        var c = core()
+        c.otherAppActivated(t, front: s, now: 10.02)  // T's own activation, heard with S in front already
+        XCTAssertFalse(c.userIsWorking(in: t, front: t, now: 10.5), "the click's mark is spent: a later return to T is no work")
+    }
+
     /// R17-d (ii): an INTERACTIVE LAUNCHER within the causal window before the start — Return into Spotlight's panel (the
     /// tap names the process it is delivered to), a click in the Dock that is not on a running app's tile (a tile that
     /// launches, Launchpad), a double-click in a Finder window — makes the launch theirs, even BEFORE the agent's act.
