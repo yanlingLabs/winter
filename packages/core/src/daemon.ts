@@ -1408,6 +1408,7 @@ export async function startDaemon(opts: {
       // management surface with its own hub/store would read every attached session as idle.
       sessions: {
         store,
+        mayList: (callerId, targetId) => sessionMessaging?.mayList(callerId, targetId) ?? false,
         derive: (row, sessionId, nowMs) => activityDeriver?.(row, sessionId, nowMs),
         turnStartedAt: (sid) => winterDrivers.get(sid)?.turnStartedAt,
         working: (sid) => signalsDeriver?.(sid).working ?? (winterDrivers.get(sid)?.turnRunning ?? false),
@@ -2155,6 +2156,7 @@ export async function startDaemon(opts: {
   // `session.list` and ListSessions use (`activityDeriver`, published by the IPC server below — read live).
   sessionMessaging = new SessionMessaging({
     store,
+    cowork: runtime ? new CoworkRepository(runtime.db) : undefined,
     derive: (row, sid, nowMs) => activityDeriver?.(row, sid, nowMs),
     working: (sid) => signalsDeriver?.(sid).working ?? false,
     sessions: { get: (sid) => winterDrivers.get(sid), ensure: (sid) => winterDrivers.ensure(sid) },

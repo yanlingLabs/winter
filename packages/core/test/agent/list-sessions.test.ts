@@ -10,9 +10,10 @@ import {
   LIST_SESSIONS_RECENT_COMPLETED_CHILDREN,
   LIST_SESSIONS_TOOL,
   type ListSessionsStore,
+  type ListSessionsDeps,
 } from "../../src/agent/tools/list-sessions";
 import { makeActivityDeriver } from "../../src/sessions/activity";
-import { SessionStore } from "../../src/sessions/store";
+import { SessionStore, type SessionRow } from "../../src/sessions/store";
 import { parseSessionQuery, rankSessions, type QueryableSession } from "../../src/sessions/session-query";
 
 // Dispatch's `list_sessions`, rebuilt (user ruling 2026-10-02): the default listing (active + background +
@@ -351,5 +352,78 @@ describe("the per-mode registry", () => {
     expect(registry.namesForMode("code").has(LIST_SESSIONS_TOOL)).toBe(false);
     expect(registry.namesForMode("chat").has(LIST_SESSIONS_TOOL)).toBe(false);
     expect(registry.namesForMode("dispatch").has("manage_session")).toBe(false);
+  });
+});
+
+describe("list_sessions: host-owned Cowork authority", () => {
+  function scoped(mayList?: ListSessionsDeps["mayList"], callerMode?: string) {
+    const reads: string[] = [];
+    const rows = [
+      { sessionId: "s_host", mode: "code", title: "host secret", cwd: "/host/private" },
+      { sessionId: "s_peer", mode: "cowork", title: "project work", cwd: "/host/cowork/private" },
+      { sessionId: "s_other", mode: "cowork", title: "unrelated secret", cwd: "/host/unrelated" },
+    ].map((row) => ({ ...row, createdAt: NOW - 1000, archived: false })) as SessionRow[];
+    const read = <T>(id: string, field: string, value: T): T => { reads.push(`${id}:${field}`); return value; };
+    const registry = new ToolRegistry();
+    registerListSessionsTools(registry, {
+      store: {
+        list: () => rows,
+        ...(callerMode === undefined ? {} : { meta: () => ({ mode: callerMode }) }),
+        lastEventTs: (id) => read(id, "last", NOW),
+        transcriptPath: (id) => read(id, "transcript", `/host/sessions/${id}.jsonl`),
+        editedFiles: (id) => read(id, "files", ["/host/secret-needle.ts"]),
+        firstMessage: (id) => read(id, "first", "transcript-needle"),
+      },
+      derive: (_, id) => read(id, "activity", "active" as const),
+      turnStartedAt: (id) => read(id, "turn", undefined),
+      now: () => NOW,
+      ...(mayList === undefined ? {} : { mayList }),
+    });
+    return {
+      reads,
+      call: (args: unknown, mode: "code" | "dispatch" | null = "dispatch") => registry.execute(LIST_SESSIONS_TOOL, args, { cwd: "/fixture", roots: ["/fixture"], sessionId: "s_caller", ...(mode === null ? {} : { mode }) }),
+    };
+  }
+
+  test("filters before default counts and query metadata, using context rather than tool arguments", async () => {
+    let allowed = true;
+    const h = scoped((caller, target) => caller === "s_caller" && target === "s_peer" && allowed);
+    const listed = await h.call({ sessionId: "s_host" });
+    expect(rowsOf(listed.output)).toHaveLength(1);
+    expect(listed.output).toContain("s_peer");
+    expect(listed.output).not.toContain("other session");
+    expect(listed.output).not.toContain("secret");
+    expect(h.reads.every((read) => read.startsWith("s_peer:"))).toBe(true);
+    const query = await h.call({ query: "secret" });
+    expect(query.output).toStartWith('no sessions matched "secret"');
+    expect(h.reads.every((read) => read.startsWith("s_peer:"))).toBe(true);
+    allowed = false;
+    expect(rowsOf((await h.call({})).output)).toHaveLength(0);
+  });
+
+  test("Cowork discovery omits host cwd/transcript paths and never queries host file or transcript content", async () => {
+    const h = scoped((_, target) => target === "s_peer");
+    for (const args of [{}, { query: "project" }]) {
+      const result = await h.call(args);
+      expect(result.output).toContain("s_peer");
+      expect(result.output).not.toContain("/host/");
+      expect(result.output).not.toContain("cwd");
+    }
+    for (const query of ["/host/secret-needle.ts", "transcript-needle"]) {
+      expect(rowsOf((await h.call({ query })).output)).toHaveLength(0);
+    }
+    expect(h.reads.some((read) => /:(transcript|files|first)$/.test(read))).toBe(false);
+  });
+
+  test("missing authority only preserves host discovery and refuses Cowork or unknown callers", async () => {
+    const host = scoped();
+    expect(rowsOf((await host.call({})).output).map((row) => row.split(" | ")[0])).toEqual(["s_host"]);
+    expect(host.reads.every((read) => read.startsWith("s_host:"))).toBe(true);
+    const cowork = scoped(undefined, "cowork");
+    expect(rowsOf((await cowork.call({})).output)).toHaveLength(0);
+    expect(cowork.reads).toEqual([]);
+    const unknown = scoped();
+    expect(rowsOf((await unknown.call({}, null)).output)).toHaveLength(0);
+    expect(unknown.reads).toEqual([]);
   });
 });
