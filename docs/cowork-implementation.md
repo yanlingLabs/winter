@@ -133,17 +133,36 @@ separately. Cowork remains unavailable until its required gates pass.
 
 ## Work in progress
 
-The composed host storage primitive now includes schema 9 raw volumes through
-`ca0d5316`. It records sparse image identity, sticky backup exclusion and durable
-writable ownership; outer transaction rollback and transaction-completion FD
-cleanup have regressions. Root composition checks passed 60 tests/305 assertions
-and Core typecheck. These images remain explicitly unformatted: native descriptor
-transfer, filesystem bootstrap and authenticated worker stop evidence are still
-required. See [raw volume scope](cowork-raw-volumes.md).
+The feature composition now includes schema 10 volume filesystem preparation and
+recovery through `9c48655d`. Format-once intent is durable before writable handoff;
+unknown disks cannot regain virgin eligibility, and pending journal recovery cannot
+confirm readiness. Actual disposable Linux ext4 tests passed (14 tests, one
+Darwin-only skip), and the composed host suites passed 70 tests/540 assertions.
+This does not establish guest mounts or a production native stop adapter. See
+[Linux filesystem evidence](research/2026-10-12-cowork-filesystem-v2-linux-ci.md).
+
+SDK PR #5 at `5ef3482a` now passes its actual Linux supervisor CI job against
+byte-identical service source. The real SDK Read/Edit/Write/Bash routes, two runtime
+UIDs, plan/read-only mounts, cancellation/revocation and namespace descendant
+cleanup passed; all 11 protocol tests passed on Linux. Earlier actual startup
+failures exposed inherited mount-descriptor namespace ownership; the correction
+clones detached mounts before unsharing and attaches those exact objects afterward.
+A pathname-replacement regression preserves the admitted directory identity.
+Full PR CI and designated re-review remain separate from this Linux job result.
+Full guest startup is still disabled, and Winter's SDK pin is unchanged.
+
+The two-disk fixture at `9a588735` is built and signed with 60 Python regressions
+and two strict-C handoff runs passing, but has no independent launch-admission
+receipt and has not run. The native review task was held after its agent turn
+failed an automatic content check; no VM launch was substituted. The macOS
+management UI at `b0c2ca58` passed 16 focused Swift tests and independent metadata
+review; the next source-selection change must resolve both asynchronous picker
+ownership races before enabling selection. Provider proxy/broker and host-owned
+folder-selection integration are progressing in isolated worktrees.
 
 | Area | Current work | Required before completion |
 | --- | --- | --- |
-| Canonical host state | Schema 9 repository and raw volume records, receipts/outbox, typed workspace metadata RPCs, remote allowlist mirrors and bounded cursor pages | Native controller acknowledgments, source provisioning, authority service wiring, lifecycle/recovery and paired-client scope adapter |
+| Canonical host state | Schema 10 repository, raw volumes and filesystem readiness journals, receipts/outbox, typed workspace metadata RPCs, remote allowlist mirrors and bounded cursor pages | Native controller acknowledgments, source provisioning, authority service wiring, lifecycle/recovery and paired-client scope adapter |
 | Host storage protection | Retained-home fences, accepted Core/SDK path consumer, raw image owner/mode/identity and backup checks; deferred synthetic key-broker | Native descriptor consumer and stop proof; installed SDK integration; Workflow wiring; stop owned host effects on daemon loss |
 | Native VM integration | VZ research foundations; reviewed Linux/HVF live reclaim with one RAW disk | Persistent RAW storage and remaining asynchronous devices, production signed worker admission, cancellation/ownership, direct shares, automatic resources and concurrent latency |
 | Guest execution | Merged remote transport; confined text file and foreground-process helpers; protected-store bootstrap seam | Immutable runtime/supervisor, native ownership and termination adapters, complete process/extension routes, run-home/instructions and cold VM parent/child restoration |
@@ -179,9 +198,10 @@ Winter installation or deliberately creates host memory pressure.
 
 The immediate integration target is a developer-only real guest turn through the
 same concrete host admission, disk ownership, worker and SDK transport intended
-for production. The native profile first needs admitted descriptor intake for
-both data and environment disks, distinct device registrations and reclaim
-coverage; its current one-disk fixture cannot stand in for that. Then connect an
+for production. The native profile has source-reviewed admitted descriptor intake for
+both data and environment disks and distinct device registrations; its two-disk
+worker still needs launch review and live reclaim coverage. The measured one-disk
+fixture cannot stand in for that. Then connect an
 immutable Linux supervisor/runtime image, durable format-once preparation,
 protected stores and actual confined Read/Write/Edit/Bash. Test with credential-free
 scripted host-provider traffic before introducing a real provider broker.
