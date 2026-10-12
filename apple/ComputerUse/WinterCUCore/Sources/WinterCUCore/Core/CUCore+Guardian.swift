@@ -412,7 +412,8 @@ extension CUCore {
     /// One event the listen-only session tap saw (not a type-21 process notification): the user's input only when
     /// `CUHardwareInput` says so — the window server's own events around an activation or a desktop change are not.
     func noteTapEvent(type: CGEventType, sourcePid: Int64, userData: Int64, flags: CGEventFlags = [], keycode: Int64 = -1,
-                      location: CGPoint? = nil, targetPid: Int64 = 0, now: TimeInterval) {
+                      location: CGPoint? = nil, targetPid: Int64 = 0, scrollPhase: Int64 = 0, momentumPhase: Int64 = 0,
+                      now: TimeInterval) {
         let kind = CUHardwareInput.classify(type: type, sourcePid: sourcePid, userData: userData)
         // (Not the user's — a synthetic event, the helper's own: nothing to read, not even Secure Event Input — round 17b.)
         guard kind != .none else { return }
@@ -442,9 +443,17 @@ extension CUCore {
         // A scroll in the app in front's own window: USE of an app left in front — their place, as typing in it is (round
         // 18, the controller's ruling: scrolling there is work per I6). (The window under the pointer is read only while the
         // app in front is a left one.)
-        if type == .scrollWheel, let p = location, let front = sys.frontmostPid(),
-           guardianLock.withLock({ guardianCore.isLeftInFront(front) }), windowUnder(p)?.pid == front {
-            guardianLock.withLock { guardianCore.userInputInFront(front, now: now) }
+        // R18-b (the controller's ruling): only a scroll whose gesture BEGAN after the app came forward — a gesture's
+        // began event since then, or a plain wheel event (no phase) — never momentum, nor the tail of a gesture begun
+        // before it.
+        if type == .scrollWheel {
+            if scrollPhase == Self.scrollPhaseBegan { guardianLock.withLock { scrollGestureBeganAt = now } }
+            if momentumPhase == 0, let p = location, let front = sys.frontmostPid(),
+               let since = guardianLock.withLock({ guardianCore.isLeftInFront(front) ? guardianCore.frontSince(front) : nil }),
+               scrollPhase == 0 || guardianLock.withLock({ scrollGestureBeganAt.map { $0 >= since } ?? false }),
+               windowUnder(p)?.pid == front {
+                guardianLock.withLock { guardianCore.userInputInFront(front, now: now) }
+            }
         }
         noteUserInteraction(type: type, flags: flags, keycode: keycode, location: location, targetPid: targetPid)
         let secure = (type == .flagsChanged || type == .keyDown) && secureNow
@@ -1185,11 +1194,14 @@ private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
     // told apart.
     if type.rawValue != CUFocusTaps.processNotificationType {
         let pointer = type == .rightMouseDown || type == .otherMouseDown || type == .scrollWheel
+        let scroll = type == .scrollWheel
         core.noteTapEvent(type: type, sourcePid: event.getIntegerValueField(.eventSourceUnixProcessID),
                           userData: event.getIntegerValueField(.eventSourceUserData), flags: event.flags,
                           keycode: type == .keyDown ? event.getIntegerValueField(.keyboardEventKeycode) : -1,
                           location: pointer ? event.location : nil,
                           targetPid: type == .keyDown ? event.getIntegerValueField(.eventTargetUnixProcessID) : 0,
+                          scrollPhase: scroll ? event.getIntegerValueField(.scrollWheelEventScrollPhase) : 0,
+                          momentumPhase: scroll ? event.getIntegerValueField(.scrollWheelEventMomentumPhase) : 0,
                           now: core.clock.nowSeconds())
     }
     if type == .leftMouseDown {

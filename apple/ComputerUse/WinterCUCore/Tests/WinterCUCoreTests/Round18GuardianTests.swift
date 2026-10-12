@@ -78,6 +78,42 @@ final class Round18GuardianTests: XCTestCase {
         }
     }
 
+    /// R18-b (the controller's ruling, the review of round 18's M1): a scroll is USE of a left app only when its gesture
+    /// BEGAN after the app came forward — a began-phase event since, or a plain wheel event; never momentum, never the
+    /// tail of a gesture begun before.
+    func testOnlyAScrollGestureBegunAfterTheAppCameForwardIsUse() {
+        func left(_ events: (CUCore) -> Void) -> pid_t? {
+            let sys = FakeSystem()
+            sys.running = [1, 88]
+            sys.front = 88
+            let w88 = FakeSystem.window(880, pid: 88, CGRect(x: 0, y: 40, width: 400, height: 300))
+            sys.windows = [880: w88]
+            sys.stack = [w88]
+            let core = guardedCore(sys)
+            core.guardianLock.withLock {
+                core.guardianCore.begin(view: CUGuardedView(app: 1, space: 100))
+                core.guardianCore.noteCause(500, now: 10.0)
+                core.guardianCore.noteOpenerCause(now: 10.0, scope: .apps(["com.apple.mail"]))
+                core.guardianCore.appLaunched(88, startedAt: 10.2, bundle: "us.zoom.xos", now: 10.25)
+                _ = core.guardianCore.judge(CUMoveQuery(app: 88, space: 100, appBundle: "us.zoom.xos"), now: 11.0)
+            }
+            events(core)
+            return core.guardianPlace()?.app
+        }
+        let at = CGPoint(x: 100, y: 100)
+        XCTAssertEqual(left { $0.noteTapEvent(type: .scrollWheel, sourcePid: 0, userData: 0, location: at, now: 12) }, 88, "a plain wheel event")
+        XCTAssertEqual(left { c in
+            c.noteTapEvent(type: .scrollWheel, sourcePid: 0, userData: 0, location: at, scrollPhase: 1, now: 11.5)
+            c.noteTapEvent(type: .scrollWheel, sourcePid: 0, userData: 0, location: at, scrollPhase: 2, now: 11.6)
+        }, 88, "a gesture begun after it came forward")
+        XCTAssertEqual(left { c in
+            c.noteTapEvent(type: .scrollWheel, sourcePid: 0, userData: 0, location: at, scrollPhase: 1, now: 10.5)  // before
+            c.noteTapEvent(type: .scrollWheel, sourcePid: 0, userData: 0, location: at, scrollPhase: 2, now: 11.6)
+        }, 1, "the tail of a gesture begun before it came forward")
+        XCTAssertEqual(left { $0.noteTapEvent(type: .scrollWheel, sourcePid: 0, userData: 0, location: at, momentumPhase: 2, now: 12) }, 1,
+                       "momentum")
+    }
+
     /// I6's pending click mark (round 18, found by the model-based test's mid-act click — round 17's H1 exercised): a click
     /// into T's window while another app is in front is work once T's own activation lands. Another app's activation heard
     /// before T's, with no switch input of theirs since the click, is the landing of input from BEFORE it — the mark

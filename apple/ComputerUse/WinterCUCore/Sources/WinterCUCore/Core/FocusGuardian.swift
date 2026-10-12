@@ -576,6 +576,8 @@ public struct CUFocusGuardianCore: Sendable {
 
     /// Whether `app` was last judged left in front (unexplained) and has not become their place since.
     public func isLeftInFront(_ app: pid_t) -> Bool { leftInFront.contains(app) }
+    /// Since when `app` has been in front without a break, as the guardian last saw it (nil: it isn't).
+    public func frontSince(_ app: pid_t) -> TimeInterval? { lastSeen?.app == app ? lastSeenSince : nil }
 
     /// The user typed into, clicked in or scrolled in (round 18) the app in front: an app left in front becomes their place.
     public mutating func userInputInFront(_ app: pid_t?, now: TimeInterval) {
