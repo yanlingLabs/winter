@@ -45,16 +45,51 @@ final class Round14Tests: XCTestCase {
         if case .indirect = judge(&h, 77, bundle: nil, now: 10.3) {} else { XCTFail("Finder opens any app") }
     }
 
-    /// Review of round 14, HIGH #1: a COLD launch right after an opener act is judged with ANY reach — an app no scope
-    /// names (a zoommtg: link's Zoom) is the agent's indirect effect when clearly so (undone)…
-    func testAColdLaunchRightAfterAnActIsTheAgentsWhateverItsReach() {
+    /// The ruled launch attribution (round 16, §4.12): a cold launch right after an opener act, no input of the user's,
+    /// OUT of the act's reach (another session's `open -a`, a dev server's Chrome): LEFT in front and said — never undone,
+    /// never adopted (round 14's test, restored: the round-15 "any reach" undid third parties' launches).
+    func testAColdLaunchOutOfReachRightAfterAnActIsLeftNeverUndone() {
         var g = started()
         g.noteCause(500, now: 10.0)
         g.noteOpenerCause(now: 10.0, scope: .apps(["com.apple.mail", "com.apple.Safari"]))
         g.appLaunched(88, startedAt: 10.2, bundle: "us.zoom.xos", now: 10.25)
         let v = judge(&g, 88, bundle: "us.zoom.xos", now: 11.0)
-        if case .indirect = v {} else { XCTFail("the agent's indirect effect, undone: \(v)") }
-        XCTAssertEqual(g.view.app, 1, "never the user's place")
+        if case .unexplained = v {} else { XCTFail("left in front and said: \(v)") }
+        XCTAssertEqual(g.view.app, 1, "never adopted")
+    }
+
+    /// (2) WITHIN the act's reach, no input of the user's: clearly the agent's — undone.
+    func testAColdLaunchWithinReachRightAfterAnActIsUndone() {
+        var g = started()
+        g.noteCause(500, now: 10.0)
+        g.noteOpenerCause(now: 10.0, scope: .apps(["com.apple.mail", "com.apple.Safari"]))
+        g.appLaunched(89, startedAt: 10.2, bundle: "com.apple.Safari", now: 10.25)
+        let v = judge(&g, 89, bundle: "com.apple.Safari", now: 11.0)
+        if case .indirect = v {} else { XCTFail("undone: \(v)") }
+    }
+
+    /// (1) Input of the user's BETWEEN the act and the process start (their Spotlight Return): their own launch — adopted.
+    func testAColdLaunchAfterTheUsersInputIsTheirs() {
+        var g = started()
+        g.noteCause(500, now: 10.0)
+        g.noteOpenerCause(now: 10.0, scope: .apps(["com.apple.mail"]))
+        g.noteHardwareAction(now: 10.1)
+        g.appLaunched(90, startedAt: 10.2, bundle: "com.apple.Notes", now: 10.25)
+        let v = judge(&g, 90, bundle: "com.apple.Notes", now: 11.0)
+        XCTAssertTrue(v.isUsers, "\(v)")
+        XCTAssertEqual(g.view.app, 90, "their place")
+    }
+
+    /// (3) A left app the user then types in: their place — a restore never pulls them out of it.
+    func testTypingInALeftAppMakesItTheirPlace() {
+        var g = started()
+        g.noteCause(500, now: 10.0)
+        g.noteOpenerCause(now: 10.0, scope: .apps(["com.apple.mail"]))
+        g.appLaunched(91, startedAt: 10.2, bundle: "us.zoom.xos", now: 10.25)
+        _ = judge(&g, 91, bundle: "us.zoom.xos", now: 11.0)
+        XCTAssertEqual(g.view.app, 1)
+        g.userInputInFront(91, now: 12.0)
+        XCTAssertEqual(g.view.app, 91, "their place now")
     }
 
     /// …and, when not clearly so (input of the user's just before), left in front and said — NEVER adopted as the user's
@@ -82,6 +117,29 @@ final class Round14Tests: XCTestCase {
         if case .unexplained = v {} else { XCTFail("left in front and said: \(v)") }
     }
 
+    /// The same through the REAL bind path (review of round 15, LOW: the test above set the bundle by hand): the default
+    /// `resolveBindApp` of a RUNNING app (Finder — a lookup only: nothing is launched, opened or activated) names its
+    /// bundle on the bind's pending launch. A third party's Terminal coming forward meanwhile is left; Finder is in reach.
+    func testABindOfARunningAppThroughTheRealResolverReachesOnlyIt() async throws {
+        guard case .running = try CUApps.resolve("com.apple.finder") else { throw XCTSkip("Finder is not running") }
+        let (c, _) = core(bundle: nil, browser: false)
+        c.guardianLock.withLock { c.guardianCore.begin(view: CUGuardedView(app: 1, space: 100)) }
+        let token = c.beginGuardianLaunch()
+        let app = try await CUCore.$bindLaunchToken.withValue(token) { try await c.resolveBindApp("com.apple.finder", c) }
+        XCTAssertFalse(app.launched, "a running app: nothing launched")
+        let now = c.clock.nowSeconds() + 0.3
+        let terminal = c.guardianLock.withLock {
+            c.guardianCore.judge(CUMoveQuery(app: 77, space: 100, appBundle: "com.apple.Terminal"), now: now)
+        }
+        XCTAssertFalse(terminal.undoes, "\(terminal)")
+        if case .unexplained = terminal {} else { XCTFail("left in front and said: \(terminal)") }
+        let finder = c.guardianLock.withLock {
+            c.guardianCore.judge(CUMoveQuery(app: 78, space: 100, appBundle: "com.apple.finder"), now: now + 0.1)
+        }
+        if case .indirect = finder {} else { XCTFail("the bound app is in the pending launch's reach: \(finder)") }
+        c.endGuardianLaunch(token, pid: nil)
+    }
+
     // MARK: the scope of an act
 
     private func core(bundle: String?, browser: Bool) -> (CUCore, CUTarget) {
@@ -97,14 +155,16 @@ final class Round14Tests: XCTestCase {
     func testTheScopeOfAnAct() {
         let click = CUAction.click(CUClickAction(ref: 1))
         let (b, chrome) = core(bundle: "com.google.Chrome", browser: true)
-        XCTAssertEqual(b.openerScope(click, chrome), .apps(["com.google.Chrome", "com.apple.finder", "com.apple.mail"]),
+        XCTAssertEqual(b.openerScope(click, chrome), .apps(["com.google.Chrome", "com.apple.mail"]),
                        "a browser's web links stay in it; its mailto: opens the mail app; Reveal in Finder (review of round 14, MEDIUM #2)")
         XCTAssertEqual(b.openerScope(.menu(CUMenuAction(path: ["Help", "Chrome Help"])), chrome),
-                       .apps(["com.google.Chrome", "com.apple.finder", "com.apple.Safari", "com.apple.mail", "com.apple.helpviewer"]),
+                       .apps(["com.google.Chrome", "com.apple.Safari", "com.apple.mail", "com.apple.helpviewer"]),
                        "a menu command: the same list as a click, the Help viewer too")
         let (e, editor) = core(bundle: "com.example.editor", browser: false)
-        XCTAssertEqual(e.openerScope(click, editor), .apps(["com.example.editor", "com.apple.finder", "com.apple.Safari", "com.apple.mail"]),
+        XCTAssertEqual(e.openerScope(click, editor), .apps(["com.example.editor", "com.apple.Safari", "com.apple.mail"]),
                        "a link in it opens the default browser or mail app")
+        // Finder only for an act that can reveal in it (review of round 15, MEDIUM #3b).
+        XCTAssertTrue(e.openerScope(.menu(CUMenuAction(path: ["File", "Show in Finder"])), editor).covers("com.apple.finder"))
         let (f, finder) = core(bundle: "com.apple.finder", browser: false)
         XCTAssertEqual(f.openerScope(click, finder), .any, "Finder opens documents in any app")
         let (u, unknown) = core(bundle: nil, browser: false)

@@ -148,7 +148,11 @@ extension CUCore {
                     case .absent: candidates.append(w)
                     case .unknown:
                         candidates.append(w); complete = false
-                        if let id { t.remoteDebuggingSlowWalks[id] = now }
+                        if let id {
+                            // (Pruned as it grows: entries past their 5 s are of no use — review of round 15, LOW.)
+                            t.remoteDebuggingSlowWalks = t.remoteDebuggingSlowWalks.filter { now - $0.value < Self.slowWalkAgainMs }
+                            t.remoteDebuggingSlowWalks[id] = now
+                        }
                     case .present, .large: break
                     }
                 }

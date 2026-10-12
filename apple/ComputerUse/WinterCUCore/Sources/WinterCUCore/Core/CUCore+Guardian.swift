@@ -222,17 +222,26 @@ extension CUCore {
     /// open any app, and so does an act on a target whose bundle is unknown. Never an arbitrary app like Terminal.
     func openerScope(_ a: CUAction?, _ t: CUTarget) -> CUOpenerScope {
         guard let b = t.bundleId, !Self.opensAnyApp.contains(b) else { return .any }
-        // Finder always: Show/Reveal in Finder from Xcode, VS Code, a browser's downloads (review of round 14, MEDIUM #2).
-        var apps: Set<String> = [b, "com.apple.finder"]
+        var apps: Set<String> = [b]
         let menu: Bool = { if case .menu? = a { return true }; return false }()
+        // Finder only for an act that can reveal in it — a menu command or a pressed control named like "Show/Reveal in
+        // Finder" (review of round 15, MEDIUM #3b: Finder in every reach undid a third party's `open .`).
+        let named: AXUIElement? = Self.actRef(a).flatMap { try? element($0, in: t) }
+        let words: String = {
+            if case .menu(let m)? = a { return m.path.joined(separator: " ") }
+            return named.map { e in [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute].compactMap { ax.string(e, $0) }.joined(separator: " ") } ?? ""
+        }()
+        if words.lowercased().contains("finder") { apps.insert("com.apple.finder") }
         // The default web and mail handlers: a non-browser's links land there. A browser's own web links stay in it, but
         // its mailto: opens the mail app; a menu command uses the same list (Help › Contact Support, Share › Email).
         for scheme in isWebBrowser(t) && !menu ? ["mailto"] : ["http", "https", "mailto"] {
             if let h = defaultHandler(scheme) { apps.insert(h) }
         }
         if menu { apps.insert("com.apple.helpviewer") }
-        // The pressed element's own link: its scheme's handler (zoommtg:, slack:, x-apple.systempreferences:, …).
-        if let ref = Self.actRef(a), let e = try? element(ref, in: t), let scheme = linkScheme(e), let h = defaultHandler(scheme) {
+        // The pressed element's own link: its scheme's handler (zoommtg:, slack:, x-apple.systempreferences:, …) — never a
+        // web link's in a browser, which opens it itself (review of round 15, MEDIUM #3b).
+        if let e = named, let scheme = linkScheme(e), !(["http", "https"].contains(scheme) && isWebBrowser(t) && !menu),
+           let h = defaultHandler(scheme) {
             apps.insert(h)
         }
         return .apps(apps)
@@ -402,6 +411,12 @@ extension CUCore {
         let kind = CUHardwareInput.classify(type: type, sourcePid: sourcePid, userData: userData)
         if kind != .none { noteHardwareInput(now: now, move: kind == .move) }
         guard kind == .action else { return }
+        // Typing into the app in front (no ⌘/⌃, not Escape): an app left in front becomes their place — a restore never
+        // pulls them out of it (the ruling, round 16).
+        if type == .keyDown, !flags.contains(.maskCommand), !flags.contains(.maskControl), keycode != 53 {
+            let front = sys.frontmostPid()
+            guardianLock.withLock { guardianCore.userInputInFront(front, now: now) }
+        }
         noteUserInteraction(type: type, flags: flags, keycode: keycode, location: location, targetPid: targetPid)
         let secure = (type == .flagsChanged || type == .keyDown) && secureInputOn
         guardianLock.withLock { guardianCore.inputEvent(type: type, flags: flags, keycode: keycode, secure: secure, now: now) }
@@ -430,6 +445,12 @@ extension CUCore {
                 let receiver = pid_t(truncatingIfNeeded: targetPid)
                 guard receiver == front || sys.isContentProcess(receiver, of: front) else { return }
             }
+            // A focus blip's reroute on the app in front sends the user's keys to THEIR place unless their own move took
+            // them there: with the app in front by the agent's doing (not their place), the key never reached it — no
+            // work in it (round 16's editor-target seed 51: the target stole the front mid-burst, the user's keys went
+            // to their app, and the burst's in-flight check stopped the act "the user started working in it").
+            if let r = activeKeyReroute, r.isInstalled, r.target == front,
+               guardianLock.withLock({ guardianCore.view.app != front }) { return }
             if guardianLock.withLock({ guardianCore.userWorkingApp == front }) { return }  // marked already: nothing more read
             userInteracted(front)
         case .rightMouseDown, .otherMouseDown, .scrollWheel:
@@ -489,6 +510,14 @@ extension CUCore {
         } else {
             userInteracted(pid)
         }
+    }
+
+    /// The work mark alone (no Secure Event Input evidence — an act's own typing changes the text): for the checks INSIDE
+    /// an act already in flight, before each focus placement, key and paste.
+    func refuseIfUserWorkMarked(_ t: CUTarget) throws {
+        guard userIsWorking(in: t.pid) else { return }
+        CULog.act.notice("act in \(t.appName, privacy: .public): the user started working in it while the act ran — stopped")
+        throw CUError.refused(.userWorking, "the user is working in \(t.appName) right now — wait and retry, or ask them")
     }
 
     /// The refusal while the user is working in the target (round 10).
@@ -933,7 +962,12 @@ extension CUCore {
         let isTarget = boundTargetPids().contains(hit.pid)
         // A click into the app already in front is still input for THAT app: should their place move before the click
         // lands (a desktop switch of theirs right after), the app coming back is theirs (seed 1067).
-        if hit.pid == front, !elsewhere { guardianLock.withLock { guardianCore.noteSwitch(now: now, .app, target: hit.pid, quiet: true) } }
+        if hit.pid == front, !elsewhere {
+            guardianLock.withLock {
+                guardianCore.noteSwitch(now: now, .app, target: hit.pid, quiet: true)
+                guardianCore.userInputInFront(hit.pid, now: now)  // a click in an app left in front: their place (round 16)
+            }
+        }
         guard hit.pid != front || elsewhere || isTarget else { return nil }
         if hit.pid == front, !elsewhere {
             // Into the bound target that is in front already: no activation will come — their place now.

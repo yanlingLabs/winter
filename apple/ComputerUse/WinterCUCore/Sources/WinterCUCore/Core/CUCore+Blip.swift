@@ -94,6 +94,7 @@ extension CUCore {
             CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used — no keyboard reroute tap")
             return nil
         }
+        activeKeyReroute = reroute
         let space = space0
         let undo: () -> Void
         var refusal: CUError?

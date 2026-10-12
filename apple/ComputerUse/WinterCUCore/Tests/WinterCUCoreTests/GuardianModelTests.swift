@@ -87,6 +87,8 @@ final class GuardianModelTests: XCTestCase {
         // Round 11's sweep of seeds 1000–1079 (each failed on round 10's engine too; 10 more of its failures are gone):
         (1018, "I4: settled at U, should be X@200 — an untouched U sent back as the agent's indirect effect after the user moved"),
         (1022, "I2: the engine's place T@200, the user's T@100 — the same app on two desktops"),
+        // Round 16: pinned per the review of round 15 (LOW) — still failing there.
+        (1062, "I1: S came forward as the user clicked into it, 4 ms later — the engine took the click as theirs and said nothing"),
     ]
 
     /// The standing second check (round 14): T an ORDINARY app (its acts reach T, Finder, the default browser and the mail
@@ -116,12 +118,31 @@ final class GuardianModelTests: XCTestCase {
         }
     }
 
-    /// Seeds fixed in an earlier round, pinned so they stay fixed (review of round 13: 1067 — a click into the app already
-    /// in front, the quiet instant).
+    /// Seeds fixed in an earlier round, pinned so they stay fixed — THE RATCHET (the user's process ruling, round 16 → 17:
+    /// every pinned seed that ever passed keeps passing). Review of round 13: 1067 — a click into the app already in front,
+    /// the quiet instant. Round 16: 1063 (the review of round 15, HIGH #1 — "pin 1063 to pass": a restore never leaves a
+    /// launched app the user is in); 1008, 1017, 1057, 1073 (the launch rule's survey, fixed with it); 1049 (a left launch
+    /// never adopted later); 1051 (Secure Event Input within the quiet window).
+    static let fixedSeeds = [1008, 1011, 1017, 1038, 1049, 1051, 1055, 1057, 1059, 1063, 1067, 1073]
+
     func testFixedSeedsStayFixed() async {
-        for seed in [1011, 1038, 1055, 1059, 1067] {
+        for seed in Self.fixedSeeds {
             let r = await SimRun.execute(SimPlan.generate(seed: UInt64(seed), count: Self.steps))
             XCTAssertNil(r.violation, "seed \(seed): \(r.violation ?? "")")
+        }
+    }
+
+    /// The same ratchet with an ordinary target (WINTER_CU_SIM_TARGET=sim.editor's survey): round 14's 36 (the review of
+    /// round 15, LOW: "pin 36"), round 16's 49, 51 (a key the focus blip sends to the user's place is no work in the
+    /// target) and 58.
+    static let fixedOrdinaryTargetSeeds = [36, 49, 51, 58]
+
+    func testFixedOrdinaryTargetSeedsStayFixed() async {
+        for seed in Self.fixedOrdinaryTargetSeeds {
+            var plan = SimPlan.generate(seed: UInt64(seed), count: Self.steps)
+            plan.targetBundle = "sim.editor"
+            let r = await SimRun.execute(plan)
+            XCTAssertNil(r.violation, "seed \(seed) with an ordinary target: \(r.violation ?? "")")
         }
     }
 

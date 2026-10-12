@@ -914,13 +914,103 @@ extension CUCore {
         return nil
     }
 
+    /// End, Home, Page Up or Page Down done to a page over accessibility (its keyboard focus elsewhere): the name of the
+    /// way that worked, or nil (another key, or no way).
+    func scrollPageForKey(_ k: CUNamedKey, area: AXUIElement, element: AXUIElement, times: Int, _ t: CUTarget) throws -> String? {
+        let scroller = scrollArea(from: area) ?? scrollArea(from: element)
+        switch k {
+        case .pageDown, .pageUp:
+            return try axScroll(area: scroller, element: area, direction: k == .pageDown ? .down : .up, pages: Double(times))
+        case .end, .home:
+            if let s = scroller, let bar = ax.element(s, kAXVerticalScrollBarAttribute), ax.isSettable(bar, kAXValueAttribute) {
+                let target: Double = k == .end ? 1 : 0
+                do { try ax.set(bar, kAXValueAttribute, NSNumber(value: target)) } catch let error where Self.deliveryUncertain(error) { throw busyAfterSend(t) }
+                if let v = (ax.attribute(bar, kAXValueAttribute) as? NSNumber)?.doubleValue, abs(v - target) < 0.02 {
+                    return "the scroll bar moved to its \(k == .end ? "end" : "start")"
+                }
+            }
+            // The page's last (or first) element brought into view.
+            var n = area
+            for _ in 0..<30 {
+                let kids = ax.elements(n, kAXChildrenAttribute).filter { ax.frame($0).map { $0.height > 0 } ?? false }
+                guard let next = k == .end ? kids.last : kids.first else { break }
+                n = next
+            }
+            guard !CFEqual(n, area), (try? ax.perform(n, "AXScrollToVisible")) != nil else { return nil }
+            return "its \(k == .end ? "last" : "first") element scrolled into view"
+        default:
+            return nil
+        }
+    }
+
+    /// The web area `e` sits in, if any (up to 40 levels).
+    func webAreaAncestor(of e: AXUIElement) -> AXUIElement? {
+        var n: AXUIElement? = e
+        for _ in 0..<40 {
+            guard let x = n else { return nil }
+            if ax.string(x, kAXRoleAttribute) == "AXWebArea" { return x }
+            n = ax.element(x, kAXParentAttribute)
+        }
+        return nil
+    }
+
+    /// Whether `e` is `area` or inside it.
+    func isInside(_ e: AXUIElement, _ area: AXUIElement) -> Bool {
+        var n: AXUIElement? = e
+        for _ in 0..<60 {
+            guard let x = n else { return false }
+            if CFEqual(x, area) { return true }
+            n = ax.element(x, kAXParentAttribute)
+        }
+        return false
+    }
+
+    /// A point of the page, inside the bound window, where nothing pressable or editable lies (the page itself, or a
+    /// plain group or text): where a click gives the page the keyboard focus and acts on nothing. Nil when none is found.
+    func blankSpot(in area: AXUIElement, _ t: CUTarget) -> CGPoint? {
+        guard let f = ax.frame(area), let w = sys.window(id: t.windowID)?.frame else { return nil }
+        let r = f.intersection(w).insetBy(dx: 6, dy: 6)
+        guard !r.isNull, r.width > 4, r.height > 4 else { return nil }
+        let candidates = [CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.midX, y: r.maxY),
+                          CGPoint(x: r.maxX, y: r.midY), CGPoint(x: r.minX, y: r.midY), CGPoint(x: r.maxX, y: r.minY)]
+        let editable: Set<String> = [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole, "AXSearchField"]
+        for p in candidates {
+            // The page's own nodes under the point (the last drawn on top), read live over accessibility: nothing on the
+            // way down takes a press, a click or text (a link's text, a button's label, a field) — a blank spot.
+            var chain: [AXUIElement] = [area]
+            var budget = 400
+            var level = area
+            descend: while budget > 0 {
+                for c in ax.elements(level, kAXChildrenAttribute).reversed() {
+                    budget -= 1
+                    if let f = ax.frame(c), f.width > 0, f.height > 0, f.contains(p) { chain.append(c); level = c; continue descend }
+                }
+                break
+            }
+            let acts = chain.dropFirst().contains { n in
+                let role = ax.string(n, kAXRoleAttribute) ?? ""
+                let actions = ax.actions(n)
+                return Self.clickableRoles.contains(role) || editable.contains(role)
+                    || actions.contains(kAXPressAction) || actions.contains("AXOpen") || actions.contains("AXConfirm")
+            }
+            if !acts { return p }
+        }
+        return nil
+    }
+
     /// Controls a press acts on: giving one the keyboard focus by a press already acts on it.
     static let pressActsRoles: Set<String> = [
         "AXCheckBox", "AXRadioButton", "AXSwitch", "AXToggle", "AXButton", "AXLink", "AXMenuButton", "AXPopUpButton",
         "AXDisclosureTriangle", "AXMenuItem",
     ]
-    /// The ones Space toggles and Return does not.
-    static let toggleRoles: Set<String> = ["AXCheckBox", "AXRadioButton", "AXSwitch", "AXToggle"]
+    /// The ones Space toggles and Return does not (a disclosure triangle too — review of round 15, LOW).
+    static let toggleRoles: Set<String> = ["AXCheckBox", "AXRadioButton", "AXSwitch", "AXToggle", "AXDisclosureTriangle"]
+
+    /// A navigation key: the arrows, Home/End, Page Up/Down, Tab, Escape — with no modifier but ⇧, pressed once.
+    static func isNavigationChord(_ chord: CUKeyChord) -> Bool {
+        guard chord.modifiers.subtracting([.shift]).isEmpty, case .named(let k) = chord.key else { return false }
+        return [.up, .down, .left, .right, .home, .end, .pageUp, .pageDown, .tab, .escape].contains(k)
+    }
 
     /// Roles that take a click: the hit test climbs from the deepest element at the point to the first of these
     /// (or anything listing press / open / show menu).
@@ -934,6 +1024,15 @@ extension CUCore {
     /// (a cached state may be stale after a scroll): the deepest element whose frame holds the point, climbing to
     /// the nearest one that takes a click. Pure over the tree; nil when nothing there does.
     static func clickTarget(at point: CGPoint, in roots: [CUNode]) -> CUNode? {
+        guard let chain = pointChain(at: point, in: roots) else { return nil }
+        return chain.reversed().first { n in
+            !n.states.contains(.disabled) && (clickableRoles.contains(n.role)
+                || n.actions.contains(kAXPressAction) || n.actions.contains("AXOpen") || n.actions.contains(kAXShowMenuAction))
+        }
+    }
+
+    /// The nodes under `point`, outermost first (the last drawn on top), in the first root that holds it.
+    static func pointChain(at point: CGPoint, in roots: [CUNode]) -> [CUNode]? {
         func path(_ n: CUNode) -> [CUNode]? {
             guard let f = n.frame, f.width > 0, f.height > 0, f.contains(point) else {
                 // A node without geometry (a group) may still hold children that have it.
@@ -946,28 +1045,29 @@ extension CUCore {
             return [n]
         }
         for r in roots.reversed() {
-            guard let chain = path(r) else { continue }
-            return chain.reversed().first { n in
-                !n.states.contains(.disabled) && (clickableRoles.contains(n.role)
-                    || n.actions.contains(kAXPressAction) || n.actions.contains("AXOpen") || n.actions.contains(kAXShowMenuAction))
-            }
+            if let chain = path(r) { return chain }
         }
         return nil
     }
 
     /// `clickTarget` over a fresh, bounded read of the bound window (refs are kept: nothing ages out).
     func elementAt(_ point: CGPoint, in t: CUTarget) -> AXUIElement? {
-        let roots: [CUNode]
-        if let read = treeReadOverride {
-            roots = read(t)
-        } else {
-            guard let win = try? windowElement(t) else { return nil }
-            var reader = AXTreeReader()
-            reader.timeBudgetMs = 1500
-            roots = reader.read(roots: [win], cache: t.refs, now: clock.nowMs).roots
-        }
-        guard let node = Self.clickTarget(at: point, in: roots), let key = t.refs.key(for: node.ref) else { return nil }
-        return key.element
+        elementsAt([point], in: t)[0]
+    }
+
+    /// `elementAt` for several points, from ONE read of the tree.
+    func elementsAt(_ points: [CGPoint], in t: CUTarget) -> [AXUIElement?] {
+        let roots = freshRoots(t)
+        return points.map { p in Self.clickTarget(at: p, in: roots).flatMap { t.refs.key(for: $0.ref)?.element } }
+    }
+
+    /// A fresh, bounded read of the bound window's tree.
+    func freshRoots(_ t: CUTarget) -> [CUNode] {
+        if let read = treeReadOverride { return read(t) }
+        guard let win = try? windowElement(t) else { return [] }
+        var reader = AXTreeReader()
+        reader.timeBudgetMs = 1500
+        return reader.read(roots: [win], cache: t.refs, now: clock.nowMs).roots
     }
 
     /// A screenshot pixel of this target (`shotId`, else its latest shot) → global screen points.
@@ -1327,6 +1427,11 @@ extension CUCore {
                     // Before EVERY character: not cancelled, still running, and focus still on a typable,
                     // non-sensitive field — a tab or return may just have moved it to a password field.
                     try token.check()
+                    // Before EVERY key: the user started working in the app meanwhile → nothing more goes out.
+                    if userIsWorking(in: t.pid) {
+                        CULog.act.notice("type in \(t.appName, privacy: .public): the user started working in it after \(sent, privacy: .public) of \(chars.count, privacy: .public) characters — stopped")
+                        throw CUError.refused(.userWorking, "typed \(sent) of \(chars.count) characters; then the user started working in \(t.appName), so the rest was not sent — wait and retry, or ask them")
+                    }
                     try blips.before()
                     guard sys.appRunning(t.pid) else { throw CUError.targetLost("\(t.appName) quit while typing", reason: .appQuit) }
                     if sent > 0, chars[sent - 1] == "\t" || chars[sent - 1].isNewline { g.focusMayHaveMoved = true }
@@ -1922,6 +2027,10 @@ extension CUCore {
     /// another element focused — nothing is typed, because the keys would go there. When the app reports no
     /// focus at all there is nothing to check against: the focus-unknown floor still governs the typing.
     func placeFocus(_ e: AXUIElement, _ t: CUTarget, ref: Int?) throws {
+        // Nothing moves the focus inside a bound app once the user works in it — an act already in flight included
+        // (round 15's live run: a type act checked I6 at its start, the user clicked into Name, and its focus placement
+        // 242 ms later took them back to Email).
+        try refuseIfUserWorkMarked(t)
         if try focusField(e, t) { return }
         guard t.accessible else { return }
         if focusRelation(e, t) == .elsewhere { throw focusNotPlacedRefusal(t, ref: ref) }
@@ -1994,9 +2103,10 @@ extension CUCore {
     /// Focuses `e` by pressing it, never by the `AXFocused` write: a listed `AXPress`/`AXConfirm`, else a
     /// window-targeted click at its centre when the window is on screen. Verified against the focused element.
     /// False when nothing placed focus on it.
-    func pressToFocus(_ e: AXUIElement, _ t: CUTarget) throws -> Bool {
+    func pressToFocus(_ e: AXUIElement, _ t: CUTarget, clickAt: CGPoint? = nil) throws -> Bool {
         let web = isWebContent(e) || keyboardTarget(t, focused: e) != t.pid
-        let actions = ax.actions(e)
+        // (`clickAt`: only the window-targeted click, at that point — a page's blank spot, never a control's press.)
+        let actions = clickAt == nil ? ax.actions(e) : []
         for a in [kAXPressAction, "AXConfirm"] where actions.contains(a) {
             let done = (try? ax.perform(e, a)) != nil
             let placed = done && waitFocused(e, t, web: web)
@@ -2005,7 +2115,7 @@ extension CUCore {
         }
         // A selection write puts the caret in a text control (WebKit focuses the control it selects in) — an AX
         // write of the selection, never of AXFocused. At the end, so nothing is replaced.
-        if ax.isSettable(e, kAXSelectedTextRangeAttribute), let end = textLength(e, t) {
+        if clickAt == nil, ax.isSettable(e, kAXSelectedTextRangeAttribute), let end = textLength(e, t) {
             if let r = AX.makeRange(location: end, length: 0) {
                 let done = (try? ax.set(e, kAXSelectedTextRangeAttribute, r)) != nil
                 let placed = done && waitFocused(e, t, web: web)
@@ -2027,7 +2137,7 @@ extension CUCore {
         // Only then the point (review of round 13, MEDIUM #4): an element scrolled out of view is scrolled to (round 13's
         // dogfood item 13 — Return into an off-screen button was refused focus_not_placed); one that stays outside the
         // window that takes the click there gets none — it would land on something else.
-        guard let c = focusClickPoint(e, t, windowFor: windowFor) else { return false }
+        guard let c = clickAt ?? focusClickPoint(e, t, windowFor: windowFor) else { return false }
         // Key IN ITS APP (the app's focused window): in the background the system-wide key focus is the user's
         // app, always, so it can't tell whether the click only made the window key.
         let wasKey = boundWindowIsKeyInApp(t)
@@ -2037,6 +2147,7 @@ extension CUCore {
         case .appInFront: throw clickRefusal(t)  // the user may be using it now: no click, and nothing typed after it
         case .activatedItself: throw clickActivatedItselfRefusal(t)
         }
+        try refuseIfUserWorkMarked(t)
         try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()
         let clicked = waitFocused(e, t, web: web)
@@ -2046,6 +2157,7 @@ extension CUCore {
         // address bar) with the focus: once more.
         if (wasKey != true && boundWindowIsKeyInApp(t) != false) || focusRelation(e, t) == .elsewhere {
             CULog.act.notice("focus in \(t.appName, privacy: .public): the first click only made the window key — clicking the field once more")
+            try refuseIfUserWorkMarked(t)
             try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
             t.lastFocusClickMs = clock.nowMs()
             if waitFocused(e, t, web: web) { return true }
@@ -2108,6 +2220,7 @@ extension CUCore {
         } else if web {
             seq.deferIfUnconfirmed = { [self] saved, ours in scheduleRestore(pb, saved: saved, ours: ours) }
         }
+        try refuseIfUserWorkMarked(t)
         let result = try seq.run(items: CUPasteSequence.items(text: text, format: format),
                                  plain: CUPasteSequence.plain(text: text, format: format))
         var o = sent ?? ActOutcome(rung: .processEvents)
@@ -2162,9 +2275,11 @@ extension CUCore {
         func fold(_ s: String) -> String { String(s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(Character.init)) }
         let n = fold(now), w = fold(was)
         for t in texts {
-            let first = t.split(whereSeparator: \.isNewline).first.map(String.init) ?? t
+            // The first line that HAS letters or digits; a key of at least 3 of them (a punctuation- or emoji-only paste,
+            // or a 1–2 character key that streaming output matches, proves nothing — review of round 15, LOW).
+            let first = t.split(whereSeparator: \.isNewline).map(String.init).first { !fold($0).isEmpty } ?? ""
             let key = String(fold(first).prefix(32))
-            guard !key.isEmpty else { continue }
+            guard key.count >= 3 else { continue }
             if CUEditEvidence.occurrences(of: key, in: n) > CUEditEvidence.occurrences(of: key, in: w) { return true }
         }
         return false
@@ -2179,6 +2294,7 @@ extension CUCore {
         guard (1...100).contains(rep) else { throw CUError.invalidParams("repeat must be 1–100") }
         var e: AXUIElement?
         let g = TypingFocus()
+        var navNote: String?
         if let into = a.into {
             let el = try element(into, in: t)
             let info = ElementInfo(el, ax)
@@ -2205,12 +2321,32 @@ extension CUCore {
                 if ret && toggle {
                     throw CUError.unsupported("Return does not toggle \(Self.elementLabel(into, info)) — key(\"space\", { into: \(into) }) or click(\(into)) does")
                 }
-                if Self.producesText(chord) {
-                    throw CUError.unsupported("\(Self.elementLabel(into, info)) takes no text, and putting the keyboard focus on it would press it — click(\(into)) presses it")
+                // Only a NAVIGATION key (the arrows, Home/End, Page Up/Down, Tab, Escape — at most with ⇧) goes to where the
+                // focus is; any other key would act on whatever has it (Delete deleting in a field, ⇧Return submitting a
+                // form): refused, as round 14 did (review of round 15, HIGH #2).
+                guard Self.isNavigationChord(chord) else {
+                    throw CUError.unsupported("putting the keyboard focus on [\(into)] would press it (\(Self.elementLabel(into, info))) — click(\(into)) presses it; send other keys once it has the focus")
                 }
                 CULog.act.notice("key in \(t.appName, privacy: .public): \(a.combo, privacy: .public) aimed at a control a press acts on — sent to where the focus is, no focusing press")
+                navNote = "\(a.combo) went to where the keyboard focus is (giving \(Self.elementLabel(into, info)) the focus would have pressed it)"
             }
             if pressActs {
+                // The keyboard focus not in the control's page (a WKWebView whose page never had it — round 15's live run,
+                // End scrolled nothing): the page gets it first, by a click on a BLANK spot of it — never a press of the
+                // control, never the AXFocused write on web content (round 16, P2).
+                if let area = webAreaAncestor(of: el), !(reportedFocus(t).map { isInside($0, area) } ?? false) {
+                    if let spot = blankSpot(in: area, t) {
+                        let placed = (try? pressToFocus(area, t, clickAt: spot)) ?? false
+                        CULog.act.notice("key in \(t.appName, privacy: .public): the page had no keyboard focus — a click on a blank spot of it \(placed ? "placed" : "did not confirm", privacy: .public) it")
+                    }
+                    // Still none (a background WKWebView keeps it from a blank spot — measured, run138): End, Home, Page
+                    // Up/Down do to the page what they would, over accessibility.
+                    if !(reportedFocus(t).map { isInside($0, area) } ?? false), chord.modifiers.isEmpty, case .named(let k) = chord.key,
+                       let how = try scrollPageForKey(k, area: area, element: el, times: rep, t) {
+                        CULog.act.notice("key in \(t.appName, privacy: .public): \(a.combo, privacy: .public) — the page had no keyboard focus: \(how, privacy: .public)")
+                        return ActOutcome(rung: .accessibility, detail: "the page had no keyboard focus, so \(a.combo) was done over accessibility (\(how)) — \(Self.elementLabel(into, info)) was not pressed")
+                    }
+                }
                 e = reportedFocus(t)
             } else {
                 announceTarget(t, info, pressing: false)
@@ -2241,6 +2377,7 @@ extension CUCore {
         let pageBeforeReturn = returnInChrome ? pageSignature(t) : nil
         for _ in 0..<rep {
             try token.check()
+            try refuseIfUserWorkMarked(t)  // every press of it, an act in flight included
             if textual { try requireTypableFocus(t, g) }
             out = try execute(plan, p, t, token, keyPid: keyPid, blips: blips)
         }
@@ -2262,7 +2399,8 @@ extension CUCore {
                 out = out.noting("the page did not change after Return (still \u{201C}\(page.prefix(80))\u{201D}) — if a page should load, check the field with state(), or waitFor({ title }) if it is slow")
             }
         }
-        return receiving(e, t, out)
+        // A key that went to an element other than the one named: said (review of round 15, HIGH #2).
+        return receiving(e, t, out.noting(navNote))
     }
 
     /// `e` lies in a toolbar (an `AXToolbar` ancestor, a few levels up).

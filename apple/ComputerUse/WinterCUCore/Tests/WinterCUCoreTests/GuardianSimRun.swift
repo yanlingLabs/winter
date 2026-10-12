@@ -301,7 +301,7 @@ final class SimRun {
             // only; X is Terminal — a third party's app, outside every act's reach.
             world.bundles[SimPid.safari] = "com.apple.Safari"
             world.bundles[SimPid.third] = "com.apple.Terminal"
-            world.targetScope = [plan.targetBundle, "com.apple.finder", "com.apple.Safari", "com.apple.mail"]
+            world.targetScope = [plan.targetBundle, "com.apple.Safari", "com.apple.mail"]
             core.isWebBrowserOverride = { _ in false }
             core.defaultHandlerOverride = { ["http": "com.apple.Safari", "https": "com.apple.Safari", "mailto": "com.apple.mail"][$0] }
         }
@@ -589,6 +589,7 @@ final class SimRun {
                     w.mainWin[pid] = wid
                     w.zOrder.append(pid)
                     w.userLaunches[pid] = w.now
+                    w.noteLaunchStart(pid)
                     return pid
                 }
                 w.log("the user's app \(SimPid.name(pid)) starts")
@@ -777,7 +778,9 @@ final class SimRun {
                 w.wins[wid] = SimWin(id: wid, pid: pid, frame: CGRect(x: 320, y: 620, width: 300, height: 200), space: w.space1)
                 w.mainWin[pid] = wid
                 w.zOrder.append(pid)
-                w.agentColdLaunches[pid] = (w.now, w.clearlyNow(for: pid, anyReach: true))
+                // (Undone only within the act's reach — the ruling, round 16.)
+                w.agentColdLaunches[pid] = (w.now, w.clearlyNow(for: pid))
+                w.noteLaunchStart(pid)
                 return pid
             }
             w.log("\(SimPid.name(pid)) starts (the agent's action opened it; clearly the agent's: \(w.lock.withLock { w.agentColdLaunches[pid].map { "\($0.clearly)" } ?? "?" }))")
@@ -955,7 +958,9 @@ final class SimRun {
                 let e = error as? CUError
                 w.log("the act: \(e?.message ?? "\(error)")")
                 let refusedForWork = e?.code == "refused" && e?.data?["reason"] == .string("user_working")
-                if refusedForWork, !working {
+                // (Refused mid-act is right when they started working in it DURING the act — round 16, P1: an act in flight checks
+                // the work mark before every focus placement and key. Never when they don't work in it at the refusal either.)
+                if refusedForWork, !working, !w.userWorks(in: tpid) {
                     w.lock.withLock { w.fail("I6: the act was refused as \"the user is working in it\", but they are not (only switched there, or left it)") }
                 } else if refusedForWork {
                     w.lock.withLock { w.stats.handsOff += 1 }
