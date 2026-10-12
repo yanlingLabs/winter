@@ -51,6 +51,33 @@ final class Round18GuardianTests: XCTestCase {
         XCTAssertFalse(posted.isUsers, "a posted click: \(posted)")
     }
 
+    /// The controller's round-18 ruling (the review of round 16's LOW, "used ignores scrolling"): a scroll in the window of
+    /// an app LEFT in front is using it — their place, as typing in it is; a scroll over another app's window is not.
+    func testAScrollInALeftAppsWindowMakesItTheirPlace() {
+        for overItsWindow in [true, false] {
+            let sys = FakeSystem()
+            sys.running = [1, 88, 90]
+            sys.front = 88
+            let w88 = FakeSystem.window(880, pid: 88, CGRect(x: 0, y: 40, width: 400, height: 300))
+            let w90 = FakeSystem.window(900, pid: 90, CGRect(x: 500, y: 40, width: 400, height: 300))
+            sys.windows = [880: w88, 900: w90]
+            sys.stack = [w88, w90]
+            let core = guardedCore(sys)
+            core.guardianLock.withLock {
+                core.guardianCore.begin(view: CUGuardedView(app: 1, space: 100))
+                core.guardianCore.noteCause(500, now: 10.0)
+                core.guardianCore.noteOpenerCause(now: 10.0, scope: .apps(["com.apple.mail"]))
+                core.guardianCore.appLaunched(88, startedAt: 10.2, bundle: "us.zoom.xos", now: 10.25)
+                _ = core.guardianCore.judge(CUMoveQuery(app: 88, space: 100, appBundle: "us.zoom.xos"), now: 11.0)
+            }
+            XCTAssertEqual(core.guardianPlace()?.app, 1, "left in front, not adopted")
+            XCTAssertTrue(core.guardianLock.withLock { core.guardianCore.isLeftInFront(88) })
+            core.noteTapEvent(type: .scrollWheel, sourcePid: 0, userData: 0, location: overItsWindow ? CGPoint(x: 100, y: 100) : CGPoint(x: 600, y: 100), now: 12.0)
+            XCTAssertEqual(core.guardianPlace()?.app, overItsWindow ? 88 : 1,
+                           overItsWindow ? "a scroll in its window: their place" : "a scroll over another app's window: not")
+        }
+    }
+
     /// R17-d (ii): an INTERACTIVE LAUNCHER within the causal window before the start — Return into Spotlight's panel (the
     /// tap names the process it is delivered to), a click in the Dock that is not on a running app's tile (a tile that
     /// launches, Launchpad), a double-click in a Finder window — makes the launch theirs, even BEFORE the agent's act.

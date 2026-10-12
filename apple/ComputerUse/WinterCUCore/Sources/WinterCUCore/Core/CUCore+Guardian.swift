@@ -439,6 +439,13 @@ extension CUCore {
             let front = sys.frontmostPid()
             guardianLock.withLock { guardianCore.userInputInFront(front, now: now) }
         }
+        // A scroll in the app in front's own window: USE of an app left in front — their place, as typing in it is (round
+        // 18, the controller's ruling: scrolling there is work per I6). (The window under the pointer is read only while the
+        // app in front is a left one.)
+        if type == .scrollWheel, let p = location, let front = sys.frontmostPid(),
+           guardianLock.withLock({ guardianCore.isLeftInFront(front) }), windowUnder(p)?.pid == front {
+            guardianLock.withLock { guardianCore.userInputInFront(front, now: now) }
+        }
         noteUserInteraction(type: type, flags: flags, keycode: keycode, location: location, targetPid: targetPid)
         let secure = (type == .flagsChanged || type == .keyDown) && secureNow
         guardianLock.withLock { guardianCore.inputEvent(type: type, flags: flags, keycode: keycode, secure: secure, now: now) }

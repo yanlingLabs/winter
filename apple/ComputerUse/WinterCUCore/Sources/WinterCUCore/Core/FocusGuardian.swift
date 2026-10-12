@@ -574,7 +574,10 @@ public struct CUFocusGuardianCore: Sendable {
     /// (3): a restore never pulls them out of a left app they typed or clicked in).
     private var leftInFront: Set<pid_t> = []
 
-    /// The user typed into (or clicked in) the app in front: an app left in front becomes their place.
+    /// Whether `app` was last judged left in front (unexplained) and has not become their place since.
+    public func isLeftInFront(_ app: pid_t) -> Bool { leftInFront.contains(app) }
+
+    /// The user typed into, clicked in or scrolled in (round 18) the app in front: an app left in front becomes their place.
     public mutating func userInputInFront(_ app: pid_t?, now: TimeInterval) {
         guard active, !visiting(now: now), let a = app, leftInFront.contains(a), view.app != a, let cur = lastSeen, cur.app == a else { return }
         view = cur
