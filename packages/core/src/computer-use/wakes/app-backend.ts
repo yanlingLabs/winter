@@ -10,6 +10,13 @@
 // connection closed: it quit or crashed) takes every armed watch with it — each is reported `lost`, "Winter
 // Computer Use quit".
 //
+// "Only the user's action counts" on an app (the controller's ruling): `clicked` fires on the user's HARDWARE click on
+// the element (the helper's listen-only mouse-down tap — never a synthetic event, never Winter's own input); `changed`
+// needs the user's input too, but the helper can't see keys without Input Monitoring (which is never asked for), so a
+// change counts as theirs when the field holds the keyboard focus in the frontmost app, or their own hardware click
+// went to it; the STATE kinds (`appeared`, `gone`, `titled`) fire on any false→true transition Winter's own input did
+// not cause (in flight, or within 500 ms after). A condition already true at arming is refused (`already_met`).
+//
 // Every sentence this backend throws is the daemon's own — app names and the model's own words only, never a window
 // title or an element's name (those come back in `WakeArmed` and the event's `detail`, which the registry fences).
 import { AutomationFailure } from "../errors";
@@ -136,6 +143,15 @@ export class AppWakeBackend implements WakeBackend {
     if (entry.arming) { entry.early = event; return; }
     this.armed.delete(p.watchId);
     entry.onEvent(event);
+  }
+
+  /** The daemon is stopping (the registry calls it before the engine and the helper go): every watch is cancelled
+   *  quietly and nothing is reported — the registry persists what was armed and reports it at the next boot. */
+  stop(): void {
+    for (const [wakeId, entry] of [...this.armed]) {
+      this.armed.delete(wakeId);
+      if (!entry.arming) this.deps.helper.tell("watch.cancel", { watchId: wakeId });
+    }
   }
 
   /** The helper's connection closed: it quit or crashed, and every watch it held went with it. */

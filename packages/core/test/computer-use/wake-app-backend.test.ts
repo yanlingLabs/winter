@@ -195,6 +195,21 @@ describe("AppWakeBackend: events, disarm, the helper going", () => {
     expect(r.backend.armedCount).toBe(0);
   });
 
+  test("stop() cancels every watch quietly and reports nothing", async () => {
+    const r = rig();
+    await bound(r);
+    await r.backend.arm(req({ kind: "clicked", ref: "12" }, "wk_a"), r.onEvent);
+    await r.backend.arm(req({ kind: "titled", title: "Done" }, "wk_b"), r.onEvent);
+    r.backend.stop();
+    await settle();
+    expect(r.fake.calls("watch.cancel")).toEqual([{ watchId: "wk_a" }, { watchId: "wk_b" }]);
+    r.fake.notify("watchEvent", { watchId: "wk_a", outcome: "fired", at: 1, detail: "clicked" });
+    r.fake.quit();
+    await settle();
+    expect(r.events).toEqual([]);
+    expect(r.backend.armedCount).toBe(0);
+  });
+
   test("an event that overtakes the arm's answer is delivered after it, never before", async () => {
     const r = rig();
     await bound(r);
