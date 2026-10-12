@@ -152,6 +152,7 @@ export class SessionMessaging {
   private readonly now: () => number;
   private readonly log: (line: string) => void;
   private draining = false;
+  private authorityReadFaultLogged = false;
   /** (caller, message id, target, text digest) → the delivery's answer, in flight or settled. */
   private readonly deliveries = new Map<string, { at: number; answer: Promise<SendAnswer> }>();
 
@@ -210,7 +211,14 @@ export class SessionMessaging {
   private consistentMode(sessionId: string, meta: Meta): boolean {
     if (!this.deps.cowork) return meta.mode !== "cowork";
     try { this.deps.cowork.binding(sessionId); return meta.mode === "cowork"; }
-    catch (error) { return error instanceof CoworkError && error.code === "not_found" && meta.mode !== "cowork"; }
+    catch (error) {
+      if (error instanceof CoworkError && error.code === "not_found") return meta.mode !== "cowork";
+      if (!this.authorityReadFaultLogged) {
+        this.authorityReadFaultLogged = true;
+        this.log("session_authority_unavailable: canonical conversation records could not be read; refusing agent session access");
+      }
+      return false;
+    }
   }
 
   /** All-session discovery uses the same authority before query/count/path projection.

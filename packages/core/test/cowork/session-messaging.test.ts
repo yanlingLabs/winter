@@ -5,13 +5,17 @@ import { join } from "node:path";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { mayContactCoworkPeer } from "../../src/cowork/messaging-authority";
 import { SessionMessaging, type MessagingDriverHandle } from "../../src/agent/session-messaging";
-import { openRuntimeStateDb } from "../../src/runtime-state/db";
+import { downgradeCoworkRuntimeStateToV7, openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION } from "../../src/runtime-state/db";
 import type { SessionRow } from "../../src/sessions/store";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
-function fixture() {
+function fixture(legacyHome = false) {
   const home = mkdtempSync(join(tmpdir(), "winter-project-messaging-"));
+  if (legacyHome) {
+    openRuntimeStateDb(home).close();
+    downgradeCoworkRuntimeStateToV7(home);
+  }
   const db = openRuntimeStateDb(home), records = new CoworkRepository(db);
   cleanups.push(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
   const rows = new Map<string, SessionRow>(), drivers = new Map<string, MessagingDriverHandle>();
@@ -104,8 +108,12 @@ test("missing authority and mismatched canonical project fail closed, even with 
   expect(f.records.binding(a).projectId).toBe(project); expect(f.ensured).toEqual([]);
 });
 
-test("host Code-to-Code send and stop retain existing broader authority", async () => {
-  const f = fixture(), a = f.session("code"), b = f.session("code");
+test.each([false, true])("host-only home (legacy=%s) has the canonical schema and preserves Code messaging without Cowork rows", async (legacy) => {
+  const f = fixture(legacy), a = f.session("code"), b = f.session("code");
+  expect(f.db.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);
+  expect(f.db.integrity().tables).toContain("cowork_conversations");
+  expect(f.records.list()).toEqual([]);
+  expect(f.db.db.query("SELECT count(*) AS n FROM cowork_conversations").get()).toEqual({ n: 0 });
   f.rows.get(a)!.approvalPolicy = "ask"; f.rows.get(b)!.approvalPolicy = "bypass";
   expect((await f.send(a, b)).status).toBe("resumed_and_delivered");
   expect((await f.messaging.stop(a, { id: b })).status).toBe("stopped");
@@ -138,7 +146,8 @@ test("session-index mode cannot downgrade a canonical guest binding to host auth
 
 test("canonical record failures never fall back to broad host authority", async () => {
   const f = fixture(), host = f.session("code"), target = f.session("code");
-  const unavailable = new SessionMessaging({ ...f.deps, cowork: {
+  const logs: string[] = [];
+  const unavailable = new SessionMessaging({ ...f.deps, log: line => logs.push(line), cowork: {
     binding: () => { throw new Error("canonical store unavailable"); },
     project: (id) => f.records.project(id), get: (id) => f.records.get(id),
   } });
@@ -148,4 +157,5 @@ test("canonical record failures never fall back to broad host authority", async 
   expect(unavailable.mayList(host, host)).toBe(false);
   expect((await unavailable.stop(host, { id: target })).status).toBe("not_found");
   expect(f.sent).toEqual([]); expect(f.ensured).toEqual([]); expect(f.stopped).toEqual([]);
+  expect(logs).toHaveLength(1); expect(logs[0]).toContain("session_authority_unavailable");
 });

@@ -65,3 +65,13 @@ caller/target gate used by messaging, discovery, transcript/output, stop and
 spawn ports. Forwarding guest requests to the local socket as Harness would
 discard that authority boundary. User RPCs retain their separate authenticated
 user authorization and workspace projection path.
+
+## Host-only schema and startup follow-up
+
+Fresh and legacy-v7 host-only homes now have an explicit messaging regression:
+the writable runtime-state open applies the Cowork schema before SessionMessaging
+construction, no Cowork rows exist, and ordinary host Code messaging/stop still
+works. Unexpected canonical-store failures emit one nonsecret
+`session_authority_unavailable` diagnostic per service lifetime while access
+remains refused. Startup before the messaging service exists reports a retry
+error rather than claiming an empty ListSessions inventory.

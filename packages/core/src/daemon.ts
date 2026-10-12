@@ -1408,7 +1408,10 @@ export async function startDaemon(opts: {
       // management surface with its own hub/store would read every attached session as idle.
       sessions: {
         store,
-        mayList: (callerId, targetId) => sessionMessaging?.mayList(callerId, targetId) ?? false,
+        mayList: (callerId, targetId) => {
+          if (!sessionMessaging) throw Object.assign(new Error("session_authority_unavailable: session messaging is starting; retry shortly"), { code: "session_authority_unavailable", retryable: true });
+          return sessionMessaging.mayList(callerId, targetId);
+        },
         derive: (row, sessionId, nowMs) => activityDeriver?.(row, sessionId, nowMs),
         turnStartedAt: (sid) => winterDrivers.get(sid)?.turnStartedAt,
         working: (sid) => signalsDeriver?.(sid).working ?? (winterDrivers.get(sid)?.turnRunning ?? false),

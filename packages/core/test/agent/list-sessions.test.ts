@@ -426,4 +426,13 @@ describe("list_sessions: host-owned Cowork authority", () => {
     expect(rowsOf((await unknown.call({}, null)).output)).toHaveLength(0);
     expect(unknown.reads).toEqual([]);
   });
+
+  test("an initializing authority reports an error to retry rather than an empty inventory", async () => {
+    const h = scoped(() => { throw Object.assign(new Error("session_authority_unavailable: session messaging is starting; retry shortly"), { code: "session_authority_unavailable", retryable: true }); });
+    const result = await h.call({});
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("session_authority_unavailable");
+    expect(result.output).toContain("retry");
+    expect(h.reads).toEqual([]);
+  });
 });
