@@ -1,0 +1,110 @@
+{
+  "status": "source-only-generic-port-independent-review-required",
+  "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+  "source": "out/libkrun-runtime-port",
+  "basePatches": [
+    {
+      "patchFile": "patches/0004-proposed-guarded-block-reviewed-fixes.patch",
+      "patchSha256": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481"
+    },
+    {
+      "patchFile": "patches/0005-proposed-guarded-block-producer-progress.patch",
+      "patchSha256": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775"
+    },
+    {
+      "patchFile": "patches/0006-proposed-raw-block-trace.patch",
+      "patchSha256": "00e169fb7e5c527d348269cc8211afc99daa800622bce6140a4b2b42c204951d"
+    },
+    {
+      "patchFile": "patches/0007-proposed-guarded-stream.patch",
+      "patchSha256": "4acf7d82622d98ca1265e6a57bcd167f6df1fd5efb6a63cc65a9f6b24f35e044"
+    },
+    {
+      "patchFile": "patches/0008-proposed-guarded-stream-reviewed-fixes.patch",
+      "patchSha256": "43331eedec8e73f735830932b56c28cb3eb311f1c9bcbf3535f497063a369378"
+    },
+    {
+      "patchFile": "patches/0009-proposed-guarded-stream-closed-factory.patch",
+      "patchSha256": "ae46b3d1732cf6e00b3cb451334be04b222093cd78418b91b706d2a33a4f35c4"
+    }
+  ],
+  "patchFile": "patches/0010-proposed-generic-runtime-port.patch",
+  "patchSha256": "62298de5d9176725d6a4bf0f79183a141de6d3162ff6085bce42ecd43f235752",
+  "fullSourceDiffSha256": "6331d0e07ba4cfab8a318bd31ef52cf1645ffedfee6e46da185c568db0e15c2d",
+  "moduleCorrespondence": {
+    "stream_reclaim_access.rs": "src/devices/src/reclaim_access.rs",
+    "stream_io_v3.rs": "src/devices/src/stream_io.rs",
+    "runtime_port.rs": "src/devices/src/virtio/console/runtime_port.rs",
+    "runtime_port_control.rs": "src/devices/src/virtio/console/runtime_port_control.rs"
+  },
+  "features": [
+    "blk"
+  ],
+  "defaultFeatures": false,
+  "devices": [
+    "PL011",
+    "balloon",
+    "bounded RNG",
+    "one RAW block",
+    "one generic non-console port0 (four virtqueues)"
+  ],
+  "streamAdmission": "Closed library-created AF_UNIX SOCK_STREAM socketpair; only opposite peer fd>=3/CLOEXEC published; private device endpoint nonblocking/CLOEXEC and every duplicate internal. Caller-FD setter always refuses.",
+  "maxDevices": 2,
+  "maxPins": 32,
+  "maxPinnedBytes": 8388608,
+  "maxTxBytes": 65536,
+  "maxRxOwnedBytes": 16384,
+  "maxRxReportedChainBytes": 1048576,
+  "queueSize": 32,
+  "terminalFaultExitCode": 77,
+  "terminalFaultOutcome": "UNCERTAIN",
+  "vmStarted": false,
+  "payloadLogging": false,
+  "credentialAuthorityImplemented": false,
+  "keysOrUnlockImplemented": false,
+  "productionReady": false,
+  "fullResourceGatePassed": false,
+  "limitations": [
+    "Generic device has not booted; prior HVC resource evidence is not transferred.",
+    "Linux generic data path is asynchronous; Linux __send_control_msg still spins until control ACK.",
+    "One boot port lifetime: guest CLOSE is ACKed then terminal/UNCERTAIN; no hotplug/name/resize/remove/reopen protocol.",
+    "Host Stop/reset and short-copy constraints retained; live generic guest reset/cancellation remains unproved.",
+    "Reset may deliver/consume already-started owned bytes; no authenticated runtime/replay/exactly-once guarantee.",
+    "No key delivery, guest confinement, worker admission or full Cowork integration is supplied by this source candidate.",
+    "Existing RAW block reset/25ms completion-hold limitations remain unchanged."
+  ],
+  "priorCheckpoint": "020e1547586c26a95c9a8fe83ee84e064758e3c2",
+  "priorFullSourceDiffSha256": "7ad027f83b8b51a5e0ec62da2546ad01b2dc5c111937be63874d5bd2278d03bd",
+  "factoryAPI": "krun_create_cowork_runtime_stream(ctx_id)",
+  "factoryReturns": "Peer FD>=3 on success, caller owns/closes it; negative errno on failure, no endpoint published and all newly created endpoints closed.",
+  "workerNoForkContract": "Before production factory call, install worker purpose-built sandbox denying process-fork/exec; never fork afterward. Threads allowed. Signed-worker process-fork denial test remains required before secret-bearing guest run.",
+  "hostileSameProcessBoundary": false,
+  "forkClosureProvenByLibrary": false,
+  "darwinPrivateABIUsed": false,
+  "queueCount": 4,
+  "queueRoles": [
+    "port0 RX",
+    "port0 TX",
+    "control RX",
+    "control TX"
+  ],
+  "featuresRequired": [
+    "VERSION_1",
+    "MULTIPORT"
+  ],
+  "maxPorts": 1,
+  "maxPendingControlResponses": 1,
+  "maxControlTxReportedBytes": 8,
+  "maxControlRxReportedChainBytes": 1048576,
+  "maxControlPacketsPerTurn": 2,
+  "genericDataAfter": "generation-checked PORT_OPEN(0,1) used ACK",
+  "activeReturnVerified": false,
+  "incrementalAddedFiles": [
+    "src/devices/src/virtio/console/runtime_port.rs",
+    "src/devices/src/virtio/console/runtime_port_control.rs"
+  ],
+  "maxControlOwnedBytesPerFrame": 8,
+  "maxPendingControlRxFrames": 1,
+  "maxPendingControlTxFrames": 1,
+  "maxPendingControlPayloadBytesUpperBound": 24
+}
