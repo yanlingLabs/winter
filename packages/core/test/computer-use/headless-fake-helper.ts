@@ -11,7 +11,10 @@
 //   http://crash.test/        — it answers, then exits 1 (a crash of the whole browser)
 //   http://renderer.test/     — it answers, then reports the tab gone `crashed` (one renderer)
 //   http://events.test/       — it answers, then sends events for the tab (one off the allowlist, one for an unknown tab)
-//   http://wedge.test/        — it answers, then never answers a cdp.send for that tab (a wedged browser)
+//   http://wedge.test/        — it answers, then never answers a cdp.send for that tab (a page busy-looping in its
+//                               renderer: everything else, tabs.live included, is still answered)
+//   http://hang.test/         — it answers, then — from that tab's first cdp.send on — answers nothing at all (the
+//                               helper's own main thread stuck)
 //   http://notice.test/       — it answers, then reports a refused popup twice and a refused local-network request
 //                               once (plus a notice of an unknown kind, and one for an unknown tab)
 // It exits 0 on EOF, like the real helper.
@@ -52,9 +55,12 @@ void (async () => {
   process.stdout.end(() => process.exit(0));
 })();
 
+let hung = false;
+
 function handle(m: { params: { linkId: string; cmdId: string; op: string; params: Record<string, unknown> } }): void {
   const { cmdId, op, params: p } = m.params;
   if (logFile !== undefined) appendFileSync(logFile, `${JSON.stringify({ op, params: p })}\n`);
+  if (hung) return;
   switch (op) {
     case "tab.ensure": {
       const tabId = String(p.tabId);
@@ -94,6 +100,7 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
     case "cdp.send": {
       if (!tabs.has(String(p.tabId))) return fail(cmdId, "tab_gone", "the headless tab is gone");
       if (tabs.get(String(p.tabId))!.url === "http://wedge.test/") return; // never answered
+      if (tabs.get(String(p.tabId))!.url === "http://hang.test/") { hung = true; return; } // nothing answered from now on
       if (p.method === "Runtime.evaluate") return reply(cmdId, { result: { result: { type: "number", value: 2 } } });
       return reply(cmdId, { result: {} });
     }

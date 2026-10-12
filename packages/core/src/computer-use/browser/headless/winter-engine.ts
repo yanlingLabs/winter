@@ -27,7 +27,7 @@ export type HeadlessOp = "tab.ensure" | "tab.release" | "tab.close" | "tabs.live
 export const HEADLESS_COMMAND_MAX = 1024 * 1024;
 /** The longest line read back (a result is at most 8 MiB plus its envelope). */
 export const HEADLESS_LINE_MAX = 16 * 1024 * 1024;
-export const HEADLESS_TIMEOUTS = { send: 15_000, screenshot: 20_000, ensure: 20_000, other: 15_000, hello: 30_000 } as const;
+export const HEADLESS_TIMEOUTS = { send: 15_000, screenshot: 20_000, ensure: 20_000, other: 15_000, hello: 30_000, probe: 3_000 } as const;
 /** How long a helper whose pipe was closed has to exit before it is killed. */
 export const HEADLESS_EXIT_GRACE_MS = 3_000;
 

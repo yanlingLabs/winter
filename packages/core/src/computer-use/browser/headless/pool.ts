@@ -10,8 +10,10 @@
 //     nothing is closed for the model;
 //   - gone after 5 minutes with no tab, at daemon stop, and when `computerUse.headless.enabled` turns off (read live,
 //     at every command and every 10 s);
-//   - a crash loses every tab (`tabGone(crashed)`; the next `browsers.open` starts a fresh helper) — and so does a
-//     helper that stops answering: 3 commands in a row that time out and it is killed as wedged;
+//   - a crash loses every tab (`tabGone(crashed)`; the next `browsers.open` starts a fresh helper). 3 commands in a
+//     row that time out: the helper is asked `tabs.live`, which its main thread answers without any page — answered,
+//     only the tabs those commands named are lost (a page busy-looping in its renderer); not answered within 3 s, the
+//     helper is wedged and killed, every tab with it;
 //   - `<home>/run/headless.pid` names the running helper (pid + start time) and `<home>/cache/headless-cef/<random>`
 //     is its own cache root, so the next daemon's boot sweep (`sweepHeadless`) can clear what a dead one left.
 // A session's context (its cookies) outlives its tabs while the helper runs, and goes when the session's runtime ends
@@ -38,7 +40,8 @@ export const HEADLESS_IDLE_EXIT_MS = 5 * 60_000;
 export const HEADLESS_ENABLED_POLL_MS = 10_000;
 /** The memory reading is reused this long. */
 const RSS_CACHE_MS = 1_000;
-/** This many commands in a row that time out and the helper is wedged: it is killed, and every tab it held is lost. */
+/** This many commands in a row that time out and the helper is probed (`tabs.live`): stuck itself, it is killed and
+ *  every tab it held is lost; answering, only the tabs those commands named are lost. */
 export const HEADLESS_WEDGED_AFTER_TIMEOUTS = 3;
 
 export const HEADLESS_NAME = "Winter (headless)";
@@ -136,8 +139,11 @@ export class HeadlessPool implements CdpTransport {
   private launching: Promise<WinterHeadlessProcess> | undefined;
   /** Each helper run's own cache directory, removed when it exits (and again, for a stop, at once). */
   private readonly runDirs = new Map<WinterHeadlessProcess, string>();
-  /** Commands in a row that timed out, for the running helper. */
+  /** Commands in a row that timed out, for the running helper, and the tabs they named. */
   private timeoutStreak = 0;
+  private readonly streakTabs = new Set<string>();
+  /** A wedge probe in flight (one at a time). */
+  private probing = false;
   private readonly tabs = new Map<string, PoolTab>();
   /** Slots taken by `createTab` calls still in flight (so two at once cannot both pass the budget). */
   private readonly reserved = new Map<string, number>();
@@ -219,6 +225,7 @@ export class HeadlessPool implements CdpTransport {
     this.runDirs.set(proc, runDir);
     this.exitReason = undefined;
     this.timeoutStreak = 0;
+    this.streakTabs.clear();
     proc.onExit((code, signal) => this.exited(proc, code, signal));
     proc.onEvent((e) => this.event(proc, e));
     proc.onTabGone((tabKey, reason) => this.helperTabGone(proc, tabKey, reason));
@@ -329,26 +336,70 @@ export class HeadlessPool implements CdpTransport {
 
   /**
    * One command to the helper. A timeout counts toward the wedge: `HEADLESS_WEDGED_AFTER_TIMEOUTS` in a row and the
-   * helper is killed (a crash: every tab it held is lost, the next open starts a fresh one). Any answer resets it.
+   * helper is probed (`probeWedge`). Any answer resets it.
    */
   private async command(proc: WinterHeadlessProcess, op: HeadlessOp, params: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {
     try {
       const r = await proc.command(op, params, timeoutMs);
-      if (this.proc === proc) this.timeoutStreak = 0;
+      if (this.proc === proc) this.resetStreak();
       return r;
     } catch (err) {
       if (this.proc === proc) {
         if (err instanceof TransportError && err.code === "timeout") {
-          if (++this.timeoutStreak >= HEADLESS_WEDGED_AFTER_TIMEOUTS && proc.alive) {
-            this.deps.log?.(`computer-use: Winter's headless browser stopped answering (${this.timeoutStreak} commands in a row timed out) — restarting it`);
-            proc.kill();
-          }
+          if (typeof params.tabId === "string") this.streakTabs.add(params.tabId);
+          if (++this.timeoutStreak >= HEADLESS_WEDGED_AFTER_TIMEOUTS && proc.alive) void this.probeWedge(proc);
         } else if (err instanceof TransportError && err.code !== "tab_gone") {
-          this.timeoutStreak = 0;
+          this.resetStreak();
         }
       }
       throw err;
     }
+  }
+
+  private resetStreak(): void {
+    this.timeoutStreak = 0;
+    this.streakTabs.clear();
+  }
+
+  /**
+   * Commands in a row timed out: is it the HELPER that is stuck, or a page? `tabs.live` is answered on the helper's
+   * own main thread, asking no page. Answered: the helper is fine and a page is not (a renderer busy-looping) — only the
+   * tabs those commands named are lost (closed in the helper, `crashed` to the engine), every other session's tabs
+   * stay. Not answered within the probe's time: the helper is wedged and killed (a crash: every tab it held is lost,
+   * the next open starts a fresh one).
+   */
+  private async probeWedge(proc: WinterHeadlessProcess): Promise<void> {
+    if (this.probing) return;
+    this.probing = true;
+    const streak = this.timeoutStreak;
+    const suspects = [...this.streakTabs];
+    const probeMs = this.deps.timeouts?.probe ?? HEADLESS_TIMEOUTS.probe;
+    let answered = true;
+    try {
+      await proc.command("tabs.live", {}, probeMs);
+    } catch (err) {
+      // An answer that is a failure is still an answer; only silence is the wedge.
+      answered = !(err instanceof TransportError && err.code === "timeout");
+    } finally {
+      this.probing = false;
+    }
+    if (this.proc !== proc || !proc.alive) return;
+    if (!answered) {
+      this.deps.log?.(`computer-use: Winter's headless browser stopped answering (${streak} commands in a row timed out, and it did not answer a check of itself) — restarting it`);
+      proc.kill();
+      return;
+    }
+    this.resetStreak();
+    const lost = suspects.map((k) => this.tabs.get(k)).filter((t): t is PoolTab => t !== undefined && t.proc === proc);
+    for (const t of lost) {
+      this.tabs.delete(t.tabKey);
+      void proc.command("tab.close", { tabId: t.tabKey }, probeMs).catch(() => { /* the helper closes it with its context at the latest */ });
+      this.emitGone(t.tabKey, "crashed");
+    }
+    this.deps.log?.(lost.length > 0
+      ? `computer-use: a page in Winter's headless browser stopped answering (${streak} commands in a row timed out) — its tab closed (${lost.length}); the browser itself still answers`
+      : `computer-use: ${streak} commands to Winter's headless browser timed out, but it still answers — nothing closed`);
+    this.armIdle();
   }
 
   private metric(primitive: string, ms: number, extra: Partial<PrimitiveMetric>): void {

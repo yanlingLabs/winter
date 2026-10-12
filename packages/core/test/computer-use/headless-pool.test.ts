@@ -52,7 +52,7 @@ function rig(o: { mode?: string; verify?: boolean; rss?: number; idleExitMs?: nu
     log: (l) => logs.push(l),
     ...(o.idleExitMs === undefined ? {} : { idleExitMs: o.idleExitMs }),
     ...(o.enabledPollMs === undefined ? {} : { enabledPollMs: o.enabledPollMs }),
-    timeouts: { hello: 5_000, ...(o.sendTimeoutMs === undefined ? {} : { send: o.sendTimeoutMs }) },
+    timeouts: { hello: 5_000, probe: 300, ...(o.sendTimeoutMs === undefined ? {} : { send: o.sendTimeoutMs }) },
   };
   r.pool = new HeadlessPool(deps);
   pools.push(r.pool);
@@ -283,11 +283,12 @@ describe("the helper's life", () => {
     expect(r.metrics.find((m) => m.primitive === "headless.exit")).toMatchObject({ exitReason: "stop" });
   });
 
-  test(`${HEADLESS_WEDGED_AFTER_TIMEOUTS} commands in a row that time out: the helper is killed as wedged, its tabs lost, and the next open starts a fresh one`, async () => {
+  test(`${HEADLESS_WEDGED_AFTER_TIMEOUTS} commands in a row that time out, and the helper still answers a check of itself: only that page's tab is lost — the helper and every other tab stay`, async () => {
     const r = rig({ sendTimeoutMs: 100 });
     const gone: Array<[string, string]> = [];
     r.pool.onTabGone((k, why) => gone.push([k, why]));
     const ok = await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
+    const other = await r.pool.createTab({ sessionId: "s2", url: "https://b.example/" });
     const stuck = await r.pool.createTab({ sessionId: "s1", url: "http://wedge.test/" });
     for (let i = 1; i < HEADLESS_WEDGED_AFTER_TIMEOUTS; i++) {
       expect(((await failure(r.pool.send(stuck.tabKey, "Page.enable"))) as TransportError).code).toBe("timeout");
@@ -295,11 +296,37 @@ describe("the helper's life", () => {
     // An answer in between resets the count.
     await r.pool.send(ok.tabKey, "Page.enable");
     for (let i = 1; i < HEADLESS_WEDGED_AFTER_TIMEOUTS; i++) await failure(r.pool.send(stuck.tabKey, "Page.enable"));
-    expect(r.pool.running).toBe(true);
+    expect(gone).toEqual([]);
     await failure(r.pool.send(stuck.tabKey, "Page.enable"));
+    await until("the stuck tab lost", () => gone.length > 0);
+    expect(gone).toEqual([[stuck.tabKey, "crashed"]]);
+    expect(r.pool.running).toBe(true);
+    expect(r.spawned).toBe(1);
+    expect(((await failure(r.pool.send(stuck.tabKey, "Page.enable"))) as TransportError).code).toBe("tab_gone");
+    // The other tabs, this session's and another's, still work on the same helper.
+    await r.pool.send(ok.tabKey, "Page.enable");
+    await r.pool.send(other.tabKey, "Page.enable");
+    expect(r.pool.tabCount()).toBe(2);
+    await until("the helper told to close it", () => r.commands().some((c) => c.op === "tab.close" && c.params.tabId === stuck.tabKey));
+    expect(r.commands().filter((c) => c.op === "tabs.live").length).toBe(1);
+    expect(r.logs.some((l) => l.includes(`a page in Winter's headless browser stopped answering (${HEADLESS_WEDGED_AFTER_TIMEOUTS} commands in a row timed out) — its tab closed (1); the browser itself still answers`))).toBe(true);
+    expect(r.logs.some((l) => l.includes("restarting it"))).toBe(false);
+    expect(r.metrics.some((m) => m.primitive === "headless.exit")).toBe(false);
+  });
+
+  test(`${HEADLESS_WEDGED_AFTER_TIMEOUTS} commands in a row that time out, and the helper does not answer a check of itself either: it is killed as wedged, every tab lost, and the next open starts a fresh one`, async () => {
+    const r = rig({ sendTimeoutMs: 100 });
+    const gone: Array<[string, string]> = [];
+    r.pool.onTabGone((k, why) => gone.push([k, why]));
+    const ok = await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
+    const stuck = await r.pool.createTab({ sessionId: "s2", url: "http://hang.test/" });
+    for (let i = 0; i < HEADLESS_WEDGED_AFTER_TIMEOUTS; i++) {
+      expect(((await failure(r.pool.send(stuck.tabKey, "Page.enable"))) as TransportError).code).toBe("timeout");
+    }
     await until("the kill", () => !r.pool.running);
     expect(gone.sort()).toEqual(([[ok.tabKey, "crashed"], [stuck.tabKey, "crashed"]] as Array<[string, string]>).sort());
-    expect(r.logs.some((l) => l.includes(`stopped answering (${HEADLESS_WEDGED_AFTER_TIMEOUTS} commands in a row timed out) — restarting it`))).toBe(true);
+    expect(r.commands().filter((c) => c.op === "tabs.live").length).toBe(1);
+    expect(r.logs.some((l) => l.includes(`stopped answering (${HEADLESS_WEDGED_AFTER_TIMEOUTS} commands in a row timed out, and it did not answer a check of itself) — restarting it`))).toBe(true);
     expect(r.metrics.find((m) => m.primitive === "headless.exit")).toMatchObject({ exitReason: "crash" });
     await r.pool.createTab({ sessionId: "s1", url: "https://again.example/" });
     expect(r.spawned).toBe(2);
