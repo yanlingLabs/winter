@@ -265,7 +265,19 @@ export function wakeWatcher(arg: WatcherArg): unknown {
         if ((el as HTMLElement).isContentEditable === true) return (el as HTMLElement).innerText ?? "";
         return Array.from(el.querySelectorAll("input, select, textarea")).filter((f) => !secure(f)).map(fieldValue).join("\u0000");
       };
+      // The page's text costs a layout to read: read again only after the DOM changed (or every 10 s, for what changes
+      // with no mutation), never on every tick of an hours-long wait.
+      let textCache: string | undefined;
+      let textAt = 0;
+      let dirty = true;
       const visibleText = (): string => {
+        if (textCache !== undefined && !dirty && Date.now() - textAt < 10_000) return textCache;
+        dirty = false;
+        textAt = Date.now();
+        textCache = readText();
+        return textCache;
+      };
+      const readText = (): string => {
         const body = document.body;
         if (body === null) return "";
         let t = body.innerText ?? "";
@@ -387,9 +399,10 @@ export function wakeWatcher(arg: WatcherArg): unknown {
         }
         place();
       };
+      const onMutation = (): void => { dirty = true; scheduleCheck(); };
       const scheduleCheck = (): void => {
         if (checkTimer !== undefined) return;
-        checkTimer = setTimeout(() => { checkTimer = undefined; check(); }, Math.max(0, 300 - (Date.now() - lastCheck)));
+        checkTimer = setTimeout(() => { checkTimer = undefined; check(); }, Math.max(0, 500 - (Date.now() - lastCheck)));
       };
       const onTick = (): void => {
         const now = Date.now();
@@ -472,7 +485,7 @@ export function wakeWatcher(arg: WatcherArg): unknown {
         for (const [type, fn] of LISTENERS) addEventListener(type, fn, { capture: true });
         addEventListener("scroll", onMove, { capture: true, passive: true });
         addEventListener("resize", onMove, { passive: true });
-        observer = new MutationObserver(scheduleCheck);
+        observer = new MutationObserver(onMutation);
         try { observer.observe(document, { childList: true, subtree: true, attributes: true, characterData: true }); } catch { /* a detached document */ }
         tick = setInterval(onTick, 1_000);
       };
@@ -509,6 +522,7 @@ export function wakeWatcher(arg: WatcherArg): unknown {
         arm: (a) => {
           sink = a.sink;
           lastPoll = Date.now();
+          dirty = true;
           const spec = a.spec;
           const existing = watches.get(spec.watchId);
           if (existing !== undefined) {
