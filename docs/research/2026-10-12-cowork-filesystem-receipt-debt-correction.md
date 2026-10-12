@@ -1,0 +1,9 @@
+# Current receipt cannot suppress journal debt
+
+Parent `b4bf90db90767eab1b7e92b71d16e4150cc88fdc`. Independent review reproduced a blocker: `record()` treated any truthy current receipt as completed, skipped replay-debt requirements, then `readyFilesystemHistory()` fell back to a prior ready receipt. A probing replay journal with `receipt:{}` and deleted debt could mint another same-owner replay without old-writer stop verification.
+
+The current receipt key is now checked by presence, not truthiness. If present, it must match the current plan, carry clean transient state, and accompany the ready row state that confirmation writes atomically. Otherwise the record refuses as recovery_required before prior-ready fallback or new replay admission. This also rejects null, stale and dirty observations, and valid-looking current observations left in probing state. Existing valid legacy ready history remains readable; no receipt/phase/debt is inferred or repaired.
+
+The exact disposable DB regression failed before the fix and passes afterward. Five variants (empty, null, stale, dirty, clean-but-probing) delete replay debt and demand refusal of both record retrieval and same-owner preparation while the old-writer verifier explicitly returns false. Assertions retain the corrupt journal, probing phase and owner unchanged.
+
+**100 host tests /764 assertions passed** across filesystem/raw-volume/repository/admission suites, plus Core typecheck. The five targeted variants also passed separately after the explicit false-stop-verifier assertion was added. `git diff --check` passed. No SQL/protocol/bootstrap change, image replacement, privileged execution, Linux formatting, CI, push or VM launch occurred. Native stop/receipt producers and actual protocol-3 Linux recovery remain separate review/execution gates.

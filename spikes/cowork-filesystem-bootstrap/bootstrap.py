@@ -39,8 +39,8 @@ def integer(value, minimum, maximum):
     return type(value) is int and minimum <= value <= maximum
 
 def validate_plan(plan):
-    keys(plan, "protocolVersion operationId homeId workspaceId owner volumes virginZeroProvenance ext4Features requiredMountOptions checkMode")
-    require(type(plan["protocolVersion"]) is int and plan["protocolVersion"] == 2, "version")
+    keys(plan, "protocolVersion operationId homeId workspaceId owner volumes virginZeroProvenance ext4Features requiredMountOptions checkMode priorReplay")
+    require(type(plan["protocolVersion"]) is int and plan["protocolVersion"] == 3, "version")
     for field in ("operationId", "homeId", "workspaceId"):
         require(type(plan[field]) is str and TOKEN.fullmatch(plan[field]), "scope")
     require(plan["virginZeroProvenance"] == "new-sparse-creation", "zero_provenance")
@@ -52,13 +52,22 @@ def validate_plan(plan):
         require(type(owner[field]) is str and TOKEN.fullmatch(owner[field]), "owner")
     require(integer(owner["leaseEpoch"], 1, 2**53 - 1), "lease")
     require(type(owner["runtimeImageDigest"]) is str and re.fullmatch(r"[a-f0-9]{64}", owner["runtimeImageDigest"]), "image")
+    prior = plan["priorReplay"]
+    if prior is not None:
+        keys(prior, "operationId owner")
+        require(type(prior["operationId"]) is str and TOKEN.fullmatch(prior["operationId"]) and prior["operationId"] != plan["operationId"], "prior_replay")
+        keys(prior["owner"], "controllerInstanceId workerInstanceId incarnationId leaseEpoch runtimeImageDigest")
+        require(all(type(prior["owner"][k]) is str and TOKEN.fullmatch(prior["owner"][k]) for k in ("controllerInstanceId", "workerInstanceId", "incarnationId")) and integer(prior["owner"]["leaseEpoch"], 1, 2**53 - 1) and type(prior["owner"]["runtimeImageDigest"]) is str and re.fullmatch(r"[a-f0-9]{64}", prior["owner"]["runtimeImageDigest"]), "prior_replay_owner")
+        require(prior["owner"] != owner, "new_replay_owner_required")
     require(type(plan["volumes"]) is list and len(plan["volumes"]) == 2, "pair")
     for index, target in enumerate(plan["volumes"]):
-        keys(target, "volumeId creationId purpose identity capacityBytes sectorBytes filesystemBlockBytes expectedFilesystemUUID action")
+        keys(target, "volumeId creationId purpose identity capacityBytes sectorBytes filesystemBlockBytes expectedFilesystemUUID action readyOperationId")
         for field in ("volumeId", "creationId"):
             require(type(target[field]) is str and TOKEN.fullmatch(target[field]), "volume_identity")
         require(target["purpose"] == ("data", "environment")[index], "fixed_disk_order")
-        require(target["action"] in ("format-new", "probe-existing"), "action")
+        require(target["action"] in ("format-new", "probe-existing", "replay-journal-then-probe"), "action")
+        require(target["readyOperationId"] is None if target["action"] == "format-new" else type(target["readyOperationId"]) is str and TOKEN.fullmatch(target["readyOperationId"]), "previous_ready")
+        require(target["action"] != "replay-journal-then-probe" or plan["checkMode"] == "normal", "readonly_replay_denied")
         require(integer(target["capacityBytes"], MIN_BYTES, MAX_BYTES) and target["capacityBytes"] % 4096 == 0, "capacity")
         require(type(target["sectorBytes"]) is int and target["sectorBytes"] == 512 and type(target["filesystemBlockBytes"]) is int and target["filesystemBlockBytes"] == 4096, "geometry")
         require(type(target["expectedFilesystemUUID"]) is str and UUID.fullmatch(target["expectedFilesystemUUID"]), "uuid")
@@ -105,7 +114,7 @@ def run_tool(name, args, fd, deadline, accepted=(0,)):
     # Temporary output files prevent pipe backpressure; retained output is capped at 4096 bytes.
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         try:
-            result = subprocess.run([tool_path(name), *args, f"/proc/self/fd/{fd}"], pass_fds=(fd,), stdin=subprocess.DEVNULL, stdout=out, stderr=err, timeout=remaining, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C", "MKE2FS_CONFIG": "/dev/null", "HOME": "/nonexistent"}, check=False)
+            result = subprocess.run([tool_path(name), *args, f"/proc/self/fd/{fd}"], pass_fds=(fd,), stdin=subprocess.DEVNULL, stdout=out, stderr=err, timeout=remaining, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C", "MKE2FS_CONFIG": "/dev/null", "E2FSCK_CONFIG": "/dev/null", "HOME": "/nonexistent"}, check=False)
         except subprocess.TimeoutExpired:
             # subprocess.run kills/reaps its own helper before this exception escapes.
             raise Refused("owned_helper_timeout") from None
@@ -153,9 +162,10 @@ class FixtureBootstrap:
     Production must authenticate the exact native envelope and immutable bootstrap
     digest before admitting any descriptor. This fixture cannot supply that evidence.
     """
-    def __init__(self, authenticate):
+    def __init__(self, authenticate, journal_replay=None):
         require(callable(authenticate), "mandatory_authenticator")
         self.authenticate = authenticate
+        self.journal_replay = journal_replay
         self.consumed = set()
 
     def execute(self, incoming, descriptors, proof):
@@ -170,18 +180,36 @@ class FixtureBootstrap:
         self.consumed.add(plan["operationId"])
         deadline = time.monotonic() + 60
         # Preflight BOTH before any formatting effect. Nonzero foreign bytes never get repaired.
+        preflight = []
         for fd, target in zip(descriptors, plan["volumes"]):
             if target["action"] == "format-new":
-                all_zero(fd, target["capacityBytes"], min(deadline, time.monotonic() + 5))
+                all_zero(fd, target["capacityBytes"], min(deadline, time.monotonic() + 5)); preflight.append(([], []))
             else:
-                probe(fd, target, deadline, plan)
+                preflight.append(probe(fd, target, deadline, plan))
+        # Admit the complete replay route set before formatting OR replaying either disk.
+        # Missing/closed adapter cannot turn a mixed pair into a partial format.
+        replay_targets = [(fd, target) for index, (fd, target) in enumerate(zip(descriptors, plan["volumes"])) if target["action"] == "replay-journal-then-probe" and preflight[index][1]]
+        replay_adapter = self.journal_replay
+        if replay_targets:
+            require(callable(replay_adapter), "kernel_replay_adapter_required")
+            if hasattr(replay_adapter, "check_admission"):
+                for fd, target in replay_targets: replay_adapter.check_admission(fd, target, deadline)
         observed = []
-        for fd, target in zip(descriptors, plan["volumes"]):
+        for index, (fd, target) in enumerate(zip(descriptors, plan["volumes"])):
             check_fixture_fd(fd, target)
+            journal_replayed = False
             if target["action"] == "format-new":
                 run_tool("mke2fs", ["-q", "-t", "ext4", "-b", "4096", "-I", "256", "-U", target["expectedFilesystemUUID"], "-O", "none," + ",".join(EXT4_FEATURES), "-E", "lazy_itable_init=1,lazy_journal_init=0,nodiscard", "-F"], fd, deadline)
+            elif target["action"] == "replay-journal-then-probe" and preflight[index][1]:
+                # Root-admitted kernel mount replay only, after BOTH readonly preflights.
+                # This may modify metadata on failure; consumed operation/debt never clears.
+                require(callable(replay_adapter), "kernel_replay_adapter_required")
+                require(replay_adapter(fd, target, deadline) == "kernel-mount", "kernel_replay_receipt")
+                journal_replayed = True
             os.fsync(fd)
             check_fixture_fd(fd, target)
             features, transient = probe(fd, target, deadline, plan)
-            observed.append({**target, "filesystemFeatures": features, "transientFilesystemFeatures": transient, "fullReadOnlyCheck": plan["checkMode"] == "full-read-only", "filesystemType": "ext4", "filesystemUUID": target["expectedFilesystemUUID"], "flushConfirmed": True, "checked": True})
+            if journal_replayed:
+                require(not transient, "journal_recovery_incomplete")
+            observed.append({**target, "journalReplayed": journal_replayed, "journalReplay": "kernel-mount" if journal_replayed else "none", "filesystemFeatures": features, "transientFilesystemFeatures": transient, "fullReadOnlyCheck": plan["checkMode"] == "full-read-only", "filesystemType": "ext4", "filesystemUUID": target["expectedFilesystemUUID"], "flushConfirmed": True, "checked": True})
         return {**plan, "volumes": observed}
