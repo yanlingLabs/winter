@@ -48,7 +48,7 @@ import { harvestHeadlessComponents, headlessComponentsDir, seedHeadlessComponent
 import { DEFAULT_HEADLESS_ENGINE, HEADLESS_ENGINES, type ResolvedEngine } from "./engines";
 import { processTreeFootprint } from "./memory";
 import {
-  HEADLESS_PIPE_PROTOCOL, HEADLESS_TIMEOUTS, spawnEngineProcess, WinterHeadlessProcess, type HeadlessNoticeKind, type HeadlessOp, type HeadlessPresentationEvent,
+  HEADLESS_AGENT_VIEW, HEADLESS_PIPE_PROTOCOL, HEADLESS_TIMEOUTS, spawnEngineProcess, WinterHeadlessProcess, type HeadlessNoticeKind, type HeadlessOp, type HeadlessPresentationEvent,
   type SpawnEngine,
 } from "./winter-engine";
 
@@ -124,6 +124,11 @@ interface PoolTab {
   /** A window the page opened while the person held this tab's opener (a sign-in window): the person's alone — never
    *  listed to the agent, shown beside its opener, closed when the person lets the opener go. */
   openerTabKey?: string;
+  /** The size the page is laid out in, as the helper applied it (`headless.viewChanged`; absent: the agent's own,
+   *  `HEADLESS_AGENT_VIEW`) and how many times it changed: a shown tab follows the panel's size, and gets the agent's
+   *  back after. */
+  view?: { width: number; height: number };
+  viewEpoch?: number;
 }
 
 /** One headless tab shown in Winter's panel. */
@@ -1033,9 +1038,10 @@ export class HeadlessPool implements CdpTransport {
     this.pushTabs(t.sessionId);
   }
 
-  /** The helper says a presentation's viewer was accepted, or that the viewer ended it. */
+  /** The helper says a presentation's viewer was accepted, or that the viewer ended it, or that a tab's view changed. */
   private presentationEvent(proc: WinterHeadlessProcess, e: HeadlessPresentationEvent): void {
     if (e.kind === "popup") { void this.adoptWindow(proc, e); return; }
+    if (e.kind === "view") { this.viewChanged(proc, e); return; }
     const t = this.tabs.get(e.tabKey);
     if (t === undefined || t.proc !== proc || t.presentation === undefined) return;
     const p = t.presentation;
@@ -1055,6 +1061,25 @@ export class HeadlessPool implements CdpTransport {
       this.emitGone(t.tabKey, "closed");
     }
     this.pushTabs(t.sessionId);
+  }
+
+  /** The page was laid out in another size (the panel's while the person looks, the agent's after). A scale alone
+   *  moves nothing on the page and is not counted. */
+  private viewChanged(proc: WinterHeadlessProcess, e: { tabKey: string; width: number; height: number }): void {
+    const t = this.tabs.get(e.tabKey);
+    if (t === undefined || t.proc !== proc) return;
+    const now = t.view ?? HEADLESS_AGENT_VIEW;
+    if (now.width === e.width && now.height === e.height) return;
+    t.view = { width: e.width, height: e.height };
+    t.viewEpoch = (t.viewEpoch ?? 0) + 1;
+  }
+
+  /** Lane H3: the size a headless tab's page is laid out in, once it has changed from the agent's own — how many times,
+   *  and whether a person watches it now (the engine says so once, and refuses a Point of an earlier screenshot). */
+  view(tabKey: string): { epoch: number; width: number; height: number; watched: boolean } | undefined {
+    const t = this.tabs.get(tabKey);
+    if (t?.view === undefined) return undefined;
+    return { epoch: t.viewEpoch ?? 0, width: t.view.width, height: t.view.height, watched: t.presentation?.started === true };
   }
 
   onEvent(listener: (e: CdpEvent) => void): () => void { this.eventListeners.add(listener); return () => { this.eventListeners.delete(listener); }; }

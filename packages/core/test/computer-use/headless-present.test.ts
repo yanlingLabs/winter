@@ -2,7 +2,8 @@
 // (`headless-fake-helper.ts`) and a fake panel (the browser link's `headless` feature): the hand-off (`present`, the
 // person in control), the control lease (the agent's commands refused while the person holds the tab; the ones in flight
 // finish first), watch and take over from the panel, a presentation nobody connected to, a viewer that leaves, the
-// turn's end closing a tab the person holds, the panel's list, and a helper or app without the feature.
+// turn's end closing a tab the person holds, the panel's list, the page laid out in the panel's size, and a helper or app
+// without the feature.
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -258,6 +259,21 @@ describe("watch and take over from the panel", () => {
     process.kill(r.pool.pid!, "SIGKILL");
     await until("the panel told again", () => r.panel.hidden.length === 2);
     expect(r.panel.hidden[1]!.reason).toBe("the headless browser stopped");
+  });
+});
+
+describe("the panel's size (the page laid out in it while shown)", () => {
+  test("a size the helper applied is counted and says whether the person watches; a scale alone is not; the agent's view comes back after", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "http://resizes.test/" });
+    expect(r.pool.view(t.tabKey)).toBeUndefined();
+    await r.pool.panelAction("s1", t.tabKey, "watch");
+    await until("the panel's size", () => r.pool.view(t.tabKey) !== undefined);
+    await new Promise((res) => setTimeout(res, 60)); // the scale alone, and the line that is no view, came and went
+    expect(r.pool.view(t.tabKey)).toEqual({ epoch: 1, width: 704, height: 900, watched: true });
+    await r.pool.panelAction("s1", t.tabKey, "done");
+    await until("the agent's view back", () => r.pool.view(t.tabKey)?.width === 1280);
+    expect(r.pool.view(t.tabKey)).toEqual({ epoch: 2, width: 1280, height: 800, watched: false });
   });
 });
 

@@ -27,6 +27,9 @@
 //   http://viewer-leaves.test/ — presented, its viewer is accepted and then leaves 150 ms later (`presentationEnded`)
 //   http://opens-window.test/ — presented, its page opens a window once its viewer is accepted (`headless.popupOpened`,
 //                               a tab of the fake's own minting at http://window.test/)
+//   http://resizes.test/      — presented, its page is laid out in the panel's size once its viewer is accepted
+//                               (`headless.viewChanged` 704×900 at 2, then a scale alone, 704×900 at 1, and one that is
+//                               not a view at all), and in the agent's own again when it is unpresented (1280×800 at 1)
 // Any other presented tab's viewer is accepted 20 ms after `headless.present` is answered.
 // It exits 0 on EOF, like the real helper.
 import { appendFileSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
@@ -166,6 +169,13 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
             tabs.set(windowId, { sessionId: t.sessionId, url: "http://window.test/" });
             setTimeout(() => send("headless.popupOpened", { linkId, tabId: windowId, openerTabId: tabId, url: "http://window.test/" }), 20);
           }
+          if (t.url === "http://resizes.test/") {
+            send("headless.viewChanged", { linkId, tabId, cssWidth: 704, cssHeight: 900, scale: 2 });
+            setTimeout(() => {
+              send("headless.viewChanged", { linkId, tabId, cssWidth: 704, cssHeight: 900, scale: 1 });
+              send("headless.viewChanged", { linkId, tabId, cssWidth: 0, cssHeight: 900, scale: 1 });
+            }, 10);
+          }
           if (t.url === "http://viewer-leaves.test/") {
             setTimeout(() => {
               if (presented.get(tabId) !== p.nonce) return;
@@ -177,7 +187,12 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
       }
       return;
     }
-    case "headless.unpresent": presented.delete(String(p.tabId)); return reply(cmdId, { frames: 0 });
+    case "headless.unpresent": {
+      presented.delete(String(p.tabId));
+      reply(cmdId, { frames: 0 });
+      if (tabs.get(String(p.tabId))?.url === "http://resizes.test/") send("headless.viewChanged", { linkId, tabId: String(p.tabId), cssWidth: 1280, cssHeight: 800, scale: 1 });
+      return;
+    }
     case "headless.control":
       if (!presented.has(String(p.tabId))) return fail(cmdId, "not_live", "the headless tab is not presented");
       return reply(cmdId, {});

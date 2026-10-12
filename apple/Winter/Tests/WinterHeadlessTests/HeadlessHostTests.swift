@@ -19,6 +19,7 @@ final class FakeHeadlessDriver {
     var noticeObserver: ((Int, String) -> Void)?
     var popupAdopter: ((Int, String) -> NSView?)?
     var closedObserver: ((Int) -> Void)?
+    var viewObserver: ((Int, Int, Int, Double) -> Void)?
     /// Presentations: started (browser id, request), ended, control changes; a scripted refusal.
     var presented: [(browserId: Int, request: HeadlessPresentRequest)] = []
     var unpresented = 0
@@ -58,6 +59,7 @@ final class FakeHeadlessDriver {
             setNoticeObserver: { [unowned self] observer in noticeObserver = observer },
             setPopupAdopter: { [unowned self] adopter in popupAdopter = adopter },
             setClosedObserver: { [unowned self] observer in closedObserver = observer },
+            setViewObserver: { [unowned self] observer in viewObserver = observer },
             present: { [unowned self] _, browserId, request, started, ended in
                 if let presentRefusal { return .failure(HeadlessPresentFailure(message: presentRefusal)) }
                 presented.append((browserId, request))
@@ -84,6 +86,8 @@ final class RecordingOutput: HeadlessOutput {
     var popups: [(tabId: String, openerTabId: String, url: String)] = []
     func popupOpened(tabId: String, openerTabId: String, url: String) { popups.append((tabId, openerTabId, url)) }
     func presentationEnded(tabId: String, reason: String) { presentationsEnded.append((tabId, reason)) }
+    var views: [(tabId: String, width: Int, height: Int, scale: Double)] = []
+    func viewChanged(tabId: String, cssWidth: Int, cssHeight: Int, scale: Double) { views.append((tabId, cssWidth, cssHeight, scale)) }
     func emitEvent(tabId: String, method: String, params: Data, cdpSessionId: String?, strip: Bool) {
         events.append((tabId, method, strip))
     }
@@ -344,6 +348,21 @@ final class HeadlessHostTests: XCTestCase {
         _ = run(.tabClose(tabId: "w-1"))
         fake.closedObserver?(1)
         XCTAssertEqual(output.gone.count, 1)
+    }
+
+    func testAViewChangeIsSaidByTabAndAnUnknownBrowserIsNot() {
+        _ = open("w-1")  // browser id 1
+        _ = open("w-2")  // browser id 2
+        // Shown in the panel: laid out in its size; after: the agent's own back.
+        fake.viewObserver?(2, 704, 900, 2)
+        fake.viewObserver?(2, 1280, 800, 1)
+        fake.viewObserver?(42, 704, 900, 2)  // a browser this host does not know
+        fake.viewObserver?(0, 704, 900, 2)
+        XCTAssertEqual(output.views.map(\.tabId), ["w-2", "w-2"])
+        XCTAssertEqual(output.views.first?.width, 704)
+        XCTAssertEqual(output.views.first?.height, 900)
+        XCTAssertEqual(output.views.first?.scale, 2)
+        XCTAssertEqual(output.views.last?.width, 1280)
     }
 
     func testARefusedPresentationIsAFailure() {

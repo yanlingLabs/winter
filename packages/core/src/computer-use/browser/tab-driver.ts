@@ -195,6 +195,8 @@ export class TabDriver {
   private loadSeen?: string;
   private readonly pokes = new Set<() => void>();
   private readonly shots = new Map<string, ShotFrame>();
+  /** The tab's view as last synced (`syncView`): screenshots are stamped with it. */
+  private viewEpoch = 0;
   private shotCounter = 0;
   /** The `uniqueId` each recently created context reported (`<session>:<id>` → uniqueId): the browser reports a world's
    *  creation BEFORE it answers the `Page.createIsolatedWorld` that made it, so the id is matched up afterwards. */
@@ -1295,7 +1297,24 @@ export class TabDriver {
     const shot = shotId === undefined ? undefined : this.shots.get(shotId);
     if (shot === undefined) throw new AutomationFailure("NotAllowed", "a point is pixels in this tab's latest screenshot — take tab.screenshot() first, or use an element ref");
     if (shot.fullPage === true) throw new AutomationFailure("NotAllowed", "a full-page screenshot is for looking — take an ordinary screenshot() to act at a point, or use an element ref");
+    if ((shot.viewEpoch ?? 0) !== this.viewEpoch) throw new AutomationFailure("NotAllowed", VIEW_RESIZED_POINT);
     return toCss(shot, x, y);
+  }
+
+  /**
+   * Lane H3: the view a headless tab's page is laid out in, as the pool last heard it from the helper — a tab shown in
+   * Winter's panel is laid out in the panel's size while the person looks (watching too), and gets the agent's 1280×800
+   * back after. Called at the start of every primitive. A change since the last call (a new `epoch`): the Points of
+   * every screenshot taken before it are refused (`VIEW_RESIZED_POINT`) — refs keep working — and the one daemon line
+   * for the state header is answered, once.
+   */
+  syncView(view: { epoch: number; width: number; height: number; watched: boolean } | undefined): string | undefined {
+    const epoch = view?.epoch ?? 0;
+    if (epoch === this.viewEpoch) return undefined;
+    this.viewEpoch = epoch;
+    if (view === undefined) return undefined;
+    return view.watched ? `the view is now ${view.width}×${view.height} while the user watches`
+      : `the view is back to ${view.width}×${view.height} — the user stopped watching`;
   }
 
   // ── Phase 3: element readers ───────────────────────────────────────────────────────────────────
@@ -1762,6 +1781,9 @@ export class TabDriver {
   /** One JPEG at the budget; its frame is kept so a Point maps back to CSS px. */
   async screenshot(budget: ScreenshotBudget, region: CssRect | undefined, quality: number, o: { fullPage?: boolean } = {}): Promise<{ shotId: string; imageBase64: string; width: number; height: number; css: CssRect }> {
     this.requireNoDialog("screenshot()");
+    // The view as known BEFORE the capture: a change that lands meanwhile makes the shot's Points refused (never the
+    // other way round).
+    const epoch = this.viewEpoch;
     const m = await this.send<{ cssVisualViewport: { pageX: number; pageY: number; clientWidth: number; clientHeight: number }; cssContentSize?: { width: number; height: number } }>("Page.getLayoutMetrics");
     const vv = m.cssVisualViewport;
     if (o.fullPage === true) return await this.fullPageShot(budget, quality, vv, m.cssContentSize);
@@ -1783,7 +1805,7 @@ export class TabDriver {
       scale *= Math.min(budget.maxLongEdge / Math.max(size.width, size.height), 0.97);
     }
     const shotId = `tshot${++this.shotCounter}`;
-    this.shots.set(shotId, { width: size!.width, height: size!.height, css });
+    this.shots.set(shotId, { width: size!.width, height: size!.height, css, viewEpoch: epoch });
     if (this.shots.size > 16) this.shots.delete(this.shots.keys().next().value!);
     return { shotId, imageBase64: shot!.data, width: size!.width, height: size!.height, css };
   }
@@ -1791,6 +1813,7 @@ export class TabDriver {
   /** The whole document (its height capped at FULL_PAGE_MAX_CSS), scaled to the budget. For looking only: a Point in it
    *  is refused (`pointForShot`). */
   private async fullPageShot(budget: ScreenshotBudget, quality: number, vv: { clientWidth: number; clientHeight: number }, content: { width: number; height: number } | undefined): Promise<{ shotId: string; imageBase64: string; width: number; height: number; css: CssRect }> {
+    const epoch = this.viewEpoch;
     const css: CssRect = { x: 0, y: 0, width: Math.max(1, Math.round(content?.width ?? vv.clientWidth)), height: Math.max(1, Math.min(FULL_PAGE_MAX_CSS, Math.round(content?.height ?? vv.clientHeight))) };
     let scale = scaleFor(css, this.dpr, budget);
     let shot: { data: string } | undefined;
@@ -1806,7 +1829,7 @@ export class TabDriver {
       scale *= Math.min(budget.maxLongEdge / Math.max(size.width, size.height), 0.97);
     }
     const shotId = `tshot${++this.shotCounter}`;
-    this.shots.set(shotId, { width: size!.width, height: size!.height, css, fullPage: true });
+    this.shots.set(shotId, { width: size!.width, height: size!.height, css, fullPage: true, viewEpoch: epoch });
     if (this.shots.size > 16) this.shots.delete(this.shots.keys().next().value!);
     return { shotId, imageBase64: shot!.data, width: size!.width, height: size!.height, css };
   }
@@ -1814,6 +1837,10 @@ export class TabDriver {
 
 /** A full-page screenshot's document height at most this (CSS px). */
 export const FULL_PAGE_MAX_CSS = 10_000;
+
+/** Lane H3: a Point of a screenshot taken before the tab's view changed (a headless tab shown in Winter's panel follows the
+ *  panel's size while the user looks, and gets the agent's view back after). */
+export const VIEW_RESIZED_POINT = "the tab was resized while the user was looking — take a new screenshot before using a Point";
 
 /** The user's own tab is never moved for a picture: `fullPage` lays the page out again, `within` would scroll. */
 export const USER_TAB_FULL_PAGE = "screenshot({ fullPage }) lays the page out again, which can move what the user sees — on the user's own tab Winter takes only what is in view: screenshot(), or text() for the whole page";

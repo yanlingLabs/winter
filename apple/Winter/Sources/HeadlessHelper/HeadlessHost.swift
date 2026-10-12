@@ -86,6 +86,16 @@ final class HeadlessHost {
         driver.setClosedObserver { [weak self] browserId in
             MainActor.assumeIsolated { self?.browserClosed(browserId: browserId) }
         }
+        driver.setViewObserver { [weak self] browserId, width, height, scale in
+            MainActor.assumeIsolated { self?.browserViewChanged(browserId: browserId, width: width, height: height, scale: scale) }
+        }
+    }
+
+    /// A tab's page was laid out in another view (shown in Winter's panel: the panel's size; after: the agent's): the
+    /// daemon hears it (`headless.viewChanged`), so a Point of an earlier screenshot is refused and the agent is told.
+    func browserViewChanged(browserId: Int, width: Int, height: Int, scale: Double) {
+        guard browserId != 0, let tab = tabs.values.first(where: { $0.browserId == browserId }) else { return }
+        output?.viewChanged(tabId: tab.tabId, cssWidth: width, cssHeight: height, scale: scale)
     }
 
     // MARK: - Windows the person opens
@@ -527,6 +537,8 @@ protocol HeadlessOutput: AnyObject {
     func popupOpened(tabId: String, openerTabId: String, url: String)
     /// A presentation of the tab ended on the viewer's side (`headless.presentationEnded`).
     func presentationEnded(tabId: String, reason: String)
+    /// The view the tab's page is laid out in changed, as applied (`headless.viewChanged`).
+    func viewChanged(tabId: String, cssWidth: Int, cssHeight: Int, scale: Double)
 }
 
 /// The answer door for ONE command. A second answer is ignored, so a late completion racing a failure can never

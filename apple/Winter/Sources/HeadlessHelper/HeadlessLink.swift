@@ -151,6 +151,12 @@ final class HeadlessLink: HeadlessOutput, @unchecked Sendable {
         }
     }
 
+    func viewChanged(tabId: String, cssWidth: Int, cssHeight: Int, scale: Double) {
+        out.async { [self] in
+            for line in outbox.viewChanged(tabId: tabId, cssWidth: cssWidth, cssHeight: cssHeight, scale: scale) { write(line) }
+        }
+    }
+
     /// The whole line, or the pipe is gone.
     private func write(_ line: Data) {
         guard !writeFailed else { return }

@@ -113,6 +113,9 @@ export interface BrowserEngineDeps {
   headlessHandBack?(tabKey: string): Promise<void>;
   /** Lane H3: a `waitForUser` on a shown headless tab ended without Done — the tab stays with the person. */
   headlessHandoffOver?(tabKey: string): void;
+  /** Lane H3: the view a headless tab's page is laid out in, once it differs from the agent's own (a tab shown in Winter's
+   *  panel follows the panel's size): how often it changed, its size, and whether a person is watching it now. */
+  headlessView?(tabKey: string): { epoch: number; width: number; height: number; watched: boolean } | undefined;
   now?(): number;
   log?(line: string): void;
   /** Phase 4: the plain-HTTP page reader `browsers.read` uses (default: one on the system resolver and `fetch`). */
@@ -321,6 +324,12 @@ export class BrowserEngine {
       try {
         await driver.ensureAttached(scope.sessionId);
         scope.live();
+        if (this.isHeadless(b.backend)) {
+          // Lane H3: the page was re-laid out in another size since the agent last looked (the panel's while the user
+          // watches, its own after): said once, and a Point of an earlier screenshot is refused from here on.
+          const resized = driver.syncView(this.deps.headlessView?.(b.tabKey));
+          if (resized !== undefined) scope.builder.daemonLine(resized);
+        }
         if (!BLOCKED_TAB_PRIMITIVES.has(primitive)) await this.siteFloor(scope, b, driver);
         return await this.run(scope, b, driver, primitive, args);
       } finally {

@@ -39,6 +39,9 @@ enum HeadlessWire {
         /// A window the page opened while the person held `openerTabId` in Winter's panel (a sign-in window) is a tab
         /// of its own: `{linkId, tabId, openerTabId, url}` — in the opener's session, never the agent's.
         static let popupOpened = "headless.popupOpened"
+        /// The view a tab's page is laid out in changed, as applied — a shown tab laid out in the panel's size, the
+        /// agent's own back after: `{linkId, tabId, cssWidth, cssHeight, scale}`.
+        static let viewChanged = "headless.viewChanged"
     }
 
     /// What this helper can do beyond protocol 1, said in `headless.hello`'s `features`.
@@ -279,6 +282,15 @@ final class HeadlessOutbox {
         var lines = flush()
         lines.append(Self.line(method: HeadlessWire.Method.presentationStarted,
                                params: ["linkId": .string(linkId), "tabId": .string(tabId)]))
+        return lines
+    }
+
+    /// A tab's view changed — after the events already pending (those were painted in the old one).
+    func viewChanged(tabId: String, cssWidth: Int, cssHeight: Int, scale: Double) -> [Data] {
+        var lines = flush()
+        lines.append(Self.line(method: HeadlessWire.Method.viewChanged,
+                               params: ["linkId": .string(linkId), "tabId": .string(tabId), "cssWidth": .number(Double(cssWidth)),
+                                        "cssHeight": .number(Double(cssHeight)), "scale": .number(scale)]))
         return lines
     }
 

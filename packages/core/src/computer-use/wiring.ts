@@ -312,6 +312,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     headlessPresentMissing: () => headless.presentMissing(),
     headlessHandBack: (tabKey) => headless.handBack(tabKey),
     headlessHandoffOver: (tabKey) => headless.handoffOver(tabKey),
+    headlessView: (tabKey) => headless.view(tabKey),
     log,
   });
 

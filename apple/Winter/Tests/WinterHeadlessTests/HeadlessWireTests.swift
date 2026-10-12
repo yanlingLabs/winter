@@ -157,6 +157,20 @@ final class HeadlessWireTests: XCTestCase {
         XCTAssertEqual(started["params"]?["linkId"], .string("h-1"))
     }
 
+    func testAViewChangeFollowsThePendingEvents() throws {
+        let outbox = HeadlessOutbox(linkId: "h-1")
+        _ = outbox.event(.init(tabId: "w-1", method: "Page.loadEventFired", params: Data("{}".utf8), cdpSessionId: nil, strip: false))
+        let lines = outbox.viewChanged(tabId: "w-1", cssWidth: 704, cssHeight: 900, scale: 2)
+        XCTAssertEqual(lines.count, 2, "the pending events (painted in the old view) go first")
+        let view = try XCTUnwrap(decode(lines[1]))
+        XCTAssertEqual(view["method"], .string("headless.viewChanged"))
+        XCTAssertEqual(view["params"]?["linkId"], .string("h-1"))
+        XCTAssertEqual(view["params"]?["tabId"], .string("w-1"))
+        XCTAssertEqual(view["params"]?["cssWidth"], .number(704))
+        XCTAssertEqual(view["params"]?["cssHeight"], .number(900))
+        XCTAssertEqual(view["params"]?["scale"], .number(2))
+    }
+
     func testTabGoneFlushesFirst() throws {
         let outbox = HeadlessOutbox(linkId: "h-1")
         _ = outbox.event(.init(tabId: "w-1", method: "Page.loadEventFired", params: Data("{}".utf8), cdpSessionId: nil, strip: false))

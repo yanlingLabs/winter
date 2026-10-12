@@ -926,6 +926,10 @@ void WinterCEFHeadlessSetPresentation(NSView *key, int cssWidth, int cssHeight, 
 /// The view `key`'s browser is laid out in now (as applied: a wish still settling is not counted). NO for no browser.
 BOOL WinterCEFHeadlessViewGeometry(NSView *key, int *cssWidth, int *cssHeight, double *scale);
 
+/// A headless browser's view changed, as applied (`WinterCEFHeadlessSetPresentation`, after its settle): its CSS size
+/// and device scale. Main thread. `nil` stops it.
+void WinterCEFHeadlessSetViewObserver(void (^observer)(int browserId, int cssWidth, int cssHeight, double scale));
+
 // ---- Presentation, version 2: IME, edit commands, page dialogs and file choosers for the person in control ----------
 
 /// Where the IME composition of each headless browser is drawn: its range in the field and one rect per composed

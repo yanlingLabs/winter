@@ -17,7 +17,10 @@
 // `headless.control {tabId, control}`, and the helper's `headless.presentationStarted {tabId}` (its viewer was accepted),
 // `headless.presentationEnded {tabId, reason}` (the viewer ended it) and `headless.popupOpened {tabId, openerTabId, url}`
 // (a window the page opened while the person held the opener — a tab of the helper's own minting, in the opener's
-// session). A helper that does not name a feature is never sent its ops.
+// session), and `headless.viewChanged {tabId, cssWidth, cssHeight, scale}` (the view a tab's page is laid out in, as
+// applied: a shown tab follows the panel's size, and gets the agent's `HEADLESS_AGENT_VIEW` back after — said by a helper
+// that lays a shown page out in the panel's size; an older one never sends it). A helper that does not name a feature is
+// never sent its ops.
 //
 // Winter Headless exposes ONLY these link ops — no browser-level CDP command at all (no `Target.createTarget`, no
 // `Browser.*`). A browser-level command list belongs to installed browsers run headless, a later stage.
@@ -35,6 +38,9 @@ export type HeadlessOp = "tab.ensure" | "tab.release" | "tab.close" | "tabs.live
 /** The helper features this daemon knows (`headless.hello`'s `features`). */
 export const HEADLESS_FEATURES = ["present"] as const;
 export type HeadlessFeature = (typeof HEADLESS_FEATURES)[number];
+/** The view every headless page is laid out in while nobody views it (the helper's `WinterCEFHeadlessViewWidth`/`Height`
+ *  at a scale of 1): the agent's. */
+export const HEADLESS_AGENT_VIEW = { width: 1280, height: 800 } as const;
 /** The helper reads a command line of at most this many bytes. */
 export const HEADLESS_COMMAND_MAX = 1024 * 1024;
 /** The longest line read back (a result is at most 8 MiB plus its envelope). */
@@ -206,7 +212,9 @@ export interface HeadlessHello { linkId: string; protocol: number; pid?: number;
 export type HeadlessPresentationEvent =
   | { tabKey: string; kind: "started" }
   | { tabKey: string; kind: "ended"; reason: string }
-  | { tabKey: string; kind: "popup"; openerTabKey: string; url: string };
+  | { tabKey: string; kind: "popup"; openerTabKey: string; url: string }
+  /** The view the tab's page is laid out in changed (as applied): CSS pixels and device scale. */
+  | { tabKey: string; kind: "view"; width: number; height: number; scale: number };
 
 /** One running Winter Headless and its pipe. */
 export class WinterHeadlessProcess {
@@ -382,6 +390,18 @@ export class WinterHeadlessProcess {
         else if (message.method === "headless.presentationEnded") e = { tabKey: p.tabId, kind: "ended", reason: typeof p.reason === "string" ? p.reason.slice(0, 200) : "ended" };
         else if (typeof p.openerTabId === "string") e = { tabKey: p.tabId, kind: "popup", openerTabKey: p.openerTabId, url: typeof p.url === "string" ? p.url.slice(0, 8_192) : "" };
         else return;
+        for (const l of [...this.presentationListeners]) {
+          try { l(e); } catch { /* a listener never breaks the pipe */ }
+        }
+        return;
+      }
+      case "headless.viewChanged": {
+        if (p.linkId !== this.linkId || typeof p.tabId !== "string" || !/^w-[0-9a-f]{12}$/.test(p.tabId)) return;
+        const size = (v: unknown): number | undefined => typeof v === "number" && Number.isInteger(v) && v > 0 && v <= 8192 ? v : undefined;
+        const width = size(p.cssWidth), height = size(p.cssHeight);
+        const scale = typeof p.scale === "number" && p.scale >= 1 && p.scale <= 4 ? p.scale : undefined;
+        if (width === undefined || height === undefined || scale === undefined) return;
+        const e: HeadlessPresentationEvent = { tabKey: p.tabId, kind: "view", width, height, scale };
         for (const l of [...this.presentationListeners]) {
           try { l(e); } catch { /* a listener never breaks the pipe */ }
         }

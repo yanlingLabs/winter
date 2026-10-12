@@ -4940,6 +4940,8 @@ BOOL (^g_headless_file_chooser_handler)(int, int, int, NSArray<NSString *> *) = 
 /// browser's close (`WinterCEFHeadlessSetClosedObserver`).
 NSView *(^g_headless_popup_adopter)(int, NSString *) = nil;
 void (^g_headless_closed_observer)(int) = nil;
+/// Every applied change of a headless browser's view (`WinterCEFHeadlessSetViewObserver`).
+void (^g_headless_view_observer)(int, int, int, double) = nil;
 /// The dialog each headless browser holds now (type 0 alert, 1 confirm, 2 prompt, 3 beforeunload), by browser id.
 struct HeadlessDialogInfo {
   int type;
@@ -6015,6 +6017,9 @@ void ApplyHeadlessView(CefRefPtr<CefBrowser> browser, HeadlessViewState &state) 
   host->NotifyScreenInfoChanged();
   host->WasResized();
   host->Invalidate(PET_VIEW);
+  if (g_headless_view_observer) {
+    g_headless_view_observer(browser->GetIdentifier(), state.applied.width, state.applied.height, state.applied.scale);
+  }
 }
 
 /// What a presentation may ask for: a size of at least `WinterCEFHeadlessViewMinWidth`×`MinHeight` CSS pixels and at most
@@ -6060,6 +6065,10 @@ void WinterCEFHeadlessSetPresentation(NSView *key, int cssWidth, int cssHeight, 
     if (!current || current->GetIdentifier() != id) return;
     ApplyHeadlessView(current, it->second);
   });
+}
+
+void WinterCEFHeadlessSetViewObserver(void (^observer)(int browserId, int cssWidth, int cssHeight, double scale)) {
+  g_headless_view_observer = [observer copy];
 }
 
 BOOL WinterCEFHeadlessViewGeometry(NSView *key, int *cssWidth, int *cssHeight, double *scale) {

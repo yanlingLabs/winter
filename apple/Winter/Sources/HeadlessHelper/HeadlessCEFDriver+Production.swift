@@ -57,6 +57,11 @@ extension HeadlessCEFDriver {
         setClosedObserver: { observer in
             WinterCEFHeadlessSetClosedObserver(observer.map { observe in { browserId in observe(Int(browserId)) } })
         },
+        setViewObserver: { observer in
+            WinterCEFHeadlessSetViewObserver(observer.map { observe in
+                { browserId, width, height, scale in observe(Int(browserId), Int(width), Int(height), scale) }
+            })
+        },
         present: { key, browserId, request, started, ended in
             let presenter = WinterHeadlessPresenter(key: key, browserId: Int32(browserId), nonce: request.nonce,
                                                     viewerRequirement: request.viewerRequirement, control: request.control,

@@ -393,6 +393,7 @@ try {
   //    display, re-laid out (never reloaded), and the agent's own view back when the presentation ends ──
   {
     const before = await sentinelState();
+    const viewMark = events.length;
     const { viewer } = await present(true);
     await viewer.until("welcome");
     const firstWait = await atView(viewer, panelW, panelH, 2);
@@ -457,6 +458,11 @@ try {
     check("when the presentation ends, the agent's own view comes back: 1280×800 at 1",
       back.w === 1280 && back.h === 800 && back.dpr === 1 && before.w === 1280 && before.dpr === 1,
       `before ${String(before.w)}×${String(before.h)} at ${String(before.dpr)}; after ${String(back.w)}×${String(back.h)} at ${String(back.dpr)}; ${Number(back.resizes) - Number(before.resizes)} resize event(s) in all`);
+    // The daemon hears every view the page was laid out in, as applied (it refuses a Point of an older screenshot).
+    const said = events.slice(viewMark).filter((m) => m.method === "headless.viewChanged" && m.params.tabId === "w-1")
+      .map((m) => `${String(m.params.cssWidth)}x${String(m.params.cssHeight)}@${String(m.params.scale)}`);
+    check("the daemon is told each view the page was laid out in, as applied (headless.viewChanged)",
+      said.includes(`${panelW}x${panelH}@2`) && said.includes(`${w}x${h}@1`) && said.at(-1) === "1280x800@1", said.join(" → "));
     await oracle("the panel's size (a live resize, a move between displays)", { b: userText });
   }
 

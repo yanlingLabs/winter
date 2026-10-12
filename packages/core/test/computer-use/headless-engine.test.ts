@@ -4,6 +4,7 @@
 // as TargetBusy, and the listing.
 import { describe, expect, test } from "bun:test";
 import { HEADLESS_KEEP } from "../../src/computer-use/browser/engine";
+import { VIEW_RESIZED_POINT } from "../../src/computer-use/browser/tab-driver";
 import { HEADLESS_LAN_REFUSAL } from "../../src/computer-use/browser/headless/private-network";
 import { TransportError } from "../../src/computer-use/browser/transport";
 import { AutomationFailure } from "../../src/computer-use/errors";
@@ -330,6 +331,35 @@ describe("waitForUser() on a headless tab (lane H3): shown in Winter's panel, th
     const e = await failure(h.engine.primitive(r.scope, tab.targetId, "text", {}));
     expect((e as AutomationFailure).kind).toBe("TargetBusy");
     expect(e.message).toBe("the user has this tab in Winter's panel — it is theirs until they hand it back; work in another tab meanwhile");
+    r.end();
+  });
+});
+
+describe("the panel's size (lane H3): a tab shown in Winter's panel is laid out in it while the user looks", () => {
+  test("a Point of a screenshot from before a size change is refused, refs keep working, and the next primitive says so once", async () => {
+    let view: { epoch: number; width: number; height: number; watched: boolean } | undefined;
+    const h = withHeadless({ engineDeps: { headlessView: () => view } });
+    h.headless.pages["https://a.example/"] = { url: "https://a.example/", title: "A", nodes: [{ id: 1, role: "main", children: [{ id: 2, role: "button", name: "Go" }] }] };
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const p = (primitive: string, args: Record<string, unknown> = {}) => h.engine.primitive(r.scope, tab.targetId, primitive, args);
+    await p("screenshot", { emit: false });
+    await p("click", { target: [5, 5] });
+    // The user watches in Winter's panel: the page is laid out in its size.
+    view = { epoch: 1, width: 704, height: 900, watched: true };
+    const e = await failure(p("click", { target: [5, 5] }));
+    expect((e as AutomationFailure).kind).toBe("NotAllowed");
+    expect(e.message).toBe(VIEW_RESIZED_POINT);
+    expect(e.message).toBe("the tab was resized while the user was looking — take a new screenshot before using a Point");
+    await p("click", { target: 2 }); // a ref is found where it is now
+    await p("screenshot", { emit: false });
+    await p("click", { target: [5, 5] }); // a screenshot of the new size works
+    expect(r.text().split("the view is now 704×900 while the user watches").length - 1).toBe(1);
+    // The presentation ended: the agent's own view is back — said once more, and the panel-size shot's Points refused.
+    view = { epoch: 2, width: 1280, height: 800, watched: false };
+    expect((await failure(p("click", { target: [5, 5] }))).message).toBe(VIEW_RESIZED_POINT);
+    expect(r.text()).toContain("the view is back to 1280×800 — the user stopped watching");
+    expect(r.text().split("the view is back to 1280×800").length - 1).toBe(1);
     r.end();
   });
 });

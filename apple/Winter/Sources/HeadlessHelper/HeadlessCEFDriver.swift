@@ -48,6 +48,9 @@ struct HeadlessCEFDriver {
     var setPopupAdopter: (((Int, String) -> NSView?)?) -> Void = { _ in }
     /// A browser closed — by the page (`window.close()` of a window it opened) or by Winter (main thread).
     var setClosedObserver: (((Int) -> Void)?) -> Void = { _ in }
+    /// A browser's view changed as applied — a shown tab laid out in the panel's size, or the agent's view back:
+    /// `(browserId, cssWidth, cssHeight, scale)` (main thread). `nil` stops it.
+    var setViewObserver: (((Int, Int, Int, Double) -> Void)?) -> Void = { _ in }
     /// Present the key's browser (`HeadlessPresentation`) to the viewer naming `nonce` and satisfying `requirement`:
     /// the presentation's bootstrap service name and a handle, or why not. `started` runs once when the viewer's HELLO
     /// is accepted; `ended` runs once if the VIEWER ends it.
