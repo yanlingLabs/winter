@@ -1,0 +1,113 @@
+{
+  "pins": {
+    "libkrun": {
+      "url": "https://github.com/containers/libkrun.git",
+      "tag": "v1.19.6",
+      "revision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+      "lockSha256": "a73d2ee0e4f2d2b63c7b4a00d2639076e4f7884a40cec495d5d82eed14dcd873",
+      "features": [],
+      "defaultFeatures": false
+    },
+    "rust": {
+      "version": "1.90.0",
+      "url": "https://static.rust-lang.org/dist/rust-1.90.0-aarch64-apple-darwin.tar.xz",
+      "sha256": "9772d20d5cd736079a0ee84d00e6697cf2084f0fc4621b011e24e6f2d08d2d7f"
+    },
+    "kernel": {
+      "cachedPath": "../cowork-vm/out/assets/vmlinux-apple-6.18.35",
+      "sha256": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d",
+      "version": "6.18.35-197-debug",
+      "format": "RAW",
+      "provenance": "Existing cowork-vm/pins.json Apple-recommended Kata archive; verify cached member before copying."
+    },
+    "zig": {
+      "cachedPath": "../cowork-vm/out/tools/zig-aarch64-macos-0.14.1/zig",
+      "version": "0.14.1",
+      "archiveSha256": "39f3dc5e79c22088ce878edc821dedb4ca5a1cd9f5ef915e9b3cc3053e8faefa"
+    }
+  },
+  "candidate": {
+    "status": "candidate-no-vm-review-required",
+    "productionReady": false,
+    "vmStarted": false,
+    "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+    "patchSha256": "00e169fb7e5c527d348269cc8211afc99daa800622bce6140a4b2b42c204951d",
+    "preservedA6PatchSha256": "a6e26d15693007d42df5c60155055b09c69897584665d227c8ee9c720d3cfb31",
+    "features": [
+      "blk"
+    ],
+    "defaultFeatures": false,
+    "memoryMiB": 768,
+    "vcpus": 2,
+    "source": "out/libkrun-block-reclaim",
+    "moduleCorrespondence": {
+      "reclaim_access.rs": "src/devices/src/reclaim_access.rs",
+      "block_bounce.rs": "src/devices/src/block_bounce.rs",
+      "block_reclaim_control.rs": "src/vmm/src/cowork_control.rs",
+      "block_trace.rs": "src/devices/src/block_trace.rs"
+    },
+    "reviewRequired": [
+      "actual barrier/lifecycle/mapping order",
+      "guarded block raw-memory leaf and queue/pin validation",
+      "reset/Stop and blocked IO termination",
+      "bounded disk-bearing Linux reclaim before any crypto claims"
+    ],
+    "knownLimitations": [
+      "No block-bearing VM run.",
+      "DAX/fs/net/vsock/virtio-console/GPU/audio/input disabled.",
+      "Host I/O may block indefinitely; it holds no RAM lease, but device reset join can block until worker process termination.",
+      "Crypto kernel and userspace not built/selected.",
+      "WFE deadline now captured before post-emulation park and actual functions regressed; no timer SLA or latency guarantee established."
+    ],
+    "revision": 4,
+    "patchFile": "patches/0006-proposed-raw-block-trace.patch",
+    "previousCandidate": {
+      "commit": "734ba3a21cadbf781fe4b0ec1c36f215ae9bc30a",
+      "patchFile": "patches/0005-proposed-guarded-block-producer-progress.patch",
+      "patchSha256": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775",
+      "review": "Astra accepted bounded RAW experiment subject to frozen instrumentation prelaunch review."
+    },
+    "patchType": "incremental-against-previousCandidate",
+    "fullSourceDiffSha256": "356ea78c37bc4467d9e6cb425f97fc574deafbfb4ed8e7bd77fd7cfc942dfcc6",
+    "basePatches": [
+      {
+        "patchFile": "patches/0004-proposed-guarded-block-reviewed-fixes.patch",
+        "patchSha256": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481"
+      },
+      {
+        "patchFile": "patches/0005-proposed-guarded-block-producer-progress.patch",
+        "patchSha256": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775"
+      }
+    ],
+    "nativeOwnedCompletionHoldMillis": 25
+  },
+  "productionReady": false,
+  "vmStarted": false,
+  "identity": "dev.cowork.hvf.raw-block-fixture-worker",
+  "nativeOwnedCompletionHoldMillis": 25,
+  "encryption": false,
+  "priorBuildSha256": "8fa206aecb01a8db275718d0a6d9f5b56d282fe68e7ab94552ed11720508ec1f",
+  "receiptOnly": true,
+  "artifactRebuilt": false,
+  "artifacts": {
+    "libkrun.1.dylib": "57cb318d8a80e3b1672a4f70aee44fd57de57eccc35ac2150a5c2ceb32892ec7",
+    "cowork-hvf-block-worker": "6484b1795acbc045ddfbaf8e33c238050eec9e5f5d63e8998dd88714970f4113",
+    "init": "9084696a286782f2031dc8eaa37f0bd00392adf27706a0d7968caf1ada0b136b",
+    "initramfs.cpio": "a6e18d8a52887328742d7bd5e5efb32aa15fd27777f50cc7db11d7f21ee881f7",
+    "kernel": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d"
+  },
+  "fixtureSources": {
+    "block_worker.c": "34f8da23e2b02af227ed00a58ccb38c0a5e7baafb441c5f75dae6c13bc3f4fa1",
+    "block_init.c": "1def9cb1b4ecd56f2008fe682dabfdd10e608ccd4463f97e0a3a8f81f4d52a64",
+    "build_block.py": "9011f25a26f1d79d45b820bda65b58e006d8fa56c27fefecb04cf4c06b2fc357",
+    "run_block.py": "58c4b9c22685101e37b8e65b049417e5eb19ee36cc64e5094d093570619232aa",
+    "block_capture.py": "bc4648193e2e06a3871bc9ec07fbdc58037eb5d9eea3606abd3cf17e50a8b89a",
+    "block_receipts.py": "9c1c7603d46b43cead995fdb2c3fe3b5fa0583ad27bf42558fab475b7b28b01d",
+    "reclaim_receipts.py": "b7ef0e1bb84209df4d26c8a14466a72bd151a0f2dc688497352e0f878b6e3db4",
+    "build.py": "ee5ccec6b096c5391dbe8fc599b8142499556d90d38af7219d38566852895cb4",
+    "prepare_block.py": "6f89c58fdf1f6e975dcdeb2836f4be432c42d78c9b38c6ab269c9e5e9674b586",
+    "worker.entitlements": "70d65ae13874e183526aa48e55bb330f2156da94effca24f89b5e2f940262723",
+    "pins.json": "ee52a593846568dbefe811abe39efce808b72383c07d47af0ce1a5c86b0fdf17",
+    "block-candidate.json": "c83517a349f4a49d18a7e4dbbe980c2d238d78b4dd1dc98ad8609447323dd69c"
+  }
+}

@@ -1,8 +1,11 @@
 """Explicit sandbox/prelaunch/run lifecycle. Review receipt gates VM; only direct owned child killed."""
-import argparse,fcntl,json,os,queue,shutil,stat,struct,subprocess,tempfile,threading,time
+import argparse,fcntl,json,os,shutil,stat,struct,subprocess,tempfile
 from pathlib import Path
 from build import ROOT,OUT,digest
 from block_receipts import summary
+from block_capture import capture_owned_child
+
+LAUNCH_DEPENDENCIES=frozenset(['run_block.py','block_capture.py','block_receipts.py','reclaim_receipts.py','build.py'])
 
 def processes():
     lines=subprocess.check_output(['/bin/ps','-axo','pid=,comm='],text=True).splitlines()
@@ -29,6 +32,7 @@ def main():
     if build['candidate']!=candidate:raise RuntimeError('Built candidate differs from frozen source manifest')
     for name,pin in build['artifacts'].items():
         if digest(artifacts/name)!=pin:raise RuntimeError('Artifact changed: '+name)
+    if not LAUNCH_DEPENDENCIES.issubset(build['fixtureSources']):raise RuntimeError('Build omits a launch/audit dependency')
     for name,pin in build['fixtureSources'].items():
         if digest(ROOT/name)!=pin:raise RuntimeError('Fixture source changed: '+name)
     subprocess.run(['/usr/bin/codesign','--verify','--strict',str(artifacts/'cowork-hvf-block-worker')],check=True)
@@ -51,32 +55,15 @@ def main():
             shutil.copy2(artifacts/name,fixture/name)
         disk=fixture/'fixture.raw';fd=os.open(disk,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);os.ftruncate(fd,64*1024*1024);identity=os.fstat(fd);os.close(fd)
         command=[str(fixture/'cowork-hvf-block-worker'),'--run-raw-block-fixture' if args.run_raw_block_fixture else '--sandbox-check',str(fixture),str(fixture/'kernel'),str(fixture/'initramfs.cpio'),str(disk)]
-        rows=[];start=time.monotonic();timed_out=False
-        with (fixture/'stdout.log').open('w') as stdout,(fixture/'stderr.log').open('w') as stderr:
-            child=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={'PATH':'/usr/bin:/bin','HOME':str(fixture),'TMPDIR':str(fixture)},text=True,bufsize=1,start_new_session=True)
-            (fixture/'pid.json').write_text(json.dumps({'pid':child.pid,'command':command})+'\n');pending=queue.Queue()
-            def read(stream,channel):
-                for line in stream:pending.put((channel,line))
-                pending.put((channel,None))
-            for stream,channel in [(child.stdout,'stdout'),(child.stderr,'stderr')]:threading.Thread(target=read,args=(stream,channel),daemon=True).start()
-            closed=0
-            try:
-                while closed<2:
-                    if time.monotonic()-start>130:timed_out=True;child.kill();break
-                    try:channel,line=pending.get(timeout=1)
-                    except queue.Empty:continue
-                    if line is None:closed+=1;continue
-                    sink=stdout if channel=='stdout' else stderr;sink.write(line);sink.flush()
-                    try:
-                        payload=line[line.index('{'):] if line.startswith('[') and '{' in line else line
-                        row=json.loads(payload);row.update(channel=channel,hostElapsedSeconds=round(time.monotonic()-start,6));rows.append(row)
-                    except (ValueError,TypeError):pass
-                try:code=child.wait(timeout=5)
-                except subprocess.TimeoutExpired:timed_out=True;child.kill();code=child.wait(timeout=5)
-            finally:
-                if child.poll() is None:child.kill();child.wait()
+        child=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={'PATH':'/usr/bin:/bin','HOME':str(fixture),'TMPDIR':str(fixture)},bufsize=0,start_new_session=True)
+        (fixture/'pid.json').write_text(json.dumps({'pid':child.pid,'command':command})+'\n')
+        rows,capture=capture_owned_child(child,fixture)
+        code=capture['exitCode'];timed_out=capture['timedOut']
+        if not capture['exitVerified']:
+            result={'fixture':fixture.name,'vmStarted':args.run_raw_block_fixture,**capture,'diskAuditSkipped':True,'diskSha256':None,'buildSha256':digest(artifacts/'build.json'),'candidate':candidate,'productionReady':False,'fullResourceGatePassed':False,'encryption':False,'activeReturnVerified':False}
+            (fixture/'events.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows));(fixture/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2));raise SystemExit(1)
         after=disk.lstat();same=stat.S_ISREG(after.st_mode) and after.st_nlink==1 and after.st_dev==identity.st_dev and after.st_ino==identity.st_ino and after.st_size==64*1024*1024
-        result={'fixture':fixture.name,'vmStarted':args.run_raw_block_fixture,'exitCode':code,'timedOut':timed_out,'diskSameIdentity':same,'diskSha256':digest(disk),'buildSha256':digest(artifacts/'build.json'),'candidate':candidate,'ownedChildReaped':child.poll() is not None,'productionReady':False,'fullResourceGatePassed':False,'encryption':False}
+        result={'fixture':fixture.name,'vmStarted':args.run_raw_block_fixture,'exitCode':code,'timedOut':timed_out,'diskSameIdentity':same,'diskSha256':digest(disk),'buildSha256':digest(artifacts/'build.json'),'candidate':candidate,**capture,'productionReady':False,'fullResourceGatePassed':False,'encryption':False}
         if args.run_raw_block_fixture:
             result.update(audit=summary(rows),diskIntegrity=disk_integrity(disk,rows))
             inventory_ok=sorted(r.get('device') for r in rows if r.get('kind')=='virtio_device')==['0x0002','0x0004','0x0005']
@@ -92,7 +79,7 @@ def main():
 
         result['sandbox']=next((r for r in rows if r.get('kind')=='sandbox'),None)
         (fixture/'events.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows));(fixture/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
-        if code or timed_out or not same or not result['sandbox'] or (args.run_raw_block_fixture and not result.get('fixtureChecksPassed')):raise SystemExit(1)
+        if code or timed_out or not capture['captureComplete'] or not same or not result['sandbox'] or (args.run_raw_block_fixture and not result.get('fixtureChecksPassed')):raise SystemExit(1)
 if __name__=='__main__':
     from pathlib import Path
     main()

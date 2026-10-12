@@ -36,7 +36,7 @@ def summary(rows):
         if row['ranges']!=capture['ranges']:errors.append('frozen request pin ranges changed')
         ack=next((r for r in item['stages'] if r['kind']=='block_used_ack'),None)
         if ack and capture['clockMicros']<=row['clockMicros']<ack['clockMicros']:
-            overlap.append({'epoch':row['epoch'],'request':request,'pin':row['pin'],'ownedCompletionHold':any(r['kind']=='block_owned_completion_hold' for r in item['stages']),'osSyscallOverlap':any(a['clockMicros']<=row['clockMicros']<b['clockMicros'] for a in item['stages'] if a['kind']=='block_owned_io_begin' for b in item['stages'] if b['kind']=='block_owned_io_end')})
+            overlap.append({'epoch':row['epoch'],'request':request,'pin':row['pin'],'ownedCompletionHold':any(r['kind']=='block_owned_completion_hold' for r in item['stages']),'ownedIoIntervalOverlap':any(a['clockMicros']<=row['clockMicros']<b['clockMicros'] for a in item['stages'] if a['kind']=='block_owned_io_begin' for b in item['stages'] if b['kind']=='block_owned_io_end')})
         else:errors.append('freeze pin outside captured outstanding lifetime')
     windows=[]
     for cycle in range(1,4):
@@ -45,4 +45,4 @@ def summary(rows):
         windows.append({'cycle':cycle,'progressReceipts':len(progress),'threads':sorted({r['thread'] for r in progress})})
         if {r['thread'] for r in progress}!={0,1}:errors.append('missing concurrent disk progress in freed interval '+str(cycle))
     reclaimed=reclaim_summary(rows)
-    return {'blockReceiptsPassed':bool(requests) and bool(overlap) and not errors,'errors':errors,'requestCount':len(requests),'commands':dict(Counter(item['capture']['command'] for item in requests.values())),'outstandingRequestOverlap':overlap,'ringPinCount':len(ring),'freedWindows':windows,'reclaim':reclaimed,'activeReturnVerified':False,'verificationPending':'Independent root raw receipt/footprint audit','productionReady':False,'fullResourceGatePassed':False,'encryption':False}
+    return {'blockReceiptsPassed':bool(requests) and bool(overlap) and not errors,'errors':errors,'requestCount':len(requests),'commands':dict(Counter(item['capture']['command'] for item in requests.values())),'outstandingRequestOverlap':overlap,'ringPinCount':len(ring),'freedWindows':windows,'reclaim':reclaimed,'activeReturnVerified':False,'verificationPending':'Independent root raw receipt/footprint audit','productionReady':False,'fullResourceGatePassed':False,'encryption':False,'blockedSyscallOverlapVerified':False,'overlapMeaning':'Owned perform interval includes allocations, multiple syscalls and gaps; no actual blocked-syscall proof.'}

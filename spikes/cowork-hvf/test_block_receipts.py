@@ -11,6 +11,15 @@ class Receipts(unittest.TestCase):
         self.assertIn('bounded trace overflow',summary([{'kind':'block_trace_overflow'}])['errors'])
     def test_stage_without_capture_rejects(self):
         self.assertIn('stage without capture',summary([{'kind':'block_used_ack','request':1}])['errors'])
+    def test_owned_interval_is_not_labeled_as_blocked_syscall(self):
+        ranges=[{'gpa':4096,'len':16}]
+        rows=[{'kind':'block_request_capture','request':1,'pin':1,'head':0,'command':'Read','length':512,'leaseReleased':True,'ranges':ranges,'clockMicros':0},
+              {'kind':'block_owned_io_begin','request':1,'clockMicros':1},
+              {'kind':'block_owned_io_end','request':1,'clockMicros':10,'success':True},
+              {'kind':'block_used_ack','request':1,'clockMicros':12,'head':0,'success':True},
+              {'kind':'block_freeze_pin','pin':1,'epoch':1,'ranges':ranges,'clockMicros':5},
+              {'kind':'reclaim_exclusion','epoch':1,'gpa':4096,'len':16}]
+        result=summary(rows);overlap=result['outstandingRequestOverlap'][0];self.assertTrue(overlap['ownedIoIntervalOverlap']);self.assertNotIn('osSyscallOverlap',overlap);self.assertFalse(result['blockedSyscallOverlapVerified']);self.assertFalse(result['activeReturnVerified'])
     def test_whole_synthetic_disk_pattern_and_tamper(self):
         with tempfile.TemporaryDirectory(prefix='block-receipt-',dir=OUT) as directory:
             disk=Path(directory)/'fixture.raw'

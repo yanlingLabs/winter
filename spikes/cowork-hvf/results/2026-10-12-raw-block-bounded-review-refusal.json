@@ -1,0 +1,7 @@
+{
+  "vmStarted": false,
+  "reviewReceiptAbsentRefused": true,
+  "exitCode": 1,
+  "buildSha256": "99162c0f198d128f80cf5c6a0a57af964df924c60e162e050cf0a523320adf55",
+  "priorArtifactsUnchanged": true
+}
