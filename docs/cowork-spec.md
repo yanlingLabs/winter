@@ -19,7 +19,7 @@ Independent review accepted specification commit `21e3e5f4` for planning gates 1
 | Resource management | No manual per-VM CPU/RAM/GPU allocation workflow. Automatic use of available host capacity must include RAM return during active work; the user explicitly rejected idle shutdown as the sole memory-return mechanism. Keep actual VM ceilings and reclaim limits explicit. |
 | Execution | Winter's agent loop and its subagents run inside one Linux VM per durable workspace, subject to the backend/security/resource gates below. |
 | Host process topology | One sandboxed VMM worker per workspace, orchestrated by the daemon. This subsequent user decision replaces the earlier in-daemon controller preference. Project conversations share their workspace's worker. |
-| Private storage | Required before Cowork is enabled at all: encrypt private VM data/environment disks at rest. Keys are held only by a signed storage/key helper, not the Bun daemon. Path fences and IPC restrictions are defense in depth; same-user deletion/corruption is detectable, not preventable. See the scoped [storage contract](cowork-storage-security.md). |
+| Private storage | First version: plaintext `raw-ext4-v1` data/environment images, 0700 directories/0600 files, verified owner/file identity, explicit backup exclusion and authenticated worker admission. Separate per-workspace encryption is deferred by user choice. FileVault protects the host volume offline when enabled; same-user processes and approved escapes can read images. See the [storage contract](cowork-storage-security.md). |
 | Workspace inputs | At least one explicitly allowed host directory or one selected GitHub repository. A GitHub account connection alone is not a selected repository. Combining directories and repositories is allowed. |
 | Changing inputs | Users may add repositories and folders during a conversation. They may remove sources, but at least one source must remain; add a replacement before removing the last source. Project changes affect every conversation in that workspace. |
 | Host folders | Granted writable folders are edited directly. Changes already made to host files survive VM deletion or rollback. |
@@ -44,7 +44,7 @@ The prior Containerization probe follows Apple's lightweight, sub-second-start d
 ```mermaid
 flowchart TB
   UI[Mac, CLI and paired phone] --> D[Winter daemon]
-  D --> L[Native launch and key broker]
+  D --> L[Authenticated native worker launcher]
   D --> B[Provider, Git and approved host-tool brokers]
   L --> W1[Sandboxed workspace worker]
   L --> W2[Sandboxed Project worker]
@@ -98,7 +98,7 @@ Proposed guest layout:
 
 `outputs/<session-id>` is an optional destination for user-facing deliverables such as PDFs, spreadsheets, reports, images or archives. Source edits stay in their repository or mounted folder; build caches and intermediate products stay in their appropriate cache/build directories. Do not duplicate all changed files into outputs. Export a build product there only when it is a requested deliverable. Selected host folders are not copied in or synchronized out on every boot/stop; persistent guest disks and tool caches are reused rather than routinely rebuilt.
 
-The host owns the manifest and encrypted volume files beneath a Cowork workspace directory. Canonical identity, grants, trust and policy retain one host authority; the manifest cannot confer authority. Keep the canonical runtime-state DB; integrity-protect identity/key-version records consumed by the key broker or worker under the [storage contract](cowork-storage-security.md). Plaintext records alone cannot authorize launch/unlock. The [host-storage fence and migration contract](cowork-execution-contracts.md#host-storage-authority-fences-and-migration) supplies defense in depth for host tools, while guest tool confinement remains an enforced boundary. Mount each writable disk into at most one guest. Materialize runtime configuration/run homes using guest paths, not host symlinks or Mac cwd strings. Separate conversation runtime identity from the shared Project memory path.
+The host owns the manifest and versioned plaintext volume images beneath a Cowork workspace directory. Canonical identity, grants, trust and policy retain one host authority; the manifest cannot confer authority. Keep the canonical runtime-state DB and validate worker-consumed workspace/volume/format identity against an authenticated launch request under the [storage contract](cowork-storage-security.md). A file descriptor or manifest alone cannot authorize a launch. Separate disk encryption and key custody are deferred. The [host-storage fence and migration contract](cowork-execution-contracts.md#host-storage-authority-fences-and-migration) supplies defense in depth for host tools, while guest tool confinement remains an enforced boundary. Mount each writable disk into at most one guest. Materialize runtime configuration/run homes using guest paths, not host symlinks or Mac cwd strings. Separate conversation runtime identity from the shared Project memory path.
 
 ### Where the restored state lives on the Mac
 
@@ -109,16 +109,16 @@ The following Cowork paths are proposed; they have not been created by this spec
   cache/cowork/images/<image-digest>/     shared immutable image/kernel assets
   cowork/workspaces/<workspace-id>/
     manifest.json                       nonauthoritative storage/version descriptor
-    env.img.enc                         encrypted writable environment layer
-    data.img.enc                        encrypted workspace data volume
+    env.ext4                            plaintext writable environment image (raw-ext4-v1)
+    data.ext4                           plaintext workspace data image (raw-ext4-v1)
     shared/instructions/WINTER.md       canonical editable workspace guidance
     shared/memory/                      canonical Project memory files
     shared/outputs/<session-id>/        canonical user-facing deliverables
 ```
 
-`data.img.enc` is ciphertext on the Mac and exposes its filesystem only through the admitted guest unlock path, mounted at `/workspace` inside the guest. It contains cloned repositories, worktrees, real per-conversation SDK stores (including subagents) and persistent scratch. Its nested host-backed mounts have one authoritative plaintext host copy: `shared/memory` at `/workspace/.winter/memory` and `shared/outputs` at `/workspace/outputs`. Mount `shared/instructions` read-only at `/run/winter/shared-instructions`, with a supervisor-owned `/workspace/.winter/WINTER.md` alias to its WINTER.md. Only the approved host write path or direct user editing changes that file; do not redirect SDK store directory levels through symlinks. The encrypted container format is pending validation; changing the filename alone establishes nothing.
+`data.ext4` is a plaintext guest filesystem image mounted at `/workspace` inside the admitted guest. Direct image reads by same-user processes and approved escapes remain possible; macOS does not natively mount ext4 for ordinary UI browsing. It contains cloned repositories, worktrees, real per-conversation SDK stores (including subagents) and persistent scratch. Its nested host-backed mounts have one authoritative plaintext host copy: `shared/memory` at `/workspace/.winter/memory` and `shared/outputs` at `/workspace/outputs`. Mount `shared/instructions` read-only at `/run/winter/shared-instructions`, with a supervisor-owned `/workspace/.winter/WINTER.md` alias to its WINTER.md. Only the approved host write path or direct user editing changes that file; do not redirect SDK store directory levels through symlinks. The explicit volume format is `raw-ext4-v1`; any future encryption conversion must be recorded and recoverable.
 
-`env.img.enc` retains encrypted tool packages/environment changes, paired with its base image, but never the mutable source of trusted runtime code. No ordinary Mac filesystem reader can treat the encrypted image as plaintext guest files. Guest-only file browsing uses the [authenticated guest file channel](cowork-execution-contracts.md#guest-router-file-channel-and-immutable-runtime) and may require visible wake; host-backed guidance, memory, outputs and host transcripts remain available while stopped and are outside this disk-only encryption guarantee. Shares are direct files, not periodically synchronized replicas. Host reads of guest-writable shared data must reject traversal and symlink escapes. Images may use sparse backing; deleted guest files do not imply immediate host disk-space reclamation.
+`env.ext4` retains plaintext tool packages/environment changes, paired with its base image, but never supplies trusted runtime code. Raw image access is possible to host processes with sufficient file access. Guest-only file browsing uses the [authenticated guest file channel](cowork-execution-contracts.md#guest-router-file-channel-and-immutable-runtime) and may require visible wake; host-backed guidance, memory, outputs and host transcripts remain available while stopped and have no per-workspace encryption guarantee. Shares are direct files, not periodically synchronized replicas. Host reads of guest-writable shared data must reject traversal and symlink escapes. Images may use sparse backing; deleted guest files do not imply immediate host disk-space reclamation.
 
 Selected Mac folders stay at their original Mac paths, outside these images. They are mounted into `/workspace/folders/<grant-id>`; their direct edits are not copied back from a private snapshot and are not rolled back with the VM.
 
@@ -295,14 +295,14 @@ Retain only the workspace portion of Projects in this scope. Keep Code behavior 
 
 ## Build order and acceptance gates
 
-The subsequent [encrypted-storage contract](cowork-storage-security.md) adds a
-mandatory security slice before activation: helper-only key custody, a real
-encrypted/integrity-protected block path, sealed broker-consumed identity records,
-and locked/tampered/missing-key/backup recovery behavior. Existing plaintext
-fixture results do not satisfy it. Treat Code path floors as defense in depth,
-not as a substitute or a requirement to forbid normal approved escapes.
+The [first-version storage contract](cowork-storage-security.md) defers separate
+workspace encryption. Keep signed worker admission, owner/mode/file-identity
+checks, protected tool routes, backup exclusions and truthful recovery. Build a
+working persistent VM session first; crypto kernel/key broker/LUKS integration
+remain a separately recorded follow-up. This does not relax VM isolation, host
+credential custody or active RAM return.
 
-1. **Native/authority/resource slice:** signed sandboxed workers/key broker, pinned candidate backend, immutable minimal guest control components and authenticated channels; disposable folder fixtures/mocked credentials only. Prove worker sandbox and authentic launch, cross-workspace key separation, Linux control/tool separation, host network enforcement without bypass, signed folder access/revocation, worker/daemon lifetime, genuine active memory reclaim and multi-daemon admission before attaching user data. Real-VM tests require explicit opt-in; ordinary tests use a fake backend.
+1. **Native/authority/resource slice:** signed sandboxed workers and authenticated launch, pinned candidate backend, immutable minimal guest control components and authenticated channels; disposable folder fixtures/mocked credentials only. Prove worker sandbox and authentic launch, cross-workspace storage/share separation, Linux control/tool separation, host network enforcement without bypass, signed folder access/revocation, worker/daemon lifetime, genuine active memory reclaim and multi-daemon admission before attaching user data. Real-VM tests require explicit opt-in; ordinary tests use a fake backend.
 2. **Durable execution slice:** immutable Linux Winter artifact, guest router/run-home/file transport, explicit policy/messaging matrix, all host-reader replacements, Linux Workflow, two concurrent Project conversations, independent cancellation and real cold parent/child continuation. Include parent crash, sleep/wake, update/quit drain and interrupted effects. Release/pin the SDK prerequisite separately and complete shutdown/resume ownership gates needed for auto-stop.
 3. **Workspace behavior:** live source changes, minimum-source/revocation rules, instruction refresh, executable trust/extensions, ordinary shared filesystem/Git behavior, Linux/Mac build-artifact separation, feature-branch publication gateway, provider/auxiliary-model transport, same-Project messaging, host-backed artifacts/memory, image compatibility, backup/restore and retention.
 4. **Scheduled/UI flows:** one canonical host scheduler, Mac/CLI/paired-client flows, activity parity, archive/delete behavior and end-to-end support through real supported creation doors.
