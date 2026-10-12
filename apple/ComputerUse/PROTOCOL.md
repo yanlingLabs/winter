@@ -84,7 +84,7 @@ anchor, and drops the connection if it does not match.
 
 | Client | May call after `hello` | Receives |
 | --- | --- | --- |
-| `daemon` | every method except `view.*` | `escPressed`, `targetLost`, `permissionsChanged` |
+| `daemon` | every method except `view.*` | `escPressed`, `targetLost`, `permissionsChanged`, `desktopVisited`, `watchEvent` |
 | `app` | `status`, `view.subscribe`, `view.unsubscribe` | `view.bound`, `view.released`, `view.frame`, `view.cursor` for the sessions it subscribed to |
 
 Any other call is refused `not_allowed` with `data.reason: "client"`. Only `daemon` connections own sessions
@@ -726,6 +726,78 @@ decides nothing between that change's answers; a ⌘-Tab or ⌃-arrow under Secu
 into a touched app is undone (the tap sees nothing). Unmeasured: hardware-origin modifiers under Secure Event Input
 (run107 measured posted ones).
 
+### 4.13 Watches (wake triggers)
+
+User rulings 2026-10-12: the agent can arm a trigger — "wake me when the user clicks Submit", "when “Sent” appears" —
+and end its turn; the daemon wakes the session when it happens. On an app, the helper does the watching: the daemon arms
+a WATCH on a bound target and the helper sends ONE `watchEvent` (§7.1) when it fires or can no longer fire. A watch never
+acts: it only looks.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `watch.arm` (1.17.0) | `{targetId, watchId, condition, expiresAt?}` | `{element?: {role, name}, targetLabel}` |
+| `watch.cancel` (1.17.0) | `{watchId}` | `{}` — idempotent: an unknown or ended watch is no error |
+
+- `watchId` is the daemon's own id for the trigger (at most 64 characters); every `watchEvent` names it. `expiresAt`
+  (epoch ms) is the daemon's: it expires the trigger itself; the helper only drops the watch silently 10 s after it, as a
+  backstop (with none, after 8 h).
+- `condition` is exactly one of: `{kind: "clicked", ref}` — the user clicks the element (or something inside it);
+  `{kind: "appeared", text}` — the text comes to be shown in the window; `{kind: "gone", ref}` / `{kind: "gone", text}` —
+  the element, or the text, is no longer shown; `{kind: "changed", ref, settleMs?}` — the user changes the field's value,
+  fired once it has stayed the same `settleMs` (default 1,500, at most 60,000); `{kind: "titled", title}` — the window's
+  title comes to contain the text. A `ref` is a `target.snapshot` ref; a text or title is 1…500 characters, matched as
+  `target.waitFor` matches (names and non-secure values, case and diacritics folded, the first 1,500 elements read).
+  `submitted` and `navigated` are for browser tabs only: refused `invalid_params`.
+- **Arming** checks, in order, and arms nothing when one fails: the target is bound and alive (`target_lost`); the
+  Accessibility grant (`permission_missing`); never Winter (`refused`, `winter_itself`); the window exposes accessibility
+  (a capture-only bind: `unsupported`); never System Settings' Privacy & Security (`refused`, `privacy_pane`); the ref's
+  element exists (`stale_ref`); never a password or payment field, nor anything inside one (`refused`, `secure_field`);
+  a STATE condition (`appeared`, `gone`, `titled`) that already holds is refused `not_allowed` with `reason:
+  "already_met"` (the controller's ruling: only a false→true transition after arming fires); a `watchId` already armed
+  is `invalid_params`; more than 64 watches in the helper is `busy`.
+- **The answer**: `element` — the watched element as `target.snapshot` names it: its role words and its title, else its
+  description, else its placeholder; `targetLabel` — "<App> — <window title>" (the title as the state header prints it:
+  app window titles are not redacted). Both are screen text: the daemon fences them for the model.
+- **A watch lives on its own.** It holds the target's pid, window and element itself (and reads the window through its
+  own element and ref cache, never touching the target's refs), so `target.release`, `session.ended` (a script's reset,
+  a worker restart, the worker's idle end) never end it. It ends on `watch.cancel`, on its one `watchEvent`, when the
+  daemon connection that armed it closes (silently — the daemon reads its connection closing as the helper gone and ends
+  each trigger itself), or at its backstop (silently). An armed watch keeps the helper running (§8.1).
+- **What fires it** — only what the USER did, never Winter's own input:
+  - `clicked`: a HARDWARE mouse-down (any button) whose app hit-test (`AXUIElementCopyElementAtPosition` in the window's
+    app, the window under the point being that app's) lands on the element or inside it. The helper's own listen-only
+    session tap for the three mouse-down types (nothing else: no keys, no moves) runs only while a `clicked` or `changed`
+    watch is armed — the same public API as the work watcher (§4.12), covered by the Accessibility grant: no other
+    permission, no prompt. An event with a source process (the helper's own stamped ones, another process's synthetic
+    ones) never counts — except, on a live-test instance only, the live suite's test click (§9). The point is dropped
+    once judged; nothing of it is logged or sent.
+  - `changed`: the user's input must explain the change. Keys can't be seen without Input Monitoring (never asked for),
+    so a change counts as the user's when the field (or something inside it) holds the keyboard focus while its app is
+    frontmost, or when their hardware click went to the field within the last 30 s (to its window within 3 s). A change
+    no input of theirs explains becomes the new baseline; one back to the arming value is no change; a field that goes
+    away while a change of theirs is settling fires.
+  - `appeared`, `gone`, `titled`: any false→true transition — "Upload complete" appearing after the user's action, a
+    build finishing — that Winter's own input did not cause.
+  - **Winter's own input**: a change that lands while a request that can send input to that app is in flight —
+    `target.act`, `target.applescript`, `target.foreground`, `target.useWindow` on any target of that app; `target.bind`
+    and `apps.openDocument` for EVERY app (their app is known only once they answer) — or within 500 ms after it, is
+    Winter's: a click then is ignored, a state transition becomes the baseline (it must go and come back to fire), and a
+    `gone` element removed by it is lost.
+- **When it looks**: an `AXObserver` per watched app (creations, destructions, values, titles, layout, focus, windows),
+  debounced 250 ms and at most 1 s apart while notifications keep coming; a fallback look every 5 s; a `changed` field's
+  settle. Every look reads the window afresh on the app's own queue. Timers carry leeway (an hour-long watch costs almost
+  no wake-ups).
+- **Lost** (`watchEvent` `outcome: "lost"`), with the helper's `reason`: "the app quit"; "the window closed" (a window
+  that reads as gone is looked at again 1.5 s later — a full-screen or Space transition); "the element is gone (the
+  window changed under it)"; "the element went away while Winter was acting in the app"; "Winter Computer Use lost its
+  Accessibility permission".
+- **The user can see that Winter waits** (the spine's rule): while a watch is armed and its app is frontmost with the
+  watched window its front window on the active Space, the helper draws a ring around the element (clipped to the
+  window) and a pill with a FIXED sentence that names only the element's own label — "Winter continues when you click
+  “Submit”", "… when you change “Name”", "… when “Uploading” goes away"; the window-wide kinds name nothing ("Winter
+  continues when this window changes") — never the text the model waits for, never its note. Click-through, never key,
+  never activating, `sharingType = .none` (never in a capture); followed every 0.5 s while shown, gone with the watch.
+
 ## 5. Errors
 
 Every error is a JSON-RPC error object whose `data.code` is the code to branch on; `message` is one
@@ -818,6 +890,7 @@ Notifications are `{"jsonrpc":"2.0","method":…,"params":…}` lines with no `i
 | `targetLost` | `{targetId, reason: "app_quit" \| "window_closed" \| "helper_restart" \| "unknown"}` | a bound target's app quit or its window closed (§5's reasons; the helper itself sends `app_quit` and `window_closed` here) |
 | `permissionsChanged` | `{permissions: {accessibility, screenRecording}}` | a grant changed (each change once) |
 | `desktopVisited` | `{visitId, sessionId, callId?, targetId, app, why, actions, ms, returned, userMoved?}` | a desktop visit CLOSED (§4.10), whatever its outcome — the work done, a failed primitive, a cancelled request, a window that never came on screen; `callId` is the request that opened it |
+| `watchEvent` (1.17.0) | `{watchId, outcome: "fired" \| "lost", at, detail?, reason?}` | a watch ended (§4.13), once: `at` is epoch ms; `fired` carries `detail` ("clicked", "appeared", "gone", "changed", "title now “…”" — screen text the daemon fences), `lost` its `reason` |
 
 They go to every ready `daemon` connection, never to Winter.app.
 
@@ -874,8 +947,8 @@ A paused or off-screen target is never released for it, and an unchanged frame i
   path (dist: inside Winter.app; dev: `dist/dev/`) and verifies it by code signature after `hello`.
 - One helper per home: a helper that finds a live listener on the socket refuses to start; a stale socket
   file is replaced.
-- **Idle quit:** after 10 minutes with no bound target and no active script, the helper quits (if a request is
-  still in flight, the countdown starts over). Open connections do not keep it running; the daemon relaunches
+- **Idle quit:** after 10 minutes with no bound target, no active script and no armed watch (§4.13), the helper quits
+  (if a request is still in flight, the countdown starts over). Open connections do not keep it running; the daemon relaunches
   it on its next call.
 - `SIGTERM` quits the same way. On quit the socket file is removed (if it is still the helper's) and every
   connection closed.
@@ -887,6 +960,7 @@ A paused or off-screen target is never released for it, and an unchanged frame i
 - A `daemon` connection that sends a request with `params.sessionId` owns that session. When the last
   connection that owned a session closes, the helper cancels that connection's in-flight requests, waits for
   them to wind down (at most 2 s), and runs `session.ended` for the session.
+- A `daemon` connection closing also ends the watches it armed (§4.13), silently.
 - An `app` connection closing ends only its subscriptions.
 - The daemon keeps one persistent connection; a closed connection means the helper is gone.
 
@@ -912,6 +986,7 @@ None of this exists in a dev or release binary; `scripts/release.ts` scans the s
 | `test.capture` | `{windowId, source: "skylight"\|"stream", path, rect?: [x, y, w, h]}` | `{width, height, frameAgeMs?}` — writes one PNG (inside the instance's home only) of a window: the off-Space still path (`skylight`) or the latest frame of the test stream (`stream`); `rect` in the window's points |
 | `test.stream` | `{windowId, on, fps?}` | `{running}` — starts/stops a desktop-independent ScreenCaptureKit stream on that window (the freshness measurement) |
 | `test.automation` | `{pid?, bundleId?}` | `{status: "granted" \| "would_ask" \| "denied" \| "not_running" \| "unknown", code}` — may this helper already send the app Apple Events; asked with `AEDeterminePermissionToAutomateTarget(…, askUserIfNeeded: false)`, so it NEVER raises macOS's Automation question (the suite runs an AppleScript-backed scenario only on `granted`) |
+| `test.userClick` | `{pid, name}` | `{clicked}` — (1.17.0) the USER's click for the wake-trigger rows: a real left click posted at the HID level (the pointer moves there and is put back) at the centre of the first element of that app whose title or description is `name`, stamped `CUWatchTestStamp` — the one synthetic input a live-test instance's watches count as the user's (nothing else counts it, and no other helper has the route) |
 
 ## 10. Compatibility and versioning
 
