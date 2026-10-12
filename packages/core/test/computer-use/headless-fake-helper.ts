@@ -19,6 +19,8 @@
 //                               beside a run's own data (Default/Cookies)
 //   http://notice.test/       — it answers, then reports a refused popup twice and a refused local-network request
 //                               once (plus a notice of an unknown kind, and one for an unknown tab)
+//   http://slow-close.test/   — its tab.close is answered 300 ms late, with a `closed` line in the log just before (a
+//                               page whose renderer takes a while to go)
 // It exits 0 on EOF, like the real helper.
 import { appendFileSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -106,7 +108,17 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
       return;
     }
     case "tab.release": return reply(cmdId, {});
-    case "tab.close": tabs.delete(String(p.tabId)); return reply(cmdId, {});
+    case "tab.close": {
+      const tabId = String(p.tabId);
+      const slow = tabs.get(tabId)?.url === "http://slow-close.test/";
+      tabs.delete(tabId);
+      if (!slow) return reply(cmdId, {});
+      setTimeout(() => {
+        if (logFile !== undefined) appendFileSync(logFile, `${JSON.stringify({ op: "closed", params: { tabId } })}\n`);
+        reply(cmdId, {});
+      }, 300);
+      return;
+    }
     case "tabs.live": return reply(cmdId, { tabs: [...tabs].map(([tabId, t]) => ({ tabId, sessionId: t.sessionId, url: t.url, title: `live ${t.url}`, held: true })) });
     case "cdp.send": {
       if (!tabs.has(String(p.tabId))) return fail(cmdId, "tab_gone", "the headless tab is gone");

@@ -5,9 +5,12 @@
 // The pool implements the pinned `CdpTransport` and runs its ENGINE — Winter Headless, the windowless CEF helper
 // (`winter-engine.ts`, `engines.ts`) — on demand:
 //   - started by the first tab (`createTab`), never by a listing (`listTabs` answers `[]` with nothing running);
-//   - at most 8 open tabs per session and 24 in all, and no new tab while the helper's process tree holds more than
-//     3 GB (the user's ruling on the budget): running out answers `capacity` (the engine reads it as `TargetBusy`);
-//     nothing is closed for the model;
+//   - at most 8 open tabs per session and 24 in all, and no new tab while the helper's memory is over 3 GB (the user's
+//     ruling on the budget) — its processes' physical footprint summed, what Activity Monitor shows (`memory.ts`), read
+//     afresh for every new tab and only once the closes still in flight have finished: running out answers `capacity`
+//     (the engine reads it as `TargetBusy`); nothing is closed for the model. A helper over it with NO tab open is
+//     restarted instead (a fresh one is cheap: its components are kept) — the guard never stays tripped with nothing
+//     left to close;
 //   - gone after 5 minutes with no tab, at daemon stop, and when `computerUse.headless.enabled` turns off (read live,
 //     at every command and every 10 s);
 //   - a crash loses every tab (`tabGone(crashed)`; the next `browsers.open` starts a fresh helper). 3 commands in a
@@ -24,7 +27,6 @@
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
 import { processStartSeconds } from "../../../auth/credential-migration-lock";
 import { AutomationFailure } from "../../errors";
 import type { PrimitiveMetric } from "../../telemetry";
@@ -32,18 +34,22 @@ import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS } from "../cdp-allowlist";
 import { TransportError, type CdpEvent, type CdpTransport, type TransportTab } from "../transport";
 import { harvestHeadlessComponents, headlessComponentsDir, seedHeadlessComponents } from "./components";
 import { DEFAULT_HEADLESS_ENGINE, HEADLESS_ENGINES, type ResolvedEngine } from "./engines";
+import { processTreeFootprint } from "./memory";
 import { HEADLESS_PIPE_PROTOCOL, HEADLESS_TIMEOUTS, spawnEngineProcess, WinterHeadlessProcess, type HeadlessNoticeKind, type HeadlessOp, type SpawnEngine } from "./winter-engine";
 
-/** The open-tab budget and the memory guard (the user's ruling). */
+/** The open-tab budget and the memory guard (the user's ruling). The guard reads the helper's processes' physical
+ *  footprint summed (`memory.ts`). Measured (M-series, 2026-10-12): the helper with no tab ~220 MiB; 24 plain pages
+ *  ~1.4 GiB; 24 of the live drill's media-heavy pages (WebGL, canvas, big SVGs, ~130 MiB each, ~37 of it in the GPU
+ *  process) ~3.3 GiB — so pages that heavy meet the guard at about 22 tabs, before the 24-tab cap. */
 export const HEADLESS_TABS_PER_SESSION = 8;
 export const HEADLESS_TABS_GLOBAL = 24;
-export const HEADLESS_RSS_LIMIT_BYTES = 3 * 1024 * 1024 * 1024;
+export const HEADLESS_MEMORY_LIMIT_BYTES = 3 * 1024 * 1024 * 1024;
+/** Over the limit while tabs are still closing: the guard waits this long for them before it reads again and decides. */
+export const HEADLESS_CLOSE_SETTLE_MS = 2_000;
 /** The helper exits after this long with no headless tab open anywhere. */
 export const HEADLESS_IDLE_EXIT_MS = 5 * 60_000;
 /** How often a running helper re-reads `computerUse.headless.enabled`. */
 export const HEADLESS_ENABLED_POLL_MS = 10_000;
-/** The memory reading is reused this long. */
-const RSS_CACHE_MS = 1_000;
 /** This many commands in a row that time out and the helper is probed (`tabs.live`): stuck itself, it is killed and
  *  every tab it held is lost; answering, only the tabs those commands named are lost. */
 export const HEADLESS_WEDGED_AFTER_TIMEOUTS = 3;
@@ -68,8 +74,10 @@ export interface HeadlessPoolDeps {
   spawn?: SpawnEngine;
   /** Does the spawned process satisfy the engine's designated requirement (`processSatisfiesRequirement`)? */
   verify?(pid: number, requirement: string): boolean;
-  /** The resident memory of a process and every process under it, bytes (`ps`). */
-  rssOf?(rootPid: number): number | undefined;
+  /** The memory of a process and every process under it, bytes (`processTreeFootprint`). */
+  memoryOf?(rootPid: number): number | undefined;
+  /** How long the guard waits for closes in flight before it decides (`HEADLESS_CLOSE_SETTLE_MS`). */
+  closeSettleMs?: number;
   /** `headless.launch` / `headless.exit` metric lines. */
   metric?(m: PrimitiveMetric): void;
   now?(): number;
@@ -81,7 +89,7 @@ export interface HeadlessPoolDeps {
 
 interface PoolTab { tabKey: string; sessionId: string; proc: WinterHeadlessProcess; url: string; title: string; noticed: Set<HeadlessNoticeKind>; localNetworkAt?: number }
 
-type ExitReason = "idle" | "stop" | "crash" | "disabled";
+type ExitReason = "idle" | "stop" | "crash" | "disabled" | "memory";
 
 /** `<home>/run/headless.pid`. */
 export function headlessPidPath(home: string): string { return join(home, "run", "headless.pid"); }
@@ -108,34 +116,6 @@ export function sweepHeadless(home: string, deps: { startOf?: (pid: number) => n
   try { rmSync(headlessCacheRoot(home), { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
-/** The whole process tree's resident memory, bytes, from one `ps` (`-A -o pid=,ppid=,rss=`). */
-export function processTreeRss(rootPid: number): number | undefined {
-  const r = spawnSync("/bin/ps", ["-A", "-o", "pid=,ppid=,rss="], { encoding: "utf8", timeout: 2_000, env: { ...process.env, LC_ALL: "C" } });
-  if (r.status !== 0 || typeof r.stdout !== "string") return undefined;
-  const children = new Map<number, number[]>();
-  const rss = new Map<number, number>();
-  for (const line of r.stdout.split("\n")) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/.exec(line);
-    if (m === null) continue;
-    const pid = Number(m[1]); const ppid = Number(m[2]);
-    rss.set(pid, Number(m[3]) * 1024);
-    const list = children.get(ppid);
-    if (list === undefined) children.set(ppid, [pid]); else list.push(pid);
-  }
-  if (!rss.has(rootPid)) return undefined;
-  let total = 0;
-  const stack = [rootPid];
-  const seen = new Set<number>();
-  while (stack.length > 0) {
-    const pid = stack.pop()!;
-    if (seen.has(pid)) continue;
-    seen.add(pid);
-    total += rss.get(pid) ?? 0;
-    stack.push(...(children.get(pid) ?? []));
-  }
-  return total;
-}
-
 export class HeadlessPool implements CdpTransport {
   readonly backend = "headless";
   readonly family = "headless" as const;
@@ -159,7 +139,14 @@ export class HeadlessPool implements CdpTransport {
   private launchedAt = 0;
   private stopped = false;
   private resolved: { at: number; value: ResolvedEngine | { missing: string } } | undefined;
-  private rss: { at: number; pid: number; bytes: number | undefined } | undefined;
+  /** `tab.close` / `context.dispose` commands still in flight (their renderers are still there), and who waits for them
+   *  to finish. */
+  private closing = 0;
+  private readonly closeWaiters = new Set<() => void>();
+  /** `tab.ensure` commands of new tabs still in flight (a restart must never cut one off). */
+  private ensuring = 0;
+  /** A restart for memory in flight (shared by every new tab that finds the helper over the guard with no tab open). */
+  private recycling: Promise<void> | undefined;
 
   constructor(private readonly deps: HeadlessPoolDeps) {}
 
@@ -306,7 +293,7 @@ export class HeadlessPool implements CdpTransport {
     }
   }
 
-  private shutdown(reason: Exclude<ExitReason, "crash">): void {
+  private shutdown(reason: Exclude<ExitReason, "crash" | "memory">): void {
     const proc = this.proc;
     if (proc === undefined || !proc.alive) return;
     this.exitReason = reason;
@@ -405,7 +392,7 @@ export class HeadlessPool implements CdpTransport {
     const lost = suspects.map((k) => this.tabs.get(k)).filter((t): t is PoolTab => t !== undefined && t.proc === proc);
     for (const t of lost) {
       this.tabs.delete(t.tabKey);
-      void proc.command("tab.close", { tabId: t.tabKey }, probeMs).catch(() => { /* the helper closes it with its context at the latest */ });
+      void this.closingWhile(proc.command("tab.close", { tabId: t.tabKey }, probeMs)).catch(() => { /* the helper closes it with its context at the latest */ });
       this.emitGone(t.tabKey, "crashed");
     }
     this.deps.log?.(lost.length > 0
@@ -434,7 +421,7 @@ export class HeadlessPool implements CdpTransport {
     for (const t of mine) { this.tabs.delete(t.tabKey); this.emitGone(t.tabKey, "closed"); }
     const proc = this.proc;
     if (proc?.alive === true) {
-      void this.command(proc, "context.dispose", { sessionId }).catch((err: unknown) => this.deps.log?.(`computer-use: disposing a headless context failed (${err instanceof Error ? err.message : "error"})`));
+      void this.closingWhile(this.command(proc, "context.dispose", { sessionId })).catch((err: unknown) => this.deps.log?.(`computer-use: disposing a headless context failed (${err instanceof Error ? err.message : "error"})`));
     }
     this.armIdle();
   }
@@ -443,13 +430,78 @@ export class HeadlessPool implements CdpTransport {
 
   private capacity(message: string): TransportError { return new TransportError("capacity", message); }
 
-  private memoryOf(pid: number): number | undefined {
-    const now = this.now();
-    if (this.rss !== undefined && this.rss.pid === pid && now - this.rss.at < RSS_CACHE_MS) return this.rss.bytes;
-    let bytes: number | undefined;
-    try { bytes = (this.deps.rssOf ?? processTreeRss)(pid); } catch { bytes = undefined; }
-    this.rss = { at: now, pid, bytes };
-    return bytes;
+  /** The helper's memory now (`memory.ts`'s footprint sum) — never a reading kept from before: tabs come and go. */
+  private memoryNow(pid: number): number | undefined {
+    try { return (this.deps.memoryOf ?? processTreeFootprint)(pid); } catch { return undefined; }
+  }
+
+  /** A close or a context's disposal, counted while its command is in flight: until the helper answers, the pages it
+   *  ends are still there, so the memory guard waits for it before it refuses anything. */
+  private async closingWhile<T>(p: Promise<T>): Promise<T> {
+    this.closing++;
+    try { return await p; } finally {
+      this.closing--;
+      if (this.closing === 0) for (const w of [...this.closeWaiters]) w();
+    }
+  }
+
+  /** Every close in flight finished, or `ms` passed. */
+  private closesSettled(ms: number): Promise<void> {
+    if (this.closing === 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = (): void => { clearTimeout(timer); this.closeWaiters.delete(done); resolve(); };
+      const timer = setTimeout(done, ms);
+      this.closeWaiters.add(done);
+    });
+  }
+
+  /**
+   * The memory guard, before a new tab: over the limit, it waits for the closes still in flight and reads again; still
+   * over with no tab open (nothing a close could free), the helper is restarted (`recycle`); still over with tabs open,
+   * the new tab is refused. A reading that can't be made (the helper just went) refuses nothing.
+   */
+  private async guardMemory(): Promise<void> {
+    // A restart in flight: the new tab waits for the old helper to be gone and goes to the fresh one.
+    if (this.recycling !== undefined) { await this.recycling; return; }
+    const proc = this.proc?.alive === true && this.exitReason === undefined ? this.proc : undefined;
+    if (proc === undefined) return;
+    const limit = HEADLESS_MEMORY_LIMIT_BYTES;
+    let bytes = this.memoryNow(proc.pid);
+    if (bytes === undefined || bytes <= limit) return;
+    if (this.closing > 0) {
+      await this.closesSettled(this.deps.closeSettleMs ?? HEADLESS_CLOSE_SETTLE_MS);
+      if (this.proc !== proc || !proc.alive) return;
+      bytes = this.memoryNow(proc.pid);
+      if (bytes === undefined || bytes <= limit) return;
+    }
+    if (this.tabs.size === 0 && this.closing === 0 && this.ensuring === 0) {
+      await this.recycle(proc, bytes);
+      return;
+    }
+    throw this.capacity("Winter's headless browser is using too much memory — close some tabs with tab.close()");
+  }
+
+  /**
+   * The helper holds more than the guard allows with no tab open: nothing a close could free, so it is ended (its pipe
+   * closed, killed after the grace) and the tab that found it starts a fresh one — cheap, since its components are kept.
+   * Every session's context (cookies) goes with it, as at the idle exit. The old run's exit still takes back its
+   * components and removes its cache before the new run is seeded.
+   */
+  private recycle(proc: WinterHeadlessProcess, bytes: number): Promise<void> {
+    if (this.recycling !== undefined) return this.recycling;
+    const run = (async () => {
+      if (this.proc !== proc || !proc.alive) return;
+      this.deps.log?.(`computer-use: Winter's headless browser used ${Math.round(bytes / (1024 * 1024))} MiB with no tab open — starting a fresh one`);
+      // From here the pool no longer knows it: a new tab launches anew, and its exit is not reported a second time.
+      this.proc = undefined;
+      this.clearTimers();
+      this.resetStreak();
+      this.metric("headless.exit", this.launchedAt === 0 ? 0 : this.now() - this.launchedAt, { headlessEngine: DEFAULT_HEADLESS_ENGINE, exitReason: "memory" });
+      try { rmSync(headlessPidPath(this.deps.home), { force: true }); } catch { /* best effort */ }
+      await new Promise<void>((resolve) => { proc.onExit(() => resolve()); proc.close(); });
+    })();
+    this.recycling = run.finally(() => { this.recycling = undefined; });
+    return this.recycling;
   }
 
   async createTab(opts: { sessionId: string; sessionTitle?: string; url: string; tabKey?: string; engine?: string }): Promise<TransportTab> {
@@ -457,22 +509,25 @@ export class HeadlessPool implements CdpTransport {
     const engine = opts.engine ?? DEFAULT_HEADLESS_ENGINE;
     if (!(HEADLESS_ENGINES as readonly string[]).includes(engine)) throw new TransportError("not_allowed", `no headless engine "${engine}" — the engines are: ${HEADLESS_ENGINES.join(", ")}`);
     if (!this.connected) throw new TransportError("disconnected", this.reason ?? "unavailable");
-    // The budget, counted with the creations still in flight.
+    // The budget, counted with the creations still in flight — checked and taken at once, before anything waits.
     const mine = this.tabCount(opts.sessionId) + (this.reserved.get(opts.sessionId) ?? 0);
     const all = this.tabs.size + [...this.reserved.values()].reduce((a, b) => a + b, 0);
     if (mine >= HEADLESS_TABS_PER_SESSION) throw this.capacity(`this session already has ${HEADLESS_TABS_PER_SESSION} headless tabs open — close one with tab.close()`);
     if (all >= HEADLESS_TABS_GLOBAL) throw this.capacity(`Winter's headless browser already has ${HEADLESS_TABS_GLOBAL} tabs open — close one with tab.close()`);
-    const running = this.proc?.alive === true ? this.proc : undefined;
-    if (running !== undefined) {
-      const bytes = this.memoryOf(running.pid);
-      if (bytes !== undefined && bytes > HEADLESS_RSS_LIMIT_BYTES) throw this.capacity("Winter's headless browser is using too much memory — close some tabs with tab.close()");
-    }
     this.reserved.set(opts.sessionId, (this.reserved.get(opts.sessionId) ?? 0) + 1);
     if (this.idleTimer !== undefined) { clearTimeout(this.idleTimer); this.idleTimer = undefined; }
     try {
+      await this.guardMemory();
+      if (this.stopped) throw new TransportError("disconnected", "Winter is shutting down");
       const proc = await this.engine();
       const tabKey = `w-${randomBytes(6).toString("hex")}`;
-      const r = await this.command(proc, "tab.ensure", { sessionId: opts.sessionId, tabId: tabKey, url: opts.url }, this.deps.timeouts?.ensure ?? HEADLESS_TIMEOUTS.ensure) as { url?: unknown; title?: unknown };
+      this.ensuring++;
+      let r: { url?: unknown; title?: unknown };
+      try {
+        r = await this.command(proc, "tab.ensure", { sessionId: opts.sessionId, tabId: tabKey, url: opts.url }, this.deps.timeouts?.ensure ?? HEADLESS_TIMEOUTS.ensure) as { url?: unknown; title?: unknown };
+      } finally {
+        this.ensuring--;
+      }
       const url = typeof r?.url === "string" ? r.url : opts.url;
       const title = typeof r?.title === "string" ? r.title : "";
       this.tabs.set(tabKey, { tabKey, sessionId: opts.sessionId, proc, url, title, noticed: new Set() });
@@ -489,7 +544,7 @@ export class HeadlessPool implements CdpTransport {
     if (t === undefined) return;
     this.tabs.delete(tabKey);
     try {
-      if (t.proc.alive) await this.command(t.proc, "tab.close", { tabId: tabKey });
+      if (t.proc.alive) await this.closingWhile(this.command(t.proc, "tab.close", { tabId: tabKey }));
     } finally {
       this.armIdle();
     }
