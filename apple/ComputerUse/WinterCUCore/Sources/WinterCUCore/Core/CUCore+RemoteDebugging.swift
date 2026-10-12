@@ -56,16 +56,14 @@ extension CUCore {
     /// version (`CURemoteDebuggingLexiconStore`).
     func remoteDebuggingWords(_ t: CUTarget) -> CURemoteDebuggingWords {
         if let o = remoteDebuggingWordsOverride { return o(t) }
-        if let url = NSRunningApplication(processIdentifier: t.pid)?.bundleURL,
-           let l = CURemoteDebuggingLexiconStore.lexicon(appBundle: url) {
-            return .lexicon(l)
-        }
-        return CURemoteDebuggingLexiconStore.showsEnglish(bundleId: t.bundleId) ? .englishOnly : .unreadable
+        let lexicon = NSRunningApplication(processIdentifier: t.pid)?.bundleURL.flatMap(CURemoteDebuggingLexiconStore.lexicon(appBundle:))
+        return CURemoteDebuggingLexiconStore.words(lexicon: lexicon, shownLanguage: CURemoteDebuggingLexiconStore.shownLanguage(bundleId: t.bundleId))
     }
 
     /// Reads the browser's words ahead, off the act's path (the first read of an installed version maps every locale
     /// pack: about half a second), so a dialog that comes up later finds them ready. Once per bundle.
     func warmRemoteDebuggingWords(_ t: CUTarget) {
+        remoteDebuggingWarmed?(t)
         guard remoteDebuggingWordsOverride == nil, let url = NSRunningApplication(processIdentifier: t.pid)?.bundleURL else { return }
         CURemoteDebuggingLexiconStore.warm(appBundle: url)
     }
@@ -80,11 +78,20 @@ extension CUCore {
         // A capture-only bind (no accessibility) still sends point clicks: judged by the window server's titles.
         guard t.accessible else {
             let titles = sys.windows(pid: t.pid).map(\.title).filter { !$0.isEmpty }
-            let words = titles.isEmpty ? CURemoteDebuggingWords.englishOnly : remoteDebuggingWords(t)
+            // A dialog-like window of the app, by the window server alone: above the normal level (and below menus
+            // and tooltips), or a normal window with no title, never the bound one.
+            let dialogLike = sys.windowStack().contains { $0.pid == t.pid && $0.id != t.windowID && $0.alpha > 0 && $0.layer > 0 && $0.layer < 100 }
+                || sys.windows(pid: t.pid).contains { $0.id != t.windowID && $0.layer == 0 && $0.onScreen && $0.title.isEmpty }
+            let words = titles.isEmpty && !dialogLike ? CURemoteDebuggingWords.englishOnly : remoteDebuggingWords(t)
             if Self.isInspectPageTitle(sys.window(id: t.windowID)?.title)
                 || titles.contains(where: { Self.isRemoteDebuggingDialogText($0, words) }) {
                 CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): an inspect page or the remote-debugging dialog (capture-only) — refused")
                 throw refusal
+            }
+            // Fail closed here too: no words for the language it shows, and a dialog-like window is up.
+            if words == .unreadable, dialogLike {
+                CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): a dialog-like window in words Winter can't read (capture-only, fail closed) — refused")
+                throw CUError.refused(.remoteDebugging, Self.remoteDebuggingUnreadableSentence(t.appName))
             }
             return
         }

@@ -38,18 +38,15 @@ extension CUCore {
         return out
     }
 
-    /// The select a page's hidden text input belongs to: the ONE select near it (in its parent's, else its
-    /// grandparent's, subtree — two levels down). Nil when there is none, or more than one.
+    /// The select a page's hidden text input belongs to: the ONE select beside it in its own container, the input
+    /// lying on it. Nil when there is none, or more than one.
     func selectBeside(_ e: AXUIElement) -> AXUIElement? {
-        var cur = ax.element(e, kAXParentAttribute)
-        for _ in 0..<2 {
-            guard let c = cur else { return nil }
-            let found = boundedDescendants(of: c, depth: 2, max: 40).filter { !CFEqual($0, e) && isWebSelect($0) }
-            if found.count == 1 { return found[0] }
-            if found.count > 1 { return nil }
-            cur = ax.element(c, kAXParentAttribute)
-        }
-        return nil
+        // Only the select's own stand-in: a ZERO-SIZE input (never one parked off the window — a document's input
+        // target) in the SAME container as exactly one select, laid on (or at) that select.
+        guard let f = ax.frame(e), f.width < 2 || f.height < 2, let c = ax.element(e, kAXParentAttribute) else { return nil }
+        let found = ax.elements(c, kAXChildrenAttribute).filter { !CFEqual($0, e) && isWebSelect($0) }
+        guard found.count == 1, let sf = ax.frame(found[0]) else { return nil }
+        return sf.insetBy(dx: -4, dy: -4).contains(f.origin) ? found[0] : nil
     }
 
     /// The text a select shows: its value, else its title, else its description.
@@ -176,12 +173,14 @@ extension CUCore {
         let chosen = try click(CUClickAction(ref: optionRef), p, t, token)
         let end = clock.nowMs() + Self.selectWaitMs
         var shows = selectShows(select)
-        while shows.map({ Self.optionKey($0).contains(Self.optionKey(option.text)) }) != true, clock.nowMs() < end {
+        // EQUAL to the option (case and spacing aside) — never merely containing it: "Extra Small" is not "Small".
+        let isChosen = { (s: String?) in s.map { Self.optionKey($0) == Self.optionKey(option.text) } == true }
+        while !isChosen(shows), clock.nowMs() < end {
             clock.pause(ms: 50)
             shows = selectShows(select)
         }
-        CULog.act.notice("setValue in \(t.appName, privacy: .public): a web select — opened, option pressed, \(shows.map { Self.optionKey($0).contains(Self.optionKey(option.text)) } == true ? "shown" : "NOT shown", privacy: .public)")
-        if shows.map({ Self.optionKey($0).contains(Self.optionKey(option.text)) }) == true {
+        CULog.act.notice("setValue in \(t.appName, privacy: .public): a web select — option pressed, \(isChosen(shows) ? "shown" : "NOT shown", privacy: .public)")
+        if isChosen(shows) {
             return ActOutcome(rung: chosen.rung, detail: "chose \u{201C}\(option.text.prefix(80))\u{201D} in \(label) (\(opened ? "opened it, pressed the option" : "pressed its option"); it shows it now)")
         }
         let now = shows.map { "it reads \u{201C}\($0.prefix(80))\u{201D}" } ?? "it shows no value accessibility can read"
@@ -225,8 +224,20 @@ extension CUCore {
             return toggles[0]
         }
         if let inside = one(in: e) { return inside }
-        guard let parent = ax.element(e, kAXParentAttribute) else { return nil }
-        return one(in: parent)
+        // A label beside its control: only the toggle's OWN label — the one it names as its title element, or one of
+        // them links the other — never any text that merely sits in the same row.
+        guard let parent = ax.element(e, kAXParentAttribute), let toggle = one(in: parent) else { return nil }
+        return isOwnLabel(e, of: toggle) ? toggle : nil
+    }
+
+    /// `label` is `toggle`'s own label: its `AXTitleUIElement` (or that element's child), or either links the other.
+    func isOwnLabel(_ label: AXUIElement, of toggle: AXUIElement) -> Bool {
+        if let title = ax.element(toggle, kAXTitleUIElementAttribute) {
+            if CFEqual(title, label) { return true }
+            if ax.element(label, kAXParentAttribute).map({ CFEqual($0, title) }) == true { return true }
+        }
+        if ax.elements(toggle, "AXLinkedUIElements").contains(where: { CFEqual($0, label) }) { return true }
+        return ax.elements(label, "AXLinkedUIElements").contains(where: { CFEqual($0, toggle) })
     }
 
     /// What a plain left click on `e` stands for, when not `e` itself: a select's hidden text input → the select; a
@@ -274,7 +285,7 @@ extension CUCore {
 
     /// What a key could be seen to change, read before it.
     struct KeyWatch {
-        enum Kind { case tab, toggle(AXUIElement, String?), selectAll(AXUIElement, NSRange, Int), panel(AXUIElement, Int, AXIdentity?, String?) }
+        enum Kind { case tab(AXUIElement, String?), toggle(AXUIElement, String?), selectAll(AXUIElement, NSRange, Int), panel(AXUIElement, Int, AXIdentity?, String?, PanelSelection) }
         var kind: Kind
         var focus: AXIdentity?
     }
@@ -298,14 +309,15 @@ extension CUCore {
         if let into = a.into, let el = try? element(into, in: t), inSheetOrPanel(el, t) {
             let focusId = reportedFocus(t).map { AXIdentity(element: $0) }
             let app = ax.application(t.pid)
-            return KeyWatch(kind: .panel(el, panelFingerprint(el, app: app), focusId, ax.string(el, kAXValueAttribute)), focus: focusId)
+            return KeyWatch(kind: .panel(el, panelFingerprint(el, app: app), focusId, ax.string(el, kAXValueAttribute), panelSelection(el)),
+                            focus: focusId)
         }
         let plain = chord.modifiers.isEmpty || chord.modifiers == [.shift]
         let watched = (plain && chord.key == .named(.tab)) || (chord.modifiers.isEmpty && chord.key == .named(.space))
             || (chord.modifiers == [.command] && chord.key == .character("a"))
         guard a.into == nil, watched, let f = reportedFocus(t), isWebContent(f) else { return nil }
         let focusId: AXIdentity? = AXIdentity(element: f)
-        if plain, chord.key == .named(.tab) { return KeyWatch(kind: .tab, focus: focusId) }
+        if plain, chord.key == .named(.tab) { return KeyWatch(kind: .tab(f, ax.string(f, kAXValueAttribute)), focus: focusId) }
         if chord.modifiers.isEmpty, chord.key == .named(.space), isToggleControl(f) {
             return KeyWatch(kind: .toggle(f, ax.string(f, kAXValueAttribute)), focus: focusId)
         }
@@ -332,6 +344,28 @@ extension CUCore {
         return n
     }
 
+    /// What is selected in the panel `e` lies in, nearest first: the selected rows or children of `e` and its
+    /// ancestors up to the sheet or window, and the selected text of `e`.
+    func panelSelection(_ e: AXUIElement) -> PanelSelection {
+        var out: [AXIdentity] = []
+        var cur: AXUIElement? = e
+        for _ in 0..<12 {
+            guard let c = cur else { break }
+            for name in [kAXSelectedRowsAttribute, kAXSelectedChildrenAttribute, kAXSelectedCellsAttribute] {
+                out += ax.elements(c, name).map { AXIdentity(element: $0) }
+            }
+            let role = ax.string(c, kAXRoleAttribute)
+            if role == kAXSheetRole || role == kAXWindowRole { break }
+            cur = ax.element(c, kAXParentAttribute)
+        }
+        return PanelSelection(items: out, text: ax.string(e, kAXSelectedTextAttribute))
+    }
+
+    struct PanelSelection: Equatable {
+        var items: [AXIdentity]
+        var text: String?
+    }
+
     func keyUnchanged(_ w: KeyWatch, _ a: CUKeyAction, _ t: CUTarget) -> String? {
         let deadline = clock.nowMs() + Self.keyWatchMs
         func changed() -> Bool {
@@ -340,20 +374,26 @@ extension CUCore {
             case .tab: return focus != w.focus
             case .toggle(let e, let v): return ax.string(e, kAXValueAttribute) != v || focus != w.focus
             case .selectAll(let e, let r, _): return selectionRange(e) != r || focus != w.focus
-            case .panel(let e, let fp, let f, let v):
+            case .panel(let e, let fp, let f, let v, let sel):
                 return panelFingerprint(e, app: ax.application(t.pid)) != fp || focus != f || ax.string(e, kAXValueAttribute) != v
+                    || panelSelection(e) != sel
             }
         }
         while !changed() {
             if clock.nowMs() >= deadline {
                 switch w.kind {
-                case .tab:
+                case .tab(let f, let v):
+                    // The field took the key itself (a tab character, a field that indents): said as that — never as
+                    // the page ignoring it.
+                    if let now = ax.string(f, kAXValueAttribute), now != v {
+                        return "the keyboard focus stayed in its field after \(a.combo), and the field's text changed (it took the key itself, as a tab character or an indent) — click the next field you mean, or pass { into }"
+                    }
                     return "the keyboard focus did not move after \(a.combo) (the page may not have taken the key) — click the field you mean, or pass { into }"
                 case .toggle:
                     return "the focused check box did not change after \(a.combo) (the page may not have taken the key) — click(ref) presses it"
                 case .selectAll(_, _, let len):
                     return "the selection did not change after \(a.combo) (the field holds \(len) characters; the page may not have taken the key) — setValue(ref, text) replaces a field's text"
-                case .panel:
+                case .panel(_, _, _, _, _):
                     return "nothing new appeared in the panel after \(a.combo) (no sheet or window opened, its focus did not move) — the panel may not take keys from here; set its fields with setValue (state({ within: <the panel> }) shows them — its search field, or the Go to folder field once open) or click a row"
                 }
             }
@@ -375,7 +415,8 @@ extension CUCore {
     /// a window late (or not until it is seen). A first picture waits until a moment has passed since the act; one the
     /// same as the picture before the act is taken again, every 100 ms for up to `offScreenAfterActWaitMs`, until it
     /// changes. Never moves anything.
-    func offScreenAfterAct(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget) throws -> CUCapturedImage? {
+    func offScreenAfterAct(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget,
+                           token: CUCancellation.Token? = nil) throws -> CUCapturedImage? {
         guard let acted = t.lastActionMs, clock.nowMs() - acted < Self.offScreenAfterActWindowMs else {
             return try offScreenStill(t, region, budget)
         }
@@ -383,13 +424,24 @@ extension CUCore {
         guard let previous, previous.atMs < acted else {
             // No picture from before the act to compare with: a moment after the act, at least.
             let since = clock.nowMs() - acted
-            if since < Self.offScreenAfterActMinMs { clock.pause(ms: Self.offScreenAfterActMinMs - since) }
+            if since < Self.offScreenAfterActMinMs {
+                // In steps, the call's cancel (Esc) checked between them.
+                var left = Self.offScreenAfterActMinMs - since
+                while left > 0 {
+                    try token?.check()
+                    clock.pause(ms: min(50, left))
+                    left -= 50
+                }
+            }
+            try token?.check()
             return try offScreenStill(t, region, budget)
         }
         guard var shot = try offScreenStill(t, region, budget) else { return nil }
         let deadline = clock.nowMs() + Self.offScreenAfterActWaitMs
         while Self.contentDigest(shot.jpeg) == previous.digest, clock.nowMs() < deadline {
+            try token?.check()
             clock.pause(ms: 100)
+            try token?.check()
             guard let again = try offScreenStill(t, region, budget) else { break }
             shot = again
         }

@@ -1009,15 +1009,22 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   dialog of it Winter can't tell apart is refused (`remote_debugging`, its own sentence: "… shows a dialog Winter
   can't tell apart from its "Allow remote debugging?" prompt … — ask the user to answer or close the dialog");
   a slow page's window is no dialog for that rule.
+  The lexicon knows which locale folders gave words: a browser showing a language outside them (or one that can't
+  be read) is read fail-closed too; a capture-only bind fails closed on a dialog-like window (above the normal
+  level, or an untitled normal window) of such a browser; the words are read ahead from the moment a Chromium
+  browser is bound.
 - Web selects (a pop-up button, or a combo box whose value can't be set, inside a page): a click on the select's
   hidden text input presses the select; `setValue` opens it, clicks the matching option (exact, then a unique
-  prefix, then a unique "contains") and checks the shown value — a page's own `<select>` is chosen in place, never
+  prefix, then a unique "contains") and checks the shown value — EQUAL to the option's text, never one containing it — a page's own `<select>` is chosen in place, never
   opened; no match is `invalid_params` naming the options. A click on a web check box's or radio's wrapper, label or
-  inner text presses that one control (verified by its value).
+  inner text presses that one control (verified by its value) — a label only when it is the control's own (its title
+  element, or linked); a hidden input stands for a select only when it is the select's own zero-size stand-in in the
+  same container.
 - Tab, Space and ⌘A into web content, and a key aimed into a sheet or panel, say in `detail` when nothing visibly
-  changed (the focus, the check box, the selection; no new sheet or window); a click with no effect on a web button
+  changed (the focus, the check box, the selection; no new sheet or window, no selected row or text changed; a Tab
+  the field took itself is said as that); a click with no effect on a web button
   named like a file picker names `key("return", { into })`.
 - An off-desktop `target.screenshot` within 1.5 s of an act waits (bounded, ~700 ms) for a picture that differs from
   the one before the act; otherwise its `detail` adds that it may predate the last action and names
-  `screenshot({ live: true, reason })`.
+  `screenshot({ live: true, reason })`; the wait stops on the call's cancel.
 - A value over 8,000 characters says that `state({within})` shows its first 8,000.

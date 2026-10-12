@@ -110,6 +110,19 @@ struct CURemoteDebuggingLexicon: Equatable {
     let phrases: Set<String>
     /// How many locale packs were read (English included).
     let languages: Int
+    /// The base language codes (`fr`, `pt`, `zh`, …: a folder's name before `_`, `-` or `.lproj`, lowercased) whose
+    /// pack gave at least one phrase — English included. A browser showing a language outside it has no words here.
+    var languageCodes: Set<String> = []
+
+    /// A locale folder's or a preferred language's base code: `pt_BR.lproj` → `pt`, `zh-Hans-CN` → `zh`. Pure.
+    static func baseLanguage(_ s: String) -> String {
+        var name = s.lowercased()
+        if name.hasSuffix(".lproj") { name.removeLast(6) }
+        return String(name.split(whereSeparator: { $0 == "_" || $0 == "-" }).first ?? Substring(name))
+    }
+
+    /// Whether the browser's words cover `language` (its shown language, a preferred-languages entry). Pure.
+    func covers(_ language: String) -> Bool { languageCodes.contains(Self.baseLanguage(language)) }
 
     /// The English resources the lexicon is anchored on: the dialog's title ("Allow remote debugging?"), and its body
     /// ("An external app wants full control over this … session to debug it …"). Pure.
@@ -143,19 +156,31 @@ struct CURemoteDebuggingLexicon: Equatable {
     /// Builds the lexicon from the English pack and the others (any order; English may be among them). Nil when the
     /// English pack names no anchor (the browser's wording changed, or it is no Chromium pack). Pure.
     static func build(english: CUResourcePack, others: [CUResourcePack]) -> CURemoteDebuggingLexicon? {
+        build(english: english, named: others.enumerated().map { ("pack\($0.offset)", $0.element) })
+    }
+
+    /// `build`, with each other pack's folder name (`fr.lproj`), so the lexicon knows which languages gave words.
+    static func build(english: CUResourcePack, named others: [(name: String, pack: CUResourcePack)]) -> CURemoteDebuggingLexicon? {
         let anchors = english.ids.filter { id in english.string(id).map(isAnchor) ?? false }
         guard !anchors.isEmpty else { return nil }
         var phrases = Set<String>()
-        func add(_ raw: String?) {
-            guard let raw else { return }
+        func add(_ raw: String?) -> Bool {
+            guard let raw else { return false }
             // A placeholder (`$1`) splits a phrase the dialog fills in: its parts are not reliable alone.
-            guard raw.range(of: #"\$\d"#, options: .regularExpression) == nil else { return }
+            guard raw.range(of: #"\$\d"#, options: .regularExpression) == nil else { return false }
             let p = normalize(raw)
-            if p.count >= minPhraseLength { phrases.insert(p) }
+            guard p.count >= minPhraseLength else { return false }
+            phrases.insert(p)
+            return true
         }
-        for id in anchors { add(english.string(id)) }
-        for pack in others { for id in anchors { add(pack.string(id)) } }
-        return CURemoteDebuggingLexicon(phrases: phrases, languages: 1 + others.count)
+        var codes: Set<String> = ["en"]
+        for id in anchors { _ = add(english.string(id)) }
+        for (name, pack) in others {
+            var gave = false
+            for id in anchors where add(pack.string(id)) { gave = true }
+            if gave { codes.insert(baseLanguage(name)) }
+        }
+        return CURemoteDebuggingLexicon(phrases: phrases, languages: 1 + others.count, languageCodes: codes)
     }
 
     /// Whether `text` (a title, a label, a value) holds one of the dialog's phrases. Pure.
@@ -218,12 +243,14 @@ enum CURemoteDebuggingLexiconStore {
         lock.unlock()
         var phrases = Set<String>()
         var languages = 0
+        var codes = Set<String>()
         for folder in folders {
             guard let l = lexicon(resources: folder) else { continue }
             phrases.formUnion(l.phrases)
+            codes.formUnion(l.languageCodes)
             languages = max(languages, l.languages)
         }
-        let built = phrases.isEmpty ? nil : CURemoteDebuggingLexicon(phrases: phrases, languages: languages)
+        let built = phrases.isEmpty ? nil : CURemoteDebuggingLexicon(phrases: phrases, languages: languages, languageCodes: codes)
         lock.lock()
         cache[key] = .some(built)
         lock.unlock()
@@ -242,16 +269,31 @@ enum CURemoteDebuggingLexiconStore {
         let others = ((try? fm.contentsOfDirectory(atPath: resources.path)) ?? [])
             .filter { $0.hasSuffix(".lproj") && $0 != englishFolder }
             .sorted()
-            .compactMap { pack(resources.appendingPathComponent($0).appendingPathComponent("locale.pak")) }
-        return CURemoteDebuggingLexicon.build(english: english, others: others)
+            .compactMap { name in pack(resources.appendingPathComponent(name).appendingPathComponent("locale.pak")).map { (name, $0) } }
+        return CURemoteDebuggingLexicon.build(english: english, named: others)
     }
 
     /// Whether the browser shows English: the first of its preferred languages (its own `AppleLanguages`, else the
     /// user's) is English. A browser whose language can't be read counts as NOT English (fail closed).
     static func showsEnglish(bundleId: String?) -> Bool {
+        shownLanguage(bundleId: bundleId).map { CURemoteDebuggingLexicon.baseLanguage($0) == "en" } ?? false
+    }
+
+    /// The language the browser shows: the first of its preferred languages (its own `AppleLanguages`, else the
+    /// user's). Nil when none can be read.
+    static func shownLanguage(bundleId: String?) -> String? {
         let own = bundleId.flatMap { CFPreferencesCopyAppValue("AppleLanguages" as CFString, $0 as CFString) as? [String] }
-        guard let first = (own ?? Locale.preferredLanguages).first else { return false }
-        return first.lowercased().hasPrefix("en")
+        return (own ?? Locale.preferredLanguages).first
+    }
+
+    /// What Floor F reads a browser's dialogs with, from its lexicon (if any) and the language it shows: the lexicon
+    /// only when that language gave it words (English always does) — a language the packs had no phrase for, or one
+    /// that can't be read, is `.unreadable` (fail closed); with no lexicon, English reads by the English rule. Pure.
+    static func words(lexicon: CURemoteDebuggingLexicon?, shownLanguage: String?) -> CURemoteDebuggingWords {
+        guard let shownLanguage else { return .unreadable }
+        let english = CURemoteDebuggingLexicon.baseLanguage(shownLanguage) == "en"
+        if let lexicon { return english || lexicon.covers(shownLanguage) ? .lexicon(lexicon) : .unreadable }
+        return english ? .englishOnly : .unreadable
     }
 
     private static var warming = Set<String>()

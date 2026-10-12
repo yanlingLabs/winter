@@ -321,4 +321,74 @@ final class RemoteDebuggingLexiconTests: XCTestCase {
         }
         XCTAssertEqual(target.remoteDebuggingScan?.unreadable, true)
     }
+
+    // MARK: - Review fixes
+
+    /// M2: the lexicon knows which languages gave words; a browser showing another one is unreadable (fail closed).
+    func testALanguageThePacksGaveNoWordsForIsUnreadable() {
+        let german: [UInt16: String] = [102: "Zulassen", 104: "Passwort speichern?"]  // no title, no body
+        let l = CURemoteDebuggingLexicon.build(english: CUResourcePack(Self.pack(Self.english))!, named: [
+            ("fr.lproj", CUResourcePack(Self.pack(Self.french))!), ("de.lproj", CUResourcePack(Self.pack(german))!),
+            ("pt_BR.lproj", CUResourcePack(Self.pack(Self.spanish))!),
+        ])!
+        XCTAssertEqual(l.languageCodes, ["en", "fr", "pt"])
+        let words = { CURemoteDebuggingLexiconStore.words(lexicon: l, shownLanguage: $0) }
+        XCTAssertEqual(words("de-DE"), .unreadable, "German gave no words")
+        XCTAssertEqual(words("ja"), .unreadable, "no Japanese pack at all")
+        XCTAssertEqual(words(nil), .unreadable, "a language that can't be read")
+        XCTAssertEqual(words("fr-CA"), .lexicon(l))
+        XCTAssertEqual(words("pt-PT"), .lexicon(l))
+        XCTAssertEqual(words("en-GB"), .lexicon(l))
+        XCTAssertEqual(CURemoteDebuggingLexiconStore.words(lexicon: nil, shownLanguage: "en-US"), .englishOnly)
+        XCTAssertEqual(CURemoteDebuggingLexiconStore.words(lexicon: nil, shownLanguage: "fr"), .unreadable)
+        XCTAssertEqual(CURemoteDebuggingLexicon.baseLanguage("zh_TW.lproj"), "zh")
+        XCTAssertEqual(CURemoteDebuggingLexicon.baseLanguage("zh-Hans-CN"), "zh")
+    }
+
+    /// L2: a capture-only bind fails closed too — unreadable words and a dialog-like window up.
+    func testACaptureOnlyBindFailsClosedOnADialogLikeWindow() {
+        world(words: .unreadable)
+        target.accessible = false
+        var dialogWindow = FakeSystem.window(81, pid: pid, CGRect(x: 200, y: 200, width: 400, height: 200))
+        dialogWindow.layer = 8
+        sys.stack = [dialogWindow, sys.windows[78]!]
+        XCTAssertThrowsError(try core.floorCheckRemoteDebugging(params(.key(CUKeyAction(combo: "space"))), target)) {
+            XCTAssertEqual(self.refusal($0)?.message, CUCore.remoteDebuggingUnreadableSentence("Google Chrome"))
+        }
+        // Readable words, the same window: only its words could refuse it.
+        world(words: .lexicon(Self.lexicon()))
+        target.accessible = false
+        sys.stack = [dialogWindow, sys.windows[78]!]
+        XCTAssertNoThrow(try core.floorCheckRemoteDebugging(params(.key(CUKeyAction(combo: "space"))), target))
+        // Unreadable words, no dialog-like window: nothing refused.
+        world(words: .unreadable)
+        target.accessible = false
+        XCTAssertNoThrow(try core.floorCheckRemoteDebugging(params(.key(CUKeyAction(combo: "space"))), target))
+    }
+
+    /// L3: binding a Chromium browser reads its words ahead at once, not only once an act finds no dialog.
+    func testBindingAChromiumBrowserReadsItsWordsAhead() async throws {
+        let ax = FakeAX()
+        let w = fakeElement(97_001)
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [w]])
+        ax.add(w, role: kAXWindowRole, subrole: kAXStandardWindowSubrole, title: "Example", frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        ax.windowIDs[AXIdentity(element: w)] = 78
+        let sys = FakeSystem()
+        sys.running = [pid]
+        sys.bundles[pid] = "com.google.Chrome"
+        sys.windows[78] = FakeSystem.window(78, pid: pid, CGRect(x: 0, y: 0, width: 800, height: 600), owner: "Google Chrome")
+        sys.stack = [sys.windows[78]!]
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: ax, sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        core.windowWaitMs = 150
+        let pid = self.pid
+        core.resolveBindApp = { _, _ in
+            CUCore.BindApp(pid: pid, bundleIdentifier: "com.google.Chrome", name: "Google Chrome", executableName: "Google Chrome",
+                           isChromium: true, launched: false, running: nil)
+        }
+        var warmed: [String] = []
+        core.remoteDebuggingWarmed = { warmed.append($0.appName) }
+        _ = try await core.targetBind(TargetBindParams(sessionId: "s", app: "Google Chrome", mirror: false))
+        XCTAssertEqual(warmed, ["Google Chrome"])
+    }
 }

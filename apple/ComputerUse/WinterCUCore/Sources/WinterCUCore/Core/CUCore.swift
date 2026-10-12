@@ -386,6 +386,8 @@ public final class CUCore: @unchecked Sendable {
             return t
         }()
         updateWorkWatcher()
+        // Floor F's words for a Chromium browser are read ahead, in the background, from the moment it is bound.
+        if chromium { warmRemoteDebuggingWords(target) }
         // The element is cached now: a window on another Space is not in the AX list to find it again.
         windowElementsLock.withLock { windowElements[target.id] = chosen.element }
         target.knownWindows = Set(CUBindWait.realWindows(serverNow).map(\.id)).union([chosen.id])
@@ -632,6 +634,8 @@ public final class CUCore: @unchecked Sendable {
     var isWebBrowserOverride: ((CUTarget) -> Bool)?
     /// Floor F's words for a browser's dialogs, as a test says (live: the browser's own locale packs — `remoteDebuggingWords`).
     var remoteDebuggingWordsOverride: ((CUTarget) -> CURemoteDebuggingWords)?
+    /// Tests: told each time Floor F's words are read ahead for a target (`warmRemoteDebuggingWords`).
+    var remoteDebuggingWarmed: ((CUTarget) -> Void)?
     /// Tests: the default handler of a URL scheme (`defaultHandler`), instead of LaunchServices.
     var defaultHandlerOverride: ((String) -> String?)?
     /// `defaultHandler`'s cache: per scheme, the handler and when it was looked up.
@@ -1149,7 +1153,7 @@ public final class CUCore: @unchecked Sendable {
             return try await queues.run(t.pid) { [self] in isOffThisDesktop(t) }
         }
         if p.live == true, try await offDesktop() {
-            if t.privatePath, let shot = try await offScreenShot(t, region, p.budget) {
+            if t.privatePath, let shot = try await offScreenShot(t, region, p.budget, token: token) {
                 privateTried = true
                 let note = try await offScreenNote(t, shot)
                 if note.hasPrefix("live:") {
@@ -1189,7 +1193,7 @@ public final class CUCore: @unchecked Sendable {
         // (off screen → the SkyLight capture). Nothing is moved, raised or focused.
         if t.privatePath, sys.window(id: t.windowID)?.onScreen == false {
             privateTried = true
-            if let shot = try await offScreenShot(t, region, p.budget) {
+            if let shot = try await offScreenShot(t, region, p.budget, token: token) {
                 taken = shot
                 detail = try await offScreenNote(t, shot)
             } else if try await queues.run(t.pid, { [self] in isOffThisDesktop(t) }) {
@@ -1209,7 +1213,7 @@ public final class CUCore: @unchecked Sendable {
                 // The capturer knows only the window: whether its app quit or only the window closed is the target's.
                 if e.code == "target_lost" { throw CUError.targetLost(e.message, reason: lostReason(t)) }
                 guard try await queues.run(t.pid, { [self] in isOffThisDesktop(t) }) else { throw e }
-                guard t.privatePath, !privateTried, let shot = try await offScreenShot(t, region, p.budget) else {
+                guard t.privatePath, !privateTried, let shot = try await offScreenShot(t, region, p.budget, token: token) else {
                     throw CUError.screenshotElsewhere(t.appName)
                 }
                 img = shot
@@ -1252,9 +1256,11 @@ public final class CUCore: @unchecked Sendable {
     /// The window server's image of the bound window when it is not on screen (current for an app that keeps
     /// drawing there), cropped to `region` and fitted to the budget like a ScreenCaptureKit capture. Nil when
     /// there is none, or it is blank (a window macOS has not drawn).
-    func offScreenShot(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget) async throws -> CUCapturedImage? {
-        // Right after an act: waits, bounded, for the act's picture — on the target's queue (never a cooperative thread).
-        try await queues.run(t.pid) { [self] in try offScreenAfterAct(t, region, budget) }
+    func offScreenShot(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget,
+                       token: CUCancellation.Token? = nil) async throws -> CUCapturedImage? {
+        // Right after an act: waits, bounded, for the act's picture — on the target's queue (never a cooperative thread),
+        // stopping on the call's cancel.
+        try await queues.run(t.pid) { [self] in try offScreenAfterAct(t, region, budget, token: token) }
     }
 
     /// `offScreenShot`, synchronously (a visit's return takes one on the pid queue).

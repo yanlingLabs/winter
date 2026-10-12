@@ -55,7 +55,7 @@ final class LeftoversTests: XCTestCase {
                extra: [kAXParentAttribute: form, kAXChildrenAttribute: [box, boxLabel]])
         ax.setActions(boxRow, [kAXPressAction])
         ax.add(box, role: kAXCheckBoxRole, frame: CGRect(x: 60, y: 170, width: 20, height: 20),
-               extra: [kAXParentAttribute: boxRow, kAXValueAttribute: 0])
+               extra: [kAXParentAttribute: boxRow, kAXValueAttribute: 0, kAXTitleUIElementAttribute: boxLabel])
         ax.setActions(box, [kAXPressAction])
         ax.add(boxLabel, role: kAXStaticTextRole, frame: CGRect(x: 90, y: 170, width: 300, height: 20),
                extra: [kAXParentAttribute: boxRow, kAXValueAttribute: "Mature content"])
@@ -287,6 +287,129 @@ final class LeftoversTests: XCTestCase {
         XCTAssertEqual(CUStateFormatter.wholeHint(ref: 5, count: 9000), "state({within:5}) shows its first 8000")
         let node = CUNode(ref: 5, role: "AXTextArea", value: String(repeating: "a", count: 9000))
         XCTAssertTrue(CUFinder.summary(node).value?.hasSuffix("(9000 characters — state({within:5}) shows its first 8000)") ?? false)
+    }
+
+    // MARK: review fixes
+
+    /// H1: an option whose text another option's contains is chosen only when the select shows EXACTLY it.
+    private func sizes(_ names: [String], shows: String, pageIgnores: Bool, pageShows: String? = nil) {
+        world()
+        for (i, o) in options.enumerated() { ax.put(o, [kAXValueAttribute: i < names.count ? names[i] : "Other \(i)"]) }
+        ax.put(select, [kAXValueAttribute: shows])
+        ax.onPerform = { [unowned self] what in
+            if what == "\(token(select)):AXPress" { open(true) }
+            for o in options where what == "\(token(o)):AXPress" {
+                if !pageIgnores { ax.put(select, [kAXValueAttribute: pageShows ?? ax.string(o, kAXValueAttribute)!]) }
+                open(false)
+            }
+        }
+    }
+
+    func testAnIgnoredPressIsNotTakenForSmallInExtraSmall() async throws {
+        sizes(["Small", "Extra Small"], shows: "Extra Small", pageIgnores: true)
+        let r = try await act(.setValue(CUSetValueAction(ref: ref(select), value: "small")))
+        XCTAssertTrue(r.detail?.contains("pressed the option \u{201C}Small\u{201D} of [\(ref(select))] \u{201C}Category\u{201D}, but the select did not change to it (it reads \u{201C}Extra Small\u{201D})") ?? false, r.detail ?? "")
+    }
+
+    func testASelectShowingALongerOptionIsNotTheShorterOne() async throws {
+        sizes(["Small", "Small Print"], shows: "Choose one", pageIgnores: false, pageShows: "Small Print")
+        let r = try await act(.setValue(CUSetValueAction(ref: ref(select), value: "Small")))
+        XCTAssertTrue(r.detail?.contains("but the select did not change to it (it reads \u{201C}Small Print\u{201D})") ?? false, r.detail ?? "")
+        sizes(["Small", "Extra Small"], shows: "Choose one", pageIgnores: false)
+        let ok = try await act(.setValue(CUSetValueAction(ref: ref(select), value: "Extra Small")))
+        XCTAssertTrue(ok.detail?.hasPrefix("chose \u{201C}Extra Small\u{201D}") ?? false, ok.detail ?? "")
+    }
+
+    /// M5: text beside a check box that is not its own label presses nothing else.
+    func testTextBesideACheckBoxThatIsNotItsLabelIsNotRedirected() async throws {
+        world()
+        ax.drop(box, kAXTitleUIElementAttribute)
+        XCTAssertNil(core.toggleFor(boxLabel))
+        XCTAssertTrue(core.toggleFor(boxRow).map { CFEqual($0, box) } ?? false, "the wrapper still holds it")
+        // Linked either way counts.
+        ax.put(boxLabel, ["AXLinkedUIElements": [box]])
+        XCTAssertTrue(core.toggleFor(boxLabel).map { CFEqual($0, box) } ?? false)
+    }
+
+    /// M5: a document's stand-in input (parked off the window, or in another container) is never a select's.
+    func testADocumentStandInIsNotASelectsHiddenInput() {
+        world()
+        XCTAssertTrue(core.selectBeside(hiddenInput).map { CFEqual($0, select) } ?? false)
+        var o = CGPoint(x: -9999, y: 100), z = CGSize(width: 1, height: 1)
+        ax.put(hiddenInput, [kAXPositionAttribute: AXValueCreate(.cgPoint, &o)!])
+        XCTAssertNil(core.selectBeside(hiddenInput), "not on the select")
+        o = CGPoint(x: 60, y: 100); z = CGSize(width: 300, height: 1)
+        ax.put(hiddenInput, [kAXPositionAttribute: AXValueCreate(.cgPoint, &o)!, kAXSizeAttribute: AXValueCreate(.cgSize, &z)!])
+        XCTAssertTrue(core.selectBeside(hiddenInput) != nil)
+        // In another container than the select (a document's input target inside its own group).
+        let editor = fakeElement(98_060)
+        ax.add(editor, role: kAXGroupRole, frame: CGRect(x: 40, y: 80, width: 600, height: 400),
+               extra: [kAXParentAttribute: form, kAXChildrenAttribute: [hiddenInput]])
+        ax.put(hiddenInput, [kAXParentAttribute: editor])
+        XCTAssertNil(core.selectBeside(hiddenInput))
+        XCTAssertEqual(core.hiddenInputWords(hiddenInput, target), "the page's hidden text input (it types into the document)")
+    }
+
+    /// M3: an arrow key that moved the panel's selected row is a change — no note.
+    func testAnArrowThatMovedThePanelsSelectionGetsNoNote() async throws {
+        world()
+        let sheet = fakeElement(98_070), table = fakeElement(98_071), rows = [fakeElement(98_072), fakeElement(98_073)]
+        ax.put(window, [kAXChildrenAttribute: [web, sheet]])
+        ax.add(sheet, role: kAXSheetRole, frame: CGRect(x: 100, y: 40, width: 600, height: 400),
+               extra: [kAXParentAttribute: window, kAXChildrenAttribute: [table]])
+        ax.add(table, role: kAXOutlineRole, frame: CGRect(x: 120, y: 80, width: 560, height: 300),
+               extra: [kAXParentAttribute: sheet, kAXChildrenAttribute: rows, kAXSelectedRowsAttribute: [rows[0]]])
+        for (i, r) in rows.enumerated() {
+            ax.add(r, role: kAXRowRole, frame: CGRect(x: 120, y: 80 + CGFloat(i) * 20, width: 560, height: 20), extra: [kAXParentAttribute: table])
+        }
+        ax.focus(pid: pid, on: table)
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            ax.put(table, [kAXSelectedRowsAttribute: [rows[1]]])
+        }
+        let r = try await act(.key(CUKeyAction(combo: "down", into: ref(table))))
+        XCTAssertFalse(r.detail?.contains("nothing new appeared") ?? false, r.detail ?? "")
+    }
+
+    /// L5: the after-act wait stops on the call's cancel.
+    func testTheAfterActWaitStopsOnCancel() throws {
+        world()
+        sys.windows[88]?.onScreen = false
+        let budget = CUImageBudget(maxLongEdge: 400, quality: 0.8)
+        let first = try XCTUnwrap(core.offScreenStill(target, nil, budget))
+        let clock = CUSystemClock()
+        _ = target.noteOffScreenShot(digest: CUCore.contentDigest(first.jpeg), at: clock.nowMs() - 50)
+        target.lastActionMs = clock.nowMs()
+        let token = CUCancellation.Token()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) { token.cancel() }
+        let start = clock.nowMs()
+        XCTAssertThrowsError(try core.offScreenAfterAct(target, nil, budget, token: token)) { e in
+            XCTAssertEqual((e as? CUError)?.code, "cancelled")
+        }
+        XCTAssertLessThan(clock.nowMs() - start, 400, "not the whole 700 ms")
+        // A first picture's wait too.
+        let t2 = CUCancellation.Token(); t2.cancel()
+        target.lastActionMs = clock.nowMs()
+        _ = target.noteOffScreenShot(digest: 1, at: clock.nowMs() + 10)  // a picture after the act: no comparison
+        XCTAssertThrowsError(try core.offScreenAfterAct(target, nil, budget, token: t2))
+    }
+
+    /// L6: a Tab the field took itself is not called ignored.
+    func testATabTheFieldTookItselfIsSaidAsThat() async throws {
+        world()
+        let area = fakeElement(98_080)
+        ax.put(form, [kAXChildrenAttribute: ax.elements(form, kAXChildrenAttribute) + [area]])
+        ax.add(area, role: kAXTextAreaRole, frame: CGRect(x: 60, y: 400, width: 300, height: 60),
+               extra: [kAXParentAttribute: form, kAXValueAttribute: "code", kAXFocusedAttribute: true])
+        ax.focus(pid: pid, on: area)
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            ax.put(area, [kAXValueAttribute: "code\t"])
+        }
+        let r = try await act(.key(CUKeyAction(combo: "tab")))
+        let d = r.detail ?? ""
+        XCTAssertFalse(d.contains("may not have taken the key"), d)
+        XCTAssertTrue(d.contains("the keyboard focus stayed in its field after tab, and the field's text changed (it took the key itself, as a tab character or an indent)"), d)
     }
 
     // MARK: a file chooser's button
