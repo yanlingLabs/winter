@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import Metal
+import OSLog
 import WinterKit
 
 /// ComputerV2 Phase 4 (lane H3) — **the app's headless presentations and the sessions' headless tabs**, one per app,
@@ -40,6 +41,10 @@ final class HeadlessPresentStore: ObservableObject {
     /// How long an ended presentation's last line stays before the view goes.
     var endedLinger: TimeInterval = 3
 
+    /// What it shows and lists, by session and tab id and counts only — never a page's address or title
+    /// (`log show --predicate 'subsystem == "com.winter.app" AND category == "headless-present"'`).
+    private static let log = Logger(subsystem: "com.winter.app", category: "headless-present")
+
     private let device: MTLDevice?
     /// Sessions whose list was fetched on this link (a fresh link fetches again).
     private var listed: Set<String> = []
@@ -75,12 +80,11 @@ final class HeadlessPresentStore: ObservableObject {
         case .tabs(let sessionId, let tabs):
             listGeneration[sessionId, default: 0] += 1
             tabsBySession[sessionId] = tabs
-            // Ids and counts only: never a page's address or title.
-            NSLog("[HeadlessPresent] %@ lists %ld headless tab(s), %ld shown", sessionId, tabs.count, tabs.filter(\.presented).count)
+            Self.log.notice("\(sessionId, privacy: .public) lists \(tabs.count) headless tab(s), \(tabs.filter(\.presented).count) shown")
             reply(.empty)
         case .update(let sessionId, let tabId, let purpose):
             for p in presentations where p.sessionId == sessionId && p.tabId == tabId { p.purposeChanged(purpose) }
-            NSLog("[HeadlessPresent] %@ %@ is shown for %@ now", sessionId, tabId, purpose.rawValue)
+            Self.log.notice("\(sessionId, privacy: .public) \(tabId, privacy: .public) is shown for \(purpose.rawValue, privacy: .public) now")
             reply(.empty)
         }
     }
@@ -104,8 +108,7 @@ final class HeadlessPresentStore: ObservableObject {
         }
         presentation.onEnded = { [weak self] ended in self?.presentationEnded(ended) }
         presentations.append(presentation)
-        NSLog("[HeadlessPresent] %@ %@ shown (%@, %@)", show.sessionId, show.tabId, show.purpose.rawValue,
-              show.control ? "the person has control" : "watch-only")
+        Self.log.notice("\(show.sessionId, privacy: .public) \(show.tabId, privacy: .public) shown (\(show.purpose.rawValue, privacy: .public), \(show.control ? "the person has control" : "watch-only", privacy: .public))")
         watchPending.remove(show.tabId)
         onShow?(show.sessionId)
         return .empty
@@ -127,7 +130,7 @@ final class HeadlessPresentStore: ObservableObject {
     }
 
     private func presentationEnded(_ presentation: HeadlessPresentation) {
-        NSLog("[HeadlessPresent] %@ %@ ended by the helper", presentation.sessionId, presentation.tabId)
+        Self.log.notice("\(presentation.sessionId, privacy: .public) \(presentation.tabId, privacy: .public) ended by the helper")
         let id = presentation.id
         DispatchQueue.main.asyncAfter(deadline: .now() + endedLinger) { [weak self] in
             MainActor.assumeIsolated { self?.presentations.removeAll { $0.id == id } }
