@@ -4,6 +4,7 @@ from pathlib import Path
 from generic_fixture_oracle import GenericOracle,OracleLimits,pattern
 from generic_fixture_receipts import audit,EXPECTED_ACKS
 from build import ROOT,OUT,digest
+from generic_fixture_paths import ARTIFACT_DIRECTORY,RUN_PREFIX
 
 class FixtureTests(unittest.TestCase):
     def test_actual_raw_pause_with_owned_worker_alive_and_recovery(self):
@@ -50,17 +51,17 @@ class FixtureTests(unittest.TestCase):
     def test_actual_normal_runner_aggregates_generic_audit_key(self):
         import run_generic_fixture as runner
         from unittest.mock import patch
-        build={'hostSamplerTransport':'dedicated-inherited-pipe-v1','candidate':{},'artifacts':{},'fixtureSources':{name:'pin' for name in runner.LAUNCH_DEPENDENCIES}}
+        build={'hostSamplerTransport':'dedicated-inherited-pipe-v1','artifactDirectory':ARTIFACT_DIRECTORY,'candidate':{},'artifacts':{},'fixtureSources':{name:'pin' for name in runner.LAUNCH_DEPENDENCIES}}
         rows=[{'kind':'virtio_device','device':device} for device in ['0x0002','0x0003','0x0004','0x0005']]+[{'kind':'linux_boot'},{'kind':'guest_complete','cycles':3},{'kind':'sandbox'},{'kind':'stream_sandbox'}]
         for cycle in range(1,4):rows.extend([{'kind':'guest_reuse','anonymousZeroFill':True,'writtenIntegrity':True},{'kind':'guest_integrity','retained':True,'progress':True}])
         capture={'exitCode':0,'exitVerified':True,'ownersQuiescent':True,'timedOut':False,'captureComplete':True}
         with tempfile.TemporaryDirectory() as name:
-            out=Path(name);(out/'generic-fixture').mkdir();(out/'generic-fixture/build.json').write_text(json.dumps(build));root=out/'source';root.mkdir();(root/'runtime-port-trace-candidate.json').write_text('{}')
+            out=Path(name);(out/ARTIFACT_DIRECTORY).mkdir();(out/ARTIFACT_DIRECTORY/'build.json').write_text(json.dumps(build));root=out/'source';root.mkdir();(root/'runtime-port-trace-candidate.json').write_text('{}')
             review=out/'review.json';review.write_text(json.dumps({'accepted':True,'buildSha256':'pin','heavyCompileQuiescent':True,'scenario':'normal'}))
             def supervised(command,directory,mode,parent,worker,**kwargs):parent.close();worker.close();return rows,capture,None,None
             with patch.multiple(runner,ROOT=root,OUT=out,digest=lambda p:'pin',processes=lambda:[],verify_signed_worker=lambda p:{},supervise=supervised,summary=lambda rows:{'blockReceiptsPassed':True,'reclaim':{'receiptOrderingPassed':True,'afterGuestFree':[{'heartbeatsDuringWindow':10}]}},disk_integrity=lambda p,rows:{'passed':True},stream_audit=lambda rows,oracle:{'genericChecksPassed':True}),patch.object(runner.subprocess,'check_output',return_value='System-wide memory free percentage: 50%'),patch.object(sys,'argv',['fixture','--run-runtime-port-fixture','--review-receipt',str(review)]):
                 runner.main()
-            result=json.loads(next(out.glob('generic-fixture-*/result.json')).read_text());self.assertTrue(result['fixtureChecksPassed']);self.assertTrue(result['streamAudit']['genericChecksPassed'])
+            result=json.loads(next(out.glob(RUN_PREFIX+'*/result.json')).read_text());self.assertTrue(result['fixtureChecksPassed']);self.assertTrue(result['streamAudit']['genericChecksPassed'])
     def rows(self):
         rows=[{'kind':'runtime_control_used_ack','channel':'stderr','row':i,'queue':q,'id':identity,'event':event,'value':value,'usedAck':True,'hostElapsedSeconds':.1+i*.1} for i,(q,identity,event,value) in enumerate(EXPECTED_ACKS)]
         rows.append({'kind':'guest_generic_ready','generic':True,'tty':False,'nonblocking':True,'exclusiveOwner':True,'openControlAckReturned':True,'portId':0,'queues':[0,1,2,3],'multiport':True,'hostElapsedSeconds':.5})
@@ -84,8 +85,8 @@ class FixtureTests(unittest.TestCase):
             self.assertFalse(audit([r for r in self.rows() if r['kind']!=kind],{'threadJoined':True,'error':None,'receiveOraclePassed':True},True)['genericChecksPassed'])
     def test_exact_build_binds_all_launch_sources_and_artifacts(self):
         from run_generic_fixture import LAUNCH_DEPENDENCIES
-        build=json.loads((OUT/'generic-fixture/build.json').read_text());self.assertTrue(LAUNCH_DEPENDENCIES.issubset(build['fixtureSources']))
+        build=json.loads((OUT/ARTIFACT_DIRECTORY/'build.json').read_text());self.assertTrue(LAUNCH_DEPENDENCIES.issubset(build['fixtureSources']))
         for name,sha in build['fixtureSources'].items():self.assertEqual(digest(ROOT/name),sha,name)
-        for name,sha in build['artifacts'].items():self.assertEqual(digest(OUT/'generic-fixture'/name),sha,name)
+        for name,sha in build['artifacts'].items():self.assertEqual(digest(OUT/ARTIFACT_DIRECTORY/name),sha,name)
 
 if __name__=='__main__':unittest.main()

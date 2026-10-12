@@ -6,6 +6,7 @@ from generic_capture import Limits,capture_owned_child
 from generic_fixture_oracle import GenericOracle as PeerOracle
 from generic_fixture_lifecycle import supervise
 from build import ROOT
+from generic_fixture_paths import ARTIFACT_DIRECTORY,RUN_PREFIX
 
 HELPER=r'''
 import array,socket,sys,time
@@ -94,7 +95,7 @@ class LifecycleTests(unittest.TestCase):
     def test_runner_skips_disk_and_raw_inspection_when_owners_uncertain(self):
         import run_generic_fixture as runner
         # Uses actual runner, preflight mocked to synthetic receipts. Any disk/hash call after spawn is forbidden.
-        build={'hostSamplerTransport':'dedicated-inherited-pipe-v1','candidate':{},'artifacts':{},'fixtureSources':{name:'pin' for name in runner.LAUNCH_DEPENDENCIES}}
+        build={'hostSamplerTransport':'dedicated-inherited-pipe-v1','artifactDirectory':ARTIFACT_DIRECTORY,'candidate':{},'artifacts':{},'fixtureSources':{name:'pin' for name in runner.LAUNCH_DEPENDENCIES}}
         capture={'exitCode':None,'exitVerified':False,'ownersQuiescent':False,'timedOut':False,'lifecycleError':'injected','readerThreadsJoined':False}
         calls=[]
         def digest(path):
@@ -102,12 +103,12 @@ class LifecycleTests(unittest.TestCase):
             if Path(path).name=='fixture.raw' or str(path).endswith('.bin'):raise AssertionError('uncertain owner file inspection')
             return 'pin'
         with tempfile.TemporaryDirectory() as name:
-            out=Path(name);(out/'generic-fixture').mkdir();(out/'generic-fixture/build.json').write_text(json.dumps(build))
+            out=Path(name);(out/ARTIFACT_DIRECTORY).mkdir();(out/ARTIFACT_DIRECTORY/'build.json').write_text(json.dumps(build))
             root=out/'source';root.mkdir();(root/'runtime-port-trace-candidate.json').write_text('{}')
             def lifecycle(command,directory,mode,parent,worker,**kwargs):parent.close();worker.close();return [],capture,None,None
             with patch.multiple(runner,ROOT=root,OUT=out,digest=digest,processes=lambda:[],verify_signed_worker=lambda p:{},supervise=lifecycle),patch.object(sys,'argv',['fixture','--sandbox-check']):
                 with self.assertRaises(SystemExit):runner.main()
-            result=json.loads(next(out.glob('generic-fixture-*/result.json')).read_text())
+            result=json.loads(next(out.glob(RUN_PREFIX+'*/result.json')).read_text())
             self.assertTrue(result['diskAuditSkipped']);self.assertIsNone(result['diskSha256']);self.assertNotIn('fixture.raw',calls)
     def test_spawn_failure_closes_both_exact_owned_sampler_descriptors(self):
         descriptors=[];real_pipe=os.pipe

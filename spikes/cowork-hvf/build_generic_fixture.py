@@ -2,14 +2,16 @@
 import argparse,json,os,shutil,stat,subprocess
 from build import ROOT,OUT,PINS,checked,digest,verify,cpio
 from prepare_runtime_port_trace import prepare
+from generic_fixture_paths import ARTIFACT_DIRECTORY
 
 def main():
     if os.uname().sysname!='Darwin' or os.uname().machine!='arm64':raise RuntimeError('Apple Silicon macOS required')
     parser=argparse.ArgumentParser();parser.add_argument('--receipt-only',action='store_true');args=parser.parse_args()
-    source=prepare();artifacts=OUT/'generic-fixture';artifacts.mkdir(exist_ok=True)
+    source=prepare();artifacts=OUT/ARTIFACT_DIRECTORY;artifacts.mkdir(exist_ok=True)
     prior_sha=digest(artifacts/'build.json') if (artifacts/'build.json').exists() else None
     if args.receipt_only:
         prior=json.loads((artifacts/'build.json').read_text())
+        if prior.get('artifactDirectory')!=ARTIFACT_DIRECTORY or prior.get('hostSamplerTransport')!='dedicated-inherited-pipe-v1':raise RuntimeError('Dedicated sampler artifact build required before receipt-only refresh')
         if prior['candidate']!=json.loads((ROOT/'runtime-port-trace-candidate.json').read_text()):raise RuntimeError('Candidate changed; full build required')
         for name,pin in prior['artifacts'].items():verify(artifacts/name,pin)
         for name in ['generic_fixture_worker.c','generic_fixture_init.c','stream_frame_deadline.h','generic_port_discovery.h','generic_sampler.h']:verify(ROOT/name,prior['fixtureSources'][name])
@@ -28,9 +30,10 @@ def main():
     write_receipt(artifacts,prior_sha,False)
 
 def write_receipt(artifacts,prior_sha,receipt_only):
+    if artifacts.resolve()!=(OUT/ARTIFACT_DIRECTORY).resolve():raise RuntimeError("Sampler receipt cannot target frozen artifact directory")
     pin=json.loads((ROOT/'runtime-port-trace-candidate.json').read_text())
-    receipt={'pins':PINS,'candidate':pin,'productionReady':False,'vmStarted':False,'identity':'dev.cowork.hvf.generic-fixture-worker','nativeOwnedCompletionHoldMillis':25,'encryption':False,'nonsecretOnly':True,'sandboxBeforeFactory':True,'hardenedRuntime':True,'nativeLinkage':'staticlib','debuggerEntitlement':False,'kernelProfile':'previously-measured-Apple-kernel/generic-vport-PL011-telemetry','normalShutdown':'supervisor port remains open through disk flush/poweroff','terminalCloseExpectedExitCode':77,'terminalCloseEffects':'UNCERTAIN','deliberateHostSinkStallSeconds':6,'fixtureTraceMaxRows':64,'hostSamplerTransport':'dedicated-inherited-pipe-v1','priorBuildSha256':prior_sha,'receiptOnly':receipt_only,'artifactRebuilt':not receipt_only}
+    receipt={'pins':PINS,'candidate':pin,'productionReady':False,'vmStarted':False,'identity':'dev.cowork.hvf.generic-fixture-worker','nativeOwnedCompletionHoldMillis':25,'encryption':False,'nonsecretOnly':True,'sandboxBeforeFactory':True,'hardenedRuntime':True,'nativeLinkage':'staticlib','debuggerEntitlement':False,'kernelProfile':'previously-measured-Apple-kernel/generic-vport-PL011-telemetry','normalShutdown':'supervisor port remains open through disk flush/poweroff','terminalCloseExpectedExitCode':77,'terminalCloseEffects':'UNCERTAIN','deliberateHostSinkStallSeconds':6,'fixtureTraceMaxRows':64,'hostSamplerTransport':'dedicated-inherited-pipe-v1','artifactDirectory':ARTIFACT_DIRECTORY,'priorBuildSha256':prior_sha,'receiptOnly':receipt_only,'artifactRebuilt':not receipt_only}
     receipt['artifacts']={name:digest(artifacts/name) for name in ['libkrun.a','cowork-hvf-generic-worker','init','initramfs.cpio','kernel']}
-    receipt['fixtureSources']={name:digest(ROOT/name) for name in ['generic_fixture_worker.c','generic_fixture_init.c','stream_frame_deadline.h','generic_port_discovery.h','build_generic_fixture.py','run_generic_fixture.py','generic_fixture_lifecycle.py','generic_sampler.h','generic_capture.py','stream_capture_v2.py','block_capture.py','block_receipts.py','generic_fixture_oracle.py','run_block.py','reclaim_receipts.py','build.py','prepare_runtime_port_trace.py','runtime_port_traced.rs','runtime_port_control.rs','runtime_port_fixture_trace.rs','generic_fixture_receipts.py','run_stream_fixture.py','stream_lifecycle.py','stream_fixture_oracle.py','stream_io_v3.rs','stream_reclaim_access.rs','worker.entitlements','pins.json','runtime-port-trace-candidate.json']}
+    receipt['fixtureSources']={name:digest(ROOT/name) for name in ['generic_fixture_worker.c','generic_fixture_init.c','stream_frame_deadline.h','generic_port_discovery.h','build_generic_fixture.py','run_generic_fixture.py','generic_fixture_lifecycle.py','generic_fixture_paths.py','generic_sampler.h','generic_capture.py','stream_capture_v2.py','block_capture.py','block_receipts.py','generic_fixture_oracle.py','run_block.py','reclaim_receipts.py','build.py','prepare_runtime_port_trace.py','runtime_port_traced.rs','runtime_port_control.rs','runtime_port_fixture_trace.rs','generic_fixture_receipts.py','run_stream_fixture.py','stream_lifecycle.py','stream_fixture_oracle.py','stream_io_v3.rs','stream_reclaim_access.rs','worker.entitlements','pins.json','runtime-port-trace-candidate.json']}
     (artifacts/'build.json').write_text(json.dumps(receipt,indent=2)+'\n');print(json.dumps(receipt))
 if __name__=='__main__':main()

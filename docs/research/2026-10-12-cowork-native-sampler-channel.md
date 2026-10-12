@@ -21,3 +21,12 @@ A small actual C helper uses the same descriptor admission and sample writer. It
 Additional tests cover exact CLOEXEC/nonblocking setup, wrong types/direction/aliases/named FIFOs, sample-pipe writes under macOS deny-default without extra file-path rights, original limit equality, per-channel/total/line/row overflow, preserved malformed bytes, partial reader startup, spawn/setup/cancellation cleanup, uncertain reaping, oracle joins and synthetic normal-runner aggregation. The macOS sandbox helper has no libkrun or VM code. Worker C syntax is checked against the existing pinned libkrun header with the actual warning/error flags. Python modules pass py_compile.
 
 Validation: **40 focused no-VM tests passed** across sampler, generic lifecycle/discovery, block receipts, stream lifecycle and the synthetic normal-runner case. C worker `-fsyntax-only -Wall -Wextra -Werror` and Python py_compile pass. No fixture artifact was rebuilt and no original result/log was staged. This fixes fixture telemetry serialization; it does not change the original failed aggregate or pass Cowork's full production/resource gates.
+
+
+## Preserved frozen artifact directory
+
+The sampler revision builds and reads only `out/generic-fixture-sampler`, with new run captures under `out/generic-fixture-sampler-*`. The shared pure `generic_fixture_paths.py` constants are hash-bound launch/build dependencies, and the receipt binds artifactDirectory=generic-fixture-sampler plus the dedicated sampler profile marker. Direct receipt writing refuses any other artifact directory, and receipt-only refresh requires an already matching sampler directory/profile marker. No fallback reads or promotes the old cache.
+
+`out/generic-fixture/build.json` and the original `generic-fixture-7zmd1ypu` / `generic-fixture-0zaad_cn` runs remain unchanged, so the original independent audit can still bind its frozen 821c build receipt and raw logs. This follow-up performed no artifact build, worker or VM launch, and did not open or mutate that original cache. Isolated tests create synthetic old-cache sentinels only in disposable directories to verify refusal/preservation.
+
+Follow-up validation: **46 no-VM tests passed**, including six namespace/receipt-preservation regressions plus the prior 40 capture/lifecycle/native-helper tests. Python py_compile and diff checks pass. No build, worker, VM or original cache/result write occurred.

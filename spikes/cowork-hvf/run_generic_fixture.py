@@ -4,10 +4,11 @@ from pathlib import Path
 from build import ROOT,OUT,digest
 from block_receipts import summary
 from generic_fixture_lifecycle import supervise
+from generic_fixture_paths import ARTIFACT_DIRECTORY,RUN_PREFIX
 from generic_fixture_receipts import audit as stream_audit
 from run_block import disk_integrity,processes
 
-LAUNCH_DEPENDENCIES=frozenset(['run_generic_fixture.py','generic_fixture_lifecycle.py','generic_fixture_oracle.py','generic_fixture_receipts.py','run_stream_fixture.py','stream_lifecycle.py','stream_fixture_oracle.py','stream_capture_v2.py','generic_capture.py','generic_sampler.h','run_block.py','block_capture.py','block_receipts.py','reclaim_receipts.py','build.py'])
+LAUNCH_DEPENDENCIES=frozenset(['run_generic_fixture.py','generic_fixture_lifecycle.py','generic_fixture_paths.py','generic_fixture_oracle.py','generic_fixture_receipts.py','run_stream_fixture.py','stream_lifecycle.py','stream_fixture_oracle.py','stream_capture_v2.py','generic_capture.py','generic_sampler.h','run_block.py','block_capture.py','block_receipts.py','reclaim_receipts.py','build.py'])
 
 from run_stream_fixture import verify_signed_worker
 
@@ -15,8 +16,8 @@ def main():
     parser=argparse.ArgumentParser();mode=parser.add_mutually_exclusive_group(required=True);mode.add_argument('--sandbox-check',action='store_true');mode.add_argument('--run-runtime-port-fixture',action='store_true');mode.add_argument('--run-runtime-port-close-fixture',action='store_true');parser.add_argument('--review-receipt',type=str);args=parser.parse_args()
     run_requested=args.run_runtime_port_fixture or args.run_runtime_port_close_fixture
     scenario='terminal-close' if args.run_runtime_port_close_fixture else 'normal'
-    artifacts=OUT/'generic-fixture';build=json.loads((artifacts/'build.json').read_text());candidate=json.loads((ROOT/'runtime-port-trace-candidate.json').read_text())
-    if build.get('hostSamplerTransport')!='dedicated-inherited-pipe-v1':raise RuntimeError('Dedicated sampler build required; prior receipt is stale')
+    artifacts=OUT/ARTIFACT_DIRECTORY;build=json.loads((artifacts/'build.json').read_text());candidate=json.loads((ROOT/'runtime-port-trace-candidate.json').read_text())
+    if build.get('artifactDirectory')!=ARTIFACT_DIRECTORY or build.get('hostSamplerTransport')!='dedicated-inherited-pipe-v1':raise RuntimeError('Dedicated sampler build required; prior receipt is stale')
     if build['candidate']!=candidate:raise RuntimeError('Built candidate differs from frozen source manifest')
     for name,pin in build['artifacts'].items():
         if digest(artifacts/name)!=pin:raise RuntimeError('Artifact changed: '+name)
@@ -36,7 +37,7 @@ def main():
         if not found or int(found.group(1))<15:raise RuntimeError('Ordinary host pressure preflight not acceptable; no VM launched')
     with (OUT/'worker.lock').open('w') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        fixture=Path(tempfile.mkdtemp(prefix='generic-fixture-',dir=OUT)).resolve();fixture.chmod(0o700)
+        fixture=Path(tempfile.mkdtemp(prefix=RUN_PREFIX,dir=OUT)).resolve();fixture.chmod(0o700)
         for name in build['artifacts']:
             if name in ['init','libkrun.a']:continue
             shutil.copy2(artifacts/name,fixture/name)
