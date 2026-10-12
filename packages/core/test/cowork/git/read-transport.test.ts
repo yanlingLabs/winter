@@ -8,6 +8,7 @@ import { CoworkGitHubReadTransport, type GitReadHttp } from "../../../src/cowork
 import { DEFAULT_GIT_READ_LIMITS, type GitReadCaller, type GitReadGrant, type GitReadRequest } from "../../../src/cowork/git/read-types";
 import { validateUploadPackRequest, validateUploadPackResponse } from "../../../src/cowork/git/read-wire";
 import { resolveGitExecutable } from "../../../src/cowork/git/executor";
+import { buildGitReadParserFixture } from "./read-parser-fixture";
 import { FileSecretStore } from "../../../src/auth/secret-store";
 const sentinel = "FIXTURE_GITHUB_SECRET_never_guest_7ca81f";
 const caller: GitReadCaller = { workspaceId: "workspace", incarnationId: "boot", leaseEpoch: 1 };
@@ -75,6 +76,7 @@ async function git(cwd: string, home: string, args: string[], input?: Uint8Array
 test("real Git clone + incremental fetch through private fake upstream keep credentials/helpers out of guest", async () => {
   const root = temp(), home = join(root, "home"), upstream = join(root, "upstream"), guest = join(root, "guest"); mkdirSync(home); mkdirSync(upstream);
   await git(upstream, home, ["init", "--initial-branch=main"]); writeFileSync(join(upstream, "hello.txt"), "first\n"); await git(upstream, home, ["add", "."]); await git(upstream, home, ["commit", "-m", "first"]);
+  const parser = process.env.WINTER_GIT_READ_NODE_FIXTURE ? (await buildGitReadParserFixture(join(root, "parser-helper"))).parser : undefined;
   const secretStore = new FileSecretStore(join(root, "host-secrets")); await secretStore.set("fixture-slot", sentinel); let privateCalls = 0, gatewayCalls = 0;
   const fake = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
     if (req.headers.get("authorization") !== `Basic ${Buffer.from(`x-access-token:${sentinel}`).toString("base64")}`) return new Response("no", { status: 401 }); privateCalls++; const url = new URL(req.url);
@@ -84,7 +86,7 @@ test("real Git clone + incremental fetch through private fake upstream keep cred
   } }); stops.push(() => { fake.stop(true); });
   const t = new CoworkGitHubReadTransport({ authorize: () => ({ ...grant }) }, secretStore, async (url, init) => {
     expect(url.startsWith("https://github.com/fixture-owner/fixture-repo.git/")).toBe(true); const target = new URL(url); const res = await fetch(`http://127.0.0.1:${fake.port}${target.pathname}${target.search}`, init); return new Response(res.body, { status: res.status, headers: res.headers });
-  }, {}, { isolatedFixture: true });
+  }, {}, { isolatedFixture: true, parser });
   const gateway = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
     const url = new URL(req.url); let operation: GitReadRequest["operation"];
     if (req.method === "GET" && url.pathname === "/source.git/info/refs" && url.search === "?service=git-upload-pack") operation = "advertise";
@@ -97,6 +99,7 @@ test("real Git clone + incremental fetch through private fake upstream keep cred
   writeFileSync(join(upstream, "hello.txt"), "second\n"); await git(upstream, home, ["add", "."]); await git(upstream, home, ["commit", "-m", "second"]); await git(guest, home, ["fetch", "--no-recurse-submodules", "origin"]);
   expect((await git(guest, home, ["show", "origin/main:hello.txt"])).toString()).toBe("second\n"); await git(guest, home, ["fsck", "--strict"]);
   const config = readFileSync(join(guest, ".git/config"), "utf8"); expect(config).not.toContain(sentinel); expect(config).not.toContain("credential"); expect(config).not.toContain("fixture-slot"); expect(await Bun.file(join(root, "helper-ran")).exists()).toBe(false); expect(privateCalls).toBeGreaterThanOrEqual(4); expect(gatewayCalls).toBe(privateCalls);
+  if (parser) expect(parser.measurements.peakObservedRssBytes).toBeGreaterThan(0);
   expect((await fetch(`http://127.0.0.1:${gateway.port}/source.git/info/refs?service=git-receive-pack`)).status).toBe(403);
 }, 15_000);
 

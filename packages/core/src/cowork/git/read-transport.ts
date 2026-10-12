@@ -2,6 +2,7 @@ import { Agent, request as httpsRequest } from "node:https";
 import { Readable } from "node:stream";
 import type { SecretStore } from "../../auth/secret-store";
 import { validateGitHubReadRepository } from "./read-authority";
+import type { GitReadParser } from "./read-parser-helper";
 import { validateReadAdvertisement, validateUploadPackRequest, validateUploadPackResponse } from "./read-wire";
 import { DEFAULT_GIT_READ_LIMITS, GitReadError, type GitReadAuthority, type GitReadCaller, type GitReadGrant, type GitReadLimits, type GitReadRequest, type GitReadResponse } from "./read-types";
 
@@ -29,7 +30,7 @@ export class CoworkGitHubReadTransport {
   private readonly active = new Set<{ caller: GitReadCaller; sourceId: string; abort: () => void }>();
   constructor(private readonly authority: GitReadAuthority, private readonly secrets: Pick<SecretStore, "get">,
     private readonly http: GitReadHttp = directGitHubReadHttp, limits: Partial<GitReadLimits> = {},
-    private readonly activation?: { isolatedFixture: true }) {
+    private readonly activation?: { isolatedFixture: true; parser?: GitReadParser }) {
     this.limits = { ...DEFAULT_GIT_READ_LIMITS, ...limits };
     if (!Object.values(this.limits).every(n => Number.isSafeInteger(n) && n > 0)
       || this.limits.requestBytes > 1_048_576 || this.limits.responseBytes > 67_108_864
@@ -53,7 +54,7 @@ export class CoworkGitHubReadTransport {
       || !["advertise", "upload-pack"].includes(request.operation) || (request.operation === "advertise" && request.body !== undefined)
       || (request.operation === "upload-pack" && (!(request.body instanceof Uint8Array) || !request.body.length))) throw new GitReadError("invalid_request");
     if (request.body && request.body.length > this.limits.requestBytes) throw new GitReadError("budget_exceeded");
-    if (request.body) validateUploadPackRequest(request.body);
+
     if (this.active.size >= this.limits.concurrent) throw new GitReadError("busy");
     const controller = new AbortController(); let failure: GitReadError | undefined;
     const stop = (code: GitReadError["code"]) => { failure ??= new GitReadError(code); controller.abort(); };
@@ -88,6 +89,11 @@ export class CoworkGitHubReadTransport {
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined, upstream: Response | undefined;
     try {
       grant = recheck();
+      if (request.body) {
+        if (this.activation.parser) await bounded(this.activation.parser.validate("request", request.body, this.limits, controller.signal));
+        else validateUploadPackRequest(request.body);
+        recheck();
+      }
       const token = await bounded(this.secrets.get(grant.credentialRef));
       if (!token || !/^[!-~]{1,4096}$/.test(token)) throw new GitReadError("authority_denied");
       recheck();
@@ -112,7 +118,8 @@ export class CoworkGitHubReadTransport {
       const resultBytes = bytes.subarray(0, total);
       // A credential-bearing upstream error must never become guest bytes or logs.
       if (resultBytes.includes(Buffer.from(token)) || resultBytes.includes(Buffer.from(auth))) throw new GitReadError("invalid_response");
-      if (advertise) validateReadAdvertisement(resultBytes); else await bounded(validateUploadPackResponse(resultBytes, this.limits, controller.signal));
+      if (this.activation.parser) await bounded(this.activation.parser.validate(advertise ? "advertisement" : "response", resultBytes, this.limits, controller.signal));
+      else if (advertise) validateReadAdvertisement(resultBytes); else await bounded(validateUploadPackResponse(resultBytes, this.limits, controller.signal));
       recheck();
       return { contentType, body: Buffer.from(resultBytes) };
     } catch (error) { throw failure ?? (error instanceof GitReadError ? error : new GitReadError("upstream_failed")); }
