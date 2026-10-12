@@ -230,7 +230,12 @@ extension CUCore {
     /// What a reroute does with a key of the user's it let through into the target `tpid`: typing there is work in it.
     func passThroughWorkMarker(_ tpid: pid_t) -> (CGEvent) -> Void {
         { [weak self] e in
-            guard let self, e.type == .keyDown, Self.isTypingKey(flags: e.flags, keycode: e.getIntegerValueField(.keyboardEventKeycode)) else { return }
+            // (The user's own key only — a hardware event, as the session tap reads it: never a synthetic key another
+            // process posted, nor one of the helper's — round 17b, the review of round 17.)
+            guard let self, e.type == .keyDown,
+                  CUHardwareInput.classify(type: e.type, sourcePid: e.getIntegerValueField(.eventSourceUnixProcessID),
+                                           userData: e.getIntegerValueField(.eventSourceUserData)) == .action,
+                  Self.isTypingKey(flags: e.flags, keycode: e.getIntegerValueField(.keyboardEventKeycode)) else { return }
             self.userInteracted(tpid)
         }
     }

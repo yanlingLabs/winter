@@ -89,6 +89,7 @@ final class CUActGuardedAX: CUAXBackend {
     func windowID(_ e: AXUIElement) -> CGWindowID? { inner.windowID(e) }
     func remoteWindows(pid: pid_t, windowIDs: [CGWindowID]) -> [CGWindowID: AXUIElement] { inner.remoteWindows(pid: pid, windowIDs: windowIDs) }
     func ownerPid(_ e: AXUIElement) -> pid_t? { inner.ownerPid(e) }
+    func elementAt(pid: pid_t, _ point: CGPoint) -> AXUIElement? { inner.elementAt(pid: pid, point) }
 }
 
 /// The event poster every act uses, with the guard in front of the events that START something (a key down, a button down,

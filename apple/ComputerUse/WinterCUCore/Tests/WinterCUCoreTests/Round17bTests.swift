@@ -169,4 +169,24 @@ final class Round17bTests: XCTestCase {
         XCTAssertTrue(core.guardianLock.withLock { core.guardianCore.secureInputMaybeOn(from: 101 - 2.5, to: 101) },
                       "the poll saw the secure span with no tap event")
     }
+    /// Round 17b (the review of round 17, LOW): the reroute's work mark is the user's own key only — a hardware event, as
+    /// the session tap reads it — never the helper's own key nor one another process posted.
+    func testTheReroutesWorkMarkTakesOnlyTheUsersHardwareKey() {
+        world()
+        core.guardianLock.withLock { core.guardianCore.begin(view: CUGuardedView(app: pid, space: nil)) }
+        sys.front = pid  // their own move: the reroute lets their keys through into T
+        let reroute = CUKeyReroute(target: pid, victim: 1, installer: FakeKeyTapInstaller(), post: { _, _ in }, destination: { [unowned self] in pid })
+        reroute.onPassThrough = core.passThroughWorkMarker(pid)
+        XCTAssertTrue(reroute.begin())
+        let ours = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)!
+        CUEventStamp.stamp(ours)
+        _ = reroute.handle(ours)  // the helper's own: passes, marks nothing
+        let posted = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)!
+        posted.setIntegerValueField(.eventSourceUnixProcessID, value: 9_999)
+        _ = reroute.handle(posted)  // another process's synthetic key: marks nothing
+        XCTAssertFalse(core.userIsWorking(in: pid), "no hardware key yet")
+        _ = reroute.handle(keyEvent(stamped: false))  // the user's (a hardware key)
+        XCTAssertTrue(core.userIsWorking(in: pid))
+        _ = reroute.end()
+    }
 }

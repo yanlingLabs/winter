@@ -943,7 +943,14 @@ extension CUCore {
             let shown = [scroller.flatMap { ax.frame($0) } ?? ax.frame(area), sys.window(id: t.windowID)?.frame].compactMap { $0 }
                 .reduce(nil as CGRect?) { acc, r in acc.map { $0.intersection(r) } ?? r }
             let which = k == .end ? "last" : "first"
-            if let f = ax.frame(n), let shown, !shown.isNull, shown.intersects(f) { return "its \(which) element scrolled into view" }
+            // (Read until it settles — a page scrolls a moment after the request — for 300 ms, as a focus click's point is;
+            // round 17b.)
+            let until = clock.nowMs() + 300
+            while true {
+                if let f = ax.frame(n), let shown, !shown.isNull, shown.intersects(f) { return "its \(which) element scrolled into view" }
+                if clock.nowMs() >= until { break }
+                clock.pause(ms: 30)
+            }
             return "its \(which) element was asked into view — not confirmed (it still reads outside what the page shows)"
         default:
             return nil
@@ -981,30 +988,26 @@ extension CUCore {
         let candidates = [CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.midX, y: r.maxY),
                           CGPoint(x: r.maxX, y: r.midY), CGPoint(x: r.minX, y: r.midY), CGPoint(x: r.maxX, y: r.minY)]
         let editable: Set<String> = [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole, "AXSearchField"]
-        // The page's own nodes, read live over accessibility, ALL of them (round 17, the review of round 16: a descent only
-        // into frames holding the point missed a link inside a `display:contents` wrapper — no box of its own — and a
-        // positioned or overflowing child outside its parent's box): every node that takes a press, a click or text, by its
-        // frame. A page too large to read within the budget proves no spot blank (fail closed).
-        var acting: [CGRect] = []
-        var queue = ax.elements(area, kAXChildrenAttribute)
-        var budget = 800
-        while !queue.isEmpty {
-            guard budget > 0 else {
-                CULog.act.notice("blank spot: the page is too large to read within the budget — no spot taken for blank")
-                return nil
+        // The app's OWN hit test at each candidate (round 17b, the review of round 17's M3: round 17 walked up to 800 nodes
+        // and failed closed on any real site): WebKit's hit test sees a link inside a `display:contents` wrapper and a
+        // positioned or overflowing child. A spot is blank when what is hit there, and every ancestor of it up to the page,
+        // takes no press, click or text — and the hit lies inside the page (else, or nothing hit: not proven blank).
+        for p in candidates {
+            guard let hit = ax.elementAt(pid: t.pid, p) else { continue }
+            var n: AXUIElement? = hit
+            var inside = false, acts = false
+            for _ in 0..<60 {
+                guard let x = n else { break }
+                if CFEqual(x, area) { inside = true; break }
+                let role = ax.string(x, kAXRoleAttribute) ?? ""
+                let actions = ax.actions(x)
+                if Self.clickableRoles.contains(role) || editable.contains(role)
+                    || actions.contains(kAXPressAction) || actions.contains("AXOpen") || actions.contains("AXConfirm") { acts = true; break }
+                n = ax.element(x, kAXParentAttribute)
             }
-            budget -= 1
-            let n = queue.removeFirst()
-            let role = ax.string(n, kAXRoleAttribute) ?? ""
-            let actions = ax.actions(n)
-            if Self.clickableRoles.contains(role) || editable.contains(role)
-                || actions.contains(kAXPressAction) || actions.contains("AXOpen") || actions.contains("AXConfirm"),
-               let f = ax.frame(n), f.width > 0, f.height > 0 {
-                acting.append(f)
-            }
-            queue.append(contentsOf: ax.elements(n, kAXChildrenAttribute))
+            if inside, !acts { return p }
         }
-        return candidates.first { p in !acting.contains { $0.insetBy(dx: -2, dy: -2).contains(p) } }
+        return nil
     }
 
     /// Controls a press acts on: giving one the keyboard focus by a press already acts on it.
@@ -2363,7 +2366,12 @@ extension CUCore {
                     // Still outside the control's page, shown just now: the key would act on something else (round 17, the
                     // review of round 16: ↓ aimed at a web link in Mail moved the message list) — refused, nothing sent.
                     if !(reportedFocus(t).map { isInside($0, area) } ?? false) {
-                        throw CUError.refused(.focusNotPlaced, "the keyboard focus is outside the page that holds [\(into)], so \(a.combo) would act on something else — nothing was sent; click(\(into)) acts on it, or scroll(\(into)) moves the page")
+                        // (Said as it is: an app that reports no focused element — Electron, Chromium often — is not shown
+                        // to have its focus outside the page; it does not say where it is. Refused either way — round 17b.)
+                        let whereFocus = reportedFocus(t) == nil
+                            ? "\(t.appName) doesn't say where its keyboard focus is (it reports no focused element), so \(a.combo) could act on something other than the page that holds [\(into)]"
+                            : "the keyboard focus is outside the page that holds [\(into)], so \(a.combo) would act on something else"
+                        throw CUError.refused(.focusNotPlaced, "\(whereFocus) — nothing was sent; click(\(into)) acts on it, or scroll(\(into)) moves the page")
                     }
                 }
                 // A navigation key goes to where the focus is ONCE per call (round 17, the review of round 16: "pressed once"

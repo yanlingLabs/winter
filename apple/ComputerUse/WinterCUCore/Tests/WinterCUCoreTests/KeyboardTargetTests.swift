@@ -292,7 +292,7 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertTrue(reroute.begin())
         core.activeKeyReroute = reroute
         sys.front = pid  // the target took the front by itself
-        let key = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)!
+        let key = keyEvent(stamped: false)  // the user's hardware key
         // The session tap sees the key first: the reroute decides, nothing is marked from the front app.
         core.noteUserInteraction(type: .keyDown, flags: [], keycode: 0, location: nil, targetPid: Int64(pid))
         XCTAssertNil(reroute.handle(key), "sent to their place, dropped from the target")
@@ -521,6 +521,65 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertFalse(CGRect(x: 0, y: 580, width: 60, height: 20).insetBy(dx: -2, dy: -2).contains(spot), "not under the link: \(spot)")
         XCTAssertFalse(CGRect(x: 850, y: 570, width: 60, height: 40).insetBy(dx: -2, dy: -2).contains(spot), "not under the button: \(spot)")
         XCTAssertEqual(spot, CGPoint(x: 450, y: 594), "the next candidate: the bottom's middle")
+    }
+
+    /// Round 17b (the review of round 17, M3): a real page has thousands of nodes — round 17's walk stopped at 800 and
+    /// proved no spot blank. The app's own hit test at each candidate needs no walk.
+    func testABlankSpotIsFoundOnAPageOfThousandsOfNodes() throws {
+        safari(fieldOwner: pid)
+        let web = ax.element(field, kAXParentAttribute)!   // (0, 50, 900, 550)
+        var kids: [AXUIElement] = [field]
+        for i in 0..<1_200 {
+            let e = fakeElement(Int32(94_000 + i))
+            ax.add(e, role: kAXStaticTextRole, frame: CGRect(x: 20, y: 100 + Double(i % 40) * 10, width: 200, height: 8), extra: [kAXParentAttribute: web])
+            kids.append(e)
+        }
+        ax.put(web, [kAXChildrenAttribute: kids])
+        let spot = try XCTUnwrap(core.blankSpot(in: web, target), "a blank spot on a large page")
+        XCTAssertFalse(CGRect(x: 20, y: 60, width: 300, height: 24).contains(spot))
+    }
+
+    /// Round 17b (the review of round 17, LOW): an app that reports NO focused element (Electron, Chromium often) is not
+    /// shown to have its focus outside the page — the refusal says what is known: it doesn't say where its focus is.
+    func testANavigationKeyRefusalWithNoFocusReportedSaysSo() async throws {
+        safari(fieldOwner: pid)
+        let web = ax.element(field, kAXParentAttribute)!
+        let link = fakeElement(93_102)
+        ax.add(link, role: "AXLink", title: "Read more", frame: CGRect(x: 20, y: 160, width: 120, height: 30), extra: [kAXParentAttribute: web])
+        ax.setActions(link, [kAXPressAction])
+        ax.put(web, [kAXChildrenAttribute: [field, link]])
+        ax.focus(pid: pid, on: nil)  // the app reports no focused element
+        do {
+            _ = try await act(.key(CUKeyAction(combo: "down", into: ref(link))))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("focus_not_placed"), e.message)
+            XCTAssertTrue(e.message.contains("doesn't say where its keyboard focus is"), e.message)
+            XCTAssertFalse(e.message.contains("is outside the page"), e.message)
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty)
+    }
+
+    /// Round 17b (the review of round 17, LOW): the fallback's check reads until the page settles (a page scrolls a moment
+    /// after the request) — an element that arrives on the second read is "scrolled into view", not "unconfirmed".
+    func testTheFallbacksScrollCheckWaitsForThePageToSettle() async throws {
+        safari(fieldOwner: pid)
+        let web = ax.element(field, kAXParentAttribute)!
+        let button = fakeElement(93_103), footer = fakeElement(93_104)
+        ax.add(button, role: kAXButtonRole, title: "Web Button", frame: CGRect(x: 20, y: 160, width: 120, height: 30), extra: [kAXParentAttribute: web])
+        ax.setActions(button, [kAXPressAction])
+        ax.add(footer, role: "AXGroup", frame: CGRect(x: 0, y: 5_000, width: 900, height: 40), extra: [kAXParentAttribute: web])
+        ax.put(web, [kAXChildrenAttribute: [field, button, footer]])
+        _ = searchHasFocus()
+        var asked = false, reads = 0
+        ax.onPerform = { what in if what == "\(self.token(footer)):AXScrollToVisible" { asked = true } }
+        ax.onRead = { [unowned self] what in
+            guard asked, what == "\(token(footer)):\(kAXPositionAttribute)" else { return }
+            reads += 1
+            if reads == 2 { var p = CGPoint(x: 0, y: 500); ax.put(footer, [kAXPositionAttribute: AXValueCreate(.cgPoint, &p)!]) }
+        }
+        let r = try await act(.key(CUKeyAction(combo: "end", into: ref(button))))
+        XCTAssertTrue(r.detail?.contains("its last element scrolled into view") ?? false, r.detail ?? "")
     }
 
     /// Round 17 (the review of round 16, MEDIUM): ↓ aimed at a web link in Mail moved the message list — the key went to
