@@ -44,7 +44,7 @@ Retries resume only a recorded virgin inode of zero or exact final size. A crash
 before recording file/directory identity, or an unexpected pre-existing file,
 leaves recovery required; the primitive never deletes/truncates unknown data.
 Crash after recorded identity, exclusion or sizing can finish the same allocation.
-Allocation effects and public `claim`, `open` and `release` reject caller-owned
+Allocation effects and public `plan`, `claim`, `open` and `release` reject caller-owned
 SQLite transactions before authorization, ownership changes or descriptor opens.
 Their internal transaction completion is therefore a top-level commit, and an
 outer rollback cannot erase a published claim or restore a previous owner beside
@@ -58,13 +58,22 @@ There is no destructive cleanup or automatic replacement operation.
 `-v`, then `isexcluded`, and verifies the sticky item metadata on the already
 checked vnode descriptor. It touches only the two disposable/new image items,
 never parent directories, volumes or global backup settings. The implementation
-accepts the exact binary plist marker emitted by current macOS tmutil; unknown
-marker encoding refuses conservatively and requires a verified adapter update.
+parses at most 256 bytes of binary plist metadata through CoreFoundation and
+requires a root string exactly equal to `com.apple.backupd`. Equivalent ASCII or
+Unicode encodings are accepted; malformed data, other root types/values, XML,
+oversized metadata and unknown binary-plist versions refuse conservatively.
 A named-item operation is bracketed by descriptor-relative identity revalidation;
 a persistent path swap refuses. The named tmutil operation still resolves its
 path during execution; bracketing is not an atomic guarantee that a transiently
 swapped name receives no backup-metadata side effect. Every subsequent
 admission/open verifies image exclusion.
+Named `tmutil` checks run outside SQLite transactions while the image descriptors
+stay pinned. Inside each `IMMEDIATE` transaction, the host reauthorizes, rereads
+canonical records and revalidates those descriptors' identity, geometry and sticky
+metadata through the cheap `verifyDescriptorExcluded` port, plus a fresh directory
+identity walk. That port must never spawn or perform named-item operations. A
+change between preflight and the locked operation refuses and closes pending
+descriptors. Creation also rechecks sticky metadata before publishing allocation.
 Shared instructions, memory and outputs receive no item exclusions and retain
 their ordinary backup eligibility (a user's pre-existing exclusions can still
 apply). A future explicit replacement path must exclude/verify the new item; this
@@ -105,4 +114,6 @@ image-local sticky metadata and absence of shared-directory markers, rather than
 claiming the machine's global backup policy includes TMPDIR. Fault tests cover
 creation/sizing/exclusion crashes, identity/permission/link/geometry drift, backup
 path swaps, lost exclusion, cold owner continuity, stop proof, both outer
-transaction rollback reproductions and schema rollback.
+transaction rollback reproductions, failed-open descriptor cleanup, backup helper
+transaction boundaries, post-preflight revalidation, bounded plist decoding and
+schema rollback.

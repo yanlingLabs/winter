@@ -35,6 +35,7 @@ export class CoworkVolumeError extends Error {
   constructor(readonly code: VolumeFailure) { super(code); this.name = "CoworkVolumeError"; }
 }
 type Row = Record<string, any>;
+interface CheckedVolume { volume: CoworkVolumeRecord; fd: number; close(): void }
 function fail(code: VolumeFailure): never { throw new CoworkVolumeError(code); }
 const token = (value: unknown): string => typeof value === "string" && /^[a-zA-Z0-9_-]{1,160}$/.test(value) ? value : fail("invalid_request");
 function owner(value: CoworkVolumeOwner): CoworkVolumeOwner {
@@ -150,6 +151,7 @@ export class CoworkVolumes {
     finally { closeFd(fd); dirs.forEach(closeFd); }
   }
   private exclude(volume: CoworkVolumeRecord, fd: number, apply: boolean): void {
+    if (this.rs.db.inTransaction) fail("invalid_request");
     const path = join(this.home, "cowork", "workspaces", volume.workspaceId, filename(volume.purpose));
     this.verifyNamed(volume);
     try {
@@ -157,21 +159,45 @@ export class CoworkVolumes {
       if (this.backup.verifyItemExcluded(path, fd) !== true) fail("backup_exclusion_unavailable");
     } catch (error) { if (error instanceof CoworkVolumeError) throw error; fail("backup_exclusion_unavailable"); }
     this.verifyNamed(volume);
+    this.validateDescriptor(volume, fd, volume.state === "creating" ? [0, volume.capacityBytes] : [volume.capacityBytes]);
+  }
+  /** Transaction-safe checks: only pinned metadata/identity and descriptor-relative directory I/O.
+   * tmutil cross-checks have already completed outside the writer lock. */
+  private validateDescriptor(volume: CoworkVolumeRecord, fd: number, sizes: readonly number[] = [volume.capacityBytes]): void {
+    this.validate(fd, volume, sizes);
+    try { if (this.backup.verifyDescriptorExcluded(fd) !== true) fail("backup_exclusion_unavailable"); }
+    catch (error) { if (error instanceof CoworkVolumeError) throw error; fail("backup_exclusion_unavailable"); }
+  }
+  private revalidateChecked(volume: CoworkVolumeRecord, checked: readonly CheckedVolume[]): void {
+    const pinned = checked.find(v => v.volume.volumeId === volume.volumeId);
+    if (!pinned || pinned.volume.creationId !== volume.creationId || pinned.volume.homeId !== volume.homeId || pinned.volume.workspaceId !== volume.workspaceId || pinned.volume.purpose !== volume.purpose || volume.state !== "allocated") fail("recovery_required");
+    this.verifyNamed(volume);
+    this.validateDescriptor(volume, pinned.fd);
+  }
+  private prepareChecked(volumes: readonly CoworkVolumeRecord[]): CheckedVolume[] {
+    const checked: CheckedVolume[] = [];
+    try {
+      for (const volume of volumes) checked.push({ volume, ...this.openChecked(volume) });
+      return checked;
+    } catch (error) { checked.forEach(v => v.close()); throw error; }
   }
   /** Durable allocation intent only; no files are created by this method. Geometries are immutable.
    * Previously allocated images must still match their identity/modes/exclusion on re-admission. */
   plan(input: CoworkVolumeRequest, capacities: { data: number; environment: number }): CoworkVolumeRecord[] {
+    if (this.rs.db.inTransaction) fail("invalid_request");
     const data = geometry(capacities.data), environment = geometry(capacities.environment);
-    return this.rs.transaction(() => {
-      const { request, homeId } = this.admit("allocate", input);
-      // DB intent commits separately from host effects; no rollback can erase the identity of an
-      // image already created. The effect stage refuses nested caller transactions.
-      for (const existing of this.records(request.workspaceId)) {
-        if (existing.state === "allocated") { const handle = this.openChecked(existing); handle.close(); }
-      }
-      this.planRecords(request.workspaceId, homeId, data, environment);
-      return this.records(request.workspaceId);
-    }, { mode: "immediate" });
+    const { request: admitted } = this.admit("allocate", input);
+    const checked = this.prepareChecked(this.records(admitted.workspaceId).filter(v => v.state === "allocated"));
+    try {
+      return this.rs.transaction(() => {
+        const { request, homeId } = this.admit("allocate", input);
+        for (const existing of this.records(request.workspaceId)) {
+          if (existing.state === "allocated") this.revalidateChecked(existing, checked);
+        }
+        this.planRecords(request.workspaceId, homeId, data, environment);
+        return this.records(request.workspaceId);
+      }, { mode: "immediate" });
+    } finally { checked.forEach(v => v.close()); }
   }
   private planRecords(workspaceId: string, homeId: string, data: number, environment: number): void {
     for (const purpose of ["data", "environment"] as const) {
@@ -219,9 +245,9 @@ export class CoworkVolumes {
             this.rs.transaction(() => {
               const current = this.records(request.workspaceId).find(v => v.volumeId === volume.volumeId)!;
               if (current.owner || current.state !== "creating") fail("volume_busy");
-              this.validate(fd, current, [0, current.capacityBytes]);
+              this.verifyNamed(current); this.validateDescriptor(current, fd, [0, current.capacityBytes]);
               ftruncateSync(fd, volume.capacityBytes); fsyncSync(fd);
-              this.checkpoint("image-sized"); this.validate(fd, volume);
+              this.checkpoint("image-sized"); this.validateDescriptor(volume, fd);
               this.run("UPDATE cowork_volumes SET state='allocated',updated_at=? WHERE volume_id=? AND state='creating'", new Date().toISOString(), volume.volumeId);
             }, { mode: "immediate" });
           }
@@ -236,17 +262,25 @@ export class CoworkVolumes {
    * Caller-owned transactions refuse before effects: a nested savepoint is not a durable claim. */
   claim(input: CoworkVolumeRequest): CoworkVolumeRecord[] {
     if (this.rs.db.inTransaction) fail("invalid_request");
-    return this.rs.transaction(() => {
-      const { request, homeId } = this.admit("claim", input), volumes = this.records(request.workspaceId);
+    const validateClaim = (request: CoworkVolumeRequest, homeId: string, volumes: CoworkVolumeRecord[]) => {
       if (volumes.length !== 2) fail("recovery_required");
       for (const volume of volumes) {
         if (volume.homeId !== homeId || volume.state !== "allocated") fail("recovery_required");
         if (volume.owner && !sameOwner(volume.owner, request.owner)) fail("volume_busy");
-        const handle = this.openChecked(volume); handle.close();
       }
-      this.run("UPDATE cowork_volumes SET owner_json=?,last_stop_id=NULL WHERE workspace_id=?", JSON.stringify(request.owner), request.workspaceId);
-      return this.records(request.workspaceId);
-    }, { mode: "immediate" });
+    };
+    const admitted = this.admit("claim", input), prior = this.records(admitted.request.workspaceId);
+    validateClaim(admitted.request, admitted.homeId, prior);
+    const checked = this.prepareChecked(prior);
+    try {
+      return this.rs.transaction(() => {
+        const { request, homeId } = this.admit("claim", input), volumes = this.records(request.workspaceId);
+        validateClaim(request, homeId, volumes);
+        volumes.forEach(v => this.revalidateChecked(v, checked));
+        this.run("UPDATE cowork_volumes SET owner_json=?,last_stop_id=NULL WHERE workspace_id=?", JSON.stringify(request.owner), request.workspaceId);
+        return this.records(request.workspaceId);
+      }, { mode: "immediate" });
+    } finally { checked.forEach(v => v.close()); }
   }
   private openChecked(volume: CoworkVolumeRecord): { fd: number; close(): void } {
     const dirs = this.directories(volume.workspaceId, false); let fd = -1;
@@ -261,19 +295,22 @@ export class CoworkVolumes {
    * explicitly to its authenticated worker. Descriptor closure does not prove worker termination. */
   open(input: CoworkVolumeRequest, purpose: VolumePurpose): { volume: CoworkVolumeRecord; fd: number; close(): void } {
     if (this.rs.db.inTransaction) fail("invalid_request");
-    const pending: { handle?: { fd: number; close(): void } } = {};
+    const { request, homeId } = this.admit("open", input), prior = this.records(request.workspaceId).find(v => v.purpose === purpose);
+    if (!prior) fail("not_found");
+    if (prior.homeId !== homeId || prior.state !== "allocated" || !sameOwner(prior.owner, request.owner)) fail("volume_busy");
+    const pending: CheckedVolume = { volume: prior, ...this.openChecked(prior) };
     let opened: { volume: CoworkVolumeRecord; handle: { fd: number; close(): void } };
     try {
       opened = this.rs.transaction(() => {
         const { request, homeId } = this.admit("open", input), volume = this.records(request.workspaceId).find(v => v.purpose === purpose);
         if (!volume) fail("not_found");
         if (volume.homeId !== homeId || volume.state !== "allocated" || !sameOwner(volume.owner, request.owner)) fail("volume_busy");
-        const handle = this.openChecked(volume); pending.handle = handle;
-        return { volume, handle };
+        this.revalidateChecked(volume, [pending]);
+        return { volume, handle: pending };
       }, { mode: "immediate" });
     } catch (error) {
-      // COMMIT may fail after the callback opened an image. No descriptor or local handle survives.
-      pending.handle?.close(); throw error;
+      // Transaction completion may fail after preflight opened an image. No local handle survives.
+      pending.close(); throw error;
     }
     const { volume, handle } = opened; let closed = false;
     this.handles.set(volume.workspaceId, (this.handles.get(volume.workspaceId) ?? 0) + 1);
@@ -283,14 +320,22 @@ export class CoworkVolumes {
   }
   release(input: CoworkVolumeRequest, stop: CoworkVolumeStop): void {
     if (this.rs.db.inTransaction) fail("invalid_request");
-    this.rs.transaction(() => {
-      const { request } = this.admit("release", input), volumes = this.records(request.workspaceId);
-      token(stop.confirmationId);
+    token(stop.confirmationId);
+    const validateRelease = (request: CoworkVolumeRequest, volumes: CoworkVolumeRecord[]) => {
       if ((this.handles.get(request.workspaceId) ?? 0) > 0) fail("stop_unconfirmed");
       if (volumes.length !== 2 || volumes.some(v => !sameOwner(v.owner, request.owner))) fail("volume_busy");
-      for (const volume of volumes) { const handle = this.openChecked(volume); handle.close(); }
-      if (this.authority.verifyStopped(request, stop, volumes) !== true) fail("stop_unconfirmed");
-      this.run("UPDATE cowork_volumes SET owner_json=NULL,last_stop_id=? WHERE workspace_id=?", stop.confirmationId, request.workspaceId);
-    }, { mode: "immediate" });
+    };
+    const { request: admitted } = this.admit("release", input), prior = this.records(admitted.workspaceId);
+    validateRelease(admitted, prior);
+    const checked = this.prepareChecked(prior);
+    try {
+      this.rs.transaction(() => {
+        const { request } = this.admit("release", input), volumes = this.records(request.workspaceId);
+        validateRelease(request, volumes);
+        volumes.forEach(v => this.revalidateChecked(v, checked));
+        if (this.authority.verifyStopped(request, stop, volumes) !== true) fail("stop_unconfirmed");
+        this.run("UPDATE cowork_volumes SET owner_json=NULL,last_stop_id=? WHERE workspace_id=?", stop.confirmationId, request.workspaceId);
+      }, { mode: "immediate" });
+    } finally { checked.forEach(v => v.close()); }
   }
 }

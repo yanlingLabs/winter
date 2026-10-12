@@ -21,13 +21,42 @@ export function openImageAt(dir: number, name: "data.ext4" | "env.ext4"): number
   return fd;
 }
 
-/** Verify the item itself carries tmutil's sticky marker, not merely an ancestor/path exclusion.
- * Exact binary plist emitted by supported tmutil: unknown metadata encoding refuses conservatively.
- * Reads the checked vnode descriptor, never re-resolves an image path. */
+function loadPropertyLists() {
+  return dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", {
+    CFDataCreate: { args: [FFIType.ptr, FFIType.ptr, FFIType.i64], returns: FFIType.ptr },
+    CFPropertyListCreateWithData: { args: [FFIType.ptr, FFIType.ptr, FFIType.u64, FFIType.ptr, FFIType.ptr], returns: FFIType.ptr },
+    CFGetTypeID: { args: [FFIType.ptr], returns: FFIType.u64 },
+    CFStringGetTypeID: { args: [], returns: FFIType.u64 },
+    CFStringGetLength: { args: [FFIType.ptr], returns: FFIType.i64 },
+    CFStringGetCString: { args: [FFIType.ptr, FFIType.ptr, FFIType.i64, FFIType.u32], returns: FFIType.u8 },
+    CFRelease: { args: [FFIType.ptr], returns: FFIType.void },
+  });
+}
+let propertyLists: ReturnType<typeof loadPropertyLists> | undefined;
+export const BACKUP_EXCLUSION_MAX_BYTES = 256;
+/** Parse only a bounded binary plist whose root is exactly the expected string. No byte-for-byte
+ * serialization assumption, recursive JS parser, subprocess, XML or external entity processing. */
+export function isStickyBackupExclusion(value: Buffer): boolean {
+  if (process.platform !== "darwin" || process.arch !== "arm64" || value.length < 40 || value.length > BACKUP_EXCLUSION_MAX_BYTES || !value.subarray(0, 8).equals(Buffer.from("bplist00"))) return false;
+  propertyLists ??= loadPropertyLists();
+  const cf = propertyLists.symbols, data = cf.CFDataCreate!(null, value, BigInt(value.length));
+  if (data === null) return false;
+  let plist: ReturnType<typeof cf.CFPropertyListCreateWithData> = null;
+  try {
+    plist = cf.CFPropertyListCreateWithData!(null, data, 0n, null, null);
+    const expected = Buffer.from("com.apple.backupd"), decoded = Buffer.alloc(expected.length + 1);
+    if (plist === null || cf.CFGetTypeID!(plist) !== cf.CFStringGetTypeID!() || Number(cf.CFStringGetLength!(plist)) !== expected.length) return false;
+    return cf.CFStringGetCString!(plist, decoded, BigInt(decoded.length), 0x08000100) !== 0 && decoded.subarray(0, expected.length).equals(expected);
+  } finally {
+    if (plist !== null) cf.CFRelease!(plist);
+    cf.CFRelease!(data);
+  }
+}
+
+/** Verify sticky item metadata on the checked vnode, never re-resolve an image path. */
 export function hasStickyBackupExclusion(fd: number): boolean {
   if (!native) return false;
-  const marker = Buffer.from("62706c69737430305f1011636f6d2e6170706c652e6261636b75706408000000000000010100000000000000010000000000000000000000000000001c", "hex");
-  const value = Buffer.alloc(256), name = Buffer.from("com.apple.metadata:com_apple_backup_excludeItem\0");
+  const value = Buffer.alloc(BACKUP_EXCLUSION_MAX_BYTES), name = Buffer.from("com.apple.metadata:com_apple_backup_excludeItem\0");
   const bytes = Number(native.symbols.fgetxattr!(fd, name, value, value.length, 0, 0));
-  return bytes === marker.length && value.subarray(0, bytes).equals(marker);
+  return bytes > 0 && bytes <= value.length && isStickyBackupExclusion(value.subarray(0, bytes));
 }

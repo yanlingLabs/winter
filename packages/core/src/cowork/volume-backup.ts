@@ -5,7 +5,10 @@ import { spawnSync } from "node:child_process";
 export interface CoworkVolumeBackup {
   /** Add a sticky item exclusion only. Must not configure path/volume/global backup settings. */
   excludeItem(path: string, fd: number): void;
+  /** Named tmutil cross-check; called only outside SQLite transactions. */
   verifyItemExcluded(path: string, fd: number): boolean;
+  /** Cheap pinned-vnode metadata check only; must not spawn or perform named-item operations. */
+  verifyDescriptorExcluded(fd: number): boolean;
 }
 /** Supported nonprivileged sticky item exclusion. Caller pins and validates the image before/after
  * each operation; an identity change is a refusal, never enrollment of a replacement. No ancestor
@@ -21,4 +24,5 @@ export const timeMachineVolumeBackup: CoworkVolumeBackup = {
     const result = spawnSync("/usr/bin/tmutil", ["isexcluded", path], { encoding: "utf8", timeout: 5000 });
     return !result.error && result.status === 0 && result.stdout.trim().replace(/^\[Excluded\]\s+/, "") === path && /^\[Excluded\]\s+/.test(result.stdout.trim()) && hasStickyBackupExclusion(fd);
   },
+  verifyDescriptorExcluded: hasStickyBackupExclusion,
 };
