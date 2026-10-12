@@ -531,7 +531,8 @@ is kept, the engine is held to the one it took, and the share is reported. THE F
 ruling, round 17): the oracle — `GuardianSim*`, `GuardianSimRun`, `GuardianModelTests`' expectation lists — and its
 world's fakes (`FakeAX`, `RecordingPoster`, the fakes' user key) change only in commits of their own, each citing a ruling,
 never with engine code; and the WHOLE surveyed seed ranges pass but for a known-failing list that only shrinks (the
-ratchet). Its world has the helper's own windows, the
+ratchet — since 1.18.0 the default seeds 1–20 too, each known-failing seed pinned to its violation class, and a child
+of the survey that crashes or hangs fails it). Its world has the helper's own windows, the
 menu bar and status items, notification banners, picture in picture, non-activating panels, the empty desktop, a
 second display, launches of the user's and the agent's, system dialogs, activation latency (~0.3 s across desktops),
 refused activations, asynchronous restores, NSWorkspace's notifications late and reordered (measured: within 13 ms of
@@ -565,16 +566,24 @@ the change, run108; the world allows 120 ms, a stress sweep 400 ms) and Secure E
   as their place, and said ("<App> came forward around your action — it may have been your action's doing or the user's;
   it was left in front"). THE LAUNCH RULE (ruled in round 16, 1.15.0) — an app coming to the front for the FIRST time
   after a process start that follows an agent opener act (any reach) or a pending launch of the agent's within 1.5 s:
-  (1) the user's hardware input (a key, a click, a switch input) between that act and the start, or an interactive
-  launcher (Spotlight's Return, a Dock click, a Finder double-click — the 2.5 s quiet below keeps those from any undo):
-  THEIRS, adopted as their place; (2) no input of theirs in that interval, the app WITHIN the act's reach, and no input
+  (1) the user's LAUNCH-CAPABLE input between that act and the start (1.18.0, R17-d: a click, Return/Enter, a chord with
+  ⌘/⌃/⌥, a function key — never plain typing, a key-up or a scroll), or an INTERACTIVE LAUNCHER within the causal window
+  before the start (a Return the tap delivers to Spotlight's or a launcher's panel, a click in the Dock not on a running
+  app's tile — a tile that launches, Launchpad —, a double-click in a Finder window): THEIRS, adopted as their place; (2) no input of theirs in that interval, the app WITHIN the act's reach, and no input
   of theirs in the 2.5 s before the start: CLEARLY the agent's — undone when no input of the user's came since the start,
   and said; (3) otherwise — left in front and said, never adopted. "Any reach" decides only the never-adopt gate, never an
-  undo. And a restore never pulls the user out of an app left in front once they have typed or clicked in it: their input
-  there makes it their place. A launch LEFT in front has had its first activation: a later coming forward of it (a
+  undo. Under that gate ((2) and (3)) the user's switch input adopts the app only when it is SEEN and TARGETED at it
+  (1.18.0, the controller's ruling: a click on its window or its Dock tile, a ⌘-Tab whose Tab the tap saw — it lands on
+  what comes forward); a swipe, a ⌃-arrow, a click on a status item, a banner or a panel, a ⌘ release with no Tab seen
+  adopt nothing there, and the table's own verdict decides — never the running app's "clearly the agent's". And a
+  restore never pulls the user out of an app left in front once they have typed, clicked or scrolled in it (1.18.0: a
+  scroll in its window is work per I6, so it is using it): their input there makes it their place. A launch LEFT in front has had its first activation: a later coming forward of it (a
   visit's return) is never read as the first activation of a launch of the user's. The rule is a decision table in the
   helper (`CULaunchRule`, facts → verdict, its first matching row deciding), a test walking every row and every
-  combination of its facts; the never-adopt gate reads it (1.15.0; the undo and adoption paths move onto it next).
+  combination of its facts; every path that attributes a launch decides through it (1.18.0) — the never-adopt gate, the
+  undo and the adoption — every fact read from the world (a process start's facts kept from its launch notice; the first
+  sighting as of when the state was first seen), and a fact-flip test flips each fact in the world and sees the verdict
+  change as the table says.
   Never undone either: the first activation of an app after a launch the agent did not make
   (the user's own slow launch — told by the launch notice, or by its process having started within 60 s, not by the
   agent, never seen in front) — and a system dialog's process (never the user's own launch, however
