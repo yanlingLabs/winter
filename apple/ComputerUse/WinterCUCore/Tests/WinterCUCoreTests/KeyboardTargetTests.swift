@@ -277,6 +277,26 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "no focusing click")
     }
 
+    /// Round 16's editor-target seed 51: the target stole the front mid-burst while the focus blip's reroute was on it;
+    /// the user's keys went to THEIR app — no work in the target, so the burst is not stopped as "the user started working
+    /// in it". Their own move there (the guardian's place) makes the same key work in it.
+    func testAKeyTheBlipSendsToTheUsersPlaceIsNoWorkInTheTarget() throws {
+        safari(fieldOwner: pid)
+        core.guardianLock.withLock { core.guardianCore.begin(view: CUGuardedView(app: 1, space: nil)) }
+        let installer = FakeKeyTapInstaller()
+        let reroute = CUKeyReroute(target: pid, victim: 1, installer: installer, post: { _, _ in }, destination: { 1 })
+        XCTAssertTrue(reroute.begin())
+        core.activeKeyReroute = reroute
+        sys.front = pid  // the target took the front by itself
+        core.noteUserInteraction(type: .keyDown, flags: [], keycode: 0, location: nil, targetPid: Int64(pid))
+        XCTAssertFalse(core.userIsWorking(in: pid), "their key went to their place, not into the target")
+        // Their own move there: the target is their place — the same key is work in it.
+        core.guardianLock.withLock { core.guardianCore.end(); core.guardianCore.begin(view: CUGuardedView(app: pid, space: nil)) }
+        core.noteUserInteraction(type: .keyDown, flags: [], keycode: 0, location: nil, targetPid: Int64(pid))
+        XCTAssertTrue(core.userIsWorking(in: pid))
+        _ = reroute.end()
+    }
+
     func testABurstInFlightStopsBeforeItsNextKeyOnceTheUserWorks() async throws {
         safari(fieldOwner: pid)
         var downs = 0

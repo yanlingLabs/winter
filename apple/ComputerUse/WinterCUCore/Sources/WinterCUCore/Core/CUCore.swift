@@ -718,6 +718,9 @@ public final class CUCore: @unchecked Sendable {
     // The focus blip (CUCore+Blip) and the keyboard reroute that guards it.
     /// Installs the reroute's head keyboard tap on the target; test cores install none (no blip).
     var keyTapInstaller: CUKeyTapInstalling = CULiveKeyTapInstaller()
+    /// The focus blip's keyboard reroute while its tap is installed: a key of the user's that it sends to their place is
+    /// no work in the target in front (`noteUserInteraction`).
+    weak var activeKeyReroute: CUKeyReroute?
     /// Posts a rerouted key event to the user's app.
     var keyReroutePost: (CGEvent, pid_t) -> Void = { e, pid in e.postToPid(pid) }
     /// Runs `work` after `ms` (the blip's hard deadline); tests fire it by hand.

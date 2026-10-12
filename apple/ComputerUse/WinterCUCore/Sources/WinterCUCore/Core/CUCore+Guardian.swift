@@ -445,6 +445,12 @@ extension CUCore {
                 let receiver = pid_t(truncatingIfNeeded: targetPid)
                 guard receiver == front || sys.isContentProcess(receiver, of: front) else { return }
             }
+            // A focus blip's reroute on the app in front sends the user's keys to THEIR place unless their own move took
+            // them there: with the app in front by the agent's doing (not their place), the key never reached it — no
+            // work in it (round 16's editor-target seed 51: the target stole the front mid-burst, the user's keys went
+            // to their app, and the burst's in-flight check stopped the act "the user started working in it").
+            if let r = activeKeyReroute, r.isInstalled, r.target == front,
+               guardianLock.withLock({ guardianCore.view.app != front }) { return }
             if guardianLock.withLock({ guardianCore.userWorkingApp == front }) { return }  // marked already: nothing more read
             userInteracted(front)
         case .rightMouseDown, .otherMouseDown, .scrollWheel:
