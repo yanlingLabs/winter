@@ -142,7 +142,7 @@ test("canonical record failures never fall back to broad host authority", async 
     binding: () => { throw new Error("canonical store unavailable"); },
     project: (id) => f.records.project(id), get: (id) => f.records.get(id),
   } });
-  expect((await unavailable.handlerFor(host).send({ to: target, message: "hello", messageId: "record-error" }, {})).status).toBe("not_found");
+  expect((await unavailable.handlerFor(host).send({ to: target, message: "hello", messageId: "record-error" }, { signal: new AbortController().signal })).status).toBe("not_found");
   expect(unavailable.list(host).sessions).toEqual([]);
   expect(unavailable.mayList(host, target)).toBe(false);
   expect(unavailable.mayList(host, host)).toBe(false);

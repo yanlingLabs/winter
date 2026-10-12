@@ -123,7 +123,9 @@ export function listSessionsToolDefs(deps: ListSessionsDeps): ToolDefinition[] {
         if (why !== undefined && why.length > 0) parts.push(`matched: ${why.join(", ")}`);
         return parts.join(" | ");
       };
-      const footer = "Message one with SendMessage (to: its session id; a finished one is resumed for it); stop its running turn with TaskStop (task_id: its session id).";
+      const footer = rows.some(row => row.mode === "cowork")
+        ? "Message an authorized Project peer with SendMessage (to: its session id; a finished one is resumed for it). Project membership does not authorize TaskStop on another conversation."
+        : "Message one with SendMessage (to: its session id; a finished one is resumed for it); stop its running turn with TaskStop (task_id: its session id).";
 
       if (args.query !== undefined) {
         if (rows.some((row) => row.mode !== "cowork") && deps.store.editedFilesBackfilled?.() === false) deps.store.backfillEditedFiles?.();
