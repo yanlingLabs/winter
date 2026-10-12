@@ -45,6 +45,7 @@ import {
   renderPluginMarketplaceRemoveOutcome, renderPluginMarketplaceListOutcome, renderPluginMarketplaceUpdateOutcome,
   type PluginDoor,
 } from "./plugin-cli";
+import { PRINT_USAGE, checkPrintModelOffline, createPrintSession, parsePrintArgs, type PrintModel } from "./print-model";
 import { parseModelArgs, validateEffort, validateModelTag, internalProviderNote, validateAdvisorSlug, renderModelListing, modelDisplayWithHint, type ModelListingRow } from "./model-cli";
 import {
   runMcpAddRoute, runMcpAddJsonRoute, runMcpRemoveRoute, runMcpRenameRoute, runMcpGetRoute,
@@ -406,8 +407,8 @@ export function invisibleKeyCharWarning(key: string): string | null {
 // LOOPS (chat:true — bare `winter`, `resume <id>` with no text): after each turn it erases the block
 // and shows the `› ` composer, sends the next line, and watches again. ctrl+C / ctrl+D (EOF) tears
 // down cleanly (timers cleared, terminal restored, client closed).
-async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boolean; existingSessionId?: string; chat: boolean }): Promise<void> {
-  const { promptOverride, forceAuto = false, existingSessionId, chat } = opts;
+async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boolean; existingSessionId?: string; chat: boolean; printModel?: PrintModel }): Promise<void> {
+  const { promptOverride, forceAuto = false, existingSessionId, chat, printModel } = opts;
 
   // Ink TUI cutover (Phase 3a Task 6): the new Ink renderer owns the interactive chat TTY unless the
   // WINTER_LEGACY_CLI escape hatch is set. Everything else — one-shot `-p`, piped/non-TTY, the escape
@@ -450,7 +451,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   // the composer, so it never reads argv[3] (in `resume <id>` chat, argv[3] is the SESSION id).
   const oneShotPrompt = promptOverride ?? process.argv[3];
   if (!chat && !oneShotPrompt) {
-    console.error('usage: winter -p "<prompt>" [--auto|--plan]');
+    console.error(PRINT_USAGE);
     process.exit(1);
   }
   const auto = forceAuto || process.argv.includes("--auto");
@@ -964,7 +965,15 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
     const attachedLastSeq = await c.attach(sessionId, attachFromSeq);
     if (inkMode) resumeTargetSeq = attachedLastSeq;
   } else {
-    const created = await c.createSession("global", { cwd, approvalPolicy: auto ? "auto" : plan ? "plan" : "ask" });
+    // `-p --model <tag>`: the tag is checked against the daemon's `sync.config` list BEFORE the session exists
+    // (print-model.ts), so a refusal creates nothing. Every other route has no `printModel` and is the plain create.
+    const createdOrRefused = await createPrintSession(c, {
+      cwd,
+      approvalPolicy: auto ? "auto" : plan ? "plan" : "ask",
+      ...(printModel !== undefined ? { model: printModel } : {}),
+    });
+    if (!createdOrRefused.ok) { console.error(createdOrRefused.message); c.close(); process.exit(1); }
+    const created = createdOrRefused;
     sessionId = created.sessionId;
     if (!created.trusted) {
       const wantTrust = process.argv.includes("--trust")
@@ -1521,7 +1530,23 @@ if (import.meta.main) {
   const route = routeCliInvocation(argv, isTTY);
 
   if (argv[0] === "-p") {
-    await runTurnSession({ chat: false }); // one-shot; never resolves normally — exits via process.exit()
+    // `--model <tag>` is parsed and checked BEFORE anything connects: `connect()` launches Winter.app when the
+    // daemon is down, and a bad flag must not do that. Without it the prompt is still `argv[3]`, exactly as before.
+    const printArgs = parsePrintArgs(argv.slice(1));
+    if (printArgs.kind === "usageError") { console.error(printArgs.message); process.exit(1); }
+    // No prompt (or an empty one) is the same usage error runTurnSession gives. It is checked here as well because
+    // `--model <tag>` may now sit where the prompt used to be, so runTurnSession's own `argv[3]` fallback must never run.
+    if (!printArgs.prompt) { console.error(PRINT_USAGE); process.exit(1); }
+    let printModel: PrintModel | undefined;
+    if (printArgs.model !== undefined) {
+      let settings: Settings | undefined;
+      try { settings = loadSettings(join(resolveWinterHome(), "settings.json")); } catch { /* no settings yet: the catalog alone decides */ }
+      const checked = checkPrintModelOffline(printArgs.model, settings);
+      if (!checked.ok) { console.error(checked.message); process.exit(1); }
+      printModel = checked.model;
+    }
+    // one-shot; never resolves normally — exits via process.exit()
+    await runTurnSession({ chat: false, promptOverride: printArgs.prompt, ...(printModel !== undefined ? { printModel } : {}) });
   }
   if (route.kind === "chat" && route.existingSessionId === undefined) {
     // bare `winter`, or `winter --auto`/`--plan` (Finding 3) → persistent chat mode on a fresh
@@ -3097,6 +3122,6 @@ if (import.meta.main) {
   init                                            generate/update WINTER.md by surveying the project
   migrate [--from <legacyHome>] [--status|--resume|--rollback] [--yes]        Migration B: copy a legacy home into this one
   migrate-project [dir] [--yes]                   convert one project's legacy instructions file / project dir to WINTER.md/.winter
-  -p "<prompt>" [--auto|--plan] [--trust|--no-trust]   headless agent turn (asks for tool approval unless --auto/--plan)`);
+  -p "<prompt>" [--auto|--plan] [--trust|--no-trust] [--model <providerId>/<modelId>]   headless agent turn (asks for tool approval unless --auto/--plan; --model picks this one session's model; \`winter model\` lists them)`);
   }
 }
