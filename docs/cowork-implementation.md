@@ -163,6 +163,24 @@ Winter installation or deliberately creates host memory pressure.
 
 ## Completion evidence still required
 
+The immediate integration target is a developer-only real guest turn through the
+same concrete host admission, disk ownership, worker and SDK transport intended
+for production. The native profile first needs admitted descriptor intake for
+both data and environment disks, distinct device registrations and reclaim
+coverage; its current one-disk fixture cannot stand in for that. Then connect an
+immutable Linux supervisor/runtime image, durable format-once preparation,
+protected stores and actual confined Read/Write/Edit/Bash. Test with credential-free
+scripted host-provider traffic before introducing a real provider broker.
+Unknown/restored disks must never be reformatted. The first cold-resume test must
+use distinct host logical and SDK backend session IDs.
+
+Keep unsupported tools and public creation refused during this integration.
+In particular, protected child stores need separately admitted child identities
+and lineage: a parent-scoped store cannot simply be reused for every subagent.
+Host shares, shared guidance/memory/output mounts, networking and source readiness
+must describe real prepared devices, not simulated acknowledgments. Complete
+subagent restoration and all accepted source surfaces remain product requirements.
+
 Follow all four gates in the main specification. In particular, demonstrate two
 concurrent Project conversations and isolated cancellation; durable peer delivery;
 real SDK child resumption after process and VM restart; revocation across all tool,
