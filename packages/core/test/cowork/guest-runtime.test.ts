@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { query } from "@yanlinglabs/winter-agent-sdk";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
 import { CoworkRepository } from "../../src/cowork/repository";
-import type { SourceSelection } from "../../src/cowork/types";
+import type { CapabilityCeiling, SourceSelection } from "../../src/cowork/types";
 import { CoworkAuthority } from "../../src/cowork/authority";
 import { CoworkGuestRuntimeSupervisor, GUEST_RUNTIME_TRANSPORT_LIMITS, type GuestRuntimeLaunch, type GuestRuntimeChannel, type GuestRuntimeTermination } from "../../src/cowork/guest-runtime";
 
@@ -28,10 +28,10 @@ function fixture(kind: "folder" | "repository" = "folder") {
   const epoch = records.beginIncarnation(created.workspaceId, "incarnation", 1), source = records.sources(created.workspaceId)[0]!;
   records.acknowledgeSource(epoch, source.sourceId, source.revision, "ready");
   records.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: 1 }, created.workspaceId, { sessionId: "conversation", sourceId: source.sourceId, relativeCwd: "repo/subdir" });
-  let revoked = false, resume = false, backend = "backend-stable";
-  const authority = new CoworkAuthority(records, { folder: () => ({ rootIdentity: "root", writable: true, revoked }), repository: () => ({ readable: true, writable: true, revoked }) });
-  const deps = { records, authority, identity: () => ({ backendSessionId: backend, model: "winter-test/echo", resume }), bootId: () => "12345678-1234-1234-1234-123456789abc" };
-  return { home, db, records, deps, workspaceId: created.workspaceId, source, revoke: () => { revoked = true; }, resume: () => { resume = true; }, changeBackend: () => { backend = "backend-replaced"; } };
+  let revoked = false, resume = false, backend = "backend-stable", model = "winter-test/echo", boot = "12345678-1234-1234-1234-123456789abc", root = "root";
+  const authority = new CoworkAuthority(records, { folder: () => ({ rootIdentity: root, writable: true, revoked }), repository: () => ({ readable: true, writable: true, revoked }) });
+  const deps = { records, authority, identity: () => ({ backendSessionId: backend, model, resume }), bootId: () => boot };
+  return { home, db, records, deps, workspaceId: created.workspaceId, source, revoke: () => { revoked = true; }, resume: () => { resume = true; }, changeBackend: () => { backend = "backend-replaced"; }, changeModel: () => { model = "winter-test/replaced"; }, changeBoot: () => { boot = "12345678-1234-1234-1234-123456789abd"; }, replaceRoot: () => { root = "replaced-root"; } };
 }
 function channel(launch: Readonly<GuestRuntimeLaunch>) {
   const stdout = new Chunks(), stderr = new Chunks(), exit = deferred<{ code: number | null; signal: string | null }>(), proof = deferred<GuestRuntimeTermination>();
@@ -142,11 +142,11 @@ test("wrong termination generation never clears held admission", async () => {
   wire.proof.resolve({ scope: { ...wire.port.scope, leaseEpoch: wire.port.scope.leaseEpoch + 1 }, launchId: wire.port.launchId, outcome: "confirmed-stopped", storeOwnerReleased: true }); await Bun.sleep(0);
   expect(host.retained()).toHaveLength(1); expect(() => host.spawn("conversation")).toThrow("recovery_required");
 });
-test("policy revision changed during launch refuses transport and requests native stop", () => {
+test("effective ceiling narrowing during launch refuses transport and requests native stop", () => {
   const f = fixture(); let wire!: ReturnType<typeof channel>;
   const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) {
     wire = channel(launch);
-    f.records.updatePolicy({ principalId: "fixture", requestId: "narrow", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, { defaultPolicy: "plan" });
+    f.records.updatePolicy({ principalId: "fixture", requestId: "narrow", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, { ceiling: { toolClasses: ["read"], hostServices: [], connectors: [], network: "none" } });
     return wire.port;
   } } });
   expect(() => host.spawn("conversation")).toThrow("stale_acknowledgment"); expect(wire.stops).toEqual([true]); expect(host.retained()).toHaveLength(1);
@@ -281,4 +281,93 @@ test("primary iterator throw fences delivery but never substitutes for native st
   expect(() => host.spawn("conversation")).toThrow("recovery_required");
   wires[0]!.exit.resolve({ code: 0, signal: null }); wires[0]!.release(); await Bun.sleep(0); host.spawn("conversation");
   await expect(iterator.throw!(new Error("late throw"))).rejects.toThrow("late throw"); expect(wires[1]!.stops).toEqual([]); expect(host.retained()).toHaveLength(1); host.stop();
+});
+
+
+test("actual SDK stream finishes across rename, instructions, unrelated sources, defaults and resume/model refresh", async () => {
+  const f = fixture(), wires: ReturnType<typeof channel>[] = [], launches: Readonly<GuestRuntimeLaunch>[] = [];
+  const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) { launches.push(launch); const wire = channel(launch); wires.push(wire); return wire.port; } } });
+  const q = query({ prompt: "continue through metadata", options: { model: "winter-test/echo", sessionId: "backend-stable", cwd: f.home, persistSession: false, spawnClaudeCodeProcess: () => host.spawn("conversation") } });
+  const wire = wires[0]!, frames: unknown[] = [];
+  const finished = (async () => { for await (const frame of q) frames.push(frame); })(); void finished.catch(() => {});
+  wire.stdout.write(JSON.stringify({ type: "init", protocolVersion: "1.0", sessionId: "backend-stable", permissionMode: "default", cwd: launches[0]!.runtime.cwd, model: "winter-test/echo", tools: [] }) + "\n");
+  await Bun.sleep(10); expect(wire.inputs.join("")).toContain("continue through metadata");
+  // Rename/instruction APIs are absent here; mutate their canonical isolated DB records.
+  f.db.db.query("UPDATE cowork_workspaces SET title=?,config_revision=config_revision+1,instruction_revision=instruction_revision+1 WHERE workspace_id=?").run("renamed", f.workspaceId);
+  const context = (requestId: string) => ({ principalId: "fixture", requestId, expectedRevision: f.records.get(f.workspaceId).configRevision });
+  const extra = f.records.addSource(context("unrelated-add"), f.workspaceId, { kind: "folder", access: "read-only", label: "other", detail: { grantRef: "other", rootIdentity: "root" } }).value;
+  f.records.removeSource(context("unrelated-remove"), f.workspaceId, extra.sourceId);
+  f.records.updatePolicy(context("new-default"), f.workspaceId, { defaultPolicy: "plan", publication: "manual" }); f.resume(); f.changeModel();
+  wire.stdout.write(JSON.stringify({ type: "data", message: { type: "result", subtype: "success", is_error: false, result: "completed original turn" } }) + "\n");
+  wire.stdout.end(); wire.stderr.end(); wire.exit.resolve({ code: 0, signal: null }); wire.release(); await finished; await Bun.sleep(0);
+  expect(JSON.stringify(frames)).toContain("completed original turn"); expect(wire.stops).not.toContain(true); expect(host.retained()).toEqual([]); host.spawn("conversation");
+  expect(launches[0]!.runtime.resume).toBeUndefined(); expect(launches[0]!.runtime.model).toBe("winter-test/echo");
+  expect(launches[1]!.runtime.resume).toBe("backend-stable"); expect(launches[1]!.runtime.model).toBe("winter-test/replaced");
+  expect(launches[1]!.scope.instructionRevision).toBe(launches[0]!.scope.instructionRevision + 1);
+  expect(launches[1]!.runtime.permissionMode).toBe(launches[0]!.runtime.permissionMode); host.stop();
+});
+
+test("equal or wider ceiling permits streaming without widening the admitted launch", async () => {
+  const f = fixture(), full = f.records.policy(f.workspaceId).ceiling;
+  f.records.updatePolicy({ principalId: "fixture", requestId: "initial-narrow", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, { ceiling: { ...full, toolClasses: ["read"] } });
+  let wire!: ReturnType<typeof channel>, launch!: Readonly<GuestRuntimeLaunch>;
+  const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(value) { launch = value; wire = channel(value); return wire.port; } } });
+  const proc = host.spawn("conversation"), stream = proc.stdout[Symbol.asyncIterator](); wire.stdout.write("before\n"); expect((await stream.next()).value).toBe("before\n");
+  const changes: [string, CapabilityCeiling][] = [["equal", { ...full, toolClasses: ["read"] }], ["wider", full]];
+  for (const [requestId, ceiling] of changes) {
+    f.records.updatePolicy({ principalId: "fixture", requestId, expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, { ceiling });
+    proc.stdin.write(requestId + "\n"); wire.stdout.write(requestId + "\n"); expect((await stream.next()).value).toBe(requestId + "\n");
+  }
+  await Bun.sleep(0); expect(wire.inputs).toEqual(["equal\n", "wider\n"]); expect(launch.capabilities.toolClasses).toEqual(["read"]); expect(wire.stops).toEqual([]); await stream.return!(); host.stop();
+});
+
+for (const replacement of ["narrower", "incomparable"] as const) test(`mid-stream ${replacement} ceiling stops buffered output and queued input`, async () => {
+  const f = fixture(); let wire!: ReturnType<typeof channel>;
+  const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) { wire = channel(launch); return wire.port; } } });
+  const proc = host.spawn("conversation"), stream = proc.stdout[Symbol.asyncIterator](); wire.stdout.write("before\n"); await stream.next();
+  const full = f.records.policy(f.workspaceId).ceiling;
+  f.records.updatePolicy({ principalId: "fixture", requestId: replacement, expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, { ceiling: { ...full, toolClasses: ["read", ...(replacement === "incomparable" ? ["different"] : [])] } });
+  wire.stdout.write("must not relay\n"); await expect(stream.next()).rejects.toThrow("stale_acknowledgment");
+  expect(() => proc.stdin.write("must not send\n")).toThrow("recovery_required"); expect(wire.inputs).toEqual([]); expect(wire.stops).toContain(true); expect(host.retained()).toHaveLength(1);
+});
+
+for (const change of ["boot", "lease", "source-revocation", "root-replacement", "source-replacement", "binding-policy"] as const) test(`mid-stream ${change} stops the captured lifetime`, async () => {
+  const f = fixture(); let wire!: ReturnType<typeof channel>;
+  const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) { wire = channel(launch); return wire.port; } } });
+  const proc = host.spawn("conversation"), stream = proc.stdout[Symbol.asyncIterator](); wire.stdout.write("before\n"); await stream.next();
+  if (change === "boot") f.changeBoot();
+  else if (change === "lease") f.db.db.query("UPDATE cowork_workspaces SET lease_epoch=lease_epoch+1 WHERE workspace_id=?").run(f.workspaceId);
+  else if (change === "source-revocation") f.records.removeSource({ principalId: "fixture", requestId: "own-revoke", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, f.source.sourceId, true);
+  else if (change === "root-replacement") {
+    f.replaceRoot(); f.db.db.query("UPDATE cowork_sources SET detail_json=? WHERE source_id=?").run(JSON.stringify({ grantRef: "grant", rootIdentity: "replaced-root" }), f.source.sourceId);
+  } else if (change === "source-replacement") f.db.db.query("UPDATE cowork_sources SET location_id=? WHERE source_id=?").run("replaced-location", f.source.sourceId);
+  else f.db.db.query("UPDATE cowork_conversations SET policy=? WHERE session_id=?").run("plan", "conversation");
+  wire.stdout.write("must not relay\n"); await expect(stream.next()).rejects.toThrow(); expect(wire.stops).toContain(true);
+  expect(() => proc.stdin.write("must not send\n")).toThrow("recovery_required"); expect(() => host.spawn("conversation")).toThrow("recovery_required");
+});
+
+
+test("narrowed authority prevents an already queued send after the preceding ACK", async () => {
+  const f = fixture(), held = deferred<void>(); let wire!: ReturnType<typeof channel>;
+  const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) {
+    wire = channel(launch); wire.port.send = async chunk => { wire.inputs.push(chunk); await held.promise; }; return wire.port;
+  } } });
+  const proc = host.spawn("conversation"); proc.stdin.write("first\n"); proc.stdin.write("queued\n"); await Bun.sleep(0);
+  const full = f.records.policy(f.workspaceId).ceiling;
+  f.records.updatePolicy({ principalId: "fixture", requestId: "queued-narrow", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, { ceiling: { ...full, toolClasses: ["read"] } });
+  held.resolve(); await Bun.sleep(0); expect(wire.inputs).toEqual(["first\n"]); expect(wire.stops).toContain(true); expect(host.retained()).toHaveLength(1);
+});
+
+for (const axis of ["hostServices", "connectors", "network"] as const) test(`mid-stream ${axis} authority narrowing is denied`, async () => {
+  const f = fixture(), initial = { toolClasses: ["read"], hostServices: ["host-fixture"], connectors: ["connector-fixture"], network: "internet" as const };
+  // Current API fixes binding restrictions at creation; set a canonical richer binding fixture
+  // before admission so every ceiling axis is exercised independently.
+  f.db.db.query("UPDATE cowork_conversations SET restrictions_json=? WHERE session_id=?").run(JSON.stringify(initial), "conversation");
+  f.records.updatePolicy({ principalId: "fixture", requestId: "initial-rich", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, { ceiling: initial });
+  let wire!: ReturnType<typeof channel>;
+  const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) { wire = channel(launch); return wire.port; } } });
+  const proc = host.spawn("conversation"), stream = proc.stdout[Symbol.asyncIterator](); wire.stdout.write("before\n"); await stream.next();
+  const narrower = { ...initial, [axis]: axis === "network" ? "none" : [] };
+  f.records.updatePolicy({ principalId: "fixture", requestId: "axis-narrow", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, { ceiling: narrower });
+  wire.stdout.write("denied\n"); await expect(stream.next()).rejects.toThrow("stale_acknowledgment"); expect(wire.stops).toContain(true);
 });

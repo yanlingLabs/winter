@@ -1,0 +1,283 @@
+bun test v1.3.14 (0d9b296a)
+
+test/ipc/cowork-workspace-api.test.ts:
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-EDGT0I/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-EDGT0I/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-EDGT0I": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-EDGT0I": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-EDGT0I/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-EDGT0I/run/browser.sock
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-EDGT0I": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-EDGT0I": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-EDGT0I/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-EDGT0I/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > host fixture create, effective acknowledgment, policy, source removal/revocation, operation and cold reload [86.66ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-qN31Ge/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-qN31Ge/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-qN31Ge": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-qN31Ge": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-qN31Ge/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-qN31Ge/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > paired scope filters lists, checks every record and source parent, and rechecks revocation [39.33ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-KqU6Du/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-KqU6Du/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-KqU6Du": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-KqU6Du": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-KqU6Du/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-KqU6Du/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > paired missing and out-of-scope identifiers have the same refusal [28.94ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-foxo0a/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-foxo0a/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-foxo0a": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-foxo0a": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-foxo0a/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-foxo0a/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > every paired route rejects a missing principal before malformed params [24.99ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-2jFfau/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-2jFfau/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-2jFfau": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-2jFfau": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-2jFfau/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-2jFfau/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > typed canonical policy setters enforce the host ceiling and scope idempotency to the RPC method [36.60ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-7i3YMa/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-7i3YMa/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-7i3YMa": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-7i3YMa": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-7i3YMa/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-7i3YMa/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > response budget rejects a mutation before commit and bounded pages preserve scoped cursors [26.91ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-MhBYmL/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-MhBYmL/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-MhBYmL": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-MhBYmL": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-MhBYmL/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-MhBYmL/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > production create stays blocked and raw grant/path/authority inputs never become host selections [35.45ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-tY6cUP/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-tY6cUP/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-tY6cUP": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-tY6cUP": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-tY6cUP/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-tY6cUP/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > small source receipts cannot commit an unreadable aggregate; admitted lifecycle changes stay readable [98.37ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-ZVmVLy/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-ZVmVLy/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-ZVmVLy": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-ZVmVLy": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-ZVmVLy/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-ZVmVLy/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > capability expansion reserves aggregate and list envelopes, not only its policy receipt [33.32ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-d4wnbw/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-d4wnbw/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-d4wnbw": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-d4wnbw": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-d4wnbw/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-d4wnbw/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > legacy oversized records remain discoverable with explicit summaries and scoped paged recovery [47.68ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-wqLHwn/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-wqLHwn/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-wqLHwn": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-wqLHwn": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-wqLHwn/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-wqLHwn/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > scoped source pages preserve complete details and refuse stale configuration cursors [27.82ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-WuzG0L/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-WuzG0L/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-WuzG0L": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-WuzG0L": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-WuzG0L/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-WuzG0L/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > detach acknowledgment invalidates content cursors instead of silently skipping a remaining source [25.60ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-agQxgy/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-agQxgy/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-agQxgy": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-agQxgy": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-agQxgy/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-agQxgy/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > detail cursors are bound to their workspace and detail kind before offsets are interpreted [37.33ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-upT7vT/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-upT7vT/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-upT7vT": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-upT7vT": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-upT7vT/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-upT7vT/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > oversized legacy policies permit network and publication narrowing without discarding unrelated capabilities [41.54ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-2TcJ2I/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-2TcJ2I/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-2TcJ2I": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-2TcJ2I": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-2TcJ2I/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-2TcJ2I/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > sequential legacy ceiling narrowing replays its original exact receipt before expansion admission [26.75ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-qcY04D/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-qcY04D/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-qcY04D": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-qcY04D": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-qcY04D/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-qcY04D/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > legacy maximum-width source details page by serialized bytes and every source remains recoverable [36.78ms]
+settings split: copied permissions.allow (the Computer default) into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-ymEM2Q/sdk
+builtin skills: computer-use seeded into /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-ymEM2Q/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-ymEM2Q": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "/var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-ymEM2Q": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-ymEM2Q/run/core.sock
+[browser-host] listening on /var/folders/8n/xsn7stcx2qn576xmzw3y7z_00000gn/T/winter-test-7e88CT/winter-cowork-api-ymEM2Q/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > a full workspace fitting by one byte still needs space for the single-entry Project list envelope [28.02ms]
+
+test/cowork/session-messaging.test.ts:
+(pass) same-Project messages resume and attribute; discovery omits host paths and unrelated sessions [9.48ms]
+(pass) host-to-Cowork, standalone/unbound and sibling stop refuse without effects [7.35ms]
+(pass) canonical binding/project state is rechecked after asynchronous resume [6.97ms]
+(pass) missing authority and mismatched canonical project fail closed, even with matching session metadata [6.49ms]
+(pass) host-only home (legacy=%s) has the canonical schema and preserves Code messaging without Cowork rows [5.72ms]
+(pass) host-only home (legacy=%s) has the canonical schema and preserves Code messaging without Cowork rows [13.32ms]
+(pass) a replacement retry rechecks membership and does not send into the successor [7.61ms]
+(pass) session-index mode cannot downgrade a canonical guest binding to host authority [6.67ms]
+(pass) canonical record failures never fall back to broad host authority [6.18ms]
+
+test/cowork/admission.test.ts:
+(pass) construction requires explicit isolated path and all probes; no production fallback [0.47ms]
+(pass) canonical prepared home registration persists across handles and checks DB origin plus observed filesystem identity [5.38ms]
+(pass) copied homes, aliases, directory replacement and copied DB identity cannot register or activate [4.03ms]
+(pass) a copied home's origin machine or installation is refused even when the ledger is initially empty [1.36ms]
+(pass) a filesystem identity change after admission remains uncertain and blocks reuse [4.22ms]
+(pass) homes may neither contain nor sit inside the external coordination directory [1.27ms]
+(pass) reservations compete through the global SQLite ledger across handles and homes [4.99ms]
+(pass) pressure, unknown/null probes and expired/future observations refuse rather than silently over-admit [3.82ms]
+(pass) PID reuse, expired heartbeat, dead or unknown owner keep uncertain reservations and capacity [16.96ms]
+(pass) owner nonce and process-start bindings cannot be changed, including by a reused PID [4.27ms]
+(pass) heartbeats restore only heartbeat-interrupted accounting; explicit uncertainty needs separate recovery [5.23ms]
+(pass) release requires exact owner/workspace/epoch and trusted confirmed-stop receipt; release never proves disk ownership [4.92ms]
+(pass) a changed boot token alone preserves uncertainty; only a trusted same-host prior-boot end observation releases admission [4.36ms]
+(pass) explicit local relocation requires authorization, a matching revision and no active or uncertain owner [5.04ms]
+(pass) copied ledger bytes or host identity changes cannot establish a second coordination domain [4.72ms]
+(pass) host-machine changes cannot reclaim old reservations using a claimed boot transition [4.01ms]
+(pass) integer accounting refuses malformed and oversized commitments with no partial owner/reservation rows [4.20ms]
+(pass) simultaneous independent Bun processes cannot over-reserve the shared ledger [120.73ms]
+(pass) sleep and backward clocks preserve each accounting phase across independent handles [50.79ms]
+(pass) a harder owner uncertainty cannot be overwritten by a later heartbeat gap [6.48ms]
+(pass) backward time alone cannot release admission but cannot invalidate a genuine exact stop proof [5.58ms]
+(pass) v1 ledger migrates without inventing a prior phase for legacy uncertainty [10.89ms]
+
+test/cowork/repository.test.ts:
+(pass) canonical identity, creation receipt and source authority persist across independent handles [9.62ms]
+(pass) creation requires a source and rolls back the whole operation on invalid selection [6.41ms]
+(pass) concurrent revisions prevent two clients removing the final sources; revocation always narrows [7.34ms]
+(pass) temporary folder loss/removal never enables GitHub-only publication before confirmed detachment [7.00ms]
+(pass) stale callback cannot resurrect a revoked source or cross workspace ownership [6.83ms]
+(pass) standalone reserves one immutable conversation identity; Project bindings share files but preserve policy [7.63ms]
+(pass) outbox fanout survives reopen; receipt retry neither duplicates change nor alters result [6.83ms]
+(pass) authority rechecks live grants, rejects paired folder grants and cross-workspace peer access [6.71ms]
+(pass) relative cwd rejects absolute paths and traversal rather than normalizing them into authority [0.04ms]
+(pass) legacy rollback refuses any populated Cowork authority without deleting records [6.86ms]
+(pass) revocation cannot resurrect a source already selected for removal [6.20ms]
+(pass) outbox preserves commit order when timestamps tie and random change IDs sort backward [6.25ms]
+(pass) source readiness commits a durable notification and duplicate acknowledgment is inert [6.09ms]
+(pass) live controller refresh is explicit, while superseded callbacks and owners stay fenced [5.94ms]
+(pass) revocation narrows archived workspaces and supersedes pending source operations [5.75ms]
+(pass) a revoked source cannot justify removing the last usable or preparing replacement [5.84ms]
+(pass) GitHub-only membership alone never authorizes publication to a disconnected repository [5.99ms]
+(pass) read-only GitHub credentials permit local checkout work but cannot authorize publication [6.49ms]
+(pass) empty current-schema rollback to v7 preserves run-home metadata and refuses populated Cowork state [8.54ms]
+(pass) multi-source supersession emits one durable terminal receipt and later source readiness cannot revive it [9.37ms]
+
+test/cowork/guest-runtime.test.ts:
+(pass) guest supervision refuses absent port or unsupported image before launch [8.95ms]
+(pass) actual SDK query frame bridge preserves chunks/control and closes stdin only after admitted writes [23.54ms]
+(pass) EOF, runtime exit, kill and uncertain store proof cannot enable a second lifetime [8.61ms]
+(pass) exact independent proof enables cold continuation with stable backend/store identity [9.03ms]
+(pass) mismatched boot/channel identity and failed launch retain recovery debt [7.90ms]
+(pass) changed grants close input admission and stale output before relay [7.60ms]
+(pass) input ACK backpressure and split output frame limits fail closed without replay [32.35ms]
+(pass) stdin end drains accepted frames in order and shutdown prevents future starts [10.12ms]
+(pass) actual candidate SDK confined posture refuses before any runtime/store init [139.42ms]
+(pass) wrong termination generation never clears held admission [9.87ms]
+(pass) effective ceiling narrowing during launch refuses transport and requests native stop [8.22ms]
+(pass) failed input acknowledgment stops subsequent queued input instead of replaying [9.01ms]
+(pass) two canonical conversations cannot share a backend/store lifetime by mistaken identity mapping [10.57ms]
+(pass) repository clone cwd uses canonical repository identity and durable conversation directory [8.79ms]
+(pass) canonical resume identity change blocks input without rewriting held admission identity [7.84ms]
+(pass) canonical unavailable source refuses before transport and cannot be revived by a stale ACK [7.03ms]
+(pass) channel generation cannot be rebound after the initial scope acknowledgment [7.12ms]
+(pass) malformed native teardown receipt remains held without an unhandled error [6.71ms]
+(pass) actual SDK buffered permission/result holds the original lifetime through exit-before-drain [8.49ms]
+(pass) unconsumed cancellation fences old query bytes before a replacement and late old callbacks cannot remove it [7.38ms]
+(pass) primary iterator return before first next fences output but still requires native store proof [6.83ms]
+(pass) started consumer cancellation keeps admitted buffered chunks held until return [9.37ms]
+(pass) canceling an opened but unconsumed primary stream fences it without requiring a first next [7.22ms]
+(pass) old pending input acknowledgments cannot send queued callbacks to or delete a replacement [7.03ms]
+(pass) primary iterator throw fences delivery but never substitutes for native store proof [7.91ms]
+(pass) actual SDK stream finishes across rename, instructions, unrelated sources, defaults and resume/model refresh [21.76ms]
+(pass) equal or wider ceiling permits streaming without widening the admitted launch [11.05ms]
+(pass) mid-stream narrower ceiling stops buffered output and queued input [9.23ms]
+(pass) mid-stream incomparable ceiling stops buffered output and queued input [8.25ms]
+(pass) mid-stream boot stops the captured lifetime [7.44ms]
+(pass) mid-stream lease stops the captured lifetime [6.70ms]
+(pass) mid-stream source-revocation stops the captured lifetime [7.00ms]
+(pass) mid-stream root-replacement stops the captured lifetime [6.68ms]
+(pass) mid-stream source-replacement stops the captured lifetime [6.43ms]
+(pass) mid-stream binding-policy stops the captured lifetime [6.45ms]
+(pass) narrowed authority prevents an already queued send after the preceding ACK [7.07ms]
+(pass) mid-stream hostServices authority narrowing is denied [8.13ms]
+(pass) mid-stream connectors authority narrowing is denied [6.90ms]
+(pass) mid-stream network authority narrowing is denied [6.60ms]
+
+ 107 pass
+ 0 fail
+ 1034 expect() calls
+Ran 107 tests across 5 files. [1.93s]

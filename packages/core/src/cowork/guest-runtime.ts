@@ -3,8 +3,8 @@ import type { SpawnedRuntimeProcess } from "@yanlinglabs/winter-agent-sdk";
 import { permissionModeFor } from "../runtime-sdk/mode-options";
 import type { CoworkRepository } from "./repository";
 import { relativeCoworkPath } from "./repository";
-import type { CoworkAuthority } from "./authority";
-import { CoworkError, type CapabilityCeiling, type GuestEpoch, type SourceAccess } from "./types";
+import { intersectCeilings, type CoworkAuthority } from "./authority";
+import { CoworkError, type CapabilityCeiling, type GuestEpoch, type SourceAccess, type ConversationBinding, type WorkspaceSource } from "./types";
 
 export const GUEST_RUNTIME_TRANSPORT_LIMITS = Object.freeze({ frameBytes: 1024 * 1024, chunkBytes: 256 * 1024, pendingInputBytes: 2 * 1024 * 1024 });
 export interface GuestRuntimeScope extends GuestEpoch {
@@ -56,6 +56,7 @@ const sameScope = (a: Readonly<GuestRuntimeScope>, b: Readonly<GuestRuntimeScope
 function freezeCeiling(value: CapabilityCeiling): GuestRuntimeCapabilities {
   return Object.freeze({ ...value, toolClasses: Object.freeze([...value.toolClasses]), hostServices: Object.freeze([...value.hostServices]), connectors: Object.freeze([...value.connectors]) });
 }
+interface Admission { launch: Readonly<GuestRuntimeLaunch>; binding: ConversationBinding; source: WorkspaceSource }
 interface Lifetime { launch: Readonly<GuestRuntimeLaunch>; phase: "opening" | "running" | "retained"; stop?: (force: boolean) => void; cancel?: (force: boolean) => void }
 
 /** Host-side conversation transport executor. No local spawn or generic argv/env fallback.
@@ -65,7 +66,7 @@ export class CoworkGuestRuntimeSupervisor {
   private readonly lifetimes = new Map<string, Lifetime>();
   private stopped = false;
   constructor(private readonly deps: GuestRuntimeSupervisorDeps) {}
-  private descriptor(sessionId: string): Readonly<GuestRuntimeLaunch> {
+  private descriptor(sessionId: string): Admission {
     const binding = this.deps.records.binding(sessionId), workspace = this.deps.records.get(binding.workspaceId);
     if (binding.state !== "active" || !workspace.incarnationId) throw new CoworkError("authority_denied");
     const epoch = this.deps.records.refreshEpoch(workspace.workspaceId, workspace.incarnationId, workspace.leaseEpoch);
@@ -77,22 +78,34 @@ export class CoworkGuestRuntimeSupervisor {
     const relativeCwd = relativeCoworkPath(binding.relativeCwd);
     const sourceRoot = source.kind === "folder" ? `/workspace/folders/${safeSegment(source.detail.grantRef)}` : `/workspace/repos/${safeSegment(source.detail.repositoryId)}`;
     const cwd = `${sourceRoot}${relativeCwd === "." ? "" : `/${relativeCwd}`}`;
-    return Object.freeze({ protocolVersion: 1, limits: GUEST_RUNTIME_TRANSPORT_LIMITS, launchId: randomUUID(),
+    const launch: Readonly<GuestRuntimeLaunch> = Object.freeze({ protocolVersion: 1, limits: GUEST_RUNTIME_TRANSPORT_LIMITS, launchId: randomUUID(),
       scope: Object.freeze({ ...epoch, homeId: this.deps.records.homeIdentity(), bootId, sessionId, backendSessionId: safeSegment(identity.backendSessionId), bindingRevision: binding.revision, policyRevision: policy.revision, instructionRevision: workspace.instructionRevision }),
       source: Object.freeze({ sourceId: source.sourceId, locationId: source.locationId, revision: source.revision, access: source.access }), capabilities: freezeCeiling(capabilities),
       runtime: Object.freeze({ executionPosture: "confined-guest", sessionId: identity.backendSessionId, model: identity.model, cwd,
         winterHome: `/run/winter/conversations/${safeSegment(sessionId)}`, storeHome: store, persistSession: true, permissionMode: permissionModeFor(binding.policy), ...(identity.resume ? { resume: identity.backendSessionId } : {}) }),
     });
+    return { launch, binding, source };
   }
-  private assertCurrent(launch: Readonly<GuestRuntimeLaunch>): void {
-    const fresh = this.descriptor(launch.scope.sessionId);
-    if (!sameScope(launch.scope, fresh.scope) || JSON.stringify(launch.runtime) !== JSON.stringify(fresh.runtime) || JSON.stringify(launch.source) !== JSON.stringify(fresh.source) || JSON.stringify(launch.capabilities) !== JSON.stringify(fresh.capabilities)) throw new CoworkError("stale_acknowledgment");
+  private assertCurrent({ launch, binding: admittedBinding, source: admittedSource }: Admission): void {
+    const { scope } = launch, binding = this.deps.records.binding(scope.sessionId);
+    // Recheck ownership and selected authority, not mutable launch configuration. Model/resume,
+    // instructions, labels and workspace defaults refresh at the next launch. Current APIs do
+    // not edit a bound conversation's approval policy; any such edit remains a stop condition.
+    if (binding.state !== "active" || binding.workspaceId !== scope.workspaceId || binding.sourceId !== admittedBinding.sourceId || binding.revision !== admittedBinding.revision || binding.policy !== admittedBinding.policy || relativeCoworkPath(binding.relativeCwd) !== relativeCoworkPath(admittedBinding.relativeCwd) || this.deps.records.homeIdentity() !== scope.homeId || this.deps.bootId(scope.workspaceId) !== scope.bootId || this.deps.identity(scope.sessionId).backendSessionId !== scope.backendSessionId) throw new CoworkError("stale_acknowledgment");
+    this.deps.records.refreshEpoch(scope.workspaceId, scope.incarnationId, scope.leaseEpoch);
+    const source = this.deps.authority.requireSource(scope.workspaceId, admittedSource.sourceId, admittedSource.access === "read-write");
+    if (source.locationId !== admittedSource.locationId || source.kind !== admittedSource.kind || JSON.stringify(source.detail) !== JSON.stringify(admittedSource.detail) || (source.trust === "revoked" && admittedSource.trust !== "revoked")) throw new CoworkError("stale_acknowledgment");
+    const captured: CapabilityCeiling = { ...launch.capabilities, toolClasses: [...launch.capabilities.toolClasses], hostServices: [...launch.capabilities.hostServices], connectors: [...launch.capabilities.connectors] };
+    const current = this.deps.authority.effectiveCapabilities(scope.sessionId);
+    // Captured authority must remain a subset of current authority. Narrowing and incomparable
+    // replacements fail closed; widening does not widen this already-admitted launch.
+    if (JSON.stringify(intersectCeilings(captured, current)) !== JSON.stringify(intersectCeilings(captured, captured))) throw new CoworkError("stale_acknowledgment");
   }
   spawn(sessionId: string): SpawnedRuntimeProcess {
     const { port, runtimeCapability } = this.deps;
     if (this.stopped || !port || runtimeCapability?.protocolVersion !== 1 || runtimeCapability.supportsConfinedGuestExecution !== true || !Array.isArray(runtimeCapability.capabilities) || !runtimeCapability.capabilities.includes("confined-guest-posture-v1")) throw new CoworkError("unsupported_topology");
     if (this.lifetimes.has(sessionId)) throw new CoworkError("recovery_required");
-    const launch = this.descriptor(sessionId);
+    const admission = this.descriptor(sessionId), { launch } = admission;
     if ([...this.lifetimes.values()].some(value => value.launch.scope.backendSessionId === launch.scope.backendSessionId)) throw new CoworkError("authority_denied");
     const lifetime: Lifetime = { launch, phase: "opening" }; this.lifetimes.set(sessionId, lifetime);
     let channel: GuestRuntimeChannel;
@@ -100,7 +113,7 @@ export class CoworkGuestRuntimeSupervisor {
       channel = port.open(launch); lifetime.stop = force => channel.stop(force);
       if (typeof channel.send !== "function" || typeof channel.endInput !== "function" || typeof channel.stop !== "function" || typeof channel.stdout?.[Symbol.asyncIterator] !== "function" || (channel.stderr !== undefined && typeof channel.stderr?.[Symbol.asyncIterator] !== "function") || typeof channel.runtimeExited?.then !== "function" || typeof channel.termination?.then !== "function") throw new CoworkError("unsupported_topology");
       if (channel.protocolVersion !== 1 || !sameScope(launch.scope, channel.scope) || channel.launchId !== launch.launchId) throw new CoworkError("authority_denied");
-      this.assertCurrent(launch); lifetime.phase = "running";
+      this.assertCurrent(admission); lifetime.phase = "running";
     } catch (error) { lifetime.phase = "retained"; try { lifetime.stop?.(true); } catch {} throw error; }
     let failed = false, ended = false, pending = 0, inputLine = 0;
     let nativeStopped = false, primaryOpened = false, primaryYielded = false, primaryClosed = false;
@@ -125,7 +138,7 @@ export class CoworkGuestRuntimeSupervisor {
     const thisCheck = (): void => {
       if (this.lifetimes.get(sessionId) !== lifetime) throw new CoworkError("recovery_required");
       if (channel.protocolVersion !== 1 || !sameScope(launch.scope, channel.scope) || channel.launchId !== launch.launchId) throw new CoworkError("authority_denied");
-      this.assertCurrent(launch);
+      this.assertCurrent(admission);
     };
     const check = (alreadyAdmitted = false): void => {
       if (failed || (!alreadyAdmitted && ended) || lifetime.phase !== "running") throw new CoworkError("recovery_required");
