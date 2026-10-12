@@ -28,6 +28,15 @@ import { allowedOrigins, EXTENSION_IDS, NATIVE_HOST_NAME } from "../../../packag
 import { hostManifest, writeManifestInto } from "../../../packages/core/src/computer-use/browser/extension/manifest";
 import type { BackendId, BackendRegistry, BrowserBackendInfo, BrowserFamily, CdpEvent, CdpTransport } from "../../../packages/core/src/computer-use/browser/transport";
 import { startDaemon, type RunningDaemon } from "../../../packages/core/src/daemon";
+import { BrowserEngine } from "../../../packages/core/src/computer-use/browser/engine";
+import { BrowserBackendRegistry } from "../../../packages/core/src/computer-use/browser/registry";
+import type { TabRunScope } from "../../../packages/core/src/computer-use/browser/tab-scope";
+import { BrowserWakeBackend } from "../../../packages/core/src/computer-use/browser/wake/backend";
+import { DiffBases } from "../../../packages/core/src/computer-use/diff-base";
+import { TargetLocks } from "../../../packages/core/src/computer-use/locks";
+import { ResultBuilder } from "../../../packages/core/src/computer-use/result";
+import type { TabHandle } from "../../../packages/core/src/computer-use/worker/bridge";
+import type { WakeBackendEvent, WakeCondition } from "../../../packages/core/src/computer-use/wakes/types";
 import { build as buildExtension } from "../../../extensions/winter-for-chrome/scripts/build";
 import { helperRequirement } from "../../computer-helper-lib";
 
@@ -292,6 +301,149 @@ async function phase3(p3: CdpTransport, base: string, profile: string): Promise<
   await p3.closeTab(dl.tabKey);
 }
 
+// ── wake triggers through Winter for Chrome 1.2.0: no debugger while it waits ───────────────────────────────────────────
+//
+// The REAL engine and wake backend over the registered transport. The USER is a CDP session of the test's own on the
+// browser's DevTools endpoint, attached to the page — never the extension's debugger, so nothing of Winter's knows.
+
+async function wakeRow(t: CdpTransport, base: string, profile: string): Promise<void> {
+  const features = (t as { features?: ReadonlySet<string> }).features ?? new Set<string>();
+  check(features.has("watch") && typeof t.watch === "function", "1.2.0's hello names watch, and the daemon offers the debugger-free watch", [...features]);
+  const registry = new BrowserBackendRegistry();
+  registry.register(t, { family: "chrome", name: "Chrome for Testing", bundleId: "com.google.chrome.for.testing", instanceKey: "wake-e2e" });
+  const home = mkdtempSync(join(tmpdir(), "wfc-wake-home-"));
+  const engine = new BrowserEngine({
+    registry, mintWinterTab: () => "unused", winterTabs: () => ({ tabs: [] }), sessionInfo: () => ({ cwd: home, title: "Wake e2e" }),
+    site: { dangerousDomainsAdded: () => [], savedAllowRules: () => [] }, home, persistentlyAllowed: () => true,
+  });
+  const wakes = new BrowserWakeBackend(engine);
+  const locks = new TargetLocks();
+  const diffBases = new DiffBases();
+  const facts = { policy: "bypass" as const, mode: "code" as const };
+  const runScope = (runId: string) => {
+    const builder = new ResultBuilder();
+    const held = new Map<string, () => void>();
+    const abort = new AbortController();
+    const s: TabRunScope = {
+      sessionId: "s_wake", runId, callId: "cv2_wake", vision: true, signal: abort.signal, live: () => {}, timeLeft: () => 60_000, clampWait: (ms) => Math.min(ms, 60_000),
+      lock: async (key, label) => { if (!held.has(key)) held.set(key, await locks.acquire(key, { runId, sessionId: "s_wake" }, { label })); },
+      lockRun: (key) => locks.holder(key)?.runId, authorize: async () => {}, sessionPolicy: () => facts.policy, sessionFacts: () => facts,
+      siteCard: async () => ({ approved: false }), persistentlyAllowed: () => true, granted: () => true, builder,
+      keepImage: (img) => ({ image: "img", width: img.width, height: img.height }), lastTargetShot: new Map(), acted: new Set(), diffBases,
+      metric: { ts: 0, sessionId: "s_wake", callId: "cv2_wake", primitive: "x", ms: 0, helperMs: 0 }, noteSite: () => {}, noteBrowser: () => {}, trusted: () => {},
+    };
+    return { s, end: () => { for (const r of held.values()) r(); abort.abort(); engine.runEnded("s_wake", runId); } };
+  };
+  const events: WakeBackendEvent[] = [];
+  let n = 0;
+  const arm = (targetId: string, condition: WakeCondition) => {
+    const id = `wk_${(0xe2e000 + ++n).toString(16).padStart(12, "0")}`;
+    return wakes.arm({ wakeId: id, sessionId: "s_wake", targetId, condition, expiresAt: Date.now() + 600_000 }, (e) => events.push(e)).then((armed) => ({ id, armed }));
+  };
+  const eventOf = (id: string, ms = 8_000) => waitFor(() => events.find((e) => e.wakeId === id), ms);
+  const cdp = await BrowserCdp.connect(profile);
+  /** The user, on a session of their own on the page whose URL ends with `suffix`. */
+  const asUser = async <T>(suffix: string, fn: (send: (m: string, p?: Record<string, unknown>) => Promise<any>) => Promise<T>): Promise<T> => {
+    const { targetInfos } = await cdp.send<{ targetInfos: { targetId: string; type: string; url: string }[] }>("Target.getTargets");
+    const target = targetInfos.find((x) => x.type === "page" && x.url.endsWith(suffix));
+    if (target === undefined) throw new Error(`no page ${suffix}`);
+    const { sessionId } = await cdp.send<{ sessionId: string }>("Target.attachToTarget", { targetId: target.targetId, flatten: true });
+    try { return await fn((m, p = {}) => cdp.send(m, p, sessionId)); } finally { await cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined); }
+  };
+  const userClicks = (suffix: string, selector: string) => asUser(suffix, async (send) => {
+    const r = await send("Runtime.evaluate", { expression: `(() => { const b = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return [b.x + b.width / 2, b.y + b.height / 2]; })()`, returnByValue: true });
+    const [x, y] = r.result.value as [number, number];
+    for (const type of ["mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
+  });
+  const userReads = (suffix: string, expression: string) => asUser(suffix, async (send) => (await send("Runtime.evaluate", { expression, returnByValue: true })).result.value as unknown);
+  try {
+    // The USER's own tab (not Winter's), bound by the engine for one run, then released at the turn's end.
+    await cdp.send("Target.createTarget", { url: `${base}/wake.html?user=1`, background: true });
+    let listed: Awaited<ReturnType<CdpTransport["listTabs"]>>[number] | undefined;
+    for (let i = 0; i < 50 && listed === undefined; i++) {
+      listed = (await t.listTabs()).find((tab) => tab.url.endsWith("/wake.html?user=1"));
+      if (listed === undefined) await sleep(100);
+    }
+    if (!check(listed !== undefined && !listed.agent, "the user's own tab is listed (not Winter's)", listed)) return;
+    await sleep(500);
+    const run = runScope("rwake1");
+    const bound = await engine.global(run.s, "browsers.tab", { tab: `chrome:${listed!.tabKey}` }) as TabHandle;
+    const state = await engine.primitive(run.s, bound.targetId, "state", { full: true, emit: false }) as string;
+    const refOf = (re: RegExp) => String(/\[(\d+)\]/.exec(state.split("\n").find((l) => re.test(l)) ?? "")?.[1] ?? "");
+    const clicked = await arm(bound.targetId, { kind: "clicked", ref: refOf(/button "Submit for review"/) });
+    check(clicked.armed.note === undefined && clicked.armed.element?.name === "Submit for review", "armed through the extension — no debugger note, the element's own label", clicked.armed);
+    const appeared = await arm(bound.targetId, { kind: "appeared", text: "Submitted for review" });
+    run.end();
+    engine.turnEnded("s_wake");
+    await sleep(800);
+    const debuggers = await cdp.inWorker<number>(`chrome.debugger.getTargets().then((ts) => ts.filter((x) => x.attached && x.tabId === ${listed!.tabKey}).length)`);
+    check(debuggers === 0, "while it waits, no debugger is attached to the tab (no debugging bar)", debuggers);
+    check(await userReads("/wake.html?user=1", "document.querySelectorAll('winter-wake-overlay').length") === 1, "the pill and ring are on the page (one <winter-wake-overlay>)");
+    check(await userReads("/wake.html?user=1", "document.querySelector('winter-wake-overlay').shadowRoot") === null, "…its shadow root closed to the page");
+    await userClicks("/wake.html?user=1", "#submit");
+    const c = await eventOf(clicked.id);
+    check(c?.outcome === "fired" && c.detail === "clicked", "the user's click (a session of their own) fires the click wake", c ?? events);
+    const a = await eventOf(appeared.id);
+    check(a?.outcome === "fired" && a.detail === "appeared", "the text the page then shows fires the appeared wake", a ?? events);
+    await sleep(500);
+    check(await userReads("/wake.html?user=1", "document.querySelectorAll('winter-wake-overlay').length") === 0, "…and the pill left the page with them");
+
+    // Page conditions across a new document: the extension injects the watcher again; the URL change is reported.
+    const run2 = runScope("rwake2");
+    const again = await engine.global(run2.s, "browsers.tab", { tab: `chrome:${listed!.tabKey}` }) as TabHandle;
+    const nav = await arm(again.targetId, { kind: "navigated", url: "step=2" });
+    const done = await arm(again.targetId, { kind: "appeared", text: "all done" });
+    run2.end();
+    engine.turnEnded("s_wake");
+    await sleep(500);
+    await userClicks("/wake.html?user=1", "#next");
+    const nv = await eventOf(nav.id);
+    // The extension matched the words itself: what reached Winter is the address's site and path, never its query.
+    check(nv?.outcome === "fired" && nv.detail === `now at ${base}/wake.html?… — matched “step=2”`, "the user following a link fires the { url } wake (the extension's tabs.onUpdated; no query reaches Winter)", nv ?? events);
+    const dn = await eventOf(done.id);
+    check(dn?.outcome === "fired" && dn.detail === "appeared", "the new document gets the watcher again, and its text fires the appeared wake", dn ?? events);
+    const left = await cdp.inWorker<number>(`chrome.debugger.getTargets().then((ts) => ts.filter((x) => x.attached && x.tabId === ${listed!.tabKey}).length)`);
+    check(left === 0, "…with no debugger attached at any point of the wait", left);
+
+    // The extension's own-input stamp: Winter's own click through the extension's debugger never fires a wake.
+    const runOwn = runScope("rwake-own");
+    const mine = await engine.global(runOwn.s, "browsers.tab", { tab: `chrome:${listed!.tabKey}` }) as TabHandle;
+    const stOwn = await engine.primitive(runOwn.s, mine.targetId, "state", { full: true, emit: false }) as string;
+    const refOwn = (re: RegExp) => String(/\[(\d+)\]/.exec(stOwn.split("\n").find((l) => re.test(l)) ?? "")?.[1] ?? "");
+    const ownWake = await arm(mine.targetId, { kind: "clicked", ref: refOwn(/button "Next button"/) });
+    await engine.primitive(runOwn.s, mine.targetId, "click", { target: Number(refOwn(/button "Next button"/)) });
+    await sleep(1_500);
+    check(!events.some((e) => e.wakeId === ownWake.id), "Winter's own click (its debugger, stamped own) never fires the wake", events.filter((e) => e.wakeId === ownWake.id));
+    runOwn.end();
+    engine.turnEnded("s_wake");
+    await sleep(500);
+    await userClicks("/wake.html?step=2", "#nextButton");
+    const ow = await eventOf(ownWake.id);
+    check(ow?.outcome === "fired" && ow.detail === "clicked", "…and the user's own click then does", ow ?? events);
+
+    // The headline case: the user presses a form's submit button and the page navigates away at once.
+    const run3 = runScope("rwake3");
+    const third = await engine.global(run3.s, "browsers.tab", { tab: `chrome:${listed!.tabKey}` }) as TabHandle;
+    const st3 = await engine.primitive(run3.s, third.targetId, "state", { full: true, emit: false }) as string;
+    const ref3 = (re: RegExp) => String(/\[(\d+)\]/.exec(st3.split("\n").find((l) => re.test(l)) ?? "")?.[1] ?? "");
+    const sub = await arm(third.targetId, { kind: "submitted", ref: ref3(/form "Continue"/) });
+    const go = await arm(third.targetId, { kind: "clicked", ref: ref3(/button "Send and continue"/) });
+    run3.end();
+    engine.turnEnded("s_wake");
+    await sleep(500);
+    await userClicks("/wake.html?step=2", "#go");
+    const se = await eventOf(sub.id);
+    const ge = await eventOf(go.id);
+    check(se?.outcome === "fired" && se.detail === "submitted the form", "a submit that navigates the page away fires the submit wake (never lost)", se ?? events);
+    check(ge?.outcome === "fired" && ge.detail === "clicked", "…and the click wake on its button", ge ?? events);
+  } finally {
+    wakes.stop();
+    engine.stop();
+    cdp.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
 // ── the run ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -330,7 +482,9 @@ async function main(): Promise<void> {
     const chromeLog: string[] = [];
     chrome = spawn(exe, [
       "--headless=new", `--user-data-dir=${profile}`, `--load-extension=${extensionDir}`, "--no-first-run", "--no-default-browser-check",
-      "--disable-gpu", "--window-size=1200,900", "--force-device-scale-factor=2", "--remote-debugging-port=0", "--enable-features=WebMCP", `${base}/user.html`,
+      "--disable-gpu", "--window-size=1200,900", "--force-device-scale-factor=2", "--remote-debugging-port=0", "--enable-features=WebMCP",
+      // Never the login Keychain (no "Safe Storage" prompt).
+      "--use-mock-keychain", "--password-store=basic", `${base}/user.html`,
     ], {
       env: { ...process.env, WINTER_BROWSER_HOST_HOME: home, WINTER_CU_TEST_DAEMON_REQUIREMENT: bunDr },
       stdio: ["ignore", "ignore", "pipe"],
@@ -650,6 +804,9 @@ async function main(): Promise<void> {
       check(user?.active === true && left.filter((x) => x.active).length === 1, "the user's tab was the active one from start to end — nothing came forward", { now: left.map((x) => [x.url, x.active]), trail: activeTrail });
     }
     check(gone.length === 0 || gone.every((g) => !g.startsWith(`${userTab!.tabKey}:`)), "no tab of the user's was reported gone", gone);
+
+    // ── wake triggers through the real extension (1.2.0): debugger-free ──
+    if (again !== undefined) await wakeRow(again, base, profile);
 
     // ── Phase 3 through the real extension (1.1.0) — last, since the hand-off brings a tab forward ──
     if (again !== undefined) await phase3(again, base, profile);

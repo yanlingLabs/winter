@@ -9,6 +9,7 @@ import { listSiteTools, modelContextOf, SiteToolCalls } from "../../src/computer
 import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { TransportError, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportDownload, type TransportTab } from "../../src/computer-use/browser/transport";
+import { FakeWakes } from "./browser-wake-fake";
 
 export interface FakeFrame {
   frameId: string;
@@ -167,6 +168,11 @@ export class FakeTab {
   beforeUnload = false;
   pendingNav?: string;
   holders = new Set<string>();
+  /** Wake triggers: each hold the built-in browser's fake was asked for ("full", or "watch" — `watchOnly`), and what the
+   *  engine turned on in the tab: file-chooser interception per CDP session ("" = the tab's own), focus emulation. */
+  readonly holdModes: Array<"full" | "watch"> = [];
+  readonly intercept = new Map<string, boolean>();
+  focusEmulation = false;
   /** Phase 4: the site tool calls in flight in this tab's page (`cancelSiteTool` aborts one). */
   readonly siteCalls = new SiteToolCalls();
   /** Phase 3: CDP sessions with Fetch interception on, the requests paused, the body streams handed out. */
@@ -204,6 +210,8 @@ export class FakeCdpTransport implements CdpTransport {
   commandDelay?: (method: string, session?: string) => number;
   /** Called with every command the fake accepts, before it is answered. */
   onSend?: (method: string, params: Record<string, unknown>, session?: string) => void;
+  /** A navigation's commit comes this long after it STARTED (`Page.frameStartedLoading` at once, as a browser says). */
+  slowCommitMs?: number;
 
   /** Phase 3's optional members — a user's browser (Winter for Chrome 1.1) has them; the built-in fake starts without
    *  (a test adds or deletes them to play another build). */
@@ -233,9 +241,22 @@ export class FakeCdpTransport implements CdpTransport {
   private nextReq = 1;
   private nextDl = 1;
   armDownloads?: CdpTransport["armDownloads"];
+  /** Wake triggers: the page watcher's ops, and (`withWatch()`) Winter for Chrome 1.2.0's debugger-free watch. */
+  readonly wakes: FakeWakes = new FakeWakes(this);
+  /** The built-in browser's link feature `watchOnly` (a test deletes it to play an older Winter.app). */
+  watchOnlyHolds?: boolean;
+  watch?: CdpTransport["watch"];
+  unwatch?: CdpTransport["unwatch"];
+  onWatchEvent?: CdpTransport["onWatchEvent"];
   startDownload?: CdpTransport["startDownload"];
   onDownload?: CdpTransport["onDownload"];
   releaseDownload?: CdpTransport["releaseDownload"];
+
+  /** Winter for Chrome 1.2.0: the debugger-free watch members (feature `watch`). */
+  withWatch(): this {
+    this.wakes.enableExtension();
+    return this;
+  }
 
   /** Give this fake the native download members (the built-in browser's link 2; Winter for Chrome's downloads). */
   withNativeDownloads(): this {
@@ -310,6 +331,7 @@ export class FakeCdpTransport implements CdpTransport {
   private readonly doneListeners = new Set<(tabKey: string, done: boolean) => void>();
 
   constructor(readonly backend: string, readonly family: BrowserFamily) {
+    if (family === "winter") this.watchOnlyHolds = true;
     // Both the built-in browser's link (protocol 2) and Winter for Chrome 1.1 can present a tab and mute one.
     this.present = async (tabKey, o) => { this.tab(tabKey); this.presented.push(`${tabKey}@${o.sessionId}`); };
     this.setMuted = async (tabKey, muted) => { this.tab(tabKey).muted = muted; };
@@ -374,11 +396,12 @@ export class FakeCdpTransport implements CdpTransport {
       ...(t.lastAccessed === undefined ? {} : { lastAccessed: t.lastAccessed }), ...(t.group === undefined ? {} : { group: t.group }),
     }));
   }
-  async attach(tabKey: string, opts: { sessionId: string }): Promise<{ viewport: [number, number]; dpr: number }> {
+  async attach(tabKey: string, opts: { sessionId: string; watchOnly?: boolean }): Promise<{ viewport: [number, number]; dpr: number }> {
     const t = this.tab(tabKey);
     if (Date.now() < t.betweenUntil) throw new TransportError("tab_gone", "the tab is between documents");
     t.attached = true;
     t.holders.add(opts.sessionId);
+    if (this.watchOnlyHolds === true) t.holdModes.push(opts.watchOnly === true ? "watch" : "full");
     return { viewport: [1200, 800], dpr: 2 };
   }
   async detach(tabKey: string): Promise<void> {
@@ -390,6 +413,8 @@ export class FakeCdpTransport implements CdpTransport {
     t.endedContexts.clear();
     t.runtimeOn.clear();
     t.winterObjects.clear();
+    t.intercept.clear();
+    t.focusEmulation = false;
   }
   async subscribe(tabKey: string, events: readonly string[]): Promise<void> {
     const bad = events.find((e) => !CDP_ALLOWED_EVENTS.includes(e));
@@ -490,6 +515,14 @@ export class FakeCdpTransport implements CdpTransport {
     this.commit(t, url);
   }
 
+  /** The USER answers the open dialog in the browser (no CDP command): it closes. `silently`: the browser's closing
+   *  event is lost (the engine's record of the dialog goes stale). */
+  closeDialog(tabKey: string, accept: boolean, o: { silently?: boolean } = {}): void {
+    const t = this.tab(tabKey);
+    t.dialog = undefined;
+    if (o.silently !== true) this.emit(t, "Page.javascriptDialogClosed", { result: accept, userInput: "" });
+  }
+
   /** A JavaScript dialog opens. */
   openDialog(tabKey: string, type: string, message: string): void {
     const t = this.tab(tabKey);
@@ -497,7 +530,7 @@ export class FakeCdpTransport implements CdpTransport {
     this.emit(t, "Page.javascriptDialogOpening", { url: t.page.url, message, type, hasBrowserHandler: false });
   }
 
-  private commit(t: FakeTab, url: string): void {
+  private commit(t: FakeTab, url: string, started = false): void {
     for (const [k, c] of [...t.contexts]) {
       if (c.frameId === "top" || c.session === undefined) {
         t.contexts.delete(k);
@@ -509,12 +542,13 @@ export class FakeCdpTransport implements CdpTransport {
     t.page = this.page(url);
     t.values.clear();
     t.dialog = undefined;
-    this.emit(t, "Page.frameStartedLoading", { frameId: "top" });
+    if (!started) this.emit(t, "Page.frameStartedLoading", { frameId: "top" });
     this.emit(t, "Page.frameNavigated", { frame: { id: "top", url, loaderId: `L${t.doc}` }, type: "Navigation" });
     this.emit(t, "Page.lifecycleEvent", { frameId: "top", loaderId: `L${t.doc}`, name: "DOMContentLoaded", timestamp: 1 });
     this.emit(t, "Page.domContentEventFired", { timestamp: 1 });
     this.emit(t, "Page.loadEventFired", { timestamp: 1 });
     this.emit(t, "Page.frameStoppedLoading", { frameId: "top" });
+    this.wakes.committed(t, url);
   }
 
   private frameOf(t: FakeTab, frameId: string): { nodes: RtNode[]; secure: number[]; editable: number[]; url: string } {
@@ -530,6 +564,7 @@ export class FakeCdpTransport implements CdpTransport {
     if (!t.attached) throw new TransportError("cdp_error", "not attached", { cdpCode: -32000, cdpMessage: "Not attached" });
     const session = opts.cdpSessionId;
     this.sent.push({ tabKey, method, params, ...(session === undefined ? {} : { session }) });
+    if (/^(?:Input\.|Page\.navigate$|Page\.reload$|Page\.navigateToHistoryEntry$)/.test(method)) this.wakes.stampOwn(tabKey);
     this.onSend?.(method, params, session);
     const delay = (method.startsWith("Input.") ? this.inputDelay?.(method, params) ?? this.inputDelayMs : 0) + (this.commandDelay?.(method, session) ?? 0);
     if (delay > 0) await new Promise((res) => setTimeout(res, delay));
@@ -592,8 +627,10 @@ export class FakeCdpTransport implements CdpTransport {
         if (b === undefined || t.networkBuffers.resource === 0) throw new TransportError("cdp_error", "No resource with given identifier found", { cdpCode: -32000, cdpMessage: "No resource with given identifier found" });
         return r(b.body.length > CDP_RESPONSE_BODY_MAX_CHARS ? { body: b.body.slice(0, CDP_RESPONSE_BODY_MAX_CHARS), base64Encoded: b.base64Encoded, truncated: true } : { ...b });
       }
+      case "Page.setInterceptFileChooserDialog": t.intercept.set(session ?? "", params.enabled === true); return r({});
+      case "Emulation.setFocusEmulationEnabled": t.focusEmulation = params.enabled === true; return r({});
       case "Page.enable": case "Page.setLifecycleEventsEnabled": case "Log.enable": case "Log.disable":
-      case "Page.setInterceptFileChooserDialog": case "Emulation.setFocusEmulationEnabled": case "Runtime.releaseObject":
+      case "Runtime.releaseObject":
       case "Page.disable": case "Network.disable":
         return r({});
       case "Target.getTargetInfo":
@@ -664,7 +701,7 @@ export class FakeCdpTransport implements CdpTransport {
           t.winterObjects.add(objectId);
           return r({ result: { type: "object", objectId } });
         }
-        const value = this.op(t, frameId, op, arg);
+        const value = this.op(t, frameId, op, arg, ctxKey(params.executionContextId));
         if (!(value instanceof Promise)) return r({ result: { type: "object", value } });
         // An op that waits (a site tool): a navigation meanwhile ends its world, as Chrome answers it.
         const doc = t.doc;
@@ -673,6 +710,8 @@ export class FakeCdpTransport implements CdpTransport {
         return r({ result: { type: "object", value: settled.v } });
       }
       case "Input.dispatchMouseEvent": {
+        // Winter's own click lands in the page as a trusted click too (a wake trigger tells them apart by time).
+        if (params.type === "mouseReleased" && session === undefined) this.wakes.inputClick(t, Number(params.x), Number(params.y));
         if (params.type === "mouseReleased" && session === undefined) {
           const page = t.page;
           if (page.clickBlob !== undefined) {
@@ -751,6 +790,9 @@ export class FakeCdpTransport implements CdpTransport {
           t.pendingNav = url;
           t.dialog = { type: "beforeunload", message: "" };
           queueMicrotask(() => this.emit(t, "Page.javascriptDialogOpening", { url: t.page.url, message: "", type: "beforeunload", hasBrowserHandler: false }));
+        } else if (this.slowCommitMs !== undefined) {
+          queueMicrotask(() => this.emit(t, "Page.frameStartedLoading", { frameId: "top" }));
+          setTimeout(() => { if (!t.closed) this.commit(t, url, true); }, this.slowCommitMs);
         } else queueMicrotask(() => this.commit(t, url));
         return r({ frameId: "top", loaderId: `L${t.doc + 1}` });
       }
@@ -803,7 +845,7 @@ export class FakeCdpTransport implements CdpTransport {
   /** Every page-runtime call, in order (what a test asks of the page: a point brought into view, an inspect, …). */
   readonly ops: Array<{ tabKey: string; frameId: string; op: string; arg: Record<string, any> | null }> = [];
 
-  private op(t: FakeTab, frameId: string, op: string, arg: Record<string, any> | null): unknown {
+  private op(t: FakeTab, frameId: string, op: string, arg: Record<string, any> | null, ctx = ""): unknown {
     this.ops.push({ tabKey: t.tabKey, frameId, op, arg });
     const f = this.frameOf(t, frameId);
     const key = (id: unknown): string => `${frameId}:${String(id)}`;
@@ -942,6 +984,8 @@ export class FakeCdpTransport implements CdpTransport {
       case "callSiteTool":
         return t.siteCalls.call(modelContextOf({ modelContext: t.page.modelContext }), { window: FAKE_TOP_WINDOW, origin: new URL(t.page.url).origin }, arg as { name: string; input: unknown; callId: string });
       case "cancelSiteTool": return t.siteCalls.cancel(arg?.callId);
+      case "watchLocate": case "watchArm": case "watchWait": case "watchDisarm":
+        return this.wakes.op(t, frameId, op, arg, ctx);
       default: throw new Error(`fake runtime: unknown op ${op}`);
     }
   }

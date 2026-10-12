@@ -55,6 +55,30 @@ describe("the browser link (daemon side)", () => {
     expect(link.connected).toBe(true);
   });
 
+  test("features: the app names `watchOnly`, the daemon answers its own; only then does tab.ensure carry a watch-only hold", async () => {
+    const registry = new BrowserBackendRegistry();
+    const link = new BrowserLink({ registry });
+    // An app that names no feature: holds are full, whatever is asked.
+    const old = app(link);
+    const plain = old.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "0.124.0", pid: 1 });
+    expect(plain.features).toEqual(["watchOnly"]);
+    const t0 = registry.get("winter")!;
+    expect(t0.watchOnlyHolds).toBe(false);
+    void t0.attach("tab-1", { sessionId: "s1", watchOnly: true }).catch(() => undefined);
+    expect(old.last().params).toMatchObject({ op: "tab.ensure", params: { sessionId: "s1", tabId: "tab-1" } });
+    expect(old.last().params.params.watchOnly).toBeUndefined();
+    // An app that names it (and one it does not know): only the shared one is in use.
+    const a = app(link);
+    const res = a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "0.125.0", pid: 2, features: ["watchOnly", "teleport"] }) as { linkId: string; features: string[] };
+    expect(res.features).toEqual(["watchOnly"]);
+    const t = registry.get("winter")!;
+    expect(t.watchOnlyHolds).toBe(true);
+    void t.attach("tab-1", { sessionId: "s1", watchOnly: true }).catch(() => undefined);
+    expect(a.last().params).toMatchObject({ op: "tab.ensure", params: { sessionId: "s1", tabId: "tab-1", watchOnly: true } });
+    void t.attach("tab-1", { sessionId: "s1" }).catch(() => undefined);
+    expect(a.last().params.params.watchOnly).toBeUndefined();
+  });
+
   test("a command goes out as a notification and its result settles it; a late or foreign result is dropped and answered {}", async () => {
     const registry = new BrowserBackendRegistry();
     const link = new BrowserLink({ registry });

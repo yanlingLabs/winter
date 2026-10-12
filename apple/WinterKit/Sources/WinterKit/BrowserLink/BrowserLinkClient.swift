@@ -67,6 +67,8 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
         /// Every wait the link makes. Injected so a test can run a reconnect without waiting a second.
         public var sleep: @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) }
         public var log: @Sendable (String) -> Void = { _ in }
+        /// What the app names at attach (`BrowserLinkProtocol.features` by default).
+        public var features: [String] = BrowserLinkProtocol.features
 
         public init(appVersion: String, pid: Int32) {
             self.appVersion = appVersion
@@ -87,7 +89,7 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
     private let lock = NSLock()
     private var stopped = false
     private var activeClient: WinterClient?
-    private var connection: (client: WinterClient, linkId: String)?
+    private var connection: (client: WinterClient, linkId: String, features: Set<String>)?
     private var runTask: Task<Void, Never>?
     private var drainTask: Task<Void, Never>?
 
@@ -100,6 +102,10 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
 
     /// The link that is up right now, if any.
     public var linkId: String? { lock.withLock { connection?.linkId } }
+
+    /// What the daemon named at attach for the link that is up (empty while none is). A feature is used only when
+    /// both sides named it.
+    public var daemonFeatures: Set<String> { lock.withLock { connection?.features ?? [] } }
 
     /// Start connecting; reconnects on its own until `stop()`. Calling it twice does nothing.
     public func start() {
@@ -191,12 +197,17 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
             let detaches = client.notifications(method: BrowserLinkProtocol.Method.detached)
 
             let linkId: String
+            var features: Set<String> = []
             do {
-                let answer = try await client.request(BrowserLinkProtocol.Method.attach, params: .object([
+                var attachParams: [String: JSONValue] = [
                     "protocol": .number(Double(BrowserLinkProtocol.version)),
                     "appVersion": .string(configuration.appVersion),
                     "pid": .number(Double(configuration.pid)),
-                ]))
+                ]
+                if !configuration.features.isEmpty {
+                    attachParams["features"] = .array(configuration.features.map(JSONValue.string))
+                }
+                let answer = try await client.request(BrowserLinkProtocol.Method.attach, params: .object(attachParams))
                 guard let id = answer["linkId"]?.stringValue, !id.isEmpty else {
                     throw RpcError(code: -3, message: "browserLink.attach answered no linkId")
                 }
@@ -205,6 +216,9 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
                                    data: .object(["code": .string("protocol_mismatch")]))
                 }
                 linkId = id
+                // The features both sides named are the ones used.
+                let named = Set((answer["features"]?.arrayValue ?? []).compactMap(\.stringValue))
+                features = named.intersection(configuration.features)
             } catch {
                 let rpc = error as? RpcError
                 if rpc?.isMethodNotFound == true {
@@ -225,7 +239,7 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
 
             backoff = configuration.backoffInitial
             saidNoMethod = false
-            lock.withLock { connection = (client, linkId) }
+            lock.withLock { connection = (client, linkId, features) }
             configuration.log("browser link: attached (\(linkId))")
             await MainActor.run { handlerBox.handler?.browserLinkAttached(linkId: linkId) }
 
@@ -306,7 +320,7 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
 
     // MARK: - The outbox: what leaves, in the order it was produced
 
-    private var currentConnection: (client: WinterClient, linkId: String)? { lock.withLock { connection } }
+    private var currentConnection: (client: WinterClient, linkId: String, features: Set<String>)? { lock.withLock { connection } }
 
     private func drainLoop() async {
         while !Task.isCancelled {
@@ -338,7 +352,7 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
     }
 
     private func send(events batch: [BrowserLinkOutbox.QueuedEvent]) async {
-        guard let (client, linkId) = currentConnection else { return }
+        guard let (client, linkId, _) = currentConnection else { return }
         let encoder = JSONEncoder()
         // Every event is bounded before it leaves (`BrowserLinkProtocol.eventStringMaxBytes`,
         // `eventMaxBytes`), and the batch goes in as many requests as it takes to keep each under
@@ -373,7 +387,7 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
     }
 
     private func send(_ item: BrowserLinkOutbox.Item) async {
-        guard let (client, linkId) = currentConnection else { return }
+        guard let (client, linkId, _) = currentConnection else { return }
         switch item {
         case .result(let itemLink, let cmdId, let reply):
             guard itemLink == linkId else { return }

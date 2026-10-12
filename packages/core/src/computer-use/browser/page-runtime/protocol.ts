@@ -6,6 +6,8 @@
 // Ids are the runtime's own (`RtId`): small integers per DOCUMENT, minted the first time the runtime meets a node and
 // kept while it exists. The engine maps (runtime instance, id) to the tab's model-visible refs.
 
+import type { WatchArmResult, WatchLocator, WatchSpec, WatchWaitResult } from "./watch";
+
 export type RtId = number;
 
 /** One element (or text leaf) of a frame's tree. Role words are already Phase 1's ("text field", "check box"). */
@@ -107,6 +109,13 @@ export type RtSiteToolAnswer =
   /** The page's tool failed: the browser's error name and message (the page's words, cut). */
   | { ok: false; reason: "failed"; name: string; message: string };
 
+/** Wake triggers: an element read for a watch — its role and name as the model reads them (redacted), and the locator
+ *  any isolated world of this document can find it by — or why it can't be watched. */
+export type RtWatchLocate =
+  | { ok: true; element: { role: string; name: string }; locator: WatchLocator; top: boolean }
+  /** gone: no such element; secure: a password or payment field, or anything in a payment frame (never watched). */
+  | { ok: false; reason: "gone" | "secure" };
+
 /** The ops, by name → argument → answer. */
 export interface RtOps {
   hello: { arg: null; result: { id: string; url: string; title: string; readyState: string } };
@@ -158,6 +167,15 @@ export interface RtOps {
   /** Run one of them (`executeTool`), abortable by `cancelSiteTool` with the same `callId`. */
   callSiteTool: { arg: { name: string; input: unknown; callId: string }; result: RtSiteToolAnswer };
   cancelSiteTool: { arg: { callId: string }; result: boolean };
+  // ── wake triggers (`watch.ts`) ──
+  /** Read an element for a watch (the secure-field floor first). */
+  watchLocate: { arg: { id: RtId }; result: RtWatchLocate };
+  /** Arm a watch in this world (`id`: the element itself; else the spec's locator). */
+  watchArm: { arg: { spec: WatchSpec; id?: RtId }; result: WatchArmResult };
+  /** The long poll: events after `ack`, waiting at most `maxMs` for one; `live`: the watches the daemon keeps (any
+   *  other in this world is dropped). */
+  watchWait: { arg: { ack: number; maxMs: number; world?: string; live?: string[] }; result: WatchWaitResult };
+  watchDisarm: { arg: { watchId: string }; result: boolean };
 }
 export type RtOp = keyof RtOps;
 

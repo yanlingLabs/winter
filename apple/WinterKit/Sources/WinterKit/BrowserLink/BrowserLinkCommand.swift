@@ -5,6 +5,9 @@ public struct BrowserLinkCommand: Sendable, Equatable {
     public let linkId: String
     public let cmdId: String
     public let op: Op
+    /// Feature `watchOnly` (wake triggers): a `tab.ensure` that holds the tab WATCH-ONLY — with none of the app's
+    /// native-UI holds. False for a full hold and for every other op.
+    public let watchOnly: Bool
 
     public enum Op: Sendable, Equatable {
         /// Make the tab's browser live (created parked if it is not), load `url` if it has to create
@@ -38,10 +41,11 @@ public struct BrowserLinkCommand: Sendable, Equatable {
         }
     }
 
-    public init(linkId: String, cmdId: String, op: Op) {
+    public init(linkId: String, cmdId: String, op: Op, watchOnly: Bool = false) {
         self.linkId = linkId
         self.cmdId = cmdId
         self.op = op
+        self.watchOnly = watchOnly
     }
 
     /// Why a command could not be read. When the command at least named itself (`linkId` and `cmdId`),
@@ -81,7 +85,8 @@ public struct BrowserLinkCommand: Sendable, Equatable {
             guard let sessionId = string("sessionId"), let tabId = string("tabId") else {
                 return unreadable("tab.ensure needs sessionId and tabId")
             }
-            return done(.tabEnsure(sessionId: sessionId, tabId: tabId, url: string("url")))
+            return .success(BrowserLinkCommand(linkId: linkId, cmdId: cmdId, op: .tabEnsure(sessionId: sessionId, tabId: tabId, url: string("url")),
+                                               watchOnly: p["watchOnly"]?.boolValue == true))
         case BrowserLinkProtocol.Op.tabRelease:
             guard let tabId = string("tabId") else { return unreadable("tab.release needs tabId") }
             return done(.tabRelease(tabId: tabId))

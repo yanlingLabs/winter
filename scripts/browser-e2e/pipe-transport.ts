@@ -43,6 +43,10 @@ export class PipeTransport implements CdpTransport {
   /** As Winter for Chrome says in its hello (Phase 3: `cdp3`); undefined for the built-in browser's stand-in. */
   features?: Set<string>;
 
+  /** Wake triggers: standing in for Winter.app with the link feature `watchOnly` (it holds no native UI, so a
+   *  watch-only hold is an ordinary attach). */
+  watchOnlyHolds?: boolean;
+
   constructor(readonly backend: string, family: BrowserFamily) { this.family = family; }
 
   /** TEST ONLY, browser level: where a download the engine did NOT catch lands (never the user's Downloads folder). */
@@ -185,8 +189,12 @@ export class PipeTransport implements CdpTransport {
     return out;
   }
 
-  async attach(tabKey: string): Promise<{ viewport: [number, number]; dpr: number }> {
+  /** Wake triggers: every attach asked for, and whether it was watch-only (what Winter.app would have been told). */
+  readonly attaches: Array<{ tabKey: string; watchOnly: boolean }> = [];
+
+  async attach(tabKey: string, opts?: { sessionId: string; watchOnly?: boolean }): Promise<{ viewport: [number, number]; dpr: number }> {
     const t = this.tab(tabKey);
+    this.attaches.push({ tabKey, watchOnly: opts?.watchOnly === true });
     if (t.session === undefined) {
       const r = await this.raw<{ sessionId: string }>("Target.attachToTarget", { targetId: t.targetId, flatten: true });
       t.session = r.sessionId;
@@ -269,6 +277,18 @@ export class PipeTransport implements CdpTransport {
     const bad = events.find((e) => !CDP_ALLOWED_EVENTS.includes(e));
     if (bad !== undefined) throw new TransportError("not_allowed", `${bad} is not an allowed event`);
     this.tab(tabKey).events = new Set(events);
+  }
+
+  /** TEST ONLY — the USER: a CDP session of the test's own on the tab's page (never one the engine sends on, so nothing
+   *  of Winter's knows about it), for a click or a key the browser delivers as trusted input, or a read of the page. */
+  async asUser<T>(tabKey: string, fn: (send: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>) => Promise<T>): Promise<T> {
+    const t = this.tab(tabKey);
+    const { sessionId } = await this.raw<{ sessionId: string }>("Target.attachToTarget", { targetId: t.targetId, flatten: true });
+    try {
+      return await fn((method, params = {}) => this.raw<Record<string, unknown>>(method, params, sessionId));
+    } finally {
+      await this.raw("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
   }
 
   onEvent(listener: (e: CdpEvent) => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }

@@ -90,7 +90,8 @@ struct BrowserLinkCEFDriver {
 /// browser, so a page's own `window.print()` does nothing in any tab, held or not.
 ///
 /// A tab the link does not hold gets none of it: every handler then gives CEF's own default, exactly as
-/// before the link existed.
+/// before the link existed — and neither does a tab held WATCH-ONLY (link feature `watchOnly`): a wake trigger only
+/// watches it for the user, whose dialogs, prompts, file choosers, downloads, menus, keys and focus they are.
 enum BrowserNativeUIPolicy {
     static func flags(held: Bool) -> UInt32 {
         guard held else { return 0 }
