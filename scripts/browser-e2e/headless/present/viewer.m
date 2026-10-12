@@ -60,6 +60,7 @@ static void Emit(NSDictionary *object) {
   uint64_t _pendingSentAt;
   uint32_t _lastColour;
   NSString *_endReason;
+  uint64_t _welcomedAt, _firstFrameAt;
 }
 
 - (instancetype)initWithProbeX:(int)x y:(int)y {
@@ -83,10 +84,12 @@ static void Emit(NSDictionary *object) {
 - (dispatch_queue_t)work { return _work; }
 
 - (void)presentConsumer:(WinterPresentConsumer *)consumer welcomedCSSWidth:(int)width height:(int)height scale:(double)scale control:(BOOL)control {
+  _welcomedAt = mach_absolute_time();
   Emit(@{@"event" : @"welcome", @"cssWidth" : @(width), @"cssHeight" : @(height), @"scale" : @(scale), @"control" : @(control)});
 }
 
 - (void)presentConsumer:(WinterPresentConsumer *)consumer frame:(WinterPresentFrame *)frame {
+  if (_firstFrameAt == 0) _firstFrameAt = frame.receivedAt;
   if (frame.sequence <= _lastSequence) _outOfOrder++;
   _lastSequence = frame.sequence;
   _droppedReported += frame.droppedBefore;
@@ -275,6 +278,8 @@ static void Emit(NSDictionary *object) {
     @"transportP50" : @(Pct(_transport, 0.5)), @"transportP95" : @(Pct(_transport, 0.95)), @"transportP99" : @(Pct(_transport, 0.99)),
     @"gpuReadP50" : @(Pct(_gpuRead, 0.5)), @"gpuReadP95" : @(Pct(_gpuRead, 0.95)),
     @"colour" : [NSString stringWithFormat:@"%06x", _lastColour],
+    // From HELLO accepted to the first frame at an already-connected viewer (no process launch in it).
+    @"firstFrameAfterWelcomeMs" : @(_firstFrameAt > _welcomedAt && _welcomedAt > 0 ? Ms(_firstFrameAt - _welcomedAt) : -1),
   });
 }
 

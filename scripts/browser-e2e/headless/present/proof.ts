@@ -63,7 +63,8 @@ const sentinel = (port: number): string => `<!doctype html><title>sentinel</titl
 <div id=f><input id=a placeholder=agent><input id=b placeholder=user><select id=s><option>one</option><option>two</option><option>three</option></select></div>
 <pre id=state style="position:absolute;left:20px;top:300px"></pre>
 <script>
-const S = { id: crypto.randomUUID(), origin: performance.timeOrigin, ticks: 0, keys: 0, wsOpen: 0, wsMessages: 0, uploads: 0, uploadDone: "" };
+const S = { id: crypto.randomUUID(), origin: performance.timeOrigin, ticks: 0, keys: 0, wsOpen: 0, wsMessages: 0, uploads: 0, uploadDone: "", visibilityChanges: 0, hidden: document.hidden };
+document.addEventListener("visibilitychange", () => { S.visibilityChanges++; S.hidden = document.hidden; });
 const tick = (() => { let n = 0; return () => ++n; })();
 let parity = 0;
 document.addEventListener("keydown", (e) => {
@@ -229,6 +230,9 @@ async function oracle(label: string, expect: { b?: string; s?: string } = {}): P
   if (expect.b !== undefined && now.b !== expect.b) problems.push(`the user's field reads "${String(now.b)}", not "${expect.b}"`);
   if (expect.s !== undefined && now.s !== expect.s) problems.push(`the select reads "${String(now.s)}", not "${expect.s}"`);
   if (now.history !== baseline.history) problems.push(`history length ${String(now.history)} (was ${String(baseline.history)})`);
+  if (now.visibilityChanges !== baseline.visibilityChanges || now.hidden !== baseline.hidden) {
+    problems.push(`the page's visibility changed (${String(now.visibilityChanges)} visibilitychange event(s), hidden ${String(now.hidden)})`);
+  }
   if (wsOpens !== 1 || wsCloses !== 0) problems.push(`server: ${wsOpens} WebSocket opening(s), ${wsCloses} close(s)`);
   if (Number(now.wsOpen) !== 1) problems.push(`the page opened its socket ${String(now.wsOpen)} time(s)`);
   if (uploadRequests !== 1 || Number(now.uploads) !== 1) problems.push(`${uploadRequests} upload request(s) at the server, ${String(now.uploads)} started by the page`);
@@ -260,7 +264,7 @@ try {
   events.splice(0, events.length, ...events.filter((m) => m.method !== "browserLink.events"));
   baseline = await sentinelState();
   check("the sentinel page is live (its socket open, its upload in progress)", typeof baseline.id === "string" && baseline.wsOpen === 1 && baseline.uploads === 1,
-    `id ${String(baseline.id).slice(0, 8)}, history ${String(baseline.history)}`);
+    `id ${String(baseline.id).slice(0, 8)}, history ${String(baseline.history)}, hidden ${String(baseline.hidden)}`);
   const bBox = JSON.parse(((await cdp("Runtime.evaluate", { expression: "JSON.stringify(document.getElementById('b').getBoundingClientRect())", contextId: world, returnByValue: true })) as { result?: { value?: string } }).result?.value ?? "{}") as { x: number; y: number; height: number };
 
   // ── the cycles: show, take over, hand back ──
@@ -416,6 +420,17 @@ try {
 
   // ── a viewer that is not the one the daemon named ──
   {
+    // The right signature, the wrong nonce (another viewer told the service by someone else).
+    const r = await command("headless.present", { tabId: "w-1", nonce: nonceHex(), viewerRequirement, control: true, scale: 2 });
+    const wrongNonce = new ViewerProc(String(r.service), nonceHex());
+    await Bun.sleep(1_500);
+    const vs = await wrongNonce.stats().catch(() => ({ event: "stats", frames: -1 } as ViewerEvent));
+    await command("headless.unpresent", { tabId: "w-1" });
+    wrongNonce.send({ cmd: "bye" });
+    await wrongNonce.exited();
+    check("a viewer with Winter's signature but another presentation's nonce gets no frame", Number(vs.frames) === 0, `${String(vs.frames)} frame(s)`);
+  }
+  {
     const nonce = nonceHex();
     const r = await command("headless.present", { tabId: "w-1", nonce, viewerRequirement: 'identifier "com.example.not-winter"', control: true, scale: 2 });
     const impostor = new ViewerProc(String(r.service), nonce);
@@ -438,6 +453,7 @@ try {
   const pct = (xs: number[], p: number) => { const s = [...xs].sort((a, b) => a - b); return s.length === 0 ? -1 : s[Math.min(s.length - 1, Math.floor(p * (s.length - 1) + 0.5))]!; };
   const summary = {
     firstFrameMs: { p50: pct(firstFrameMs, 0.5), max: Math.max(...firstFrameMs, -1) },
+    firstFrameAfterWelcomeMs: { p50: pct(all("firstFrameAfterWelcomeMs"), 0.5), max: Math.max(...all("firstFrameAfterWelcomeMs"), -1) },
     inputToPixelMsP50PerCycle: all("inputToPixelP50"), inputToPixelMsP95PerCycle: all("inputToPixelP95"), inputToPixelMsP99PerCycle: all("inputToPixelP99"),
     frameAgeMsP50PerCycle: all("frameAgeP50"), frameAgeMsP95PerCycle: all("frameAgeP95"),
     copyMsP50: producerStats.map((p) => Number(p.copyP50Ms)), copyMsP99: producerStats.map((p) => Number(p.copyP99Ms)), copyMsMax: producerStats.map((p) => Number(p.copyMaxMs)),
