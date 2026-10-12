@@ -305,6 +305,16 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// U's Secure Keyboard Entry: Secure Event Input is on while U is in front.
     var secureEntry = false
     var secure: Bool { secureEntry && front == SimPid.user }
+    /// When Secure Event Input last went off (R17-a, the user's ruling: on at ANY moment of the 2.5 s quiet window is
+    /// never quiet — the contract 82f8caece wrote; the oracle read it only at the instant).
+    var secureEndedAt: Double = -.infinity
+    var wasSecure = false
+    /// Called wherever `secure` can change (U's front, Secure Keyboard Entry): records when it went off.
+    func noteSecureChange() {
+        let s = secure
+        if wasSecure, !s { secureEndedAt = now }
+        wasSecure = s
+    }
     var held: CGEventFlags = []
     /// The app the banner on screen is about, how long the AppleScript running takes, and when an indirect effect of
     /// the agent's came forward (for the report it owes).
@@ -357,14 +367,14 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// The world's answer: is the user working in `pid` now?
     func userWorks(in pid: pid_t) -> Bool {
         lock.withLock {
-            if let p = pendingWork, front == p.app, now <= p.until { userWorkingIn = p.app; pendingWork = nil }
+            if let p = pendingWork, front == p.app, now <= p.until { userWorkingIn = p.app; workBegan(p.app); pendingWork = nil }
             return userWorkingIn == pid && front == pid
         }
     }
     func userInteracted(_ app: pid_t) {
         lock.withLock {
             guard SimPid.agentTargets.contains(app) else { return }
-            if front == app { userWorkingIn = app; pendingWork = nil } else { pendingWork = (app, now + 500) }
+            if front == app { userWorkingIn = app; workBegan(app); pendingWork = nil } else { pendingWork = (app, now + 500) }
         }
     }
     /// The world's own record of the agent: operations running per app, the last thing it did to each app (a cause, or
@@ -408,6 +418,15 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     var actEpisode = 0
     var actStartFront: pid_t = 0
     var agentEventsAfterFront = 0
+    /// An act of the agent's on T is running (it began while the user was not working in T): from the moment they start
+    /// working in T, nothing of it may reach T — no key or click posted to it, no accessibility write or action on its
+    /// elements (round 17, the review of round 16's H1: I6 was checked only at an act's start).
+    var actOnT = false
+    /// The user started working in T during the running act (the world's own moment). Sticky for the rest of the act —
+    /// leaving T afterwards does not reopen it (the review of round 17, M1).
+    var actWorkSeen = false
+    /// T became the app the user works in (called wherever the world's mark is set).
+    func workBegan(_ app: pid_t) { if app == SimPid.target, actOnT { actWorkSeen = true } }
     var stepsRetiredAtStart = 0
     var targetForwardDuringOp = false
     var ctx: [SimCtx] = []
@@ -636,13 +655,16 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     }
 
     /// A key: the tap sees none under Secure Event Input.
-    func key(_ type: CGEventType, flags f: CGEventFlags = [], keycode: Int64 = 0) {
+    func key(_ type: CGEventType, flags f: CGEventFlags = [], keycode: Int64 = 0, rerouteDecides: Bool = false) {
         hardware(observable: !secure)
         guard !secure else { return }
         // A key the tap sees (typing — no ⌘/⌃ chord) while an agent target is in front: the contract counts it as work in
         // it (round 10's I6), wherever the key lands (Spotlight's panel too: the engine can't tell).
         let receiver = lock.withLock { front }
-        if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl) { userInteracted(receiver) }
+        // (A key the focus blip's reroute takes decides by where it sends it — PROTOCOL §4.12 I6, 1.15.0/1.16.0: a key it
+        // sends to the user's place is no work in the target in front; `userKey` marks the one it lets through.)
+        let reroutes = rerouteDecides && lock.withLock { keyFocus == SimPid.target && receiver == SimPid.target && installer?.isInstalled == true }
+        if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl), !reroutes { userInteracted(receiver) }
         // Their typing in an app left in front: it is their place now — no restore may pull them out of it (the ruling,
         // round 16: STRICT, every answer moves there).
         if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl), keycode != 53 {
@@ -734,7 +756,11 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         let bundle = pid.flatMap { bundles[$0] }
         let last = openers.last { o in anyReach || (o.scope.map { s in bundle.map(s.contains) ?? false } ?? true) }?.at ?? -.infinity
         let quiet = now - lastObservableHardwareAt, opener = now - last
-        return secure ? .no : (quiet > 2_600 && opener <= 1_400) ? .yes : (quiet < 2_400 || opener > 1_600) ? .no : .edge
+        // Secure Event Input on at any moment of the 2.5 s window: never quiet (R17-a) — at its edge, either answer.
+        let sinceSecure = secure ? 0 : now - secureEndedAt
+        if sinceSecure <= 2_400 { return .no }
+        let base: Touch = (quiet > 2_600 && opener <= 1_400) ? .yes : (quiet < 2_400 || opener > 1_600) ? .no : .edge
+        return sinceSecure <= 2_600 && base == .yes ? .edge : base
     }
 
     func untouchedCause(_ pid: pid_t, indirect: Bool, why: String, newPlace n: SPlace) -> SimCause {
@@ -961,10 +987,13 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
                 default: return false
                 }
             }
-            if hasLeft(cause) { leftApps.insert(n.app) } else { leftApps.remove(n.app) }
-            if case .untouched(_, .leftAlone, _, _) = cause { leftOnly.insert(n.app) } else { leftOnly.remove(n.app) }
+            // (R17-c, the controller's ruling: a desktop visit's return to an app left in front keeps it left — their typing
+            // there still makes it their place.)
+            let visitBack: Bool = { if case .engine(.visitReturn) = cause { return true }; return false }()
+            if hasLeft(cause) || (visitBack && leftApps.contains(n.app)) { leftApps.insert(n.app) } else { leftApps.remove(n.app) }
+            if case .untouched(_, .leftAlone, _, _) = cause { leftOnly.insert(n.app) } else if !visitBack { leftOnly.remove(n.app) }
             let oldFront = front, oldSpace = space
-            if let p = pendingWork, n.app == p.app, now <= p.until { userWorkingIn = p.app; pendingWork = nil }
+            if let p = pendingWork, n.app == p.app, now <= p.until { userWorkingIn = p.app; workBegan(p.app); pendingWork = nil }
             if let w = userWorkingIn, n.app != w { userWorkingIn = nil }  // they left the app they were working in
             if n.space == 400 { focusDisplay = 2 } else { focusDisplay = 1; space1 = n.space }
             if let w = appWindow(n.app, onSpace: n.space), mainWin[n.app] != w.id {
@@ -978,6 +1007,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             zOrder.insert(n.app, at: 0)
             FocusSPI.frontPid = n.app
             core?.secureInputOverride = secure
+            noteSecureChange()
             if space != oldSpace { onDesktop?() }
             guard n.app != oldFront || space != oldSpace else { nextWiden = nil; return }
             if case .engine(.consented(let h)) = cause, space1 != oldSpace1 {
@@ -1292,7 +1322,9 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     // MARK: the user's keys (I3)
 
     func userKey(flags f: CGEventFlags = []) {
-        key(.keyDown, flags: f)
+        key(.keyDown, flags: f, rerouteDecides: true)
+        var throughToT = false
+        defer { if throughToT, !f.contains(.maskCommand), !f.contains(.maskControl) { userInteracted(SimPid.target) } }
 
         lock.withLock {
             let to = keyFocus
@@ -1301,6 +1333,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
                 lastReroute = nil
                 let e = keyEvent(stamped: false)
                 landed = h(e) != nil ? to : (lastReroute ?? -1)
+                throughToT = landed == SimPid.target && front == SimPid.target
                 stats.userKeysRerouted += 1
                 stats.keysChecked += 1
                 // During a visit, what is in front may be the visit's or a theft it leaves be: the key may go there too.

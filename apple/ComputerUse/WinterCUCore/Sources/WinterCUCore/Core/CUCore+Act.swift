@@ -173,7 +173,8 @@ extension CUCore {
                 defer { noteAgentPopups(t, before: windowsBefore, opens: opensPopups) }
                 var o: ActOutcome
                 do {
-                    o = try guardingUserView(p, t) { try perform(p, on: t, token: token) }
+                    // (Under the write guard: nothing of it reaches the target once the user works in it — round 17.)
+                    o = try guardingUserView(p, t) { try withActWriteGuard(t) { try perform(p, on: t, token: token) } }
                 } catch let e as CUError where !inVisit && Self.visitCouldHelp(e) && isOffThisDesktop(t) {
                     if p.desktopVisit == true {
                         CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): can't land from this desktop (\(e.code, privacy: .public)) — once more inside a desktop visit, as the user allowed")
@@ -937,7 +938,20 @@ extension CUCore {
                 n = next
             }
             guard !CFEqual(n, area), (try? ax.perform(n, "AXScrollToVisible")) != nil else { return nil }
-            return "its \(k == .end ? "last" : "first") element scrolled into view"
+            // Verified, never assumed (round 17, the review of round 16): the element's frame read again against what the
+            // page shows (its scroll area, else the page, within the window).
+            let shown = [scroller.flatMap { ax.frame($0) } ?? ax.frame(area), sys.window(id: t.windowID)?.frame].compactMap { $0 }
+                .reduce(nil as CGRect?) { acc, r in acc.map { $0.intersection(r) } ?? r }
+            let which = k == .end ? "last" : "first"
+            // (Read until it settles — a page scrolls a moment after the request — for 300 ms, as a focus click's point is;
+            // round 17b.)
+            let until = clock.nowMs() + 300
+            while true {
+                if let f = ax.frame(n), let shown, !shown.isNull, shown.intersects(f) { return "its \(which) element scrolled into view" }
+                if clock.nowMs() >= until { break }
+                clock.pause(ms: 30)
+            }
+            return "its \(which) element was asked into view — not confirmed (it still reads outside what the page shows)"
         default:
             return nil
         }
@@ -974,26 +988,24 @@ extension CUCore {
         let candidates = [CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.midX, y: r.maxY),
                           CGPoint(x: r.maxX, y: r.midY), CGPoint(x: r.minX, y: r.midY), CGPoint(x: r.maxX, y: r.minY)]
         let editable: Set<String> = [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole, "AXSearchField"]
+        // The app's OWN hit test at each candidate (round 17b, the review of round 17's M3: round 17 walked up to 800 nodes
+        // and failed closed on any real site): WebKit's hit test sees a link inside a `display:contents` wrapper and a
+        // positioned or overflowing child. A spot is blank when what is hit there, and every ancestor of it up to the page,
+        // takes no press, click or text — and the hit lies inside the page (else, or nothing hit: not proven blank).
         for p in candidates {
-            // The page's own nodes under the point (the last drawn on top), read live over accessibility: nothing on the
-            // way down takes a press, a click or text (a link's text, a button's label, a field) — a blank spot.
-            var chain: [AXUIElement] = [area]
-            var budget = 400
-            var level = area
-            descend: while budget > 0 {
-                for c in ax.elements(level, kAXChildrenAttribute).reversed() {
-                    budget -= 1
-                    if let f = ax.frame(c), f.width > 0, f.height > 0, f.contains(p) { chain.append(c); level = c; continue descend }
-                }
-                break
+            guard let hit = ax.elementAt(pid: t.pid, p) else { continue }
+            var n: AXUIElement? = hit
+            var inside = false, acts = false
+            for _ in 0..<60 {
+                guard let x = n else { break }
+                if CFEqual(x, area) { inside = true; break }
+                let role = ax.string(x, kAXRoleAttribute) ?? ""
+                let actions = ax.actions(x)
+                if Self.clickableRoles.contains(role) || editable.contains(role)
+                    || actions.contains(kAXPressAction) || actions.contains("AXOpen") || actions.contains("AXConfirm") { acts = true; break }
+                n = ax.element(x, kAXParentAttribute)
             }
-            let acts = chain.dropFirst().contains { n in
-                let role = ax.string(n, kAXRoleAttribute) ?? ""
-                let actions = ax.actions(n)
-                return Self.clickableRoles.contains(role) || editable.contains(role)
-                    || actions.contains(kAXPressAction) || actions.contains("AXOpen") || actions.contains("AXConfirm")
-            }
-            if !acts { return p }
+            if inside, !acts { return p }
         }
         return nil
     }
@@ -1900,21 +1912,21 @@ extension CUCore {
         }
         if let item = try enabledItem() {
             CULog.act.notice("menu in \(t.appName, privacy: .public): “\(title, privacy: .public)” reads enabled — no focus blip")
-            return try pressMenu(item, t)
+            return try pressMenuInBackground(p, item, t)
         }
         // In front: disabled for what it applies to (the disabled error).
-        guard sys.frontmostPid() != t.pid else { return try pressMenu(try resolveMenu(a, p, t), t) }
-        switch try pressInBlip(p, t, title: title, read: enabledItem, press: { try pressMenu($0, t) }) {
+        guard sys.frontmostPid() != t.pid else { return try pressMenuInBackground(p, try resolveMenu(a, p, t), t) }
+        switch try pressInBlip(p, t, title: title, read: enabledItem, press: { try pressMenuInBackground(p, $0, t) }) {
         case .pressed(let note):
             blipped = true
             return note
         case .stillDisabled:
             blipped = true
-            return try pressMenu(try resolveMenu(a, p, t), t)  // the disabled error (or enabled at last)
+            return try pressMenuInBackground(p, try resolveMenu(a, p, t), t)  // the disabled error (or enabled at last)
         case .unavailable:
             CULog.act.notice("menu in \(t.appName, privacy: .public): “\(title, privacy: .public)” reads disabled and no focus blip is possible — the activation again, read for \(Int(self.menuSettleMs), privacy: .public) ms")
             activateForMenu(p, t)
-            return try pressMenu(try resolveMenuSettled(a, p, t), t)
+            return try pressMenuInBackground(p, try resolveMenuSettled(a, p, t), t)
         }
     }
 
@@ -2336,7 +2348,12 @@ extension CUCore {
                 // control, never the AXFocused write on web content (round 16, P2).
                 if let area = webAreaAncestor(of: el), !(reportedFocus(t).map { isInside($0, area) } ?? false) {
                     if let spot = blankSpot(in: area, t) {
-                        let placed = (try? pressToFocus(area, t, clickAt: spot)) ?? false
+                        // (A refusal "the user is working in it" is never swallowed here: the fallback below would write to
+                        // the page after it — round 17, the review of round 16's H1.)
+                        let placed: Bool
+                        do { placed = try pressToFocus(area, t, clickAt: spot) } catch let e as CUError where Self.isUserWorkingRefusal(e) {
+                            throw e
+                        } catch { placed = false }
                         CULog.act.notice("key in \(t.appName, privacy: .public): the page had no keyboard focus — a click on a blank spot of it \(placed ? "placed" : "did not confirm", privacy: .public) it")
                     }
                     // Still none (a background WKWebView keeps it from a blank spot — measured, run138): End, Home, Page
@@ -2346,6 +2363,21 @@ extension CUCore {
                         CULog.act.notice("key in \(t.appName, privacy: .public): \(a.combo, privacy: .public) — the page had no keyboard focus: \(how, privacy: .public)")
                         return ActOutcome(rung: .accessibility, detail: "the page had no keyboard focus, so \(a.combo) was done over accessibility (\(how)) — \(Self.elementLabel(into, info)) was not pressed")
                     }
+                    // Still outside the control's page, shown just now: the key would act on something else (round 17, the
+                    // review of round 16: ↓ aimed at a web link in Mail moved the message list) — refused, nothing sent.
+                    if !(reportedFocus(t).map { isInside($0, area) } ?? false) {
+                        // (Said as it is: an app that reports no focused element — Electron, Chromium often — is not shown
+                        // to have its focus outside the page; it does not say where it is. Refused either way — round 17b.)
+                        let whereFocus = reportedFocus(t) == nil
+                            ? "\(t.appName) doesn't say where its keyboard focus is (it reports no focused element), so \(a.combo) could act on something other than the page that holds [\(into)]"
+                            : "the keyboard focus is outside the page that holds [\(into)], so \(a.combo) would act on something else"
+                        throw CUError.refused(.focusNotPlaced, "\(whereFocus) — nothing was sent; click(\(into)) acts on it, or scroll(\(into)) moves the page")
+                    }
+                }
+                // A navigation key goes to where the focus is ONCE per call (round 17, the review of round 16: "pressed once"
+                // said so and `repeat` up to 100 was allowed — the safer way): the focus it lands on is not the control's.
+                guard rep == 1 else {
+                    throw CUError.unsupported("\(a.combo) aimed at \(Self.elementLabel(into, info)) goes to where the keyboard focus is, once per call — repeat is not taken here (scroll(\(into)) moves the page)")
                 }
                 e = reportedFocus(t)
             } else {
@@ -3187,7 +3219,10 @@ extension CUCore {
             if let fromInfo { announceTarget(t, fromInfo, pressing: false) }
             return try eventsElsewhere(p, t, token, cursor: CursorEvent(kind: "drag", point: from, dragTo: to), what: "the drag",
                                        subject: subject) { synth, route in
-                try synth.drag(pid: t.pid, windowFor: { _ in t.windowID }, from: from, to: to, route: route)
+                // (Each step checked like the on-screen routes': the user's work stops it, the button released where it
+                // stopped — round 17b, H1.)
+                try synth.drag(pid: t.pid, windowFor: { _ in t.windowID }, from: from, to: to, route: route,
+                               check: { [self] _, _ in try token.check(); try refuseIfUserWorkMarked(t) })
             }
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
@@ -3779,6 +3814,16 @@ extension CUCore {
         return item
     }
 
+    /// The background path's press (round 17, the review of round 16's H2): `menu()` checked the user's window at its
+    /// start, but the selection hold, `keyForMenu`, the activation and the walk can take about a second — the user may have
+    /// clicked into another window of the app meanwhile (the command would act on THEIR window) or started working in it.
+    /// Both are checked again right before the press.
+    private func pressMenuInBackground(_ p: TargetActParams, _ item: CUAXMenuNode, _ t: CUTarget) throws -> String? {
+        if let refusal = coveredWindowRefusal(t, allowForeground: p.allowForeground, menu: true) { throw refusal }
+        try refuseIfUserWorkMarked(t)
+        return try pressMenu(item, t)
+    }
+
     /// Presses a menu item; a note when the app answered with an error but the command took effect.
     @discardableResult
     private func pressMenu(_ item: CUAXMenuNode, _ t: CUTarget) throws -> String? {
@@ -3845,6 +3890,7 @@ extension CUCore {
         case .foreground:
             let check: CUEventSynth.PointerCheck = { [self] _, point in
                 try token.check()
+                try refuseIfUserWorkMarked(t)  // every press, drag step and release (round 17b, H1)
                 try hitTest(point, t)
             }
             cursor(t, "foreground", at: sys.cursorLocation(), text: "on", remember: false)
@@ -3859,7 +3905,7 @@ extension CUCore {
             CUUserInputGuard.waitForQuiet()
             // No focus records here (the user's ruling: the focus blip is for menu validation only, never for
             // typing, clicks or reads): window-targeted events after the synthetic activation.
-            let used = try body(.skyLight) { _, _ in try token.check() }
+            let used = try body(.skyLight) { [self] _, _ in try token.check(); try refuseIfUserWorkMarked(t) }
             if used != .skyLight {
                 logOnce("skylight-fallback", "SkyLight posting unavailable; falling back to public pid events")
                 return ActOutcome(rung: .processEvents, detail: "the private event path failed, so public events were used")
@@ -3868,7 +3914,7 @@ extension CUCore {
         case .accessibility, .processEvents:
             send(event, t)
             if focus { syntheticFocus(t) }
-            _ = try body(.publicPid) { _, _ in try token.check() }
+            _ = try body(.publicPid) { [self] _, _ in try token.check(); try refuseIfUserWorkMarked(t) }
             return ActOutcome(rung: .processEvents, detail: d.detail)
         }
     }

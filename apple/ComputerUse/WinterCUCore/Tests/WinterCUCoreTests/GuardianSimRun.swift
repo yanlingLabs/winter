@@ -268,9 +268,24 @@ final class SimRun {
             }
             for (pid, els) in apps { ax.put(ax.application(pid), [kAXWindowsAttribute: els]) }
         }
+        // I6 in flight (round 17, the review of round 16's H1): an act on T that began before the user worked in it must
+        // stop reaching T the moment they do — the world's own moment, whatever the engine knew.
+        let tTokens: Set<String> = ["\(SimPid.target)", "97002", "97030", "97031"]
+        let isT = { (token: Substring) -> Bool in
+            if tTokens.contains(String(token)) { return true }
+            guard let id = byToken[String(token)] else { return false }
+            return w.lock.withLock { w.wins[id]?.pid } == SimPid.target
+        }
+        let inFlightCheck = { (what: String) in
+            // (Sticky: once they started working in T during the act, it holds after they leave T too — the review of
+            // round 17, M1.)
+            guard w.lock.withLock({ w.actOnT }), w.userWorks(in: SimPid.target) || w.lock.withLock({ w.actWorkSeen }) else { return }
+            w.lock.withLock { w.fail("I6 (in flight): the agent's \(what) reached T after the user started working in it") }
+        }
         ax.onPerform = { what in
             let parts = what.split(separator: ":")
             guard parts.count == 2 else { return }
+            if isT(parts[0]), parts[1] != "AXRaise" { inFlightCheck("accessibility action \(parts[1])") }  // (a raise: a restore's)
             // A raise (a restore's or an act's: no cause either way — the engine counts the act itself); an action on an
             // agent target's element: an event of the agent's (the latest its last cause can be).
             if parts[1] == "AXRaise", let id = byToken[String(parts[0])] { w.raised(id) }
@@ -281,6 +296,9 @@ final class SimRun {
         ax.onSet = { what in
             let parts = what.split(separator: ":")
             guard parts.count == 2 else { return }
+            // (Not AXFrontmost: an activation of T is a restore of the user's place — the guardian's, judged by I1–I5 — never
+            // the act's input.)
+            if isT(parts[0]), parts[1] != "AXFrontmost" { inFlightCheck("accessibility write \(parts[1])") }
             if parts[1] == "AXFrontmost", let pid = pid_t(parts[0]) {
                 w.engineActivates(pid, how: "AXFrontmost", refusable: false)
             } else if parts[1] == "AXMain", let id = byToken[String(parts[0])] {
@@ -358,6 +376,7 @@ final class SimRun {
         core.focusEnforcerFactory = { _ in enforcer }
         poster.onPost = { e in
             guard e.type == .keyDown || e.type == .leftMouseDown else { return }
+            if e.pid == SimPid.target { inFlightCheck(e.type == .keyDown ? "key" : "click") }
             w.lock.withLock {
                 w.lastPostAt = w.now
                 // A change during this act that brought T forward (by itself, or by the user's own move): at most the one
@@ -485,6 +504,14 @@ final class SimRun {
             core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: clock.nowSeconds())
             // A click on that app's Dock tile: input for THAT app, claimed (the contract).
             let i = w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, target: a, claim: true, dest: a))
+            // R17-b (the controller's ruling): a click on the FRONT app's Dock tile makes that app their place AT THE CLICK,
+            // strictly — a replacement, never a union (as a click into its window does).
+            w.lock.withLock {
+                guard a == w.front, !w.visiting else { return }
+                let cur = SPlace(app: w.front, space: w.space)
+                w.cands = [SimCand(place: cur, expected: cur, held: nil)]
+                w.log("  (a click on the front app's Dock tile: \(cur) is their place now)")
+            }
             w.lock.withLock { w.dockTileApp = a }
             _ = core.onPhysicalClick(at: CGPoint(x: 800, y: 975), userData: 0, now: clock.nowSeconds())
             w.lock.withLock { w.dockTileApp = nil }
@@ -568,6 +595,7 @@ final class SimRun {
             w.lock.withLock {
                 w.secureEntry = on
                 core.secureInputOverride = w.secure
+                w.noteSecureChange()
             }
             w.log("Terminal's Secure Keyboard Entry \(on ? "on" : "off")")
         case .userLaunch(let after):
@@ -947,6 +975,8 @@ final class SimRun {
             let working = w.userWorks(in: tpid)
             if !working { w.agentBegins(tpid) }
             defer { if !working { w.agentEnds(tpid) } }
+            w.lock.withLock { w.actOnT = !working; w.actWorkSeen = false }
+            defer { w.lock.withLock { w.actOnT = false } }
             let opener = CUCore.actCanOpenApps(action) && !working
             if opener { w.lock.withLock { w.noteOpener(w.targetScope) } }
             defer { if opener { w.lock.withLock { w.noteOpener(w.targetScope) } } }
@@ -960,7 +990,9 @@ final class SimRun {
                 let refusedForWork = e?.code == "refused" && e?.data?["reason"] == .string("user_working")
                 // (Refused mid-act is right when they started working in it DURING the act — round 16, P1: an act in flight checks
                 // the work mark before every focus placement and key. Never when they don't work in it at the refusal either.)
-                if refusedForWork, !working, !w.userWorks(in: tpid) {
+                // (Sticky: right too when they worked in it at any moment of the act and have left since — the review of
+                // round 17, M1.)
+                if refusedForWork, !working, !w.userWorks(in: tpid), !w.lock.withLock({ w.actWorkSeen }) {
                     w.lock.withLock { w.fail("I6: the act was refused as \"the user is working in it\", but they are not (only switched there, or left it)") }
                 } else if refusedForWork {
                     w.lock.withLock { w.stats.handsOff += 1 }
