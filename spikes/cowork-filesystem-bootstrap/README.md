@@ -147,7 +147,7 @@ from independent review; calculating a fresh digest is not approval.
 sudo /usr/bin/python3 -I -S -B -c '
 import hashlib,os,stat,sys
 source,digest,*arguments=sys.argv[1:]
-fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
 try:
     identity=os.fstat(fd)
     if not stat.S_ISREG(identity.st_mode) or identity.st_nlink!=1 or identity.st_size>4194304:raise SystemExit("parent identity refused")

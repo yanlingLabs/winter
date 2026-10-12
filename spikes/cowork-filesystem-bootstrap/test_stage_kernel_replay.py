@@ -64,4 +64,7 @@ class StageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'staging ancestry'):stage.run_staged(original,self.approved)
             run.assert_not_called()
         (parent/'displaced').chmod(0o700)
+    def test_fifo_input_is_refused_without_waiting_for_a_writer(self):
+        target=self.source/'bootstrap.py';target.unlink();os.mkfifo(target,0o600)
+        with self.assertRaisesRegex(ValueError,'review input identity'):stage.capture(self.source,self.artifacts,self.path,self.approved)
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -13,7 +13,7 @@ def checked_bytes(directory,name,expected):
     # Hold a directory and exact no-follow leaf descriptor; never reopen original
     # spelling after checking an alias or trust caller-provided imports/search paths.
     folder=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
-    try:fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=folder)
+    try:fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=folder)
     finally:os.close(folder)
     try:
         identity=os.fstat(fd)
