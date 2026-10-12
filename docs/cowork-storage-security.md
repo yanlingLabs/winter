@@ -35,6 +35,15 @@ Keep ordinary Code, hooks, LSP and third-party tool behavior, with no extra oute
 floor or injected sandbox-disabling flags. Purpose-built worker/bridge sandboxes
 and guest tool compartments remain enforced boundaries.
 
+Activation has an explicit residual: live policy updates cover subsequent file
+checks and newly launched sandboxed commands, not commands already running with
+an earlier sandbox profile. A pre-existing Dispatch Bash command or background
+task may therefore read Cowork files created after provisioning. Native Code's
+idle/restart boundary reduces this window but does not stop background tasks that
+outlive the turn. First-version activation does not claim to revoke those
+processes or scrub their prior context; retaining live host sessions accepts this
+window alongside the same-user and approved-escape residuals above.
+
 Exclude private images and their backing-store paths from automatic Time Machine
 backup at creation, and verify the exclusion before activation. Use the supported
 sticky item exclusion (`tmutil addexclusion` without `-p`), which travels
