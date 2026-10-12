@@ -29,7 +29,7 @@ import type { TabRunScope } from "./tab-scope";
 import { redactText, redactUrl } from "./page-runtime/redact";
 import { cssSelectorRefusal } from "./page-runtime/rules";
 import { escapeInvisible } from "./page-runtime/webmcp";
-import { HOLD_CEILING_SENTENCE, pickerSentence, shownUrl, SITE_TOOL_STOP_GRACE_MS, TabDriver, transportFailure, transportHasCdp3, USER_TAB_FULL_PAGE } from "./tab-driver";
+import { HOLD_CEILING_SENTENCE, isWakeHolder, pickerSentence, shownUrl, SITE_TOOL_STOP_GRACE_MS, TabDriver, transportFailure, transportHasCdp3, USER_TAB_FULL_PAGE } from "./tab-driver";
 import { HttpReader } from "./http-read";
 import { TransportError, type BackendId, type BrowserFamily, type CdpTransport, type TransportTab } from "./transport";
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
@@ -725,7 +725,8 @@ export class BrowserEngine {
 
   private stopPressed(backend: BackendId, tabKey: string): void {
     const d = this.drivers.get(tabKeyOf(backend, tabKey));
-    for (const sid of d?.holders ?? []) this.deps.stopScript?.(sid, "the user pressed Stop in the browser");
+    // Sessions only: a wake trigger's hold (`wake:<id>`) runs no script.
+    for (const sid of d?.holders ?? []) if (!isWakeHolder(sid)) this.deps.stopScript?.(sid, "the user pressed Stop in the browser");
   }
 
   private driverFor(backend: BackendId, tabKey: string): TabDriver {

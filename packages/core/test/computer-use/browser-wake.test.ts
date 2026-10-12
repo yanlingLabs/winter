@@ -551,6 +551,19 @@ describe("rekey, leaks", () => {
     expect(s.events[0]).toMatchObject({ outcome: "lost", reason: "the tab was closed" });
   });
 
+  test("Stop pressed in a browser on a tab a trigger holds stops the sessions' scripts only — never a wake holder as a session", async () => {
+    const s = setup();
+    const tab = await s.userTab();
+    await s.arm(tab.targetId, { kind: "titled", title: "Ready" });
+    s.h.chrome.pressStop("7");
+    expect(s.h.stops.map((x) => x.sessionId)).toEqual(["s1"]);
+    s.r.end();
+    s.h.engine.turnEnded("s1");
+    await sleep(30);
+    s.h.chrome.pressStop("7");
+    expect(s.h.stops.map((x) => x.sessionId)).toEqual(["s1"]);
+  });
+
   test("the debugger path's navigation listener goes with the tab's last watch", async () => {
     const s = setup();
     const tab = await s.winterTab();
