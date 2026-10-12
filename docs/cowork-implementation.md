@@ -103,6 +103,20 @@ separately. Cowork remains unavailable until its required gates pass.
   stalled and exits 77 with effects uncertain. Telemetry serialization is being
   fixed; no live MMIO reset/host disconnect or full resource gate is claimed.
   See the [frozen audit](https://github.com/yanlingLabs/winter/blob/86e9cfb7/docs/research/2026-10-12-cowork-generic-fixture-independent-postrun-review.md).
+- The separate sampler-channel correction has a clean passing live aggregate at
+  build `477d204b`, with zero malformed or reconstructed telemetry. Independent
+  audit and root replay verified all 1,568 request lifecycles, captured bytes and
+  disk words, plus 19 epochs/302 replacements outside 128 frozen pins. Active
+  footprint drops were 246.922/247.875/245.953 MiB. The earlier failed evidence
+  remains unchanged. This still covers one RAW disk and the generic port, not
+  the forthcoming two-volume production profile. See the
+  [clean sampler audit](https://github.com/yanlingLabs/winter/blob/b8584b16/docs/research/2026-10-12-cowork-sampler-independent-postrun-review.md).
+- The actual Winter runtime now cross-builds to Linux ARM64 using an explicit,
+  version/hash-pinned Bun base and a private verified copy for compilation.
+  SDK PR #4 (`c4227c45`) has designated source acceptance and all 12 CI checks
+  passing. The binary's ELF interpreter and glibc dependencies are recorded;
+  actual Linux execution, immutable image library pins and guest page-size checks
+  remain open. No Linux package release or Winter dependency pin changed.
 - Project peer messaging/discovery authority is merged into the feature
   composition through PR #23. Canonical membership, stale-index refusal,
   post-resume checks and host-path redaction are tested; durable cross-restart
