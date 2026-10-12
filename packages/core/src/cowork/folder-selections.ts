@@ -4,6 +4,8 @@ import { isAbsolute, resolve } from "node:path";
 import { openDirAt, AT_FDCWD } from "../computer-use/browser/fd-fs";
 import { canonicalizeForWrite } from "../agent/paths";
 import { CoworkError, type SourceAccess, type SourceSelection } from "./types";
+import { CoworkFolderGrants } from "./folder-grants";
+import type { WorkspaceSource } from "./types";
 import type { CoworkPrincipal } from "./authority";
 import { resolveMacFolderBookmark, type FolderBookmarkResolver, type ResolvedFolderBookmark } from "./folder-bookmark";
 
@@ -15,6 +17,7 @@ export interface FolderSelectionOptions {
   resolver?: FolderBookmarkResolver;
   now?: () => number;
   ttlMs?: number;
+  durable?: CoworkFolderGrants;
 }
 const denied = () => { throw new CoworkError("authority_denied"); };
 function identity(fd: number): string {
@@ -48,17 +51,18 @@ export class CoworkFolderSelections {
     this.timer = setInterval(() => this.sweep(), Math.min(this.ttl, 10_000)); this.timer.unref();
   }
   private owner(principal: CoworkPrincipal) { if (principal.kind !== "local-user") return denied(); return principal.id; }
-  private checkRoot(path: string): string {
-    if (!isAbsolute(path) || path.includes("\0")) return denied();
-    const canonical = realpathSync(path), target = canonical.toLowerCase();
+  private checkPolicy(canonical: string): void {
+    const target = canonical.toLowerCase();
     for (const root of this.options.protectedRoots()) {
-      // Include literal and resolved spellings even for a not-yet-created protected child.
-      const spellings = [resolve(root), canonicalizeForWrite(resolve(root))];
-      for (const spelling of spellings) {
-        const protectedPath = spelling.toLowerCase();
-        if (target === protectedPath || target.startsWith(protectedPath + "/") || protectedPath.startsWith(target === "/" ? "/" : target + "/")) return denied();
+      for (const spelling of [resolve(root), canonicalizeForWrite(resolve(root))]) {
+        const p=spelling.toLowerCase();
+        if (target===p || target.startsWith(p+"/") || p.startsWith(target==="/"?"/":target+"/")) return denied();
       }
     }
+  }
+  private checkRoot(path: string): string {
+    if (!isAbsolute(path) || path.includes("\0")) return denied();
+    const canonical = realpathSync(path); this.checkPolicy(canonical);
     return canonical;
   }
   prepare(principal: CoworkPrincipal, connectionId: number, bookmarkBase64: string, label: string, access: SourceAccess, requestId: string = randomUUID()): PreparedFolder {
@@ -112,15 +116,57 @@ export class CoworkFolderSelections {
     if (!entry || entry.owner !== owner || entry.connectionId !== connectionId) return undefined;
     try { this.validate(entry); return structuredClone(entry.selection); } catch { this.drop(id); return undefined; }
   }
+  /** Native preflight before the repository starts its IMMEDIATE mutation. */
+  prepareConsumption(principal: CoworkPrincipal, connectionId: number, id: string): { bind(source: WorkspaceSource): void; committed(): void } {
+    const owner = this.owner(principal), entry = this.entries.get(id), durable = this.options.durable;
+    if (this.closed || !durable || !entry || entry.owner !== owner || entry.connectionId !== connectionId || durable.consumed(id)) return denied();
+    this.validate(entry);
+    let bound = false;
+    return {
+      bind: source => {
+        if (this.closed || this.entries.get(id) !== entry || this.now() >= entry.expires || identity(entry.fd) !== entry.identity) return denied();
+        this.checkPolicy(entry.path);
+        durable.bind(source, owner, id, {
+          bookmark: entry.bookmark, path: entry.path, identity: entry.identity,
+          rootIdentity: entry.selection.detail.rootIdentity, grantRef: entry.selection.detail.grantRef, access: entry.selection.access,
+        });
+        bound = true;
+      },
+      committed: () => { if (bound && durable.consumed(id)) this.drop(id); },
+    };
+  }
   folder(grantRef: string) {
     if (this.closed) return undefined;
     this.sweep(); const id = this.grantIds.get(grantRef), entry = id ? this.entries.get(id) : undefined;
-    if (!entry) return undefined;
+    if (!entry) {
+      const grant = this.options.durable?.get(grantRef);
+      if (!grant) return undefined;
+      let scoped: ResolvedFolderBookmark | undefined, fd: number | undefined;
+      try {
+        scoped = (this.options.resolver ?? resolveMacFolderBookmark)(grant.bookmark);
+        const path = this.checkRoot(scoped.path);
+        if (path !== grant.path) return denied();
+        fd = directory(path);
+        if (identity(fd) !== grant.identity) return denied();
+        accessSync(path, constants.R_OK | constants.X_OK | (grant.access === "read-write" ? constants.W_OK : 0));
+        // Final reopen/descriptor comparison after all intake work; no replacement adoption.
+        const second = directory(path);
+        try { if (identity(second) !== grant.identity) return denied(); } finally { closeSync(second); }
+        return { rootIdentity: grant.rootIdentity, writable: grant.access === "read-write", revoked: false };
+      } catch {
+        this.options.durable!.invalidate(grant);
+        return undefined;
+      } finally {
+        if (fd !== undefined) closeSync(fd);
+        scoped?.close(); grant.bookmark.fill(0);
+      }
+    }
     try { this.validate(entry); return { rootIdentity: entry.selection.detail.rootIdentity, writable: entry.selection.access === "read-write", revoked: false }; }
     catch { this.drop(id!); return undefined; }
   }
   revoke(principal: CoworkPrincipal, connectionId: number, id: string): void {
     const owner = this.owner(principal), entry = this.entries.get(id);
+    if (this.options.durable?.consumed(id)) return; // UI cleanup cannot revoke an accepted source grant.
     if (!entry) {
       if ([...this.requests.values()].some(r => r.selectionId === id && r.owner === owner && r.connectionId === connectionId)) return;
       return denied();

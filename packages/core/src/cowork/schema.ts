@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 /** Reverse dependency order also permits removing an unused additive schema on explicit rollback. */
-export const COWORK_TABLES = ["cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
+export const COWORK_TABLES = ["cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
 
 /** Host authority only. A guest manifest or rebuilt session index never populates these tables. */
 export function migrateCoworkSchema(db: Database): void {
@@ -126,4 +126,23 @@ export function migrateCoworkFilesystemSchema(db: Database): void {
       SELECT volume_id,home_id,workspace_id,creation_id,purpose,format,format_version,capacity_bytes,sector_bytes,filesystem_block_bytes,state,'recovery-required',device,inode,uid,mode,owner_json,last_stop_id,created_at,updated_at FROM cowork_volumes_v9;
     DROP TABLE cowork_volumes_v9;
   `);
+}
+
+
+/** Protected, source-bound local grants. Never reconstruct from a guest/storage manifest. */
+export function migrateCoworkFolderGrantSchema(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS cowork_folder_grants (
+    grant_ref TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES cowork_home_identity(home_id),
+    workspace_id TEXT NOT NULL, source_id TEXT NOT NULL UNIQUE,
+    principal_id TEXT NOT NULL, selection_id TEXT NOT NULL UNIQUE,
+    root_identity TEXT NOT NULL, root_device TEXT NOT NULL, root_inode TEXT NOT NULL,
+    root_path TEXT NOT NULL, access TEXT NOT NULL CHECK(access IN ('read-only','read-write')),
+    bookmark BLOB NOT NULL CHECK(typeof(bookmark)='blob' AND length(bookmark)<=65536),
+    state TEXT NOT NULL CHECK(state IN ('active','revoked')), revision INTEGER NOT NULL CHECK(revision>0),
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    CHECK(state='revoked' OR (length(bookmark)>0 AND length(root_path)>0 AND length(root_path)<=4096)),
+    FOREIGN KEY(workspace_id,source_id) REFERENCES cowork_sources(workspace_id,source_id)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS cowork_folder_grants_root ON cowork_folder_grants(workspace_id,root_device,root_inode) WHERE state='active';
+  CREATE INDEX IF NOT EXISTS cowork_folder_grants_scope ON cowork_folder_grants(workspace_id,source_id);`);
 }
