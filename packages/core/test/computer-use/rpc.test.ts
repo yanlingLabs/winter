@@ -87,7 +87,7 @@ describe("computerUse.* (local-only RPCs)", () => {
     await c.hello(tokens.harness, "app");
     const r1 = await c.request(METHODS.computerUseStatus, {});
     expect(r1.result).toEqual({
-      enabled: true, allowAllApps: true, legacyComputer: false, mirror: false, privateEventPath: true, headlessEnabled: true, webmcp: true,
+      enabled: true, allowAllApps: true, legacyComputer: false, mirror: false, privateEventPath: true, headlessEnabled: true, webmcp: true, wakes: true,
       helper: { installed: true, running: false },
       // Phase 4: Winter's headless browser is always listed (a test daemon finds it only through $WINTER_HEADLESS_APP).
       browsers: [{ id: "winter", name: "Winter (built-in)", connected: false, reason: "Winter isn't running" },

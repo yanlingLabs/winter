@@ -440,6 +440,47 @@ export const ChildUpdateEvent = ThreadBase.extend({
  *  given, so the durable send queue keeps its pairing. */
 export const DISPATCH_WAKE_CLIENT_NAME = "dispatch-wake";
 
+/** ComputerV2 wake triggers (2026-10-12): the `clientName` of the `user_message` that WAKES a session when a trigger
+ *  its model armed (`target.wakeWhen(…)`) ends — the user clicked what it waited for, the target was lost, or Winter
+ *  restarted (core's `computer-use/wakes/`). The daemon wrote it, not the user: clients render it as a notice built from
+ *  the `wake_armed`/`wake_ended` pair, never as a user bubble. Not a variant, for the same reason as
+ *  `DISPATCH_WAKE_CLIENT_NAME` (Swift mirror: `SessionModel`'s `computerWakeClientName`). */
+export const COMPUTER_WAKE_CLIENT_NAME = "computer-wake";
+
+/** A wake trigger's id: `wk_` + 12 hex. */
+export const WAKE_ID_PATTERN = /^wk_[0-9a-f]{12}$/;
+/** The longest label a wake event carries (the target, the element) — screen-derived, so bounded here, and cut by
+ *  the producer before it is appended. */
+export const WAKE_LABEL_MAX = 200;
+/** What a trigger waits for (`computer-use/wakes/types.ts`'s `WakeConditionKind`). */
+export const WakeConditionKind = z.enum(["clicked", "submitted", "navigated", "appeared", "gone", "changed", "titled"]);
+/** How a trigger ended (`computer-use/wakes/types.ts`'s `WakeEndReason`). */
+export const WakeEndReason = z.enum(["fired", "lost", "expired", "cancelled", "restart", "disabled"]);
+
+/** ComputerV2 wake triggers: the model armed a trigger on a bound app or tab (`wakeWhen`). PERSISTED on the session's
+ *  main thread, and broadcast to every harness like `session_titled` (the session list's "waiting for you" mark). The
+ *  labels are what the user sees ("Chrome — Developer Dashboard", “Submit for review”), redacted by the backend and
+ *  cut to `WAKE_LABEL_MAX`; the model's own `note` is NEVER here (it is for the model alone). `expiresAt`: epoch ms.
+ *  The Mac shows a pill while it is armed: "Waiting for you · click “Submit for review” in Chrome · 52 min left". */
+export const WakeArmedEvent = ThreadBase.extend({
+  type: z.literal("wake_armed"),
+  wakeId: z.string().regex(WAKE_ID_PATTERN),
+  condition: WakeConditionKind,
+  targetLabel: z.string().max(WAKE_LABEL_MAX),
+  elementLabel: z.string().max(WAKE_LABEL_MAX).optional(),
+  expiresAt: z.number().int().nonnegative(),
+});
+
+/** ComputerV2 wake triggers: a trigger ended — `fired` / `lost` (its backend), `expired`, `cancelled` (the model or
+ *  the user), `disabled` (the setting turned off, the session archived), `restart` (reported at the next boot).
+ *  Appended for EVERY ending, whether or not the session is woken for it. `at`: epoch ms. */
+export const WakeEndedEvent = ThreadBase.extend({
+  type: z.literal("wake_ended"),
+  wakeId: z.string().regex(WAKE_ID_PATTERN),
+  reason: WakeEndReason,
+  at: z.number().int().nonnegative(),
+});
+
 /** CC-parity phase 3 (Workflows, Track D Task D1): the wire counterpart of WorkflowRuntime's
  *  internal `WorkflowRuntimeEvent` (core's `workflows/runtime.ts`) — the daemon's `onEvent` bridge
  *  (daemon.ts) maps its `started`/`progress`/`completed`/`failed` variants onto these 4 events so
@@ -1109,6 +1150,8 @@ export const SessionEvent = z.discriminatedUnion("type", [
   PanelCommandEvent,
   ProviderLoginProgressEvent,
   ProviderLoginFinishedEvent,
+  WakeArmedEvent,
+  WakeEndedEvent,
 ]);
 export type SessionEvent = z.infer<typeof SessionEvent>;
 

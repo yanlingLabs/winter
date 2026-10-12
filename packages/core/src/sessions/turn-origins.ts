@@ -19,7 +19,7 @@
 // its continuation lands, and a daemon-held `send` queued earlier keeps its own place. From then on the
 // running turn's origin reads as the folded message's: a peer's message folded into a human turn makes
 // it automated, the user's steer folded into Dispatch's turn makes it human.
-import type { SessionEvent } from "@yanlinglabs/winter-protocol";
+import { COMPUTER_WAKE_CLIENT_NAME, type SessionEvent } from "@yanlinglabs/winter-protocol";
 
 /** The projector's own pass-through `user_message` (it echoes the child's view; never a host push). */
 const PROJECTOR_PASSTHROUGH_CLIENT = "winter";
@@ -93,8 +93,10 @@ export function mainTurnOpenInLog(events: readonly SessionEvent[]): boolean {
 
 /** Turns started by the daemon on someone else's behalf — never "owned" by a terminal that merely
  *  attached to watch (`activity-enforcement.ts`): another session's SendMessage, Dispatch's spawn
- *  prompt and its own wake. */
-export const AUTOMATED_TURN_ORIGINS: ReadonlySet<string> = new Set(["messaging", "dispatch", "dispatch-wake"]);
+ *  prompt and its own wake, and a ComputerV2 wake trigger's message (`computer-use/wakes/`) — so a detach
+ *  never aborts a wake turn, a dispatch child's card in one stays bounded, and it lifts no desktop-switch
+ *  refusal (it is not the user writing). */
+export const AUTOMATED_TURN_ORIGINS: ReadonlySet<string> = new Set(["messaging", "dispatch", "dispatch-wake", COMPUTER_WAKE_CLIENT_NAME]);
 
 /** Was a turn of this origin started by a HUMAN — a known client's message (the Mac, the TUI, the phone, a
  *  client that named itself nothing, `"session"`) rather than one of `AUTOMATED_TURN_ORIGINS`? An unknown

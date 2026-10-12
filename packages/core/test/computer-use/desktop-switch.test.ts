@@ -203,7 +203,7 @@ describe("the desktop-switch prompt (policy)", () => {
     expect(desktopRefusalLiftFor(msg("orb"))).toBe("s1");
     expect(desktopRefusalLiftFor(msg("iphone-gateway"))).toBe("s1");
     expect(desktopRefusalLiftFor(msg(undefined))).toBe("s1");
-    for (const automated of ["messaging", "dispatch", "dispatch-wake"]) expect(desktopRefusalLiftFor(msg(automated))).toBeUndefined();
+    for (const automated of ["messaging", "dispatch", "dispatch-wake", "computer-wake"]) expect(desktopRefusalLiftFor(msg(automated))).toBeUndefined();
     expect(desktopRefusalLiftFor({ type: "turn_started", seq: 2, ts: 0, sessionId: "s1", threadId: "main" } as unknown as SessionEvent)).toBeUndefined();
   });
 

@@ -165,7 +165,7 @@ function harness(rows: Record<string, ActivityRow> = { s1: { mode: "code" } }) {
 }
 
 describe("a terminal detach never aborts a turn the daemon started on someone else's behalf (2026-10-02)", () => {
-  for (const origin of ["messaging", "dispatch", "dispatch-wake"]) {
+  for (const origin of ["messaging", "dispatch", "dispatch-wake", "computer-wake"]) {
     test(`a ${origin}-started turn keeps running when a terminal attaches and detaches — no provisional mark, no grace`, () => {
       const h = harness();
       h.running.add("s1");

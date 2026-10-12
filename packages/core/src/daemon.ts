@@ -1279,6 +1279,11 @@ export async function startDaemon(opts: {
       })];
     },
     turnRunning: (sid) => winterDrivers.get(sid)?.turnRunning ?? false,
+    // Wake triggers (2026-10-12): a wake goes in through the session's own driver (late-bound, like `interrupt`), and a
+    // Dispatch child's wake turn is followed when its trigger was armed in a followed turn.
+    sessions: () => ({ get: (sid) => winterDrivers.get(sid), ensure: (sid) => winterDrivers.ensure(sid) }),
+    followedNow: (sid) => dispatchChildren?.followingTurn(sid) ?? false,
+    followWake: (sid, text) => dispatchChildren?.expectWake(sid, text),
     ...(opts.computerUse === undefined ? {} : { inject: opts.computerUse }),
     log: (line) => console.error(line),
   });
@@ -2140,6 +2145,9 @@ export async function startDaemon(opts: {
     log: (line) => console.error(`dispatch-children: ${line}`),
   });
   dispatchChildren.start();
+  // Wake triggers (2026-10-12): what the last daemon left armed ends `restart`, and each session is woken once —
+  // after the driver table and Dispatch's follower exist (the sweep resumes sessions).
+  computerUseRuntime.wakes.start();
   // (ListSessions' edited-files index needs no boot step here: the store's `recoverAll` pass indexes every
   // log as the store opens — the one-time backfill and the crash catch-up alike.)
   // SendMessage between sessions: resolve an `s_…` id, resume a finished session through its own driver,
@@ -2969,7 +2977,7 @@ export async function startDaemon(opts: {
     // ComputerV2 (2026-10-08): Settings → Computer Use's local-only RPCs.
     computerUse: computerUseRuntime.control,
     browserLink: computerUseRuntime.browserLink,
-    onSessionArchived: (sid) => computerUseRuntime.browsers.sessionArchived(sid),
+    onSessionArchived: (sid) => { computerUseRuntime.browsers.sessionArchived(sid); computerUseRuntime.wakes.sessionEnded(sid); },
     // A client's `session.interrupt` is the user's stop (the Mac's stop button, a terminal's Esc, the phone).
     onUserInterrupt: (sid) => dispatchChildren?.noteStop(sid, { kind: "user" }),
     connectorPermissions,
@@ -3113,6 +3121,7 @@ export async function startDaemon(opts: {
       winterDrivers.beginShutdown?.();
       dispatchChildren?.beginShutdown();
       sessionMessaging?.beginShutdown(); // no SendMessage resumes a session into a daemon that is going away
+      computerUseRuntime.wakes.beginShutdown(); // no wake resumes a session either: its trigger stays in wakes.json for the next boot
       computerUseRuntime.stop(); // no automation worker outlives the daemon; the helper connection closes
       browserHostServer.stop(); // Winter for Chrome's connections close (its transports read disconnected); browser.sock goes
       server.stop(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();

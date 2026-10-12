@@ -535,6 +535,9 @@ export const Settings = z.object({
     /** ComputerV2 Phase 4: a site's own agent tools (WebMCP) — discovered and callable unless false
      *  (`computerUseWebMcpFrom`). Gates the daemon only; never changes a browser's command line. */
     webmcp: z.boolean().optional(),
+    /** ComputerV2 wake triggers (2026-10-12): a script may arm `wakeWhen` on a bound app or tab unless false
+     *  (`computerUseWakesFrom`). Turned off, arming is `NotAllowed` and every armed trigger ends `disabled`. */
+    wakes: z.boolean().optional(),
   }).optional(),
   /** web_search backend (4g Task 6). `provider` defaults to "brave" when the block/field is
    *  absent — the literal union is forward-room for other search backends later; today "brave"
@@ -1358,6 +1361,10 @@ export const computerUseHeadlessEnabledFrom = (s: Settings | null | undefined): 
 /** ComputerV2 Phase 4: the ONE reader of `computerUse.webmcp` — default ON (user ruling D9; only `false` turns it off). */
 export const computerUseWebMcpFrom = (s: Settings | null | undefined): boolean => s?.computerUse?.webmcp !== false;
 
+/** ComputerV2 wake triggers (2026-10-12): the ONE reader of `computerUse.wakes` — default ON (only `false` turns it
+ *  off). Off, `wakeWhen` is `NotAllowed` and the registry ends every armed trigger `disabled` (`computer-use/wakes/`). */
+export const computerUseWakesFrom = (s: Settings | null | undefined): boolean => s?.computerUse?.wakes !== false;
+
 /** ComputerV2: the ONE reader of `computerUse.screenshotMaxDim` — `undefined` when unset (no extra bound). */
 export const computerUseScreenshotMaxDimFrom = (s: Settings | null | undefined): number | undefined => s?.computerUse?.screenshotMaxDim;
 
@@ -1428,6 +1435,8 @@ export interface ComputerUseFlagsPatch {
   headlessEnabled?: boolean;
   /** Phase 4: `computerUse.webmcp`. */
   webmcp?: boolean;
+  /** Wake triggers (2026-10-12): `computerUse.wakes`. */
+  wakes?: boolean;
 }
 
 /** ComputerV2: `computerUse.setSettings`' pure transform — each key present is written, each absent one is left
@@ -1440,6 +1449,7 @@ export function setComputerUseFlags(settings: Settings, patch: ComputerUseFlagsP
   if (patch.privateEventPath !== undefined) next.privateEventPath = patch.privateEventPath;
   if (patch.headlessEnabled !== undefined) next.headless = { ...(next.headless ?? {}), enabled: patch.headlessEnabled };
   if (patch.webmcp !== undefined) next.webmcp = patch.webmcp;
+  if (patch.wakes !== undefined) next.wakes = patch.wakes;
   return { ...settings, computerUse: next };
 }
 

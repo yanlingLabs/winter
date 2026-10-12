@@ -32,7 +32,11 @@ import type { RecentApps } from "./recent-apps";
 import { ResultBuilder, type ResultContent, type ScriptError } from "./result";
 import type { AutomationTelemetry, PrimitiveMetric } from "./telemetry";
 import { AutomationWorker, AutomationWorkerUnavailable, type AutomationWorkerOptions, type CallMessage } from "./worker-host";
-import { APP_PRIMITIVES, BROWSER_PRIMITIVES, EXTRA_PRIMITIVES, GLOBAL_PRIMITIVES, SCRIPT_PRIMITIVES, savedScriptNameOk, TAB_PRIMITIVES, type AppHandle, type ImageHandle, type SavedScriptSource } from "./worker/bridge";
+import { APP_PRIMITIVES, BROWSER_PRIMITIVES, EXTRA_PRIMITIVES, GLOBAL_PRIMITIVES, SCRIPT_PRIMITIVES, savedScriptNameOk, TAB_PRIMITIVES, WAKE_PRIMITIVES, type AppHandle, type ImageHandle, type SavedScriptSource, type WakeHandle } from "./worker/bridge";
+import type { DaemonLinePart } from "./result";
+import { durationWords, waitingForWords } from "./wakes/delivery";
+import type { ArmedWake, WakeRegistry } from "./wakes/registry";
+import { TAB_ONLY_WAKE_KINDS, WAKE_LIMITS, type WakeCondition } from "./wakes/types";
 import { SavedScripts } from "./saved-scripts";
 import type { AdapterRunScope, AppAdapters } from "./adapters";
 import { AdapterDelivery } from "./adapters/delivery";
@@ -114,6 +118,8 @@ export interface ComputerV2ServiceDeps {
   adapters?: AppAdapters;
   /** Phase 4: the sessions' saved scripts (`scripts.save`); the service makes its own when absent. */
   savedScripts?: SavedScripts;
+  /** Wake triggers (2026-10-12): the registry `wakeWhen` arms through (`wakes/registry.ts`). Absent: `NotAllowed`. */
+  wakes?: WakeRegistry;
 }
 
 /** `windowId`: the bound window (its window-server id), from the bind and every `useWindow` — what an app adapter's
@@ -602,6 +608,8 @@ export class ComputerV2Service {
       case "screen.appAt": return await this.screenAppAt(ctx, args, metric);
       case "scripts.save": return this.saveScript(ctx, args, metric);
       case "scripts.run": return this.runSavedScript(ctx, args, metric);
+      case "wakes.list": return this.listWakes(ctx, args);
+      case "wakes.cancel": return this.cancelWake(ctx, args);
       default: break;
     }
     const targetId = msg.target ?? "";
@@ -610,6 +618,86 @@ export class ComputerV2Service {
     const run = prev.catch(() => {}).then(() => this.targetPrimitive(ctx, targetId, msg.primitive, args, metric));
     ctx.chains.set(targetId, run);
     return await run;
+  }
+
+  // ── wake triggers (2026-10-12) ─────────────────────────────────────────────────────────────────
+
+  /**
+   * `target.wakeWhen(condition, options)`: arm a trigger that outlives this script and this turn, and return once it is
+   * armed. Arming only observes (view class) and is allowed under every policy; an APP must be bound under a SESSION or
+   * ALWAYS grant (an "Allow once" binding is released when this call ends, and the trigger would watch nothing). The
+   * registry checks the setting and the limits; the backend checks the floors (secure fields, headless, the site floor)
+   * and whether the condition is already true.
+   */
+  private async armWake(ctx: RunCtx, targetId: string, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<WakeHandle> {
+    const wakes = this.deps.wakes;
+    const { condition, key } = parseWakeCondition(args.cond, args.settleMs);
+    const o = parseWakeOptions(args);
+    if (wakes === undefined) throw new AutomationFailure("NotAllowed", "wake triggers are not available in this Winter — ask the user to tell you when they are done");
+    const isTab = this.deps.browsers?.owns(ctx.sessionId, targetId) === true;
+    let audit: { app?: string; site?: string } | undefined;
+    if (!isTab) {
+      if (TAB_ONLY_WAKE_KINDS.has(condition.kind)) {
+        throw new AutomationFailure("NotAllowed", `wakeWhen({ ${key} }) watches browser tabs only — on an app, wait for { clicked }, { text }, { gone }, { changed } or { title }`);
+      }
+      this.live(ctx);
+      const t = this.target(ctx, targetId);
+      const app: AppRef = { bundleId: t.bundleId, name: t.name };
+      await this.deps.policy.authorize(ctx.grants, app, { kind: "observe" }, ctx.abort.signal);
+      this.live(ctx);
+      if (!this.deps.policy.persistentlyAllowed(ctx.sessionId, t.bundleId)) {
+        throw new AutomationFailure("NotAllowed", `${t.name} was allowed for one call only — a wake trigger needs it allowed for this session`);
+      }
+      await this.ensureLock(ctx, t);
+      audit = { app: t.name };
+    } else {
+      const host = (this.deps.browsers as { hostOf?(sessionId: string, targetId: string): string | undefined } | undefined)?.hostOf?.(ctx.sessionId, targetId);
+      if (host !== undefined) audit = { site: host };
+    }
+    const backend = isTab ? "tab" as const : "app" as const;
+    metric.wake = { kind: condition.kind, backend };
+    const armed = await wakes.arm({
+      sessionId: ctx.sessionId, targetId, backend, condition, timeoutMs: o.timeoutMs,
+      ...(o.note === undefined ? {} : { note: o.note }), notifyOnTimeout: o.notifyOnTimeout, ...(audit === undefined ? {} : { audit }),
+    });
+    // The script was cancelled while the trigger was being armed: nobody holds its id — it does not stay armed.
+    if (ctx.ended || ctx.cancelled !== undefined) {
+      wakes.cancel(ctx.sessionId, armed.wakeId, "model");
+      this.live(ctx);
+    }
+    ctx.builder.daemonLineWithData(armingLine(condition, armed, this.now()));
+    if (armed.backendNote !== undefined) ctx.builder.daemonLine(armed.backendNote);
+    return { id: armed.wakeId, expiresAt: armed.expiresAt };
+  }
+
+  /** `wakes.list()`: the session's armed triggers. Their labels came from the screen: fenced. */
+  private listWakes(ctx: RunCtx, args: Record<string, unknown>): unknown {
+    const rows = this.deps.wakes?.list(ctx.sessionId) ?? [];
+    ctx.builder.markScreenRead();
+    if (args.emit !== false) {
+      const lines = rows.map((r) => {
+        const what = waitingForWords({ kind: r.condition as WakeCondition["kind"], targetLabel: r.target, ...(r.element === undefined ? {} : { elementLabel: r.element }) });
+        return `${r.id} — waiting for ${what} — expires in ${r.expiresInMin} min${r.note === undefined ? "" : ` — your note: ${r.note}`}`;
+      });
+      ctx.builder.text(lines.length === 0 ? "(no wake triggers armed)" : lines.join("\n"), { screen: true });
+    }
+    return rows;
+  }
+
+  /** `wakes.cancel(id)` / `wake.cancel()`: end one of this session's triggers (no wake). Idempotent. */
+  private cancelWake(ctx: RunCtx, args: Record<string, unknown>): undefined {
+    const id = args.id;
+    if (typeof id !== "string" || !/^wk_[0-9a-f]{12}$/.test(id)) throw bad("wakes.cancel() takes a wake trigger's id (wk_…) — wakes.list() shows them");
+    const cancelled = this.deps.wakes?.cancel(ctx.sessionId, id, "model") === true;
+    ctx.builder.daemonLine(cancelled ? `cancelled ${id} — it will not wake you` : `${id} is not armed in this session (it has already ended)`);
+    return undefined;
+  }
+
+  /** The app target behind `targetId` in this session (the app wake backend's door, lane C): its identity and pid,
+   *  and why it is lost when it is. Undefined when the session's runtime holds no such binding. */
+  appTarget(sessionId: string, targetId: string): { bundleId: string; name: string; pid: number; lost?: string } | undefined {
+    const t = this.sessions.get(sessionId)?.targets.get(targetId);
+    return t === undefined ? undefined : { bundleId: t.bundleId, name: t.name, pid: t.pid, ...(t.lost === undefined ? {} : { lost: t.lost }) };
   }
 
   // ── saved scripts (Phase 4) ────────────────────────────────────────────────────────────────────
@@ -636,6 +724,8 @@ export class ComputerV2Service {
   }
 
   private async targetPrimitive(ctx: RunCtx, targetId: string, primitive: string, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<unknown> {
+    // Wake triggers route by TARGET KIND to their backend — never to the engine's or the helper's own primitives.
+    if (primitive === "wakeWhen") return await this.armWake(ctx, targetId, args, metric);
     if (this.deps.browsers?.owns(ctx.sessionId, targetId) === true) return await this.trackTabWork(ctx, this.deps.browsers.primitive(this.tabScope(ctx, metric), targetId, primitive, args));
     // A browser tab's own primitive never reaches the helper for an app target (the worker is untrusted).
     if (TAB_ONLY_PRIMITIVES.has(primitive)) throw bad(`${primitive}() belongs to a browser tab — this target is an app`);
@@ -1749,6 +1839,8 @@ export class ComputerV2Service {
     if (reason === "deleted") {
       this.savedScripts.clearSession(sessionId);
       this.ranWorker.delete(sessionId);
+      // A trigger's life is the SESSION's: the idle end and a daemon stop leave it armed; a deletion ends it.
+      this.deps.wakes?.sessionEnded(sessionId);
     }
     this.deps.browsers?.sessionEnded(sessionId, reason);
     const state = this.sessions.get(sessionId);
@@ -1866,7 +1958,7 @@ function failure(name: string, message: string): ScriptResult {
 }
 
 /** The functions a script may call — anything else from the worker is refused unrecorded (review I6). */
-const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES, ...EXTRA_PRIMITIVES, ...TAB_PRIMITIVES, ...BROWSER_PRIMITIVES, ...SCRIPT_PRIMITIVES]);
+const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES, ...EXTRA_PRIMITIVES, ...TAB_PRIMITIVES, ...BROWSER_PRIMITIVES, ...SCRIPT_PRIMITIVES, ...WAKE_PRIMITIVES]);
 /** The `browsers` global's primitives: every one is the browser engine's (`BrowserEngine.global`). */
 const BROWSER_GLOBALS: ReadonlySet<string> = new Set<string>(BROWSER_PRIMITIVES);
 /** A browser tab's primitives no app has (refused on an app target before the helper sees them). */
@@ -2054,4 +2146,84 @@ export function visitLine(app: string, v: { ms: number; actions: number; returne
   if (v.userMoved === true) return { line: `moved the user to ${what}; they took over during it, so Winter left them where they went` };
   if (v.returned) return { line: `moved the user to ${what} and back` };
   return { notice: `Winter moved the user to ${app}'s desktop and could NOT bring them back to their own. Tell the user now, and do nothing more in ${app} until they are back on their desktop.` };
+}
+
+// ── wake triggers (2026-10-12) ───────────────────────────────────────────────────────────────────
+
+/** The condition keys `wakeWhen` takes — exactly one per call (spine §1). */
+const WAKE_KEYS = ["clicked", "submitted", "navigated", "url", "text", "gone", "changed", "title"] as const;
+const WAKE_TEXT_MAX = 500;
+const WAKE_SETTLE_MIN_MS = 250;
+const WAKE_SETTLE_MAX_MS = 60_000;
+
+const wakeText = (v: unknown, key: string): string => {
+  if (typeof v !== "string" || v.trim().length === 0) throw bad(`wakeWhen({ ${key} }) takes a non-empty string`);
+  if (v.length > WAKE_TEXT_MAX) throw bad(`wakeWhen({ ${key} }) takes at most ${WAKE_TEXT_MAX} characters`);
+  return v;
+};
+
+/** The script's `{ clicked: ref }`, … onto the pinned `WakeCondition` (refs travel as strings). */
+export function parseWakeCondition(c: unknown, settleMs?: unknown): { condition: WakeCondition; key: string } {
+  const usage = "wakeWhen() takes exactly one of { clicked: ref }, { submitted: ref | true }, { navigated: true }, { url }, { text }, { gone: ref | text }, { changed: ref }, { title }";
+  if (c === null || typeof c !== "object" || Array.isArray(c)) throw bad(usage);
+  const keys = Object.keys(c as Record<string, unknown>);
+  const known = keys.filter((k) => (WAKE_KEYS as readonly string[]).includes(k));
+  if (known.length !== 1 || keys.length !== 1) throw bad(usage);
+  const key = known[0]!;
+  const v = (c as Record<string, unknown>)[key];
+  const ref = (what: string): string => {
+    if (!isRef(v)) throw bad(`wakeWhen({ ${what} }) takes an element ref (a [n] number from state())`);
+    return String(v);
+  };
+  switch (key) {
+    case "clicked": return { key, condition: { kind: "clicked", ref: ref("clicked") } };
+    case "submitted":
+      if (v === true) return { key, condition: { kind: "submitted" } };
+      return { key, condition: { kind: "submitted", ref: ref("submitted: ref | true") } };
+    case "navigated":
+      if (v !== true) throw bad("wakeWhen({ navigated: true }) — pass { url } to wait for a particular address");
+      return { key, condition: { kind: "navigated" } };
+    case "url": return { key, condition: { kind: "navigated", url: wakeText(v, "url") } };
+    case "text": return { key, condition: { kind: "appeared", text: wakeText(v, "text") } };
+    case "gone": return isRef(v) ? { key, condition: { kind: "gone", ref: String(v) } } : { key, condition: { kind: "gone", text: wakeText(v, "gone") } };
+    case "changed": {
+      const settle = typeof settleMs === "number" && Number.isFinite(settleMs) ? Math.min(WAKE_SETTLE_MAX_MS, Math.max(WAKE_SETTLE_MIN_MS, Math.round(settleMs))) : WAKE_LIMITS.defaultSettleMs;
+      return { key, condition: { kind: "changed", ref: ref("changed"), settleMs: settle } };
+    }
+    default: return { key, condition: { kind: "titled", title: wakeText(v, "title") } };
+  }
+}
+
+/** `wakeWhen`'s options: the model's note (≤ 500), its timeout (60 min by default, 8 h at most), `notifyOnTimeout`. */
+export function parseWakeOptions(o: Record<string, unknown>): { note?: string; timeoutMs: number; notifyOnTimeout: boolean } {
+  let note: string | undefined;
+  if (o.note !== undefined) {
+    if (typeof o.note !== "string") throw bad("wakeWhen()'s note is a string — your own reminder of what to do next");
+    if (o.note.length > WAKE_LIMITS.noteMaxChars) throw bad(`wakeWhen()'s note is at most ${WAKE_LIMITS.noteMaxChars} characters`);
+    if (o.note.trim().length > 0) note = o.note;
+  }
+  if (o.timeoutMs !== undefined && (typeof o.timeoutMs !== "number" || !Number.isFinite(o.timeoutMs) || o.timeoutMs <= 0)) {
+    throw bad(`wakeWhen()'s timeoutMs is a number of ms (at most ${WAKE_LIMITS.maxTimeoutMs}, 8 h)`);
+  }
+  if (o.notifyOnTimeout !== undefined && typeof o.notifyOnTimeout !== "boolean") throw bad("wakeWhen()'s notifyOnTimeout is true or false");
+  const timeoutMs = typeof o.timeoutMs === "number" ? Math.min(WAKE_LIMITS.maxTimeoutMs, Math.max(1_000, Math.floor(o.timeoutMs))) : WAKE_LIMITS.defaultTimeoutMs;
+  return { ...(note === undefined ? {} : { note }), timeoutMs, notifyOnTimeout: o.notifyOnTimeout === true };
+}
+
+/** The arming result's line (spine §1): the daemon's words outside the fence, every screen-derived label inside it. */
+export function armingLine(c: WakeCondition, a: ArmedWake, now: number): DaemonLinePart[] {
+  const el = a.elementLabel === undefined ? (a.elementRole ?? undefined) : a.elementRole === undefined ? a.elementLabel : `${a.elementRole} ${a.elementLabel}`;
+  const t = { data: a.targetLabel };
+  const d = (s: string | undefined, fallback: string): DaemonLinePart => (s === undefined ? fallback : { data: s });
+  let when: DaemonLinePart[];
+  switch (c.kind) {
+    case "clicked": when = ["the user clicks ", d(el, "it"), " in ", t]; break;
+    case "submitted": when = ["the user submits ", d(el, "a form"), " in ", t]; break;
+    case "changed": when = ["the user changes ", d(el, "the field"), " in ", t]; break;
+    case "navigated": when = a.elementLabel === undefined ? [t, " moves to another page"] : [t, " reaches ", { data: a.elementLabel }]; break;
+    case "appeared": when = [d(a.elementLabel, "the text"), " appears in ", t]; break;
+    case "gone": when = [d(el, "it"), " goes away in ", t]; break;
+    case "titled": when = [t, "'s title contains ", d(a.elementLabel, "the text")]; break;
+  }
+  return [`Armed ${a.wakeId} — you'll be woken when `, ...when, ` (expires in ${durationWords(a.expiresAt - now)}). End your turn and tell the user what you're waiting for.`];
 }

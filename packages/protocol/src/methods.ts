@@ -325,6 +325,10 @@ export const SessionListResult = z.object({
     // NOT the same absence as `runtimeKind`'s (a daemon can know the leg from `legOf` while this
     // daemon build predates threading the record through to `session.list` at all).
     providerId: z.string().min(1).optional(),
+    // ComputerV2 wake triggers (2026-10-12): how many triggers the session's model has ARMED now (`wakeWhen` — Winter
+    // waits for the user to click, submit, …) — the session list's "waiting for you" mark. Absent when none (or on an
+    // older daemon); kept live by the `wake_armed`/`wake_ended` pair, which every harness receives.
+    wakesArmed: z.number().int().positive().optional(),
   })),
 });
 
@@ -459,6 +463,9 @@ export const ComputerUseStatusResult = z.object({
   headlessEnabled: z.boolean(),
   /** Phase 4: sites' own agent tools (WebMCP) are discovered and callable (`computerUse.webmcp`, default true). */
   webmcp: z.boolean(),
+  /** Wake triggers (2026-10-12): a script may arm `wakeWhen` (`computerUse.wakes`, default true). Optional: an
+   *  older daemon does not say. */
+  wakes: z.boolean().optional(),
   helper: z.object({
     installed: z.boolean(),
     running: z.boolean(),
@@ -566,8 +573,18 @@ export const ComputerUseSetSettingsParams = z.object({
   privateEventPath: z.boolean().optional(),
   headlessEnabled: z.boolean().optional(),
   webmcp: z.boolean().optional(),
+  /** Wake triggers (2026-10-12): `computerUse.wakes`. Off ends every armed trigger (`disabled`). */
+  wakes: z.boolean().optional(),
 });
 export const ComputerUseSetSettingsResult = z.object({ ok: z.literal(true) });
+/** ComputerV2 wake triggers (2026-10-12): the Mac's [Stop waiting] on a session's "Waiting for you" pill — ends one
+ *  trigger the session's model armed (`cancelled`, no wake). LOCAL ROLE ONLY, like every `computerUse.*` door.
+ *  `cancelled: false` when the trigger had already ended (or never belonged to that session). */
+export const ComputerUseWakesCancelParams = z.object({
+  sessionId: z.string().min(1),
+  wakeId: z.string().regex(/^wk_[0-9a-f]{12}$/),
+});
+export const ComputerUseWakesCancelResult = z.object({ ok: z.literal(true), cancelled: z.boolean() });
 
 /** Code-mode image input (2026-09-29, raw paths 2026-10-10): a composer image that has NO file of its
  *  own (clipboard data, a screenshot in the clipboard), STAGED as it is into the session's own temp
@@ -3240,6 +3257,7 @@ export const METHODS = {
   computerUseAppsList: "computerUse.apps.list",
   computerUseAppsSet: "computerUse.apps.set",
   computerUseSetSettings: "computerUse.setSettings",
+  computerUseWakesCancel: "computerUse.wakes.cancel",
   // ComputerV2 Phase 2: Winter.app's browser link. HARNESS role only.
   browserLinkAttach: "browserLink.attach",
   browserLinkResult: "browserLink.result",

@@ -194,7 +194,9 @@ export class SessionHub {
     this.fanOut(sessionId, event);
     // Narrow on purpose: session_created already has its own server-side broadcast, and every
     // other event type is scoped to a session's own attachments.
-    if (event.type === "session_titled") this.onGlobalEvent?.(event);
+    // ComputerV2 wake triggers (2026-10-12): the pair is global the same way — a session list shows a "waiting for you"
+    // mark on a row nobody has open. Persisted, so the attached double is absorbed by seq dedupe like `session_titled`'s.
+    if (event.type === "session_titled" || event.type === "wake_armed" || event.type === "wake_ended") this.onGlobalEvent?.(event);
     this.notifyObservers(event);
     return event;
   }
