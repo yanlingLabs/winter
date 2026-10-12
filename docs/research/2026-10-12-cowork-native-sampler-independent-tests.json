@@ -1,0 +1,33 @@
+{
+  "sourceCommit": "1d9652821cdcb9d2f95772246dc9c300ce48857c",
+  "testsRun": 46,
+  "passed": true,
+  "vmStarted": false,
+  "libkrunWorkerStarted": false,
+  "fullRustBuild": false,
+  "testModules": [
+    "test_generic_sampler",
+    "test_generic_sampler_paths",
+    "test_generic_lifecycle",
+    "test_generic_discovery",
+    "test_block_receipts",
+    "test_stream_lifecycle",
+    "test_generic_fixture.FixtureTests.test_actual_normal_runner_aggregates_generic_audit_key"
+  ],
+  "sourceHashes": {
+    "docs/research/2026-10-12-cowork-native-sampler-channel.md": "15c8d48a00922ce845103ac1766784e284933222f172ef666239219b891e4ec0",
+    "spikes/cowork-hvf/build_generic_fixture.py": "4e627a868acd7a670ca15606bd5aee33a812683a04bd99ebfb74332f4b32a63f",
+    "spikes/cowork-hvf/generic_capture.py": "5689f2302161956f325a9183433c74fb72289bebd6c405177bc0ca289304b568",
+    "spikes/cowork-hvf/generic_fixture_lifecycle.py": "3912adf9ca57d36c6da05cafeddbe2cce5fce4f2a4b28da49df2e3c1cb6562bb",
+    "spikes/cowork-hvf/generic_fixture_paths.py": "f8964cb3c311691b15030ad83cbf14043edf3f533fef3fd3713861384e156a63",
+    "spikes/cowork-hvf/generic_fixture_worker.c": "f67cba1000ac869256811d63bb25646cb482b2725562a6967f8571bb17e50cda",
+    "spikes/cowork-hvf/generic_sampler.h": "ce8c8f8816103cc413d76e911ee79c516d7572ff11a83034d3c52343c7283016",
+    "spikes/cowork-hvf/run_generic_fixture.py": "9aa98391c0ae859e756f386060ed64770b6c852e278d05ada53b216733fde50c",
+    "spikes/cowork-hvf/test_generic_fixture.py": "f393ce6ba522e83060079f1b1bdd379255783b46a80362d9fbd2706109f068cf",
+    "spikes/cowork-hvf/test_generic_lifecycle.py": "1c7220688fc45f3fa4b782a3c542effb725220a3c4d47eea0869dcf3a93a3b6b",
+    "spikes/cowork-hvf/test_generic_sampler.py": "b5f72ebffc194562c0a7a7a4e2e76061c6353abd6258fc1a71b8cabb417a03b6",
+    "spikes/cowork-hvf/test_generic_sampler_paths.py": "06ab86e146bc1d2641a9526997380c3fe716247f2af4ead2edb4331911f5e490"
+  },
+  "finalReviewedCommit": "65974b9b06e802b2b5b30ad3d152789f87065d47",
+  "postTestChange": "Documentation-only clarification of SIGPIPE versus returned-write-error exit78; executable source hashes unchanged."
+}

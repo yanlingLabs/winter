@@ -1,0 +1,44 @@
+{
+  "2026-10-12-sampler-live-result.json": {
+    "sha256": "9b600df632071619eb20d7da5f05e8045ec8ce1967dbb2b64aca5053f203501f",
+    "originalSha256": "9b600df632071619eb20d7da5f05e8045ec8ce1967dbb2b64aca5053f203501f",
+    "originalBytes": 16681,
+    "fixture": "generic-fixture-sampler-rnklq4m2"
+  },
+  "2026-10-12-sampler-live-events.jsonl": {
+    "sha256": "4cb2a01d7864c5bc8aa93c9b71a9f29c4d601d85b0c5f86e61e6cd01b117712b",
+    "originalSha256": "4cb2a01d7864c5bc8aa93c9b71a9f29c4d601d85b0c5f86e61e6cd01b117712b",
+    "originalBytes": 2963642,
+    "fixture": "generic-fixture-sampler-rnklq4m2"
+  },
+  "2026-10-12-sampler-live-stdout.log": {
+    "sha256": "718f2e9a0d15a282bbfd8ea2ba4b5bc2cc87f1061fa503e503112796813f4118",
+    "originalSha256": "718f2e9a0d15a282bbfd8ea2ba4b5bc2cc87f1061fa503e503112796813f4118",
+    "originalBytes": 21414,
+    "fixture": "generic-fixture-sampler-rnklq4m2"
+  },
+  "2026-10-12-sampler-live-stderr.log": {
+    "sha256": "fb9fe7b9084cf1835c467fdb1f630a28fd399025d7493594be9d423aec8c96d5",
+    "originalSha256": "fb9fe7b9084cf1835c467fdb1f630a28fd399025d7493594be9d423aec8c96d5",
+    "originalBytes": 2127099,
+    "fixture": "generic-fixture-sampler-rnklq4m2"
+  },
+  "2026-10-12-sampler-live-sampler.log": {
+    "sha256": "9adcedaaa103db8f35cc7a1261f3a21f280eccd1781b8cc8e6be19465ac77193",
+    "originalSha256": "9adcedaaa103db8f35cc7a1261f3a21f280eccd1781b8cc8e6be19465ac77193",
+    "originalBytes": 3693,
+    "fixture": "generic-fixture-sampler-rnklq4m2"
+  },
+  "2026-10-12-sampler-live-stream-host-to-guest.bin.gz": {
+    "sha256": "2653781eb8cbd78699ccb60411d318fb3352a4cd735d80fed429d7cfb332e7b1",
+    "originalSha256": "c32966e265867ec22048903534863d707af2318c54ae13e68bda85dde9e09dfa",
+    "originalBytes": 9310208,
+    "fixture": "generic-fixture-sampler-rnklq4m2"
+  },
+  "2026-10-12-sampler-live-stream-guest-to-host.bin.gz": {
+    "sha256": "c5ef659814de398382cdc91ef1c4d7a134fffb1623e7a003b183708313b18951",
+    "originalSha256": "5a01729d6a56547961cbe4b3f5412b038972edf786c07e57b07180760567681e",
+    "originalBytes": 14811136,
+    "fixture": "generic-fixture-sampler-rnklq4m2"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "closedSamplerReader": {
+    "exitCode": -13,
+    "stdoutBytes": 0,
+    "stderrBytes": 0,
+    "SIGPIPEInsteadOfExit78": true,
+    "failClosed": true
+  },
+  "workerSyntaxCheck": {
+    "exitCode": 0,
+    "output": ""
+  },
+  "historicalEvidenceHashes": {
+    "out/generic-fixture/build.json": "821c5f7341f760bb0e5f1e584115bf5e247438d13f5c7883d0e143e4c164e9d3",
+    "out/generic-fixture-7zmd1ypu/result.json": "8bafc3a7c9bc3db1b6c5187864410e4c368dd7f70d8f21771e8832a8fff13664",
+    "out/generic-fixture-0zaad_cn/result.json": "80f9a666f0ad14f58783920d7e95e06467821cab8709a95af5f0ce24cb440cea",
+    "out/generic-fixture-7zmd1ypu/stderr.log": "3c4be015d07bc26ce3d913b86d6c2b5201b6c40bc03b8c57b3cefc2d2f0c0801"
+  },
+  "guestAndBackendUnchanged": true,
+  "vmStarted": false,
+  "libkrunWorkerStarted": false
+}

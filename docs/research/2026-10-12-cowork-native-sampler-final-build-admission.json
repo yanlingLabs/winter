@@ -1,0 +1,42 @@
+{
+  "reviewedSourceCommit": "65974b9b06e802b2b5b30ad3d152789f87065d47",
+  "rootSourceCommit": "c6458fc69825223fc677cbdb117a76d5a4f481b8",
+  "reviewedExecutableSourcesIdentical": true,
+  "buildSha256": "477d204b4f0e2f8cebfb20e55ef69d85b78e6f34d62bff3a29c2030a6c5eebbd",
+  "artifactHashes": {
+    "libkrun.a": "ac5b21bbf1c175af5d24c2c475659a27f82e9794142816e69e3e377dfdb94430",
+    "cowork-hvf-generic-worker": "66876583bec9a85b7303faf31f8552560570978af0ee4e211f7958aba4633c92",
+    "init": "afd6b543b53e506efcaabeb80dc332acd4059b6c9a86dbb90aa63d21523395c8",
+    "initramfs.cpio": "4f175f0832de9851b2efff703545cd1eaccb6b5fcc78664ce121c53b5de3d0e2",
+    "kernel": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d"
+  },
+  "sourceAndNativeHashesVerified": true,
+  "signing": {
+    "hardenedRuntime": true,
+    "libraryValidationRetained": true,
+    "debuggerEntitlement": false,
+    "entitlements": {
+      "com.apple.security.hypervisor": true
+    },
+    "runtimeDependencies": [
+      "/System/Library/Frameworks/Hypervisor.framework/Versions/A/Hypervisor",
+      "/usr/lib/libiconv.2.dylib",
+      "/usr/lib/libSystem.B.dylib"
+    ]
+  },
+  "signatureKind": "ad-hoc fixture hardened runtime; not production team admission",
+  "rootSandboxReceiptSha256": "55ff5f937c3f308d9dd10152c1051c8c8da823eccaabe397b678f42b3fdd81fa",
+  "rootSandboxFixture": "generic-fixture-sampler-jiuttqcn",
+  "sandboxOnlyPassed": true,
+  "preservedHistoricalHashes": {
+    "out/generic-fixture/build.json": "821c5f7341f760bb0e5f1e584115bf5e247438d13f5c7883d0e143e4c164e9d3",
+    "out/generic-fixture-7zmd1ypu/result.json": "8bafc3a7c9bc3db1b6c5187864410e4c368dd7f70d8f21771e8832a8fff13664",
+    "out/generic-fixture-0zaad_cn/result.json": "80f9a666f0ad14f58783920d7e95e06467821cab8709a95af5f0ce24cb440cea"
+  },
+  "boundedNormalAdmissionAccepted": true,
+  "requiresFreshCompilerQuiescenceAndPressurePreflight": true,
+  "reviewerVmStarted": false,
+  "reviewerWorkerStarted": false,
+  "productionReady": false,
+  "fullResourceGatePassed": false
+}

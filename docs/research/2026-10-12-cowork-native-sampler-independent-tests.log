@@ -1,0 +1,139 @@
+test_capture_limits_match_frozen_stream_v2_without_raising_any_bound (test_generic_sampler.SamplerTests.test_capture_limits_match_frozen_stream_v2_without_raising_any_bound) ... ok
+test_concurrent_native_fragmented_trace_and_sampler_flood_remain_exact (test_generic_sampler.SamplerTests.test_concurrent_native_fragmented_trace_and_sampler_flood_remain_exact) ... ok
+test_descriptor_admits_only_exact_write_pipe_and_restores_cloexec (test_generic_sampler.SamplerTests.test_descriptor_admits_only_exact_write_pipe_and_restores_cloexec) ... ok
+test_inherited_sampler_pipe_writes_under_deny_default_without_extra_path_rights (test_generic_sampler.SamplerTests.test_inherited_sampler_pipe_writes_under_deny_default_without_extra_path_rights) ... ok
+test_malformed_sampler_json_is_preserved_and_counted_without_repair (test_generic_sampler.SamplerTests.test_malformed_sampler_json_is_preserved_and_counted_without_repair) ... ok
+test_sampler_overflow_obeys_same_channel_total_line_and_row_bounds (test_generic_sampler.SamplerTests.test_sampler_overflow_obeys_same_channel_total_line_and_row_bounds) ... ok
+test_moved_old_directory_marker_is_refused_before_launch (test_generic_sampler_paths.SamplerPathsTests.test_moved_old_directory_marker_is_refused_before_launch) ... ok
+test_new_receipt_binds_directory_profile_and_shared_paths_dependency (test_generic_sampler_paths.SamplerPathsTests.test_new_receipt_binds_directory_profile_and_shared_paths_dependency) ... ok
+test_receipt_only_cannot_promote_a_moved_legacy_artifact_receipt (test_generic_sampler_paths.SamplerPathsTests.test_receipt_only_cannot_promote_a_moved_legacy_artifact_receipt) ... ok
+test_receipt_only_routes_only_to_new_artifact_directory (test_generic_sampler_paths.SamplerPathsTests.test_receipt_only_routes_only_to_new_artifact_directory) ... ok
+test_receipt_writer_refuses_frozen_directory_before_reading_sources (test_generic_sampler_paths.SamplerPathsTests.test_receipt_writer_refuses_frozen_directory_before_reading_sources) ... ok
+test_runner_does_not_fall_back_to_existing_frozen_cache (test_generic_sampler_paths.SamplerPathsTests.test_runner_does_not_fall_back_to_existing_frozen_cache) ... ok
+test_absolute_deadline_nanoseconds_and_positive_progress (test_generic_lifecycle.LifecycleTests.test_absolute_deadline_nanoseconds_and_positive_progress) ... ok
+test_error_after_ack_before_capture_reaps_direct_child (test_generic_lifecycle.LifecycleTests.test_error_after_ack_before_capture_reaps_direct_child) ... ok
+test_error_after_actual_oracle_thread_start_joins_writer (test_generic_lifecycle.LifecycleTests.test_error_after_actual_oracle_thread_start_joins_writer) ... ok
+test_interrupt_after_ack_reaps_direct_child (test_generic_lifecycle.LifecycleTests.test_interrupt_after_ack_reaps_direct_child) ... ok
+test_interrupt_capture_supervision_reaps_and_joins_oracle (test_generic_lifecycle.LifecycleTests.test_interrupt_capture_supervision_reaps_and_joins_oracle) ... ok
+test_interrupt_inside_capture_reaps_and_joins_partial_readers (test_generic_lifecycle.LifecycleTests.test_interrupt_inside_capture_reaps_and_joins_partial_readers) ... ok
+test_oracle_thread_start_failure_closes_peer (test_generic_lifecycle.LifecycleTests.test_oracle_thread_start_failure_closes_peer) ... ok
+test_partial_capture_reader_start_reaps_and_joins (test_generic_lifecycle.LifecycleTests.test_partial_capture_reader_start_reaps_and_joins) ... ok
+test_runner_skips_disk_and_raw_inspection_when_owners_uncertain (test_generic_lifecycle.LifecycleTests.test_runner_skips_disk_and_raw_inspection_when_owners_uncertain) ... {
+  "fixture": "generic-fixture-sampler-zgncwgni",
+  "vmStarted": false,
+  "exitCode": null,
+  "exitVerified": false,
+  "ownersQuiescent": false,
+  "timedOut": false,
+  "lifecycleError": "injected",
+  "readerThreadsJoined": false,
+  "diskAuditSkipped": true,
+  "diskSha256": null,
+  "streamOracle": null,
+  "peerTransferError": "injected",
+  "buildSha256": "pin",
+  "candidate": {},
+  "productionReady": false,
+  "fullResourceGatePassed": false,
+  "encryption": false,
+  "activeReturnVerified": false
+}
+ok
+test_spawn_failure_closes_both_exact_owned_sampler_descriptors (test_generic_lifecycle.LifecycleTests.test_spawn_failure_closes_both_exact_owned_sampler_descriptors) ... ok
+test_unreapable_child_is_finite_and_keeps_ownership_uncertain (test_generic_lifecycle.LifecycleTests.test_unreapable_child_is_finite_and_keeps_ownership_uncertain) ... ok
+test_exact_generic_port_identity (test_generic_discovery.DiscoveryTests.test_exact_generic_port_identity) ... ok
+test_extra_port_wrong_port_id_and_wrong_parent_are_refused (test_generic_discovery.DiscoveryTests.test_extra_port_wrong_port_id_and_wrong_parent_are_refused) ... ok
+test_missing_multiport_is_refused (test_generic_discovery.DiscoveryTests.test_missing_multiport_is_refused) ... ok
+test_missing_version1_and_additional_feature_are_refused (test_generic_discovery.DiscoveryTests.test_missing_version1_and_additional_feature_are_refused) ... ok
+test_second_virtio_console_is_refused (test_generic_discovery.DiscoveryTests.test_second_virtio_console_is_refused) ... ok
+test_unbound_or_wrong_driver_is_refused (test_generic_discovery.DiscoveryTests.test_unbound_or_wrong_driver_is_refused) ... ok
+test_wrong_generic_device_number_is_refused (test_generic_discovery.DiscoveryTests.test_wrong_generic_device_number_is_refused) ... ok
+test_missing_trace_and_progress_cannot_pass (test_block_receipts.Receipts.test_missing_trace_and_progress_cannot_pass) ... ok
+test_owned_interval_is_not_labeled_as_blocked_syscall (test_block_receipts.Receipts.test_owned_interval_is_not_labeled_as_blocked_syscall) ... ok
+test_stage_without_capture_rejects (test_block_receipts.Receipts.test_stage_without_capture_rejects) ... ok
+test_trace_overflow_rejects (test_block_receipts.Receipts.test_trace_overflow_rejects) ... ok
+test_whole_synthetic_disk_pattern_and_tamper (test_block_receipts.Receipts.test_whole_synthetic_disk_pattern_and_tamper) ... ok
+test_absolute_deadline_nanoseconds_and_positive_progress (test_stream_lifecycle.LifecycleTests.test_absolute_deadline_nanoseconds_and_positive_progress) ... ok
+test_error_after_ack_before_capture_reaps_direct_child (test_stream_lifecycle.LifecycleTests.test_error_after_ack_before_capture_reaps_direct_child) ... ok
+test_error_after_actual_oracle_thread_start_joins_writer (test_stream_lifecycle.LifecycleTests.test_error_after_actual_oracle_thread_start_joins_writer) ... ok
+test_interrupt_after_ack_reaps_direct_child (test_stream_lifecycle.LifecycleTests.test_interrupt_after_ack_reaps_direct_child) ... ok
+test_interrupt_capture_supervision_reaps_and_joins_oracle (test_stream_lifecycle.LifecycleTests.test_interrupt_capture_supervision_reaps_and_joins_oracle) ... ok
+test_interrupt_inside_capture_reaps_and_joins_partial_readers (test_stream_lifecycle.LifecycleTests.test_interrupt_inside_capture_reaps_and_joins_partial_readers) ... ok
+test_oracle_thread_start_failure_closes_peer (test_stream_lifecycle.LifecycleTests.test_oracle_thread_start_failure_closes_peer) ... ok
+test_partial_capture_reader_start_reaps_and_joins (test_stream_lifecycle.LifecycleTests.test_partial_capture_reader_start_reaps_and_joins) ... ok
+test_runner_skips_disk_and_raw_inspection_when_owners_uncertain (test_stream_lifecycle.LifecycleTests.test_runner_skips_disk_and_raw_inspection_when_owners_uncertain) ... {
+  "fixture": "stream-fixture-v3-ut9wkby2",
+  "vmStarted": false,
+  "exitCode": null,
+  "exitVerified": false,
+  "ownersQuiescent": false,
+  "timedOut": false,
+  "lifecycleError": "injected",
+  "readerThreadsJoined": false,
+  "diskAuditSkipped": true,
+  "diskSha256": null,
+  "streamOracle": null,
+  "peerTransferError": "injected",
+  "buildSha256": "pin",
+  "candidate": {},
+  "productionReady": false,
+  "fullResourceGatePassed": false,
+  "encryption": false,
+  "activeReturnVerified": false
+}
+ok
+test_unreapable_child_is_finite_and_keeps_ownership_uncertain (test_stream_lifecycle.LifecycleTests.test_unreapable_child_is_finite_and_keeps_ownership_uncertain) ... ok
+test_actual_normal_runner_aggregates_generic_audit_key (test_generic_fixture.FixtureTests.test_actual_normal_runner_aggregates_generic_audit_key) ... {
+  "fixture": "generic-fixture-sampler-prk79y50",
+  "vmStarted": true,
+  "exitCode": 0,
+  "timedOut": false,
+  "diskSameIdentity": true,
+  "diskSha256": "pin",
+  "buildSha256": "pin",
+  "candidate": {},
+  "exitVerified": true,
+  "ownersQuiescent": true,
+  "captureComplete": true,
+  "productionReady": false,
+  "fullResourceGatePassed": false,
+  "encryption": false,
+  "streamOracle": null,
+  "peerTransferError": null,
+  "sandboxPeerEOF": null,
+  "audit": {
+    "blockReceiptsPassed": true,
+    "reclaim": {
+      "receiptOrderingPassed": true,
+      "afterGuestFree": [
+        {
+          "heartbeatsDuringWindow": 10
+        }
+      ]
+    }
+  },
+  "diskIntegrity": {
+    "passed": true
+  },
+  "streamAudit": {
+    "genericChecksPassed": true
+  },
+  "footprint": [],
+  "fixtureChecksPassed": true,
+  "signing": {},
+  "rawCaptureHashes": null,
+  "streamSandbox": {
+    "kind": "stream_sandbox"
+  },
+  "activeReturnVerified": false,
+  "streamStopVerified": false,
+  "sandbox": {
+    "kind": "sandbox"
+  }
+}
+ok
+
+----------------------------------------------------------------------
+Ran 46 tests in 4.458s
+
+OK

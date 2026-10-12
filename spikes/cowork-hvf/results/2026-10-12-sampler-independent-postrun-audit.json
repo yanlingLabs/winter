@@ -1,0 +1,250 @@
+{
+  "buildSha256": "477d204b4f0e2f8cebfb20e55ef69d85b78e6f34d62bff3a29c2030a6c5eebbd",
+  "reviewerVmLaunches": 0,
+  "reviewerWorkerLaunches": 0,
+  "normal": {
+    "fixture": "generic-fixture-sampler-rnklq4m2",
+    "originalResultSha256": "9b600df632071619eb20d7da5f05e8045ec8ce1967dbb2b64aca5053f203501f",
+    "originalAggregatePassed": true,
+    "exitCode": 0,
+    "originalArtifactHashes": {
+      "result.json": "9b600df632071619eb20d7da5f05e8045ec8ce1967dbb2b64aca5053f203501f",
+      "stdout.log": "718f2e9a0d15a282bbfd8ea2ba4b5bc2cc87f1061fa503e503112796813f4118",
+      "stderr.log": "fb9fe7b9084cf1835c467fdb1f630a28fd399025d7493594be9d423aec8c96d5",
+      "sampler.log": "9adcedaaa103db8f35cc7a1261f3a21f280eccd1781b8cc8e6be19465ac77193",
+      "events.jsonl": "4cb2a01d7864c5bc8aa93c9b71a9f29c4d601d85b0c5f86e61e6cd01b117712b",
+      "stream-host-to-guest.bin": "c32966e265867ec22048903534863d707af2318c54ae13e68bda85dde9e09dfa",
+      "stream-guest-to-host.bin": "5a01729d6a56547961cbe4b3f5412b038972edf786c07e57b07180760567681e",
+      "cowork-hvf-generic-worker": "66876583bec9a85b7303faf31f8552560570978af0ee4e211f7958aba4633c92",
+      "initramfs.cpio": "4f175f0832de9851b2efff703545cd1eaccb6b5fcc78664ce121c53b5de3d0e2",
+      "kernel": "fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d"
+    },
+    "rawParsingMatchesEvents": true,
+    "malformedTelemetry": [],
+    "controlAcks": [
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 0,
+        "queue": 3,
+        "id": 4294967295,
+        "event": 0,
+        "value": 1,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.098218
+      },
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 1,
+        "queue": 2,
+        "id": 0,
+        "event": 1,
+        "value": 0,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.098244
+      },
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 2,
+        "queue": 3,
+        "id": 0,
+        "event": 3,
+        "value": 1,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.098372
+      },
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 3,
+        "queue": 2,
+        "id": 0,
+        "event": 6,
+        "value": 1,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.098481
+      },
+      {
+        "kind": "runtime_control_used_ack",
+        "row": 4,
+        "queue": 3,
+        "id": 0,
+        "event": 6,
+        "value": 1,
+        "usedAck": true,
+        "channel": "stderr",
+        "hostElapsedSeconds": 0.139599
+      }
+    ],
+    "stallSecondsObserved": 6.000318208010867,
+    "stallHeartbeats": 6,
+    "stallDiskThreads": [
+      0,
+      1
+    ],
+    "stallAliveReceipts": 6,
+    "guestBackpressure": [
+      {
+        "kind": "guest_generic_tx_backpressure",
+        "bytes": 1048576,
+        "frameOffset": 0,
+        "eagain": 1,
+        "heartbeat": 0,
+        "reads": 0,
+        "writes": 0,
+        "channel": "stdout",
+        "hostElapsedSeconds": 0.14452
+      }
+    ],
+    "rawStreams": {
+      "hostToGuest": {
+        "bytes": 9310208,
+        "sha256": "c32966e265867ec22048903534863d707af2318c54ae13e68bda85dde9e09dfa",
+        "everyBytePassed": true
+      },
+      "guestToHost": {
+        "bytes": 14811136,
+        "sha256": "5a01729d6a56547961cbe4b3f5412b038972edf786c07e57b07180760567681e",
+        "everyBytePassed": true
+      }
+    },
+    "originalsUnchanged": true,
+    "blockAudit": {
+      "completeRequests": 1568,
+      "contiguousNativeTraceRows": 7970,
+      "lastNativeTraceRow": 7969,
+      "everyRequestCaptureIoAckOrdered": true,
+      "reconstructedRows": 0
+    },
+    "samplerAudit": {
+      "records": 42,
+      "separateChannel": true,
+      "allSamplesMatchWorkerPid": true,
+      "malformedRows": 0
+    },
+    "diskSha256": "4a6985d76c0ebedf3ed40a16a9a97a131a04b62b2740b7327de72c29fc26d914",
+    "diskThreads": [
+      {
+        "thread": 0,
+        "iterations": 97,
+        "wordsChecked": 524288,
+        "everyWordPassed": true
+      },
+      {
+        "thread": 1,
+        "iterations": 97,
+        "wordsChecked": 524288,
+        "everyWordPassed": true
+      }
+    ],
+    "untouchedDiskTailZero": true,
+    "mappingAudit": {
+      "epochs": 19,
+      "replacedSpans": 302,
+      "mappingOrderAndExclusionsPassed": true,
+      "frozenPinObservations": 128,
+      "genericFrozenPinObservations": 90
+    },
+    "activeWindows": [
+      {
+        "cycle": 1,
+        "touchedSamples": [
+          432751576,
+          432915416,
+          433128432
+        ],
+        "lateFreeSamples": [
+          174211912,
+          174211912
+        ],
+        "peakDropBytes": 258916520,
+        "peakDropMiB": 246.92203521728516,
+        "conservativeDropBytes": 258539664,
+        "heartbeats": 10,
+        "streamDirections": [
+          "guest-to-host",
+          "host-to-guest"
+        ],
+        "diskThreads": [
+          0,
+          1
+        ],
+        "retainedAndReuseChecksPassed": true
+      },
+      {
+        "cycle": 2,
+        "touchedSamples": [
+          434603016,
+          434603016,
+          434668552
+        ],
+        "lateFreeSamples": [
+          178946888,
+          174752584
+        ],
+        "peakDropBytes": 259915968,
+        "peakDropMiB": 247.87518310546875,
+        "conservativeDropBytes": 255656128,
+        "heartbeats": 10,
+        "streamDirections": [
+          "guest-to-host",
+          "host-to-guest"
+        ],
+        "diskThreads": [
+          0,
+          1
+        ],
+        "retainedAndReuseChecksPassed": true
+      },
+      {
+        "cycle": 3,
+        "touchedSamples": [
+          435094560,
+          435127328,
+          435127328
+        ],
+        "lateFreeSamples": [
+          177226568,
+          177259336
+        ],
+        "peakDropBytes": 257900760,
+        "peakDropMiB": 245.95333099365234,
+        "conservativeDropBytes": 257835224,
+        "heartbeats": 10,
+        "streamDirections": [
+          "guest-to-host",
+          "host-to-guest"
+        ],
+        "diskThreads": [
+          0,
+          1
+        ],
+        "retainedAndReuseChecksPassed": true
+      }
+    ],
+    "guestConsumedStreamBytes": {
+      "host-to-guest": 9175040,
+      "guest-to-host": 14811136
+    },
+    "narrowActiveReturnEvidencePassed": true
+  },
+  "durableCaptureManifest": {
+    "path": "results/2026-10-12-sampler-live-capture-manifest.json",
+    "sha256": "514b5ae97c64ac39ec8655e9fccd3b4278d32d00ea36e6a0ad861cd6c20f7489",
+    "filesVerified": 7,
+    "compressedAndUncompressedHashesPassed": true
+  },
+  "historicalFailedRunHashesUnchanged": {
+    "out/generic-fixture/build.json": "821c5f7341f760bb0e5f1e584115bf5e247438d13f5c7883d0e143e4c164e9d3",
+    "out/generic-fixture-7zmd1ypu/result.json": "8bafc3a7c9bc3db1b6c5187864410e4c368dd7f70d8f21771e8832a8fff13664",
+    "out/generic-fixture-7zmd1ypu/stderr.log": "3c4be015d07bc26ce3d913b86d6c2b5201b6c40bc03b8c57b3cefc2d2f0c0801"
+  },
+  "auditScriptSha256": "1993dec314c0975a07e6614413e17fa14b7445fd36c4f7b4648b587853eafa00",
+  "scopedActiveReturnAndCleanTelemetryPassed": true,
+  "fullResourceGatePassed": false,
+  "productionReady": false,
+  "authenticatedProtocolImplemented": false,
+  "liveResetOrHostDisconnectVerified": false
+}
