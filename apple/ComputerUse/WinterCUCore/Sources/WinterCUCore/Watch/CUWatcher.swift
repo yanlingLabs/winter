@@ -197,6 +197,9 @@ public final class CUWatcher: @unchecked Sendable {
     private var changeSince: [pid_t: Double] = [:]
     private var evaluating = Set<pid_t>()
     private var evaluateAgain = Set<pid_t>()
+    /// A burst's request that came in while a look of its app was running: one more pass, but only if its change is
+    /// still waiting (an earlier pass may have taken it, folded into its own date).
+    private var changeAgain = Set<pid_t>()
     /// Daemon connections that have closed: an arm still probing for one of them arms nothing.
     private var closedConnections = Set<Int>()
     private var presentTimer: CUWatchCancellable?
@@ -373,7 +376,7 @@ public final class CUWatcher: @unchecked Sendable {
             if !kept { timer.cancel() }
             return
         }
-        Task.detached(priority: .utility) { [weak self] in await self?.evaluate(pid: pid) }
+        Task.detached(priority: .utility) { [weak self] in await self?.evaluate(pid: pid, forChange: true) }
     }
 
     private func fallbackFired() {
@@ -402,24 +405,37 @@ public final class CUWatcher: @unchecked Sendable {
     // MARK: - Looking
 
     /// Looks at every watch of `pid` once (one look at a time per app; a request meanwhile makes one more after it).
-    func evaluate(pid: pid_t) async {
+    /// `forChange`: a burst's request (`debounceFired`), whose change was dated in `changeSince` before it asked. A pass
+    /// asked for by bursts alone that finds no change waiting looks at nothing: a pass that began after the burst's date
+    /// was written took it (folded into its own) — another look then would be a text watch's tree read outside its 2 s.
+    func evaluate(pid: pid_t, forChange: Bool = false) async {
         let first: Bool = lock.withLock {
-            if evaluating.contains(pid) { evaluateAgain.insert(pid); return false }
+            if evaluating.contains(pid) {
+                if forChange { changeAgain.insert(pid) } else { evaluateAgain.insert(pid) }
+                return false
+            }
             evaluating.insert(pid)
             return true
         }
         guard first else { return }
+        var changeOnly = forChange
         while true {
             let (mine, since): ([Watch], Double?) = lock.withLock {
                 (watches.values.filter { $0.subject.pid == pid }, changeSince.removeValue(forKey: pid))
             }
-            for w in mine { await look(w, changeSince: since) }
-            let again: Bool = lock.withLock {
-                if evaluateAgain.remove(pid) != nil { return true }
-                evaluating.remove(pid)
-                return false
+            if !(changeOnly && since == nil) {
+                for w in mine { await look(w, changeSince: since) }
             }
-            if !again { break }
+            // nil: done; else whether the next pass is asked for by bursts alone.
+            let next: Bool? = lock.withLock {
+                let plain = evaluateAgain.remove(pid) != nil
+                let change = changeAgain.remove(pid) != nil
+                if plain || change { return !plain }
+                evaluating.remove(pid)
+                return nil
+            }
+            guard let next else { break }
+            changeOnly = next
         }
         refreshPresentation()
     }

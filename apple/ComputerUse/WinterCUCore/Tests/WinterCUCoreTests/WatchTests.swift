@@ -576,6 +576,19 @@ final class WatcherEngineTests: XCTestCase {
         XCTAssertEqual(reads, 2)
     }
 
+    // A burst's request that lands while a look of its app is running asks for one more pass — but the pass that began
+    // meanwhile may already have taken its change (folded into its own date). With no change left waiting, a pass asked
+    // for by bursts alone looks at nothing: before, it read the tree with no date, outside the 2 s (a storm under load).
+    func testABurstsPassWithItsChangeAlreadyTakenReadsNothing() async throws {
+        var reads = 0
+        watcher.read = { [unowned self] _ in reads += 1; return observation }
+        _ = try await arm("wk_r", .init(kind: "appeared", text: "Sent"))
+        await watcher.evaluate(pid: 42, forChange: true)
+        XCTAssertEqual(reads, 0, "no change waiting: nothing to look at")
+        await watcher.evaluate(pid: 42)
+        XCTAssertEqual(reads, 1, "any other request (the fallback, a settle, a quit) still looks")
+    }
+
     func testTheHelperIsKeptResponsiveExactlyWhileAWatchIsArmed() async throws {
         var holds: [Bool] = []
         watcher.keepResponsive = { holds.append($0) }
