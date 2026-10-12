@@ -674,6 +674,9 @@ final class SimRun {
                     w.launchCapable()
                     w.log("the user clicks the Dock tile of an app that is not running")
                     core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: clock.nowSeconds())
+                    // (§4.12's switch input: "A click elsewhere in the Dock … an app switch of no known app" — its tile names
+                    // no running app.)
+                    w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, dest: nil))
                     w.lock.withLock { w.dockLaunches = true }
                     _ = core.onPhysicalClick(at: CGPoint(x: 800, y: 975), userData: 0, now: clock.nowSeconds())
                     w.lock.withLock { w.dockLaunches = nil }
