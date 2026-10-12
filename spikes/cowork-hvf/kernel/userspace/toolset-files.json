@@ -1,0 +1,87 @@
+{
+  "lib/aarch64-linux-gnu/libc.so.6": {
+    "sha256": "0f1905dc27dbc6715875c70527bc8da846a10084c9c483e9d8ff76dce8d69d0e",
+    "bytes": 1722920,
+    "mode": "0444"
+  },
+  "lib/aarch64-linux-gnu/libcap.so.2": {
+    "sha256": "1b6d3932cf8b60b2f27f80cdd26d9a296b8a9608fc02b4eccb8fb2fdab73fea2",
+    "bytes": 67704,
+    "mode": "0444"
+  },
+  "lib/aarch64-linux-gnu/libcrypto.so.3": {
+    "sha256": "b27a2396652ee28629c94d59d667c417dbffdf2dee84e5bf140bd17d3eedb7d9",
+    "bytes": 4663464,
+    "mode": "0444"
+  },
+  "lib/aarch64-linux-gnu/libdevmapper.so.1.02.1": {
+    "sha256": "cefc3ee497db3d24bc5f3d79e9ab179512d2102af92e4ac4755dd1feb1a8d01e",
+    "bytes": 471280,
+    "mode": "0444"
+  },
+  "lib/aarch64-linux-gnu/libjson-c.so.5": {
+    "sha256": "773990495f98a200f449dc915a14709007ce4b09f41d08c8e46c8d04082df35b",
+    "bytes": 133288,
+    "mode": "0444"
+  },
+  "lib/aarch64-linux-gnu/libm.so.6": {
+    "sha256": "5e0391562de36de323fb9cb0f2c1b6bd6d034c840b1dac018499f5fe4ded1b4a",
+    "bytes": 591800,
+    "mode": "0444"
+  },
+  "lib/aarch64-linux-gnu/libpcre2-8.so.0": {
+    "sha256": "aa4e91ff910dbb8e40472ed4fcaaeebfef19ad13fe925d9ed8e22e87d45ce13b",
+    "bytes": 592328,
+    "mode": "0444"
+  },
+  "lib/aarch64-linux-gnu/libpopt.so.0": {
+    "sha256": "3161e2e8b4fae8d4752757260ffc106a1124dee4c8548e967bec0dd0acb7996c",
+    "bytes": 67952,
+    "mode": "0444"
+  },
+  "lib/aarch64-linux-gnu/libselinux.so.1": {
+    "sha256": "bc36fbbc9f066f882948ba3429f272cc75840a096e0a3e3461c3badaed18c5ba",
+    "bytes": 198800,
+    "mode": "0444"
+  },
+  "lib/aarch64-linux-gnu/libudev.so.1": {
+    "sha256": "8bc3e61d93877d05dd4efc8a4b36a2c8559afbd1d154c7b95a662b5e83e1f740",
+    "bytes": 264712,
+    "mode": "0444"
+  },
+  "lib/aarch64-linux-gnu/libuuid.so.1": {
+    "sha256": "c5e4db4464688e9fa7a67c7219a478927de65450bcb2815fec10cb3e1b5bfc0d",
+    "bytes": 67576,
+    "mode": "0444"
+  },
+  "lib/ld-linux-aarch64.so.1": {
+    "sha256": "390027e5f45f236bd1838bc54bf464c5ff01d260ab9f8b415ea8276641bce505",
+    "bytes": 203968,
+    "mode": "0555"
+  },
+  "lib/libcryptsetup.so.12": {
+    "sha256": "cd8c013e9cabb8488e13b356772fbcaa39b0060551d59f73b6245eadcc1b360a",
+    "bytes": 597840,
+    "mode": "0444"
+  },
+  "sbin/cowork-crypto-capability": {
+    "sha256": "d2469afebf303963e999c532ddcc1f6bb2468744350ec71a9348896085bb5b8c",
+    "bytes": 71016,
+    "mode": "0555"
+  },
+  "sbin/cryptsetup": {
+    "sha256": "855985944a795d01eeaab43f80d021aadd6496b82c44f87d5d1803462df95261",
+    "bytes": 313152,
+    "mode": "0555"
+  },
+  "sbin/integritysetup": {
+    "sha256": "2189508d6ffbb58c5f0614f5d41ce431426d58d6fe61736e59785dacef767fd6",
+    "bytes": 89712,
+    "mode": "0555"
+  },
+  "usr/lib/aarch64-linux-gnu/ossl-modules/legacy.so": {
+    "sha256": "142433b4bb35f7d091c8899ee3c0e7ba2248e5f3401b31d57fa00f7dc25b2aaa",
+    "bytes": 133128,
+    "mode": "0444"
+  }
+}

@@ -1,0 +1,408 @@
+{
+  "toolsetBuilt": true,
+  "bootableInitramfsBuilt": false,
+  "unlockImplemented": false,
+  "productionReady": false,
+  "source": {
+    "version": "2.8.8",
+    "url": "https://cdn.kernel.org/pub/linux/utils/cryptsetup/v2.8/cryptsetup-2.8.8.tar.xz",
+    "sha256": "3acfa685f2dd7fcc832e0b77bc7093aa7da554a51ce8dafbb4138eaa854eee35",
+    "signatureFile": "cryptsetup-2.8.8.tar.sign",
+    "signatureSha256": "5891c713fe2bb9c74499d99673457354bb673a0cb1b072e36d52a229ac937c6b",
+    "signerFingerprint": "2A2918243FDE46648D0686F9D9B0577BD93E98FC",
+    "keyFile": "milan-public.gpg",
+    "keySha256": "67d937efc9176f8c61e199837a978d810574d1b00ea7e43a76b255982b0bbace",
+    "fingerprintSource": "https://gitlab.com/cryptsetup/cryptsetup/-/raw/v2.8.8/SECURITY.md",
+    "keySource": "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x2A2918243FDE46648D0686F9D9B0577BD93E98FC",
+    "keyPolicy": "Published upstream fingerprint; current self-certified certificate expiry2031. Reject expired/revoked/bad signature status. Kernel.org WKD stale certificate was rejected. No live GPG home."
+  },
+  "commands": [
+    [
+      "/build/source/cryptsetup-2.8.8/configure",
+      "--prefix=/usr",
+      "--sbindir=/sbin",
+      "--libdir=/lib",
+      "--disable-udev",
+      "--disable-blkid",
+      "--disable-external-tokens",
+      "--disable-ssh-token",
+      "--disable-luks2-reencryption",
+      "--disable-hw-opal",
+      "--disable-internal-argon2",
+      "--with-luks2-pbkdf=pbkdf2",
+      "--disable-nls",
+      "--disable-asciidoc",
+      "--disable-selinux",
+      "--disable-veritysetup",
+      "--disable-static",
+      "--with-crypto_backend=openssl"
+    ],
+    [
+      "make",
+      "-j2"
+    ],
+    [
+      "make",
+      "-j2",
+      "DESTDIR=/build/stage",
+      "install"
+    ],
+    [
+      "/kernel-build/llvm/llvm-20.1.8-aarch64/bin/clang",
+      "-O2",
+      "-g0",
+      "-fstack-protector-strong",
+      "-D_FORTIFY_SOURCE=2",
+      "-ffile-prefix-map=/build=.",
+      "-I/build/stage/usr/include",
+      "/inputs/capability.c",
+      "-L/build/stage/lib",
+      "-lcryptsetup",
+      "-o",
+      "/build/stage/sbin/cowork-crypto-capability",
+      "-Wl,-z,relro,-z,now"
+    ]
+  ],
+  "environment": {
+    "PATH": "/kernel-build/llvm/llvm-20.1.8-aarch64/bin:/usr/bin:/bin",
+    "HOME": "/build/home",
+    "TMPDIR": "/build/tmp",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "SOURCE_DATE_EPOCH": "1788779410",
+    "CC": "/kernel-build/llvm/llvm-20.1.8-aarch64/bin/clang",
+    "AR": "/kernel-build/llvm/llvm-20.1.8-aarch64/bin/llvm-ar",
+    "RANLIB": "/kernel-build/llvm/llvm-20.1.8-aarch64/bin/llvm-ranlib",
+    "CFLAGS": "-O2 -g0 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -ffile-prefix-map=/build=.",
+    "LDFLAGS": "-Wl,-z,relro,-z,now",
+    "LD_LIBRARY_PATH": "/build/stage/lib",
+    "OPENSSL_MODULES": "/build/toolset/usr/lib/aarch64-linux-gnu/ossl-modules"
+  },
+  "runtimeFiles": {
+    "lib/aarch64-linux-gnu/libc.so.6": {
+      "sha256": "0f1905dc27dbc6715875c70527bc8da846a10084c9c483e9d8ff76dce8d69d0e",
+      "bytes": 1722920,
+      "mode": "0444"
+    },
+    "lib/aarch64-linux-gnu/libcap.so.2": {
+      "sha256": "1b6d3932cf8b60b2f27f80cdd26d9a296b8a9608fc02b4eccb8fb2fdab73fea2",
+      "bytes": 67704,
+      "mode": "0444"
+    },
+    "lib/aarch64-linux-gnu/libcrypto.so.3": {
+      "sha256": "b27a2396652ee28629c94d59d667c417dbffdf2dee84e5bf140bd17d3eedb7d9",
+      "bytes": 4663464,
+      "mode": "0444"
+    },
+    "lib/aarch64-linux-gnu/libdevmapper.so.1.02.1": {
+      "sha256": "cefc3ee497db3d24bc5f3d79e9ab179512d2102af92e4ac4755dd1feb1a8d01e",
+      "bytes": 471280,
+      "mode": "0444"
+    },
+    "lib/aarch64-linux-gnu/libjson-c.so.5": {
+      "sha256": "773990495f98a200f449dc915a14709007ce4b09f41d08c8e46c8d04082df35b",
+      "bytes": 133288,
+      "mode": "0444"
+    },
+    "lib/aarch64-linux-gnu/libm.so.6": {
+      "sha256": "5e0391562de36de323fb9cb0f2c1b6bd6d034c840b1dac018499f5fe4ded1b4a",
+      "bytes": 591800,
+      "mode": "0444"
+    },
+    "lib/aarch64-linux-gnu/libpcre2-8.so.0": {
+      "sha256": "aa4e91ff910dbb8e40472ed4fcaaeebfef19ad13fe925d9ed8e22e87d45ce13b",
+      "bytes": 592328,
+      "mode": "0444"
+    },
+    "lib/aarch64-linux-gnu/libpopt.so.0": {
+      "sha256": "3161e2e8b4fae8d4752757260ffc106a1124dee4c8548e967bec0dd0acb7996c",
+      "bytes": 67952,
+      "mode": "0444"
+    },
+    "lib/aarch64-linux-gnu/libselinux.so.1": {
+      "sha256": "bc36fbbc9f066f882948ba3429f272cc75840a096e0a3e3461c3badaed18c5ba",
+      "bytes": 198800,
+      "mode": "0444"
+    },
+    "lib/aarch64-linux-gnu/libudev.so.1": {
+      "sha256": "8bc3e61d93877d05dd4efc8a4b36a2c8559afbd1d154c7b95a662b5e83e1f740",
+      "bytes": 264712,
+      "mode": "0444"
+    },
+    "lib/aarch64-linux-gnu/libuuid.so.1": {
+      "sha256": "c5e4db4464688e9fa7a67c7219a478927de65450bcb2815fec10cb3e1b5bfc0d",
+      "bytes": 67576,
+      "mode": "0444"
+    },
+    "lib/ld-linux-aarch64.so.1": {
+      "sha256": "390027e5f45f236bd1838bc54bf464c5ff01d260ab9f8b415ea8276641bce505",
+      "bytes": 203968,
+      "mode": "0555"
+    },
+    "lib/libcryptsetup.so.12": {
+      "sha256": "cd8c013e9cabb8488e13b356772fbcaa39b0060551d59f73b6245eadcc1b360a",
+      "bytes": 597840,
+      "mode": "0444"
+    },
+    "sbin/cowork-crypto-capability": {
+      "sha256": "d2469afebf303963e999c532ddcc1f6bb2468744350ec71a9348896085bb5b8c",
+      "bytes": 71016,
+      "mode": "0555"
+    },
+    "sbin/cryptsetup": {
+      "sha256": "855985944a795d01eeaab43f80d021aadd6496b82c44f87d5d1803462df95261",
+      "bytes": 313152,
+      "mode": "0555"
+    },
+    "sbin/integritysetup": {
+      "sha256": "2189508d6ffbb58c5f0614f5d41ce431426d58d6fe61736e59785dacef767fd6",
+      "bytes": 89712,
+      "mode": "0555"
+    },
+    "usr/lib/aarch64-linux-gnu/ossl-modules/legacy.so": {
+      "sha256": "142433b4bb35f7d091c8899ee3c0e7ba2248e5f3401b31d57fa00f7dc25b2aaa",
+      "bytes": 133128,
+      "mode": "0444"
+    }
+  },
+  "sourceLicenseHashes": {
+    "docs/licenses/COPYING.Apache-2.0": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "docs/licenses/COPYING.CC-BY-SA-4.0": "28a9529c7d0bb4dc51f4bf5c116a3d16ef247a052f7591466768ddf563fd1cf5",
+    "docs/licenses/COPYING.GPL-2.0-or-later-WITH-cryptsetup-OpenSSL-exception": "45670cce8b6a0ddd66c8016cd8ccef6cd71f35717cbacc7f1e895b3855207b33",
+    "docs/licenses/COPYING.LGPL-2.1-or-later-WITH-cryptsetup-OpenSSL-exception": "8c33cc37871654ec7ed87e6fbb896c8cf33ef5ef05b1611a5aed857596ffafa5",
+    "COPYING": "45670cce8b6a0ddd66c8016cd8ccef6cd71f35717cbacc7f1e895b3855207b33"
+  },
+  "capability": {
+    "libcryptsetupVersion": "2.8.8",
+    "defaultLuks2Pbkdf": "pbkdf2",
+    "boundedPbkdf2SettingsAccepted": true,
+    "iterations": 1000,
+    "benchmarkExecuted": false,
+    "keyConsumed": false,
+    "deviceOpened": false,
+    "kernelCipherAvailabilityChecked": false,
+    "formatOrActivationExecuted": false
+  },
+  "archiveSha256": "30a35be0d452c9bcc8ab882027e1072ea0ce1125211a42af91b94d4dc4786671",
+  "archiveBytes": 10270720,
+  "remaining": "Independent candidate/header-binding review; trusted PID1/scoped inherited key transport and immutable bootstrap, no disk or VM run, no format/unlock implementation.",
+  "builder": {
+    "imageDigest": "sha256:44c38e1c7c5050f86c1f974925f6bbb412bc117914bef868ca19fbf773470531",
+    "imageDigestKind": "Docker immutable local image ID; base registry manifest separately pinned",
+    "baseImageManifest": "sha256:08571ca13e00ca07a2a84eab83a959b4242e22cceb16486a11bef1428c9e93a7",
+    "snapshot": "20261011T000000Z",
+    "tools": {
+      "make": {
+        "path": "/usr/bin/make",
+        "sha256": "abbecc214fcadef6530d1cc137bde7ceb74cae3f6b992c7d10a8669a7314c7e0"
+      },
+      "bison": {
+        "path": "/usr/bin/bison",
+        "sha256": "746581750f75fe81394562ab14f2d0942addface479685b9a11840ab8d002959"
+      },
+      "flex": {
+        "path": "/usr/bin/flex",
+        "sha256": "b0b03937b2b0ed6c8992dbee72c1978c4b545c14c8444b5256fb87d67a30f676"
+      },
+      "bc": {
+        "path": "/usr/bin/bc",
+        "sha256": "3da7a7527037a868fda18c1a4cfd3534cd009d652cc3f67c31c960febd1df84f"
+      },
+      "perl": {
+        "path": "/usr/bin/perl",
+        "sha256": "32b632e848ac6d106042c9628ea5ba3c558791e8bbad3c0b89bd5483e9abcb77"
+      },
+      "openssl": {
+        "path": "/usr/bin/openssl",
+        "sha256": "a2044013d30169104887d7823bf7a0a1d443eafc34d7501876e22da532f24f0e"
+      },
+      "sh": {
+        "path": "/usr/bin/dash",
+        "sha256": "c883d9c27228339580994a1d0ea960645368c7d1b960a712bd0c655860c2d0d7"
+      },
+      "awk": {
+        "path": "/usr/bin/gawk",
+        "sha256": "74a585a10c39d4ddc1b3a21df5dc5137c14bf4c4d2c1a76c25d724dfbb836496"
+      },
+      "sed": {
+        "path": "/usr/bin/sed",
+        "sha256": "39ca7d42a112f32abd4f2a016c8a0d1777a5fd75608f8e1a5d80ac161337a0fe"
+      },
+      "find": {
+        "path": "/usr/bin/find",
+        "sha256": "1ee9e96c55e9d3551cebb991882087c5b21d18c4b4ead73203ca84ab54940ce1"
+      },
+      "pahole": {
+        "path": "/usr/bin/pahole",
+        "sha256": "6ad2e798fe3b6147d82f1dff13957c5998d02910b92b8fc3b3a4d9bd3653b026"
+      },
+      "python3": {
+        "path": "/usr/bin/python3.12",
+        "sha256": "c86f21d0da9290ece2d7d49a3f7ed52aed59cb029abdf0ea25c79634f6cbe960"
+      },
+      "gpgv": {
+        "path": "/usr/bin/gpgv",
+        "sha256": "e4d7e8ce2f59e4e3098981cfea5d6178411d5bbd3670b88914078b53a400c146"
+      },
+      "xz": {
+        "path": "/usr/bin/xz",
+        "sha256": "296a7eaf0ac8cc4f37bd29f8fded9c768ed60fc646f64333e83e4f3a9148451d"
+      },
+      "ldd": {
+        "path": "/usr/bin/ldd",
+        "sha256": "8b1b9cb2220e2b8942431c102e249984cb61b5c62e8ac8e099968e610d3a27f8"
+      },
+      "ld": {
+        "path": "/usr/bin/aarch64-linux-gnu-ld.bfd",
+        "sha256": "1e4d3369b76845fa8e099b83513bf28f6f722e046f9b2cde1378c9e27f96d19c"
+      }
+    },
+    "packagesSha256": "ce963e65c3bf9df44bd78cd065830d8028edf126da9a8bc5acd93b0f3736be2e",
+    "packageArchivesSha256": "adb2c2c78fcfeb27ff475168bbaefa8d2e7a712ad9c485a6210c65d79f6b3264",
+    "sysrootSha256": "dc0a591254c0e824b513eead17b517441a95576ad188705346f5ff7fa806682c",
+    "packageCount": 176,
+    "downloadedPackageCount": 85,
+    "missingCopyright": [],
+    "limits": {
+      "jobs": 2,
+      "cpus": 2,
+      "memoryBytes": 2147483648,
+      "swapBytes": 0,
+      "diskStopBytes": 8589934592,
+      "hostFreeFloorBytes": 8589934592
+    },
+    "isolation": "Docker Linux arm64; compile non-root, read-only rootfs, no network, all capabilities dropped, no-new-privileges. Fixture input read-only and private scratch/output only. No Docker socket or home mount. Dependency inventory does not itself establish trusted/accepted production tooling."
+  },
+  "resources": {
+    "toolExitCodes": [
+      0,
+      0,
+      0
+    ],
+    "cgroup": {
+      "memory.current": "67854336",
+      "memory.peak": "122417152",
+      "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0"
+    }
+  },
+  "relocatedVerification": {
+    "cowork-crypto-capability": {
+      "exitCode": 0,
+      "stdout": "{\"libcryptsetupVersion\":\"2.8.8\",\"defaultLuks2Pbkdf\":\"pbkdf2\",\"boundedPbkdf2SettingsAccepted\":true,\"iterations\":1000,\"benchmarkExecuted\":false,\"keyConsumed\":false,\"deviceOpened\":false,\"kernelCipherAvailabilityChecked\":false,\"formatOrActivationExecuted\":false}",
+      "initializedLibraries": [
+        "/bundle/lib/ld-linux-aarch64.so.1",
+        "/bundle/lib/aarch64-linux-gnu/libc.so.6",
+        "/bundle/lib/aarch64-linux-gnu/libcap.so.2",
+        "/bundle/lib/aarch64-linux-gnu/libpcre2-8.so.0",
+        "/bundle/lib/aarch64-linux-gnu/libm.so.6",
+        "/bundle/lib/aarch64-linux-gnu/libudev.so.1",
+        "/bundle/lib/aarch64-linux-gnu/libselinux.so.1",
+        "/bundle/lib/aarch64-linux-gnu/libjson-c.so.5",
+        "/bundle/lib/aarch64-linux-gnu/libcrypto.so.3",
+        "/bundle/lib/aarch64-linux-gnu/libdevmapper.so.1.02.1",
+        "/bundle/lib/aarch64-linux-gnu/libuuid.so.1",
+        "/bundle/lib/libcryptsetup.so.12",
+        "/bundle/usr/lib/aarch64-linux-gnu/ossl-modules/legacy.so"
+      ],
+      "builderLibraryFallback": []
+    },
+    "cryptsetup": {
+      "exitCode": 0,
+      "stdout": "cryptsetup 2.8.8 flags: KEYRING KERNEL_CAPI",
+      "initializedLibraries": [
+        "/bundle/lib/ld-linux-aarch64.so.1",
+        "/bundle/lib/aarch64-linux-gnu/libc.so.6",
+        "/bundle/lib/aarch64-linux-gnu/libcap.so.2",
+        "/bundle/lib/aarch64-linux-gnu/libpcre2-8.so.0",
+        "/bundle/lib/aarch64-linux-gnu/libm.so.6",
+        "/bundle/lib/aarch64-linux-gnu/libudev.so.1",
+        "/bundle/lib/aarch64-linux-gnu/libselinux.so.1",
+        "/bundle/lib/aarch64-linux-gnu/libjson-c.so.5",
+        "/bundle/lib/aarch64-linux-gnu/libcrypto.so.3",
+        "/bundle/lib/aarch64-linux-gnu/libdevmapper.so.1.02.1",
+        "/bundle/lib/aarch64-linux-gnu/libuuid.so.1",
+        "/bundle/lib/aarch64-linux-gnu/libpopt.so.0",
+        "/bundle/lib/libcryptsetup.so.12"
+      ],
+      "builderLibraryFallback": []
+    },
+    "integritysetup": {
+      "exitCode": 0,
+      "stdout": "integritysetup 2.8.8 flags: KEYRING KERNEL_CAPI",
+      "initializedLibraries": [
+        "/bundle/lib/ld-linux-aarch64.so.1",
+        "/bundle/lib/aarch64-linux-gnu/libc.so.6",
+        "/bundle/lib/aarch64-linux-gnu/libcap.so.2",
+        "/bundle/lib/aarch64-linux-gnu/libpcre2-8.so.0",
+        "/bundle/lib/aarch64-linux-gnu/libm.so.6",
+        "/bundle/lib/aarch64-linux-gnu/libudev.so.1",
+        "/bundle/lib/aarch64-linux-gnu/libselinux.so.1",
+        "/bundle/lib/aarch64-linux-gnu/libjson-c.so.5",
+        "/bundle/lib/aarch64-linux-gnu/libcrypto.so.3",
+        "/bundle/lib/aarch64-linux-gnu/libdevmapper.so.1.02.1",
+        "/bundle/lib/aarch64-linux-gnu/libuuid.so.1",
+        "/bundle/lib/aarch64-linux-gnu/libpopt.so.0",
+        "/bundle/lib/libcryptsetup.so.12"
+      ],
+      "builderLibraryFallback": []
+    },
+    "scope": "Version and no-key/no-device API settings only; not all possible cryptsetup operations or a guest cipher/unlock/boot test."
+  },
+  "containerFinalState": {
+    "Status": "exited",
+    "Running": false,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 0,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-10-12T00:06:15.015681922Z",
+    "FinishedAt": "2026-10-12T00:06:20.262618799Z"
+  },
+  "evidenceRoot": "spikes/cowork-hvf/out/kernel-crypto/userspace-build-repeat",
+  "supportingEvidence": {
+    "toolset-receipt.json": "a544ee661312b4df6db8f4ea8458c02a0a709c1e0f1de17c91cb8a19c67b19ab",
+    "toolset-files.json": "632208cb2a60ec2a0100932e67b5b66e467b46640c123cac03b97c935aa89ecf",
+    "build.log": "268221f40c09f51ddb93c36f14787c3d46babea89d100257a25af8fc2faf8ad0",
+    "build-resources.json": "715f4fa47b6ab68df83b3018c8d467a19171684bf9a096a26ee692b24aa25ae1",
+    "source-verification.log": "0a4b861cc50338cbf8638e5b983bd706282d62b12b1275ee609285c0efdd7c82",
+    "runtime-dependencies.json": "2ee6a36b4af521818b607f75bebb42e31d804358da7729e44f10568016494360",
+    "source-licenses.json": "5d9a76eff4ddcc2c54eeba62a14de1479e30f35763be608825dd3582b74e32e0",
+    "receipt/packages.json": "ce963e65c3bf9df44bd78cd065830d8028edf126da9a8bc5acd93b0f3736be2e",
+    "receipt/package-archives.json": "adb2c2c78fcfeb27ff475168bbaefa8d2e7a712ad9c485a6210c65d79f6b3264",
+    "receipt/sysroot-files.json": "dc0a591254c0e824b513eead17b517441a95576ad188705346f5ff7fa806682c",
+    "relocated-verification.json": "dcac721d14af95c813002ce5128ddd0d433a7c8abddc145c135925d7454f2675",
+    "container-final-inspect.json": "4ea5773b2eb02d7bb7fd0471a5f8bcb0e61814d09067aa8a7d0ca953794f3fef"
+  },
+  "verification": {
+    "manifestFiles": 17,
+    "archiveFileHashModeSizeAndRootOwnershipVerified": true,
+    "exportedFileHashesAndModesVerified": true,
+    "relocatedNoBuilderLibraryFallbackForObservedOperations": true,
+    "focusedTestsPassed": 3,
+    "cleanIndependentBuildArchiveSha256": "30a35be0d452c9bcc8ab882027e1072ea0ce1125211a42af91b94d4dc4786671",
+    "twoCleanBuildArchivesByteIdentical": true,
+    "coverage": "Version/no-device API setting checks; no cipher/disk/key/format/unlock/VM operations."
+  },
+  "attempts": [
+    {
+      "name": "first",
+      "outcome": "Source/configure/make/install succeeded; copyfile lost execute modes and bundle capability launch failed."
+    },
+    {
+      "name": "mode-corrected",
+      "outcome": "Toolset source build and capability check succeeded; independent relocation trace found missing dynamic OpenSSL legacy provider."
+    },
+    {
+      "name": "provider-corrected",
+      "outcome": "Actual final source build, all17-file archive hashes/modes and relocated loader/provider verification passed."
+    },
+    {
+      "name": "clean-comparison",
+      "outcome": "Final checked-in compiler-hash guard and integrated export-mode/relocation verification passed; archive byte-identical."
+    }
+  ],
+  "exportModeNote": "Linux archive/staging kept0444/0555; Docker Desktop host mirror exports initially added owner-write. Host mirror was normalized and independently hash/mode checked. Checked-in runner includes normalization/verification."
+}

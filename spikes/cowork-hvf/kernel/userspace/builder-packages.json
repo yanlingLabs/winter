@@ -1,0 +1,1586 @@
+[
+  {
+    "name": "apt",
+    "version": "2.8.3",
+    "architecture": "arm64",
+    "sourcePackage": "apt",
+    "sourceVersion": "2.8.3",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/apt/2.8.3",
+    "copyrightSha256": "b4701305243d8d746f4acaafe15d94f946251b05691bd6917fef41dd15e9ee12"
+  },
+  {
+    "name": "base-files",
+    "version": "13ubuntu10.5",
+    "architecture": "arm64",
+    "sourcePackage": "base-files",
+    "sourceVersion": "13ubuntu10.5",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/base-files/13ubuntu10.5",
+    "copyrightSha256": "fd7e4aae7e7b05f217bcf2d02322825c360e66c52c4c2f1b28d784d6297a1c23"
+  },
+  {
+    "name": "base-passwd",
+    "version": "3.6.3build1",
+    "architecture": "arm64",
+    "sourcePackage": "base-passwd",
+    "sourceVersion": "3.6.3build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/base-passwd/3.6.3build1",
+    "copyrightSha256": "0f1cde79bd80a75f9029ae9a8c252b642223027ef36f6989c63a8230aae576a7"
+  },
+  {
+    "name": "bash",
+    "version": "5.2.21-2ubuntu4",
+    "architecture": "arm64",
+    "sourcePackage": "bash",
+    "sourceVersion": "5.2.21-2ubuntu4",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/bash/5.2.21-2ubuntu4",
+    "copyrightSha256": "06319d84c3e5ed096036f6a9310a030c7e84e50dff2b8a6792285c83ec0ada73"
+  },
+  {
+    "name": "bc",
+    "version": "1.07.1-3ubuntu4",
+    "architecture": "arm64",
+    "sourcePackage": "bc",
+    "sourceVersion": "1.07.1-3ubuntu4",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/bc/1.07.1-3ubuntu4",
+    "copyrightSha256": "1c76065d1149aef89a3095561eb92cd01cf4309fedabe77e7c0d33e5fb4863eb"
+  },
+  {
+    "name": "binutils",
+    "version": "2.42-4ubuntu2.10",
+    "architecture": "arm64",
+    "sourcePackage": "binutils",
+    "sourceVersion": "2.42-4ubuntu2.10",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/binutils/2.42-4ubuntu2.10",
+    "copyrightSha256": "a81bdd422c2c015deca84bf6ad249bf0d7d19885fc01d1894463291b0b7313e1"
+  },
+  {
+    "name": "binutils-aarch64-linux-gnu",
+    "version": "2.42-4ubuntu2.10",
+    "architecture": "arm64",
+    "sourcePackage": "binutils",
+    "sourceVersion": "2.42-4ubuntu2.10",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/binutils/2.42-4ubuntu2.10",
+    "copyrightSha256": "a81bdd422c2c015deca84bf6ad249bf0d7d19885fc01d1894463291b0b7313e1"
+  },
+  {
+    "name": "binutils-common:arm64",
+    "version": "2.42-4ubuntu2.10",
+    "architecture": "arm64",
+    "sourcePackage": "binutils",
+    "sourceVersion": "2.42-4ubuntu2.10",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/binutils/2.42-4ubuntu2.10",
+    "copyrightSha256": "a81bdd422c2c015deca84bf6ad249bf0d7d19885fc01d1894463291b0b7313e1"
+  },
+  {
+    "name": "bison",
+    "version": "2:3.8.2+dfsg-1ubuntu0.24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "bison",
+    "sourceVersion": "2:3.8.2+dfsg-1ubuntu0.24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/bison/2:3.8.2+dfsg-1ubuntu0.24.04.1",
+    "copyrightSha256": "0870e455b94b9043e84948624d3368d9a45d10674ae4398762b99bb2c328dffd"
+  },
+  {
+    "name": "bsdutils",
+    "version": "1:2.39.3-9ubuntu6.6",
+    "architecture": "arm64",
+    "sourcePackage": "util-linux",
+    "sourceVersion": "2.39.3-9ubuntu6.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/util-linux/2.39.3-9ubuntu6.6",
+    "copyrightSha256": "3492fb92cb56cf517d9a899828b4f989038421a38736e49e5525ffbd33196eab"
+  },
+  {
+    "name": "ca-certificates",
+    "version": "20240203",
+    "architecture": "all",
+    "sourcePackage": "ca-certificates",
+    "sourceVersion": "20240203",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/ca-certificates/20240203",
+    "copyrightSha256": "e85e1bcad3a915dc7e6f41412bc5bdeba275cadd817896ea0451f2140a93967c"
+  },
+  {
+    "name": "coreutils",
+    "version": "9.4-3ubuntu6.3",
+    "architecture": "arm64",
+    "sourcePackage": "coreutils",
+    "sourceVersion": "9.4-3ubuntu6.3",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/coreutils/9.4-3ubuntu6.3",
+    "copyrightSha256": "d23a4fb17c4a2e5bc46dafe9d22192ecf3905473317e17139d210339dcf50fa9"
+  },
+  {
+    "name": "dash",
+    "version": "0.5.12-6ubuntu5",
+    "architecture": "arm64",
+    "sourcePackage": "dash",
+    "sourceVersion": "0.5.12-6ubuntu5",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/dash/0.5.12-6ubuntu5",
+    "copyrightSha256": "d98c53f281321baad38164aa9ae6e368a9253be6ec51bd26a759b5e72b326f4a"
+  },
+  {
+    "name": "debconf",
+    "version": "1.5.86ubuntu1",
+    "architecture": "all",
+    "sourcePackage": "debconf",
+    "sourceVersion": "1.5.86ubuntu1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/debconf/1.5.86ubuntu1",
+    "copyrightSha256": "57163c71bd8a5289660892827dd0dfaa7fef47f89deedc9dc6711ced7d0a28d7"
+  },
+  {
+    "name": "debianutils",
+    "version": "5.17build1",
+    "architecture": "arm64",
+    "sourcePackage": "debianutils",
+    "sourceVersion": "5.17build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/debianutils/5.17build1",
+    "copyrightSha256": "aeb68ea374f488431b8963df24f05482692edfa70d7556d7e528dd06d255461c"
+  },
+  {
+    "name": "diffutils",
+    "version": "1:3.10-1ubuntu0.1",
+    "architecture": "arm64",
+    "sourcePackage": "diffutils",
+    "sourceVersion": "1:3.10-1ubuntu0.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/diffutils/1:3.10-1ubuntu0.1",
+    "copyrightSha256": "ac6fcf18142bab7569188ae75b204a9e1c73c050c0f9467adaf080759e516123"
+  },
+  {
+    "name": "dpkg",
+    "version": "1.22.6ubuntu6.6",
+    "architecture": "arm64",
+    "sourcePackage": "dpkg",
+    "sourceVersion": "1.22.6ubuntu6.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/dpkg/1.22.6ubuntu6.6",
+    "copyrightSha256": "6511e06b27f2297fde6ee8fb2e59807b7712dda61837ca00a0980da1e5df07ac"
+  },
+  {
+    "name": "dwarves",
+    "version": "1.25-0ubuntu3",
+    "architecture": "all",
+    "sourcePackage": "dwarves",
+    "sourceVersion": "1.25-0ubuntu3",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/dwarves/1.25-0ubuntu3",
+    "copyrightSha256": "66985ab6a497dd397f1df5cde859bb926d1f7594883e728e81a0f780c30d1e99"
+  },
+  {
+    "name": "e2fsprogs",
+    "version": "1.47.0-2.4~exp1ubuntu4.1",
+    "architecture": "arm64",
+    "sourcePackage": "e2fsprogs",
+    "sourceVersion": "1.47.0-2.4~exp1ubuntu4.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/e2fsprogs/1.47.0-2.4~exp1ubuntu4.1",
+    "copyrightSha256": "1ca415a294c0e56958c4f795b3f1f69ea3479bca53d7811f5cdd020a258949db"
+  },
+  {
+    "name": "findutils",
+    "version": "4.9.0-5build1",
+    "architecture": "arm64",
+    "sourcePackage": "findutils",
+    "sourceVersion": "4.9.0-5build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/findutils/4.9.0-5build1",
+    "copyrightSha256": "601cc227b3e22ad219beeed7c86b9e146ddf9c88c25620f78169fd5451d4f966"
+  },
+  {
+    "name": "flex",
+    "version": "2.6.4-8.2build1",
+    "architecture": "arm64",
+    "sourcePackage": "flex",
+    "sourceVersion": "2.6.4-8.2build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/flex/2.6.4-8.2build1",
+    "copyrightSha256": "908e7be25f1d5848fc378b76bdbaed59f3d1e19ae61fdeb9d1ad12640bf0e078"
+  },
+  {
+    "name": "gawk",
+    "version": "1:5.2.1-2ubuntu0.1",
+    "architecture": "arm64",
+    "sourcePackage": "gawk",
+    "sourceVersion": "1:5.2.1-2ubuntu0.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gawk/1:5.2.1-2ubuntu0.1",
+    "copyrightSha256": "4d8bd683c14ce5e3f68094a56892ecd336524e9977b6cfd3eb22ef835d67f367"
+  },
+  {
+    "name": "gcc-13-base:arm64",
+    "version": "13.3.0-6ubuntu2~24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "gcc-13",
+    "sourceVersion": "13.3.0-6ubuntu2~24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gcc-13/13.3.0-6ubuntu2~24.04.1",
+    "copyrightSha256": "08c6f3dee4c19aa1e57eb7d4ad45829b2e99656313bd07fa0922e2553f500be5"
+  },
+  {
+    "name": "gcc-14-base:arm64",
+    "version": "14.2.0-4ubuntu2~24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "gcc-14",
+    "sourceVersion": "14.2.0-4ubuntu2~24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gcc-14/14.2.0-4ubuntu2~24.04.1",
+    "copyrightSha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+  },
+  {
+    "name": "gpgv",
+    "version": "2.4.4-2ubuntu17.6",
+    "architecture": "arm64",
+    "sourcePackage": "gnupg2",
+    "sourceVersion": "2.4.4-2ubuntu17.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gnupg2/2.4.4-2ubuntu17.6",
+    "copyrightSha256": "2be9a9a5d7db2584cf984de83379d395bb4a33478404160d1d77d0060b5a1bd1"
+  },
+  {
+    "name": "grep",
+    "version": "3.11-4build1",
+    "architecture": "arm64",
+    "sourcePackage": "grep",
+    "sourceVersion": "3.11-4build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/grep/3.11-4build1",
+    "copyrightSha256": "42d9b4d610396b1e8d1303dcb9487af3f5a2d2709623cf03a04cf76acdf6c5e3"
+  },
+  {
+    "name": "gzip",
+    "version": "1.12-1ubuntu3.2",
+    "architecture": "arm64",
+    "sourcePackage": "gzip",
+    "sourceVersion": "1.12-1ubuntu3.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gzip/1.12-1ubuntu3.2",
+    "copyrightSha256": "1ca5dd5098fe2e1c0f0d05196f5b3da8b414a807702e6ca8b536eb5fd3059130"
+  },
+  {
+    "name": "hostname",
+    "version": "3.23+nmu2ubuntu2",
+    "architecture": "arm64",
+    "sourcePackage": "hostname",
+    "sourceVersion": "3.23+nmu2ubuntu2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/hostname/3.23+nmu2ubuntu2",
+    "copyrightSha256": "94189fc5a9a7b7224d96e1a0cfdfe9be0df2018b04bf21d591627ab96b30cad1"
+  },
+  {
+    "name": "init-system-helpers",
+    "version": "1.66ubuntu1",
+    "architecture": "all",
+    "sourcePackage": "init-system-helpers",
+    "sourceVersion": "1.66ubuntu1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/init-system-helpers/1.66ubuntu1",
+    "copyrightSha256": "7534601cc4fa513804d16490359f5831e7b6a1212da3bbf948bebdd4c8799783"
+  },
+  {
+    "name": "libacl1:arm64",
+    "version": "2.3.2-1build1.1",
+    "architecture": "arm64",
+    "sourcePackage": "acl",
+    "sourceVersion": "2.3.2-1build1.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/acl/2.3.2-1build1.1",
+    "copyrightSha256": "9a2dfb4a5abc7e84be2cc41f1089be665519c9409549296f6c19de57ab1d37c2"
+  },
+  {
+    "name": "libapt-pkg6.0t64:arm64",
+    "version": "2.8.3",
+    "architecture": "arm64",
+    "sourcePackage": "apt",
+    "sourceVersion": "2.8.3",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/apt/2.8.3",
+    "copyrightSha256": "b4701305243d8d746f4acaafe15d94f946251b05691bd6917fef41dd15e9ee12"
+  },
+  {
+    "name": "libasan8:arm64",
+    "version": "14.2.0-4ubuntu2~24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "gcc-14",
+    "sourceVersion": "14.2.0-4ubuntu2~24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gcc-14/14.2.0-4ubuntu2~24.04.1",
+    "copyrightSha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+  },
+  {
+    "name": "libassuan0:arm64",
+    "version": "2.5.6-1build1",
+    "architecture": "arm64",
+    "sourcePackage": "libassuan",
+    "sourceVersion": "2.5.6-1build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libassuan/2.5.6-1build1",
+    "copyrightSha256": "d704d521eb7ba7b9e3d82d85ac6caac4dfb4c784a4762f61a95fbb2733b05ff3"
+  },
+  {
+    "name": "libatomic1:arm64",
+    "version": "14.2.0-4ubuntu2~24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "gcc-14",
+    "sourceVersion": "14.2.0-4ubuntu2~24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gcc-14/14.2.0-4ubuntu2~24.04.1",
+    "copyrightSha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+  },
+  {
+    "name": "libattr1:arm64",
+    "version": "1:2.5.2-1ubuntu0.1",
+    "architecture": "arm64",
+    "sourcePackage": "attr",
+    "sourceVersion": "1:2.5.2-1ubuntu0.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/attr/1:2.5.2-1ubuntu0.1",
+    "copyrightSha256": "0cbec745d85ea775450b2d54fac55277197f429e52d611f72852ed420450620e"
+  },
+  {
+    "name": "libaudit-common",
+    "version": "1:3.1.2-2.1build1.1",
+    "architecture": "all",
+    "sourcePackage": "audit",
+    "sourceVersion": "1:3.1.2-2.1build1.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/audit/1:3.1.2-2.1build1.1",
+    "copyrightSha256": "6c7011e93f643b112c4cc3622131e28a30477afad6c4f5efe466b13aa7f603cc"
+  },
+  {
+    "name": "libaudit1:arm64",
+    "version": "1:3.1.2-2.1build1.1",
+    "architecture": "arm64",
+    "sourcePackage": "audit",
+    "sourceVersion": "1:3.1.2-2.1build1.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/audit/1:3.1.2-2.1build1.1",
+    "copyrightSha256": "6c7011e93f643b112c4cc3622131e28a30477afad6c4f5efe466b13aa7f603cc"
+  },
+  {
+    "name": "libbinutils:arm64",
+    "version": "2.42-4ubuntu2.10",
+    "architecture": "arm64",
+    "sourcePackage": "binutils",
+    "sourceVersion": "2.42-4ubuntu2.10",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/binutils/2.42-4ubuntu2.10",
+    "copyrightSha256": "a81bdd422c2c015deca84bf6ad249bf0d7d19885fc01d1894463291b0b7313e1"
+  },
+  {
+    "name": "libblkid1:arm64",
+    "version": "2.39.3-9ubuntu6.6",
+    "architecture": "arm64",
+    "sourcePackage": "util-linux",
+    "sourceVersion": "2.39.3-9ubuntu6.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/util-linux/2.39.3-9ubuntu6.6",
+    "copyrightSha256": "3492fb92cb56cf517d9a899828b4f989038421a38736e49e5525ffbd33196eab"
+  },
+  {
+    "name": "libbpf1:arm64",
+    "version": "1:1.3.0-2build2",
+    "architecture": "arm64",
+    "sourcePackage": "libbpf",
+    "sourceVersion": "1.3.0-2build2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libbpf/1.3.0-2build2",
+    "copyrightSha256": "4d0df00a62374f3992ad0f2ec566838cafb406d11bef776d2667d3aabaa4b430"
+  },
+  {
+    "name": "libbz2-1.0:arm64",
+    "version": "1.0.8-5.1ubuntu0.1",
+    "architecture": "arm64",
+    "sourcePackage": "bzip2",
+    "sourceVersion": "1.0.8-5.1ubuntu0.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/bzip2/1.0.8-5.1ubuntu0.1",
+    "copyrightSha256": "832ed535ff3c3d025a8d2348eb1b697b89addcf2eaadbc17650262040b9145e2"
+  },
+  {
+    "name": "libc-bin",
+    "version": "2.39-0ubuntu8.9",
+    "architecture": "arm64",
+    "sourcePackage": "glibc",
+    "sourceVersion": "2.39-0ubuntu8.9",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/glibc/2.39-0ubuntu8.9",
+    "copyrightSha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265"
+  },
+  {
+    "name": "libc-dev-bin",
+    "version": "2.39-0ubuntu8.9",
+    "architecture": "arm64",
+    "sourcePackage": "glibc",
+    "sourceVersion": "2.39-0ubuntu8.9",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/glibc/2.39-0ubuntu8.9",
+    "copyrightSha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265"
+  },
+  {
+    "name": "libc6:arm64",
+    "version": "2.39-0ubuntu8.9",
+    "architecture": "arm64",
+    "sourcePackage": "glibc",
+    "sourceVersion": "2.39-0ubuntu8.9",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/glibc/2.39-0ubuntu8.9",
+    "copyrightSha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265"
+  },
+  {
+    "name": "libc6-dev:arm64",
+    "version": "2.39-0ubuntu8.9",
+    "architecture": "arm64",
+    "sourcePackage": "glibc",
+    "sourceVersion": "2.39-0ubuntu8.9",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/glibc/2.39-0ubuntu8.9",
+    "copyrightSha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265"
+  },
+  {
+    "name": "libcap-ng0:arm64",
+    "version": "0.8.4-2build2",
+    "architecture": "arm64",
+    "sourcePackage": "libcap-ng",
+    "sourceVersion": "0.8.4-2build2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libcap-ng/0.8.4-2build2",
+    "copyrightSha256": "567997de097e3738564c90e6fe13343b2daae21a7926d6fb161df41322c1840b"
+  },
+  {
+    "name": "libcap2:arm64",
+    "version": "1:2.66-5ubuntu2.4",
+    "architecture": "arm64",
+    "sourcePackage": "libcap2",
+    "sourceVersion": "1:2.66-5ubuntu2.4",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libcap2/1:2.66-5ubuntu2.4",
+    "copyrightSha256": "e60a5642e12e340060e4e519a65b2eb0330be2917854841c644e36268f607d54"
+  },
+  {
+    "name": "libcom-err2:arm64",
+    "version": "1.47.0-2.4~exp1ubuntu4.1",
+    "architecture": "arm64",
+    "sourcePackage": "e2fsprogs",
+    "sourceVersion": "1.47.0-2.4~exp1ubuntu4.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/e2fsprogs/1.47.0-2.4~exp1ubuntu4.1",
+    "copyrightSha256": "1ca415a294c0e56958c4f795b3f1f69ea3479bca53d7811f5cdd020a258949db"
+  },
+  {
+    "name": "libcrypt-dev:arm64",
+    "version": "1:4.4.36-4build1",
+    "architecture": "arm64",
+    "sourcePackage": "libxcrypt",
+    "sourceVersion": "1:4.4.36-4build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libxcrypt/1:4.4.36-4build1",
+    "copyrightSha256": "5a5e7ca0e9f3f9679977e3a3e9ede45ad92885a3297ea78e766979f9866c5a16"
+  },
+  {
+    "name": "libcrypt1:arm64",
+    "version": "1:4.4.36-4build1",
+    "architecture": "arm64",
+    "sourcePackage": "libxcrypt",
+    "sourceVersion": "1:4.4.36-4build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libxcrypt/1:4.4.36-4build1",
+    "copyrightSha256": "5a5e7ca0e9f3f9679977e3a3e9ede45ad92885a3297ea78e766979f9866c5a16"
+  },
+  {
+    "name": "libctf-nobfd0:arm64",
+    "version": "2.42-4ubuntu2.10",
+    "architecture": "arm64",
+    "sourcePackage": "binutils",
+    "sourceVersion": "2.42-4ubuntu2.10",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/binutils/2.42-4ubuntu2.10",
+    "copyrightSha256": "a81bdd422c2c015deca84bf6ad249bf0d7d19885fc01d1894463291b0b7313e1"
+  },
+  {
+    "name": "libctf0:arm64",
+    "version": "2.42-4ubuntu2.10",
+    "architecture": "arm64",
+    "sourcePackage": "binutils",
+    "sourceVersion": "2.42-4ubuntu2.10",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/binutils/2.42-4ubuntu2.10",
+    "copyrightSha256": "a81bdd422c2c015deca84bf6ad249bf0d7d19885fc01d1894463291b0b7313e1"
+  },
+  {
+    "name": "libdb5.3t64:arm64",
+    "version": "5.3.28+dfsg2-7",
+    "architecture": "arm64",
+    "sourcePackage": "db5.3",
+    "sourceVersion": "5.3.28+dfsg2-7",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/db5.3/5.3.28+dfsg2-7",
+    "copyrightSha256": "8b53da37d73289d9df7317b3a2dbe16491f1fa9fec8b77b86d69704b40ce2c26"
+  },
+  {
+    "name": "libdebconfclient0:arm64",
+    "version": "0.271ubuntu3",
+    "architecture": "arm64",
+    "sourcePackage": "cdebconf",
+    "sourceVersion": "0.271ubuntu3",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/cdebconf/0.271ubuntu3",
+    "copyrightSha256": "cf63099896d1c0f6529c41b8d95738e6fea342ffba609187d339c4f38ce36ecc"
+  },
+  {
+    "name": "libdevmapper-dev:arm64",
+    "version": "2:1.02.185-3ubuntu3.2",
+    "architecture": "arm64",
+    "sourcePackage": "lvm2",
+    "sourceVersion": "2.03.16-3ubuntu3.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/lvm2/2.03.16-3ubuntu3.2",
+    "copyrightSha256": "85275778bfeeb4461375e42feb6a52343e521286ef7ba073e98a37a8c6f5143c"
+  },
+  {
+    "name": "libdevmapper-event1.02.1:arm64",
+    "version": "2:1.02.185-3ubuntu3.2",
+    "architecture": "arm64",
+    "sourcePackage": "lvm2",
+    "sourceVersion": "2.03.16-3ubuntu3.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/lvm2/2.03.16-3ubuntu3.2",
+    "copyrightSha256": "85275778bfeeb4461375e42feb6a52343e521286ef7ba073e98a37a8c6f5143c"
+  },
+  {
+    "name": "libdevmapper1.02.1:arm64",
+    "version": "2:1.02.185-3ubuntu3.2",
+    "architecture": "arm64",
+    "sourcePackage": "lvm2",
+    "sourceVersion": "2.03.16-3ubuntu3.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/lvm2/2.03.16-3ubuntu3.2",
+    "copyrightSha256": "85275778bfeeb4461375e42feb6a52343e521286ef7ba073e98a37a8c6f5143c"
+  },
+  {
+    "name": "libdw1t64:arm64",
+    "version": "0.190-1.1ubuntu0.1",
+    "architecture": "arm64",
+    "sourcePackage": "elfutils",
+    "sourceVersion": "0.190-1.1ubuntu0.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/elfutils/0.190-1.1ubuntu0.1",
+    "copyrightSha256": "657e078ed1e718b57ca839cdc38bb93196a0009488bea43cd0f429e7531530fa"
+  },
+  {
+    "name": "libelf-dev:arm64",
+    "version": "0.190-1.1ubuntu0.1",
+    "architecture": "arm64",
+    "sourcePackage": "elfutils",
+    "sourceVersion": "0.190-1.1ubuntu0.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/elfutils/0.190-1.1ubuntu0.1",
+    "copyrightSha256": "657e078ed1e718b57ca839cdc38bb93196a0009488bea43cd0f429e7531530fa"
+  },
+  {
+    "name": "libelf1t64:arm64",
+    "version": "0.190-1.1ubuntu0.1",
+    "architecture": "arm64",
+    "sourcePackage": "elfutils",
+    "sourceVersion": "0.190-1.1ubuntu0.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/elfutils/0.190-1.1ubuntu0.1",
+    "copyrightSha256": "657e078ed1e718b57ca839cdc38bb93196a0009488bea43cd0f429e7531530fa"
+  },
+  {
+    "name": "libexpat1:arm64",
+    "version": "2.6.1-2ubuntu0.6",
+    "architecture": "arm64",
+    "sourcePackage": "expat",
+    "sourceVersion": "2.6.1-2ubuntu0.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/expat/2.6.1-2ubuntu0.6",
+    "copyrightSha256": "60919fe1a156395ff14511bb6ff79756c50ade2fff59ac60c9bae1d8a7fe6292"
+  },
+  {
+    "name": "libext2fs2t64:arm64",
+    "version": "1.47.0-2.4~exp1ubuntu4.1",
+    "architecture": "arm64",
+    "sourcePackage": "e2fsprogs",
+    "sourceVersion": "1.47.0-2.4~exp1ubuntu4.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/e2fsprogs/1.47.0-2.4~exp1ubuntu4.1",
+    "copyrightSha256": "1ca415a294c0e56958c4f795b3f1f69ea3479bca53d7811f5cdd020a258949db"
+  },
+  {
+    "name": "libffi8:arm64",
+    "version": "3.4.6-1build1",
+    "architecture": "arm64",
+    "sourcePackage": "libffi",
+    "sourceVersion": "3.4.6-1build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libffi/3.4.6-1build1",
+    "copyrightSha256": "737ff68f0eb104d3b0d96b291c3a8f40a775a3ec2b53f9b2e4bcfe3188bde118"
+  },
+  {
+    "name": "libgcc-13-dev:arm64",
+    "version": "13.3.0-6ubuntu2~24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "gcc-13",
+    "sourceVersion": "13.3.0-6ubuntu2~24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gcc-13/13.3.0-6ubuntu2~24.04.1",
+    "copyrightSha256": "08c6f3dee4c19aa1e57eb7d4ad45829b2e99656313bd07fa0922e2553f500be5"
+  },
+  {
+    "name": "libgcc-s1:arm64",
+    "version": "14.2.0-4ubuntu2~24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "gcc-14",
+    "sourceVersion": "14.2.0-4ubuntu2~24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gcc-14/14.2.0-4ubuntu2~24.04.1",
+    "copyrightSha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+  },
+  {
+    "name": "libgcrypt20:arm64",
+    "version": "1.10.3-2ubuntu0.2",
+    "architecture": "arm64",
+    "sourcePackage": "libgcrypt20",
+    "sourceVersion": "1.10.3-2ubuntu0.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libgcrypt20/1.10.3-2ubuntu0.2",
+    "copyrightSha256": "40162167dff80843a4b24aa8d0a4ffc50be5338d004ebe38f86ae3397ba9de3e"
+  },
+  {
+    "name": "libgdbm-compat4t64:arm64",
+    "version": "1.23-5.1build1",
+    "architecture": "arm64",
+    "sourcePackage": "gdbm",
+    "sourceVersion": "1.23-5.1build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gdbm/1.23-5.1build1",
+    "copyrightSha256": "8bea8cf2f94cd8b37a0b8b3a2b974122b9194c1165e6ad508e366c74679e8817"
+  },
+  {
+    "name": "libgdbm6t64:arm64",
+    "version": "1.23-5.1build1",
+    "architecture": "arm64",
+    "sourcePackage": "gdbm",
+    "sourceVersion": "1.23-5.1build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gdbm/1.23-5.1build1",
+    "copyrightSha256": "8bea8cf2f94cd8b37a0b8b3a2b974122b9194c1165e6ad508e366c74679e8817"
+  },
+  {
+    "name": "libgmp10:arm64",
+    "version": "2:6.3.0+dfsg-2ubuntu6.1",
+    "architecture": "arm64",
+    "sourcePackage": "gmp",
+    "sourceVersion": "2:6.3.0+dfsg-2ubuntu6.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gmp/2:6.3.0+dfsg-2ubuntu6.1",
+    "copyrightSha256": "7d366aef5ba325150246de1d7820c4c9926cd27ca61a69948492b26cd3b61601"
+  },
+  {
+    "name": "libgnutls30t64:arm64",
+    "version": "3.8.3-1.1ubuntu3.6",
+    "architecture": "arm64",
+    "sourcePackage": "gnutls28",
+    "sourceVersion": "3.8.3-1.1ubuntu3.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gnutls28/3.8.3-1.1ubuntu3.6",
+    "copyrightSha256": "51da5214308b87d6a0a2fbcaea1f7dbd15510be733e5921d9548ff6b88d84dd8"
+  },
+  {
+    "name": "libgomp1:arm64",
+    "version": "14.2.0-4ubuntu2~24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "gcc-14",
+    "sourceVersion": "14.2.0-4ubuntu2~24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gcc-14/14.2.0-4ubuntu2~24.04.1",
+    "copyrightSha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+  },
+  {
+    "name": "libgpg-error0:arm64",
+    "version": "1.47-3build2.1",
+    "architecture": "arm64",
+    "sourcePackage": "libgpg-error",
+    "sourceVersion": "1.47-3build2.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libgpg-error/1.47-3build2.1",
+    "copyrightSha256": "0250e9e7cbf6c68c2bd05b6db1ea684988f91cd95da69f2936064cf302729fe5"
+  },
+  {
+    "name": "libgprofng0:arm64",
+    "version": "2.42-4ubuntu2.10",
+    "architecture": "arm64",
+    "sourcePackage": "binutils",
+    "sourceVersion": "2.42-4ubuntu2.10",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/binutils/2.42-4ubuntu2.10",
+    "copyrightSha256": "a81bdd422c2c015deca84bf6ad249bf0d7d19885fc01d1894463291b0b7313e1"
+  },
+  {
+    "name": "libhogweed6t64:arm64",
+    "version": "3.9.1-2.2build1.1",
+    "architecture": "arm64",
+    "sourcePackage": "nettle",
+    "sourceVersion": "3.9.1-2.2build1.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/nettle/3.9.1-2.2build1.1",
+    "copyrightSha256": "2cecdc7ac1913beb31299a41a8092fc936d9e6a1d00872fc3bf6e2263aecf842"
+  },
+  {
+    "name": "libhwasan0:arm64",
+    "version": "14.2.0-4ubuntu2~24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "gcc-14",
+    "sourceVersion": "14.2.0-4ubuntu2~24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gcc-14/14.2.0-4ubuntu2~24.04.1",
+    "copyrightSha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+  },
+  {
+    "name": "libicu74:arm64",
+    "version": "74.2-1ubuntu3.1",
+    "architecture": "arm64",
+    "sourcePackage": "icu",
+    "sourceVersion": "74.2-1ubuntu3.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/icu/74.2-1ubuntu3.1",
+    "copyrightSha256": "5bbff5f646ce750ac0a347e7f91793279b7422a1119820b5f75d98879c201c68"
+  },
+  {
+    "name": "libidn2-0:arm64",
+    "version": "2.3.7-2build1.1",
+    "architecture": "arm64",
+    "sourcePackage": "libidn2",
+    "sourceVersion": "2.3.7-2build1.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libidn2/2.3.7-2build1.1",
+    "copyrightSha256": "41702469f28e8ff406345e3d1dd0c741f11bdfca319264f67036efd6aaa79e4b"
+  },
+  {
+    "name": "libitm1:arm64",
+    "version": "14.2.0-4ubuntu2~24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "gcc-14",
+    "sourceVersion": "14.2.0-4ubuntu2~24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gcc-14/14.2.0-4ubuntu2~24.04.1",
+    "copyrightSha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+  },
+  {
+    "name": "libjansson4:arm64",
+    "version": "2.14-2build2",
+    "architecture": "arm64",
+    "sourcePackage": "jansson",
+    "sourceVersion": "2.14-2build2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/jansson/2.14-2build2",
+    "copyrightSha256": "29347e2528ab31d20e8582b09aa89cd878d306c59a273541141c9aede1903cb8"
+  },
+  {
+    "name": "libjson-c-dev:arm64",
+    "version": "0.17-1build1",
+    "architecture": "arm64",
+    "sourcePackage": "json-c",
+    "sourceVersion": "0.17-1build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/json-c/0.17-1build1",
+    "copyrightSha256": "17c4a26a5995911064bdfb8af6a5dacd2c29b2648da47045fe25c746dee23b2d"
+  },
+  {
+    "name": "libjson-c5:arm64",
+    "version": "0.17-1build1",
+    "architecture": "arm64",
+    "sourcePackage": "json-c",
+    "sourceVersion": "0.17-1build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/json-c/0.17-1build1",
+    "copyrightSha256": "17c4a26a5995911064bdfb8af6a5dacd2c29b2648da47045fe25c746dee23b2d"
+  },
+  {
+    "name": "liblsan0:arm64",
+    "version": "14.2.0-4ubuntu2~24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "gcc-14",
+    "sourceVersion": "14.2.0-4ubuntu2~24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gcc-14/14.2.0-4ubuntu2~24.04.1",
+    "copyrightSha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+  },
+  {
+    "name": "liblz4-1:arm64",
+    "version": "1.9.4-1build1.1",
+    "architecture": "arm64",
+    "sourcePackage": "lz4",
+    "sourceVersion": "1.9.4-1build1.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/lz4/1.9.4-1build1.1",
+    "copyrightSha256": "d3be0f43fe14da244f97c451bbae789c0acf868612598a69f5f22a289abeca40"
+  },
+  {
+    "name": "liblzma5:arm64",
+    "version": "5.6.1+really5.4.5-1ubuntu0.3",
+    "architecture": "arm64",
+    "sourcePackage": "xz-utils",
+    "sourceVersion": "5.6.1+really5.4.5-1ubuntu0.3",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/xz-utils/5.6.1+really5.4.5-1ubuntu0.3",
+    "copyrightSha256": "a2dc8fac0f496e1c58aff67018cf0c6b88336316afa5642f9335b71642e28aa8"
+  },
+  {
+    "name": "libmd0:arm64",
+    "version": "1.1.0-2build1.1",
+    "architecture": "arm64",
+    "sourcePackage": "libmd",
+    "sourceVersion": "1.1.0-2build1.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libmd/1.1.0-2build1.1",
+    "copyrightSha256": "4365ef6255ad553fce69dd4bc0e093472c5d0e41b8ea493a545cc926ce171aa6"
+  },
+  {
+    "name": "libmount1:arm64",
+    "version": "2.39.3-9ubuntu6.6",
+    "architecture": "arm64",
+    "sourcePackage": "util-linux",
+    "sourceVersion": "2.39.3-9ubuntu6.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/util-linux/2.39.3-9ubuntu6.6",
+    "copyrightSha256": "3492fb92cb56cf517d9a899828b4f989038421a38736e49e5525ffbd33196eab"
+  },
+  {
+    "name": "libmpfr6:arm64",
+    "version": "4.2.1-1build1.1",
+    "architecture": "arm64",
+    "sourcePackage": "mpfr4",
+    "sourceVersion": "4.2.1-1build1.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/mpfr4/4.2.1-1build1.1",
+    "copyrightSha256": "c434a44e656a89e72b5cee13bba6719011e0899bfc626ab9c08205010ab2dbbe"
+  },
+  {
+    "name": "libncursesw6:arm64",
+    "version": "6.4+20240113-1ubuntu2.2",
+    "architecture": "arm64",
+    "sourcePackage": "ncurses",
+    "sourceVersion": "6.4+20240113-1ubuntu2.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/ncurses/6.4+20240113-1ubuntu2.2",
+    "copyrightSha256": "7c9d2c8dbee48b6f4bbbffb1f370cc5858de11cc4f5a70c5c622c274917e1c65"
+  },
+  {
+    "name": "libnettle8t64:arm64",
+    "version": "3.9.1-2.2build1.1",
+    "architecture": "arm64",
+    "sourcePackage": "nettle",
+    "sourceVersion": "3.9.1-2.2build1.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/nettle/3.9.1-2.2build1.1",
+    "copyrightSha256": "2cecdc7ac1913beb31299a41a8092fc936d9e6a1d00872fc3bf6e2263aecf842"
+  },
+  {
+    "name": "libnpth0t64:arm64",
+    "version": "1.6-3.1build1",
+    "architecture": "arm64",
+    "sourcePackage": "npth",
+    "sourceVersion": "1.6-3.1build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/npth/1.6-3.1build1",
+    "copyrightSha256": "df6909abb38f4e84d237d8617e948bdbb391b2004ecf573863011d54a88ccf22"
+  },
+  {
+    "name": "libp11-kit0:arm64",
+    "version": "0.25.3-4ubuntu2.2",
+    "architecture": "arm64",
+    "sourcePackage": "p11-kit",
+    "sourceVersion": "0.25.3-4ubuntu2.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/p11-kit/0.25.3-4ubuntu2.2",
+    "copyrightSha256": "d33af1e069981d1c1b576cb22e4bc260a134ffa2fce6ddd3cbbbb5b181113f0c"
+  },
+  {
+    "name": "libpam-modules:arm64",
+    "version": "1.5.3-5ubuntu5.7",
+    "architecture": "arm64",
+    "sourcePackage": "pam",
+    "sourceVersion": "1.5.3-5ubuntu5.7",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/pam/1.5.3-5ubuntu5.7",
+    "copyrightSha256": "9596b9028339d66c285422237728d6170e1e29d0b0d9adf0e9f1bda82e2391ce"
+  },
+  {
+    "name": "libpam-modules-bin",
+    "version": "1.5.3-5ubuntu5.7",
+    "architecture": "arm64",
+    "sourcePackage": "pam",
+    "sourceVersion": "1.5.3-5ubuntu5.7",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/pam/1.5.3-5ubuntu5.7",
+    "copyrightSha256": "9596b9028339d66c285422237728d6170e1e29d0b0d9adf0e9f1bda82e2391ce"
+  },
+  {
+    "name": "libpam-runtime",
+    "version": "1.5.3-5ubuntu5.7",
+    "architecture": "all",
+    "sourcePackage": "pam",
+    "sourceVersion": "1.5.3-5ubuntu5.7",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/pam/1.5.3-5ubuntu5.7",
+    "copyrightSha256": "9596b9028339d66c285422237728d6170e1e29d0b0d9adf0e9f1bda82e2391ce"
+  },
+  {
+    "name": "libpam0g:arm64",
+    "version": "1.5.3-5ubuntu5.7",
+    "architecture": "arm64",
+    "sourcePackage": "pam",
+    "sourceVersion": "1.5.3-5ubuntu5.7",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/pam/1.5.3-5ubuntu5.7",
+    "copyrightSha256": "9596b9028339d66c285422237728d6170e1e29d0b0d9adf0e9f1bda82e2391ce"
+  },
+  {
+    "name": "libpcre2-16-0:arm64",
+    "version": "10.42-4ubuntu2.1",
+    "architecture": "arm64",
+    "sourcePackage": "pcre2",
+    "sourceVersion": "10.42-4ubuntu2.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/pcre2/10.42-4ubuntu2.1",
+    "copyrightSha256": "030511beb4d9d620ad09914c369c36ec0528dcf301d1923cc643c948ee7c6a38"
+  },
+  {
+    "name": "libpcre2-32-0:arm64",
+    "version": "10.42-4ubuntu2.1",
+    "architecture": "arm64",
+    "sourcePackage": "pcre2",
+    "sourceVersion": "10.42-4ubuntu2.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/pcre2/10.42-4ubuntu2.1",
+    "copyrightSha256": "030511beb4d9d620ad09914c369c36ec0528dcf301d1923cc643c948ee7c6a38"
+  },
+  {
+    "name": "libpcre2-8-0:arm64",
+    "version": "10.42-4ubuntu2.1",
+    "architecture": "arm64",
+    "sourcePackage": "pcre2",
+    "sourceVersion": "10.42-4ubuntu2.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/pcre2/10.42-4ubuntu2.1",
+    "copyrightSha256": "030511beb4d9d620ad09914c369c36ec0528dcf301d1923cc643c948ee7c6a38"
+  },
+  {
+    "name": "libpcre2-dev:arm64",
+    "version": "10.42-4ubuntu2.1",
+    "architecture": "arm64",
+    "sourcePackage": "pcre2",
+    "sourceVersion": "10.42-4ubuntu2.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/pcre2/10.42-4ubuntu2.1",
+    "copyrightSha256": "030511beb4d9d620ad09914c369c36ec0528dcf301d1923cc643c948ee7c6a38"
+  },
+  {
+    "name": "libpcre2-posix3:arm64",
+    "version": "10.42-4ubuntu2.1",
+    "architecture": "arm64",
+    "sourcePackage": "pcre2",
+    "sourceVersion": "10.42-4ubuntu2.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/pcre2/10.42-4ubuntu2.1",
+    "copyrightSha256": "030511beb4d9d620ad09914c369c36ec0528dcf301d1923cc643c948ee7c6a38"
+  },
+  {
+    "name": "libperl5.38t64:arm64",
+    "version": "5.38.2-3.2ubuntu0.6",
+    "architecture": "arm64",
+    "sourcePackage": "perl",
+    "sourceVersion": "5.38.2-3.2ubuntu0.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/perl/5.38.2-3.2ubuntu0.6",
+    "copyrightSha256": "657ac19622868be1f2bf8ac3823a952b28c7a2a467f61353743e9c9d89291921"
+  },
+  {
+    "name": "libpkgconf3:arm64",
+    "version": "1.8.1-2build1",
+    "architecture": "arm64",
+    "sourcePackage": "pkgconf",
+    "sourceVersion": "1.8.1-2build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/pkgconf/1.8.1-2build1",
+    "copyrightSha256": "676c75e54ff7e3b9892940fbf1b31763cb6f2a6527a5607a3640ac59a2441fba"
+  },
+  {
+    "name": "libpopt-dev:arm64",
+    "version": "1.19+dfsg-1build1",
+    "architecture": "arm64",
+    "sourcePackage": "popt",
+    "sourceVersion": "1.19+dfsg-1build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/popt/1.19+dfsg-1build1",
+    "copyrightSha256": "46bf8fceccc1c186fe9e67b21a8670e2fef58989093ef65c377307c974e3c733"
+  },
+  {
+    "name": "libpopt0:arm64",
+    "version": "1.19+dfsg-1build1",
+    "architecture": "arm64",
+    "sourcePackage": "popt",
+    "sourceVersion": "1.19+dfsg-1build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/popt/1.19+dfsg-1build1",
+    "copyrightSha256": "46bf8fceccc1c186fe9e67b21a8670e2fef58989093ef65c377307c974e3c733"
+  },
+  {
+    "name": "libproc2-0:arm64",
+    "version": "2:4.0.4-4ubuntu3.3",
+    "architecture": "arm64",
+    "sourcePackage": "procps",
+    "sourceVersion": "2:4.0.4-4ubuntu3.3",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/procps/2:4.0.4-4ubuntu3.3",
+    "copyrightSha256": "90a66617c36d83068b52bbb77cbfef1234f526bfa287156d9d05f7df4d339539"
+  },
+  {
+    "name": "libpython3-stdlib:arm64",
+    "version": "3.12.3-0ubuntu2.1",
+    "architecture": "arm64",
+    "sourcePackage": "python3-defaults",
+    "sourceVersion": "3.12.3-0ubuntu2.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/python3-defaults/3.12.3-0ubuntu2.1",
+    "copyrightSha256": "5b274dbb44b28a54b795b9471c07ab045054d6b8a86273cb9feb632b6fd2760d"
+  },
+  {
+    "name": "libpython3.12-minimal:arm64",
+    "version": "3.12.3-1ubuntu0.17",
+    "architecture": "arm64",
+    "sourcePackage": "python3.12",
+    "sourceVersion": "3.12.3-1ubuntu0.17",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/python3.12/3.12.3-1ubuntu0.17",
+    "copyrightSha256": "f1cbf908e1daa8789b389fdcf17811ed36b675d736b39a103591399861350382"
+  },
+  {
+    "name": "libpython3.12-stdlib:arm64",
+    "version": "3.12.3-1ubuntu0.17",
+    "architecture": "arm64",
+    "sourcePackage": "python3.12",
+    "sourceVersion": "3.12.3-1ubuntu0.17",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/python3.12/3.12.3-1ubuntu0.17",
+    "copyrightSha256": "f1cbf908e1daa8789b389fdcf17811ed36b675d736b39a103591399861350382"
+  },
+  {
+    "name": "libreadline8t64:arm64",
+    "version": "8.2-4build1",
+    "architecture": "arm64",
+    "sourcePackage": "readline",
+    "sourceVersion": "8.2-4build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/readline/8.2-4build1",
+    "copyrightSha256": "854c6f5f249a109a913e1e58528445c4fec96f063ae8ba496bfb2b460bcc6866"
+  },
+  {
+    "name": "libseccomp2:arm64",
+    "version": "2.5.5-1ubuntu3.1",
+    "architecture": "arm64",
+    "sourcePackage": "libseccomp",
+    "sourceVersion": "2.5.5-1ubuntu3.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libseccomp/2.5.5-1ubuntu3.1",
+    "copyrightSha256": "6da0653a365b80ab31478dbfe9e7c358e80d58b6d2b52b4e16b4dbb42d7d9f5c"
+  },
+  {
+    "name": "libselinux1:arm64",
+    "version": "3.5-2ubuntu2.1",
+    "architecture": "arm64",
+    "sourcePackage": "libselinux",
+    "sourceVersion": "3.5-2ubuntu2.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libselinux/3.5-2ubuntu2.1",
+    "copyrightSha256": "864f1bb189f609075d580b8c4aada16d85a44546884f1687989e1cacc8c56751"
+  },
+  {
+    "name": "libselinux1-dev:arm64",
+    "version": "3.5-2ubuntu2.1",
+    "architecture": "arm64",
+    "sourcePackage": "libselinux",
+    "sourceVersion": "3.5-2ubuntu2.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libselinux/3.5-2ubuntu2.1",
+    "copyrightSha256": "864f1bb189f609075d580b8c4aada16d85a44546884f1687989e1cacc8c56751"
+  },
+  {
+    "name": "libsemanage-common",
+    "version": "3.5-1build5",
+    "architecture": "all",
+    "sourcePackage": "libsemanage",
+    "sourceVersion": "3.5-1build5",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libsemanage/3.5-1build5",
+    "copyrightSha256": "fe5876a94047cafbeb8b164fd98304912d94b6028e19415f08b7a8a2f90645fe"
+  },
+  {
+    "name": "libsemanage2:arm64",
+    "version": "3.5-1build5",
+    "architecture": "arm64",
+    "sourcePackage": "libsemanage",
+    "sourceVersion": "3.5-1build5",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libsemanage/3.5-1build5",
+    "copyrightSha256": "fe5876a94047cafbeb8b164fd98304912d94b6028e19415f08b7a8a2f90645fe"
+  },
+  {
+    "name": "libsepol-dev:arm64",
+    "version": "3.5-2build1",
+    "architecture": "arm64",
+    "sourcePackage": "libsepol",
+    "sourceVersion": "3.5-2build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libsepol/3.5-2build1",
+    "copyrightSha256": "78d2a34606a0302057ec499a3b3c07bcbc43ca334064ce4c80891a0f69c8f6c6"
+  },
+  {
+    "name": "libsepol2:arm64",
+    "version": "3.5-2build1",
+    "architecture": "arm64",
+    "sourcePackage": "libsepol",
+    "sourceVersion": "3.5-2build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libsepol/3.5-2build1",
+    "copyrightSha256": "78d2a34606a0302057ec499a3b3c07bcbc43ca334064ce4c80891a0f69c8f6c6"
+  },
+  {
+    "name": "libsframe1:arm64",
+    "version": "2.42-4ubuntu2.10",
+    "architecture": "arm64",
+    "sourcePackage": "binutils",
+    "sourceVersion": "2.42-4ubuntu2.10",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/binutils/2.42-4ubuntu2.10",
+    "copyrightSha256": "a81bdd422c2c015deca84bf6ad249bf0d7d19885fc01d1894463291b0b7313e1"
+  },
+  {
+    "name": "libsigsegv2:arm64",
+    "version": "2.14-1ubuntu2",
+    "architecture": "arm64",
+    "sourcePackage": "libsigsegv",
+    "sourceVersion": "2.14-1ubuntu2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libsigsegv/2.14-1ubuntu2",
+    "copyrightSha256": "7b99c9331ab4f430f78516833f9f04ca3408ab0f3d325534c6ee34a5ada0ce24"
+  },
+  {
+    "name": "libsmartcols1:arm64",
+    "version": "2.39.3-9ubuntu6.6",
+    "architecture": "arm64",
+    "sourcePackage": "util-linux",
+    "sourceVersion": "2.39.3-9ubuntu6.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/util-linux/2.39.3-9ubuntu6.6",
+    "copyrightSha256": "3492fb92cb56cf517d9a899828b4f989038421a38736e49e5525ffbd33196eab"
+  },
+  {
+    "name": "libsqlite3-0:arm64",
+    "version": "3.45.1-1ubuntu2.8",
+    "architecture": "arm64",
+    "sourcePackage": "sqlite3",
+    "sourceVersion": "3.45.1-1ubuntu2.8",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/sqlite3/3.45.1-1ubuntu2.8",
+    "copyrightSha256": "78e9df8f8153c91c762ec970b82d224ac4d30f05aa7773e7e17e268141e53873"
+  },
+  {
+    "name": "libss2:arm64",
+    "version": "1.47.0-2.4~exp1ubuntu4.1",
+    "architecture": "arm64",
+    "sourcePackage": "e2fsprogs",
+    "sourceVersion": "1.47.0-2.4~exp1ubuntu4.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/e2fsprogs/1.47.0-2.4~exp1ubuntu4.1",
+    "copyrightSha256": "1ca415a294c0e56958c4f795b3f1f69ea3479bca53d7811f5cdd020a258949db"
+  },
+  {
+    "name": "libssl-dev:arm64",
+    "version": "3.0.13-0ubuntu3.16",
+    "architecture": "arm64",
+    "sourcePackage": "openssl",
+    "sourceVersion": "3.0.13-0ubuntu3.16",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/openssl/3.0.13-0ubuntu3.16",
+    "copyrightSha256": "6a7da622fe0637a334d2a8fc470852d2ffb77d9a2b2f930f854e32a41ad6ef35"
+  },
+  {
+    "name": "libssl3t64:arm64",
+    "version": "3.0.13-0ubuntu3.16",
+    "architecture": "arm64",
+    "sourcePackage": "openssl",
+    "sourceVersion": "3.0.13-0ubuntu3.16",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/openssl/3.0.13-0ubuntu3.16",
+    "copyrightSha256": "6a7da622fe0637a334d2a8fc470852d2ffb77d9a2b2f930f854e32a41ad6ef35"
+  },
+  {
+    "name": "libstdc++6:arm64",
+    "version": "14.2.0-4ubuntu2~24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "gcc-14",
+    "sourceVersion": "14.2.0-4ubuntu2~24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gcc-14/14.2.0-4ubuntu2~24.04.1",
+    "copyrightSha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+  },
+  {
+    "name": "libsystemd0:arm64",
+    "version": "255.4-1ubuntu8.17",
+    "architecture": "arm64",
+    "sourcePackage": "systemd",
+    "sourceVersion": "255.4-1ubuntu8.17",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/systemd/255.4-1ubuntu8.17",
+    "copyrightSha256": "a7d06854714a1ca99f6dbd1a1641dde5bcf28635be149f6554449618f8f427f3"
+  },
+  {
+    "name": "libtasn1-6:arm64",
+    "version": "4.19.0-3ubuntu0.24.04.2",
+    "architecture": "arm64",
+    "sourcePackage": "libtasn1-6",
+    "sourceVersion": "4.19.0-3ubuntu0.24.04.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libtasn1-6/4.19.0-3ubuntu0.24.04.2",
+    "copyrightSha256": "572ad60ad184d8f52c6dc66d83a61a68f137db560b3452ce00588c9ecf128a65"
+  },
+  {
+    "name": "libtinfo6:arm64",
+    "version": "6.4+20240113-1ubuntu2.2",
+    "architecture": "arm64",
+    "sourcePackage": "ncurses",
+    "sourceVersion": "6.4+20240113-1ubuntu2.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/ncurses/6.4+20240113-1ubuntu2.2",
+    "copyrightSha256": "7c9d2c8dbee48b6f4bbbffb1f370cc5858de11cc4f5a70c5c622c274917e1c65"
+  },
+  {
+    "name": "libtsan2:arm64",
+    "version": "14.2.0-4ubuntu2~24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "gcc-14",
+    "sourceVersion": "14.2.0-4ubuntu2~24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gcc-14/14.2.0-4ubuntu2~24.04.1",
+    "copyrightSha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+  },
+  {
+    "name": "libubsan1:arm64",
+    "version": "14.2.0-4ubuntu2~24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "gcc-14",
+    "sourceVersion": "14.2.0-4ubuntu2~24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/gcc-14/14.2.0-4ubuntu2~24.04.1",
+    "copyrightSha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+  },
+  {
+    "name": "libudev-dev:arm64",
+    "version": "255.4-1ubuntu8.17",
+    "architecture": "arm64",
+    "sourcePackage": "systemd",
+    "sourceVersion": "255.4-1ubuntu8.17",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/systemd/255.4-1ubuntu8.17",
+    "copyrightSha256": "a7d06854714a1ca99f6dbd1a1641dde5bcf28635be149f6554449618f8f427f3"
+  },
+  {
+    "name": "libudev1:arm64",
+    "version": "255.4-1ubuntu8.17",
+    "architecture": "arm64",
+    "sourcePackage": "systemd",
+    "sourceVersion": "255.4-1ubuntu8.17",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/systemd/255.4-1ubuntu8.17",
+    "copyrightSha256": "a7d06854714a1ca99f6dbd1a1641dde5bcf28635be149f6554449618f8f427f3"
+  },
+  {
+    "name": "libunistring5:arm64",
+    "version": "1.1-2build1.1",
+    "architecture": "arm64",
+    "sourcePackage": "libunistring",
+    "sourceVersion": "1.1-2build1.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libunistring/1.1-2build1.1",
+    "copyrightSha256": "dbbfee567c5eb53ad1c75ce666779e596b5f794b52be7f5834685ddd633185ea"
+  },
+  {
+    "name": "libuuid1:arm64",
+    "version": "2.39.3-9ubuntu6.6",
+    "architecture": "arm64",
+    "sourcePackage": "util-linux",
+    "sourceVersion": "2.39.3-9ubuntu6.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/util-linux/2.39.3-9ubuntu6.6",
+    "copyrightSha256": "3492fb92cb56cf517d9a899828b4f989038421a38736e49e5525ffbd33196eab"
+  },
+  {
+    "name": "libxml2:arm64",
+    "version": "2.9.14+dfsg-1.3ubuntu3.10",
+    "architecture": "arm64",
+    "sourcePackage": "libxml2",
+    "sourceVersion": "2.9.14+dfsg-1.3ubuntu3.10",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libxml2/2.9.14+dfsg-1.3ubuntu3.10",
+    "copyrightSha256": "ee746b96cfa5be73c3ea3e4cfb1285e9b315d4c9267f99b2ee9c5d911d9fe3f4"
+  },
+  {
+    "name": "libxxhash0:arm64",
+    "version": "0.8.2-2build1",
+    "architecture": "arm64",
+    "sourcePackage": "xxhash",
+    "sourceVersion": "0.8.2-2build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/xxhash/0.8.2-2build1",
+    "copyrightSha256": "53acfd069ef57d3a68fc03d3ecdbcb7939c8083bae3fe52851da69b0383d7ee0"
+  },
+  {
+    "name": "libzstd-dev:arm64",
+    "version": "1.5.5+dfsg2-2build1.1",
+    "architecture": "arm64",
+    "sourcePackage": "libzstd",
+    "sourceVersion": "1.5.5+dfsg2-2build1.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libzstd/1.5.5+dfsg2-2build1.1",
+    "copyrightSha256": "35e85e8e9bbb71492c5f5dddf39ed65b68775a02ad8d710c25d097b497f06c49"
+  },
+  {
+    "name": "libzstd1:arm64",
+    "version": "1.5.5+dfsg2-2build1.1",
+    "architecture": "arm64",
+    "sourcePackage": "libzstd",
+    "sourceVersion": "1.5.5+dfsg2-2build1.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/libzstd/1.5.5+dfsg2-2build1.1",
+    "copyrightSha256": "35e85e8e9bbb71492c5f5dddf39ed65b68775a02ad8d710c25d097b497f06c49"
+  },
+  {
+    "name": "linux-libc-dev:arm64",
+    "version": "6.8.0-146.146",
+    "architecture": "arm64",
+    "sourcePackage": "linux",
+    "sourceVersion": "6.8.0-146.146",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/linux/6.8.0-146.146",
+    "copyrightSha256": "4ab34baa23c94237ffef144c80348b982d2d8e814c46b3a6a3538a706ef26114"
+  },
+  {
+    "name": "login",
+    "version": "1:4.13+dfsg1-4ubuntu3.2",
+    "architecture": "arm64",
+    "sourcePackage": "shadow",
+    "sourceVersion": "1:4.13+dfsg1-4ubuntu3.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/shadow/1:4.13+dfsg1-4ubuntu3.2",
+    "copyrightSha256": "a4c3e5b19700dd3cc5961663d204bd7150f65f913314682aede5931548c436d5"
+  },
+  {
+    "name": "logsave",
+    "version": "1.47.0-2.4~exp1ubuntu4.1",
+    "architecture": "arm64",
+    "sourcePackage": "e2fsprogs",
+    "sourceVersion": "1.47.0-2.4~exp1ubuntu4.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/e2fsprogs/1.47.0-2.4~exp1ubuntu4.1",
+    "copyrightSha256": "1ca415a294c0e56958c4f795b3f1f69ea3479bca53d7811f5cdd020a258949db"
+  },
+  {
+    "name": "m4",
+    "version": "1.4.19-4build1",
+    "architecture": "arm64",
+    "sourcePackage": "m4",
+    "sourceVersion": "1.4.19-4build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/m4/1.4.19-4build1",
+    "copyrightSha256": "9438e0cbd4cf2121d2a9b61f42b1aaf765788dc3454983c55f2107cfe504f11c"
+  },
+  {
+    "name": "make",
+    "version": "4.3-4.1build2",
+    "architecture": "arm64",
+    "sourcePackage": "make-dfsg",
+    "sourceVersion": "4.3-4.1build2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/make-dfsg/4.3-4.1build2",
+    "copyrightSha256": "16deb73e706ec72758ce5e079a80d1aab17f3834449da9b718c4a4b60eb1f6ec"
+  },
+  {
+    "name": "mawk",
+    "version": "1.3.4.20240123-1build1",
+    "architecture": "arm64",
+    "sourcePackage": "mawk",
+    "sourceVersion": "1.3.4.20240123-1build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/mawk/1.3.4.20240123-1build1",
+    "copyrightSha256": "f6b94f461b09398ef192207356d89d7bf59833fe03082a14b910b3c740f2a318"
+  },
+  {
+    "name": "media-types",
+    "version": "10.1.0",
+    "architecture": "all",
+    "sourcePackage": "media-types",
+    "sourceVersion": "10.1.0",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/media-types/10.1.0",
+    "copyrightSha256": "5ded7c53199b6a1d089b0b7e231d77e5c84081c7156b372b3f11ad9c1c2c5cc7"
+  },
+  {
+    "name": "mount",
+    "version": "2.39.3-9ubuntu6.6",
+    "architecture": "arm64",
+    "sourcePackage": "util-linux",
+    "sourceVersion": "2.39.3-9ubuntu6.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/util-linux/2.39.3-9ubuntu6.6",
+    "copyrightSha256": "3492fb92cb56cf517d9a899828b4f989038421a38736e49e5525ffbd33196eab"
+  },
+  {
+    "name": "ncurses-base",
+    "version": "6.4+20240113-1ubuntu2.2",
+    "architecture": "all",
+    "sourcePackage": "ncurses",
+    "sourceVersion": "6.4+20240113-1ubuntu2.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/ncurses/6.4+20240113-1ubuntu2.2",
+    "copyrightSha256": "7c9d2c8dbee48b6f4bbbffb1f370cc5858de11cc4f5a70c5c622c274917e1c65"
+  },
+  {
+    "name": "ncurses-bin",
+    "version": "6.4+20240113-1ubuntu2.2",
+    "architecture": "arm64",
+    "sourcePackage": "ncurses",
+    "sourceVersion": "6.4+20240113-1ubuntu2.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/ncurses/6.4+20240113-1ubuntu2.2",
+    "copyrightSha256": "7c9d2c8dbee48b6f4bbbffb1f370cc5858de11cc4f5a70c5c622c274917e1c65"
+  },
+  {
+    "name": "netbase",
+    "version": "6.4",
+    "architecture": "all",
+    "sourcePackage": "netbase",
+    "sourceVersion": "6.4",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/netbase/6.4",
+    "copyrightSha256": "795b66147ea5ad692991caa7008ece551fb0fa88b9c53656223bd1518dc58ab2"
+  },
+  {
+    "name": "openssl",
+    "version": "3.0.13-0ubuntu3.16",
+    "architecture": "arm64",
+    "sourcePackage": "openssl",
+    "sourceVersion": "3.0.13-0ubuntu3.16",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/openssl/3.0.13-0ubuntu3.16",
+    "copyrightSha256": "6a7da622fe0637a334d2a8fc470852d2ffb77d9a2b2f930f854e32a41ad6ef35"
+  },
+  {
+    "name": "pahole",
+    "version": "1.25-0ubuntu3",
+    "architecture": "arm64",
+    "sourcePackage": "dwarves",
+    "sourceVersion": "1.25-0ubuntu3",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/dwarves/1.25-0ubuntu3",
+    "copyrightSha256": "66985ab6a497dd397f1df5cde859bb926d1f7594883e728e81a0f780c30d1e99"
+  },
+  {
+    "name": "passwd",
+    "version": "1:4.13+dfsg1-4ubuntu3.2",
+    "architecture": "arm64",
+    "sourcePackage": "shadow",
+    "sourceVersion": "1:4.13+dfsg1-4ubuntu3.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/shadow/1:4.13+dfsg1-4ubuntu3.2",
+    "copyrightSha256": "a4c3e5b19700dd3cc5961663d204bd7150f65f913314682aede5931548c436d5"
+  },
+  {
+    "name": "perl",
+    "version": "5.38.2-3.2ubuntu0.6",
+    "architecture": "arm64",
+    "sourcePackage": "perl",
+    "sourceVersion": "5.38.2-3.2ubuntu0.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/perl/5.38.2-3.2ubuntu0.6",
+    "copyrightSha256": "657ac19622868be1f2bf8ac3823a952b28c7a2a467f61353743e9c9d89291921"
+  },
+  {
+    "name": "perl-base",
+    "version": "5.38.2-3.2ubuntu0.6",
+    "architecture": "arm64",
+    "sourcePackage": "perl",
+    "sourceVersion": "5.38.2-3.2ubuntu0.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/perl/5.38.2-3.2ubuntu0.6",
+    "copyrightSha256": "657ac19622868be1f2bf8ac3823a952b28c7a2a467f61353743e9c9d89291921"
+  },
+  {
+    "name": "perl-modules-5.38",
+    "version": "5.38.2-3.2ubuntu0.6",
+    "architecture": "all",
+    "sourcePackage": "perl",
+    "sourceVersion": "5.38.2-3.2ubuntu0.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/perl/5.38.2-3.2ubuntu0.6",
+    "copyrightSha256": "657ac19622868be1f2bf8ac3823a952b28c7a2a467f61353743e9c9d89291921"
+  },
+  {
+    "name": "pkg-config:arm64",
+    "version": "1.8.1-2build1",
+    "architecture": "arm64",
+    "sourcePackage": "pkgconf",
+    "sourceVersion": "1.8.1-2build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/pkgconf/1.8.1-2build1",
+    "copyrightSha256": "676c75e54ff7e3b9892940fbf1b31763cb6f2a6527a5607a3640ac59a2441fba"
+  },
+  {
+    "name": "pkgconf:arm64",
+    "version": "1.8.1-2build1",
+    "architecture": "arm64",
+    "sourcePackage": "pkgconf",
+    "sourceVersion": "1.8.1-2build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/pkgconf/1.8.1-2build1",
+    "copyrightSha256": "676c75e54ff7e3b9892940fbf1b31763cb6f2a6527a5607a3640ac59a2441fba"
+  },
+  {
+    "name": "pkgconf-bin",
+    "version": "1.8.1-2build1",
+    "architecture": "arm64",
+    "sourcePackage": "pkgconf",
+    "sourceVersion": "1.8.1-2build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/pkgconf/1.8.1-2build1",
+    "copyrightSha256": "676c75e54ff7e3b9892940fbf1b31763cb6f2a6527a5607a3640ac59a2441fba"
+  },
+  {
+    "name": "procps",
+    "version": "2:4.0.4-4ubuntu3.3",
+    "architecture": "arm64",
+    "sourcePackage": "procps",
+    "sourceVersion": "2:4.0.4-4ubuntu3.3",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/procps/2:4.0.4-4ubuntu3.3",
+    "copyrightSha256": "90a66617c36d83068b52bbb77cbfef1234f526bfa287156d9d05f7df4d339539"
+  },
+  {
+    "name": "python3",
+    "version": "3.12.3-0ubuntu2.1",
+    "architecture": "arm64",
+    "sourcePackage": "python3-defaults",
+    "sourceVersion": "3.12.3-0ubuntu2.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/python3-defaults/3.12.3-0ubuntu2.1",
+    "copyrightSha256": "5b274dbb44b28a54b795b9471c07ab045054d6b8a86273cb9feb632b6fd2760d"
+  },
+  {
+    "name": "python3-minimal",
+    "version": "3.12.3-0ubuntu2.1",
+    "architecture": "arm64",
+    "sourcePackage": "python3-defaults",
+    "sourceVersion": "3.12.3-0ubuntu2.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/python3-defaults/3.12.3-0ubuntu2.1",
+    "copyrightSha256": "5b274dbb44b28a54b795b9471c07ab045054d6b8a86273cb9feb632b6fd2760d"
+  },
+  {
+    "name": "python3.12",
+    "version": "3.12.3-1ubuntu0.17",
+    "architecture": "arm64",
+    "sourcePackage": "python3.12",
+    "sourceVersion": "3.12.3-1ubuntu0.17",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/python3.12/3.12.3-1ubuntu0.17",
+    "copyrightSha256": "f1cbf908e1daa8789b389fdcf17811ed36b675d736b39a103591399861350382"
+  },
+  {
+    "name": "python3.12-minimal",
+    "version": "3.12.3-1ubuntu0.17",
+    "architecture": "arm64",
+    "sourcePackage": "python3.12",
+    "sourceVersion": "3.12.3-1ubuntu0.17",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/python3.12/3.12.3-1ubuntu0.17",
+    "copyrightSha256": "f1cbf908e1daa8789b389fdcf17811ed36b675d736b39a103591399861350382"
+  },
+  {
+    "name": "readline-common",
+    "version": "8.2-4build1",
+    "architecture": "all",
+    "sourcePackage": "readline",
+    "sourceVersion": "8.2-4build1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/readline/8.2-4build1",
+    "copyrightSha256": "854c6f5f249a109a913e1e58528445c4fec96f063ae8ba496bfb2b460bcc6866"
+  },
+  {
+    "name": "rpcsvc-proto",
+    "version": "1.4.2-0ubuntu7",
+    "architecture": "arm64",
+    "sourcePackage": "rpcsvc-proto",
+    "sourceVersion": "1.4.2-0ubuntu7",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/rpcsvc-proto/1.4.2-0ubuntu7",
+    "copyrightSha256": "e4ad18547554bdcb4e5290c2bf562d4c891748524b38740509c14a2a3f7f5418"
+  },
+  {
+    "name": "sed",
+    "version": "4.9-2ubuntu0.24.04.1",
+    "architecture": "arm64",
+    "sourcePackage": "sed",
+    "sourceVersion": "4.9-2ubuntu0.24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/sed/4.9-2ubuntu0.24.04.1",
+    "copyrightSha256": "719320e425e8e6da53a55e0fcfa2f2ed9b1332cea16abd65321bd651b2a88568"
+  },
+  {
+    "name": "sensible-utils",
+    "version": "0.0.22",
+    "architecture": "all",
+    "sourcePackage": "sensible-utils",
+    "sourceVersion": "0.0.22",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/sensible-utils/0.0.22",
+    "copyrightSha256": "4405a7fb92b693f790887d5f1d6b190e2fd00d824d80ef0b3d10e64cf21275dc"
+  },
+  {
+    "name": "sysvinit-utils",
+    "version": "3.08-6ubuntu3",
+    "architecture": "arm64",
+    "sourcePackage": "sysvinit",
+    "sourceVersion": "3.08-6ubuntu3",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/sysvinit/3.08-6ubuntu3",
+    "copyrightSha256": "53c7ef3839f64b24cc25a0937d11ce228517a48be0cc794f0d67b7e209b2a9ba"
+  },
+  {
+    "name": "tar",
+    "version": "1.35+dfsg-3ubuntu0.4",
+    "architecture": "arm64",
+    "sourcePackage": "tar",
+    "sourceVersion": "1.35+dfsg-3ubuntu0.4",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/tar/1.35+dfsg-3ubuntu0.4",
+    "copyrightSha256": "a0a44d41b2a045eb5946a8952487151cfa6ff0cd080bbf4b2eec220751d23024"
+  },
+  {
+    "name": "tzdata",
+    "version": "2026c-0ubuntu0.24.04.1",
+    "architecture": "all",
+    "sourcePackage": "tzdata",
+    "sourceVersion": "2026c-0ubuntu0.24.04.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/tzdata/2026c-0ubuntu0.24.04.1",
+    "copyrightSha256": "97fad960bf4aea7cb5faf6dc8a536bf91bf85a69a7869cfa8254a0162134c1d8"
+  },
+  {
+    "name": "ubuntu-keyring",
+    "version": "2023.11.28.1",
+    "architecture": "all",
+    "sourcePackage": "ubuntu-keyring",
+    "sourceVersion": "2023.11.28.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/ubuntu-keyring/2023.11.28.1",
+    "copyrightSha256": "191cdb1291b2fc3b9fdcd8648b16ab7f9e4f15b74dc5b30959a9fdcfb4782b6c"
+  },
+  {
+    "name": "unminimize",
+    "version": "0.2.1",
+    "architecture": "arm64",
+    "sourcePackage": "unminimize",
+    "sourceVersion": "0.2.1",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/unminimize/0.2.1",
+    "copyrightSha256": "3d2c2c55ac1cc4a77652fa1d33aa7cb9b3f3cbc92c200c69f52b32825585085f"
+  },
+  {
+    "name": "util-linux",
+    "version": "2.39.3-9ubuntu6.6",
+    "architecture": "arm64",
+    "sourcePackage": "util-linux",
+    "sourceVersion": "2.39.3-9ubuntu6.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/util-linux/2.39.3-9ubuntu6.6",
+    "copyrightSha256": "3492fb92cb56cf517d9a899828b4f989038421a38736e49e5525ffbd33196eab"
+  },
+  {
+    "name": "uuid-dev:arm64",
+    "version": "2.39.3-9ubuntu6.6",
+    "architecture": "arm64",
+    "sourcePackage": "util-linux",
+    "sourceVersion": "2.39.3-9ubuntu6.6",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/util-linux/2.39.3-9ubuntu6.6",
+    "copyrightSha256": "3492fb92cb56cf517d9a899828b4f989038421a38736e49e5525ffbd33196eab"
+  },
+  {
+    "name": "xz-utils",
+    "version": "5.6.1+really5.4.5-1ubuntu0.3",
+    "architecture": "arm64",
+    "sourcePackage": "xz-utils",
+    "sourceVersion": "5.6.1+really5.4.5-1ubuntu0.3",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/xz-utils/5.6.1+really5.4.5-1ubuntu0.3",
+    "copyrightSha256": "a2dc8fac0f496e1c58aff67018cf0c6b88336316afa5642f9335b71642e28aa8"
+  },
+  {
+    "name": "zlib1g:arm64",
+    "version": "1:1.3.dfsg-3.1ubuntu2.2",
+    "architecture": "arm64",
+    "sourcePackage": "zlib",
+    "sourceVersion": "1:1.3.dfsg-3.1ubuntu2.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/zlib/1:1.3.dfsg-3.1ubuntu2.2",
+    "copyrightSha256": "9e5b96d63773a5d177ba264254390f792be07e41748ebd94730981c6cac31cc6"
+  },
+  {
+    "name": "zlib1g-dev:arm64",
+    "version": "1:1.3.dfsg-3.1ubuntu2.2",
+    "architecture": "arm64",
+    "sourcePackage": "zlib",
+    "sourceVersion": "1:1.3.dfsg-3.1ubuntu2.2",
+    "sourceLocator": "https://launchpad.net/ubuntu/+source/zlib/1:1.3.dfsg-3.1ubuntu2.2",
+    "copyrightSha256": "9e5b96d63773a5d177ba264254390f792be07e41748ebd94730981c6cac31cc6"
+  }
+]

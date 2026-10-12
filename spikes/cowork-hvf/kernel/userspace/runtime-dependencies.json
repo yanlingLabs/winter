@@ -1,0 +1,15 @@
+{
+  "/build/stage/lib/libcryptsetup.so.12": "cd8c013e9cabb8488e13b356772fbcaa39b0060551d59f73b6245eadcc1b360a",
+  "/lib/aarch64-linux-gnu/libpopt.so.0": "3161e2e8b4fae8d4752757260ffc106a1124dee4c8548e967bec0dd0acb7996c",
+  "/lib/aarch64-linux-gnu/libuuid.so.1": "c5e4db4464688e9fa7a67c7219a478927de65450bcb2815fec10cb3e1b5bfc0d",
+  "/lib/aarch64-linux-gnu/libc.so.6": "0f1905dc27dbc6715875c70527bc8da846a10084c9c483e9d8ff76dce8d69d0e",
+  "/lib/ld-linux-aarch64.so.1": "390027e5f45f236bd1838bc54bf464c5ff01d260ab9f8b415ea8276641bce505",
+  "/lib/aarch64-linux-gnu/libdevmapper.so.1.02.1": "cefc3ee497db3d24bc5f3d79e9ab179512d2102af92e4ac4755dd1feb1a8d01e",
+  "/lib/aarch64-linux-gnu/libcrypto.so.3": "b27a2396652ee28629c94d59d667c417dbffdf2dee84e5bf140bd17d3eedb7d9",
+  "/lib/aarch64-linux-gnu/libjson-c.so.5": "773990495f98a200f449dc915a14709007ce4b09f41d08c8e46c8d04082df35b",
+  "/lib/aarch64-linux-gnu/libselinux.so.1": "bc36fbbc9f066f882948ba3429f272cc75840a096e0a3e3461c3badaed18c5ba",
+  "/lib/aarch64-linux-gnu/libudev.so.1": "8bc3e61d93877d05dd4efc8a4b36a2c8559afbd1d154c7b95a662b5e83e1f740",
+  "/lib/aarch64-linux-gnu/libm.so.6": "5e0391562de36de323fb9cb0f2c1b6bd6d034c840b1dac018499f5fe4ded1b4a",
+  "/lib/aarch64-linux-gnu/libpcre2-8.so.0": "aa4e91ff910dbb8e40472ed4fcaaeebfef19ad13fe925d9ed8e22e87d45ce13b",
+  "/lib/aarch64-linux-gnu/libcap.so.2": "1b6d3932cf8b60b2f27f80cdd26d9a296b8a9608fc02b4eccb8fb2fdab73fea2"
+}
