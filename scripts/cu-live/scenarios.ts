@@ -11,6 +11,7 @@
 // "Fixture Web" (WKWebView), "Fixture Canvas" (no accessibility), "Fixture Offspace" (full screen = its own Space).
 // Handles persist across calls in the session's runtime (`win()` binds a window once and keeps it).
 import { check, eventsSince, lastValue, MARKER, MIXED_TEXT, type Check, type FixtureEvent } from "./lib";
+import type { WakeObservation } from "./wake";
 
 export const FIXTURE_APP = "Winter CU Fixture";
 export const FIXTURE_BUNDLE = "dev.cu-live.fixture";
@@ -42,6 +43,8 @@ export interface VerifyContext {
   shots: readonly ImageStats[];
   /** A `desktopSwitch` scenario: what the runner saw of the desktop-switch prompt (absent otherwise). */
   prompt?: PromptObservation;
+  /** A `wake` scenario (`wake.ts`): what the runner saw of the wake trigger after the action (absent otherwise). */
+  wake?: WakeObservation;
 }
 
 /**
@@ -126,6 +129,14 @@ export interface Scenario {
   desktopSwitch?: { answer: "allow" | "refuse"; afterMs: number };
   /** With `allowExcursionMs`: at most this many separate excursions (the open visit's "not back and forth", 5d). */
   maxExcursions?: number;
+  /**
+   * WAKE TRIGGERS (`wake.ts`): after the action's turn (and its 3 s watch), the runner — when `userClicks` names an
+   * element — brings the fixture to the front as the USER, counts the helper's new on-screen windows (the ring and the
+   * pill), and has the live-test helper click that element for the user (`test.userClick`; `stamp: "winter"` marks it as
+   * Winter's own instead); then it waits up to `withinMs` for the session's `computer-wake` turn (`VerifyContext.wake`),
+   * and runs `cleanup` (ComputerV2 code, after the prelude) as one more turn in the same session.
+   */
+  wake?: { userClicks?: string; stamp?: "user" | "winter"; withinMs: number; cleanup?: string };
   verify(ctx: VerifyContext): Check[];
 }
 

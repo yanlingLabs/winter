@@ -10,6 +10,7 @@ import WinterCUPresentation
     private var server: HelperServer?
     private var coordinator: HelperCoordinator?
     private var core: CUCore?
+    private var watcher: CUWatcher?
     private var idleTimer: IdleQuitTimer?
     private var terminationSource: DispatchSourceSignal?
     private var log = HelperLog(subsystem: Bundle.main.bundleIdentifier ?? "com.winter.computeruse")
@@ -59,9 +60,15 @@ import WinterCUPresentation
         let core = CUCore(events: coordinator)
         // Esc closes the open desktop visit at once (the user returned), before the daemon hears it.
         coordinator.onEscape = { [weak core] in Task { await core?.closeAllVisits() } }
+        // The wake triggers' watches: their events to the daemon, their count to the idle quit, their rings on screen.
+        let watcher = CUWatcher.live(core: core)
+        watcher.countsTestInput = identity.liveTest  // the live suite's test click counts as the user's — there only
+        watcher.onEvent = { [weak coordinator] e in DispatchQueue.main.async { MainActor.assumeIsolated { coordinator?.watchEvent(e) } } }
+        watcher.onArmedCount = { [weak coordinator] n in DispatchQueue.main.async { MainActor.assumeIsolated { coordinator?.setArmedWatches(n) } } }
+        watcher.onPresent = { [weak coordinator] s in DispatchQueue.main.async { MainActor.assumeIsolated { coordinator?.showWatches(s) } } }
         let inFlight = InFlightRegistry()
         let dispatcher = RPCDispatcher(core: core, coordinator: coordinator, viewHub: viewHub, inFlight: inFlight, liveTest: identity.liveTest,
-                                       capturer: identity.liveTest ? TestCapture(home: identity.home) : nil)
+                                       capturer: identity.liveTest ? TestCapture(home: identity.home) : nil, watches: watcher)
         let server = HelperServer(
             configuration: .init(socketPath: identity.socketPath, home: identity.home, helperVersion: version),
             authenticator: authenticator, dispatcher: dispatcher, coordinator: coordinator, inFlight: inFlight, log: log)
@@ -81,7 +88,7 @@ import WinterCUPresentation
                 coordinator?.restartIdleCountdown()
                 return
             }
-            self?.log.info("idle for \(Int(identity.idleQuitSeconds)) s with no bound target and no running script — quitting")
+            self?.log.info("idle for \(Int(identity.idleQuitSeconds)) s with no bound target, no running script and no armed watch — quitting")
             NSApp.terminate(nil) // closes every connection; the daemon relaunches the helper on its next call
         }
         coordinator.attach(idleTimer: idle)
@@ -89,6 +96,7 @@ import WinterCUPresentation
         self.server = server
         self.coordinator = coordinator
         self.core = core
+        self.watcher = watcher
         self.idleTimer = idle
     }
 
