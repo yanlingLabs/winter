@@ -31,10 +31,15 @@ extern "C" {
 
 /// `CefInitialize` with `external_message_pump = true`, plus the pump this file owns.
 ///
-/// **It `dlopen`s the framework itself**, from `Contents/Frameworks` via
-/// `CefScopedLibraryLoader::LoadInMain()` — the framework is NEVER linked directly, which
-/// `include/wrapper/cef_library_loader.h` documents as a requirement of the macOS sandbox
-/// implementation rather than a style choice. The loader used to be exported here as
+/// **It `dlopen`s the framework itself, BY PATH** — `frameworkDir` is the `Chromium Embedded
+/// Framework.framework` directory, which lives in the nested Winter Headless helper
+/// (`Contents/Helpers/Winter Headless.app/Contents/Frameworks`, the user's ruling: one Chromium), not
+/// where `CefScopedLibraryLoader::LoadInMain()` would look (`Contents/Frameworks`) — and it is handed
+/// to CEF as `framework_dir_path`, beside `subprocessPath` (the base "Winter Helper" next to it). The
+/// framework is NEVER linked directly, which `include/wrapper/cef_library_loader.h` documents as a
+/// requirement of the macOS sandbox implementation rather than a style choice. Every Chromium
+/// subprocess's sandbox reads only inside Winter.app's bundle, which holds the helper, so they may
+/// load it from there. The loader used to be exported here as
 /// `WinterCEFLoadLibrary`, with a caller obligation ("nothing else in this header may be called
 /// before this returns YES") that nobody had and nobody needed: every other entry point guards on
 /// initialisation, and this one loads the library on its own. It is `static` in the implementation
@@ -48,6 +53,7 @@ extern "C" {
 BOOL WinterCEFInitialize(int argc,
                         char **argv,
                         const char *rootCachePath,
+                        const char *frameworkDir,
                         const char *subprocessPath);
 
 /// YES once `CefInitialize` has succeeded. `CefShutdown` is terminal for a process — CEF cannot be
@@ -811,6 +817,77 @@ void WinterCEFShutdown(void);
 /// leak into every test that runs after it (`CEFRuntimeTests`), and what keeps
 /// `WinterCEFRuntime.isRetryable` honest.
 BOOL WinterCEFDidShutdown(void);
+
+// ---------------------------------------------------------------------------------------------------
+// ComputerV2 Phase 4 — **Winter Headless**: the windowless mode. Used ONLY by the Winter Headless helper
+// app (`Sources/HeadlessHelper`), a separate background-only process the daemon spawns over a pipe. Winter
+// itself never calls any of this, and nothing above changes behaviour because it exists.
+//
+// A headless tab is keyed exactly like a panel tab — by an `NSView` — but the view is a bare KEY the helper
+// allocates and never puts in a window: every entry point above resolves a tab through the bridge attached
+// to its key, never through a window handle, so `WinterCEFSendCDP`, the observers, the native-UI flags and
+// `WinterCEFCloseBrowser` work on a windowless browser unchanged. The browser itself has no NSWindow and no
+// NSView (`SetAsWindowless`), paints into a buffer nobody reads, and lives in its session's own in-memory
+// request context.
+// ---------------------------------------------------------------------------------------------------
+
+/// The fixed view every headless browser reports: 1280×800 at a device scale factor of 1.
+enum { WinterCEFHeadlessViewWidth = 1280, WinterCEFHeadlessViewHeight = 800 };
+
+/// `CefInitialize` for the headless helper: the framework loaded BY PATH (`frameworkDir` is the
+/// `Chromium Embedded Framework.framework` directory), windowless rendering enabled, `mainBundlePath` the app
+/// bundle whose `Contents/Frameworks` holds `frameworkDir` and the "Winter Helper" bundles (the subprocesses
+/// derive the same outer bundle from their own location, and the two must agree), `subprocessPath` the base
+/// "Winter Helper" executable, `rootCachePath` a directory of the helper's own. The global request context is
+/// in-memory (no `cache_path`). The message loop is the external pump on the caller's `[NSApp run]` (the app
+/// must conform to `CefAppProtocol`). Returns NO with `WinterCEFLastError` on failure. Call once, on the main
+/// thread, before anything else here.
+BOOL WinterCEFInitializeHeadless(int argc,
+                                 char **argv,
+                                 const char *frameworkDir,
+                                 const char *mainBundlePath,
+                                 const char *subprocessPath,
+                                 const char *rootCachePath);
+
+/// YES once CEF's global context is up — the helper accepts no command before then.
+BOOL WinterCEFHeadlessReady(void);
+
+/// Create a windowless browser keyed by `key` (a bare `NSView` the caller keeps for the tab's life and never
+/// shows) in `sessionId`'s request context — made on first use with no `cache_path` (in memory: nothing the
+/// session's pages store reaches the disk) and printing off, before any of its browsers is created. Asynchronous
+/// like `WinterCEFCreateBrowser`: `WinterCEFBrowserIdentifierForParent(key)` turns non-zero once it exists.
+/// Every native-UI flag (`WinterCEFAutomationNativeUI`) should be set on `key` at once and never cleared:
+/// nobody can see or answer this browser's UI. Its pop-ups are refused (no pop-up observer is ever set).
+void WinterCEFCreateWindowlessBrowser(NSView *key, const char *url, const char *sessionId);
+
+/// The headless browser's LOCAL-NETWORK rule (the helper's `HeadlessNetworkRule`): true when a request to `url` —
+/// as Chromium canonicalised it — must be refused. Installed by the helper before `WinterCEFInitializeHeadless`, and
+/// applied to every request a headless browser makes: a navigation and each of its redirects (`OnBeforeBrowse`), and
+/// every other load, a sub-resource, a fetch, a service worker's (`OnBeforeResourceLoad`, `OnResourceRedirect`) —
+/// cancelled before any socket opens. Called on CEF's UI and IO threads: it must be pure. Unset, every request is
+/// refused (fail closed).
+typedef bool (*WinterCEFHeadlessRequestRule)(const char *url);
+void WinterCEFHeadlessSetRequestRule(WinterCEFHeadlessRequestRule rule);
+
+/// What a headless page tried and the helper refused, reported on the main thread with the browser's identifier and
+/// a kind: "popup" (it tried to open a window) or "local-network" (a request the rule refused). Never the URL.
+void WinterCEFHeadlessSetNoticeObserver(void (^observer)(int browserId, const char *kind));
+
+/// Forget `sessionId`'s request context: its cookies are deleted and the context released. The caller closes
+/// the session's browsers first (`WinterCEFCloseBrowser`); a browser still open keeps its context alive until
+/// it closes. A creation still waiting for the context is dropped. Unknown sessions are a no-op.
+void WinterCEFHeadlessDisposeContext(const char *sessionId);
+
+/// Forget every session's request context — the helper's last step before `WinterCEFShutdown`, so no context is
+/// still referenced from here when CEF shuts down.
+void WinterCEFHeadlessDisposeAllContexts(void);
+
+/// How many sessions have a request context right now (for the helper's logs and tests).
+int WinterCEFHeadlessContextCount(void);
+
+/// What turning printing off on `sessionId`'s context came to ("disabled", "absent", "not-settable",
+/// "refused: …", "pending" before the context is initialised, "" for an unknown session).
+NSString *WinterCEFHeadlessPrintingOutcome(const char *sessionId);
 
 #ifdef __cplusplus
 }

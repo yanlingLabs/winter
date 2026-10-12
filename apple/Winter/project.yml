@@ -48,6 +48,9 @@ targets:
         # design (see that file's own header comment for why it lives outside OfficeHelper/).
         excludes:
           - OfficeHelper
+          # ComputerV2 Phase 4: Winter Headless's own sources (its `main.swift` and app class) belong to the
+          # WinterHeadless target below only.
+          - HeadlessHelper
       - path: Support/AppIcon.icns
       # DD-T4: dev icon bundles alongside dist; the config-selected CFBundleIconFile
       # ($(WINTER_APP_ICON)) picks AppIcon (dist) / AppIconDev (dev) at build time.
@@ -97,6 +100,11 @@ targets:
       # embedding is not involved.
       - target: WinterComputerUse
         embed: false
+      # ComputerV2 Phase 4: build order only — the "Embed Winter Headless" phase below (every configuration) copies the
+      # windowless browser helper into Contents/Helpers and signs it. It carries Winter's ONE Chromium, which Winter.app's
+      # own CEF runs from (the user's ruling); it depends on the five CEF helper targets itself.
+      - target: WinterHeadless
+        embed: false
       # panel-cef Task 6a: the app now LINKS CEF's C++/C-API translation layer, which Task 4 built
       # for the helper targets alone. `Sources/CEF/WinterCEF.mm` calls CefInitialize /
       # CefDoMessageLoopWork / CefBrowserHost::CreateBrowser / CefShutdown — none of them
@@ -106,23 +114,6 @@ targets:
       # those entry points through the runtime `dlopen` that `CefScopedLibraryLoader::LoadInMain`
       # performs — a macOS sandbox requirement CEF documents, not a style choice.
       - target: CefDllWrapper
-      # panel-cef Task 4: build-order dependencies only (embed: false), matching the WinterHelper
-      # entry directly above — xcodegen's automatic app-embedding machinery has no first-class
-      # notion of "a full nested .app bundle inside Contents/Frameworks/" (that shape is CEF/
-      # Chromium's own convention, not a recognized product type like an extension or XPC service),
-      # so the "Embed CEF helpers" postCompileScript below does the copy by hand, exactly like
-      # "Embed WinterHelper" already does for WinterHelper's bare executable. These five just need to
-      # finish building before that script runs.
-      - target: CEFHelperBase
-        embed: false
-      - target: CEFHelperAlerts
-        embed: false
-      - target: CEFHelperGPU
-        embed: false
-      - target: CEFHelperPlugin
-        embed: false
-      - target: CEFHelperRenderer
-        embed: false
     # panel-cef Task 2: CEF is vendored (fetched, SHA1-verified, gitignored — scripts/fetch-cef.ts)
     # rather than committed (332MB uncompressed). preBuildScripts runs before Compile Sources so a
     # missing framework fails FAST with the fix command, instead of surfacing later as a confusing
@@ -214,133 +205,10 @@ targets:
           HELPER_LABEL="com.winter.helper"
           if [ "${CONFIGURATION}" != "Release" ]; then HELPER_LABEL="com.winter.helper.dev"; fi
           sed "s/com\.winter\.helper/${HELPER_LABEL}/g" "${SRCROOT}/HelperResources/com.winter.helper.plist" > "${DEST_LAUNCHD}/com.winter.helper.plist"
-      - name: Embed CEF framework
-        basedOnDependencyAnalysis: false
-        script: |
-          set -euo pipefail
-          # panel-cef Task 5. Two jobs: put the vendored framework at the ONE path CEF's own
-          # loader computes, and give it a real code identity.
-          #
-          # The path is not a preference. libcef_dll/wrapper/cef_scoped_library_loader_mac.mm
-          # builds it from the running executable: the main process uses "../Frameworks", a
-          # helper uses "../../.." — from Contents/Frameworks/Winter Helper.app/Contents/MacOS
-          # that is also Contents/Frameworks. Both land on
-          # Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework.
-          #
-          # SIGNING, and why it is done HERE rather than left to Xcode: this framework is not a
-          # build product, so nothing in the target graph signs it, and it arrives from CEF's CDN
-          # ad-hoc/linker-signed with `TeamIdentifier=not set` and `Sealed Resources=none`
-          # (measured with codesign -dvv on the vendored copy). Three consequences, all of which
-          # this script exists to fix:
-          #   1. Notarization rejects any nested Mach-O lacking a Developer ID signature, a secure
-          #      timestamp, or the hardened-runtime flag — and, exactly as the "Embed winter-core"
-          #      script below already records, a nested signature does NOT inherit those from the
-          #      outer xcodebuild invocation. Hence the explicit --options runtime / --timestamp.
-          #   2. Library validation. Both the app (Task 6) and all five helpers dlopen this
-          #      framework, and the helpers additionally dlopen Libraries/libcef_sandbox.dylib.
-          #      Under the hardened runtime a process may only load libraries signed by the SAME
-          #      TEAM ID (or by Apple). Signing here with this build's identity is what makes that
-          #      condition hold — and it is why this branch does NOT add
-          #      com.apple.security.cs.disable-library-validation. The plan flagged the spike's
-          #      ad-hoc crash as "very likely an artifact of Team-ID-less signatures"; Task 5
-          #      confirmed it by A/B on a copy of the built app (Developer ID framework: the
-          #      helper loads it and reaches CefExecuteProcess; the same helper against an
-          #      ad-hoc-re-signed framework: dlopen refused). Upstream agrees — Google Chrome
-          #      ships zero disable-library-validation anywhere in its bundle.
-          #   3. Sealed resources. Signing the framework BUNDLE (not just its Mach-O) is what
-          #      writes its _CodeSignature/CodeResources, without which `codesign --verify --deep
-          #      --strict` on the outer app has nothing to check the 220-odd locale packs against.
-          #
-          # Inside-out: the five Libraries/*.dylib are signed FIRST, then the framework bundle
-          # whose seal covers them, then (last, by Xcode's own CodeSign phase, after every script
-          # here) the app. Same shape as the winter-core embed below, one level deeper.
-          #
-          # VERSIONED LAYOUT, and why this script rearranges a third-party bundle at all.
-          # CEF ships its framework FLAT — binary, Libraries/ and Resources/ at the bundle root,
-          # no Versions/ — because CEF's own build is CMake/ninja, which never runs Xcode's
-          # product validator. Xcode does, unconditionally: `builtin-validationUtility` runs after
-          # CodeSign for every application target (measured — it runs even with
-          # VALIDATE_PRODUCT=NO, which this project already sets), and it rejected the app with
-          #   error: Framework …/Chromium Embedded Framework.framework did not contain an
-          #   Info.plist
-          # So the copy is restructured here into the standard macOS versioned-framework shape:
-          # Versions/A/{binary,Libraries,Resources}, Versions/Current -> A, and top-level symlinks.
-          # Three independent reasons this is the right fix rather than silencing the validator:
-          #   - Sparkle.framework, already embedded in this same app, is versioned (Versions/B)
-          #     and this same validator has passed it in every build this project has ever done.
-          #   - Every shipped Chromium-family app on a real Mac ships the versioned shape:
-          #     /Applications/Google Chrome.app and Visual Studio Code.app (Electron) both have
-          #     Versions/A + Current + top-level symlinks. Flat is CEF's packaging convention, not
-          #     Chromium's runtime requirement.
-          #   - It keeps a real check enabled instead of turning one off to accommodate a layout.
-          # The VENDORED tree is never touched — it stays the pristine, SHA1-verified upstream
-          # artifact; only the copy inside the app is restructured. Runtime paths are unaffected:
-          # CEF computes ".../Chromium Embedded Framework.framework/Chromium Embedded Framework"
-          # (loader) and ".../Libraries/libcef_sandbox.dylib" (sandbox), both of which resolve
-          # through the top-level symlinks, and dlopen follows symlinks.
-          CEF_SRC="${SRCROOT}/vendor/cef/Release/Chromium Embedded Framework.framework"
-          DEST_FRAMEWORKS="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks"
-          DEST="${DEST_FRAMEWORKS}/Chromium Embedded Framework.framework"
-          # Copying 317MB and signing a 224MB Mach-O on every incremental build is not
-          # acceptable, and basedOnDependencyAnalysis:false means this phase runs on every one.
-          # The stamp is the up-to-date check. It deliberately lives OUTSIDE the bundle, in this
-          # target's temp dir: a stray dotfile under Contents/Frameworks/ would be sealed into the
-          # app's CodeResources and shipped. It records the vendored CEF version, the signing
-          # identity and the configuration, so a CEF bump or an identity change (dev build ->
-          # release build) re-copies and re-signs rather than silently keeping the old bits. The
-          # `-d "${DEST}"` half matters independently: it catches a wiped bundle whose temp dir
-          # survived.
-          # The trailing token is this script's own EMBED-RECIPE revision: bump it whenever the
-          # layout or signing below changes, so an existing build directory re-does the work
-          # instead of skipping on a stamp whose CEF version and identity both still match.
-          STAMP="${TARGET_TEMP_DIR}/cef-framework.stamp"
-          WANT="$(cat "${SRCROOT}/vendor/cef/.vendored-version")|${EXPANDED_CODE_SIGN_IDENTITY}|${CONFIGURATION}|recipe-2-versioned"
-          if [ -d "${DEST}" ] && [ -f "${STAMP}" ] && [ "$(cat "${STAMP}")" = "${WANT}" ]; then
-            echo "CEF framework already embedded and signed for this identity — skipping"
-            exit 0
-          fi
-          # Secure timestamps need Apple's timestamp server. Required for notarization, so
-          # non-negotiable in Release; skipped in Debug so a dev build still works offline.
-          TS=""
-          if [ "${CONFIGURATION}" = "Release" ]; then TS="--timestamp"; fi
-          mkdir -p "${DEST_FRAMEWORKS}" "${TARGET_TEMP_DIR}"
-          # Stamp first, content second: the stamp must never outlive a copy that did not finish.
-          rm -f "${STAMP}"
-          rm -rf "${DEST}"
-          # ditto, not cp -R: preserves the bundle exactly, matching every other bundle copy in
-          # this codebase (fetch-cef.ts, release.ts, fetch-iroh.sh, and the helper embed below).
-          ditto "${CEF_SRC}" "${DEST}"
-          if [ ! -d "${DEST}/Libraries" ] || [ ! -f "${DEST}/Resources/Info.plist" ]; then
-            echo "error: vendored CEF framework is missing Libraries/ or Resources/Info.plist —" >&2
-            echo "error: the upstream distribution layout changed; re-check fetch-cef.ts." >&2
-            exit 1
-          fi
-          # Flat -> versioned (see the header). Only these three entries exist at the root of
-          # CEF's flat framework, so afterwards the root holds exactly Versions/ plus the three
-          # symlinks — nothing loose, which `codesign --strict` would object to.
-          # Guarded so a future CEF that ships ALREADY versioned is left alone rather than having
-          # its top-level symlinks moved into Versions/A — which would build, copy and sign
-          # cleanly while producing a framework nothing can load.
-          if [ -d "${DEST}/Versions" ]; then
-            echo "note: vendored CEF framework is already versioned — leaving its layout as-is"
-          else
-            mkdir -p "${DEST}/Versions/A"
-            mv "${DEST}/Chromium Embedded Framework" "${DEST}/Libraries" "${DEST}/Resources" "${DEST}/Versions/A/"
-            ln -s "A" "${DEST}/Versions/Current"
-            ln -s "Versions/Current/Chromium Embedded Framework" "${DEST}/Chromium Embedded Framework"
-            ln -s "Versions/Current/Libraries" "${DEST}/Libraries"
-            ln -s "Versions/Current/Resources" "${DEST}/Resources"
-          fi
-          for LIB in "${DEST}/Versions/A/Libraries/"*.dylib; do
-            codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime ${TS} "${LIB}"
-          done
-          # Sign the VERSION directory, not the framework root — this is what Xcode itself does
-          # for Sparkle.framework in this same app ("CodeSign …/Sparkle.framework/Versions/B" in
-          # the build log), and it is what puts _CodeSignature inside Versions/A where a versioned
-          # framework's seal belongs. Verification through the root still resolves via
-          # Versions/Current, so `codesign -dvv "…framework"` and --deep --strict are unaffected.
-          codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime ${TS} "${DEST}/Versions/A"
-          printf '%s' "${WANT}" > "${STAMP}"
+      # Winter's ONE Chromium is no longer embedded here: the CEF framework and the five "Winter Helper" bundles live in
+      # the nested Winter Headless helper's Contents/Frameworks (its own "Embed Winter's Chromium" phase signs them
+      # inside-out), and Winter.app's CEF runs from there (WinterChromium.swift). "Embed Winter Headless" below nests
+      # the helper in every configuration and removes any copy an older build left in Contents/Frameworks.
       - name: Embed CEF + Chromium licence notices
         basedOnDependencyAnalysis: false
         script: |
@@ -381,16 +249,16 @@ targets:
           # scripts/fetch-monaco.ts) the same way CEF is, for the same reason — third-party bytes
           # this repo doesn't author have no business being committed. This phase places it, plus
           # the in-repo editor page shell Task 4 lands at Resources/EditorAssets/app, plus the
-          # licence notice, into the built app — mirroring "Embed CEF framework" / "Embed CEF +
+          # licence notice, into the built app — mirroring "Embed Winter's Chromium" (WinterHeadless) / "Embed CEF +
           # Chromium licence notices" above. No signing needed (pure JS/HTML/CSS resources, unlike
           # CEF's Mach-O framework) and no stamp/skip — a 14MB ditto on every build is cheap,
           # matching "Embed CEF + Chromium licence notices" above rather than the signing-heavy
-          # "Embed CEF framework" phase's stamp.
+          # "Embed Winter's Chromium" phase's stamp (in the WinterHeadless target).
           MONACO_SRC="${SRCROOT}/vendor/monaco"
           DEST_RESOURCES="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
           DEST_EDITOR="${DEST_RESOURCES}/EditorAssets"
           mkdir -p "${DEST_EDITOR}"
-          # rm -rf before each ditto (not a bare merge-in) — matches "Embed CEF helpers" below:
+          # rm -rf before each ditto (not a bare merge-in) — as the CEF helper copies do:
           # ditto merges into an existing destination, so a future Monaco bump that DROPS a file
           # would otherwise leave it lingering in the built bundle across incremental builds.
           rm -rf "${DEST_EDITOR}/vs"
@@ -415,28 +283,6 @@ targets:
           fi
           mkdir -p "${DEST_RESOURCES}/Licenses"
           ditto "${MONACO_SRC}/LICENSE" "${DEST_RESOURCES}/Licenses/MONACO-LICENSE.txt"
-      - name: Embed CEF helpers
-        basedOnDependencyAnalysis: false
-        script: |
-          set -euo pipefail
-          # panel-cef Task 4: CEF looks for these five bundles at this EXACT nested path — the path
-          # is not a preference (Task 4 brief) — so this copies each already-built helper .app from
-          # ${BUILT_PRODUCTS_DIR} (where every target in this scheme's products land, Winter
-          # included) into Contents/Frameworks/. ditto, not cp -R: preserves bundle structure
-          # exactly, matching every other app-bundle copy in this codebase (fetch-cef.ts,
-          # release.ts, fetch-iroh.sh — see fetch-cef.ts's own comment on why).
-          DEST_FRAMEWORKS="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks"
-          mkdir -p "${DEST_FRAMEWORKS}"
-          for NAME in "Winter Helper" "Winter Helper (Alerts)" "Winter Helper (GPU)" "Winter Helper (Plugin)" "Winter Helper (Renderer)"; do
-            SRC="${BUILT_PRODUCTS_DIR}/${NAME}.app"
-            if [ ! -d "${SRC}" ]; then
-              echo "error: expected built CEF helper bundle not found at ${SRC}" >&2
-              echo "error: check that all five CEFHelper* targets are in this scheme's build list." >&2
-              exit 1
-            fi
-            rm -rf "${DEST_FRAMEWORKS}/${NAME}.app"
-            ditto "${SRC}" "${DEST_FRAMEWORKS}/${NAME}.app"
-          done
       - name: Embed WinterOfficeHelper
         basedOnDependencyAnalysis: false
         script: |
@@ -469,7 +315,7 @@ targets:
         shell: /bin/bash
         script: |
           set -euo pipefail
-          # office-plumbing Task 2. Two jobs, same shape as "Embed CEF framework" above (one level
+          # office-plumbing Task 2. Two jobs, same shape as "Embed Winter's Chromium" (WinterHeadless; one level
           # simpler: LibreOffice's product-set is a plain directory tree, not a .framework bundle
           # Xcode's product validator inspects, so there is no versioned-layout restructuring here):
           #
@@ -547,7 +393,7 @@ targets:
 
           # Copying ~488MB and signing 66 Mach-Os on every incremental build is not acceptable, and
           # basedOnDependencyAnalysis:false means this phase runs on every one — same stamp
-          # discipline as "Embed CEF framework" above. The trailing token is this script's own
+          # discipline as "Embed Winter's Chromium" (WinterHeadless). The trailing token is this script's own
           # EMBED-RECIPE revision: bump it whenever the layout or signing below changes (recipe-2:
           # the Frameworks/ -> Resources/ relocation above), so an existing build directory re-does
           # the work instead of skipping on a stale-but-matching stamp — and so a build directory
@@ -684,6 +530,13 @@ targets:
         script: |
           set -euo pipefail
           "${SRCROOT}/../../scripts/embed-computer-helper.sh"
+      # Every configuration: Winter.app's own CEF runs from the Chromium inside this helper (Debug nests
+      # "Winter Headless Dev.app" the same way, so Winter Dev exercises the Release layout every day).
+      - name: Embed Winter Headless
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          "${SRCROOT}/../../scripts/embed-headless-helper.sh"
     info:
       path: Support/Info.plist
       properties:
@@ -1108,6 +961,178 @@ targets:
           DEPLOYMENT_POSTPROCESSING: YES
           STRIP_INSTALLED_PRODUCT: YES
           STRIP_STYLE: debugging
+  # ComputerV2 Phase 4 — **Winter Headless**: Winter's private, invisible browser for the agent's background reading
+  # (`browsers.open(url, { browser: "headless" })`). A background-only app (LSBackgroundOnly: no Dock tile, no menu bar,
+  # no window) running only WINDOWLESS CEF browsers, one in-memory request context per Winter session. The daemon spawns
+  # its executable directly (never through LaunchServices) with a pipe on fds 3/4 and drives it with the browser-link op
+  # set (Sources/HeadlessHelper/HeadlessWire.swift); it exits when the pipe closes.
+  #
+  # Winter's ONE Chromium lives here (the user's ruling): the CEF framework and the five "Winter Helper" bundles are in
+  # this app's own Contents/Frameworks ("Embed Winter's Chromium" below), and Winter.app — which nests this app at
+  # Contents/Helpers/ in every configuration — runs its own CEF from here too. It compiles WinterCEF.mm (its windowless
+  # additions) and loads the framework by path. WinterKit is not linked (it would drag Iroh in): the pure files of the browser link — the
+  # wire vocabulary, the command parser, the CDP allowlist and the per-tab gate — are compiled in directly, so the helper
+  # enforces the very same Swift copy of the allowlist and world rules Winter.app does.
+  #
+  # Identity: com.winter.headless (Release), com.winter.headless.dev (only `bun run dev:headless` gives it, through
+  # WINTER_HEADLESS_DEBUG_BUNDLE_ID on its own command line — a setting only this target reads, so the CEF helper targets
+  # it builds keep their own identifiers), com.winter.headless.xcode-debug for a plain Xcode Debug build. Hardened runtime, NO entitlements, a
+  # stated designated requirement at every signing site (scripts/embed-headless-helper.sh, dev:headless). Built on its
+  # own (`bun run dev:headless`) it is the dev helper, running outside Winter.app on the same Chromium it carries.
+  WinterHeadless:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/HeadlessHelper
+      - path: Sources/CEF/WinterCEF.h
+      - path: Sources/CEF/WinterCEF.mm
+      - path: Sources/CEF/WinterCEFAssetResolve.h
+      - path: Sources/CEF/WinterCEFAssetResolve.mm
+      - path: Sources/CEF/WinterEditorBridge.h
+      - path: Sources/CEF/WinterEditorScheme.h
+      - path: ../WinterKit/Sources/WinterKit/JSONValue.swift
+      - path: ../WinterKit/Sources/WinterKit/LineDecoder.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/BrowserLinkProtocol.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/BrowserLinkCommand.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/CDPAllowlist.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/CDPTabGate.swift
+    dependencies:
+      - target: CefDllWrapper
+      # Build order only: "Embed Winter's Chromium" copies them into this app's own Contents/Frameworks.
+      - target: CEFHelperBase
+        embed: false
+      - target: CEFHelperAlerts
+        embed: false
+      - target: CEFHelperGPU
+        embed: false
+      - target: CEFHelperPlugin
+        embed: false
+      - target: CEFHelperRenderer
+        embed: false
+    postCompileScripts:
+      # Winter's ONE Chromium (the user's ruling): the CEF framework and the five "Winter Helper" bundles live in THIS
+      # helper's Contents/Frameworks, and Winter.app's own CEF runs from here too (its "Embed Winter Headless" phase nests
+      # this whole app at Winter.app/Contents/Helpers/). Every Chromium subprocess enters a sandbox that reads only inside
+      # its BROWSER process's main bundle: this bundle holds them for the helper's own browser, and Winter.app holds this
+      # bundle for Winter's. Same recipe as Winter.app's embed used to be (see its history): the vendored framework copied
+      # into the versioned macOS layout, its five Libraries/*.dylib signed first, then Versions/A — inside-out, with this
+      # build's identity (library validation: same team), the hardened runtime, and a secure timestamp in Release
+      # (notarization). The helper bundles arrive already signed by their own targets (the Renderer and GPU ones with
+      # allow-jit). The stamp keeps an incremental build from re-copying 317 MB.
+      - name: Embed Winter's Chromium
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          CEF_SRC="${SRCROOT}/vendor/cef/Release/Chromium Embedded Framework.framework"
+          DEST_FRAMEWORKS="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks"
+          DEST="${DEST_FRAMEWORKS}/Chromium Embedded Framework.framework"
+          STAMP="${TARGET_TEMP_DIR}/cef-framework.stamp"
+          WANT="$(cat "${SRCROOT}/vendor/cef/.vendored-version")|${EXPANDED_CODE_SIGN_IDENTITY}|${CONFIGURATION}|recipe-3-one-chromium"
+          TS=""
+          if [ "${CONFIGURATION}" = "Release" ]; then TS="--timestamp"; fi
+          mkdir -p "${DEST_FRAMEWORKS}" "${TARGET_TEMP_DIR}"
+          if [ -d "${DEST}" ] && [ -f "${STAMP}" ] && [ "$(cat "${STAMP}")" = "${WANT}" ]; then
+            echo "CEF framework already embedded and signed for this identity — skipping"
+          else
+            rm -f "${STAMP}"
+            rm -rf "${DEST}"
+            # An APFS clone where the volume allows it: a 300 MB copy that costs no space.
+            cp -c -R "${CEF_SRC}" "${DEST}" 2>/dev/null || ditto "${CEF_SRC}" "${DEST}"
+            if [ ! -d "${DEST}/Libraries" ] && [ ! -d "${DEST}/Versions" ]; then
+              echo "error: vendored CEF framework is missing Libraries/ — re-check fetch-cef.ts" >&2
+              exit 1
+            fi
+            if [ ! -d "${DEST}/Versions" ]; then
+              mkdir -p "${DEST}/Versions/A"
+              mv "${DEST}/Chromium Embedded Framework" "${DEST}/Libraries" "${DEST}/Resources" "${DEST}/Versions/A/"
+              ln -s "A" "${DEST}/Versions/Current"
+              ln -s "Versions/Current/Chromium Embedded Framework" "${DEST}/Chromium Embedded Framework"
+              ln -s "Versions/Current/Libraries" "${DEST}/Libraries"
+              ln -s "Versions/Current/Resources" "${DEST}/Resources"
+            fi
+            for LIB in "${DEST}/Versions/A/Libraries/"*.dylib; do
+              codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime ${TS} "${LIB}"
+            done
+            codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime ${TS} "${DEST}/Versions/A"
+            printf '%s' "${WANT}" > "${STAMP}"
+          fi
+          for NAME in "Winter Helper" "Winter Helper (Alerts)" "Winter Helper (GPU)" "Winter Helper (Plugin)" "Winter Helper (Renderer)"; do
+            SRC="${BUILT_PRODUCTS_DIR}/${NAME}.app"
+            if [ ! -d "${SRC}" ]; then
+              echo "error: expected built CEF helper bundle not found at ${SRC}" >&2
+              exit 1
+            fi
+            rm -rf "${DEST_FRAMEWORKS}/${NAME}.app"
+            ditto "${SRC}" "${DEST_FRAMEWORKS}/${NAME}.app"
+          done
+    info:
+      path: Support/WinterHeadless-Info.plist
+      properties:
+        CFBundleName: "$(WINTER_HEADLESS_APP_NAME)"
+        CFBundleDisplayName: "$(WINTER_HEADLESS_APP_NAME)"
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+        CFBundleShortVersionString: "0.124.0"
+        CFBundleVersion: "0.124.0"
+        # No Dock tile, no menu bar, never activated: this process has no UI at all.
+        LSBackgroundOnly: true
+        LSMinimumSystemVersion: "26.0"
+        # Never forces the discrete GPU on for a process nobody sees.
+        NSSupportsAutomaticGraphicsSwitching: true
+    settings:
+      base:
+        PRODUCT_NAME: "$(WINTER_HEADLESS_APP_NAME)"
+        PRODUCT_BUNDLE_IDENTIFIER: com.winter.headless
+        WINTER_HEADLESS_APP_NAME: Winter Headless
+        WINTER_HEADLESS_DEBUG_BUNDLE_ID: com.winter.headless.xcode-debug
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_DEBUG_DYLIB: NO
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/HeadlessHelper/HeadlessBridge.h
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/vendor/cef
+          - $(SRCROOT)/Sources/CEF
+        CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: $(WINTER_HEADLESS_DEBUG_BUNDLE_ID)
+          WINTER_HEADLESS_APP_NAME: Winter Headless Dev
+        Release:
+          # The helper's privacy set: the release identity scan reads every byte of it too.
+          OTHER_SWIFT_FLAGS: -file-prefix-map $(HOME)=/builder
+          OTHER_CPLUSPLUSFLAGS: -ffile-prefix-map=$(HOME)=/builder
+          OTHER_CFLAGS: -ffile-prefix-map=$(HOME)=/builder
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
+  # Winter Headless's logic with no CEF and no host app (a logic-test bundle: nothing launches, nothing takes focus) —
+  # the op executor against a fake driver, the pipe's wire and outbox, the layout and argument rules.
+  WinterHeadlessTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/WinterHeadlessTests
+      - path: Sources/HeadlessHelper/HeadlessHost.swift
+      - path: Sources/HeadlessHelper/HeadlessCEFDriver.swift
+      - path: Sources/HeadlessHelper/HeadlessWire.swift
+      - path: Sources/HeadlessHelper/HeadlessLayout.swift
+      - path: Sources/HeadlessHelper/HeadlessNetworkRule.swift
+      - path: ../WinterKit/Sources/WinterKit/JSONValue.swift
+      - path: ../WinterKit/Sources/WinterKit/LineDecoder.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/BrowserLinkProtocol.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/BrowserLinkCommand.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/CDPAllowlist.swift
+      - path: ../WinterKit/Sources/WinterKit/BrowserLink/CDPTabGate.swift
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
   # panel-cef Task 4 — CEF's own generated C++/C-API translation layer ("libcef_dll_wrapper" in
   # CEF's own CMakeLists.txt, vendored verbatim alongside include/ and Release/ by fetch-cef.ts).
   # CefExecuteProcess / CefScopedLibraryLoader / CefScopedSandboxContext — what the five helper
@@ -1379,6 +1404,7 @@ schemes:
         WinterHelper: all
         WinterOfficeHelper: all
         WinterComputerUse: all
+        WinterHeadless: all
         # F7 (T2 review, "if trivial"): [test], not `all` — the fixture is test-only infrastructure
         # (Tests/OfficeHelperFixtureSources/, never embedded, never touched by any postCompileScript),
         # so it belongs in the same scheme-action scope as WinterAppTests itself immediately below,
@@ -1401,3 +1427,11 @@ schemes:
     build:
       targets:
         WinterComputerUse: all
+  # Winter Headless alone — what `bun run dev:headless` builds — and its logic tests.
+  WinterHeadless:
+    build:
+      targets:
+        WinterHeadless: all
+        WinterHeadlessTests: [test]
+    test:
+      targets: [WinterHeadlessTests]

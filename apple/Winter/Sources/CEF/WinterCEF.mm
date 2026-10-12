@@ -3712,36 +3712,39 @@ static void (^g_pre_shutdown_hook)(void) = nil;
 // caller obligation nobody had — "nothing else in this header may be called before this returns
 // YES" — which is discharged here instead: `WinterCEFInitialize` below is its only caller, and
 // every other entry point guards on `g_initialized`.
-static BOOL WinterCEFLoadLibrary(void) {
+static BOOL WinterCEFLoadLibrary(const char *frameworkDir) {
   if (g_library_loaded) {
     return YES;
   }
-  // `LoadInMain` — the MAIN-process arm of the loader. Task 5's signing A/B exercised only
-  // `LoadInHelper`; same team-ID logic and the same symlink, but this call had never run anywhere
-  // before Task 6a. It computes `<executable dir>/../Frameworks/Chromium Embedded Framework
-  // .framework/Chromium Embedded Framework` (`cef_scoped_library_loader_mac.mm`, kPathFromMainExe)
-  // — which, since Task 5 restructured the embedded copy into the versioned macOS layout Xcode's
-  // product validator demands, resolves through the framework's top-level symlink to
-  // `Versions/A/`. dlopen follows symlinks, so the path is unchanged from CEF's flat original.
+  // BY PATH. Winter's one Chromium lives in the nested Winter Headless helper
+  // (`Contents/Helpers/Winter Headless.app/Contents/Frameworks`, the user's ruling), not where
+  // `LoadInMain` looks (`<executable dir>/../Frameworks`, `cef_scoped_library_loader_mac.mm`'s
+  // kPathFromMainExe) — the same call `LoadInMain` ends in, `cef_load_library`, with the path given.
+  // The framework is in the versioned layout; its top-level symlink resolves to `Versions/A/`, and
+  // dlopen follows symlinks. Library validation holds: it is signed by Winter's team, like the app.
   //
-  // The handle is deliberately never destroyed — the framework stays loaded for the life of the
-  // process. It was `static` until the whole-branch review (F9), which did nothing: the value is
-  // overwritten on every call and the function early-returns on `g_library_loaded` anyway, so the
-  // storage class only read as though it were load-bearing.
-  void *loader = cef_scoped_library_loader_create(0 /* 0 = main process, not helper */);
-  if (loader == nullptr) {
-    g_last_error = "could not load the Chromium Embedded Framework (LoadInMain failed)";
+  // The library is deliberately never unloaded — the framework stays loaded for the life of the
+  // process.
+  if (frameworkDir == nullptr || *frameworkDir == '\0') {
+    g_last_error = "no Chromium Embedded Framework path was given";
+    Log("FAILED: %s", g_last_error.c_str());
+    return NO;
+  }
+  const std::string library = std::string(frameworkDir) + "/Chromium Embedded Framework";
+  if (!cef_load_library(library.c_str())) {
+    g_last_error = "could not load the Chromium Embedded Framework from Winter Headless's bundle";
     Log("FAILED: %s", g_last_error.c_str());
     return NO;
   }
   g_library_loaded = true;
-  Log("framework loaded (LoadInMain)");
+  Log("framework loaded (by path, from the nested helper)");
   return YES;
 }
 
 BOOL WinterCEFInitialize(int argc,
                         char **argv,
                         const char *rootCachePath,
+                        const char *frameworkDir,
                         const char *subprocessPath) {
   if (g_initialized) {
     return YES;
@@ -3752,7 +3755,7 @@ BOOL WinterCEFInitialize(int argc,
     Log("REFUSED: %s", g_last_error.c_str());
     return NO;
   }
-  if (!WinterCEFLoadLibrary()) {
+  if (!WinterCEFLoadLibrary(frameworkDir)) {
     return NO;
   }
 
@@ -3761,6 +3764,8 @@ BOOL WinterCEFInitialize(int argc,
   CefMainArgs main_args(argc, argv);
 
   CefSettings settings;
+  // Where the framework is (its resources, locales and ICU data are read from it): the nested helper's.
+  CefString(&settings.framework_dir_path).FromString(frameworkDir);
   settings.external_message_pump = true;  // this app's run loop is SwiftUI's, and already running
   settings.multi_threaded_message_loop = false;  // unsupported on macOS anyway
   settings.no_sandbox = false;                   // the helpers' CEF_USE_SANDBOX half is in project.yml
@@ -4868,4 +4873,600 @@ void WinterCEFShutdown(void) {
 
 BOOL WinterCEFDidShutdown(void) {
   return g_did_shutdown ? YES : NO;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// ComputerV2 Phase 4 — Winter Headless: the windowless mode and per-session request contexts.
+//
+// ADDITIONS ONLY. Nothing above calls into this section, and nothing here changes a browser Winter.app
+// creates: only `WinterCEFInitializeHeadless` (which Winter.app never calls) turns windowless rendering on,
+// and only `WinterCEFCreateWindowlessBrowser` makes a browser with the client below. See `WinterCEF.h`.
+// ---------------------------------------------------------------------------------------------------
+
+#include <atomic>
+
+#include "include/cef_cookie.h"
+#include "include/cef_render_handler.h"
+#include "include/cef_request_context_handler.h"
+#include "include/cef_resource_request_handler.h"
+
+namespace {
+
+/// Low on purpose: nobody sees these frames, and a page's own animation work is bound to this rate.
+/// `Page.captureScreenshot` asks for a fresh frame of its own. (To be tuned by measuring memory and CPU on a live run.)
+const int kHeadlessFrameRate = 10;
+
+bool g_headless = false;
+
+/// The view a headless browser reports. Paint goes nowhere: the engine reads pixels only through
+/// `Page.captureScreenshot`, which the compositor answers on its own.
+class WinterHeadlessRenderHandler : public CefRenderHandler {
+ public:
+  WinterHeadlessRenderHandler() = default;
+
+  void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect &rect) override {
+    rect = CefRect(0, 0, WinterCEFHeadlessViewWidth, WinterCEFHeadlessViewHeight);
+  }
+
+  bool GetScreenInfo(CefRefPtr<CefBrowser> browser, CefScreenInfo &screen_info) override {
+    const CefRect screen(0, 0, WinterCEFHeadlessViewWidth, WinterCEFHeadlessViewHeight);
+    screen_info.Set(1.0f, 24, 8, false, screen, screen);
+    return true;
+  }
+
+  void OnPaint(CefRefPtr<CefBrowser> browser,
+               PaintElementType type,
+               const RectList &dirtyRects,
+               const void *buffer,
+               int width,
+               int height) override {}
+
+  /// A drag the page starts has nowhere to go: no window, no pasteboard of the user's. Cancelled.
+  bool StartDragging(CefRefPtr<CefBrowser> browser,
+                     CefRefPtr<CefDragData> drag_data,
+                     DragOperationsMask allowed_ops,
+                     int x,
+                     int y) override {
+    return false;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(WinterHeadlessRenderHandler);
+  DISALLOW_COPY_AND_ASSIGN(WinterHeadlessRenderHandler);
+};
+
+/// The helper's local-network rule (`WinterCEFHeadlessSetRequestRule`). Read on the UI and IO threads.
+std::atomic<WinterCEFHeadlessRequestRule> g_headless_rule{nullptr};
+/// Where refusals are reported (`WinterCEFHeadlessSetNoticeObserver`). Main thread only.
+void (^g_headless_notice)(int, const char *) = nil;
+
+/// Must a request to `url` be refused? With no rule installed, every request is (fail closed).
+bool HeadlessRequestRefused(const CefString &url) {
+  const WinterCEFHeadlessRequestRule rule = g_headless_rule.load();
+  if (rule == nullptr) {
+    return true;
+  }
+  return rule(url.ToString().c_str());
+}
+
+/// Report a refusal for `browser` on the main thread (from any thread). `kind` is a string literal. A request with no
+/// browser (a service worker's) has no tab to name and is not reported.
+void NoteHeadless(CefRefPtr<CefBrowser> browser, const char *kind) {
+  const int browserId = browser ? browser->GetIdentifier() : 0;
+  Log("headless %s refused (id=%d)", kind, browserId);
+  if (browserId == 0) {
+    return;
+  }
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (g_headless_notice != nil) {
+      g_headless_notice(browserId, kind);
+    }
+  });
+}
+
+/// **Every request a headless browser makes, before it is sent.** Returned by the headless client for each request
+/// tied to a browser and by each session's request-context handler for the rest (a service worker's): a request the
+/// local-network rule refuses is cancelled before any socket opens, and a redirect to one is never followed. A URL
+/// with an unknown scheme is never handed to another app.
+class WinterHeadlessRequestGuard : public CefResourceRequestHandler {
+ public:
+  WinterHeadlessRequestGuard() = default;
+
+  ReturnValue OnBeforeResourceLoad(CefRefPtr<CefBrowser> browser,
+                                   CefRefPtr<CefFrame> frame,
+                                   CefRefPtr<CefRequest> request,
+                                   CefRefPtr<CefCallback> callback) override {
+    if (!request || !HeadlessRequestRefused(request->GetURL())) {
+      return RV_CONTINUE;
+    }
+    NoteHeadless(browser, "local-network");
+    return RV_CANCEL;
+  }
+
+  /// A redirect to a refused address is pointed at `about:blank` instead — a redirect nothing follows to the network
+  /// (Chromium refuses a redirect to it as unsafe). The redirected request meets `OnBeforeResourceLoad` again too.
+  void OnResourceRedirect(CefRefPtr<CefBrowser> browser,
+                          CefRefPtr<CefFrame> frame,
+                          CefRefPtr<CefRequest> request,
+                          CefRefPtr<CefResponse> response,
+                          CefString &new_url) override {
+    if (!HeadlessRequestRefused(new_url)) {
+      return;
+    }
+    NoteHeadless(browser, "local-network");
+    new_url = "about:blank";
+  }
+
+  /// `mailto:`, `tel:`, a custom scheme: never handed to the app registered for it.
+  void OnProtocolExecution(CefRefPtr<CefBrowser> browser,
+                           CefRefPtr<CefFrame> frame,
+                           CefRefPtr<CefRequest> request,
+                           bool &allow_os_execution) override {
+    allow_os_execution = false;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(WinterHeadlessRequestGuard);
+  DISALLOW_COPY_AND_ASSIGN(WinterHeadlessRequestGuard);
+};
+
+/// One guard serves every request (it keeps no state). Heap-allocated and never released: CEF's IO thread may still
+/// hold it while the process shuts down.
+CefRefPtr<WinterHeadlessRequestGuard> &HeadlessRequestGuard() {
+  static auto *guard = new CefRefPtr<WinterHeadlessRequestGuard>(new WinterHeadlessRequestGuard());
+  return *guard;
+}
+
+/// `WinterClient` for a browser nobody can see. Two differences are forced by having no window:
+///  * a render handler (a windowless browser cannot exist without one);
+///  * `DoClose` answers `false`. Winter.app's `true` means "the host completes the close by releasing the
+///    host view" — and a windowless browser has none, so CEF's own reading of `false` for it ("If no OS
+///    window exists … returning false will cause the browser object to be destroyed immediately") is the only
+///    close that ever completes. With `true`, `CloseBrowser(true)` would be cancelled and the browser leak.
+/// The rest are additions for a browser driven with no one watching: the local-network rule on every request
+/// (`WinterHeadlessRequestGuard`, `OnBeforeBrowse`), and an explicit answer from every handler whose default could
+/// show UI. Everything else — the CDP door and its DevTools observer (`WinterCEFSendCDP`, `WinterCDPObserver`: one
+/// door for both apps), the crash observer — is the base class's, unchanged.
+///
+/// **Every CEF handler whose default can show UI, and what a headless browser answers** (the native-UI flags —
+/// `WinterCEFAutomationNativeUI` — are all set when the browser is created and never cleared):
+///  * JS dialogs, `beforeunload` (`OnJSDialog`, `OnBeforeUnloadDialog`) — held for the engine, answered over
+///    DevTools or by `WinterCEFResolveHeldDialog`; never shown (base, flag).
+///  * Permission prompts (`OnShowPermissionPrompt`: notifications, location, clipboard, local network access, …) —
+///    denied (base, flag).
+///  * Camera, microphone, screen capture (`OnRequestMediaAccessPermission`, `getDisplayMedia` included) — cancelled
+///    before macOS is asked (base, flag).
+///  * File choosers, the File System Access pickers (`OnFileDialog`) — cancelled; `upload()` intercepts the chooser
+///    over DevTools first (base, flag).
+///  * Downloads (`CanDownload`, `OnBeforeDownload`) — refused, never a save dialog (base, flag).
+///  * Pop-ups (`OnBeforePopup`) — cancelled (no pop-up observer is ever set) and reported (below).
+///  * Context menus (`RunContextMenu`) — cancelled (below): no menu is ever run.
+///  * HTTP authentication (`GetAuthCredentials`) — cancelled, never a credential dialog (below).
+///  * Certificate errors (`OnCertificateError`) — cancelled (below).
+///  * Client certificates (`OnSelectClientCertificate`) — continued WITHOUT a certificate, never a selection dialog,
+///    never a key used (below).
+///  * External protocols (`OnProtocolExecution`) — never handed to another app (`WinterHeadlessRequestGuard`).
+///  * Printing — `printing.enabled` off in every session's context: `window.print()` does nothing.
+///  * WebRTC — `webrtc.ip_handling_policy` `disable_non_proxied_udp` in every session's context: no UDP, so no
+///    host candidate, no mDNS announcement and no STUN check to an address a page names (below).
+///  * Focus, fullscreen, keys (`OnSetFocus`, fullscreen, unhandled keys) — refused, exited, swallowed (base, flags).
+///  * Native pickers that are windows of their own (a colour panel, an eye dropper) — cannot reach the screen: the
+///    helper's window guard refuses to order any window in (`WinterHeadlessApplication`). `<select>` and date pickers
+///    are painted off screen by a windowless browser.
+///  * WebAuthn, Bluetooth, USB, HID, serial choosers — no chooser exists in this embed; the request fails.
+class WinterHeadlessClient : public WinterClient {
+ public:
+  WinterHeadlessClient(WinterCEFBrowserCreation *creation,
+                       WinterCEFTabBridge *bridge,
+                       CefRefPtr<CefRenderHandler> render)
+      : WinterClient(creation, bridge), render_(render) {}
+
+  CefRefPtr<CefRenderHandler> GetRenderHandler() override { return render_; }
+
+  /// A navigation (and each of its redirects) the local-network rule refuses is cancelled before it is sent. The
+  /// `cefQuery` router's call is owed only to a navigation that proceeds, so it is made only then.
+  bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
+                      CefRefPtr<CefFrame> frame,
+                      CefRefPtr<CefRequest> request,
+                      bool user_gesture,
+                      bool is_redirect) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (request && HeadlessRequestRefused(request->GetURL())) {
+      NoteHeadless(browser, "local-network");
+      return true;  // cancel
+    }
+    return WinterClient::OnBeforeBrowse(browser, frame, request, user_gesture, is_redirect);
+  }
+
+  CefRefPtr<CefResourceRequestHandler> GetResourceRequestHandler(CefRefPtr<CefBrowser> browser,
+                                                                 CefRefPtr<CefFrame> frame,
+                                                                 CefRefPtr<CefRequest> request,
+                                                                 bool is_navigation,
+                                                                 bool is_download,
+                                                                 const CefString &request_initiator,
+                                                                 bool &disable_default_handling) override {
+    return HeadlessRequestGuard();
+  }
+
+  bool GetAuthCredentials(CefRefPtr<CefBrowser> browser,
+                          const CefString &origin_url,
+                          bool isProxy,
+                          const CefString &host,
+                          int port,
+                          const CefString &realm,
+                          const CefString &scheme,
+                          CefRefPtr<CefAuthCallback> callback) override {
+    return false;  // cancel the request: nobody can type a password here
+  }
+
+  bool OnCertificateError(CefRefPtr<CefBrowser> browser,
+                          cef_errorcode_t cert_error,
+                          const CefString &request_url,
+                          CefRefPtr<CefSSLInfo> ssl_info,
+                          CefRefPtr<CefCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    return false;  // cancel the request
+  }
+
+  /// CEF's default with certificates on offer is a selection DIALOG. Continued without one instead: no dialog, and
+  /// none of the user's keys is ever used by a page nobody sees.
+  bool OnSelectClientCertificate(CefRefPtr<CefBrowser> browser,
+                                 bool isProxy,
+                                 const CefString &host,
+                                 int port,
+                                 const X509CertificateList &certificates,
+                                 CefRefPtr<CefSelectClientCertificateCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (callback) {
+      callback->Select(nullptr);
+    }
+    Log("headless client-certificate request answered with none (offered=%zu)", certificates.size());
+    return true;
+  }
+
+  /// Cancelled as the base does (no pop-up observer is ever set on a headless tab) — and reported.
+  bool OnBeforePopup(CefRefPtr<CefBrowser> browser,
+                     CefRefPtr<CefFrame> frame,
+                     int popup_id,
+                     const CefString &target_url,
+                     const CefString &target_frame_name,
+                     WindowOpenDisposition target_disposition,
+                     bool user_gesture,
+                     const CefPopupFeatures &popupFeatures,
+                     CefWindowInfo &windowInfo,
+                     CefRefPtr<CefClient> &client,
+                     CefBrowserSettings &settings,
+                     CefRefPtr<CefDictionaryValue> &extra_info,
+                     bool *no_javascript_access) override {
+    const bool cancel = WinterClient::OnBeforePopup(browser, frame, popup_id, target_url, target_frame_name,
+                                                    target_disposition, user_gesture, popupFeatures, windowInfo,
+                                                    client, settings, extra_info, no_javascript_access);
+    NoteHeadless(browser, "popup");
+    return cancel;
+  }
+
+  bool RunContextMenu(CefRefPtr<CefBrowser> browser,
+                      CefRefPtr<CefFrame> frame,
+                      CefRefPtr<CefContextMenuParams> params,
+                      CefRefPtr<CefMenuModel> model,
+                      CefRefPtr<CefRunContextMenuCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (callback) {
+      callback->Cancel();
+    }
+    return true;  // handled: no menu is ever run
+  }
+
+  bool DoClose(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    Log("headless browser close completes in CEF (DoClose->false, id=%d)", browser->GetIdentifier());
+    return false;
+  }
+
+ private:
+  CefRefPtr<CefRenderHandler> render_;
+};
+
+CefRefPtr<WinterHeadlessRenderHandler> g_headless_render;
+
+}  // namespace
+
+/// A creation waiting for its session's context to come up. Weak: a tab closed meanwhile is simply dropped.
+@interface WinterCEFHeadlessPendingBrowser : NSObject
+@property(nonatomic, weak) NSView *key;
+@property(nonatomic, copy) NSString *url;
+@end
+
+@implementation WinterCEFHeadlessPendingBrowser
+@end
+
+namespace {
+
+struct HeadlessContext {
+  CefRefPtr<CefRequestContext> context;
+  bool initialized = false;
+  std::string printing = "pending";
+  /// What turning the browser's own predictive connections off came to (the same answers as `printing`).
+  std::string prediction = "pending";
+  /// What holding WebRTC to proxied TCP came to (the same answers as `printing`).
+  std::string webrtc = "pending";
+  NSMutableArray<WinterCEFHeadlessPendingBrowser *> *pending = nil;
+};
+
+/// One request context per Winter session, keyed by the session id. Main (CEF UI) thread only. Heap-allocated and
+/// never destroyed, like the registrations above: nothing here may be released by a static destructor after
+/// `CefShutdown`.
+std::map<std::string, HeadlessContext> &HeadlessContexts() {
+  static auto *contexts = new std::map<std::string, HeadlessContext>();
+  return *contexts;
+}
+
+void CreateWindowlessBrowserNow(NSView *key, const std::string &url, CefRefPtr<CefRequestContext> context) {
+  CefWindowInfo window_info;
+  // `SetAsWindowless` also sets the Alloy runtime style (`cef_mac.h`). No parent: there is no view to attach
+  // dialogs or menus to, and none is wanted.
+  window_info.SetAsWindowless(kNullWindowHandle);
+
+  WinterCEFBrowserCreation *creation = [[WinterCEFBrowserCreation alloc] init];
+  creation.parent = key;  // held for the length of the creation, as `CreateBrowserNow` does
+  WinterCEFTabBridge *bridge = BridgeFor(key);
+  bridge.creation = creation;
+
+  CefBrowserSettings browser_settings;
+  browser_settings.windowless_frame_rate = kHeadlessFrameRate;
+  // Opaque white, explicitly: for a WINDOWLESS browser a transparent (0) background turns on transparent
+  // painting, and a screenshot of a page with no background of its own would come back transparent.
+  browser_settings.background_color = 0xFFFFFFFF;
+
+  if (!g_headless_render) {
+    g_headless_render = new WinterHeadlessRenderHandler();
+  }
+  CefRefPtr<WinterHeadlessClient> client = new WinterHeadlessClient(creation, bridge, g_headless_render);
+  if (!CefBrowserHost::CreateBrowser(window_info, client, CefString(url), browser_settings, nullptr, context)) {
+    creation.parent = nil;
+    Log("headless CreateBrowser refused the request");
+  }
+}
+
+void HeadlessContextInitialized(const std::string &sessionId, CefRefPtr<CefRequestContext> context) {
+  auto it = HeadlessContexts().find(sessionId);
+  if (it == HeadlessContexts().end() || !it->second.context || !it->second.context->IsSame(context)) {
+    return;  // disposed (or replaced) before it came up
+  }
+  HeadlessContext &record = it->second;
+  // Before any of the session's browsers exists — they are created just below — so no page in this context
+  // ever runs with printing on. The same preference, and the same decision, as the built-in browser's.
+  const CefString name(kPrintingEnabledPreference);
+  record.printing = DisablePrinting(
+      [&] { return context->HasPreference(name); },
+      [&] { return context->CanSetPreference(name); },
+      [&](std::string &error) {
+        CefRefPtr<CefValue> value = CefValue::Create();
+        value->SetBool(false);
+        CefString reason;
+        const bool ok = context->SetPreference(name, value, reason);
+        error = reason.ToString();
+        return ok;
+      });
+  // Off too: the browser's own predictive connections (a page's `<link rel=preconnect>`, DNS prefetching) — a socket
+  // opened with no request, which the request guard never sees. `NETWORK_PREDICTION_NEVER` is 2.
+  const CefString prediction("net.network_prediction_options");
+  record.prediction = DisablePrinting(
+      [&] { return context->HasPreference(prediction); },
+      [&] { return context->CanSetPreference(prediction); },
+      [&](std::string &error) {
+        CefRefPtr<CefValue> value = CefValue::Create();
+        value->SetInt(2);
+        CefString reason;
+        const bool ok = context->SetPreference(prediction, value, reason);
+        error = reason.ToString();
+        return ok;
+      });
+  // WebRTC held to proxied TCP (`disable_non_proxied_udp`): no UDP socket at all, so no host candidate is gathered
+  // and no STUN check is ever sent to an address a page names — none of it is a request the guard or the resolver
+  // belt sees. What TCP WebRTC still makes goes through the proxy resolution, where the PAC belt refuses the local
+  // network. (Its mDNS responder, which binds the mDNS port even so, is off by switch: `HeadlessArguments`.)
+  const CefString webrtc("webrtc.ip_handling_policy");
+  record.webrtc = DisablePrinting(
+      [&] { return context->HasPreference(webrtc); },
+      [&] { return context->CanSetPreference(webrtc); },
+      [&](std::string &error) {
+        CefRefPtr<CefValue> value = CefValue::Create();
+        value->SetString("disable_non_proxied_udp");
+        CefString reason;
+        const bool ok = context->SetPreference(webrtc, value, reason);
+        error = reason.ToString();
+        return ok;
+      });
+  record.initialized = true;
+  Log("headless context initialized (printing: %s, network prediction: %s, webrtc: %s)", record.printing.c_str(),
+      record.prediction.c_str(), record.webrtc.c_str());
+  NSArray<WinterCEFHeadlessPendingBrowser *> *pending = [record.pending copy];
+  record.pending = nil;
+  for (WinterCEFHeadlessPendingBrowser *request in pending) {
+    NSView *key = request.key;
+    if (key == nil) {
+      continue;
+    }
+    CreateWindowlessBrowserNow(key, std::string([request.url UTF8String] ?: ""), record.context);
+  }
+}
+
+class WinterHeadlessContextHandler : public CefRequestContextHandler {
+ public:
+  explicit WinterHeadlessContextHandler(std::string sessionId) : session_(std::move(sessionId)) {}
+
+  void OnRequestContextInitialized(CefRefPtr<CefRequestContext> request_context) override {
+    CEF_REQUIRE_UI_THREAD();
+    HeadlessContextInitialized(session_, request_context);
+  }
+
+  /// The requests no browser's client sees — a service worker's: the same guard.
+  CefRefPtr<CefResourceRequestHandler> GetResourceRequestHandler(CefRefPtr<CefBrowser> browser,
+                                                                 CefRefPtr<CefFrame> frame,
+                                                                 CefRefPtr<CefRequest> request,
+                                                                 bool is_navigation,
+                                                                 bool is_download,
+                                                                 const CefString &request_initiator,
+                                                                 bool &disable_default_handling) override {
+    return HeadlessRequestGuard();
+  }
+
+ private:
+  std::string session_;
+  IMPLEMENT_REFCOUNTING(WinterHeadlessContextHandler);
+  DISALLOW_COPY_AND_ASSIGN(WinterHeadlessContextHandler);
+};
+
+}  // namespace
+
+BOOL WinterCEFInitializeHeadless(int argc,
+                                 char **argv,
+                                 const char *frameworkDir,
+                                 const char *mainBundlePath,
+                                 const char *subprocessPath,
+                                 const char *rootCachePath) {
+  if (g_initialized) {
+    return g_headless ? YES : NO;
+  }
+  if (g_did_shutdown) {
+    g_last_error = "CEF was already shut down in this process and cannot be restarted";
+    return NO;
+  }
+  if (frameworkDir == nullptr || mainBundlePath == nullptr || subprocessPath == nullptr ||
+      rootCachePath == nullptr) {
+    g_last_error = "the headless helper's layout is incomplete";
+    return NO;
+  }
+  if (!g_library_loaded) {
+    // BY PATH, from the layout the helper resolved (its own Contents/Frameworks), so that layout is the one
+    // source of where the framework is.
+    const std::string library = std::string(frameworkDir) + "/Chromium Embedded Framework";
+    if (!cef_load_library(library.c_str())) {
+      g_last_error = "could not load the Chromium Embedded Framework at the headless layout's path";
+      Log("FAILED: %s", g_last_error.c_str());
+      return NO;
+    }
+    g_library_loaded = true;
+    Log("framework loaded (headless, by path)");
+  }
+
+  ExternalPump::Create();
+  CefMainArgs main_args(argc, argv);
+
+  CefSettings settings;
+  settings.external_message_pump = true;  // the helper's own `[NSApp run]`
+  settings.multi_threaded_message_loop = false;
+  settings.no_sandbox = false;  // the renderers keep CEF's sandbox (the "Winter Helper" bundles' own)
+  settings.windowless_rendering_enabled = true;
+  CefString(&settings.framework_dir_path).FromString(frameworkDir);
+  CefString(&settings.main_bundle_path).FromString(mainBundlePath);
+  CefString(&settings.browser_subprocess_path).FromString(subprocessPath);
+  CefString(&settings.root_cache_path).FromString(rootCachePath);
+  // No `cache_path`: the global context is in memory, like every session's. Nothing a page stores is written.
+  const std::string logPath = std::string(rootCachePath) + "/chromium-debug.log";
+  CefString(&settings.log_file).FromString(logPath);
+#if DEBUG
+  settings.log_severity = LOGSEVERITY_WARNING;
+#else
+  settings.log_severity = LOGSEVERITY_DISABLE;
+#endif
+
+  // The SAME app class as Winter.app's browser process: CEF requires the same custom-scheme list in every
+  // process, and the "Winter Helper" subprocesses — the ones this host carries, which Winter.app's own CEF runs
+  // too — register Winter's editor scheme.
+  g_app = new WinterApp();
+  if (!CefInitialize(main_args, settings, g_app.get(), nullptr)) {
+    g_last_error = "CefInitialize failed (exit code " + std::to_string(CefGetExitCode()) + ")";
+    Log("FAILED: %s", g_last_error.c_str());
+    g_app = nullptr;
+    return NO;
+  }
+  g_initialized = true;
+  g_headless = true;
+  Log("CefInitialize ok (headless, windowless rendering)");
+  return YES;
+}
+
+BOOL WinterCEFHeadlessReady(void) {
+  return (g_headless && g_initialized && g_context_initialized && !g_shutting_down) ? YES : NO;
+}
+
+void WinterCEFCreateWindowlessBrowser(NSView *key, const char *url, const char *sessionId) {
+  if (!g_headless || !g_initialized || g_shutting_down || key == nil || sessionId == nullptr ||
+      sessionId[0] == '\0') {
+    return;
+  }
+  const std::string session(sessionId);
+  const std::string target(url != nullptr ? url : "");
+  auto it = HeadlessContexts().find(session);
+  if (it == HeadlessContexts().end()) {
+    HeadlessContext record;
+    CefRequestContextSettings context_settings;  // no cache_path: "incognito", in memory
+    record.context = CefRequestContext::CreateContext(context_settings, new WinterHeadlessContextHandler(session));
+    if (!record.context) {
+      Log("headless CreateContext refused the request");
+      return;
+    }
+    it = HeadlessContexts().emplace(session, std::move(record)).first;
+    Log("headless context created (contexts=%zu)", HeadlessContexts().size());
+  }
+  HeadlessContext &record = it->second;
+  if (record.initialized) {
+    CreateWindowlessBrowserNow(key, target, record.context);
+    return;
+  }
+  if (record.pending == nil) {
+    record.pending = [[NSMutableArray alloc] init];
+  }
+  WinterCEFHeadlessPendingBrowser *request = [[WinterCEFHeadlessPendingBrowser alloc] init];
+  request.key = key;
+  request.url = [NSString stringWithUTF8String:target.c_str()] ?: @"";
+  [record.pending addObject:request];
+}
+
+void WinterCEFHeadlessSetRequestRule(WinterCEFHeadlessRequestRule rule) {
+  g_headless_rule.store(rule);
+}
+
+void WinterCEFHeadlessSetNoticeObserver(void (^observer)(int browserId, const char *kind)) {
+  g_headless_notice = [observer copy];
+}
+
+void WinterCEFHeadlessDisposeContext(const char *sessionId) {
+  if (sessionId == nullptr) {
+    return;
+  }
+  auto it = HeadlessContexts().find(std::string(sessionId));
+  if (it == HeadlessContexts().end()) {
+    return;
+  }
+  if (it->second.context && it->second.initialized) {
+    // Belt: the context is in memory and goes with its last reference, but its cookies go NOW, whatever
+    // still holds a reference to it.
+    if (CefRefPtr<CefCookieManager> cookies = it->second.context->GetCookieManager(nullptr)) {
+      cookies->DeleteCookies(CefString(), CefString(), nullptr);
+    }
+  }
+  HeadlessContexts().erase(it);
+  Log("headless context disposed (contexts=%zu)", HeadlessContexts().size());
+}
+
+void WinterCEFHeadlessDisposeAllContexts(void) {
+  HeadlessContexts().clear();
+}
+
+int WinterCEFHeadlessContextCount(void) {
+  return static_cast<int>(HeadlessContexts().size());
+}
+
+NSString *WinterCEFHeadlessPrintingOutcome(const char *sessionId) {
+  if (sessionId == nullptr) {
+    return @"";
+  }
+  auto it = HeadlessContexts().find(std::string(sessionId));
+  if (it == HeadlessContexts().end()) {
+    return @"";
+  }
+  return [NSString stringWithUTF8String:it->second.printing.c_str()] ?: @"";
 }

@@ -146,8 +146,8 @@ final class SpikeCloseLeakHarness {
     }
 
     private func startCEF(page: String) {
-        guard let helper = Self.helperExecutablePath() else {
-            fatal("no CEF helper bundle in this build")
+        guard let chromium = WinterChromium.location(appBundle: Bundle.main.bundleURL) else {
+            fatal("no Chromium (the nested Winter Headless helper) in this build")
             return
         }
         let cache = Self.cachePath()
@@ -160,7 +160,7 @@ final class SpikeCloseLeakHarness {
         // an EXCLUSIVE lock on it. Sharing it breaks whichever process loses the race, including
         // theirs. Same constraint, same answer, as Task 1's reparent spike. Everything downstream —
         // creation, observers, the close path — is the production API verbatim.
-        guard WinterCEFInitialize(CommandLine.argc, CommandLine.unsafeArgv, cache, helper) else {
+        guard WinterCEFInitialize(CommandLine.argc, CommandLine.unsafeArgv, cache, chromium.framework.path, chromium.subprocessExecutable.path) else {
             fatal("CefInitialize failed: \(String(cString: WinterCEFLastError()))")
             return
         }
@@ -722,15 +722,6 @@ final class SpikeCloseLeakHarness {
             return explicit
         }
         return NSTemporaryDirectory() + "winter-closeleak-cef"
-    }
-
-    /// A three-line copy of `WinterCEFRuntime.helperExecutablePath()` — private there, and copying it
-    /// is right for spike code that must not widen a production surface.
-    private static func helperExecutablePath() -> String? {
-        let url = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Frameworks/Winter Helper.app/Contents/MacOS", isDirectory: true)
-            .appendingPathComponent("Winter Helper", isDirectory: false)
-        return FileManager.default.isExecutableFile(atPath: url.path) ? url.path : nil
     }
 
     /// A `file://` page with a looping audio element, so the run reproduces the user's *symptom*

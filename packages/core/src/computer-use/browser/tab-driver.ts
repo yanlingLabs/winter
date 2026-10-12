@@ -113,6 +113,7 @@ export function transportFailure(err: unknown, browserName: string): Error {
   if (!(err instanceof TransportError)) return err instanceof Error ? err : new Error(String(err));
   switch (err.code) {
     case "disconnected":
+      if (browserName === "Winter's headless browser") return new AutomationFailure("BrowserUnavailable", `Winter's headless browser can't be reached: ${err.message}`, true);
       return new AutomationFailure("BrowserUnavailable", browserName === "Winter's browser"
         ? "Winter's browser can't be reached: Winter isn't running — ask the user to open Winter"
         : `${browserName} can't be reached: Winter for Chrome is not connected — ask the user`, true);
@@ -935,7 +936,9 @@ export class TabDriver {
     const notes: string[] = [];
     if (this.fileChooser !== undefined) notes.push("the page asked for a file — use upload(ref, paths) on its file input");
     for (const name of this.takeUncaughtDownloads()) {
-      notes.push(`the page started a download of "${redactText(name)}" — ${this.browserName === "Winter's browser" ? "it was not saved" : `${this.browserName} saved it in its own Downloads folder`}; download(ref) saves a file into this session`);
+      notes.push(this.browserName === "Winter's headless browser"
+        ? `the page started a download of "${redactText(name)}" — it was not saved (Winter's headless browser doesn't download files)`
+        : `the page started a download of "${redactText(name)}" — ${this.browserName === "Winter's browser" ? "it was not saved" : `${this.browserName} saved it in its own Downloads folder`}; download(ref) saves a file into this session`);
     }
     return {
       title: this.shownTitle, url: this.shownUrl,

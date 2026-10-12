@@ -1,11 +1,11 @@
 // Winter Phase 9c (P9c-2): the new `#.###.#` version scheme. Pure logic only — no shell-outs, no
 // real releases — mirrors release-lib.test.ts's own posture for the rest of the release pipeline.
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HELPER_VERSION_MARKER, readHelperVersion } from "./computer-helper-lib";
-import { FORMAT, nextVersion, readCanonical, ROOT, semverTwin, stampInfoPlist, stampProjectYml } from "./version-lib";
+import { FORMAT, nextVersion, readCanonical, ROOT, semverTwin, stampInfoPlist, stampProjectYml, WINTER_INFO_PLISTS } from "./version-lib";
 
 const temps: string[] = [];
 afterEach(() => {
@@ -93,14 +93,23 @@ describe("stamping the apple sources", () => {
   test("project.yml: EVERY Winter target is stamped, not just the first — but never the helper's marked lines (its own version)", () => {
     const yml = readFileSync(join(ROOT, "apple", "Winter", "project.yml"), "utf8");
     const count = (text: string, re: RegExp) => [...text.matchAll(re)].length;
-    expect(count(yml, /CFBundleShortVersionString: "[^"]*"/g)).toBe(2);
+    // Winter, Winter Headless (Winter's version too) and the Computer Use helper (its own, marked).
+    expect(count(yml, /CFBundleShortVersionString: "[^"]*"/g)).toBe(3);
     const stamped = stampProjectYml(yml, "9.999.9");
-    expect(count(stamped, /CFBundleShortVersionString: "9\.999\.9"/g)).toBe(1);
-    expect(count(stamped, /CFBundleVersion: "9\.999\.9"/g)).toBe(1);
+    expect(count(stamped, /CFBundleShortVersionString: "9\.999\.9"/g)).toBe(2);
+    expect(count(stamped, /CFBundleVersion: "9\.999\.9"/g)).toBe(2);
     const helper = readHelperVersion();
     expect(stamped).toContain(`CFBundleShortVersionString: "${helper}" ${HELPER_VERSION_MARKER}`);
     expect(stamped).toContain(`CFBundleVersion: "${helper}" ${HELPER_VERSION_MARKER}`);
     expect(stamped.replaceAll("9.999.9", readCanonical())).toBe(yml);
+  });
+
+  test("every generated Info.plist in apple/Winter/Support that carries Winter's version is stamped — Winter Headless's too", () => {
+    const support = join(ROOT, "apple", "Winter", "Support");
+    const carriers = readdirSync(support).filter((f) => f.endsWith(".plist")).filter((f) =>
+      new RegExp(`<key>CFBundleShortVersionString</key>\\s*<string>${readCanonical().replaceAll(".", "\\.")}</string>`).test(readFileSync(join(support, f), "utf8")));
+    expect(carriers.sort()).toEqual([...WINTER_INFO_PLISTS].sort());
+    expect(WINTER_INFO_PLISTS).toContain("WinterHeadless-Info.plist");
   });
 
   test("the helper's generated Info.plist carries the helper's OWN version (apple/ComputerUse/VERSION), not Winter's", () => {

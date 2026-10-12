@@ -8,8 +8,9 @@
 // sites approved on the dangerous-domain card. Tab targets never enter the service's own target table: every
 // helper-facing loop stays app-only, and a tab-only script never launches the helper.
 //
-// POLICY. The built-in browser (`winter`) has no per-app card and no access setting ("Allow all apps" does not apply),
-// but `plan` is observe-only and chat has no computer use. A user's browser is the app with its bundle id: the
+// POLICY. Winter's own browsers — the built-in browser (`winter`) and the headless one (`headless`, Phase 4) — have no
+// per-app card and no access setting ("Allow all apps" does not apply), but `plan` is observe-only and chat has no
+// computer use; the headless browser also stays off the local network (`headless/private-network.ts`). A user's browser is the app with its bundle id: the
 // existing per-app policy (`authorize`) — `browsers.open` is checked as a full-class act first, then as a bind;
 // `browsers.tab` is a bind; reads are observes; acts are acts. One grant covers the browser as an app and its tabs.
 // The dangerous-domain floor and the secure-field floor apply to both backends.
@@ -32,6 +33,8 @@ import { pickerSentence, shownUrl, SITE_TOOL_STOP_GRACE_MS, TabDriver, transport
 import { HttpReader } from "./http-read";
 import { TransportError, type BackendId, type BrowserFamily, type CdpTransport, type TransportTab } from "./transport";
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
+import { HEADLESS_ENGINES } from "./headless/engines";
+import { HEADLESS_LAN_REFUSAL, isPrivateNetworkUrl } from "./headless/private-network";
 import { BODY_DEFAULT_CHARS, BODY_MAX_CHARS, isTextMime, redactBody } from "./body-redact";
 import { bytesLabel, CONSOLE_LEVELS, consoleLine, requestLine } from "./devtools";
 import { clearStagedDownloads, DOWNLOAD_MAX_BYTES, DOWNLOADS_PER_RUN, newStagingDir, placeDownload, planDownload, type DownloadPlan, type DownloadRoots } from "./download-paths";
@@ -98,6 +101,12 @@ export interface BrowserEngineDeps {
   stopScript?(sessionId: string, reason: string): void;
   /** Is the session running a main-thread turn now (a daemon restart's orphaned agent tabs stay open while it is)? */
   turnRunning?(sessionId: string): boolean;
+  /** Phase 4: the session's runtime ended (idle, deleted) — its headless browser context (its cookies) goes. */
+  headlessSessionEnded?(sessionId: string): void;
+  /** Phase 4: why the headless browser is not offered, when it is not ("turned off in Settings", missing). */
+  headlessReason?(): string | undefined;
+  /** When Winter Headless last refused a request of this tab to the local network (the pool's `localNetworkRefusedAt`). */
+  headlessLocalNetworkRefusedAt?(tabKey: string): number | undefined;
   now?(): number;
   log?(line: string): void;
   /** Phase 4: the plain-HTTP page reader `browsers.read` uses (default: one on the system resolver and `fetch`). */
@@ -142,6 +151,23 @@ export const USER_TAB_NAVIGATION = "this is the user's own tab — navigating it
 /** How long a closed tab's teardown is kept for a `rekey` (a navigation's answer follows its "closed" at once). */
 const RECENTLY_CLOSED_MS = 30_000;
 export const HOLDS_GLOBAL = 16;
+
+/** How long a failed headless navigation waits for the browser's local-network notice (it can trail the answer). */
+const HEADLESS_REFUSAL_GRACE_MS = 400;
+
+/** Phase 4 (the user's ruling on headless tabs): a headless tab is nobody's but the agent's — never handed over, never
+ *  shown. */
+export const HEADLESS_KEEP = "a headless tab can't be handed to the user — nobody can see it; open the page with browsers.open(url) in Winter's browser to show them";
+/** What a headless tab can't do, by primitive (the same ruling; the headless browser never downloads and has no sound). */
+function headlessRefusal(primitive: string, args: Record<string, unknown>): string | undefined {
+  switch (primitive) {
+    case "keep": return HEADLESS_KEEP;
+    case "waitForUser": return "nobody can see a headless tab, so the user can't act in it — open the page with browsers.open(url) in Winter's browser and call waitForUser() there";
+    case "download": return "Winter's headless browser doesn't download files — open the page with browsers.open(url) in Winter's browser to download it";
+    case "mute": return args.on === false ? "a headless tab never plays sound" : undefined;
+    default: return undefined;
+  }
+}
 
 const isRef = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
 const isPoint = (v: unknown): v is [number, number] => Array.isArray(v) && v.length === 2 && v.every((n) => typeof n === "number" && Number.isFinite(n));
@@ -263,7 +289,12 @@ export class BrowserEngine {
       scope.live();
       const facts = scope.sessionFacts();
       if (facts.mode === "chat" || facts.policy === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
-      if (NAVIGATE_PRIMITIVES.has(primitive) && this.familyOf(b.backend) !== "winter" && this.usersTab(scope.sessionId, b)) throw new AutomationFailure("NotAllowed", USER_TAB_NAVIGATION);
+      if (NAVIGATE_PRIMITIVES.has(primitive) && !this.isWintersOwn(b.backend) && this.usersTab(scope.sessionId, b)) throw new AutomationFailure("NotAllowed", USER_TAB_NAVIGATION);
+      if (this.isHeadless(b.backend)) {
+        scope.metric.headlessEngine = "winter";
+        const refusal = headlessRefusal(primitive, args);
+        if (refusal !== undefined) throw new AutomationFailure("NotAllowed", refusal);
+      }
       const act = !OBSERVE_PRIMITIVES.has(primitive);
       // A site's own tool (WebMCP) is called only while the setting allows it — said before any card.
       if (primitive === "callTool" && scope.webMcp?.() === false) throw new AutomationFailure("NotAllowed", SITE_TOOLS_OFF);
@@ -353,7 +384,9 @@ export class BrowserEngine {
     const d = this.drivers.get(key);
     if (d !== undefined) { void d.release(sessionId); d.onGone("closed"); this.drivers.delete(key); }
     const transport = this.deps.registry.get(a.backend);
-    if (transport === undefined || !transport.connected) return;
+    // The headless pool is asked even while it is not offered (turned off, its app gone): it forgets the tab at once,
+    // so a tab it can no longer close never stays counted against the open-tab budget.
+    if (transport === undefined || (!transport.connected && this.familyOf(a.backend) !== "headless")) return;
     void transport.closeTab(a.tabKey).catch((err: unknown) => this.deps.log?.(`computer-use: closing ${a.backend}:${a.tabKey} failed (${err instanceof Error ? err.message : "error"})`));
   }
 
@@ -374,11 +407,17 @@ export class BrowserEngine {
     const s = this.sessions.get(sessionId);
     if (s !== undefined) {
       for (const b of s.bindings.values()) if (b.lost === undefined) void this.drivers.get(tabKeyOf(b.backend, b.tabKey))?.release(sessionId);
-      if (reason === "deleted") {
+      if (reason === "deleted" || reason === "idle") {
+        const event = reason === "deleted" ? "session-deleted" : "idle-ended";
         for (const [key, a] of [...s.agentTabs]) {
-          if (shouldCloseAgentTab({ event: "session-deleted", family: this.familyOf(a.backend), kept: a.kept })) this.closeAgentTab(sessionId, s, key, a, "closed_session_end");
+          if (shouldCloseAgentTab({ event, family: this.familyOf(a.backend), kept: a.kept })) this.closeAgentTab(sessionId, s, key, a, "closed_session_end");
         }
       }
+    }
+    // The session's private headless context (its cookies) goes with its runtime; at daemon stop the headless browser
+    // exits and takes every context along.
+    if (reason !== "stop") {
+      try { this.deps.headlessSessionEnded?.(sessionId); } catch { /* best effort */ }
     }
     // The runtime idling out keeps the session's memory of its agent tabs (the next turn's end still closes them);
     // the bindings themselves went with the worker.
@@ -427,7 +466,9 @@ export class BrowserEngine {
   listRows(): BrowserListRow[] {
     const rows = new Map<string, BrowserListRow>();
     for (const r of this.deps.registry.list()) {
-      rows.set(r.id, { id: r.id, name: r.name, isDefault: r.id === "winter", connected: r.connected, ...(r.reason === undefined ? {} : { reason: r.reason }) });
+      // The headless browser's reason is the pool's own ("turned off in Settings", missing), not a link's.
+      const reason = r.connected ? undefined : r.family === "headless" ? (this.deps.headlessReason?.() ?? "Winter's headless browser is not available") : r.reason;
+      rows.set(r.id, { id: r.id, name: r.name, isDefault: r.id === "winter", connected: r.connected, ...(reason === undefined ? {} : { reason }) });
     }
     if (!rows.has("winter")) rows.set("winter", { id: "winter", name: "Winter (built-in)", isDefault: true, connected: false, reason: "Winter isn't running" });
     const installed = this.installedBundleIds();
@@ -440,7 +481,7 @@ export class BrowserEngine {
       const name = browserForBundleId(channel)?.name ?? info.name;
       rows.set(fam, { id: fam, name, isDefault: false, connected: false, reason: `Winter for Chrome is not installed in ${name} — ask the user` });
     }
-    const order = ["winter", "chrome", "edge", "brave", "vivaldi", "opera", "arc", "chromium"];
+    const order = ["winter", "headless", "chrome", "edge", "brave", "vivaldi", "opera", "arc", "chromium"];
     return [...rows.values()].sort((a, b) => order.indexOf(familyOfBackendId(a.id) ?? "") - order.indexOf(familyOfBackendId(b.id) ?? "") || a.id.localeCompare(b.id));
   }
 
@@ -466,7 +507,7 @@ export class BrowserEngine {
         })]),
       ];
       this.hooked.set(transport, { backend: id, off });
-      if (this.familyOf(id) !== "winter" && transport.connected) void this.reconcileOrphans(id, transport);
+      if (!this.isWintersOwn(id) && transport.connected) void this.reconcileOrphans(id, transport);
     }
     for (const [t, h] of this.hooked) {
       if (live.has(t)) continue;
@@ -536,7 +577,10 @@ export class BrowserEngine {
   private makeRoomForHold(scope: TabRunScope, driver: TabDriver): void {
     driver.lastUsed = this.now();
     if (driver.isAttached && driver.holders.has(scope.sessionId)) return;
-    const held = [...this.drivers.values()].filter((d) => d !== driver && d.isAttached && d.holders.size > 0);
+    // A headless tab's attachment costs nothing in Winter.app: the pool's open-tab caps are its budget, and it neither
+    // counts toward these caps nor is let go for them.
+    if (this.isHeadless(driver.backend)) return;
+    const held = [...this.drivers.values()].filter((d) => d !== driver && d.isAttached && d.holders.size > 0 && !this.isHeadless(d.backend));
     const mine = held.filter((d) => d.holders.has(scope.sessionId));
     const free = (list: TabDriver[]): TabDriver[] => list.filter((d) => {
       if (d.busy > 0) return false;
@@ -563,7 +607,7 @@ export class BrowserEngine {
     let d = this.drivers.get(key);
     if (d === undefined) {
       const driver = new TabDriver(backend, tabKey, transport, this.browserName(backend), () => this.now());
-      if (this.familyOf(backend) !== "winter") driver.onRekey = (newKey) => this.rekey(driver, newKey);
+      if (!this.isWintersOwn(backend)) driver.onRekey = (newKey) => this.rekey(driver, newKey);
       d = driver;
       this.drivers.set(key, d);
     } else d.replaceTransport(transport);
@@ -613,7 +657,8 @@ export class BrowserEngine {
 
   private unavailable(backend: BackendId): AutomationFailure {
     const row = this.listRows().find((r) => r.id === backend);
-    const reason = row?.reason ?? (familyOfBackendId(backend) === "winter" ? "Winter isn't running" : "it is not connected");
+    const fam = familyOfBackendId(backend);
+    const reason = row?.reason ?? (fam === "winter" ? "Winter isn't running" : fam === "headless" ? (this.deps.headlessReason?.() ?? "it is not available") : "it is not connected");
     return new AutomationFailure("BrowserUnavailable", `${row?.name ?? backend} can't be reached: ${reason}`, true);
   }
 
@@ -621,14 +666,23 @@ export class BrowserEngine {
     return this.deps.registry.info(backend)?.family ?? familyOfBackendId(backend) ?? "chromium";
   }
 
+  /** Winter's own browsers (`winter`, `headless`): no bundle id, no per-app card; `plan` is observe-only. */
+  private isWintersOwn(backend: BackendId): boolean {
+    const f = this.familyOf(backend);
+    return f === "winter" || f === "headless";
+  }
+
+  private isHeadless(backend: BackendId): boolean { return this.familyOf(backend) === "headless"; }
+
   private browserName(backend: BackendId): string {
     if (this.familyOf(backend) === "winter") return "Winter's browser";
+    if (this.familyOf(backend) === "headless") return "Winter's headless browser";
     return this.deps.registry.info(backend)?.name ?? familyInfo(this.familyOf(backend))?.name ?? backend;
   }
 
   private bundleIdOf(backend: BackendId): string | undefined {
     const fam = this.familyOf(backend);
-    if (fam === "winter") return undefined;
+    if (fam === "winter" || fam === "headless") return undefined;
     return this.deps.registry.info(backend)?.bundleId ?? familyInfo(fam)?.bundleIds[0];
   }
 
@@ -739,6 +793,15 @@ export class BrowserEngine {
   private async open(scope: TabRunScope, args: Record<string, unknown>): Promise<TabHandle> {
     const url = checkTabUrl(args.url, "browsers.open()");
     const backend = this.backendFor(args.browser);
+    const headless = this.isHeadless(backend);
+    // `engine` (Phase 4): which engine runs a headless tab — Winter Headless (`winter`) is the only one.
+    if (args.engine !== undefined) {
+      if (!headless) throw bad("{ engine } is for { browser: \"headless\" }");
+      if (typeof args.engine !== "string" || !(HEADLESS_ENGINES as readonly string[]).includes(args.engine.trim().toLowerCase())) {
+        throw bad(`no headless engine "${String(args.engine).slice(0, 40)}" — the engines are: ${HEADLESS_ENGINES.join(", ")}`);
+      }
+    }
+    if (headless && isPrivateNetworkUrl(url)) throw new AutomationFailure("NotAllowed", HEADLESS_LAN_REFUSAL);
     const facts = scope.sessionFacts();
     if (facts.mode === "chat" || facts.policy === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
     const transport = this.deps.registry.get(backend);
@@ -763,6 +826,9 @@ export class BrowserEngine {
       if (this.familyOf(backend) === "winter") {
         const tabKey = this.deps.mintWinterTab(scope.sessionId, url === "about:blank" ? undefined : url);
         tab = await transport.createTab({ sessionId: scope.sessionId, url, tabKey, ...(title === undefined ? {} : { sessionTitle: title }) });
+      } else if (headless) {
+        const engine = typeof args.engine === "string" ? args.engine.trim().toLowerCase() : HEADLESS_ENGINES[0];
+        tab = await transport.createTab({ sessionId: scope.sessionId, url, engine });
       } else {
         tab = await transport.createTab({ sessionId: scope.sessionId, url, ...(title === undefined ? {} : { sessionTitle: title }) });
       }
@@ -773,7 +839,8 @@ export class BrowserEngine {
     const driver = this.driverFor(backend, tab.tabKey);
     const loaded = await driver.waitOpened(url, scope.signal);
     scope.live();
-    scope.builder.daemonLine(this.familyOf(backend) === "winter" ? "opened a new tab in Winter's browser" : `opened a new tab in ${name} (in the background)`);
+    scope.builder.daemonLine(this.familyOf(backend) === "winter" ? "opened a new tab in Winter's browser"
+      : headless ? "opened a new tab in Winter's headless browser (nobody sees it)" : `opened a new tab in ${name} (in the background)`);
     if (!loaded) scope.builder.daemonLine("still loading after 10 s");
     // Where the tab LANDED (a redirect) meets the dangerous-domain floor before anything of it is printed.
     await this.siteFloor(scope, this.binding(scope.sessionId, handle.targetId), driver);
@@ -795,6 +862,15 @@ export class BrowserEngine {
     }
     const transport = this.deps.registry.get(backend);
     if (transport === undefined || !transport.connected) throw this.unavailable(backend);
+    if (this.isHeadless(backend)) {
+      // The session's own headless tabs only (another session's are in another context); nothing is started to list.
+      let mine: TransportTab[];
+      try { mine = await transport.listTabs({ sessionId: scope.sessionId }); } catch (err) { throw transportFailure(err, this.browserName(backend)); }
+      return mine.map((t) => ({
+        id: `${backend}:${t.tabKey}`, browser: backend, url: shownUrl(t.url.length > 0 ? t.url : "about:blank"), title: t.title, active: false,
+        yours: s.agentTabs.get(tabKeyOf(backend, t.tabKey))?.kept === false,
+      }));
+    }
     // Listing a user's browser reads every tab's title and URL: it needs that browser's per-app consent, the same as
     // binding it (the card under the asking policies; only "Always allow" under dont-ask).
     const bundleId = this.bundleIdOf(backend);
@@ -817,6 +893,8 @@ export class BrowserEngine {
     for (const r of this.listRows()) {
       if (familyOfBackendId(r.id) === "winter") { ids.push(r.id); continue; }
       if (!r.connected) continue;
+      // The headless browser is Winter's own: its tabs are listed with no grant (only this session's).
+      if (familyOfBackendId(r.id) === "headless") { ids.push(r.id); continue; }
       const bundleId = this.bundleIdOf(r.id);
       if (bundleId !== undefined && !scope.granted(bundleId)) { leftOut.push(`${r.name} (${r.id}) — not allowed in this session yet`); continue; }
       ids.push(r.id);
@@ -859,18 +937,19 @@ export class BrowserEngine {
       const rows = await this.tabRows(scope, backend);
       const hit = rows.find((r) => r.id === `${backend}:${tabKey}`);
       if (hit === undefined) {
-        throw new AutomationFailure("TargetLost", this.familyOf(backend) === "winter"
+        throw new AutomationFailure("TargetLost", this.isWintersOwn(backend)
           ? `no tab ${t.slice(0, 80)} in this session's tabs — browsers.tabs() lists them`
           : `no tab ${t.slice(0, 80)} is open — browsers.tabs() lists them`);
       }
       url = hit.url;
     } else if (t !== null && typeof t === "object" && (t as { active?: unknown }).active === true) {
       // The tab the user has in front in a user's browser (named, or the one allowed and connected).
-      const chosen = args.browser === undefined ? this.defaultBackends(scope).ids.filter((id) => this.familyOf(id) !== "winter") : [this.backendFor(args.browser)];
+      const chosen = args.browser === undefined ? this.defaultBackends(scope).ids.filter((id) => !this.isWintersOwn(id)) : [this.backendFor(args.browser)];
       if (chosen.length === 0) throw bad("browsers.tab({ active: true }) needs a user's browser: name it with { browser } (browsers.list() shows them)");
       if (chosen.length > 1) throw bad(`several browsers are connected — name one with { browser }: ${chosen.join(", ")}`);
       backend = chosen[0]!;
       if (this.familyOf(backend) === "winter") throw bad("browsers.tab({ active: true }) is for a user's browser — bind a built-in tab by its id from browsers.tabs()");
+      if (this.isHeadless(backend)) throw bad("browsers.tab({ active: true }) is for a user's browser — bind a headless tab by its id from browsers.tabs()");
       const rows = await this.tabRows(scope, backend);
       const front = rows.filter((r) => r.active).sort((a, b) => (b.lastUsed ?? "").localeCompare(a.lastUsed ?? ""))[0];
       if (front === undefined) throw new AutomationFailure("TargetLost", `no tab is in front in ${this.browserName(backend)}`);
@@ -942,6 +1021,11 @@ export class BrowserEngine {
     const cwd = this.cwdOf(scope.sessionId);
     const url = driver.url;
     if (url.length === 0) return;
+    // The user's ruling (the LAN is refused): a headless tab that landed on the local network (a redirect, the page's own script) is read and acted on no
+    // further — only the members a blocked tab keeps work until it navigates away.
+    if (this.isHeadless(b.backend) && isPrivateNetworkUrl(url)) {
+      throw new AutomationFailure("NotAllowed", `${HEADLESS_LAN_REFUSAL}. This tab is on one — only ${blockedTabMembers()} work on it until it navigates away`);
+    }
     const match = listedHost(url, this.deps.site ?? {}, cwd);
     if (match === null) return;
     const runKey = `${scope.sessionId}\u0000${scope.runId}`;
@@ -1183,6 +1267,7 @@ export class BrowserEngine {
       }
       case "goto": {
         const url = checkTabUrl(args.url, "goto()");
+        if (this.isHeadless(b.backend) && isPrivateNetworkUrl(url)) throw new AutomationFailure("NotAllowed", HEADLESS_LAN_REFUSAL);
         if (url !== "about:blank") await ensureSiteAllowed(scope, this.approvals, this.deps.site ?? {}, url, this.browserName(b.backend), this.cwdOf(sid));
         scope.live();
         noteSiteOf(scope, url);
@@ -1304,6 +1389,8 @@ export class BrowserEngine {
         this.requireOwnTab(sid, b, "mute()");
         const on = args.on === undefined ? true : args.on;
         if (typeof on !== "boolean") throw bad("mute() takes true (the default) or false");
+        // A headless tab is silent already (its browser runs muted); unmuting was refused above.
+        if (this.isHeadless(b.backend)) return undefined;
         const t = driver.transport;
         if (t.setMuted === undefined) {
           throw this.familyOf(b.backend) === "winter"
@@ -1392,15 +1479,16 @@ export class BrowserEngine {
     if (named !== undefined) {
       const id = this.backendFor(named);
       if (this.familyOf(id) === "winter") throw new Error(`Winter's built-in browser has no ${what} — name a user's browser (browsers.list())`);
+      if (this.isHeadless(id)) throw new Error(`Winter's headless browser has no ${what} — name a user's browser (browsers.list())`);
       return id;
     }
-    const ids = this.defaultBackends(scope).ids.filter((id) => this.familyOf(id) !== "winter");
+    const ids = this.defaultBackends(scope).ids.filter((id) => !this.isWintersOwn(id));
     if (ids.length === 1) return ids[0]!;
     throw bad(ids.length === 0 ? `name the user's browser with { browser } (browsers.list() shows them) — none is allowed in this session yet` : `several browsers are connected — name one with { browser }: ${ids.join(", ")}`);
   }
 
   private async windowsCall(scope: TabRunScope, args: Record<string, unknown>): Promise<unknown> {
-    const ids = args.browser !== undefined ? [this.oneUserBrowser(scope, args.browser, "windows")] : this.defaultBackends(scope).ids.filter((id) => this.familyOf(id) !== "winter");
+    const ids = args.browser !== undefined ? [this.oneUserBrowser(scope, args.browser, "windows")] : this.defaultBackends(scope).ids.filter((id) => !this.isWintersOwn(id));
     const rows: Array<{ browser: string; id: number; focused: boolean; tabs: number }> = [];
     for (const id of ids) {
       const t = this.deps.registry.get(id);
@@ -1426,10 +1514,13 @@ export class BrowserEngine {
     if (args.browser !== undefined && this.familyOf(this.backendFor(args.browser)) === "winter") {
       throw new Error("Winter's built-in browser keeps no history or bookmarks Winter can read");
     }
+    if (args.browser !== undefined && this.isHeadless(this.backendFor(args.browser))) {
+      throw new Error("Winter's headless browser keeps no history or bookmarks");
+    }
     const facts = scope.sessionFacts();
     if (facts.mode === "chat" || facts.policy === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
     const chosen = args.browser === undefined ? this.defaultBackends(scope) : { ids: [this.backendFor(args.browser)], leftOut: [] as string[] };
-    const ids = chosen.ids.filter((id) => this.familyOf(id) !== "winter");
+    const ids = chosen.ids.filter((id) => !this.isWintersOwn(id));
     if (ids.length === 0) {
       throw bad(`browsers.${label} searches a user's browser — name it with { browser } (browsers.list() shows them)${chosen.leftOut.length > 0 ? `; not allowed in this session yet: ${chosen.leftOut.join("; ")}` : ""}`);
     }
@@ -2037,8 +2128,23 @@ export class BrowserEngine {
 
   private async navigate(scope: TabRunScope, b: Binding, driver: TabDriver, go: () => Promise<boolean>): Promise<undefined> {
     driver.agentNavigating = b.kind === "agent";
+    const startedAt = Date.now();
     let loaded: boolean;
-    try { loaded = await go(); } finally { driver.agentNavigating = false; }
+    try {
+      loaded = await go();
+    } catch (err) {
+      // A headless navigation the browser itself cancelled because it led to the local network (a redirect there):
+      // the model reads why, not a bare net error. The browser's notice can trail the failed navigation's answer by a
+      // moment (they travel separately), so a failure waits a little for it.
+      if (this.isHeadless(b.backend) && this.deps.headlessLocalNetworkRefusedAt !== undefined) {
+        const refused = (): boolean => (this.deps.headlessLocalNetworkRefusedAt?.(b.tabKey) ?? -1) >= startedAt;
+        for (let waited = 0; !refused() && waited < HEADLESS_REFUSAL_GRACE_MS; waited += 25) await new Promise((r) => setTimeout(r, 25));
+        if (refused()) throw new AutomationFailure("NotAllowed", `${HEADLESS_LAN_REFUSAL} — the page led there (a redirect); nothing was sent to it`);
+      }
+      throw err;
+    } finally {
+      driver.agentNavigating = false;
+    }
     scope.live();
     scope.acted.add(b.targetId);
     scope.diffBases.clearTarget(scope.sessionId, b.targetId);
@@ -2161,7 +2267,9 @@ function lostSentence(b: Binding): string {
     case "closed_by_you": return "you closed that tab — open another with browsers.open()";
     case "closed_turn_end": return "Winter closed that tab when your turn ended (it was not marked with keep() or handoff()) — open a new one with browsers.open()";
     case "closed_session_end": return "Winter closed that tab when the session ended — open a new one with browsers.open()";
-    case "crashed": return "the tab crashed — open it again with browsers.open()";
+    case "crashed": return familyOfBackendId(b.backend) === "headless"
+      ? "Winter's headless browser stopped (or this tab's page crashed) — open the page again with browsers.open()"
+      : "the tab crashed — open it again with browsers.open()";
     case "detached_by_user": return "the user stopped Winter from controlling this tab — ask them before binding it again";
     case "stopped": return "the tab's browser was stopped — open a new tab with browsers.open()";
     default: return "the tab was closed — open a new one with browsers.open() or bind another with browsers.tab()";

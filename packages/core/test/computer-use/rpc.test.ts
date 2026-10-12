@@ -71,7 +71,7 @@ describe("computerUse.* (local-only RPCs)", () => {
     fake.running = false;
     const runtime = createComputerUseRuntime({
       home, profile: "dev", settings: () => live, settingsPath, approvals: new ApprovalBroker(), hub, store,
-      launchAllowed: true, inject: { transport: fake.transport, launcher: fake.launcher, verifier: fake.verifier, browserInstalled: () => false },
+      launchAllowed: true, inject: { transport: fake.transport, launcher: fake.launcher, verifier: fake.verifier, browserInstalled: () => false, headless: { resolve: () => ({ missing: "Winter's headless browser is missing — reinstall Winter" }) } },
     });
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -89,7 +89,9 @@ describe("computerUse.* (local-only RPCs)", () => {
     expect(r1.result).toEqual({
       enabled: true, allowAllApps: true, legacyComputer: false, mirror: false, privateEventPath: true, headlessEnabled: true, webmcp: true,
       helper: { installed: true, running: false },
-      browsers: [{ id: "winter", name: "Winter (built-in)", connected: false, reason: "Winter isn't running" }],
+      // Phase 4: Winter's headless browser is always listed (a test daemon finds it only through $WINTER_HEADLESS_APP).
+      browsers: [{ id: "winter", name: "Winter (built-in)", connected: false, reason: "Winter isn't running" },
+        { id: "headless", name: "Winter (headless)", connected: false, reason: "Winter's headless browser is missing — reinstall Winter" }],
     });
     expect(fake.launched).toEqual([]);
     fake.running = true;

@@ -1,17 +1,18 @@
 import XCTest
 import Foundation
+@testable import Winter
 
-/// panel-cef Task 4: the runtime pin for the five CEF helper bundles.
+/// panel-cef Task 4: the runtime pin for the five CEF helper bundles — which, since the user's ruling
+/// on ONE Chromium, live in the nested Winter Headless helper's `Contents/Frameworks` beside the
+/// framework (`WinterChromium`), never in Winter.app's own.
 ///
 /// "Build and land" (the brief's own words) has no compile-time failure mode of its own — a
-/// helper target could silently stop being embedded (dropped from the scheme's `build.targets`,
-/// the "Embed CEF helpers" postCompileScript's name list drifting from a target's actual
-/// PRODUCT_NAME, ...) and nothing would fail to compile. The exact nested path is also load-
-/// bearing, not cosmetic: CEF locates each helper by a hardcoded relative-path convention
-/// (`cef_scoped_library_loader_mac.mm` walks `../Frameworks/Chromium Embedded Framework...` from
-/// the MAIN app, and `../../..` from a HELPER back to the same framework; the browser process
-/// launches `Contents/Frameworks/Winter Helper<suffix>.app` by name) — not a preference this test
-/// could safely relax.
+/// helper target could silently stop being embedded (dropped from the WinterHeadless target's
+/// dependencies, the "Embed Winter's Chromium" postCompileScript's name list drifting from a
+/// target's actual PRODUCT_NAME, ...) and nothing would fail to compile. The relative layout is
+/// also load-bearing, not cosmetic: a HELPER finds the framework at `../../..` from its own
+/// executable (`cef_scoped_library_loader_mac.mm`), and the browser process launches
+/// `<frameworks>/Winter Helper<suffix>.app` by name — not a preference this test could safely relax.
 ///
 /// `Bundle.main` under this test host is `Winter.app` itself, the real as-built bundle, not a
 /// fixture — see `WinterApplicationTests`'s own comment on the same mechanism.
@@ -23,13 +24,28 @@ final class CEFHelperBundlesTests: XCTestCase {
     private static let suffixes = ["", " (Alerts)", " (GPU)", " (Plugin)", " (Renderer)"]
 
     private static var frameworksDir: URL {
-        Bundle.main.bundleURL.appendingPathComponent("Contents/Frameworks", isDirectory: true)
+        get throws {
+            try XCTUnwrap(WinterChromium.location(appBundle: Bundle.main.bundleURL),
+                          "no Chromium in the nested Winter Headless helper of \(Bundle.main.bundleURL.path)").frameworks
+        }
+    }
+
+    /// ONE Chromium: the nested helper carries it, and Winter.app's own Contents/Frameworks holds none of it.
+    func testTheOneChromiumIsInTheNestedHelperAndNotInWintersOwnFrameworks() throws {
+        let frameworks = try Self.frameworksDir
+        XCTAssertEqual(frameworks.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().lastPathComponent,
+                       "Helpers", "the Chromium is not in a nested helper: \(frameworks.path)")
+        let own = Bundle.main.bundleURL.appendingPathComponent("Contents/Frameworks", isDirectory: true)
+        for name in [WinterChromium.frameworkName] + WinterChromium.subprocessBundleNames.map({ "\($0).app" }) {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: own.appendingPathComponent(name).path),
+                           "a second Chromium: \(name) is in Winter.app's own Contents/Frameworks")
+        }
     }
 
     func testAllFiveHelperExecutablesLandAtTheExactContractedPath() throws {
         for suffix in Self.suffixes {
             let bundleName = "Winter Helper\(suffix).app"
-            let executablePath = Self.frameworksDir
+            let executablePath = try Self.frameworksDir
                 .appendingPathComponent(bundleName, isDirectory: true)
                 .appendingPathComponent("Contents/MacOS/Winter Helper\(suffix)", isDirectory: false)
 
@@ -50,7 +66,7 @@ final class CEFHelperBundlesTests: XCTestCase {
     func testAllFiveHelpersAreUIElementsWithNoDockPresence() throws {
         for suffix in Self.suffixes {
             let bundleName = "Winter Helper\(suffix).app"
-            let bundleURL = Self.frameworksDir.appendingPathComponent(bundleName, isDirectory: true)
+            let bundleURL = try Self.frameworksDir.appendingPathComponent(bundleName, isDirectory: true)
             let helperBundle = try XCTUnwrap(
                 Bundle(url: bundleURL), "could not load helper bundle at \(bundleURL.path)"
             )
@@ -69,7 +85,7 @@ final class CEFHelperBundlesTests: XCTestCase {
         var seen = Set<String>()
         for suffix in Self.suffixes {
             let bundleName = "Winter Helper\(suffix).app"
-            let bundleURL = Self.frameworksDir.appendingPathComponent(bundleName, isDirectory: true)
+            let bundleURL = try Self.frameworksDir.appendingPathComponent(bundleName, isDirectory: true)
             let helperBundle = try XCTUnwrap(
                 Bundle(url: bundleURL), "could not load helper bundle at \(bundleURL.path)"
             )

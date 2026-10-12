@@ -247,10 +247,10 @@ final class EditorPlumbingTests: XCTestCase {
         var binaries: [(String, URL)] = [
             ("Winter (browser process)", app.appendingPathComponent("Contents/MacOS/Winter"))
         ]
-        for suffix in ["", " (Alerts)", " (GPU)", " (Plugin)", " (Renderer)"] {
-            let name = "Winter Helper\(suffix)"
-            binaries.append((name, app.appendingPathComponent(
-                "Contents/Frameworks/\(name).app/Contents/MacOS/\(name)")))
+        // The five live in the nested Winter Headless helper (Winter's one Chromium), not in Winter.app's own Frameworks.
+        let chromium = try XCTUnwrap(WinterChromium.location(appBundle: app), "no Chromium in the nested helper")
+        for name in WinterChromium.subprocessBundleNames {
+            binaries.append((name, chromium.executable(of: name)))
         }
 
         for (name, executable) in binaries {
@@ -896,10 +896,10 @@ final class EditorPlumbingTests: XCTestCase {
         var binaries: [(String, URL)] = [
             ("Winter (browser process)", app.appendingPathComponent("Contents/MacOS/Winter"))
         ]
-        for suffix in ["", " (Alerts)", " (GPU)", " (Plugin)", " (Renderer)"] {
-            let name = "Winter Helper\(suffix)"
-            binaries.append((name, app.appendingPathComponent(
-                "Contents/Frameworks/\(name).app/Contents/MacOS/\(name)")))
+        // The five live in the nested Winter Headless helper (Winter's one Chromium), not in Winter.app's own Frameworks.
+        let chromium = try XCTUnwrap(WinterChromium.location(appBundle: app), "no Chromium in the nested helper")
+        for name in WinterChromium.subprocessBundleNames {
+            binaries.append((name, chromium.executable(of: name)))
         }
 
         for (name, executable) in binaries {

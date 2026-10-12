@@ -53,6 +53,12 @@ export interface PrimitiveMetric {
   /** An act (helper 1.9.8): the apps that came forward after the agent's action with no input of the user's since — sent
    *  back, or left in front (a system dialog) — since the act before (names only, at most 8). */
   viewMovedBy?: string[];
+  /** Phase 4, the headless pool: the engine a headless tab runs on (`winter`), on every primitive of one and on the
+   *  pool's own `headless.launch` / `headless.exit` lines; the launched engine's version (a launch line); why the
+   *  engine exited (`idle`, `stop`, `crash`, `disabled` — an exit line). */
+  headlessEngine?: string;
+  headlessVersion?: string;
+  exitReason?: string;
 }
 
 export const AUTOMATION_METRICS_MAX_BYTES = 8 * 1024 * 1024;
