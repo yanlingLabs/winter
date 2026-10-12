@@ -224,6 +224,48 @@ final class GuardianRound11Tests: XCTestCase {
         // What the agent's own act typed is never the user's: the base is refreshed at its end.
         sys.front = 1
         XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "not in front")
-        XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "not in front")
+    }
+
+    /// The user's ruling (round 14): KEEP the safe side. Under Secure Keyboard Entry a bound front Terminal whose text
+    /// changes — a command's streaming output as much as their typing — is the user working: the agent waits until
+    /// Terminal leaves the front, and the refusal says why. A password field focused says so too.
+    func testUnderSecureKeyboardEntryAChangingTerminalWaitsUntilItLeavesTheFront() throws {
+        let sys = FakeSystem()
+        sys.running = [1, 500]; sys.front = 500; sys.space = 100
+        sys.windows[77] = FakeSystem.window(77, pid: 500, CGRect(x: 500, y: 0, width: 400, height: 300))
+        let ax = FakeAX()
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: ax, sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        let t = CUTarget(id: "t1", sessionId: "s", pid: 500, bundleId: "com.apple.Terminal", appName: "Terminal",
+                         isChromium: false, mirror: false, windowID: 77, windowTitle: "")
+        core.registerForTesting(t, windowElement: nil)
+        let text = fakeElement(97_510)
+        ax.add(text, role: kAXTextAreaRole, extra: [kAXValueAttribute: "$ make\n"])
+        ax.focus(pid: 500, on: text)
+        core.secureInputOverride = true
+        core.secureInputOwnerOverride = 500
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "only looking: nothing changed")
+        // A command's output streams in, nobody typing: the same as their typing, by the ruling.
+        ax.put(text, [kAXValueAttribute: "$ make\ncc -c main.c\n"])
+        let sentence = "Terminal is in front with Secure Keyboard Entry on and its text is changing — Winter waits until you switch away"
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(t)) { e in
+            XCTAssertEqual((e as? CUError)?.data?["reason"], .string("user_working"))
+            XCTAssertEqual((e as? CUError)?.message, sentence)
+        }
+        // The output stops: it still waits while Terminal stays in front, with the same reason.
+        ax.put(text, [kAXValueAttribute: "$ make\n"])
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(t)) { e in XCTAssertEqual((e as? CUError)?.message, sentence) }
+        // Terminal leaves the front: the agent may act again; back in front with nothing changing, it does not wait.
+        sys.front = 1
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t))
+        sys.front = 500
+        XCTAssertNoThrow(try core.refuseWhileUserWorks(t), "back in front, nothing changed since")
+        // A password field of it focused: its own sentence.
+        let pw = fakeElement(97_511)
+        ax.add(pw, role: kAXTextFieldRole, subrole: kAXSecureTextFieldSubrole)
+        ax.focus(pid: 500, on: pw)
+        XCTAssertThrowsError(try core.refuseWhileUserWorks(t)) { e in
+            XCTAssertEqual((e as? CUError)?.message, "Terminal is in front with a password field focused (Secure Event Input) — Winter waits until you switch away")
+        }
     }
 }

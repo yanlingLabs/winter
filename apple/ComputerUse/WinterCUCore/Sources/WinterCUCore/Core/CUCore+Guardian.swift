@@ -463,26 +463,44 @@ extension CUCore {
         // blocked a looker for 2.5 s, and letters typed under it are never seen) — TYPING is: the focused element's text
         // changed since the agent last looked (`secureTypingBase`, refreshed at each of its acts' end), which marks the
         // user working in the app until it leaves the front (the ordinary I6 mark).
-        let secureOwner: Bool = {
+        // The user's ruling (round 14): KEEP the safe side — a bound front app under Secure Keyboard Entry whose text
+        // changes (their typing, or a command's streaming output: the two can't be told apart) is the user working, and
+        // the agent waits until the app leaves the front; the refusal says why.
+        enum SecureWork { case none, secureField, textChanging }
+        let secureWork: SecureWork = {
             guard secureInputOn, sys.frontmostPid() == t.pid, let owner = secureInputOwnerPid(),
                   owner == t.pid || sys.isContentProcess(owner, of: t.pid) else {
-                guardianLock.withLock { t.secureTypingBase = nil }
-                return false
+                guardianLock.withLock { t.secureTypingBase = nil; t.secureTextChanged = false }
+                return .none
             }
             let focused = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
-            if focused.flatMap({ ax.string($0, kAXSubroleAttribute) }) == kAXSecureTextFieldSubrole { return true }
+            if focused.flatMap({ ax.string($0, kAXSubroleAttribute) }) == kAXSecureTextFieldSubrole { return .secureField }
             let now = secureTypingState(t)
             let base = guardianLock.withLock { () -> (focus: AXIdentity?, chars: Int?)? in
                 let b = t.secureTypingBase
                 if b == nil || b?.focus != now.focus { t.secureTypingBase = now }
                 return b
             }
-            guard let base, base.focus == now.focus, let a = base.chars, let b = now.chars, a != b else { return false }
-            CULog.act.notice("act in \(t.appName, privacy: .public): its text changed since the agent's last act, under Secure Event Input — the user typing")
+            guard let base, base.focus == now.focus, let a = base.chars, let b = now.chars, a != b else {
+                // (Once seen, it holds while the app stays in front — the sticky I6 mark — and keeps its reason.)
+                return guardianLock.withLock { t.secureTextChanged } ? .textChanging : .none
+            }
+            CULog.act.notice("act in \(t.appName, privacy: .public): its text changed since the agent's last act, under Secure Event Input — the user typing (or its output: the same, by the user's ruling)")
+            guardianLock.withLock { t.secureTextChanged = true }
             userInteracted(t.pid)
-            return true
+            return .textChanging
         }()
-        guard secureOwner || userIsWorking(in: t.pid) else { return }
+        switch secureWork {
+        case .textChanging:
+            CULog.act.notice("act in \(t.appName, privacy: .public): refused — Secure Keyboard Entry, its text changing")
+            throw CUError.refused(.userWorking, "\(t.appName) is in front with Secure Keyboard Entry on and its text is changing — Winter waits until you switch away")
+        case .secureField:
+            CULog.act.notice("act in \(t.appName, privacy: .public): refused — a secure field of it has the keyboard")
+            throw CUError.refused(.userWorking, "\(t.appName) is in front with a password field focused (Secure Event Input) — Winter waits until you switch away")
+        case .none:
+            break
+        }
+        guard userIsWorking(in: t.pid) else { return }
         CULog.act.notice("act in \(t.appName, privacy: .public): refused — the user is working in it")
         throw CUError.refused(.userWorking, "the user is working in \(t.appName) right now — wait and retry, or ask them")
     }

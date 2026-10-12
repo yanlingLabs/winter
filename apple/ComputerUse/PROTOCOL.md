@@ -770,7 +770,12 @@ with ANOTHER of its windows key (it would raise the bound window over the user's
 accessibility press or a value still go; a menu command is refused too (1.12.0: it would act on the window the user
 is in, or bring the bound one over it), and every ⌘-chord (1.13.0, a sheet's or a panel's too), except inside the
 session's own desktop visit once it has ARRIVED and only for the visit's own app and window (1.13.0). `user_working` (1.9.9): the user is working in the app (I6, §4.12) — every act
-on it is refused until it leaves the front; retry later. `front_unknown`: a desktop visit was not made because the app the user is in can't be read — they
+on it is refused until it leaves the front; retry later. Under Secure Keyboard Entry (the bound app in front holds Secure
+Event Input) the tap sees no key: its text CHANGING since the agent's last act — the user's typing or a command's streaming
+output, which can't be told apart — is work, by the user's ruling (round 14: keep the safe side), until it leaves the front,
+refused "<App> is in front with Secure Keyboard Entry on and its text is changing — Winter waits until you switch away"; a
+password field of it focused, "<App> is in front with a password field focused (Secure Event Input) — Winter waits until you
+switch away". `front_unknown`: a desktop visit was not made because the app the user is in can't be read — they
 could not have been brought back; nothing was moved. `app_in_front`: the app came to the front while a background act
 was being prepared (the user may be using it): the keys or the click were not sent.
 
