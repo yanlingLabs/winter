@@ -655,13 +655,16 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     }
 
     /// A key: the tap sees none under Secure Event Input.
-    func key(_ type: CGEventType, flags f: CGEventFlags = [], keycode: Int64 = 0) {
+    func key(_ type: CGEventType, flags f: CGEventFlags = [], keycode: Int64 = 0, rerouteDecides: Bool = false) {
         hardware(observable: !secure)
         guard !secure else { return }
         // A key the tap sees (typing — no ⌘/⌃ chord) while an agent target is in front: the contract counts it as work in
         // it (round 10's I6), wherever the key lands (Spotlight's panel too: the engine can't tell).
         let receiver = lock.withLock { front }
-        if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl) { userInteracted(receiver) }
+        // (A key the focus blip's reroute takes decides by where it sends it — PROTOCOL §4.12 I6, 1.15.0/1.16.0: a key it
+        // sends to the user's place is no work in the target in front; `userKey` marks the one it lets through.)
+        let reroutes = rerouteDecides && lock.withLock { keyFocus == SimPid.target && receiver == SimPid.target && installer?.isInstalled == true }
+        if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl), !reroutes { userInteracted(receiver) }
         // Their typing in an app left in front: it is their place now — no restore may pull them out of it (the ruling,
         // round 16: STRICT, every answer moves there).
         if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl), keycode != 53 {
@@ -1319,7 +1322,9 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     // MARK: the user's keys (I3)
 
     func userKey(flags f: CGEventFlags = []) {
-        key(.keyDown, flags: f)
+        key(.keyDown, flags: f, rerouteDecides: true)
+        var throughToT = false
+        defer { if throughToT, !f.contains(.maskCommand), !f.contains(.maskControl) { userInteracted(SimPid.target) } }
 
         lock.withLock {
             let to = keyFocus
@@ -1328,6 +1333,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
                 lastReroute = nil
                 let e = keyEvent(stamped: false)
                 landed = h(e) != nil ? to : (lastReroute ?? -1)
+                throughToT = landed == SimPid.target && front == SimPid.target
                 stats.userKeysRerouted += 1
                 stats.keysChecked += 1
                 // During a visit, what is in front may be the visit's or a theft it leaves be: the key may go there too.

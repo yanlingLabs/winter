@@ -285,7 +285,7 @@ final class SimRun {
         ax.onPerform = { what in
             let parts = what.split(separator: ":")
             guard parts.count == 2 else { return }
-            if isT(parts[0]) { inFlightCheck("accessibility action \(parts[1])") }
+            if isT(parts[0]), parts[1] != "AXRaise" { inFlightCheck("accessibility action \(parts[1])") }  // (a raise: a restore's)
             // A raise (a restore's or an act's: no cause either way — the engine counts the act itself); an action on an
             // agent target's element: an event of the agent's (the latest its last cause can be).
             if parts[1] == "AXRaise", let id = byToken[String(parts[0])] { w.raised(id) }
@@ -296,7 +296,9 @@ final class SimRun {
         ax.onSet = { what in
             let parts = what.split(separator: ":")
             guard parts.count == 2 else { return }
-            if isT(parts[0]) { inFlightCheck("accessibility write \(parts[1])") }
+            // (Not AXFrontmost: an activation of T is a restore of the user's place — the guardian's, judged by I1–I5 — never
+            // the act's input.)
+            if isT(parts[0]), parts[1] != "AXFrontmost" { inFlightCheck("accessibility write \(parts[1])") }
             if parts[1] == "AXFrontmost", let pid = pid_t(parts[0]) {
                 w.engineActivates(pid, how: "AXFrontmost", refusable: false)
             } else if parts[1] == "AXMain", let id = byToken[String(parts[0])] {
@@ -988,7 +990,9 @@ final class SimRun {
                 let refusedForWork = e?.code == "refused" && e?.data?["reason"] == .string("user_working")
                 // (Refused mid-act is right when they started working in it DURING the act — round 16, P1: an act in flight checks
                 // the work mark before every focus placement and key. Never when they don't work in it at the refusal either.)
-                if refusedForWork, !working, !w.userWorks(in: tpid) {
+                // (Sticky: right too when they worked in it at any moment of the act and have left since — the review of
+                // round 17, M1.)
+                if refusedForWork, !working, !w.userWorks(in: tpid), !w.lock.withLock({ w.actWorkSeen }) {
                     w.lock.withLock { w.fail("I6: the act was refused as \"the user is working in it\", but they are not (only switched there, or left it)") }
                 } else if refusedForWork {
                     w.lock.withLock { w.stats.handsOff += 1 }
