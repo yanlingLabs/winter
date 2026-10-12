@@ -1,0 +1,61 @@
+test_actual_normal_runner_aggregates_generic_audit_key (test_generic_fixture.FixtureTests.test_actual_normal_runner_aggregates_generic_audit_key) ... ok
+test_actual_raw_pause_with_owned_worker_alive_and_recovery (test_generic_fixture.FixtureTests.test_actual_raw_pause_with_owned_worker_alive_and_recovery) ... ok
+test_exact_build_binds_all_launch_sources_and_artifacts (test_generic_fixture.FixtureTests.test_exact_build_binds_all_launch_sources_and_artifacts) ... ok
+test_missing_concurrent_disk_heartbeat_or_worker_liveness_fails (test_generic_fixture.FixtureTests.test_missing_concurrent_disk_heartbeat_or_worker_liveness_fails) ... ok
+test_missing_control_ack_wrong_channel_or_ended_stall_fails (test_generic_fixture.FixtureTests.test_missing_control_ack_wrong_channel_or_ended_stall_fails) ... ok
+test_normal_owner_exit_during_stall_drains_pending_bytes_to_eof_without_tx (test_generic_fixture.FixtureTests.test_normal_owner_exit_during_stall_drains_pending_bytes_to_eof_without_tx) ... ok
+test_terminal_close_ack_and_effect_uncertainty_are_distinct (test_generic_fixture.FixtureTests.test_terminal_close_ack_and_effect_uncertainty_are_distinct) ... ok
+test_terminal_owner_exit_during_stall_keeps_partial_capture_explicit (test_generic_fixture.FixtureTests.test_terminal_owner_exit_during_stall_keeps_partial_capture_explicit) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.322s
+
+OK
+{
+  "fixture": "generic-fixture-k9dgxz0n",
+  "vmStarted": true,
+  "exitCode": 0,
+  "timedOut": false,
+  "diskSameIdentity": true,
+  "diskSha256": "pin",
+  "buildSha256": "pin",
+  "candidate": {},
+  "exitVerified": true,
+  "ownersQuiescent": true,
+  "captureComplete": true,
+  "productionReady": false,
+  "fullResourceGatePassed": false,
+  "encryption": false,
+  "streamOracle": null,
+  "peerTransferError": null,
+  "sandboxPeerEOF": null,
+  "audit": {
+    "blockReceiptsPassed": true,
+    "reclaim": {
+      "receiptOrderingPassed": true,
+      "afterGuestFree": [
+        {
+          "heartbeatsDuringWindow": 10
+        }
+      ]
+    }
+  },
+  "diskIntegrity": {
+    "passed": true
+  },
+  "streamAudit": {
+    "genericChecksPassed": true
+  },
+  "footprint": [],
+  "fixtureChecksPassed": true,
+  "signing": {},
+  "rawCaptureHashes": null,
+  "streamSandbox": {
+    "kind": "stream_sandbox"
+  },
+  "activeReturnVerified": false,
+  "streamStopVerified": false,
+  "sandbox": {
+    "kind": "sandbox"
+  }
+}

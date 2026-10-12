@@ -1,0 +1,20 @@
+{
+  "vmStarted": false,
+  "buildSha256": "821c5f7341f760bb0e5f1e584115bf5e247438d13f5c7883d0e143e4c164e9d3",
+  "pythonTestsPassed": 25,
+  "nativeTestExecutions": 104,
+  "nativeDistinctTests": 101,
+  "patchSha256": "fe41eb3b7891d4c7bb7fa61d43508d4173d9e72a27b9476bb4de0c64ea5815c0",
+  "fullSourceDiffSha256": "c39d78098ca2a994182a2361e8fe21aac956ef8a943d1cffe7ed49df4eab306c",
+  "testSourceSha256": {
+    "test_generic_fixture.py": "6e5e48f1d6b54a63e7c8803c2d6a1660f052f7977e9179fcee15aaeb9380b361",
+    "test_generic_lifecycle.py": "3b193268ce249018e8e4a48553a168495a0df06a5094eaaf1bf876e6b5f72751",
+    "test_generic_discovery.py": "7695f4c37999ec94315710b717fa8a6af8c6f3868495ad2c1dbb55c2286f939c",
+    "test_runtime_port_trace.py": "02deb1b715708b0da62d81f0c4dd5e7c8c5e0f2c9fdb338690fd8944657e422d"
+  },
+  "sandboxPassed": true,
+  "productionReady": false,
+  "activeReturnVerified": false,
+  "guestGenericBootVerified": false,
+  "terminalCloseLiveVerified": false
+}

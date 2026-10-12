@@ -1,0 +1,12 @@
+test_exact_generic_port_identity (test_generic_discovery.DiscoveryTests.test_exact_generic_port_identity) ... ok
+test_extra_port_wrong_port_id_and_wrong_parent_are_refused (test_generic_discovery.DiscoveryTests.test_extra_port_wrong_port_id_and_wrong_parent_are_refused) ... ok
+test_missing_multiport_is_refused (test_generic_discovery.DiscoveryTests.test_missing_multiport_is_refused) ... ok
+test_missing_version1_and_additional_feature_are_refused (test_generic_discovery.DiscoveryTests.test_missing_version1_and_additional_feature_are_refused) ... ok
+test_second_virtio_console_is_refused (test_generic_discovery.DiscoveryTests.test_second_virtio_console_is_refused) ... ok
+test_unbound_or_wrong_driver_is_refused (test_generic_discovery.DiscoveryTests.test_unbound_or_wrong_driver_is_refused) ... ok
+test_wrong_generic_device_number_is_refused (test_generic_discovery.DiscoveryTests.test_wrong_generic_device_number_is_refused) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.486s
+
+OK

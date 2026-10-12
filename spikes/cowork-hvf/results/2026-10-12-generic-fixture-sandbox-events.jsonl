@@ -1,0 +1,3 @@
+{"kind": "sandbox", "hostReadDenied": true, "networkOutboundDenied": true, "unrelatedWritesDenied": true, "rawDiskOnly": true, "rawReadWriteFullSync": true, "channel": "stderr", "hostElapsedSeconds": 0.000571}
+{"kind": "reclaim_profile", "console": "PL011+generic-runtime-port", "implicitConsole": false, "fixtureOnly": true, "channel": "stderr", "hostElapsedSeconds": 0.000593}
+{"kind": "stream_sandbox", "sandboxBeforeFactory": true, "forkDenied": true, "execDenied": true, "closedFactorySucceeded": true, "oppositePeerOnlyTransferred": true, "genericRuntimeFactory": true, "fixtureControlTrace": true, "channel": "stderr", "hostElapsedSeconds": 0.000601}

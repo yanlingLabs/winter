@@ -1,0 +1,23 @@
+{
+  "reviewedWinterHead": "486cf21b0ad2b5fe6bd70a22af8283b0bb69ce81",
+  "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+  "patchSha256": "62298de5d9176725d6a4bf0f79183a141de6d3162ff6085bce42ecd43f235752",
+  "fullSourceDiffSha256": "6331d0e07ba4cfab8a318bd31ef52cf1645ffedfee6e46da185c568db0e15c2d",
+  "buildReceiptSha256": "e73dd694bded5a9b05b9d5a7dc553222b97713e44fe126a77256ef09f9825ba5",
+  "executions": 100,
+  "distinctTestNames": 97,
+  "genericDistinctTestNames": 27,
+  "testsPassed": true,
+  "nativeCheckPassed": true,
+  "staticLibraryBuildPassed": true,
+  "headerCppDoubleIncludeCLinkagePassed": true,
+  "vmStarted": false,
+  "workerLaunched": false,
+  "guestDriverVerified": false,
+  "activeReturnVerified": false,
+  "productionReady": false,
+  "logs": {
+    "2026-10-12-generic-runtime-port-independent-tests.log": "f3a54d5e364a443be2572587ff77921ceaf72e3c55737dc9dbe1c39791e623cc",
+    "2026-10-12-generic-runtime-port-independent-build.log": "b804e5f3ef3c8b066d14019cd82530de3c2f25fd056ec94e6a5f8212c7779744"
+  }
+}
