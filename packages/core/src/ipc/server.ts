@@ -2241,7 +2241,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // LIVE (hub.fanOut calls the same deliver).
         const isRemote = socket.data.authedRole === "remote";
         // Per client: the remote policy also drops repeats of an unchanged thinking-pill title.
-        const remoteFilter = isRemote ? createRemoteStreamFilter() : undefined;
+        // A ComputerV2 wake message's phone line is read from the session's log (`sessions/wake-phone-line.ts`).
+        const remoteFilter = isRemote ? createRemoteStreamFilter({ log: (sid) => opts.store.read(sid, 0) }) : undefined;
         const hubClient: HubClient = {
           clientName: socket.data.clientName,
           // T5: carried so the hub's detach hook can classify this harness by the daemon's OWN

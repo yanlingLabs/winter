@@ -1,5 +1,6 @@
-import type { SessionEvent } from "@yanlinglabs/winter-protocol";
+import { COMPUTER_WAKE_CLIENT_NAME, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionStore } from "./store";
+import { computerWakePhoneLine } from "./wake-phone-line";
 
 /** The persisted, phone-foldable event types history is allowed to return. Allowlist, never a
  *  denylist: an unknown future type stays out until deliberately added — and adding one REQUIRES
@@ -194,7 +195,15 @@ export function capEvent(event: SessionEvent, outputCap: number = DEFAULT_OUTPUT
  *  live stream. The session log keeps the text, and the Mac (a harness connection) still gets it.
  *  Applied on BOTH phone paths (`readHistoryPage` and `filterRemoteStreamEvent`), so a block re-read
  *  from history is the same bytes it was live. Every other event comes back as the same reference. */
-export function phoneViewOf(event: SessionEvent): SessionEvent {
+export function phoneViewOf(event: SessionEvent, log?: () => readonly SessionEvent[] | undefined): SessionEvent {
+  // ComputerV2 wake triggers (spine R-W3): a `computer-wake` message's text is the MODEL's — its own note and the
+  // `<screen-data>` fence markup — never the phone's. It gets one daemon line built from the pair on the session's log
+  // (`log`, read only for such a message; both phone paths pass it, so the line is the same bytes live and re-read).
+  if (event.type === "user_message" && event.clientName === COMPUTER_WAKE_CLIENT_NAME) {
+    let events: readonly SessionEvent[] | undefined;
+    try { events = log?.(); } catch { events = undefined; }
+    return { ...event, text: computerWakePhoneLine(event.text, event.seq, events) };
+  }
   if (event.type === "thinking_block") return event.text.length === 0 ? event : { ...event, text: "" };
   if (event.type === "thinking_delta" && event.text !== undefined) {
     const { text: _withheld, ...rest } = event;
@@ -220,7 +229,7 @@ export function readHistoryPage(
   // Candidate = the newest `limit` of the filtered list (ascending).
   const candidate = filtered.slice(Math.max(0, filtered.length - limit));
   // Per-event cap, then byte-budget walk newest→oldest, always keeping at least the newest.
-  const capped = candidate.map((e) => capEvent(phoneViewOf(e), outputCap));
+  const capped = candidate.map((e) => capEvent(phoneViewOf(e, () => all), outputCap));
   const kept: SessionEvent[] = [];
   let used = 0;
   for (let i = capped.length - 1; i >= 0; i--) {
