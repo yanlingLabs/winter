@@ -82,6 +82,8 @@ describe("the browser link (daemon side)", () => {
     expect(a.last().params).toMatchObject({ op: "headless.hide", params: { tabId: "w-1", reason: "done" } });
     viewer.tabs({ sessionId: "s1", tabs: [{ tabId: "w-1", url: "https://a.example/", title: "A", presented: true, control: false }] });
     expect(a.last().params).toMatchObject({ op: "headless.tabs", params: { sessionId: "s1", tabs: [{ tabId: "w-1", presented: true }] } });
+    viewer.update({ sessionId: "s1", tabId: "w-1", purpose: "watch" });
+    expect(a.last().params).toMatchObject({ op: "headless.update", params: { sessionId: "s1", tabId: "w-1", purpose: "watch" } });
     // The link closing takes the viewer with it.
     link.connectionClosed(a.conn);
     expect(link.headlessViewer()).toBeUndefined();

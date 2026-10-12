@@ -4929,8 +4929,10 @@ void (^g_headless_cursor_observer)(int, int) = nil;
 /// Version 2 of a presentation (`WinterPresentWire.h`): where the IME composition is drawn, the page's dialogs and file
 /// choosers. Main (CEF UI) thread only.
 void (^g_headless_ime_observer)(int, int, int, NSArray<NSValue *> *) = nil;
-void (^g_headless_dialog_opened_observer)(int, int, NSString *, NSString *) = nil;
+void (^g_headless_dialog_opened_observer)(int, int, NSString *, NSString *, NSString *) = nil;
 void (^g_headless_dialog_closed_observer)(int) = nil;
+/// The shown page's address and title, by browser id (`WinterCEFHeadlessSetPageObserver`).
+void (^g_headless_page_observer)(int, NSString *, NSString *) = nil;
 BOOL (^g_headless_file_chooser_handler)(int, int, int, NSArray<NSString *> *) = nil;
 /// A window the page opens while the person holds the browser (`WinterCEFHeadlessSetPopupAdopter`), and every headless
 /// browser's close (`WinterCEFHeadlessSetClosedObserver`).
@@ -4941,7 +4943,27 @@ struct HeadlessDialogInfo {
   int type;
   std::string message;
   std::string defaultText;
+  std::string origin;  // the page that raised it, `scheme://host[:port]` (empty when unknown)
 };
+/// Each headless browser's main-frame address and title as last reported, by browser id.
+struct HeadlessPage {
+  std::string url;
+  std::string title;
+};
+std::map<int, HeadlessPage> &HeadlessPages() {
+  static auto *pages = new std::map<int, HeadlessPage>();
+  return *pages;
+}
+/// `scheme://host[:port]` of `url` — what a dialog names as its author; empty for a URL with no host (data:, about:).
+std::string HeadlessOriginOf(const std::string &url) {
+  @autoreleasepool {
+    NSURLComponents *c = [NSURLComponents componentsWithString:[NSString stringWithUTF8String:url.c_str()] ?: @""];
+    if (c.scheme.length == 0 || c.host.length == 0) return std::string();
+    NSString *origin = c.port != nil ? [NSString stringWithFormat:@"%@://%@:%@", c.scheme, c.host, c.port]
+                                     : [NSString stringWithFormat:@"%@://%@", c.scheme, c.host];
+    return std::string(origin.UTF8String ?: "");
+  }
+}
 std::map<int, HeadlessDialogInfo> &HeadlessDialogs() {
   static auto *dialogs = new std::map<int, HeadlessDialogInfo>();
   return *dialogs;
@@ -4966,6 +4988,20 @@ std::set<int> &HeadlessUserControlled() {
 std::map<int, double> &HeadlessScales() {
   static auto *scales = new std::map<int, double>();
   return *scales;
+}
+
+/// An in-page drag the person started in a presented browser (HTML5 drag and drop: a list reordered, a card moved):
+/// run inside the browser itself — its drag data handed straight back as the drop target's, the person's moves its drag
+/// moves, their release its drop — since there is no window here for a system drag. By browser id.
+struct HeadlessDrag {
+  CefRefPtr<CefDragData> data;
+  cef_drag_operations_mask_t allowed = DRAG_OPERATION_NONE;
+  cef_drag_operations_mask_t current = DRAG_OPERATION_NONE;
+  bool inside = true;
+};
+std::map<int, HeadlessDrag> &HeadlessDrags() {
+  static auto *drags = new std::map<int, HeadlessDrag>();
+  return *drags;
 }
 
 /// A browser's device scale as applied, and when it last changed. Two changes in quick succession (a presentation ending
@@ -5042,13 +5078,42 @@ class WinterHeadlessRenderHandler : public CefRenderHandler {
     }
   }
 
-  /// A drag the page starts has nowhere to go: no window, no pasteboard of the user's. Cancelled.
+  /// A drag the page starts goes nowhere for the agent (no window, no pasteboard of the user's): cancelled. For the
+  /// PERSON holding a presented browser it is an in-page drag, run inside the browser (`HeadlessDrags`): its data
+  /// enters as the drop target's at once, and the person's moves and release (`WinterCEFHeadlessSendInput`) carry it.
   bool StartDragging(CefRefPtr<CefBrowser> browser,
                      CefRefPtr<CefDragData> drag_data,
                      DragOperationsMask allowed_ops,
                      int x,
                      int y) override {
-    return false;
+    if (!browser || !drag_data || HeadlessUserControlled().count(browser->GetIdentifier()) == 0) return false;
+    const int id = browser->GetIdentifier();
+    CefRefPtr<CefDragData> data = drag_data->Clone();
+    data->ResetFileContents();  // file contents may not be dragged into a web view
+    HeadlessDrag &drag = HeadlessDrags()[id];
+    drag.data = data;
+    drag.allowed = allowed_ops;
+    drag.current = DRAG_OPERATION_NONE;
+    drag.inside = true;
+    CefRefPtr<CefBrowser> held = browser;
+    // After this callback: the drag source's own bookkeeping comes first.
+    dispatch_async(dispatch_get_main_queue(), ^{
+      auto it = HeadlessDrags().find(id);
+      if (it == HeadlessDrags().end()) return;
+      CefMouseEvent event;
+      event.x = x;
+      event.y = y;
+      held->GetHost()->DragTargetDragEnter(it->second.data, event, it->second.allowed);
+      held->GetHost()->DragTargetDragOver(event, it->second.allowed);
+    });
+    Log("in-page drag for the person in control (id=%d)", id);
+    return true;
+  }
+
+  void UpdateDragCursor(CefRefPtr<CefBrowser> browser, DragOperation operation) override {
+    if (!browser) return;
+    auto it = HeadlessDrags().find(browser->GetIdentifier());
+    if (it != HeadlessDrags().end()) it->second.current = static_cast<cef_drag_operations_mask_t>(operation);
   }
 
  private:
@@ -5199,12 +5264,27 @@ class WinterHeadlessClient : public WinterClient {
     return WinterClient::OnSetFocus(browser, source);
   }
 
+  void OnAddressChange(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, const CefString &url) override {
+    WinterClient::OnAddressChange(browser, frame, url);
+    if (!frame || !frame->IsMain()) return;
+    const std::string u = url.ToString();
+    PageChanged(browser, &u, nullptr);
+  }
+
+  void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString &title) override {
+    WinterClient::OnTitleChange(browser, title);
+    const std::string t = title.ToString();
+    PageChanged(browser, nullptr, &t);
+  }
+
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
     if (browser) {
       if (g_headless_closed_observer) g_headless_closed_observer(browser->GetIdentifier());
       HeadlessUserControlled().erase(browser->GetIdentifier());
+      HeadlessDrags().erase(browser->GetIdentifier());
       HeadlessScales().erase(browser->GetIdentifier());
       HeadlessScaleStates().erase(browser->GetIdentifier());
+      HeadlessPages().erase(browser->GetIdentifier());
       DialogGone(browser);
       WinterCEFHeadlessCancelFileChoosers(browser->GetIdentifier());
     }
@@ -5222,7 +5302,8 @@ class WinterHeadlessClient : public WinterClient {
                   bool &suppress_message) override {
     const bool held = WinterClient::OnJSDialog(browser, origin_url, dialog_type, message_text, default_prompt_text, callback, suppress_message);
     if (held && browser) {
-      DialogHeld(browser, dialog_type == JSDIALOGTYPE_ALERT ? 0 : dialog_type == JSDIALOGTYPE_CONFIRM ? 1 : 2, message_text, default_prompt_text);
+      DialogHeld(browser, dialog_type == JSDIALOGTYPE_ALERT ? 0 : dialog_type == JSDIALOGTYPE_CONFIRM ? 1 : 2, message_text, default_prompt_text,
+                 HeadlessOriginOf(origin_url.ToString()));
     }
     return held;
   }
@@ -5232,7 +5313,10 @@ class WinterHeadlessClient : public WinterClient {
                             bool is_reload,
                             CefRefPtr<CefJSDialogCallback> callback) override {
     const bool held = WinterClient::OnBeforeUnloadDialog(browser, message_text, is_reload, callback);
-    if (held && browser) DialogHeld(browser, 3, message_text, CefString());
+    if (held && browser) {
+      CefRefPtr<CefFrame> main = browser->GetMainFrame();
+      DialogHeld(browser, 3, message_text, CefString(), main ? HeadlessOriginOf(main->GetURL().ToString()) : std::string());
+    }
     return held;
   }
 
@@ -5394,10 +5478,26 @@ class WinterHeadlessClient : public WinterClient {
   }
 
  private:
-  void DialogHeld(CefRefPtr<CefBrowser> browser, int type, const CefString &message, const CefString &defaultText) {
+  void DialogHeld(CefRefPtr<CefBrowser> browser, int type, const CefString &message, const CefString &defaultText,
+                  const std::string &origin) {
     const int id = browser->GetIdentifier();
-    HeadlessDialogs()[id] = {type, message.ToString(), defaultText.ToString()};
-    if (g_headless_dialog_opened_observer) g_headless_dialog_opened_observer(id, type, StringOf(message), StringOf(defaultText));
+    HeadlessDialogs()[id] = {type, message.ToString(), defaultText.ToString(), origin};
+    if (g_headless_dialog_opened_observer) {
+      g_headless_dialog_opened_observer(id, type, StringOf(message), StringOf(defaultText),
+                                        [NSString stringWithUTF8String:origin.c_str()] ?: @"");
+    }
+  }
+
+  /// The main frame's address and title, recorded and said (a presentation's viewer names the page by them).
+  void PageChanged(CefRefPtr<CefBrowser> browser, const std::string *url, const std::string *title) {
+    if (!browser) return;
+    HeadlessPage &page = HeadlessPages()[browser->GetIdentifier()];
+    if (url) page.url = *url;
+    if (title) page.title = *title;
+    if (g_headless_page_observer) {
+      g_headless_page_observer(browser->GetIdentifier(), [NSString stringWithUTF8String:page.url.c_str()] ?: @"",
+                               [NSString stringWithUTF8String:page.title.c_str()] ?: @"");
+    }
   }
 
   void DialogGone(CefRefPtr<CefBrowser> browser) {
@@ -5723,13 +5823,14 @@ void WinterCEFHeadlessSetImeObserver(void (^observer)(int browserId, int rangeSt
   g_headless_ime_observer = [observer copy];
 }
 
-void WinterCEFHeadlessSetDialogObservers(void (^opened)(int browserId, int type, NSString *message, NSString *defaultText),
+void WinterCEFHeadlessSetDialogObservers(void (^opened)(int browserId, int type, NSString *message, NSString *defaultText,
+                                                         NSString *origin),
                                          void (^closed)(int browserId)) {
   g_headless_dialog_opened_observer = [opened copy];
   g_headless_dialog_closed_observer = [closed copy];
 }
 
-BOOL WinterCEFHeadlessCurrentDialog(NSView *key, int *type, NSString **message, NSString **defaultText) {
+BOOL WinterCEFHeadlessCurrentDialog(NSView *key, int *type, NSString **message, NSString **defaultText, NSString **origin) {
   CefRefPtr<CefBrowser> browser = BrowserForParent(key);
   if (!browser) return NO;
   auto it = HeadlessDialogs().find(browser->GetIdentifier());
@@ -5737,6 +5838,21 @@ BOOL WinterCEFHeadlessCurrentDialog(NSView *key, int *type, NSString **message, 
   if (type) *type = it->second.type;
   if (message) *message = [NSString stringWithUTF8String:it->second.message.c_str()] ?: @"";
   if (defaultText) *defaultText = [NSString stringWithUTF8String:it->second.defaultText.c_str()] ?: @"";
+  if (origin) *origin = [NSString stringWithUTF8String:it->second.origin.c_str()] ?: @"";
+  return YES;
+}
+
+void WinterCEFHeadlessSetPageObserver(void (^observer)(int browserId, NSString *url, NSString *title)) {
+  g_headless_page_observer = [observer copy];
+}
+
+BOOL WinterCEFHeadlessCurrentPage(NSView *key, NSString **url, NSString **title) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return NO;
+  auto it = HeadlessPages().find(browser->GetIdentifier());
+  if (it == HeadlessPages().end()) return NO;
+  if (url) *url = [NSString stringWithUTF8String:it->second.url.c_str()] ?: @"";
+  if (title) *title = [NSString stringWithUTF8String:it->second.title.c_str()] ?: @"";
   return YES;
 }
 
@@ -5772,8 +5888,20 @@ void WinterCEFHeadlessSetClosedObserver(void (^observer)(int browserId)) {
 void WinterCEFHeadlessSetUserControl(NSView *key, BOOL control) {
   CefRefPtr<CefBrowser> browser = BrowserForParent(key);
   if (!browser) return;
-  if (control) HeadlessUserControlled().insert(browser->GetIdentifier());
-  else HeadlessUserControlled().erase(browser->GetIdentifier());
+  const int id = browser->GetIdentifier();
+  if (control) {
+    HeadlessUserControlled().insert(id);
+    return;
+  }
+  HeadlessUserControlled().erase(id);
+  // A drag the person had in progress ends with their control: cancelled, nothing dropped.
+  auto drag = HeadlessDrags().find(id);
+  if (drag != HeadlessDrags().end()) {
+    if (drag->second.inside) browser->GetHost()->DragTargetDragLeave();
+    HeadlessDrags().erase(drag);
+    browser->GetHost()->DragSourceEndedAt(-1, -1, DRAG_OPERATION_NONE);
+    browser->GetHost()->DragSourceSystemDragEnded();
+  }
 }
 
 void WinterCEFHeadlessCancelFileChoosers(int browserId) {
@@ -5891,6 +6019,31 @@ void WinterCEFHeadlessSendInput(NSView *key, int kind, int x, int y, int dx, int
   mouse.x = x;
   mouse.y = y;
   mouse.modifiers = modifiers;
+  // An in-page drag the person started (`StartDragging`): their moves are its moves, their release its drop.
+  auto drag = HeadlessDrags().find(browser->GetIdentifier());
+  if (drag != HeadlessDrags().end() && (kind == 1 || kind == 3 || kind == 5)) {
+    HeadlessDrag &d = drag->second;
+    if (kind == 1) {
+      if (!d.inside) {
+        host->DragTargetDragEnter(d.data, mouse, d.allowed);
+        d.inside = true;
+      }
+      host->DragTargetDragOver(mouse, d.allowed);
+    } else if (kind == 5) {
+      if (d.inside) host->DragTargetDragLeave();
+      d.inside = false;
+    } else {
+      cef_drag_operations_mask_t op = DRAG_OPERATION_NONE;
+      if (d.inside) {
+        host->DragTargetDrop(mouse);
+        op = d.current;
+      }
+      HeadlessDrags().erase(drag);
+      host->DragSourceEndedAt(x, y, op);
+      host->DragSourceSystemDragEnded();
+    }
+    return;
+  }
   const cef_mouse_button_type_t which = button == 2 ? MBT_RIGHT : button == 1 ? MBT_MIDDLE : MBT_LEFT;
   switch (kind) {
     case 1: host->SendMouseMoveEvent(mouse, false); break;                       // move

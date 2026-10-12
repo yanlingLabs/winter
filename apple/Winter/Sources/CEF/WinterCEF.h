@@ -926,14 +926,21 @@ void WinterCEFHeadlessIme(NSView *key, int kind, NSString *text, int selectionSt
 void WinterCEFHeadlessEdit(NSView *key, int command, NSString *text);
 
 /// A headless browser's page dialog was held (type 0 alert, 1 confirm, 2 prompt, 3 beforeunload) — still answered by
-/// DevTools or `WinterCEFResolveHeldDialog` — and when it went away (answered, dismissed, the page moved on). `nil`
-/// stops them.
-void WinterCEFHeadlessSetDialogObservers(void (^opened)(int browserId, int type, NSString *message, NSString *defaultText),
+/// DevTools or `WinterCEFResolveHeldDialog` — and when it went away (answered, dismissed, the page moved on). `origin`
+/// is the raising page's `scheme://host[:port]` (empty when it has none). `nil` stops them.
+void WinterCEFHeadlessSetDialogObservers(void (^opened)(int browserId, int type, NSString *message, NSString *defaultText,
+                                                         NSString *origin),
                                          void (^closed)(int browserId));
 
 /// The dialog `key`'s browser holds now, if any.
 BOOL WinterCEFHeadlessCurrentDialog(NSView *key, int *type, NSString **message,
-                                    NSString **defaultText);
+                                    NSString **defaultText, NSString **origin);
+
+/// A headless browser's main-frame address or title changed (both given, as now). `nil` stops it. Main thread.
+void WinterCEFHeadlessSetPageObserver(void (^observer)(int browserId, NSString *url, NSString *title));
+
+/// `key`'s browser's main-frame address and title as last reported (NO before the first report).
+BOOL WinterCEFHeadlessCurrentPage(NSView *key, NSString **url, NSString **title);
 
 /// A headless browser's page asks for files: the handler answers YES to answer it later
 /// (`WinterCEFHeadlessResolveFileChooser`), NO to leave it to the default (cancelled). `mode` 0 open, 1 open multiple,

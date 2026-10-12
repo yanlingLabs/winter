@@ -134,7 +134,17 @@ final class HeadlessPresentKeysTests: XCTestCase {
         XCTAssertEqual(K.modifiers([], button: .right), 1 << 6)
         XCTAssertEqual(K.modifiers([], keyCode: 0x52), 1 << 9, "keypad")
         XCTAssertEqual(K.modifiers([], keyCode: 0x00), 0)
+        XCTAssertEqual(K.modifiers([], keyCode: 0x00, repeating: true), 1 << 13, "a held key's repeat")
+        XCTAssertEqual(K.precisionScrollingDelta, 1 << 14)
         XCTAssertEqual(K.modifiers([.shift, .command], keyCode: 0x08, button: .none), (1 << 1) | (1 << 7))
+    }
+
+    func testTheArrowKeysAreNotOnTheKeypad() {
+        // macOS sets .numericPad on the arrows; a page must not read them as number-pad keys.
+        for arrow: UInt16 in [0x7B, 0x7C, 0x7D, 0x7E] {
+            XCTAssertEqual(K.modifiers([.numericPad, .function], keyCode: arrow) & K.isKeyPad, 0, "arrow \(arrow)")
+        }
+        XCTAssertEqual(K.modifiers([.numericPad], keyCode: 0x4C) & K.isKeyPad, K.isKeyPad, "keypad Enter")
     }
 
     func testAModifierReleaseIsReadFromItsOwnFlag() {
@@ -397,6 +407,13 @@ final class HeadlessPresentChromeTests: XCTestCase {
                        "A — a.example")
     }
 
+    func testADialogIsNamedAfterItsOwnOriginOrNoneAtAll() {
+        XCTAssertEqual(C.dialogAuthor(origin: "https://accounts.example.com"), "accounts.example.com")
+        XCTAssertEqual(C.dialogAuthor(origin: "http://127.0.0.1:8080"), "127.0.0.1")
+        XCTAssertNil(C.dialogAuthor(origin: ""), "an opaque origin names no host")
+        XCTAssertNil(C.dialogAuthor(origin: "not a url"))
+    }
+
     func testTheAccessibilityWords() {
         XCTAssertEqual(C.accessibilityLabel(title: "Sign in", url: "https://accounts.example.com/"),
                        "Live page from Winter's headless browser: Sign in, accounts.example.com")
@@ -515,6 +532,44 @@ final class HeadlessPresentStoreTests: XCTestCase {
         XCTAssertEqual(sent.values.first?.0, "s_1")
         XCTAssertEqual(sent.values.first?.1, "ht_1")
         XCTAssertEqual(sent.values.first?.2, .watch)
+    }
+
+    func testAnUpdateForATabNotShownIsStillAnswered() throws {
+        let store = try store()
+        let replies = Recorded<BrowserLinkReply>()
+        store.handle(BrowserLinkHeadlessCommand(linkId: "L", cmdId: "c", op: .update(sessionId: "s_1", tabId: "ht_9", purpose: .handoff)),
+                     reply: BrowserLinkReplier { replies.values.append($0) })
+        XCTAssertEqual(replies.values, [.empty])
+        XCTAssertTrue(store.presentations.isEmpty)
+    }
+
+    func testThePurposeFollowsTheDaemonUntilTheViewEnds() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
+        let presentation = HeadlessPresentation(show: show(), device: device, uploadsRoot: "/h/cache/headless-uploads")
+        XCTAssertEqual(presentation.purpose, .watch)
+        presentation.purposeChanged(.handoff)
+        XCTAssertEqual(presentation.purpose, .handoff)
+        presentation.close()
+        presentation.purposeChanged(.watch)
+        XCTAssertEqual(presentation.purpose, .handoff, "a closed view changes no more")
+    }
+
+    func testAListAnsweredAfterANewerPushNeverOverwritesIt() async throws {
+        let store = try store()
+        let gate = Recorded<CheckedContinuation<Void, Never>>()
+        store.sendAction = { _, _, _ in
+            await withCheckedContinuation { gate.values.append($0) }
+            return [BrowserLinkHeadlessTab(tabId: "old", url: "", title: "", presented: false, control: false)]
+        }
+        store.refreshTabsIfNeeded(sessionId: "s_1")
+        for _ in 0..<200 where gate.values.isEmpty { try await Task.sleep(nanoseconds: 5_000_000) }
+        // The daemon pushes a newer list while the fetch is out …
+        let fresh = [BrowserLinkHeadlessTab(tabId: "new", url: "", title: "", presented: true, control: false)]
+        store.handle(BrowserLinkHeadlessCommand(linkId: "L", cmdId: "c", op: .tabs(sessionId: "s_1", tabs: fresh)), reply: BrowserLinkReplier { _ in })
+        // … and the fetch's older answer lands after it.
+        gate.values.first?.resume()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(store.tabsBySession["s_1"]?.map(\.tabId), ["new"])
     }
 
     func testTheListIsFetchedOncePerLink() async throws {

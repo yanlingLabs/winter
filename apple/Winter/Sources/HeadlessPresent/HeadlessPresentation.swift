@@ -14,8 +14,9 @@ import WinterKit
 ///
 /// Threads: this object is main-actor. The consumer's delegate calls arrive on the presentation's own serial queue
 /// (`queue`) — frames stay there, for the renderer; everything else hops to the main thread here. Every consumer
-/// call that touches its ports is made on that queue too, except the ones it documents as "any thread" (input,
-/// IME, edits, replies, slot releases).
+/// call that touches its ports is made on that queue too, except the ones it documents as "any thread": slot
+/// releases and replies, and the person's input, IME and edits — those go out in order on their own serial queue
+/// (`inputQueue`), so a send that waits for room in the helper's queue never holds the main thread or the frames.
 @MainActor
 final class HeadlessPresentation: ObservableObject, Identifiable {
     typealias Phase = HeadlessPresentChromeState.Phase
@@ -43,6 +44,8 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
     private(set) var imeRects: [CGRect] = []
 
     let queue: DispatchQueue
+    /// The person's input, IME and edits, in the order they made them.
+    private let inputQueue: DispatchQueue
     let renderer: HeadlessPresentRenderer
     private let consumer: WinterPresentConsumer
     private let bridge: HeadlessPresentBridge
@@ -82,6 +85,7 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
         control = show.control
         self.uploadsRoot = uploadsRoot
         queue = DispatchQueue(label: "com.winter.headless.present", qos: .userInteractive)
+        inputQueue = DispatchQueue(label: "com.winter.headless.present.input", qos: .userInteractive)
         renderer = HeadlessPresentRenderer(queue: queue, device: device)
         bridge = HeadlessPresentBridge(renderer: renderer)
         consumer = WinterPresentConsumer(service: show.service, nonce: show.nonce, producerRequirement: show.producerRequirement,
@@ -127,6 +131,22 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
         guard !closed, self.control != control else { return }
         self.control = control
         if !control { teardownPrompts() }
+        view?.presentationChanged()
+    }
+
+    /// The producer named the shown page (after the welcome, and on every change of address or title).
+    fileprivate func pageChanged(url: String, title: String) {
+        guard !closed, url != self.url || title != self.title else { return }
+        if !url.isEmpty { self.url = url }
+        self.title = title
+        view?.presentationChanged()
+    }
+
+    /// The daemon says why it is shown now (`headless.update`): a watch the person took over became the agent's
+    /// hand-off, or a hand-off the agent stopped waiting on stays the person's.
+    func purposeChanged(_ purpose: BrowserLinkHeadlessPurpose) {
+        guard !closed, purpose != self.purpose else { return }
+        self.purpose = purpose
         view?.presentationChanged()
     }
 
@@ -189,34 +209,56 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
     /// One input event (the consumer fills its header and sequence).
     func send(_ input: WinterPresentInputMsg) {
         guard acceptsInput else { return }
-        consumer.sendInput(input)
+        let consumer = ConsumerRef(consumer)
+        inputQueue.async { consumer.consumer.sendInput(input) }
     }
 
     func setComposition(_ text: String, selection: NSRange, replacement: NSRange) {
         guard acceptsInput else { return }
-        consumer.setComposition(text, selection: selection, replacement: replacement)
+        let consumer = ConsumerRef(consumer)
+        inputQueue.async { consumer.consumer.setComposition(text, selection: selection, replacement: replacement) }
     }
 
     func commitText(_ text: String, replacement: NSRange) {
         guard acceptsInput, !text.isEmpty else { return }
-        consumer.commitText(text, replacement: replacement)
+        let consumer = ConsumerRef(consumer)
+        inputQueue.async { consumer.consumer.commitText(text, replacement: replacement) }
     }
 
     func finishComposing() {
         guard acceptsInput else { return }
-        consumer.finishComposing()
+        let consumer = ConsumerRef(consumer)
+        inputQueue.async { consumer.consumer.finishComposing() }
     }
 
     func cancelComposition() {
         guard acceptsInput else { return }
-        consumer.cancelComposition()
+        let consumer = ConsumerRef(consumer)
+        inputQueue.async { consumer.consumer.cancelComposition() }
     }
+
+    /// The longest paste carried to the page, in UTF-16 units (64 of the wire's pieces). Longer text is refused
+    /// whole, with a notice — never cut.
+    static let pasteMaxUnits = 64 * Int(WinterPresentTextMax)
 
     /// An edit command the person chose (`WinterPresentEditCopy` …); a paste carries the text Winter read from the
     /// pasteboard on their ⌘V — the helper never reads the pasteboard.
     func edit(_ command: UInt32, text: String? = nil) {
         guard acceptsInput else { return }
-        consumer.sendEdit(command, text: text)
+        if command == UInt32(WinterPresentEditPaste), let text, text.utf16.count > Self.pasteMaxUnits {
+            showNotice("That's too much text to paste into the page at once (more than \(Self.pasteMaxUnits / 1024)K characters)")
+            return
+        }
+        let consumer = ConsumerRef(consumer)
+        inputQueue.async { [weak self] in
+            guard !consumer.consumer.sendEdit(command, text: text), command == UInt32(WinterPresentEditPaste) else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, !self.closed else { return }
+                    self.showNotice("The paste didn't reach the page in full — Winter's headless browser was busy. Try again.")
+                }
+            }
+        }
     }
 
     /// The view wants pixels at `scale` (device pixels per CSS pixel): asked of the producer after the welcome, only
@@ -266,22 +308,25 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
     }
 
     private func presentDialog(_ dialog: WinterPresentDialog, on window: NSWindow) {
-        let host = HeadlessPresentChromeState.host(of: url) ?? "This page"
+        // Named after the page that raised it (its origin, as the helper read it then) — never the address the tab
+        // was first shown at, and never a guess: an opaque origin is just "this page".
+        let author = HeadlessPresentChromeState.dialogAuthor(origin: dialog.origin)
+        let says = author.map { "\($0) says" } ?? "This page says"
         let alert = NSAlert()
         var field: NSTextField?
         switch dialog.type {
         case UInt32(WinterPresentDialogBeforeUnload):
             alert.messageText = "Leave this page?"
-            alert.informativeText = "Changes you made on \(host) may not be saved."
+            alert.informativeText = author.map { "Changes you made on \($0) may not be saved." } ?? "Changes you made may not be saved."
             alert.addButton(withTitle: "Leave")
             alert.addButton(withTitle: "Stay")
         case UInt32(WinterPresentDialogConfirm):
-            alert.messageText = "\(host) says"
+            alert.messageText = says
             alert.informativeText = dialog.message
             alert.addButton(withTitle: "OK")
             alert.addButton(withTitle: "Cancel")
         case UInt32(WinterPresentDialogPrompt):
-            alert.messageText = "\(host) says"
+            alert.messageText = says
             alert.informativeText = dialog.message
             alert.addButton(withTitle: "OK")
             alert.addButton(withTitle: "Cancel")
@@ -291,7 +336,7 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
             alert.window.initialFirstResponder = input
             field = input
         default:
-            alert.messageText = "\(host) says"
+            alert.messageText = says
             alert.informativeText = dialog.message
             alert.addButton(withTitle: "OK")
         }
@@ -413,6 +458,10 @@ final class HeadlessPresentBridge: NSObject, WinterPresentConsumerDelegate, @unc
 
     func presentConsumer(_ consumer: WinterPresentConsumer, frame: WinterPresentFrame) {
         renderer.frame(frame)
+    }
+
+    func presentConsumer(_ consumer: WinterPresentConsumer, pageURL url: String, title: String) {
+        onMain { $0.pageChanged(url: url, title: title) }
     }
 
     func presentConsumer(_ consumer: WinterPresentConsumer, cursor cursorType: Int32) {

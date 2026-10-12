@@ -76,6 +76,8 @@ public enum BrowserLinkProtocol {
         public static let headlessHide = "headless.hide"
         /// Feature `headless`: the session's headless tabs changed (the panel's list).
         public static let headlessTabs = "headless.tabs"
+        /// Feature `headless`: why a shown tab is shown changed (a watch became a hand-off, a hand-off is over).
+        public static let headlessUpdate = "headless.update"
     }
 
     /// A download the app reports (`browserLink.download`'s `download.state`).

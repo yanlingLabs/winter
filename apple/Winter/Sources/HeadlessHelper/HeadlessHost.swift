@@ -105,17 +105,27 @@ final class HeadlessHost {
         return tab.key
     }
 
+    /// How long a window made blank is given to report its address before it is announced without one.
+    static let popupAddressWait: TimeInterval = 1
+
     /// A tab id of the helper's own minting (`w-` and 12 hex, the daemon's shape — 48 random bits).
     static func mintTabId() -> String {
         var generator = SystemRandomNumberGenerator()  // arc4random on Darwin
         return "w-" + (0..<6).map { _ in String(format: "%02x", UInt8.random(in: 0...255, using: &generator)) }.joined()
     }
 
-    private func announcePopup(_ tab: Tab, deadline: Date) {
+    private func announcePopup(_ tab: Tab, deadline: Date, urlDeadline: Date? = nil) {
         guard tabs[tab.tabId] === tab, let opener = tab.openerTabId else { return }
         let browserId = driver.browserIdentifier(tab.key)
         if browserId != 0 {
             tab.browserId = browserId
+            // A window may be made blank first and given its address a moment later (CEF names none for it then):
+            // announced with its address once the browser reports one, or after a second regardless.
+            let wait = urlDeadline ?? clock.now().addingTimeInterval(Self.popupAddressWait)
+            if tab.url.isEmpty, clock.now() < wait {
+                clock.after(Self.ensurePollInterval) { [weak self] in self?.announcePopup(tab, deadline: deadline, urlDeadline: wait) }
+                return
+            }
             output?.popupOpened(tabId: tab.tabId, openerTabId: opener, url: tab.url)
             return
         }

@@ -27,8 +27,9 @@ static NSMutableDictionary<NSNumber *, WinterHeadlessPresenter *> *g_presenters;
 - (void)popupKind:(int)kind x:(int)x y:(int)y width:(int)width height:(int)height;
 - (void)cursor:(int)type;
 - (void)imeRangeStart:(int)start end:(int)end rects:(NSArray<NSValue *> *)rects;
-- (void)dialogOpenedType:(int)type message:(NSString *)message defaultText:(NSString *)defaultText;
+- (void)dialogOpenedType:(int)type message:(NSString *)message defaultText:(NSString *)defaultText origin:(NSString *)origin;
 - (void)dialogClosed;
+- (void)pageURL:(NSString *)url title:(NSString *)title;
 - (BOOL)fileChooser:(int)requestId mode:(int)mode accept:(NSArray<NSString *> *)accept;
 @end
 
@@ -60,10 +61,13 @@ static void InstallObservers(void) {
     [g_presenters[@(browserId)] imeRangeStart:start end:end rects:rects];
   });
   WinterCEFHeadlessSetDialogObservers(
-      ^(int browserId, int type, NSString *message, NSString *defaultText) {
-        [g_presenters[@(browserId)] dialogOpenedType:type message:message defaultText:defaultText];
+      ^(int browserId, int type, NSString *message, NSString *defaultText, NSString *origin) {
+        [g_presenters[@(browserId)] dialogOpenedType:type message:message defaultText:defaultText origin:origin];
       },
       ^(int browserId) { [g_presenters[@(browserId)] dialogClosed]; });
+  WinterCEFHeadlessSetPageObserver(^(int browserId, NSString *url, NSString *title) {
+    [g_presenters[@(browserId)] pageURL:url title:title];
+  });
   WinterCEFHeadlessSetFileChooserHandler(^BOOL(int browserId, int requestId, int mode, NSArray<NSString *> *accept) {
     WinterHeadlessPresenter *presenter = g_presenters[@(browserId)];
     return presenter != nil && [presenter fileChooser:requestId mode:mode accept:accept];
@@ -190,6 +194,9 @@ static double Percentile(NSArray<NSNumber *> *values, double p) {
   _source = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, _port, 0, dispatch_get_main_queue());
   __weak WinterHeadlessPresenter *weak = self;
   dispatch_source_set_event_handler(_source, ^{ [weak drain]; });
+  // The receive right (and the service name with it) goes only once the source is done with it.
+  const mach_port_t port = _port;
+  dispatch_source_set_cancel_handler(_source, ^{ mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1); });
   dispatch_resume(_source);
   g_presenters[@(_browserId)] = self;
   return name;
@@ -270,10 +277,14 @@ static NSUInteger TaskPortCount(void) {
 
 - (void)handle:(mach_msg_header_t *)header {
   if (header->msgh_id == MACH_NOTIFY_DEAD_NAME) {
+    // Only the kernel's (anyone can look the service up and send one): a forged one would make us drop a reference
+    // we never got. A real one carries a reference of its own on the dead name, given back whatever the name.
+    mach_port_name_t name = MACH_PORT_NULL;
+    if (!WinterPresentKernelDeadName(header, &name)) return;
+    const BOOL viewer = name == _viewer;
+    mach_port_deallocate(mach_task_self(), name);
     // The viewer's port died: the viewer is gone. The tab is not.
-    const mach_dead_name_notification_t *dead = (const mach_dead_name_notification_t *)header;
-    if (dead->not_port != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), dead->not_port);
-    [self endSaying:-1 reason:@"the viewer went away"];
+    if (viewer) [self endSaying:-1 reason:@"the viewer went away"];
     return;
   }
   audit_token_t token;
@@ -425,20 +436,44 @@ static NSUInteger TaskPortCount(void) {
   mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, m.header.msgh_size, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
 }
 
-- (void)dialogOpenedType:(int)type message:(NSString *)message defaultText:(NSString *)defaultText {
+- (void)dialogOpenedType:(int)type message:(NSString *)message defaultText:(NSString *)defaultText origin:(NSString *)origin {
   if (_viewer == MACH_PORT_NULL || !_control) return;
-  [self sendDialogType:type message:message defaultText:defaultText];
+  [self sendDialogType:type message:message defaultText:defaultText origin:origin];
 }
 
 /// The page's held dialog, if any, offered to the viewer (control was just given).
 - (void)offerHeldDialog {
   int type = 0;
-  NSString *message = nil, *defaultText = nil;
-  if (_dialogId != 0 || !WinterCEFHeadlessCurrentDialog(_key, &type, &message, &defaultText)) return;
-  [self sendDialogType:type message:message ?: @"" defaultText:defaultText ?: @""];
+  NSString *message = nil, *defaultText = nil, *origin = nil;
+  if (_dialogId != 0 || !WinterCEFHeadlessCurrentDialog(_key, &type, &message, &defaultText, &origin)) return;
+  [self sendDialogType:type message:message ?: @"" defaultText:defaultText ?: @"" origin:origin ?: @""];
 }
 
-- (void)sendDialogType:(int)type message:(NSString *)message defaultText:(NSString *)defaultText {
+/// The shown page's address and title, to the viewer (whether or not it holds control: it names the page by them).
+- (void)pageURL:(NSString *)url title:(NSString *)title {
+  if (_viewer == MACH_PORT_NULL) return;
+  WinterPresentPageMsg m;
+  memset(&m, 0, sizeof(m));
+  m.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+  m.header.msgh_remote_port = _viewer;
+  m.header.msgh_id = WinterPresentMsgPage;
+  NSData *bytes = [url dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+  // Cut at a character boundary: a continuation byte never starts the cut-off part.
+  NSUInteger n = MIN(bytes.length, (NSUInteger)WinterPresentPageURLMax);
+  const uint8_t *u = (const uint8_t *)bytes.bytes;
+  while (n > 0 && n < bytes.length && (u[n] & 0xC0) == 0x80) n--;
+  memcpy(m.url, u, n);
+  m.urlLength = (uint32_t)n;
+  NSUInteger t = MIN(title.length, (NSUInteger)WinterPresentPageTitleMax);
+  if (t > 0 && t < title.length && CFStringIsSurrogateHighCharacter([title characterAtIndex:t - 1])) t--;
+  [title getCharacters:(unichar *)m.title range:NSMakeRange(0, t)];
+  m.titleLength = (uint32_t)t;
+  const mach_msg_size_t size = (mach_msg_size_t)((offsetof(WinterPresentPageMsg, title) + t * sizeof(uint16_t) + 3) & ~(size_t)3);
+  m.header.msgh_size = size;
+  mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, size, 0, MACH_PORT_NULL, 100, MACH_PORT_NULL);
+}
+
+- (void)sendDialogType:(int)type message:(NSString *)message defaultText:(NSString *)defaultText origin:(NSString *)origin {
   WinterPresentDialogMsg m;
   memset(&m, 0, sizeof(m));
   m.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
@@ -453,6 +488,12 @@ static NSUInteger TaskPortCount(void) {
   const NSUInteger defaultLength = MIN(defaultText.length, (NSUInteger)WinterPresentDialogDefaultMax);
   [defaultText getCharacters:(unichar *)m.defaultText range:NSMakeRange(0, defaultLength)];
   m.defaultLength = (uint32_t)defaultLength;
+  // An origin longer than the field is no origin at all: never a cut one that names another host.
+  NSData *originBytes = [origin dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+  if (originBytes.length <= WinterPresentOriginMax) {
+    memcpy(m.origin, originBytes.bytes, originBytes.length);
+    m.originLength = (uint32_t)originBytes.length;
+  }
   if (mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m), 0, MACH_PORT_NULL, 100, MACH_PORT_NULL) == KERN_SUCCESS) {
     _dialogId = m.dialogId;
   }
@@ -530,6 +571,8 @@ static NSUInteger TaskPortCount(void) {
   welcome.cssHeight = WinterCEFHeadlessViewHeight;
   welcome.scale = _scale;
   mach_msg(&welcome.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(welcome), 0, MACH_PORT_NULL, 100, MACH_PORT_NULL);
+  NSString *pageURL = nil, *pageTitle = nil;
+  if (WinterCEFHeadlessCurrentPage(_key, &pageURL, &pageTitle)) [self pageURL:pageURL ?: @"" title:pageTitle ?: @""];
   // Render for the viewer from now on: its scale, a viewer's frame rate, a fresh frame now.
   WinterCEFHeadlessSetPresentation(_key, _scale, 60);
   [self awaitFrame];
@@ -774,13 +817,12 @@ static NSUInteger TaskPortCount(void) {
     _viewer = MACH_PORT_NULL;
   }
   if (_source != nil) {
-    dispatch_source_cancel(_source);
+    dispatch_source_cancel(_source);  // its cancel handler lets the receive right (and the service name) go
     _source = nil;
+  } else if (_port != MACH_PORT_NULL) {
+    mach_port_mod_refs(mach_task_self(), _port, MACH_PORT_RIGHT_RECEIVE, -1);
   }
-  if (_port != MACH_PORT_NULL) {
-    mach_port_mod_refs(mach_task_self(), _port, MACH_PORT_RIGHT_RECEIVE, -1);  // the service name goes with it
-    _port = MACH_PORT_NULL;
-  }
+  _port = MACH_PORT_NULL;
   [self releasePool];
   _popup = nil;
   // Nothing the viewer was asked stays waiting on it: a held dialog stays held (the agent can answer it), file choosers

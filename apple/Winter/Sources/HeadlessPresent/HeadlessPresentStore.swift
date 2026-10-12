@@ -6,12 +6,13 @@ import WinterKit
 /// ComputerV2 Phase 4 (lane H3) — **the app's headless presentations and the sessions' headless tabs**, one per app,
 /// living as long as it does (the browser link starts it at launch, before any window exists).
 ///
-/// It executes feature `headless`'s three browser-link ops (`BrowserLinkHost` hands them over):
+/// It executes feature `headless`'s four browser-link ops (`BrowserLinkHost` hands them over):
 ///   * `headless.show` — a `HeadlessPresentation` connected to the producer's service (the reply waits for
 ///     `connectWithError:`), the session's window summoned and its panel revealed (`onShow`); a second show for
 ///     the same tab replaces the first;
 ///   * `headless.hide` — that presentation closed (BYE) and gone; `{}` even when nothing was shown;
-///   * `headless.tabs` — the session's tabs, kept for the panel's list.
+///   * `headless.tabs` — the session's tabs, kept for the panel's list;
+///   * `headless.update` — why a shown tab is shown now (its chrome's buttons follow).
 /// And it sends the person's actions back (`browserLink.headless`, through `sendAction`).
 ///
 /// The panel shows the newest presentation of the session it shows; nothing here is a panel tab or a session event.
@@ -42,6 +43,8 @@ final class HeadlessPresentStore: ObservableObject {
     private let device: MTLDevice?
     /// Sessions whose list was fetched on this link (a fresh link fetches again).
     private var listed: Set<String> = []
+    /// Each session's list version: bumped by every push, so a fetch answered after a newer push never overwrites it.
+    private var listGeneration: [String: Int] = [:]
 
     init(device: MTLDevice? = MTLCreateSystemDefaultDevice()) {
         self.device = device
@@ -70,7 +73,11 @@ final class HeadlessPresentStore: ObservableObject {
             hide(sessionId: sessionId, tabId: tabId)
             reply(.empty)
         case .tabs(let sessionId, let tabs):
+            listGeneration[sessionId, default: 0] += 1
             tabsBySession[sessionId] = tabs
+            reply(.empty)
+        case .update(let sessionId, let tabId, let purpose):
+            for p in presentations where p.sessionId == sessionId && p.tabId == tabId { p.purposeChanged(purpose) }
             reply(.empty)
         }
     }
@@ -110,6 +117,7 @@ final class HeadlessPresentStore: ObservableObject {
     func linkChanged() {
         tabsBySession = [:]
         listed = []
+        listGeneration = [:]
         watchPending = []
     }
 
@@ -173,9 +181,12 @@ final class HeadlessPresentStore: ObservableObject {
     func refreshTabsIfNeeded(sessionId: String?) {
         guard let sessionId, !listed.contains(sessionId), let send = sendAction else { return }
         listed.insert(sessionId)
+        let generation = listGeneration[sessionId, default: 0]
         Task { @MainActor [weak self] in
-            guard let tabs = try? await send(sessionId, nil, .list) else { return }
-            self?.tabsBySession[sessionId] = tabs
+            guard let tabs = try? await send(sessionId, nil, .list), let self else { return }
+            // A push that came in meanwhile is newer than this answer.
+            guard self.listGeneration[sessionId, default: 0] == generation else { return }
+            self.tabsBySession[sessionId] = tabs
         }
     }
 

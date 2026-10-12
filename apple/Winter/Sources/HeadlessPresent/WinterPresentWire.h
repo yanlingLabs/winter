@@ -74,6 +74,7 @@ enum {
   WinterPresentMsgDialogDone = 0x57501008,   // that dialog went away (answered elsewhere, the page navigated)
   WinterPresentMsgFileChooser = 0x57501009,  // the page asks the user to choose files
   WinterPresentMsgControl = 0x5750100A,      // the viewer may (1) or may no longer (0) send input
+  WinterPresentMsgPage = 0x5750100B,         // the shown page's address and title (after the welcome, and on a change)
 };
 
 typedef struct {
@@ -250,7 +251,7 @@ enum {
   WinterPresentDialogBeforeUnload = 3,  // "leave this page?"
 };
 
-enum { WinterPresentDialogDefaultMax = 256 };
+enum { WinterPresentDialogDefaultMax = 256, WinterPresentOriginMax = 256 };
 
 typedef struct {
   mach_msg_header_t header;
@@ -261,6 +262,11 @@ typedef struct {
   uint32_t messageLength, defaultLength;
   uint16_t message[WinterPresentTextMax];
   uint16_t defaultText[WinterPresentDialogDefaultMax];
+  /// Bytes in `origin`: the origin of the page that raised the dialog (`scheme://host[:port]`), UTF-8, not
+  /// NUL-terminated — what the viewer names as the dialog's author (never the address it was first shown at).
+  uint32_t originLength;
+  uint32_t reserved;
+  char origin[WinterPresentOriginMax];
 } WinterPresentDialogMsg;
 
 typedef struct {
@@ -279,6 +285,18 @@ typedef struct {
   uint32_t dialogId;
   uint32_t reserved;
 } WinterPresentDialogDoneMsg;
+
+// ---- version 2: the shown page ---------------------------------------------------------------------------------------
+
+enum { WinterPresentPageURLMax = 2048, WinterPresentPageTitleMax = 256 };
+
+typedef struct {
+  mach_msg_header_t header;
+  /// Bytes of `url` (UTF-8, not NUL-terminated) and UTF-16 code units of `title`, cut at their maxima.
+  uint32_t urlLength, titleLength;
+  char url[WinterPresentPageURLMax];
+  uint16_t title[WinterPresentPageTitleMax];
+} WinterPresentPageMsg;
 
 // ---- version 2: file choosers ------------------------------------------------------------------------------------------
 
@@ -334,6 +352,7 @@ typedef union {
   WinterPresentDialogDoneMsg dialogDone;
   WinterPresentFileChooserMsg fileChooser;
   WinterPresentFileReplyMsg fileReply;
+  WinterPresentPageMsg page;
 } WinterPresentAnyMsg;
 
 typedef struct {

@@ -39,6 +39,7 @@ export interface HeadlessViewer {
   show(p: HeadlessShowParams): Promise<void>;
   hide(p: { sessionId: string; tabId: string; reason: string }): Promise<void>;
   tabs(p: { sessionId: string; tabs: HeadlessTabRow[] }): void;
+  update(p: { sessionId: string; tabId: string; purpose: HeadlessShowParams["purpose"] }): void;
 }
 
 export interface BrowserLinkDeps extends CefTransportOptions {
@@ -62,7 +63,7 @@ export class BrowserLink {
     const c = this.current;
     if (c === undefined || !c.transport.connected || !c.transport.appFeatures.has("headless")) return undefined;
     const t = c.transport;
-    return { show: (p) => t.headlessShow(p), hide: (p) => t.headlessHide(p), tabs: (p) => t.headlessTabs(p) };
+    return { show: (p) => t.headlessShow(p), hide: (p) => t.headlessHide(p), tabs: (p) => t.headlessTabs(p), update: (p) => t.headlessUpdate(p) };
   }
 
   /** Why there is no headless viewer now (for the model's sentence), or undefined when there is one. */

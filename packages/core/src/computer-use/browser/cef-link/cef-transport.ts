@@ -10,9 +10,9 @@ import { TransportError, type CdpEvent, type CdpTransport, type TransportDownloa
 /** 2 (ComputerV2 Phase 3): the ops `tab.present`, `tab.mute`, `tab.downloads`, `tab.download`, and the app's
  *  `browserLink.download` request. */
 export const BROWSER_LINK_PROTOCOL = 2;
-/** The ops a `browserLink.command` carries (spine §5.2; Phase 3's last four; feature `headless`'s three). */
+/** The ops a `browserLink.command` carries (spine §5.2; Phase 3's last four; feature `headless`'s four). */
 export type BrowserLinkOp = "tab.ensure" | "tab.release" | "tab.close" | "tabs.live" | "cdp.send" | "cdp.subscribe" | "overlay" | "tab.present" | "tab.mute" | "tab.downloads" | "tab.download"
-  | "headless.show" | "headless.hide" | "headless.tabs";
+  | "headless.show" | "headless.hide" | "headless.tabs" | "headless.update";
 
 /** Feature `headless` (`BROWSER_LINK_FEATURES`): show one of the session's headless tabs in Winter's panel — the app
  *  connects to the presentation `service` Winter Headless checked in for it, naming `nonce`, and holds the helper to
@@ -263,6 +263,13 @@ export class CefTransport implements CdpTransport {
   /** Stop showing it (the app closes its viewer; the tab itself is the helper's and is not touched). */
   async headlessHide(p: { sessionId: string; tabId: string; reason: string }): Promise<void> {
     await this.command("headless.hide", { ...p }, this.timeouts.other);
+  }
+
+  /** Why a shown tab is shown changed (a watch the person took over became a hand-off; a hand-off is over and the tab
+   *  stays theirs): the panel's buttons follow. Best effort. */
+  headlessUpdate(p: { sessionId: string; tabId: string; purpose: HeadlessShowParams["purpose"] }): void {
+    if (!this.connected) return;
+    void this.command("headless.update", { ...p }, this.timeouts.other).catch(() => undefined);
   }
 
   /** The session's headless tabs changed (opened, closed, shown): the panel's list. Best effort. */

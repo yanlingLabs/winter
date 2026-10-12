@@ -111,6 +111,20 @@ final class BrowserLinkHeadlessTests: XCTestCase {
         }
     }
 
+    func testAnUpdateIsRead() throws {
+        let command = try parse(#"{"linkId":"L","cmdId":"c4","op":"headless.update","params":{"sessionId":"s_1","tabId":"ht_1","purpose":"handoff"}}"#).get()
+        XCTAssertEqual(command.op, .update(sessionId: "s_1", tabId: "ht_1", purpose: .handoff))
+        XCTAssertTrue(BrowserLinkHeadlessCommand.handles(op: "headless.update"))
+        for json in [
+            #"{"linkId":"L","cmdId":"c4","op":"headless.update","params":{"tabId":"ht_1","purpose":"watch"}}"#,
+            #"{"linkId":"L","cmdId":"c4","op":"headless.update","params":{"sessionId":"s_1","purpose":"watch"}}"#,
+            #"{"linkId":"L","cmdId":"c4","op":"headless.update","params":{"sessionId":"s_1","tabId":"ht_1"}}"#,
+            #"{"linkId":"L","cmdId":"c4","op":"headless.update","params":{"sessionId":"s_1","tabId":"ht_1","purpose":"steal"}}"#,
+        ] {
+            guard case .failure = parse(json) else { return XCTFail("should be unreadable: \(json)") }
+        }
+    }
+
     func testTabsAreRead() throws {
         let command = try parse(#"{"linkId":"L","cmdId":"c3","op":"headless.tabs","params":{"sessionId":"s_1","tabs":[{"tabId":"ht_1","url":"https://a.example/","title":"A","presented":true,"control":false},{"tabId":"ht_2","url":"","title":"","presented":false,"control":false}]}}"#).get()
         XCTAssertEqual(command.op, .tabs(sessionId: "s_1", tabs: [

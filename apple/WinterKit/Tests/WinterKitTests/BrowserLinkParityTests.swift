@@ -141,7 +141,7 @@ final class BrowserLinkParityTests: XCTestCase {
                      BrowserLinkProtocol.Op.overlay, BrowserLinkProtocol.Op.tabPresent, BrowserLinkProtocol.Op.tabMute,
                      BrowserLinkProtocol.Op.tabDownloads, BrowserLinkProtocol.Op.tabDownload,
                      BrowserLinkProtocol.Op.headlessShow, BrowserLinkProtocol.Op.headlessHide,
-                     BrowserLinkProtocol.Op.headlessTabs]
+                     BrowserLinkProtocol.Op.headlessTabs, BrowserLinkProtocol.Op.headlessUpdate]
         XCTAssertEqual(Set(ops), Set(swift), "the daemon's BrowserLinkOp and WinterKit's ops drifted")
         // Every op is read by exactly one of the two parsers: the headless ones by `BrowserLinkHeadlessCommand`,
         // the rest by `BrowserLinkCommand` (whose closed `Op` Winter Headless switches over).

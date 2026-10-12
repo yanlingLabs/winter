@@ -22,7 +22,7 @@
 
 @interface WinterPresentDialog ()
 @property(nonatomic, readwrite) uint32_t dialogId, type;
-@property(nonatomic, readwrite, copy) NSString *message, *defaultText;
+@property(nonatomic, readwrite, copy) NSString *message, *defaultText, *origin;
 @end
 
 @implementation WinterPresentDialog
@@ -114,12 +114,19 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
     if (error) *error = [NSString stringWithFormat:@"no receive port (%d)", kr];
     return NO;
   }
+  // Room for a burst (a pool, a page update, a dialog) while the queue is busy: the default five drop the rest.
+  mach_port_limits_t limits = {.mpl_qlimit = 64};
+  mach_port_set_attributes(mach_task_self(), _port, MACH_PORT_LIMITS_INFO, (mach_port_info_t)&limits, MACH_PORT_LIMITS_INFO_COUNT);
   // Learn of the producer's death through our own port.
   mach_port_t previous = MACH_PORT_NULL;
   mach_port_request_notification(mach_task_self(), _producer, MACH_NOTIFY_DEAD_NAME, 0, _port, MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous);
+  if (previous != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), previous);
   _source = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, _port, 0, _queue);
   __weak WinterPresentConsumer *weak = self;
   dispatch_source_set_event_handler(_source, ^{ [weak drain]; });
+  // The receive right goes only once the source is done with it (never under a running handler).
+  const mach_port_t port = _port;
+  dispatch_source_set_cancel_handler(_source, ^{ mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1); });
   dispatch_resume(_source);
 
   WinterPresentHelloMsg hello = {};
@@ -153,10 +160,15 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
 
 - (void)handle:(mach_msg_header_t *)header receivedAt:(uint64_t)receivedAt {
   if (header->msgh_id == MACH_NOTIFY_DEAD_NAME) {
-    // The notification carries a user reference of its own on the dead name (as the producer's handler reads it).
-    const mach_dead_name_notification_t *dead = (const mach_dead_name_notification_t *)header;
-    if (dead->not_port != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), dead->not_port);
-    [self endWithReason:@"the presenting browser went away"];
+    // Only the kernel's: one forged by a peer would make us drop a reference we never got. A real one carries a user
+    // reference of its own on the dead name, given back whether or not it is still our producer's.
+    mach_port_name_t name = MACH_PORT_NULL;
+    if (!WinterPresentKernelDeadName(header, &name)) return;
+    os_unfair_lock_lock(&_lock);
+    const BOOL ours = !_closed && name == _producer;
+    os_unfair_lock_unlock(&_lock);
+    mach_port_deallocate(mach_task_self(), name);
+    if (ours) [self endWithReason:@"the presenting browser went away"];
     return;
   }
   audit_token_t token;
@@ -209,7 +221,7 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
         if (textures[i] == nil) ok = NO;
       }
       mach_msg_destroy(header);  // the surface rights: the textures hold the surfaces now
-      if (!ok) break;
+      if (!ok) return;           // destroyed already: never twice
       os_unfair_lock_lock(&_lock);
       _generation = m->generation;
       _scale = m->scale;
@@ -290,8 +302,22 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
       dialog.type = m->type;
       dialog.message = PresentText(m->message, m->messageLength, WinterPresentTextMax);
       dialog.defaultText = PresentText(m->defaultText, m->defaultLength, WinterPresentDialogDefaultMax);
+      dialog.origin = [[NSString alloc] initWithBytes:m->origin length:MIN(m->originLength, (uint32_t)WinterPresentOriginMax)
+                                             encoding:NSUTF8StringEncoding] ?: @"";
       // A viewer that can't show it leaves it held: the agent can still answer it after the hand-back.
       if ([delegate respondsToSelector:@selector(presentConsumer:dialog:)]) [delegate presentConsumer:self dialog:dialog];
+      break;
+    }
+    case WinterPresentMsgPage: {
+      if (header->msgh_size < offsetof(WinterPresentPageMsg, title)) break;
+      const WinterPresentPageMsg *m = (const WinterPresentPageMsg *)header;
+      const uint32_t titleFits = (uint32_t)((header->msgh_size - offsetof(WinterPresentPageMsg, title)) / sizeof(uint16_t));
+      NSString *url = [[NSString alloc] initWithBytes:m->url length:MIN(m->urlLength, (uint32_t)WinterPresentPageURLMax)
+                                             encoding:NSUTF8StringEncoding] ?: @"";
+      NSString *title = PresentText(m->title, MIN(m->titleLength, titleFits), WinterPresentPageTitleMax);
+      if ([delegate respondsToSelector:@selector(presentConsumer:pageURL:title:)]) {
+        [delegate presentConsumer:self pageURL:url title:title];
+      }
       break;
     }
     case WinterPresentMsgDialogDone: {
@@ -329,17 +355,34 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
   mach_msg_destroy(header);
 }
 
-/// One message to the producer (a copy of the send right; never blocks long).
-- (void)sendToProducer:(mach_msg_header_t *)header size:(mach_msg_size_t)size {
+/// The producer's send right with a reference of our own (MACH_PORT_NULL once closed or dead): a teardown on another
+/// thread can then never free the name under a send, nor let it be reused for another port before the send is made.
+/// Give it back with `mach_port_deallocate`.
+- (mach_port_t)retainProducer {
   os_unfair_lock_lock(&_lock);
-  const mach_port_t producer = _closed ? MACH_PORT_NULL : _producer;
+  mach_port_t producer = _closed ? MACH_PORT_NULL : _producer;
+  if (producer != MACH_PORT_NULL && mach_port_mod_refs(mach_task_self(), producer, MACH_PORT_RIGHT_SEND, 1) != KERN_SUCCESS) {
+    producer = MACH_PORT_NULL;  // a dead name: nothing to send to
+  }
   os_unfair_lock_unlock(&_lock);
-  if (producer == MACH_PORT_NULL) return;
+  return producer;
+}
+
+/// One message to the producer, waiting at most `timeout` ms for room in its queue (0: not at all). YES when sent.
+- (BOOL)sendToProducer:(mach_msg_header_t *)header size:(mach_msg_size_t)size timeout:(mach_msg_timeout_t)timeout {
+  const mach_port_t producer = [self retainProducer];
+  if (producer == MACH_PORT_NULL) return NO;
   header->msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
   header->msgh_size = size;
   header->msgh_remote_port = producer;
   header->msgh_local_port = MACH_PORT_NULL;
-  mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, size, 0, MACH_PORT_NULL, 100, MACH_PORT_NULL);
+  const kern_return_t kr = mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, size, 0, MACH_PORT_NULL, timeout, MACH_PORT_NULL);
+  mach_port_deallocate(mach_task_self(), producer);
+  return kr == KERN_SUCCESS;
+}
+
+- (BOOL)sendToProducer:(mach_msg_header_t *)header size:(mach_msg_size_t)size {
+  return [self sendToProducer:header size:size timeout:100];
 }
 
 - (uint64_t)nextSequence {
@@ -386,7 +429,7 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
   [self sendIme:WinterPresentImeCancel text:@"" selection:NSMakeRange(NSNotFound, 0) replacement:NSMakeRange(NSNotFound, 0)];
 }
 
-- (void)sendEdit:(uint32_t)command text:(NSString *)text {
+- (BOOL)sendEdit:(uint32_t)command text:(NSString *)text {
   NSArray<NSString *> *pieces = command == WinterPresentEditPaste ? PresentPieces(text ?: @"", WinterPresentTextMax) : @[ @"" ];
   for (NSString *piece in pieces) {
     WinterPresentEditMsg m;
@@ -397,8 +440,12 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
     m.length = (uint32_t)piece.length;
     m.sequence = [self nextSequence];
     m.sentAt = mach_absolute_time();
-    [self sendToProducer:&m.header size:PresentRound4(offsetof(WinterPresentEditMsg, text) + piece.length * sizeof(uint16_t))];
+    // The first piece that can't be delivered stops the rest: a paste never arrives with a hole in it.
+    if (![self sendToProducer:&m.header size:PresentRound4(offsetof(WinterPresentEditMsg, text) + piece.length * sizeof(uint16_t))]) {
+      return NO;
+    }
   }
+  return YES;
 }
 
 - (void)replyToDialog:(uint32_t)dialogId accept:(BOOL)accept text:(NSString *)text {
@@ -438,57 +485,40 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
   os_unfair_lock_lock(&_lock);
   const BOOL send = !_closed && generation == _generation && slot < WinterPresentPoolSlots && _held[slot];
   if (send) _held[slot] = NO;
-  const mach_port_t producer = _producer;
   os_unfair_lock_unlock(&_lock);
-  if (!send || producer == MACH_PORT_NULL) return;
+  if (!send) return;
   WinterPresentReleaseMsg m = {};
-  m.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
-  m.header.msgh_size = sizeof(m);
-  m.header.msgh_remote_port = producer;
   m.header.msgh_id = WinterPresentMsgRelease;
   m.generation = generation;
   m.slot = slot;
-  mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m), 0, MACH_PORT_NULL, 50, MACH_PORT_NULL);
+  [self sendToProducer:&m.header size:sizeof(m) timeout:50];
 }
 
 - (uint64_t)sendInput:(WinterPresentInputMsg)input {
   os_unfair_lock_lock(&_lock);
   const uint64_t sequence = ++_inputSequence;
-  const mach_port_t producer = _closed ? MACH_PORT_NULL : _producer;
   os_unfair_lock_unlock(&_lock);
-  if (producer == MACH_PORT_NULL) return 0;
-  input.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
-  input.header.msgh_size = sizeof(input);
-  input.header.msgh_remote_port = producer;
-  input.header.msgh_local_port = MACH_PORT_NULL;
   input.header.msgh_id = WinterPresentMsgInput;
   input.sequence = sequence;
   if (input.sentAt == 0) input.sentAt = mach_absolute_time();
-  mach_msg(&input.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(input), 0, MACH_PORT_NULL, 50, MACH_PORT_NULL);
-  return sequence;
+  // A move or a wheel step the producer has no room for is dropped (the next one carries on), never waited for: these
+  // come by the dozen and are sent from the main thread. Everything else may wait a moment.
+  const BOOL droppable = input.kind == WinterPresentInputMouseMove || input.kind == WinterPresentInputWheel;
+  return [self sendToProducer:&input.header size:sizeof(input) timeout:droppable ? 0 : 50] ? sequence : 0;
 }
 
 - (void)setScale:(double)scale {
-  if (_producer == MACH_PORT_NULL || _closed) return;
   WinterPresentResizeMsg m = {};
-  m.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
-  m.header.msgh_size = sizeof(m);
-  m.header.msgh_remote_port = _producer;
   m.header.msgh_id = WinterPresentMsgResize;
   m.scale = scale;
-  mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m), 0, MACH_PORT_NULL, 50, MACH_PORT_NULL);
+  [self sendToProducer:&m.header size:sizeof(m) timeout:50];
 }
 
 - (void)close {
   if (_closed) return;
-  if (_producer != MACH_PORT_NULL) {
-    WinterPresentEndedMsg bye = {};
-    bye.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
-    bye.header.msgh_size = sizeof(bye);
-    bye.header.msgh_remote_port = _producer;
-    bye.header.msgh_id = WinterPresentMsgBye;
-    mach_msg(&bye.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(bye), 0, MACH_PORT_NULL, 50, MACH_PORT_NULL);
-  }
+  WinterPresentEndedMsg bye = {};
+  bye.header.msgh_id = WinterPresentMsgBye;
+  [self sendToProducer:&bye.header size:sizeof(bye) timeout:50];
   [self teardown];
 }
 
@@ -508,15 +538,14 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
   const mach_port_t producer = _producer;
   _producer = MACH_PORT_NULL;
   os_unfair_lock_unlock(&_lock);
-  if (_source != nil) {
-    dispatch_source_cancel(_source);
-    _source = nil;
-  }
   if (producer != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), producer);
-  if (_port != MACH_PORT_NULL) {
+  if (_source != nil) {
+    dispatch_source_cancel(_source);  // its cancel handler lets the receive right go
+    _source = nil;
+  } else if (_port != MACH_PORT_NULL) {
     mach_port_mod_refs(mach_task_self(), _port, MACH_PORT_RIGHT_RECEIVE, -1);
-    _port = MACH_PORT_NULL;
   }
+  _port = MACH_PORT_NULL;
 }
 
 @end

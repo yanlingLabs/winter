@@ -28,6 +28,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) uint32_t type;
 @property(nonatomic, readonly, copy) NSString *message;
 @property(nonatomic, readonly, copy) NSString *defaultText;
+/// The origin of the page that raised it (`scheme://host[:port]`; empty when unknown) — what to name as its author.
+@property(nonatomic, readonly, copy) NSString *origin;
 @end
 
 /// A file chooser waiting for the user (`WinterPresentMsgFileChooser`).
@@ -48,6 +50,8 @@ NS_ASSUME_NONNULL_BEGIN
 @optional
 /// Version 2. The viewer now holds control (input, IME, edits, dialogs, file choosers) — or no longer does.
 - (void)presentConsumer:(WinterPresentConsumer *)consumer control:(BOOL)control;
+/// The shown page's address and title (after the welcome, and whenever they change).
+- (void)presentConsumer:(WinterPresentConsumer *)consumer pageURL:(NSString *)url title:(NSString *)title;
 /// Where the composition's characters are drawn (CSS pixels of the view, one rect per character), for the input
 /// method's candidate window.
 - (void)presentConsumer:(WinterPresentConsumer *)consumer imeRange:(NSRange)range characterBounds:(NSArray<NSValue *> *)rects;
@@ -93,8 +97,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// The marked text is dropped.
 - (void)cancelComposition;
 /// An edit command (`WinterPresentEditCopy` …). A paste carries `text` (read from the pasteboard by the caller, on the
-/// user's own ⌘V); every other command ignores it.
-- (void)sendEdit:(uint32_t)command text:(nullable NSString *)text;
+/// user's own ⌘V); every other command ignores it. NO when a piece could not be delivered (the producer's queue was
+/// full): the rest is not sent, so a paste never arrives with a hole in it.
+- (BOOL)sendEdit:(uint32_t)command text:(nullable NSString *)text;
 /// The user's answer to a page dialog (a prompt's `text`, else nil). Once per dialog.
 - (void)replyToDialog:(uint32_t)dialogId accept:(BOOL)accept text:(nullable NSString *)text;
 /// The user's choice for a file chooser: the paths of copies inside `<home>/cache/headless-uploads/` (nil or empty:

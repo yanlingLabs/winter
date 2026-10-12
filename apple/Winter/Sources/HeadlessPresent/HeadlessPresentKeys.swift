@@ -22,19 +22,27 @@ enum HeadlessPresentKeys {
     static let rightMouseButton: UInt32 = 1 << 6
     static let commandDown: UInt32 = 1 << 7
     static let isKeyPad: UInt32 = 1 << 9
+    static let isRepeat: UInt32 = 1 << 13
+    static let precisionScrollingDelta: UInt32 = 1 << 14
 
     /// Which mouse button an event carries (for its EVENTFLAG bit).
     enum MouseButton { case none, left, middle, right }
 
-    /// CEF's modifier bits for an event's modifier flags, its key code (keypad keys), and the button it carries.
-    static func modifiers(_ flags: NSEvent.ModifierFlags, keyCode: UInt16? = nil, button: MouseButton = .none) -> UInt32 {
+    /// CEF's modifier bits for an event's modifier flags, its key code (keypad keys), whether it is a held key's
+    /// repeat, and the button it carries.
+    ///
+    /// A keypad key is known by its key code alone: macOS also sets `.numericPad` on the arrow keys, which a page would
+    /// then read as keys on the number pad (`KeyboardEvent.location` 3).
+    static func modifiers(_ flags: NSEvent.ModifierFlags, keyCode: UInt16? = nil, repeating: Bool = false,
+                          button: MouseButton = .none) -> UInt32 {
         var bits: UInt32 = 0
         if flags.contains(.control) { bits |= controlDown }
         if flags.contains(.shift) { bits |= shiftDown }
         if flags.contains(.option) { bits |= altDown }
         if flags.contains(.command) { bits |= commandDown }
         if flags.contains(.capsLock) { bits |= capsLockOn }
-        if let keyCode, flags.contains(.numericPad) || isKeyPad(keyCode) { bits |= isKeyPad }
+        if let keyCode, isKeyPad(keyCode) { bits |= isKeyPad }
+        if repeating { bits |= isRepeat }
         switch button {
         case .left: bits |= leftMouseButton
         case .middle: bits |= middleMouseButton

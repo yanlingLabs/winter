@@ -98,6 +98,13 @@ struct HeadlessPresentChromeState: Equatable {
         return host
     }
 
+    /// Who a page dialog is from: the host of the origin that raised it (`scheme://host[:port]`), nil for an opaque
+    /// one (a data: page, a sandboxed frame) — the sheet then says "this page", never another host.
+    static func dialogAuthor(origin: String) -> String? {
+        guard !origin.isEmpty else { return nil }
+        return host(of: origin)
+    }
+
     /// One row of the panel's list of a session's headless tabs.
     static func tabLabel(_ tab: BrowserLinkHeadlessTab) -> String {
         let title = titleLine(title: tab.title, url: tab.url)

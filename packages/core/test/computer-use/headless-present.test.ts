@@ -22,14 +22,16 @@ interface Panel extends HeadlessViewer {
   shown: HeadlessShowParams[];
   hidden: Array<{ sessionId: string; tabId: string; reason: string }>;
   lists: Array<{ sessionId: string; tabs: HeadlessTabRow[] }>;
+  updates: Array<{ sessionId: string; tabId: string; purpose: string }>;
 }
 
 function panel(): Panel {
   const p: Panel = {
-    shown: [], hidden: [], lists: [],
+    shown: [], hidden: [], lists: [], updates: [],
     show: async (s) => { p.shown.push(s); },
     hide: async (h) => { p.hidden.push(h); },
     tabs: (t) => { p.lists.push(t); },
+    update: (u) => { p.updates.push(u); },
   };
   return p;
 }
@@ -118,6 +120,8 @@ describe("the hand-off (waitForUser): the tab shown in Winter's panel, the perso
     await r.pool.panelAction("s1", t.tabKey, "stopWaiting");
     expect(answers).toEqual([false]);
     r.pool.handoffOver(t.tabKey);
+    // The panel hears that nobody waits now (its buttons become Hand back).
+    expect(r.panel.updates).toEqual([{ sessionId: "s1", tabId: t.tabKey, purpose: "watch" }]);
     expect(isUserHasTab(await failure(r.pool.send(t.tabKey, "Page.enable")))).toBe(true);
     // Nobody waits now: Done hands it back and the view goes, here.
     await r.pool.panelAction("s1", t.tabKey, "done");
@@ -177,6 +181,13 @@ describe("watch and take over from the panel", () => {
     const control = r.commands().filter((c) => c.op === "headless.control");
     expect(control.map((c) => c.params.control)).toEqual([true]);
     expect(isUserHasTab(await failure(r.pool.send(t.tabKey, "Page.enable")))).toBe(true);
+    // The agent asks the person to do something while they already hold it: the same view becomes the hand-off, and
+    // the panel hears it (Done / Stop waiting); no second presentation.
+    await r.pool.present(t.tabKey, { sessionId: "s1" });
+    expect(r.panel.shown).toHaveLength(1);
+    expect(r.panel.updates).toEqual([{ sessionId: "s1", tabId: t.tabKey, purpose: "handoff" }]);
+    r.pool.handoffOver(t.tabKey);
+    expect(r.panel.updates.at(-1)).toEqual({ sessionId: "s1", tabId: t.tabKey, purpose: "watch" });
     await r.pool.panelAction("s1", t.tabKey, "handBack");
     expect(r.commands().filter((c) => c.op === "headless.control").map((c) => c.params.control)).toEqual([true, false]);
     expect(r.panel.hidden).toEqual([]); // still shown, watch-only

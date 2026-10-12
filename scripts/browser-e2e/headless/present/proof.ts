@@ -24,7 +24,7 @@
 // (`headless.popupOpened`), presentable, and gone as a tab when the page closes it.
 //
 //   bun scripts/browser-e2e/headless/present/proof.ts --app "<Winter Headless Dev.app>" [--cycles 8] [--report <file>]
-//     [--skip dialog,ime,files,window]   leave out version 2's steps (to tell which one a failure follows)
+//     [--skip dialog,ime,files,window,drag]   leave out version 2's steps (to tell which one a failure follows)
 //     [--helper-log]              print the helper's stderr when something failed
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -72,12 +72,18 @@ const sentinel = (port: number): string => `<!doctype html><title>sentinel</titl
 @keyframes spin{to{transform:rotate(360deg)}}</style>
 <div id=m></div><div id=spin></div>
 <div id=f><input id=a placeholder=agent><input id=b placeholder=user><select id=s><option>one</option><option>two</option><option>three</option></select>
-<input id=c placeholder=ime><input id=file type=file accept=".txt,text/plain"><button id=open onclick="window.open('/window', 'signin', 'width=480,height=600')">Sign in</button></div>
+<input id=c placeholder=ime><input id=file type=file accept=".txt,text/plain"><button id=open onclick="window.open('/window', 'signin', 'width=480,height=600')">Sign in</button>
+<div id=dragme draggable=true style="width:80px;height:30px;background:#c80">drag me</div>
+<div id=dropzone style="width:200px;height:60px;background:#08c;margin-top:10px">drop here</div></div>
 <pre id=state style="position:absolute;left:20px;top:300px"></pre>
 <script>
 const S = { id: crypto.randomUUID(), origin: performance.timeOrigin, ticks: 0, keys: 0, wsOpen: 0, wsMessages: 0, uploads: 0, uploadDone: "", visibilityChanges: 0, hidden: document.hidden, files: "", fileChanges: 0 };
 S.selectLog = [];
 window.addEventListener("message", (e) => { S.fromWindow = String(e.data); });
+document.getElementById("dragme").addEventListener("dragstart", (e) => { e.dataTransfer.setData("text/plain", "the card"); S.dragStarted = (S.dragStarted || 0) + 1; });
+const zone = document.getElementById("dropzone");
+zone.addEventListener("dragover", (e) => e.preventDefault());
+zone.addEventListener("drop", (e) => { e.preventDefault(); S.dropped = e.dataTransfer.getData("text/plain"); S.drops = (S.drops || 0) + 1; });
 for (const t of ["mousedown", "keydown", "change", "focus"]) document.getElementById("s").addEventListener(t, (e) => { S.selectLog.push(t + (e.key ? ":" + e.key : "") + "=" + document.getElementById("s").value); });
 document.getElementById("file").addEventListener("change", (e) => {
   S.fileChanges++;
@@ -116,7 +122,13 @@ const server = Bun.serve({
       return new Response(`<!doctype html><title>Sign-in window</title><style>body{margin:0;background:#225;color:#fff;font:20px system-ui}
 @keyframes p{to{opacity:.3}}h1{animation:p 1s infinite alternate}</style><h1>Signing in…</h1>
 <script>setTimeout(() => { window.opener && window.opener.postMessage("signed in from the window", "*"); }, 300);
-setTimeout(() => window.close(), 2500);</script>`, { headers: { "content-type": "text/html" } });
+// On to ANOTHER SITE (127.0.0.1 → localhost: another renderer process) while it is shown, as a sign-in redirect does.
+setTimeout(() => { location.href = location.href.replace("127.0.0.1", "localhost").replace("/window", "/window-2"); }, 900);</script>`, { headers: { "content-type": "text/html" } });
+    }
+    if (path === "/window-2") {
+      return new Response(`<!doctype html><title>Signed in</title><style>body{margin:0;background:#252;color:#fff;font:20px system-ui}
+@keyframes p{to{opacity:.3}}h1{animation:p 1s infinite alternate}</style><h1>Done</h1>
+<script>setTimeout(() => window.close(), 1600);</script>`, { headers: { "content-type": "text/html" } });
     }
     if (path === "/upload") {
       // The upload's request stays IN FLIGHT across the presentations: its body taken, its answer held 40 s.
@@ -439,9 +451,13 @@ try {
     const done = viewer.events.some((e) => e.event === "dialogDone");
     await endPresentation(viewer);
     const a = await cdp("Runtime.evaluate", { expression: "JSON.stringify([window.p2, window.p2n])", contextId: world, returnByValue: true }) as { result?: { value?: string } };
-    check("a page dialog is shown to the person in control and answered there, once",
-      shown?.type === 2 && shown?.message === "your name?" && shown?.defaultText === "nobody" && a.result?.value === '["from the person",1]',
+    check("a page dialog is shown to the person in control and answered there, once — named after the page that raised it",
+      shown?.type === 2 && shown?.message === "your name?" && shown?.defaultText === "nobody" && shown?.origin === new URL(pageUrl).origin &&
+        a.result?.value === '["from the person",1]',
       `shown ${JSON.stringify(shown ?? null)}; [answer, answers] ${a.result?.value}; withdrawn after: ${done}`);
+    const page = viewer.events.find((e) => e.event === "page");
+    check("the viewer is told the shown page's address and title after the welcome",
+      page !== undefined && String(page.url).startsWith(pageUrl), `page ${JSON.stringify(page ?? null)}`);
     await oracle("a dialog answered by the person", { b: userText, s: "two" });
   }
 
@@ -506,24 +522,47 @@ try {
     const opened = await wait((m) => m.method === "headless.popupOpened" && events.indexOf(m) >= mark, 10_000, "headless.popupOpened").catch(() => undefined);
     const windowId = String(opened?.params.tabId ?? "");
     let windowFrames = -1;
+    let afterHopFrames = -1;
+    let hopPage: ViewerEvent | undefined;
     if (opened !== undefined) {
       const nonce = nonceHex();
       const r = await command("headless.present", { tabId: windowId, nonce, viewerRequirement, control: true, scale: 1 });
       const wv = new ViewerProc(String(r.service), nonce);
       await wv.until("welcome").catch(() => undefined);
-      await Bun.sleep(600);
+      await Bun.sleep(400);
       windowFrames = Number((await wv.stats().catch(() => ({ event: "stats", frames: -1 }) as ViewerEvent)).frames);
+      // Past its hop to another site (at ~0.9 s): the frames keep coming from the new document's renderer.
+      await Bun.sleep(1_300);
+      afterHopFrames = Number((await wv.stats().catch(() => ({ event: "stats", frames: -1 }) as ViewerEvent)).frames) - windowFrames;
+      hopPage = wv.events.filter((e) => e.event === "page").at(-1);
       wv.send({ cmd: "bye" });
       await wv.exited();
     }
     const closed = await wait((m) => m.method === "browserLink.tabGone" && m.params.tabId === windowId, 10_000, "the window's tabGone").then((m) => String(m.params.reason), () => "");
     await endPresentation(viewer);
     const now = await sentinelState();
-    check("a window the person opens is created with its opener kept, announced as a tab of its own, presentable, and gone when its page closes it",
+    check("a window the person opens is created with its opener kept, announced as a tab of its own, presentable (across its own hop to another site), and gone when its page closes it",
       opened !== undefined && opened.params.openerTabId === "w-1" && /^w-[0-9a-f]{12}$/.test(windowId) && String(opened.params.url).endsWith("/window") &&
-        now.fromWindow === "signed in from the window" && windowFrames > 0 && closed === "closed",
-      `opened ${JSON.stringify(opened?.params ?? null)}; the opener heard "${String(now.fromWindow)}"; ${windowFrames} frame(s) of it; its tab ${closed || "never went"}`);
+        now.fromWindow === "signed in from the window" && windowFrames > 0 && afterHopFrames > 0 && closed === "closed" &&
+        String(hopPage?.url ?? "").includes("//localhost:") && String(hopPage?.url ?? "").includes("/window-2"),
+      `opened ${JSON.stringify(opened?.params ?? null)}; the opener heard "${String(now.fromWindow)}"; ${windowFrames} frame(s) of it, ${afterHopFrames} more after it went on to another site (its viewer last told ${String(hopPage?.url ?? "nothing")}); its tab ${closed || "never went"}`);
     await oracle("a window the person opened", { b: userText, s: "two" });
+  }
+
+  // ── version 2: an in-page drag by the person (HTML5 drag and drop), run inside the browser ──
+  if (!skip.includes("drag")) {
+    const from = await rect("dragme");
+    const to = await rect("dropzone");
+    const { viewer } = await present(true);
+    await viewer.until("welcome");
+    await Bun.sleep(200);
+    viewer.send({ cmd: "drag", from: [from.x + 20, from.y + from.height / 2], to: [to.x + 50, to.y + to.height / 2], steps: 12 });
+    await Bun.sleep(1_200);
+    await endPresentation(viewer);
+    const now = await sentinelState();
+    check("an in-page drag by the person reaches its drop target, once", now.dragStarted === 1 && now.drops === 1 && now.dropped === "the card",
+      `dragstart ${String(now.dragStarted)}, drops ${String(now.drops)}, dropped "${String(now.dropped)}"`);
+    await oracle("an in-page drag", { b: userText, s: "two" });
   }
 
   // ── a viewer that dies without a word ──

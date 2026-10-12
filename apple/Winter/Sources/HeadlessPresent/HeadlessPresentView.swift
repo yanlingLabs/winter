@@ -33,6 +33,8 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
     /// The window's occlusion observer: a window nobody can see draws nothing (its layer would hold the renderer's
     /// queue waiting for a drawable).
     private var occlusionObserver: NSObjectProtocol?
+    /// The label and value VoiceOver was last told of.
+    private var lastSpoken: [String] = []
 
     // The key-down state machine (cefclient's `HandleKeyEventBefore/AfterTextInputClient`).
     private var handlingKeyDown = false
@@ -61,11 +63,12 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
 
     // MARK: - The presentation
 
-    /// Show `presentation` (nil: none). The previous one's renderer lets this view's layer go.
+    /// Show `presentation` (nil: none). The previous one's renderer lets this view's layer go — only this view's: a
+    /// newer view showing it keeps drawing.
     func attach(_ presentation: HeadlessPresentation?) {
         guard presentation !== self.presentation else { return }
         if let old = self.presentation {
-            old.renderer.attach(nil)
+            old.renderer.detach(metalLayer)
             if old.view === self { old.view = nil }
             resetInputState()
         }
@@ -81,7 +84,7 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
     /// The view is going away (SwiftUI dismantled it): the presentation keeps running without it.
     func detach() { attach(nil) }
 
-    /// The presentation's state changed (welcomed, control, ended).
+    /// The presentation's state changed (welcomed, control, ended, the page's title).
     func presentationChanged() {
         if presentation?.acceptsInput != true {
             if hasMarked { inputContext?.discardMarkedText() }
@@ -90,7 +93,12 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
         }
         updateViewport()
         window?.invalidateCursorRects(for: self)
-        NSAccessibility.post(element: self, notification: .valueChanged)
+        // VoiceOver hears a change only when there is one (SwiftUI updates this view far more often).
+        let spoken = [accessibilityLabel() ?? "", accessibilityValue() as? String ?? ""]
+        if spoken != lastSpoken {
+            lastSpoken = spoken
+            NSAccessibility.post(element: self, notification: .valueChanged)
+        }
     }
 
     /// The page's cursor changed.
@@ -151,7 +159,8 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
     }
 
     private func updateViewport() {
-        guard let presentation else { return }
+        // Only the view showing it sizes its pictures (an older view still being torn down never does).
+        guard let presentation, presentation.view === self else { return }
         let backing = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         metalLayer.contentsScale = backing
         let fit = pageRect
@@ -290,6 +299,8 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
                                                        precise: event.hasPreciseScrollingDeltas, fitScale: Double(fitScale))
         guard delta.dx != 0 || delta.dy != 0 else { return }
         var m = message(WinterPresentInputWheel, event, at: css, button: .none)
+        // A trackpad's deltas are pixels to scroll by as they are (no smooth-scroll animation on top).
+        if event.hasPreciseScrollingDeltas { m.modifiers |= HeadlessPresentKeys.precisionScrollingDelta }
         m.dx = delta.dx
         m.dy = delta.dy
         presentation.send(m)
@@ -300,7 +311,8 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
     private func keyMessage(_ kind: Int, _ event: NSEvent) -> WinterPresentInputMsg {
         var m = WinterPresentInputMsg()
         m.kind = UInt32(kind)
-        m.modifiers = HeadlessPresentKeys.modifiers(event.modifierFlags, keyCode: event.keyCode)
+        m.modifiers = HeadlessPresentKeys.modifiers(event.modifierFlags, keyCode: event.keyCode,
+                                                    repeating: event.type == .keyDown && event.isARepeat)
         m.nativeKeyCode = Int32(event.keyCode)
         if event.type == .flagsChanged {
             m.windowsKeyCode = HeadlessPresentKeys.windowsKeyCode(keyCode: event.keyCode)
@@ -457,8 +469,14 @@ final class HeadlessPresentView: NSView, NSTextInputClient {
         if handlingKeyDown { unmarkCalled = true } else { presentation?.finishComposing() }
     }
 
+    /// In the same coordinates as `markedRange()` (the field's, once the producer said where the composition is):
+    /// the input method asks `firstRect` for ranges it read from either.
     func selectedRange() -> NSRange {
-        hasMarked && markedSelection.location != NSNotFound ? markedSelection : NSRange(location: NSNotFound, length: 0)
+        guard hasMarked, markedSelection.location != NSNotFound else { return NSRange(location: NSNotFound, length: 0) }
+        if let range = presentation?.imeRange, range.location != NSNotFound {
+            return NSRange(location: range.location + markedSelection.location, length: markedSelection.length)
+        }
+        return markedSelection
     }
 
     func markedRange() -> NSRange {

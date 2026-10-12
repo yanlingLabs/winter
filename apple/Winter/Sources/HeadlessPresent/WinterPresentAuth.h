@@ -24,6 +24,11 @@ BOOL WinterPresentSamePeer(audit_token_t a, audit_token_t b);
 /// `msgh_size`, rounded up). NO when the trailer is missing or short.
 BOOL WinterPresentAuditToken(const mach_msg_header_t *header, audit_token_t *token);
 
+/// A dead-name notification the KERNEL sent (its audit token names pid 0, which no process has, and the body is whole)
+/// — never one a peer with a send right to our port forged. On YES, `*name` is the dead name: the notification gave us
+/// a user reference on it, which the caller must deallocate whether or not it still cares about that name.
+BOOL WinterPresentKernelDeadName(const mach_msg_header_t *header, mach_port_name_t *name);
+
 /// A fresh random presentation service name: `com.winter.headless.present.<pid>.<32 hex>`.
 NSString *WinterPresentServiceName(void);
 

@@ -9,10 +9,12 @@ import Foundation
 //     uploadDir}` — connect to the presentation Winter Headless checked in under `service` (naming `nonce`,
 //     holding the helper to `producerRequirement`) and show it in the session's panel;
 //   * `headless.hide {sessionId, tabId, reason}` — stop showing it;
-//   * `headless.tabs {sessionId, tabs}` — the session's headless tabs changed.
+//   * `headless.tabs {sessionId, tabs}` — the session's headless tabs changed;
+//   * `headless.update {sessionId, tabId, purpose}` — why a shown tab is shown changed (the person took over a
+//     watched tab and the agent now waits for them; the agent stopped waiting and the tab stays theirs).
 // App → daemon: `browserLink.headless {linkId, sessionId, tabId?, action}` (`BrowserLinkClient.headless`).
 //
-// The three ops are read HERE rather than by `BrowserLinkCommand.parse`: Winter Headless compiles that parser
+// The four ops are read HERE rather than by `BrowserLinkCommand.parse`: Winter Headless compiles that parser
 // into its own target and switches over every case of `BrowserLinkCommand.Op`, so that enum stays closed. A
 // `headless.*` op is routed to this parser by `BrowserLinkClient` before the ordinary one is asked; it is just as
 // strict — a command that does not read is answered with a failure, never executed.
@@ -85,6 +87,7 @@ public struct BrowserLinkHeadlessCommand: Sendable, Equatable {
         case show(Show)
         case hide(sessionId: String, tabId: String, reason: String)
         case tabs(sessionId: String, tabs: [BrowserLinkHeadlessTab])
+        case update(sessionId: String, tabId: String, purpose: BrowserLinkHeadlessPurpose)
     }
 
     /// `headless.show`'s params, checked.
@@ -136,7 +139,7 @@ public struct BrowserLinkHeadlessCommand: Sendable, Equatable {
     /// Is `op` one of the ops this parser reads (and `BrowserLinkCommand.parse` does not)?
     public static func handles(op: String) -> Bool {
         op == BrowserLinkProtocol.Op.headlessShow || op == BrowserLinkProtocol.Op.headlessHide
-            || op == BrowserLinkProtocol.Op.headlessTabs
+            || op == BrowserLinkProtocol.Op.headlessTabs || op == BrowserLinkProtocol.Op.headlessUpdate
     }
 
     /// Read a notification's params. Never traps; every shape it does not understand is `Unreadable`.
@@ -203,6 +206,14 @@ public struct BrowserLinkHeadlessCommand: Sendable, Equatable {
                 return unreadable("headless.tabs: every tab has tabId, url, title, presented and control")
             }
             return done(.tabs(sessionId: sessionId, tabs: tabs))
+        case BrowserLinkProtocol.Op.headlessUpdate:
+            guard let sessionId = string("sessionId"), let tabId = string("tabId") else {
+                return unreadable("headless.update needs sessionId and tabId")
+            }
+            guard let purposeText = string("purpose"), let purpose = BrowserLinkHeadlessPurpose(rawValue: purposeText) else {
+                return unreadable("headless.update: purpose is handoff, watch or popup")
+            }
+            return done(.update(sessionId: sessionId, tabId: tabId, purpose: purpose))
         default:
             return unreadable("unknown op \(op)")
         }

@@ -47,9 +47,28 @@ enum HeadlessPresentUploads {
     /// `/var`) and still agree, while a path that leads outside the folder is refused before anything is written.
     static func isInside(_ uploadDir: String, root: String) -> Bool {
         guard uploadDir.hasPrefix("/"), root.hasPrefix("/") else { return false }
-        let dir = URL(fileURLWithPath: uploadDir).standardizedFileURL.resolvingSymlinksInPath().path
-        let base = URL(fileURLWithPath: root).standardizedFileURL.resolvingSymlinksInPath().path
+        let dir = resolved(uploadDir)
+        let base = resolved(root)
         return dir == base || dir.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+    }
+
+    /// `path` standardised, its links resolved as far as it exists: the longest existing ancestor through `realpath`,
+    /// the rest (not made yet — the uploads folder before its first file) appended as written. Foundation's
+    /// `resolvingSymlinksInPath` leaves a path that does not exist unresolved, links in its parents included.
+    static func resolved(_ path: String) -> String {
+        var url = URL(fileURLWithPath: path).standardizedFileURL
+        var rest: [String] = []
+        while true {
+            if let real = realpath(url.path, nil) {
+                defer { free(real) }
+                var out = String(cString: real)
+                for component in rest.reversed() { out = (out as NSString).appendingPathComponent(component) }
+                return out
+            }
+            if url.path == "/" { return URL(fileURLWithPath: path).standardizedFileURL.path }
+            rest.append(url.lastPathComponent)
+            url.deleteLastPathComponent()
+        }
     }
 
     // MARK: - Names

@@ -732,7 +732,8 @@ export class HeadlessPool implements CdpTransport {
     const t = this.live(tabKey);
     if (t.sessionId !== opts.sessionId) throw new TransportError("not_allowed", "that headless tab belongs to another session");
     if (t.presentation !== undefined && t.presentation.started && t.presentation.control) {
-      t.presentation.purpose = "handoff";
+      // The person already holds it (they took over a watched tab): the same view, now the agent's hand-off.
+      this.setPurpose(t, "handoff");
       t.presentation.handoffPending = true;
       return;
     }
@@ -753,8 +754,20 @@ export class HeadlessPool implements CdpTransport {
   /** The hand-off's wait ended without the person's Done (Stop waiting, no answer): the tab stays with them — still
    *  shown, still theirs — until they hand it back or close it in the panel. */
   handoffOver(tabKey: string): void {
-    const p = this.tabs.get(tabKey)?.presentation;
-    if (p !== undefined) p.handoffPending = false;
+    const t = this.tabs.get(tabKey);
+    const p = t?.presentation;
+    if (t === undefined || p === undefined) return;
+    p.handoffPending = false;
+    // Nobody waits any more: the panel offers Hand back instead of Done / Stop waiting.
+    if (p.purpose === "handoff") this.setPurpose(t, "watch");
+  }
+
+  /** Why `t`'s view is shown changed: the app hears it (its chrome's buttons follow) once the view is up. */
+  private setPurpose(t: PoolTab, purpose: "handoff" | "watch"): void {
+    const p = t.presentation;
+    if (p === undefined || p.purpose === purpose) return;
+    p.purpose = purpose;
+    if (p.started) this.deps.viewer?.()?.update({ sessionId: t.sessionId, tabId: t.tabKey, purpose });
   }
 
   /** The panel's Done / Stop waiting for a hand-off (the engine's `waitForUser` listens). */

@@ -85,6 +85,16 @@ final class HeadlessPresentRenderer: @unchecked Sendable {
         }
     }
 
+    /// `layer`'s view lets go — only if it is still the one drawn into (a newer view may have attached since; its
+    /// layer is never taken away by an older view's teardown).
+    func detach(_ layer: CAMetalLayer) {
+        queue.async { [weak self] in
+            guard let self, self.layer === layer else { return }
+            self.layer = nil
+            self.appliedDrawableSize = .zero
+        }
+    }
+
     /// The view's size, the page's place in it and the letterbox colour changed: redraw from the copy.
     func setViewport(_ new: Viewport) {
         let changed: Bool = lock.withLock {

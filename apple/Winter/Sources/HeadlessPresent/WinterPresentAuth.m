@@ -1,5 +1,7 @@
 #import "WinterPresentAuth.h"
 
+#include <mach/notify.h>
+
 #import <Security/Security.h>
 #include <unistd.h>
 
@@ -45,6 +47,15 @@ BOOL WinterPresentAuditToken(const mach_msg_header_t *header, audit_token_t *tok
   }
   *token = trailer->msgh_audit;
   return YES;
+}
+
+BOOL WinterPresentKernelDeadName(const mach_msg_header_t *header, mach_port_name_t *name) {
+  if (header->msgh_id != MACH_NOTIFY_DEAD_NAME) return NO;
+  if (header->msgh_size < sizeof(mach_dead_name_notification_t) - sizeof(mach_msg_format_0_trailer_t)) return NO;
+  audit_token_t token;
+  if (!WinterPresentAuditToken(header, &token) || audit_token_to_pid(token) != 0) return NO;
+  *name = ((const mach_dead_name_notification_t *)header)->not_port;
+  return *name != MACH_PORT_NULL;
 }
 
 NSString *WinterPresentServiceName(void) {

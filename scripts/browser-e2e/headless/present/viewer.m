@@ -21,7 +21,8 @@
 //   {"cmd":"edit","command":N,"text":".."}  an edit command (WinterPresentEdit*; a paste carries its text)
 //   {"cmd":"answerDialogs","accept":true,"text":".."}  answer every page dialog from now on (shown as "dialog" events)
 //   {"cmd":"files","paths":[..]}   answer the next file chooser (or the one waiting) with these paths ([] cancels)
-// Events it prints besides: control, imeBounds, dialog, dialogDone, fileChooser.
+//   {"cmd":"drag","from":[x,y],"to":[x,y],"steps":N}  a person's drag: press, move with the button held, release
+// Events it prints besides: control, page, imeBounds, dialog (with its origin), dialogDone, fileChooser.
 //   {"cmd":"bye"}                 stop presenting and exit; {"cmd":"die"}: exit at once, no goodbye
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -190,10 +191,14 @@ static void Emit(NSDictionary *object) {
 
 - (void)presentConsumer:(WinterPresentConsumer *)consumer dialog:(WinterPresentDialog *)dialog {
   Emit(@{@"event" : @"dialog", @"dialogId" : @(dialog.dialogId), @"type" : @(dialog.type), @"message" : dialog.message,
-         @"defaultText" : dialog.defaultText});
+         @"defaultText" : dialog.defaultText, @"origin" : dialog.origin});
   if (_dialogAnswer != nil) {
     [consumer replyToDialog:dialog.dialogId accept:[_dialogAnswer[@"accept"] boolValue] text:_dialogAnswer[@"text"]];
   }
+}
+
+- (void)presentConsumer:(WinterPresentConsumer *)consumer pageURL:(NSString *)url title:(NSString *)title {
+  Emit(@{@"event" : @"page", @"url" : url, @"title" : title});
 }
 
 - (void)presentConsumer:(WinterPresentConsumer *)consumer dialogDone:(uint32_t)dialogId {
@@ -291,6 +296,37 @@ static void Emit(NSDictionary *object) {
     WinterPresentInputMsg f = [self input:WinterPresentInputFocus];
     f.x = 1;
     [self.consumer sendInput:f];
+  } else if ([cmd isEqualToString:@"drag"]) {
+    // A person's drag: press at `from`, move in `steps` steps (the left button held) to `to`, release there.
+    const int fx = [c[@"from"][0] intValue], fy = [c[@"from"][1] intValue], tx = [c[@"to"][0] intValue], ty = [c[@"to"][1] intValue];
+    const int steps = MAX(2, [c[@"steps"] intValue]);
+    const unsigned leftHeld = 1u << 4;  // EVENTFLAG_LEFT_MOUSE_BUTTON
+    WinterPresentInputMsg move = [self input:WinterPresentInputMouseMove];
+    move.x = fx;
+    move.y = fy;
+    [self.consumer sendInput:move];
+    WinterPresentInputMsg down = move;
+    down.kind = WinterPresentInputMouseDown;
+    down.clickCount = 1;
+    down.modifiers = leftHeld;
+    [self.consumer sendInput:down];
+    WinterPresentConsumer *consumer = self.consumer;
+    for (int i = 1; i <= steps; i++) {
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)i * 40 * NSEC_PER_MSEC), _work, ^{
+        WinterPresentInputMsg m = [self input:WinterPresentInputMouseMove];
+        m.x = fx + (tx - fx) * i / steps;
+        m.y = fy + (ty - fy) * i / steps;
+        m.modifiers = leftHeld;
+        [consumer sendInput:m];
+      });
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(steps + 3) * 40 * NSEC_PER_MSEC), _work, ^{
+      WinterPresentInputMsg up = [self input:WinterPresentInputMouseUp];
+      up.x = tx;
+      up.y = ty;
+      up.clickCount = 1;
+      [consumer sendInput:up];
+    });
   } else if ([cmd isEqualToString:@"ime"]) {
     NSString *kind = c[@"kind"], *text = c[@"text"] ?: @"";
     if ([kind isEqualToString:@"set"]) [self.consumer setComposition:text selection:NSMakeRange(text.length, 0) replacement:NSMakeRange(NSNotFound, 0)];
