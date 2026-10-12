@@ -39,15 +39,17 @@ export function homeFencedDirs(home: string): string[] {
 
 /**
  * The fenced home subtrees the model is POINTED AT to read and execute — plugin skill content, and the
- * skill-plugin views under `cache` (whole-branch review N1). The sandbox and the write-tool fence treat
+ * skill-plugin views under `cache` (whole-branch review N1) — or may simply read (ComputerV2's own records under
+ * `computer-use`: reads are unrestricted, only a forged write matters). The sandbox and the write-tool fence treat
  * every fenced path alike (they only ever fence writes); the escape floor, which matches a command's
  * text, refuses these only in a write-shaped position, and every other fenced path on any mention.
  *
  * PATH PREFIXES relative to `<home>`, one or more segments (WS-21 §7.1: `sdk/plugins` is where the
  * installed plugins live now); a fenced path is write-only when its relative path equals a prefix or
- * lies under one (`isHomeWriteOnly`).
+ * lies under one (`isHomeWriteOnly`). The escape floor matches one only as a whole path segment
+ * (`<home>/computer-use-notes.txt` is not `<home>/computer-use`), a glob after it still counting.
  */
-export const HOME_WRITE_ONLY_FENCED: readonly string[] = ["cache", "plugins", "sdk/plugins"];
+export const HOME_WRITE_ONLY_FENCED: readonly string[] = ["cache", "plugins", "sdk/plugins", "computer-use"];
 
 /** Whether a fenced path, relative to `<home>`, is one the escape floor refuses in a write-shaped
  *  position only. */
