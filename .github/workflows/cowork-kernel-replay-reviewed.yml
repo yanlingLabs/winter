@@ -1,0 +1,49 @@
+name: Reviewed Cowork kernel recovery fixture
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/cowork-kernel-replay-reviewed.yml'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: cowork-reviewed-kernel-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  reviewed-disposable-files:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'cowork/journal-only-recovery'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Fixed reviewed build, never the latest artifact from an arbitrary run.
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-replay-linux-review
+          run-id: 38267412916
+          github-token: ${{ github.token }}
+          path: out/kernel-replay-approved
+      - name: Require existing runner facilities without changing the host
+        run: |
+          test -c /dev/loop-control
+          command -v debugfs
+          command -v mke2fs
+          command -v dumpe2fs
+          command -v blkid
+      - name: Run only the hash-admitted fixture on new disposable files
+        run: |
+          sudo -n /usr/bin/python3 -I -S -B -c '
+          import hashlib,os,stat,sys
+          source,digest,*arguments=sys.argv[1:]
+          fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+          try:
+              identity=os.fstat(fd)
+              if not stat.S_ISREG(identity.st_mode) or identity.st_nlink!=1 or identity.st_size>4194304:raise SystemExit("parent identity refused")
+              data=os.pread(fd,4194305,0)
+          finally:os.close(fd)
+          if len(data)!=identity.st_size or hashlib.sha256(data).hexdigest()!=digest:raise SystemExit("unreviewed parent refused")
+          sys.argv=[source,*arguments]
+          exec(compile(data,"<reviewed-no-effect-parent>","exec"),{"__name__":"__main__","__file__":source})
+          ' spikes/cowork-filesystem-bootstrap/stage_kernel_replay.py 452218acb0e3cb9c1e9ac6c911ba1b3544a1e8e07d08e773aa77c7739e3ddd3b --source spikes/cowork-filesystem-bootstrap --artifacts out/kernel-replay-approved --receipt out/kernel-replay-approved/build.json --approved-receipt-sha256 9e0e0f1540ccd9e024d62e89192297a3aaa680dd870d8c77381a6b4be5d20188
