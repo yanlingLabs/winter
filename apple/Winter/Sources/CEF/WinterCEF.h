@@ -31,10 +31,15 @@ extern "C" {
 
 /// `CefInitialize` with `external_message_pump = true`, plus the pump this file owns.
 ///
-/// **It `dlopen`s the framework itself**, from `Contents/Frameworks` via
-/// `CefScopedLibraryLoader::LoadInMain()` — the framework is NEVER linked directly, which
-/// `include/wrapper/cef_library_loader.h` documents as a requirement of the macOS sandbox
-/// implementation rather than a style choice. The loader used to be exported here as
+/// **It `dlopen`s the framework itself, BY PATH** — `frameworkDir` is the `Chromium Embedded
+/// Framework.framework` directory, which lives in the nested Winter Headless helper
+/// (`Contents/Helpers/Winter Headless.app/Contents/Frameworks`, the user's ruling: one Chromium), not
+/// where `CefScopedLibraryLoader::LoadInMain()` would look (`Contents/Frameworks`) — and it is handed
+/// to CEF as `framework_dir_path`, beside `subprocessPath` (the base "Winter Helper" next to it). The
+/// framework is NEVER linked directly, which `include/wrapper/cef_library_loader.h` documents as a
+/// requirement of the macOS sandbox implementation rather than a style choice. Every Chromium
+/// subprocess's sandbox reads only inside Winter.app's bundle, which holds the helper, so they may
+/// load it from there. The loader used to be exported here as
 /// `WinterCEFLoadLibrary`, with a caller obligation ("nothing else in this header may be called
 /// before this returns YES") that nobody had and nobody needed: every other entry point guards on
 /// initialisation, and this one loads the library on its own. It is `static` in the implementation
@@ -48,6 +53,7 @@ extern "C" {
 BOOL WinterCEFInitialize(int argc,
                         char **argv,
                         const char *rootCachePath,
+                        const char *frameworkDir,
                         const char *subprocessPath);
 
 /// YES once `CefInitialize` has succeeded. `CefShutdown` is terminal for a process — CEF cannot be

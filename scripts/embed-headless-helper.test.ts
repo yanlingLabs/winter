@@ -5,7 +5,7 @@
 // the real artifact).
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkSignedHeadless, HEADLESS, HEADLESS_EMBED_RELATIVE, HEADLESS_NESTED_HELPERS, headlessBuildArgs, headlessRequirement, headlessSignArgs, signedFacts } from "./headless-helper-lib";
@@ -121,6 +121,15 @@ describe("embed-headless-helper.sh (the 'Embed Winter Headless' postCompileScrip
       expect(r.stderr).toContain(message);
       expect(existsSync(join(dir, "Winter.app", HEADLESS_EMBED_RELATIVE))).toBe(false);
     }
+  });
+
+  test("an older build's Chromium in Winter.app's own Contents/Frameworks is removed (one copy, in the helper)", () => {
+    const dir = builtProducts();
+    const old = join(dir, "Winter.app", "Contents", "Frameworks");
+    for (const name of ["Chromium Embedded Framework.framework", ...CHROMIUM_HELPERS.map((h) => `${h}.app`)]) mkdirSync(join(old, name, "x"), { recursive: true });
+    mkdirSync(join(old, "Sparkle.framework"), { recursive: true });
+    expect(embed(dir).status).toBe(0);
+    expect(readdirSync(old)).toEqual(["Sparkle.framework"]);
   });
 
   test("a re-embed replaces the old copy rather than merging into it", () => {

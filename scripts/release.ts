@@ -802,20 +802,25 @@ if (!officeSandboxProfileEmbedded.equals(officeSandboxProfileSource)) {
 console.log(`office-helper.sb present at ${officeSandboxProfile}, unmodified since signing ` +
   `(codesign --verify --deep --strict above), and byte-identical to the repository source.`);
 
-// --- CEF (panel-cef Task 5) -------------------------------------------------
+// --- CEF (panel-cef Task 5; moved into Winter Headless, the user's ruling) ---------------------
+// Winter's ONE Chromium lives inside the nested Winter Headless helper — Winter.app/Contents/Helpers/Winter Headless.app/
+// Contents/Frameworks — and Winter.app's own CEF runs from there too (every Chromium subprocess's sandbox reads only
+// inside its browser's main bundle: the helper holds them for its own browser, Winter.app holds the helper). Winter.app's
+// own Contents/Frameworks must hold NO second copy (checked below).
 // The framework, its five dlopen'd dylibs, and the five helper bundles. `--deep --strict` above
 // already proves the seals nest correctly; this roster proves the two things it does NOT check
 // and that notarization rejects outright — a Developer ID TEAM identity and a secure timestamp
 // on every one of them. Both matter beyond notarization here: the Team ID is exactly what lets
 // the hardened runtime's library validation permit the app and the helpers to dlopen this
-// framework at all (see project.yml's "Embed CEF framework"), and libcef_sandbox.dylib is
+// framework at all (see project.yml's "Embed Winter's Chromium"), and libcef_sandbox.dylib is
 // dlopen'd separately by every helper's CefScopedSandboxContext, so it needs its own identity
 // rather than inheriting the framework's seal.
 //
 // `existsSync`-tolerant loops are deliberately NOT used here, unlike the Sparkle nested helpers
 // above (whose set legitimately varies by Sparkle version): every path below is produced by this
 // repo's own build, so a missing one is a broken build, and assertSigned fails closed on it.
-const cefFramework = join(app, "Contents", "Frameworks", "Chromium Embedded Framework.framework");
+const chromiumFrameworks = join(app, HEADLESS_EMBED_RELATIVE, "Contents", "Frameworks");
+const cefFramework = join(chromiumFrameworks, "Chromium Embedded Framework.framework");
 assertSigned(cefFramework, "Chromium Embedded Framework.framework");
 for (const lib of ["libEGL.dylib", "libGLESv2.dylib", "libcef_sandbox.dylib", "libvk_swiftshader.dylib", "libvulkan.dylib"]) {
   assertSigned(join(cefFramework, "Libraries", lib), `CEF framework library (${lib})`);
@@ -828,7 +833,13 @@ const CEF_HELPERS = [
   "Winter Helper (Renderer)",
 ];
 for (const name of CEF_HELPERS) {
-  assertSigned(join(app, "Contents", "Frameworks", `${name}.app`), `CEF helper (${name})`);
+  assertSigned(join(chromiumFrameworks, `${name}.app`), `CEF helper (${name})`);
+}
+{
+  const second = ["Chromium Embedded Framework.framework", ...CEF_HELPERS.map((n) => `${n}.app`)]
+    .filter((name) => existsSync(join(app, "Contents", "Frameworks", name)));
+  if (second.length > 0) fail(`Winter.app's own Contents/Frameworks still holds a second Chromium (${second.join(", ")}) — the one copy lives in ${HEADLESS_EMBED_RELATIVE}`);
+  console.log(`Chromium: one copy, in ${HEADLESS_EMBED_RELATIVE}/Contents/Frameworks (Winter.app's own Frameworks hold none).`);
 }
 // --- Winter Computer Use (ComputerV2) ---------------------------------------
 // The helper app that holds its OWN Accessibility and Screen Recording grants, embedded at
@@ -990,7 +1001,7 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // `"termination": {"namespace":"CODESIGNING","indicator":"Invalid Page"}`. Chrome 151 ships
   // `allow-jit` on both of these helpers and on neither of the other three; so does Winter.
   ...CEF_HELPERS.map((name) => ({
-    path: join(app, "Contents", "Frameworks", `${name}.app`),
+    path: join(chromiumFrameworks, `${name}.app`),
     label: `CEF helper (${name})`,
     expect: CEF_JIT_HELPERS.includes(name) ? [JIT] : [],
   })),

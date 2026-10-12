@@ -14,7 +14,9 @@
 #   0. Refuse a built helper with the wrong bundle id for this configuration (Release: com.winter.headless; Debug: the
 #      Debug build's own), one that is not LSBackgroundOnly, or one without its Chromium (the framework and the five
 #      helper bundles in its Contents/Frameworks).
-#   1. ditto the helper into Contents/Helpers.
+#   1. Remove the OLD layout's copy from Winter.app's own Contents/Frameworks (an incremental build of a tree made
+#      before the move still holds one; a second Chromium must never ship), then ditto the helper into
+#      Contents/Helpers.
 #   2. Re-sign the helper BUNDLE (its framework and helpers are already signed, inside-out, by its own build — never a
 #      --deep re-sign) with the app's identity, the hardened runtime, NO entitlements, its stable identifier and a
 #      STATED designated requirement (identifier + Winter's team under Apple's anchor) — the requirement the daemon
@@ -72,6 +74,11 @@ if [ -n "${MISSING}" ]; then
   echo "error: the built helper does not carry Winter's Chromium in its Contents/Frameworks — missing:${MISSING}" >&2
   exit 1
 fi
+
+# The old layout's copy in Winter.app's own Contents/Frameworks goes (an incremental build of a tree made before the
+# move still holds one): one Chromium, in the helper.
+rm -rf "${APP_CONTENTS}/Frameworks/Chromium Embedded Framework.framework"
+for H in "${HELPERS[@]}"; do rm -rf "${APP_CONTENTS}/Frameworks/${H}.app"; done
 
 mkdir -p "${DEST_DIR}"
 # The other configuration's helper never rides along (a tree that built both).

@@ -3712,36 +3712,39 @@ static void (^g_pre_shutdown_hook)(void) = nil;
 // caller obligation nobody had — "nothing else in this header may be called before this returns
 // YES" — which is discharged here instead: `WinterCEFInitialize` below is its only caller, and
 // every other entry point guards on `g_initialized`.
-static BOOL WinterCEFLoadLibrary(void) {
+static BOOL WinterCEFLoadLibrary(const char *frameworkDir) {
   if (g_library_loaded) {
     return YES;
   }
-  // `LoadInMain` — the MAIN-process arm of the loader. Task 5's signing A/B exercised only
-  // `LoadInHelper`; same team-ID logic and the same symlink, but this call had never run anywhere
-  // before Task 6a. It computes `<executable dir>/../Frameworks/Chromium Embedded Framework
-  // .framework/Chromium Embedded Framework` (`cef_scoped_library_loader_mac.mm`, kPathFromMainExe)
-  // — which, since Task 5 restructured the embedded copy into the versioned macOS layout Xcode's
-  // product validator demands, resolves through the framework's top-level symlink to
-  // `Versions/A/`. dlopen follows symlinks, so the path is unchanged from CEF's flat original.
+  // BY PATH. Winter's one Chromium lives in the nested Winter Headless helper
+  // (`Contents/Helpers/Winter Headless.app/Contents/Frameworks`, the user's ruling), not where
+  // `LoadInMain` looks (`<executable dir>/../Frameworks`, `cef_scoped_library_loader_mac.mm`'s
+  // kPathFromMainExe) — the same call `LoadInMain` ends in, `cef_load_library`, with the path given.
+  // The framework is in the versioned layout; its top-level symlink resolves to `Versions/A/`, and
+  // dlopen follows symlinks. Library validation holds: it is signed by Winter's team, like the app.
   //
-  // The handle is deliberately never destroyed — the framework stays loaded for the life of the
-  // process. It was `static` until the whole-branch review (F9), which did nothing: the value is
-  // overwritten on every call and the function early-returns on `g_library_loaded` anyway, so the
-  // storage class only read as though it were load-bearing.
-  void *loader = cef_scoped_library_loader_create(0 /* 0 = main process, not helper */);
-  if (loader == nullptr) {
-    g_last_error = "could not load the Chromium Embedded Framework (LoadInMain failed)";
+  // The library is deliberately never unloaded — the framework stays loaded for the life of the
+  // process.
+  if (frameworkDir == nullptr || *frameworkDir == '\0') {
+    g_last_error = "no Chromium Embedded Framework path was given";
+    Log("FAILED: %s", g_last_error.c_str());
+    return NO;
+  }
+  const std::string library = std::string(frameworkDir) + "/Chromium Embedded Framework";
+  if (!cef_load_library(library.c_str())) {
+    g_last_error = "could not load the Chromium Embedded Framework from Winter Headless's bundle";
     Log("FAILED: %s", g_last_error.c_str());
     return NO;
   }
   g_library_loaded = true;
-  Log("framework loaded (LoadInMain)");
+  Log("framework loaded (by path, from the nested helper)");
   return YES;
 }
 
 BOOL WinterCEFInitialize(int argc,
                         char **argv,
                         const char *rootCachePath,
+                        const char *frameworkDir,
                         const char *subprocessPath) {
   if (g_initialized) {
     return YES;
@@ -3752,7 +3755,7 @@ BOOL WinterCEFInitialize(int argc,
     Log("REFUSED: %s", g_last_error.c_str());
     return NO;
   }
-  if (!WinterCEFLoadLibrary()) {
+  if (!WinterCEFLoadLibrary(frameworkDir)) {
     return NO;
   }
 
@@ -3761,6 +3764,8 @@ BOOL WinterCEFInitialize(int argc,
   CefMainArgs main_args(argc, argv);
 
   CefSettings settings;
+  // Where the framework is (its resources, locales and ICU data are read from it): the nested helper's.
+  CefString(&settings.framework_dir_path).FromString(frameworkDir);
   settings.external_message_pump = true;  // this app's run loop is SwiftUI's, and already running
   settings.multi_threaded_message_loop = false;  // unsupported on macOS anyway
   settings.no_sandbox = false;                   // the helpers' CEF_USE_SANDBOX half is in project.yml

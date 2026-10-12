@@ -276,8 +276,10 @@ export function dmgStagePlan(appPath: string): DmgStageOp[] {
 // why. Anchored on the version segment rather than skipping it, so the top-level `Resources`
 // SYMLINK (…framework/Resources -> Versions/Current/Resources) is deliberately not matched: the
 // scan walker never follows symlinks, so a locale pack is reachable by exactly one path.
+// Winter's one Chromium lives inside the nested Winter Headless helper (the user's ruling), so that is where its
+// locale packs are; Winter.app's own Contents/Frameworks holds no copy.
 export const NAME_SCAN_EXCLUSIONS: readonly RegExp[] = [
-  /^Contents\/Frameworks\/Chromium Embedded Framework\.framework\/Versions\/[^/]+\/Resources\/[^/]+\.lproj$/,
+  /^Contents\/Helpers\/Winter Headless\.app\/Contents\/Frameworks\/Chromium Embedded Framework\.framework\/Versions\/[^/]+\/Resources\/[^/]+\.lproj$/,
   // editor-plumbing Task 1 — a DIFFERENT rationale from the rule above, deliberately not
   // dressed up as the same one. The CEF rule is REACTIVE: a real scan found one genuine
   // collision (a Swahili word) and was narrowed to exactly that class. This rule is
