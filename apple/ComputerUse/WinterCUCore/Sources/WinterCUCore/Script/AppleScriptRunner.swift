@@ -19,15 +19,22 @@ enum CUAppleScriptRunner {
         let alsoRefused: [String: String]
         var original: OSASendUPP?
         var originalRefCon: UnsafeMutableRawPointer?
+        /// Asked before EVERY event the script sends (round 17, the review of round 16's H1: the user's work was checked
+        /// only at the run's start): a reason to stop — the user started working in the bound app — or nil.
+        let stop: (() -> String?)?
         private let lock = NSLock()
         private var _refused: String?
+        private var _stopped: String?
         var refused: String? { lock.withLock { _refused } }
+        var stopped: String? { lock.withLock { _stopped } }
         func refuse(_ why: String) { lock.withLock { if _refused == nil { _refused = why } } }
-        init(boundPid: pid_t, boundName: String, deadline: Date, alsoRefused: [String: String] = [:]) {
+        func stopped(_ why: String) { lock.withLock { if _stopped == nil { _stopped = why } } }
+        init(boundPid: pid_t, boundName: String, deadline: Date, alsoRefused: [String: String] = [:], stop: (() -> String?)? = nil) {
             self.boundPid = boundPid
             self.boundName = boundName
             self.deadline = deadline
             self.alsoRefused = alsoRefused
+            self.stop = stop
         }
     }
 
@@ -80,6 +87,13 @@ enum CUAppleScriptRunner {
             if case .refuse(let why) = verdict { state.refuse(why) }
             return OSErr(errAEEventNotPermitted)
         }
+        // The user started working in the bound app while the script ran: no further event of it is sent — sticky for the
+        // rest of the run once one was refused (the review of round 17, M1).
+        if state.stopped != nil { return OSErr(errAEEventNotPermitted) }
+        if let why = state.stop?() {
+            state.stopped(why)
+            return OSErr(errAEEventNotPermitted)
+        }
         // Never wait past the run's own deadline.
         let left = Int32(max(1, state.deadline.timeIntervalSinceNow * 60))
         let ticks = timeout < 0 || timeout > left ? left : timeout
@@ -92,13 +106,13 @@ enum CUAppleScriptRunner {
 
     /// Runs `source` against `bound` (pid `boundPid`); the display value of its result (nil for none).
     static func run(_ source: String, bound: CUAppleScriptPolicy.BoundApp, boundPid: pid_t, timeoutMs: Int,
-                    alsoRefused: [String: String] = [:]) throws -> String? {
+                    alsoRefused: [String: String] = [:], stop: (() -> String?)? = nil) throws -> String? {
         final class Box: @unchecked Sendable { var result: Result<String?, Error> = .success(nil) }
         let box = Box()
         let done = DispatchSemaphore(value: 0)
         let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000)
         let thread = Thread {
-            box.result = Result { try execute(source, bound: bound, boundPid: boundPid, deadline: deadline, alsoRefused: alsoRefused) }
+            box.result = Result { try execute(source, bound: bound, boundPid: boundPid, deadline: deadline, alsoRefused: alsoRefused, stop: stop) }
             done.signal()
         }
         thread.stackSize = 8 << 20
@@ -112,11 +126,11 @@ enum CUAppleScriptRunner {
     }
 
     private static func execute(_ source: String, bound: CUAppleScriptPolicy.BoundApp, boundPid: pid_t, deadline: Date,
-                                alsoRefused: [String: String]) throws -> String? {
+                                alsoRefused: [String: String], stop: (() -> String?)?) throws -> String? {
         guard let language = OSALanguage(forName: "AppleScript") else { throw CUError.unsupported("AppleScript is not available on this Mac") }
         let instance = OSALanguageInstance(language: language)
         let component = instance.componentInstance
-        let state = HookState(boundPid: boundPid, boundName: bound.name, deadline: deadline, alsoRefused: alsoRefused)
+        let state = HookState(boundPid: boundPid, boundName: bound.name, deadline: deadline, alsoRefused: alsoRefused, stop: stop)
         var original: OSASendUPP?
         var originalRefCon: UnsafeMutableRawPointer?
         _ = OSAGetSendProc(component, &original, &originalRefCon)
@@ -136,6 +150,9 @@ enum CUAppleScriptRunner {
         try CUAppleScriptPolicy.checkSource(script.richTextSource?.string ?? script.source, bound: bound)
         var display: NSAttributedString?
         let value = script.executeAndReturnDisplayValue(&display, error: &error)
+        if let why = state.stopped {
+            throw CUError.refused(.userWorking, "the AppleScript was stopped part-way: \(why) — what it did before stays done; wait and retry, or ask them")
+        }
         if let refused = state.refused {
             throw CUError.notAllowed("applescript", "the AppleScript was stopped: \(refused)")
         }

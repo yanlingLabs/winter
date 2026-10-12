@@ -409,7 +409,14 @@ extension CUCore {
     func noteTapEvent(type: CGEventType, sourcePid: Int64, userData: Int64, flags: CGEventFlags = [], keycode: Int64 = -1,
                       location: CGPoint? = nil, targetPid: Int64 = 0, now: TimeInterval) {
         let kind = CUHardwareInput.classify(type: type, sourcePid: sourcePid, userData: userData)
-        if kind != .none { noteHardwareInput(now: now, move: kind == .move) }
+        // (Not the user's — a synthetic event, the helper's own: nothing to read, not even Secure Event Input — round 17b.)
+        guard kind != .none else { return }
+        // Secure Event Input sampled on every tap event of the user's, not only at judgments (R17-a, the user's ruling) —
+        // and 4 times a second while the guardian runs (`pollSecureInput`, round 17b): on at any moment of the quiet window,
+        // never quiet.
+        let secureNow = secureInputOn
+        guardianLock.withLock { guardianCore.noteSecureInputIfChanged(secureNow, now: now) }
+        noteHardwareInput(now: now, move: kind == .move)
         guard kind == .action else { return }
         // Typing into the app in front (no ⌘/⌃, not Escape): an app left in front becomes their place — a restore never
         // pulls them out of it (the ruling, round 16).
@@ -418,7 +425,7 @@ extension CUCore {
             guardianLock.withLock { guardianCore.userInputInFront(front, now: now) }
         }
         noteUserInteraction(type: type, flags: flags, keycode: keycode, location: location, targetPid: targetPid)
-        let secure = (type == .flagsChanged || type == .keyDown) && secureInputOn
+        let secure = (type == .flagsChanged || type == .keyDown) && secureNow
         guardianLock.withLock { guardianCore.inputEvent(type: type, flags: flags, keycode: keycode, secure: secure, now: now) }
     }
 
@@ -439,18 +446,16 @@ extension CUCore {
             // Typing (no ⌘ or ⌃): a ⌘/⌃ chord may be the system's (⌘-Space, ⌘-Tab, ⌃-arrows), not work in the app —
             // found by the model-based test (the user's ⌘-Space for Spotlight refused the agent's next act). Nor ⌥-Space (a
             // launcher's hotkey: Alfred, Raycast), nor Escape (their Esc stops the agent, or closes a panel of the system's).
-            guard !flags.contains(.maskCommand), !flags.contains(.maskControl) else { return }
-            guard !(flags.contains(.maskAlternate) && keycode == 49), keycode != 53 else { return }
+            guard Self.isTypingKey(flags: flags, keycode: keycode) else { return }
             if targetPid > 0 {
                 let receiver = pid_t(truncatingIfNeeded: targetPid)
                 guard receiver == front || sys.isContentProcess(receiver, of: front) else { return }
             }
-            // A focus blip's reroute on the app in front sends the user's keys to THEIR place unless their own move took
-            // them there: with the app in front by the agent's doing (not their place), the key never reached it — no
-            // work in it (round 16's editor-target seed 51: the target stole the front mid-burst, the user's keys went
-            // to their app, and the burst's in-flight check stopped the act "the user started working in it").
-            if let r = activeKeyReroute, r.isInstalled, r.target == front,
-               guardianLock.withLock({ guardianCore.view.app != front }) { return }
+            // A focus blip's reroute on the app in front decides where each key of the user's goes — to THEIR place unless
+            // their own move took them there — and marks the work itself when it lets one through into the app (round 17,
+            // the review of round 16: round 16's seed-51 fix guessed it from "the app in front is not their place", and the
+            // session tap can see a key before the reroute's tap decides it).
+            if let r = activeKeyReroute, r.isInstalled, r.target == front { return }
             if guardianLock.withLock({ guardianCore.userWorkingApp == front }) { return }  // marked already: nothing more read
             userInteracted(front)
         case .rightMouseDown, .otherMouseDown, .scrollWheel:
@@ -479,6 +484,12 @@ extension CUCore {
         return sys.windowStack().filter { $0.alpha > 0 && $0.frame.contains(point) }.first { $0.pid != own || ownWindowTakesClicks($0) }
     }
 
+    /// A key that is typing in the app it reaches (I6): no ⌘ or ⌃ (a chord may be the system's: ⌘-Space, ⌘-Tab, ⌃-arrows),
+    /// not ⌥-Space (a launcher's hotkey), not Escape (it stops the agent, or closes a panel of the system's).
+    static func isTypingKey(flags: CGEventFlags, keycode: Int64) -> Bool {
+        !flags.contains(.maskCommand) && !flags.contains(.maskControl) && !(flags.contains(.maskAlternate) && keycode == 49) && keycode != 53
+    }
+
     func userInteracted(_ app: pid_t) {
         let front = sys.frontmostPid()
         let now = clock.nowSeconds()
@@ -487,6 +498,13 @@ extension CUCore {
             return guardianCore.userWorkingApp != app
         }
         if changed { CULog.guardian.notice("the user is working in \(self.appName(app), privacy: .public): hands off it until it leaves the front") }
+    }
+
+    /// One reading of Secure Event Input for the guardian (its 4 Hz poll; round 17b, the review of round 17's M2).
+    func pollSecureInput(now: TimeInterval? = nil) {
+        let on = secureInputOn
+        let t = now ?? clock.nowSeconds()
+        guardianLock.withLock { guardianCore.noteSecureInputIfChanged(on, now: t) }
     }
 
     /// Whether the user is working in `pid` now (round 10): the agent does not act on it.
@@ -637,7 +655,14 @@ extension CUCore {
         guardianCore.begin(view: CUGuardedView(app: sys.frontmostPid(), space: sys.activeSpace()))
         // (Never in a test's core: the machine's REAL activations — another app, a probe running meanwhile — reached the
         // model-based test's simulated world as an unknown pid and failed a seed, round 14.)
-        if guardianLiveTapEnabled { installGuardianObservers() }
+        if guardianLiveTapEnabled {
+            installGuardianObservers()
+            let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+            timer.schedule(deadline: .now(), repeating: .milliseconds(250), leeway: .milliseconds(50))
+            timer.setEventHandler { [weak self] in self?.pollSecureInput() }
+            timer.resume()
+            secureInputPoll = timer
+        }
         startCPSTap()
         startGestureMonitor()
         CULog.guardian.notice("guarding the user's view while a script runs")
@@ -652,6 +677,8 @@ extension CUCore {
         guardianCore.end()
         for o in guardianObservers { NSWorkspace.shared.notificationCenter.removeObserver(o) }
         guardianObservers.removeAll()
+        secureInputPoll?.cancel()
+        secureInputPoll = nil
         stopCPSTap()
         stopGestureMonitor()
         CULog.guardian.notice("stopped guarding: no script running")
@@ -941,6 +968,17 @@ extension CUCore {
             guard let app = sys.dockItemApp(at: point, dockPid: hit.pid), app != own else {
                 noteSwitchInput(now: now, .app)
                 return nil
+            }
+            // The FRONT app's tile (R17-b, the controller's ruling): their place AT THE CLICK, as a click into its window
+            // already in front is — no activation may come to claim it later (seed 1020: the click on T's tile while T was in
+            // front, an earlier restore of P landing 11 ms on, and the engine's place stayed P).
+            if app == sys.frontmostPid() {
+                guardianLock.withLock {
+                    guardianCore.noteSwitch(now: now, .app, target: app, quiet: true)
+                    guardianCore.userClickedFront(app: app, space: sys.activeSpace(), now: now)
+                }
+                CULog.guardian.notice("the user clicked \(self.appName(app), privacy: .public) in the Dock while it is in front: their place")
+                return app
             }
             noteSwitchInput(now: now, .app, target: app)
             guardianLock.withLock { guardianCore.userClicked(app: app, space: nil, now: now) }

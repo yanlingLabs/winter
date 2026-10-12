@@ -50,6 +50,9 @@ export interface WakeArmed {
   /** How the model gets the target back after the wake (its worker may have restarted): `browsers.tab("…")`,
    *  `apps.bind("com.apple.mail")`. Daemon-written, not screen text. */
   rebind: string;
+  /** A DAEMON-WRITTEN sentence about how this trigger waits, printed unfenced as a daemon line (e.g. "update Winter for
+   *  Chrome to wait without the debugging bar"). Never screen text. */
+  note?: string;
 }
 
 /** How a trigger ended. `fired` and `lost` come from a backend; the rest from the registry. */

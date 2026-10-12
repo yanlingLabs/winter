@@ -19,6 +19,12 @@ protocol CUAXBackend: AnyObject {
     /// The AX elements of windows `kAXWindowsAttribute` omits (another Space, full screen), by window id, in
     /// one remote-token walk that may stop at the first it finds; private.
     func remoteWindows(pid: pid_t, windowIDs: [CGWindowID]) -> [CGWindowID: AXUIElement]
+    /// The process an element belongs to; nil when it can't be told (the act's write guard then takes it for the
+    /// target's). Default: `AXUIElementGetPid` (CUCore+ActGuard).
+    func ownerPid(_ e: AXUIElement) -> pid_t?
+    /// The app's own hit test: the element at `point` (screen points) as the app answers it
+    /// (`AXUIElementCopyElementAtPosition` — WebKit's hit test sees `display:contents` and overflowing children).
+    func elementAt(pid: pid_t, _ point: CGPoint) -> AXUIElement?
 }
 
 extension CUAXBackend {
@@ -56,6 +62,11 @@ final class CULiveAX: CUAXBackend {
     func set(_ e: AXUIElement, _ name: String, _ value: CFTypeRef) throws { try AX.set(e, name, value) }
     func perform(_ e: AXUIElement, _ action: String) throws { try AX.perform(e, action) }
     func isAlive(_ e: AXUIElement) -> Bool { AX.isAlive(e) }
+    func elementAt(pid: pid_t, _ point: CGPoint) -> AXUIElement? {
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(AX.app(pid), Float(point.x), Float(point.y), &hit) == .success else { return nil }
+        return hit
+    }
     func windowID(_ e: AXUIElement) -> CGWindowID? { AX.windowID(e) }
     func remoteWindows(pid: pid_t, windowIDs: [CGWindowID]) -> [CGWindowID: AXUIElement] {
         AX.windowsByRemoteToken(pid: pid, wanted: Set(windowIDs), stopAtFirst: true).found

@@ -77,7 +77,42 @@ final class FakeAX: CUAXBackend {
     // MARK: CUAXBackend
 
     func isTrusted() -> Bool { trusted }
-    func application(_ pid: pid_t) -> AXUIElement { fakeElement(pid) }
+    func application(_ pid: pid_t) -> AXUIElement { appTokens.insert(pid); return fakeElement(pid) }
+    /// The apps whose application element was asked for (an element with that token is the app's own).
+    private(set) var appTokens = Set<pid_t>()
+    /// Element owners a test states ("token" → pid); any other element is of an unknown process — the act's write guard
+    /// takes it for the target's (round 17).
+    var owners: [Int32: pid_t] = [:]
+    /// The app's hit test, as WebKit's: the DEEPEST element (the last drawn, among equals) whose frame holds the point,
+    /// over the whole tree from the app's windows — a child outside its parent's box, or under a box-less wrapper, found.
+    func elementAt(pid: pid_t, _ point: CGPoint) -> AXUIElement? {
+        var best: (depth: Int, e: AXUIElement)?
+        var queue = elements(application(pid), kAXWindowsAttribute).map { ($0, 0) }
+        var seen = Set<AXIdentity>()
+        while !queue.isEmpty {
+            let (e, d) = queue.removeFirst()
+            guard seen.insert(AXIdentity(element: e)).inserted else { continue }
+            if let f = frame(e), f.width > 0, f.height > 0, f.contains(point), d >= (best?.depth ?? -1) { best = (d, e) }
+            queue += elements(e, kAXChildrenAttribute).map { ($0, d + 1) }
+        }
+        return best?.e
+    }
+
+    func ownerPid(_ e: AXUIElement) -> pid_t? {
+        let t = token(e)
+        if let o = owners[t] { return o }
+        if appTokens.contains(t) { return t }
+        // A window an app lists (its windows, its focused window) is that app's — as `AXUIElementGetPid` answers live
+        // (a restore raising the user's window inside an act is never taken for the target's).
+        let id = AXIdentity(element: e)
+        for app in appTokens.sorted() {
+            let d = attrs[AXIdentity(element: fakeElement(app))] ?? [:]
+            let listed = (d[kAXWindowsAttribute] as? [AXUIElement]) ?? []
+            let focused = d[kAXFocusedWindowAttribute].flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil }
+            if listed.contains(where: { AXIdentity(element: $0) == id }) || focused.map({ AXIdentity(element: $0) == id }) == true { return app }
+        }
+        return nil
+    }
     /// Runs before each attribute read ("token:attribute"), to change the fake world as time passes (WebKit
     /// moving focus a moment after a click).
     var onRead: ((String) -> Void)?
@@ -184,7 +219,15 @@ final class FakeKeyTapInstaller: CUKeyTapInstalling, @unchecked Sendable {
 /// A key event as the tap would see it: the user's own (no stamp) or the helper's (stamped).
 func keyEvent(down: Bool = true, stamped: Bool) -> CGEvent {
     let e = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down)!
-    if stamped { CUEventStamp.stamp(e) }
+    if stamped { CUEventStamp.stamp(e) } else { hardware(e) }
+    return e
+}
+
+/// The user's own key, as the window server delivers a hardware event: no source process (an event made here carries
+/// this process's pid — round 17b: the reroute's work mark takes hardware keys only).
+@discardableResult
+func hardware(_ e: CGEvent) -> CGEvent {
+    e.setIntegerValueField(.eventSourceUnixProcessID, value: 0)
     return e
 }
 
@@ -230,6 +273,9 @@ final class FakeSystem: CUSystemBackend {
     /// The active Space (nil: unreadable, as on a Mac whose SkyLight lacks the call).
     var space: UInt64? = 1
     func activeSpace() -> UInt64? { space }
+    /// The app whose Dock tile is under the pointer (a click on the Dock).
+    var dockTile: pid_t?
+    func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? { dockTile }
     /// Runs on every activation (after `front` is set): a test moves the Space back as macOS would.
     var onActivate: ((pid_t) -> Void)?
     /// Apps whose activation macOS refuses (a background caller's, under cooperative activation): recorded, no effect.

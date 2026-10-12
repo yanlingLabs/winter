@@ -484,6 +484,9 @@ public struct CUFocusGuardianCore: Sendable {
                                      inputObservable: Bool = true, secureInput: Bool = false) {
         noteSecureInput(secureInput, now: now)
         guard !isTouched(pid, startedAt: startedAt, bundle: bundle, now: now) else { return }
+        // A launch notice heard after the app's first sighting in front re-arms nothing (review of round 16, LOW: it set
+        // "the user's launch" again for 60 s and reopened seed 1049 — a left launch adopted on a later coming forward).
+        guard !everFront.contains(pid) else { return }
         othersLaunches = othersLaunches.filter { now - $0.value <= Self.launchFirstWindow }
         othersLaunches[pid] = now
         // Judged at its process START, while the facts from then are at hand (review of round 10, HIGH #1): a launch the
@@ -616,6 +619,12 @@ public struct CUFocusGuardianCore: Sendable {
         // (The latest reading from before what is kept stays: it says how the kept span began.)
         while secureReadings.count > 1, now - secureReadings[1].at > Self.keepFacts { secureReadings.removeFirst() }
         if secureReadings.count > 512 { secureReadings.removeFirst(secureReadings.count - 512) }
+    }
+    /// A reading from the session tap's events (R17-a): kept only when it differs from the last one — enough to know every
+    /// span it was on (it stays on until a reading says otherwise), at no cost per pointer move.
+    public mutating func noteSecureInputIfChanged(_ on: Bool, now: TimeInterval) {
+        guard secureReadings.last?.on != on else { return }
+        noteSecureInput(on, now: now)
     }
     /// Secure Event Input readings in time order.
     private var secureReadings: [(at: TimeInterval, on: Bool)] = []
@@ -1132,7 +1141,12 @@ public struct CUFocusGuardianCore: Sendable {
 
     /// The app the user is WORKING in: they clicked, typed or scrolled in its window while it was in front (switching there
     /// to look is not working in it). The agent is hands-off it until it leaves the front (user ruling, round 10).
-    public private(set) var userWorkingApp: pid_t?
+    public private(set) var userWorkingApp: pid_t? {
+        // Every time the mark LANDS on an app (round 17b): an act compares the count with its start (sticky in flight).
+        didSet { if let a = userWorkingApp, a != oldValue { workMarks[a, default: 0] += 1 } }
+    }
+    /// How many times the user's work mark has landed on each app.
+    public private(set) var workMarks: [pid_t: Int] = [:]
     /// A click of theirs into a window of an app NOT in front: working in it once its own activation lands (within
     /// `workClickWindow` — the claim's own window: a slow app's activation lands up to 1.5 s after the click, review of
     /// round 10, MEDIUM #5) — a drag out of a background window activates nothing and is no work in it.
