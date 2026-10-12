@@ -37,8 +37,10 @@ and guest tool compartments remain enforced boundaries.
 
 Exclude private images and their backing-store paths from automatic Time Machine
 backup at creation, and verify the exclusion before activation. Use the supported
-exclusion mechanism; tests inject disposable paths and never change the user's
-backup settings. Offer an explicit quiescent export/restore path instead of
+sticky item exclusion (`tmutil addexclusion` without `-p`), which travels
+with the file and does not require root. Reapply and verify it whenever an image
+is created or replaced; tests inject disposable paths and never change the
+user's backup settings. Offer an explicit quiescent export/restore path instead of
 claiming a live sparse-image copy is consistent. Shared instructions, memory and
 outputs remain eligible for the user's normal backups; they are plaintext and
 backup protection depends on the destination. Preserve that choice on relocation.
