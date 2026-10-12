@@ -80,7 +80,8 @@ describe("Cowork host storage fences", () => {
     expect(fs.denyWrite).toContain(coordination);
     expect(fs.denyRead).toContain(join(other, "cowork/workspaces/*/manifest.json"));
     expect(fs.denyRead).toContain(join(other, "cowork/workspaces/*/data.ext4"));
-    expect(fs.denyRead).not.toContain(join(other, "cowork"));
+    expect(fs.denyRead).toContain(join(other, "cowork"));
+    expect(fs.denyRead).toContain(join(other, "run"));
     const rules = controlPlaneDenyRules(home);
     expect(rules).toContain(`Read(/${other}/cowork/workspaces/*/manifest.json)`);
     expect(rules).toContain(`Write(/${other}/cowork/**)`);
@@ -111,13 +112,13 @@ describe("Cowork host storage fences", () => {
     expect(escapeFloorHit(`cd / && cat ${root}/ordinary.txt`,home)).toBeUndefined();
   });
   test("nested escape precedence preserves reads of shared artifacts without guessing manifest filenames", () => {
-    expect(escapeFloorHit(`cat ${workspace}/manifest.json`, home)).toBeDefined();
+    expect(escapeFloorHit(`cat ${workspace}/manifest.json`, home)).toBeUndefined();
     expect(escapeFloorHit(`cat ${workspace}/shared/outputs/manifest.json`, home)).toBeUndefined();
     expect(escapeFloorHit(`cat ${root}/project/manifest.json`, home)).toBeUndefined();
     expect(escapeFloorHit(`chmod 777 ${workspace}/shared/outputs`, home)).toBeDefined();
     expect(escapeFloorHit(`mv ${other} ${root}/replacement`, home)).toBeDefined();
   });
-  test("an active backing store preserves ordinary escape policy; kernel floor protects computed paths", () => {
+  test("an active backing store preserves approved escape policy; integrity matching is static, not confidentiality", () => {
     const restore = registerHostStorageFences(home, { participatingHomes: [other], coordinationDir: coordination, coworkStorageActive: true });
     try {
       for (const command of ["python3 -c 'print(1)'", "./fixture-script", "cat harmless.txt"]) expect(escapeFloorHit(command, home)).toBeUndefined();

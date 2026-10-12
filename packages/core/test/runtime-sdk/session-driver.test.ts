@@ -1,3 +1,4 @@
+import { HostCodeExecutionService } from "../../src/runtime-sdk/host-code-broker";
 // P8b Task 16 (fix round 1) — the DRIVER TABLE over real 8a records, a real session store and
 // hub, the real router (in-memory directory), and a FAKE `winter` peer (no child process).
 //
@@ -148,6 +149,7 @@ function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<stri
     ...overrides,
   });
   const close = (): void => {
+    drivers.beginShutdown?.();
     try { store.close(); } catch { /* closed */ } try { rs.close(); } catch { /* closed */ } rmSync(home, { recursive: true, force: true });
     if (opts.legacyRouter === true) setRunHomeSupportForTests(undefined);
   };
@@ -155,6 +157,37 @@ function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<stri
 }
 
 describe("createWinterSessionDrivers — the table", () => {
+  test("storage activation refreshes an idle boundary/run home and replays queued Code work without daemon restart or native floor", async () => {
+    const t = table(); let unregister: (() => void) | undefined;
+    try {
+      const cwd = mkdtempSync(join(tmpdir(), "winter-code-policy-cwd-"));
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd });
+      const session = await t.drivers.create(sid);
+      await session.send("first", "fixture"); await Bun.sleep(0);
+      const old = t.q(), backend = session.backendSessionId, oldRun = t.runHomes.built[0]!.dir;
+      mkdirSync(join(t.home, "cowork"));
+      const activation = new HostCodeExecutionService(t.home, null).refreshForStorage(t.home, {
+        coordinationDir: mkdtempSync(join(tmpdir(), "winter-code-policy-coordination-")), coworkStorageActive: true,
+      }, 1000);
+      await Bun.sleep(0);
+      expect(session.handoffPending).toBe(true);
+      expect((await session.send("queued", "fixture")).queued).toBe(true);
+      expect(t.queries).toHaveLength(1); // current approved work is allowed to finish
+      old.emit(result());
+      unregister = await activation;
+      await Bun.sleep(0);
+      expect(t.queries).toHaveLength(2);
+      expect(t.q().pushed).toEqual(["queued"]);
+      expect(session.backendSessionId).toBe(backend);
+      expect(t.runHomes.built[1]!.dir).not.toBe(oldRun);
+      expect(t.q().options.sandbox?.filesystem?.denyRead).toContain(join(t.home, "cowork"));
+      expect(t.q().options.sandbox?.filesystem?.denyWrite).toContain(join(t.home, "cowork"));
+      expect((t.q().options as { hostCodeProcessBroker?: unknown }).hostCodeProcessBroker).toBeUndefined();
+      expect((t.q().options as { requireHostFloor?: unknown }).requireHostFloor).toBeUndefined();
+      t.q().emit(result()); await session.idle(); await t.drivers.endAll();
+    } finally { unregister?.(); t.close(); }
+  });
+
   test("create: the record (leg winter, backend uuid), one child, tracked; the driver is in the table", async () => {
     const t = table();
     try {

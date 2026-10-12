@@ -55,13 +55,13 @@ function withRuntimes(runtimes: Omit<NonNullable<Settings["runtimes"]>, "handoff
   return { schemaVersion: 2, runtimes: { handoff: { crossRuntime: false }, ...runtimes } } as unknown as Settings;
 }
 
-test("active retained storage refuses Code start when no kernel floor/broker consumer is installed",async()=>{
+test("active retained storage preserves Code when no optional worker/bridge broker is installed",async()=>{
   mkdirSync(join(home,"cowork"));
   const coordination=mkdtempSync(join(tmpdir(),"winter-create-floor-coordination-"));
   const unregister=registerHostStorageFences(home,{coordinationDir:coordination,coworkStorageActive:true});
   try {
     const handle=await createWinterRuntimeSdk(deps({codeExecution:new HostCodeExecutionService(home,null)}));handles.push(handle);
-    expect(handle.spawnHookFor("code")).toBeInstanceOf(HostCodeUnavailable);
+    expect(handle.spawnHookFor("code")).not.toBeInstanceOf(HostCodeUnavailable);
   } finally {unregister();rmSync(coordination,{recursive:true,force:true});}
 });
 

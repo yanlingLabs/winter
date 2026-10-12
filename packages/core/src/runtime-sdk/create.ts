@@ -415,7 +415,7 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
       if (runsEmbedded(mode)) {
         try {
           if (codeExecution.protectedStorageActive()) return new EmbeddedRuntimeUnavailable(
-            "protected Cowork storage requires a persistent host floor; embedded chat and dispatch remain unavailable until complete embedded containment is verified",
+            "protected Cowork storage requires complete file/context policy coverage; embedded chat and dispatch remain unavailable until that coverage is verified",
           );
         } catch (error) {
           if (error instanceof HostStorageFenceUnavailable) return error;

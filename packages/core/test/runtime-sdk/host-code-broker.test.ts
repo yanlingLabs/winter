@@ -26,6 +26,7 @@ import {
 import {
   hostStorageFloorDescriptor,
   registerHostStorageFences,
+  registerHostStoragePolicyConsumer,
 } from "../../src/runtime-sdk/host-storage-fence";
 let root: string,
   home: string,
@@ -128,6 +129,7 @@ function fixture({
     options = withBinding ? withHostCodeBinding(base, binding) : base;
   const enroll = (opts = options) =>
     service.enroll({
+      ownedBridge: true,
       options: opts,
       sessionId: "logical",
       backendSessionId: "backend",
@@ -214,12 +216,12 @@ function fixture({
     },
   };
 }
-test("missing binding cannot erase active service-home floor", () => {
+test("explicit owned bridge requires binding while ordinary Code needs no broker capability", () => {
   const f = fixture({ withBinding: false });
   expect(() => f.enroll()).toThrow(HostCodeUnavailable);
   expect(() =>
     new HostCodeExecutionService(home, null).assertReady(home),
-  ).toThrow("capability-missing");
+  ).not.toThrow();
   expect(() => f.service.assertReady(source)).toThrow("foreign-service-home");
 });
 test("inactive unregistered Code preserves resolved spawn posture", () => {
@@ -438,50 +440,32 @@ test("terminal call and disposed generation cannot replay", async () => {
   expect(f.disposed).toBeGreaterThan(0);
   f.exited.resolve(0);
 });
-test("refresh deadline bounds stop and rolls registration back", async () => {
-  const f = fixture({ active: false, stop: () => new Promise<void>(() => {}) }),
-    g = f.enroll();
-  f.spawnGeneration(g);
-  mkdirSync(join(home, "cowork"));
+test("ordinary live children do not require stop/descendant receipts for storage activation", async () => {
+  const f = fixture({ active: false, stop: () => new Promise<void>(() => {}) }), g = f.enroll();
+  f.spawnGeneration(g); mkdirSync(join(home, "cowork"));
   const start = Date.now();
-  await expect(
-    f.service.refreshForStorage(
-      home,
-      { coordinationDir: coordination, coworkStorageActive: true },
-      25,
-    ),
-  ).rejects.toThrow("stop-unconfirmed");
-  expect(Date.now() - start).toBeLessThan(500);
-  expect(hostStorageFloorDescriptor(home).denyReadPaths).toHaveLength(0);
-  f.exited.resolve(0);
+  const remove = await f.service.refreshForStorage(home, { coordinationDir: coordination, coworkStorageActive: true }, 25);
+  try { expect(Date.now() - start).toBeLessThan(500); expect(hostStorageFloorDescriptor(home).denyReadPaths.length).toBeGreaterThan(0); }
+  finally { remove(); f.exited.resolve(0); }
 });
-test("old parent exit alone retains descendant activation debt", async () => {
-  const f = fixture({ active: false }),
-    g = f.enroll();
-  f.spawnGeneration(g);
-  g.dispose();
-  f.exited.resolve(0);
-  await Promise.resolve();
-  await Promise.resolve();
+test("activation stays blocked when a logical host policy consumer cannot acknowledge refresh", async () => {
   mkdirSync(join(home, "cowork"));
-  await expect(
-    f.service.refreshForStorage(
-      home,
-      { coordinationDir: coordination, coworkStorageActive: true },
-      100,
-    ),
-  ).rejects.toThrow("retired-code-descendants-unconfirmed");
-  expect(hostStorageFloorDescriptor(home).denyWritePaths).toHaveLength(0);
+  const removeConsumer = registerHostStoragePolicyConsumer(() => new Promise<void>(() => {}));
+  try {
+    await expect(new HostCodeExecutionService(home, null).refreshForStorage(home, { coordinationDir: coordination, coworkStorageActive: true }, 15)).rejects.toThrow("host-storage-policy-refresh-pending");
+    expect(hostStorageFloorDescriptor(home).denyReadPaths).toHaveLength(0);
+  } finally { removeConsumer(); }
 });
-
-test("raw router queries cannot bypass enrollment and valid spawn survives option copies", () => {
-  const f = fixture(),
-    g = f.enroll();
-  expect(() => f.service.assertQueryOptions({} as Options)).toThrow(
-    "query-generation-not-enrolled",
-  );
-  expect(() => f.service.assertQueryOptions({ ...g.options })).not.toThrow();
-  g.dispose();
+test("ordinary retired children never impose first-activation restart debt", async () => {
+  const f = fixture({ active: false }), g = f.enroll(); f.spawnGeneration(g); g.dispose(); f.exited.resolve(0);
+  await Promise.resolve(); await Promise.resolve(); mkdirSync(join(home, "cowork"));
+  const remove = await f.service.refreshForStorage(home, { coordinationDir: coordination, coworkStorageActive: true }, 100);
+  try { expect(hostStorageFloorDescriptor(home).denyWritePaths.length).toBeGreaterThan(0); } finally { remove(); }
+});
+test("ordinary router queries use SDK policy without automatic Cowork broker enrollment", () => {
+  const f = fixture(), g = f.enroll();
+  expect(() => f.service.assertQueryOptions({} as Options)).not.toThrow();
+  expect(() => f.service.assertQueryOptions({ ...g.options })).not.toThrow(); g.dispose();
 });
 test("parallel starts for one observed call have only one admission", async () => {
   const permission = deferred<boolean>(),
@@ -681,7 +665,7 @@ test("completed host callback is required; early broker calls and duplicate revi
 test("installed-adapter enrollment refuses absent bounded native output transport", () => {
   const f = fixture();
   f.adapter.requiresNativeOutput = true;
-  expect(() => f.enroll()).toThrow("native-output-transport-missing");
+  expect(() => f.enroll()).toThrow("owned-bridge-capability-unavailable");
 });
 
 test("authorized background Agent lineage survives launch ACK, but not thread completion", async () => {

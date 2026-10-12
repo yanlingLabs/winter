@@ -1,4 +1,4 @@
-import { hostStorageFloorDescriptor, trackDaemonChildFloor } from "./host-storage-fence";
+import { hostStorageFloorDescriptor, registerHostStoragePolicyConsumer } from "./host-storage-fence";
 // WS-23 (ruling R1): CHAT AND DISPATCH RUN THE WINTER RUNTIME EMBEDDED — one Bun Worker per session,
 // inside `winter-core`. Code sessions keep the spawned `winter` binary (`executable.ts`'s ladder).
 //
@@ -271,13 +271,27 @@ export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): E
   const newest = new Map<string, EmbeddedWorkerProcess>();
   let spawned = 0;
   let shuttingDown: Promise<void> | undefined;
+  const unregisterStoragePolicyConsumer = deps.home ? registerHostStoragePolicyConsumer(async () => {
+    if (!Object.values(hostStorageFloorDescriptor(deps.home!)).some(paths => paths.length)) return;
+    const procs = [...live.keys()];
+    for (const proc of procs) proc.kill();
+    // Existing embedded file/context consumers must actually close before materializing storage.
+    // This is a Worker-lifecycle acknowledgment, never a receipt for third-party descendants.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all(procs.map(proc => proc.exited)),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new EmbeddedRuntimeUnavailable("embedded storage policy transition remains pending; existing Workers have not closed")), 1000); }),
+      ]);
+    } finally { if (timer) clearTimeout(timer); }
+  }) : () => {};
 
   const assertUnprotectedSpawn = (options: SpawnRuntimeOptions): void => {
     // Core must enforce this itself: the installed older SDK may silently ignore new flags.
     // Full embedded containment remains an explicit unavailable topology, without binary fallback.
     if ((options as { requireHostFloor?: boolean }).requireHostFloor || options.command === "/usr/bin/sandbox-exec" ||
       (deps.home && Object.values(hostStorageFloorDescriptor(deps.home)).some(paths => paths.length))) {
-      throw new EmbeddedRuntimeUnavailable("protected Cowork storage requires a persistent host floor; this embedded host cannot satisfy requireHostFloor");
+      throw new EmbeddedRuntimeUnavailable("protected Cowork storage requires complete embedded file/context policy coverage; this embedded host is unavailable");
     }
   };
   const workerProcess = (options: SpawnRuntimeOptions): EmbeddedWorkerProcess => {
@@ -294,7 +308,6 @@ export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): E
     }
     const workflowWorkerCommand = (deps.workflowWorkerCommand ?? runtimeWorkflowWorkerCommand)();
     assertUnprotectedSpawn(options); // recheck after host preparation, at the actual SDK use point
-    const inheritedFloor = deps.home ? hostStorageFloorDescriptor(deps.home) : undefined;
     const proc = (deps.spawnWorker ?? spawnEmbeddedWorker)({
       workerEntry: deps.workerEntry ?? embeddedWorkerEntry(),
       spawn: options,
@@ -302,12 +315,6 @@ export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): E
       killGraceMs: deps.killGraceMs ?? EMBEDDED_KILL_GRACE_MS,
       ...(predecessorExited !== undefined ? { startAfter: predecessorExited } : {}),
     });
-    const retireFloor = deps.home && inheritedFloor
-      ? trackDaemonChildFloor(deps.home, inheritedFloor, () => proc.kill())
-      : () => {};
-    // Worker close is not proof that its subprocess descendants are gone. Retire the live stop
-    // callback only; H3 retains the inherited floor evidence for this daemon's lifetime.
-    void proc.exited.then(retireFloor, retireFloor);
     live.set(proc, sessionId);
     newest.set(sessionId, proc);
     const onLifecycle = deps.onLifecycle;
@@ -349,6 +356,7 @@ export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): E
     },
     shutdown(budgetMs: number = EMBEDDED_SHUTDOWN_BUDGET_MS): Promise<void> {
       if (shuttingDown !== undefined) return shuttingDown;
+      unregisterStoragePolicyConsumer();
       shuttingDown = (async () => {
         const procs = [...live.keys()];
         if (procs.length === 0) return;

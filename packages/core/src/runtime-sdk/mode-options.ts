@@ -1035,7 +1035,10 @@ export function sandboxConfigFor(home: string, cwd?: string | null, options?: Ho
       // R.3 I-4 — but that row is not added there): the deny rules and the path fence hook carry them
       // (DECISION 12).
       denyRead: [...new Set([join(home, "run"), join(home, "runtimes"), join(sdkHomeFor(home), ".winter.json"),
-        ...hostStorageReadPatterns(home, options).filter(({ tail }) => tail === "**").map(({ root }) => root)])],
+        ...hostStorageReadPatterns(home, options).filter(({ tail }) => tail === "**").map(({ root }) => root),
+        // Cowork backing/control/socket trees belong in this ONE ordinary Bash profile.
+        // File tools separately retain their narrow shared-artifact read exception.
+        ...hostStorageWriteRoots(home, options)])],
     },
     // `allowUnsandboxedCommands` is deliberately NOT set. It is consulted only together with
     // `excludedCommands` (`sandbox/spawn.ts:109,122`), which this config does not set, so `false`

@@ -1,6 +1,9 @@
 # Cowork implementation map
 
-As of 2026-10-10, Winter cannot create or run a supported Cowork session. Code, Chat, and Dispatch are the implemented daemon modes. Cowork has visible UI placeholders, reserved names, and reusable infrastructure. A reserved predicate or a passing synthetic test does not make it a working product mode.
+As of 2026-10-12, Winter cannot create or run a supported Cowork session. Code, Chat, and Dispatch are the implemented daemon modes. Cowork has visible UI placeholders, reserved names, and reusable infrastructure. A reserved predicate or a passing synthetic test does not make it a working product mode.
+
+
+The 2026-10-12 accepted native-host policy preserves ordinary Code/tool execution without a persistent outer floor or first-activation restart debt. Core file checks and the existing single Bash sandbox protect registered paths; approved escapes keep their normal approval behavior with static write-shaped Cowork integrity checks. Activation refreshes Code incarnations/run homes while preserving queued messages and logical identity, and waits for existing embedded Workers to close. Protected Chat/Dispatch execution remains an interim refusal pending complete file/context coverage. Explicit owned-worker/bridge floors and encrypted storage/key custody remain separate requirements; these changes do not pass the production Cowork gate.
 
 This map covers the Winter host and its sibling agent SDK, runtime SDK, and iOS repositories. It describes source behavior; the unavailable Cowork mode has no end-to-end execution to validate. Outstanding work is tracked in [Follow-ups](../follow_up.md#cowork).
 

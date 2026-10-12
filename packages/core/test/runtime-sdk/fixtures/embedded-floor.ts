@@ -19,7 +19,7 @@ if (mode === "daemon") {
   let unregister: (() => void) | undefined;
   try {
     const captured = daemon.runtimeSdk!.spawnHookFor("chat") as { spawnClaudeCodeProcess: (options: unknown) => unknown };
-    unregister = registerHostStorageFences(home, { coordinationDir: join(root, "coordination"), coworkStorageActive: true });
+    unregister = await daemon.runtimeSdk!.codeExecution!.refreshForStorage(home, { coordinationDir: join(root, "coordination"), coworkStorageActive: true });
     for (const topology of ["chat", "dispatch"] as const) {
       if (!(daemon.runtimeSdk!.spawnHookFor(topology) instanceof EmbeddedRuntimeUnavailable)) throw new Error("real daemon embedded topology was admitted");
     }
@@ -46,8 +46,10 @@ try {
     while (host.live().length && Date.now() < deadline) await Bun.sleep(5);
     if (host.live().length) throw new Error("real Worker did not close");
   }
-  try { registerHostStorageFences(home, { coordinationDir: join(root, "coordination"), coworkStorageActive: true }); throw new Error("accepted unproved embedded descendants"); }
-  catch (error) { if ((error as { reason?: string }).reason !== "daemon-child-descendants-unconfirmed") throw error; }
+  const { HostCodeExecutionService } = await import("../../../src/runtime-sdk/host-code-broker");
+  const remove = await new HostCodeExecutionService(home, null).refreshForStorage(home, { coordinationDir: join(root, "coordination"), coworkStorageActive: true });
+  try { if (host.live().length) throw new Error("existing embedded context consumer remained live after activation"); }
+  finally { remove(); }
 } finally {
   await host.shutdown();
   await draining.catch(() => {});
