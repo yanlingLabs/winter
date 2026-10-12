@@ -3,7 +3,10 @@
  * real pipe.
  *
  *   bun run verify:headless-helper            build a proof copy into a temp dir (dist/dev is never touched)
- *   bun run verify:headless-helper --app <p>  check and drive an existing build instead (e.g. dist/dev's)
+ *   bun run verify:headless-helper --app <p>  check and drive an existing build instead: dist/dev's, or a Release
+ *                                             Winter.app's nested Contents/Helpers/Winter Headless.app (its flavor is
+ *                                             read from its bundle id; a nested one must borrow the enclosing app's
+ *                                             Chromium and carry none of its own)
  *
  * What it proves:
  *   1. the signature (`checkSignedHeadless`): identifier, Winter's team, the hardened runtime, the stated designated
@@ -21,10 +24,10 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectHeadless } from "./dev-headless";
-import { HEADLESS, headlessExecutable } from "./headless-helper-lib";
+import { HEADLESS, headlessExecutable, type HeadlessFlavor } from "./headless-helper-lib";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const results: Array<[string, boolean, string]> = [];
@@ -47,11 +50,25 @@ function main(): void {
     app = join(scratch, `${HEADLESS.dev.name}.app`);
   }
   app = resolve(app);
+  const id = spawnSync("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleIdentifier", join(app, "Contents", "Info.plist")], { encoding: "utf8" }).stdout.trim();
+  const flavor: HeadlessFlavor = id === HEADLESS.dist.identifier ? "dist" : "dev";
+  console.log(`${app}: ${id} (${flavor === "dist" ? "a Release helper, nested in Winter.app" : "a self-contained dev helper"})`);
   try {
-    const failures = inspectHeadless(app, "dev");
-    check("the signature: stated requirement, hardened runtime, no entitlements, background-only, self-contained", failures.length === 0, failures.join("; "));
+    const failures = inspectHeadless(app, flavor);
+    check(flavor === "dist"
+      ? "the signature: stated requirement, hardened runtime, no entitlements, background-only, no Chromium of its own"
+      : "the signature: stated requirement, hardened runtime, no entitlements, background-only, self-contained", failures.length === 0, failures.join("; "));
 
-    const exe = headlessExecutable(app, "dev");
+    if (flavor === "dist") {
+      // Nested at Winter.app/Contents/Helpers/: the enclosing app's Chromium is what it runs.
+      const frameworks = join(app, "..", "..", "Frameworks");
+      const borrowed = ["Chromium Embedded Framework.framework", ...["", " (Alerts)", " (GPU)", " (Plugin)", " (Renderer)"].map((s) => `Winter Helper${s}.app`)]
+        .filter((name) => !existsSync(join(frameworks, name)));
+      check("nested in a Winter.app whose Frameworks hold the CEF framework and the five Winter Helper bundles", basename(join(app, "..")) === "Helpers" && borrowed.length === 0,
+        borrowed.length === 0 ? resolve(frameworks) : `missing: ${borrowed.join(", ")}`);
+    }
+
+    const exe = headlessExecutable(app, flavor);
     const noPipe = spawnSync(exe, ["--winter-cache-root=/tmp/winter-headless-never"], { encoding: "utf8", timeout: 10_000, stdio: ["ignore", "ignore", "pipe"] });
     check("started without its pipe it refuses at once", noPipe.status === 2 && /only Winter starts this/.test(noPipe.stderr ?? ""), `exit ${noPipe.status}`);
     const sh = spawnSync("/bin/sh", ["-c", `exec "$0" 3</dev/null 4>/dev/null`, exe], { encoding: "utf8", timeout: 10_000, stdio: ["ignore", "ignore", "pipe"] });
