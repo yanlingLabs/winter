@@ -617,6 +617,12 @@ public struct CUFocusGuardianCore: Sendable {
         while secureReadings.count > 1, now - secureReadings[1].at > Self.keepFacts { secureReadings.removeFirst() }
         if secureReadings.count > 512 { secureReadings.removeFirst(secureReadings.count - 512) }
     }
+    /// A reading from the session tap's events (R17-a): kept only when it differs from the last one — enough to know every
+    /// span it was on (it stays on until a reading says otherwise), at no cost per pointer move.
+    public mutating func noteSecureInputIfChanged(_ on: Bool, now: TimeInterval) {
+        guard secureReadings.last?.on != on else { return }
+        noteSecureInput(on, now: now)
+    }
     /// Secure Event Input readings in time order.
     private var secureReadings: [(at: TimeInterval, on: Bool)] = []
     /// Whether Secure Event Input may have been on at some moment of [from, to]: a reading of it on within, or the latest

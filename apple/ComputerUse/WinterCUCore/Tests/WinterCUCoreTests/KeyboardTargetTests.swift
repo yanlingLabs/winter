@@ -278,22 +278,31 @@ final class KeyboardTargetTests: XCTestCase {
     }
 
     /// Round 16's editor-target seed 51: the target stole the front mid-burst while the focus blip's reroute was on it;
-    /// the user's keys went to THEIR app — no work in the target, so the burst is not stopped as "the user started working
-    /// in it". Their own move there (the guardian's place) makes the same key work in it.
-    func testAKeyTheBlipSendsToTheUsersPlaceIsNoWorkInTheTarget() throws {
+    /// the user's keys went to THEIR app — no work in the target. Round 17 (the review of round 16, MEDIUM): the REROUTE's
+    /// own decision marks the work — a key it lets through into the target is work there even while the guardian's place
+    /// is still elsewhere (the session tap can see the key before the reroute decides it); one it sends to their place is
+    /// not. Its destination changes between the two keys, as the one rule's answer does.
+    func testTheReroutesOwnDecisionMarksTheWorkNeverTheFrontApp() throws {
         safari(fieldOwner: pid)
         core.guardianLock.withLock { core.guardianCore.begin(view: CUGuardedView(app: 1, space: nil)) }
         let installer = FakeKeyTapInstaller()
-        let reroute = CUKeyReroute(target: pid, victim: 1, installer: installer, post: { _, _ in }, destination: { 1 })
+        var destination: pid_t = 1
+        let reroute = CUKeyReroute(target: pid, victim: 1, installer: installer, post: { _, _ in }, destination: { destination })
+        reroute.onPassThrough = core.passThroughWorkMarker(pid)  // as the focus blip installs it
         XCTAssertTrue(reroute.begin())
         core.activeKeyReroute = reroute
         sys.front = pid  // the target took the front by itself
+        let key = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)!
+        // The session tap sees the key first: the reroute decides, nothing is marked from the front app.
         core.noteUserInteraction(type: .keyDown, flags: [], keycode: 0, location: nil, targetPid: Int64(pid))
+        XCTAssertNil(reroute.handle(key), "sent to their place, dropped from the target")
         XCTAssertFalse(core.userIsWorking(in: pid), "their key went to their place, not into the target")
-        // Their own move there: the target is their place — the same key is work in it.
-        core.guardianLock.withLock { core.guardianCore.end(); core.guardianCore.begin(view: CUGuardedView(app: pid, space: nil)) }
+        // The one rule now says the target (their own move, heard by the rule) — while the guardian's place is still U: the
+        // key goes through, and that is work in it.
+        destination = pid
         core.noteUserInteraction(type: .keyDown, flags: [], keycode: 0, location: nil, targetPid: Int64(pid))
-        XCTAssertTrue(core.userIsWorking(in: pid))
+        XCTAssertNotNil(reroute.handle(key), "let through into the target")
+        XCTAssertTrue(core.userIsWorking(in: pid), "a key that reached the target is work in it")
         _ = reroute.end()
     }
 
