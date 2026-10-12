@@ -7,7 +7,8 @@ for Winter. The techniques adapted are named so the lineage stays clear.
 | Project | Copyright | License | Used for | Where |
 |---|---|---|---|---|
 | [flutter_cef](https://github.com/FlutterFlow/flutter_cef) (`packages/flutter_cef_macos/native/cef_host/render_handler.mm`, at 7c7bcb0b2142128d3ad7ff648d03ba92d683d3f2) | Copyright (c) 2026 the flutter_cef authors | MIT | A separate CEF host handing frames to its UI process: producer-allocated IOSurfaces sized to what CEF painted, a Metal blit of CEF's borrowed accelerated frame into an owned surface completed (`waitUntilCompleted`) before `OnAcceleratedPaint` returns, the surface's send right moved to the consumer as a Mach port descriptor (`IOSurfaceCreateMachPort`), a `<select>` popup composited over the view | `HeadlessPresentProducer.mm`, `WinterPresentWire.h` |
-| [CEF](https://github.com/chromiumembedded/cef) `tests/cefclient` (`browser_window_osr_mac.mm`, `osr_accessibility_node_mac.mm`, at be1e15d8892c064f0299ba18350236a9b272ce7f) | Copyright (c) 2008-2020 Marshall A. Greenblatt; portions Copyright (c) 2006-2009 Google Inc. | BSD-3-Clause | The macOS off-screen view's input, IME, cursor, drag-and-drop and accessibility handling, adapted for Winter's panel (its direct `CefBrowserHost` calls become messages to the helper) | Winter.app's presentation view |
+| [CEF](https://github.com/chromiumembedded/cef) `tests/cefclient` (`browser/browser_window_osr_mac.mm`, `browser/text_input_client_osr_mac.mm`, at be1e15d8892c064f0299ba18350236a9b272ce7f) | Copyright (c) 2008-2020 Marshall A. Greenblatt; portions Copyright (c) 2006-2009 Google Inc.; portions Copyright 2013 The Chromium Authors | BSD-3-Clause | The macOS off-screen view's input handling, adapted for Winter's panel (its direct `CefBrowserHost` calls become messages to the helper): mouse presses, moves, drags, the mouse leaving and scrolling; the key event's fields (character, unmodified character, native key code) and `EVENTFLAG` modifiers, including which modifier key a `flagsChanged` event released and which keys are the keypad's; the input method's key-down state machine (text inserted, marked text set or cleared while a key is handled, then one char event, committed text, a composition update, or the composition finished or cancelled) and the `NSTextInputClient` methods behind it; the candidate window's rect from the composition's character bounds; the edit commands from the responder chain. Its `osr_accessibility_node_mac.mm` was read and NOT used — there is no accessibility tree on the presentation wire, so the view is one element; drag-and-drop was not adapted | `HeadlessPresentView.swift`, `HeadlessPresentKeys.swift`, `HeadlessPresentGeometry.swift` |
+| [Chromium](https://chromium.googlesource.com/chromium/src) `ui/events/keycodes/keyboard_code_conversion_mac.mm` | Copyright 2012 The Chromium Authors | BSD-3-Clause | The rule for a Mac key event's Windows key code (a key off the keypad by its character, then its unmodified character, else by its physical key code) and the mapping tables behind it (macOS key codes and US-layout characters to `VK_*` codes), transcribed into Winter's own table | `HeadlessPresentKeys.swift` |
 
 ## MIT License (flutter_cef)
 
@@ -26,7 +27,7 @@ EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-## BSD 3-Clause License (CEF)
+## BSD 3-Clause License (CEF; Chromium's is the same license, naming The Chromium Authors and Google Inc.)
 
 Redistribution and use in source and binary forms, with or without modification, are permitted provided
 that the following conditions are met:

@@ -28,6 +28,15 @@ public enum BrowserLinkProtocol {
     /// The link's own connection, separate from every other harness the app runs.
     public static let clientName = "browser-link"
 
+    /// `BROWSER_LINK_FEATURES` — what this side can do beyond the protocol number, named at attach (the app in its
+    /// params, the daemon in its answer). A side never uses a feature the other did not name. A repo test keeps this
+    /// equal to the daemon's list (`BrowserLinkParityTests`).
+    ///
+    /// `headless` (ComputerV2 Phase 4, lane H3): the app's panel can show a tab of Winter's HEADLESS browser — the
+    /// live page drawn from Winter Headless's own GPU frames (`headless.show`/`headless.hide`/`headless.tabs`), and
+    /// the person's actions on it go back as `browserLink.headless`.
+    public static let features = ["headless"]
+
     public enum Method {
         public static let attach = "browserLink.attach"
         public static let result = "browserLink.result"
@@ -35,6 +44,8 @@ public enum BrowserLinkProtocol {
         public static let tabGone = "browserLink.tabGone"
         /// Phase 3: one download the built-in browser saved for an armed tab (or refused for an unarmed one).
         public static let download = "browserLink.download"
+        /// Feature `headless`: the person, in Winter's panel, acting on one of a session's headless tabs.
+        public static let headless = "browserLink.headless"
         /// Daemon → app notification.
         public static let command = "browserLink.command"
         /// Daemon → app notification.
@@ -57,6 +68,14 @@ public enum BrowserLinkProtocol {
         public static let tabDownloads = "tab.downloads"
         /// Phase 3: download a URL in the tab's browser (its cookies), caught by the armed handler.
         public static let tabDownload = "tab.download"
+        /// Feature `headless`: connect to a headless tab's presentation and show it in the session's panel. These
+        /// three are read by `BrowserLinkHeadlessCommand`, never by `BrowserLinkCommand.parse` (whose `Op` stays
+        /// closed: Winter Headless compiles that parser and switches over every case).
+        public static let headlessShow = "headless.show"
+        /// Feature `headless`: stop showing it.
+        public static let headlessHide = "headless.hide"
+        /// Feature `headless`: the session's headless tabs changed (the panel's list).
+        public static let headlessTabs = "headless.tabs"
     }
 
     /// A download the app reports (`browserLink.download`'s `download.state`).

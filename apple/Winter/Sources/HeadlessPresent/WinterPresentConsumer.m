@@ -3,6 +3,7 @@
 #import <IOSurface/IOSurface.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <mach/notify.h>
 #include <servers/bootstrap.h>
 #include <os/lock.h>
 
@@ -152,6 +153,9 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
 
 - (void)handle:(mach_msg_header_t *)header receivedAt:(uint64_t)receivedAt {
   if (header->msgh_id == MACH_NOTIFY_DEAD_NAME) {
+    // The notification carries a user reference of its own on the dead name (as the producer's handler reads it).
+    const mach_dead_name_notification_t *dead = (const mach_dead_name_notification_t *)header;
+    if (dead->not_port != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), dead->not_port);
     [self endWithReason:@"the presenting browser went away"];
     return;
   }
