@@ -1,0 +1,194 @@
+{
+  "categories": {
+    "docs/man/info-including-licenses": 14662929,
+    "locales": 35036405,
+    "native-helpers": 131384,
+    "other-distro-payload": 123434773,
+    "perl-libraries": 44632843,
+    "python-stdlib": 15031970,
+    "supervisor-source": 24442,
+    "winter-runtime": 102344848
+  },
+  "cpioBytes": 336631808,
+  "docsLocalesPolicy": "retain all verified package payload; no ad-hoc deletion",
+  "duplicateBytes": 16401978,
+  "filePayloadBytes": 335299594,
+  "hardlinkPolicy": "input hardlinks become independent bytes; newc nlink=1 for all records",
+  "topDuplicates": [
+    {
+      "copies": 2,
+      "duplicateBytes": 3756992,
+      "paths": [
+        "/opt/winter/environment/base/usr/bin/git",
+        "/opt/winter/environment/base/usr/lib/git-core/git"
+      ],
+      "sha256": "54af380ba6ca1b36305358e99427a31ae4b0af5dc5cb6d0198c6f2f16e97651d",
+      "size": 3756992
+    },
+    {
+      "copies": 2,
+      "duplicateBytes": 3681928,
+      "paths": [
+        "/opt/winter/environment/base/usr/bin/perl",
+        "/opt/winter/environment/base/usr/bin/perl5.36.0"
+      ],
+      "sha256": "a6097f7672f78105082b665344a2deef7f26be89833dc170fa573c0c64deba2b",
+      "size": 3681928
+    },
+    {
+      "copies": 2,
+      "duplicateBytes": 2264520,
+      "paths": [
+        "/opt/winter/environment/base/usr/bin/scalar",
+        "/opt/winter/environment/base/usr/lib/git-core/scalar"
+      ],
+      "sha256": "56f40e9a93edab5dceb33828133785cee11259a12e8cdf2e2c1314b8b0779d79",
+      "size": 2264520
+    },
+    {
+      "copies": 2,
+      "duplicateBytes": 2194176,
+      "paths": [
+        "/opt/winter/environment/base/usr/bin/git-shell",
+        "/opt/winter/environment/base/usr/lib/git-core/git-shell"
+      ],
+      "sha256": "a52e1faa2399a4ed6e9d5fd0f4b5e46e9e0da4dd1f3fc76b52ab83e38f721f71",
+      "size": 2194176
+    },
+    {
+      "copies": 2,
+      "duplicateBytes": 968990,
+      "paths": [
+        "/opt/winter/environment/base/usr/share/doc/git-man/changelog.gz",
+        "/opt/winter/environment/base/usr/share/doc/git/changelog.gz"
+      ],
+      "sha256": "077b46faab8e6a0eeb8439d5bc39d1aff398d024afc22e6d48c0392697a0b895",
+      "size": 968990
+    },
+    {
+      "copies": 2,
+      "duplicateBytes": 401955,
+      "paths": [
+        "/opt/winter/environment/base/usr/lib/aarch64-linux-gnu/perl-base/unicore/To/NFKCCF.pl",
+        "/opt/winter/environment/base/usr/share/perl/5.36.0/unicore/To/NFKCCF.pl"
+      ],
+      "sha256": "16ff01b773a1dd5b9fd2a8c470966a07df7be5d4c5055020baf4365c6edb990d",
+      "size": 401955
+    },
+    {
+      "copies": 4,
+      "duplicateBytes": 329316,
+      "paths": [
+        "/opt/winter/environment/base/usr/share/doc/libperl5.36/copyright",
+        "/opt/winter/environment/base/usr/share/doc/perl-base/copyright",
+        "/opt/winter/environment/base/usr/share/doc/perl-modules-5.36/copyright",
+        "/opt/winter/environment/base/usr/share/doc/perl/copyright"
+      ],
+      "sha256": "b52f3ca17b45473cb0da6ec46748949101fcf0dda1fd5d8b306e6c97fd41af4d",
+      "size": 109772
+    },
+    {
+      "copies": 2,
+      "duplicateBytes": 254900,
+      "paths": [
+        "/opt/winter/environment/base/usr/share/doc/libssl3/changelog.gz",
+        "/opt/winter/environment/base/usr/share/doc/openssl/changelog.gz"
+      ],
+      "sha256": "5fd8012bfc48cece72419865bb912e940e52b46c638352a1faa7d0e874d3c652",
+      "size": 254900
+    },
+    {
+      "copies": 4,
+      "duplicateBytes": 189141,
+      "paths": [
+        "/opt/winter/environment/base/usr/share/doc/libgssapi-krb5-2/copyright",
+        "/opt/winter/environment/base/usr/share/doc/libk5crypto3/copyright",
+        "/opt/winter/environment/base/usr/share/doc/libkrb5-3/copyright",
+        "/opt/winter/environment/base/usr/share/doc/libkrb5support0/copyright"
+      ],
+      "sha256": "936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816",
+      "size": 63047
+    },
+    {
+      "copies": 2,
+      "duplicateBytes": 126824,
+      "paths": [
+        "/opt/winter/environment/base/usr/share/doc/bash/CHANGES.gz",
+        "/opt/winter/environment/base/usr/share/doc/bash/changelog.gz"
+      ],
+      "sha256": "f36693fd9a9fe19117b089f967eed107287eb0b7412e7ec3251ca7bceae0118a",
+      "size": 126824
+    },
+    {
+      "copies": 2,
+      "duplicateBytes": 122690,
+      "paths": [
+        "/opt/winter/environment/base/usr/share/doc/libhogweed6/changelog.gz",
+        "/opt/winter/environment/base/usr/share/doc/libnettle8/changelog.gz"
+      ],
+      "sha256": "58a09328d3eb3c1718cd3011be8f20c5036b7d63caad47f7b40361415a2ad6fc",
+      "size": 122690
+    },
+    {
+      "copies": 3,
+      "duplicateBytes": 99710,
+      "paths": [
+        "/opt/winter/environment/base/usr/share/doc/libpython3.11-minimal/copyright",
+        "/opt/winter/environment/base/usr/share/doc/python3.11-minimal/copyright",
+        "/opt/winter/environment/base/usr/share/doc/python3.11/copyright"
+      ],
+      "sha256": "f1cbf908e1daa8789b389fdcf17811ed36b675d736b39a103591399861350382",
+      "size": 49855
+    }
+  ],
+  "topFiles": [
+    {
+      "bytes": 102344848,
+      "path": "/opt/winter/runtime/winter"
+    },
+    {
+      "bytes": 6616880,
+      "path": "/opt/winter/environment/base/usr/bin/python3.11"
+    },
+    {
+      "bytes": 4532392,
+      "path": "/opt/winter/environment/base/usr/lib/aarch64-linux-gnu/libcrypto.so.3"
+    },
+    {
+      "bytes": 4472989,
+      "path": "/opt/winter/environment/base/usr/lib/aarch64-linux-gnu/perl/5.36.0/CORE/charclass_invlists.h"
+    },
+    {
+      "bytes": 3756992,
+      "path": "/opt/winter/environment/base/usr/bin/git"
+    },
+    {
+      "bytes": 3756992,
+      "path": "/opt/winter/environment/base/usr/lib/git-core/git"
+    },
+    {
+      "bytes": 3754784,
+      "path": "/opt/winter/environment/base/usr/lib/aarch64-linux-gnu/libperl.so.5.36.0"
+    },
+    {
+      "bytes": 3681928,
+      "path": "/opt/winter/environment/base/usr/bin/perl"
+    },
+    {
+      "bytes": 3681928,
+      "path": "/opt/winter/environment/base/usr/bin/perl5.36.0"
+    },
+    {
+      "bytes": 2754760,
+      "path": "/opt/winter/environment/base/usr/lib/aarch64-linux-gnu/perl/5.36.0/auto/Encode/JP/JP.so"
+    },
+    {
+      "bytes": 2427080,
+      "path": "/opt/winter/environment/base/usr/lib/aarch64-linux-gnu/perl/5.36.0/auto/Encode/KR/KR.so"
+    },
+    {
+      "bytes": 2303440,
+      "path": "/opt/winter/environment/base/usr/lib/aarch64-linux-gnu/libgnutls.so.30.34.3"
+    }
+  ]
+}
