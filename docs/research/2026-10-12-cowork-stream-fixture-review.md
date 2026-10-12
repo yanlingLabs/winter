@@ -54,3 +54,20 @@ The actual selected native `src/libkrun/src/lib.rs:3211–3214,3239–3270` matc
 After the corrections, root should review the changed source and replacement receipt, require the no-VM lifecycle regressions, and authorize at most the intended bounded nonsecret run. Independently audit raw binary captures, guest completion/heartbeat/retained/reuse evidence, actual stream/block frozen pins and exclusions, reclaim mapping/ACK order, and per-cycle footprint drops. Keep `activeReturnVerified:false` until that audit. Normal poweroff/EOF is not MMIO Stop/reset (`streamStopVerified:false`); prior native Stop/reset tests retain their distinct scope. The 25 ms post-I/O completion hold is not a deliberate stall inside a block syscall.
 
 No keys, encryption, bootstrap authority, production worker custody, full guest-runtime confinement, or complete Cowork resource/integration acceptance follows from this review. Before any later key experiment, host-initiated one-shot material delivery, an immutable initramfs receiver before user code, exclusive port ownership/removal before `switch_root`, ordinary-user/post-switch-root-root negative checks, authenticated boot-generation/workspace/volume/nonce binding, per-volume authority and broker custody remain separate gates. No live Winter app, daemon, home, credentials or Keychain was accessed.
+
+## Root HVC discovery follow-up review
+
+Root reviewed `396ab84f` after the first bounded run refused its single-class-node
+assumption. The replacement discovery distinguishes eight registered TTY slots
+from one connected HVC instance; it validates one bound VERSION_1-only console,
+port0's canonical parent and the expected character-device identities. Only
+inactive ENODEV slots are tolerated. The failed run remains failed and preserved.
+
+Root independently ran all 12 C discovery tests, checked the new source/artifact
+hashes, and verified that native libkrun, the signed worker and measured kernel
+are byte-identical to the prior accepted build. The change is confined to guest
+discovery and its oracle/fixture binding. Receipt
+`b4e5b6908ecfa6eb220f478c4d0c27e59e28900c4d697ef9527d30b52e93d139`
+was accepted by root for one additional bounded nonsecret run after compiler and
+host-pressure preflight. This incremental acceptance is root's, not a repeated
+Astra native review; guest communication/reclaim still require the actual result.
