@@ -5,12 +5,14 @@ let package = Package(name: "WinterCoworkKeyBroker", platforms: [.macOS("26.0")]
     .library(name: "KeyBrokerCore", targets: ["KeyBrokerCore"]),
     .executable(name: "cowork-key-broker-fixture", targets: ["FixtureBroker"]),
     .executable(name: "cowork-key-worker-fixture", targets: ["FixtureWorker"]),
-    .executable(name: "cowork-key-client-fixture", targets: ["FixtureClient"])
+    .executable(name: "cowork-key-client-fixture", targets: ["FixtureClient"]),
+    .executable(name: "cowork-child-lifecycle-fixture", targets: ["FixtureLifecycle"])
 ], targets: [
     .target(name: "KeyBrokerNative", linkerSettings: [.linkedLibrary("sandbox")]),
     .target(name: "KeyBrokerCore", dependencies: ["KeyBrokerNative"]),
     .executableTarget(name: "FixtureWorker", dependencies: ["KeyBrokerCore"]),
     .executableTarget(name: "FixtureClient", dependencies: ["KeyBrokerCore"]),
     .executableTarget(name: "FixtureBroker", dependencies: ["KeyBrokerCore"]),
+    .executableTarget(name: "FixtureLifecycle", dependencies: ["KeyBrokerCore"]),
     .testTarget(name: "KeyBrokerTests", dependencies: ["KeyBrokerCore"])
 ])

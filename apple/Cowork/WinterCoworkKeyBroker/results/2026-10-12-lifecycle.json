@@ -1,0 +1,127 @@
+{
+  "actualKeychain": false,
+  "artifactSha256": {
+    "cowork-child-lifecycle-fixture": "cd82adc5a32579b51ba48dfde58da9d7a764f9e47688d2420fd469cdef624862",
+    "cowork-key-broker-fixture": "07d1ee1146595b50e332fa2d61811c2145cd8c62dad3eb1c3176e1c284905733",
+    "cowork-key-client-fixture": "b252975c52b3a12fc9cd5842992c917a072670dbc1f1874d45efa434eee335fc",
+    "cowork-key-worker-fixture": "8a4c8ec4f49f6b9b30f458d62bfe0b93c15aa3f441267064f5c0a15c6ede2609"
+  },
+  "baseCommit": "fecd004adb6cb18681bcf1e634e00e6c70e576b7",
+  "branch": "cowork/key-broker-lifecycle",
+  "buildJobs": 2,
+  "date": "2026-10-12",
+  "errata": [
+    {
+      "attempt": "timeout-preflight-original-path",
+      "childCreated": false,
+      "exitCode": null,
+      "reason": "FixedFixtureImage refused absent /usr/bin/sleep before spawn; original wrapper JSON parse failed before persisting exit metadata. Corrected fixed macOS path to /bin/sleep. No key-delivery run occurred."
+    }
+  ],
+  "frozenFormatEvidenceSha256": "d894754e4a38f1cc319b0fb967664bc19d0dc6da0351049bc048f4590ab59d15",
+  "frozenFormatEvidenceUnchanged": true,
+  "hostPressureExperiment": false,
+  "key_delivery": {
+    "elapsedSeconds": 1.0761740839807317,
+    "exitCode": 0,
+    "receipt": {
+      "actualKeychain": false,
+      "actualSandboxDenials": true,
+      "brokerSelectedIdentityEchoTamperingDenied": true,
+      "clientPIDAndExecutableDenied": true,
+      "crossFormatEchoDeniedBothDirections": true,
+      "daemonReceivesNoKeys": true,
+      "daemonWorkspaceAuthorizationVerified": false,
+      "extra160InheritableFDsExcluded": true,
+      "format32And96WorkerDelivery": true,
+      "genericDeriveDecryptDenied": true,
+      "independentClientDenied": true,
+      "inheritedOneShotEchoAdmission": true,
+      "nativeKeyBrokerFixture": true,
+      "ownedChildNoUnresolvedDebt": true,
+      "ownedWorkerKeyDelivery": true,
+      "productionReady": false,
+      "realVM": false,
+      "replayDenied": true,
+      "replayRealPacketsDenied": true,
+      "sameChallengeCrossKeyProofDenied": true,
+      "sealedIdentity": true,
+      "swappedExecutedImageDenied": true,
+      "twoWorkspaceWorkers": true,
+      "unknownKeyFormatEchoDenied": true,
+      "workerFrameVersion2": true
+    },
+    "stderrEmpty": true,
+    "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdoutSha256": "cab061d695c0ebe01b2e9255542cc8ef1f666e11f70b0d6b67e6e017658940ed",
+    "timeoutSeconds": 30
+  },
+  "macOS": {
+    "build": "25G76",
+    "version": "26.6.1"
+  },
+  "newHostSystemInstalls": false,
+  "ownershipPolicy": {
+    "activePlusDebtCapacity": 16,
+    "autoReapRefused": true,
+    "blockingWaitpidUsed": false,
+    "competingExternalReaperSupported": false,
+    "debtDurable": false,
+    "defaultSIGCHLDRequired": true,
+    "deinitWaitMilliseconds": 0,
+    "normalWaitMilliseconds": 2000,
+    "postKillReapMilliseconds": 250,
+    "signalsAfterUncertainOrLostOwnership": false,
+    "soleReaperRequired": true,
+    "wallClockOSGuarantee": false
+  },
+  "productionReady": false,
+  "realVM": false,
+  "recordVersion": 1,
+  "scope": "synthetic-native-owned-child-lifecycle-only",
+  "sourceSha256": {
+    "Package.swift": "49b8b3ead266664be7f1b3ba7ce7291b00ffa6873cf0c68fbb16da591d8a36fd",
+    "Sources/FixtureBroker/main.swift": "1270b4b9524205c68dcf2b3ed8726dbc15e22bc77fb7016fa44ffcad7b118608",
+    "Sources/FixtureLifecycle/main.swift": "310da839e4afa9fb0ca58164d5e98fad48c3fe6789b00fe6e317f8180030f64b",
+    "Sources/KeyBrokerCore/NativeLaunch.swift": "7b387982bbe1ca486e99d6c3e4146f46fbc562bf7b57355946c54e2a7f802a6f",
+    "Sources/KeyBrokerCore/OwnedChild.swift": "d7488addf2c521e3ac5eb14d3c4aa72ebf1a902c85a38fca15c70813cf2f127f",
+    "Sources/KeyBrokerNative/include/key_broker_native.h": "5476349ab042393ef1eb11dbdb0ac93dc05c79b9f94cb27a753cc643fe54fc37",
+    "Sources/KeyBrokerNative/native.c": "1ced1b160d782b2c96f91351fadeb9bebf5d4d483a64b44fa3c0c34ec5bff97d",
+    "Tests/KeyBrokerTests/OwnedChildTests.swift": "0324fab11e38ae207219237f9d0cbfe786a0b85b4326a484b6cfe0f2ab678965",
+    "scripts/verify-lifecycle.py": "5b765cbcb1735b12ceabcdb504c58001feed6a8948b956b9fb9a433e94148b9c"
+  },
+  "swiftTests": {
+    "command": "swift test --package-path apple/Cowork/WinterCoworkKeyBroker --jobs 2",
+    "count": 29,
+    "failures": 0,
+    "logSha256": "726a7886865fa2ebb94f315990321289431921d10c788907042f27cf71678370",
+    "nativeInjectedScenarios": 15
+  },
+  "swiftVersion": "Apple Swift 6.3.1 (swiftlang-6.3.1.1.2 clang-2100.0.123.102)",
+  "target": "arm64-apple-macosx26.0",
+  "timeout": {
+    "elapsedSeconds": 2.4637708340305835,
+    "exitCode": 0,
+    "receipt": {
+      "autoReapAdmissionRefused": true,
+      "configuredPostKillReapMilliseconds": 250,
+      "configuredWaitMilliseconds": 2000,
+      "confirmedReap": true,
+      "createdChildOnly": true,
+      "elapsedSeconds": 2.0022005,
+      "exitStatus": 137,
+      "killSent": true,
+      "noKeys": true,
+      "ownedChildTimeoutFixture": true,
+      "ownershipDebtCount": 0,
+      "productionReady": false,
+      "realVM": false,
+      "timedOut": true,
+      "wallClockOSGuarantee": false
+    },
+    "stderrEmpty": true,
+    "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdoutSha256": "ea32a36f714a5e055d91b2d72734e3e5913f01716d796da987dfcfa6e7c767db",
+    "timeoutSeconds": 8
+  }
+}

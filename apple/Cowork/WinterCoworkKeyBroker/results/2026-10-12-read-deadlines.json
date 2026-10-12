@@ -1,0 +1,87 @@
+{
+  "baseCommit": "222d6d14",
+  "binarySha256": {
+    "cowork-child-lifecycle-fixture": "1a2228413f539132d2611dfa15e8e2b6fb298246ab85d4879c3f463e62954977",
+    "cowork-key-broker-fixture": "848bb44cc1507f8072ce8093a25aa1b1459ca639a228acbeb3dc396058d790b6",
+    "cowork-key-client-fixture": "6d2291ea55feebab8c69bd845ab3b43bde998ed3bb4f4eb065a9c879a22e042e",
+    "cowork-key-worker-fixture": "27bca5225ffb8a3c0746a3dc2aa0423050b77e927db2e17c7fa9eeebbebba65b"
+  },
+  "key_delivery": {
+    "elapsedSeconds": 1.0654367501847446,
+    "exitCode": 0,
+    "receipt": {
+      "actualKeychain": false,
+      "actualSandboxDenials": true,
+      "brokerSelectedIdentityEchoTamperingDenied": true,
+      "clientPIDAndExecutableDenied": true,
+      "crossFormatEchoDeniedBothDirections": true,
+      "daemonReceivesNoKeys": true,
+      "daemonWorkspaceAuthorizationVerified": false,
+      "extra160InheritableFDsExcluded": true,
+      "format32And96WorkerDelivery": true,
+      "genericDeriveDecryptDenied": true,
+      "independentClientDenied": true,
+      "inheritedOneShotEchoAdmission": true,
+      "nativeKeyBrokerFixture": true,
+      "ownedChildNoUnresolvedDebt": true,
+      "ownedWorkerKeyDelivery": true,
+      "productionReady": false,
+      "realVM": false,
+      "replayDenied": true,
+      "replayRealPacketsDenied": true,
+      "sameChallengeCrossKeyProofDenied": true,
+      "sealedIdentity": true,
+      "swappedExecutedImageDenied": true,
+      "twoWorkspaceWorkers": true,
+      "unknownKeyFormatEchoDenied": true,
+      "workerFrameVersion2": true
+    },
+    "stderrEmpty": true,
+    "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdoutSha256": "c62600f4a78649894eb5d911983025876b6f905033985d65384e2b7a7fa0930a",
+    "timeoutSeconds": 30
+  },
+  "priorEvidenceUnchanged": {
+    "2026-10-12-key-formats.json": "d894754e4a38f1cc319b0fb967664bc19d0dc6da0351049bc048f4590ab59d15",
+    "2026-10-12-lifecycle.json": "352940b2f883e55410d90b164459065a1edd41d8308c99703cf307f51e10603c"
+  },
+  "readDeadlineScope": "One monotonic deadline per receive/frame under a sole-reader endpoint contract; write/send are unchanged and no whole-launch deadline is claimed.",
+  "scope": "synthetic-native-fixtures-only",
+  "sourceSha256": {
+    "Sources/KeyBrokerNative/include/key_broker_native.h": "c130316f0b7eaf962048f2c10b0e951322e0d6a9ccff28ab8261e447d97c5d21",
+    "Sources/KeyBrokerNative/native.c": "1779429273f710e71ed5d3dd473bd49df24f3be4cd5e4ab69809e5ea18336990",
+    "Tests/KeyBrokerTests/ReadDeadlineTests.swift": "3859c6fb330ba08b1613d652d1b5587cc402c0c94678c416d2b8f1f8e0ff5024"
+  },
+  "swiftTests": {
+    "failed": 0,
+    "passed": 33,
+    "testLogSha256": "ea3a7b043cf2974c6b65764b946c0997e15e6a781a0ba801107edf8b1438913c"
+  },
+  "timeout": {
+    "elapsedSeconds": 2.436908124946058,
+    "exitCode": 0,
+    "receipt": {
+      "autoReapAdmissionRefused": true,
+      "configuredPostKillReapMilliseconds": 250,
+      "configuredWaitMilliseconds": 2000,
+      "confirmedReap": true,
+      "createdChildOnly": true,
+      "elapsedSeconds": 2.00109775,
+      "exitStatus": 137,
+      "killSent": true,
+      "noKeys": true,
+      "ownedChildTimeoutFixture": true,
+      "ownershipDebtCount": 0,
+      "productionReady": false,
+      "realVM": false,
+      "timedOut": true,
+      "wallClockOSGuarantee": false
+    },
+    "stderrEmpty": true,
+    "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdoutSha256": "d7c75f956e8ee026dcdbe900a925b077b66f6c574e6ab7b94fffb1c350451eea",
+    "timeoutSeconds": 8
+  },
+  "truncationRegression": "Original recv(..., MSG_TRUNC) accepted a five-byte packet as four bytes on Darwin; recvmsg returned flags now reject truncation; exact-size subsequent packet succeeds.",
+  "wallClockOSGuarantee": false
+}
