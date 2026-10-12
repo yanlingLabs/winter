@@ -90,9 +90,19 @@ separately. Cowork remains unavailable until its required gates pass.
   both communication directions and disk threads progressed. Its original
   aggregate remains false for absent guest-TX EAGAIN; Linux HVC can wait inside
   the driver and still return a full write. The unconsumed host-sent suffix is
-  explicit. A generic non-console port is being implemented for asynchronous
-  runtime data traffic; the console evidence does not cover its new control
+  explicit. This prompted the generic non-console port below for asynchronous
+  runtime data traffic; the console evidence itself does not cover its new control
   queues. See [recorded results](https://github.com/yanlingLabs/winter/blob/18fafff1/docs/research/2026-10-12-cowork-stream-results.md).
+- The generic non-console port now has independently accepted Linux evidence:
+  real guest EAGAIN during a six-second sink stall while heartbeats and both disk
+  threads continue; active footprint drops of 246.906/247.953/252.031 MiB with
+  two-way stream work in every window. Byte/disk checks and 18 epochs/300 mapping
+  replacements pass the separate audit. The original normal aggregate remains
+  false because a memory sample split one disk ACK log line; the exact raw-byte
+  reconstruction is separate. A second guest-close run acknowledges control while
+  stalled and exits 77 with effects uncertain. Telemetry serialization is being
+  fixed; no live MMIO reset/host disconnect or full resource gate is claimed.
+  See the [frozen audit](https://github.com/yanlingLabs/winter/blob/86e9cfb7/docs/research/2026-10-12-cowork-generic-fixture-independent-postrun-review.md).
 - Project peer messaging/discovery authority is merged into the feature
   composition through PR #23. Canonical membership, stale-index refusal,
   post-resume checks and host-path redaction are tested; durable cross-restart
