@@ -97,6 +97,8 @@ export interface ComputerV2ServiceDeps {
   /** The dangerous-domain floor's user-added half, for a link the daemon opens with no browser engine (review of
    *  round 13, LOW). */
   site?: SiteFloorDeps;
+  /** A session's working directory (a trusted project's own dangerous domains — review of round 14, LOW #7). */
+  sessionCwd?(sessionId: string): string | undefined;
   /** Resolves a path or an unlisted bundle id to a bundle id WITHOUT launching (`app-resolve.ts`). */
   appResolver?: AppResolver;
   idleMs?: number;
@@ -1298,7 +1300,9 @@ export class ComputerV2Service {
       } else {
         // No browser engine (its site approvals live there): the list — the shipped half and the user's own — refused
         // outright.
-        const match = listedHost(url, this.deps.site ?? {}, undefined);
+        let cwd: string | undefined;
+        try { cwd = this.deps.sessionCwd?.(ctx.sessionId); } catch { cwd = undefined; }
+        const match = listedHost(url, this.deps.site ?? {}, cwd);
         if (match !== null) {
           (ctx.sites ??= new Set()).add(match.host);
           throw new AutomationFailure("NotAllowed", `${match.host} is on the dangerous-domains list (${match.matchedEntry}) — the link was not opened; ask the user if they need it`);

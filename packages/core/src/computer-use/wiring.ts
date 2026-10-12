@@ -278,6 +278,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       ...(deps.dangerousDomainsAdded === undefined ? {} : { dangerousDomainsAdded: deps.dangerousDomainsAdded }),
       ...(deps.savedAllowRules === undefined ? {} : { savedAllowRules: deps.savedAllowRules }),
     },
+    sessionCwd: (sessionId) => deps.store.meta(sessionId).cwd ?? undefined,
     telemetry: new AutomationTelemetry(deps.home),
     ...(deps.audit === undefined ? {} : { audit: deps.audit }),
     ...(deps.interrupt === undefined ? {} : { interrupt: deps.interrupt }),
