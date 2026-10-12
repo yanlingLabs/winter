@@ -1,0 +1,59 @@
+{
+  "exitCode": 0,
+  "elapsedSeconds": 1.323492957977578,
+  "receipt": {
+    "sameChallengeCrossKeyProofDenied": true,
+    "productionReady": false,
+    "daemonReceivesNoKeys": true,
+    "independentClientDenied": true,
+    "unknownKeyFormatEchoDenied": true,
+    "actualSandboxDenials": true,
+    "clientPIDAndExecutableDenied": true,
+    "daemonWorkspaceAuthorizationVerified": false,
+    "actualKeychain": false,
+    "brokerSelectedIdentityEchoTamperingDenied": true,
+    "ownedWorkerKeyDelivery": true,
+    "crossFormatEchoDeniedBothDirections": true,
+    "realVM": false,
+    "sealedIdentity": true,
+    "nativeKeyBrokerFixture": true,
+    "replayRealPacketsDenied": true,
+    "inheritedOneShotEchoAdmission": true,
+    "swappedExecutedImageDenied": true,
+    "genericDeriveDecryptDenied": true,
+    "twoWorkspaceWorkers": true,
+    "format32And96WorkerDelivery": true,
+    "workerFrameVersion2": true,
+    "replayDenied": true,
+    "extra160InheritableFDsExcluded": true
+  },
+  "stderr": "",
+  "isolation": "Disposable HOME/TMPDIR, sanitized environment, only fixed ad-hoc fixture binaries; owned private FD/Seatbelt scope; no real credentials, Keychain, VM or disk.",
+  "unitTests": {
+    "passed": 20,
+    "failed": 0,
+    "baselinePassed": 10
+  },
+  "scope": "One authorized synthetic native fixture; no production Keychain/volume/VM/unlock/guest transport. No production write budget selected.",
+  "binarySha256": {
+    "cowork-key-broker-fixture": "02bd1cc3059eed13e4c7c2de3a836f24fb3cf2b8748745bf4dfb3e6ecfd13abc",
+    "cowork-key-worker-fixture": "ff19b1226baaf42a5a88e54b98f35b61ebe370049f184ae42a95150da905b3d3",
+    "cowork-key-client-fixture": "91328a24817660c885a42e072352de453ce9d7b3a502591d15082191a96d9239"
+  },
+  "sourceSha256": {
+    "Sources/FixtureBroker/main.swift": "ef1bdeb0d6d24b484bfe9dbb412e2220de7a476e5c5b8b14c58092519483a843",
+    "Sources/FixtureClient/main.swift": "7e7882cb20a50234652f90cc8a077b89a1358f541ab0c887dc074aaf8cb4523e",
+    "Sources/FixtureWorker/main.swift": "2d2cce3ac9255f33335bceb976d2dbaae268287577f798c66d30c2172fbfc03e",
+    "Sources/KeyBrokerCore/Identity.swift": "e75a3121d78635061461afa6156aa99be6f48f8dbdf7fdf55282294ff0acaba2",
+    "Sources/KeyBrokerCore/KeyFormat.swift": "dbbeef4d6d603d4bf80a1822fb927c2ab9967601b194b16b0fe4d5460e3bbd2b",
+    "Sources/KeyBrokerCore/NativeLaunch.swift": "c09b71d0a6b4b553d4614161acc46f666b7ab2d3e77fdc2a4a1d352080a0008c",
+    "Sources/KeyBrokerCore/WorkerKeyFrame.swift": "4bdd0d4d1cbb2cf2e67b2298ea79ae554d88df870810f1324442106593510ade",
+    "Sources/KeyBrokerNative/include/key_broker_native.h": "faacd93d0b31065e96f2124f3d6a8134785cddf26106ae89036d350601a3d163",
+    "Sources/KeyBrokerNative/native.c": "4d281a0d08eddde9c9f18216f2598228359c5c5cadf407cfe759c98e7c3ca019"
+  },
+  "testsSha256": "e1f114fa7105398674fe9c565dad4f69cb1bce90df9d0eaa9a429e5702fd5f98",
+  "nativeLifecycleFollowup": {
+    "strictlyBoundedTimeoutTeardownVerified": false,
+    "issue": "kb_wait_owned timeout kills then blocking waitpid(...,0); OwnedChild.waitStatus sets reaped even on negative result. Successful run exit0 remains valid; lifecycle reviewed separately."
+  }
+}

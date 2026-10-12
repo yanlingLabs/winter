@@ -77,11 +77,33 @@ public final class OwnedChild {
     deinit { if !reaped { _=kill(pid,SIGKILL);_=kb_wait_owned(pid,2000) } }
 }
 public struct WorkerBootstrap: Codable {
+    public let frameVersion: UInt32
+    public let keyByteCount: UInt16
     public let identity: VolumeIdentity
     public let challenge: Data
     public let deniedFixturePath: String
+    public init(identity: VolumeIdentity, challenge: Data, deniedFixturePath: String) {
+        frameVersion=WorkerKeyFrame.version;keyByteCount=UInt16(identity.keyFormat.byteCount)
+        self.identity=identity;self.challenge=challenge;self.deniedFixturePath=deniedFixturePath
+    }
+    public func validate() throws {
+        try identity.validate()
+        guard frameVersion==WorkerKeyFrame.version,Int(keyByteCount)==identity.keyFormat.byteCount,
+              challenge.count==32,deniedFixturePath.utf8.count<=1024,deniedFixturePath.hasPrefix("/"),
+              !deniedFixturePath.contains("\0") else { throw BrokerFailure.invalidFrame }
+    }
+    public static func decode(_ data: Data) throws -> WorkerBootstrap {
+        guard data.count<2048,let object=try JSONSerialization.jsonObject(with:data) as? [String:Any],
+              Set(object.keys)==["frameVersion","keyByteCount","identity","challenge","deniedFixturePath"],
+              let identity=object["identity"] as? [String:Any],Set(identity.keys)==VolumeIdentity.wireFields else { throw BrokerFailure.invalidFrame }
+        do { let value=try JSONDecoder().decode(Self.self,from:data);try value.validate();return value }
+        catch { throw BrokerFailure.invalidFrame }
+    }
 }
 public struct WorkerReceipt: Codable {
+    public let frameVersion: UInt32
+    public let keyFormat: VolumeKeyFormat
+    public let keyByteCount: UInt16
     public let challenge: Data
     public let proof: Data
     public let sandbox: Bool
@@ -91,9 +113,27 @@ public struct WorkerReceipt: Codable {
     public let networkDenied: Bool
     public let execDenied: Bool
     public let securityServiceDenied: Bool
-    public init(challenge: Data, proof: Data, sandbox: Bool, bootstrapClosed: Bool, extraFDs: Int, fileDenied: Bool, networkDenied: Bool, execDenied: Bool, securityServiceDenied: Bool) { self.challenge=challenge;self.proof=proof;self.sandbox=sandbox;self.bootstrapClosed=bootstrapClosed;self.extraFDs=extraFDs;self.fileDenied=fileDenied;self.networkDenied=networkDenied;self.execDenied=execDenied;self.securityServiceDenied=securityServiceDenied }
+    public init(keyFormat: VolumeKeyFormat, challenge: Data, proof: Data, sandbox: Bool, bootstrapClosed: Bool, extraFDs: Int, fileDenied: Bool, networkDenied: Bool, execDenied: Bool, securityServiceDenied: Bool) { frameVersion=WorkerKeyFrame.version;self.keyFormat=keyFormat;keyByteCount=UInt16(keyFormat.byteCount);self.challenge=challenge;self.proof=proof;self.sandbox=sandbox;self.bootstrapClosed=bootstrapClosed;self.extraFDs=extraFDs;self.fileDenied=fileDenied;self.networkDenied=networkDenied;self.execDenied=execDenied;self.securityServiceDenied=securityServiceDenied }
+    public static func decode(_ data: Data) throws -> WorkerReceipt {
+        guard data.count<=4096,let object=try JSONSerialization.jsonObject(with:data) as? [String:Any],
+              Set(object.keys)==["frameVersion","keyFormat","keyByteCount","challenge","proof","sandbox","bootstrapClosed","extraFDs","fileDenied","networkDenied","execDenied","securityServiceDenied"] else { throw BrokerFailure.invalidFrame }
+        do {
+            let value=try JSONDecoder().decode(Self.self,from:data)
+            guard value.frameVersion==WorkerKeyFrame.version,Int(value.keyByteCount)==value.keyFormat.byteCount,
+                  value.challenge.count==32,value.proof.count==32 else { throw BrokerFailure.invalidFrame }
+            return value
+        } catch { throw BrokerFailure.invalidFrame }
+    }
 }
-public struct WorkerReady: Codable { public let sandbox: Bool;public let bootstrapFD: Int;public init(sandbox: Bool, bootstrapFD: Int) { self.sandbox=sandbox;self.bootstrapFD=bootstrapFD } }
+public struct WorkerReady: Codable {
+    public let frameVersion: UInt32;public let sandbox: Bool;public let bootstrapFD: Int
+    public init(sandbox: Bool, bootstrapFD: Int) { frameVersion=WorkerKeyFrame.version;self.sandbox=sandbox;self.bootstrapFD=bootstrapFD }
+    public static func decode(_ data: Data) throws -> WorkerReady {
+        guard data.count<=4096,let object=try JSONSerialization.jsonObject(with:data) as? [String:Any],Set(object.keys)==["frameVersion","sandbox","bootstrapFD"] else { throw BrokerFailure.invalidFrame }
+        let value=try JSONDecoder().decode(Self.self,from:data)
+        guard value.frameVersion==WorkerKeyFrame.version else { throw BrokerFailure.invalidFrame };return value
+    }
+}
 public func emitFixtureJSON<T:Encodable>(_ value: T) throws { let data=try JSONEncoder().encode(value);try OwnedFD(dup(STDOUT_FILENO)).write(data+Data([10])) }
 
 /// Native capability, never constructed from JSON/RPC. The only key-bearing
@@ -108,18 +148,18 @@ public final class FixtureWorkerLauncher {
         let (reader,writer)=try fixturePipe(),(reportReader,reportWriter)=try fixturePipe()
         let child=try OwnedChild(image:image,mode:"worker",input:reader,output:reportWriter,beforeSpawn:beforeSpawn)
         reader.close();reportWriter.close();try child.resume()
-        let ready=try JSONDecoder().decode(WorkerReady.self,from:reportReader.line())
+        let ready=try WorkerReady.decode(reportReader.line())
         guard ready.sandbox,ready.bootstrapFD==3 else { throw BrokerFailure.sandboxRequired }
         // Validate actual code again after READY, before any raw material flows.
         try image.validateExecuted(child.pid)
         let bootstrap=WorkerBootstrap(identity:record.identity,challenge:Data(SymmetricKey(size:.bits256).withUnsafeBytes{Data($0)}),deniedFixturePath:deniedFixturePath)
         var key=try vault.unlockMaterial(record);defer { wipe(&key) }
-        let header=try JSONEncoder().encode(bootstrap)
-        guard header.count<2048 else { throw BrokerFailure.invalidIdentity }
-        var length=UInt32(header.count).bigEndian
-        try writer.write(withUnsafeBytes(of:&length){Data($0)}+header+key);keyDeliveries+=1;writer.close()
-        let receipt=try JSONDecoder().decode(WorkerReceipt.self,from:reportReader.line());try child.wait()
-        guard receipt.challenge==bootstrap.challenge,try vault.proofMatches(receipt.proof,record:record,challenge:bootstrap.challenge),receipt.sandbox,receipt.bootstrapClosed,receipt.extraFDs==0,receipt.fileDenied,receipt.networkDenied,receipt.execDenied,receipt.securityServiceDenied else { throw BrokerFailure.processFailure }
+        var frame=try WorkerKeyFrame.encode(bootstrap,material:key);defer { wipe(&frame) }
+        try writer.write(frame);keyDeliveries+=1;writer.close()
+        let receipt=try WorkerReceipt.decode(reportReader.line());try child.wait()
+        guard receipt.frameVersion==WorkerKeyFrame.version,receipt.keyFormat==record.identity.keyFormat,
+              Int(receipt.keyByteCount)==record.identity.keyFormat.byteCount,
+              receipt.challenge==bootstrap.challenge,try vault.proofMatches(receipt.proof,record:record,challenge:bootstrap.challenge),receipt.sandbox,receipt.bootstrapClosed,receipt.extraFDs==0,receipt.fileDenied,receipt.networkDenied,receipt.execDenied,receipt.securityServiceDenied else { throw BrokerFailure.processFailure }
         return receipt
     }
 }

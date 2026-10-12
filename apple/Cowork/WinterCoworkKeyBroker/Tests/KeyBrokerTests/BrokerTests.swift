@@ -7,7 +7,7 @@ final class BrokerTests: XCTestCase {
     private func identity(_ changes: [String:Any] = [:]) throws -> VolumeIdentity {
         var value:[String:Any]=["homeId":"00000000-0000-0000-0000-000000000001","homePath":"/fixture/home","homeDevice":1,"homeInode":2,
             "workspaceId":"00000000-0000-0000-0000-000000000003","volumeId":"00000000-0000-0000-0000-000000000004",
-            "creationId":"00000000-0000-0000-0000-000000000005","keyVersion":1,"formatVersion":1,"purpose":"data"]
+            "creationId":"00000000-0000-0000-0000-000000000005","keyVersion":1,"formatVersion":1,"keyFormat":VolumeKeyFormat.fixtureRaw256V1.rawValue,"purpose":"data"]
         value.merge(changes){_,new in new};let result=try JSONDecoder().decode(VolumeIdentity.self,from:JSONSerialization.data(withJSONObject:value));try result.validate();return result
     }
     private func fingerprint(_ record: SealedRecord, _ vault: SyntheticVault) throws -> Data {
@@ -33,7 +33,7 @@ final class BrokerTests: XCTestCase {
         for change: [String: Any] in [["homeId": "00000000-0000-0000-0000-000000000006"], ["homePath": "/fixture/other"],
             ["homeDevice": 9], ["homeInode": 9], ["workspaceId": "00000000-0000-0000-0000-000000000006"],
             ["volumeId": "00000000-0000-0000-0000-000000000006"], ["creationId": "00000000-0000-0000-0000-000000000006"],
-            ["keyVersion": 2], ["purpose": "environment"]] {
+            ["keyVersion": 2], ["purpose": "environment"], ["keyFormat":VolumeKeyFormat.luks2AES256XTSHMACSHA256V1.rawValue]] {
             XCTAssertThrowsError(try vault.validate(.init(identity: identity(change), wrappedKey: record.wrappedKey)))
         }
         try vault.validate(record)
@@ -113,5 +113,76 @@ final class BrokerTests: XCTestCase {
     }
     func testProductionLaunchAlwaysBlockedWithoutFixtureSecrets() {
         XCTAssertThrowsError(try ProductionKeyBroker.launch()){XCTAssertEqual($0 as? BrokerFailure,.productionBlocked)}
+    }
+
+    func testClosedFormatLengthsAndIndependentComponents() throws {
+        XCTAssertEqual(Set(VolumeKeyFormat.allCases.map(\.byteCount)),[32,96])
+        for format in VolumeKeyFormat.allCases {
+            var calls=0
+            var material=try format.generateForFixture(randomComponent:{ calls+=1;return Data(repeating:UInt8(calls),count:32) })
+            defer { wipe(&material) }
+            XCTAssertEqual(calls,format.byteCount/32)
+            XCTAssertEqual(material.count,format.byteCount)
+            XCTAssertNoThrow(try format.validateMaterial(material))
+        }
+        XCTAssertThrowsError(try VolumeKeyFormat.luks2AES256XTSHMACSHA256V1.generateForFixture(randomComponent:{ Data(repeating:1,count:32) })) {
+            XCTAssertEqual($0 as? BrokerFailure,.invalidKeyMaterial)
+        }
+        XCTAssertThrowsError(try VolumeKeyFormat.fixtureRaw256V1.generateForFixture(randomComponent:{ Data(repeating:1,count:31) }))
+    }
+    func testWrongLengthsAndEqualAESKeysAreRefusedBeforeSealing() throws {
+        for format in VolumeKeyFormat.allCases {
+            let id=try identity(["keyFormat":format.rawValue]),vault=SyntheticVault()
+            for size in [0,31,32,33,64,95,96,97] where size != format.byteCount {
+                var material=Data(repeating:0,count:size);defer { wipe(&material) }
+                XCTAssertThrowsError(try vault.seal(material,identity:id,using:SymmetricKey(size:.bits256))) {
+                    XCTAssertEqual($0 as? BrokerFailure,.invalidKeyMaterial)
+                }
+            }
+        }
+        var equalHalves=Data(repeating:0,count:96);defer { wipe(&equalHalves) }
+        XCTAssertThrowsError(try VolumeKeyFormat.luks2AES256XTSHMACSHA256V1.validateMaterial(equalHalves))
+    }
+    func testBothFormatsWrapAllBytesAndRefuseCrossFormatReprovision() throws {
+        for format in VolumeKeyFormat.allCases {
+            let vault=SyntheticVault(),id=try identity(["keyFormat":format.rawValue]),record=try vault.provisionForFixture(id)
+            var material=try vault.unlockMaterial(record);defer { wipe(&material) }
+            XCTAssertEqual(material.count,format.byteCount)
+            XCTAssertEqual(record.wrappedKey.count,format.byteCount+28)
+            let before=try fingerprint(record,vault)
+            let other:VolumeKeyFormat=format == .fixtureRaw256V1 ? .luks2AES256XTSHMACSHA256V1:.fixtureRaw256V1
+            XCTAssertThrowsError(try vault.provisionForFixture(identity(["keyFormat":other.rawValue]))) {
+                XCTAssertEqual($0 as? BrokerFailure,.recordAlreadyExists)
+            }
+            XCTAssertThrowsError(try vault.validate(.init(identity:identity(["keyFormat":other.rawValue]),wrappedKey:record.wrappedKey)))
+            XCTAssertEqual(try fingerprint(record,vault),before)
+        }
+    }
+    func testRelocationAndKEKRotationPreserve96BytesAndFormat() throws {
+        let vault=SyntheticVault(),format=VolumeKeyFormat.luks2AES256XTSHMACSHA256V1
+        let first=try vault.provisionForFixture(identity(["keyFormat":format.rawValue]))
+        let other=try vault.provisionForFixture(identity(["volumeId":"00000000-0000-0000-0000-000000000006"]))
+        let firstBits=try fingerprint(first,vault),otherBits=try fingerprint(other,vault)
+        let moved=try vault.rebindForFixture(first,to:identity(["keyFormat":format.rawValue,"homePath":"/fixture/relocated","homeDevice":9,"homeInode":10,"keyVersion":2]))
+        XCTAssertEqual(try fingerprint(moved,vault),firstBits);XCTAssertEqual(moved.identity.keyFormat,format)
+        XCTAssertThrowsError(try vault.rebindForFixture(moved,to:identity(["keyFormat":VolumeKeyFormat.fixtureRaw256V1.rawValue,"keyVersion":3]))) {
+            XCTAssertEqual($0 as? BrokerFailure,.invalidTransition)
+        }
+        let rotated=try vault.rotateWrappingKeyForFixture()
+        for record in rotated {
+            XCTAssertEqual(try fingerprint(record,vault),record.identity.volumeId==first.identity.volumeId ? firstBits:otherBits)
+            XCTAssertEqual(record.identity.keyFormat,record.identity.volumeId==first.identity.volumeId ? format:.fixtureRaw256V1)
+        }
+        XCTAssertThrowsError(try vault.validate(first));XCTAssertThrowsError(try vault.validate(moved));XCTAssertThrowsError(try vault.validate(other))
+    }
+    func testUnknownOrMissingFormatAndAdditionalLengthFieldsAreRejected() throws {
+        let record=try SyntheticVault().provisionForFixture(identity()),request=OneShotAdmission(record:record,launchedPID:100).bootstrap()
+        let bytes=try JSONEncoder().encode(request)
+        for mode in ["unknown","missing","extra-length"] {
+            var object=try JSONSerialization.jsonObject(with:bytes) as! [String:Any],id=object["identity"] as! [String:Any]
+            switch mode { case "unknown": id["keyFormat"]="unknown-v1";case "missing": id.removeValue(forKey:"keyFormat");default:id["keyByteCount"]=96 }
+            object["identity"]=id
+            XCTAssertThrowsError(try LaunchRequest.decode(JSONSerialization.data(withJSONObject:object)))
+        }
     }
 }

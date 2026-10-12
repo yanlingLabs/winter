@@ -1,7 +1,7 @@
 import Foundation
 import CryptoKit
 
-public enum BrokerFailure: String, Error { case invalidIdentity, invalidSeal, staleRecord, unauthorizedChannel, replay, forbiddenField, imageMismatch, processFailure, sandboxRequired, productionBlocked, recordAlreadyExists, invalidTransition }
+public enum BrokerFailure: String, Error { case invalidIdentity, invalidSeal, invalidKeyMaterial, invalidFrame, staleRecord, unauthorizedChannel, replay, forbiddenField, imageMismatch, processFailure, sandboxRequired, productionBlocked, recordAlreadyExists, invalidTransition }
 public enum VolumePurpose: String, Codable, Sendable { case data, environment }
 public struct VolumeIdentity: Codable, Equatable, Sendable {
     public let homeId: String
@@ -13,9 +13,10 @@ public struct VolumeIdentity: Codable, Equatable, Sendable {
     public let creationId: String
     public let keyVersion: UInt64
     public let formatVersion: UInt32
+    public let keyFormat: VolumeKeyFormat
     public let purpose: VolumePurpose
-    public init(homeId: String, homePath: String, homeDevice: UInt64, homeInode: UInt64, workspaceId: String, volumeId: String, creationId: String, keyVersion: UInt64, formatVersion: UInt32 = 1, purpose: VolumePurpose) throws {
-        self.homeId=homeId;self.homePath=homePath;self.homeDevice=homeDevice;self.homeInode=homeInode;self.workspaceId=workspaceId;self.volumeId=volumeId;self.creationId=creationId;self.keyVersion=keyVersion;self.formatVersion=formatVersion;self.purpose=purpose
+    public init(homeId: String, homePath: String, homeDevice: UInt64, homeInode: UInt64, workspaceId: String, volumeId: String, creationId: String, keyVersion: UInt64, formatVersion: UInt32 = 1, keyFormat: VolumeKeyFormat = .fixtureRaw256V1, purpose: VolumePurpose) throws {
+        self.homeId=homeId;self.homePath=homePath;self.homeDevice=homeDevice;self.homeInode=homeInode;self.workspaceId=workspaceId;self.volumeId=volumeId;self.creationId=creationId;self.keyVersion=keyVersion;self.formatVersion=formatVersion;self.keyFormat=keyFormat;self.purpose=purpose
         try validate()
     }
     public func validate() throws {
@@ -28,8 +29,8 @@ public struct VolumeIdentity: Codable, Equatable, Sendable {
         try validate()
         var output=Data()
         func field(_ bytes: Data) { var count=UInt32(bytes.count).bigEndian;withUnsafeBytes(of:&count){output.append(contentsOf:$0)};output.append(bytes) }
-        for value in ["WinterCoworkKeyBroker/v1",domain,homeId,homePath,workspaceId,volumeId,creationId,purpose.rawValue] { field(Data(value.utf8)) }
-        for value in [homeDevice,homeInode,keyVersion,UInt64(formatVersion)] { var number=value.bigEndian;withUnsafeBytes(of:&number){field(Data($0))} }
+        for value in ["WinterCoworkKeyBroker/v2",domain,homeId,homePath,workspaceId,volumeId,creationId,purpose.rawValue,keyFormat.rawValue,keyFormat.layout] { field(Data(value.utf8)) }
+        for value in [homeDevice,homeInode,keyVersion,UInt64(formatVersion),UInt64(keyFormat.byteCount)] { var number=value.bigEndian;withUnsafeBytes(of:&number){field(Data($0))} }
         return output
     }
 }
@@ -46,8 +47,8 @@ public final class SyntheticVault {
     private var current: [String: SealedRecord] = [:]
     public init() {}
 
-    private func seal(_ material: Data, identity: VolumeIdentity, using key: SymmetricKey) throws -> SealedRecord {
-        guard material.count == 32 else { throw BrokerFailure.invalidSeal }
+    func seal(_ material: Data, identity: VolumeIdentity, using key: SymmetricKey) throws -> SealedRecord {
+        try identity.keyFormat.validateMaterial(material)
         let box = try AES.GCM.seal(material, using: key, authenticating: identity.canonical(domain: "wrapped-volume-dek"))
         guard let combined = box.combined else { throw BrokerFailure.invalidSeal }
         return SealedRecord(identity: identity, wrappedKey: combined)
@@ -59,7 +60,9 @@ public final class SyntheticVault {
             material = try AES.GCM.open(AES.GCM.SealedBox(combined: record.wrappedKey), using: wrappingKey,
                 authenticating: record.identity.canonical(domain: "wrapped-volume-dek"))
         } catch { throw BrokerFailure.invalidSeal }
-        guard material.count == 32, current[record.identity.volumeId] == record else {
+        do { try record.identity.keyFormat.validateMaterial(material) }
+        catch { wipe(&material);throw error }
+        guard current[record.identity.volumeId] == record else {
             wipe(&material)
             throw BrokerFailure.staleRecord
         }
@@ -70,7 +73,7 @@ public final class SyntheticVault {
         // Re-provisioning an existing identity must never silently replace its
         // disk key. Relocation/KEK rotation use explicit re-sealing below.
         guard current[identity.volumeId] == nil else { throw BrokerFailure.recordAlreadyExists }
-        var material = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
+        var material = try identity.keyFormat.generateForFixture()
         defer { wipe(&material) }
         let record = try seal(material, identity: identity, using: wrappingKey)
         current[identity.volumeId] = record
@@ -93,7 +96,7 @@ public final class SyntheticVault {
               identity.homeId == old.homeId,
               identity.workspaceId == old.workspaceId, identity.volumeId == old.volumeId,
               identity.creationId == old.creationId, identity.purpose == old.purpose,
-              identity.formatVersion == old.formatVersion else { throw BrokerFailure.invalidTransition }
+              identity.formatVersion == old.formatVersion, identity.keyFormat == old.keyFormat else { throw BrokerFailure.invalidTransition }
         var material = try verifiedMaterial(record)
         defer { wipe(&material) }
         let rebound = try seal(material, identity: identity, using: wrappingKey)
@@ -111,7 +114,7 @@ public final class SyntheticVault {
             let identity = try VolumeIdentity(homeId: value.homeId, homePath: value.homePath,
                 homeDevice: value.homeDevice, homeInode: value.homeInode, workspaceId: value.workspaceId,
                 volumeId: value.volumeId, creationId: value.creationId, keyVersion: value.keyVersion + 1,
-                formatVersion: value.formatVersion, purpose: value.purpose)
+                formatVersion: value.formatVersion, keyFormat: value.keyFormat, purpose: value.purpose)
             var material = try verifiedMaterial(old)
             defer { wipe(&material) }
             next[identity.volumeId] = try seal(material, identity: identity, using: nextKey)
@@ -141,11 +144,16 @@ public struct LaunchRequest: Codable, Sendable {
     public init(nonce: Data, identity: VolumeIdentity) { self.nonce=nonce;self.identity=identity }
     public static func decode(_ data: Data) throws -> LaunchRequest {
         guard data.count<=4096,let object=try JSONSerialization.jsonObject(with:data) as? [String:Any],Set(object.keys)==["nonce","identity"] else { throw BrokerFailure.forbiddenField }
-        let identityFields:Set<String>=["homeId","homePath","homeDevice","homeInode","workspaceId","volumeId","creationId","keyVersion","formatVersion","purpose"]
-        guard let identity=object["identity"] as? [String:Any],Set(identity.keys)==identityFields else { throw BrokerFailure.forbiddenField }
-        let request=try JSONDecoder().decode(LaunchRequest.self,from:data)
+        guard let identity=object["identity"] as? [String:Any],Set(identity.keys)==VolumeIdentity.wireFields else { throw BrokerFailure.forbiddenField }
+        let request:LaunchRequest
+        do { request=try JSONDecoder().decode(LaunchRequest.self,from:data) }
+        catch { throw BrokerFailure.invalidIdentity }
         guard request.nonce.count==32 else { throw BrokerFailure.unauthorizedChannel };try request.identity.validate();return request
     }
+}
+
+extension VolumeIdentity {
+    static let wireFields: Set<String> = ["homeId","homePath","homeDevice","homeInode","workspaceId","volumeId","creationId","keyVersion","formatVersion","keyFormat","purpose"]
 }
 public final class OneShotAdmission {
     private let nonce: Data
