@@ -6,6 +6,8 @@ This map covers the Winter host and its sibling agent SDK, runtime SDK, and iOS 
 
 The 2026-10-11 [workspace metadata API slice](cowork-workspace-api.md) adds canonical host RPC reads/mutations and isolated daemon fixture coverage. Production Cowork creation/execution and client availability remain blocked; the historical infrastructure map below is retained.
 
+The [implementation ledger](cowork-implementation.md) tracks subsequent native VM, RAM return, protected-store, key-broker, host-output and CLI work, including their remaining gates. The tables below describe the original source audit, not the latest implementation branch inventory.
+
 ## What already exists
 
 | Area | Implemented today | Cowork boundary | Source |

@@ -37,23 +37,45 @@ separately. Cowork remains unavailable until its required gates pass.
   replacement sequences. This proves the restricted PL011-earlycon/RNG/balloon
   fixture, not asynchronous block/fs/network/vsock coordination or encrypted
   storage. See the [frozen evidence](https://github.com/yanlingLabs/winter/blob/b4088811/spikes/cowork-hvf/results/2026-10-11-linux-active-reclaim.json).
+- The subsequent guarded RAW disk fixture also returned RAM during direct reads,
+  writes and flushes. Root audited all epochs, mapping replacements, completion
+  receipts and final disk words. Outstanding pins were observed during explicit
+  post-I/O holds, not a proven blocked OS syscall. The separately built crypto
+  kernel and cryptsetup toolset have not booted; neither encryption nor other
+  asynchronous devices are covered by this result. See the [RAW evidence](https://github.com/yanlingLabs/winter/blob/159df65c/spikes/cowork-hvf/results/2026-10-12-raw-block-root-audit.json)
+  and [scope and reproduction](https://github.com/yanlingLabs/winter/blob/159df65c/spikes/cowork-hvf/README.md).
 - The runtime SDK guest-transport PR is merged. The agent SDK's explicit text
   Read/Write/Edit routes use a protected file-helper binding; the exact C worker
   passed its Linux CI compartment checks, including conditional writes and symlink
   races. Full confined runtime startup still refuses: file routes alone do not
   establish a supervisor, instruction/store access, shell or extension boundary.
+- The agent SDK branch now also has a confined foreground-Bash process helper and
+  a trusted protected-store bootstrap seam. The latter carries native ownership
+  and prior-boot termination evidence into actual root/child stores, guards
+  durable sidecars and reports retained ownership separately from a successful
+  turn. Native ownership adapters and full guest startup remain absent. These
+  changes are unreleased and not pinned in Winter.
+- The standalone host-output adapter has an explicit Core constructor path and
+  asynchronous first-use bundle verification. Source and compiled fixtures reach
+  the local SDK registration through that path; they do not prove installed SDK
+  support, production signing or a complete Workflow transport. See
+  [host output](cowork-host-output.md) and [loading](host-output-loading.md).
+- The synthetic native key-broker fixture generates random volume keys and wraps
+  them under a broker key. Approved identity rebinding and wrapping-key rotation
+  preserve the volume key. It does not implement durable Keychain custody,
+  production caller authorization or encrypted volumes.
 
 ## Work in progress
 
 | Area | Current work | Required before completion |
 | --- | --- | --- |
-| Canonical host state | Schema 8, workspace/source/policy/binding repository, durable receipts/outbox and pure authority checks | Controller acknowledgments, authority service wiring, lifecycle/recovery, typed public protocol |
-| Host storage protection | Retained-home fences and Core/SDK authority consumer; proposed native key/launch broker | Actual encrypted disks and sealed launch records; native output/Workflow producer wiring; preserve ordinary Code behavior and real SDK hook ordering; stop owned host effects on daemon loss |
-| Native VM integration | VZ research foundations; reviewed Linux/HVF restricted live reclaim; standalone host-output integration underway | Verified active reclaim, real signed worker admission/sandbox, cancellation/ownership, admitted encrypted disks/shares and concurrent latency |
-| Guest execution | Merged remote transport; confined text file routes and Linux helper evidence | Immutable Linux runtime/supervisor, complete file/process/extension routes, guest run-home/instructions, cold parent/child restoration |
+| Canonical host state | Schema 8 repository, receipts/outbox, typed workspace metadata RPCs, remote allowlist mirrors and bounded cursor pages | Native controller acknowledgments, source provisioning, authority service wiring, lifecycle/recovery and paired-client scope adapter |
+| Host storage protection | Retained-home fences and Core/SDK authority consumer; synthetic native key-broker and host-output fixtures | Actual encrypted disks and durable sealed records; embedded/daemon file and spawn coverage; Workflow wiring; preserve ordinary Code behavior; stop owned host effects on daemon loss |
+| Native VM integration | VZ research foundations; reviewed Linux/HVF live reclaim with one RAW disk | Encrypted storage and remaining asynchronous devices, production signed worker admission, cancellation/ownership, direct shares, automatic resources and concurrent latency |
+| Guest execution | Merged remote transport; confined text file and foreground-process helpers; protected-store bootstrap seam | Immutable runtime/supervisor, native ownership and termination adapters, complete process/extension routes, run-home/instructions and cold VM parent/child restoration |
 | Network and credentials | Native egress and bounded Git publication foundations, isolated package receipts | Guest parser outside credential daemon; brokered sockets and providers/MCP; GitHub auth/private clone/service wiring; native resource bounds and revocation draining |
-| Workspace behavior | Durable source/policy transitions being implemented | Live add/remove/revoke, context refresh and trust, artifact/export/backup retention, same-Project messaging |
-| Product integration | Pending dependent runtime/authority slices | Mac/CLI/iOS flows, host schedules, producer/consumer protocol mirrors, kit/SDK version integration and end-to-end checks |
+| Workspace behavior | Durable source/policy metadata transitions and replay-safe mutations | Real source admission and live add/remove/revoke, context refresh and trust, artifact/export/backup retention, same-Project messaging |
+| Product integration | CLI metadata commands and Swift RPC methods; production create remains refused | Mac/CLI/iOS creation and execution, host schedules, lifecycle events, kit/SDK version integration and end-to-end checks |
 
 Internal repositories and fake backends do not enable a session creation door.
 Source/policy changes require the trusted controller to refresh its epoch before
@@ -63,8 +85,8 @@ explicit v7 rollback that preserves SDK layout (`winter migrate --cowork-schema
 The release that first ships schema 8 must name this rollback command and its
 populated-data refusal in its release notes; no release is being prepared yet.
 Draft native and Git components remain isolated from production creation. Open
-review work includes native output teardown/descriptor ownership, unintended
-unprotected Code observation limits, real SDK callback ordering, and VM/admission
+review work includes embedded and daemon-owned tool coverage, native
+descendant termination evidence, and VM/admission
 recovery after worker loss or sleep. An accepted specification, merged transport,
 compiled helper or passing fixture is not a claim those integrations are complete.
 The admission ledger's v2 migration preserves the accounting phase before a
