@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AutomationFailure } from "../../src/computer-use/errors";
 import {
-  headlessCacheRoot, headlessPidPath, HeadlessPool, HEADLESS_TABS_GLOBAL, HEADLESS_TABS_PER_SESSION, HEADLESS_WEDGED_AFTER_TIMEOUTS, sweepHeadless, type HeadlessPoolDeps,
+  headlessCacheRoot, headlessPidPath, HeadlessPool, HEADLESS_MEMORY_LIMIT_BYTES, HEADLESS_TABS_GLOBAL, HEADLESS_TABS_PER_SESSION, HEADLESS_WEDGED_AFTER_TIMEOUTS, sweepHeadless, type HeadlessPoolDeps,
 } from "../../src/computer-use/browser/headless/pool";
 import { headlessComponentsDir } from "../../src/computer-use/browser/headless/components";
 import { headlessHelperEnv, spawnEngineProcess, WinterHeadlessProcess, type EngineChild } from "../../src/computer-use/browser/headless/winter-engine";
@@ -32,7 +32,7 @@ interface Rig {
 const pools: HeadlessPool[] = [];
 afterEach(() => { for (const p of pools.splice(0)) p.stop(); });
 
-function rig(o: { mode?: string; verify?: boolean; rss?: number; idleExitMs?: number; enabledPollMs?: number; missing?: boolean; sendTimeoutMs?: number } = {}): Rig {
+function rig(o: { mode?: string; verify?: boolean; memory?: number | ((r: Rig, pid: number) => number); idleExitMs?: number; enabledPollMs?: number; missing?: boolean; sendTimeoutMs?: number; closeSettleMs?: number } = {}): Rig {
   const home = mkdtempSync(join(tmpdir(), "winter-headless-home-"));
   const log = join(home, "fake.log");
   const metrics: PrimitiveMetric[] = [];
@@ -48,7 +48,8 @@ function rig(o: { mode?: string; verify?: boolean; rss?: number; idleExitMs?: nu
     resolve: () => (o.missing === true ? { missing: "Winter's headless browser is missing — reinstall Winter" } : { engine: "winter", app: "/fake/Winter Headless.app", executable: "/fake/Winter Headless.app/Contents/MacOS/Winter Headless", requirement: "fake requirement" }),
     spawn: (_cmd, args) => { r.spawned++; return spawnEngineProcess("/bin/sh", ["-c", 'exec "$0" "$@" 0<&3 1>&4 3<&- 4>&-', process.execPath, FAKE, `--fake-mode=${o.mode ?? "normal"}`, `--fake-log=${log}`, ...args]); },
     verify: () => o.verify ?? true,
-    rssOf: () => o.rss ?? 100 * 1024 * 1024,
+    memoryOf: (pid) => (typeof o.memory === "function" ? o.memory(r, pid) : o.memory ?? 100 * 1024 * 1024),
+    ...(o.closeSettleMs === undefined ? {} : { closeSettleMs: o.closeSettleMs }),
     metric: (m) => metrics.push(m),
     log: (l) => logs.push(l),
     ...(o.idleExitMs === undefined ? {} : { idleExitMs: o.idleExitMs }),
@@ -133,7 +134,7 @@ describe("the headless pool's engine", () => {
   });
 });
 
-describe("the budget (8 per session, 24 in all, 3 GB)", () => {
+describe("the budget (8 per session, 24 in all, 3 GB of memory)", () => {
   test(`at most ${HEADLESS_TABS_PER_SESSION} open tabs per session and ${HEADLESS_TABS_GLOBAL} in all — capacity, nothing closed`, async () => {
     const r = rig();
     await Promise.all(Array.from({ length: HEADLESS_TABS_PER_SESSION }, (_, i) => r.pool.createTab({ sessionId: "s1", url: `https://a.example/${i}` })));
@@ -157,12 +158,81 @@ describe("the budget (8 per session, 24 in all, 3 GB)", () => {
     expect(results.filter((x) => x.status === "rejected").every((x) => ((x as PromiseRejectedResult).reason as TransportError).code === "capacity")).toBe(true);
   });
 
-  test("past 3 GB in the helper's process tree a new tab is refused", async () => {
-    const r = rig({ rss: 4 * 1024 * 1024 * 1024 });
+  test("past 3 GB of the helper's memory a new tab is refused while tabs are open", async () => {
+    const r = rig({ memory: 4 * 1024 * 1024 * 1024 });
     await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
     const e = await failure(r.pool.createTab({ sessionId: "s1", url: "https://b.example/" }));
     expect((e as TransportError).code).toBe("capacity");
     expect(e.message).toMatch(/using too much memory — close some tabs/);
+    expect(r.spawned).toBe(1);
+  });
+
+  test("the guard reads the memory afresh for every new tab: a reading from before closes never refuses", async () => {
+    const level = { bytes: HEADLESS_MEMORY_LIMIT_BYTES + 1 };
+    const r = rig({ memory: () => level.bytes });
+    const a = await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
+    expect(((await failure(r.pool.createTab({ sessionId: "s1", url: "https://b.example/" }))) as TransportError).code).toBe("capacity");
+    // The memory goes back down (a tab closed elsewhere, the GPU process let go): the very next tab is allowed.
+    level.bytes = 1024 * 1024 * 1024;
+    await r.pool.createTab({ sessionId: "s1", url: "https://b.example/" });
+    expect(r.pool.tabCount()).toBe(2);
+    await r.pool.closeTab(a.tabKey);
+  });
+
+  test("over the limit while a close is still in flight: the guard waits for it and reads again, refusing nothing", async () => {
+    // Once the slow tab is open: high until the helper has really closed it (its log says so just before it answers).
+    const armed = { on: false };
+    const r = rig({ memory: (rig) => (!armed.on || rig.commands().some((c) => c.op === "closed") ? 500 * 1024 * 1024 : HEADLESS_MEMORY_LIMIT_BYTES + 1) });
+    const keep = await r.pool.createTab({ sessionId: "s1", url: "https://keep.example/" });
+    const slow = await r.pool.createTab({ sessionId: "s1", url: "http://slow-close.test/" });
+    armed.on = true;
+    const closing = r.pool.closeTab(slow.tabKey);
+    const t = await r.pool.createTab({ sessionId: "s1", url: "https://after.example/" });
+    await closing;
+    expect(t.url).toBe("https://after.example/");
+    expect(r.spawned).toBe(1);
+    expect(r.pool.tabCount()).toBe(2);
+    expect(keep.tabKey).not.toBe(t.tabKey);
+  });
+
+  test("over the limit with a close in flight that never settles in time: refused once the wait is over (tabs are open)", async () => {
+    const armed = { on: false };
+    const r = rig({ memory: () => (armed.on ? HEADLESS_MEMORY_LIMIT_BYTES + 1 : 500 * 1024 * 1024), closeSettleMs: 50 });
+    await r.pool.createTab({ sessionId: "s1", url: "https://keep.example/" });
+    const slow = await r.pool.createTab({ sessionId: "s1", url: "http://slow-close.test/" });
+    armed.on = true;
+    const closing = r.pool.closeTab(slow.tabKey);
+    const t0 = Date.now();
+    const e = await failure(r.pool.createTab({ sessionId: "s1", url: "https://after.example/" }));
+    expect((e as TransportError).code).toBe("capacity");
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(45);
+    await closing;
+  });
+
+  test("over the limit with NO tab open: the helper is restarted, not the tab refused — the guard never stays tripped", async () => {
+    // The first helper reads over the limit (whatever it holds); a fresh one reads little.
+    let firstPid: number | undefined;
+    const r = rig({ memory: (_r, pid) => (pid === firstPid ? HEADLESS_MEMORY_LIMIT_BYTES + 1 : 300 * 1024 * 1024) });
+    const a = await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
+    firstPid = r.pool.pid;
+    const b = await r.pool.createTab({ sessionId: "s2", url: "https://b.example/" }).catch((err: unknown) => err as TransportError);
+    expect((b as TransportError).code).toBe("capacity"); // a tab is open: refused, nothing restarted
+    await r.pool.closeTab(a.tabKey);
+    const [c, d] = await Promise.all([
+      r.pool.createTab({ sessionId: "s2", url: "https://c.example/" }),
+      r.pool.createTab({ sessionId: "s3", url: "https://d.example/" }),
+    ]);
+    expect(r.spawned).toBe(2);
+    expect(r.pool.pid).not.toBe(firstPid);
+    expect([c.url, d.url]).toEqual(["https://c.example/", "https://d.example/"]);
+    expect(r.metrics.filter((m) => m.primitive === "headless.exit").map((m) => m.exitReason)).toEqual(["memory"]);
+    expect(r.metrics.filter((m) => m.primitive === "headless.launch").length).toBe(2);
+    expect(r.logs.some((l) => /used \d+ MiB with no tab open — starting a fresh one/.test(l))).toBe(true);
+    // The old run is gone with its cache: one run directory left, and the pid file names the new helper.
+    await until("the old run's cache removed", () => readdirSync(headlessCacheRoot(r.home)).length === 1);
+    expect((JSON.parse(readFileSync(headlessPidPath(r.home), "utf8")) as { pid: number }).pid).toBe(r.pool.pid!);
+    // The old helper got its pipe's EOF (it exits as the real one does).
+    expect(r.commands().filter((c) => c.op === "eof").length).toBe(1);
   });
 });
 

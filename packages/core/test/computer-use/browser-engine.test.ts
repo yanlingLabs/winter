@@ -10,6 +10,7 @@ import type { TabHandle } from "../../src/computer-use/worker/bridge";
 import { BrowserEngine } from "../../src/computer-use/browser/engine";
 import { browserForBundleId, isRealInstallPath } from "../../src/computer-use/browser/families";
 import { BrowserBackendRegistry } from "../../src/computer-use/browser/registry";
+import { TransportError } from "../../src/computer-use/browser/transport";
 import { FakeCdpTransport, type FakePage } from "./browser-fake-transport";
 import { harness } from "./browser-harness";
 
@@ -822,6 +823,26 @@ describe("lifecycle", () => {
     await new Promise((res) => setTimeout(res, 10));
     expect(r.tabs.get("2")!.closed).toBe(false);
     engine.stop();
+  });
+
+  test("a tab whose browser dies during a waitFor is TargetLost — the failed command first, then the tab gone", async () => {
+    const h = harness();
+    const r = h.run();
+    const t = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "chrome" }) as TabHandle;
+    const key = t.id.split(":")[1]!;
+    let died = false;
+    // As the headless helper's exit does it: the command in flight fails tab_gone, and the tab is reported gone at once.
+    h.chrome.onSend = (method, params) => {
+      const op = (params.arguments as Array<{ value?: unknown }> | undefined)?.[0]?.value;
+      if (died || method !== "Runtime.callFunctionOn" || op !== "waitChange") return;
+      died = true;
+      h.chrome.goneTab(key, "crashed");
+      throw new TransportError("tab_gone", "Winter's headless browser stopped");
+    };
+    const e = await failure(h.engine.primitive(r.scope, t.targetId, "waitFor", { cond: { text: "never shows" }, timeoutMs: 2_000 }));
+    expect(died).toBe(true);
+    expect((e as AutomationFailure).kind).toBe("TargetLost");
+    expect(e.message).toContain("the tab crashed");
   });
 
   test("a tab closed under the engine is TargetLost; the extension's Stop stops the session holding it", async () => {

@@ -55,7 +55,7 @@ export interface PrimitiveMetric {
   viewMovedBy?: string[];
   /** Phase 4, the headless pool: the engine a headless tab runs on (`winter`), on every primitive of one and on the
    *  pool's own `headless.launch` / `headless.exit` lines; the launched engine's version (a launch line); why the
-   *  engine exited (`idle`, `stop`, `crash`, `disabled` — an exit line). */
+   *  engine exited (`idle`, `stop`, `crash`, `disabled`, `memory` — an exit line). */
   headlessEngine?: string;
   headlessVersion?: string;
   exitReason?: string;
