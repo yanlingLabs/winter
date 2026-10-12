@@ -370,6 +370,47 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertNil(sessions[1].providerId, "absent on the wire decodes to nil")
     }
 
+    /// ComputerV2 wake triggers (2026-10-12): `listSessions()` threads `wakesArmed` — how many triggers the session has
+    /// armed (the row's "waiting for you" mark); absent on the wire (none, or an older daemon) decodes to nil.
+    func testListSessionsDecodesWakesArmed() async throws {
+        let (client, t) = try await connected()
+        let (_, sessions) = try await roundTrip(
+            t, sentIndex: 1,
+            result: #"{"sessions":[{"sessionId":"s_1","scope":"global","createdAt":5,"lastSeq":9,"wakesArmed":2},{"sessionId":"s_2","scope":"global","createdAt":6,"lastSeq":1}]}"#
+        ) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(sessions[0].wakesArmed, 2)
+        XCTAssertNil(sessions[1].wakesArmed, "absent on the wire decodes to nil")
+    }
+
+    /// ComputerV2 wake triggers: the pill's [Stop waiting] — `computerUse.wakes.cancel {sessionId, wakeId}`, its
+    /// `cancelled` decoded (false: the trigger had already ended), and a refusal thrown as the daemon's `RpcError` (the
+    /// pill shows its message and lets the user try again).
+    func testCancelWakeEncodesTheIdsDecodesCancelledAndThrowsARefusal() async throws {
+        let (client, t) = try await connected()
+        let (req, cancelled) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"cancelled":true}"#) {
+            try await client.cancelWake(sessionId: "s_1", wakeId: "wk_1a2b3c4d5e6f")
+        }
+        XCTAssertEqual(req["method"] as? String, "computerUse.wakes.cancel")
+        XCTAssertEqual(req["params"] as? [String: String], ["sessionId": "s_1", "wakeId": "wk_1a2b3c4d5e6f"])
+        XCTAssertTrue(cancelled)
+        let (_, already) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"cancelled":false}"#) {
+            try await client.cancelWake(sessionId: "s_1", wakeId: "wk_1a2b3c4d5e6f")
+        }
+        XCTAssertFalse(already)
+        async let refused: Bool = client.cancelWake(sessionId: "s_1", wakeId: "wk_1a2b3c4d5e6f")
+        let sent = try await waitForSent(t, count: 4)
+        let third = decodeLine(sent[3])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(third["id"] as! Int),"error":{"code":-32001,"message":"computerUse.wakes.cancel is available to local clients only"}}"#)
+        do {
+            _ = try await refused
+            XCTFail("a refusal must throw")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.message, "computerUse.wakes.cancel is available to local clients only")
+        }
+    }
+
     /// provider-correctness T4: `session.setEffort`'s wire shape — same required-but-nullable rule
     /// as `session.setModel` above (`SessionSetEffortParams.effort: z.string().min(1).nullable()`),
     /// so a clear must carry a LITERAL JSON `null` rather than omitting the key, which would fail

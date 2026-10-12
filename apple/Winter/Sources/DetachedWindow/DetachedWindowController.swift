@@ -178,10 +178,13 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         adapter.onInterrupt = { [weak self] in self?.stopTurn() }
         // ComputerV2 wake triggers: the "Waiting for you" pill's [Stop waiting], on this window's pinned session.
         adapter.onStopWaiting = { [weak self] wakeId in
-            guard let self else { return }
-            let client = self.feed.client
-            let sid = self.sessionId
-            Task { _ = try? await client.cancelWake(sessionId: sid, wakeId: wakeId) }
+            guard let self else { return "this window closed" }
+            do {
+                _ = try await self.feed.client.cancelWake(sessionId: self.sessionId, wakeId: wakeId)
+                return nil
+            } catch {
+                return wakeStopFailure(error)
+            }
         }
         // A stop that nothing confirmed in time: this window is behind the stream, or lost the terminal.
         // Re-attach so it shows what the daemon says.

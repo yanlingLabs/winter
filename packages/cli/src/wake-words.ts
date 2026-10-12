@@ -45,6 +45,9 @@ export function endedWords(w: ArmedWakeFacts, reason: string): string {
   }
 }
 
-/** Does a trigger ending this way wake the session? (`cancelled` and `disabled` never do; `expired` only when the model
- *  asked — then the wake message follows, and the note reads from it.) */
-export const WAKING_REASONS: ReadonlySet<string> = new Set(["fired", "lost", "expired", "restart"]);
+/** Why Winter stopped waiting, for an ending that wakes NOBODY (`wake_ended.woken` false): "ran out" for a silent
+ *  expiry, else the reason as it is ("cancelled", "disabled"). Whether an ending wakes the session is `woken`'s to
+ *  say — never the reason's (an `expired` wakes only when the model asked). */
+export function stoppedWords(reason: string): string {
+  return reason === "expired" ? "ran out" : reason;
+}

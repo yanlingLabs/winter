@@ -7,8 +7,9 @@ import SwiftUI
 /// The minutes tick on a half-minute timeline; the pill leaves when `wake_ended` lands.
 struct WakeWaitingPills: View {
     let wakes: [ArmedWake]
-    /// [Stop waiting] — nil on a surface that has no door to the daemon for it (then the pill has no button).
-    let onStop: ((String) -> Void)?
+    /// [Stop waiting] — nil on a surface that has no door to the daemon for it (then the pill has no button). Answers
+    /// `nil` once the daemon took it (the pill leaves when `wake_ended` lands), or the sentence to show when it failed.
+    let onStop: (@MainActor (String) async -> String?)?
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
@@ -25,9 +26,11 @@ struct WakeWaitingPills: View {
 struct WakeWaitingPill: View {
     let wake: ArmedWake
     let now: Date
-    let onStop: ((String) -> Void)?
+    let onStop: (@MainActor (String) async -> String?)?
     @State private var stopping = false
     @State private var hoveringStop = false
+    /// Why the last [Stop waiting] failed — shown on the pill's line until the next try. The button is live again.
+    @State private var failure: String?
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
@@ -45,7 +48,15 @@ struct WakeWaitingPill: View {
                 Button {
                     guard !stopping else { return }
                     stopping = true
-                    onStop(wake.wakeId)
+                    failure = nil
+                    let wakeId = wake.wakeId
+                    Task { @MainActor in
+                        // Success: stay "Stopping…" until the daemon's `wake_ended` removes the pill.
+                        if let message = await onStop(wakeId) {
+                            failure = message
+                            stopping = false
+                        }
+                    }
                 } label: {
                     Text(stopping ? "Stopping…" : "Stop waiting")
                         .font(Typography.caption(.medium))
@@ -57,6 +68,14 @@ struct WakeWaitingPill: View {
                 .onHover { hoveringStop = $0 }
                 .disabled(stopping)
                 .accessibilityLabel("Stop waiting")
+                if let failure {
+                    Label("Couldn't stop: \(failure)", systemImage: "exclamationmark.triangle")
+                        .font(Typography.caption())
+                        .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(failure)
+                }
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 6)

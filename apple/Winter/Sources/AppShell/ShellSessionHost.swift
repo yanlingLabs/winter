@@ -3566,16 +3566,22 @@ final class ShellSessionHost: ObservableObject {
         // window changes). Both surfaces come through this one closure.
         adapter.onInterrupt = { [weak self] in self?.interruptAttachedTurn() }
         // ComputerV2 wake triggers: the "Waiting for you" pill's [Stop waiting].
-        adapter.onStopWaiting = { [weak self] wakeId in self?.stopWaiting(wakeId) }
+        adapter.onStopWaiting = { [weak self] wakeId in
+            guard let self else { return "this window closed" }
+            return await self.stopWaiting(wakeId)
+        }
     }
 
     /// ComputerV2 wake triggers (2026-10-12): the user's [Stop waiting] on the attached session's pill —
-    /// `computerUse.wakes.cancel`. The pill leaves when the daemon's `wake_ended` lands. `attachedSessionId` read FRESH.
-    func stopWaiting(_ wakeId: String) {
-        guard let live = attachment, let sid = attachedSessionId else { return }
-        let client = live.feed.client
-        Task { @MainActor in
-            _ = try? await client.cancelWake(sessionId: sid, wakeId: wakeId)
+    /// `computerUse.wakes.cancel`. The pill leaves when the daemon's `wake_ended` lands; a failure comes back as the
+    /// sentence the pill shows. `attachedSessionId` read FRESH.
+    func stopWaiting(_ wakeId: String) async -> String? {
+        guard let live = attachment, let sid = attachedSessionId else { return "Winter isn't connected" }
+        do {
+            _ = try await live.feed.client.cancelWake(sessionId: sid, wakeId: wakeId)
+            return nil
+        } catch {
+            return wakeStopFailure(error)
         }
     }
 

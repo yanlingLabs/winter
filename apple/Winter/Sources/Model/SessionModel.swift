@@ -831,7 +831,9 @@ enum SessionReducer {
         case .wakeEnded(let v) where v.threadId == mainThread:
             if let i = s.armedWakes.firstIndex(where: { $0.wakeId == v.wakeId }) {
                 let wake = s.armedWakes.remove(at: i)
-                if WakeWords.wakingReasons.contains(v.reason) { s.pendingWakeNews.append(WakeWords.endedWords(wake, reason: v.reason)) }
+                // Held for the wake message's notice only when one will carry it (`woken` — never judged from the
+                // reason: a silent expiry is not news, and must never be glued onto a later wake's notice).
+                if v.woken { s.pendingWakeNews.append(WakeWords.endedWords(wake, reason: v.reason)) }
             }
         case .userMessage(let v) where v.threadId == mainThread && v.clientName == WakeWords.computerWakeClientName:
             // ComputerV2 wake triggers: the daemon WAKES the session (`computer-wake`) — never a user bubble. Its text is

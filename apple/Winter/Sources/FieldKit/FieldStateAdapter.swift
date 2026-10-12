@@ -457,9 +457,10 @@ final class FieldStateAdapter: ObservableObject {
     /// "Waiting for you" pill above the composer, one line per armed trigger. Empty when nothing is armed.
     var armedWakes: [ArmedWake] { session.state.armedWakes }
 
-    /// The pill's [Stop waiting] (`computerUse.wakes.cancel`) for one trigger. OPTIONAL, defaulting `nil`, like
-    /// `onInterrupt`: a surface that does not wire it shows the pill with no button.
-    var onStopWaiting: ((String) -> Void)?
+    /// The pill's [Stop waiting] (`computerUse.wakes.cancel`) for one trigger: `nil` once the daemon took it, else the
+    /// sentence the pill shows (and the button is live again). OPTIONAL, defaulting `nil`, like `onInterrupt`: a
+    /// surface that does not wire it shows the pill with no button.
+    var onStopWaiting: (@MainActor (String) async -> String?)?
 
     // MARK: - Composer draft
 

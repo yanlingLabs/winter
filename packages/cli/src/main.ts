@@ -62,7 +62,7 @@ import { parsePlanResponse } from "./plan-response";
 import { ShellCardQueue, approvalPromptLine, approvalResolvedHow } from "./shell-cards";
 import { legacyFilesDoctorLine, sdkHomeDoctorSection } from "./doctor-legacy-files";
 import { makeEventBridge, type EventBridge } from "./tui/event-bridge";
-import { COMPUTER_WAKE_CLIENT_NAME, endedWords, waitingWords, WAKING_REASONS, type ArmedWakeFacts } from "./wake-words";
+import { COMPUTER_WAKE_CLIENT_NAME, endedWords, stoppedWords, waitingWords, type ArmedWakeFacts } from "./wake-words";
 
 const AQUA = "\x1b[38;2;53;214;232m";
 
@@ -767,8 +767,9 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
       } else {
         const facts = wakeFacts.get(e.wakeId);
         wakeFacts.delete(e.wakeId);
-        if (facts !== undefined && WAKING_REASONS.has(e.reason)) wakeNews.push(endedWords(facts, e.reason));
-        else if (facts !== undefined) emit(`${DIM}⏹ stopped waiting for ${waitingWords(facts)} (${e.reason})${RESET}\n`);
+        // `woken` says whether a wake message carries this ending — never the reason (a silent expiry is not news).
+        if (facts !== undefined && e.woken === true) wakeNews.push(endedWords(facts, e.reason));
+        else if (facts !== undefined) emit(`${DIM}⏹ stopped waiting for ${waitingWords(facts)} (${stoppedWords(e.reason)})${RESET}\n`);
       }
     } else if (e.type === "user_message" && e.clientName === COMPUTER_WAKE_CLIENT_NAME && e.sessionId === sessionId && e.threadId === "main") {
       // The daemon's wake: never shown as the user's words (its text is the model's) — what happened, as a note.
@@ -2404,7 +2405,9 @@ if (import.meta.main) {
     const sessionId = process.argv[3];
     if (!sessionId) { console.error("usage: winter watch <sessionId>"); process.exit(1); }
     const c = await connect("cli-watch", (e) => {
-      if (e.type === "user_message") console.log(`${AQUA}❯${RESET} [${e.clientName}] ${e.text}`);
+      // A ComputerV2 wake message's text is the MODEL's (its own note among it): never printed — a note instead.
+      if (e.type === "user_message" && e.clientName === COMPUTER_WAKE_CLIENT_NAME) console.log(`${DIM}↻ [${e.clientName}] a wake trigger ended — Winter continues${RESET}`);
+      else if (e.type === "user_message") console.log(`${AQUA}❯${RESET} [${e.clientName}] ${e.text}`);
       else console.log(`${DIM}· ${e.type}${"clientName" in e ? ` (${e.clientName})` : ""}${RESET}`);
     });
     // Plan-immunity Task 2: CLIENT-side mode gate, same reasoning as `case "send"` above (product-

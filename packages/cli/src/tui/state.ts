@@ -44,7 +44,7 @@
 
 import type { ApprovalOption, ApprovalPolicy, SessionActivity, Task } from "@yanlinglabs/winter-protocol";
 import { DISPATCH_WAKE_CLIENT_NAME } from "@yanlinglabs/winter-protocol";
-import { COMPUTER_WAKE_CLIENT_NAME, endedWords, waitingWords, WAKING_REASONS, type ArmedWakeFacts } from "../wake-words";
+import { COMPUTER_WAKE_CLIENT_NAME, endedWords, stoppedWords, waitingWords, type ArmedWakeFacts } from "../wake-words";
 import { updateSubagents, type CliSubagent } from "../subagent-state";
 import { subagentTokens } from "../subagent-display";
 import { upsertTask } from "../task-block";
@@ -335,10 +335,11 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       const reason = str(e.reason);
       const next: TuiState = { ...s, wakes: rest };
       if (facts === undefined) return next;
-      // An ending that wakes the session is said with the wake message's note; one that does not (cancelled, the
-      // setting off, a silent expiry) is said now.
-      if (WAKING_REASONS.has(reason)) return { ...next, wakeNews: [...(s.wakeNews ?? []), endedWords(facts, reason)] };
-      return { ...next, committed: [...s.committed, { kind: "note", text: `⏹ stopped waiting for ${waitingWords(facts)} (${reason})` }] };
+      // An ending that wakes the session (`woken` — never judged from the reason) is said with the wake message's
+      // note; one that does not (cancelled, the setting off, a silent expiry) is said now, and never held for a later
+      // wake's note.
+      if (e.woken === true) return { ...next, wakeNews: [...(s.wakeNews ?? []), endedWords(facts, reason)] };
+      return { ...next, committed: [...s.committed, { kind: "note", text: `⏹ stopped waiting for ${waitingWords(facts)} (${stoppedWords(reason)})` }] };
     }
 
     case "user_message": {
