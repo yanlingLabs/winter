@@ -1,0 +1,131 @@
+{
+  "status": "native-source-only-independent-review-required",
+  "baseRevision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+  "source": "out/libkrun-workspace-disks-v2",
+  "basePatches": [
+    {
+      "patchFile": "patches/0004-proposed-guarded-block-reviewed-fixes.patch",
+      "patchSha256": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481"
+    },
+    {
+      "patchFile": "patches/0005-proposed-guarded-block-producer-progress.patch",
+      "patchSha256": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775"
+    },
+    {
+      "patchFile": "patches/0006-proposed-raw-block-trace.patch",
+      "patchSha256": "00e169fb7e5c527d348269cc8211afc99daa800622bce6140a4b2b42c204951d"
+    },
+    {
+      "patchFile": "patches/0007-proposed-guarded-stream.patch",
+      "patchSha256": "4acf7d82622d98ca1265e6a57bcd167f6df1fd5efb6a63cc65a9f6b24f35e044"
+    },
+    {
+      "patchFile": "patches/0008-proposed-guarded-stream-reviewed-fixes.patch",
+      "patchSha256": "43331eedec8e73f735830932b56c28cb3eb311f1c9bcbf3535f497063a369378"
+    },
+    {
+      "patchFile": "patches/0009-proposed-guarded-stream-closed-factory.patch",
+      "patchSha256": "ae46b3d1732cf6e00b3cb451334be04b222093cd78418b91b706d2a33a4f35c4"
+    },
+    {
+      "patchFile": "patches/0010-proposed-generic-runtime-port.patch",
+      "patchSha256": "62298de5d9176725d6a4bf0f79183a141de6d3162ff6085bce42ecd43f235752"
+    },
+    {
+      "patchFile": "patches/0011-proposed-runtime-port-fixture-trace.patch",
+      "patchSha256": "fe41eb3b7891d4c7bb7fa61d43508d4173d9e72a27b9476bb4de0c64ea5815c0"
+    },
+    {
+      "patchFile": "patches/0012-proposed-admitted-workspace-disks.patch",
+      "patchSha256": "c956cfcedc99dcebee26784873fd22f7efd3fa1fb22b3beb937b974756efcba7"
+    }
+  ],
+  "patchFile": "patches/0013-proposed-workspace-disks-startup-phases.patch",
+  "patchSha256": "f70c5b11586211c81b88a0acc27bdc357ed4437418bdffbf8cae0a2217c152ae",
+  "fullSourceDiffSha256": "1f10f599acb6a29455c0422011aaa851cd598e6a7fee7e3699eb0f6988cfc300",
+  "allAddedFiles": [
+    "src/devices/src/block_bounce.rs",
+    "src/devices/src/block_trace.rs",
+    "src/devices/src/reclaim_access.rs",
+    "src/devices/src/stream_io.rs",
+    "src/devices/src/virtio/block/cowork.rs",
+    "src/devices/src/virtio/block/workspace_fd_tests.rs",
+    "src/devices/src/virtio/console/cowork_stream.rs",
+    "src/devices/src/virtio/console/runtime_port.rs",
+    "src/devices/src/virtio/console/runtime_port_control.rs",
+    "src/devices/src/virtio/console/runtime_port_fixture_trace.rs",
+    "src/devices/src/workspace_disks.rs",
+    "src/devices/src/workspace_raw_storage.rs",
+    "src/libkrun/src/cowork_workspace_disks_tests.rs",
+    "src/vmm/src/cowork_barrier.rs",
+    "src/vmm/src/cowork_control.rs",
+    "src/vmm/src/cowork_coordinator.rs",
+    "src/vmm/src/cowork_fixture.rs",
+    "src/vmm/src/cowork_ops.rs",
+    "src/vmm/src/cowork_ranges.rs",
+    "src/vmm/src/vmm_config/workspace_disks_builder_tests.rs"
+  ],
+  "incrementalAddedFiles": [],
+  "moduleCorrespondence": {
+    "stream_reclaim_access.rs": "src/devices/src/reclaim_access.rs",
+    "stream_io_v3.rs": "src/devices/src/stream_io.rs",
+    "runtime_port_control.rs": "src/devices/src/virtio/console/runtime_port_control.rs",
+    "runtime_port_traced.rs": "src/devices/src/virtio/console/runtime_port.rs",
+    "runtime_port_fixture_trace.rs": "src/devices/src/virtio/console/runtime_port_fixture_trace.rs",
+    "workspace_raw_storage.rs": "src/devices/src/workspace_raw_storage.rs",
+    "workspace_disks_device_tests.rs": "src/devices/src/virtio/block/workspace_fd_tests.rs",
+    "workspace_disks_builder_tests.rs": "src/vmm/src/vmm_config/workspace_disks_builder_tests.rs",
+    "workspace_disks_v2.rs": "src/devices/src/workspace_disks.rs",
+    "workspace_disks_api_tests_v2.rs": "src/libkrun/src/cowork_workspace_disks_tests.rs"
+  },
+  "features": [
+    "blk"
+  ],
+  "defaultFeatures": false,
+  "profile": "developer-only-admitted-raw-pair-and-generic-runtime-port",
+  "factoryAPI": "krun_set_cowork_workspace_disks",
+  "expectedIdentityABIBytes": 32,
+  "volumes": [
+    {
+      "purpose": "data",
+      "blockId": "winter-data",
+      "accessDeviceId": 0
+    },
+    {
+      "purpose": "environment",
+      "blockId": "winter-environment",
+      "accessDeviceId": 1
+    }
+  ],
+  "runtimeAccessDeviceId": 2,
+  "maxDevices": 3,
+  "maxPins": 48,
+  "maxPinnedBytes": 8388608,
+  "volumeMinBytes": 16777216,
+  "volumeMaxBytes": 274877906944,
+  "volumeAlignmentBytes": 4096,
+  "vcpuCount": 2,
+  "memoryMiB": 768,
+  "fixedResourcesAreDeveloperBounds": true,
+  "fdPolicy": "Borrowed input fd>=3; F_DUPFD_CLOEXEC; pinned regular RW non-append, current UID exact0600, nlink1 and expected dev/ino/capacity; reject same-inode aliases; pair revalidated before publication. Owned descriptor-only fixed-capacity positional RAW storage; no path reopening or constructor writes.",
+  "nativeAuthorityImplemented": false,
+  "signedWorkerAdmissionVerified": false,
+  "workerBuilt": false,
+  "vmStarted": false,
+  "guestFilesystemReady": false,
+  "twoDiskActiveReturnVerified": false,
+  "productionReady": false,
+  "fullResourceGatePassed": false,
+  "encryption": false,
+  "knownLimits": [
+    "Expected identities and descriptor ownership do not grant daemon/workspace/worker authority.",
+    "No VM/worker launch, guest mount/format/bootstrap readiness, two-disk active RAM return or integration proof.",
+    "Approved raw plaintext residual includes same-user concurrent mutation; metadata checks are not cryptographic content integrity.",
+    "Existing guarded block reset/join and bounded completion-hold limitations remain unchanged.",
+    "Full krun-vmm unit harness has stale patched-candidate HVF constructor/resource fixtures; exact block-builder source tested via libkrun harness.",
+    "Live sandbox/no-fork/signature/library validation and durable native-stop receipts remain production gates."
+  ],
+  "priorCheckpoint": "a4856143dffc33389fc24fcdb315657fa996c576",
+  "priorFullSourceDiffSha256": "610667ff8cac9325f3358f00234e3bf48174605b089de057ee11df77d46a8517",
+  "startupPhases": "BeforeConstruction requires no list or retained provenance; actual cowork_prepare_blocks prevalidates, constructs and postvalidates; final normalized BeforeVmm check requires exact internally minted ordered Arc pair and fixed per-block expected identity/capacity/provenance."
+}

@@ -1,0 +1,13 @@
+   Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks-v2/src/devices)
+   Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks-v2/src/vmm)
+   Compiling libkrun v1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks-v2/src/libkrun)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.99s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-workspace-disks-v2/target/debug/deps/krun-fe8b317545a4d4ac)
+
+running 4 tests
+test cowork_workspace_disks_tests::workspace_disks_startup_postvalidation_rejects_pair_from_another_admission ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_postvalidation_requires_exact_owned_pair_order_and_provenance ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_preconstruct_postvalidate_sequence ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_preparation_refuses_prebuilt_extra_or_retained_provenance_before_duplication ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.15s

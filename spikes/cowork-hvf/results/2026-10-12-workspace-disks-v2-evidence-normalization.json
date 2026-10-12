@@ -1,0 +1,33 @@
+{
+  "normalizedEvidence": true,
+  "personalPathPrefixReplacement": "<WORKTREE>",
+  "trailingLogWhitespaceStripped": true,
+  "rawFiles": {
+    "2026-10-12-workspace-disks-v2-startup-red.log": {
+      "sha256": "43c022367e74eb3e7897affe9639f7cf3c835ce03fbfc70ae7468a1f8acb3df4",
+      "bytes": 2752,
+      "normalizedSha256": "282daaaeadea12b968f2916ad5eba051c92f2add4595f3885e806c7369629806"
+    },
+    "2026-10-12-workspace-disks-v2-startup-green.log": {
+      "sha256": "e45490c1a7d456b4f9205e737ce82c658522ab5512503738dee9d9e686631e1e",
+      "bytes": 1352,
+      "normalizedSha256": "803f937a94071c2d97c124564583413442a712ac615cb5a424d796eb79fd54ae"
+    },
+    "2026-10-12-workspace-disks-v2-native-tests.log": {
+      "sha256": "b5e17f4ebe6c5ee92777b4289e05022b2f17c7fba7636ca2822a1adc09ed22a5",
+      "bytes": 33065,
+      "normalizedSha256": "ebf9ca1ae0eb0592c94caeaaa23adbb64e4a96e2213e9c3675d662d53010a58f"
+    },
+    "2026-10-12-workspace-disks-v2-static-build.log": {
+      "sha256": "dc808bd0a624d229dd9af1484954ab35264714fc729648caf47897bff0286378",
+      "bytes": 8641,
+      "normalizedSha256": "51efcff7f75826d6034ba3ead9ad26f1395b66a011dcb920e8c2b180e9280a3b"
+    },
+    "2026-10-12-workspace-disks-v2-test-receipt.json": {
+      "sha256": "c63f1df56fdb4f0f4498af3a513970548bac4c29f3662c5c8c7d3185a23cefbc",
+      "bytes": 8757,
+      "normalizedSha256": "01f5b992e385a9139a99471ea8c70c33d478baeefc4ba0bf7a6978a1721b4940"
+    }
+  },
+  "trailingBlankLogLinesStripped": true
+}

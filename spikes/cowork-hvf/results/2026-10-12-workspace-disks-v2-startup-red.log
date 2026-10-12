@@ -1,0 +1,28 @@
+   Compiling krun-utils v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks-v2/src/utils)
+   Compiling krun-smbios v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks-v2/src/smbios)
+   Compiling krun-arch-gen v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks-v2/src/arch_gen)
+   Compiling krun-polly v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks-v2/src/polly)
+   Compiling krun-arch v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks-v2/src/arch)
+   Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks-v2/src/vmm)
+   Compiling krun-hvf v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks-v2/src/hvf)
+   Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks-v2/src/devices)
+   Compiling krun-kernel v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks-v2/src/kernel)
+   Compiling libkrun v1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks-v2/src/libkrun)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.20s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-workspace-disks-v2/target/debug/deps/krun-fe8b317545a4d4ac)
+
+running 1 test
+test cowork_workspace_disks_tests::workspace_disks_startup_preconstruct_postvalidate_sequence ...
+thread 'cowork_workspace_disks_tests::workspace_disks_startup_preconstruct_postvalidate_sequence' panicked at src/libkrun/src/cowork_workspace_disks_tests.rs:318:5:
+actual startup postconstruction validation rejected owned pair
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    cowork_workspace_disks_tests::workspace_disks_startup_preconstruct_postvalidate_sequence
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p libkrun --lib`
