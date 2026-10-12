@@ -84,7 +84,14 @@ for (const scenario of [{ providerId: "openai", partial: false }, { providerId: 
     if (turn.nativeState) state.appendProviderState(sidecar, { ...base, itemIndex: 1, kind: "native-state", payload: { items: turn.nativeState.items } });
     if (turn.thinking?.blocks) state.appendProviderState(sidecar, { ...base, itemIndex: 1, kind: "reasoning-blocks", payload: { blocks: turn.thinking.blocks.map((block: unknown, at: number) => ({ at, block })) } });
     const chain = state.buildContinuationChain(state.readProviderState(sidecar), new Set(["assistant-first"])); const restored = chain.get("assistant-first");
-    const content = turn.content ?? [...(turn.text ? [{ type: "text", text: turn.text }] : []), ...turn.calls.map((call: any) => ({ type: "tool_use", ...call }))];
+    // Inline signed blocks otherwise mask whether disk-restored reasoning is consumed.
+    // Keep ordinary assistant content, and require the replay-critical blocks from the sidecar.
+    const content = JSON.parse(JSON.stringify(turn.content ?? [...(turn.text ? [{ type: "text", text: turn.text }] : []), ...turn.calls.map((call: any) => ({ type: "tool_use", ...call }))]))
+      .filter((block: any) => block.type !== "thinking" && block.type !== "redacted_thinking");
+    if (providerId === "anthropic") {
+      expect(JSON.stringify(content)).not.toContain("fixture-real-provider-signature");
+      expect(JSON.stringify(restored.nativeState)).toContain("fixture-real-provider-signature");
+    }
     messages.push({ role: "assistant", uuid: "assistant-first", origin: restored.origin, content, ...(restored.nativeState ? { nativeState: restored.nativeState } : {}) }, { role: "tool", content: [{ type: "tool_result", tool_use_id: "read-call", content: "Fixture file bytes" }] });
     const resumed = await provider.generate({ messages, tools }); expect(resumed.kind).toBe("text"); expect(resumed.text).toBe("Finished continuation"); expect(requests).toBe(2);
     expect(JSON.stringify(bodies[1])).toContain("read-call"); expect(JSON.stringify(bodies[1])).toContain("Fixture file bytes");
