@@ -271,6 +271,18 @@ export class PipeTransport implements CdpTransport {
     this.tab(tabKey).events = new Set(events);
   }
 
+  /** TEST ONLY — the USER: a CDP session of the test's own on the tab's page (never one the engine sends on, so nothing
+   *  of Winter's knows about it), for a click or a key the browser delivers as trusted input, or a read of the page. */
+  async asUser<T>(tabKey: string, fn: (send: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>) => Promise<T>): Promise<T> {
+    const t = this.tab(tabKey);
+    const { sessionId } = await this.raw<{ sessionId: string }>("Target.attachToTarget", { targetId: t.targetId, flatten: true });
+    try {
+      return await fn((method, params = {}) => this.raw<Record<string, unknown>>(method, params, sessionId));
+    } finally {
+      await this.raw("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
+  }
+
   onEvent(listener: (e: CdpEvent) => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   onTabGone(listener: (tabKey: string, reason: "closed" | "crashed" | "stopped" | "detached_by_user") => void): () => void { this.goneListeners.add(listener); return () => { this.goneListeners.delete(listener); }; }
   overlay(): void { /* no overlay in a headless test */ }

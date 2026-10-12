@@ -33,6 +33,8 @@ import type { SessionFacts } from "../../packages/core/src/computer-use/policy";
 import { ResultBuilder } from "../../packages/core/src/computer-use/result";
 import type { PrimitiveMetric } from "../../packages/core/src/computer-use/telemetry";
 import type { TabHandle } from "../../packages/core/src/computer-use/worker/bridge";
+import { BrowserWakeBackend } from "../../packages/core/src/computer-use/browser/wake/backend";
+import type { WakeArmed, WakeBackendEvent, WakeCondition } from "../../packages/core/src/computer-use/wakes/types";
 import { PipeTransport } from "./pipe-transport";
 
 if (process.env.WINTER_BROWSER_E2E !== "1") {
@@ -729,6 +731,95 @@ run2.end();
 
 }
 
+// ── wake triggers: the debugger path through the REAL page runtime's watcher (the built-in browser's stand-in). The USER
+// acts on a CDP session of the test's own (`asUser`) — one the engine never sends on, so nothing of Winter's knows. ──
+const wakes = new BrowserWakeBackend(engine);
+const wakeEvents: WakeBackendEvent[] = [];
+let wakeN = 0;
+const armWake = async (targetId: string, condition: WakeCondition): Promise<{ id: string; armed: WakeArmed }> => {
+  const id = `wk_${(++wakeN).toString(16).padStart(12, "0")}`;
+  const armed = await wakes.arm({ wakeId: id, sessionId: "e2e", targetId, condition, expiresAt: Date.now() + 600_000 }, (e) => wakeEvents.push(e));
+  return { id, armed };
+};
+const wakeEvent = async (id: string, ms = 6_000): Promise<WakeBackendEvent> => {
+  const end = Date.now() + ms;
+  for (;;) {
+    const e = wakeEvents.find((x) => x.wakeId === id);
+    if (e !== undefined) return e;
+    if (Date.now() > end) throw new Error(`no event for ${id} within ${ms} ms (events: ${JSON.stringify(wakeEvents)})`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+};
+/** The user reads the page (their own session, its main world). */
+const userReads = (key: string, expression: string): Promise<unknown> =>
+  transport.asUser(key, async (send) => ((await send("Runtime.evaluate", { expression, returnByValue: true })).result as { value?: unknown }).value);
+/** The user clicks the element `selector` names — trusted input on their own session. */
+const userClicks = (key: string, selector: string): Promise<void> => transport.asUser(key, async (send) => {
+  const r = await send("Runtime.evaluate", { expression: `(() => { const b = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return [b.x + b.width / 2, b.y + b.height / 2]; })()`, returnByValue: true });
+  const [x, y] = (r.result as { value: [number, number] }).value;
+  for (const type of ["mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
+});
+const wakeTab = async (sc: ReturnType<typeof scope>): Promise<{ t: TabHandle; key: string; state: string }> => {
+  const t = await engine.global(sc.s, "browsers.open", { url: `${BASE}/wake.html` }) as TabHandle;
+  return { t, key: t.id.slice(t.id.indexOf(":") + 1), state: await engine.primitive(sc.s, t.targetId, "state", { full: true, emit: false }) as string };
+};
+
+if (!HEADLESS) await check("wake: a click wake — its pill and ring on the page, never in the engine's state; Winter's own click is not the user's; the user's click fires it", async () => {
+  const sc = scope("rw1");
+  const { t, key, state } = await wakeTab(sc);
+  const submit = refOf(state, /button "Submit for review"/);
+  const { id, armed } = await armWake(t.targetId, { kind: "clicked", ref: String(submit) });
+  expect(armed.element?.role === "button" && armed.element.name === "Submit for review" && armed.targetLabel.endsWith("Review form"), "armed with the element's own label", JSON.stringify(armed));
+  expect(await userReads(key, "document.querySelectorAll('winter-wake-overlay').length") === 1, "one <winter-wake-overlay> on the page");
+  expect(await userReads(key, "document.querySelector('winter-wake-overlay').shadowRoot") === null, "its shadow root closed to the page");
+  const full = await engine.primitive(sc.s, t.targetId, "state", { full: true, emit: false }) as string;
+  expect(!full.includes("Winter continues"), "the engine's own tree walk leaves the pill out", full);
+  await engine.primitive(sc.s, t.targetId, "click", { target: submit });
+  await new Promise((r) => setTimeout(r, 1_200));
+  expect(!wakeEvents.some((e) => e.wakeId === id), "Winter's own click did not fire it", JSON.stringify(wakeEvents));
+  await userClicks(key, "#submit");
+  const e = await wakeEvent(id);
+  expect(e.outcome === "fired" && e.detail === "clicked", "the user's click fired it", JSON.stringify(e));
+  await new Promise((r) => setTimeout(r, 300));
+  expect(await userReads(key, "document.querySelectorAll('winter-wake-overlay').length") === 0, "the pill left the page");
+  sc.end();
+});
+
+if (!HEADLESS) await check("wake: already true is refused; a text the page shows after the user's submit fires; a change the user types fires (no value in it); the password field is never watched", async () => {
+  const sc = scope("rw2");
+  const { t, key, state } = await wakeTab(sc);
+  await failsWith(armWake(t.targetId, { kind: "appeared", text: "Submit your listing" }), "NotAllowed");
+  await failsWith(armWake(t.targetId, { kind: "changed", ref: String(refOf(state, /text field "Password"/)), settleMs: 500 }), "Refused");
+  const appeared = await armWake(t.targetId, { kind: "appeared", text: "Submitted for review" });
+  const changed = await armWake(t.targetId, { kind: "changed", ref: String(refOf(state, /text field "Email"/)), settleMs: 500 });
+  await userClicks(key, "#email");
+  await transport.asUser(key, async (send) => {
+    for (const ch of "me@example.com") {
+      await send("Input.dispatchKeyEvent", { type: "keyDown", text: ch, key: ch, unmodifiedText: ch });
+      await send("Input.dispatchKeyEvent", { type: "keyUp", key: ch });
+    }
+  });
+  const c = await wakeEvent(changed.id);
+  expect(c.outcome === "fired" && c.detail === "changed" && !JSON.stringify(c).includes("example.com"), "the change fired, with no value in it", JSON.stringify(c));
+  await userClicks(key, "#submit");
+  const a = await wakeEvent(appeared.id);
+  expect(a.outcome === "fired" && a.detail === "appeared", "the text the page showed fired it", JSON.stringify(a));
+  sc.end();
+});
+
+if (!HEADLESS) await check("wake: the user following a link fires a { url } wake (a new document); a ref wake whose page goes away is lost", async () => {
+  const sc = scope("rw3");
+  const { t, key, state } = await wakeTab(sc);
+  const nav = await armWake(t.targetId, { kind: "navigated", url: "/page2.html" });
+  const other = await armWake(t.targetId, { kind: "clicked", ref: String(refOf(state, /button "Another button"/)) });
+  await userClicks(key, "#next");
+  const n = await wakeEvent(nav.id);
+  expect(n.outcome === "fired" && n.detail === `now at ${BASE}/page2.html`, "the new page's address", JSON.stringify(n));
+  const o = await wakeEvent(other.id);
+  expect(o.outcome === "lost" && o.reason === "the page changed", "the button's page went", JSON.stringify(o));
+  sc.end();
+});
+
 if (HEADLESS) await check("the engine never sent a method outside the allowlist, and Winter Headless refused nothing", async () => {
   expect(headlessSent.length > 0 && headlessSent.every((m) => CDP_ALLOWED_METHODS.includes(m)), "all methods allowlisted");
   expect(headlessRefused.length === 0, "nothing refused", headlessRefused.join("\n"));
@@ -742,6 +833,7 @@ if (!HEADLESS) await check("the engine never sent a method outside the allowlist
 });
 
 run1.end();
+wakes.stop();
 engine.stop();
 if (headlessPool !== undefined) {
   headlessPool.stop();
