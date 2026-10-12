@@ -501,6 +501,28 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertTrue(again.detail?.contains("its last element scrolled into view") ?? false, again.detail ?? "")
     }
 
+    /// Round 17 (the review of round 16, MEDIUM): a blank spot is never one a link covers from inside a `display:contents`
+    /// wrapper (no box of its own) or from a positioned child outside its parent's box.
+    func testABlankSpotIsNeverUnderALinkOutsideItsParentsBox() throws {
+        safari(fieldOwner: pid)
+        let web = ax.element(field, kAXParentAttribute)!   // (0, 50, 900, 550); the window (0, 0, 900, 600)
+        let wrapper = fakeElement(93_098), link = fakeElement(93_099), box = fakeElement(93_100), popup = fakeElement(93_101)
+        // The first candidate (the page's bottom-left, inset 6): a link inside a zero-size wrapper covers it.
+        ax.add(wrapper, role: "AXGroup", frame: CGRect(x: 0, y: 0, width: 0, height: 0), extra: [kAXParentAttribute: web])
+        ax.add(link, role: "AXLink", title: "Footer link", frame: CGRect(x: 0, y: 580, width: 60, height: 20), extra: [kAXParentAttribute: wrapper])
+        ax.put(wrapper, [kAXChildrenAttribute: [link]])
+        // The second (bottom-right): a positioned button outside its small parent's box.
+        ax.add(box, role: "AXGroup", frame: CGRect(x: 10, y: 60, width: 10, height: 10), extra: [kAXParentAttribute: web])
+        ax.add(popup, role: kAXButtonRole, title: "Chat", frame: CGRect(x: 850, y: 570, width: 60, height: 40), extra: [kAXParentAttribute: box])
+        ax.setActions(popup, [kAXPressAction])
+        ax.put(box, [kAXChildrenAttribute: [popup]])
+        ax.put(web, [kAXChildrenAttribute: [field, wrapper, box]])
+        let spot = try XCTUnwrap(core.blankSpot(in: web, target))
+        XCTAssertFalse(CGRect(x: 0, y: 580, width: 60, height: 20).insetBy(dx: -2, dy: -2).contains(spot), "not under the link: \(spot)")
+        XCTAssertFalse(CGRect(x: 850, y: 570, width: 60, height: 40).insetBy(dx: -2, dy: -2).contains(spot), "not under the button: \(spot)")
+        XCTAssertEqual(spot, CGPoint(x: 450, y: 594), "the next candidate: the bottom's middle")
+    }
+
     /// Round 17 (the review of round 16, MEDIUM): ↓ aimed at a web link in Mail moved the message list — the key went to
     /// a focus the act had just shown is outside the control's page. Now refused, nothing sent (End and its kin still have
     /// the accessibility fallback above).

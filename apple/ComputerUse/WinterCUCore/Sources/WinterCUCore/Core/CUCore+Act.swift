@@ -981,28 +981,30 @@ extension CUCore {
         let candidates = [CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.midX, y: r.maxY),
                           CGPoint(x: r.maxX, y: r.midY), CGPoint(x: r.minX, y: r.midY), CGPoint(x: r.maxX, y: r.minY)]
         let editable: Set<String> = [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole, "AXSearchField"]
-        for p in candidates {
-            // The page's own nodes under the point (the last drawn on top), read live over accessibility: nothing on the
-            // way down takes a press, a click or text (a link's text, a button's label, a field) — a blank spot.
-            var chain: [AXUIElement] = [area]
-            var budget = 400
-            var level = area
-            descend: while budget > 0 {
-                for c in ax.elements(level, kAXChildrenAttribute).reversed() {
-                    budget -= 1
-                    if let f = ax.frame(c), f.width > 0, f.height > 0, f.contains(p) { chain.append(c); level = c; continue descend }
-                }
-                break
+        // The page's own nodes, read live over accessibility, ALL of them (round 17, the review of round 16: a descent only
+        // into frames holding the point missed a link inside a `display:contents` wrapper — no box of its own — and a
+        // positioned or overflowing child outside its parent's box): every node that takes a press, a click or text, by its
+        // frame. A page too large to read within the budget proves no spot blank (fail closed).
+        var acting: [CGRect] = []
+        var queue = ax.elements(area, kAXChildrenAttribute)
+        var budget = 800
+        while !queue.isEmpty {
+            guard budget > 0 else {
+                CULog.act.notice("blank spot: the page is too large to read within the budget — no spot taken for blank")
+                return nil
             }
-            let acts = chain.dropFirst().contains { n in
-                let role = ax.string(n, kAXRoleAttribute) ?? ""
-                let actions = ax.actions(n)
-                return Self.clickableRoles.contains(role) || editable.contains(role)
-                    || actions.contains(kAXPressAction) || actions.contains("AXOpen") || actions.contains("AXConfirm")
+            budget -= 1
+            let n = queue.removeFirst()
+            let role = ax.string(n, kAXRoleAttribute) ?? ""
+            let actions = ax.actions(n)
+            if Self.clickableRoles.contains(role) || editable.contains(role)
+                || actions.contains(kAXPressAction) || actions.contains("AXOpen") || actions.contains("AXConfirm"),
+               let f = ax.frame(n), f.width > 0, f.height > 0 {
+                acting.append(f)
             }
-            if !acts { return p }
+            queue.append(contentsOf: ax.elements(n, kAXChildrenAttribute))
         }
-        return nil
+        return candidates.first { p in !acting.contains { $0.insetBy(dx: -2, dy: -2).contains(p) } }
     }
 
     /// Controls a press acts on: giving one the keyboard focus by a press already acts on it.
