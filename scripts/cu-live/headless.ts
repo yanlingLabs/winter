@@ -205,15 +205,16 @@ export function parseApplicationType(stdout: string): string | undefined {
   return /"ApplicationType"="([^"]+)"/.exec(stdout)?.[1];
 }
 
-/** The processes (from `ps -A -o pid=,command=`) whose executable lies inside the helper app — the helper itself and,
- *  for a self-contained dev build, its own "Winter Helper" subprocesses (a nested Release helper borrows Winter.app's,
- *  which this cannot tell from the user's Winter). */
-export function processesInside(psOutput: string, appPath: string): Array<{ pid: number; command: string }> {
+/** The processes (from `ps -A -o pid=,command=`) whose executable lies inside the helper app AND that this run's
+ *  helper tree held (`ours`) — the helper itself and its "Winter Helper" subprocesses. The path alone is never enough:
+ *  Winter.app's own CEF runs its subprocesses from the nested helper's Contents/Frameworks too, so a running Winter's
+ *  processes can lie inside the same app and must never be counted (or killed) as the helper's. */
+export function processesInside(psOutput: string, appPath: string, ours: ReadonlySet<number>): Array<{ pid: number; command: string }> {
   const prefix = `${appPath.replace(/\/+$/, "")}/`;
   const out: Array<{ pid: number; command: string }> = [];
   for (const line of psOutput.split("\n")) {
     const m = /^\s*(\d+)\s+(.*)$/.exec(line);
-    if (m !== null && m[2]!.startsWith(prefix)) out.push({ pid: Number(m[1]), command: m[2]! });
+    if (m !== null && m[2]!.startsWith(prefix) && ours.has(Number(m[1]))) out.push({ pid: Number(m[1]), command: m[2]! });
   }
   return out;
 }
@@ -316,7 +317,7 @@ for (const [k, u] of [["lan", "http://192.168.1.1/"], ["mdns", "http://winter-pr
 
 /** By hand with the user before merge (it needs a Release-signed Winter.app and the daemon). */
 export const HEADLESS_LIVE_BY_HAND: readonly string[] = [
-  "First start (before merge): a Release-signed Winter.app's daemon starts Winter Headless with Winter.app itself closed; the helper borrows Winter.app's CEF framework and its \"Winter Helper\" bundles (no second Chromium); a headless tab answers state(), screenshot() (a vision model), a click and typing, an out-of-process iframe, a dialog and a file chooser; killing the daemon ends the helper (its pipe's EOF); document.modelContext exists (--enable-features=WebMCP).",
+  "First start (before merge): a Release-signed Winter.app's daemon starts Winter Headless with Winter.app itself closed; the helper carries Winter's one Chromium (the CEF framework and its \"Winter Helper\" bundles in its own Contents/Frameworks; Winter.app's own holds none); a headless tab answers state(), screenshot() (a vision model), a click and typing, an out-of-process iframe, a dialog and a file chooser; killing the daemon ends the helper (its pipe's EOF); document.modelContext exists (--enable-features=WebMCP).",
   "With the daemon (not this script): note which name a macOS prompt would carry, if --prompt-probes ever raised one here.",
 ];
 
@@ -763,9 +764,14 @@ async function main(): Promise<void> {
     results.push({ name: "the whole run: never move the view", group: "view", status: statusOf(runChecks), ms: to - from, checks: runChecks,
       note: `${changes.length} front/Space change(s) (${changes.filter((c) => c.by === "user").length} the user's${keysWatched ? "" : "; the user's keys were not visible to the monitor (no Input Monitoring), so a keyboard-only switch reads as unexplained"}); ${windowsSeen.size} window(s) owned by the helper's ${treeSeen.size} process(es) (${onScreen.length} on screen); application types ${JSON.stringify(Object.fromEntries(appTypes))}` });
 
-    // The daemon's stop ends the helper and everything it started.
+    // The daemon's stop ends the helper and everything it started. "Everything it started" is its process tree as it
+    // is just before the stop, with every process the run saw in it — never the app path alone (processesInside).
+    const ours = new Set(treeSeen);
+    const lastHelper = pool.pid;
+    if (lastHelper !== undefined) helperPids.add(lastHelper);
+    for (const p of processTree(spawnSync("/bin/ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).stdout ?? "", helperPids)) ours.add(p);
     pool.stop();
-    const inside = (): Array<{ pid: number; command: string }> => processesInside(spawnSync("/bin/ps", ["-A", "-o", "pid=,command="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).stdout ?? "", o.app);
+    const inside = (): Array<{ pid: number; command: string }> => processesInside(spawnSync("/bin/ps", ["-A", "-o", "pid=,command="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).stdout ?? "", o.app, ours);
     const clean = await waitUntil(() => inside().length === 0, 8_000);
     const left = inside();
     results.push({ name: "the pool's stop leaves no helper process behind", group: "isolation", status: clean ? "pass" : "fail", ms: 0,

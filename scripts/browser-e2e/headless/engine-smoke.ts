@@ -8,8 +8,8 @@
 //
 //   bun scripts/browser-e2e/headless/engine-smoke.ts --app "<Winter Headless .app>" [--no-verify]
 //
-// For a Release-built Winter.app, --app is its nested `Contents/Helpers/Winter Headless.app` (it borrows the enclosing
-// app's Chromium). Everything it writes is in temp directories.
+// For a Release-built Winter.app, --app is its nested `Contents/Helpers/Winter Headless.app` (it carries Winter's one
+// Chromium). Everything it writes is in temp directories.
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

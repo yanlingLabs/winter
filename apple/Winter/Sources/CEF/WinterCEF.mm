@@ -5319,8 +5319,8 @@ BOOL WinterCEFInitializeHeadless(int argc,
     return NO;
   }
   if (!g_library_loaded) {
-    // BY PATH: the helper is not where `LoadInMain` looks (`<exe>/../Frameworks/…` inside its own bundle) —
-    // in Winter.app it borrows Winter's own framework from the enclosing bundle.
+    // BY PATH, from the layout the helper resolved (its own Contents/Frameworks), so that layout is the one
+    // source of where the framework is.
     const std::string library = std::string(frameworkDir) + "/Chromium Embedded Framework";
     if (!cef_load_library(library.c_str())) {
       g_last_error = "could not load the Chromium Embedded Framework at the headless layout's path";
@@ -5353,7 +5353,8 @@ BOOL WinterCEFInitializeHeadless(int argc,
 #endif
 
   // The SAME app class as Winter.app's browser process: CEF requires the same custom-scheme list in every
-  // process, and the "Winter Helper" subprocesses this host borrows register Winter's editor scheme.
+  // process, and the "Winter Helper" subprocesses — the ones this host carries, which Winter.app's own CEF runs
+  // too — register Winter's editor scheme.
   g_app = new WinterApp();
   if (!CefInitialize(main_args, settings, g_app.get(), nullptr)) {
     g_last_error = "CefInitialize failed (exit code " + std::to_string(CefGetExitCode()) + ")";

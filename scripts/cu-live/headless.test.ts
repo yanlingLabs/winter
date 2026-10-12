@@ -107,8 +107,22 @@ describe("the readers", () => {
       `  104 /tmp/x/Winter Headless Dev.app.bak/Contents/MacOS/other`,
       "  105 /Applications/Winter.app/Contents/Frameworks/Winter Helper.app/Contents/MacOS/Winter Helper",
     ].join("\n");
-    expect(processesInside(ps, APP).map((p) => p.pid)).toEqual([101, 102]);
-    expect(processesInside(ps, `${APP}/`).map((p) => p.pid)).toEqual([101, 102]);
+    const ours = new Set([101, 102, 103, 104, 105]);
+    expect(processesInside(ps, APP, ours).map((p) => p.pid)).toEqual([101, 102]);
+    expect(processesInside(ps, `${APP}/`, ours).map((p) => p.pid)).toEqual([101, 102]);
+  });
+
+  test("a process inside the helper app that this run's helper never held is not its — Winter.app's own CEF runs from there too", () => {
+    const nested = "/Applications/Winter.app/Contents/Helpers/Winter Headless.app";
+    const ps = [
+      `  201 ${nested}/Contents/MacOS/Winter Headless --winter-cache-root=/tmp/c`,
+      `  202 ${nested}/Contents/Frameworks/Winter Helper (Renderer).app/Contents/MacOS/Winter Helper (Renderer) --type=renderer`,
+      // Winter.app's own panel browser: the same executables, another parent.
+      `  301 ${nested}/Contents/Frameworks/Winter Helper (GPU).app/Contents/MacOS/Winter Helper (GPU) --type=gpu-process`,
+      `  302 ${nested}/Contents/Frameworks/Winter Helper (Renderer).app/Contents/MacOS/Winter Helper (Renderer) --type=renderer`,
+    ].join("\n");
+    expect(processesInside(ps, nested, new Set([201, 202])).map((p) => p.pid)).toEqual([201, 202]);
+    expect(processesInside(ps, nested, new Set())).toEqual([]);
   });
 
   test("mib", () => {

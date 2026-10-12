@@ -5,8 +5,8 @@
  *   bun run verify:headless-helper            build a proof copy into a temp dir (dist/dev is never touched)
  *   bun run verify:headless-helper --app <p>  check and drive an existing build instead: dist/dev's, or a Release
  *                                             Winter.app's nested Contents/Helpers/Winter Headless.app (its flavor is
- *                                             read from its bundle id; a nested one must borrow the enclosing app's
- *                                             Chromium and carry none of its own)
+ *                                             read from its bundle id; a nested one carries Winter's one Chromium and
+ *                                             the enclosing app's own Contents/Frameworks must hold none)
  *
  * What it proves:
  *   1. the signature (`checkSignedHeadless`): identifier, Winter's team, the hardened runtime, the stated designated
@@ -19,10 +19,13 @@
  *      and the frontmost app unchanged;
  *   4. the whole chain (`engine-smoke.ts`): the REAL engine over the REAL pool, which spawns the helper and checks the
  *      process against its requirement (`processSatisfiesRequirement`) before it sends anything.
- * Everything runs on temp directories; nothing is registered with LaunchServices.
+ * Everything runs on temp directories. Running the helper registers its bundles with LaunchServices (Chromium's
+ * notification helper checks in at start, and with it the bundle it is in): the proof copy's are unregistered before
+ * its temp directory goes. An --app build's are left as they are — that build is not this run's to unregister (for a
+ * temporary one, `lsregister -u` its bundles, and the enclosing Winter.app's, by hand).
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +38,20 @@ const check = (name: string, ok: boolean, detail = ""): void => {
   results.push([name, ok, detail]);
   console.log(`${ok ? "PASS" : "FAIL"} ${name}${detail.length > 0 ? ` — ${detail}` : ""}`);
 };
+
+const LSREGISTER = "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister";
+
+/** Unregister the proof copy and its nested bundles from LaunchServices (each path as spelled and as resolved —
+ *  the per-user temp dir is a link — so the records the run made go, whichever spelling they took). Best effort. */
+function unregister(app: string): void {
+  const bundles = [app, ...HEADLESS_NESTED_HELPERS.map((name) => join(app, "Contents", "Frameworks", `${name}.app`))];
+  const paths = new Set<string>();
+  for (const bundle of bundles) {
+    paths.add(bundle);
+    try { paths.add(realpathSync(bundle)); } catch { /* gone already */ }
+  }
+  for (const path of paths) spawnSync(LSREGISTER, ["-u", path], { stdio: "ignore", timeout: 10_000 });
+}
 
 function main(): void {
   if (process.platform !== "darwin") { console.error("verify:headless-helper: macOS only"); process.exit(1); }
@@ -82,7 +99,10 @@ function main(): void {
     check("the engine over the pool, the signature checked (engine-smoke.ts)", engine.status === 0, engineTail);
     if (engine.status !== 0) console.log(engine.stdout);
   } finally {
-    if (scratch !== undefined && existsSync(scratch)) rmSync(scratch, { recursive: true, force: true });
+    if (scratch !== undefined && existsSync(scratch)) {
+      unregister(app);
+      rmSync(scratch, { recursive: true, force: true });
+    }
   }
   const failed = results.filter(([, ok]) => !ok).length;
   console.log(`verify:headless-helper: ${results.length - failed} passed, ${failed} failed`);
