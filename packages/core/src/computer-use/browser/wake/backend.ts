@@ -1,0 +1,604 @@
+// ComputerV2 — WAKE TRIGGERS on browser tabs: the `WakeBackend` for tab bindings (`bt_…`), built beside the browser
+// engine. The registry (`wakes/registry.ts`) arms and disarms; this backend watches, and reports the ONE event that ends a
+// trigger (`fired` or `lost`).
+//
+// TWO PATHS, one watcher (`page-runtime/watch.ts`):
+//  - DEBUGGER-FREE (Winter for Chrome 1.2.0, feature `watch`): the element is read in the winter world while the tab is
+//    attached (role, name, the secure-field floor, a LOCATOR), then the extension injects the watcher into ITS OWN
+//    isolated world — no debugger — and injects it again into each new document of the tab. The tab is let go at once:
+//    no "is debugging this browser" bar while the user works.
+//  - THE DEBUGGER PATH (Winter's built-in browser; a Winter for Chrome older than 1.2.0; an element inside a child
+//    frame): the watcher runs in the frame's winter world and the backend LONG-POLLS it (`watchWait`, ≤ 20 s a round,
+//    acknowledged, so an answer lost on the way is sent again), holding the tab (`wake:<id>`) for the trigger's life —
+//    the built-in browser's hold stays, an older extension keeps its debugger (and says how to wait without its bar).
+//
+// The trigger outlives the script's binding: a reset, a worker restart, the worker's idle end and a turn end (the user's
+// tab released, the built-in tab's hold let go) leave it armed — it keeps the tab's driver, never the binding. Only these
+// end it: a cancel (`disarm`), the tab closing or crashing (`lost`), a ref condition's document going away (`lost`,
+// unless the user's own press of that element or form came just before — then `fired`), and the backend's link dropping
+// (`lost`: "Winter for Chrome disconnected" / "Winter isn't running").
+//
+// THE RULINGS (controller, 2026-10-12), each held by a test (`test/computer-use/browser-wake.test.ts`):
+//  - NO SCOPE AT ARM: `arm` has no run, so it can raise no card. A tab on a dangerous-domains host is `NotAllowed` unless
+//    the session already approved that host for the SESSION (a one-run approval does not count) or a saved
+//    `WebFetch(domain:…)` rule allows it.
+//  - A USER'S BROWSER needs the app allowed beyond one call (`persistentlyAllowed`), else the once-grant refusal.
+//  - WINTER'S OWN INPUT is every Input.* and Page.navigate/reload/navigateToHistoryEntry the tab's driver sends, and the
+//    whole act primitive the engine marks — from ANY session — with a 500 ms grace after it (`TabDriver.ownInputAt`);
+//    an extension also stamps what its debugger sends (`own`). What lands inside is never the user's: an input event is
+//    dropped, a state transition is not counted (it becomes the baseline).
+//  - A DOCUMENT WINTER'S OWN NAVIGATION LOADED sets the baseline of a page condition and never fires.
+//  - ALREADY TRUE AT ARM: a state condition that holds when armed is refused `NotAllowed` with one daemon sentence.
+//  - Only a false→true transition after arming fires; input conditions need the user's trusted DOM events.
+//
+// Floors: a headless tab is refused (nobody can see it); a secure field, or anything in a payment frame, is never
+// watched (`Refused`, Phase 1's sentence); a content condition never fires on a page behind the dangerous-domain floor
+// (it waits for the tab to leave it). Privacy: what a watcher reports is the kind, when, and the top URL / title, which
+// are redacted here before they reach a `detail`.
+import { AutomationFailure } from "../../errors";
+import { redactText, redactUrl } from "../page-runtime/redact";
+import type { WatchArmResult, WatchKind, WatchSpec } from "../page-runtime/watch";
+import type { BrowserEngine, WakeTabTarget } from "../engine";
+import { familyOfBackendId } from "../families";
+import { SECURE_FIELD_SENTENCE, shownUrl, WakeWorldGone, type TabDriver, type WakeFrame } from "../tab-driver";
+import { TransportError, type CdpEvent, type CdpTransport, type TransportWatchEvent } from "../transport";
+import type { WakeArmed, WakeArmRequest, WakeBackend, WakeBackendEvent, WakeCondition } from "../../wakes/types";
+
+/** A long poll waits at most this long for an event (a round trip every 20 s keeps an older extension's idle detach off). */
+export const WAKE_POLL_MS = 20_000;
+/** A navigation (or the element going) this soon after the user's own press of the watched element or form: `fired`. */
+export const WAKE_PRESS_NAV_MS = 3_000;
+/** How long a lost world is tried again (a new document still loading) before the trigger is `lost`. */
+export const WAKE_RECOVER_MS = 20_000;
+
+export const WAKE_HEADLESS = "nobody can see a headless tab — the user can't act in it; open the page with browsers.open(url) in Winter's browser and wait there";
+export const WAKE_OLD_EXTENSION_NOTE = "this Winter for Chrome is older than 1.2.0, so Winter keeps the browser's debugger on the tab while it waits (its debugging bar shows) — update Winter for Chrome to wait without the debugging bar";
+export const WAKE_IN_FRAME_NOTE = "the element is inside a frame of the page, so Winter keeps the browser's debugger on the tab while it waits (its debugging bar shows)";
+
+const STATE_KINDS: ReadonlySet<string> = new Set(["appeared", "gone", "titled"]);
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, Math.max(0, ms)));
+const bad = (message: string): Error => Object.assign(new TypeError(message), { name: "TypeError" });
+const quoted = (s: string, max = 60): string => {
+  const t = s.replace(/\s+/g, " ").trim();
+  return `“${t.length > max ? `${t.slice(0, max - 1)}…` : t}”`;
+};
+
+/** The pill on the page — fixed words per kind, naming only the element's own label (never the model's words). */
+export function wakePill(kind: WatchKind, label: string, o: { anyForm?: boolean } = {}): string {
+  const l = label.replace(/\s+/g, " ").trim();
+  const it = l.length === 0 ? "the marked element" : quoted(l);
+  switch (kind) {
+    case "clicked": return `Winter continues when you click ${it}`;
+    case "submitted": return o.anyForm === true ? "Winter continues when you submit a form on this page" : `Winter continues when you submit ${it}`;
+    case "changed": return `Winter continues when you change ${it}`;
+    case "gone": return l.length === 0 && o.anyForm === true ? "Winter continues when this page changes" : `Winter continues when ${it} goes away`;
+    case "titled": return "Winter continues when this page's title changes";
+    case "navigated": return "Winter continues when you go to another page";
+    default: return "Winter continues when this page changes";
+  }
+}
+
+interface Armed {
+  req: WakeArmRequest;
+  onEvent: (e: WakeBackendEvent) => void;
+  target: WakeTabTarget;
+  driver: TabDriver;
+  transport: CdpTransport;
+  path: "cdp" | "ext";
+  spec: WatchSpec;
+  /** The element's ref (a ref condition). */
+  ref?: number;
+  /** The debugger path: the watch's frame now, its holder, its poller's key. */
+  frame?: WakeFrame;
+  holder: string;
+  pollKey?: string;
+  /** The document the watch was last armed in (`performance.timeOrigin`). */
+  doc?: number;
+  /** The user's own press of the watched element or form (a navigation or the element going right after it fires). */
+  pressedAt?: number;
+  /** navigated: the URL it compares with, and (with `url`) whether that was met. */
+  baseUrl: string;
+  urlMet?: boolean;
+  ended: boolean;
+  off: Array<() => void>;
+}
+
+interface Poller {
+  key: string;
+  driver: TabDriver;
+  frame: WakeFrame;
+  wakes: Set<string>;
+  /** The watcher world polled, and the last of its events taken. */
+  world?: string;
+  ack: number;
+  running: boolean;
+}
+
+export interface BrowserWakeBackendDeps {
+  now?(): number;
+  log?(line: string): void;
+  /** Tests: shorter waits. */
+  pollMs?: number;
+  recoverMs?: number;
+}
+
+export class BrowserWakeBackend implements WakeBackend {
+  private readonly armed = new Map<string, Armed>();
+  private readonly pollers = new Map<string, Poller>();
+  private readonly hookedTransports = new Set<CdpTransport>();
+  /** Per tab (driver): whether its last top-level commit came from Winter's own input. */
+  private readonly navOwn = new WeakMap<TabDriver, boolean>();
+  private readonly navHooked = new WeakSet<TabDriver>();
+  private stopped = false;
+  private pollerSeq = 0;
+
+  constructor(private readonly engine: BrowserEngine, private readonly deps: BrowserWakeBackendDeps = {}) {}
+
+  private now(): number { return (this.deps.now ?? Date.now)(); }
+
+  // ── arm ─────────────────────────────────────────────────────────────────────────────────────────────
+
+  async arm(req: WakeArmRequest, onEvent: (e: WakeBackendEvent) => void): Promise<WakeArmed> {
+    if (this.stopped) throw new AutomationFailure("BrowserUnavailable", "Winter is shutting down");
+    const t = this.engine.wakeTarget(req.sessionId, req.targetId);
+    if (t.family === "headless") throw new AutomationFailure("NotAllowed", WAKE_HEADLESS);
+    if (t.bundleId !== undefined && !this.engine.wakeAllowed(req.sessionId, t.bundleId)) {
+      throw new AutomationFailure("NotAllowed", `${t.browserName} was allowed for one call only — a wake trigger needs it allowed for this session`);
+    }
+    const c = req.condition;
+    const ref = "ref" in c && c.ref !== undefined ? parseRef(c.ref) : undefined;
+    const driver = t.driver;
+    const transport = driver.transport;
+    const holder = `wake:${req.wakeId}`;
+    // Attached for the arm (the run that arms has it attached already; the debugger-free path lets go after).
+    await driver.ensureAttached(holder);
+    let keepHold = false;
+    try {
+      if (driver.dialog !== undefined) throw new AutomationFailure("TargetBusy", `${driver.dialogBusySentence()} (wakeWhen() waits for it)`);
+      try { await driver.quietInfo(); } catch { /* the last committed URL and title */ }
+      const host = this.engine.wakeSiteBlocked(req.sessionId, driver.url);
+      if (host !== undefined) {
+        throw new AutomationFailure("NotAllowed", `this tab is on ${host}, which is on the dangerous-domains list and not approved for this session — a wake trigger can't watch it`);
+      }
+
+      // The element (a ref condition): read in its own frame's winter world — its label, the secure-field floor, its locator.
+      let frame: WakeFrame | undefined;
+      let element: { role: string; name: string } | undefined;
+      let locator: WatchSpec["locator"];
+      if (ref !== undefined) {
+        let got: Awaited<ReturnType<TabDriver["wakeLocate"]>>;
+        try {
+          got = await driver.wakeLocate(ref);
+        } catch (err) {
+          if (c.kind === "gone" && err instanceof AutomationFailure && err.kind === "StaleRef") throw alreadyTrue(c);
+          throw err;
+        }
+        if (!got.found.ok) {
+          if (got.found.reason === "secure") throw new AutomationFailure("Refused", SECURE_FIELD_SENTENCE);
+          if (c.kind === "gone") throw alreadyTrue(c);
+          throw new AutomationFailure("StaleRef", `[${ref}] is gone — call state()`);
+        }
+        frame = got.frame;
+        element = got.found.element;
+        locator = got.found.locator;
+      }
+      if (c.kind === "navigated" && c.url !== undefined && c.url.length > 0 && driver.url.includes(c.url)) throw alreadyTrue(c);
+
+      const kind: WatchKind = c.kind;
+      const anyForm = c.kind === "submitted" && ref === undefined;
+      const spec: WatchSpec = {
+        watchId: req.wakeId, kind, pill: wakePill(kind, element?.name ?? "", { anyForm: anyForm || (c.kind === "gone" && ref === undefined) }),
+        expiresAt: req.expiresAt, initial: "refuse",
+        ...(locator === undefined ? {} : { locator }),
+        ...(c.kind === "appeared" ? { text: c.text } : {}),
+        ...(c.kind === "gone" && ref === undefined && c.text !== undefined ? { text: c.text } : {}),
+        ...(c.kind === "titled" ? { title: c.title } : {}),
+        ...(anyForm ? { anyForm: true } : {}),
+        ...(c.kind === "changed" ? { settleMs: c.settleMs } : {}),
+      };
+      if (c.kind === "gone" && ref === undefined && (c.text === undefined || c.text.length === 0)) throw bad("wakeWhen({ gone }) takes an element ref or a text");
+
+      const path: "cdp" | "ext" = transport.watch !== undefined && (frame === undefined || frame.top) ? "ext" : "cdp";
+      const a: Armed = {
+        req, onEvent, target: t, driver, transport, path, spec, ...(ref === undefined ? {} : { ref }), holder,
+        baseUrl: driver.url, ended: false, off: [],
+      };
+      if (c.kind === "navigated" && c.url !== undefined) a.urlMet = false;
+
+      let result: WatchArmResult;
+      if (path === "ext") {
+        this.hookTransport(transport);
+        try { result = await transport.watch!(t.tabKey, spec); } catch (err) { throw watchFailure(err, t.browserName); }
+      } else {
+        frame ??= await driver.wakeTopFrame();
+        try { result = await driver.wakeArm(frame, spec, ref); } catch (err) {
+          if (err instanceof WakeWorldGone) throw new AutomationFailure("StaleRef", "the page changed — call state()");
+          throw err;
+        }
+        a.frame = frame;
+      }
+      if (!result.ok) {
+        if (path === "ext") void transport.unwatch?.(t.tabKey, req.wakeId).catch(() => undefined);
+        throw armRefusal(result.reason, c, ref);
+      }
+      a.doc = result.doc;
+
+      // Armed: from here on only an event or a disarm ends it.
+      this.armed.set(req.wakeId, a);
+      driver.wakesArmed++;
+      a.off.push(this.onGone(a));
+      if (path === "cdp") {
+        keepHold = true;
+        driver.wakeHolders.set(holder, req.sessionId);
+        this.hookNavigation(driver);
+        this.addToPoller(a);
+      }
+      const title = driver.shownTitle.replace(/\s+/g, " ").trim();
+      const note = path === "cdp" && t.family !== "winter"
+        ? (transport.watch === undefined ? WAKE_OLD_EXTENSION_NOTE : WAKE_IN_FRAME_NOTE)
+        : undefined;
+      return {
+        ...(element === undefined ? {} : { element }),
+        targetLabel: title.length > 0 ? `${t.browserName} — ${title.slice(0, 80)}` : t.browserName,
+        rebind: `browsers.tab(${JSON.stringify(`${t.backend}:${t.tabKey}`)})`,
+        ...(note === undefined ? {} : { note }),
+      };
+    } finally {
+      if (!keepHold) void driver.release(holder);
+    }
+  }
+
+  // ── disarm and ending ───────────────────────────────────────────────────────────────────────────────
+
+  disarm(wakeId: string): void {
+    const a = this.armed.get(wakeId);
+    if (a === undefined || a.ended) return;
+    this.finish(a);
+  }
+
+  /** Daemon stop: every trigger left as it is (the registry persists them for the restart notice); nothing polled. */
+  stop(): void {
+    this.stopped = true;
+    for (const a of this.armed.values()) {
+      a.ended = true;
+      for (const off of a.off) off();
+    }
+    this.armed.clear();
+    this.pollers.clear();
+  }
+
+  /** What is armed now (tests, status). */
+  armedIds(): string[] { return [...this.armed.keys()]; }
+
+  private finish(a: Armed): void {
+    if (a.ended) return;
+    a.ended = true;
+    this.armed.delete(a.req.wakeId);
+    a.driver.wakesArmed = Math.max(0, a.driver.wakesArmed - 1);
+    for (const off of a.off) { try { off(); } catch { /* best effort */ } }
+    if (a.path === "ext") {
+      void a.transport.unwatch?.(a.target.tabKey, a.req.wakeId).catch(() => undefined);
+    } else {
+      const p = a.pollKey === undefined ? undefined : this.pollers.get(a.pollKey);
+      p?.wakes.delete(a.req.wakeId);
+      if (p !== undefined && p.wakes.size === 0) this.pollers.delete(p.key);
+      a.driver.wakeHolders.delete(a.holder);
+      // The watch leaves the page (its ring and pill) before the tab is let go.
+      const d = a.driver;
+      const frame = a.frame;
+      void (async () => {
+        if (frame !== undefined && d.gone === undefined) await d.wakeDisarm(frame, a.req.wakeId);
+        await d.release(a.holder);
+      })();
+    }
+  }
+
+  private end(a: Armed, e: Omit<WakeBackendEvent, "wakeId">): void {
+    if (a.ended) return;
+    this.finish(a);
+    try { a.onEvent({ wakeId: a.req.wakeId, ...e }); } catch (err) {
+      this.deps.log?.(`computer-use: a wake listener threw (${err instanceof Error ? err.message : "error"})`);
+    }
+  }
+
+  private lose(a: Armed, reason: string): void { this.end(a, { outcome: "lost", at: this.now(), reason }); }
+
+  // ── what the watchers report ────────────────────────────────────────────────────────────────────────
+
+  /** Did Winter (any session) cause what landed at `at`: its input to the tab, its helper's input to the browser app,
+   *  or (the extension's own stamp) its debugger's? */
+  private own(a: Armed, at: number, stamped?: boolean): boolean {
+    if (stamped === true) return true;
+    if (a.driver.ownInputAt(at)) return true;
+    return a.target.bundleId !== undefined && this.engine.wakeOwnAppInput(a.target.bundleId, at);
+  }
+
+  private onReport(a: Armed, e: { outcome: string; at: number; url?: string; title?: string; reason?: string; own?: boolean }): void {
+    if (a.ended) return;
+    const at = Number.isFinite(e.at) ? e.at : this.now();
+    switch (e.outcome) {
+      case "pressed":
+        if (!this.own(a, at, e.own)) a.pressedAt = at;
+        return;
+      case "fired": {
+        if (this.own(a, at, e.own)) return;
+        // A page condition never fires on a page behind the dangerous-domain floor: it waits for the tab to leave.
+        if (pageWatch(a.spec) && typeof e.url === "string" && this.engine.wakeSiteBlocked(a.req.sessionId, e.url) !== undefined) return;
+        this.end(a, { outcome: "fired", at, detail: this.detail(a, e) });
+        return;
+      }
+      case "url":
+        if (typeof e.url === "string") this.onUrl(a, e.url, at, e.own === true);
+        return;
+      case "lost":
+        this.lostOrPressed(a, e.reason === "doc" ? "doc" : e.reason === "gone" ? "gone" : "other", e.reason);
+        return;
+      default:
+        return;
+    }
+  }
+
+  /** A ref condition's document (or its element) went: `fired` when the user's own press of it came just before, else
+   *  `lost`. */
+  private lostOrPressed(a: Armed, why: "doc" | "gone" | "other", raw?: string): void {
+    if (a.ended) return;
+    if ((why === "doc" || why === "gone") && a.pressedAt !== undefined && this.now() - a.pressedAt <= WAKE_PRESS_NAV_MS
+      && (a.spec.kind === "clicked" || a.spec.kind === "submitted")) {
+      this.end(a, { outcome: "fired", at: a.pressedAt, detail: a.spec.kind === "clicked" ? "clicked" : "submitted the form" });
+      return;
+    }
+    if (why === "doc") return this.lose(a, "the page changed");
+    if (why === "gone") return this.lose(a, "the element is gone");
+    this.lose(a, raw === "disconnected" ? this.linkSentence(a) : raw !== undefined && raw.length > 0 ? raw.slice(0, 200) : "the page can't be watched any more");
+  }
+
+  /** navigated: the tab's top-level URL is now `url` (a same-document change counts). */
+  private onUrl(a: Armed, url: string, at: number, stamped: boolean): void {
+    if (a.ended || a.spec.kind !== "navigated") return;
+    const c = a.req.condition as Extract<WakeCondition, { kind: "navigated" }>;
+    const want = c.url !== undefined && c.url.length > 0 ? c.url : undefined;
+    if (this.own(a, at, stamped)) {
+      // Winter's own navigation: the new baseline.
+      a.baseUrl = url;
+      if (want !== undefined) a.urlMet = url.includes(want);
+      return;
+    }
+    if (want === undefined) {
+      if (url === a.baseUrl) return;
+    } else {
+      const was = a.urlMet === true;
+      a.urlMet = url.includes(want);
+      if (!a.urlMet || was) return;
+    }
+    this.end(a, { outcome: "fired", at, detail: `now at ${redactUrl(shownUrl(url)).slice(0, 300)}` });
+  }
+
+  private detail(a: Armed, e: { url?: string; title?: string }): string {
+    switch (a.spec.kind) {
+      case "clicked": return "clicked";
+      case "submitted": return "submitted the form";
+      case "changed": return "changed";
+      case "appeared": return "appeared";
+      case "gone": return "gone";
+      case "titled": return `title now ${quoted(redactText(e.title ?? a.driver.title), 120)}`;
+      case "navigated": return `now at ${redactUrl(shownUrl(e.url ?? a.driver.url)).slice(0, 300)}`;
+    }
+  }
+
+  private linkSentence(a: Armed): string {
+    return familyOfBackendId(a.target.backend) === "winter" || a.target.family === "winter" ? "Winter isn't running" : "Winter for Chrome disconnected";
+  }
+
+  /** The tab closed, crashed, or the user took it back. */
+  private onGone(a: Armed): () => void {
+    const l = (reason: string): void => {
+      if (a.ended) return;
+      switch (reason) {
+        case "closed": this.lose(a, "the tab was closed"); return;
+        case "crashed": this.lose(a, "the tab crashed"); return;
+        case "detached_by_user": this.lose(a, "the user stopped Winter from controlling this tab"); return;
+        default: return; // stopped: the debugger path attaches again
+      }
+    };
+    a.driver.goneListeners.add(l);
+    return () => { a.driver.goneListeners.delete(l); };
+  }
+
+  private hookTransport(t: CdpTransport): void {
+    if (this.hookedTransports.has(t) || t.onWatchEvent === undefined) return;
+    this.hookedTransports.add(t);
+    t.onWatchEvent((tabKey, e: TransportWatchEvent) => {
+      const a = this.armed.get(e.watchId);
+      if (a === undefined || a.path !== "ext" || a.transport !== t || a.target.tabKey !== tabKey) return;
+      this.onReport(a, e);
+    });
+  }
+
+  /** The debugger path's view of the tab's top-level URL (navigated) and of who made its last commit. */
+  private hookNavigation(driver: TabDriver): void {
+    if (this.navHooked.has(driver)) return;
+    this.navHooked.add(driver);
+    const l = (e: CdpEvent): void => {
+      if (e.cdpSessionId !== undefined) return;
+      let url: string | undefined;
+      if (e.method === "Page.frameNavigated") {
+        const f = (e.params.frame ?? {}) as { parentId?: string; url?: string; urlFragment?: string };
+        if (f.parentId !== undefined || typeof f.url !== "string") return;
+        url = `${f.url}${f.urlFragment ?? ""}`;
+        this.navOwn.set(driver, driver.ownInputNow);
+      } else if (e.method === "Page.navigatedWithinDocument") {
+        if (e.params.frameId !== driver.mainFrameId || typeof e.params.url !== "string") return;
+        url = e.params.url;
+      } else return;
+      const at = this.now();
+      for (const a of [...this.armed.values()]) {
+        if (a.driver === driver && a.path === "cdp" && a.spec.kind === "navigated") this.onUrl(a, url, at, false);
+      }
+    };
+    driver.listeners.add(l);
+  }
+
+  // ── the debugger path: long polls ───────────────────────────────────────────────────────────────────
+
+  private addToPoller(a: Armed): void {
+    let p = [...this.pollers.values()].find((x) => x.driver === a.driver && x.frame.frameId === a.frame!.frameId);
+    if (p === undefined) {
+      p = { key: `p${++this.pollerSeq}`, driver: a.driver, frame: a.frame!, wakes: new Set(), ack: 0, running: false };
+      this.pollers.set(p.key, p);
+    }
+    p.wakes.add(a.req.wakeId);
+    a.pollKey = p.key;
+    if (!p.running) void this.runPoller(p);
+  }
+
+  private live(p: Poller): Armed[] {
+    return [...p.wakes].map((id) => this.armed.get(id)).filter((x): x is Armed => x !== undefined && !x.ended);
+  }
+
+  private async runPoller(p: Poller): Promise<void> {
+    p.running = true;
+    let failures = 0;
+    try {
+      while (!this.stopped && this.live(p).length > 0) {
+        const d = p.driver;
+        if (d.gone !== undefined) { this.goneAll(p, d.gone); return; }
+        if (d.dialog !== undefined) { await sleep(500); continue; }
+        try {
+          const r = await d.wakeWait(p.frame, p.ack, this.deps.pollMs ?? WAKE_POLL_MS, p.world);
+          failures = 0;
+          if (r.world !== p.world) { p.world = r.world; p.ack = 0; }
+          for (const ev of r.events) {
+            p.ack = Math.max(p.ack, ev.seq);
+            const a = this.armed.get(ev.watchId);
+            if (a !== undefined && p.wakes.has(ev.watchId)) this.onReport(a, ev);
+          }
+          // A watch no longer in the page (it removed itself): armed there again.
+          const missing = this.live(p).filter((a) => !r.alive.includes(a.req.wakeId));
+          if (missing.length > 0) await this.recover(p, missing);
+        } catch (err) {
+          if (err instanceof WakeWorldGone) { await this.recover(p, this.live(p)); continue; }
+          if (d.gone !== undefined) { this.goneAll(p, d.gone); return; }
+          if (err instanceof AutomationFailure && err.kind === "BrowserUnavailable") { for (const a of this.live(p)) this.lose(a, this.linkSentence(a)); return; }
+          if (err instanceof AutomationFailure && err.kind === "TargetLost") {
+            // The debugger let go while the tab lives (an extension's detach): attached again by `recover`.
+            await this.recover(p, this.live(p));
+            continue;
+          }
+          if (err instanceof AutomationFailure && err.kind === "TargetBusy") { await sleep(500); continue; }
+          failures++;
+          this.deps.log?.(`computer-use: a wake watch's poll failed (${err instanceof Error ? err.message.slice(0, 120) : "error"})`);
+          if (failures >= 5) { for (const a of this.live(p)) this.lose(a, "the page can't be watched any more"); return; }
+          await sleep(500 * failures);
+        }
+      }
+    } finally {
+      p.running = false;
+      if (this.live(p).length === 0) this.pollers.delete(p.key);
+    }
+  }
+
+  private goneAll(p: Poller, reason: string): void {
+    for (const a of this.live(p)) {
+      this.lose(a, reason === "crashed" ? "the tab crashed" : reason === "detached_by_user" ? "the user stopped Winter from controlling this tab" : "the tab was closed");
+    }
+  }
+
+  /**
+   * A watch's world went (a new document, or a detach) or the watch left it: attach again if need be and arm each watch
+   * again in the frame's world now — a ref watch by its locator (another document: `lost`, or `fired` after the user's
+   * press), a page watch with the new document as its baseline (a transition when the user or the page brought the
+   * document and the condition holds there; never when Winter's own navigation did).
+   */
+  private async recover(p: Poller, wakes: Armed[]): Promise<void> {
+    const d = p.driver;
+    const deadline = this.now() + (this.deps.recoverMs ?? WAKE_RECOVER_MS);
+    let todo = wakes.filter((a) => !a.ended);
+    while (todo.length > 0 && !this.stopped) {
+      if (d.gone !== undefined) { this.goneAll(p, d.gone); return; }
+      try {
+        for (const a of todo) await d.ensureAttached(a.holder);
+        const frame = p.frame.top ? await d.wakeTopFrame() : await d.wakeFrameAgain(p.frame.frameId);
+        const navOwn = this.navOwn.get(d) === true;
+        for (const a of todo) {
+          if (a.ended) continue;
+          // A page condition on a page behind the floor: not watched there (it waits for the tab to leave it).
+          if (pageWatch(a.spec) && this.engine.wakeSiteBlocked(a.req.sessionId, d.url) !== undefined) continue;
+          const r = await d.wakeArm(frame, { ...a.spec, initial: "baseline" });
+          if (!r.ok) {
+            this.lostOrPressed(a, r.reason === "doc" ? "doc" : "gone");
+            continue;
+          }
+          const newDoc = a.doc !== undefined && r.doc !== a.doc;
+          a.frame = frame;
+          a.doc = r.doc;
+          if (r.met === true && a.spec.kind === "gone" && a.spec.locator !== undefined) {
+            // Its element went while the world was away: that is the condition.
+            if (!this.own(a, this.now())) this.end(a, { outcome: "fired", at: this.now(), detail: "gone" });
+            continue;
+          }
+          if (r.met === true && newDoc && !navOwn && STATE_KINDS.has(a.spec.kind)) this.end(a, { outcome: "fired", at: this.now(), detail: this.detail(a, { title: d.title }) });
+        }
+        p.frame = frame;
+        return;
+      } catch (err) {
+        if (d.gone !== undefined) { this.goneAll(p, d.gone); return; }
+        // A child frame that went (its parent navigated): its watches' document is gone.
+        if (err instanceof WakeWorldGone && !p.frame.top) { for (const a of todo) this.lostOrPressed(a, "doc"); return; }
+        if (err instanceof AutomationFailure && err.kind === "BrowserUnavailable") { for (const a of todo) this.lose(a, this.linkSentence(a)); return; }
+        if (err instanceof AutomationFailure && (err.kind === "Refused" || err.kind === "NotAllowed")) { for (const a of todo) this.lose(a, "the page can't be watched any more"); return; }
+        if (this.now() >= deadline) { for (const a of todo) this.lose(a, "the page can't be watched any more"); return; }
+        await sleep(250);
+      }
+      todo = todo.filter((a) => !a.ended);
+    }
+  }
+}
+
+/** A watch of the page itself (no element; `navigated` aside): the dangerous-domain floor keeps it from firing — and
+ *  from being installed — on a page behind it. */
+function pageWatch(spec: WatchSpec): boolean {
+  return spec.locator === undefined && spec.kind !== "navigated";
+}
+
+function parseRef(ref: string): number {
+  const n = Number(ref);
+  if (!Number.isInteger(n) || n <= 0) throw bad("wakeWhen() takes an element ref from state() or find()");
+  return n;
+}
+
+/** The controller's ruling: a state condition already true at arm is refused, in the daemon's words. */
+function alreadyTrue(c: WakeCondition): AutomationFailure {
+  switch (c.kind) {
+    case "appeared": return new AutomationFailure("NotAllowed", `${quoted(c.text)} is already shown in this tab — nothing to wait for; check state()`);
+    case "gone": return new AutomationFailure("NotAllowed", c.ref !== undefined
+      ? `[${c.ref}] is already gone from this tab — nothing to wait for; check state()`
+      : `${quoted(c.text ?? "")} isn't shown in this tab — nothing to wait for; check state()`);
+    case "titled": return new AutomationFailure("NotAllowed", `this tab's title already contains ${quoted(c.title)} — nothing to wait for; check title()`);
+    case "navigated": return new AutomationFailure("NotAllowed", `this tab's address already contains ${quoted(c.url ?? "")} — nothing to wait for; check url()`);
+    default: return new AutomationFailure("NotAllowed", "that is already true in this tab — nothing to wait for; check state()");
+  }
+}
+
+function armRefusal(reason: "met" | "gone" | "doc" | "noform", c: WakeCondition, ref: number | undefined): Error {
+  switch (reason) {
+    case "met": return alreadyTrue(c);
+    case "gone": return c.kind === "gone" ? alreadyTrue(c) : new AutomationFailure("StaleRef", `[${ref ?? "?"}] is gone — call state()`);
+    case "doc": return new AutomationFailure("StaleRef", "the page changed — call state()");
+    case "noform": return new Error(`[${ref ?? "?"}] is not in a form — wakeWhen({ submitted: true }) waits for any form of the page`);
+  }
+}
+
+/** The extension's refusal of a watch, as the model's error. */
+function watchFailure(err: unknown, browserName: string): Error {
+  if (err instanceof TransportError) {
+    if (err.code === "not_allowed") {
+      if (err.data.reason === "secure") return new AutomationFailure("Refused", SECURE_FIELD_SENTENCE);
+      return new AutomationFailure("Refused", `this page doesn't let Winter watch it (${err.message.slice(0, 160)})`);
+    }
+    if (err.code === "tab_gone") return new AutomationFailure("TargetLost", "the tab was closed — open it again with browsers.open() or bind another with browsers.tab()");
+    if (err.code === "disconnected") return new AutomationFailure("BrowserUnavailable", `${browserName} can't be reached: Winter for Chrome is not connected — ask the user`, true);
+    if (err.code === "timeout") return new AutomationFailure("TargetBusy", "the browser did not answer in time — try again in a moment", true);
+    return new Error(err.message.slice(0, 300));
+  }
+  return err instanceof Error ? err : new Error(String(err));
+}

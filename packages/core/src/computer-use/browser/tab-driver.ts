@@ -18,8 +18,10 @@ import { buttonOf, keyEvents, keyForChar, modifiersOf, parseCombo, type KeyPress
 import { PAGE_RUNTIME_SOURCE } from "./page-runtime/bundle.generated";
 import { redactText, redactUrl } from "./page-runtime/redact";
 import { pickerAdvice } from "./page-runtime/rules";
+import { WAKE_LIMITS } from "../wakes/types";
+import type { WatchArmResult, WatchSpec, WatchWaitResult } from "./page-runtime/watch";
 import {
-  PAGE_RUNTIME_CALL, type RtCheck, type RtClassify, type RtCondition, type RtFindQuery, type RtFound, type RtHit, type RtInspect, type RtLink, type RtNode, type RtPoint, type RtSiteToolAnswer, type RtSiteTools, type RtSnapshot,
+  PAGE_RUNTIME_CALL, type RtWatchLocate, type RtCheck, type RtClassify, type RtCondition, type RtFindQuery, type RtFound, type RtHit, type RtInspect, type RtLink, type RtNode, type RtPoint, type RtSiteToolAnswer, type RtSiteTools, type RtSnapshot,
 } from "./page-runtime/protocol";
 import { fitsBudget, imageSize, outputSize, scaleFor, toCss, type CssRect, type ShotFrame } from "./scale";
 import { diffState, fullState, makeSnapshot, printedState, type TabDialogLine, type TabHeader, type TabNode, type TabSnapshot } from "./state-format";
@@ -216,6 +218,15 @@ export class TabDriver {
   readonly listeners = new Set<(e: CdpEvent) => void>();
   /** Phase 3: a `download()` capture is armed on this tab (a download the page starts now is the capture's to say). */
   capturing = 0;
+  /** Wake triggers: told when the tab goes (`closed`, `crashed`, `stopped`, `detached_by_user`). */
+  readonly goneListeners = new Set<(reason: string) => void>();
+  /** Wake triggers armed on this tab now, either path (an agent tab waiting on the user is not closed at turn end). */
+  wakesArmed = 0;
+  /** Wake holders (`wake:<id>` → its session): the debugger path keeps the tab held while armed. */
+  readonly wakeHolders = new Map<string, string>();
+  private ownInputDepth = 0;
+  private ownInputStart = 0;
+  private readonly ownInputWindows: Array<[number, number]> = [];
 
   constructor(
     readonly backend: string,
@@ -230,13 +241,20 @@ export class TabDriver {
 
   // ── transport ───────────────────────────────────────────────────────────────────────────────────
 
-  async send<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}, session?: string, timeoutMs?: number): Promise<T> {
+  async send<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}, session?: string, timeoutMs?: number, o: { dialogRace?: boolean } = {}): Promise<T> {
     if (this.gone !== undefined) throw this.lost();
     // A page dialog pauses the page: input, and any read of the page, would be answered only once the dialog is — so
-    // nothing of the kind is sent while one is open (only the dialog's answer, navigation and closing are).
-    const pausable = method.startsWith("Input.") || method === "Runtime.callFunctionOn" || method === "Runtime.evaluate";
+    // nothing of the kind is sent while one is open (only the dialog's answer, navigation and closing are). A wake
+    // watch's long poll (`dialogRace: false`) only waits longer.
+    const pausable = o.dialogRace !== false && (method.startsWith("Input.") || method === "Runtime.callFunctionOn" || method === "Runtime.evaluate");
     if (pausable && this.dialog !== undefined) throw new AutomationFailure("TargetBusy", this.dialogBusySentence());
     const sent = this.transport.send<T>(this.tabKey, method, params, { ...(session === undefined ? {} : { cdpSessionId: session }), ...(timeoutMs === undefined ? {} : { timeoutMs }) });
+    // Winter's own input to the tab, from any session: what lands meanwhile (and just after) is never the user's.
+    if (OWN_INPUT_METHOD.test(method)) {
+      this.beginOwnInput();
+      const end = (): void => this.endOwnInput();
+      void sent.then(end, end);
+    }
     try {
       // A dialog opening while it is in flight: stop waiting at once — input counts as delivered; a read is TargetBusy.
       if (pausable) {
@@ -592,6 +610,9 @@ export class TabDriver {
       }
       case "Inspector.targetCrashed":
         this.gone ??= "crashed";
+        for (const l of [...this.goneListeners]) {
+          try { l("crashed"); } catch { /* a listener never breaks the driver */ }
+        }
         break;
       case "Inspector.detached":
         // The tab's debugger was let go (idle, or the target swapped) while the tab lives: attach again on the next
@@ -613,6 +634,9 @@ export class TabDriver {
   }
 
   onGone(reason: string): void {
+    for (const l of [...this.goneListeners]) {
+      try { l(reason); } catch { /* a listener never breaks the driver */ }
+    }
     if (reason === "stopped") {
       // The tab's browser was stopped or its debugger let go (the app parked it; the extension idled out): the tab
       // itself may live on — the next primitive attaches again; its document (and so every ref) is new.
@@ -1749,6 +1773,113 @@ export class TabDriver {
     }
   }
 
+  // ── wake triggers (`wake/backend.ts`) ─────────────────────────────────────────────────────────────
+
+  /** Winter's own input to this tab starts (the engine marks each act primitive; `send` each input or navigation). */
+  beginOwnInput(): void {
+    if (this.ownInputDepth++ === 0) this.ownInputStart = this.now();
+  }
+
+  endOwnInput(): void {
+    if (this.ownInputDepth === 0) return;
+    if (--this.ownInputDepth > 0) return;
+    const end = this.now();
+    this.ownInputWindows.push([this.ownInputStart, end]);
+    while (this.ownInputWindows.length > 32 || (this.ownInputWindows.length > 0 && end - this.ownInputWindows[0]![1] > 60_000)) this.ownInputWindows.shift();
+  }
+
+  /** Was Winter's own input to this tab in flight at `at` (epoch ms), or did it end at most the grace before? */
+  ownInputAt(at: number): boolean {
+    const grace = WAKE_LIMITS.ownInputGraceMs;
+    if (this.ownInputDepth > 0 && at >= this.ownInputStart - 50) return true;
+    return this.ownInputWindows.some(([start, end]) => at >= start - 50 && at <= end + grace);
+  }
+
+  /** Winter's own input to this tab is in flight now, or ended within the grace. */
+  get ownInputNow(): boolean { return this.ownInputAt(this.now()); }
+
+  /** A watch's frame: its document's page runtime instance. Gone (another document, or the world went with a detach):
+   *  `WakeWorldGone`. */
+  private wakeRec(frame: WakeFrame): FrameRec {
+    const rec = this.frames.get(frame.frameId);
+    if (rec === undefined || rec.rtId !== frame.rtId || rec.ctx === undefined) throw new WakeWorldGone();
+    return rec;
+  }
+
+  /** Read an element for a watch, in its own frame's runtime. */
+  async wakeLocate(ref: number): Promise<{ frame: WakeFrame; found: RtWatchLocate }> {
+    this.requireNoDialog("wakeWhen()");
+    const { rec, id, rtId } = this.resolve(ref);
+    const found = await this.callIn<RtWatchLocate>(rec, "watchLocate", { id }, { expectRt: rtId });
+    return { frame: { frameId: rec.frameId, rtId, top: rec.parentId === undefined }, found };
+  }
+
+  /** The top frame's runtime now (made if need be), for a watch of the page itself. */
+  async wakeTopFrame(): Promise<WakeFrame> {
+    const top = this.top();
+    await this.ensureRuntime(top);
+    if (top.rtId === undefined) throw new WakeWorldGone();
+    return { frameId: top.frameId, rtId: top.rtId, top: true };
+  }
+
+  /** A frame's runtime as it is now (another world of the same document after a detach, or another document), for a
+   *  watch armed again by its locator. */
+  async wakeFrameAgain(frameId: string): Promise<WakeFrame> {
+    const rec = this.frames.get(frameId);
+    if (rec === undefined) throw new WakeWorldGone();
+    await this.ensureRuntime(rec);
+    if (rec.rtId === undefined) throw new WakeWorldGone();
+    return { frameId, rtId: rec.rtId, top: rec.parentId === undefined };
+  }
+
+  /** Arm a watch in `frame`'s world (`ref`: its element, when it is still that runtime's; else the spec's locator). */
+  async wakeArm(frame: WakeFrame, spec: WatchSpec, ref?: number): Promise<WatchArmResult> {
+    const rec = this.wakeRec(frame);
+    let id: number | undefined;
+    if (ref !== undefined) {
+      try { const r = this.resolve(ref); if (r.rtId === frame.rtId) id = r.id; } catch { id = undefined; }
+    }
+    try {
+      return await this.callIn<WatchArmResult>(rec, "watchArm", { spec, ...(id === undefined ? {} : { id }) }, { expectRt: frame.rtId });
+    } catch (err) {
+      if (isContextGone(err) || (err instanceof AutomationFailure && err.kind === "StaleRef")) throw new WakeWorldGone();
+      if (err instanceof Error && /secure_field/.test(err.message)) throw new AutomationFailure("Refused", SECURE_FIELD_SENTENCE);
+      throw err;
+    }
+  }
+
+  /** The long poll: the watch events of `frame`'s world after `ack`. A page dialog only delays it. */
+  async wakeWait(frame: WakeFrame, ack: number, maxMs: number, world?: string): Promise<WatchWaitResult> {
+    const rec = this.wakeRec(frame);
+    let res: { result?: { value?: unknown }; exceptionDetails?: { text?: string; exception?: { description?: string } } };
+    try {
+      res = await this.send("Runtime.callFunctionOn", {
+        functionDeclaration: PAGE_RUNTIME_CALL, executionContextId: rec.ctx, arguments: [{ value: "watchWait" }, { value: { ack, maxMs, ...(world === undefined ? {} : { world }) } }],
+        returnByValue: true, awaitPromise: true,
+      }, rec.ctxSession, maxMs + 15_000, { dialogRace: false });
+    } catch (err) {
+      if (isContextGone(err) || /navigated or closed/i.test(err instanceof Error ? err.message : "") || (err instanceof AutomationFailure && err.kind === "StaleRef")) throw new WakeWorldGone();
+      throw err;
+    }
+    if (res.exceptionDetails !== undefined) {
+      const msg = res.exceptionDetails.exception?.description ?? res.exceptionDetails.text ?? "error";
+      if (isContextGone(new Error(msg))) throw new WakeWorldGone();
+      throw new Error(`the page runtime failed (${msg.split("\n")[0]!.slice(0, 200)})`);
+    }
+    const v = res.result?.value as WatchWaitResult | undefined;
+    if (v === undefined || typeof v.world !== "string" || !Array.isArray(v.events) || !Array.isArray(v.alive)) throw new WakeWorldGone();
+    if (this.wakeRec(frame) !== rec) throw new WakeWorldGone();
+    return v;
+  }
+
+  /** Best effort: the watch leaves `frame`'s world (its ring and pill with it). */
+  async wakeDisarm(frame: WakeFrame, watchId: string): Promise<void> {
+    try {
+      const rec = this.wakeRec(frame);
+      await this.callIn(rec, "watchDisarm", { watchId }, { expectRt: frame.rtId, timeoutMs: 5_000 });
+    } catch { /* the world (or the tab) went: the watch went with it */ }
+  }
+
   // ── screenshots ────────────────────────────────────────────────────────────────────────────────
 
   private async viewportSize(): Promise<[number, number]> {
@@ -1811,6 +1942,17 @@ export class TabDriver {
     return { shotId, imageBase64: shot!.data, width: size!.width, height: size!.height, css };
   }
 }
+
+/** Wake triggers: a watch's frame, by the page runtime instance (its world in one document) it was armed in. */
+export interface WakeFrame { frameId: string; rtId: string; top: boolean }
+
+/** A watch's world is gone: another document, or the world went with a detach — arm it again (by its locator). */
+export class WakeWorldGone extends Error {
+  constructor() { super("the watch's page world is gone"); this.name = "WakeWorldGone"; }
+}
+
+/** Winter's own input to a tab, for the wake triggers' rule (only the user's action counts). */
+const OWN_INPUT_METHOD = /^(?:Input\.|Page\.navigate$|Page\.reload$|Page\.navigateToHistoryEntry$)/;
 
 /** A full-page screenshot's document height at most this (CSS px). */
 export const FULL_PAGE_MAX_CSS = 10_000;

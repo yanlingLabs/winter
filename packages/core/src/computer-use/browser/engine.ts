@@ -24,7 +24,7 @@ import type { TabHandle } from "../worker/bridge";
 import { browserForBundleId, familyInfo, familyOfBackendId } from "./families";
 import { shouldCloseAgentTab } from "./lifecycle";
 import type { BrowserBackendRegistry } from "./registry";
-import { BLOCKED_TAB_PRIMITIVES, blockedTabMembers, ensureSiteAllowed, listedHost, SiteApprovals, type SiteFloorDeps } from "./site-policy";
+import { BLOCKED_TAB_PRIMITIVES, blockedTabMembers, ensureSiteAllowed, listedHost, ruleAllowsSite, SiteApprovals, type SiteFloorDeps } from "./site-policy";
 import type { TabRunScope } from "./tab-scope";
 import { redactText, redactUrl } from "./page-runtime/redact";
 import { cssSelectorRefusal } from "./page-runtime/rules";
@@ -111,6 +111,19 @@ export interface BrowserEngineDeps {
   log?(line: string): void;
   /** Phase 4: the plain-HTTP page reader `browsers.read` uses (default: one on the system resolver and `fetch`). */
   httpReader?: HttpReader;
+  /** Wake triggers: did Winter's helper send input to this browser APP (bound as an app) at `at`, or within the grace
+   *  before it? Its clicks in a page are trusted DOM events too, so a tab watch never counts them as the user's. */
+  ownAppInputAt?(bundleId: string, at: number): boolean;
+}
+
+/** Wake triggers (`wake/backend.ts`): what a tab binding names — its tab's driver and the facts the floors read. */
+export interface WakeTabTarget {
+  backend: BackendId;
+  tabKey: string;
+  family: BrowserFamily;
+  bundleId?: string;
+  browserName: string;
+  driver: TabDriver;
 }
 
 interface Binding {
@@ -220,6 +233,9 @@ export class BrowserEngine {
   /** waitForUser(): the hand-off card waiting on a tab (backend|tabKey), answerable from the browser's own Done. */
   private readonly handoffAnswers = new Map<string, (approved: boolean, by: string, optionId?: string) => void>();
   private installedCache?: { at: number; ids: Set<string> };
+  /** Wake triggers: the tab each armed target named (session + target id → backend, tab key) — `hostOf` still answers
+   *  after a reset or a worker restart let go of the binding. */
+  private readonly wakeTabs = new Map<string, { backend: BackendId; tabKey: string }>();
   private unwatch?: () => void;
   private stopped = false;
 
@@ -311,6 +327,9 @@ export class BrowserEngine {
       scope.live();
       this.makeRoomForHold(scope, driver);
       driver.busy++;
+      // An act is Winter's own input to the tab, whatever it sends (a wake trigger never takes what it causes for the
+      // user's).
+      if (act) driver.beginOwnInput();
       try {
         await driver.ensureAttached(scope.sessionId);
         scope.live();
@@ -318,6 +337,7 @@ export class BrowserEngine {
         return await this.run(scope, b, driver, primitive, args);
       } finally {
         driver.busy--;
+        if (act) driver.endOwnInput();
       }
     } catch (err) {
       throw this.lostIfGone(scope.sessionId, b, err);
@@ -358,7 +378,8 @@ export class BrowserEngine {
       void this.drivers.get(tabKeyOf(b.backend, b.tabKey))?.release(sessionId);
     }
     for (const [key, a] of [...s.agentTabs]) {
-      if (shouldCloseAgentTab({ event: "turn-ended", family: this.familyOf(a.backend), kept: a.kept, handoff: a.handoff })) {
+      const waiting = (this.drivers.get(key)?.wakesArmed ?? 0) > 0;
+      if (shouldCloseAgentTab({ event: "turn-ended", family: this.familyOf(a.backend), kept: a.kept, handoff: a.handoff, waiting })) {
         this.closeAgentTab(sessionId, s, key, a, "closed_turn_end");
       } else {
         a.handoff = false;
@@ -426,6 +447,7 @@ export class BrowserEngine {
       s.byTab.clear();
     }
     if (reason === "deleted") {
+      for (const k of [...this.wakeTabs.keys()]) if (k.startsWith(`${sessionId}\u0000`)) this.wakeTabs.delete(k);
       this.sessions.delete(sessionId);
       this.approvals.sessionEnded(sessionId);
     }
@@ -460,6 +482,57 @@ export class BrowserEngine {
     this.unwatch?.();
     for (const h of this.hooked.values()) for (const off of h.off) off();
     this.hooked.clear();
+  }
+
+  // ── wake triggers (`wake/backend.ts`) ───────────────────────────────────────────────────────────
+
+  /** What a session's tab binding names now: its tab's driver (taken by the backend for the trigger's life — the
+   *  binding itself may go with a reset, a worker restart or a turn end) and the facts its floors read. */
+  wakeTarget(sessionId: string, targetId: string): WakeTabTarget {
+    if (this.stopped) throw new AutomationFailure("BrowserUnavailable", "Winter is shutting down");
+    const b = this.binding(sessionId, targetId);
+    this.wakeTabs.set(`${sessionId}\u0000${targetId}`, { backend: b.backend, tabKey: b.tabKey });
+    return {
+      backend: b.backend, tabKey: b.tabKey, family: this.familyOf(b.backend), browserName: this.browserName(b.backend),
+      ...(b.bundleId === undefined ? {} : { bundleId: b.bundleId }), driver: this.driverFor(b.backend, b.tabKey),
+    };
+  }
+
+  /** The dangerous-domain floor with no run (a trigger is armed without a card): the listed host `url` is on when the
+   *  session has not approved it for the session (a one-run approval does not count) and no saved rule allows it. */
+  wakeSiteBlocked(sessionId: string, url: string): string | undefined {
+    if (!/^https?:/i.test(url)) return undefined;
+    const cwd = this.cwdOf(sessionId);
+    const match = listedHost(url, this.deps.site ?? {}, cwd);
+    if (match === null) return undefined;
+    if (this.approvals.approved(sessionId, "", match.host)) return undefined;
+    let rules: readonly string[] = [];
+    try { rules = this.deps.site?.savedAllowRules?.(cwd) ?? []; } catch { rules = []; }
+    return ruleAllowsSite(rules, url) ? undefined : match.host;
+  }
+
+  /** The bound tab's host now — the wake audit line's `site` (a host only, token-looking runs redacted; never a path or
+   *  query). Answers for a target a trigger was armed on even after its binding went. */
+  hostOf(sessionId: string, targetId: string): string | undefined {
+    const b = this.sessions.get(sessionId)?.bindings.get(targetId);
+    const tab = b === undefined ? this.wakeTabs.get(`${sessionId}\u0000${targetId}`) : { backend: b.backend, tabKey: b.tabKey };
+    if (tab === undefined) return undefined;
+    const d = this.drivers.get(tabKeyOf(tab.backend, tab.tabKey));
+    if (d === undefined) return undefined;
+    try {
+      const host = new URL(d.url).hostname;
+      return host.length > 0 ? redactText(host) : undefined;
+    } catch { return undefined; }
+  }
+
+  /** Did the user allow this browser app beyond one call (a trigger outlives the call)? */
+  wakeAllowed(sessionId: string, bundleId: string): boolean {
+    try { return this.deps.persistentlyAllowed?.(sessionId, bundleId) === true; } catch { return false; }
+  }
+
+  /** Winter's helper input to this browser app at `at` (see `BrowserEngineDeps.ownAppInputAt`). */
+  wakeOwnAppInput(bundleId: string, at: number): boolean {
+    try { return this.deps.ownAppInputAt?.(bundleId, at) === true; } catch { return false; }
   }
 
   /** The backends for `computerUse.status` and `browsers.list()`. */
@@ -581,9 +654,10 @@ export class BrowserEngine {
     // counts toward these caps nor is let go for them.
     if (this.isHeadless(driver.backend)) return;
     const held = [...this.drivers.values()].filter((d) => d !== driver && d.isAttached && d.holders.size > 0 && !this.isHeadless(d.backend));
-    const mine = held.filter((d) => d.holders.has(scope.sessionId));
+    // A tab a wake trigger holds (its debugger path) counts for its session, and is never let go for another hold.
+    const mine = held.filter((d) => d.holders.has(scope.sessionId) || [...d.wakeHolders.values()].includes(scope.sessionId));
     const free = (list: TabDriver[]): TabDriver[] => list.filter((d) => {
-      if (d.busy > 0) return false;
+      if (d.busy > 0 || d.wakeHolders.size > 0) return false;
       const run = scope.lockRun(`tab:${d.backend}:${d.tabKey}`);
       return run === undefined || run === scope.runId;
     });
@@ -1667,6 +1741,10 @@ export class BrowserEngine {
     // the dialog is answered first, by the model, knowing what it says.
     if (driver.dialog !== undefined) {
       throw new AutomationFailure("TargetBusy", `a page dialog is open (${driver.dialog.type}) — read it with dialog() and answer it with answerDialog() first: handing the tab to the user would dismiss it`);
+    }
+    // A wake trigger's debugger path holds the tab: handing it over would let go of it.
+    if (driver.wakeHolders.size > 0) {
+      throw new AutomationFailure("TargetBusy", "a wake trigger is armed on this tab — handing it over would end it; cancel the trigger first (wakes.cancel(id)), or let the trigger alone wait for the user");
     }
     if (scope.userCard === undefined) throw new Error("this Winter can't hand a tab to the user");
     const winter = this.familyOf(b.backend) === "winter";

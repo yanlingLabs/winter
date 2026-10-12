@@ -2,6 +2,7 @@
 // CDP through it and nothing else; the built-in browser (Winter.app over the browser link), Winter's headless browser
 // (private, windowless engines the daemon runs over pipes) and the user's browsers (the Winter for Chrome extension
 // over winter-browser-host) each implement it. Change it only through the controller.
+import type { WatchArmResult, WatchSpec } from "./page-runtime/watch";
 
 /** A browser family as the model names it: `browsers.list()` ids, `{ browser }` options, tab id prefixes. */
 export type BrowserFamily = "winter" | "headless" | "chrome" | "edge" | "brave" | "vivaldi" | "opera" | "arc" | "chromium";
@@ -129,6 +130,32 @@ export interface CdpTransport {
   onDownload?(listener: (tabKey: string, d: TransportDownload) => void): () => void;
   /** The engine has taken the finished file: the browser forgets the item (extension: its downloads list entry). */
   releaseDownload?(id: string): Promise<void>;
+
+  // ── wake triggers (Winter for Chrome 1.2.0, feature `watch`) ──
+
+  /** Keep a watch on the tab's top document with NO debugger: the extension injects the page watcher
+   *  (`page-runtime/watch.ts`) into its own isolated world, again in each new document of the tab (`initial: "fire"`,
+   *  or `"baseline"` after its own input or navigation), and reports what it sees. The watcher's answer to the first
+   *  injection. */
+  watch?(tabKey: string, spec: WatchSpec): Promise<WatchArmResult>;
+  /** Idempotent; the watcher (its ring and pill) leaves the page. */
+  unwatch?(tabKey: string, watchId: string): Promise<void>;
+  onWatchEvent?(listener: (tabKey: string, e: TransportWatchEvent) => void): () => void;
+}
+
+/** One report of a tab watch (`CdpTransport.onWatchEvent`). */
+export interface TransportWatchEvent {
+  watchId: string;
+  /** `url`: the tab's top-level URL changed (a `navigated` watch); `lost`: `reason` "doc" (a new document under a ref
+   *  watch), "gone" (its element went), "disconnected" (the link to the extension dropped). */
+  outcome: "fired" | "pressed" | "lost" | "url";
+  /** Epoch ms. */
+  at: number;
+  url?: string;
+  title?: string;
+  reason?: string;
+  /** The extension sent this tab input or a navigation (its debugger) within the grace before `at`. */
+  own?: boolean;
 }
 
 export interface BrowserBackendInfo {
