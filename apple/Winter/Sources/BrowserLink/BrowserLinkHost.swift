@@ -78,6 +78,9 @@ final class BrowserLinkHost: BrowserLinkHandler {
     var onPresent: ((_ sessionId: String, _ tabId: String) -> Void)?
     /// When each download last reported progress (one report per `downloadProgressInterval`).
     private var lastProgress: [String: Date] = [:]
+    /// ComputerV2 Phase 4 (lane H3), feature `headless`: where `headless.show`/`hide`/`tabs` go — the app's
+    /// headless presentations (`HeadlessPresentStore`). Set by `BrowserLinkStarter`. `nil`: refused.
+    var headless: HeadlessPresentStore?
 
     init(runtime: BrowserRuntime, driver: BrowserLinkCEFDriver = .production, clock: Clock = .production,
          replan: (() -> Void)? = nil, downloadsRoot: String? = nil) {
@@ -99,11 +102,27 @@ final class BrowserLinkHost: BrowserLinkHandler {
         // Nothing can be held across links; `browserLinkLost` already let go. Belt for a lost that
         // never came.
         releaseEverything()
+        headless?.linkChanged()
     }
 
     func browserLinkLost() {
         linkId = nil
         releaseEverything()
+        headless?.linkChanged()
+    }
+
+    /// Feature `headless`: a headless tab shown in (or taken from) the panel, or the session's list of them. None of
+    /// it touches CEF here — the page lives in Winter Headless and reaches the panel over its own Mach channel.
+    func browserLinkHeadlessCommand(_ command: BrowserLinkHeadlessCommand, reply: BrowserLinkReplier) {
+        guard !runtime.isQuiescent else {
+            reply(.failure(code: .quiescent, message: "Winter is quitting"))
+            return
+        }
+        guard let headless else {
+            reply(.failure(code: .notAllowed, message: "this Winter can't show a headless tab"))
+            return
+        }
+        headless.handle(command, reply: reply)
     }
 
     func browserLinkCommand(_ command: BrowserLinkCommand, reply: BrowserLinkReplier) {

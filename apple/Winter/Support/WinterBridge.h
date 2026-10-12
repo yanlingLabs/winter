@@ -21,6 +21,10 @@
 // handler that uses it.
 #import "WinterCEFAssetResolve.h"
 
+// ComputerV2 Phase 4 (lane H3): the headless presentation's viewer core — the Mach channel to Winter Headless that
+// the panel's live-page view drives (Sources/HeadlessPresent). Plain Objective-C over the C wire header.
+#import "WinterPresentConsumer.h"
+
 typedef struct { float x; float y; } MTPoint;
 typedef struct { MTPoint pos; MTPoint vel; } MTReadout;
 

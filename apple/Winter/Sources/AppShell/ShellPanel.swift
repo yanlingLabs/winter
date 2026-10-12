@@ -175,6 +175,16 @@ struct ShellPanel: View {
     /// page's draft survives (`onOpenTab` below). Every OTHER destination's auto-create still
     /// navigates through here, unchanged.
     var nav: ShellNavigationModel? = nil
+    /// ComputerV2 Phase 4 (lane H3): the app's headless presentations. While one exists for the session this panel
+    /// shows, the panel shows IT — the live page and its own chrome row — in place of the shown tab (app-local: it is
+    /// not a panel tab and writes nothing to the session). Observed, so a `headless.show` arriving while the panel is
+    /// up replaces the content at once.
+    @ObservedObject var headless: HeadlessPresentStore = .shared
+
+    /// The headless presentation this panel shows, if any (the newest for its session).
+    private var presented: HeadlessPresentation? {
+        headless.shown(for: host?.panelSessionId)
+    }
 
     /// panel-cef Task 6a: which tab the panel actually SHOWS — `nil` only when there are no tabs at
     /// all. One lookup, read by both slots below, so the chrome row and the content area can never
@@ -220,7 +230,8 @@ struct ShellPanel: View {
                     // `foldPanelTabs` clears `activeTabId` by design. Deriving both from one lookup
                     // is what retires Task 6a's named cost: "the shown tab is not the highlighted
                     // one" cannot happen, because there is only one answer to which tab that is.
-                    shownTabId: shownTab?.tabId,
+                    // A shown headless tab covers the panel's tab: no pill reads as the one on screen then.
+                    shownTabId: presented == nil ? shownTab?.tabId : nil,
                     presentation: $presentation,
                     filesTabAvailable: filesTabAvailable,
                     onOpenTab: {
@@ -275,7 +286,10 @@ struct ShellPanel: View {
                 // still renders `Color.clear` (`PanelPlaceholderTab.makeChrome`), the blank row
                 // Plan A drew for every kind before any of them had a real surface.
                 Group {
-                    if let content = activeTabContent {
+                    if let presented {
+                        HeadlessPresentChromeBar(presentation: presented, store: headless)
+                            .id(presented.id)
+                    } else if let content = activeTabContent {
                         content.makeChrome()
                     } else {
                         Color.clear
@@ -309,13 +323,24 @@ struct ShellPanel: View {
             // tab's id, so the first tab's page would stay mounted while the strip highlighted the
             // second, indefinitely.
             Group {
-                if let tab = shownTab, let content = activeTabContent {
+                if let presented {
+                    HeadlessPresentContent(presentation: presented).id(presented.id)
+                } else if let tab = shownTab, let content = activeTabContent {
                     content.makeContent().id(tab.tabId)
                 } else {
                     Color.clear
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Lane H3: the session's headless tabs, offered to watch when none is shown.
+            .overlay(alignment: .bottom) {
+                if presented == nil, let sessionId = host?.panelSessionId {
+                    HeadlessTabsOffer(store: headless, sessionId: sessionId)
+                }
+            }
+            .task(id: host?.panelSessionId) {
+                headless.refreshTabsIfNeeded(sessionId: host?.panelSessionId)
+            }
         }
         // review round 2, Important 2 (Task 2, plan-mandated fix, adjudicated by the user): a
         // BACKGROUND LAYER that ignores the safe area, not a clip on the content — `ShellSidebar
