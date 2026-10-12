@@ -1,3 +1,4 @@
+import { hostStorageFloorDescriptor, trackDaemonChildFloor } from "./host-storage-fence";
 // WS-23 (ruling R1): CHAT AND DISPATCH RUN THE WINTER RUNTIME EMBEDDED — one Bun Worker per session,
 // inside `winter-core`. Code sessions keep the spawned `winter` binary (`executable.ts`'s ladder).
 //
@@ -168,6 +169,8 @@ export interface EmbeddedLifecycleEvent {
 }
 
 export interface EmbeddedSessionHostDeps {
+  /** Trusted daemon home. Optional only for standalone transport fixtures. */
+  home?: string;
   log?: (line: string) => void;
   /** Observer for tests (WS-23 review I-2): every engine start and every Worker close, in order. */
   onLifecycle?: (event: EmbeddedLifecycleEvent) => void;
@@ -269,7 +272,16 @@ export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): E
   let spawned = 0;
   let shuttingDown: Promise<void> | undefined;
 
+  const assertUnprotectedSpawn = (options: SpawnRuntimeOptions): void => {
+    // Core must enforce this itself: the installed older SDK may silently ignore new flags.
+    // Full embedded containment remains an explicit unavailable topology, without binary fallback.
+    if ((options as { requireHostFloor?: boolean }).requireHostFloor || options.command === "/usr/bin/sandbox-exec" ||
+      (deps.home && Object.values(hostStorageFloorDescriptor(deps.home)).some(paths => paths.length))) {
+      throw new EmbeddedRuntimeUnavailable("protected Cowork storage requires a persistent host floor; this embedded host cannot satisfy requireHostFloor");
+    }
+  };
   const workerProcess = (options: SpawnRuntimeOptions): EmbeddedWorkerProcess => {
+    assertUnprotectedSpawn(options);
     const sessionId = sessionIdOf(options.args);
     const worker = ++spawned;
     const prior = newest.get(sessionId);
@@ -280,13 +292,22 @@ export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): E
       log(`embedded session ${sessionId}: a new incarnation arrived while the previous Worker was still running — ending it before the new one starts`);
       prior!.kill();
     }
+    const workflowWorkerCommand = (deps.workflowWorkerCommand ?? runtimeWorkflowWorkerCommand)();
+    assertUnprotectedSpawn(options); // recheck after host preparation, at the actual SDK use point
+    const inheritedFloor = deps.home ? hostStorageFloorDescriptor(deps.home) : undefined;
     const proc = (deps.spawnWorker ?? spawnEmbeddedWorker)({
       workerEntry: deps.workerEntry ?? embeddedWorkerEntry(),
       spawn: options,
-      workflowWorkerCommand: (deps.workflowWorkerCommand ?? runtimeWorkflowWorkerCommand)(),
+      workflowWorkerCommand,
       killGraceMs: deps.killGraceMs ?? EMBEDDED_KILL_GRACE_MS,
       ...(predecessorExited !== undefined ? { startAfter: predecessorExited } : {}),
     });
+    const retireFloor = deps.home && inheritedFloor
+      ? trackDaemonChildFloor(deps.home, inheritedFloor, () => proc.kill())
+      : () => {};
+    // Worker close is not proof that its subprocess descendants are gone. Retire the live stop
+    // callback only; H3 retains the inherited floor evidence for this daemon's lifetime.
+    void proc.exited.then(retireFloor, retireFloor);
     live.set(proc, sessionId);
     newest.set(sessionId, proc);
     const onLifecycle = deps.onLifecycle;

@@ -413,6 +413,14 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
         }
       }
       if (runsEmbedded(mode)) {
+        try {
+          if (codeExecution.protectedStorageActive()) return new EmbeddedRuntimeUnavailable(
+            "protected Cowork storage requires a persistent host floor; embedded chat and dispatch remain unavailable until complete embedded containment is verified",
+          );
+        } catch (error) {
+          if (error instanceof HostStorageFenceUnavailable) return error;
+          throw error;
+        }
         const embedded = deps.embedded;
         if (embedded === undefined) return new EmbeddedRuntimeUnavailable("this daemon was built without an embedded-session host; chat and dispatch cannot start");
         // Checked on every call, not only at boot: the values are constants, so this costs nothing,
