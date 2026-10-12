@@ -475,6 +475,49 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertTrue(poster.keyDowns.isEmpty, "no key into whatever has the focus")
     }
 
+    /// Round 17 (the review of round 16, MEDIUM): ↓ aimed at a web link in Mail moved the message list — the key went to
+    /// a focus the act had just shown is outside the control's page. Now refused, nothing sent (End and its kin still have
+    /// the accessibility fallback above).
+    func testAnArrowIsNeverSentToAFocusShownOutsideTheControlsPage() async throws {
+        safari(fieldOwner: pid)
+        let web = ax.element(field, kAXParentAttribute)!
+        let link = fakeElement(93_094)
+        ax.add(link, role: "AXLink", title: "Read more", frame: CGRect(x: 20, y: 160, width: 120, height: 30),
+               extra: [kAXParentAttribute: web])
+        ax.setActions(link, [kAXPressAction])
+        ax.put(web, [kAXChildrenAttribute: [field, link]])
+        _ = searchHasFocus()  // the focus outside the page (the message list, in Mail)
+        for combo in ["down", "tab", "escape"] {
+            do {
+                _ = try await act(.key(CUKeyAction(combo: combo, into: ref(link))))
+                XCTFail("\(combo): refused")
+            } catch let e as CUError {
+                XCTAssertEqual(e.data?["reason"], .string("focus_not_placed"), "\(combo): \(e.message)")
+            }
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty, "nothing sent to the focus outside the page")
+        XCTAssertTrue(ax.performed.filter { $0.hasSuffix(":AXPress") }.isEmpty, "the link never pressed")
+    }
+
+    /// Round 17 (the review of round 16, MEDIUM): a navigation key aimed at a press-acted control goes to where the focus
+    /// is ONCE per call, as its doc said — `repeat` is refused there (the safer way), nothing sent.
+    func testANavigationKeyAimedAtAControlIsSentOncePerCall() async throws {
+        safari(fieldOwner: pid)
+        let button = fakeElement(93_095)
+        ax.add(button, role: kAXButtonRole, title: "Web Button", frame: CGRect(x: 20, y: 160, width: 120, height: 30),
+               extra: [kAXParentAttribute: ax.element(field, kAXParentAttribute)!])
+        ax.setActions(button, [kAXPressAction])
+        do {
+            _ = try await act(.key(CUKeyAction(combo: "down", into: ref(button), repeat: 5)))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertTrue(e.message.contains("once per call"), e.message)
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty)
+        _ = try await act(.key(CUKeyAction(combo: "down", into: ref(button))))
+        XCTAssertEqual(poster.keyDowns.count, 1, "once")
+    }
+
     /// Review of round 13, MEDIUM #5: a paste the field took but shows otherwise (a formatting input, a rich target, a
     /// block editor) is done and said — never Uncertain; Markdown is looked for rendered too.
     func testAPasteTheFieldReformattedIsDoneAndSaid() async throws {

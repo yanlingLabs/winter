@@ -55,4 +55,21 @@ final class Round16Tests: XCTestCase {
         XCTAssertFalse(again.isUsers, "a left launch is never adopted later: \(again)")
         XCTAssertNotEqual(g.view.app, 88)
     }
+
+    /// Round 17 (the review of round 16, LOW): the same left launch, its launch notice heard LATE (after its first sighting
+    /// in front) — the notice re-arms no "first activation of an app the user launched".
+    func testALateLaunchNoticeNeverReArmsTheUsersLaunch() {
+        var g = started()
+        g.noteCause(500, now: 10.0)
+        g.noteOpenerCause(now: 10.0, scope: .apps(["com.apple.Safari"]))
+        g.appLaunched(88, startedAt: 10.2, bundle: "us.zoom.xos", now: 10.25)
+        let first = judge(&g, 88, bundle: "us.zoom.xos", now: 11.0)
+        if case .unexplained = first {} else { XCTFail("left in front and said: \(first)") }
+        _ = judge(&g, 1, bundle: "com.example.user", now: 12.0)
+        g.appLaunched(88, startedAt: 10.2, bundle: "us.zoom.xos", now: 12.5)  // the notice, again and late
+        g.noteCause(500, now: 13.9)
+        let again = judge(&g, 88, bundle: "us.zoom.xos", now: 14.0)
+        XCTAssertFalse(again.isUsers, "a late notice re-arms nothing: \(again)")
+        XCTAssertNotEqual(g.view.app, 88)
+    }
 }

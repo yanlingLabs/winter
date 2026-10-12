@@ -2352,6 +2352,16 @@ extension CUCore {
                         CULog.act.notice("key in \(t.appName, privacy: .public): \(a.combo, privacy: .public) — the page had no keyboard focus: \(how, privacy: .public)")
                         return ActOutcome(rung: .accessibility, detail: "the page had no keyboard focus, so \(a.combo) was done over accessibility (\(how)) — \(Self.elementLabel(into, info)) was not pressed")
                     }
+                    // Still outside the control's page, shown just now: the key would act on something else (round 17, the
+                    // review of round 16: ↓ aimed at a web link in Mail moved the message list) — refused, nothing sent.
+                    if !(reportedFocus(t).map { isInside($0, area) } ?? false) {
+                        throw CUError.refused(.focusNotPlaced, "the keyboard focus is outside the page that holds [\(into)], so \(a.combo) would act on something else — nothing was sent; click(\(into)) acts on it, or scroll(\(into)) moves the page")
+                    }
+                }
+                // A navigation key goes to where the focus is ONCE per call (round 17, the review of round 16: "pressed once"
+                // said so and `repeat` up to 100 was allowed — the safer way): the focus it lands on is not the control's.
+                guard rep == 1 else {
+                    throw CUError.unsupported("\(a.combo) aimed at \(Self.elementLabel(into, info)) goes to where the keyboard focus is, once per call — repeat is not taken here (scroll(\(into)) moves the page)")
                 }
                 e = reportedFocus(t)
             } else {

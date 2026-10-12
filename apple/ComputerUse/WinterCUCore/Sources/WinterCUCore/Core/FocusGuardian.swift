@@ -484,6 +484,9 @@ public struct CUFocusGuardianCore: Sendable {
                                      inputObservable: Bool = true, secureInput: Bool = false) {
         noteSecureInput(secureInput, now: now)
         guard !isTouched(pid, startedAt: startedAt, bundle: bundle, now: now) else { return }
+        // A launch notice heard after the app's first sighting in front re-arms nothing (review of round 16, LOW: it set
+        // "the user's launch" again for 60 s and reopened seed 1049 — a left launch adopted on a later coming forward).
+        guard !everFront.contains(pid) else { return }
         othersLaunches = othersLaunches.filter { now - $0.value <= Self.launchFirstWindow }
         othersLaunches[pid] = now
         // Judged at its process START, while the facts from then are at hand (review of round 10, HIGH #1): a launch the
