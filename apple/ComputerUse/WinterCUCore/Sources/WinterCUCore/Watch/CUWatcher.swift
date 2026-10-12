@@ -26,7 +26,7 @@ protocol CUWatchNotifying: AnyObject {
     var onNotification: (@Sendable (pid_t) -> Void)? { get set }
 }
 
-/// The click tap (live: `CUWatchClickTap`, a listen-only session tap for mouse-down only).
+/// The click tap (live: `CUWatchClickTap`, a listen-only session tap for the left mouse-down only).
 protocol CUWatchTapping: AnyObject {
     /// Installs it (idempotent); false when it can't be created. `onMouseDown(point, sourcePid, userData)` runs on the
     /// tap's own thread and must return at once.
@@ -46,6 +46,10 @@ protocol CUWatchScheduling: AnyObject {
 enum CUWatchHit: Equatable {
     /// The watched element, or something inside it.
     case element
+    /// The watched element's window, elsewhere — and the element is GONE right after the click (the click closed the
+    /// sheet it was in, before the hit test could ask): the engine counts it as the element's when no fresh frame of
+    /// the element says otherwise.
+    case goneAfterClick
     /// The bound window, elsewhere.
     case window
     case none
@@ -59,10 +63,11 @@ enum CUWatchHit: Equatable {
 /// backstop a little after its `expiresAt` (the daemon's own expiry always comes first).
 ///
 /// What drives a decision: the app's accessibility notifications (debounced 250 ms, at most 1 s apart while they keep
-/// coming), a 5 s fallback look, and — for `clicked` and `changed` — a listen-only mouse-down tap that runs only while
-/// such a watch is armed. Every look re-reads the window on the app's own queue; the tap's point is hit-tested there and
-/// dropped. Nothing typed, no coordinates and no screen text leave the helper beyond the arm's labels and the event's few
-/// words.
+/// coming; a text watch's tree is read at most once per 2 s), a 10 s fallback look, and — for `clicked` and `changed` — a
+/// listen-only left-mouse-down tap that runs only while such a watch is armed. A change is dated by the FIRST
+/// notification of its burst, so Winter's own input explains only what landed while it was in flight or within its
+/// 500 ms grace. Nothing typed, no coordinates and no screen text leave the helper beyond the arm's labels and the
+/// event's few words.
 public final class CUWatcher: @unchecked Sendable {
     /// A watch's fixed facts, captured at arming.
     struct Subject: @unchecked Sendable {
@@ -73,10 +78,12 @@ public final class CUWatcher: @unchecked Sendable {
         let windowID: UInt32
         let appName: String
         let condition: CUWatchCondition
-        /// The target as it was bound (its window element is re-resolved through it); nil in tests.
+        /// The target as it was bound; nil in tests.
         let target: CUTarget?
         /// The watched element (ref kinds).
         let element: AXUIElement?
+        /// The window the element is in (a sheet's own window), when it could be read; else the bound window.
+        let elementWindowID: UInt32?
         /// The element's own label, for the pill.
         let label: String?
     }
@@ -95,18 +102,30 @@ public final class CUWatcher: @unchecked Sendable {
         var met: Bool?
         /// `changed`: the value's digest now.
         var valueDigest: Int?
+        /// Where the element and its window are now (screen points), and the element's own window.
+        var elementFrame: CGRect?
+        var windowFrame: CGRect?
+        var elementWindowID: UInt32?
     }
 
     private final class Watch: @unchecked Sendable {
         let subject: Subject
         var judge: CUWatchJudge
-        /// The start of the interval the next look covers (Winter's own input in it explains a change).
+        /// The start of the interval the next look covers when no notification dates the change.
         var lastLookMs: Double
         /// When the watch is dropped silently (a backstop past the daemon's expiry).
         let dropAtMs: Double
         var userClickOnElementMs = -Double.infinity
         var userClickInWindowMs = -Double.infinity
         var settleTimer: CUWatchCancellable?
+        /// A text watch's last tree read, and the look deferred to the end of its 2 s.
+        var lastTreeReadMs = -Double.infinity
+        var deferredTimer: CUWatchCancellable?
+        /// The element's and window's frames as last read, and when (a click inside a fresh element frame is the
+        /// element's with no accessibility round trip; one outside the window's frame never asks the window server).
+        var elementFrame: CGRect?
+        var windowFrame: CGRect?
+        var framesAtMs = -Double.infinity
         init(subject: Subject, judge: CUWatchJudge, armedMs: Double, dropAtMs: Double) {
             self.subject = subject
             self.judge = judge
@@ -118,9 +137,13 @@ public final class CUWatcher: @unchecked Sendable {
     // Tunables (ms).
     static let debounceMs: Double = 250
     static let debounceMaxMs: Double = 1_000
-    static let fallbackMs: Double = 5_000
+    static let fallbackMs: Double = 10_000
+    /// A text watch (`appeared`, `gone` with a text) reads the window's tree at most this often.
+    static let treeReadMinGapMs: Double = 2_000
     /// How often the ring follows its element while it is on screen.
     static let presentPollMs: Double = 500
+    /// How old a cached element frame may be and still decide a click by itself.
+    static let frameTrustMs: Double = 1_500
     /// The backstop after the daemon's `expiresAt`, and the longest watch with none (the daemon's 8 h, and a margin).
     static let expiryBackstopMs: Double = 10_000
     static let maxLifetimeMs: Double = 8 * 60 * 60_000 + 60_000
@@ -132,7 +155,7 @@ public final class CUWatcher: @unchecked Sendable {
 
     /// Where events go (the shell broadcasts `watchEvent`). Called from any thread.
     public var onEvent: (@Sendable (CUWatchEvent) -> Void)?
-    /// How many watches are armed, at every change (the shell's idle accounting). Called from any thread.
+    /// How many watches are armed, at every change (the shell's idle accounting). Called in order, from any thread.
     public var onArmedCount: (@Sendable (Int) -> Void)?
     /// What to draw now: every armed watch whose bound window is frontmost on the active Space. Called from any thread.
     public var onPresent: (@Sendable ([CUWatchShown]) -> Void)?
@@ -157,7 +180,7 @@ public final class CUWatcher: @unchecked Sendable {
     /// A target id's app (the own-input ledger's key), when that target is bound.
     var pidOfTarget: (String) -> pid_t?
 
-    /// A watch ended (any way): the live seams drop what they keep for it.
+    /// A watch ended, or an arm was refused after its probe: the live seams drop what they keep for it.
     var forget: (String) -> Void = { _ in }
     /// The live seams' own state (`CUWatcher.live`).
     let liveStateLock = NSLock()
@@ -166,15 +189,23 @@ public final class CUWatcher: @unchecked Sendable {
     private let lock = NSLock()
     private var watches: [String: Watch] = [:]
     private var debounce: [pid_t: (timer: CUWatchCancellable?, firstMs: Double, lastMs: Double)] = [:]
+    /// The first notification time of the bursts a look of that app has yet to take (the change's date).
+    private var changeSince: [pid_t: Double] = [:]
     private var evaluating = Set<pid_t>()
     private var evaluateAgain = Set<pid_t>()
-    private var fallbackTimer: CUWatchCancellable?
-    /// The apps whose notifications are observed.
-    private var observedPids = Set<pid_t>()
+    /// Daemon connections that have closed: an arm still probing for one of them arms nothing.
+    private var closedConnections = Set<Int>()
     private var presentTimer: CUWatchCancellable?
     private var presenting = false
     private var presentAgain = false
     private var lastShown: [CUWatchShown] = []
+
+    /// THE RECONCILE (decided and done under one lock, review M3): the apps observed, the click tap, the fallback timer
+    /// and the count the shell is told always follow the watches as they are when it runs — a concurrent arm and cancel
+    /// can never leave an observer, a running tap or a stale count behind.
+    private let reconcileLock = NSLock()
+    private var observedPids = Set<pid_t>()
+    private var lastSentCount: Int?
 
     init(clock: CUClock, wallMs: @escaping @Sendable () -> Double, notifier: CUWatchNotifying, tap: CUWatchTapping,
          scheduler: CUWatchScheduling,
@@ -210,28 +241,36 @@ public final class CUWatcher: @unchecked Sendable {
             if watches.count >= Self.maxWatches { throw CUError.busy("this helper already holds \(Self.maxWatches) watches — cancel one first") }
         }
         let ready = try await prepare(p, condition)
-        if ready.met == true, let sentence = CUWatchJudge.alreadyMet(condition, app: ready.appName) {
-            throw CUError.notAllowed("already_met", sentence)
+        do {
+            if ready.met == true, let sentence = CUWatchJudge.alreadyMet(condition, app: ready.appName) {
+                throw CUError.notAllowed("already_met", sentence)
+            }
+            let now = clock.nowMs()
+            let wallNow = wallMs()
+            let lifetime = p.expiresAt.map { min(max(0, $0 - wallNow), Self.maxLifetimeMs) } ?? Self.maxLifetimeMs
+            let subject = Subject(watchId: p.watchId, connection: connection, sessionId: ready.sessionId, pid: ready.pid,
+                                  windowID: ready.windowID, appName: ready.appName, condition: condition, target: ready.target,
+                                  element: ready.element, elementWindowID: ready.elementWindowID,
+                                  label: ready.elementInfo.map { $0.name.isEmpty ? $0.role : $0.name })
+            let watch = Watch(subject: subject, judge: CUWatchJudge(condition, baselineValue: ready.valueDigest), armedMs: now,
+                              dropAtMs: now + lifetime + Self.expiryBackstopMs)
+            watch.elementFrame = ready.elementFrame
+            watch.windowFrame = ready.windowFrame
+            watch.framesAtMs = now
+            try lock.withLock {
+                // The connection that asked closed while the window was being read (review M1): nobody would ever cancel
+                // this watch — it is not armed. Likewise a request the shell already gave up.
+                if closedConnections.contains(connection) || Task.isCancelled { throw CUError.cancelled }
+                // A concurrent arm of the same id won the race meanwhile.
+                if watches[p.watchId] != nil { throw CUError.invalidParams("watch \(p.watchId) is already armed") }
+                watches[p.watchId] = watch
+            }
+        } catch {
+            forget(p.watchId)  // a refused arm keeps nothing its probe made (review L1)
+            throw error
         }
-        let now = clock.nowMs()
-        let wallNow = wallMs()
-        let lifetime = p.expiresAt.map { min(max(0, $0 - wallNow), Self.maxLifetimeMs) } ?? Self.maxLifetimeMs
-        let subject = Subject(watchId: p.watchId, connection: connection, sessionId: ready.sessionId, pid: ready.pid,
-                              windowID: ready.windowID, appName: ready.appName, condition: condition, target: ready.target,
-                              element: ready.element, label: ready.elementInfo.map { $0.name.isEmpty ? $0.role : $0.name })
-        let watch = Watch(subject: subject, judge: CUWatchJudge(condition, baselineValue: ready.valueDigest), armedMs: now,
-                          dropAtMs: now + lifetime + Self.expiryBackstopMs)
-        let (count, observe): (Int, Bool) = try lock.withLock {
-            // A concurrent arm of the same id won the race meanwhile.
-            if watches[p.watchId] != nil { throw CUError.invalidParams("watch \(p.watchId) is already armed") }
-            watches[p.watchId] = watch
-            return (watches.count, observedPids.insert(ready.pid).inserted)
-        }
-        if observe { notifier.watch(pid: ready.pid) }
-        updateTap()
-        ensureFallback()
         CULog.watch.notice("watch \(p.watchId, privacy: .public) armed on \(ready.appName, privacy: .public): \(condition.kind, privacy: .public)")
-        onArmedCount?(count)
+        reconcile()
         refreshPresentation()
         return WatchArmResult(element: ready.elementInfo, targetLabel: ready.targetLabel)
     }
@@ -244,9 +283,13 @@ public final class CUWatcher: @unchecked Sendable {
     }
 
     /// The daemon connection that armed them closed: its watches end silently (nobody is there to hear an event; the
-    /// daemon reads its connection's close as "Winter Computer Use quit" and ends each one `lost` itself).
+    /// daemon reads its connection's close as "Winter Computer Use quit" and ends each one `lost` itself). An arm of that
+    /// connection still probing arms nothing.
     public func connectionClosed(_ connection: Int) {
-        let ids: [String] = lock.withLock { watches.values.filter { $0.subject.connection == connection }.map(\.subject.watchId) }
+        let ids: [String] = lock.withLock {
+            closedConnections.insert(connection)
+            return watches.values.filter { $0.subject.connection == connection }.map(\.subject.watchId)
+        }
         guard !ids.isEmpty else { return }
         for id in ids { _ = remove(id) }
         CULog.watch.notice("\(ids.count, privacy: .public) watch(es) ended: the daemon connection that armed them closed")
@@ -278,9 +321,10 @@ public final class CUWatcher: @unchecked Sendable {
         ledger.end(token.pid, nowMs: clock.nowMs())
     }
 
-    // MARK: - Notifications, the fallback, settle timers
+    // MARK: - Notifications, the fallback, settle and deferred looks
 
-    /// An accessibility notification of `pid` (any thread): look again 250 ms after they stop, at most 1 s apart.
+    /// An accessibility notification of `pid` (any thread): look again 250 ms after they stop, at most 1 s apart. The
+    /// burst's FIRST notification dates the change.
     func noted(_ pid: pid_t) {
         let now = clock.nowMs()
         let schedule: Bool = lock.withLock {
@@ -311,6 +355,7 @@ public final class CUWatcher: @unchecked Sendable {
                 return min(Self.debounceMs - quietFor, Self.debounceMaxMs - (now - d.firstMs))
             }
             debounce[pid] = nil
+            changeSince[pid] = min(changeSince[pid] ?? .infinity, d.firstMs)
             return 0
         }
         guard let wait else { return }
@@ -327,21 +372,12 @@ public final class CUWatcher: @unchecked Sendable {
         Task.detached(priority: .utility) { [weak self] in await self?.evaluate(pid: pid) }
     }
 
-    private func ensureFallback() {
-        let start: Bool = lock.withLock { fallbackTimer == nil && !watches.isEmpty }
-        guard start else { return }
-        let t = scheduler.after(ms: Self.fallbackMs) { [weak self] in self?.fallbackFired() }
-        lock.withLock {
-            if fallbackTimer == nil, !watches.isEmpty { fallbackTimer = t } else { t.cancel() }
-        }
-    }
-
     private func fallbackFired() {
-        lock.withLock { fallbackTimer = nil }
+        reconcileLock.withLock { fallbackTimer = nil }
         Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
             await self.tick()
-            self.ensureFallback()
+            self.reconcile()
         }
     }
 
@@ -370,8 +406,10 @@ public final class CUWatcher: @unchecked Sendable {
         }
         guard first else { return }
         while true {
-            let mine: [Watch] = lock.withLock { watches.values.filter { $0.subject.pid == pid } }
-            for w in mine { await look(w) }
+            let (mine, since): ([Watch], Double?) = lock.withLock {
+                (watches.values.filter { $0.subject.pid == pid }, changeSince.removeValue(forKey: pid))
+            }
+            for w in mine { await look(w, changeSince: since) }
             let again: Bool = lock.withLock {
                 if evaluateAgain.remove(pid) != nil { return true }
                 evaluating.remove(pid)
@@ -382,8 +420,28 @@ public final class CUWatcher: @unchecked Sendable {
         refreshPresentation()
     }
 
-    private func look(_ w: Watch) async {
+    /// One look. `changeSince`: the first notification of the burst that asked for it (nil: a fallback, a settle or a
+    /// deferred look — the interval since the last look is judged then).
+    private func look(_ w: Watch, changeSince: Double?) async {
         let s = w.subject
+        let start = clock.nowMs()
+        if s.condition.readsTree, let since = changeSince {
+            // A text watch's tree at most once per 2 s in a storm: the rest wait for the 2 s to end (with their date).
+            enum Plan { case read, deferTo(Double), alreadyDeferred }
+            let plan: Plan = lock.withLock {
+                guard start - w.lastTreeReadMs < Self.treeReadMinGapMs else { return .read }
+                return w.deferredTimer != nil ? .alreadyDeferred : .deferTo(w.lastTreeReadMs + Self.treeReadMinGapMs)
+            }
+            switch plan {
+            case .read: break
+            case .alreadyDeferred:
+                lock.withLock { self.changeSince[s.pid] = min(self.changeSince[s.pid] ?? .infinity, since) }
+                return
+            case .deferTo(let at):
+                deferLook(w, at: at, changeSince: since)
+                return
+            }
+        }
         var o: CUWatchObservation
         do {
             o = try await read(s)
@@ -400,10 +458,19 @@ public final class CUWatcher: @unchecked Sendable {
         let now = clock.nowMs()
         let decision: CUWatchDecision = lock.withLock {
             guard watches[s.watchId] === w else { return .none }
+            if s.condition.readsTree { w.lastTreeReadMs = start }
+            if o.windowFrame != nil || o.elementFrame != nil {
+                if let f = o.windowFrame { w.windowFrame = f }
+                if let f = o.elementFrame { w.elementFrame = f }
+                w.framesAtMs = now
+            }
             o.userEvidence = o.userEvidence
                 || now - w.userClickOnElementMs <= Self.clickOnElementEvidenceMs
                 || now - w.userClickInWindowMs <= Self.clickInWindowEvidenceMs
-            let own = ledger.touched(s.pid, fromMs: w.lastLookMs)
+            // The change happened at or after its burst's first notification (review M2); with no notification to date
+            // it, anywhere since the last look.
+            let from = changeSince.map { max(w.lastLookMs, $0) } ?? w.lastLookMs
+            let own = ledger.touched(s.pid, fromMs: from)
             let d = w.judge.judge(o, ownInput: own, nowMs: now)
             w.lastLookMs = now
             return d
@@ -425,10 +492,29 @@ public final class CUWatcher: @unchecked Sendable {
         }
     }
 
+    /// A text watch's look put off to the end of its 2 s, keeping the change's date.
+    private func deferLook(_ w: Watch, at: Double, changeSince: Double) {
+        let pid = w.subject.pid
+        let timer = scheduler.after(ms: max(0, at - clock.nowMs())) { [weak self] in
+            guard let self else { return }
+            self.lock.withLock {
+                w.deferredTimer = nil
+                self.changeSince[pid] = min(self.changeSince[pid] ?? .infinity, changeSince)
+            }
+            Task.detached(priority: .utility) { await self.evaluate(pid: pid) }
+        }
+        let kept: Bool = lock.withLock {
+            guard watches[w.subject.watchId] === w, w.deferredTimer == nil else { return false }
+            w.deferredTimer = timer
+            return true
+        }
+        if !kept { timer.cancel() }
+    }
+
     // MARK: - Clicks
 
-    /// The tap saw a mouse-down (its thread): the user's only — hardware input — is looked at; the point is handed to a
-    /// task and dropped once judged.
+    /// The tap saw a left mouse-down (its thread): the user's only — hardware input — is looked at; the point is handed
+    /// to a task and dropped once judged.
     func mouseDown(at point: CGPoint, sourcePid: Int64, userData: Int64) {
         guard CUWatchInput.isUsers(sourcePid: sourcePid, userData: userData, countsTestInput: countsTestInput) else { return }
         let now = clock.nowMs()
@@ -436,17 +522,33 @@ public final class CUWatcher: @unchecked Sendable {
         Task.detached(priority: .userInitiated) { [weak self] in await self?.judgeClick(at: point, nowMs: now, wall: wall) }
     }
 
+    /// A hardware click is the user's by its source alone (no source process, no stamp): Winter's own input in flight
+    /// never drops one (review L3).
     func judgeClick(at point: CGPoint, nowMs: Double, wall: Double) async {
-        let clickers: [Watch] = lock.withLock { watches.values.filter { $0.subject.condition.isInput } }
-        guard !clickers.isEmpty, let under = windowAt(point) else { return }
-        for w in clickers where w.subject.pid == under.pid {
-            let h = await hit(w.subject, point)
+        // Only watches whose window could be under the point: a click outside a watch's window (as last read) never asks
+        // the window server anything (review M5).
+        let candidates: [Watch] = lock.withLock {
+            watches.values.filter { $0.subject.condition.isInput && ($0.windowFrame.map { $0.contains(point) } ?? true) }
+        }
+        guard !candidates.isEmpty, let under = windowAt(point) else { return }
+        for w in candidates where w.subject.pid == under.pid {
+            let fresh: (frame: CGRect?, trusted: Bool) = lock.withLock {
+                (w.elementFrame, nowMs - w.framesAtMs <= Self.frameTrustMs && w.elementFrame != nil)
+            }
+            let inWindow = under.windowID == (w.subject.elementWindowID ?? w.subject.windowID)
+            var h: CUWatchHit
+            if fresh.trusted, inWindow, let f = fresh.frame, f.contains(point) {
+                // A fresh frame of the element decides it: no round trip that a busy app or a sheet closing could lose.
+                h = .element
+            } else {
+                h = await hit(w.subject, point)
+                if h == .goneAfterClick { h = fresh.trusted ? .window : .element }
+            }
             let decision: CUWatchDecision = lock.withLock {
                 guard watches[w.subject.watchId] === w else { return .none }
                 switch w.subject.condition {
                 case .clicked:
-                    guard h == .element else { return .none }
-                    return w.judge.clicked(ownInput: ledger.touched(w.subject.pid, fromMs: nowMs))
+                    return h == .element ? w.judge.clicked() : .none
                 case .changed:
                     if h == .element { w.userClickOnElementMs = nowMs }
                     if h != .none || under.windowID == w.subject.windowID { w.userClickInWindowMs = nowMs }
@@ -484,49 +586,66 @@ public final class CUWatcher: @unchecked Sendable {
             watches[id] = nil
             w.settleTimer?.cancel()
             w.settleTimer = nil
+            w.deferredTimer?.cancel()
+            w.deferredTimer = nil
             return w
         }
         if w != nil { forget(id) }
         return w
     }
 
-    /// After any removal: the app's observer, the tap and the timers go when nothing needs them; the count and the
-    /// drawing follow.
+    /// After any removal: the debounces of apps nobody watches go; the reconcile does the rest; the drawing follows.
     private func afterRemoval() {
-        let (count, unwatch): (Int, Set<pid_t>) = lock.withLock {
+        lock.withLock {
             let left = Set(watches.values.map(\.subject.pid))
             for pid in debounce.keys where !left.contains(pid) { debounce.removeValue(forKey: pid)?.timer?.cancel() }
+            for pid in changeSince.keys where !left.contains(pid) { changeSince[pid] = nil }
             if watches.isEmpty {
-                fallbackTimer?.cancel()
-                fallbackTimer = nil
                 presentTimer?.cancel()
                 presentTimer = nil
             }
-            let gone = observedPids.subtracting(left)
-            observedPids.subtract(gone)
-            return (watches.count, gone)
         }
-        for pid in unwatch { notifier.unwatch(pid: pid) }
-        updateTap()
-        onArmedCount?(count)
+        reconcile()
         refreshPresentation()
     }
 
-    /// The click tap runs exactly while a `clicked` or `changed` watch is armed.
-    private func updateTap() {
-        let wanted = lock.withLock { watches.values.contains { $0.subject.condition.isInput } }
-        if wanted, !tap.running {
-            let ok = tap.start { [weak self] point, source, userData in self?.mouseDown(at: point, sourcePid: source, userData: userData) }
-            if ok {
-                CULog.watch.notice("the click tap is on (a click or change watch is armed)")
-            } else {
-                CULog.watch.notice("the click tap could not start (no event tap)")
+    /// Makes the observers, the click tap, the fallback and the count the shell was told match the watches NOW — decided
+    /// and done under one lock (review M3), so concurrent arms and cancels apply in order and the last one leaves the
+    /// truth: no observer of an app nobody watches, no tap with no click or change watch, no stale count holding the
+    /// idle quit.
+    func reconcile() {
+        reconcileLock.withLock {
+            let (count, pids, wantTap): (Int, Set<pid_t>, Bool) = lock.withLock {
+                (watches.count, Set(watches.values.map(\.subject.pid)), watches.values.contains { $0.subject.condition.isInput })
             }
-        } else if !wanted, tap.running {
-            tap.stop()
-            CULog.watch.notice("the click tap is off (no click or change watch is armed)")
+            for pid in pids.subtracting(observedPids) { notifier.watch(pid: pid) }
+            for pid in observedPids.subtracting(pids) { notifier.unwatch(pid: pid) }
+            observedPids = pids
+            if wantTap, !tap.running {
+                if tap.start(onMouseDown: { [weak self] point, source, userData in self?.mouseDown(at: point, sourcePid: source, userData: userData) }) {
+                    CULog.watch.notice("the click tap is on (a click or change watch is armed)")
+                } else {
+                    CULog.watch.notice("the click tap could not start (no event tap)")
+                }
+            } else if !wantTap, tap.running {
+                tap.stop()
+                CULog.watch.notice("the click tap is off (no click or change watch is armed)")
+            }
+            if count == 0 {
+                fallbackTimer?.cancel()
+                fallbackTimer = nil
+            } else if fallbackTimer == nil {
+                fallbackTimer = scheduler.after(ms: Self.fallbackMs) { [weak self] in self?.fallbackFired() }
+            }
+            if count != lastSentCount {
+                lastSentCount = count
+                onArmedCount?(count)
+            }
         }
     }
+
+    /// The fallback timer (under `reconcileLock`).
+    private var fallbackTimer: CUWatchCancellable?
 
     // MARK: - The ring and the pill
 
@@ -557,9 +676,19 @@ public final class CUWatcher: @unchecked Sendable {
     }
 
     private func presentPass() async {
-        let subjects: [Subject] = lock.withLock { watches.values.map(\.subject).sorted { $0.watchId < $1.watchId } }
+        let watched: [Watch] = lock.withLock { watches.values.sorted { $0.subject.watchId < $1.subject.watchId } }
         var shown: [CUWatchShown] = []
-        for s in subjects { if let v = await present(s) { shown.append(v) } }
+        for w in watched {
+            guard let v = await present(w.subject) else { continue }
+            shown.append(v)
+            // What the ring read is the freshest frame a click can be judged by.
+            let now = clock.nowMs()
+            lock.withLock {
+                w.windowFrame = v.windowFrame
+                if let f = v.elementFrame { w.elementFrame = f }
+                w.framesAtMs = now
+            }
+        }
         let (changed, poll): (Bool, Bool) = lock.withLock {
             let live = Set(watches.keys)
             shown = shown.filter { live.contains($0.watchId) }
@@ -576,7 +705,7 @@ public final class CUWatcher: @unchecked Sendable {
                 Task.detached(priority: .utility) { await self.presentNow() }
             }
             let kept: Bool = lock.withLock {
-                guard presentTimer == nil else { return false }
+                guard presentTimer == nil, !watches.isEmpty else { return false }
                 presentTimer = t
                 return true
             }

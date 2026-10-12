@@ -137,13 +137,12 @@ final class WatchJudgeTests: XCTestCase {
         XCTAssertEqual(own.judge(.init(elementAlive: false), ownInput: true, nowMs: 1), .lost(reason: CUWatchJudge.elementGoneOwnInput))
     }
 
-    func testAClickFiresOnlyAClickWatchAndNeverOnWintersOwnInput() {
+    func testAClickFiresOnlyAClickWatchOnce() {
         var j = CUWatchJudge(.clicked(ref: 1))
-        XCTAssertEqual(j.clicked(ownInput: true), .none)
-        XCTAssertEqual(j.clicked(ownInput: false), .fire(detail: "clicked"))
-        XCTAssertEqual(j.clicked(ownInput: false), .none, "one-shot")
+        XCTAssertEqual(j.clicked(), .fire(detail: "clicked"))
+        XCTAssertEqual(j.clicked(), .none, "one-shot")
         var c = CUWatchJudge(.changed(ref: 1, settleMs: 100), baselineValue: 1)
-        XCTAssertEqual(c.clicked(ownInput: false), .none)
+        XCTAssertEqual(c.clicked(), .none)
     }
 
     func testChangedNeedsTheUsersInputAndSettles() {
@@ -183,10 +182,12 @@ final class WatchJudgeTests: XCTestCase {
         XCTAssertFalse(CUWatchInput.isUsers(sourcePid: 312, userData: 0, countsTestInput: true), "another process's synthetic event")
         XCTAssertFalse(CUWatchInput.isUsers(sourcePid: 312, userData: CUWatchTestStamp.value, countsTestInput: false))
         XCTAssertTrue(CUWatchInput.isUsers(sourcePid: 312, userData: CUWatchTestStamp.value, countsTestInput: true))
-        // The tap's mask: the three mouse-down buttons and nothing else.
+        // The tap's mask: the LEFT mouse-down and nothing else (the controller's ruling).
         let m = CUWatchInput.tapMask
-        for t: CGEventType in [.leftMouseDown, .rightMouseDown, .otherMouseDown] { XCTAssertNotEqual(m & (1 << t.rawValue), 0) }
-        for t: CGEventType in [.keyDown, .keyUp, .mouseMoved, .leftMouseUp, .scrollWheel, .flagsChanged] { XCTAssertEqual(m & (1 << t.rawValue), 0) }
+        XCTAssertNotEqual(m & (1 << CGEventType.leftMouseDown.rawValue), 0)
+        for t: CGEventType in [.rightMouseDown, .otherMouseDown, .keyDown, .keyUp, .mouseMoved, .leftMouseUp, .scrollWheel, .flagsChanged] {
+            XCTAssertEqual(m & (1 << t.rawValue), 0, "\(t.rawValue)")
+        }
     }
 
     func testTheOwnInputLedger() {
@@ -317,17 +318,14 @@ final class WatcherEngineTests: XCTestCase {
         under = (43, 9)  // another app's window there
         hit = .element
         await watcher.judgeClick(at: .zero, nowMs: clock.now, wall: 1)
-        // Winter's own input to the app in flight: not the user's.
-        under = (42, 7)
-        let token = watcher.ownInputBegan(targetId: "t1")
-        await watcher.judgeClick(at: .zero, nowMs: clock.now, wall: 1)
-        watcher.ownInputEnded(token)
-        clock.now += 400
-        await watcher.judgeClick(at: .zero, nowMs: clock.now, wall: 1)  // within the grace
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertTrue(sink.events.isEmpty)
-        clock.now += 200
+        // A HARDWARE click is the user's by its source alone: Winter's own input in flight (a bind's "every app" mark
+        // included) never drops it (review L3).
+        under = (42, 7)
+        let token = watcher.ownInputBegan(targetId: nil)
         await watcher.judgeClick(at: .zero, nowMs: clock.now, wall: 1)
+        watcher.ownInputEnded(token)
         XCTAssertEqual(sink.events.map(\.outcome), [.fired])
     }
 
@@ -396,6 +394,186 @@ final class WatcherEngineTests: XCTestCase {
         clock.now += 100
         await watcher.evaluate(pid: 42)
         XCTAssertEqual(sink.events.map(\.detail), ["changed"])
+    }
+
+    // Review M2: a change is dated by its burst's first notification — Winter's input ended long before explains nothing.
+    func testAUsersChangeLongAfterWintersOwnInputFires() async throws {
+        let token = watcher.ownInputBegan(targetId: "t1")
+        watcher.ownInputEnded(token)  // Winter acted…
+        clock.now += 100
+        _ = try await arm("wk_s", .init(kind: "appeared", text: "Sent"))  // …then armed
+        clock.now += 3_000
+        observation = CUWatchObservation(met: true)
+        notifier.onNotification?(42)  // the user's change, 3 s later
+        clock.now += 300
+        timers.fire(ms: CUWatcher.debounceMs)
+        await eventually("fired") { sink.events.count == 1 }
+        XCTAssertEqual(sink.events.first?.detail, "appeared")
+    }
+
+    func testAChangeLandingInsideTheGraceIsStillWinters() async throws {
+        _ = try await arm("wk_s", .init(kind: "appeared", text: "Sent"))
+        let token = watcher.ownInputBegan(targetId: "t1")
+        clock.now += 50
+        watcher.ownInputEnded(token)
+        clock.now += 200
+        observation = CUWatchObservation(met: true)
+        notifier.onNotification?(42)  // 200 ms after Winter's input ended
+        clock.now += 300
+        timers.fire(ms: CUWatcher.debounceMs)
+        try await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertTrue(sink.events.isEmpty, "Winter's own: the new state is the baseline")
+    }
+
+    func testAUsersEditLongAfterWintersInputFiresAChangedWatch() async throws {
+        let token = watcher.ownInputBegan(targetId: "t1")
+        watcher.ownInputEnded(token)
+        clock.now += 100
+        _ = try await arm("wk_c", .init(kind: "changed", ref: 2, settleMs: 0))
+        clock.now += 3_000
+        observation = CUWatchObservation(elementAlive: true, valueDigest: 9, userEvidence: true)
+        notifier.onNotification?(42)
+        clock.now += 300
+        timers.fire(ms: CUWatcher.debounceMs)
+        await eventually("fired") { sink.events.count == 1 }
+        XCTAssertEqual(sink.events.first?.detail, "changed")
+    }
+
+    // Review M1 (b): the connection closes while the arm is still reading the window — nothing is armed, nothing kept.
+    func testAnArmWhoseConnectionClosedDuringItsProbeArmsNothing() async throws {
+        var forgotten: [String] = []
+        watcher.forget = { forgotten.append($0) }
+        let probe = watcher.prepare
+        watcher.prepare = { [unowned self] p, c in
+            let r = try await probe(p, c)
+            watcher.connectionClosed(1)
+            return r
+        }
+        do {
+            _ = try await arm("wk_o", .init(kind: "clicked", ref: 3), connection: 1)
+            XCTFail("armed for a closed connection")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "cancelled")
+        }
+        XCTAssertEqual(watcher.armedCount, 0)
+        XCTAssertTrue(notifier.watched.isEmpty)
+        XCTAssertFalse(tap.running)
+        XCTAssertEqual(forgotten, ["wk_o"], "what the probe made is dropped (review L1)")
+    }
+
+    func testARefusedArmForgetsWhatItsProbeMade() async throws {
+        var forgotten: [String] = []
+        watcher.forget = { forgotten.append($0) }
+        met = true
+        await XCTAssertThrowsErrorAsync(try await self.arm("wk_m", .init(kind: "appeared", text: "Saved")))
+        XCTAssertEqual(forgotten, ["wk_m"])
+    }
+
+    // Review M3: concurrent arms and cancels leave the truth — no observer, no tap, no fallback, the last count 0.
+    func testConcurrentArmsAndCancelsLeaveNothingBehind() async throws {
+        for round in 0..<5 {
+            await withTaskGroup(of: Void.self) { group in
+                for i in 0..<40 {
+                    let id = "wk_\(round)_\(i)"
+                    group.addTask { [watcher] in
+                        _ = try? await watcher!.arm(WatchArmParams(targetId: "t1", watchId: id, condition: .init(kind: i % 2 == 0 ? "clicked" : "titled", ref: 3, title: "x")),
+                                                    connection: 1)
+                        watcher!.cancel(watchId: id)
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(watcher.armedCount, 0)
+        XCTAssertEqual(sink.counts.last, 0, "the last count the shell hears is the truth")
+        XCTAssertFalse(tap.running)
+        XCTAssertEqual(notifier.watched.count, notifier.unwatched.count, "every observer installed was removed")
+        XCTAssertTrue(timers.pending.filter { $0.ms == CUWatcher.fallbackMs }.isEmpty)
+    }
+
+    // Review M4: a fresh frame of the element decides a click with no round trip; a stale one asks the app.
+    func testAFreshElementFrameDecidesAClickEvenWhenTheAppCannotAnswer() async throws {
+        hit = .none  // the app is busy, or the sheet already closed
+        let probe = watcher.prepare
+        watcher.prepare = { p, c in
+            var r = try await probe(p, c)
+            r.elementFrame = CGRect(x: 10, y: 10, width: 60, height: 20)
+            r.windowFrame = CGRect(x: 0, y: 0, width: 400, height: 300)
+            return r
+        }
+        _ = try await arm("wk_a", .init(kind: "clicked", ref: 3))
+        await watcher.judgeClick(at: CGPoint(x: 30, y: 15), nowMs: clock.now, wall: 1)
+        XCTAssertEqual(sink.events.map(\.detail), ["clicked"])
+    }
+
+    func testAStaleFrameAsksTheAppAndAnElementGoneRightAfterTheClickCounts() async throws {
+        let probe = watcher.prepare
+        watcher.prepare = { p, c in
+            var r = try await probe(p, c)
+            r.elementFrame = CGRect(x: 10, y: 10, width: 60, height: 20)
+            r.windowFrame = CGRect(x: 0, y: 0, width: 400, height: 300)
+            return r
+        }
+        _ = try await arm("wk_a", .init(kind: "clicked", ref: 3))
+        clock.now += CUWatcher.frameTrustMs + 1
+        hit = .window
+        await watcher.judgeClick(at: CGPoint(x: 30, y: 15), nowMs: clock.now, wall: 1)
+        XCTAssertTrue(sink.events.isEmpty, "a stale frame decides nothing: the app said the window")
+        hit = .goneAfterClick
+        await watcher.judgeClick(at: CGPoint(x: 30, y: 15), nowMs: clock.now, wall: 1)
+        XCTAssertEqual(sink.events.map(\.detail), ["clicked"], "the click closed what held the element")
+    }
+
+    func testAnElementGoneAfterAClickOutsideItsFreshFrameIsNotIt() async throws {
+        let probe = watcher.prepare
+        watcher.prepare = { p, c in
+            var r = try await probe(p, c)
+            r.elementFrame = CGRect(x: 10, y: 10, width: 60, height: 20)
+            r.windowFrame = CGRect(x: 0, y: 0, width: 400, height: 300)
+            return r
+        }
+        _ = try await arm("wk_a", .init(kind: "clicked", ref: 3))
+        hit = .goneAfterClick
+        await watcher.judgeClick(at: CGPoint(x: 200, y: 200), nowMs: clock.now, wall: 1)
+        XCTAssertTrue(sink.events.isEmpty)
+    }
+
+    // Review M5: a click outside every watched window never asks the window server.
+    func testAClickOutsideTheWatchedWindowNeverReadsTheWindowStack() async throws {
+        var asked = 0
+        watcher.windowAt = { [unowned self] _ in asked += 1; return under }
+        let probe = watcher.prepare
+        watcher.prepare = { p, c in
+            var r = try await probe(p, c)
+            r.windowFrame = CGRect(x: 0, y: 0, width: 400, height: 300)
+            return r
+        }
+        _ = try await arm("wk_a", .init(kind: "clicked", ref: 3))
+        await watcher.judgeClick(at: CGPoint(x: 900, y: 900), nowMs: clock.now, wall: 1)
+        XCTAssertEqual(asked, 0)
+        await watcher.judgeClick(at: CGPoint(x: 100, y: 100), nowMs: clock.now, wall: 1)
+        XCTAssertEqual(asked, 1)
+    }
+
+    // Review M5: a text watch reads the tree at most once per 2 s in a storm; the rest wait, keeping their date.
+    func testATextWatchReadsAtMostOncePerTwoSecondsInAStorm() async throws {
+        var reads = 0
+        watcher.read = { [unowned self] _ in reads += 1; return observation }
+        _ = try await arm("wk_s", .init(kind: "appeared", text: "Sent"))
+        for _ in 0..<5 {
+            notifier.onNotification?(42)
+            clock.now += 300
+            timers.fire(ms: CUWatcher.debounceMs)
+            await eventually("looked") { reads >= 1 }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(reads, 1, "one read; the burst's later looks were put off")
+        let deferred = timers.pending.filter { $0.ms != CUWatcher.fallbackMs && $0.ms != CUWatcher.debounceMs }
+        XCTAssertEqual(deferred.count, 1, "one deferred look to the end of the 2 s")
+        observation = CUWatchObservation(met: true)
+        clock.now += 2_000
+        timers.fire(ms: deferred[0].ms)
+        await eventually("fired by the deferred look") { sink.events.count == 1 }
+        XCTAssertEqual(reads, 2)
     }
 
     func testTheConnectionClosingDropsItsWatchesSilently() async throws {
@@ -577,7 +755,7 @@ final class WatcherLiveSeamTests: XCTestCase {
     func testTheRingIsDrawnOnlyWhileTheBoundWindowIsFrontmost() async throws {
         _ = try await arm("wk_1", .init(kind: "clicked", ref: ref(button)))
         let subject = CUWatcher.Subject(watchId: "wk_1", connection: 1, sessionId: "s1", pid: pid, windowID: 77, appName: "Mail",
-                                        condition: .clicked(ref: 1), target: target, element: button, label: "Send")
+                                        condition: .clicked(ref: 1), target: target, element: button, elementWindowID: nil, label: "Send")
         sys.front = 1
         var shown = await core.presentWatch(subject, state: watcher.liveState!)
         XCTAssertNil(shown, "the user is in another app")

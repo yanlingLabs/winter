@@ -22,11 +22,11 @@ extension CUWatcher {
             clock: core.clock, wallMs: wallMs,
             notifier: notifier, tap: tap, scheduler: scheduler,
             prepare: { [weak core] p, condition in
-                guard let core else { throw CUError.unsupported("the automation engine is gone") }
+                guard let core else { throw CUWatcher.engineGone }
                 return try await core.prepareWatch(p, condition, state: state)
             },
             read: { [weak core] s in
-                guard let core else { throw CUError.unsupported("the automation engine is gone") }
+                guard let core else { throw CUWatcher.engineGone }
                 return try await core.lookAtWatch(s, state: state)
             },
             windowAt: { [weak core] point in core?.windowUnder(point).map { ($0.pid, $0.id) } },
@@ -47,6 +47,11 @@ extension CUWatcher {
         })
         return watcher
     }
+}
+
+extension CUWatcher {
+    /// The engine went away under the watcher (the helper is quitting): `unsupported`, `reason: "engine_gone"`.
+    static let engineGone = CUError(code: "unsupported", message: "the automation engine is gone", data: ["reason": .string("engine_gone")])
 }
 
 /// Per-watch live state: the window element captured at arming and a ref cache of the watch's own (the tree reader
@@ -92,7 +97,9 @@ extension CUCore {
             throw CUError.refused(.winterItself, "Winter never watches itself")
         }
         guard t.accessible else {
-            throw CUError.unsupported("\(t.appName)'s window has no accessibility here, so Winter can't watch it — ask the user to show the window once on its desktop, then bind it again")
+            throw CUError(code: "unsupported",
+                          message: "\(t.appName)'s window has no accessibility here, so Winter can't watch it — ask the user to show the window once on its desktop, then bind it again",
+                          data: ["reason": .string("no_accessibility")])
         }
         let ax = self.ax
         return try await queues.run(t.pid) { [self] in
@@ -102,6 +109,7 @@ extension CUCore {
             let refs = CURefCache<AXIdentity>()
             var ready = CUWatcher.Prepared(pid: t.pid, windowID: t.windowID, appName: t.appName, sessionId: t.sessionId,
                                            target: t, targetLabel: CUWatchText.targetLabel(app: t.appName, title: title))
+            ready.windowFrame = sys.window(id: t.windowID)?.frame
             if let ref = condition.ref {
                 let e = try element(ref, in: t)
                 if Self.watchSecure(e, ax: ax) {
@@ -109,6 +117,8 @@ extension CUCore {
                 }
                 ready.element = e
                 ready.elementInfo = Self.watchElementInfo(e, ax: ax)
+                ready.elementFrame = ax.frame(e)
+                ready.elementWindowID = ax.element(e, kAXWindowAttribute).flatMap { ax.windowID($0) }
                 if case .changed = condition { ready.valueDigest = CUWatchText.digest(Self.watchValue(e, ax: ax)) }
                 if case .goneRef = condition { ready.met = !ax.isAlive(e) }
             } else if case .titled = condition {
@@ -133,11 +143,14 @@ extension CUCore {
             if !watchWindowAlive(s, reading) { state.drop(s.watchId); return CUWatchObservation(windowAlive: false) }
         }
         let ax = self.ax
+        let windowFrame = sys.window(id: s.windowID)?.frame
         return try await queues.run(s.pid) { [self] in
             var o = CUWatchObservation()
+            o.windowFrame = windowFrame
             switch s.condition {
             case .clicked, .goneRef:
                 o.elementAlive = s.element.map { ax.isAlive($0) } ?? false
+                if o.elementAlive == true, let e = s.element { o.elementFrame = ax.frame(e) }
             case .changed:
                 let alive = s.element.map { ax.isAlive($0) } ?? false
                 o.elementAlive = alive
@@ -165,22 +178,32 @@ extension CUCore {
         return w.onScreen || sys.windowOnAnySpace(w.id) != false
     }
 
-    /// What a click at `point` landed on, by the app's own hit test; the point is dropped after.
+    /// What a click at `point` landed on, by the app's own hit test — asked directly (never queued behind the app's
+    /// other work, where a busy queue lost the click), retried while the app is busy, and — when the click closed what
+    /// held the element before the question reached the app — `goneAfterClick`. The point is dropped after.
     func hitTestWatch(_ s: CUWatcher.Subject, _ point: CGPoint, state: CUWatchLiveState) async -> CUWatchHit {
         let window = state.get(s.watchId)?.window
         let element = s.element
-        return (try? await queues.run(s.pid) { () -> CUWatchHit in
+        let ax = self.ax
+        var found: CUWatchHit = .none
+        for attempt in 0..<4 {
             var hit: AXUIElement?
-            guard AXUIElementCopyElementAtPosition(AX.app(s.pid), Float(point.x), Float(point.y), &hit) == .success,
-                  var cur = hit else { return .none }
-            for _ in 0..<64 {
-                if let element, CFEqual(cur, element) { return .element }
-                if let window, CFEqual(cur, window) { return .window }
-                guard let parent = AX.element(cur, kAXParentAttribute) else { break }
-                cur = parent
+            let err = AXUIElementCopyElementAtPosition(AX.app(s.pid), Float(point.x), Float(point.y), &hit)
+            if err == .success, var cur = hit {
+                for _ in 0..<64 {
+                    if let element, CFEqual(cur, element) { return .element }
+                    if let window, CFEqual(cur, window) { found = .window; break }
+                    guard let parent = AX.element(cur, kAXParentAttribute) else { break }
+                    cur = parent
+                }
+                break
             }
-            return .none
-        }) ?? .none
+            // Busy (the app is handling the click itself): ask again shortly.
+            guard err == .cannotComplete, attempt < 3 else { break }
+            try? await Task.sleep(nanoseconds: 60_000_000)
+        }
+        if let element, !ax.isAlive(element) { return .goneAfterClick }
+        return found
     }
 
     /// The ring and the pill for one watch: only while its app is frontmost and its window is that app's front window on
@@ -279,10 +302,19 @@ final class CUWatchAXObserver: CUWatchNotifying, @unchecked Sendable {
     static let notifications: [String] = [
         kAXCreatedNotification, kAXUIElementDestroyedNotification, kAXValueChangedNotification, kAXTitleChangedNotification,
         kAXLayoutChangedNotification, kAXFocusedUIElementChangedNotification, kAXFocusedWindowChangedNotification,
-        kAXWindowCreatedNotification, kAXWindowMovedNotification, kAXWindowResizedNotification,
-        kAXWindowMiniaturizedNotification, kAXSheetCreatedNotification, kAXSelectedChildrenChangedNotification,
-        kAXRowCountChangedNotification, kAXMovedNotification, kAXResizedNotification,
+        kAXWindowCreatedNotification, kAXWindowMiniaturizedNotification, kAXSheetCreatedNotification,
+        kAXSelectedChildrenChangedNotification, kAXRowCountChangedNotification,
+        // No moved or resized notifications: they change no condition (the ring is followed by its own poll), and a
+        // window being dragged would otherwise ask for a look every second (review M5).
     ]
+
+    /// The refcon of one app's observer: the pid it was made for — a notification's element may be served by another
+    /// process (WebKit's WebContent), so its own pid would name the wrong app (review L5).
+    private final class PidBox {
+        let pid: pid_t
+        weak var owner: CUWatchAXObserver?
+        init(pid: pid_t, owner: CUWatchAXObserver) { self.pid = pid; self.owner = owner }
+    }
 
     private final class Box: @unchecked Sendable {
         let lock = NSLock()
@@ -293,7 +325,7 @@ final class CUWatchAXObserver: CUWatchNotifying, @unchecked Sendable {
 
     var onNotification: (@Sendable (pid_t) -> Void)?
     private let lock = NSLock()
-    private var observers: [pid_t: AXObserver] = [:]
+    private var observers: [pid_t: (observer: AXObserver, box: PidBox)] = [:]
     private let box = Box()
 
     @discardableResult
@@ -303,13 +335,14 @@ final class CUWatchAXObserver: CUWatchNotifying, @unchecked Sendable {
         var observer: AXObserver?
         guard AXObserverCreate(pid, cuWatchObserverCallback, &observer) == .success, let observer else { return false }
         let app = AX.app(pid)
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        let pidBox = PidBox(pid: pid, owner: self)
+        let refcon = Unmanaged.passUnretained(pidBox).toOpaque()
         var added = 0
         for n in Self.notifications where AXObserverAddNotification(observer, app, n as CFString, refcon) == .success { added += 1 }
         guard added > 0 else { return false }
         let won: Bool = lock.withLock {
             if observers[pid] != nil { return false }
-            observers[pid] = observer
+            observers[pid] = (observer, pidBox)  // the box lives as long as its observer is registered
             return true
         }
         guard won else { return true }
@@ -319,12 +352,25 @@ final class CUWatchAXObserver: CUWatchNotifying, @unchecked Sendable {
     }
 
     func unwatch(pid: pid_t) {
-        guard let observer = lock.withLock({ observers.removeValue(forKey: pid) }),
+        guard let entry = lock.withLock({ observers.removeValue(forKey: pid) }),
               let rl = box.lock.withLock({ box.runLoop }) else { return }
-        CFRunLoopRemoveSource(rl, AXObserverGetRunLoopSource(observer), .defaultMode)
+        // Removed on the run loop's own thread order: no callback can run with the box after its source is gone. The
+        // box is kept until then.
+        let source = AXObserverGetRunLoopSource(entry.observer)
+        CFRunLoopPerformBlock(rl, CFRunLoopMode.defaultMode.rawValue) {
+            CFRunLoopRemoveSource(rl, source, .defaultMode)
+            withExtendedLifetime(entry) {}
+        }
+        CFRunLoopWakeUp(rl)
     }
 
     fileprivate func fire(_ pid: pid_t) { onNotification?(pid) }
+
+    /// The callback's refcon is the app's own box: the pid the observer was made for.
+    fileprivate static func deliver(_ refcon: UnsafeMutableRawPointer) {
+        let box = Unmanaged<PidBox>.fromOpaque(refcon).takeUnretainedValue()
+        box.owner?.fire(box.pid)
+    }
 
     private func ensureThread() -> CFRunLoop? {
         let box = self.box
@@ -355,15 +401,13 @@ final class CUWatchAXObserver: CUWatchNotifying, @unchecked Sendable {
 private func cuWatchObserverCallback(_ observer: AXObserver, _ element: AXUIElement, _ notification: CFString,
                                      _ refcon: UnsafeMutableRawPointer?) {
     guard let refcon else { return }
-    var pid: pid_t = 0
-    guard AXUIElementGetPid(element, &pid) == .success else { return }
-    Unmanaged<CUWatchAXObserver>.fromOpaque(refcon).takeUnretainedValue().fire(pid)
+    CUWatchAXObserver.deliver(refcon)
 }
 
 // MARK: - The click tap
 
-/// The watches' own LISTEN-ONLY session tap for the three mouse-down buttons — nothing else: no keys, no moves (so an
-/// idle Mac sends it nothing). The same public API as the work watcher's (`CGEvent.tapCreate`, listen-only), which the
+/// The watches' own LISTEN-ONLY session tap for the LEFT mouse-down — nothing else: no other button, no keys, no moves
+/// (so an idle Mac sends it nothing). The same public API as the work watcher's (`CGEvent.tapCreate`, listen-only), which the
 /// helper's Accessibility grant covers: no new permission, no prompt. It runs only while a `clicked` or `changed` watch is
 /// armed, never alters an event, and hands each one's point to the watcher, which judges and drops it.
 final class CUWatchClickTap: CUWatchTapping, @unchecked Sendable {
@@ -432,7 +476,7 @@ final class CUWatchClickTap: CUWatchTapping, @unchecked Sendable {
             context.tap?.reenable()
             return
         }
-        guard type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown else { return }
+        guard type == .leftMouseDown else { return }
         context.onMouseDown(event.location, event.getIntegerValueField(.eventSourceUnixProcessID),
                             event.getIntegerValueField(.eventSourceUserData))
     }

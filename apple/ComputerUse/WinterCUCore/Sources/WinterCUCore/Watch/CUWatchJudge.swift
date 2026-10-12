@@ -39,6 +39,14 @@ public enum CUWatchCondition: Equatable, Sendable {
         }
     }
 
+    /// A look reads the window's tree (a text to find): the costly kind, read at most once per 2 s in a storm.
+    public var readsTree: Bool {
+        switch self {
+        case .appeared, .goneText: return true
+        default: return false
+        }
+    }
+
     /// Needs the user's own input (hardware), not just a change Winter did not cause.
     public var isInput: Bool {
         switch self {
@@ -100,6 +108,9 @@ struct CUWatchObservation: Equatable {
     var userEvidence = false
     /// `titled`: the title now (the fired detail).
     var title: String?
+    /// Where the element and its window are now (screen points), when the look read them: a click is judged by them.
+    var elementFrame: CGRect?
+    var windowFrame: CGRect?
 }
 
 /// What one look at the window decided.
@@ -183,9 +194,10 @@ struct CUWatchJudge: Equatable {
         }
     }
 
-    /// The user's hardware click on the watched element (the click tap's hit). Only `clicked` fires on it.
-    mutating func clicked(ownInput: Bool) -> CUWatchDecision {
-        guard !ended, case .clicked = condition, !ownInput else { return .none }
+    /// The user's hardware click on the watched element (the click tap's hit). Only `clicked` fires on it. A hardware
+    /// click is the user's by its source alone: Winter's own input in flight never makes it Winter's (review L3).
+    mutating func clicked() -> CUWatchDecision {
+        guard !ended, case .clicked = condition else { return .none }
         return end(.fire(detail: "clicked"))
     }
 
@@ -233,11 +245,9 @@ enum CUWatchInput {
         return countsTestInput && userData == CUWatchTestStamp.value
     }
 
-    /// The mask of the click tap: the three mouse-down buttons, nothing else (no keys, no moves).
-    static let tapMask: CGEventMask = {
-        let types: [CGEventType] = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        return types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << CGEventMask($1.rawValue)) }
-    }()
+    /// The mask of the click tap: the LEFT mouse-down, nothing else (the controller's ruling: a click is a left click;
+    /// no other button, no keys, no moves).
+    static let tapMask: CGEventMask = CGEventMask(1) << CGEventMask(CGEventType.leftMouseDown.rawValue)
 }
 
 /// Winter's own input to each app, as the shell reports it around every request that can send some (an act, an
