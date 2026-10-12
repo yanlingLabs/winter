@@ -4932,6 +4932,10 @@ void (^g_headless_ime_observer)(int, int, int, NSArray<NSValue *> *) = nil;
 void (^g_headless_dialog_opened_observer)(int, int, NSString *, NSString *) = nil;
 void (^g_headless_dialog_closed_observer)(int) = nil;
 BOOL (^g_headless_file_chooser_handler)(int, int, int, NSArray<NSString *> *) = nil;
+/// A window the page opens while the person holds the browser (`WinterCEFHeadlessSetPopupAdopter`), and every headless
+/// browser's close (`WinterCEFHeadlessSetClosedObserver`).
+NSView *(^g_headless_popup_adopter)(int, NSString *) = nil;
+void (^g_headless_closed_observer)(int) = nil;
 /// The dialog each headless browser holds now (type 0 alert, 1 confirm, 2 prompt, 3 beforeunload), by browser id.
 struct HeadlessDialogInfo {
   int type;
@@ -5197,6 +5201,7 @@ class WinterHeadlessClient : public WinterClient {
 
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
     if (browser) {
+      if (g_headless_closed_observer) g_headless_closed_observer(browser->GetIdentifier());
       HeadlessUserControlled().erase(browser->GetIdentifier());
       HeadlessScales().erase(browser->GetIdentifier());
       HeadlessScaleStates().erase(browser->GetIdentifier());
@@ -5343,6 +5348,26 @@ class WinterHeadlessClient : public WinterClient {
                      CefBrowserSettings &settings,
                      CefRefPtr<CefDictionaryValue> &extra_info,
                      bool *no_javascript_access) override {
+    // A window the PERSON opened (a user gesture) while holding the browser in Winter's panel — a sign-in window, as a
+    // rule: created by CEF itself, so the page keeps its `window.opener` and the flow completes, windowless and
+    // accelerated like every headless browser, in the opener's context; the helper adopts it as a tab of the opener's
+    // session and the daemon shows it beside its opener. Every other window is cancelled and reported, as before.
+    if (browser && user_gesture && g_headless_popup_adopter && HeadlessUserControlled().count(browser->GetIdentifier()) > 0) {
+      NSView *key = g_headless_popup_adopter(browser->GetIdentifier(), StringOf(target_url));
+      if (key != nil) {
+        windowInfo.SetAsWindowless(kNullWindowHandle);
+        windowInfo.shared_texture_enabled = true;
+        WinterCEFBrowserCreation *creation = [[WinterCEFBrowserCreation alloc] init];
+        creation.parent = key;
+        WinterCEFTabBridge *bridge = BridgeFor(key);
+        bridge.creation = creation;
+        settings.windowless_frame_rate = kHeadlessFrameRate;
+        settings.background_color = 0xFFFFFFFF;
+        client = new WinterHeadlessClient(creation, bridge, render_);
+        Log("headless window opened by the person in control (opener id=%d)", browser->GetIdentifier());
+        return false;
+      }
+    }
     const bool cancel = WinterClient::OnBeforePopup(browser, frame, popup_id, target_url, target_frame_name,
                                                     target_disposition, user_gesture, popupFeatures, windowInfo,
                                                     client, settings, extra_info, no_javascript_access);
@@ -5734,6 +5759,14 @@ void WinterCEFHeadlessResolveFileChooser(int requestId, NSArray<NSString *> *pat
   for (NSString *path in paths) files.push_back(CefString(path.UTF8String));
   callback->Continue(files);
   Log("file-chooser answered by the viewer (request %d, %zu file(s))", requestId, files.size());
+}
+
+void WinterCEFHeadlessSetPopupAdopter(NSView *(^adopter)(int openerBrowserId, NSString *url)) {
+  g_headless_popup_adopter = [adopter copy];
+}
+
+void WinterCEFHeadlessSetClosedObserver(void (^observer)(int browserId)) {
+  g_headless_closed_observer = [observer copy];
 }
 
 void WinterCEFHeadlessSetUserControl(NSView *key, BOOL control) {

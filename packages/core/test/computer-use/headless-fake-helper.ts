@@ -25,6 +25,8 @@
 //                               before (an agent command in flight)
 //   http://no-viewer.test/    — presented, its viewer never comes (no `headless.presentationStarted`)
 //   http://viewer-leaves.test/ — presented, its viewer is accepted and then leaves 150 ms later (`presentationEnded`)
+//   http://opens-window.test/ — presented, its page opens a window once its viewer is accepted (`headless.popupOpened`,
+//                               a tab of the fake's own minting at http://window.test/)
 // Any other presented tab's viewer is accepted 20 ms after `headless.present` is answered.
 // It exits 0 on EOF, like the real helper.
 import { appendFileSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
@@ -159,6 +161,11 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
         setTimeout(() => {
           if (presented.get(tabId) !== p.nonce) return;
           send("headless.presentationStarted", { linkId, tabId });
+          if (t.url === "http://opens-window.test/") {
+            const windowId = `w-${Math.random().toString(16).slice(2, 14).padEnd(12, "0")}`;
+            tabs.set(windowId, { sessionId: t.sessionId, url: "http://window.test/" });
+            setTimeout(() => send("headless.popupOpened", { linkId, tabId: windowId, openerTabId: tabId, url: "http://window.test/" }), 20);
+          }
           if (t.url === "http://viewer-leaves.test/") {
             setTimeout(() => {
               if (presented.get(tabId) !== p.nonce) return;

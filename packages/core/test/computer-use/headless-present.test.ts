@@ -250,6 +250,36 @@ describe("watch and take over from the panel", () => {
   });
 });
 
+describe("a window the person opens (a sign-in window)", () => {
+  test("shown beside its opener with the person in control, never listed to the agent, closed when the person lets the opener go", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "http://opens-window.test/" });
+    await r.pool.present(t.tabKey, { sessionId: "s1" });
+    await until("the window shown", () => r.panel.shown.some((x) => x.purpose === "popup"));
+    const w = r.panel.shown.find((x) => x.purpose === "popup")!;
+    expect(w).toMatchObject({ sessionId: "s1", control: true, url: "http://window.test/" });
+    expect(w.tabId).not.toBe(t.tabKey);
+    // The person's alone: not in the agent's list, nor in the panel's watch list; it counts toward the budget.
+    expect((await r.pool.listTabs({ sessionId: "s1" })).map((x) => x.tabKey)).toEqual([t.tabKey]);
+    expect((await r.pool.panelTabs("s1")).map((x) => x.tabId)).toEqual([t.tabKey]);
+    expect(r.pool.tabCount("s1")).toBe(2);
+    // Done on the opener: the window goes with it.
+    await r.pool.handBack(t.tabKey);
+    await until("the window closed", () => r.commands().some((c) => c.op === "tab.close" && c.params.tabId === w.tabId));
+    expect(r.panel.hidden.map((h) => h.tabId).sort()).toEqual([t.tabKey, w.tabId].sort());
+    expect(r.pool.tabCount("s1")).toBe(1);
+  });
+
+  test("a window from a tab the person does not hold is closed at once", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "http://opens-window.test/" });
+    await r.pool.panelAction("s1", t.tabKey, "watch"); // watch only: the page's window is not the person's
+    await until("the window closed", () => r.commands().some((c) => c.op === "tab.close"));
+    expect(r.panel.shown.filter((x) => x.purpose === "popup")).toEqual([]);
+    expect(r.pool.tabCount("s1")).toBe(1);
+  });
+});
+
 describe("what can't show a tab says so", () => {
   test("Winter.app not there, or without the feature: refused before anything is checked in", async () => {
     const r = rig();

@@ -49,6 +49,14 @@ extension HeadlessCEFDriver {
                 { browserId, kind in observe(Int(browserId), kind.map { String(cString: $0) } ?? "") }
             })
         },
+        setPopupAdopter: { adopter in
+            WinterCEFHeadlessSetPopupAdopter(adopter.map { adopt in
+                { openerId, url in adopt(Int(openerId), url ?? "") }
+            })
+        },
+        setClosedObserver: { observer in
+            WinterCEFHeadlessSetClosedObserver(observer.map { observe in { browserId in observe(Int(browserId)) } })
+        },
         present: { key, browserId, request, started, ended in
             let presenter = WinterHeadlessPresenter(key: key, browserId: Int32(browserId), nonce: request.nonce,
                                                     viewerRequirement: request.viewerRequirement, control: request.control,

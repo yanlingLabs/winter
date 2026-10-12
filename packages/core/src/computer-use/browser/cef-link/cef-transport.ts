@@ -25,7 +25,8 @@ export interface HeadlessShowParams {
   nonce: string;
   producerRequirement: string;
   control: boolean;
-  purpose: "handoff" | "watch";
+  /** "popup": a window the page opened while the person held its opener (a sign-in window) — theirs alone. */
+  purpose: "handoff" | "watch" | "popup";
   url: string;
   title: string;
   /** Where the app puts copies of files the person chooses for a page's file chooser (`<home>/cache/headless-uploads`):

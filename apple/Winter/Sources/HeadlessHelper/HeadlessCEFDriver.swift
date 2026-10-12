@@ -43,6 +43,11 @@ struct HeadlessCEFDriver {
     var disposeContext: (String) -> Void
     /// What a page tried and was refused, by browser id: `"popup"` or `"local-network"` (main thread). `nil` stops it.
     var setNoticeObserver: (((Int, String) -> Void)?) -> Void = { _ in }
+    /// A window the page opened while the person holds the browser: `(openerBrowserId, url)` → the key of the tab to
+    /// create it under, or nil to refuse it (main thread). `nil` stops it.
+    var setPopupAdopter: (((Int, String) -> NSView?)?) -> Void = { _ in }
+    /// A browser closed — by the page (`window.close()` of a window it opened) or by Winter (main thread).
+    var setClosedObserver: (((Int) -> Void)?) -> Void = { _ in }
     /// Present the key's browser (`HeadlessPresentation`) to the viewer naming `nonce` and satisfying `requirement`:
     /// the presentation's bootstrap service name and a handle, or why not. `started` runs once when the viewer's HELLO
     /// is accepted; `ended` runs once if the VIEWER ends it.

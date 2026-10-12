@@ -361,6 +361,13 @@ final class HeadlessPresentChromeTests: XCTestCase {
         XCTAssertTrue(s.acceptsInput)
     }
 
+    func testAWindowThePageOpenedOffersOnlyTheCloseButton() {
+        let s = C.make(phase: .live, purpose: .popup, control: true)
+        XCTAssertEqual(s.stateLine, "A window the page opened — it closes when you are done")
+        XCTAssertEqual(s.buttons, [])
+        XCTAssertTrue(s.acceptsInput)
+    }
+
     func testAnActionOnItsWayDisablesTheButtons() {
         let s = C.make(phase: .live, purpose: .watch, control: false, pending: .takeOver)
         XCTAssertFalse(s.buttonsEnabled)

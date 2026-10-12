@@ -10,6 +10,8 @@ import WinterKit
 ///   finish here, then press Done" with Done and Stop waiting;
 /// - purpose `watch`: "Watching Winter's headless tab" with Take over — and while the person holds control, "You
 ///   have control — Winter waits" with Hand back;
+/// - purpose `popup` (a window the page opened while the person held its opener — a sign-in window): "A window the
+///   page opened — it closes when you are done", nothing but the close button;
 /// - a clear line once the presentation ended, and no actions;
 /// - always a close button while it is up.
 struct HeadlessPresentChromeState: Equatable {
@@ -40,6 +42,7 @@ struct HeadlessPresentChromeState: Equatable {
     static let handoffLine = "Winter is waiting for you — finish here, then press Done"
     static let watchingLine = "Watching Winter's headless tab"
     static let controlLine = "You have control — Winter waits"
+    static let popupLine = "A window the page opened — it closes when you are done"
 
     static func make(phase: Phase, purpose: BrowserLinkHeadlessPurpose, control: Bool,
                      pending: BrowserLinkHeadlessAction? = nil, notice: String? = nil) -> HeadlessPresentChromeState {
@@ -64,6 +67,9 @@ struct HeadlessPresentChromeState: Equatable {
             case .watch:
                 line = watchingLine
                 buttons = [Button(action: .takeOver, title: "Take over", prominent: false)]
+            case .popup:
+                line = popupLine
+                buttons = []
             }
             return HeadlessPresentChromeState(stateLine: notice ?? line, stateIsNotice: notice != nil,
                                               buttons: buttons, buttonsEnabled: pending == nil,

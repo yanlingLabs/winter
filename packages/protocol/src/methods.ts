@@ -495,7 +495,8 @@ export const ComputerUseStatusResult = z.object({
  *  (the page never leaves the helper; nothing reloads) — and the daemon can ask it to. Daemon → app ops on
  *  `browserLink.command`: `headless.show {sessionId, tabId, service, nonce, producerRequirement, control, purpose,
  *  url, title, uploadDir}` (connect to that presentation and show it; `purpose` "handoff" — the agent waits for the
- *  user, who has control — or "watch"; files the person picks for the page are copied into `uploadDir` first), `headless.hide {sessionId, tabId, reason}`, `headless.tabs {sessionId, tabs}` (the session's
+ *  user, who has control —, "watch", or "popup" — a window the page opened while the person held its opener, a
+ *  sign-in window as a rule, theirs alone and closed when they let the opener go; files the person picks for the page are copied into `uploadDir` first), `headless.hide {sessionId, tabId, reason}`, `headless.tabs {sessionId, tabs}` (the session's
  *  headless tabs changed). App → daemon: `browserLink.headless` (below). */
 export const BROWSER_LINK_FEATURES = ["headless"] as const;
 export const BrowserLinkAttachParams = z.object({

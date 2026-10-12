@@ -17,6 +17,8 @@ final class FakeHeadlessDriver {
     var closed: [ObjectIdentifier] = []
     var disposed: [String] = []
     var noticeObserver: ((Int, String) -> Void)?
+    var popupAdopter: ((Int, String) -> NSView?)?
+    var closedObserver: ((Int) -> Void)?
     /// Presentations: started (browser id, request), ended, control changes; a scripted refusal.
     var presented: [(browserId: Int, request: HeadlessPresentRequest)] = []
     var unpresented = 0
@@ -54,6 +56,8 @@ final class FakeHeadlessDriver {
             },
             disposeContext: { [unowned self] session in disposed.append(session) },
             setNoticeObserver: { [unowned self] observer in noticeObserver = observer },
+            setPopupAdopter: { [unowned self] adopter in popupAdopter = adopter },
+            setClosedObserver: { [unowned self] observer in closedObserver = observer },
             present: { [unowned self] _, browserId, request, started, ended in
                 if let presentRefusal { return .failure(HeadlessPresentFailure(message: presentRefusal)) }
                 presented.append((browserId, request))
@@ -77,6 +81,8 @@ final class RecordingOutput: HeadlessOutput {
     var presentationsEnded: [(tabId: String, reason: String)] = []
     var presentationsStarted: [String] = []
     func presentationStarted(tabId: String) { presentationsStarted.append(tabId) }
+    var popups: [(tabId: String, openerTabId: String, url: String)] = []
+    func popupOpened(tabId: String, openerTabId: String, url: String) { popups.append((tabId, openerTabId, url)) }
     func presentationEnded(tabId: String, reason: String) { presentationsEnded.append((tabId, reason)) }
     func emitEvent(tabId: String, method: String, params: Data, cdpSessionId: String?, strip: Bool) {
         events.append((tabId, method, strip))
@@ -310,6 +316,34 @@ final class HeadlessHostTests: XCTestCase {
         host.present(presentRequest(), reply: HeadlessReplier { _ in })
         _ = run(.tabClose(tabId: "w-1"))
         XCTAssertEqual(fake.unpresented, 1, "closing a presented tab ends its presentation")
+    }
+
+    func testAWindowThePersonOpensBecomesATabOfTheOpenersSessionAnnouncedOnceItsBrowserExists() throws {
+        _ = open("w-1")  // the opener: browser id 1
+        let key = try XCTUnwrap(fake.popupAdopter?(1, "https://accounts.example/oauth"))
+        XCTAssertTrue(fake.locked.contains(ObjectIdentifier(key)), "its native UI is locked before its browser exists")
+        XCTAssertTrue(output.popups.isEmpty, "not announced before its browser exists")
+        fake.browserIds[ObjectIdentifier(key)] = 7
+        let pending = pendingAfter
+        pendingAfter = []
+        for (_, work) in pending { work() }
+        XCTAssertEqual(output.popups.count, 1)
+        let popup = try XCTUnwrap(output.popups.first)
+        XCTAssertEqual(popup.openerTabId, "w-1")
+        XCTAssertEqual(popup.url, "https://accounts.example/oauth")
+        XCTAssertNotNil(popup.tabId.range(of: "^w-[0-9a-f]{12}$", options: .regularExpression))
+        XCTAssertEqual(host.tabs[popup.tabId]?.sessionId, "s_a")
+        // The page closes its window when it is done: the tab goes and the daemon is told.
+        fake.closedObserver?(7)
+        XCTAssertNil(host.tabs[popup.tabId])
+        XCTAssertEqual(output.gone.map(\.0), [popup.tabId])
+        XCTAssertEqual(output.gone.first?.1, .closed)
+        // A window of a browser this host does not know is refused (cancelled, as every other one is).
+        XCTAssertNil(fake.popupAdopter?(42, "https://x.example/"))
+        // Winter closing a tab itself tells nothing more: its browser's close finds no tab.
+        _ = run(.tabClose(tabId: "w-1"))
+        fake.closedObserver?(1)
+        XCTAssertEqual(output.gone.count, 1)
     }
 
     func testARefusedPresentationIsAFailure() {

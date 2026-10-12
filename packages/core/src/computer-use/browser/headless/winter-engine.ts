@@ -14,9 +14,10 @@
 // FEATURES (the protocol stays 1): what a helper can do beyond it, named in its hello. `present` — a live tab shown to
 // Winter.app through the GPU (`apple/Winter/Sources/HeadlessPresent`): the ops `headless.present {tabId, nonce,
 // viewerRequirement, control, scale}` → `{service, cssWidth, cssHeight}`, `headless.unpresent {tabId}` → its stats,
-// `headless.control {tabId, control}`, and the helper's `headless.presentationStarted {tabId}` (its viewer was accepted)
-// and `headless.presentationEnded {tabId, reason}` (the viewer ended it). A helper that does not name a feature is never
-// sent its ops.
+// `headless.control {tabId, control}`, and the helper's `headless.presentationStarted {tabId}` (its viewer was accepted),
+// `headless.presentationEnded {tabId, reason}` (the viewer ended it) and `headless.popupOpened {tabId, openerTabId, url}`
+// (a window the page opened while the person held the opener — a tab of the helper's own minting, in the opener's
+// session). A helper that does not name a feature is never sent its ops.
 //
 // Winter Headless exposes ONLY these link ops — no browser-level CDP command at all (no `Target.createTarget`, no
 // `Browser.*`). A browser-level command list belongs to installed browsers run headless, a later stage.
@@ -202,7 +203,10 @@ export function headlessErrorToTransport(code: string, message: string, data: Re
 export interface HeadlessHello { linkId: string; protocol: number; pid?: number; version?: string; features: HeadlessFeature[] }
 
 /** A presentation's life, as the helper reports it: its viewer accepted, or the viewer ended it. */
-export type HeadlessPresentationEvent = { tabKey: string; kind: "started" } | { tabKey: string; kind: "ended"; reason: string };
+export type HeadlessPresentationEvent =
+  | { tabKey: string; kind: "started" }
+  | { tabKey: string; kind: "ended"; reason: string }
+  | { tabKey: string; kind: "popup"; openerTabKey: string; url: string };
 
 /** One running Winter Headless and its pipe. */
 export class WinterHeadlessProcess {
@@ -370,11 +374,14 @@ export class WinterHeadlessProcess {
         return;
       }
       case "headless.presentationStarted":
-      case "headless.presentationEnded": {
-        if (p.linkId !== this.linkId || typeof p.tabId !== "string") return;
-        const e: HeadlessPresentationEvent = message.method === "headless.presentationStarted"
-          ? { tabKey: p.tabId, kind: "started" }
-          : { tabKey: p.tabId, kind: "ended", reason: typeof p.reason === "string" ? p.reason.slice(0, 200) : "ended" };
+      case "headless.presentationEnded":
+      case "headless.popupOpened": {
+        if (p.linkId !== this.linkId || typeof p.tabId !== "string" || !/^w-[0-9a-f]{12}$/.test(p.tabId)) return;
+        let e: HeadlessPresentationEvent;
+        if (message.method === "headless.presentationStarted") e = { tabKey: p.tabId, kind: "started" };
+        else if (message.method === "headless.presentationEnded") e = { tabKey: p.tabId, kind: "ended", reason: typeof p.reason === "string" ? p.reason.slice(0, 200) : "ended" };
+        else if (typeof p.openerTabId === "string") e = { tabKey: p.tabId, kind: "popup", openerTabKey: p.openerTabId, url: typeof p.url === "string" ? p.url.slice(0, 8_192) : "" };
+        else return;
         for (const l of [...this.presentationListeners]) {
           try { l(e); } catch { /* a listener never breaks the pipe */ }
         }

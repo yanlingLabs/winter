@@ -19,10 +19,12 @@
 //
 // Wire version 2, with the person in control: a page dialog shown to them and answered there once; an IME composition
 // and a paste (its text from the viewer) into a field; a file chooser answered with a copy inside the uploads folder,
-// and an answer naming a file anywhere else refused; and the control messages.
+// and an answer naming a file anywhere else refused; the control messages; and a WINDOW the person opens (a sign-in
+// window): created by CEF with the opener kept (the window posts to `window.opener`), announced as a tab of its own
+// (`headless.popupOpened`), presentable, and gone as a tab when the page closes it.
 //
 //   bun scripts/browser-e2e/headless/present/proof.ts --app "<Winter Headless Dev.app>" [--cycles 8] [--report <file>]
-//     [--skip dialog,ime,files]   leave out version 2's steps (to tell which one a failure follows)
+//     [--skip dialog,ime,files,window]   leave out version 2's steps (to tell which one a failure follows)
 //     [--helper-log]              print the helper's stderr when something failed
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -70,11 +72,12 @@ const sentinel = (port: number): string => `<!doctype html><title>sentinel</titl
 @keyframes spin{to{transform:rotate(360deg)}}</style>
 <div id=m></div><div id=spin></div>
 <div id=f><input id=a placeholder=agent><input id=b placeholder=user><select id=s><option>one</option><option>two</option><option>three</option></select>
-<input id=c placeholder=ime><input id=file type=file accept=".txt,text/plain"></div>
+<input id=c placeholder=ime><input id=file type=file accept=".txt,text/plain"><button id=open onclick="window.open('/window', 'signin', 'width=480,height=600')">Sign in</button></div>
 <pre id=state style="position:absolute;left:20px;top:300px"></pre>
 <script>
 const S = { id: crypto.randomUUID(), origin: performance.timeOrigin, ticks: 0, keys: 0, wsOpen: 0, wsMessages: 0, uploads: 0, uploadDone: "", visibilityChanges: 0, hidden: document.hidden, files: "", fileChanges: 0 };
 S.selectLog = [];
+window.addEventListener("message", (e) => { S.fromWindow = String(e.data); });
 for (const t of ["mousedown", "keydown", "change", "focus"]) document.getElementById("s").addEventListener(t, (e) => { S.selectLog.push(t + (e.key ? ":" + e.key : "") + "=" + document.getElementById("s").value); });
 document.getElementById("file").addEventListener("change", (e) => {
   S.fileChanges++;
@@ -109,6 +112,12 @@ const server = Bun.serve({
   async fetch(req, srv): Promise<Response | undefined> {
     const path = new URL(req.url).pathname;
     if (path === "/hb") return srv.upgrade(req) ? undefined : new Response("ws only", { status: 400 });
+    if (path === "/window") {
+      return new Response(`<!doctype html><title>Sign-in window</title><style>body{margin:0;background:#225;color:#fff;font:20px system-ui}
+@keyframes p{to{opacity:.3}}h1{animation:p 1s infinite alternate}</style><h1>Signing in…</h1>
+<script>setTimeout(() => { window.opener && window.opener.postMessage("signed in from the window", "*"); }, 300);
+setTimeout(() => window.close(), 2500);</script>`, { headers: { "content-type": "text/html" } });
+    }
     if (path === "/upload") {
       // The upload's request stays IN FLIGHT across the presentations: its body taken, its answer held 40 s.
       uploadRequests++;
@@ -485,6 +494,36 @@ try {
     check("an answer naming a file outside the uploads folder is refused: the page gets nothing",
       asks === 2 && second.fileChanges === first.fileChanges && second.files === first.files, `${asks} chooser(s) asked; ${String(second.fileChanges)} change(s)`);
     await oracle("a file chooser", { b: userText, s: "two" });
+  }
+
+  // ── version 2: a window the person opens — created with its opener kept, a tab of its own, closed by its page ──
+  if (!skip.includes("window")) {
+    const oBox = await rect("open");
+    const { viewer } = await present(true);
+    await viewer.until("welcome");
+    const mark = events.length;
+    viewer.send({ cmd: "click", x: oBox.x + 8, y: oBox.y + oBox.height / 2 });
+    const opened = await wait((m) => m.method === "headless.popupOpened" && events.indexOf(m) >= mark, 10_000, "headless.popupOpened").catch(() => undefined);
+    const windowId = String(opened?.params.tabId ?? "");
+    let windowFrames = -1;
+    if (opened !== undefined) {
+      const nonce = nonceHex();
+      const r = await command("headless.present", { tabId: windowId, nonce, viewerRequirement, control: true, scale: 1 });
+      const wv = new ViewerProc(String(r.service), nonce);
+      await wv.until("welcome").catch(() => undefined);
+      await Bun.sleep(600);
+      windowFrames = Number((await wv.stats().catch(() => ({ event: "stats", frames: -1 }) as ViewerEvent)).frames);
+      wv.send({ cmd: "bye" });
+      await wv.exited();
+    }
+    const closed = await wait((m) => m.method === "browserLink.tabGone" && m.params.tabId === windowId, 10_000, "the window's tabGone").then((m) => String(m.params.reason), () => "");
+    await endPresentation(viewer);
+    const now = await sentinelState();
+    check("a window the person opens is created with its opener kept, announced as a tab of its own, presentable, and gone when its page closes it",
+      opened !== undefined && opened.params.openerTabId === "w-1" && /^w-[0-9a-f]{12}$/.test(windowId) && String(opened.params.url).endsWith("/window") &&
+        now.fromWindow === "signed in from the window" && windowFrames > 0 && closed === "closed",
+      `opened ${JSON.stringify(opened?.params ?? null)}; the opener heard "${String(now.fromWindow)}"; ${windowFrames} frame(s) of it; its tab ${closed || "never went"}`);
+    await oracle("a window the person opened", { b: userText, s: "two" });
   }
 
   // ── a viewer that dies without a word ──

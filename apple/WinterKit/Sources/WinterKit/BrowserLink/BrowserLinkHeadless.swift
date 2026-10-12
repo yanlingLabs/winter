@@ -50,10 +50,12 @@ public struct BrowserLinkHeadlessTab: Sendable, Equatable, Identifiable {
 }
 
 /// Why the daemon shows a tab: the agent waits for the person (`handoff` — a `waitForUser`; the person has control),
-/// or the person watches (`watch`) and may take over from the panel.
+/// the person watches (`watch`) and may take over from the panel, or the page opened a window while the person held
+/// its opener (`popup` — a sign-in window as a rule: theirs alone, closed when they let the opener go).
 public enum BrowserLinkHeadlessPurpose: String, Sendable, Equatable {
     case handoff
     case watch
+    case popup
 }
 
 /// The person's actions on a headless tab (`browserLink.headless`'s `action`).
@@ -175,7 +177,7 @@ public struct BrowserLinkHeadlessCommand: Sendable, Equatable {
             }
             guard case .bool(let control)? = p["control"] else { return unreadable("headless.show needs control") }
             guard let purposeText = string("purpose"), let purpose = BrowserLinkHeadlessPurpose(rawValue: purposeText) else {
-                return unreadable("headless.show: purpose is handoff or watch")
+                return unreadable("headless.show: purpose is handoff, watch or popup")
             }
             guard let url = text("url"), let title = text("title") else {
                 return unreadable("headless.show needs url and title")

@@ -36,6 +36,9 @@ enum HeadlessWire {
         static let presentationStarted = "headless.presentationStarted"
         /// A presentation ended on the VIEWER's side (it said bye, it died): `{linkId, tabId, reason}`.
         static let presentationEnded = "headless.presentationEnded"
+        /// A window the page opened while the person held `openerTabId` in Winter's panel (a sign-in window) is a tab
+        /// of its own: `{linkId, tabId, openerTabId, url}` — in the opener's session, never the agent's.
+        static let popupOpened = "headless.popupOpened"
     }
 
     /// What this helper can do beyond protocol 1, said in `headless.hello`'s `features`.
@@ -259,6 +262,15 @@ final class HeadlessOutbox {
         var lines = flush()
         lines.append(Self.line(method: HeadlessWire.Method.notice,
                                params: ["linkId": .string(linkId), "tabId": .string(tabId), "kind": .string(kind)]))
+        return lines
+    }
+
+    /// A window the page opened is a tab of its own — after the events already pending.
+    func popupOpened(tabId: String, openerTabId: String, url: String) -> [Data] {
+        var lines = flush()
+        lines.append(Self.line(method: HeadlessWire.Method.popupOpened,
+                               params: ["linkId": .string(linkId), "tabId": .string(tabId), "openerTabId": .string(openerTabId),
+                                        "url": .string(HeadlessEventLimits.truncated(url, maxBytes: 8192))]))
         return lines
     }
 

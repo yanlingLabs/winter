@@ -55,6 +55,10 @@ final class HeadlessHost {
         var loading = true
         /// The live presentation of this tab (`HeadlessCEFDriver.present`), if any.
         var presentation: AnyObject?
+        /// Its browser's id once it exists (a close the page made is told by id).
+        var browserId = 0
+        /// A window the page opened while the person held this tab's opener (`adoptPopup`): its opener's tab id.
+        var openerTabId: String?
 
         init(tabId: String, sessionId: String, key: NSView, url: String) {
             self.tabId = tabId
@@ -76,6 +80,58 @@ final class HeadlessHost {
         driver.setNoticeObserver { [weak self] browserId, kind in
             MainActor.assumeIsolated { self?.browserNotice(browserId: browserId, kind: kind) }
         }
+        driver.setPopupAdopter { [weak self] openerId, url in
+            MainActor.assumeIsolated { self?.adoptPopup(openerBrowserId: openerId, url: url) }
+        }
+        driver.setClosedObserver { [weak self] browserId in
+            MainActor.assumeIsolated { self?.browserClosed(browserId: browserId) }
+        }
+    }
+
+    // MARK: - Windows the person opens
+
+    /// A window the page opened while the person held the opener in Winter's panel (CEF asks only then): a new tab of
+    /// the opener's session, its browser created by CEF itself under the key answered here (so the page keeps
+    /// `window.opener`). The daemon hears of it once its browser exists (`headless.popupOpened`). Nil — refused, as
+    /// every other window is — past the tab ceiling or for an opener this host does not know.
+    func adoptPopup(openerBrowserId: Int, url: String) -> NSView? {
+        guard openerBrowserId != 0, tabs.count < Self.maxTabs,
+              let opener = tabs.values.first(where: { driver.browserIdentifier($0.key) == openerBrowserId }) else { return nil }
+        let tab = Tab(tabId: Self.mintTabId(), sessionId: opener.sessionId, key: NSView(frame: .zero), url: url)
+        tab.openerTabId = opener.tabId
+        tabs[tab.tabId] = tab
+        install(tab)
+        announcePopup(tab, deadline: clock.now().addingTimeInterval(Self.ensureDeadline))
+        return tab.key
+    }
+
+    /// A tab id of the helper's own minting (`w-` and 12 hex, the daemon's shape — 48 random bits).
+    static func mintTabId() -> String {
+        var generator = SystemRandomNumberGenerator()  // arc4random on Darwin
+        return "w-" + (0..<6).map { _ in String(format: "%02x", UInt8.random(in: 0...255, using: &generator)) }.joined()
+    }
+
+    private func announcePopup(_ tab: Tab, deadline: Date) {
+        guard tabs[tab.tabId] === tab, let opener = tab.openerTabId else { return }
+        let browserId = driver.browserIdentifier(tab.key)
+        if browserId != 0 {
+            tab.browserId = browserId
+            output?.popupOpened(tabId: tab.tabId, openerTabId: opener, url: tab.url)
+            return
+        }
+        guard clock.now() < deadline else {
+            close(tab.tabId)  // a window whose browser never came: nothing to tell
+            return
+        }
+        clock.after(Self.ensurePollInterval) { [weak self] in self?.announcePopup(tab, deadline: deadline) }
+    }
+
+    /// A browser closed. Closed by Winter, its tab is gone already; closed by its PAGE (`window.close()` of a window it
+    /// opened — a sign-in window, done), the tab goes now and the daemon is told.
+    func browserClosed(browserId: Int) {
+        guard browserId != 0, let tab = tabs.values.first(where: { $0.browserId == browserId }) else { return }
+        close(tab.tabId)
+        output?.tabGone(tabId: tab.tabId, reason: .closed)
     }
 
     // MARK: - Refusals the browser reports
@@ -203,7 +259,9 @@ final class HeadlessHost {
             reply(.failure(code: .tabGone, message: "the tab went away before its browser was ready"))
             return
         }
-        if driver.browserIdentifier(tab.key) != 0 {
+        let browserId = driver.browserIdentifier(tab.key)
+        if browserId != 0 {
+            tab.browserId = browserId
             reply(.ok(ensureResult(tab)))
             return
         }
@@ -455,6 +513,8 @@ protocol HeadlessOutput: AnyObject {
     func notice(tabId: String, kind: String)
     /// A presentation's viewer was accepted: the tab is really shown (`headless.presentationStarted`).
     func presentationStarted(tabId: String)
+    /// A window the page opened while the person held `openerTabId` is a tab of its own now (`headless.popupOpened`).
+    func popupOpened(tabId: String, openerTabId: String, url: String)
     /// A presentation of the tab ended on the viewer's side (`headless.presentationEnded`).
     func presentationEnded(tabId: String, reason: String)
 }

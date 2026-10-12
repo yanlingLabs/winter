@@ -121,13 +121,16 @@ interface PoolTab {
   inflight: number;
   /** Shown in Winter's panel. */
   presentation?: Presentation;
+  /** A window the page opened while the person held this tab's opener (a sign-in window): the person's alone — never
+   *  listed to the agent, shown beside its opener, closed when the person lets the opener go. */
+  openerTabKey?: string;
 }
 
 /** One headless tab shown in Winter's panel. */
 interface Presentation {
   nonce: string;
   service: string;
-  purpose: "handoff" | "watch";
+  purpose: "handoff" | "watch" | "popup";
   /** The person holds control: the agent's commands are refused. */
   control: boolean;
   /** Control is being taken (the agent's commands in flight finishing): new ones are refused already. */
@@ -632,8 +635,9 @@ export class HeadlessPool implements CdpTransport {
   /** The open headless tabs — `[]`, and nothing started, while the helper is not running. */
   async listTabs(opts?: { sessionId?: string }): Promise<TransportTab[]> {
     const mine = await this.liveTabs(opts?.sessionId);
-    // A tab the turn's end closed while the person held it is no longer the agent's to find.
-    return mine.filter((t) => t.presentation?.closeWhenReleased !== true)
+    // A tab the turn's end closed while the person held it is no longer the agent's to find; a window the person opened
+    // never was.
+    return mine.filter((t) => t.presentation?.closeWhenReleased !== true && t.openerTabKey === undefined)
       .map((t) => ({ tabKey: t.tabKey, url: t.url, title: t.title, active: false, agent: true, sessionId: t.sessionId }));
   }
 
@@ -787,13 +791,19 @@ export class HeadlessPool implements CdpTransport {
         if (p === undefined) return;
         if (p.handoffPending) this.userDone(tabKey, false);
         await this.endPresentation(t, "closed in the panel", { hide: false });
+        // A window the person opened is closed with its view: it was theirs alone.
+        if (t.openerTabKey !== undefined && this.tabs.get(t.tabKey) === t) {
+          this.tabs.delete(t.tabKey);
+          void this.closingWhile(this.command(t.proc, "tab.close", { tabId: t.tabKey })).catch(() => undefined).finally(() => this.armIdle());
+          this.pushTabs(t.sessionId);
+        }
         return;
     }
   }
 
   /** The session's headless tabs, for the panel's list. */
   async panelTabs(sessionId: string): Promise<HeadlessTabRow[]> {
-    return (await this.liveTabs(sessionId)).map((t) => this.row(t));
+    return (await this.liveTabs(sessionId)).filter((t) => t.openerTabKey === undefined).map((t) => this.row(t));
   }
 
   private row(t: PoolTab): HeadlessTabRow {
@@ -813,7 +823,8 @@ export class HeadlessPool implements CdpTransport {
       this.tabsPush.delete(sessionId);
       const viewer = this.deps.viewer?.();
       if (viewer === undefined) return;
-      const rows = [...this.tabs.values()].filter((t) => t.sessionId === sessionId && t.presentation?.closeWhenReleased !== true).map((t) => this.row(t));
+      const rows = [...this.tabs.values()].filter((t) => t.sessionId === sessionId && t.presentation?.closeWhenReleased !== true && t.openerTabKey === undefined)
+        .map((t) => this.row(t));
       viewer.tabs({ sessionId, tabs: rows });
     }, 100);
     (timer as { unref?: () => void }).unref?.();
@@ -826,7 +837,7 @@ export class HeadlessPool implements CdpTransport {
    * accepted in time: the presentation is ended and the call fails, typed. `control`: the person holds the tab from the
    * start (the agent's commands in flight finish first).
    */
-  private async startPresentation(t: PoolTab, purpose: "handoff" | "watch", control: boolean): Promise<void> {
+  private async startPresentation(t: PoolTab, purpose: "handoff" | "watch" | "popup", control: boolean): Promise<void> {
     const missing = this.presentMissing();
     if (missing !== undefined) throw new AutomationFailure("BrowserUnavailable", `Winter can't show the headless tab: ${missing}`);
     const viewer = this.deps.viewer?.();
@@ -841,7 +852,8 @@ export class HeadlessPool implements CdpTransport {
     try {
       if (control) {
         await this.drain(t);
-        await this.yieldToPerson(t);
+        // A window the person opened was never the agent's: nothing to undo.
+        if (t.openerTabKey === undefined) await this.yieldToPerson(t);
       }
       if (t.presentation !== p) throw new AutomationFailure("TargetBusy", "the tab's presentation changed meanwhile — try again");
       const r = await this.command(t.proc, "headless.present", {
@@ -935,8 +947,44 @@ export class HeadlessPool implements CdpTransport {
       p.control = false;
       try { await this.command(t.proc, "headless.control", { tabId: t.tabKey, control: false }); } catch { /* the presentation may be gone */ }
     }
+    await this.closeWindowsOf(t);
     if (p.closeWhenReleased) { await this.endPresentation(t, "closed"); return; }
     this.pushTabs(t.sessionId);
+  }
+
+  /** The windows the person opened from `t` (sign-in windows) close when they let `t` go: they were theirs alone. */
+  private async closeWindowsOf(t: PoolTab): Promise<void> {
+    for (const w of [...this.tabs.values()].filter((x) => x.openerTabKey === t.tabKey)) {
+      this.tabs.delete(w.tabKey);
+      if (w.presentation !== undefined) await this.endPresentation(w, "closed");
+      if (w.proc.alive) void this.closingWhile(this.command(w.proc, "tab.close", { tabId: w.tabKey })).catch(() => undefined).finally(() => this.armIdle());
+    }
+  }
+
+  /**
+   * A window the page opened while the person held `opener` in the panel (`headless.popupOpened` — a sign-in window, as
+   * a rule): a tab of the opener's session that only the person uses, shown in the panel beside its opener with them in
+   * control. The opener no longer held, or the budget spent: closed at once.
+   */
+  private async adoptWindow(proc: WinterHeadlessProcess, e: { tabKey: string; openerTabKey: string; url: string }): Promise<void> {
+    const opener = this.tabs.get(e.openerTabKey);
+    const refuse = (why: string): void => {
+      this.deps.log?.(`computer-use: a window a page in Winter's headless browser opened was closed (${why})`);
+      void this.closingWhile(this.command(proc, "tab.close", { tabId: e.tabKey })).catch(() => undefined);
+    };
+    if (opener === undefined || opener.proc !== proc || opener.presentation?.control !== true) { refuse("its opener is no longer the person's"); return; }
+    if (this.tabCount(opener.sessionId) >= HEADLESS_TABS_PER_SESSION || this.tabs.size >= HEADLESS_TABS_GLOBAL) { refuse("too many headless tabs are open"); return; }
+    const w: PoolTab = { tabKey: e.tabKey, sessionId: opener.sessionId, proc, url: e.url, title: "", noticed: new Set(), inflight: 0, openerTabKey: opener.tabKey };
+    this.tabs.set(w.tabKey, w);
+    try {
+      await this.startPresentation(w, "popup", true);
+    } catch (err) {
+      this.deps.log?.(`computer-use: a window the person opened could not be shown (${err instanceof Error ? err.message : "error"}) — closed`);
+      if (this.tabs.get(w.tabKey) === w) {
+        this.tabs.delete(w.tabKey);
+        void this.closingWhile(this.command(proc, "tab.close", { tabId: w.tabKey })).catch(() => undefined);
+      }
+    }
   }
 
   /** End `t`'s presentation: the helper stops it (the viewer is told), the panel's view goes, control returns to the
@@ -945,6 +993,7 @@ export class HeadlessPool implements CdpTransport {
     const p = t.presentation;
     if (p === undefined) return;
     t.presentation = undefined;
+    await this.closeWindowsOf(t);
     for (const w of [...p.startWaiters]) w(false);
     if (t.proc.alive) {
       try { await this.command(t.proc, "headless.unpresent", { tabId: t.tabKey }); } catch { /* it may have ended already */ }
@@ -973,6 +1022,7 @@ export class HeadlessPool implements CdpTransport {
 
   /** The helper says a presentation's viewer was accepted, or that the viewer ended it. */
   private presentationEvent(proc: WinterHeadlessProcess, e: HeadlessPresentationEvent): void {
+    if (e.kind === "popup") { void this.adoptWindow(proc, e); return; }
     const t = this.tabs.get(e.tabKey);
     if (t === undefined || t.proc !== proc || t.presentation === undefined) return;
     const p = t.presentation;

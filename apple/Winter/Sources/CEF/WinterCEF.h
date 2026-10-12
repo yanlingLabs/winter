@@ -943,6 +943,14 @@ void WinterCEFHeadlessSetFileChooserHandler(BOOL (^handler)(int browserId, int r
 /// Answer a file chooser the handler took: the files, or nil / empty to cancel. Once; later answers are ignored.
 void WinterCEFHeadlessResolveFileChooser(int requestId, NSArray<NSString *> *paths);
 
+/// A window the page opens (with a user gesture) while a presentation's person holds the browser — a sign-in window, as
+/// a rule: the adopter answers the key of a new tab to create it under (CEF creates the browser itself, so the page
+/// keeps its `window.opener`), or nil to refuse it as every other window is. Main thread. `nil` stops it.
+void WinterCEFHeadlessSetPopupAdopter(NSView *(^adopter)(int openerBrowserId, NSString *url));
+
+/// A headless browser is closing (the page closed a window it opened, or Winter closed it). Main thread. `nil` stops it.
+void WinterCEFHeadlessSetClosedObserver(void (^observer)(int browserId));
+
 /// A presentation's person holds `key`'s browser (YES) or no longer does: while they do, it may take focus (an
 /// automated tab otherwise refuses it), which the page's IME events need.
 void WinterCEFHeadlessSetUserControl(NSView *key, BOOL control);

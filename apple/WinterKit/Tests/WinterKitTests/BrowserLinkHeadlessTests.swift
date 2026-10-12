@@ -50,6 +50,13 @@ final class BrowserLinkHeadlessTests: XCTestCase {
         XCTAssertEqual(s.uploadDir, "/tmp/home/cache/headless-uploads")
     }
 
+    func testAWindowThePageOpenedIsShownWithItsOwnPurpose() throws {
+        guard case .show(let s) = try parse(show(["purpose": #""popup""#])).get().op else {
+            return XCTFail("not a show")
+        }
+        XCTAssertEqual(s.purpose, .popup)
+    }
+
     func testAShowWithAnEmptyTitleAndURLIsStillRead() throws {
         guard case .show(let s) = try parse(show(["title": #""""#, "url": #""""#, "purpose": #""watch""#, "control": "false"])).get().op else {
             return XCTFail("not a show")
