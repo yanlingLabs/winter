@@ -500,6 +500,7 @@ final class SimRun {
             click(at: CGPoint(x: 780, y: 480), r: &r)
         case .dock(let a):
             w.hardware(observable: true)
+            w.launchCapable()  // a click (R17-d (i))
             w.log("the user clicks \(SimPid.name(a)) in the Dock")
             core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: clock.nowSeconds())
             // A click on that app's Dock tile: input for THAT app, claimed (the contract).
@@ -528,7 +529,7 @@ final class SimRun {
                 w.schedule(after: 30, "Tab (⌘ held)") {
                     let stillVisible = w.lock.withLock { !w.secure }
                     w.key(.keyDown, flags: .maskCommand, keycode: 48); w.key(.keyUp, flags: .maskCommand, keycode: 48)
-                    if stillVisible { tabSwitch = w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, dest: a, keyboard: true, pending: true)) }
+                    if stillVisible { tabSwitch = w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, dest: a, keyboard: true, pending: true, tabSeen: true)) }
                 }
             }
             let hold = holdMs ?? r.double(60, 350)
@@ -603,9 +604,12 @@ final class SimRun {
             w.press(.maskCommand)
             w.key(.keyDown, flags: .maskCommand, keycode: 49)
             w.release(.maskCommand)
-            for k in 0..<3 { w.schedule(after: 60 + Double(k) * 50, "a Spotlight key") { w.key(.keyDown); w.key(.keyUp) } }
+            // (The keys typed into Spotlight's panel go to ITS process — R17-d (ii): the interactive launcher is the world's own
+            // fact, recorded where it launches.)
+            for k in 0..<3 { w.schedule(after: 60 + Double(k) * 50, "a Spotlight key") { w.key(.keyDown, to: SimPid.spotlight); w.key(.keyUp, to: SimPid.spotlight) } }
             w.schedule(after: 260, "Return") { [unowned self] in
-                w.key(.keyDown, keycode: 36)
+                w.key(.keyDown, keycode: 36, to: SimPid.spotlight)
+                w.lock.withLock { w.launcherInputs.append(w.now) }
                 let pid = w.lock.withLock { () -> pid_t in
                     self.userLaunchSeq += 1
                     let pid = 950 + self.userLaunchSeq
@@ -705,6 +709,7 @@ final class SimRun {
             return (h, d, SimSwitch(at: t, app: true, desktop: elsewhere, target: h.pid, claim: true, dest: h.pid), nil)
         }
         w.hardware(observable: true)
+        w.launchCapable()  // a click (R17-d (i))
         // A click into an agent target's ordinary window (not a ⌘-click): they are working in it (round 10).
         if let h = hit, h.layer == 0, h.pid != SimPid.own, !flags.contains(.maskCommand) { w.userInteracted(h.pid) }
         w.log("the user \(flags.contains(.maskCommand) ? "⌘-" : "")\(drag ? "drags from" : "clicks") (\(Int(p.x)), \(Int(p.y))) — \(hit.map { "\(SimPid.name($0.pid))'s window \($0.id)" } ?? "the desktop")")
