@@ -718,6 +718,9 @@ export class TabDriver {
   // ── the page runtime ───────────────────────────────────────────────────────────────────────────
 
   private top(): FrameRec {
+    // A tab lost while a primitive was waiting on it (its browser died mid-wait: the failed command reset the document
+    // first) is lost, not "not ready".
+    if (this.gone !== undefined) throw this.lost();
     const rec = this.topFrameId === undefined ? undefined : this.frames.get(this.topFrameId);
     if (rec === undefined) throw new AutomationFailure("TargetBusy", "the page is not ready yet — try again in a moment", true);
     return rec;

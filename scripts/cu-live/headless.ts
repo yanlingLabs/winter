@@ -35,9 +35,10 @@
  *      of the helper's tree — the helper and every CEF subprocess it started, found by parent pid — ever owns an
  *      on-screen window (CoreGraphics' window list, read through JavaScript for Automation with no Apple Event to any
  *      app; off-screen windows are reported); and the helper is never a Foreground app (`lsappinfo`: a Dock tile).
- *   memory — reported, not asserted: the first open to its state (cold, and with --load), and the helper's
- *      process-tree RSS at 1, 8 and 24 tabs; asserted: a session's 9th tab and the 25th tab are TargetBusy (a
- *      memory-guard refusal before 24 is recorded as the finding it is).
+ *   memory — reported, not asserted: the first open to its state (cold, and with --load), and the helper's memory at
+ *      1, 8 and 24 tabs — its processes' physical footprint summed, what the memory guard reads (with the old
+ *      resident-size sum beside it); asserted: a session's 9th tab and the 25th tab are TargetBusy (a memory-guard
+ *      refusal before 24 is recorded as the finding it is), and once every tab is closed the guard lets a new tab open.
  *   isolation — two sessions sign in to the same local site as different users and each sees only its own (cookies
  *      and localStorage); after a session's runtime ends its context is gone (signed out); tabs close at the turn's end,
  *      handoff() keeps one for exactly one more turn, keep() is NotAllowed; the helper SIGKILLed during a waitFor →
@@ -57,7 +58,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { basename, dirname, join, resolve } from "node:path";
 import { BrowserEngine, HEADLESS_KEEP } from "../../packages/core/src/computer-use/browser/engine";
 import { headlessRequirementFor } from "../../packages/core/src/computer-use/browser/headless/engines";
-import { HEADLESS_NAME, HeadlessPool, processTreeRss } from "../../packages/core/src/computer-use/browser/headless/pool";
+import { processTreeFootprint, processTreeRss } from "../../packages/core/src/computer-use/browser/headless/memory";
+import { HEADLESS_NAME, HeadlessPool } from "../../packages/core/src/computer-use/browser/headless/pool";
 import { BrowserBackendRegistry } from "../../packages/core/src/computer-use/browser/registry";
 import type { TabRunScope } from "../../packages/core/src/computer-use/browser/tab-scope";
 import { DiffBases } from "../../packages/core/src/computer-use/diff-base";
@@ -508,6 +510,12 @@ async function main(): Promise<void> {
   const failsWith = async (p: Promise<unknown>, kind: string): Promise<string | undefined> => {
     try { await p; return undefined; } catch (err) { return err instanceof AutomationFailure && err.kind === kind ? err.message : undefined; }
   };
+  /** What a call did, for a check's detail: "resolved", or the error's kind and message. */
+  const outcome = async (p: Promise<unknown>): Promise<{ kind?: string; text: string }> => {
+    try { await p; return { text: "resolved" }; } catch (err) {
+      return err instanceof AutomationFailure ? { kind: err.kind, text: `${err.kind}: ${err.message}` } : { text: err instanceof Error ? `${err.name}: ${err.message}` : String(err) };
+    }
+  };
   const waitUntil = async (what: () => boolean, ms: number): Promise<boolean> => {
     const t0 = Date.now();
     while (Date.now() - t0 < ms) { if (what()) return true; await Bun.sleep(50); }
@@ -622,7 +630,11 @@ async function main(): Promise<void> {
       await scenario("memory: the helper's memory at 1, 8 and 24 tabs; a session's 9th and the 25th tab are TargetBusy", "memory", async () => {
         const sessions = ["s_mem_1", "s_mem_2", "s_mem_3"].map((sid) => ({ sid, sc: scope(sid) }));
         const rss: Record<string, string> = {};
-        const sample = async (label: string): Promise<void> => { await Bun.sleep(1_500); rss[label] = mib(pool.pid === undefined ? undefined : processTreeRss(pool.pid)); };
+        const sample = async (label: string): Promise<void> => {
+          await Bun.sleep(1_500);
+          const pid = pool.pid;
+          rss[label] = `${mib(pid === undefined ? undefined : processTreeFootprint(pid))} (resident-size sum ${mib(pid === undefined ? undefined : processTreeRss(pid))})`;
+        };
         let n = 100;
         let guard: string | undefined;
         const openIn = async (i: number, count: number): Promise<void> => {
@@ -641,15 +653,22 @@ async function main(): Promise<void> {
         const twentyFifth = guard === undefined ? await failsWith(extra.open(`${BASE}/media/${n++}`), "TargetBusy") : "skipped (memory guard)";
         for (const { sid, sc } of sessions) { sc.end(); engine.turnEnded(sid); }
         extra.end();
-        measures.rss = rss;
+        measures.memory = rss;
         if (guard !== undefined) measures.memoryGuard = guard;
+        const allClosed = await waitUntil(() => pool.tabCount() === 0, 5_000);
+        // At once, as the next scenario would: the guard never stays tripped once the tabs are gone.
+        const after = scope("s_mem_after");
+        let reopened: string;
+        try { await after.open(`${BASE}/media/${n++}`); reopened = "opened"; } catch (err) { reopened = err instanceof Error ? `${err.name}: ${err.message}` : String(err); }
+        after.end(); engine.turnEnded("s_mem_after");
         return {
           checks: [
             check("a session's 9th tab is TargetBusy", ninth !== undefined, String(ninth)),
             check("the 25th tab is TargetBusy", twentyFifth !== undefined, String(twentyFifth)),
-            check("every tab closed at the turns' end", await waitUntil(() => pool.tabCount() === 0, 5_000), `${pool.tabCount()} left`),
+            check("every tab closed at the turns' end", allClosed, `${pool.tabCount()} left`),
+            check("right after, a new tab opens (the guard is not left tripped)", reopened === "opened", reopened),
           ],
-          note: `RSS ${Object.entries(rss).map(([k, v]) => `${k}: ${v}`).join(", ")}${guard === undefined ? "" : ` — ${guard}`}`,
+          note: `memory ${Object.entries(rss).map(([k, v]) => `${k}: ${v}`).join(", ")}${guard === undefined ? "" : ` — ${guard}`}`,
         };
       });
     }
@@ -706,7 +725,7 @@ async function main(): Promise<void> {
         const k = scope("s_kill");
         const tab = await k.open(`${BASE}/slow`);
         const before = pool.pid;
-        const waiting = failsWith(k.p(tab, "waitFor", { cond: { text: "never shows" }, timeoutMs: 20_000 }), "TargetLost");
+        const waiting = outcome(k.p(tab, "waitFor", { cond: { text: "never shows" }, timeoutMs: 20_000 }));
         await Bun.sleep(1_000);
         if (before !== undefined) process.kill(before, "SIGKILL");
         const lost = await waiting;
@@ -717,7 +736,7 @@ async function main(): Promise<void> {
         k.end();
         engine.turnEnded("s_kill");
         return { checks: [
-          check("the waitFor running when it died is TargetLost", lost !== undefined, String(lost)),
+          check("the waitFor running when it died is TargetLost", lost.kind === "TargetLost", lost.text),
           check("the next call on that tab is TargetLost", next !== undefined, String(next)),
           check("the next browsers.open relaunched it (a new pid) and works", after !== undefined && after !== before && read.includes("signed out"), `${before} → ${after}`),
         ] };

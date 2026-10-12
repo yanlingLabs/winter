@@ -53,7 +53,7 @@ export interface ComputerUseInjection {
   /** Phase 2: is a browser app installed (default: a LaunchServices lookup, never a launch)? */
   browserInstalled?: (bundleId: string) => boolean;
   /** Phase 4: the headless pool's engine seams (a fake helper on its pipe, no signature check) — tests only. */
-  headless?: Partial<Pick<HeadlessPoolDeps, "resolve" | "spawn" | "verify" | "rssOf" | "idleExitMs" | "enabledPollMs" | "timeouts">>;
+  headless?: Partial<Pick<HeadlessPoolDeps, "resolve" | "spawn" | "verify" | "memoryOf" | "idleExitMs" | "enabledPollMs" | "timeouts">>;
 }
 
 export interface ComputerUseRuntimeDeps {
@@ -257,7 +257,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     resolve: deps.inject?.headless?.resolve ?? (() => resolveWinterHeadless(deps.profile, { overrideOnly: !(deps.inject?.launchAllowed ?? deps.launchAllowed) })),
     ...(deps.inject?.headless?.spawn === undefined ? {} : { spawn: deps.inject.headless.spawn }),
     verify: deps.inject?.headless?.verify ?? processSatisfiesRequirement,
-    ...(deps.inject?.headless?.rssOf === undefined ? {} : { rssOf: deps.inject.headless.rssOf }),
+    ...(deps.inject?.headless?.memoryOf === undefined ? {} : { memoryOf: deps.inject.headless.memoryOf }),
     ...(deps.inject?.headless?.idleExitMs === undefined ? {} : { idleExitMs: deps.inject.headless.idleExitMs }),
     ...(deps.inject?.headless?.enabledPollMs === undefined ? {} : { enabledPollMs: deps.inject.headless.enabledPollMs }),
     ...(deps.inject?.headless?.timeouts === undefined ? {} : { timeouts: deps.inject.headless.timeouts }),
