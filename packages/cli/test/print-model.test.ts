@@ -17,6 +17,12 @@ const TERRA = "codex-oauth/gpt-5.6-terra";
 const row = (id: string) => ({ id, providerId: id.slice(0, id.indexOf("/")), displayName: id, efforts: [] as string[] });
 
 describe("parsePrintArgs", () => {
+  test("a policy flag between --model and the prompt is never the prompt", () => {
+    expect(parsePrintArgs(["--model", "codex-oauth/gpt-5.6-terra", "--plan", "fix it"]))
+      .toEqual({ kind: "ok", prompt: "fix it", model: "codex-oauth/gpt-5.6-terra" });
+    expect(parsePrintArgs(["--auto", "--trust", "hi", "--model=a/b"])).toEqual({ kind: "ok", prompt: "hi", model: "a/b" });
+    expect(parsePrintArgs(["--model", "a/b", "--no-trust"])).toEqual({ kind: "ok", prompt: undefined, model: "a/b" });
+  });
   test("no --model: the prompt is the first argument, exactly as -p has always read it", () => {
     expect(parsePrintArgs(["hello"])).toEqual({ kind: "ok", prompt: "hello", model: undefined });
     expect(parsePrintArgs(["hello", "--auto", "--trust"])).toEqual({ kind: "ok", prompt: "hello", model: undefined });

@@ -24,6 +24,9 @@ export const PRINT_USAGE = 'usage: winter -p "<prompt>" [--auto|--plan] [--trust
 /** Where a refused `--model` points: `winter model` prints the catalogue a live daemon offers. */
 const LIST_HINT = "Run `winter model` to list the models you can use.";
 
+/** The flags `-p` reads off argv itself, wherever they sit; never the prompt. */
+export const PRINT_POLICY_FLAGS: ReadonlySet<string> = new Set(["--auto", "--plan", "--trust", "--no-trust"]);
+
 export type PrintArgs =
   | { kind: "ok"; prompt: string | undefined; model: string | undefined }
   | { kind: "usageError"; message: string };
@@ -62,7 +65,8 @@ export function parsePrintArgs(args: readonly string[]): PrintArgs {
     if (model !== undefined) return { kind: "usageError", message: `${PRINT_USAGE} — --model may be given only once` };
     model = value;
   }
-  return { kind: "ok", prompt: rest[0], model };
+  // The policy flags may sit anywhere (`-p --model x --plan "…"`): the prompt is the first argument that is not one.
+  return { kind: "ok", prompt: rest.find((a) => !PRINT_POLICY_FLAGS.has(a)), model };
 }
 
 /** A `--model` the offline checks accepted: the canonical tag the daemon would store, and whether it is
