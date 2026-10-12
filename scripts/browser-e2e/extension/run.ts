@@ -398,11 +398,28 @@ async function wakeRow(t: CdpTransport, base: string, profile: string): Promise<
     await sleep(500);
     await userClicks("/wake.html?user=1", "#next");
     const nv = await eventOf(nav.id);
-    check(nv?.outcome === "fired" && nv.detail === `now at ${base}/wake.html?step=2`, "the user following a link fires the { url } wake (the extension's tabs.onUpdated)", nv ?? events);
+    // The extension matched the words itself: what reached Winter is the address's site and path, never its query.
+    check(nv?.outcome === "fired" && nv.detail === `now at ${base}/wake.html?… — matched “step=2”`, "the user following a link fires the { url } wake (the extension's tabs.onUpdated; no query reaches Winter)", nv ?? events);
     const dn = await eventOf(done.id);
     check(dn?.outcome === "fired" && dn.detail === "appeared", "the new document gets the watcher again, and its text fires the appeared wake", dn ?? events);
     const left = await cdp.inWorker<number>(`chrome.debugger.getTargets().then((ts) => ts.filter((x) => x.attached && x.tabId === ${listed!.tabKey}).length)`);
     check(left === 0, "…with no debugger attached at any point of the wait", left);
+
+    // The extension's own-input stamp: Winter's own click through the extension's debugger never fires a wake.
+    const runOwn = runScope("rwake-own");
+    const mine = await engine.global(runOwn.s, "browsers.tab", { tab: `chrome:${listed!.tabKey}` }) as TabHandle;
+    const stOwn = await engine.primitive(runOwn.s, mine.targetId, "state", { full: true, emit: false }) as string;
+    const refOwn = (re: RegExp) => String(/\[(\d+)\]/.exec(stOwn.split("\n").find((l) => re.test(l)) ?? "")?.[1] ?? "");
+    const ownWake = await arm(mine.targetId, { kind: "clicked", ref: refOwn(/button "Next button"/) });
+    await engine.primitive(runOwn.s, mine.targetId, "click", { target: Number(refOwn(/button "Next button"/)) });
+    await sleep(1_500);
+    check(!events.some((e) => e.wakeId === ownWake.id), "Winter's own click (its debugger, stamped own) never fires the wake", events.filter((e) => e.wakeId === ownWake.id));
+    runOwn.end();
+    engine.turnEnded("s_wake");
+    await sleep(500);
+    await userClicks("/wake.html?step=2", "#nextButton");
+    const ow = await eventOf(ownWake.id);
+    check(ow?.outcome === "fired" && ow.detail === "clicked", "…and the user's own click then does", ow ?? events);
 
     // The headline case: the user presses a form's submit button and the page navigates away at once.
     const run3 = runScope("rwake3");

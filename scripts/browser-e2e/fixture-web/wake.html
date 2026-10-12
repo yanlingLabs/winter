@@ -2,10 +2,12 @@
 <html><head><meta charset="utf-8"><title>Review form</title></head>
 <body>
 <h1>Submit your listing</h1>
-<form id="f" action="/wake.html">
+<form id="f" aria-label="Listing" action="/wake.html">
   <label>Email <input id="email" name="email"></label>
   <label>Password <input id="password" name="password" type="password"></label>
   <button id="submit" type="submit">Submit for review</button>
+  <!-- Enter on this link activates it (a same-document move): never the form's submit. -->
+  <a id="cancel" href="#cancelled">Cancel</a>
 </form>
 <p id="status"></p>
 <!-- A form that really submits: the page navigates away as the user presses its button. -->
@@ -15,11 +17,52 @@
 </form>
 <button id="other" type="button">Another button</button>
 <a id="next" href="/page2.html">Next page</a>
+
+<!-- gone (an element, a text), titled: the user's clicks change the page. -->
+<button id="removeMe" type="button">Remove me</button>
+<p id="note">Draft saved</p>
+<button id="doRemove" type="button">Remove the button</button>
+<button id="clearNote" type="button">Clear the note</button>
+<button id="setTitle" type="button">Place the order</button>
+
+<!-- A re-render that keeps the element (an identical node in its place), and one that removes it. -->
+<div id="list"><button id="item-save" data-testid="save" type="button">Save item</button></div>
+<button id="rerender" type="button">Refresh the list</button>
+<button id="dropSave" type="button">Empty the list</button>
+
+<!-- An element inside an open shadow root. -->
+<div id="host"></div>
+
+<!-- The page's own autosave: it submits the form by script 700 ms after the last input in it. -->
+<form id="auto" aria-label="Autosave"><label>Notes <input id="autoNote" name="note"></label></form>
+<p id="autoStatus"></p>
+
+<!-- A file input (the user's own file chooser), and a form whose submit asks confirm(). -->
+<label>Attachment <input id="file" type="file"></label>
+<form id="c" aria-label="Approval"><button id="csub" type="submit">Send for approval</button></form>
+<p id="cstatus"></p>
 <script>
-  // The page's own work after the user's submit: it answers a moment later (an upload, a server round trip).
+  // The page's own answer after the user's submit (a moment later), as an upload or a server round trip would.
   document.getElementById("f").addEventListener("submit", (e) => {
     e.preventDefault();
     setTimeout(() => { document.getElementById("status").textContent = "Submitted for review"; }, 300);
+  });
+  document.getElementById("doRemove").addEventListener("click", () => document.getElementById("removeMe").remove());
+  document.getElementById("clearNote").addEventListener("click", () => document.getElementById("note").remove());
+  document.getElementById("setTitle").addEventListener("click", () => { document.title = "Order placed — Review form"; });
+  document.getElementById("rerender").addEventListener("click", () => {
+    document.getElementById("list").innerHTML = '<button id="item-save" data-testid="save" type="button">Save item</button>';
+  });
+  document.getElementById("dropSave").addEventListener("click", () => { document.getElementById("list").innerHTML = ""; });
+  const root = document.getElementById("host").attachShadow({ mode: "open" });
+  root.innerHTML = '<button id="sbtn" type="button">Shadow approve</button>';
+  const auto = document.getElementById("auto");
+  let autoTimer;
+  auto.addEventListener("input", () => { clearTimeout(autoTimer); autoTimer = setTimeout(() => auto.requestSubmit(), 700); });
+  auto.addEventListener("submit", (e) => { e.preventDefault(); document.getElementById("autoStatus").textContent = "Autosaved"; });
+  document.getElementById("c").addEventListener("submit", (e) => {
+    e.preventDefault();
+    document.getElementById("cstatus").textContent = confirm("Send it for approval?") ? "confirmed" : "cancelled";
   });
 </script>
 </body></html>

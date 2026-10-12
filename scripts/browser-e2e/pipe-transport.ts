@@ -43,6 +43,10 @@ export class PipeTransport implements CdpTransport {
   /** As Winter for Chrome says in its hello (Phase 3: `cdp3`); undefined for the built-in browser's stand-in. */
   features?: Set<string>;
 
+  /** Wake triggers: standing in for Winter.app with the link feature `watchOnly` (it holds no native UI, so a
+   *  watch-only hold is an ordinary attach). */
+  watchOnlyHolds?: boolean;
+
   constructor(readonly backend: string, family: BrowserFamily) { this.family = family; }
 
   /** TEST ONLY, browser level: where a download the engine did NOT catch lands (never the user's Downloads folder). */
