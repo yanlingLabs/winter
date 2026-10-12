@@ -1,0 +1,115 @@
+   Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/src/devices)
+   Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/src/vmm)
+warning: unused imports: `AtomicU64` and `Ordering`
+   --> src/vmm/src/macos/vstate.rs:622:35
+    |
+622 |     use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+    |                                   ^^^^^^^^^  ^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` on by default
+
+error[E0063]: missing fields `cowork_fixture_reclaim`, `cowork_guarded_block`, `cowork_runtime_fixture_trace` and 3 other fields in initializer of `resources::VmResources`
+   --> src/vmm/src/resources.rs:423:9
+    |
+423 |         VmResources {
+    |         ^^^^^^^^^^^ missing `cowork_fixture_reclaim`, `cowork_guarded_block`, `cowork_runtime_fixture_trace` and 3 other fields
+
+error[E0061]: this function takes 7 arguments but 6 arguments were supplied
+   --> src/vmm/src/macos/vstate.rs:638:20
+    |
+638 |         let vcpu = Vcpu::new_aarch64(1, GuestAddress(0), None, exit_evt, vcpu_list, false).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^    --------------- argument #2 of type `u32` is missing
+    |
+note: associated function defined here
+   --> src/vmm/src/macos/vstate.rs:272:12
+    |
+272 |     pub fn new_aarch64(
+    |            ^^^^^^^^^^^
+273 |         id: u8,
+274 |         ipa_size: u32,
+    |         -------------
+help: provide the argument
+    |
+638 |         let vcpu = Vcpu::new_aarch64(1, /* u32 */, GuestAddress(0), None, exit_evt, vcpu_list, false).unwrap();
+    |                                         ++++++++++
+
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+   --> src/vmm/src/macos/vstate.rs:652:22
+    |
+652 |         let mut vm = Vm::new(false).expect("Cannot create new vm");
+    |                      ^^^^^^^ ----- argument #1 of type `&mut krun_arch::ArchMemoryInfo` is missing
+    |
+note: associated function defined here
+   --> src/vmm/src/macos/vstate.rs:100:12
+    |
+100 |     pub fn new(arch_mem_info: &mut ArchMemoryInfo, nested_enabled: bool) -> Result<Self> {
+    |            ^^^ ----------------------------------
+help: provide the argument
+    |
+652 |         let mut vm = Vm::new(/* &mut krun_arch::ArchMemoryInfo */, false).expect("Cannot create new vm");
+    |                              +++++++++++++++++++++++++++++++++++++
+
+error[E0061]: this function takes 7 arguments but 6 arguments were supplied
+   --> src/vmm/src/macos/vstate.rs:670:24
+    |
+670 |         let mut vcpu = Vcpu::new_aarch64(
+    |                        ^^^^^^^^^^^^^^^^^
+671 |             0,
+672 |             GuestAddress(0),
+    |             --------------- argument #2 of type `u32` is missing
+    |
+note: associated function defined here
+   --> src/vmm/src/macos/vstate.rs:272:12
+    |
+272 |     pub fn new_aarch64(
+    |            ^^^^^^^^^^^
+273 |         id: u8,
+274 |         ipa_size: u32,
+    |         -------------
+help: provide the argument
+    |
+670 -         let mut vcpu = Vcpu::new_aarch64(
+671 -             0,
+672 -             GuestAddress(0),
+673 -             None,
+674 -             EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+675 -             vcpu_list,
+676 -             false,
+677 -         )
+670 +         let mut vcpu = Vcpu::new_aarch64(0, /* u32 */, GuestAddress(0), None, EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(), vcpu_list, false)
+    |
+
+error[E0061]: this function takes 7 arguments but 6 arguments were supplied
+   --> src/vmm/src/macos/vstate.rs:683:24
+    |
+683 |         let mut vcpu = Vcpu::new_aarch64(
+    |                        ^^^^^^^^^^^^^^^^^
+684 |             1,
+685 |             GuestAddress(0),
+    |             --------------- argument #2 of type `u32` is missing
+    |
+note: associated function defined here
+   --> src/vmm/src/macos/vstate.rs:272:12
+    |
+272 |     pub fn new_aarch64(
+    |            ^^^^^^^^^^^
+273 |         id: u8,
+274 |         ipa_size: u32,
+    |         -------------
+help: provide the argument
+    |
+683 -         let mut vcpu = Vcpu::new_aarch64(
+684 -             1,
+685 -             GuestAddress(0),
+686 -             None,
+687 -             EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+688 -             vcpu_list,
+689 -             false,
+690 -         )
+683 +         let mut vcpu = Vcpu::new_aarch64(1, /* u32 */, GuestAddress(0), None, EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(), vcpu_list, false)
+    |
+
+Some errors have detailed explanations: E0061, E0063.
+For more information about an error, try `rustc --explain E0061`.
+warning: `krun-vmm` (lib test) generated 1 warning
+error: could not compile `krun-vmm` (lib test) due to 5 previous errors; 1 warning emitted

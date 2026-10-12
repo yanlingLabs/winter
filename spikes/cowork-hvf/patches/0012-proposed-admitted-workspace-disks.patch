@@ -1,0 +1,1424 @@
+diff --git a/include/libkrun.h b/include/libkrun.h
+index ac18265..ea0673c 100644
+--- a/include/libkrun.h
++++ b/include/libkrun.h
+@@ -283,6 +283,32 @@ int32_t krun_add_disk2(uint32_t ctx_id,
+                        bool direct_io,
+                        uint32_t sync_mode);
+ 
++/** Developer-only admitted workspace RAW pair; Apple Silicon/macOS + blk only.
++ * Requires reduced guarded reclaim opt-in; launch additionally requires the generic runtime port,
++ * exactly two admitted disks, 2 vCPUs/768MiB and no path-backed/extra devices.
++ * Expected identities corroborate host admission; they do not grant workspace/worker authority.
++ * FDs >=3 are BORROWED for the synchronous call, duplicated CLOEXEC and validated as regular,
++ * nlink1, current-UID exact0600, O_RDWR/non-append, expected dev/ino/size. Each capacity must be
++ * 16MiB..256GiB aligned4096; same-inode aliases and replacement/duplicate setters refuse.
++ * Both duplicates are validated after intake and published atomically; errors close only newly
++ * owned duplicates. Caller must keep supplied FDs stable during this call and closes its originals.
++ * Construction consumes further owned duplicates through RAW storage without reopening a path.
++ * Context-free closes unstarted copies; FD closure is never native stop/disk-release proof.
++ * Return zero or negative errno. Fixed geometry is a developer gate, not product resource policy.
++ */
++/* Existing developer-only reduced-profile opt-in, also required for this pair API. */
++int32_t krun_enable_cowork_block_fixture_reclaim(uint32_t ctx_id);
++struct krun_cowork_volume_identity {
++    uint64_t device;
++    uint64_t inode;
++    uint64_t capacity_bytes;
++    uint32_t uid;
++    uint32_t mode;
++};
++int32_t krun_set_cowork_workspace_disks(uint32_t ctx_id,
++    int32_t data_fd, const struct krun_cowork_volume_identity *data,
++    int32_t environment_fd, const struct krun_cowork_volume_identity *environment);
++
+ /* Supported virtio-fs permission semantics */
+ 
+ /**
+diff --git a/src/devices/src/lib.rs b/src/devices/src/lib.rs
+index 621e9e8..300ded3 100644
+--- a/src/devices/src/lib.rs
++++ b/src/devices/src/lib.rs
+@@ -64,3 +64,9 @@ pub mod block_bounce;
+ 
+ #[cfg(feature="blk")]pub mod block_trace;
+ #[cfg(feature="blk")]pub mod stream_io;
++
++#[cfg(all(feature="blk",target_os="macos"))]
++pub mod workspace_disks;
++
++#[cfg(all(feature="blk",target_os="macos"))]
++pub mod workspace_raw_storage;
+diff --git a/src/devices/src/virtio/block/device.rs b/src/devices/src/virtio/block/device.rs
+index 69f0659..b6afd68 100644
+--- a/src/devices/src/virtio/block/device.rs
++++ b/src/devices/src/virtio/block/device.rs
+@@ -293,6 +293,26 @@ impl Block {
+             }
+         };
+ 
++        Self::from_storage(id, partuuid, cache_type, disk_image, disk_image_id, discard_alignment, is_disk_read_only, sync_mode)
++    }
++
++    /// Admitted descriptor path: RAW only, full sync, no filename/implicit backing opens.
++    #[cfg(target_os = "macos")]
++    pub fn new_cowork_fd(id: String, file: crate::workspace_disks::AdmittedVolume) -> io::Result<Block> {
++        let mut disk_image_id = vec![0; VIRTIO_BLK_ID_BYTES as usize];
++        if id.is_empty() || id.len() > disk_image_id.len() { return Err(io::Error::from_raw_os_error(libc::EINVAL)); }
++        disk_image_id[..id.len()].copy_from_slice(id.as_bytes());
++        let file = file.into_storage()?;
++        let discard_alignment = file.discard_align();
++        let raw = Raw::<Box<dyn DynStorage>>::open_image_sync(Box::new(file), true)?;
++        let disk_image = SyncFormatAccess::new(raw)?;
++        Self::from_storage(id, None, CacheType::Writeback, disk_image, disk_image_id, discard_alignment, false, SyncMode::Full)
++    }
++
++    #[allow(clippy::too_many_arguments)]
++    fn from_storage(id: String, partuuid: Option<String>, cache_type: CacheType,
++        disk_image: SyncFormatAccess<Box<dyn DynStorage>>, disk_image_id: Vec<u8>,
++        discard_alignment: usize, is_disk_read_only: bool, sync_mode: SyncMode) -> io::Result<Block> {
+         let disk_image = Arc::new(Mutex::new(disk_image));
+ 
+         let disk_properties =
+@@ -527,3 +547,7 @@ mod tests {
+         assert_eq!(image_id.len(), VIRTIO_BLK_ID_BYTES as usize);
+     }
+ }
++
++#[cfg(all(test,target_os="macos"))]
++#[path="workspace_fd_tests.rs"]
++mod workspace_fd_tests;
+diff --git a/src/devices/src/virtio/block/workspace_fd_tests.rs b/src/devices/src/virtio/block/workspace_fd_tests.rs
+new file mode 100644
+index 0000000..8834c94
+--- /dev/null
++++ b/src/devices/src/virtio/block/workspace_fd_tests.rs
+@@ -0,0 +1,134 @@
++use super::*;
++use crate::block_bounce::Disk;
++use crate::workspace_disks::{ExpectedVolume, WorkspaceDisks, MIN_CAPACITY};
++use std::fs::{self, OpenOptions};
++use std::os::fd::AsRawFd;
++use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
++use std::sync::atomic::{AtomicU64, Ordering};
++static NEXT: AtomicU64 = AtomicU64::new(0);
++struct Cleanup(std::path::PathBuf);
++impl Drop for Cleanup {
++    fn drop(&mut self) {
++        let _ = fs::remove_dir_all(&self.0);
++    }
++}
++#[test]
++fn workspace_disks_actual_raw_io_survives_names_and_caller_fds_without_reopen() {
++    let root = std::env::temp_dir().join(format!(
++        "winter-workspace-raw-{}-{}",
++        std::process::id(),
++        NEXT.fetch_add(1, Ordering::Relaxed)
++    ));
++    fs::create_dir(&root).unwrap();
++    let _cleanup = Cleanup(root.clone());
++    let make = |name: &str| {
++        let path = root.join(name);
++        let f = OpenOptions::new()
++            .read(true)
++            .write(true)
++            .create_new(true)
++            .mode(0o600)
++            .open(path)
++            .unwrap();
++        f.set_len(MIN_CAPACITY).unwrap();
++        let m = f.metadata().unwrap();
++        let e = ExpectedVolume {
++            device: m.dev(),
++            inode: m.ino(),
++            capacity_bytes: m.len(),
++            uid: m.uid(),
++            mode: 0o600,
++        };
++        (f, e)
++    };
++    let (data, de) = make("data");
++    let (env, ee) = make("environment");
++    data.write_all_at(b"existing-data-header", 0).unwrap();
++    env.write_all_at(b"existing-env-header", 0).unwrap();
++    let before_data = data.metadata().unwrap();
++    let before_env = env.metadata().unwrap();
++    let before_data_bytes = fs::read(root.join("data")).unwrap();
++    let before_env_bytes = fs::read(root.join("environment")).unwrap();
++    let pair = WorkspaceDisks::intake(data.as_raw_fd(), de, env.as_raw_fd(), ee).unwrap();
++    fs::rename(root.join("data"), root.join("data-admitted")).unwrap();
++    fs::rename(root.join("environment"), root.join("env-admitted")).unwrap();
++    fs::write(root.join("data"), b"unknown-replacement-data").unwrap();
++    fs::write(root.join("environment"), b"unknown-replacement-env").unwrap();
++    drop(data);
++    drop(env);
++    let [data, env] = pair.duplicate_for_blocks().unwrap();
++    let mut data = Block::new_cowork_fd("winter-data".into(), data).unwrap();
++    let mut env = Block::new_cowork_fd("winter-environment".into(), env).unwrap();
++    drop(pair);
++    // Intake and both actual RAW constructors neither write, resize nor allocate backing blocks.
++    for (name, before, bytes) in [
++        ("data-admitted", before_data, before_data_bytes),
++        ("env-admitted", before_env, before_env_bytes),
++    ] {
++        let after = fs::metadata(root.join(name)).unwrap();
++        assert_eq!(after.len(), before.len());
++        assert_eq!(
++            (after.mtime(), after.mtime_nsec()),
++            (before.mtime(), before.mtime_nsec())
++        );
++        assert_eq!(after.blocks(), before.blocks());
++        assert_eq!(fs::read(root.join(name)).unwrap(), bytes);
++    }
++    let data_capacity = data.config.capacity;
++    let env_capacity = env.config.capacity;
++    assert_eq!(data_capacity, MIN_CAPACITY / 512);
++    assert_eq!(env_capacity, MIN_CAPACITY / 512);
++    assert_eq!(&data.disk_image_id[..11], b"winter-data");
++    assert_eq!(&env.disk_image_id[..18], b"winter-environment");
++    let mut dp = data.disk.take().unwrap();
++    let mut ep = env.disk.take().unwrap();
++    assert!(dp
++        .file
++        .lock()
++        .unwrap()
++        .resize(MIN_CAPACITY + 4096, imago::format::PreallocateMode::None)
++        .is_err());
++    assert!(ep
++        .file
++        .lock()
++        .unwrap()
++        .resize(MIN_CAPACITY - 4096, imago::format::PreallocateMode::None)
++        .is_err());
++    assert_eq!(
++        fs::metadata(root.join("data-admitted")).unwrap().len(),
++        MIN_CAPACITY
++    );
++    assert_eq!(
++        fs::metadata(root.join("env-admitted")).unwrap().len(),
++        MIN_CAPACITY
++    );
++    assert_eq!(dp.write(4096, b"durable-data"), Ok(12));
++    assert_eq!(ep.write(4096, b"durable-env"), Ok(11));
++    let mut buffer = [0; 12];
++    assert_eq!(dp.read(4096, &mut buffer), Ok(12));
++    assert_eq!(&buffer, b"durable-data");
++    let mut buffer = [0; 11];
++    assert_eq!(ep.read(4096, &mut buffer), Ok(11));
++    assert_eq!(&buffer, b"durable-env");
++    drop(dp);
++    drop(ep);
++    drop(data);
++    drop(env);
++    assert_eq!(
++        fs::read(root.join("data")).unwrap(),
++        b"unknown-replacement-data"
++    );
++    assert_eq!(
++        fs::read(root.join("environment")).unwrap(),
++        b"unknown-replacement-env"
++    );
++    assert_eq!(
++        &fs::read(root.join("data-admitted")).unwrap()[4096..4108],
++        b"durable-data"
++    );
++    assert_eq!(
++        &fs::read(root.join("env-admitted")).unwrap()[4096..4107],
++        b"durable-env"
++    );
++    fs::remove_dir_all(root).unwrap();
++}
+diff --git a/src/devices/src/workspace_disks.rs b/src/devices/src/workspace_disks.rs
+new file mode 100644
+index 0000000..e431eca
+--- /dev/null
++++ b/src/devices/src/workspace_disks.rs
+@@ -0,0 +1,404 @@
++//! Developer-only admitted RAW volume pair. Expected identity corroborates a host admission;
++//! it is not daemon/workspace/worker authority. No volume path is retained or reopened.
++use std::fs::File;
++use std::io;
++use std::os::fd::{AsRawFd, FromRawFd, RawFd};
++use std::os::unix::fs::MetadataExt;
++
++pub const MIN_CAPACITY: u64 = 16 * 1024 * 1024;
++pub const MAX_CAPACITY: u64 = 256 * 1024 * 1024 * 1024;
++pub const DATA_DEVICE: u64 = 0;
++pub const ENVIRONMENT_DEVICE: u64 = 1;
++pub const RUNTIME_DEVICE: u64 = 2;
++pub const MAX_DEVICES: usize = 3;
++pub const MAX_PINS: usize = 48;
++pub const MAX_PINNED_BYTES: u64 = 8 * 1024 * 1024;
++
++#[repr(C)]
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct ExpectedVolume {
++    pub device: u64,
++    pub inode: u64,
++    pub capacity_bytes: u64,
++    pub uid: u32,
++    pub mode: u32,
++}
++
++fn invalid() -> io::Error {
++    io::Error::from_raw_os_error(libc::EINVAL)
++}
++fn duplicate(fd: RawFd) -> io::Result<File> {
++    if fd < 3 {
++        return Err(invalid());
++    }
++    // Owned immediately, including all later validation failures. Caller retains its original FD.
++    let owned = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
++    if owned < 0 {
++        return Err(io::Error::last_os_error());
++    }
++    Ok(unsafe { File::from_raw_fd(owned) })
++}
++pub(crate) fn validate(file: &File, expected: ExpectedVolume) -> io::Result<()> {
++    if expected.uid != unsafe { libc::geteuid() }
++        || expected.mode != 0o600
++        || !(MIN_CAPACITY..=MAX_CAPACITY).contains(&expected.capacity_bytes)
++        || expected.capacity_bytes % 4096 != 0
++    {
++        return Err(invalid());
++    }
++    let metadata = file.metadata()?;
++    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
++    if flags < 0 {
++        return Err(io::Error::last_os_error());
++    }
++    if !metadata.is_file()
++        || metadata.nlink() != 1
++        || metadata.uid() != expected.uid
++        || metadata.mode() & 0o7777 != expected.mode
++        || metadata.dev() != expected.device
++        || metadata.ino() != expected.inode
++        || metadata.len() != expected.capacity_bytes
++        || flags & libc::O_ACCMODE != libc::O_RDWR
++        || flags & libc::O_APPEND != 0
++    {
++        return Err(io::Error::from_raw_os_error(libc::ESTALE));
++    }
++    let descriptor_flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
++    if descriptor_flags < 0 {
++        return Err(io::Error::last_os_error());
++    }
++    if descriptor_flags & libc::FD_CLOEXEC == 0 {
++        return Err(invalid());
++    }
++    Ok(())
++}
++
++pub struct AdmittedVolume {
++    file: File,
++    expected: ExpectedVolume,
++}
++impl AsRawFd for AdmittedVolume {
++    fn as_raw_fd(&self) -> RawFd {
++        self.file.as_raw_fd()
++    }
++}
++impl AdmittedVolume {
++    fn intake(fd: RawFd, expected: ExpectedVolume) -> io::Result<Self> {
++        let file = duplicate(fd)?;
++        validate(&file, expected)?;
++        Ok(Self { file, expected })
++    }
++    fn duplicate(&self) -> io::Result<Self> {
++        let file = duplicate(self.file.as_raw_fd())?;
++        validate(&file, self.expected)?;
++        Ok(Self {
++            file,
++            expected: self.expected,
++        })
++    }
++    pub(crate) fn into_storage(self) -> io::Result<crate::workspace_raw_storage::PinnedRawStorage> {
++        crate::workspace_raw_storage::PinnedRawStorage::new(self.file, self.expected)
++    }
++}
++pub struct WorkspaceDisks {
++    data: AdmittedVolume,
++    environment: AdmittedVolume,
++}
++impl WorkspaceDisks {
++    pub fn intake(
++        data_fd: RawFd,
++        data: ExpectedVolume,
++        env_fd: RawFd,
++        environment: ExpectedVolume,
++    ) -> io::Result<Self> {
++        let pair = Self {
++            data: AdmittedVolume::intake(data_fd, data)?,
++            environment: AdmittedVolume::intake(env_fd, environment)?,
++        };
++        if (data.device, data.inode) == (environment.device, environment.inode) {
++            return Err(invalid());
++        }
++        // Corroborate both pinned descriptors after all intake work, before publishing the pair.
++        pair.validate()?;
++        Ok(pair)
++    }
++    pub fn validate(&self) -> io::Result<()> {
++        validate(&self.data.file, self.data.expected)?;
++        validate(&self.environment.file, self.environment.expected)
++    }
++    pub fn duplicate_for_blocks(&self) -> io::Result<[AdmittedVolume; 2]> {
++        let files = [self.data.duplicate()?, self.environment.duplicate()?];
++        self.validate()?;
++        validate(&files[0].file, self.data.expected)?;
++        validate(&files[1].file, self.environment.expected)?;
++        Ok(files)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::fs::{self, OpenOptions};
++    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
++    use std::path::PathBuf;
++    use std::sync::atomic::{AtomicU64, Ordering};
++    static NEXT: AtomicU64 = AtomicU64::new(0);
++    struct Fixture {
++        path: PathBuf,
++        file: File,
++        expected: ExpectedVolume,
++    }
++    impl Fixture {
++        fn new() -> Self {
++            let path = std::env::temp_dir().join(format!(
++                "winter-workspace-disk-{}-{}",
++                std::process::id(),
++                NEXT.fetch_add(1, Ordering::Relaxed)
++            ));
++            let file = OpenOptions::new()
++                .read(true)
++                .write(true)
++                .create_new(true)
++                .mode(0o600)
++                .open(&path)
++                .unwrap();
++            file.set_len(MIN_CAPACITY).unwrap();
++            let m = file.metadata().unwrap();
++            let expected = ExpectedVolume {
++                device: m.dev(),
++                inode: m.ino(),
++                capacity_bytes: m.len(),
++                uid: m.uid(),
++                mode: 0o600,
++            };
++            Self {
++                path,
++                file,
++                expected,
++            }
++        }
++    }
++    impl Drop for Fixture {
++        fn drop(&mut self) {
++            let _ = fs::remove_file(&self.path);
++        }
++    }
++    fn open_fds() -> Vec<i32> {
++        let names: Vec<_> = fs::read_dir("/dev/fd")
++            .unwrap()
++            .map(|entry| entry.unwrap().file_name())
++            .collect();
++        let mut fds: Vec<_> = names
++            .into_iter()
++            .filter_map(|name| name.to_str().and_then(|s| s.parse::<i32>().ok()))
++            .filter(|fd| *fd >= 3 && unsafe { libc::fcntl(*fd, libc::F_GETFD) } >= 0)
++            .collect();
++        fds.sort_unstable();
++        fds
++    }
++    #[test]
++    fn workspace_disks_duplicate_cloexec_and_close_only_owned_descriptors() {
++        let a = Fixture::new();
++        let b = Fixture::new();
++        let before = open_fds();
++        let pair = WorkspaceDisks::intake(
++            a.file.as_raw_fd(),
++            a.expected,
++            b.file.as_raw_fd(),
++            b.expected,
++        )
++        .unwrap();
++        assert_eq!(open_fds().len(), before.len() + 2);
++        assert_ne!(pair.data.file.as_raw_fd(), a.file.as_raw_fd());
++        assert_ne!(pair.environment.file.as_raw_fd(), b.file.as_raw_fd());
++        for file in [&pair.data.file, &pair.environment.file] {
++            assert!(
++                unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC != 0
++            );
++        }
++        drop(pair);
++        assert_eq!(open_fds(), before);
++        a.file.metadata().unwrap();
++        b.file.metadata().unwrap();
++    }
++    #[test]
++    fn workspace_disks_partial_failure_alias_stdio_and_closed_fd_leave_no_extra_handles() {
++        let a = Fixture::new();
++        let b = Fixture::new();
++        let before = open_fds();
++        for fd in [-1, 0, 1, 2, 999_999] {
++            assert!(
++                WorkspaceDisks::intake(a.file.as_raw_fd(), a.expected, fd, b.expected).is_err()
++            );
++            assert_eq!(open_fds(), before);
++        }
++        let alias = a.file.try_clone().unwrap();
++        let with_alias = open_fds();
++        assert!(WorkspaceDisks::intake(
++            a.file.as_raw_fd(),
++            a.expected,
++            alias.as_raw_fd(),
++            a.expected
++        )
++        .is_err());
++        assert_eq!(open_fds(), with_alias);
++        a.file.metadata().unwrap();
++        alias.metadata().unwrap();
++    }
++    #[test]
++    fn workspace_disks_strict_identity_capacity_mode_links_access_and_append() {
++        let a = Fixture::new();
++        let b = Fixture::new();
++        for change in 0..8 {
++            let mut expected = b.expected;
++            match change {
++                0 => expected.device ^= 1,
++                1 => expected.inode ^= 1,
++                2 => expected.uid ^= 1,
++                3 => expected.mode = 0o644,
++                4 => expected.capacity_bytes = MIN_CAPACITY - 4096,
++                5 => expected.capacity_bytes = MAX_CAPACITY + 4096,
++                6 => expected.capacity_bytes += 1,
++                _ => expected.capacity_bytes += 4096,
++            }
++            let before = open_fds();
++            assert!(WorkspaceDisks::intake(
++                a.file.as_raw_fd(),
++                a.expected,
++                b.file.as_raw_fd(),
++                expected
++            )
++            .is_err());
++            assert_eq!(open_fds(), before);
++        }
++        for file in [
++            OpenOptions::new().read(true).open(&b.path).unwrap(),
++            OpenOptions::new().write(true).open(&b.path).unwrap(),
++            OpenOptions::new()
++                .read(true)
++                .append(true)
++                .open(&b.path)
++                .unwrap(),
++        ] {
++            let before = open_fds();
++            assert!(WorkspaceDisks::intake(
++                a.file.as_raw_fd(),
++                a.expected,
++                file.as_raw_fd(),
++                b.expected
++            )
++            .is_err());
++            assert_eq!(open_fds(), before);
++        }
++        let pair = WorkspaceDisks::intake(
++            a.file.as_raw_fd(),
++            a.expected,
++            b.file.as_raw_fd(),
++            b.expected,
++        )
++        .unwrap();
++        fs::set_permissions(&b.path, fs::Permissions::from_mode(0o644)).unwrap();
++        assert!(pair.validate().is_err());
++        fs::set_permissions(&b.path, fs::Permissions::from_mode(0o600)).unwrap();
++        let link = b.path.with_extension("alias");
++        fs::hard_link(&b.path, &link).unwrap();
++        assert!(pair.validate().is_err());
++        fs::remove_file(link).unwrap();
++        b.file.set_len(MIN_CAPACITY - 4096).unwrap();
++        assert!(pair.duplicate_for_blocks().is_err());
++    }
++    #[test]
++    fn workspace_disks_reject_directory_and_socket_without_mutating_callers() {
++        let a = Fixture::new();
++        let directory = File::open(std::env::temp_dir()).unwrap();
++        let (socket, peer) = std::os::unix::net::UnixStream::pair().unwrap();
++        let before = open_fds();
++        for fd in [directory.as_raw_fd(), socket.as_raw_fd()] {
++            assert!(
++                WorkspaceDisks::intake(a.file.as_raw_fd(), a.expected, fd, a.expected).is_err()
++            );
++            assert_eq!(open_fds(), before);
++        }
++        assert!(socket.peer_addr().is_ok());
++        assert!(peer.peer_addr().is_ok());
++        directory.metadata().unwrap();
++    }
++    #[test]
++    fn workspace_disks_aggregate_pin_budget_has_distinct_ids_and_retains_pins_on_stop() {
++        use crate::reclaim_access::{Access, Fault, Range};
++        let access = Access::new(MAX_DEVICES, MAX_PINS, MAX_PINNED_BYTES);
++        let tokens = [
++            access.register(DATA_DEVICE).unwrap(),
++            access.register(ENVIRONMENT_DEVICE).unwrap(),
++            access.register(RUNTIME_DEVICE).unwrap(),
++        ];
++        assert_eq!(access.register(RUNTIME_DEVICE), Err(Fault::Duplicate));
++        assert_eq!(access.register(3), Err(Fault::Limit));
++        // Each block: permanent 256-entry ring pin plus one <=1MiB request including those rings.
++        // Runtime: four 32-entry rings, two reported <=1MiB RX chains, <=64KiB TX, 8-byte control TX.
++        let block_ring = 256 * 16 + (6 + 256 * 2) + (6 + 256 * 8);
++        let port_rings = 4 * (32 * 16 + (6 + 32 * 2) + (6 + 32 * 8));
++        let sizes = [
++            2 * block_ring + crate::block_bounce::MAX_REQUEST as u64 + 17,
++            2 * block_ring + crate::block_bounce::MAX_REQUEST as u64 + 17,
++            port_rings
++                + 2 * crate::stream_io::MAX_CHAIN as u64
++                + crate::stream_io::MAX_TX as u64
++                + 8,
++        ];
++        assert!(sizes.iter().sum::<u64>() < MAX_PINNED_BYTES);
++        let mut pins = Vec::new();
++        for (token, size) in tokens.into_iter().zip(sizes) {
++            let lease = access.begin(token).unwrap();
++            pins.push(
++                lease
++                    .pin(&[Range {
++                        gpa: 0x1000,
++                        len: size,
++                    }])
++                    .unwrap(),
++            );
++        }
++        let usage = access.pinned_usage();
++        let lease = access.begin(tokens[0]).unwrap();
++        assert!(matches!(
++            lease.pin(&[Range {
++                gpa: 0x1000,
++                len: MAX_PINNED_BYTES
++            }]),
++            Err(Fault::Limit)
++        ));
++        drop(lease);
++        assert_eq!(access.pinned_usage(), usage);
++        let frozen = access.freeze(1, std::time::Duration::from_secs(1)).unwrap();
++        let ids: Vec<_> = frozen.pin_snapshots().iter().map(|p| p.device).collect();
++        assert_eq!(ids, vec![DATA_DEVICE, ENVIRONMENT_DEVICE, RUNTIME_DEVICE]);
++        access.stop();
++        assert_eq!(access.pinned_usage(), usage);
++        assert!(frozen.resume().is_err());
++        drop(pins);
++        assert_eq!(access.pinned_usage(), (0, 0));
++        let access = Access::new(MAX_DEVICES, MAX_PINS, MAX_PINNED_BYTES);
++        let token = access.register(DATA_DEVICE).unwrap();
++        let lease = access.begin(token).unwrap();
++        let held: Vec<_> = (0..MAX_PINS)
++            .map(|_| {
++                lease
++                    .pin(&[Range {
++                        gpa: 0x1000,
++                        len: 1,
++                    }])
++                    .unwrap()
++            })
++            .collect();
++        assert!(matches!(
++            lease.pin(&[Range {
++                gpa: 0x1000,
++                len: 1
++            }]),
++            Err(Fault::Limit)
++        ));
++        assert_eq!(access.pinned_usage(), (MAX_PINS, MAX_PINS as u64));
++        drop(held);
++    }
++}
+diff --git a/src/devices/src/workspace_raw_storage.rs b/src/devices/src/workspace_raw_storage.rs
+new file mode 100644
+index 0000000..0298405
+--- /dev/null
++++ b/src/devices/src/workspace_raw_storage.rs
+@@ -0,0 +1,234 @@
++//! Fixed-capacity positional RAW storage over an owned admitted descriptor. Construction only
++//! validates metadata; unlike imago::File conversion, it performs no alignment read/write probes.
++use crate::workspace_disks::{validate, ExpectedVolume};
++use imago::io_buffers::{IoVector, IoVectorMut};
++use imago::storage::drivers::CommonStorageHelper;
++use imago::storage::PreallocateMode;
++use imago::Storage;
++use std::fmt;
++use std::fs::File;
++use std::io;
++use std::os::unix::fs::FileExt;
++
++pub struct PinnedRawStorage {
++    file: File,
++    expected: ExpectedVolume,
++    helper: CommonStorageHelper,
++}
++impl fmt::Debug for PinnedRawStorage {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("PinnedRawStorage")
++            .field("capacity", &self.expected.capacity_bytes)
++            .finish_non_exhaustive()
++    }
++}
++impl fmt::Display for PinnedRawStorage {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str("admitted-raw-volume")
++    }
++}
++impl PinnedRawStorage {
++    pub(crate) fn new(file: File, expected: ExpectedVolume) -> io::Result<Self> {
++        validate(&file, expected)?;
++        Ok(Self {
++            file,
++            expected,
++            helper: CommonStorageHelper::default(),
++        })
++    }
++    fn range(&self, offset: u64, length: u64) -> io::Result<()> {
++        validate(&self.file, self.expected)?;
++        if offset
++            .checked_add(length)
++            .is_none_or(|end| end > self.expected.capacity_bytes)
++        {
++            return Err(io::Error::from_raw_os_error(libc::EINVAL));
++        }
++        Ok(())
++    }
++    fn read_buffer(&self, buffer: &mut [u8], offset: u64) -> io::Result<()> {
++        self.range(offset, buffer.len() as u64)?;
++        transfer(
++            offset,
++            buffer.len(),
++            io::ErrorKind::UnexpectedEof,
++            |done, position| self.file.read_at(&mut buffer[done..], position),
++        )
++    }
++    fn write_buffer(&self, buffer: &[u8], offset: u64) -> io::Result<()> {
++        self.range(offset, buffer.len() as u64)?;
++        transfer(
++            offset,
++            buffer.len(),
++            io::ErrorKind::WriteZero,
++            |done, position| self.file.write_at(&buffer[done..], position),
++        )
++    }
++}
++fn transfer(
++    offset: u64,
++    length: usize,
++    zero: io::ErrorKind,
++    mut operation: impl FnMut(usize, u64) -> io::Result<usize>,
++) -> io::Result<()> {
++    offset
++        .checked_add(length as u64)
++        .ok_or_else(|| io::Error::from_raw_os_error(libc::EOVERFLOW))?;
++    let mut done = 0;
++    while done < length {
++        match operation(done, offset + done as u64) {
++            Ok(0) => return Err(zero.into()),
++            Ok(count) if count <= length - done => done += count,
++            Ok(_) => return Err(io::ErrorKind::InvalidData.into()),
++            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
++            Err(error) => return Err(error),
++        }
++    }
++    Ok(())
++}
++impl Storage for PinnedRawStorage {
++    fn size(&self) -> io::Result<u64> {
++        validate(&self.file, self.expected)?;
++        Ok(self.expected.capacity_bytes)
++    }
++    // No filename, open/create, relative-path resolution, implicit dependency or growth API.
++    async unsafe fn pure_readv(&self, vectors: IoVectorMut<'_>, mut offset: u64) -> io::Result<()> {
++        self.range(offset, vectors.len())?;
++        for mut buffer in vectors.into_inner() {
++            let bytes: &mut [u8] = &mut buffer;
++            self.read_buffer(bytes, offset)?;
++            offset += bytes.len() as u64;
++        }
++        Ok(())
++    }
++    async unsafe fn pure_writev(&self, vectors: IoVector<'_>, mut offset: u64) -> io::Result<()> {
++        self.range(offset, vectors.len())?;
++        for buffer in vectors.into_inner() {
++            let bytes: &[u8] = &buffer;
++            self.write_buffer(bytes, offset)?;
++            offset += bytes.len() as u64;
++        }
++        Ok(())
++    }
++    async fn flush(&self) -> io::Result<()> {
++        validate(&self.file, self.expected)
++    }
++    async fn sync(&self) -> io::Result<()> {
++        validate(&self.file, self.expected)?;
++        // Same full-sync primitive as imago::File's SyncMode::Full; no relaxed fsync override.
++        self.file.sync_all()?;
++        validate(&self.file, self.expected)
++    }
++    async unsafe fn invalidate_cache(&self) -> io::Result<()> {
++        validate(&self.file, self.expected)
++    }
++    fn get_storage_helper(&self) -> &CommonStorageHelper {
++        &self.helper
++    }
++    async fn resize(&self, _size: u64, _mode: PreallocateMode) -> io::Result<()> {
++        Err(io::ErrorKind::Unsupported.into())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::workspace_disks::MIN_CAPACITY;
++    use std::fs::{self, OpenOptions};
++    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
++    struct Cleanup(std::path::PathBuf);
++    impl Drop for Cleanup {
++        fn drop(&mut self) {
++            let _ = fs::remove_file(&self.0);
++        }
++    }
++    #[test]
++    fn workspace_disks_fixed_capacity_refuses_oob_overflow_and_drift_without_growth_or_partial_write(
++    ) {
++        let path =
++            std::env::temp_dir().join(format!("winter-workspace-storage-{}", std::process::id()));
++        let file = OpenOptions::new()
++            .read(true)
++            .write(true)
++            .create_new(true)
++            .mode(0o600)
++            .open(&path)
++            .unwrap();
++        let _cleanup = Cleanup(path.clone());
++        file.set_len(MIN_CAPACITY).unwrap();
++        let m = file.metadata().unwrap();
++        let expected = ExpectedVolume {
++            device: m.dev(),
++            inode: m.ino(),
++            capacity_bytes: m.len(),
++            uid: m.uid(),
++            mode: 0o600,
++        };
++        let before_blocks = m.blocks();
++        let caller = file.try_clone().unwrap();
++        let storage = PinnedRawStorage::new(file, expected).unwrap();
++        for offset in [MIN_CAPACITY, MIN_CAPACITY - 1, u64::MAX] {
++            assert!(storage.write_buffer(b"no", offset).is_err());
++            let mut read = [0; 2];
++            assert!(storage.read_buffer(&mut read, offset).is_err());
++        }
++        assert_eq!(caller.metadata().unwrap().len(), MIN_CAPACITY);
++        assert_eq!(caller.metadata().unwrap().blocks(), before_blocks);
++        storage.write_buffer(b"last", MIN_CAPACITY - 4).unwrap();
++        let mut read = [0; 4];
++        storage.read_buffer(&mut read, MIN_CAPACITY - 4).unwrap();
++        assert_eq!(&read, b"last");
++        caller.set_len(MIN_CAPACITY - 4096).unwrap();
++        assert!(storage.size().is_err());
++        assert!(storage.write_buffer(b"refuse", 0).is_err());
++        assert_eq!(caller.metadata().unwrap().len(), MIN_CAPACITY - 4096);
++    }
++    #[test]
++    fn workspace_disks_positional_partial_interrupted_zero_error_and_overflow_paths() {
++        let mut calls = 0;
++        transfer(4096, 7, io::ErrorKind::WriteZero, |done, offset| {
++            assert_eq!(offset, 4096 + done as u64);
++            calls += 1;
++            if calls == 1 {
++                Err(io::ErrorKind::Interrupted.into())
++            } else {
++                Ok((7 - done).min(2))
++            }
++        })
++        .unwrap();
++        assert_eq!(calls, 5);
++        assert_eq!(
++            transfer(0, 1, io::ErrorKind::UnexpectedEof, |_, _| Ok(0))
++                .unwrap_err()
++                .kind(),
++            io::ErrorKind::UnexpectedEof
++        );
++        assert_eq!(
++            transfer(0, 1, io::ErrorKind::WriteZero, |_, _| Ok(0))
++                .unwrap_err()
++                .kind(),
++            io::ErrorKind::WriteZero
++        );
++        assert_eq!(
++            transfer(0, 1, io::ErrorKind::WriteZero, |_, _| Ok(2))
++                .unwrap_err()
++                .kind(),
++            io::ErrorKind::InvalidData
++        );
++        assert_eq!(
++            transfer(0, 1, io::ErrorKind::WriteZero, |_, _| Err(
++                io::Error::from_raw_os_error(libc::EIO)
++            ))
++            .unwrap_err()
++            .raw_os_error(),
++            Some(libc::EIO)
++        );
++        let mut calls = 0;
++        assert!(transfer(u64::MAX, 2, io::ErrorKind::WriteZero, |_, _| {
++            calls += 1;
++            Ok(1)
++        })
++        .is_err());
++        assert_eq!(calls, 0);
++    }
++}
+diff --git a/src/libkrun/src/cowork_workspace_disks_tests.rs b/src/libkrun/src/cowork_workspace_disks_tests.rs
+new file mode 100644
+index 0000000..458df95
+--- /dev/null
++++ b/src/libkrun/src/cowork_workspace_disks_tests.rs
+@@ -0,0 +1,310 @@
++use super::*;
++use devices::workspace_disks::{ExpectedVolume, MIN_CAPACITY};
++use std::fs::{self, File, OpenOptions};
++use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
++use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
++use std::sync::atomic::{AtomicU64, Ordering};
++static NEXT: AtomicU64 = AtomicU64::new(0);
++struct Fixture {
++    path: PathBuf,
++    file: File,
++    expected: ExpectedVolume,
++}
++impl Fixture {
++    fn new() -> Self {
++        let path = std::env::temp_dir().join(format!(
++            "winter-workspace-api-{}-{}",
++            std::process::id(),
++            NEXT.fetch_add(1, Ordering::Relaxed)
++        ));
++        let file = OpenOptions::new()
++            .read(true)
++            .write(true)
++            .create_new(true)
++            .mode(0o600)
++            .open(&path)
++            .unwrap();
++        file.set_len(MIN_CAPACITY).unwrap();
++        let m = file.metadata().unwrap();
++        Self {
++            path,
++            file,
++            expected: ExpectedVolume {
++                device: m.dev(),
++                inode: m.ino(),
++                capacity_bytes: m.len(),
++                uid: m.uid(),
++                mode: 0o600,
++            },
++        }
++    }
++}
++impl Drop for Fixture {
++    fn drop(&mut self) {
++        let _ = fs::remove_file(&self.path);
++    }
++}
++fn open_fds() -> Vec<i32> {
++    let names: Vec<_> = fs::read_dir("/dev/fd")
++        .unwrap()
++        .map(|e| e.unwrap().file_name())
++        .collect();
++    let mut fds: Vec<_> = names
++        .into_iter()
++        .filter_map(|n| n.to_str().and_then(|s| s.parse::<i32>().ok()))
++        .filter(|fd| *fd >= 3 && unsafe { libc::fcntl(*fd, libc::F_GETFD) } >= 0)
++        .collect();
++    fds.sort_unstable();
++    fds
++}
++fn context() -> u32 {
++    let id = krun_create_ctx() as u32;
++    assert_eq!(krun_enable_cowork_block_fixture_reclaim(id), 0);
++    let mut map = CTX_MAP.lock().unwrap();
++    let cfg = map.get_mut(&id).unwrap();
++    cfg.vsock_config = VsockConfig::Disabled;
++    cfg.vmr.disable_implicit_console = true;
++    cfg.vmr.serial_consoles.push(SerialConsoleConfig {
++        input_fd: -1,
++        output_fd: -1,
++    });
++    cfg.vmr.external_kernel = Some(ExternalKernel::default());
++    cfg.vmr
++        .set_vm_config(&VmConfig {
++            vcpu_count: Some(2),
++            mem_size_mib: Some(768),
++            ..Default::default()
++        })
++        .unwrap();
++    id
++}
++fn intake(id: u32, a: &Fixture, b: &Fixture) -> i32 {
++    unsafe {
++        krun_set_cowork_workspace_disks(
++            id,
++            a.file.as_raw_fd(),
++            &a.expected,
++            b.file.as_raw_fd(),
++            &b.expected,
++        )
++    }
++}
++fn stream(id: u32) -> OwnedFd {
++    let fd = krun_create_cowork_runtime_stream(id);
++    assert!(fd >= 3);
++    unsafe { OwnedFd::from_raw_fd(fd) }
++}
++#[test]
++fn workspace_disks_api_context_free_closes_duplicates_only_and_duplicate_setter_is_atomic() {
++    let a = Fixture::new();
++    let b = Fixture::new();
++    let before = open_fds();
++    let id = context();
++    let peer = stream(id);
++    let with_stream = open_fds();
++    assert_eq!(intake(id, &a, &b), 0);
++    assert_eq!(open_fds().len(), with_stream.len() + 2);
++    assert_eq!(intake(id, &a, &b), -libc::EINVAL);
++    assert_eq!(open_fds().len(), with_stream.len() + 2);
++    assert!(cowork_validate_profile(CTX_MAP.lock().unwrap().get(&id).unwrap()).is_ok());
++    assert_eq!(krun_free_ctx(id), 0);
++    drop(peer);
++    assert_eq!(open_fds(), before);
++    a.file.metadata().unwrap();
++    b.file.metadata().unwrap();
++}
++#[test]
++fn workspace_disks_api_missing_context_null_invalid_second_and_alias_do_not_publish_or_close_callers(
++) {
++    let a = Fixture::new();
++    let b = Fixture::new();
++    let before = open_fds();
++    assert_eq!(intake(u32::MAX, &a, &b), -libc::ENOENT);
++    assert_eq!(open_fds(), before);
++    let id = context();
++    assert_eq!(
++        unsafe {
++            krun_set_cowork_workspace_disks(
++                id,
++                a.file.as_raw_fd(),
++                std::ptr::null(),
++                b.file.as_raw_fd(),
++                &b.expected,
++            )
++        },
++        -libc::EINVAL
++    );
++    let mut bad = b.expected;
++    bad.inode ^= 1;
++    assert!(
++        unsafe {
++            krun_set_cowork_workspace_disks(
++                id,
++                a.file.as_raw_fd(),
++                &a.expected,
++                b.file.as_raw_fd(),
++                &bad,
++            )
++        } < 0
++    );
++    assert_eq!(intake(id, &a, &a), -libc::EINVAL);
++    assert!(CTX_MAP
++        .lock()
++        .unwrap()
++        .get(&id)
++        .unwrap()
++        .vmr
++        .cowork_workspace_disks
++        .is_none());
++    assert_eq!(krun_free_ctx(id), 0);
++    assert_eq!(open_fds(), before);
++    a.file.metadata().unwrap();
++    b.file.metadata().unwrap();
++}
++fn path_disk() -> BlockDeviceConfig {
++    BlockDeviceConfig {
++        block_id: "not-workspace".into(),
++        cache_type: CacheType::Writeback,
++        disk_image_path: "/NO-OPEN-admission-test".into(),
++        disk_image_format: ImageType::Raw,
++        is_disk_read_only: false,
++        direct_io: false,
++        sync_mode: SyncMode::Full,
++    }
++}
++#[test]
++fn workspace_disks_api_refuses_old_path_backed_and_hvc_configuration() {
++    let a = Fixture::new();
++    let b = Fixture::new();
++    for option in 0..4 {
++        let id = context();
++        {
++            let mut map = CTX_MAP.lock().unwrap();
++            let cfg = map.get_mut(&id).unwrap();
++            match option {
++                0 => cfg.block_cfgs.push(path_disk()),
++                1 => cfg.root_block_cfg = Some(path_disk()),
++                2 => cfg.data_block_cfg = Some(path_disk()),
++                _ => {}
++            }
++        }
++        let peer = if option == 3 {
++            Some(unsafe { OwnedFd::from_raw_fd(krun_create_cowork_bootstrap_stream(id)) })
++        } else {
++            None
++        };
++        assert_eq!(intake(id, &a, &b), -libc::EINVAL);
++        assert!(CTX_MAP
++            .lock()
++            .unwrap()
++            .get(&id)
++            .unwrap()
++            .vmr
++            .cowork_workspace_disks
++            .is_none());
++        assert_eq!(krun_free_ctx(id), 0);
++        drop(peer);
++    }
++}
++#[test]
++fn workspace_disks_api_incompatible_profile_refuses_before_kernel_disk_or_vm_construction() {
++    let a = Fixture::new();
++    let b = Fixture::new();
++    for option in 0..6 {
++        let id = context();
++        let peer = stream(id);
++        assert_eq!(intake(id, &a, &b), 0);
++        {
++            let mut map = CTX_MAP.lock().unwrap();
++            let cfg = map.get_mut(&id).unwrap();
++            match option {
++                0 => cfg.block_cfgs.push(path_disk()),
++                1 => cfg.vmr.cowork_fixture_reclaim = false,
++                2 => cfg.vmr.cowork_runtime_port = false,
++                3 => {
++                    cfg.vmr
++                        .set_vm_config(&VmConfig {
++                            vcpu_count: Some(2),
++                            mem_size_mib: Some(512),
++                            ..Default::default()
++                        })
++                        .unwrap();
++                }
++                4 => {
++                    cfg.vmr
++                        .set_vm_config(&VmConfig {
++                            vcpu_count: Some(1),
++                            mem_size_mib: Some(768),
++                            ..Default::default()
++                        })
++                        .unwrap();
++                }
++                _ => cfg.vmr.serial_consoles.push(SerialConsoleConfig {
++                    input_fd: -1,
++                    output_fd: -1,
++                }),
++            }
++            assert!(cowork_validate_profile(cfg).is_err());
++        }
++        assert_eq!(krun_start_enter(id), -libc::EINVAL);
++        assert_eq!(krun_free_ctx(id), 0);
++        drop(peer);
++    }
++    let id = context();
++    assert_eq!(intake(id, &a, &b), 0);
++    assert_eq!(krun_start_enter(id), -libc::EINVAL);
++    assert_eq!(krun_free_ctx(id), 0);
++}
++#[test]
++fn workspace_disks_api_metadata_drift_refuses_start_without_permission_repair() {
++    let a = Fixture::new();
++    let b = Fixture::new();
++    let id = context();
++    let peer = stream(id);
++    assert_eq!(intake(id, &a, &b), 0);
++    fs::set_permissions(&b.path, fs::Permissions::from_mode(0o644)).unwrap();
++    assert_eq!(krun_start_enter(id), -libc::EINVAL);
++    assert_eq!(b.file.metadata().unwrap().mode() & 0o7777, 0o644);
++    assert_eq!(krun_free_ctx(id), 0);
++    drop(peer);
++}
++#[test]
++fn workspace_disks_api_actual_two_block_construction_has_stable_ids_and_no_volume_path() {
++    let mut a = Fixture::new();
++    let mut b = Fixture::new();
++    let id = context();
++    let peer = stream(id);
++    assert_eq!(intake(id, &a, &b), 0);
++    // Rename preserves nlink1; original names are absent. Construction has no volume path to reopen.
++    let renamed = a.path.with_extension("admitted");
++    fs::rename(&a.path, &renamed).unwrap();
++    a.path = renamed;
++    let renamed = b.path.with_extension("admitted");
++    fs::rename(&b.path, &renamed).unwrap();
++    b.path = renamed;
++    {
++        let map = CTX_MAP.lock().unwrap();
++        let pair = map
++            .get(&id)
++            .unwrap()
++            .vmr
++            .cowork_workspace_disks
++            .as_ref()
++            .unwrap();
++        let blocks = vmm::vmm_config::block::BlockBuilder::from_cowork_workspace(pair).unwrap();
++        assert_eq!(blocks.list.len(), 2);
++        let ids: Vec<_> = blocks
++            .list
++            .iter()
++            .map(|b| b.lock().unwrap().id().clone())
++            .collect();
++        assert_eq!(ids, vec!["winter-data", "winter-environment"]);
++    }
++    assert_eq!(krun_free_ctx(id), 0);
++    drop(peer);
++}
++
++// Compile the exact production block-builder file without unrelated stale HVF test modules.
++#[allow(dead_code)]
++#[path = "../../vmm/src/vmm_config/block.rs"]
++mod actual_block_builder;
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index 5f3fb9d..2696565 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -2873,6 +2873,13 @@ fn cowork_validate_profile(cfg:&ContextConfig)->Result<(),()> {
+     let r=&cfg.vmr;
+     #[cfg(feature="blk")]
+     if (r.cowork_runtime_fixture_trace && !r.cowork_runtime_port) || (r.cowork_runtime_port && r.cowork_stream.is_none()) || (r.cowork_stream.is_some() && (!r.cowork_fixture_reclaim || !r.cowork_guarded_block)){return Err(());}
++    #[cfg(all(feature="blk",target_os="macos"))]
++    if let Some(pair) = &r.cowork_workspace_disks {
++        if !r.cowork_fixture_reclaim || !r.cowork_guarded_block || !r.cowork_runtime_port || r.cowork_stream.is_none()
++            || r.vm_config().mem_size_mib != Some(768) || !cfg.block_cfgs.is_empty() || cfg.root_block_cfg.is_some()
++            || cfg.data_block_cfg.is_some() || cfg.block_root.is_some() || !r.block.list.is_empty()
++            || pair.validate().is_err() { return Err(()); }
++    }
+     if !r.cowork_fixture_reclaim{return Ok(());}
+     if cfg!(any(feature="init-blob",feature="net",feature="gpu",feature="snd",feature="input",feature="efi",feature="tee"))
+         || r.cowork_guarded_block!=cfg!(feature="blk")
+@@ -2883,7 +2890,13 @@ fn cowork_validate_profile(cfg:&ContextConfig)->Result<(),()> {
+         || r.gpu_render_server_fd.is_some() || r.vm_config().vcpu_count!=Some(2)
+         || r.vm_config().mem_size_mib.is_none_or(|m|m>1024) {return Err(());}
+     #[cfg(feature="blk")]
+-    cowork_validate_blocks(r.cowork_guarded_block,r.vm_config().mem_size_mib,&cfg.get_block_cfg())?;
++    {
++        #[cfg(target_os="macos")]
++        let workspace = r.cowork_workspace_disks.is_some();
++        #[cfg(not(target_os="macos"))]
++        let workspace = false;
++        if !workspace { cowork_validate_blocks(r.cowork_guarded_block,r.vm_config().mem_size_mib,&cfg.get_block_cfg())?; }
++    }
+     Ok(())
+ }
+ #[cfg(feature="blk")]
+@@ -2951,6 +2964,13 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+         let guarded=ctx_cfg.vmr.cowork_guarded_block;
+         let memory=ctx_cfg.vmr.vm_config().mem_size_mib;
+         let configs=ctx_cfg.get_block_cfg();
++        #[cfg(target_os="macos")]
++        if let Some(pair) = &ctx_cfg.vmr.cowork_workspace_disks {
++            ctx_cfg.vmr.block = match vmm::vmm_config::block::BlockBuilder::from_cowork_workspace(pair) {
++                Ok(blocks) => blocks, Err(_) => return -libc::EINVAL,
++            };
++        } else if cowork_construct_blocks(guarded,memory,configs,|config|ctx_cfg.vmr.add_block_device(config).map_err(|_|())).is_err(){return -libc::EINVAL;}
++        #[cfg(not(target_os="macos"))]
+         if cowork_construct_blocks(guarded,memory,configs,|config|ctx_cfg.vmr.add_block_device(config).map_err(|_|())).is_err(){return -libc::EINVAL;}
+     }
+     /*
+@@ -3430,3 +3450,26 @@ pub extern "C" fn krun_enable_cowork_runtime_port_fixture_trace(ctx_id:u32)->i32
+  }
+  #[test]fn runtime_port_existing_hvc_factory_excludes_generic_variant(){let id=krun_create_ctx() as u32;assert_eq!(krun_enable_cowork_block_fixture_reclaim(id),0);let raw=krun_create_cowork_bootstrap_stream(id);assert!(raw>=3);let peer=unsafe{OwnedFd::from_raw_fd(raw)};assert_eq!(krun_create_cowork_runtime_stream(id),-libc::EINVAL);assert!(!CTX_MAP.lock().unwrap().get(&id).unwrap().vmr.cowork_runtime_port);assert_eq!(krun_free_ctx(id),0);drop(peer);}
+ }
++
++/// Developer-only atomic admitted-FD workspace profile. FDs are borrowed; duplicates are owned.
++/// Caller identities corroborate immutable host admission, never grant native launch authority.
++#[no_mangle]
++#[allow(clippy::missing_safety_doc)]
++#[cfg(all(feature="blk",target_os="macos"))]
++pub unsafe extern "C" fn krun_set_cowork_workspace_disks(
++    ctx_id: u32, data_fd: i32, data: *const devices::workspace_disks::ExpectedVolume,
++    environment_fd: i32, environment: *const devices::workspace_disks::ExpectedVolume,
++) -> i32 {
++    let mut contexts = CTX_MAP.lock().unwrap();
++    let Some(cfg) = contexts.get_mut(&ctx_id) else { return -libc::ENOENT; };
++    if data.is_null() || environment.is_null() || !cfg.vmr.cowork_fixture_reclaim || !cfg.vmr.cowork_guarded_block
++        || cfg.vmr.cowork_workspace_disks.is_some() || !cfg.block_cfgs.is_empty() || cfg.root_block_cfg.is_some()
++        || cfg.data_block_cfg.is_some() || cfg.block_root.is_some() || !cfg.vmr.block.list.is_empty()
++        || (cfg.vmr.cowork_stream.is_some() && !cfg.vmr.cowork_runtime_port) { return -libc::EINVAL; }
++    match devices::workspace_disks::WorkspaceDisks::intake(data_fd, *data, environment_fd, *environment) {
++        Ok(pair) => { cfg.vmr.cowork_workspace_disks = Some(pair); 0 },
++        Err(error) => -error.raw_os_error().unwrap_or(libc::EIO),
++    }
++}
++#[cfg(all(test,feature="blk",target_os="macos"))]
++mod cowork_workspace_disks_tests;
+diff --git a/src/vmm/src/builder.rs b/src/vmm/src/builder.rs
+index de64402..4cca633 100644
+--- a/src/vmm/src/builder.rs
++++ b/src/vmm/src/builder.rs
+@@ -960,7 +960,8 @@ pub fn build_microvm(
+ 
+     #[cfg(all(target_os="macos",feature="blk"))]
+     let cowork_access=if vm_resources.cowork_guarded_block {
+-        let access=devices::reclaim_access::Access::new(if vm_resources.cowork_stream.is_some(){2}else{1},if vm_resources.cowork_stream.is_some(){32}else{16},8*1024*1024);
++        let workspace = vm_resources.cowork_workspace_disks.is_some();
++        let access=devices::reclaim_access::Access::new(if workspace {devices::workspace_disks::MAX_DEVICES} else if vm_resources.cowork_stream.is_some(){2}else{1},if workspace {devices::workspace_disks::MAX_PINS} else if vm_resources.cowork_stream.is_some(){32}else{16},devices::workspace_disks::MAX_PINNED_BYTES);
+         let terminal_fd=exit_evt.try_clone().map_err(Error::EventFd).map_err(StartMicrovmError::Internal)?;
+         let terminal_code=exit_code.clone();
+         access.set_terminal_notifier(Arc::new(move||{crate::cowork_fixture::mark_stop();terminal_code.store(77,std::sync::atomic::Ordering::SeqCst);let _=terminal_fd.write(1);}));Some(access)
+@@ -1006,7 +1007,7 @@ pub fn build_microvm(
+     attach_rng_device(&mut vmm, event_manager, intc.clone())?;
+     #[cfg(all(target_os="macos",feature="blk"))]
+     if let Some(stream)=&vm_resources.cowork_stream{
+-        let access=vmm.cowork_access.as_ref().expect("guarded stream access").clone();let token=access.register(1).expect("guarded stream registration");
++        let access=vmm.cowork_access.as_ref().expect("guarded stream access").clone();let token=access.register(if vm_resources.cowork_workspace_disks.is_some(){devices::workspace_disks::RUNTIME_DEVICE}else{1}).expect("guarded stream registration");
+         if vm_resources.cowork_runtime_port{
+             let port=Arc::new(Mutex::new(devices::virtio::console::runtime_port::GuardedPort::new(access.clone(),token,stream.duplicate().map_err(|e|StartMicrovmError::Internal(Error::EventFd(e)))?).expect("guarded generic port")));
+             if vm_resources.cowork_runtime_fixture_trace{port.lock().unwrap().enable_fixture_trace();}
+diff --git a/src/vmm/src/resources.rs b/src/vmm/src/resources.rs
+index 7d03cd2..5443a86 100644
+--- a/src/vmm/src/resources.rs
++++ b/src/vmm/src/resources.rs
+@@ -131,6 +131,8 @@ pub struct VmResources {
+     /// TEST-ONLY reduced-device active-reclaim opt-in.
+     pub cowork_fixture_reclaim: bool,
+     pub cowork_guarded_block: bool,
++    #[cfg(all(feature="blk",target_os="macos"))]
++    pub cowork_workspace_disks: Option<devices::workspace_disks::WorkspaceDisks>,
+     #[cfg(feature="blk")]pub cowork_stream:Option<devices::stream_io::ScopedStream>,
+     #[cfg(feature="blk")]pub cowork_runtime_port:bool,
+     #[cfg(feature="blk")]pub cowork_runtime_fixture_trace:bool,
+diff --git a/src/vmm/src/vmm_config/block.rs b/src/vmm/src/vmm_config/block.rs
+index 788be5a..6811d3d 100644
+--- a/src/vmm/src/vmm_config/block.rs
++++ b/src/vmm/src/vmm_config/block.rs
+@@ -60,6 +60,24 @@ impl BlockBuilder {
+         Ok(())
+     }
+ 
++    #[cfg(target_os = "macos")]
++    pub fn from_cowork_workspace(pair: &devices::workspace_disks::WorkspaceDisks) -> Result<Self> {
++        Self::from_cowork_workspace_with(pair, |id, file| Block::new_cowork_fd(id.into(), file))
++    }
++    #[cfg(target_os = "macos")]
++    fn from_cowork_workspace_with(pair: &devices::workspace_disks::WorkspaceDisks,
++        mut construct: impl FnMut(&str, devices::workspace_disks::AdmittedVolume) -> std::io::Result<Block>) -> Result<Self> {
++        let [data, environment] = pair.duplicate_for_blocks().map_err(BlockConfigError::CreateBlockDevice)?;
++        // Publish no partial device list: all owned FDs/devices close if either construction fails.
++        let data = construct("winter-data", data).map_err(BlockConfigError::CreateBlockDevice)?;
++        let environment = construct("winter-environment", environment).map_err(BlockConfigError::CreateBlockDevice)?;
++        pair.validate().map_err(BlockConfigError::CreateBlockDevice)?;
++        let mut list = VecDeque::new();
++        list.push_back(Arc::new(Mutex::new(data)));
++        list.push_back(Arc::new(Mutex::new(environment)));
++        Ok(Self { list })
++    }
++
+     pub fn create_block(config: BlockDeviceConfig) -> Result<Block> {
+         devices::virtio::Block::new(
+             config.block_id,
+@@ -74,3 +92,7 @@ impl BlockBuilder {
+         .map_err(BlockConfigError::CreateBlockDevice)
+     }
+ }
++
++#[cfg(all(test,target_os="macos"))]
++#[path="workspace_disks_builder_tests.rs"]
++mod workspace_disks_builder_tests;
+diff --git a/src/vmm/src/vmm_config/workspace_disks_builder_tests.rs b/src/vmm/src/vmm_config/workspace_disks_builder_tests.rs
+new file mode 100644
+index 0000000..d670d9a
+--- /dev/null
++++ b/src/vmm/src/vmm_config/workspace_disks_builder_tests.rs
+@@ -0,0 +1,75 @@
++use super::*;
++use devices::workspace_disks::{ExpectedVolume, WorkspaceDisks, MIN_CAPACITY};
++use std::fs::{self, OpenOptions};
++use std::os::fd::AsRawFd;
++use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
++struct Cleanup(std::path::PathBuf);
++impl Drop for Cleanup {
++    fn drop(&mut self) {
++        let _ = fs::remove_dir_all(&self.0);
++    }
++}
++fn open_fds() -> Vec<i32> {
++    let names: Vec<_> = fs::read_dir("/dev/fd")
++        .unwrap()
++        .map(|e| e.unwrap().file_name())
++        .collect();
++    let mut fds: Vec<_> = names
++        .into_iter()
++        .filter_map(|n| n.to_str().and_then(|s| s.parse::<i32>().ok()))
++        .filter(|fd| *fd >= 3 && unsafe { libc::fcntl(*fd, libc::F_GETFD) } >= 0)
++        .collect();
++    fds.sort_unstable();
++    fds
++}
++#[test]
++fn workspace_disks_partial_actual_block_construction_closes_all_new_handles_preserves_callers() {
++    let root =
++        std::env::temp_dir().join(format!("winter-workspace-builder-{}", std::process::id()));
++    fs::create_dir(&root).unwrap();
++    let _cleanup = Cleanup(root.clone());
++    let make = |name: &str| {
++        let file = OpenOptions::new()
++            .read(true)
++            .write(true)
++            .create_new(true)
++            .mode(0o600)
++            .open(root.join(name))
++            .unwrap();
++        file.set_len(MIN_CAPACITY).unwrap();
++        let m = file.metadata().unwrap();
++        let e = ExpectedVolume {
++            device: m.dev(),
++            inode: m.ino(),
++            capacity_bytes: m.len(),
++            uid: m.uid(),
++            mode: 0o600,
++        };
++        (file, e)
++    };
++    let (data, de) = make("data");
++    let (env, ee) = make("env");
++    let pair = WorkspaceDisks::intake(data.as_raw_fd(), de, env.as_raw_fd(), ee).unwrap();
++    let before = open_fds();
++    let mut called = 0;
++    let mut constructed_fds = vec![];
++    assert!(
++        BlockBuilder::from_cowork_workspace_with(&pair, |id, volume| {
++            called += 1;
++            constructed_fds.push(volume.as_raw_fd());
++            if called == 2 {
++                return Err(std::io::Error::from_raw_os_error(libc::EIO));
++            }
++            Block::new_cowork_fd(id.into(), volume)
++        })
++        .is_err()
++    );
++    assert_eq!(called, 2);
++    assert_eq!(open_fds(), before);
++    for fd in constructed_fds {
++        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
++    }
++    data.metadata().unwrap();
++    env.metadata().unwrap();
++    pair.validate().unwrap();
++}

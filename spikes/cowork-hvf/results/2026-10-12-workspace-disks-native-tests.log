@@ -1,0 +1,258 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
+{"source": "<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks", "patchSha256": "c956cfcedc99dcebee26784873fd22f7efd3fa1fb22b3beb937b974756efcba7", "vmStarted": false}
+
+running 8 tests
+test virtio::block::device::workspace_fd_tests::workspace_disks_actual_raw_io_survives_names_and_caller_fds_without_reopen ... ok
+test workspace_disks::tests::workspace_disks_aggregate_pin_budget_has_distinct_ids_and_retains_pins_on_stop ... ok
+test workspace_disks::tests::workspace_disks_duplicate_cloexec_and_close_only_owned_descriptors ... ok
+test workspace_disks::tests::workspace_disks_partial_failure_alias_stdio_and_closed_fd_leave_no_extra_handles ... ok
+test workspace_disks::tests::workspace_disks_reject_directory_and_socket_without_mutating_callers ... ok
+test workspace_disks::tests::workspace_disks_strict_identity_capacity_mode_links_access_and_append ... ok
+test workspace_raw_storage::tests::workspace_disks_fixed_capacity_refuses_oob_overflow_and_drift_without_growth_or_partial_write ... ok
+test workspace_raw_storage::tests::workspace_disks_positional_partial_interrupted_zero_error_and_overflow_paths ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 0.04s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-workspace-disks/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+running 7 tests
+test cowork_workspace_disks_tests::actual_block_builder::workspace_disks_builder_tests::workspace_disks_partial_actual_block_construction_closes_all_new_handles_preserves_callers ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_actual_two_block_construction_has_stable_ids_and_no_volume_path ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_context_free_closes_duplicates_only_and_duplicate_setter_is_atomic ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_incompatible_profile_refuses_before_kernel_disk_or_vm_construction ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_metadata_drift_refuses_start_without_permission_repair ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_missing_context_null_invalid_second_and_alias_do_not_publish_or_close_callers ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_refuses_old_path_backed_and_hvc_configuration ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.03s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-workspace-disks/target/debug/deps/krun-fe8b317545a4d4ac)
+
+running 28 tests
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_control_ack_remains_live_during_data_peer_backpressure ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_control_freeze_holds_pin_no_ack_or_phase_advance ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_control_rx_freeze_holds_entire_destination_until_fresh_copy_ack ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_four_queue_linux_handshake_copy_ack_and_data_gate ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_malformed_control_direction_span_length_and_state_fault ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_stale_control_generation_never_acks_or_advances ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_fixture_trace_frozen_control_has_no_rows_until_actual_used_ack ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_requires_both_features_before_four_queue_activation ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_event_manager_notify_before_finished_reset_completion ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_queue_socketpair_duplex_owned_io ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_short_tx_has_no_replay_across_freeze_or_reset ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_socket_backpressure_poll_is_stop_interruptible_without_ram_lease ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_worker_rx_wait_survives_freeze_then_acks_after_resume ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_worker_tx_backpressure_keeps_pin_stop_has_zero_old_ack ... ok
+test virtio::console::runtime_port::tests::runtime_port_async_pending_reactivation_waits_old_owner_then_real_io ... ok
+test virtio::console::runtime_port::tests::runtime_port_explicit_rx_owned_limit_report_limit_and_cross_region ... ok
+test virtio::console::runtime_port::tests::runtime_port_frozen_pending_rx_tx_keep_pins_and_no_guest_ack ... ok
+test virtio::console::runtime_port::tests::runtime_port_malformed_and_oversized_spans_reject_before_payload_io ... ok
+test virtio::console::runtime_port::tests::runtime_port_peer_eof_terminal_notifier_never_acks_guest ... ok
+test virtio::console::runtime_port::tests::runtime_port_reset_retires_but_holds_ownership_until_actual_thread_completion ... ok
+test virtio::console::runtime_port_control::tests::runtime_port_all_later_phase_adversarial_messages_and_duplicate_refusal ... ok
+test virtio::console::runtime_port_control::tests::runtime_port_bounded_adversarial_events_ids_values_lengths ... ok
+test virtio::console::runtime_port_control::tests::runtime_port_exact_linux_handshake_and_close ... ok
+test virtio::console::runtime_port_control::tests::runtime_port_no_state_change_before_ack ... ok
+test virtio::console::runtime_port_fixture_trace::tests::runtime_port_fixture_trace_exact_fields_and_strict_shared_cap ... ok
+test virtio::console::runtime_port_fixture_trace::tests::runtime_port_fixture_trace_rejects_data_queues_and_bad_sizes_without_rows ... ok
+test virtio::mmio::runtime_port_mmio_tests::runtime_port_actual_mmio_nonready_fails_terminal_without_poison ... ok
+test virtio::mmio::runtime_port_mmio_tests::runtime_port_actual_mmio_ready_cross_region_fails_terminal_without_poison ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 122 filtered out; finished in 0.13s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-workspace-disks/target/debug/deps/krun_devices-196ba91e2a52c433)
+{"kind":"runtime_control_used_ack","row":0,"queue":3,"id":4294967295,"event":0,"value":1,"usedAck":true}
+{"kind":"runtime_control_used_ack","row":1,"queue":2,"id":0,"event":1,"value":0,"usedAck":true}
+
+running 3 tests
+test runtime_port_api_tests::runtime_port_existing_hvc_factory_excludes_generic_variant ... ok
+test runtime_port_api_tests::runtime_port_public_factory_is_closed_opt_in_exclusive_and_peer_owned ... ok
+test runtime_port_trace_api_tests::runtime_port_fixture_trace_requires_exact_opt_in ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-workspace-disks/target/debug/deps/krun-fe8b317545a4d4ac)
+
+running 23 tests
+test reclaim_access::tests::cowork_stream_retirement_waits_only_for_fenced_copy_and_preserves_old_pins ... ok
+test stream_io::adversarial_tests::cowork_stream_factory_peer_mutation_cannot_change_private_io_with_sigpipe_default ...
+running 1 test
+test stream_io::adversarial_tests::cowork_stream_peer_mutation_sigpipe_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 0.00s
+
+ok
+test stream_io::adversarial_tests::cowork_stream_peer_mutation_sigpipe_child ... ok
+test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_eintr_keeps_absolute_deadline ...
+running 1 test
+test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_interrupted_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 0.14s
+
+ok
+test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_interrupted_child ... ok
+test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_zero_and_positive_bound ... ok
+test stream_io::tests::cowork_stream_factory_failure_closes_private_and_peer_before_publication ... ok
+test stream_io::tests::cowork_stream_factory_owned_dup_cloexec_and_closure ... ok
+test stream_io::tests::cowork_stream_io_bounds_reject_without_guest_or_payload_logging ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_event_manager_notify_before_finished_reset_completion ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_queue_socketpair_duplex_owned_io ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_short_tx_has_no_replay_across_freeze_or_reset ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_socket_backpressure_poll_is_stop_interruptible_without_ram_lease ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_worker_rx_wait_survives_freeze_then_acks_after_resume ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_worker_tx_backpressure_keeps_pin_stop_has_zero_old_ack ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_async_pending_reactivation_waits_old_owner_then_real_io ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_explicit_rx_owned_limit_report_limit_and_cross_region ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_frozen_pending_rx_tx_keep_pins_and_no_guest_ack ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_malformed_and_oversized_spans_reject_before_payload_io ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_peer_eof_terminal_notifier_never_acks_guest ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_reset_retires_but_holds_ownership_until_actual_thread_completion ... ok
+test virtio::mmio::cowork_stream_mmio_tests::cowork_stream_actual_mmio_nonready_fails_terminal_without_poison ... ok
+test virtio::mmio::cowork_stream_mmio_tests::cowork_stream_actual_mmio_ready_cross_region_fails_terminal_without_poison ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 0.29s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-workspace-disks/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+running 1 test
+test virtio::rng::device::cowork_rng_tests::cowork_rng_bounded_allocation_valid_large_chain_and_invalid_huge_readonly_span ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-workspace-disks/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+running 11 tests
+test reclaim_access::tests::cowork_stream_retirement_waits_only_for_fenced_copy_and_preserves_old_pins ... ok
+test reclaim_access::tests::drain_waits_for_short_copy_without_blocking_lease_drop ... ok
+test reclaim_access::tests::explicit_abort_keeps_gate_closed ... ok
+test reclaim_access::tests::freeze_denies_new_access_and_snapshots_pinned_io_with_zero_readers ... ok
+test reclaim_access::tests::frozen_mapping_and_stop_are_serialized_no_operations_after_stop ... ok
+test reclaim_access::tests::no_implicit_resume_after_partial_mutation_or_abandoned_freeze ... ok
+test reclaim_access::tests::pins_budget_and_overflow_are_checked_before_recording ... ok
+test reclaim_access::tests::resume_requires_explicit_complete_mapping_transaction ... ok
+test reclaim_access::tests::stopped_or_stale_generation_never_reenters_ram ... ok
+test reclaim_access::tests::timeout_stops_gate_and_preserves_outstanding_lease ... ok
+test reclaim_access::tests::waiting_completion_wakes_on_resume_and_stop ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 139 filtered out; finished in 0.02s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-workspace-disks/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+running 6 tests
+test virtio::queue::cowork_frq_tests::cowork_frq_malformed_chain_never_acknowledged ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_nonready_nonzero_metadata_never_pops_or_acks ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_pending_count_and_whole_ring_spans_before_pop ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_ring_intersection_is_returnable_valid_chain_for_noop ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_two_kicks_one_batch_second_has_no_invented_head ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_zero_length_payload_is_structurally_valid_for_noop ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 144 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-workspace-disks/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+running 16 tests
+test virtio::block::cowork::tests::cowork_block_actual_capture_guest_appends_second_request_both_complete ... ok
+test virtio::block::cowork::tests::cowork_block_actual_epoll_reset_reactivate_reuses_drained_stopfd_and_completes_io ... ok
+test virtio::block::cowork::tests::cowork_block_actual_epoll_stop_during_io_drains_reusable_fd ... ok
+test virtio::block::cowork::tests::cowork_block_actual_queue_copies_then_io_has_no_guest_lease ... ok
+test virtio::block::cowork::tests::cowork_block_actual_worker_stalled_io_freezes_and_defers_completion ... ok
+test virtio::block::cowork::tests::cowork_block_actual_worker_stop_after_io_never_completes_guest ... ok
+test virtio::block::cowork::tests::cowork_block_frozen_completion_is_pinned_until_gate_reopens ... ok
+test virtio::block::cowork::tests::cowork_block_nonready_and_cyclic_queue_fail_before_disk_or_ack ... ok
+test virtio::block::cowork::tests::cowork_block_out_of_range_first_head_and_next_are_terminal_not_empty ... ok
+test virtio::block::cowork::tests::cowork_block_ring_pin_survives_empty_queue_and_completion ... ok
+test virtio::block::cowork::tests::cowork_block_stale_completion_has_no_copy_or_used_ack ... ok
+test virtio::block::cowork::tests::cowork_block_terminal_access_fault_wakes_quiet_event_manager ... ok
+test virtio::block::cowork::tests::cowork_block_unsupported_command_completes_unsupp_without_disk_io ... ok
+test virtio::block::cowork::tests::cowork_block_wrong_lease_device_cannot_parse_guest_ram ... ok
+test virtio::queue::cowork_pop_tests::cowork_block_checked_pop_allows_forward_progress_and_valid_u16_wrap ... ok
+test virtio::queue::cowork_pop_tests::cowork_block_checked_pop_rejects_regression_overrun_invalid_wrap_and_head_replacement ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.09s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-workspace-disks/target/debug/deps/krun_devices-196ba91e2a52c433)
+{"kind":"block_ring_pin","clockMicros":0,"row":0,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":172,"row":1,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":239,"row":2,"request":1,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":243,"row":3,"request":1 }
+{"kind":"block_owned_io_end","clockMicros":246,"row":4,"request":1,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":253,"row":5,"request":1,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_used_ack","clockMicros":25838,"row":6,"request":1,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":25976,"row":7,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":26037,"row":8,"request":2,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":26041,"row":9,"request":2 }
+{"kind":"block_owned_io_end","clockMicros":26044,"row":10,"request":2,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":26047,"row":11,"request":2,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_used_ack","clockMicros":52305,"row":12,"request":2,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":52462,"row":13,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":52521,"row":14,"request":3,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":52525,"row":15,"request":3 }
+{"kind":"block_owned_io_end","clockMicros":52543,"row":16,"request":3,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":52547,"row":17,"request":3,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_ring_pin","clockMicros":52631,"row":18,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":52680,"row":19,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":52752,"row":20,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":52807,"row":21,"request":4,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":52811,"row":22,"request":4 }
+{"kind":"block_owned_io_end","clockMicros":52831,"row":23,"request":4,"success":true,"dataBytes":512 }
+{"kind":"block_completion_deferred","clockMicros":52836,"row":24,"request":4 }
+{"kind":"block_used_ack","clockMicros":92880,"row":25,"request":4,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":93043,"row":26,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":93099,"row":27,"request":5,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":93103,"row":28,"request":5 }
+{"kind":"block_owned_io_end","clockMicros":93119,"row":29,"request":5,"success":true,"dataBytes":512 }
+{"kind":"block_ring_pin","clockMicros":93197,"row":30,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93278,"row":31,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93298,"row":32,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93366,"row":33,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93393,"row":34,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93444,"row":35,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93511,"row":36,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93566,"row":37,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93681,"row":38,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93746,"row":39,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+
+running 8 tests
+test block_bounce::tests::actual_owned_pipeline_performs_io_with_zero_memory_leases_and_pins_excluded ... ok
+test block_bounce::tests::completion_during_freeze_stays_pinned_and_is_deferred ... ok
+test block_bounce::tests::disk_error_has_no_partial_read_data_and_returns_error_status ... ok
+test block_bounce::tests::duplicate_completion_cannot_touch_unpinned_guest_ram ... ok
+test block_bounce::tests::get_id_uses_owned_metadata_then_completes_once ... ok
+test block_bounce::tests::malformed_size_and_sector_overflow_do_not_start_io ... ok
+test block_bounce::tests::stale_queue_or_device_generation_cannot_write_completion ... ok
+test block_bounce::tests::stop_blocks_completion_without_guest_access ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-workspace-disks/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+running 2 tests
+test cowork_stream_api_tests::cowork_stream_public_caller_fd_setter_refuses_stdio_unconnected_named_and_unnamed ... ok
+test cowork_stream_api_tests::cowork_stream_public_factory_requires_opt_in_publishes_only_peer_and_refuses_duplicate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-workspace-disks/target/debug/deps/krun-fe8b317545a4d4ac)
+
+running 4 tests
+test cowork_admission_tests::cowork_admission_actual_mapping_ack_gate_stopped_freeze_prevents_all_operations ... ok
+test cowork_admission_tests::cowork_admission_normalized_gpu_resources_rejected ... ok
+test cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_before_any_vm ... ok
+test cowork_admission_tests::cowork_admission_rejected_disks_never_invoke_actual_construction_callback ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (spikes/cowork-hvf/out/libkrun-workspace-disks/target/debug/deps/krun-fe8b317545a4d4ac)
+{"vmStarted": false, "workerBuilt": false, "nativeAuthorityImplemented": false, "productionReady": false, "fullResourceGatePassed": false, "patchSha256": "c956cfcedc99dcebee26784873fd22f7efd3fa1fb22b3beb937b974756efcba7", "commands": [{"command": ["<WORKTREE>/spikes/cowork-hvf/out/rust/bin/cargo", "test", "--manifest-path", "<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/Cargo.toml", "--locked", "--offline", "--no-default-features", "--features", "blk", "--jobs", "2", "-p", "krun-devices", "workspace_disks", "--", "--test-threads=1", "--nocapture"], "passed": 8, "executionsPassed": 8, "exitCode": 0}, {"command": ["<WORKTREE>/spikes/cowork-hvf/out/rust/bin/cargo", "test", "--manifest-path", "<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/Cargo.toml", "--locked", "--offline", "--no-default-features", "--features", "blk", "--jobs", "2", "-p", "libkrun", "workspace_disks", "--", "--test-threads=1", "--nocapture"], "passed": 7, "executionsPassed": 7, "exitCode": 0}, {"command": ["<WORKTREE>/spikes/cowork-hvf/out/rust/bin/cargo", "test", "--manifest-path", "<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/Cargo.toml", "--locked", "--offline", "--no-default-features", "--features", "blk", "--jobs", "2", "-p", "krun-devices", "runtime_port", "--", "--test-threads=1", "--nocapture"], "passed": 28, "executionsPassed": 28, "exitCode": 0}, {"command": ["<WORKTREE>/spikes/cowork-hvf/out/rust/bin/cargo", "test", "--manifest-path", "<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/Cargo.toml", "--locked", "--offline", "--no-default-features", "--features", "blk", "--jobs", "2", "-p", "libkrun", "runtime_port", "--", "--test-threads=1", "--nocapture"], "passed": 3, "executionsPassed": 3, "exitCode": 0}, {"command": ["<WORKTREE>/spikes/cowork-hvf/out/rust/bin/cargo", "test", "--manifest-path", "<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/Cargo.toml", "--locked", "--offline", "--no-default-features", "--features", "blk", "--jobs", "2", "-p", "krun-devices", "cowork_stream", "--", "--test-threads=1", "--nocapture"], "passed": 23, "executionsPassed": 25, "exitCode": 0}, {"command": ["<WORKTREE>/spikes/cowork-hvf/out/rust/bin/cargo", "test", "--manifest-path", "<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/Cargo.toml", "--locked", "--offline", "--no-default-features", "--features", "blk", "--jobs", "2", "-p", "krun-devices", "cowork_rng", "--", "--test-threads=1", "--nocapture"], "passed": 1, "executionsPassed": 1, "exitCode": 0}, {"command": ["<WORKTREE>/spikes/cowork-hvf/out/rust/bin/cargo", "test", "--manifest-path", "<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/Cargo.toml", "--locked", "--offline", "--no-default-features", "--features", "blk", "--jobs", "2", "-p", "krun-devices", "reclaim_access::tests", "--", "--test-threads=1", "--nocapture"], "passed": 11, "executionsPassed": 11, "exitCode": 0}, {"command": ["<WORKTREE>/spikes/cowork-hvf/out/rust/bin/cargo", "test", "--manifest-path", "<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/Cargo.toml", "--locked", "--offline", "--no-default-features", "--features", "blk", "--jobs", "2", "-p", "krun-devices", "cowork_frq", "--", "--test-threads=1", "--nocapture"], "passed": 6, "executionsPassed": 6, "exitCode": 0}, {"command": ["<WORKTREE>/spikes/cowork-hvf/out/rust/bin/cargo", "test", "--manifest-path", "<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/Cargo.toml", "--locked", "--offline", "--no-default-features", "--features", "blk", "--jobs", "2", "-p", "krun-devices", "cowork_block", "--", "--test-threads=1", "--nocapture"], "passed": 16, "executionsPassed": 16, "exitCode": 0}, {"command": ["<WORKTREE>/spikes/cowork-hvf/out/rust/bin/cargo", "test", "--manifest-path", "<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/Cargo.toml", "--locked", "--offline", "--no-default-features", "--features", "blk", "--jobs", "2", "-p", "krun-devices", "block_bounce::tests", "--", "--test-threads=1", "--nocapture"], "passed": 8, "executionsPassed": 8, "exitCode": 0}, {"command": ["<WORKTREE>/spikes/cowork-hvf/out/rust/bin/cargo", "test", "--manifest-path", "<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/Cargo.toml", "--locked", "--offline", "--no-default-features", "--features", "blk", "--jobs", "2", "-p", "libkrun", "cowork_stream", "--", "--test-threads=1", "--nocapture"], "passed": 2, "executionsPassed": 2, "exitCode": 0}, {"command": ["<WORKTREE>/spikes/cowork-hvf/out/rust/bin/cargo", "test", "--manifest-path", "<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/Cargo.toml", "--locked", "--offline", "--no-default-features", "--features", "blk", "--jobs", "2", "-p", "libkrun", "cowork_admission", "--", "--test-threads=1", "--nocapture"], "passed": 4, "executionsPassed": 4, "exitCode": 0}, {"command": ["<WORKTREE>/spikes/cowork-hvf/out/rust/bin/cargo", "check", "--manifest-path", "<WORKTREE>/spikes/cowork-hvf/out/libkrun-workspace-disks/Cargo.toml", "--locked", "--offline", "--no-default-features", "--features", "blk", "--jobs", "2", "-p", "libkrun"], "exitCode": 0}], "testsPassed": 117, "testExecutionsPassed": 119, "passed": true}

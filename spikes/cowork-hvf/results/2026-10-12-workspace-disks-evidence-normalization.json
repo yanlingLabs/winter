@@ -1,0 +1,27 @@
+{
+  "normalizedEvidence": true,
+  "personalPathPrefixReplacement": "<WORKTREE>",
+  "trailingLogWhitespaceStripped": true,
+  "rawFiles": {
+    "2026-10-12-workspace-disks-native-tests.log": {
+      "sha256": "9236ddcd2d685be902f8ab246b45c81315c6d9498b8d9d9393e128c104a9fc2d",
+      "bytes": 30628,
+      "normalizedSha256": "9ec776ebd7066c52473ee438e839811b4c48b33475e0f773a58673464b1c49bd"
+    },
+    "2026-10-12-workspace-disks-static-build.log": {
+      "sha256": "8e0228c9611466f2ae14e67212e02f5ba7f8ada1039b3a021b4758afac5ac080",
+      "bytes": 8055,
+      "normalizedSha256": "4a4e2f7fd49b301068a691aa3e92ab756b5a0e8674d40c22f144ccaed9764d58"
+    },
+    "2026-10-12-workspace-disks-test-receipt.json": {
+      "sha256": "838a603ad5a406a619a6674506350c14eee07605a4ff80abd40001da9a4b7b57",
+      "bytes": 9428,
+      "normalizedSha256": "d84cf34f69b5bc99ff5ee7a5001f57ca5f5e25e8248bc48e01779073ed22b4c1"
+    },
+    "2026-10-12-workspace-disks-vmm-harness-blocked.log": {
+      "sha256": "8a93cc67782b7d3d79f3e74bda2629c9219f62ba45beaf539d64f286cce2f171",
+      "bytes": 4907,
+      "normalizedSha256": "8712191904477bc4f679a0649864131fcb32fc6d5721284f69a108f6342116bd"
+    }
+  }
+}
