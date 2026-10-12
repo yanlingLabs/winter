@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { SpawnedRuntimeProcess } from "@yanlinglabs/winter-agent-sdk";
+import type { PermissionMode, SpawnedRuntimeProcess } from "@yanlinglabs/winter-agent-sdk";
 import { permissionModeFor } from "../runtime-sdk/mode-options";
 import type { CoworkRepository } from "./repository";
 import { relativeCoworkPath } from "./repository";
@@ -18,7 +18,7 @@ export interface GuestRuntimeLaunch {
   readonly scope: Readonly<GuestRuntimeScope>; readonly launchId: string;
   readonly source: Readonly<{ sourceId: string; locationId: string; revision: number; access: SourceAccess }>;
   readonly capabilities: GuestRuntimeCapabilities;
-  readonly runtime: Readonly<{ executionPosture: "confined-guest"; sessionId: string; model: string; cwd: string; winterHome: string; storeHome: string; persistSession: true; permissionMode: string; resume?: string }>;
+  readonly runtime: Readonly<{ executionPosture: "confined-guest"; sessionId: string; model: string; cwd: string; winterHome: string; storeHome: string; persistSession: true; permissionMode: PermissionMode; resume?: string }>;
 }
 export interface GuestRuntimeTermination {
   scope: Readonly<GuestRuntimeScope>; launchId: string; outcome: "confirmed-stopped" | "uncertain";
@@ -46,6 +46,12 @@ export interface GuestRuntimeSupervisorDeps {
   bootId(workspaceId: string): string;
   runtimeCapability?: { protocolVersion: number; capabilities: readonly string[]; supportsConfinedGuestExecution: boolean };
   port?: GuestRuntimeSupervisorPort;
+}
+/** Canonical query snapshot with a one-use spawn closure. This is host composition,
+ * not independent native admission or a serializable startup capability. */
+export interface PreparedGuestRuntimeQuery {
+  readonly launch: Readonly<GuestRuntimeLaunch>;
+  spawn(): SpawnedRuntimeProcess;
 }
 const safeSegment = (value: string): string => {
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value)) throw new CoworkError("invalid_request");
@@ -101,11 +107,36 @@ export class CoworkGuestRuntimeSupervisor {
     // replacements fail closed; widening does not widen this already-admitted launch.
     if (JSON.stringify(intersectCeilings(captured, current)) !== JSON.stringify(intersectCeilings(captured, captured))) throw new CoworkError("stale_acknowledgment");
   }
-  spawn(sessionId: string): SpawnedRuntimeProcess {
+  private requireTransport(): GuestRuntimeSupervisorPort {
     const { port, runtimeCapability } = this.deps;
     if (this.stopped || !port || runtimeCapability?.protocolVersion !== 1 || runtimeCapability.supportsConfinedGuestExecution !== true || !Array.isArray(runtimeCapability.capabilities) || !runtimeCapability.capabilities.includes("confined-guest-posture-v1")) throw new CoworkError("unsupported_topology");
+    return port;
+  }
+  /** Preparing options has no process effect. Subsequent SDK startup must match the
+   * exact canonical snapshot; neither an options mutation nor a stale queued query
+   * can choose the runtime identity/configuration the native port receives. */
+  prepareQuery(sessionId: string): PreparedGuestRuntimeQuery {
+    this.requireTransport();
+    const admission = this.descriptor(sessionId);
+    let consumed = false;
+    return Object.freeze({ launch: admission.launch, spawn: () => {
+      if (consumed) throw new CoworkError("recovery_required");
+      consumed = true;
+      this.requireTransport();
+      this.assertCurrent(admission);
+      const current = this.descriptor(sessionId).launch;
+      if (!sameScope(admission.launch.scope, current.scope) || JSON.stringify(admission.launch.runtime) !== JSON.stringify(current.runtime) || JSON.stringify(admission.launch.source) !== JSON.stringify(current.source) || JSON.stringify(admission.launch.capabilities) !== JSON.stringify(current.capabilities)) throw new CoworkError("stale_acknowledgment");
+      return this.spawnAdmission(admission);
+    } });
+  }
+  spawn(sessionId: string): SpawnedRuntimeProcess {
+    this.requireTransport();
     if (this.lifetimes.has(sessionId)) throw new CoworkError("recovery_required");
-    const admission = this.descriptor(sessionId), { launch } = admission;
+    return this.spawnAdmission(this.descriptor(sessionId));
+  }
+  private spawnAdmission(admission: Admission): SpawnedRuntimeProcess {
+    const port = this.requireTransport(), { launch } = admission, sessionId = launch.scope.sessionId;
+    if (this.lifetimes.has(sessionId)) throw new CoworkError("recovery_required");
     if ([...this.lifetimes.values()].some(value => value.launch.scope.backendSessionId === launch.scope.backendSessionId)) throw new CoworkError("authority_denied");
     const lifetime: Lifetime = { launch, phase: "opening" }; this.lifetimes.set(sessionId, lifetime);
     let channel: GuestRuntimeChannel;
