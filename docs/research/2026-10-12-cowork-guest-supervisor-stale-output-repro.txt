@@ -1,0 +1,15 @@
+test("review: old SDK control/output still relay after proved stop and replacement launch", async () => {
+  const f=fixture();f.resume();const wires: ReturnType<typeof channel>[]=[];
+  const host=new CoworkGuestRuntimeSupervisor({...f.deps,runtimeCapability:capability,port:{open(launch){const wire=channel(launch);wires.push(wire);return wire.port;}}});
+  let handled=0;
+  const q=query({prompt:"old prompt",options:{model:"winter-test/echo",sessionId:"backend-stable",cwd:f.home,persistSession:false,canUseTool:async()=>{handled++;return {behavior:"deny",message:"synthetic review refusal"};},spawnClaudeCodeProcess:()=>host.spawn("conversation")}});
+  const old=wires[0]!;
+  old.stdout.write(JSON.stringify({type:"init",protocolVersion:"1.0",sessionId:"backend-stable",permissionMode:"default",cwd:"/workspace/folders/grant/repo/subdir",model:"winter-test/echo",tools:[]})+"\n");
+  old.stdout.write(JSON.stringify({type:"control_request",requestId:"old-control",subtype:"permission",payload:{requestId:"old-control",toolName:"Bash",input:{command:"true"},toolUseId:"old-tool",suggestions:[]}})+"\n");
+  old.stdout.write(JSON.stringify({type:"data",message:{type:"result",subtype:"success",is_error:false,result:"old buffered result"}})+"\n");
+  old.stdout.end();old.stderr.end();old.exit.resolve({code:0,signal:null});old.release();await Bun.sleep(0);
+  expect(host.retained()).toHaveLength(0);host.spawn("conversation");expect(host.retained()).toHaveLength(1);
+  const frames=[];for await(const frame of q)frames.push(frame);
+  expect(handled).toBe(1);expect(JSON.stringify(frames)).toContain("old buffered result");
+  console.log("REPRO: replacement admitted while old SDK permission callback executes and old result relays");host.stop();
+});
