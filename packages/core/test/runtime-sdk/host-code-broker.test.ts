@@ -468,6 +468,32 @@ test("activation stays blocked when a logical host policy consumer cannot acknow
     expect(hostStorageFloorDescriptor(home).denyReadPaths).toHaveLength(0);
   } finally { removeConsumer(); }
 });
+test("paths changed during policy acknowledgment cannot be cached as successfully acknowledged", async () => {
+  const f = fixture({ ownedBridge: false }), other = join(root, "new-participant");
+  let calls = 0;
+  const removeConsumer = registerHostStoragePolicyConsumer(async () => { calls++; mkdirSync(join(other, "cowork"), { recursive: true }); });
+  const options = { coordinationDir: coordination, participatingHomes: [other], coworkStorageActive: true };
+  let remove: (() => void) | undefined, repeatRemove: (() => void) | undefined;
+  try {
+    await expect(f.service.refreshForStorage(home, options)).rejects.toThrow("host-storage-policy-changed-during-refresh");
+    remove = await f.service.refreshForStorage(home, options);
+    expect(calls).toBe(2);
+    repeatRemove = await f.service.refreshForStorage(home, options);
+    expect(calls).toBe(2);
+  } finally { repeatRemove?.(); remove?.(); removeConsumer(); }
+});
+test("reordered and duplicate participating-home paths retain the acknowledged policy", async () => {
+  const f = fixture({ ownedBridge: false }), first = join(root, "first-participant"), second = join(root, "second-participant");
+  for (const path of [first, second]) mkdirSync(join(path, "cowork"), { recursive: true });
+  let calls = 0;
+  const removeConsumer = registerHostStoragePolicyConsumer(async () => { calls++; });
+  let remove: (() => void) | undefined, repeatRemove: (() => void) | undefined;
+  try {
+    remove = await f.service.refreshForStorage(home, { coordinationDir: coordination, participatingHomes: [first, second], coworkStorageActive: true });
+    repeatRemove = await f.service.refreshForStorage(home, { coordinationDir: coordination, participatingHomes: [second, first, second], coworkStorageActive: true });
+    expect(calls).toBe(1);
+  } finally { repeatRemove?.(); remove?.(); removeConsumer(); }
+});
 test("ordinary retired children never impose first-activation restart debt", async () => {
   const f = fixture({ active: false, ownedBridge: false }), g = f.enroll(); f.spawnGeneration(g); g.dispose(); f.exited.resolve(0);
   await Promise.resolve(); await Promise.resolve(); mkdirSync(join(home, "cowork"));

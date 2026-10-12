@@ -157,6 +157,48 @@ function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<stri
 }
 
 describe("createWinterSessionDrivers — the table", () => {
+  test("unchanged acknowledged storage paths leave a running Code incarnation and run home intact", async () => {
+    const t = table(), auxiliary: string[] = []; let remove: (() => void) | undefined, repeatRemove: (() => void) | undefined;
+    try {
+      mkdirSync(join(t.home, "cowork"));
+      const service = new HostCodeExecutionService(t.home, null);
+      const coordinationDir = mkdtempSync(join(tmpdir(), "winter-same-policy-coordination-")); auxiliary.push(coordinationDir);
+      const options = { coordinationDir, coworkStorageActive: true };
+      remove = await service.refreshForStorage(t.home, options);
+      const cwd = mkdtempSync(join(tmpdir(), "winter-same-policy-cwd-")); auxiliary.push(cwd);
+      const session = await t.drivers.create(t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd }));
+      await session.send("ongoing", "fixture"); await Bun.sleep(0);
+      const query = t.q(), run = t.runHomes.built[0]!.dir;
+      mkdirSync(join(t.home, "cowork/workspaces/new"), { recursive: true });
+      repeatRemove = await service.refreshForStorage(t.home, options);
+      expect(session.turnRunning).toBe(true); expect(session.handoffPending).not.toBe(true);
+      expect(t.queries).toHaveLength(1); expect(t.q()).toBe(query);
+      expect(t.runHomes.built).toHaveLength(1); expect(t.runHomes.built[0]!.dir).toBe(run);
+      query.emit(result()); await session.idle(); await t.drivers.endAll();
+    } finally { repeatRemove?.(); remove?.(); t.close(); for (const path of auxiliary) rmSync(path, { recursive: true, force: true }); }
+  });
+
+  test("a previously absent participating home's new root invalidates the acknowledged policy even before re-registration", async () => {
+    const t = table(), auxiliary: string[] = []; let remove: (() => void) | undefined, refreshRemove: (() => void) | undefined;
+    try {
+      mkdirSync(join(t.home, "cowork"));
+      const other = mkdtempSync(join(tmpdir(), "winter-new-participant-")); auxiliary.push(other);
+      const coordinationDir = mkdtempSync(join(tmpdir(), "winter-participant-coordination-")); auxiliary.push(coordinationDir);
+      const options = { coordinationDir, participatingHomes: [other], coworkStorageActive: true };
+      const service = new HostCodeExecutionService(t.home, null); remove = await service.refreshForStorage(t.home, options);
+      const cwd = mkdtempSync(join(tmpdir(), "winter-new-participant-cwd-")); auxiliary.push(cwd);
+      const session = await t.drivers.create(t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd }));
+      expect(t.q().options.sandbox?.filesystem?.denyRead).not.toContain(join(other, "cowork"));
+      mkdirSync(join(other, "cowork"));
+      refreshRemove = await service.refreshForStorage(t.home, options);
+      await session.send("next", "fixture"); await Bun.sleep(0);
+      expect(t.queries).toHaveLength(2);
+      expect(t.q().options.sandbox?.filesystem?.denyRead).toContain(join(other, "cowork"));
+      t.q().emit(result()); await session.idle(); await t.drivers.endAll();
+    } finally { refreshRemove?.(); remove?.(); t.close(); for (const path of auxiliary) rmSync(path, { recursive: true, force: true }); }
+  });
+
+
   test("storage activation refreshes an idle boundary/run home and replays queued Code work without daemon restart or native floor", async () => {
     const t = table(); let unregister: (() => void) | undefined;
     try {

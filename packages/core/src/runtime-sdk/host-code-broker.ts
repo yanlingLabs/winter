@@ -268,7 +268,8 @@ function hasFloor(floor: HostStorageFloorDescriptor): boolean {
   );
 }
 function fingerprint(floor: HostStorageFloorDescriptor): string {
-  return createHash("sha256").update(JSON.stringify(floor)).digest("hex");
+  const paths = Object.fromEntries(Object.entries(floor).sort(([a], [b]) => a.localeCompare(b)).map(([key, values]) => [key, [...new Set(values)].sort()]));
+  return createHash("sha256").update(JSON.stringify(paths)).digest("hex");
 }
 function canonicalDirectory(path: string): string {
   if (!isAbsolute(path)) throw new HostCodeUnavailable("cwd-not-absolute");
@@ -318,6 +319,8 @@ interface LiveGeneration {
 export class HostCodeExecutionService {
   private readonly live = new Map<string, LiveGeneration>();
   private refreshing = false;
+  /** Last completed consumer acknowledgment, not a fresh filesystem-derived before snapshot. */
+  private acknowledgedStoragePolicy: string | undefined;
   private readonly embeddedSpawns = new WeakSet<SpawnClaudeCodeProcess>();
   private readonly retiredProtectedFloors = new Set<string>();
   private retiredFloorOverflow = false;
@@ -1162,14 +1165,15 @@ export class HostCodeExecutionService {
     try {
       unregister = registerHostStorageFences(home, options);
       const deadline = Date.now() + timeoutMs;
+      const targetFloor = fingerprint(hostStorageFloorDescriptor(this.home));
+      const policyChanged = this.acknowledgedStoragePolicy !== targetFloor;
       let refreshTimer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
-          refreshHostStoragePolicies(),
+          policyChanged ? refreshHostStoragePolicies() : Promise.resolve(),
           new Promise<never>((_, reject) => { refreshTimer = setTimeout(() => reject(new HostCodeUnavailable("host-storage-policy-refresh-pending")), timeoutMs); }),
         ]);
       } finally { if (refreshTimer) clearTimeout(refreshTimer); }
-      const targetFloor = fingerprint(hostStorageFloorDescriptor(this.home));
       for (const entry of this.live.values()) {
         if (!entry.generation.protectedStorage) continue; // ordinary children require no descendant-stop proof
         entry.generation.dispose();
@@ -1245,6 +1249,9 @@ export class HostCodeExecutionService {
         this.retiredProtectedFloors.clear();
         this.retiredFloorOverflow = false;
       }
+      if (fingerprint(hostStorageFloorDescriptor(this.home)) !== targetFloor)
+        throw new HostCodeUnavailable("host-storage-policy-changed-during-refresh");
+      this.acknowledgedStoragePolicy = targetFloor;
       this.live.clear();
       return unregister;
     } catch (error) {

@@ -695,6 +695,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     // next incarnation, preserving backend/session identity and held user messages in the log.
     await Promise.all([...drivers.values()].map(async session => {
       const mode = deps.store.meta(session.sessionId).mode ?? "code";
+      // Host Code/Chat/Dispatch only. Future Cowork drivers need their own workspace/guest
+      // policy lifecycle and must never be swept by this native-host callback.
+      if (mode !== "code" && mode !== "chat" && mode !== "dispatch") return;
       let refreshed = false;
       const work = async () => {
         if (mode === "code") await session.idle(); // let an approved build/tool turn finish

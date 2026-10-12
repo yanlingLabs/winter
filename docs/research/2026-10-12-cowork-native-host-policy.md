@@ -32,3 +32,11 @@ The new driver test finishes the current Code turn, queues another message durin
 These are Core policy/continuation checks, not a new production Cowork claim or a full durable subagent acceptance run. Swift build/test, useful SourceKit indexing and headless Chromium comparisons against current main belong to the independent SDK baseline. This Core report does not claim those platform workflows passed. No SDK pin/release, VM, live Winter app/daemon/home or real Keychain was used.
 
 Encrypted private disks and signed native key custody provide the selected at-rest protection. Authenticated API plaintext access, approved same-user execution, arbitrary deletion/corruption, and delegated execution remain residuals. SDK file/context coverage, signed worker/storage integration and production end-to-end gates remain open.
+
+## Acknowledged-policy refinement
+
+A follow-up compares normalized path-policy fingerprints with the last successful consumer acknowledgment. Identical registration skips ordinary host handoffs, while the registration record itself and explicit owned-bridge authority/drain checks are retained. A new workspace beneath stable roots leaves a running Code incarnation unchanged. Creating a previously absent participating home's Cowork root before registration changes the effective paths and requires refresh; a fresh filesystem before/after comparison would not prove this was installed. A descriptor changed during acknowledgment refuses activation and is not cached as acknowledged.
+
+The driver callback deliberately covers only Code, Chat and Dispatch. Future Cowork drivers require their own workspace/guest policy lifecycle and cannot be implicitly swept by the host callback. Workspace/source/approval authority updates remain separate from this path-policy optimization.
+
+Refinement verification: **171 pass, zero failures, four files, 716 expectations** across host broker, driver/run-home, runtime creation and embedded-policy suites. New checks cover unchanged running Code, newly present participating roots, paths changing during acknowledgment, and reordered/duplicate root registration. Auxiliary fixture roots are explicitly removed. Core typecheck and diff checks pass.
