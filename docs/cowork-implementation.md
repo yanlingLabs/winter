@@ -103,7 +103,8 @@ separately. Cowork remains unavailable until its required gates pass.
   Native/embedded context-reader coverage is independently accepted at SDK
   `1971f9a6`; Core accepts it at `6c35a3a8`. The additional durable cron-prompt
   guard is pushed at `bbab87d9`, with focused tests and both typechecks passing;
-  full CI for that newer head remains pending. See the
+  both full CI runs and all 12 checks pass at that newer head. The designated
+  reviewer accepted it for a scoped foundations merge; release and pin remain separate. See the
   [embedded acceptance evidence](research/2026-10-12-cowork-embedded-context-acceptance.md).
 
 ## Work in progress
