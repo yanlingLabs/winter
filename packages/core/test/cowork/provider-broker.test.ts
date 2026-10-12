@@ -53,8 +53,9 @@ test("cancel/close retain exact pending adapter and finalizer before replacement
   const lease = new CoworkProviderBroker({ secrets, assertCurrent: () => {} }).open(admission); const id = randomUUID(); await lease.handle(frame(id, "begin", 0, { turn: payload }));
   const pending = lease.handle(frame(id, "next", 1)); await Bun.sleep(0);
   expect((await lease.handle(frame(id, "cancel", 2))).code).toBe("effects_uncertain"); expect(returned).toBe(false);
-  expect((await lease.handle(frame(randomUUID(), "begin", 0, { turn: payload }))).kind).toBe("refused"); resolveRead({ done: false, value: { type: "text_delta", text: "late" } }); expect((await pending).kind).toBe("refused"); await Bun.sleep(0); expect(returned).toBe(true);
-  expect((await lease.handle(frame(randomUUID(), "begin", 0, { turn: payload }))).kind).toBe("refused"); resolveDrain({ done: true, value: undefined }); await Bun.sleep(0);
+  for(let i=0;i<7;i++) expect((await lease.handle(frame(randomUUID(), "begin", 0, {turn:payload}))).kind).toBe("accepted");
+  expect((await lease.handle(frame(randomUUID(), "begin", 0, { turn: payload }))).code).toBe("capacity_busy"); resolveRead({ done: false, value: { type: "text_delta", text: "late" } }); expect((await pending).kind).toBe("refused"); await Bun.sleep(0); expect(returned).toBe(true);
+  expect((await lease.handle(frame(randomUUID(), "begin", 0, { turn: payload }))).code).toBe("capacity_busy"); resolveDrain({ done: true, value: undefined }); await Bun.sleep(0);
   expect((await lease.handle(frame(randomUUID(), "begin", 0, { turn: payload }))).kind).toBe("accepted"); lease.close();
 });
 
@@ -99,7 +100,7 @@ test("concurrent pulls refuse and oversized events never enter the private outpu
 test("iterator finalizer that yields rather than ends retains admission instead of inventing cleanup", async () => {
   const admission = fixture(() => ({ [Symbol.asyncIterator]: () => ({ next: async () => ({ done: false, value: { type: "text_delta", text: "partial" } as ProviderEvent }), return: async () => ({ done: false, value: { type: "text_delta", text: "cleanup still yielding" } as ProviderEvent }) }) }));
   const lease = new CoworkProviderBroker({ secrets, assertCurrent: () => {} }).open(admission), id = randomUUID(); await lease.handle(frame(id, "begin", 0, { turn: payload })); await lease.handle(frame(id, "next", 1));
-  expect((await lease.handle(frame(id, "cancel", 2))).code).toBe("effects_uncertain"); await Bun.sleep(0); expect((await lease.handle(frame(randomUUID(), "begin", 0, { turn: payload }))).kind).toBe("refused"); lease.close();
+  expect((await lease.handle(frame(id, "cancel", 2))).code).toBe("effects_uncertain"); await Bun.sleep(0); for(let i=0;i<7;i++)expect((await lease.handle(frame(randomUUID(), "begin", 0, {turn:payload}))).kind).toBe("accepted"); expect((await lease.handle(frame(randomUUID(), "begin", 0, { turn: payload }))).code).toBe("capacity_busy"); lease.close();
 });
 
 test("malformed decoded input refuses with bounded identity instead of throwing packet data", async () => {
@@ -108,4 +109,41 @@ test("malformed decoded input refuses with bounded identity instead of throwing 
     const response = await lease.handle(invalid as CoworkProviderRequest); expect(response.kind).toBe("refused"); expect(response.invocationId.length).toBe(36); expect(response.sequence).toBe(0);
   }
   lease.close();
+});
+
+test("parallel turns isolate cancellation, abort upstream and admit later work",async()=>{
+ let aborted=false;
+ const admission=fixture(async function*(request){
+  if(request.messages[0]?.content==="hold") {await new Promise<void>(resolve=>request.signal?.addEventListener("abort",()=>{aborted=true;resolve();},{once:true}));yield {type:"text_delta",text:"late cancelled output"};}
+  else yield {type:"text_delta",text:"independent output"};
+  yield {type:"done",stopReason:"end_turn"};
+ });
+ const lease=new CoworkProviderBroker({secrets,assertCurrent:()=>{}}).open(admission),a=randomUUID(),b=randomUUID();
+ expect((await lease.handle(frame(a,"begin",0,{turn:{...payload,messages:[{role:"user",content:"hold"}]}}))).kind).toBe("accepted");
+ expect((await lease.handle(frame(b,"begin",0,{turn:payload}))).kind).toBe("accepted");
+ const held=lease.handle(frame(a,"next",1));await Bun.sleep(0);
+ expect((await lease.handle(frame(b,"next",1))).event).toMatchObject({text:"independent output"});
+ expect((await lease.handle(frame(a,"cancel",2))).kind).toBe("closed");expect(aborted).toBe(true);
+ expect((await held).kind).toBe("refused");expect((await lease.handle(frame(b,"next",2))).event?.type).toBe("done");
+ expect((await lease.handle(frame(randomUUID(),"begin",0,{turn:payload}))).kind).toBe("accepted");lease.close();
+});
+test("cancel before begin fences only that invocation and is idempotent",async()=>{
+ let calls=0;const lease=new CoworkProviderBroker({secrets,assertCurrent:()=>{}}).open(fixture(async function*(){calls++;yield {type:"done",stopReason:"end_turn"};}));
+ const id=randomUUID();expect((await lease.handle(frame(id,"cancel",1))).kind).toBe("closed");expect((await lease.handle(frame(id,"cancel",1))).kind).toBe("closed");
+ expect((await lease.handle(frame(id,"begin",0,{turn:payload}))).kind).toBe("refused");expect(calls).toBe(0);
+ const next=randomUUID();expect((await lease.handle(frame(next,"begin",0,{turn:payload}))).kind).toBe("accepted");expect((await lease.handle(frame(next,"next",1))).event?.type).toBe("done");expect(calls).toBe(1);lease.close();
+});
+
+test("close retains all pending turns and releases each capacity slot exactly once",async()=>{
+ const completions:Array<(value:IteratorResult<ProviderEvent>)=>void>=[];let returns=0,aborts=0;
+ const admission=fixture(request=>{request.signal?.addEventListener("abort",()=>{aborts++;},{once:true});return {[Symbol.asyncIterator]:()=>({next:()=>new Promise(resolve=>{completions.push(resolve);}),return:async()=>{returns++;return {done:true,value:undefined};}})};});
+ const broker=new CoworkProviderBroker({secrets,assertCurrent:()=>{}}),lease=broker.open(admission),pending:Promise<unknown>[]=[];
+ for(let i=0;i<8;i++){const id=randomUUID();expect((await lease.handle(frame(id,"begin",0,{turn:payload}))).kind).toBe("accepted");pending.push(lease.handle(frame(id,"next",1)));}
+ await Bun.sleep(0);lease.close();lease.close();expect(aborts).toBe(8);expect(returns).toBe(0);
+ const other=broker.open(fixture(async function*(){yield {type:"done",stopReason:"end_turn"};}));
+ expect((await other.handle(frame(randomUUID(),"begin",0,{turn:payload}))).code).toBe("capacity_busy");
+ for(const complete of completions)complete({done:false,value:{type:"text_delta",text:"discarded"}});
+ await Promise.all(pending);await Bun.sleep(0);expect(returns).toBe(8);
+ for(let i=0;i<8;i++)expect((await other.handle(frame(randomUUID(),"begin",0,{turn:payload}))).kind).toBe("accepted");
+ expect((await other.handle(frame(randomUUID(),"begin",0,{turn:payload}))).code).toBe("capacity_busy");other.close();
 });
