@@ -43,4 +43,29 @@ struct HeadlessCEFDriver {
     var disposeContext: (String) -> Void
     /// What a page tried and was refused, by browser id: `"popup"` or `"local-network"` (main thread). `nil` stops it.
     var setNoticeObserver: (((Int, String) -> Void)?) -> Void = { _ in }
+    /// Present the key's browser (`HeadlessPresentation`) to the viewer naming `nonce` and satisfying `requirement`:
+    /// the presentation's bootstrap service name and a handle, or why not. `ended` runs once if the VIEWER ends it.
+    var present: (_ key: NSView, _ browserId: Int, _ request: HeadlessPresentRequest,
+                  _ ended: @escaping (String) -> Void) -> Result<(service: String, handle: AnyObject), HeadlessPresentFailure> = { _, _, _, _ in
+        .failure(HeadlessPresentFailure(message: "presentation is not available"))
+    }
+    /// End a presentation now; what it measured.
+    var unpresent: (_ handle: AnyObject) -> [String: Double] = { _ in [:] }
+    /// Whether the viewer may send input from now on.
+    var setControl: (_ handle: AnyObject, _ control: Bool) -> Void = { _, _ in }
+}
+
+/// `headless.present`'s parameters (`HeadlessWire`).
+struct HeadlessPresentRequest: Equatable, Sendable {
+    let tabId: String
+    /// The nonce both sides must name (16 hex digits on the wire).
+    let nonce: UInt64
+    /// The viewer's code-signing requirement (Winter.app's designated requirement), as the daemon names it.
+    let viewerRequirement: String
+    let control: Bool
+    let scale: Double
+}
+
+struct HeadlessPresentFailure: Error, Equatable {
+    let message: String
 }

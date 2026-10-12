@@ -25,6 +25,8 @@
 /// Winter down. Failure degrades to a placeholder plus a log line, never `exit()`. (`cefsimple`'s
 /// `return 1` shape is right for a sample whose only job is CEF, and wrong for a host app.)
 
+#import <IOSurface/IOSurfaceRef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -884,6 +886,36 @@ void WinterCEFHeadlessDisposeAllContexts(void);
 
 /// How many sessions have a request context right now (for the helper's logs and tests).
 int WinterCEFHeadlessContextCount(void);
+
+// ---- Presentation (`Sources/HeadlessPresent`): a headless tab shown to Winter.app through the GPU ----------------
+//
+// Every headless browser is created with accelerated off-screen rendering (`shared_texture_enabled`): CEF composites
+// on the GPU and hands each frame over as a BORROWED IOSurface, valid only during the callback. Nobody looks at it
+// until a presentation does; a browser's rendering mode is fixed at creation, so this is what lets any live tab be
+// shown later without reloading it.
+
+/// Every view or popup frame of every headless browser, synchronously on the CEF UI (main) thread while the borrowed
+/// `surface` is valid: the observer must finish reading it (a GPU copy waited on) before it returns. `type` 0 is the
+/// view, 1 a popup widget (a `<select>` list). `nil` stops it.
+void WinterCEFHeadlessSetPaintObserver(void (^observer)(int browserId, int type, IOSurfaceRef surface));
+
+/// A browser's popup widget: `kind` 0 hidden, 1 shown, 2 moved to (x, y, width, height) in CSS pixels. `nil` stops it.
+void WinterCEFHeadlessSetPopupObserver(void (^observer)(int browserId, int kind, int x, int y, int width, int height));
+
+/// The page's cursor changed (`cef_cursor_type_t`). `nil` stops it.
+void WinterCEFHeadlessSetCursorObserver(void (^observer)(int browserId, int cursorType));
+
+/// Render `key`'s browser at `scale` device pixels per CSS pixel (its CSS size stays the fixed view) at `frameRate`
+/// frames a second, and repaint it now. A presentation raises both while it lasts and puts them back after (1.0, the
+/// helper's own rate): nothing of the page is reloaded — it sees a device-pixel-ratio change, as on a new display.
+void WinterCEFHeadlessSetPresentation(NSView *key, double scale, int frameRate);
+
+/// One HUMAN input event for `key`'s browser, through CEF's own host input (never DevTools): `kind` as
+/// `WinterPresentInput*` (Sources/HeadlessPresent/WinterPresentWire.h), coordinates in CSS pixels of the view,
+/// `modifiers` CEF's EVENTFLAG_* bits. Main thread.
+void WinterCEFHeadlessSendInput(NSView *key, int kind, int x, int y, int dx, int dy, int button, int clickCount,
+                                unsigned modifiers, int windowsKeyCode, int nativeKeyCode, unsigned short character,
+                                unsigned short unmodifiedCharacter);
 
 /// What turning printing off on `sessionId`'s context came to ("disabled", "absent", "not-settable",
 /// "refused: …", "pending" before the context is initialised, "" for an unknown session).

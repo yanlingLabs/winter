@@ -8,6 +8,28 @@ final class HeadlessWireTests: XCTestCase {
         XCTAssertEqual(inbound, .contextDispose(linkId: "h-1", cmdId: "c1", sessionId: "s_a"))
     }
 
+    func testPresentationOpsAreReadBeforeTheBrowserLinkParser() {
+        let present = HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c1","op":"headless.present","params":{"tabId":"w-1","nonce":"0123456789abcdef","viewerRequirement":"identifier \"x\"","control":true,"scale":2}}}"#))
+        XCTAssertEqual(present, .present(linkId: "h-1", cmdId: "c1", HeadlessPresentRequest(tabId: "w-1", nonce: 0x0123_4567_89ab_cdef,
+                                                                                          viewerRequirement: #"identifier "x""#, control: true, scale: 2)))
+        XCTAssertEqual(HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c2","op":"headless.unpresent","params":{"tabId":"w-1"}}}"#)),
+                       .unpresent(linkId: "h-1", cmdId: "c2", tabId: "w-1"))
+        XCTAssertEqual(HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c3","op":"headless.control","params":{"tabId":"w-1","control":false}}}"#)),
+                       .control(linkId: "h-1", cmdId: "c3", tabId: "w-1", control: false))
+    }
+
+    func testAPresentationWithoutItsNonceOrRequirementIsOwedAFailure() {
+        for params in [#"{"tabId":"w-1","viewerRequirement":"r"}"#, #"{"tabId":"w-1","nonce":"12","viewerRequirement":"r"}"#,
+                       #"{"tabId":"w-1","nonce":"0123456789abcdef"}"#] {
+            let inbound = HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c1","op":"headless.present","params":"# + params + "}}"))
+            XCTAssertEqual(inbound, .unreadable(linkId: "h-1", cmdId: "c1", reason: "headless.present needs nonce (16 hex) and viewerRequirement"), params)
+        }
+        let scale = HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c1","op":"headless.present","params":{"tabId":"w-1","nonce":"0123456789abcdef","viewerRequirement":"r","scale":9}}}"#))
+        guard case .present(_, _, let request) = scale else { return XCTFail("\(scale)") }
+        XCTAssertEqual(request.scale, 1, "a scale out of 1…4 is 1")
+        XCTAssertFalse(request.control, "no control unless asked")
+    }
+
     func testContextDisposeWithoutASessionIsOwedAFailure() {
         let inbound = HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c1","op":"context.dispose","params":{}}}"#))
         XCTAssertEqual(inbound, .unreadable(linkId: "h-1", cmdId: "c1", reason: "context.dispose needs sessionId"))

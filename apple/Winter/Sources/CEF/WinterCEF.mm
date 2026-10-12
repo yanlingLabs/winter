@@ -4900,6 +4900,16 @@ bool g_headless = false;
 
 /// The view a headless browser reports. Paint goes nowhere: the engine reads pixels only through
 /// `Page.captureScreenshot`, which the compositor answers on its own.
+/// Presentation (`WinterCEFHeadlessSet*Observer`, `WinterCEFHeadlessSetPresentation`). Main (CEF UI) thread only.
+void (^g_headless_paint_observer)(int, int, IOSurfaceRef) = nil;
+void (^g_headless_popup_observer)(int, int, int, int, int, int) = nil;
+void (^g_headless_cursor_observer)(int, int) = nil;
+/// The device scale a presented browser renders at, by browser id (absent: 1).
+std::map<int, double> &HeadlessScales() {
+  static auto *scales = new std::map<int, double>();
+  return *scales;
+}
+
 class WinterHeadlessRenderHandler : public CefRenderHandler {
  public:
   WinterHeadlessRenderHandler() = default;
@@ -4910,16 +4920,42 @@ class WinterHeadlessRenderHandler : public CefRenderHandler {
 
   bool GetScreenInfo(CefRefPtr<CefBrowser> browser, CefScreenInfo &screen_info) override {
     const CefRect screen(0, 0, WinterCEFHeadlessViewWidth, WinterCEFHeadlessViewHeight);
-    screen_info.Set(1.0f, 24, 8, false, screen, screen);
+    double scale = 1.0;
+    if (browser) {
+      auto it = HeadlessScales().find(browser->GetIdentifier());
+      if (it != HeadlessScales().end()) scale = it->second;
+    }
+    screen_info.Set(static_cast<float>(scale), 24, 8, false, screen, screen);
     return true;
   }
 
+  /// Not called: every headless browser renders accelerated (`OnAcceleratedPaint`).
   void OnPaint(CefRefPtr<CefBrowser> browser,
                PaintElementType type,
                const RectList &dirtyRects,
                const void *buffer,
                int width,
                int height) override {}
+
+  /// The borrowed frame goes to the presentation, if any, synchronously: it must be read before this returns.
+  void OnAcceleratedPaint(CefRefPtr<CefBrowser> browser,
+                          PaintElementType type,
+                          const RectList &dirtyRects,
+                          const CefAcceleratedPaintInfo &info) override {
+    if (!g_headless_paint_observer || !browser || !info.shared_texture_io_surface) return;
+    g_headless_paint_observer(browser->GetIdentifier(), type == PET_POPUP ? 1 : 0,
+                              reinterpret_cast<IOSurfaceRef>(info.shared_texture_io_surface));
+  }
+
+  void OnPopupShow(CefRefPtr<CefBrowser> browser, bool show) override {
+    if (g_headless_popup_observer && browser) g_headless_popup_observer(browser->GetIdentifier(), show ? 1 : 0, 0, 0, 0, 0);
+  }
+
+  void OnPopupSize(CefRefPtr<CefBrowser> browser, const CefRect &rect) override {
+    if (g_headless_popup_observer && browser) {
+      g_headless_popup_observer(browser->GetIdentifier(), 2, rect.x, rect.y, rect.width, rect.height);
+    }
+  }
 
   /// A drag the page starts has nowhere to go: no window, no pasteboard of the user's. Cancelled.
   bool StartDragging(CefRefPtr<CefBrowser> browser,
@@ -5062,6 +5098,20 @@ class WinterHeadlessClient : public WinterClient {
       : WinterClient(creation, bridge), render_(render) {}
 
   CefRefPtr<CefRenderHandler> GetRenderHandler() override { return render_; }
+
+  /// The page's cursor, for a presentation (a windowless browser has no view of its own to set it on).
+  bool OnCursorChange(CefRefPtr<CefBrowser> browser,
+                      CefCursorHandle cursor,
+                      cef_cursor_type_t type,
+                      const CefCursorInfo &custom_cursor_info) override {
+    if (g_headless_cursor_observer && browser) g_headless_cursor_observer(browser->GetIdentifier(), type);
+    return true;  // handled: nothing to set it on here
+  }
+
+  void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
+    if (browser) HeadlessScales().erase(browser->GetIdentifier());
+    WinterClient::OnBeforeClose(browser);
+  }
 
   /// A navigation (and each of its redirects) the local-network rule refuses is cancelled before it is sent. The
   /// `cefQuery` router's call is owed only to a navigation that proceeds, so it is made only then.
@@ -5206,6 +5256,11 @@ void CreateWindowlessBrowserNow(NSView *key, const std::string &url, CefRefPtr<C
   // `SetAsWindowless` also sets the Alloy runtime style (`cef_mac.h`). No parent: there is no view to attach
   // dialogs or menus to, and none is wanted.
   window_info.SetAsWindowless(kNullWindowHandle);
+
+  // Accelerated: CEF composites on the GPU and hands each frame over as an IOSurface, no CPU readback — and only a
+  // browser created this way can be PRESENTED later (`WinterCEFHeadlessSetPaintObserver`): the mode is fixed at
+  // creation, and a presentation must never recreate the page.
+  window_info.shared_texture_enabled = true;
 
   WinterCEFBrowserCreation *creation = [[WinterCEFBrowserCreation alloc] init];
   creation.parent = key;  // held for the length of the creation, as `CreateBrowserNow` does
@@ -5458,6 +5513,64 @@ void WinterCEFHeadlessDisposeAllContexts(void) {
 
 int WinterCEFHeadlessContextCount(void) {
   return static_cast<int>(HeadlessContexts().size());
+}
+
+void WinterCEFHeadlessSetPaintObserver(void (^observer)(int browserId, int type, IOSurfaceRef surface)) {
+  g_headless_paint_observer = [observer copy];
+}
+
+void WinterCEFHeadlessSetPopupObserver(void (^observer)(int browserId, int kind, int x, int y, int width, int height)) {
+  g_headless_popup_observer = [observer copy];
+}
+
+void WinterCEFHeadlessSetCursorObserver(void (^observer)(int browserId, int cursorType)) {
+  g_headless_cursor_observer = [observer copy];
+}
+
+void WinterCEFHeadlessSetPresentation(NSView *key, double scale, int frameRate) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  const int id = browser->GetIdentifier();
+  if (scale > 1.0) HeadlessScales()[id] = scale; else HeadlessScales().erase(id);
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  host->NotifyScreenInfoChanged();
+  host->WasResized();
+  host->SetWindowlessFrameRate(frameRate > 0 ? frameRate : kHeadlessFrameRate);
+  host->Invalidate(PET_VIEW);
+}
+
+void WinterCEFHeadlessSendInput(NSView *key, int kind, int x, int y, int dx, int dy, int button, int clickCount,
+                                unsigned modifiers, int windowsKeyCode, int nativeKeyCode, unsigned short character,
+                                unsigned short unmodifiedCharacter) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  CefMouseEvent mouse;
+  mouse.x = x;
+  mouse.y = y;
+  mouse.modifiers = modifiers;
+  const cef_mouse_button_type_t which = button == 2 ? MBT_RIGHT : button == 1 ? MBT_MIDDLE : MBT_LEFT;
+  switch (kind) {
+    case 1: host->SendMouseMoveEvent(mouse, false); break;                       // move
+    case 2: host->SendMouseClickEvent(mouse, which, false, clickCount > 0 ? clickCount : 1); break;  // down
+    case 3: host->SendMouseClickEvent(mouse, which, true, clickCount > 0 ? clickCount : 1); break;   // up
+    case 4: host->SendMouseWheelEvent(mouse, dx, dy); break;                     // wheel
+    case 5: host->SendMouseMoveEvent(mouse, true); break;                        // leave
+    case 6: case 7: case 8: {                                                    // key down / up / char
+      CefKeyEvent event;
+      event.type = kind == 6 ? KEYEVENT_RAWKEYDOWN : kind == 7 ? KEYEVENT_KEYUP : KEYEVENT_CHAR;
+      event.modifiers = modifiers;
+      event.windows_key_code = windowsKeyCode;
+      event.native_key_code = nativeKeyCode;
+      event.character = character;
+      event.unmodified_character = unmodifiedCharacter;
+      event.is_system_key = false;
+      host->SendKeyEvent(event);
+      break;
+    }
+    case 9: host->SetFocus(x != 0); break;                                       // focus / blur
+    default: break;
+  }
 }
 
 NSString *WinterCEFHeadlessPrintingOutcome(const char *sessionId) {

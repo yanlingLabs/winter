@@ -29,10 +29,19 @@ enum HeadlessWire {
         static let events = BrowserLinkProtocol.Method.events
         static let tabGone = BrowserLinkProtocol.Method.tabGone
         static let notice = "headless.notice"
+        /// A presentation ended on the VIEWER's side (it said bye, it died): `{linkId, tabId, reason}`.
+        static let presentationEnded = "headless.presentationEnded"
     }
 
     enum Op {
         static let contextDispose = "context.dispose"
+        /// Show a tab to Winter.app through the GPU (`HeadlessPresentProducer`): `{tabId, nonce (16 hex), viewerRequirement,
+        /// control, scale}` → `{service, cssWidth, cssHeight}`.
+        static let present = "headless.present"
+        /// `{tabId}` → what the presentation measured.
+        static let unpresent = "headless.unpresent"
+        /// `{tabId, control}`: the viewer may (or may no longer) send input.
+        static let control = "headless.control"
     }
 
     /// The longest command line read (the daemon's own cap on a command is 1 MiB).
@@ -42,6 +51,9 @@ enum HeadlessWire {
     enum Inbound: Equatable {
         case command(BrowserLinkCommand)
         case contextDispose(linkId: String, cmdId: String, sessionId: String)
+        case present(linkId: String, cmdId: String, HeadlessPresentRequest)
+        case unpresent(linkId: String, cmdId: String, tabId: String)
+        case control(linkId: String, cmdId: String, tabId: String, control: Bool)
         /// A command that named itself (`cmdId`) but could not be read: still owed a failure.
         case unreadable(linkId: String?, cmdId: String?, reason: String)
         /// Not a command at all — logged and dropped.
@@ -65,6 +77,37 @@ enum HeadlessWire {
                 return .unreadable(linkId: linkId, cmdId: cmdId, reason: "context.dispose needs sessionId")
             }
             return .contextDispose(linkId: linkId, cmdId: cmdId, sessionId: sessionId)
+        }
+        if let op = params["op"]?.stringValue, [Op.present, Op.unpresent, Op.control].contains(op) {
+            let linkId = params["linkId"]?.stringValue
+            let cmdId = params["cmdId"]?.stringValue
+            guard let linkId, let cmdId else {
+                return .unreadable(linkId: linkId, cmdId: cmdId, reason: "a command without linkId/cmdId")
+            }
+            let p = params["params"]
+            guard let tabId = p?["tabId"]?.stringValue, !tabId.isEmpty else {
+                return .unreadable(linkId: linkId, cmdId: cmdId, reason: "\(op) needs tabId")
+            }
+            switch op {
+            case Op.unpresent:
+                return .unpresent(linkId: linkId, cmdId: cmdId, tabId: tabId)
+            case Op.control:
+                guard case .bool(let control)? = p?["control"] else {
+                    return .unreadable(linkId: linkId, cmdId: cmdId, reason: "headless.control needs control")
+                }
+                return .control(linkId: linkId, cmdId: cmdId, tabId: tabId, control: control)
+            default:
+                guard let nonceText = p?["nonce"]?.stringValue, nonceText.count == 16, let nonce = UInt64(nonceText, radix: 16),
+                      let requirement = p?["viewerRequirement"]?.stringValue, !requirement.isEmpty else {
+                    return .unreadable(linkId: linkId, cmdId: cmdId, reason: "headless.present needs nonce (16 hex) and viewerRequirement")
+                }
+                var control = false
+                if case .bool(let c)? = p?["control"] { control = c }
+                var scale = 1.0
+                if case .number(let n)? = p?["scale"], n >= 1, n <= 4 { scale = n }
+                return .present(linkId: linkId, cmdId: cmdId,
+                                HeadlessPresentRequest(tabId: tabId, nonce: nonce, viewerRequirement: requirement, control: control, scale: scale))
+            }
         }
         switch BrowserLinkCommand.parse(params) {
         case .success(let command):
@@ -208,6 +251,14 @@ final class HeadlessOutbox {
         var lines = flush()
         lines.append(Self.line(method: HeadlessWire.Method.notice,
                                params: ["linkId": .string(linkId), "tabId": .string(tabId), "kind": .string(kind)]))
+        return lines
+    }
+
+    /// A presentation the viewer ended — after the events already pending.
+    func presentationEnded(tabId: String, reason: String) -> [Data] {
+        var lines = flush()
+        lines.append(Self.line(method: HeadlessWire.Method.presentationEnded,
+                               params: ["linkId": .string(linkId), "tabId": .string(tabId), "reason": .string(reason)]))
         return lines
     }
 

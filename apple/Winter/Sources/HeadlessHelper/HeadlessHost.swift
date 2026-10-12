@@ -53,6 +53,8 @@ final class HeadlessHost {
         var url: String
         var title = ""
         var loading = true
+        /// The live presentation of this tab (`HeadlessCEFDriver.present`), if any.
+        var presentation: AnyObject?
 
         init(tabId: String, sessionId: String, key: NSView, url: String) {
             self.tabId = tabId
@@ -233,8 +235,65 @@ final class HeadlessHost {
 
     // MARK: - Closing
 
+    // MARK: - Presentation
+
+    /// `headless.present`: show the tab to Winter.app through the GPU. A tab already presented is presented afresh.
+    func present(_ request: HeadlessPresentRequest, reply: HeadlessReplier) {
+        guard let tab = tabs[request.tabId] else {
+            reply(.failure(code: .tabGone, message: "the headless tab is gone"))
+            return
+        }
+        let browserId = driver.browserIdentifier(tab.key)
+        guard browserId != 0 else {
+            reply(.failure(code: .notLive, message: "the headless tab's browser is not ready"))
+            return
+        }
+        if let old = tab.presentation {
+            _ = driver.unpresent(old)
+            tab.presentation = nil
+        }
+        let tabId = request.tabId
+        switch driver.present(tab.key, browserId, request, { [weak self] reason in
+            MainActor.assumeIsolated { self?.presentationEnded(tabId: tabId, reason: reason) }
+        }) {
+        case .success(let started):
+            tab.presentation = started.handle
+            reply(.ok(.object([
+                "service": .string(started.service),
+                "cssWidth": .number(Double(Self.viewWidth)),
+                "cssHeight": .number(Double(Self.viewHeight)),
+            ])))
+        case .failure(let failure):
+            reply(.failure(code: .notAllowed, message: failure.message))
+        }
+    }
+
+    /// `headless.unpresent`: end the tab's presentation now; what it measured (empty when none).
+    func unpresent(tabId: String) -> [String: Double] {
+        guard let tab = tabs[tabId], let handle = tab.presentation else { return [:] }
+        tab.presentation = nil
+        return driver.unpresent(handle)
+    }
+
+    /// `headless.control`: false when the tab is not presented.
+    func setControl(tabId: String, control: Bool) -> Bool {
+        guard let handle = tabs[tabId]?.presentation else { return false }
+        driver.setControl(handle, control)
+        return true
+    }
+
+    private func presentationEnded(tabId: String, reason: String) {
+        guard let tab = tabs[tabId], tab.presentation != nil else { return }
+        tab.presentation = nil
+        output?.presentationEnded(tabId: tabId, reason: reason)
+    }
+
     private func close(_ tabId: String) {
         guard let tab = tabs.removeValue(forKey: tabId) else { return }
+        if let handle = tab.presentation {
+            tab.presentation = nil
+            _ = driver.unpresent(handle)
+        }
         lastNotice = lastNotice.filter { !$0.key.hasPrefix("\(tabId)|") }
         tab.gate = nil
         driver.setEventObserver(tab.key, nil)
@@ -386,6 +445,8 @@ protocol HeadlessOutput: AnyObject {
     func tabGone(tabId: String, reason: BrowserLinkProtocol.TabGoneReason)
     /// A page tried something the browser refused (`headless.notice`): `"popup"` or `"local-network"`.
     func notice(tabId: String, kind: String)
+    /// A presentation of the tab ended on the viewer's side (`headless.presentationEnded`).
+    func presentationEnded(tabId: String, reason: String)
 }
 
 /// The answer door for ONE command. A second answer is ignored, so a late completion racing a failure can never

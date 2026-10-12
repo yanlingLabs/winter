@@ -17,6 +17,12 @@ final class FakeHeadlessDriver {
     var closed: [ObjectIdentifier] = []
     var disposed: [String] = []
     var noticeObserver: ((Int, String) -> Void)?
+    /// Presentations: started (browser id, request), ended, control changes; a scripted refusal.
+    var presented: [(browserId: Int, request: HeadlessPresentRequest)] = []
+    var unpresented = 0
+    var controls: [Bool] = []
+    var presentRefusal: String?
+    var presentationEnded: ((String) -> Void)?
     /// Browsers appear at once unless a test says otherwise.
     var browsersArriveAtOnce = true
 
@@ -46,7 +52,18 @@ final class FakeHeadlessDriver {
                 browserIds[ObjectIdentifier(key)] = nil
             },
             disposeContext: { [unowned self] session in disposed.append(session) },
-            setNoticeObserver: { [unowned self] observer in noticeObserver = observer })
+            setNoticeObserver: { [unowned self] observer in noticeObserver = observer },
+            present: { [unowned self] _, browserId, request, ended in
+                if let presentRefusal { return .failure(HeadlessPresentFailure(message: presentRefusal)) }
+                presented.append((browserId, request))
+                presentationEnded = ended
+                return .success((service: "com.winter.headless.present.test.\(presented.count)", handle: NSObject()))
+            },
+            unpresent: { [unowned self] _ in
+                unpresented += 1
+                return ["frames": 3]
+            },
+            setControl: { [unowned self] _, control in controls.append(control) })
     }
 }
 
@@ -55,6 +72,8 @@ final class RecordingOutput: HeadlessOutput {
     var gone: [(String, BrowserLinkProtocol.TabGoneReason)] = []
     var notices: [(tabId: String, kind: String)] = []
     func notice(tabId: String, kind: String) { notices.append((tabId, kind)) }
+    var presentationsEnded: [(tabId: String, reason: String)] = []
+    func presentationEnded(tabId: String, reason: String) { presentationsEnded.append((tabId, reason)) }
     func emitEvent(tabId: String, method: String, params: Data, cdpSessionId: String?, strip: Bool) {
         events.append((tabId, method, strip))
     }
@@ -242,6 +261,56 @@ final class HeadlessHostTests: XCTestCase {
         XCTAssertEqual(code, .cdpError)
         XCTAssertEqual(message, "the browser's answer to Runtime.evaluate could not be read")
         XCTAssertEqual(data?["cdpCode"]?.intValue, -32603)
+    }
+
+    private func presentRequest(_ tabId: String = "w-1") -> HeadlessPresentRequest {
+        HeadlessPresentRequest(tabId: tabId, nonce: 0x0123_4567_89ab_cdef, viewerRequirement: #"identifier "com.winter.app.dev""#,
+                               control: false, scale: 2)
+    }
+
+    func testAPresentationNeedsALiveTabAndAnswersItsServiceAndSize() {
+        var answer: BrowserLinkReply?
+        host.present(presentRequest(), reply: HeadlessReplier { answer = $0 })
+        XCTAssertEqual(failureCode(answer), .tabGone, "no such tab")
+        _ = open("w-1")
+        host.present(presentRequest(), reply: HeadlessReplier { answer = $0 })
+        guard case .ok(let value)? = answer else { return XCTFail("\(String(describing: answer))") }
+        XCTAssertEqual(value["service"]?.stringValue, "com.winter.headless.present.test.1")
+        XCTAssertEqual(value["cssWidth"], .number(1280))
+        XCTAssertEqual(value["cssHeight"], .number(800))
+        XCTAssertEqual(fake.presented.map(\.browserId), [1])
+        XCTAssertEqual(fake.presented.first?.request.scale, 2)
+    }
+
+    func testPresentingAgainEndsTheOldPresentationAndControlAndUnpresentReachIt() {
+        _ = open("w-1")
+        host.present(presentRequest(), reply: HeadlessReplier { _ in })
+        host.present(presentRequest(), reply: HeadlessReplier { _ in })
+        XCTAssertEqual(fake.unpresented, 1, "the first presentation ended before the second")
+        XCTAssertTrue(host.setControl(tabId: "w-1", control: true))
+        XCTAssertEqual(fake.controls, [true])
+        XCTAssertEqual(host.unpresent(tabId: "w-1"), ["frames": 3])
+        XCTAssertEqual(host.unpresent(tabId: "w-1"), [:], "nothing left to end")
+        XCTAssertFalse(host.setControl(tabId: "w-1", control: false), "not presented")
+    }
+
+    func testAViewerThatEndsThePresentationIsSaidAndClosingTheTabEndsIt() {
+        _ = open("w-1")
+        host.present(presentRequest(), reply: HeadlessReplier { _ in })
+        fake.presentationEnded?("the viewer went away")
+        XCTAssertEqual(output.presentationsEnded.map(\.reason), ["the viewer went away"])
+        XCTAssertEqual(host.unpresent(tabId: "w-1"), [:], "already ended")
+        host.present(presentRequest(), reply: HeadlessReplier { _ in })
+        _ = run(.tabClose(tabId: "w-1"))
+        XCTAssertEqual(fake.unpresented, 1, "closing a presented tab ends its presentation")
+    }
+
+    func testARefusedPresentationIsAFailure() {
+        _ = open("w-1")
+        fake.presentRefusal = "no Metal device"
+        var answer: BrowserLinkReply?
+        host.present(presentRequest(), reply: HeadlessReplier { answer = $0 })
+        XCTAssertEqual(failureCode(answer), .notAllowed)
     }
 
     func testTheHeldDialogFallbackAnswersWhatDevToolsCannotReach() {

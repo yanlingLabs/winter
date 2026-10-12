@@ -48,7 +48,23 @@ extension HeadlessCEFDriver {
             WinterCEFHeadlessSetNoticeObserver(observer.map { observe in
                 { browserId, kind in observe(Int(browserId), kind.map { String(cString: $0) } ?? "") }
             })
-        })
+        },
+        present: { key, browserId, request, ended in
+            let presenter = WinterHeadlessPresenter(key: key, browserId: Int32(browserId), nonce: request.nonce,
+                                                    viewerRequirement: request.viewerRequirement, control: request.control,
+                                                    scale: request.scale, ended: { ended($0) })
+            var error: NSString?
+            guard let service = presenter.startWithError(&error) else {
+                return .failure(HeadlessPresentFailure(message: (error as String?) ?? "the presentation could not start"))
+            }
+            return .success((service: service, handle: presenter))
+        },
+        unpresent: { handle in
+            guard let presenter = handle as? WinterHeadlessPresenter else { return [:] }
+            presenter.stop()
+            return presenter.stats.mapValues { $0.doubleValue }
+        },
+        setControl: { handle, control in (handle as? WinterHeadlessPresenter)?.control = control })
 
     static func status(_ status: WinterCEFCDPStatus) -> HeadlessCDPStatus {
         switch status {

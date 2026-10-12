@@ -112,6 +112,21 @@ enum HeadlessMain {
             guard linkId == link.linkId else { return }
             let closed = host.disposeContext(sessionId: sessionId)
             link.reply(cmdId: cmdId, .ok(.object(["closed": .number(Double(closed))])))
+        case .present(let linkId, let cmdId, let request):
+            guard linkId == link.linkId else { return }
+            let link = link
+            host.present(request, reply: HeadlessReplier { link.reply(cmdId: cmdId, $0) })
+        case .unpresent(let linkId, let cmdId, let tabId):
+            guard linkId == link.linkId else { return }
+            let stats = host.unpresent(tabId: tabId)
+            link.reply(cmdId: cmdId, .ok(.object(stats.mapValues { JSONValue.number($0) })))
+        case .control(let linkId, let cmdId, let tabId, let control):
+            guard linkId == link.linkId else { return }
+            if host.setControl(tabId: tabId, control: control) {
+                link.reply(cmdId: cmdId, .empty)
+            } else {
+                link.reply(cmdId: cmdId, .failure(code: .notLive, message: "the headless tab is not presented"))
+            }
         case .command(let command):
             guard command.linkId == link.linkId else { return }
             guard WinterCEFHeadlessReady() else {
