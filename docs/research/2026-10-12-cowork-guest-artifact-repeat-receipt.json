@@ -1,0 +1,37 @@
+{
+  "freshBuilds": 2,
+  "identicalReceipts": true,
+  "cpioSha256": "83abcaf8807966b8ae293c10bae4059ffc450076d68d7eb871fd5faf40e522e3",
+  "gzipSha256": "37a5deb69bae2fbbdf534fa142b8efdcf75975fad5044160d7fdaf24ecfdd853",
+  "runtimeSha256": "4eee5d4ce741b5e6aab0e8345f067d4fb9c08cdbb1c5b0a0aef22d36b3000c08",
+  "elfCount": 627,
+  "cpioBytes": 336631808,
+  "gzipBytes": 117771928,
+  "rootManifestSha256": "2a14c91bd7c6cabf331dfa4fbb879a7a12939455526ad346f7d993844279d114",
+  "cpioReadbackA": {
+    "cpioVerified": true,
+    "deviceNodes": 0,
+    "directoryMode": "0555",
+    "entries": 7281,
+    "gid": 0,
+    "regularModes": [
+      "0444",
+      "0555"
+    ],
+    "startupPresent": false,
+    "uid": 0
+  },
+  "cpioReadbackB": {
+    "cpioVerified": true,
+    "deviceNodes": 0,
+    "directoryMode": "0555",
+    "entries": 7281,
+    "gid": 0,
+    "regularModes": [
+      "0444",
+      "0555"
+    ],
+    "startupPresent": false,
+    "uid": 0
+  }
+}

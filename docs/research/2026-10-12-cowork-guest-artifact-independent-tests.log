@@ -1,0 +1,14 @@
+test_ar_bounds_refuse (test_image.ImageTests.test_ar_bounds_refuse) ... ok
+test_conflicting_package_bytes_refuse (test_image.ImageTests.test_conflicting_package_bytes_refuse) ... ok
+test_cpio_repeat_has_normalized_root_metadata (test_image.ImageTests.test_cpio_repeat_has_normalized_root_metadata) ... ok
+test_deb_cache_bytes_do_not_override_the_pinned_digest (test_image.ImageTests.test_deb_cache_bytes_do_not_override_the_pinned_digest) ... ok
+test_dependency_versions_and_unavailable_alternatives (test_image.ImageTests.test_dependency_versions_and_unavailable_alternatives) ... ok
+test_guest_absolute_links_never_follow_host_paths (test_image.ImageTests.test_guest_absolute_links_never_follow_host_paths) ... ok
+test_release_tamper_fails_signature_before_any_package (test_image.ImageTests.test_release_tamper_fails_signature_before_any_package) ... ok
+test_traversal_and_non_directory_ancestors_refuse (test_image.ImageTests.test_traversal_and_non_directory_ancestors_refuse) ... ok
+test_wrong_architecture_and_elf_bounds_refuse (test_image.ImageTests.test_wrong_architecture_and_elf_bounds_refuse) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.111s
+
+OK
