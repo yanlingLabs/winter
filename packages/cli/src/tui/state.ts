@@ -321,6 +321,8 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
     case "wake_armed": {
       // ComputerV2 wake triggers: Winter waits for the user — said once, as a note.
       if (e.threadId !== MAIN) return s;
+      // The pair reaches an attached client twice (its session's fan-out and the global broadcast, same seq): said once.
+      if (s.wakes?.[str(e.wakeId)] !== undefined) return s;
       const facts: ArmedWakeFacts = { condition: str(e.condition), targetLabel: str(e.targetLabel), ...(typeof e.elementLabel === "string" ? { elementLabel: e.elementLabel } : {}) };
       return { ...s, wakes: { ...(s.wakes ?? {}), [str(e.wakeId)]: facts }, committed: [...s.committed, { kind: "note", text: `⏳ waiting for ${waitingWords(facts)}` }] };
     }

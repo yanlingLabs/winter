@@ -758,9 +758,12 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
     } else if ((e.type === "wake_armed" || e.type === "wake_ended") && e.sessionId === sessionId && e.threadId === "main") {
       // ComputerV2 wake triggers: Winter waits for the user (and stops waiting) — a note each, from the pair.
       if (e.type === "wake_armed") {
-        const facts = { condition: e.condition, targetLabel: e.targetLabel, ...(e.elementLabel === undefined ? {} : { elementLabel: e.elementLabel }) };
-        wakeFacts.set(e.wakeId, facts);
-        emit(`${DIM}⏳ waiting for ${waitingWords(facts)}${RESET}\n`);
+        // The pair reaches an attached client twice (its session's fan-out and the global broadcast): said once.
+        if (!wakeFacts.has(e.wakeId)) {
+          const facts = { condition: e.condition, targetLabel: e.targetLabel, ...(e.elementLabel === undefined ? {} : { elementLabel: e.elementLabel }) };
+          wakeFacts.set(e.wakeId, facts);
+          emit(`${DIM}⏳ waiting for ${waitingWords(facts)}${RESET}\n`);
+        }
       } else {
         const facts = wakeFacts.get(e.wakeId);
         wakeFacts.delete(e.wakeId);

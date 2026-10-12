@@ -589,6 +589,9 @@ describe("state.ts — user messages", () => {
     let s = initialState();
     s = reduce(s, { type: "wake_armed", threadId: "main", wakeId: "wk_000000000001", condition: "clicked", targetLabel: "Chrome — Dashboard", elementLabel: "“Submit for review”", expiresAt: 1 }, T0);
     expect(s.committed).toEqual([{ kind: "note", text: "⏳ waiting for you to click “Submit for review” in Chrome — Dashboard" }]);
+    // The same event again (an attached client gets the pair twice: the session's fan-out and the global broadcast).
+    s = reduce(s, { type: "wake_armed", threadId: "main", wakeId: "wk_000000000001", condition: "clicked", targetLabel: "Chrome — Dashboard", elementLabel: "“Submit for review”", expiresAt: 1 }, T0);
+    expect(s.committed.length).toBe(1);
     s = reduce(s, { type: "wake_ended", threadId: "main", wakeId: "wk_000000000001", reason: "fired", at: 2 }, T0);
     expect(s.committed.length).toBe(1); // said with the wake message
     s = reduce(s, { type: "user_message", threadId: "main", text: "<computer-wake>\n…\n</computer-wake>", clientName: "computer-wake" }, T0);
