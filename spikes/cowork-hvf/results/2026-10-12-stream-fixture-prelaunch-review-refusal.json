@@ -1,0 +1,9 @@
+{
+  "vmStarted": false,
+  "mode": "--run-stream-fixture",
+  "reviewReceiptSupplied": false,
+  "refusedBeforeSpawn": true,
+  "reason": "Explicit independent prelaunch review receipt required",
+  "buildSha256": "b5a4f8b0b53dc856c5bb787e0d8f5aa21494ea1d1f02830baf8f75681823d2f9",
+  "stderr": "Traceback (most recent call last):\n  File \"${REPOSITORY_ROOT}/spikes/cowork-hvf/run_stream_fixture.py\", line 100, in <module>\n    if __name__=='__main__':main()\n                            ~~~~^^\n  File \"${REPOSITORY_ROOT}/spikes/cowork-hvf/run_stream_fixture.py\", line 35, in main\n    if not args.review_receipt:raise RuntimeError('Explicit independent prelaunch review receipt required; sandbox-check remains available')\n                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nRuntimeError: Explicit independent prelaunch review receipt required; sandbox-check remains available\n"
+}

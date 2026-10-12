@@ -1,0 +1,22 @@
+{
+  "vmStarted": false,
+  "testsPassed": 9,
+  "testSourceSha256": "c2fc7308c03024fcbf9eacd721a41a6f4ea61b599a04caa27c7f1f24e83675e7",
+  "buildSha256": "b5a4f8b0b53dc856c5bb787e0d8f5aa21494ea1d1f02830baf8f75681823d2f9",
+  "nativeSourceChanged": false,
+  "nativeBroadTestsRerun": false,
+  "sandboxPassed": true,
+  "signing": {
+    "hardenedRuntime": true,
+    "libraryValidationRetained": true,
+    "debuggerEntitlement": false,
+    "entitlements": {
+      "com.apple.security.hypervisor": true
+    },
+    "runtimeDependencies": [
+      "/System/Library/Frameworks/Hypervisor.framework/Versions/A/Hypervisor",
+      "/usr/lib/libiconv.2.dylib",
+      "/usr/lib/libSystem.B.dylib"
+    ]
+  }
+}
