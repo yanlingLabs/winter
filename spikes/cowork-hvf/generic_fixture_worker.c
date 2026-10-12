@@ -1,5 +1,6 @@
 /* Test-only single-workspace worker. No Winter integration or credential APIs. */
 #include "libkrun.h"
+#include "generic_sampler.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <mach/mach.h>
@@ -30,18 +31,22 @@ static void api(int result, const char *operation) {
     if (result < 0) { fprintf(stderr, "fixture failed: %s (%d)\n", operation, result); exit(1); }
 }
 static void *thread_probe(void *unused) { return unused; }
+static int sampler_fd=-1;
 static void *sample(void *unused) {
     (void)unused;
     for (;;) {
         task_vm_info_data_t info = {0}; mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
-        if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS)
-            fprintf(stderr, "{\"kind\":\"host_memory\",\"pid\":%d,\"footprintBytes\":%llu,\"residentBytes\":%llu}\n",
-                    getpid(), (unsigned long long)info.phys_footprint, (unsigned long long)info.resident_size);
+        if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS &&
+            generic_sampler_emit(sampler_fd,getpid(),info.phys_footprint,info.resident_size)!=0)
+            _exit(78); /* No quiet drop, no blocking/retry or fallback to shared Rust stderr. */
         sleep(1);
     }
 }
 int main(int argc, char **argv) {
-    require(argc == 7 && (!strcmp(argv[1], FIXTURE_RUN_MODE) || !strcmp(argv[1], "--run-runtime-port-close-fixture") || !strcmp(argv[1], "--sandbox-check")), "explicit fixture mode required");
+    require(argc == 8 && (!strcmp(argv[1], FIXTURE_RUN_MODE) || !strcmp(argv[1], "--run-runtime-port-close-fixture") || !strcmp(argv[1], "--sandbox-check")), "explicit fixture mode required");
+    char *control_end=NULL; long admitted_control=strtol(argv[6],&control_end,10);
+    require(control_end && !*control_end && admitted_control>=3 && admitted_control<1024,"inherited control descriptor number");
+    sampler_fd=generic_sampler_admit(argv[7],(int)admitted_control); require(sampler_fd>=3,"dedicated inherited sampler pipe");
     char executable[4096], resolved[4096], kernel[4096], initramfs[4096], disk[4096]; uint32_t length = sizeof executable;
     require(_NSGetExecutablePath(executable, &length) == 0 && realpath(executable, resolved), "worker path");
     char *slash = strrchr(resolved, '/'); require(slash != NULL, "worker directory"); *slash = 0;
@@ -122,7 +127,7 @@ int main(int argc, char **argv) {
     char acknowledgement=0;require(recv(control,&acknowledgement,1,0)==1 && acknowledgement=='A',"parent received opposite peer");close(control);
     pthread_t probe;require(pthread_create(&probe,NULL,thread_probe,NULL)==0 && pthread_join(probe,NULL)==0,"sandbox thread create/join");
     fprintf(stderr,"{\"kind\":\"stream_sandbox\",\"sandboxBeforeFactory\":true,\"forkDenied\":true,\"execDenied\":true,\"closedFactorySucceeded\":true,\"oppositePeerOnlyTransferred\":true,\"genericRuntimeFactory\":true,\"fixtureControlTrace\":true}\n");
-    if (!strcmp(argv[1], "--sandbox-check")) {api(krun_free_ctx(ctx),"free sandbox-only context");return 0;}
+    if (!strcmp(argv[1], "--sandbox-check")) {api(krun_free_ctx(ctx),"free sandbox-only context");close(sampler_fd);return 0;}
     pthread_t sampler; require(pthread_create(&sampler, NULL, sample, NULL) == 0, "sampler thread");
 
     fprintf(stderr, "{\"kind\":\"worker\",\"pid\":%d,\"vcpus\":2,\"ramMiB\":768,\"networkDevices\":0,\"vsock\":false,\"hostShares\":0}\n", getpid());

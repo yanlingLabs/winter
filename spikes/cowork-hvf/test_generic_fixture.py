@@ -50,7 +50,7 @@ class FixtureTests(unittest.TestCase):
     def test_actual_normal_runner_aggregates_generic_audit_key(self):
         import run_generic_fixture as runner
         from unittest.mock import patch
-        build={'candidate':{},'artifacts':{},'fixtureSources':{name:'pin' for name in runner.LAUNCH_DEPENDENCIES}}
+        build={'hostSamplerTransport':'dedicated-inherited-pipe-v1','candidate':{},'artifacts':{},'fixtureSources':{name:'pin' for name in runner.LAUNCH_DEPENDENCIES}}
         rows=[{'kind':'virtio_device','device':device} for device in ['0x0002','0x0003','0x0004','0x0005']]+[{'kind':'linux_boot'},{'kind':'guest_complete','cycles':3},{'kind':'sandbox'},{'kind':'stream_sandbox'}]
         for cycle in range(1,4):rows.extend([{'kind':'guest_reuse','anonymousZeroFill':True,'writtenIntegrity':True},{'kind':'guest_integrity','retained':True,'progress':True}])
         capture={'exitCode':0,'exitVerified':True,'ownersQuiescent':True,'timedOut':False,'captureComplete':True}
