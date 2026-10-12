@@ -253,7 +253,10 @@ final class HeadlessHost {
             tab.presentation = nil
         }
         let tabId = request.tabId
-        switch driver.present(tab.key, browserId, request, { [weak self] reason in
+        let started: () -> Void = { [weak self] in
+            MainActor.assumeIsolated { self?.presentationStarted(tabId: tabId) }
+        }
+        switch driver.present(tab.key, browserId, request, started, { [weak self] reason in
             MainActor.assumeIsolated { self?.presentationEnded(tabId: tabId, reason: reason) }
         }) {
         case .success(let started):
@@ -280,6 +283,11 @@ final class HeadlessHost {
         guard let handle = tabs[tabId]?.presentation else { return false }
         driver.setControl(handle, control)
         return true
+    }
+
+    private func presentationStarted(tabId: String) {
+        guard tabs[tabId]?.presentation != nil else { return }
+        output?.presentationStarted(tabId: tabId)
     }
 
     private func presentationEnded(tabId: String, reason: String) {
@@ -445,6 +453,8 @@ protocol HeadlessOutput: AnyObject {
     func tabGone(tabId: String, reason: BrowserLinkProtocol.TabGoneReason)
     /// A page tried something the browser refused (`headless.notice`): `"popup"` or `"local-network"`.
     func notice(tabId: String, kind: String)
+    /// A presentation's viewer was accepted: the tab is really shown (`headless.presentationStarted`).
+    func presentationStarted(tabId: String)
     /// A presentation of the tab ended on the viewer's side (`headless.presentationEnded`).
     func presentationEnded(tabId: String, reason: String)
 }

@@ -21,12 +21,42 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) double scale;
 @end
 
+/// A page dialog waiting for the user (`WinterPresentMsgDialog`).
+@interface WinterPresentDialog : NSObject
+@property(nonatomic, readonly) uint32_t dialogId;
+/// `WinterPresentDialogAlert` … `WinterPresentDialogBeforeUnload`.
+@property(nonatomic, readonly) uint32_t type;
+@property(nonatomic, readonly, copy) NSString *message;
+@property(nonatomic, readonly, copy) NSString *defaultText;
+@end
+
+/// A file chooser waiting for the user (`WinterPresentMsgFileChooser`).
+@interface WinterPresentFileChooser : NSObject
+@property(nonatomic, readonly) uint32_t requestId;
+/// `WinterPresentFileOpen` … `WinterPresentFileSave`.
+@property(nonatomic, readonly) uint32_t mode;
+/// The page's accepted types (".pdf", "image/*"), as it listed them.
+@property(nonatomic, readonly, copy) NSArray<NSString *> *accept;
+@end
+
 @protocol WinterPresentConsumerDelegate <NSObject>
 - (void)presentConsumer:(WinterPresentConsumer *)consumer welcomedCSSWidth:(int)width height:(int)height scale:(double)scale control:(BOOL)control;
 - (void)presentConsumer:(WinterPresentConsumer *)consumer frame:(WinterPresentFrame *)frame;
 - (void)presentConsumer:(WinterPresentConsumer *)consumer cursor:(int)cursorType;
 /// The producer ended it, its process went away, or it could not be authenticated.
 - (void)presentConsumer:(WinterPresentConsumer *)consumer endedWithReason:(NSString *)reason;
+@optional
+/// Version 2. The viewer now holds control (input, IME, edits, dialogs, file choosers) — or no longer does.
+- (void)presentConsumer:(WinterPresentConsumer *)consumer control:(BOOL)control;
+/// Where the composition's characters are drawn (CSS pixels of the view, one rect per character), for the input
+/// method's candidate window.
+- (void)presentConsumer:(WinterPresentConsumer *)consumer imeRange:(NSRange)range characterBounds:(NSArray<NSValue *> *)rects;
+/// A page dialog waits for the user: answer it once with `-replyToDialog:accept:text:`.
+- (void)presentConsumer:(WinterPresentConsumer *)consumer dialog:(WinterPresentDialog *)dialog;
+/// That dialog went away without the viewer's answer (answered otherwise, the page navigated): close its sheet.
+- (void)presentConsumer:(WinterPresentConsumer *)consumer dialogDone:(uint32_t)dialogId;
+/// The page asks the user to choose files: answer once with `-replyToFileChooser:paths:` (nil: cancelled).
+- (void)presentConsumer:(WinterPresentConsumer *)consumer fileChooser:(WinterPresentFileChooser *)chooser;
 @end
 
 @interface WinterPresentConsumer : NSObject
@@ -51,6 +81,25 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Render at `scale` device pixels per CSS pixel from now on (a new pool generation follows).
 - (void)setScale:(double)scale;
+
+// ---- version 2: only while the viewer holds control (the producer drops them otherwise) ----
+
+/// The input method set the marked text (`selection` inside it; `replacement` in the field, NSNotFound: none).
+- (void)setComposition:(NSString *)text selection:(NSRange)selection replacement:(NSRange)replacement;
+/// The input method committed `text` (replacing `replacement`, NSNotFound: none). Longer text is sent in pieces.
+- (void)commitText:(NSString *)text replacement:(NSRange)replacement;
+/// The marked text is kept as typed.
+- (void)finishComposing;
+/// The marked text is dropped.
+- (void)cancelComposition;
+/// An edit command (`WinterPresentEditCopy` …). A paste carries `text` (read from the pasteboard by the caller, on the
+/// user's own ⌘V); every other command ignores it.
+- (void)sendEdit:(uint32_t)command text:(nullable NSString *)text;
+/// The user's answer to a page dialog (a prompt's `text`, else nil). Once per dialog.
+- (void)replyToDialog:(uint32_t)dialogId accept:(BOOL)accept text:(nullable NSString *)text;
+/// The user's choice for a file chooser: the paths of copies inside `<home>/cache/headless-uploads/` (nil or empty:
+/// cancelled). Once per request.
+- (void)replyToFileChooser:(uint32_t)requestId paths:(nullable NSArray<NSString *> *)paths;
 
 /// Stop presenting (BYE) and let everything go. Safe to call twice.
 - (void)close;

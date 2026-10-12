@@ -44,9 +44,10 @@ struct HeadlessCEFDriver {
     /// What a page tried and was refused, by browser id: `"popup"` or `"local-network"` (main thread). `nil` stops it.
     var setNoticeObserver: (((Int, String) -> Void)?) -> Void = { _ in }
     /// Present the key's browser (`HeadlessPresentation`) to the viewer naming `nonce` and satisfying `requirement`:
-    /// the presentation's bootstrap service name and a handle, or why not. `ended` runs once if the VIEWER ends it.
-    var present: (_ key: NSView, _ browserId: Int, _ request: HeadlessPresentRequest,
-                  _ ended: @escaping (String) -> Void) -> Result<(service: String, handle: AnyObject), HeadlessPresentFailure> = { _, _, _, _ in
+    /// the presentation's bootstrap service name and a handle, or why not. `started` runs once when the viewer's HELLO
+    /// is accepted; `ended` runs once if the VIEWER ends it.
+    var present: (_ key: NSView, _ browserId: Int, _ request: HeadlessPresentRequest, _ started: @escaping () -> Void,
+                  _ ended: @escaping (String) -> Void) -> Result<(service: String, handle: AnyObject), HeadlessPresentFailure> = { _, _, _, _, _ in
         .failure(HeadlessPresentFailure(message: "presentation is not available"))
     }
     /// End a presentation now; what it measured.

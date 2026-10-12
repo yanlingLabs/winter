@@ -133,6 +133,12 @@ final class HeadlessLink: HeadlessOutput, @unchecked Sendable {
         }
     }
 
+    func presentationStarted(tabId: String) {
+        out.async { [self] in
+            for line in outbox.presentationStarted(tabId: tabId) { write(line) }
+        }
+    }
+
     func presentationEnded(tabId: String, reason: String) {
         out.async { [self] in
             for line in outbox.presentationEnded(tabId: tabId, reason: reason) { write(line) }

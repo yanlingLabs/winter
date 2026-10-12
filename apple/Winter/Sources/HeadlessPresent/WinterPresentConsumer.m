@@ -19,6 +19,43 @@
 @implementation WinterPresentFrame
 @end
 
+@interface WinterPresentDialog ()
+@property(nonatomic, readwrite) uint32_t dialogId, type;
+@property(nonatomic, readwrite, copy) NSString *message, *defaultText;
+@end
+
+@implementation WinterPresentDialog
+@end
+
+@interface WinterPresentFileChooser ()
+@property(nonatomic, readwrite) uint32_t requestId, mode;
+@property(nonatomic, readwrite, copy) NSArray<NSString *> *accept;
+@end
+
+@implementation WinterPresentFileChooser
+@end
+
+/// `length` UTF-16 units of `units` (at most `max`), as a string.
+static NSString *PresentText(const uint16_t *units, uint32_t length, uint32_t max) {
+  return [NSString stringWithCharacters:(const unichar *)units length:MIN(length, max)];
+}
+
+/// A message's size rounded up to Mach's 4-byte alignment.
+static mach_msg_size_t PresentRound4(size_t n) { return (mach_msg_size_t)((n + 3) & ~(size_t)3); }
+
+/// `text` cut into pieces of at most `max` UTF-16 units, never inside a surrogate pair.
+static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
+  NSMutableArray<NSString *> *pieces = [NSMutableArray array];
+  NSUInteger at = 0;
+  while (at < text.length) {
+    NSUInteger n = MIN(max, text.length - at);
+    if (at + n < text.length && CFStringIsSurrogateHighCharacter([text characterAtIndex:at + n - 1])) n--;
+    [pieces addObject:[text substringWithRange:NSMakeRange(at, n)]];
+    at += n;
+  }
+  return pieces;
+}
+
 @implementation WinterPresentConsumer {
   NSString *_service;
   uint64_t _nonce;
@@ -217,10 +254,183 @@
     case WinterPresentMsgEnded:
       [self endWithReason:@"the presentation ended"];
       break;
+    case WinterPresentMsgControl: {
+      if (header->msgh_size < sizeof(WinterPresentControlMsg)) break;
+      if ([delegate respondsToSelector:@selector(presentConsumer:control:)]) {
+        [delegate presentConsumer:self control:((const WinterPresentControlMsg *)header)->control != 0];
+      }
+      break;
+    }
+    case WinterPresentMsgImeBounds: {
+      if (header->msgh_size < offsetof(WinterPresentImeBoundsMsg, rects)) break;
+      const WinterPresentImeBoundsMsg *m = (const WinterPresentImeBoundsMsg *)header;
+      const uint32_t fits = (uint32_t)((header->msgh_size - offsetof(WinterPresentImeBoundsMsg, rects)) / sizeof(WinterPresentRect));
+      const uint32_t count = MIN(MIN(m->count, (uint32_t)WinterPresentImeRectsMax), fits);
+      NSMutableArray<NSValue *> *rects = [NSMutableArray arrayWithCapacity:count];
+      for (uint32_t i = 0; i < count; i++) {
+        [rects addObject:[NSValue valueWithRect:NSMakeRect(m->rects[i].x, m->rects[i].y, m->rects[i].width, m->rects[i].height)]];
+      }
+      const NSRange range = m->rangeStart >= 0 && m->rangeEnd >= m->rangeStart
+          ? NSMakeRange((NSUInteger)m->rangeStart, (NSUInteger)(m->rangeEnd - m->rangeStart)) : NSMakeRange(NSNotFound, 0);
+      if ([delegate respondsToSelector:@selector(presentConsumer:imeRange:characterBounds:)]) {
+        [delegate presentConsumer:self imeRange:range characterBounds:rects];
+      }
+      break;
+    }
+    case WinterPresentMsgDialog: {
+      if (header->msgh_size < sizeof(WinterPresentDialogMsg)) break;
+      const WinterPresentDialogMsg *m = (const WinterPresentDialogMsg *)header;
+      if (m->type > WinterPresentDialogBeforeUnload) break;
+      WinterPresentDialog *dialog = [[WinterPresentDialog alloc] init];
+      dialog.dialogId = m->dialogId;
+      dialog.type = m->type;
+      dialog.message = PresentText(m->message, m->messageLength, WinterPresentTextMax);
+      dialog.defaultText = PresentText(m->defaultText, m->defaultLength, WinterPresentDialogDefaultMax);
+      if ([delegate respondsToSelector:@selector(presentConsumer:dialog:)]) {
+        [delegate presentConsumer:self dialog:dialog];
+      } else {
+        [self replyToDialog:m->dialogId accept:NO text:nil];  // nobody here can answer it: the page is not left waiting
+      }
+      break;
+    }
+    case WinterPresentMsgDialogDone: {
+      if (header->msgh_size < sizeof(WinterPresentDialogDoneMsg)) break;
+      if ([delegate respondsToSelector:@selector(presentConsumer:dialogDone:)]) {
+        [delegate presentConsumer:self dialogDone:((const WinterPresentDialogDoneMsg *)header)->dialogId];
+      }
+      break;
+    }
+    case WinterPresentMsgFileChooser: {
+      if (header->msgh_size < sizeof(WinterPresentFileChooserMsg)) break;
+      const WinterPresentFileChooserMsg *m = (const WinterPresentFileChooserMsg *)header;
+      if (m->mode > WinterPresentFileSave) break;
+      NSString *accept = [[NSString alloc] initWithBytes:m->accept length:MIN(m->acceptLength, (uint32_t)WinterPresentFileAcceptMax)
+                                                encoding:NSUTF8StringEncoding] ?: @"";
+      NSMutableArray<NSString *> *types = [NSMutableArray array];
+      for (NSString *t in [accept componentsSeparatedByString:@","]) {
+        NSString *trimmed = [t stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if (trimmed.length > 0) [types addObject:trimmed];
+      }
+      WinterPresentFileChooser *chooser = [[WinterPresentFileChooser alloc] init];
+      chooser.requestId = m->requestId;
+      chooser.mode = m->mode;
+      chooser.accept = types;
+      if ([delegate respondsToSelector:@selector(presentConsumer:fileChooser:)]) {
+        [delegate presentConsumer:self fileChooser:chooser];
+      } else {
+        [self replyToFileChooser:m->requestId paths:nil];
+      }
+      break;
+    }
     default:
       break;
   }
   mach_msg_destroy(header);
+}
+
+/// One message to the producer (a copy of the send right; never blocks long).
+- (void)sendToProducer:(mach_msg_header_t *)header size:(mach_msg_size_t)size {
+  os_unfair_lock_lock(&_lock);
+  const mach_port_t producer = _closed ? MACH_PORT_NULL : _producer;
+  os_unfair_lock_unlock(&_lock);
+  if (producer == MACH_PORT_NULL) return;
+  header->msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+  header->msgh_size = size;
+  header->msgh_remote_port = producer;
+  header->msgh_local_port = MACH_PORT_NULL;
+  mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, size, 0, MACH_PORT_NULL, 100, MACH_PORT_NULL);
+}
+
+- (uint64_t)nextSequence {
+  os_unfair_lock_lock(&_lock);
+  const uint64_t sequence = ++_inputSequence;
+  os_unfair_lock_unlock(&_lock);
+  return sequence;
+}
+
+- (void)sendIme:(uint32_t)kind text:(NSString *)text selection:(NSRange)selection replacement:(NSRange)replacement {
+  WinterPresentImeMsg m;
+  memset(&m, 0, offsetof(WinterPresentImeMsg, text));
+  m.header.msgh_id = WinterPresentMsgIme;
+  m.kind = kind;
+  const NSUInteger length = MIN(text.length, (NSUInteger)WinterPresentTextMax);
+  [text getCharacters:(unichar *)m.text range:NSMakeRange(0, length)];
+  m.length = (uint32_t)length;
+  m.selectionStart = selection.location == NSNotFound ? -1 : (int32_t)selection.location;
+  m.selectionEnd = selection.location == NSNotFound ? -1 : (int32_t)NSMaxRange(selection);
+  m.replacementStart = replacement.location == NSNotFound ? -1 : (int32_t)replacement.location;
+  m.replacementEnd = replacement.location == NSNotFound ? -1 : (int32_t)NSMaxRange(replacement);
+  m.sequence = [self nextSequence];
+  m.sentAt = mach_absolute_time();
+  [self sendToProducer:&m.header size:PresentRound4(offsetof(WinterPresentImeMsg, text) + length * sizeof(uint16_t))];
+}
+
+- (void)setComposition:(NSString *)text selection:(NSRange)selection replacement:(NSRange)replacement {
+  [self sendIme:WinterPresentImeSetComposition text:text selection:selection replacement:replacement];
+}
+
+- (void)commitText:(NSString *)text replacement:(NSRange)replacement {
+  NSArray<NSString *> *pieces = PresentPieces(text, WinterPresentTextMax);
+  for (NSUInteger i = 0; i < pieces.count; i++) {
+    // Only the first piece replaces anything; the rest go in after it.
+    [self sendIme:WinterPresentImeCommit text:pieces[i] selection:NSMakeRange(NSNotFound, 0) replacement:i == 0 ? replacement : NSMakeRange(NSNotFound, 0)];
+  }
+}
+
+- (void)finishComposing {
+  [self sendIme:WinterPresentImeFinish text:@"" selection:NSMakeRange(NSNotFound, 0) replacement:NSMakeRange(NSNotFound, 0)];
+}
+
+- (void)cancelComposition {
+  [self sendIme:WinterPresentImeCancel text:@"" selection:NSMakeRange(NSNotFound, 0) replacement:NSMakeRange(NSNotFound, 0)];
+}
+
+- (void)sendEdit:(uint32_t)command text:(NSString *)text {
+  NSArray<NSString *> *pieces = command == WinterPresentEditPaste ? PresentPieces(text ?: @"", WinterPresentTextMax) : @[ @"" ];
+  for (NSString *piece in pieces) {
+    WinterPresentEditMsg m;
+    memset(&m, 0, offsetof(WinterPresentEditMsg, text));
+    m.header.msgh_id = WinterPresentMsgEdit;
+    m.command = command;
+    [piece getCharacters:(unichar *)m.text range:NSMakeRange(0, piece.length)];
+    m.length = (uint32_t)piece.length;
+    m.sequence = [self nextSequence];
+    m.sentAt = mach_absolute_time();
+    [self sendToProducer:&m.header size:PresentRound4(offsetof(WinterPresentEditMsg, text) + piece.length * sizeof(uint16_t))];
+  }
+}
+
+- (void)replyToDialog:(uint32_t)dialogId accept:(BOOL)accept text:(NSString *)text {
+  WinterPresentDialogReplyMsg m;
+  memset(&m, 0, offsetof(WinterPresentDialogReplyMsg, text));
+  m.header.msgh_id = WinterPresentMsgDialogReply;
+  m.dialogId = dialogId;
+  m.accept = accept ? 1 : 0;
+  const NSUInteger length = MIN(text.length, (NSUInteger)WinterPresentTextMax);
+  if (length > 0) [text getCharacters:(unichar *)m.text range:NSMakeRange(0, length)];
+  m.length = (uint32_t)length;
+  [self sendToProducer:&m.header size:PresentRound4(offsetof(WinterPresentDialogReplyMsg, text) + length * sizeof(uint16_t))];
+}
+
+- (void)replyToFileChooser:(uint32_t)requestId paths:(NSArray<NSString *> *)paths {
+  WinterPresentFileReplyMsg m;
+  memset(&m, 0, offsetof(WinterPresentFileReplyMsg, paths));
+  m.header.msgh_id = WinterPresentMsgFileReply;
+  m.requestId = requestId;
+  size_t used = 0;
+  uint32_t count = 0;
+  for (NSString *path in paths ?: @[]) {
+    const char *utf8 = path.fileSystemRepresentation;
+    const size_t n = strlen(utf8) + 1;
+    if (used + n > WinterPresentFilePathsMax) break;  // what does not fit is left out
+    memcpy(m.paths + used, utf8, n);
+    used += n;
+    count++;
+  }
+  m.accept = count > 0 ? 1 : 0;
+  m.length = (uint32_t)used;
+  m.count = count;
+  [self sendToProducer:&m.header size:PresentRound4(offsetof(WinterPresentFileReplyMsg, paths) + used)];
 }
 
 - (void)releaseSlot:(uint32_t)slot generation:(uint32_t)generation {

@@ -9,8 +9,10 @@ import Foundation
 // `browserLink.command {linkId, cmdId, op, params}` notifications; this side answers each with ONE
 // `browserLink.result` notification and sends `browserLink.events` / `browserLink.tabGone` of its own. Three
 // differences from Winter.app's link:
-//   * this side speaks first: `headless.hello {protocol, linkId, pid, version}` once CEF is up — the linkId is this
-//     process's, and every command must carry it;
+//   * this side speaks first: `headless.hello {protocol, linkId, pid, version, features}` once CEF is up — the linkId
+//     is this process's, and every command must carry it; `features` names what this helper can do beyond protocol 1
+//     (`HeadlessWire.features`: "present" — the presentation ops below), so a daemon never sends an op a helper of
+//     the same protocol cannot answer;
 //   * one more op, `context.dispose {sessionId}` → `{closed}`, read here before `BrowserLinkCommand.parse`
 //     (Winter.app's op set, and its protocol number, do not change);
 //   * `tab.ensure` WITH a `url` creates a missing tab; without one it never does (`HeadlessHost`).
@@ -29,9 +31,15 @@ enum HeadlessWire {
         static let events = BrowserLinkProtocol.Method.events
         static let tabGone = BrowserLinkProtocol.Method.tabGone
         static let notice = "headless.notice"
+        /// A presentation's viewer was accepted — the tab is really shown: `{linkId, tabId}`. A presentation that never
+        /// says so (no viewer came, or the one that came was refused) is the daemon's to end after its own wait.
+        static let presentationStarted = "headless.presentationStarted"
         /// A presentation ended on the VIEWER's side (it said bye, it died): `{linkId, tabId, reason}`.
         static let presentationEnded = "headless.presentationEnded"
     }
+
+    /// What this helper can do beyond protocol 1, said in `headless.hello`'s `features`.
+    static let features = ["present"]
 
     enum Op {
         static let contextDispose = "context.dispose"
@@ -254,6 +262,14 @@ final class HeadlessOutbox {
         return lines
     }
 
+    /// A presentation's viewer was accepted — after the events already pending.
+    func presentationStarted(tabId: String) -> [Data] {
+        var lines = flush()
+        lines.append(Self.line(method: HeadlessWire.Method.presentationStarted,
+                               params: ["linkId": .string(linkId), "tabId": .string(tabId)]))
+        return lines
+    }
+
     /// A presentation the viewer ended — after the events already pending.
     func presentationEnded(tabId: String, reason: String) -> [Data] {
         var lines = flush()
@@ -264,7 +280,7 @@ final class HeadlessOutbox {
 
     func hello(pid: Int32, version: String?) -> Data {
         var params: [String: JSONValue] = ["protocol": .number(Double(HeadlessWire.protocolVersion)), "linkId": .string(linkId),
-                                           "pid": .number(Double(pid))]
+                                           "pid": .number(Double(pid)), "features": .array(HeadlessWire.features.map { .string($0) })]
         if let version { params["version"] = .string(version) }
         return Self.line(method: HeadlessWire.Method.hello, params: params)
     }

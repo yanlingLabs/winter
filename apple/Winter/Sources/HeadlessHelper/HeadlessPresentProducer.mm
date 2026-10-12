@@ -65,6 +65,7 @@ static double Percentile(NSArray<NSNumber *> *values, double p) {
   uint64_t _nonce;
   NSString *_requirement;
   double _scale;
+  void (^_started)(void);
   void (^_ended)(NSString *);
 
   mach_port_t _port;            // our receive right (checked in under the service name)
@@ -93,6 +94,7 @@ static double Percentile(NSArray<NSNumber *> *values, double p) {
           viewerRequirement:(NSString *)viewerRequirement
                     control:(BOOL)control
                       scale:(double)scale
+                    started:(void (^)(void))started
                       ended:(void (^)(NSString *))ended {
   if ((self = [super init])) {
     _key = key;
@@ -101,6 +103,7 @@ static double Percentile(NSArray<NSNumber *> *values, double p) {
     _requirement = [viewerRequirement copy];
     _control = control;
     _scale = scale >= 1.0 && scale <= 4.0 ? scale : 1.0;
+    _started = [started copy];
     _ended = [ended copy];
     _copyMs = [NSMutableArray array];
   }
@@ -276,6 +279,11 @@ static NSUInteger TaskPortCount(void) {
   // Render for the viewer from now on: its scale, a viewer's frame rate, a fresh frame now.
   WinterCEFHeadlessSetPresentation(_key, _scale, 60);
   if (_control) WinterCEFHeadlessSendInput(_key, WinterPresentInputFocus, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  if (_started != nil) {
+    void (^started)(void) = _started;
+    _started = nil;
+    started();
+  }
 }
 
 // MARK: - Frames
@@ -519,6 +527,7 @@ static NSUInteger TaskPortCount(void) {
   if (_control) WinterCEFHeadlessSendInput(_key, WinterPresentInputFocus, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
   WinterCEFHeadlessSetPresentation(_key, 1.0, 0);
   [g_presenters removeObjectForKey:@(_browserId)];
+  _started = nil;
   if (reason != 0 && _ended != nil) {
     void (^ended)(NSString *) = _ended;
     _ended = nil;

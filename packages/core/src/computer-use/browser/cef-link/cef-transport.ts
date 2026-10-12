@@ -10,8 +10,29 @@ import { TransportError, type CdpEvent, type CdpTransport, type TransportDownloa
 /** 2 (ComputerV2 Phase 3): the ops `tab.present`, `tab.mute`, `tab.downloads`, `tab.download`, and the app's
  *  `browserLink.download` request. */
 export const BROWSER_LINK_PROTOCOL = 2;
-/** The ops a `browserLink.command` carries (spine §5.2; Phase 3's last four). */
-export type BrowserLinkOp = "tab.ensure" | "tab.release" | "tab.close" | "tabs.live" | "cdp.send" | "cdp.subscribe" | "overlay" | "tab.present" | "tab.mute" | "tab.downloads" | "tab.download";
+/** The ops a `browserLink.command` carries (spine §5.2; Phase 3's last four; feature `headless`'s three). */
+export type BrowserLinkOp = "tab.ensure" | "tab.release" | "tab.close" | "tabs.live" | "cdp.send" | "cdp.subscribe" | "overlay" | "tab.present" | "tab.mute" | "tab.downloads" | "tab.download"
+  | "headless.show" | "headless.hide" | "headless.tabs";
+
+/** Feature `headless` (`BROWSER_LINK_FEATURES`): show one of the session's headless tabs in Winter's panel — the app
+ *  connects to the presentation `service` Winter Headless checked in for it, naming `nonce`, and holds the helper to
+ *  `producerRequirement` (the helper the daemon spawned and verified). `purpose` "handoff": the agent waits for the
+ *  person (a `waitForUser`), who has control; "watch": the person watches, and may take over from the panel. */
+export interface HeadlessShowParams {
+  sessionId: string;
+  tabId: string;
+  service: string;
+  nonce: string;
+  producerRequirement: string;
+  control: boolean;
+  purpose: "handoff" | "watch";
+  url: string;
+  title: string;
+  /** Where the app puts copies of files the person chooses for a page's file chooser (`<home>/cache/headless-uploads`):
+   *  the only folder Winter Headless reads a chosen file from. */
+  uploadDir: string;
+}
+export interface HeadlessTabRow { tabId: string; url: string; title: string; presented: boolean; control: boolean }
 /** A command line is at most this long (the app's own cap); a result line rides the daemon's 8 MiB authed cap. */
 export const BROWSER_LINK_COMMAND_MAX = 1024 * 1024;
 export const LINK_TIMEOUTS = { send: 15_000, screenshot: 20_000, ensure: 20_000, other: 15_000 } as const;
@@ -42,6 +63,8 @@ export class CefTransport implements CdpTransport {
   readonly backend = "winter";
   readonly family = "winter" as const;
   connected = true;
+  /** What the app named at attach (`browserLink.attach`'s `features`). */
+  appFeatures: ReadonlySet<string> = new Set();
   private nextCmd = 1;
   private readonly pending = new Map<string, Pending>();
   private readonly agent = new Set<string>();
@@ -227,5 +250,23 @@ export class CefTransport implements CdpTransport {
   onDownload(listener: (tabKey: string, d: TransportDownload) => void): () => void {
     this.downloads.add(listener);
     return () => { this.downloads.delete(listener); };
+  }
+
+  // ── feature `headless` (Phase 4, lane H3): the app's panel shows a headless tab ─────────────────────────────────
+
+  /** Show the presentation in the session's panel (the app summons its window on the session). */
+  async headlessShow(p: HeadlessShowParams): Promise<void> {
+    await this.command("headless.show", { ...p }, this.timeouts.other);
+  }
+
+  /** Stop showing it (the app closes its viewer; the tab itself is the helper's and is not touched). */
+  async headlessHide(p: { sessionId: string; tabId: string; reason: string }): Promise<void> {
+    await this.command("headless.hide", { ...p }, this.timeouts.other);
+  }
+
+  /** The session's headless tabs changed (opened, closed, shown): the panel's list. Best effort. */
+  headlessTabs(p: { sessionId: string; tabs: HeadlessTabRow[] }): void {
+    if (!this.connected) return;
+    void this.command("headless.tabs", { sessionId: p.sessionId, tabs: p.tabs }, this.timeouts.other).catch(() => undefined);
   }
 }

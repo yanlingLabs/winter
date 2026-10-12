@@ -49,10 +49,10 @@ extension HeadlessCEFDriver {
                 { browserId, kind in observe(Int(browserId), kind.map { String(cString: $0) } ?? "") }
             })
         },
-        present: { key, browserId, request, ended in
+        present: { key, browserId, request, started, ended in
             let presenter = WinterHeadlessPresenter(key: key, browserId: Int32(browserId), nonce: request.nonce,
                                                     viewerRequirement: request.viewerRequirement, control: request.control,
-                                                    scale: request.scale, ended: { ended($0) })
+                                                    scale: request.scale, started: { started() }, ended: { ended($0) })
             var error: NSString?
             guard let service = presenter.startWithError(&error) else {
                 return .failure(HeadlessPresentFailure(message: (error as String?) ?? "the presentation could not start"))

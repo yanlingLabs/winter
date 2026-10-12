@@ -9,14 +9,16 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// A presentation of the browser keyed by `key` (`browserId` its CEF identifier) to the viewer that names `nonce`
 /// and satisfies `viewerRequirement`, at `scale` device pixels per CSS pixel. `control`: the viewer may send input.
-/// `ended` runs once, on the main thread, when the presentation ends for any reason but `-stop` (the viewer said
-/// bye, the viewer died, it failed authentication), with a short reason.
+/// `started` runs once, on the main thread, when the viewer's HELLO was accepted (it named the nonce and satisfied the
+/// requirement) — the daemon's sign that the presentation is really shown. `ended` runs once, on the main thread, when
+/// the presentation ends for any reason but `-stop` (the viewer said bye, the viewer died), with a short reason.
 - (instancetype)initWithKey:(NSView *)key
                   browserId:(int)browserId
                       nonce:(uint64_t)nonce
           viewerRequirement:(NSString *)viewerRequirement
                     control:(BOOL)control
                       scale:(double)scale
+                    started:(void (^)(void))started
                       ended:(void (^)(NSString *reason))ended NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 

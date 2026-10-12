@@ -3470,14 +3470,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.browserLinkResult:
       case METHODS.browserLinkEvents:
       case METHODS.browserLinkTabGone:
-      case METHODS.browserLinkDownload: {
+      case METHODS.browserLinkDownload:
+      case METHODS.browserLinkHeadless: {
         if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, `${method} is available to Winter's app only`);
         const link = opts.browserLink;
         if (link === undefined) throw new RpcFailure(ERR.INTERNAL, `${method} is not available on this server`);
         try {
-          return link.handle(socket.data, (message) => socket.data.writer.enqueue(encodeLine(message)), method, params);
+          return await link.handle(socket.data, (message) => socket.data.writer.enqueue(encodeLine(message)), method, params);
         } catch (err) {
-          if (err instanceof BrowserLinkRpcError) throw new RpcFailure(ERR.INVALID_PARAMS, err.message, { code: err.code, ...err.data });
+          if (err instanceof BrowserLinkRpcError) throw new RpcFailure(err.code === "not_found" ? ERR.NOT_FOUND : ERR.INVALID_PARAMS, err.message, { code: err.code, ...err.data });
           throw err;
         }
       }

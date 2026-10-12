@@ -142,6 +142,19 @@ final class HeadlessWireTests: XCTestCase {
         XCTAssertEqual(value["params"]?["linkId"], .string("h-9"))
         XCTAssertEqual(value["params"]?["pid"], .number(42))
         XCTAssertEqual(value["params"]?["version"], .string("0.124.0"))
+        // What it can do beyond protocol 1: a daemon sends the presentation ops only to a helper that says "present".
+        XCTAssertEqual(value["params"]?["features"], .array([.string("present")]))
+    }
+
+    func testPresentationStartedFollowsThePendingEvents() throws {
+        let outbox = HeadlessOutbox(linkId: "h-1")
+        _ = outbox.event(.init(tabId: "w-1", method: "Page.loadEventFired", params: Data("{}".utf8), cdpSessionId: nil, strip: false))
+        let lines = outbox.presentationStarted(tabId: "w-1")
+        XCTAssertEqual(lines.count, 2, "the pending events go first")
+        let started = try XCTUnwrap(decode(lines[1]))
+        XCTAssertEqual(started["method"], .string("headless.presentationStarted"))
+        XCTAssertEqual(started["params"]?["tabId"], .string("w-1"))
+        XCTAssertEqual(started["params"]?["linkId"], .string("h-1"))
     }
 
     func testTabGoneFlushesFirst() throws {

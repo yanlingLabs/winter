@@ -22,7 +22,7 @@ import { SessionStore } from "../../src/sessions/store";
 import { loadSettings, type Settings } from "../../src/settings";
 import { FakeHelper } from "./fake-helper";
 
-const LINK_METHODS = [METHODS.browserLinkAttach, METHODS.browserLinkResult, METHODS.browserLinkEvents, METHODS.browserLinkTabGone, METHODS.browserLinkDownload];
+const LINK_METHODS = [METHODS.browserLinkAttach, METHODS.browserLinkResult, METHODS.browserLinkEvents, METHODS.browserLinkTabGone, METHODS.browserLinkDownload, METHODS.browserLinkHeadless];
 
 interface Note { method: string; params: { linkId: string; cmdId: string; op: string; params: Record<string, unknown>; reason?: string } }
 
@@ -30,8 +30,10 @@ interface Note { method: string; params: { linkId: string; cmdId: string; op: st
 function app(link: BrowserLink, conn: object = {}) {
   const notes: Note[] = [];
   const write = (m: Record<string, unknown>): void => { notes.push(m as unknown as Note); };
-  const call = (method: string, params: unknown): Record<string, unknown> => link.handle(conn, write, method, params);
-  return { conn, notes, call, last: (): Note => notes[notes.length - 1]! };
+  // Every method but `browserLink.headless` answers at once.
+  const call = (method: string, params: unknown): Record<string, unknown> => link.handle(conn, write, method, params) as Record<string, unknown>;
+  const callAsync = async (method: string, params: unknown): Promise<Record<string, unknown>> => await link.handle(conn, write, method, params);
+  return { conn, notes, call, callAsync, last: (): Note => notes[notes.length - 1]! };
 }
 
 describe("the browser link (daemon side)", () => {

@@ -6,10 +6,17 @@
 //
 // The vocabulary is the browser link's: `browserLink.command {linkId, cmdId, op, params}` answered by ONE
 // `browserLink.result`, plus the helper's own `browserLink.events` and `browserLink.tabGone`. The helper speaks first
-// (`headless.hello {protocol, linkId, pid, version}`), there is one more op, `context.dispose {sessionId}`, and one more
-// message from the helper, `headless.notice {tabId, kind}` — a page tried something the helper refused (`popup`: to open
-// a window; `local-network`: to reach a private address). Closing fd 3 is how the daemon stops it — and how a daemon
-// that dies takes it along.
+// (`headless.hello {protocol, linkId, pid, version, features}`), there is one more op, `context.dispose {sessionId}`, and
+// one more message from the helper, `headless.notice {tabId, kind}` — a page tried something the helper refused
+// (`popup`: to open a window; `local-network`: to reach a private address). Closing fd 3 is how the daemon stops it —
+// and how a daemon that dies takes it along.
+//
+// FEATURES (the protocol stays 1): what a helper can do beyond it, named in its hello. `present` — a live tab shown to
+// Winter.app through the GPU (`apple/Winter/Sources/HeadlessPresent`): the ops `headless.present {tabId, nonce,
+// viewerRequirement, control, scale}` → `{service, cssWidth, cssHeight}`, `headless.unpresent {tabId}` → its stats,
+// `headless.control {tabId, control}`, and the helper's `headless.presentationStarted {tabId}` (its viewer was accepted)
+// and `headless.presentationEnded {tabId, reason}` (the viewer ended it). A helper that does not name a feature is never
+// sent its ops.
 //
 // Winter Headless exposes ONLY these link ops — no browser-level CDP command at all (no `Target.createTarget`, no
 // `Browser.*`). A browser-level command list belongs to installed browsers run headless, a later stage.
@@ -21,8 +28,12 @@ import { TransportError, type CdpEvent, type TransportErrorCode } from "../trans
 
 /** The pipe's protocol — the helper's `HeadlessWire.protocolVersion` must equal it. */
 export const HEADLESS_PIPE_PROTOCOL = 1;
-/** The ops a command carries: the browser link's, plus `context.dispose`. */
-export type HeadlessOp = "tab.ensure" | "tab.release" | "tab.close" | "tabs.live" | "cdp.send" | "cdp.subscribe" | "context.dispose";
+/** The ops a command carries: the browser link's, plus `context.dispose` and (feature `present`) the presentation's. */
+export type HeadlessOp = "tab.ensure" | "tab.release" | "tab.close" | "tabs.live" | "cdp.send" | "cdp.subscribe" | "context.dispose"
+  | "headless.present" | "headless.unpresent" | "headless.control";
+/** The helper features this daemon knows (`headless.hello`'s `features`). */
+export const HEADLESS_FEATURES = ["present"] as const;
+export type HeadlessFeature = (typeof HEADLESS_FEATURES)[number];
 /** The helper reads a command line of at most this many bytes. */
 export const HEADLESS_COMMAND_MAX = 1024 * 1024;
 /** The longest line read back (a result is at most 8 MiB plus its envelope). */
@@ -188,7 +199,10 @@ export function headlessErrorToTransport(code: string, message: string, data: Re
   return new TransportError(map[code] ?? "cdp_error", message, data);
 }
 
-export interface HeadlessHello { linkId: string; protocol: number; pid?: number; version?: string }
+export interface HeadlessHello { linkId: string; protocol: number; pid?: number; version?: string; features: HeadlessFeature[] }
+
+/** A presentation's life, as the helper reports it: its viewer accepted, or the viewer ended it. */
+export type HeadlessPresentationEvent = { tabKey: string; kind: "started" } | { tabKey: string; kind: "ended"; reason: string };
 
 /** One running Winter Headless and its pipe. */
 export class WinterHeadlessProcess {
@@ -200,6 +214,7 @@ export class WinterHeadlessProcess {
   private readonly goneListeners = new Set<(tabKey: string, reason: "closed" | "crashed" | "stopped") => void>();
   private readonly exitListeners = new Set<(code: number | null, signal: string | null) => void>();
   private readonly noticeListeners = new Set<(tabKey: string, kind: HeadlessNoticeKind) => void>();
+  private readonly presentationListeners = new Set<(e: HeadlessPresentationEvent) => void>();
   private helloWaiter: { resolve(h: HeadlessHello): void; reject(e: Error): void } | undefined;
   private hello: HeadlessHello | undefined;
   private exited = false;
@@ -215,6 +230,8 @@ export class WinterHeadlessProcess {
   get pid(): number { return this.child.pid; }
   get alive(): boolean { return !this.exited; }
   get version(): string | undefined { return this.hello?.version; }
+  /** Does this helper name `feature` in its hello? (False until it has said hello.) */
+  has(feature: HeadlessFeature): boolean { return this.hello?.features.includes(feature) === true; }
 
   private timeout(kind: keyof typeof HEADLESS_TIMEOUTS): number { return this.opts.timeouts?.[kind] ?? HEADLESS_TIMEOUTS[kind]; }
 
@@ -261,6 +278,7 @@ export class WinterHeadlessProcess {
   onEvent(listener: (e: CdpEvent) => void): () => void { this.eventListeners.add(listener); return () => { this.eventListeners.delete(listener); }; }
   onTabGone(listener: (tabKey: string, reason: "closed" | "crashed" | "stopped") => void): () => void { this.goneListeners.add(listener); return () => { this.goneListeners.delete(listener); }; }
   onNotice(listener: (tabKey: string, kind: HeadlessNoticeKind) => void): () => void { this.noticeListeners.add(listener); return () => { this.noticeListeners.delete(listener); }; }
+  onPresentation(listener: (e: HeadlessPresentationEvent) => void): () => void { this.presentationListeners.add(listener); return () => { this.presentationListeners.delete(listener); }; }
   onExit(listener: (code: number | null, signal: string | null) => void): () => void {
     if (this.exited) { listener(null, null); return () => {}; }
     this.exitListeners.add(listener);
@@ -307,9 +325,13 @@ export class WinterHeadlessProcess {
       case "headless.hello": {
         if (typeof p.linkId !== "string" || this.hello !== undefined) return;
         this.linkId = p.linkId;
+        const features = Array.isArray(p.features)
+          ? HEADLESS_FEATURES.filter((f) => (p.features as unknown[]).includes(f))
+          : [];
         this.hello = {
           linkId: p.linkId, protocol: typeof p.protocol === "number" ? p.protocol : 0,
           ...(typeof p.pid === "number" ? { pid: p.pid } : {}), ...(typeof p.version === "string" ? { version: p.version } : {}),
+          features,
         };
         this.helloWaiter?.resolve(this.hello);
         this.helloWaiter = undefined;
@@ -344,6 +366,17 @@ export class WinterHeadlessProcess {
         if (p.linkId !== this.linkId || typeof p.tabId !== "string" || (p.kind !== "popup" && p.kind !== "local-network")) return;
         for (const l of [...this.noticeListeners]) {
           try { l(p.tabId, p.kind); } catch { /* a listener never breaks the pipe */ }
+        }
+        return;
+      }
+      case "headless.presentationStarted":
+      case "headless.presentationEnded": {
+        if (p.linkId !== this.linkId || typeof p.tabId !== "string") return;
+        const e: HeadlessPresentationEvent = message.method === "headless.presentationStarted"
+          ? { tabKey: p.tabId, kind: "started" }
+          : { tabKey: p.tabId, kind: "ended", reason: typeof p.reason === "string" ? p.reason.slice(0, 200) : "ended" };
+        for (const l of [...this.presentationListeners]) {
+          try { l(e); } catch { /* a listener never breaks the pipe */ }
         }
         return;
       }

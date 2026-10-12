@@ -23,6 +23,7 @@ final class FakeHeadlessDriver {
     var controls: [Bool] = []
     var presentRefusal: String?
     var presentationEnded: ((String) -> Void)?
+    var presentationStarted: (() -> Void)?
     /// Browsers appear at once unless a test says otherwise.
     var browsersArriveAtOnce = true
 
@@ -53,9 +54,10 @@ final class FakeHeadlessDriver {
             },
             disposeContext: { [unowned self] session in disposed.append(session) },
             setNoticeObserver: { [unowned self] observer in noticeObserver = observer },
-            present: { [unowned self] _, browserId, request, ended in
+            present: { [unowned self] _, browserId, request, started, ended in
                 if let presentRefusal { return .failure(HeadlessPresentFailure(message: presentRefusal)) }
                 presented.append((browserId, request))
+                presentationStarted = started
                 presentationEnded = ended
                 return .success((service: "com.winter.headless.present.test.\(presented.count)", handle: NSObject()))
             },
@@ -73,6 +75,8 @@ final class RecordingOutput: HeadlessOutput {
     var notices: [(tabId: String, kind: String)] = []
     func notice(tabId: String, kind: String) { notices.append((tabId, kind)) }
     var presentationsEnded: [(tabId: String, reason: String)] = []
+    var presentationsStarted: [String] = []
+    func presentationStarted(tabId: String) { presentationsStarted.append(tabId) }
     func presentationEnded(tabId: String, reason: String) { presentationsEnded.append((tabId, reason)) }
     func emitEvent(tabId: String, method: String, params: Data, cdpSessionId: String?, strip: Bool) {
         events.append((tabId, method, strip))
@@ -297,6 +301,9 @@ final class HeadlessHostTests: XCTestCase {
     func testAViewerThatEndsThePresentationIsSaidAndClosingTheTabEndsIt() {
         _ = open("w-1")
         host.present(presentRequest(), reply: HeadlessReplier { _ in })
+        XCTAssertEqual(output.presentationsStarted, [], "nothing is said before the viewer is accepted")
+        fake.presentationStarted?()
+        XCTAssertEqual(output.presentationsStarted, ["w-1"], "the accepted viewer is said once")
         fake.presentationEnded?("the viewer went away")
         XCTAssertEqual(output.presentationsEnded.map(\.reason), ["the viewer went away"])
         XCTAssertEqual(host.unpresent(tabId: "w-1"), [:], "already ended")

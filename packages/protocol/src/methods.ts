@@ -487,9 +487,22 @@ export const ComputerUseStatusResult = z.object({
  *  `browserLink.detached`), `browserLink.result` (one per command; an unknown or late `cmdId` is dropped and still
  *  answered `{}`), `browserLink.events` (≤ 256 per batch, only subscribed allowlisted events, Network params stripped),
  *  `browserLink.tabGone`, and (protocol 2) `browserLink.download`. Daemon → app (notifications, no id):
- *  `browserLink.command`, `browserLink.detached`. */
-export const BrowserLinkAttachParams = z.object({ protocol: z.number().int(), appVersion: z.string().max(64), pid: z.number().int() });
-export const BrowserLinkAttachResult = z.object({ linkId: z.string(), protocol: z.number().int() });
+ *  `browserLink.command`, `browserLink.detached`.
+ *
+ *  FEATURES (the protocol stays 2): what each side can do beyond it, named at attach — the app in its params, the daemon
+ *  in its answer; a side never uses a feature the other did not name. `headless` (ComputerV2 Phase 4, lane H3): the app
+ *  can show a tab of Winter's HEADLESS browser in its panel — the live page, drawn from Winter Headless's own GPU frames
+ *  (the page never leaves the helper; nothing reloads) — and the daemon can ask it to. Daemon → app ops on
+ *  `browserLink.command`: `headless.show {sessionId, tabId, service, nonce, producerRequirement, control, purpose,
+ *  url, title, uploadDir}` (connect to that presentation and show it; `purpose` "handoff" — the agent waits for the
+ *  user, who has control — or "watch"; files the person picks for the page are copied into `uploadDir` first), `headless.hide {sessionId, tabId, reason}`, `headless.tabs {sessionId, tabs}` (the session's
+ *  headless tabs changed). App → daemon: `browserLink.headless` (below). */
+export const BROWSER_LINK_FEATURES = ["headless"] as const;
+export const BrowserLinkAttachParams = z.object({
+  protocol: z.number().int(), appVersion: z.string().max(64), pid: z.number().int(),
+  features: z.array(z.string().min(1).max(64)).max(16).optional(),
+});
+export const BrowserLinkAttachResult = z.object({ linkId: z.string(), protocol: z.number().int(), features: z.array(z.string()).optional() });
 export const BrowserLinkResultParams = z.union([
   z.object({ linkId: z.string().min(1), cmdId: z.string().min(1), ok: z.literal(true), result: z.unknown() }),
   z.object({
@@ -524,6 +537,21 @@ export const BrowserLinkDownloadParams = z.object({
   }),
 });
 export const BrowserLinkAckResult = z.object({});
+/** Feature `headless` — the person, in Winter's panel, acting on one of a session's HEADLESS tabs:
+ *  `list` (the session's headless tabs, fresh; no `tabId`), `watch` (show it, watch-only: the agent keeps working and
+ *  the person sees it live), `takeOver` (the person takes control: the agent's work in flight on that tab finishes
+ *  first, then every agent command on it is `TargetBusy` until it is handed back), `handBack` (control back to the
+ *  agent; the view stays, watch-only), `done` / `stopWaiting` (the answers to a `waitForUser` hand-off shown in the
+ *  panel), `close` (stop showing it; control, if held, goes back to the agent). */
+export const BrowserLinkHeadlessAction = z.enum(["list", "watch", "takeOver", "handBack", "done", "stopWaiting", "close"]);
+export const BrowserLinkHeadlessParams = z.object({
+  linkId: z.string().min(1),
+  sessionId: z.string().min(1).max(128),
+  tabId: z.string().min(1).max(256).optional(),
+  action: BrowserLinkHeadlessAction,
+});
+export const BrowserLinkHeadlessTab = z.object({ tabId: z.string(), url: z.string(), title: z.string(), presented: z.boolean(), control: z.boolean() });
+export const BrowserLinkHeadlessResult = z.object({ tabs: z.array(BrowserLinkHeadlessTab).optional() });
 /** Daemon → app notifications. `op`: tab.ensure, tab.release, tab.close, tabs.live, cdp.send, cdp.subscribe, overlay;
  *  protocol 2: tab.present, tab.mute, tab.downloads, tab.download. */
 export const BrowserLinkCommandNotification = z.object({ linkId: z.string(), cmdId: z.string(), op: z.string(), params: z.record(z.string(), z.unknown()) });
@@ -3246,6 +3274,7 @@ export const METHODS = {
   browserLinkEvents: "browserLink.events",
   browserLinkTabGone: "browserLink.tabGone",
   browserLinkDownload: "browserLink.download",
+  browserLinkHeadless: "browserLink.headless",
   browserLinkCommand: "browserLink.command",
   browserLinkDetached: "browserLink.detached",
   sessionStageImage: "session.stageImage",
