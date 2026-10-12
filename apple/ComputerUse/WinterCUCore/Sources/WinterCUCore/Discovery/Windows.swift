@@ -253,9 +253,14 @@ enum CUWindowResolver {
             // A window on this desktop whose title only CONTAINS the one asked for never beats one elsewhere whose title IS
             // it (round 13: the find bar's "Find in page ⏎ <title>" here won over the page's own window on another
             // desktop).
+            // (Only where it is — its remote token: a bind never moves a window as a side effect, review of round 13,
+            // MEDIUM #7 — else the window here, as before.)
             if case .title(let t) = selector, let here = try? CUAXWindows.choose(axWindows, selector: selector, appName: appName),
                !CUAXWindows.exactTitle(here, t), let there = offSpace.first(where: { $0.title.lowercased() == t.lowercased() }) {
-                return try reach([there], appName: appName, privatePath: privatePath, fx)
+                if privatePath, let element = fx.remote([there.id])[there.id] {
+                    return Outcome(window: fx.describe(element, there), detail: whereItIsDetail(appName), step: .whereItIs)
+                }
+                return Outcome(window: here)
             }
             if let w = try? CUAXWindows.choose(axWindows, selector: selector, appName: appName) { return Outcome(window: w) }
             let match: CUWindowServerWindow? = {

@@ -172,6 +172,19 @@ final class RemoteDebuggingFloorTests: XCTestCase {
         XCTAssertNoThrow(try core.floorCheckRemoteDebugging(params(.click(CUClickAction(ref: ref(toolbarButton)))), target))
     }
 
+    /// Review of round 13, MEDIUM #8: the walk tells a page (more nodes than a dialog has: no candidate) from a walk out
+    /// of time (unknown: still a candidate, its text checked, the scan not cached).
+    func testTheWalkTellsALargeWindowFromAnUnfinishedOne() {
+        world(url: "https://example.com", standardTitled: "Settings")
+        let small = fakeElement(99_400)
+        ax.add(small, role: kAXWindowRole, extra: [kAXChildrenAttribute: [fakeElement(99_401)]])
+        XCTAssertEqual(core.webAreaWalk(small), .absent)
+        XCTAssertEqual(core.webAreaWalk(small, maxMs: 0), .unknown, "out of time: unknown, never a no")
+        XCTAssertEqual(core.webAreaWalk(small, maxNodes: 0), .large)
+        XCTAssertTrue(CUCore.isInspectPageTitle("Inspect with Chrome Developer Tools - Work"), "a profile's title tail")
+        XCTAssertFalse(CUCore.isInspectPageTitle("How to Inspect with Chrome Developer Tools - Work"))
+    }
+
     /// Review of round 12, LOW: the capture-only title rule is anchored.
     func testTheInspectTitleRuleIsAnchored() {
         XCTAssertTrue(CUCore.isInspectPageTitle("Inspect with Chrome Developer Tools"))

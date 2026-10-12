@@ -303,6 +303,11 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
 
   service = new ComputerV2Service({
     helper, policy, settings, diffBases, recentApps, adapters, browsers,
+    site: {
+      ...(deps.dangerousDomainsAdded === undefined ? {} : { dangerousDomainsAdded: deps.dangerousDomainsAdded }),
+      ...(deps.savedAllowRules === undefined ? {} : { savedAllowRules: deps.savedAllowRules }),
+    },
+    sessionCwd: (sessionId) => deps.store.meta(sessionId).cwd ?? undefined,
     telemetry,
     ...(deps.audit === undefined ? {} : { audit: deps.audit }),
     ...(deps.interrupt === undefined ? {} : { interrupt: deps.interrupt }),

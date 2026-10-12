@@ -268,7 +268,11 @@ public final class CUCore: @unchecked Sendable {
         var launched = false
         let app: NSRunningApplication
         switch try CUApps.resolve(query) {
-        case .running(let r): app = r
+        case .running(let r):
+            // Named for a running app too: the bind's pending launch reaches only it (review of round 14, MEDIUM #4 — a
+            // nameless one covered every app for the whole bind).
+            core.noteGuardianLaunchBundle(r.bundleIdentifier)
+            app = r
         case .installed(let url, let bundleId, let name):
             try core.refuseFloorApp(bundleId: bundleId, pid: 0, name: name)
             core.noteGuardianLaunchBundle(bundleId)
@@ -621,6 +625,11 @@ public final class CUCore: @unchecked Sendable {
     var guardianNoted: ((String) -> Void)?
     /// Whether a bound app is a web browser, as a test says (live: its Info.plist declares http/https).
     var isWebBrowserOverride: ((CUTarget) -> Bool)?
+    /// Tests: the default handler of a URL scheme (`defaultHandler`), instead of LaunchServices.
+    var defaultHandlerOverride: ((String) -> String?)?
+    /// `defaultHandler`'s cache: per scheme, the handler and when it was looked up.
+    var defaultHandlerCache: [String: (bundle: String?, at: TimeInterval)] = [:]
+    let defaultHandlerLock = NSLock()
     /// The bind whose launch a resolver is naming (`noteGuardianLaunchBundle`).
     @TaskLocal static var bindLaunchToken: Int?
     /// Sessions with a script running, the latest private-path setting seen, and the pending end of the tail.

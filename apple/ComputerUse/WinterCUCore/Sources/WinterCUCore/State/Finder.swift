@@ -21,7 +21,12 @@ public enum CUFinder {
     }
 
     public static func summary(_ n: CUNode, formatter: CUStateFormatter = CUStateFormatter()) -> CUElementSummary {
-        let value: String? = n.isSecure ? "<redacted>" : n.value.flatMap { $0.isEmpty || $0 == n.name ? nil : formatter.cut($0) }
+        // A long value is cut, and says how long it is and where it reads whole (round 13's queue, item 2 of round 14).
+        let value: String? = n.isSecure ? "<redacted>" : n.value.flatMap { v in
+            if v.isEmpty || v == n.name { return nil }
+            guard v.count > formatter.valueCap else { return v }
+            return formatter.cut(v) + " (\(v.count) characters — state({within:\(n.ref)}) shows it whole)"
+        }
         let words = n.states.words
         return CUElementSummary(ref: n.ref, role: n.roleWords, name: n.name.flatMap { $0.isEmpty ? nil : formatter.cut($0) },
                                 value: value, states: words.isEmpty ? nil : words)

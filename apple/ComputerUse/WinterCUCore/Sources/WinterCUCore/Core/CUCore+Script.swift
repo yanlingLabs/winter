@@ -64,8 +64,11 @@ extension CUCore {
         }
         try token.check()
         try refuseWhileUserWorks(t)  // an AppleScript acts in the app (round 10: hands off while the user works in it)
-        noteGuardianOpener()
-        defer { noteGuardianOpener() }
+        // What it can open: any app (an Apple Event to the bound app can make it open a document anywhere — §4.12 I1's own
+        // example, a file opened in Preview; review of round 14, MEDIUM #3).
+        let scope = CUOpenerScope.any
+        noteGuardianOpener(scope)
+        defer { noteGuardianOpener(scope) }
         do {
             try CUAppleScriptPolicy.checkSource(p.source, bound: boundApp(t))
         } catch let e as CUError {

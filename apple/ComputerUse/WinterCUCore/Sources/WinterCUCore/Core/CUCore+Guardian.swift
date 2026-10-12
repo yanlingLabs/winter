@@ -118,7 +118,9 @@ extension CUCore {
     /// The agent is about to launch an app (a bind's): an app whose process starts meanwhile is the agent's.
     func beginGuardianLaunch() -> Int {
         let now = clock.nowSeconds()
-        return guardianLock.withLock { guardianCore.noteOpenerCause(now: now); return guardianCore.beginLaunch(now: now) }
+        // (No opener cause of any reach here: the launch pending counts for the app it is for once its bundle is known,
+        // and the bundle's own opener cause is noted then — round 14: opens and launches reach the app they open.)
+        return guardianLock.withLock { guardianCore.beginLaunch(now: now) }
     }
 
     /// The bundle the pending launch is for, when the bind knows it (the default resolver does): only that app's
@@ -126,14 +128,22 @@ extension CUCore {
     /// binds at once could swap their bundles), else the latest.
     func noteGuardianLaunchBundle(_ bundle: String?) {
         let token = CUCore.bindLaunchToken
+        let now = clock.nowSeconds()
         guardianLock.withLock {
             if let token { guardianCore.setLaunchBundle(token, bundle) } else { guardianCore.setLatestLaunchBundle(bundle) }
+            guardianCore.noteOpenerCause(now: now, scope: bundle.map { .apps([$0]) } ?? .any)
         }
     }
 
     func endGuardianLaunch(_ token: Int, pid: pid_t?) {
         let now = clock.nowSeconds()
-        guardianLock.withLock { guardianCore.noteOpenerCause(now: now); guardianCore.endLaunch(token, pid: pid, now: now) }
+        // What it opened: its bundle as named, else the process's own; unknown — any app.
+        let named = guardianLock.withLock { guardianCore.launchBundle(token) }
+        let bundle = named ?? pid.flatMap { sys.bundleId(pid: $0) }
+        guardianLock.withLock {
+            guardianCore.noteOpenerCause(now: now, scope: bundle.map { .apps([$0]) } ?? .any)
+            guardianCore.endLaunch(token, pid: pid, now: now)
+        }
     }
 
     /// A restore of ours re-activates `pid` now (I2: its late landing, after the user moved elsewhere, is the restore's).
@@ -163,11 +173,11 @@ extension CUCore {
         let now = clock.nowSeconds()
         let observable = switchInputObservable
         let clickAt: TimeInterval? = observable ? nil : now - secondsSinceUserClick
-        let launching = guardianLock.withLock { guardianCore.launchPending }
         // (Always read: an app started a moment ago, not by the agent, comes forward on its first activation as the
-        // user's own launch even when NSWorkspace's launch notice was never heard — review of round 9, MEDIUM #5.)
+        // user's own launch even when NSWorkspace's launch notice was never heard — review of round 9, MEDIUM #5. The
+        // bundle too: whether an opener act of the agent's could have opened it — round 14's queue item 1.)
         let started = v.front.flatMap { pid in sys.processAge(pid: pid).map { now - $0 } }
-        let bundle = launching ? v.front.flatMap { sys.bundleId(pid: $0) } : nil
+        let bundle = v.front.flatMap { sys.bundleId(pid: $0) }
         // A desktop change: the apps the agent touched (with a cause that raises) whose window it showed.
         let placeSpace = guardianPlace()?.space ?? from?.space
         var shown: [pid_t] = []
@@ -198,10 +208,82 @@ extension CUCore {
         }
     }
 
-    /// The agent did something that can open another app (an opener act, an AppleScript, an open, a launch).
-    func noteGuardianOpener() {
+    /// The agent did something that can open another app (an opener act, an AppleScript, an open, a launch) — `scope`:
+    /// which apps it can open.
+    func noteGuardianOpener(_ scope: CUOpenerScope = .any) {
         let now = clock.nowSeconds()
-        guardianLock.withLock { guardianCore.noteOpenerCause(now: now) }
+        guardianLock.withLock { guardianCore.noteOpenerCause(now: now, scope: scope) }
+    }
+
+    /// The apps an act on `t` can open or bring forward (round 14's queue item 1 — a third party's activations right
+    /// after a click in Chrome were undone as the agent's): `t` itself; for an app that is not a web browser, the
+    /// default handlers of web and mail links (a link it opens lands there — a browser's links stay in it); for a menu
+    /// command, the Help viewer and the default browser (a Help menu item opens either). Finder, the Dock and launchers
+    /// open any app, and so does an act on a target whose bundle is unknown. Never an arbitrary app like Terminal.
+    func openerScope(_ a: CUAction?, _ t: CUTarget) -> CUOpenerScope {
+        guard let b = t.bundleId, !Self.opensAnyApp.contains(b) else { return .any }
+        // Finder always: Show/Reveal in Finder from Xcode, VS Code, a browser's downloads (review of round 14, MEDIUM #2).
+        var apps: Set<String> = [b, "com.apple.finder"]
+        let menu: Bool = { if case .menu? = a { return true }; return false }()
+        // The default web and mail handlers: a non-browser's links land there. A browser's own web links stay in it, but
+        // its mailto: opens the mail app; a menu command uses the same list (Help › Contact Support, Share › Email).
+        for scheme in isWebBrowser(t) && !menu ? ["mailto"] : ["http", "https", "mailto"] {
+            if let h = defaultHandler(scheme) { apps.insert(h) }
+        }
+        if menu { apps.insert("com.apple.helpviewer") }
+        // The pressed element's own link: its scheme's handler (zoommtg:, slack:, x-apple.systempreferences:, …).
+        if let ref = Self.actRef(a), let e = try? element(ref, in: t), let scheme = linkScheme(e), let h = defaultHandler(scheme) {
+            apps.insert(h)
+        }
+        return .apps(apps)
+    }
+
+    /// The element an act names (its ref), when it names one.
+    static func actRef(_ a: CUAction?) -> Int? {
+        switch a {
+        case .click(let c)?: return c.ref
+        case .action(let x)?: return x.ref
+        case .key(let k)?: return k.into
+        default: return nil
+        }
+    }
+
+    /// The scheme of the link `e` is (or sits in, up to two levels): its `AXURL`'s.
+    func linkScheme(_ e: AXUIElement) -> String? {
+        var n: AXUIElement? = e
+        for _ in 0..<3 {
+            guard let x = n else { return nil }
+            if let v = ax.attribute(x, "AXURL") {
+                let url: URL? = CFGetTypeID(v) == CFURLGetTypeID() ? (v as! CFURL) as URL : (v as? String).flatMap(URL.init(string:))
+                if let s = url?.scheme?.lowercased(), !s.isEmpty { return s }
+            }
+            n = ax.element(x, kAXParentAttribute)
+        }
+        return nil
+    }
+
+    /// Apps whose acts can open any other app: Finder (a document opens in its app), the Dock, launchers.
+    static let opensAnyApp: Set<String> = [
+        "com.apple.finder", "com.apple.dock", "com.apple.Spotlight", "com.runningwithcrayons.Alfred",
+        "com.raycast.macos", "com.obdev.LaunchBar",
+    ]
+
+    /// The bundle id of the app that opens `scheme:` links by default (nil: none or unknown). Cached a minute per scheme
+    /// (review of round 14, LOW: up to four LaunchServices lookups per opener act); a change of the default app is seen
+    /// within that.
+    func defaultHandler(_ scheme: String) -> String? {
+        if let o = defaultHandlerOverride { return o(scheme) }
+        let now = clock.nowSeconds()
+        if let c = defaultHandlerLock.withLock({ defaultHandlerCache[scheme] }), now - c.at < 60 { return c.bundle }
+        let found = lookUpDefaultHandler(scheme)
+        defaultHandlerLock.withLock { defaultHandlerCache[scheme] = (found, now) }
+        return found
+    }
+
+    private func lookUpDefaultHandler(_ scheme: String) -> String? {
+        guard let url = URL(string: scheme == "mailto" ? "mailto:someone@example.invalid" : "\(scheme)://example.invalid"),
+              let app = NSWorkspace.shared.urlForApplication(toOpen: url) else { return nil }
+        return Bundle(url: app)?.bundleIdentifier
     }
 
     /// The system's dialog processes (a permission or authentication prompt the user must be able to answer), and any
@@ -246,7 +328,7 @@ extension CUCore {
         // Round 10 (the user's ruling): not clearly the agent's — left in front, never adopted, said.
         let note = dialog
             ? "\(name) (a system dialog) came up after your action — it was left in front for the user to answer; avoid the action that raises it, or ask the user"
-            : "\(name) came forward around your action — the user's view may have moved"
+            : "\(name) came forward around your action — it may have been your action's doing or the user's; it was left in front (the user's view may have moved)"
         guardianLock.withLock {
             if !pendingGuardianNotes.contains(note) { pendingGuardianNotes.append(note) }
             pendingViewMovedBy.append(name)
@@ -416,18 +498,65 @@ extension CUCore {
         // Corroborated (review of round 12, MEDIUM #3: Terminal's Secure Keyboard Entry holds it whenever Terminal is in
         // front, and a user switching there only to look must block nothing): a secure field of the app has the focus, or
         // input of theirs came in the last 2.5 s. The owner may be a true part of the app (a WebContent's password field).
-        let secureOwner: Bool = {
+        // Review of round 13, MEDIUM #6: recent hardware input is no corroboration (the ⌘-Tab that brought the app forward
+        // blocked a looker for 2.5 s, and letters typed under it are never seen) — TYPING is: the focused element's text
+        // changed since the agent last looked (`secureTypingBase`, refreshed at each of its acts' end), which marks the
+        // user working in the app until it leaves the front (the ordinary I6 mark).
+        // The user's ruling (round 14): KEEP the safe side — a bound front app under Secure Keyboard Entry whose text
+        // changes (their typing, or a command's streaming output: the two can't be told apart) is the user working, and
+        // the agent waits until the app leaves the front; the refusal says why.
+        enum SecureWork { case none, secureField, textChanging }
+        let secureWork: SecureWork = {
             guard secureInputOn, sys.frontmostPid() == t.pid, let owner = secureInputOwnerPid(),
-                  owner == t.pid || sys.isContentProcess(owner, of: t.pid) else { return false }
-            let now = clock.nowSeconds()
-            let recent = guardianLock.withLock { now - lastHardwareActionAt <= 2.5 }
-            let secureField = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
-                .flatMap { ax.string($0, kAXSubroleAttribute) } == kAXSecureTextFieldSubrole
-            return recent || secureField
+                  owner == t.pid || sys.isContentProcess(owner, of: t.pid) else {
+                guardianLock.withLock { t.secureTypingBase = nil; t.secureTextChanged = false }
+                return .none
+            }
+            let focused = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
+            if focused.flatMap({ ax.string($0, kAXSubroleAttribute) }) == kAXSecureTextFieldSubrole { return .secureField }
+            let now = secureTypingState(t)
+            let base = guardianLock.withLock { () -> (focus: AXIdentity?, chars: Int?)? in
+                let b = t.secureTypingBase
+                if b == nil || b?.focus != now.focus { t.secureTypingBase = now }
+                return b
+            }
+            guard let base, base.focus == now.focus, let a = base.chars, let b = now.chars, a != b else {
+                // (Once seen, it holds while the app stays in front — the sticky I6 mark — and keeps its reason.)
+                return guardianLock.withLock { t.secureTextChanged } ? .textChanging : .none
+            }
+            CULog.act.notice("act in \(t.appName, privacy: .public): its text changed since the agent's last act, under Secure Event Input — the user typing (or its output: the same, by the user's ruling)")
+            guardianLock.withLock { t.secureTextChanged = true }
+            userInteracted(t.pid)
+            return .textChanging
         }()
-        guard secureOwner || userIsWorking(in: t.pid) else { return }
+        switch secureWork {
+        case .textChanging:
+            CULog.act.notice("act in \(t.appName, privacy: .public): refused — Secure Keyboard Entry, its text changing")
+            throw CUError.refused(.userWorking, "\(t.appName) is in front with Secure Keyboard Entry on and its text is changing — Winter waits until you switch away")
+        case .secureField:
+            CULog.act.notice("act in \(t.appName, privacy: .public): refused — a secure field of it has the keyboard")
+            throw CUError.refused(.userWorking, "\(t.appName) is in front with a password field focused (Secure Event Input) — Winter waits until you switch away")
+        case .none:
+            break
+        }
+        guard userIsWorking(in: t.pid) else { return }
         CULog.act.notice("act in \(t.appName, privacy: .public): refused — the user is working in it")
         throw CUError.refused(.userWorking, "the user is working in \(t.appName) right now — wait and retry, or ask them")
+    }
+
+    /// The focused element of `t`'s app and how many characters it holds (Secure Event Input's typing evidence).
+    func secureTypingState(_ t: CUTarget) -> (focus: AXIdentity?, chars: Int?) {
+        let focused = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
+        let chars = focused.flatMap { ax.attribute($0, "AXNumberOfCharacters") as? NSNumber }?.intValue
+            ?? focused.flatMap { ax.string($0, kAXValueAttribute) }?.utf16.count
+        return (focused.map { AXIdentity(element: $0) }, chars)
+    }
+
+    /// After an act on `t` under Secure Event Input: what it typed is the agent's, never taken for the user's typing.
+    func refreshSecureTypingBase(_ t: CUTarget) {
+        guard secureInputOn, sys.frontmostPid() == t.pid else { return }
+        let now = secureTypingState(t)
+        guardianLock.withLock { t.secureTypingBase = now }
     }
 
     /// The process holding Secure Event Input (the session's `kCGSSessionSecureInputPID`), when one does.
@@ -477,7 +606,9 @@ extension CUCore {
         guard guardianRefs == 0 else { return true }
         guardianRefs = 1
         guardianCore.begin(view: CUGuardedView(app: sys.frontmostPid(), space: sys.activeSpace()))
-        installGuardianObservers()
+        // (Never in a test's core: the machine's REAL activations — another app, a probe running meanwhile — reached the
+        // model-based test's simulated world as an unknown pid and failed a seed, round 14.)
+        if guardianLiveTapEnabled { installGuardianObservers() }
         startCPSTap()
         startGestureMonitor()
         CULog.guardian.notice("guarding the user's view while a script runs")
@@ -839,6 +970,10 @@ extension CUCore {
         }) else { return }
         guard now - p.time <= 2, hypot(point.x - p.at.x, point.y - p.at.y) <= Self.clickSlop else {
             CULog.guardian.notice("the user dragged out of \(self.appName(p.pid), privacy: .public)'s window: nothing brought forward")
+            // A drag claims nothing either: its button-down's claim goes (the ordinary-target survey's seed 54 — a drag
+            // out of T's window later explained T's landing as "they clicked into its window", and the work mark refused
+            // the agent).
+            guardianLock.withLock { guardianCore.dropClaim(app: p.pid) }
             return
         }
         guard sys.frontmostPid() != p.pid else { return }

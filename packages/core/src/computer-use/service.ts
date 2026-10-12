@@ -38,7 +38,7 @@ import type { AdapterRunScope, AppAdapters } from "./adapters";
 import { AdapterDelivery } from "./adapters/delivery";
 import type { BrowserEngine } from "./browser/engine";
 import type { TabRunScope } from "./browser/tab-scope";
-import { listedHost } from "./browser/site-policy";
+import { listedHost, type SiteFloorDeps } from "./browser/site-policy";
 
 export const SCRIPT_TIMEOUT_DEFAULT_MS = 30_000;
 export const SCRIPT_TIMEOUT_MIN_MS = 1_000;
@@ -94,6 +94,11 @@ export interface ComputerV2ServiceDeps {
   interrupt?(sessionId: string): void;
   /** Phase 2: the browser engine (browser tabs as targets, the `browsers` global). Absent: `BrowserUnavailable`. */
   browsers?: BrowserEngine;
+  /** The dangerous-domain floor's user-added half, for a link the daemon opens with no browser engine (review of
+   *  round 13, LOW). */
+  site?: SiteFloorDeps;
+  /** A session's working directory (a trusted project's own dangerous domains — review of round 14, LOW #7). */
+  sessionCwd?(sessionId: string): string | undefined;
   /** Resolves a path or an unlisted bundle id to a bundle id WITHOUT launching (`app-resolve.ts`). */
   appResolver?: AppResolver;
   idleMs?: number;
@@ -1276,7 +1281,8 @@ export class ComputerV2Service {
   /** A link the helper rerouted (round 10's MEDIUM #7): opened in the background in its default app through the daemon's
    *  own door — the opener's effective access and per-app card as an ACT (opening a page in it is acting in it: a
    *  view-only or click-only opener refuses, and so does `plan`), the dangerous-domain floor on the URL (the card or
-   *  block `browsers.open` has) — and NOT bound (the agent's click asked for no app to work in). Only http(s) and mailto. */
+   *  block `browsers.open` has) — and NOT bound (the agent's click asked for no app to work in). Only http(s) and mailto.
+   *  The floor sees the URL the link names: where the user's browser is redirected after it is beyond its reach. */
   private async openLink(ctx: RunCtx, url: string, metric: PrimitiveMetric): Promise<void> {
     let parsed: URL;
     try { parsed = new URL(url); } catch { throw new AutomationFailure("Refused", "the link's address could not be read — nothing was opened"); }
@@ -1292,8 +1298,11 @@ export class ComputerV2Service {
       if (this.deps.browsers !== undefined) {
         await this.deps.browsers.ensureLinkAllowed(this.tabScope(ctx, metric), url, who.name);
       } else {
-        // No browser engine (its site approvals live there): the shipped half of the list, refused outright.
-        const match = listedHost(url, {}, undefined);
+        // No browser engine (its site approvals live there): the list — the shipped half and the user's own — refused
+        // outright.
+        let cwd: string | undefined;
+        try { cwd = this.deps.sessionCwd?.(ctx.sessionId); } catch { cwd = undefined; }
+        const match = listedHost(url, this.deps.site ?? {}, cwd);
         if (match !== null) {
           (ctx.sites ??= new Set()).add(match.host);
           throw new AutomationFailure("NotAllowed", `${match.host} is on the dangerous-domains list (${match.matchedEntry}) — the link was not opened; ask the user if they need it`);
@@ -1309,7 +1318,9 @@ export class ComputerV2Service {
     ctx.apps.add(res.app.name);
     if (parsed.protocol !== "mailto:") (ctx.sites ??= new Set()).add(parsed.hostname);
     const host = parsed.protocol === "mailto:" ? "a mail link" : parsed.host;
-    ctx.builder.daemonLine(`the link (${host}) opened in ${res.app.name} in the background — not bound; apps.open() it to work in it`);
+    // (The app that opened it should be the one authorized; another is said — review of round 13, LOW.)
+    const other = res.app.bundleId !== who.bundleId ? ` (not ${who.name}, the app it was allowed for — check with the user)` : "";
+    ctx.builder.daemonLine(`the link (${host}) opened in ${res.app.name}${other} in the background — not bound; apps.open() it to work in it`);
   }
 
   /** The screen's one foreground lock for this primitive (rung 4, a desktop visit, a whole-screen shot) — a no-op

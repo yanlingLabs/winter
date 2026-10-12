@@ -193,6 +193,21 @@ final class ClickRoutingRound11Tests: XCTestCase {
         world(menu: true, order: [79, 78, 77])
         core.noteAgentPopups(target, before: [79, 78, 77])
         XCTAssertTrue(target.agentPopups.isEmpty, "there before the act: not the agent's")
+        // Review of round 13, MEDIUM #2: a window of the user's that appeared meanwhile — a layer-0 window not inside the
+        // bound one, or one away from it — is never the agent's; and the list lasts one act.
+        world(menu: true, order: [79, 78, 77])
+        let far = FakeSystem.window(81, pid: pid, CGRect(x: 3000, y: 3000, width: 100, height: 100), layer: 101)
+        let doc = FakeSystem.window(82, pid: pid, CGRect(x: 10, y: 10, width: 2000, height: 2000))
+        sys.stack = [far, doc] + sys.stack
+        core.noteAgentPopups(target, before: [78, 77])
+        XCTAssertEqual(target.agentPopups, [79], "only the popup over the bound window")
+        // Review of round 14, LOW #5: an act that opens nothing (typing to filter the menu) keeps it while it is on screen…
+        core.noteAgentPopups(target, before: [], opens: false)
+        XCTAssertEqual(target.agentPopups, [79], "kept across an act that opens nothing")
+        // …for a few seconds after the act that opened it.
+        target.agentPopupsAtMs = -.infinity
+        core.noteAgentPopups(target, before: [], opens: false)
+        XCTAssertTrue(target.agentPopups.isEmpty, "dropped once the time has passed")
     }
 
     /// An empty accessibility answer (a timeout) falls back to the capture-only rule — never "every window takes it".
