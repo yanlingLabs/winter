@@ -207,6 +207,24 @@ final class SimRun {
     var userLaunchSeq: pid_t = 0
     var coldSeq: pid_t = 0
     var openVisit: CUOpenVisit?
+    /// The user's click into T during an act (round 18): armed per act from its own generator, so the plans' draws stay.
+    var midActArmed = false
+    lazy var midActRng = SimRNG(plan.seed ^ 0x1D_AC75)
+    /// How often an act is armed for it (WINTER_CU_SIM_MID_ACT; 0 — off — until the engine's gaps it found are closed).
+    static let midActChance = Double(ProcessInfo.processInfo.environment["WINTER_CU_SIM_MID_ACT"] ?? "") ?? 0
+
+    /// The user clicks into T's window a few ms after the act's first event to T (once per armed act).
+    func userClickMidAct() {
+        let w = world
+        guard midActArmed, w.lock.withLock({ w.actOnT && !w.actWorkSeen }) else { return }
+        midActArmed = false
+        let after = midActRng.double(1, 15)
+        var r = SimRNG(midActRng.next())
+        w.schedule(after: after, "the user clicks into T mid-act") { [unowned self] in
+            w.log("the user clicks into T while the agent's act on it runs")
+            self.click(at: CGPoint(x: 700, y: 210), r: &r)
+        }
+    }
 
     var trace: [String] { world.trace }
     var violation: String? { world.violation }
@@ -276,6 +294,9 @@ final class SimRun {
             guard let id = byToken[String(token)] else { return false }
             return w.lock.withLock { w.wins[id]?.pid } == SimPid.target
         }
+        // (Round 18, round 17's H1 exercised: the user clicks into T while an act on it runs — scheduled from the act's own
+        // first event to T, a few ms on, so it lands during the act's next wait.)
+        let midAct = { w.onMidAct?() }
         let inFlightCheck = { (what: String) in
             // (Sticky: once they started working in T during the act, it holds after they leave T too — the review of
             // round 17, M1.)
@@ -285,7 +306,7 @@ final class SimRun {
         ax.onPerform = { what in
             let parts = what.split(separator: ":")
             guard parts.count == 2 else { return }
-            if isT(parts[0]), parts[1] != "AXRaise" { inFlightCheck("accessibility action \(parts[1])") }  // (a raise: a restore's)
+            if isT(parts[0]), parts[1] != "AXRaise" { inFlightCheck("accessibility action \(parts[1])"); midAct() }  // (a raise: a restore's)
             // A raise (a restore's or an act's: no cause either way — the engine counts the act itself); an action on an
             // agent target's element: an event of the agent's (the latest its last cause can be).
             if parts[1] == "AXRaise", let id = byToken[String(parts[0])] { w.raised(id) }
@@ -298,7 +319,7 @@ final class SimRun {
             guard parts.count == 2 else { return }
             // (Not AXFrontmost: an activation of T is a restore of the user's place — the guardian's, judged by I1–I5 — never
             // the act's input.)
-            if isT(parts[0]), parts[1] != "AXFrontmost" { inFlightCheck("accessibility write \(parts[1])") }
+            if isT(parts[0]), parts[1] != "AXFrontmost" { inFlightCheck("accessibility write \(parts[1])"); midAct() }
             if parts[1] == "AXFrontmost", let pid = pid_t(parts[0]) {
                 w.engineActivates(pid, how: "AXFrontmost", refusable: false)
             } else if parts[1] == "AXMain", let id = byToken[String(parts[0])] {
@@ -331,6 +352,7 @@ final class SimRun {
                               isChromium: false, mirror: false, windowID: 66, windowTitle: "Near", privatePath: true)
         core.registerForTesting(heldTarget, windowElement: hWindow)
         core.keyTapInstaller = installer
+        world.onMidAct = { [unowned self] in self.userClickMidAct() }
         core.switchInputObservableOverride = true
         core.secureInputOverride = false
         core.keyFocusPidOverride = { w.lock.withLock { w.keyFocus } }
@@ -374,9 +396,17 @@ final class SimRun {
         enforcer.onForce = { w.agentCause(SimPid.target); w.advance(by: 2) }
         enforcer.onDeactivate = { w.agentCause(SimPid.target); w.advance(by: 2) }
         core.focusEnforcerFactory = { _ in enforcer }
+        // Every input event that STARTS or CONTINUES something, to T or a process of T's (its content process): a key down,
+        // any button down, a drag's move, a scroll, a pointer move (round 18 — round 17's H1: only keys and left clicks were
+        // watched).
+        let watched: Set<CGEventType> = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseDragged,
+                                         .rightMouseDragged, .otherMouseDragged, .scrollWheel, .mouseMoved]
         poster.onPost = { e in
+            if watched.contains(e.type), e.pid == SimPid.target || w.isContentProcess(e.pid, of: SimPid.target) {
+                inFlightCheck(e.type == .keyDown ? "key" : e.type == .leftMouseDown ? "click" : "event \(e.type.rawValue)")
+                midAct()
+            }
             guard e.type == .keyDown || e.type == .leftMouseDown else { return }
-            if e.pid == SimPid.target { inFlightCheck(e.type == .keyDown ? "key" : "click") }
             w.lock.withLock {
                 w.lastPostAt = w.now
                 // A change during this act that brought T forward (by itself, or by the user's own move): at most the one
@@ -1000,6 +1030,7 @@ final class SimRun {
             if !working { w.agentBegins(tpid) }
             defer { if !working { w.agentEnds(tpid) } }
             w.lock.withLock { w.actOnT = !working; w.actWorkSeen = false }
+            midActArmed = !working && midActRng.chance(Self.midActChance)
             defer { w.lock.withLock { w.actOnT = false } }
             let opener = CUCore.actCanOpenApps(action) && !working
             if opener { w.lock.withLock { w.noteOpener(w.targetScope) } }
@@ -1040,7 +1071,15 @@ final class SimRun {
             }
             let el = what == .link ? link : what == .opener ? opener : field
             let ref = target.refs.ref(for: AXIdentity(element: el))
-            await act(.click(CUClickAction(ref: ref)), "c\(step.seed)")
+            // (Round 18 — round 17's H1: a DRAG of the agent's, whose moves continue after its button went down; a variant of
+            // the field click, from its own generator so the plans' draws stay.)
+            var d = SimRNG(step.seed ^ 0xD2A6)
+            if what == .field, d.chance(0.25) {
+                let to = target.refs.ref(for: AXIdentity(element: link))
+                await act(.drag(CUDragAction(from: CUDragEnd(ref: ref), to: CUDragEnd(ref: to))), "d\(step.seed)")
+            } else {
+                await act(.click(CUClickAction(ref: ref)), "c\(step.seed)")
+            }
         case .agentAppleScript(let seconds, let opens, let ms, let dialog):
             w.lock.withLock { w.scriptMs = seconds * 1000 }
             if opens, !w.userWorks(in: tpid) {  // (a script refused because the user works in T opens nothing)

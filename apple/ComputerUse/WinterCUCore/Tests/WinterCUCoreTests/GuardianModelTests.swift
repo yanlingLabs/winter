@@ -82,6 +82,8 @@ final class GuardianModelTests: XCTestCase {
         XCTAssertGreaterThan(totals.undone, 0, "thefts were undone")
         XCTAssertGreaterThan(totals.userMovesKept, 0, "user moves were kept")
         XCTAssertGreaterThan(totals.s2Ops, 0, "session s2 ran")
+        // (Round 18, round 17's H1: the in-flight invariant had chances to fail — not vacuous.)
+        XCTAssertGreaterThan(totals.inFlightChances, 0, "the user began working in T while an act on it ran")
         XCTAssertLessThan(Double(totals.unchecked), Double(totals.changes) * 0.05, "unchecked: \(totals.words)")
     }
 

@@ -42,6 +42,8 @@ enum SimPid {
     /// controller's ruling — an interactive launcher's Return is the world's own fact; PROTOCOL §4.12 I6, 1.10.0: a key
     /// into Spotlight's panel is no work in the app in front).
     static let spotlight: pid_t = 780
+    /// T's content process (a web view's): an event posted to it reaches T (round 18 — I6 in flight watches it).
+    static let targetContent: pid_t = 5253
     static let own: pid_t = getpid()
 
     static func name(_ pid: pid_t) -> String {
@@ -197,6 +199,8 @@ struct SimStats {
     /// had heard of a change, they decide nothing between that change's answers.
     /// Acts refused because the user was working in the app (round 10).
     var handsOff = 0
+    /// The user started working in T while an act on it ran (round 18 — the in-flight invariant had a chance to fail).
+    var inFlightChances = 0
     var activationsOpen = 0
     var activationsOpenWhy: [String: Int] = [:]
     var settleChecks = 0
@@ -213,6 +217,7 @@ struct SimStats {
         settleChecks += o.settleChecks; restoresChecked += o.restoresChecked; keysChecked += o.keysChecked
         userKeysRerouted += o.userKeysRerouted; undone += o.undone; userMovesKept += o.userMovesKept; leftAlone += o.leftAlone
         agentActs += o.agentActs; s2Ops += o.s2Ops; activationsOpen += o.activationsOpen; handsOff += o.handsOff
+        inFlightChances += o.inFlightChances
         for (k, v) in o.activationsOpenWhy { activationsOpenWhy[k, default: 0] += v }
         for (k, v) in o.ambiguousWhy { ambiguousWhy[k, default: 0] += v }
         for (k, v) in o.uncheckedWhy { uncheckedWhy[k, default: 0] += v }
@@ -227,7 +232,7 @@ struct SimStats {
             \(restoresChecked) engine activations checked (\(activationsOpen) of them against several answers: \(activationsOpenWhy.sorted { $0.value > $1.value }.map { "\($0.value) \($0.key)" }.joined(separator: "; "))), \(keysChecked) user keys checked (\(userKeysRerouted) through the \
             reroute); \(agentActs) agent operations, \(s2Ops) of session s2 (visits, holds, rung 4); \(undone) thefts undone, \
             \(userMovesKept) user moves kept, \(leftAlone) changes left alone (neither adopted nor undone), \(handsOff) acts refused while the \
-            user worked in the app
+            user worked in the app, \(inFlightChances) times the user began working in T during an act
             """
     }
     func pct(_ n: Int) -> String { changes == 0 ? "0%" : String(format: "%.1f%%", 100 * Double(n) / Double(changes)) }
@@ -309,6 +314,8 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     var mainWin: [pid_t: UInt32] = [SimPid.user: 31, SimPid.target: 77, SimPid.third: 71, SimPid.safari: 81, SimPid.preview: 91,
                                     SimPid.side: 41, SimPid.visited: 61, SimPid.held: 66, SimPid.coreServices: 761]
     var onMainWindow: ((pid_t, UInt32) -> Void)?
+    /// The act's first event to T (round 18): the run may have the user click into T a moment later.
+    var onMidAct: (() -> Void)?
     /// The desktop changed: accessibility lists each app's windows on the desktops shown now (not those on another Space).
     var onDesktop: (() -> Void)?
     /// U's Secure Keyboard Entry: Secure Event Input is on while U is in front.
@@ -451,7 +458,11 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// leaving T afterwards does not reopen it (the review of round 17, M1).
     var actWorkSeen = false
     /// T became the app the user works in (called wherever the world's mark is set).
-    func workBegan(_ app: pid_t) { if app == SimPid.target, actOnT { actWorkSeen = true } }
+    func workBegan(_ app: pid_t) {
+        guard app == SimPid.target, actOnT else { return }
+        if !actWorkSeen { stats.inFlightChances += 1 }
+        actWorkSeen = true
+    }
     var stepsRetiredAtStart = 0
     var targetForwardDuringOp = false
     var ctx: [SimCtx] = []
@@ -1447,7 +1458,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     }
 
     func spacesFollowActivation() -> Bool? { true }
-    func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { false }
+    func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { pid == SimPid.targetContent && appPid == SimPid.target }
     func stageManagerEnabled() -> Bool { false }
     func windowOnAnySpace(_ id: UInt32) -> Bool? { true }
     func windowSpaces(_ id: UInt32) -> Set<UInt64>? {
