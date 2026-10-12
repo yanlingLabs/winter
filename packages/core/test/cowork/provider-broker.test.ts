@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { beforeEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import type { CredentialMaterial, ProviderAdapter, ProviderEvent, ResolvedModel } from "@yanlinglabs/winter-provider-runtime";
 import { CoworkProviderBroker, type CoworkProviderAdmission, type CoworkProviderRequest, type CoworkProviderScope } from "../../src/cowork/provider-broker";
@@ -11,7 +11,9 @@ function fixture(stream: ProviderAdapter["streamTurn"]): CoworkProviderAdmission
   const resolved = { providerId: "openai", modelKey: "openai/fixture-model", providerModelId: "fixture-model", adapterId: adapter.id, adapter, descriptor: undefined, provider: {}, catalogVersion: "fixture", continuationDomain: "openai/fixture-domain" } as ResolvedModel;
   return { scope: { ...scope }, resolved, authRef: { kind: "keychain", account: "provider-slot" }, connection: { providerId: "openai" } };
 }
-const frame = (id: string, operation: CoworkProviderRequest["operation"], sequence: number, extra = {}): CoworkProviderRequest => ({ version: 1, operation, invocationId: id, scope: { ...scope }, sequence, ...extra });
+const ordinals=new Map<string,number>(); beforeEach(()=>ordinals.clear());
+const ordinal=(id:string)=>{let value=ordinals.get(id);if(value===undefined){value=ordinals.size+1;ordinals.set(id,value);}return value;};
+const frame = (id: string, operation: CoworkProviderRequest["operation"], sequence: number, extra = {}): CoworkProviderRequest => ({ version: 1, operation, invocationId: id, scope: { ...scope }, sequence, invocationOrdinal:ordinal(id), ...extra });
 const payload = { model: "fixture-model", messages: [{ role: "user" as const, content: "hello" }] };
 
 test("host-held material feeds adapter but never normalized frames/logs; full native/thinking events survive", async () => {
@@ -134,16 +136,56 @@ test("cancel before begin fences only that invocation and is idempotent",async()
  const next=randomUUID();expect((await lease.handle(frame(next,"begin",0,{turn:payload}))).kind).toBe("accepted");expect((await lease.handle(frame(next,"next",1))).event?.type).toBe("done");expect(calls).toBe(1);lease.close();
 });
 
-test("close retains all pending turns and releases each capacity slot exactly once",async()=>{
+test("close retains all pending turns and releases each global capacity slot exactly once",async()=>{
  const completions:Array<(value:IteratorResult<ProviderEvent>)=>void>=[];let returns=0,aborts=0;
  const admission=fixture(request=>{request.signal?.addEventListener("abort",()=>{aborts++;},{once:true});return {[Symbol.asyncIterator]:()=>({next:()=>new Promise(resolve=>{completions.push(resolve);}),return:async()=>{returns++;return {done:true,value:undefined};}})};});
- const broker=new CoworkProviderBroker({secrets,assertCurrent:()=>{}}),lease=broker.open(admission),pending:Promise<unknown>[]=[];
- for(let i=0;i<8;i++){const id=randomUUID();expect((await lease.handle(frame(id,"begin",0,{turn:payload}))).kind).toBe("accepted");pending.push(lease.handle(frame(id,"next",1)));}
- await Bun.sleep(0);lease.close();lease.close();expect(aborts).toBe(8);expect(returns).toBe(0);
- const other=broker.open(fixture(async function*(){yield {type:"done",stopReason:"end_turn"};}));
+ const broker=new CoworkProviderBroker({secrets,assertCurrent:()=>{}}),leases=Array.from({length:4},()=>broker.open(admission)),pending:Promise<unknown>[]=[];
+ for(const lease of leases)for(let i=0;i<8;i++){const id=randomUUID();expect((await lease.handle(frame(id,"begin",0,{turn:payload}))).kind).toBe("accepted");pending.push(lease.handle(frame(id,"next",1)));}
+ await Bun.sleep(0);for(const lease of leases){lease.close();lease.close();}expect(aborts).toBe(32);expect(returns).toBe(0);
+ const quick=fixture(async function*(){yield {type:"done",stopReason:"end_turn"};});const other=broker.open(quick);
  expect((await other.handle(frame(randomUUID(),"begin",0,{turn:payload}))).code).toBe("capacity_busy");
  for(const complete of completions)complete({done:false,value:{type:"text_delta",text:"discarded"}});
- await Promise.all(pending);await Bun.sleep(0);expect(returns).toBe(8);
- for(let i=0;i<8;i++)expect((await other.handle(frame(randomUUID(),"begin",0,{turn:payload}))).kind).toBe("accepted");
- expect((await other.handle(frame(randomUUID(),"begin",0,{turn:payload}))).code).toBe("capacity_busy");other.close();
+ await Promise.all(pending);await Bun.sleep(0);expect(returns).toBe(32);
+ const replacement=Array.from({length:4},()=>broker.open(quick));
+ for(const lease of replacement)for(let i=0;i<8;i++)expect((await lease.handle(frame(randomUUID(),"begin",0,{turn:payload}))).kind).toBe("accepted");
+ expect((await other.handle(frame(randomUUID(),"begin",0,{turn:payload}))).code).toBe("capacity_busy");for(const lease of replacement)lease.close();other.close();
+});
+test("5000 sequential invocations keep bounded replay state without ending the lease",async()=>{
+ const lease=new CoworkProviderBroker({secrets,assertCurrent:()=>{}}).open(fixture(async function*(){yield {type:"done",stopReason:"end_turn"};}));
+ let first="";
+ for(let i=1;i<=5000;i++){const id=randomUUID();if(i===1)first=id;expect((await lease.handle(frame(id,"begin",0,{turn:payload,invocationOrdinal:i}))).kind).toBe("accepted");expect((await lease.handle(frame(id,"next",1,{invocationOrdinal:i}))).event?.type).toBe("done");await Promise.resolve();}
+ expect((await lease.handle(frame(first,"begin",0,{turn:payload,invocationOrdinal:1}))).kind).toBe("refused");lease.close();
+});
+test("out-of-order invocation ordinals are consumed once within a bounded reorder window",async()=>{
+ const lease=new CoworkProviderBroker({secrets,assertCurrent:()=>{}}).open(fixture(async function*(){yield {type:"done",stopReason:"end_turn"};}));
+ const first=randomUUID(),second=randomUUID();
+ expect((await lease.handle(frame(second,"begin",0,{turn:payload,invocationOrdinal:2}))).kind).toBe("accepted");
+ expect((await lease.handle(frame(first,"begin",0,{turn:payload,invocationOrdinal:1}))).kind).toBe("accepted");
+ expect((await lease.handle(frame(randomUUID(),"begin",0,{turn:payload,invocationOrdinal:1}))).kind).toBe("refused");
+ expect((await lease.handle(frame(randomUUID(),"begin",0,{turn:payload,invocationOrdinal:131}))).kind).toBe("refused");lease.close();
+});
+test("late terminal event returns without waiting for its slow finalizer",async()=>{
+ let finish!:()=>void,retired=false;
+ const admission=fixture(()=>({[Symbol.asyncIterator]:()=>({next:async()=>{await Bun.sleep(4000);return {done:false,value:{type:"done",stopReason:"end_turn"} as ProviderEvent};},return:async()=>{await new Promise<void>(resolve=>{finish=resolve;});retired=true;return {done:true,value:undefined};}})}));
+ const broker=new CoworkProviderBroker({secrets,assertCurrent:()=>{}}),lease=broker.open(admission),id=randomUUID();
+ await lease.handle(frame(id,"begin",0,{turn:payload}));const started=performance.now();
+ const response=await lease.handle(frame(id,"next",1));expect(response.event?.type).toBe("done");expect(performance.now()-started).toBeLessThan(5500);expect(retired).toBe(false);
+ const other=broker.open(fixture(async function*(){yield {type:"done",stopReason:"end_turn"};})),otherId=randomUUID();
+ expect((await other.handle(frame(otherId,"begin",0,{turn:payload}))).kind).toBe("accepted");expect((await other.handle(frame(otherId,"next",1))).event?.type).toBe("done");
+ await Bun.sleep(4000);expect(retired).toBe(false);finish();await Bun.sleep(0);expect(retired).toBe(true);lease.close();other.close();
+},12000);
+
+test("cancelled future ordinal advances when its gap arrives without admitting a delayed begin",async()=>{
+ const lease=new CoworkProviderBroker({secrets,assertCurrent:()=>{}}).open(fixture(async function*(){yield {type:"done",stopReason:"end_turn"};}));
+ const cancelled=randomUUID(),first=randomUUID(),third=randomUUID();
+ expect((await lease.handle(frame(cancelled,"cancel",1,{invocationOrdinal:2}))).kind).toBe("closed");
+ expect((await lease.handle(frame(first,"begin",0,{turn:payload,invocationOrdinal:1}))).kind).toBe("accepted");
+ expect((await lease.handle(frame(cancelled,"begin",0,{turn:payload,invocationOrdinal:2}))).kind).toBe("refused");
+ expect((await lease.handle(frame(third,"begin",0,{turn:payload,invocationOrdinal:3}))).kind).toBe("accepted");lease.close();
+});
+test("background finalizer rejection retains its slot without delaying a terminal event",async()=>{
+ const lease=new CoworkProviderBroker({secrets,assertCurrent:()=>{}}).open(fixture(()=>({[Symbol.asyncIterator]:()=>({next:async()=>({done:false,value:{type:"done",stopReason:"end_turn"} as ProviderEvent}),return:async()=>{throw new Error("fixture finalizer uncertain");}})})));
+ const id=randomUUID();await lease.handle(frame(id,"begin",0,{turn:payload}));expect((await lease.handle(frame(id,"next",1))).event?.type).toBe("done");await Bun.sleep(0);
+ for(let i=0;i<7;i++)expect((await lease.handle(frame(randomUUID(),"begin",0,{turn:payload}))).kind).toBe("accepted");
+ expect((await lease.handle(frame(randomUUID(),"begin",0,{turn:payload}))).code).toBe("capacity_busy");lease.close();
 });

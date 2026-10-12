@@ -4,7 +4,7 @@ import type { CredentialMaterial, CredentialRef, ProviderContext, ProviderEvent,
 import { credentialStoreOverSecretStore } from "../providers/credential-store";
 import type { SecretStore } from "../auth/secret-store";
 
-export const COWORK_PROVIDER_LIMITS = Object.freeze({ requestBytes: 2 * 1024 * 1024, eventBytes: 256 * 1024, turnBytes: 16 * 1024 * 1024, eventCount: 8192, activeTurns: 8, pullDeadlineMs: 5000, idleMs: 30_000, turnMs: 600_000 });
+export const COWORK_PROVIDER_LIMITS = Object.freeze({ requestBytes: 2 * 1024 * 1024, eventBytes: 256 * 1024, turnBytes: 16 * 1024 * 1024, eventCount: 8192, activeTurns: 32, perLeaseTurns: 8, invocationWindow: 128, pullDeadlineMs: 5000, idleMs: 30_000, turnMs: 600_000 });
 /** Captured from host admission, never from a guest/model/account selector. Backend ID is distinct from logical conversation ID. */
 export interface CoworkProviderScope {
   homeId: string; workspaceId: string; sessionId: string; backendSessionId: string; taskId: string;
@@ -20,7 +20,7 @@ export interface CoworkProviderAdmission {
 }
 export interface CoworkProviderRequest {
   version: 1; operation: "begin" | "next" | "cancel"; invocationId: string;
-  scope: CoworkProviderScope; sequence: number; turn?: Omit<TurnRequest, "signal">;
+  scope: CoworkProviderScope; sequence: number; invocationOrdinal: number; turn?: Omit<TurnRequest, "signal">;
 }
 export type CoworkProviderResponse = { version: 1; invocationId: string; sequence: number; kind: "accepted" | "event" | "pending" | "closed" | "refused"; event?: ProviderEvent; code?: "authority_denied" | "provider_unavailable" | "effects_uncertain" | "limit" | "capacity_busy" };
 export interface CoworkProviderBrokerDeps {
@@ -49,7 +49,7 @@ function safeScope(value: CoworkProviderScope): CoworkProviderScope {
   }
   return Object.freeze({ ...value });
 }
-interface Turn { id: string; controller: AbortController; iterator: AsyncIterator<ProviderEvent>; next: number; bytes: number; events: number; pending?: Promise<IteratorResult<ProviderEvent>>; pulling?: boolean; retiring?: Promise<void>; failed: boolean; ended: boolean; idle?: ReturnType<typeof setTimeout>; deadline: ReturnType<typeof setTimeout> }
+interface Turn { id: string; ordinal: number; controller: AbortController; iterator: AsyncIterator<ProviderEvent>; next: number; bytes: number; events: number; pending?: Promise<IteratorResult<ProviderEvent>>; pulling?: boolean; retiring?: Promise<void>; failed: boolean; ended: boolean; idle?: ReturnType<typeof setTimeout>; deadline: ReturnType<typeof setTimeout> }
 interface MaterialState { generation: number; material: CredentialMaterial | null; fingerprint: string; refresh?: Promise<CredentialMaterial> }
 /** open() is a trusted host lifecycle method. Availability requires the native authenticated helper, not this JS shape. */
 export class CoworkProviderBroker {
@@ -60,9 +60,15 @@ export class CoworkProviderBroker {
     const admission: CoworkProviderAdmission = Object.freeze({ ...value, scope: safeScope(value.scope), authRef: Object.freeze({ ...value.authRef }), connection: Object.freeze(snapshot(value.connection, 16_384)), resolved: Object.freeze({ ...value.resolved }) });
     if (admission.authRef.kind !== "keychain" || admission.connection.providerId !== admission.resolved.providerId || !admission.resolved.providerModelId || (admission.connection.local || (admission.connection.baseUrl !== undefined && admission.connection.endpointOrigin !== "reviewed") || admission.resolved.adapter.family === "local-openai") && admission.endpointGrant !== true) throw new Error("authority_denied");
     this.deps.assertCurrent(admission);
-    const store = credentialStoreOverSecretStore(this.deps.secrets), seen = new Set<string>(), secretStrings = new Set<string>();
+    const store = credentialStoreOverSecretStore(this.deps.secrets), consumed = new Set<number>(), secretStrings = new Set<string>();
     for (const header of Object.values(admission.connection.headers ?? {})) if (header) secretStrings.add(header);
-    const slot = JSON.stringify(admission.authRef); let closed = false; const turns = new Map<string, Turn>();
+    const slot = JSON.stringify(admission.authRef); let closed = false, watermark = 0; const turns = new Map<string, Turn>();
+    const consume = (ordinal: number): void => {
+      if (ordinal <= watermark || consumed.has(ordinal)) throw new Error("authority_denied");
+      if (ordinal > watermark + COWORK_PROVIDER_LIMITS.invocationWindow) throw new Error("authority_denied");
+      consumed.add(ordinal);
+      while (consumed.delete(watermark + 1)) watermark++;
+    };
     const remember = (material: CredentialMaterial | null): void => {
       if (!material) return;
       for (const [key, entry] of Object.entries(material)) if (["key", "token", "accessToken", "refreshToken", "idToken", "secretAccessKey", "sessionToken", "privateKeyPem"].includes(key) && typeof entry === "string" && entry) secretStrings.add(entry);
@@ -114,32 +120,30 @@ export class CoworkProviderBroker {
       close: () => { closed = true; for (const current of turns.values()) stop(current); },
       handle: async request => {
         try {
-          if (closed || !request || request.version !== 1 || !uuid(request.invocationId) || !Number.isSafeInteger(request.sequence) || request.sequence < 0 || SCOPE_FIELDS.some(key => safeScope(request.scope)[key] !== admission.scope[key]) || Object.keys(request).some(key => !["version", "operation", "invocationId", "scope", "sequence", "turn"].includes(key))) throw new Error("authority_denied");
+          if (closed || !request || request.version !== 1 || !uuid(request.invocationId) || !Number.isSafeInteger(request.sequence) || request.sequence < 0 || !Number.isSafeInteger(request.invocationOrdinal) || request.invocationOrdinal < 1 || SCOPE_FIELDS.some(key => safeScope(request.scope)[key] !== admission.scope[key]) || Object.keys(request).some(key => !["version", "operation", "invocationId", "scope", "sequence", "invocationOrdinal", "turn"].includes(key))) throw new Error("authority_denied");
           this.deps.assertCurrent(admission);
           // Cancellation is scoped/idempotent, not a provider effect. Fence delayed
           // begin frames too; independent channel exchanges can arrive out of order.
           if (request.operation === "cancel") {
             if (request.turn !== undefined || request.sequence < 1) throw new Error("authority_denied");
             const current = turns.get(request.invocationId);
-            if (current) stop(current);
-            else if (!seen.has(request.invocationId)) {
-              if (seen.size >= 4096) throw new Error("limit");
-              seen.add(request.invocationId);
-            }
+            if (current) { if (current.ordinal !== request.invocationOrdinal) throw new Error("authority_denied"); stop(current); }
+            else if (request.invocationOrdinal > watermark && !consumed.has(request.invocationOrdinal)) consume(request.invocationOrdinal);
             return reply(request, "closed", { code: "effects_uncertain" });
           }
           if (request.operation === "begin") {
-            if (request.sequence !== 0 || seen.has(request.invocationId) || seen.size >= 4096) throw new Error("authority_denied");
-            if (turns.size >= COWORK_PROVIDER_LIMITS.activeTurns || this.active >= COWORK_PROVIDER_LIMITS.activeTurns) throw new Error("capacity_busy");
+            if (request.sequence !== 0 || turns.has(request.invocationId)) throw new Error("authority_denied");
+            consume(request.invocationOrdinal);
+            if (turns.size >= COWORK_PROVIDER_LIMITS.perLeaseTurns || this.active >= COWORK_PROVIDER_LIMITS.activeTurns) throw new Error("capacity_busy");
             const payload = snapshot(request.turn, COWORK_PROVIDER_LIMITS.requestBytes);
             if (!payload || Object.keys(payload).some(key => !TURN_FIELDS.has(key)) || payload.model !== admission.resolved.providerModelId || !Array.isArray(payload.messages) || payload.messages.length > 512 || payload.tools !== undefined && (!Array.isArray(payload.tools) || payload.tools.length > 128) || payload.maxOutputTokens !== undefined && (!Number.isSafeInteger(payload.maxOutputTokens) || payload.maxOutputTokens < 1 || payload.maxOutputTokens > 32_768)) throw new Error("authority_denied");
             const controller = new AbortController(); const iterator = admission.resolved.adapter.streamTurn({ ...payload, signal: controller.signal }, context())[Symbol.asyncIterator]();
             if (typeof iterator.return !== "function") throw new Error("provider_unavailable");
-            const current: Turn = { id: request.invocationId, controller, iterator, next: 1, bytes: 0, events: 0, failed: false, ended: false, deadline: setTimeout(() => stop(current), COWORK_PROVIDER_LIMITS.turnMs) }; current.deadline.unref?.();
-            turns.set(current.id, current); this.active++; seen.add(current.id); idle(current); return reply(request, "accepted");
+            const current: Turn = { id: request.invocationId, ordinal: request.invocationOrdinal, controller, iterator, next: 1, bytes: 0, events: 0, failed: false, ended: false, deadline: setTimeout(() => stop(current), COWORK_PROVIDER_LIMITS.turnMs) }; current.deadline.unref?.();
+            turns.set(current.id, current); this.active++; idle(current); return reply(request, "accepted");
           }
           const current = turns.get(request.invocationId);
-          if (!current || current.id !== request.invocationId || request.turn !== undefined || request.sequence !== current.next || current.failed || current.retiring || current.pulling) throw new Error("authority_denied");
+          if (!current || current.ordinal !== request.invocationOrdinal || current.id !== request.invocationId || request.turn !== undefined || request.sequence !== current.next || current.failed || current.retiring || current.pulling) throw new Error("authority_denied");
           current.next++;
           if (request.operation !== "next") throw new Error("authority_denied");
           if (current.idle) clearTimeout(current.idle); current.pulling = true;
@@ -163,10 +167,9 @@ export class CoworkProviderBroker {
             current.bytes += Buffer.byteLength(serialized); current.events++;
             if (current.bytes > COWORK_PROVIDER_LIMITS.turnBytes || current.events > COWORK_PROVIDER_LIMITS.eventCount) throw new Error("limit");
             if (event.type === "done" || event.type === "error") {
-              let drainDeadline: ReturnType<typeof setTimeout> | undefined;
-              try { await Promise.race([retire(current), new Promise<never>((_, reject) => { drainDeadline = setTimeout(() => reject(new Error("effects_uncertain")), COWORK_PROVIDER_LIMITS.pullDeadlineMs); })]); }
-              finally { if (drainDeadline) clearTimeout(drainDeadline); }
-              if (closed || current.failed) throw new Error("effects_uncertain"); this.deps.assertCurrent(admission);
+              // Deliver the terminal event inside this pull's one bounded wait.
+              // Background retirement retains the slot until actual cleanup settles.
+              void retire(current);
             } else idle(current);
             return reply(request, "event", { event: copied });
           } catch (error) {
