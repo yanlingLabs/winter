@@ -155,11 +155,16 @@ Full guest startup is still disabled, and Winter's SDK pin is unchanged.
 The two-disk fixture at `9a588735` is built and signed with 60 Python regressions
 and two strict-C handoff runs passing, but has no independent launch-admission
 receipt and has not run. The native review task was held after its agent turn
-failed an automatic content check; no VM launch was substituted. The macOS
-management UI at `b0c2ca58` passed 16 focused Swift tests and independent metadata
-review; the next source-selection change must resolve both asynchronous picker
-ownership races before enabling selection. Provider proxy/broker and host-owned
-folder-selection integration are progressing in isolated worktrees.
+failed an automatic content check; no VM launch was substituted. Mac workspace management and ephemeral host-owned folder preparation are now
+composed through `55eb17ee`, including both asynchronous picker ownership fixes.
+Independent 171 Core/API tests and 21 Swift tests passed; two actual Debug app
+builds succeeded. Preparation does not enable creation, durable grants or shares.
+See [selection acceptance](research/2026-10-12-cowork-macos-selection-independent-review.md).
+Git read transport at `a242e538` reuses PR17 and performs real authenticated fixture
+clone/fetch without forwarding credentials. The composed Git/repository suite
+passed 86 tests/432 assertions. It remains fixture-only until the isolated parser
+helper, durable repository grants and guest source acknowledgments are connected.
+Provider proxy/broker and the Git parser helper are progressing independently.
 
 | Area | Current work | Required before completion |
 | --- | --- | --- |
