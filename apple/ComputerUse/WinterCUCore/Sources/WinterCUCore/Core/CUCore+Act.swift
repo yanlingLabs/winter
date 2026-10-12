@@ -173,7 +173,8 @@ extension CUCore {
                 defer { noteAgentPopups(t, before: windowsBefore, opens: opensPopups) }
                 var o: ActOutcome
                 do {
-                    o = try guardingUserView(p, t) { try perform(p, on: t, token: token) }
+                    // (Under the write guard: nothing of it reaches the target once the user works in it — round 17.)
+                    o = try guardingUserView(p, t) { try withActWriteGuard(t) { try perform(p, on: t, token: token) } }
                 } catch let e as CUError where !inVisit && Self.visitCouldHelp(e) && isOffThisDesktop(t) {
                     if p.desktopVisit == true {
                         CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): can't land from this desktop (\(e.code, privacy: .public)) — once more inside a desktop visit, as the user allowed")
@@ -1900,21 +1901,21 @@ extension CUCore {
         }
         if let item = try enabledItem() {
             CULog.act.notice("menu in \(t.appName, privacy: .public): “\(title, privacy: .public)” reads enabled — no focus blip")
-            return try pressMenu(item, t)
+            return try pressMenuInBackground(p, item, t)
         }
         // In front: disabled for what it applies to (the disabled error).
-        guard sys.frontmostPid() != t.pid else { return try pressMenu(try resolveMenu(a, p, t), t) }
-        switch try pressInBlip(p, t, title: title, read: enabledItem, press: { try pressMenu($0, t) }) {
+        guard sys.frontmostPid() != t.pid else { return try pressMenuInBackground(p, try resolveMenu(a, p, t), t) }
+        switch try pressInBlip(p, t, title: title, read: enabledItem, press: { try pressMenuInBackground(p, $0, t) }) {
         case .pressed(let note):
             blipped = true
             return note
         case .stillDisabled:
             blipped = true
-            return try pressMenu(try resolveMenu(a, p, t), t)  // the disabled error (or enabled at last)
+            return try pressMenuInBackground(p, try resolveMenu(a, p, t), t)  // the disabled error (or enabled at last)
         case .unavailable:
             CULog.act.notice("menu in \(t.appName, privacy: .public): “\(title, privacy: .public)” reads disabled and no focus blip is possible — the activation again, read for \(Int(self.menuSettleMs), privacy: .public) ms")
             activateForMenu(p, t)
-            return try pressMenu(try resolveMenuSettled(a, p, t), t)
+            return try pressMenuInBackground(p, try resolveMenuSettled(a, p, t), t)
         }
     }
 
@@ -2336,7 +2337,12 @@ extension CUCore {
                 // control, never the AXFocused write on web content (round 16, P2).
                 if let area = webAreaAncestor(of: el), !(reportedFocus(t).map { isInside($0, area) } ?? false) {
                     if let spot = blankSpot(in: area, t) {
-                        let placed = (try? pressToFocus(area, t, clickAt: spot)) ?? false
+                        // (A refusal "the user is working in it" is never swallowed here: the fallback below would write to
+                        // the page after it — round 17, the review of round 16's H1.)
+                        let placed: Bool
+                        do { placed = try pressToFocus(area, t, clickAt: spot) } catch let e as CUError where Self.isUserWorkingRefusal(e) {
+                            throw e
+                        } catch { placed = false }
                         CULog.act.notice("key in \(t.appName, privacy: .public): the page had no keyboard focus — a click on a blank spot of it \(placed ? "placed" : "did not confirm", privacy: .public) it")
                     }
                     // Still none (a background WKWebView keeps it from a blank spot — measured, run138): End, Home, Page
@@ -3777,6 +3783,16 @@ extension CUCore {
             try requirePasteSafe(p, t)
         }
         return item
+    }
+
+    /// The background path's press (round 17, the review of round 16's H2): `menu()` checked the user's window at its
+    /// start, but the selection hold, `keyForMenu`, the activation and the walk can take about a second — the user may have
+    /// clicked into another window of the app meanwhile (the command would act on THEIR window) or started working in it.
+    /// Both are checked again right before the press.
+    private func pressMenuInBackground(_ p: TargetActParams, _ item: CUAXMenuNode, _ t: CUTarget) throws -> String? {
+        if let refusal = coveredWindowRefusal(t, allowForeground: p.allowForeground, menu: true) { throw refusal }
+        try refuseIfUserWorkMarked(t)
+        return try pressMenu(item, t)
     }
 
     /// Presses a menu item; a note when the app answered with an error but the command took effect.

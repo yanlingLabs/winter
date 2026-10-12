@@ -315,6 +315,74 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertEqual(poster.keyDowns.count, 2, "nothing after they started working")
     }
 
+    /// Round 17 (the review of round 16, H1 — proved there with a failing test): the agent's focusing click lands, the user's
+    /// own click into the app lands right after it, and `typeText`'s accessibility insert still went into the field. The
+    /// act's write guard stops it: nothing written after they started working.
+    func testAnAccessibilityInsertIsNeverWrittenOnceTheUserWorksAfterTheFocusClick() async throws {
+        safari(fieldOwner: pid, settableText: true)
+        _ = searchHasFocus()
+        poster.onPost = { [unowned self] e in
+            guard e.type == .leftMouseUp else { return }
+            ax.focus(pid: pid, on: field)
+            sys.front = pid
+            core.testUserInput(pid: pid, switching: false)  // their click into the app, right after the agent's
+        }
+        do {
+            try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("user_working"), e.message)
+        }
+        XCTAssertEqual(poster.entries.filter { $0.type == .leftMouseDown }.count, 1, "the agent's focusing click went (before)")
+        XCTAssertFalse(ax.written.contains("\(token(field)):\(kAXSelectedTextAttribute)"), "no insert after they started: \(ax.written)")
+        XCTAssertTrue(poster.keyDowns.isEmpty, "no key either")
+    }
+
+    /// Round 17 (the review of round 16, H1 — proved there with a failing test): AXPress does not focus the field, the user
+    /// clicks into the app during the 400 ms web wait, and the caret-placing selection write put the focus back on the field
+    /// (WebKit focuses the control it selects in). Never written now.
+    func testTheCaretPlacingSelectionWriteIsNeverMadeOnceTheUserWorksDuringTheWait() async throws {
+        safari(fieldOwner: pid)
+        _ = searchHasFocus()
+        ax.setActions(field, [kAXPressAction])
+        ax.makeSettable(field, kAXSelectedTextRangeAttribute)
+        ax.onPerform = { [unowned self] what in
+            guard what == "\(token(field)):\(kAXPressAction)" else { return }
+            sys.front = pid
+            core.testUserInput(pid: pid, switching: false)  // their click during the wait (the press placed nothing)
+        }
+        do {
+            try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("user_working"), e.message)
+        }
+        XCTAssertTrue(ax.performed.contains("\(token(field)):\(kAXPressAction)"), "the press went (before)")
+        XCTAssertFalse(ax.written.contains("\(token(field)):\(kAXSelectedTextRangeAttribute)"), "no caret write after: \(ax.written)")
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "no focusing click either")
+        XCTAssertTrue(poster.keyDowns.isEmpty)
+    }
+
+    /// Round 17: the guard stops what STARTS something (a key down, a click) — the up of a down already sent still goes, so
+    /// nothing is left held down in the app; a lone up for a down that never went is not sent.
+    func testOnceStoppedAnUpGoesOnlyForADownThatWent() async throws {
+        safari(fieldOwner: pid)
+        var downs = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            downs += 1
+            if downs == 2 { sys.front = pid; core.testUserInput(pid: pid, switching: false) }  // between key 2's down and up
+        }
+        do {
+            _ = try await act(.type(CUTypeAction(text: "\t\tabcd")))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("user_working"), e.message)
+        }
+        XCTAssertEqual(poster.keyDowns.count, 2)
+        XCTAssertEqual(poster.entries.filter { $0.type == .keyUp }.count, 2, "each down that went has its up")
+    }
+
     func testSpaceIntoACheckBoxIsOnePressNeverTwo() async throws {
         safari(fieldOwner: pid)
         let cb = fakeElement(93_090)

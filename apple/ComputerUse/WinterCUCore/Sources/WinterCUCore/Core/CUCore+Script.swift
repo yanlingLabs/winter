@@ -18,7 +18,16 @@ extension CUCore {
     func runAppleScript(_ source: String, _ t: CUTarget, timeoutMs: Int) throws -> String? {
         if let o = appleScriptOverride { return try o(source, t) }
         return try CUAppleScriptRunner.run(source, bound: boundApp(t), boundPid: t.pid, timeoutMs: timeoutMs,
-                                           alsoRefused: javaScriptDoorRefusals(t))
+                                           alsoRefused: javaScriptDoorRefusals(t), stop: appleScriptStop(t))
+    }
+
+    /// The AppleScript's per-event check (round 17): once the user works in the bound app, no further Apple Event of the
+    /// script is sent (its send hook asks before each one).
+    func appleScriptStop(_ t: CUTarget) -> () -> String? {
+        { [weak self] in
+            guard let self, self.userIsWorking(in: t.pid) else { return nil }
+            return "the user started working in \(t.appName)"
+        }
     }
 
     /// The bound app's own JavaScript doors, from its (static) dictionary: refused for every script run against it,

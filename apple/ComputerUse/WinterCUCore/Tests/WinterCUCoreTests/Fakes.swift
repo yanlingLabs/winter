@@ -77,7 +77,27 @@ final class FakeAX: CUAXBackend {
     // MARK: CUAXBackend
 
     func isTrusted() -> Bool { trusted }
-    func application(_ pid: pid_t) -> AXUIElement { fakeElement(pid) }
+    func application(_ pid: pid_t) -> AXUIElement { appTokens.insert(pid); return fakeElement(pid) }
+    /// The apps whose application element was asked for (an element with that token is the app's own).
+    private(set) var appTokens = Set<pid_t>()
+    /// Element owners a test states ("token" → pid); any other element is of an unknown process — the act's write guard
+    /// takes it for the target's (round 17).
+    var owners: [Int32: pid_t] = [:]
+    func ownerPid(_ e: AXUIElement) -> pid_t? {
+        let t = token(e)
+        if let o = owners[t] { return o }
+        if appTokens.contains(t) { return t }
+        // A window an app lists (its windows, its focused window) is that app's — as `AXUIElementGetPid` answers live
+        // (a restore raising the user's window inside an act is never taken for the target's).
+        let id = AXIdentity(element: e)
+        for app in appTokens.sorted() {
+            let d = attrs[AXIdentity(element: fakeElement(app))] ?? [:]
+            let listed = (d[kAXWindowsAttribute] as? [AXUIElement]) ?? []
+            let focused = d[kAXFocusedWindowAttribute].flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil }
+            if listed.contains(where: { AXIdentity(element: $0) == id }) || focused.map({ AXIdentity(element: $0) == id }) == true { return app }
+        }
+        return nil
+    }
     /// Runs before each attribute read ("token:attribute"), to change the fake world as time passes (WebKit
     /// moving focus a moment after a click).
     var onRead: ((String) -> Void)?
@@ -230,6 +250,9 @@ final class FakeSystem: CUSystemBackend {
     /// The active Space (nil: unreadable, as on a Mac whose SkyLight lacks the call).
     var space: UInt64? = 1
     func activeSpace() -> UInt64? { space }
+    /// The app whose Dock tile is under the pointer (a click on the Dock).
+    var dockTile: pid_t?
+    func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? { dockTile }
     /// Runs on every activation (after `front` is set): a test moves the Space back as macOS would.
     var onActivate: ((pid_t) -> Void)?
     /// Apps whose activation macOS refuses (a background caller's, under cooperative activation): recorded, no effect.

@@ -19,6 +19,9 @@ protocol CUAXBackend: AnyObject {
     /// The AX elements of windows `kAXWindowsAttribute` omits (another Space, full screen), by window id, in
     /// one remote-token walk that may stop at the first it finds; private.
     func remoteWindows(pid: pid_t, windowIDs: [CGWindowID]) -> [CGWindowID: AXUIElement]
+    /// The process an element belongs to; nil when it can't be told (the act's write guard then takes it for the
+    /// target's). Default: `AXUIElementGetPid` (CUCore+ActGuard).
+    func ownerPid(_ e: AXUIElement) -> pid_t?
 }
 
 extension CUAXBackend {

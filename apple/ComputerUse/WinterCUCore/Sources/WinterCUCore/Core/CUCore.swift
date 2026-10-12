@@ -38,6 +38,8 @@ public final class CUCore: @unchecked Sendable {
     }
     /// Where the synthetic pointer last was in each window (the hover path's start).
     let pointerMemory = CUPointerMemory()
+    /// I6 in flight (round 17): the guard in front of every accessibility write and input event an act makes.
+    let writeGuard: CUActWriteGuard
 
     /// The synth for one act: the window SPIs only while the private event path is on.
     func synth(_ p: TargetActParams) -> CUEventSynth {
@@ -71,12 +73,15 @@ public final class CUCore: @unchecked Sendable {
         self.events = events
         self.clock = clock
         self.skyLight = skyLight
-        self.poster = poster ?? CULiveEventPoster(skyLight: skyLight)
-        self.ax = ax
+        let writeGuard = CUActWriteGuard()
+        self.writeGuard = writeGuard
+        self.poster = CUActGuardedPoster(inner: poster ?? CULiveEventPoster(skyLight: skyLight), guardian: writeGuard)
+        self.ax = CUActGuardedAX(inner: ax, guardian: writeGuard)
         self.sys = sys
         self.pasteboard = pasteboard
         self.monitor = CUAXActivityMonitor(clock: clock)
         AX.configureProcessTimeout()
+        writeGuard.core = self
         monitor.onDestroyed = { [weak self] pid in self?.windowMaybeClosed(pid: pid) }
         monitor.onWindowCreated = { [weak self] pid, element in self?.noteCreatedWindow(pid: pid, element) }
         if startMonitors {
