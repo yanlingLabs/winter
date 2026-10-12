@@ -23,7 +23,7 @@ function fixture(port = true, checkpoint?: (phase: string) => void) {
   store.allocate(request, { data: RAW_VOLUME_MIN_BYTES, environment: RAW_VOLUME_MIN_BYTES }); store.claim(request);
   return { home, db, store, request, native, sealedProof, reopen: (nextDb = db) => new CoworkVolumes(nextDb, home, authority, backup, undefined, native) };
 }
-const receipt = (plan: VolumeFilesystemPlan): VolumeFilesystemReceipt => ({ ...plan, volumes: plan.volumes.map(v => ({ ...v, filesystemFeatures: [...plan.ext4Features], fullReadOnlyCheck: plan.checkMode === "full-read-only", filesystemType: "ext4", filesystemUUID: v.expectedFilesystemUUID, flushConfirmed: true, checked: true })) });
+const receipt = (plan: VolumeFilesystemPlan): VolumeFilesystemReceipt => ({ ...plan, volumes: plan.volumes.map(v => ({ ...v, filesystemFeatures: [...plan.ext4Features], transientFilesystemFeatures: [], fullReadOnlyCheck: plan.checkMode === "full-read-only", filesystemType: "ext4", filesystemUUID: v.expectedFilesystemUUID, flushConfirmed: true, checked: true })) });
 
 test("formatting is a consumed pair intent; mandatory protected receipt alone confirms both ready", () => {
   const f = fixture(), plan = f.store.prepareFilesystems(f.request);
@@ -122,7 +122,7 @@ test("failed or interrupted ready probe keeps confirmed history and safely repro
 test("v1 formatted history stays readable but cannot inherit sparse zero provenance or new features", () => {
   const f = fixture(), v2 = f.store.prepareFilesystems(f.request), oldReceipt: any = receipt(v2), oldPlan: any = structuredClone(v2);
   for (const value of [oldPlan, oldReceipt]) { value.protocolVersion = 1; delete value.ext4Features; delete value.requiredMountOptions; delete value.checkMode; delete value.virginZeroProvenance; }
-  for (const target of oldReceipt.volumes) { delete target.filesystemFeatures; delete target.fullReadOnlyCheck; }
+  for (const target of oldReceipt.volumes) { delete target.filesystemFeatures; delete target.transientFilesystemFeatures; delete target.fullReadOnlyCheck; }
   f.db.db.run("UPDATE cowork_volumes SET filesystem_state='ready',filesystem_journal_json=?", [JSON.stringify({ plan: oldPlan, receipt: oldReceipt })]);
   const before = f.store.records(f.request.workspaceId); expect(f.store.filesystemsReady(f.request)).toBe(false);
   expect(() => f.store.prepareFilesystems(f.request)).toThrow("filesystem_compatibility_required"); expect(f.store.records(f.request.workspaceId)).toEqual(before);
@@ -155,4 +155,39 @@ test("retained history cannot lend another disk its zero-provenance or mount con
   history.plan.volumes[0]!.creationId = "different-creation"; history.receipt.volumes[0]!.creationId = "different-creation";
   f.db.db.run("UPDATE cowork_volumes SET filesystem_journal_json=?", [JSON.stringify({ plan: probe, previousReady: history })]);
   expect(() => f.store.prepareFilesystems(f.request)).toThrow("recovery_required");
+});
+
+test("transient recovery observations never confirm ready and preserve a fresh explicit check route", () => {
+  const f = fixture(), initial = f.store.prepareFilesystems(f.request); f.store.confirmFilesystems(f.request, receipt(initial), f.sealedProof);
+  const normal = f.store.prepareFilesystems(f.request), pending = receipt(normal); pending.volumes[0]!.transientFilesystemFeatures = ["needs_recovery"];
+  expect(() => f.store.confirmFilesystems(f.request, pending, f.sealedProof)).toThrow("journal_recovery_required");
+  expect(f.store.filesystemsReady(f.request)).toBe(false);
+  expect(f.store.records(f.request.workspaceId).every(v => v.filesystemState === "probing" && v.owner !== null && !v.formatEligible)).toBe(true);
+  f.store.failFilesystems(f.request, normal.operationId);
+  const full = f.store.prepareFilesystems(f.request, "full-read-only"), checked = receipt(full); checked.volumes[0]!.transientFilesystemFeatures = ["needs_recovery"];
+  expect(full.volumes.every(v => v.action === "probe-existing")).toBe(true);
+  expect(() => f.store.confirmFilesystems(f.request, checked, f.sealedProof)).toThrow("journal_recovery_required");
+  expect(f.store.filesystemsReady(f.request)).toBe(false); f.store.failFilesystems(f.request, full.operationId);
+  // Stand-in for a later approved native replay; only a fresh clean observation can acknowledge.
+  const clean = f.store.prepareFilesystems(f.request);
+  expect(() => f.store.confirmFilesystems(f.request, receipt(full), f.sealedProof)).toThrow("recovery_required");
+  f.store.confirmFilesystems(f.request, receipt(clean), f.sealedProof); expect(f.store.filesystemsReady(f.request)).toBe(true);
+});
+test("unknown, duplicate or missing transient state cannot masquerade as a current clean receipt", () => {
+  const f = fixture(), plan = f.store.prepareFilesystems(f.request);
+  for (const flags of [["unknown-transient"], ["needs_recovery", "needs_recovery"]]) {
+    const bad = receipt(plan); bad.volumes[0]!.transientFilesystemFeatures = flags;
+    expect(() => f.store.confirmFilesystems(f.request, bad, f.sealedProof)).toThrow("authority_denied");
+  }
+  const missing: any = receipt(plan); delete missing.volumes[0].transientFilesystemFeatures;
+  expect(() => f.store.confirmFilesystems(f.request, missing, f.sealedProof)).toThrow("authority_denied");
+});
+test("earlier v2 receipts keep confirmed format history but require a fresh explicit state observation", () => {
+  const f = fixture(), plan = f.store.prepareFilesystems(f.request), old: any = receipt(plan);
+  for (const target of old.volumes) delete target.transientFilesystemFeatures;
+  f.db.db.run("UPDATE cowork_volumes SET filesystem_state='ready',filesystem_journal_json=?", [JSON.stringify({ plan, receipt: old })]);
+  expect(f.store.records(f.request.workspaceId).every(v => v.filesystemState === "ready")).toBe(true);
+  expect(f.store.filesystemsReady(f.request)).toBe(false);
+  const probe = f.store.prepareFilesystems(f.request); expect(probe.volumes.every(v => v.action === "probe-existing")).toBe(true);
+  f.store.confirmFilesystems(f.request, receipt(probe), f.sealedProof); expect(f.store.filesystemsReady(f.request)).toBe(true);
 });

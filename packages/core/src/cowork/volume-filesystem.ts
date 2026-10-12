@@ -2,6 +2,7 @@ import type { CoworkVolumeOwner, CoworkVolumeRequest, CoworkVolumeRecord, Volume
 
 export const COWORK_EXT4_FEATURES = Object.freeze(["64bit", "dir_index", "dir_nlink", "extent", "extra_isize", "filetype", "flex_bg", "has_journal", "huge_file", "large_file", "metadata_csum", "sparse_super"]);
 export const COWORK_EXT4_MOUNT_OPTIONS = Object.freeze(["noinit_itable"]);
+export const COWORK_EXT4_TRANSIENT_FEATURES = Object.freeze(["needs_recovery"]);
 export type FilesystemCheckMode = "normal" | "full-read-only";
 export type VolumeFilesystemState = "unformatted" | "formatting" | "probing" | "ready" | "recovery-required";
 export interface VolumeFilesystemTarget {
@@ -19,11 +20,15 @@ export interface VolumeFilesystemPlan extends PlanScope {
 interface LegacyPlan extends PlanScope { protocolVersion: 1 }
 type Observation = VolumeFilesystemTarget & { filesystemType: "ext4"; filesystemUUID: string; flushConfirmed: true; checked: true };
 export interface VolumeFilesystemReceipt extends Omit<VolumeFilesystemPlan, "volumes"> {
-  volumes: (Observation & { filesystemFeatures: string[]; fullReadOnlyCheck: boolean })[];
+  /** Header/check observations only. Pending replay cannot confirm readiness or mount authority. */
+  volumes: (Observation & { filesystemFeatures: string[]; transientFilesystemFeatures: string[]; fullReadOnlyCheck: boolean })[];
 }
+/** Prior v2 exact-live-feature checks excluded transient flags. Readable history only;
+ * a current confirmation still requires the explicit new observation field. */
+interface LegacyV2Receipt extends Omit<VolumeFilesystemPlan, "volumes"> { volumes: (Observation & { filesystemFeatures: string[]; fullReadOnlyCheck: boolean })[] }
 interface LegacyReceipt extends Omit<LegacyPlan, "volumes"> { volumes: Observation[] }
 export type RecordedFilesystemPlan = VolumeFilesystemPlan | LegacyPlan;
-export type RecordedFilesystemReceipt = VolumeFilesystemReceipt | LegacyReceipt;
+export type RecordedFilesystemReceipt = VolumeFilesystemReceipt | LegacyV2Receipt | LegacyReceipt;
 export interface FilesystemReadyHistory { plan: RecordedFilesystemPlan; receipt: RecordedFilesystemReceipt }
 /** Retain one last confirmed receipt, never a recursively growing history or another owner ledger. */
 export interface VolumeFilesystemJournal { plan: RecordedFilesystemPlan; receipt?: RecordedFilesystemReceipt; previousReady?: FilesystemReadyHistory }
@@ -47,19 +52,27 @@ export function validFilesystemPlan(value: unknown): value is RecordedFilesystem
   const [a, b] = value.volumes;
   return a.volumeId !== b.volumeId && a.creationId !== b.creationId && a.expectedFilesystemUUID !== b.expectedFilesystemUUID && (a.identity.device !== b.identity.device || a.identity.inode !== b.identity.inode);
 }
-/** Legacy receipts preserve history only; they cannot satisfy v2 current-owner readiness. */
-export function matchesFilesystemReceipt(plan: RecordedFilesystemPlan, receipt: RecordedFilesystemReceipt): boolean {
+/** Legacy observation shapes preserve history only; current confirmations require explicit state. */
+export function matchesFilesystemReceipt(plan: RecordedFilesystemPlan, receipt: RecordedFilesystemReceipt, allowLegacyV2Observation = false): boolean {
   if (!validFilesystemPlan(plan)) return false;
   const exact = (actual: unknown, expected: Record<string, unknown>): boolean => !!actual && typeof actual === "object" && Object.keys(actual).sort().join(",") === Object.keys(expected).sort().join(",") && Object.keys(expected).every(key => (actual as Record<string, unknown>)[key] === expected[key]);
   if (!closed(receipt, Object.keys(plan).join(" ")) || receipt.protocolVersion !== plan.protocolVersion || receipt.operationId !== plan.operationId || receipt.homeId !== plan.homeId || receipt.workspaceId !== plan.workspaceId || !exact(receipt.owner, { ...plan.owner }) || !Array.isArray(receipt.volumes) || receipt.volumes.length !== 2) return false;
   if (plan.protocolVersion === 2 && (receipt.protocolVersion !== 2 || receipt.virginZeroProvenance !== plan.virginZeroProvenance || !sameList(receipt.ext4Features, plan.ext4Features) || !sameList(receipt.requiredMountOptions, plan.requiredMountOptions) || receipt.checkMode !== plan.checkMode)) return false;
   return plan.volumes.every((expected, index) => {
     const actual: unknown = receipt.volumes[index];
-    return closed(actual, Object.keys(expected).join(" ") + " filesystemType filesystemUUID flushConfirmed checked" + (plan.protocolVersion === 2 ? " filesystemFeatures fullReadOnlyCheck" : "")) && Object.keys(expected).every(key => key === "identity" ? exact(actual.identity, { ...expected.identity }) : actual[key] === expected[key as keyof VolumeFilesystemTarget]) && actual.filesystemType === "ext4" && actual.filesystemUUID === expected.expectedFilesystemUUID && actual.flushConfirmed === true && actual.checked === true && (plan.protocolVersion === 1 || (sameList(actual.filesystemFeatures, plan.ext4Features) && actual.fullReadOnlyCheck === (plan.checkMode === "full-read-only")));
+    const keys = Object.keys(expected).join(" ") + " filesystemType filesystemUUID flushConfirmed checked" + (plan.protocolVersion === 2 ? " filesystemFeatures fullReadOnlyCheck" : "");
+    const oldShape = closed(actual, keys), newShape = plan.protocolVersion === 2 && closed(actual, keys + " transientFilesystemFeatures");
+    if (!(plan.protocolVersion === 1 ? oldShape : newShape || (allowLegacyV2Observation && oldShape))) return false;
+    const observed = actual as Record<string, any>;
+    if (newShape && !(sameList(observed.transientFilesystemFeatures, []) || sameList(observed.transientFilesystemFeatures, COWORK_EXT4_TRANSIENT_FEATURES))) return false;
+    return Object.keys(expected).every(key => key === "identity" ? exact(observed.identity, { ...expected.identity }) : observed[key] === expected[key as keyof VolumeFilesystemTarget]) && observed.filesystemType === "ext4" && observed.filesystemUUID === expected.expectedFilesystemUUID && observed.flushConfirmed === true && observed.checked === true && (plan.protocolVersion === 1 || (sameList(observed.filesystemFeatures, plan.ext4Features) && observed.fullReadOnlyCheck === (plan.checkMode === "full-read-only")));
   });
 }
+export function filesystemReceiptNeedsRecovery(receipt: RecordedFilesystemReceipt): boolean {
+  return receipt.protocolVersion === 2 && receipt.volumes.some(v => "transientFilesystemFeatures" in v && Array.isArray(v.transientFilesystemFeatures) && v.transientFilesystemFeatures.length !== 0);
+}
 export function readyFilesystemHistory(journal: VolumeFilesystemJournal | null): FilesystemReadyHistory | undefined {
-  if (journal?.receipt && matchesFilesystemReceipt(journal.plan, journal.receipt)) return { plan: journal.plan, receipt: journal.receipt };
+  if (journal?.receipt && matchesFilesystemReceipt(journal.plan, journal.receipt, true) && !filesystemReceiptNeedsRecovery(journal.receipt)) return { plan: journal.plan, receipt: journal.receipt };
   const previous = journal?.previousReady;
-  return previous && matchesFilesystemReceipt(previous.plan, previous.receipt) ? previous : undefined;
+  return previous && matchesFilesystemReceipt(previous.plan, previous.receipt, true) && !filesystemReceiptNeedsRecovery(previous.receipt) ? previous : undefined;
 }

@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("fixture_bootstrap", Path(__file__).with_name("bootstrap.py"))
 bootstrap = importlib.util.module_from_spec(spec)
@@ -83,6 +84,32 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(called, [])
     def test_authenticator_is_mandatory(self):
         with self.assertRaises(bootstrap.Refused): bootstrap.FixtureBootstrap(None)
+    def test_transient_journal_feature_is_reported_not_compared_as_persistent_or_silently_repaired(self):
+        # Zero filesystem/helper I/O: drive the actual probe with synthetic superblock/header data.
+        expected_uuid = "11111111-1111-4111-8111-111111111111"
+        target = {"expectedFilesystemUUID": expected_uuid, "capacityBytes": bootstrap.MIN_BYTES}
+        sb = bytearray(1024); struct.pack_into("<H", sb, 0x38, 0xEF53); struct.pack_into("<I", sb, 4, bootstrap.MIN_BYTES // 4096); struct.pack_into("<I", sb, 0x18, 2); sb[0x68:0x78] = uuid.UUID(expected_uuid).bytes
+        for mode in ("normal", "full-read-only"):
+            called = []
+            def tool(name, *_args, **_kwargs):
+                called.append(name)
+                if name == "blkid": return 0, f"TYPE=ext4\nUUID={expected_uuid}\nBLOCK_SIZE=4096\n"
+                if name == "e2fsck": return 0, ""
+                return 0, f"Filesystem UUID: {expected_uuid}\nBlock size: 4096\nBlock count: {bootstrap.MIN_BYTES // 4096}\nFilesystem state: clean\nFilesystem features: " + " ".join(bootstrap.EXT4_FEATURES + ["needs_recovery"]) + "\n"
+            with patch.object(bootstrap.os, "open", return_value=101), patch.object(bootstrap.os, "close"), patch.object(bootstrap.os, "pread", return_value=bytes(sb)), patch.object(bootstrap, "run_tool", side_effect=tool):
+                features, transient = bootstrap.probe(99, target, 1, {"ext4Features": bootstrap.EXT4_FEATURES, "checkMode": mode})
+            self.assertEqual(features, bootstrap.EXT4_FEATURES); self.assertEqual(transient, ["needs_recovery"])
+            self.assertEqual("e2fsck" in called, mode == "full-read-only")
+    def test_unknown_features_and_error_state_still_refuse_normal_header_probe(self):
+        expected_uuid = "11111111-1111-4111-8111-111111111111"
+        target = {"expectedFilesystemUUID": expected_uuid, "capacityBytes": bootstrap.MIN_BYTES}
+        sb = bytearray(1024); struct.pack_into("<H", sb, 0x38, 0xEF53); struct.pack_into("<I", sb, 4, bootstrap.MIN_BYTES // 4096); struct.pack_into("<I", sb, 0x18, 2); sb[0x68:0x78] = uuid.UUID(expected_uuid).bytes
+        for extra, state, reason in [("unknown-feature", "clean", "filesystem_features"), ("needs_recovery needs_recovery", "clean", "filesystem_features"), ("needs_recovery", "clean with errors", "explicit_full_check_required")]:
+            def tool(name, *_args, **_kwargs):
+                if name == "blkid": return 0, f"TYPE=ext4\nUUID={expected_uuid}\nBLOCK_SIZE=4096\n"
+                return 0, f"Filesystem UUID: {expected_uuid}\nBlock size: 4096\nBlock count: {bootstrap.MIN_BYTES // 4096}\nFilesystem state: {state}\nFilesystem features: " + " ".join(bootstrap.EXT4_FEATURES) + " " + extra + "\n"
+            with patch.object(bootstrap.os, "open", return_value=101), patch.object(bootstrap.os, "close"), patch.object(bootstrap.os, "pread", return_value=bytes(sb)), patch.object(bootstrap, "run_tool", side_effect=tool), self.assertRaisesRegex(bootstrap.Refused, reason):
+                bootstrap.probe(99, target, 1, {"ext4Features": bootstrap.EXT4_FEATURES, "checkMode": "normal"})
 
 @unittest.skipUnless(sys.platform == "linux" and os.getenv("WINTER_RUN_LINUX_FILESYSTEM_FIXTURE") == "1", "explicit Linux disposable fixture only")
 class LinuxFilesystemTests(unittest.TestCase):
@@ -139,6 +166,23 @@ class LinuxFilesystemTests(unittest.TestCase):
             retry = copy.deepcopy(probe); retry["operationId"] = "filesystem_" + str(uuid.uuid4())
             next_receiver, next_proof = self.receiver(retry); observed = next_receiver.execute(retry, pair.fds, next_proof)
             self.assertTrue(all(v["action"] == "probe-existing" for v in observed["volumes"])); self.assertEqual(pair.digests(), before)
+    def test_actual_needs_recovery_normal_probe_reports_state_without_fsck_or_byte_changes(self):
+        with Pair() as pair:
+            receiver, proof = self.receiver(pair.plan); receiver.execute(pair.plan, pair.fds, proof)
+            bootstrap.run_tool("debugfs", ["-w", "-R", "feature needs_recovery"], pair.fds[0], time.monotonic() + 20)
+            self.assertTrue(struct.unpack_from("<I", os.pread(pair.fds[0], 1024, 1024), 0x60)[0] & 4)
+            before = pair.digests(); probe = copy.deepcopy(pair.plan); probe["operationId"] = "filesystem_" + str(uuid.uuid4())
+            for target in probe["volumes"]: target["action"] = "probe-existing"
+            called = []; original = bootstrap.run_tool
+            def traced(name, *args, **kwargs): called.append(name); return original(name, *args, **kwargs)
+            bootstrap.run_tool = traced
+            try:
+                checker, token = self.receiver(probe); observed = checker.execute(probe, pair.fds, token)
+            finally: bootstrap.run_tool = original
+            self.assertEqual(observed["volumes"][0]["transientFilesystemFeatures"], ["needs_recovery"])
+            self.assertEqual(observed["volumes"][1]["transientFilesystemFeatures"], [])
+            self.assertEqual(observed["volumes"][0]["filesystemFeatures"], bootstrap.EXT4_FEATURES)
+            self.assertNotIn("e2fsck", called); self.assertEqual(pair.digests(), before)
     def test_sparse_multigroup_image_has_exact_features_and_lazy_zero_inode_table(self):
         # At 4096 bytes/block a block group covers128MiB; use256MiB for an unused
         # second inode table. Environment remains16MiB. No mount or loop device.

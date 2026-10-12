@@ -24,7 +24,7 @@ WINTER_RUN_LINUX_FILESYSTEM_FIXTURE=1 python3 -I -S spikes/cowork-filesystem-boo
 The dedicated `cowork-filesystem-bootstrap.yml` workflow prepares that oracle on
 Ubuntu 24.04. It has read-only repository permissions, no persistent checkout
 credentials, no package installation and a five-minute job cap. Current local
-results cover only four Mac protocol cases; eight actual Linux cases are skipped,
+results cover only six Mac protocol cases; nine actual Linux cases are skipped,
 not counted as formatting passes. The earlier v1 fixture at `85d5198e` passed its five Linux cases in CI; that
 evidence remains unchanged. This corrected v2 fixture has not run on Linux;
 no local Linux worker, Docker or VM was started.
@@ -53,7 +53,10 @@ performance or physical disk admission at production capacities.
 
 Protocol v2 pins exactly `64bit,dir_index,dir_nlink,extent,extra_isize,filetype,
 flex_bg,has_journal,huge_file,large_file,metadata_csum,sparse_super`. Receipts report
-the observed set; unknown/extra/missing features refuse. mke2fs gets fixed argv,
+the observed compatibility set; unknown/extra/missing persistent features refuse.
+Live `needs_recovery` is separately reported in `transientFilesystemFeatures`,
+which is explicitly empty for clean observations. Only that transient feature is
+allowlisted; duplicate/unknown flags refuse. mke2fs gets fixed argv,
 ext4/4096/256-byte inodes/UUID and exactly those features, `lazy_itable_init=1`,
 `lazy_journal_init=0`, a clean config/environment and `/proc/self/fd/N` for the
 pinned descriptor. Lazy inode initialization is authorized only for canonical new
@@ -70,6 +73,17 @@ and `dumpe2fs -h` feature/geometry/clean-state checks. It does not run e2fsck.
 Only explicit trusted `checkMode=full-read-only` (repair/uncertain shutdown) invokes
 `e2fsck -f -n`; no repair or UUID rewrite occurs. Receipts bind
 the original plan and exact observed ext4/UUID/geometry plus flush confirmation.
+`checked` records header/check completion, never permission to mount. A normal
+probe can report pending journal replay without forcing e2fsck; Core refuses
+ready confirmation with `journal_recovery_required` while that flag is present.
+Full read-only checking also reports it and cannot silently clear recovery debt.
+A separately approved immutable recovery/mount path must replay the journal, then
+a fresh clean observation can confirm readiness. No mount or journal replay is
+performed here. Earlier v2 receipts without the explicit field preserve format
+history only; current confirmation/readiness requires a fresh explicit state
+observation. Unknown features and error state remain refusals. The Linux-only
+debugfs case sets the real recovery bit on a disposable regular file and checks
+normal observation/read-only byte preservation; it is skipped on this Mac.
 They are observations, not native authenticity proof. Failed/interrupted probe-only work
 retains one previous confirmed receipt while current-owner readiness is false;
 a fresh nonce safely retries read-only probing. Format uncertainty still requires

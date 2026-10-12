@@ -17,6 +17,7 @@ import time
 import uuid
 
 EXT4_FEATURES = sorted("64bit dir_index dir_nlink extent extra_isize filetype flex_bg has_journal huge_file large_file metadata_csum sparse_super".split())
+TRANSIENT_FEATURES = ["needs_recovery"]
 REQUIRED_MOUNT_OPTIONS = ["noinit_itable"]
 MAX_PLAN_BYTES = 16_384
 MIN_BYTES = 16 * 1024 * 1024
@@ -129,14 +130,20 @@ def probe(fd, target, deadline, plan):
         _, header = run_tool("dumpe2fs", ["-h"], read_fd, deadline)
         properties = dict(line.split(":", 1) for line in header.splitlines() if ":" in line)
         properties = {key.strip(): value.strip() for key, value in properties.items()}
-        features = sorted(properties.get("Filesystem features", "").split())
+        live_features = sorted(properties.get("Filesystem features", "").split())
+        require(len(live_features) == len(set(live_features)), "filesystem_features")
+        transient = [feature for feature in live_features if feature in TRANSIENT_FEATURES]
+        features = [feature for feature in live_features if feature not in TRANSIENT_FEATURES]
         require(features == plan["ext4Features"], "filesystem_features")
         require(properties.get("Filesystem UUID") == target["expectedFilesystemUUID"] and properties.get("Block size") == "4096" and properties.get("Block count") == str(target["capacityBytes"] // 4096), "header_geometry")
         if plan["checkMode"] == "full-read-only":
             run_tool("e2fsck", ["-f", "-n"], read_fd, deadline)
         else:
             require(properties.get("Filesystem state") == "clean", "explicit_full_check_required")
-        return features
+        # This is a header observation, not permission to mount or mark ready. Core refuses
+        # readiness while recovery is pending; only approved journal replay + a fresh clean
+        # observation can clear that debt. A full read-only check cannot silently clear it.
+        return features, transient
     finally:
         os.close(read_fd)
 
@@ -175,6 +182,6 @@ class FixtureBootstrap:
                 run_tool("mke2fs", ["-q", "-t", "ext4", "-b", "4096", "-I", "256", "-U", target["expectedFilesystemUUID"], "-O", "none," + ",".join(EXT4_FEATURES), "-E", "lazy_itable_init=1,lazy_journal_init=0,nodiscard", "-F"], fd, deadline)
             os.fsync(fd)
             check_fixture_fd(fd, target)
-            features = probe(fd, target, deadline, plan)
-            observed.append({**target, "filesystemFeatures": features, "fullReadOnlyCheck": plan["checkMode"] == "full-read-only", "filesystemType": "ext4", "filesystemUUID": target["expectedFilesystemUUID"], "flushConfirmed": True, "checked": True})
+            features, transient = probe(fd, target, deadline, plan)
+            observed.append({**target, "filesystemFeatures": features, "transientFilesystemFeatures": transient, "fullReadOnlyCheck": plan["checkMode"] == "full-read-only", "filesystemType": "ext4", "filesystemUUID": target["expectedFilesystemUUID"], "flushConfirmed": True, "checked": True})
         return {**plan, "volumes": observed}

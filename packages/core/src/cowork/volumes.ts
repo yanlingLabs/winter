@@ -3,7 +3,7 @@ import { closeSync, fstatSync, fsyncSync, ftruncateSync, realpathSync } from "no
 import { join, resolve } from "node:path";
 import type { RuntimeStateDb } from "../runtime-state/db";
 import { AT_FDCWD, closeFd, createFileAt, mkdirAt, openDirAt, openImageAt } from "./volume-fs";
-import { COWORK_EXT4_FEATURES, COWORK_EXT4_MOUNT_OPTIONS, filesystemUUID, validFilesystemPlan, matchesFilesystemReceipt, readyFilesystemHistory, type FilesystemCheckMode, type RecordedFilesystemPlan, type CoworkVolumeFilesystemAuthority, type VolumeFilesystemState, type VolumeFilesystemJournal, type VolumeFilesystemPlan, type VolumeFilesystemReceipt } from "./volume-filesystem";
+import { COWORK_EXT4_FEATURES, COWORK_EXT4_MOUNT_OPTIONS, filesystemUUID, validFilesystemPlan, matchesFilesystemReceipt, readyFilesystemHistory, filesystemReceiptNeedsRecovery, type FilesystemCheckMode, type RecordedFilesystemPlan, type CoworkVolumeFilesystemAuthority, type VolumeFilesystemState, type VolumeFilesystemJournal, type VolumeFilesystemPlan, type VolumeFilesystemReceipt } from "./volume-filesystem";
 import { timeMachineVolumeBackup, type CoworkVolumeBackup } from "./volume-backup";
 
 export const RAW_VOLUME_FORMAT = "raw-ext4-v1" as const;
@@ -31,7 +31,7 @@ export interface CoworkVolumeAuthority {
   /** Protected native stop evidence for this exact previous owner and both disks. Never PID liveness. */
   verifyStopped(request: CoworkVolumeRequest, stop: CoworkVolumeStop, volumes: readonly CoworkVolumeRecord[]): boolean;
 }
-export type VolumeFailure = "invalid_request" | "authority_denied" | "not_found" | "unknown_format" | "recovery_required" | "volume_busy" | "stop_unconfirmed" | "backup_exclusion_unavailable" | "filesystem_compatibility_required";
+export type VolumeFailure = "invalid_request" | "authority_denied" | "not_found" | "unknown_format" | "recovery_required" | "volume_busy" | "stop_unconfirmed" | "backup_exclusion_unavailable" | "filesystem_compatibility_required" | "journal_recovery_required";
 export class CoworkVolumeError extends Error {
   constructor(readonly code: VolumeFailure) { super(code); this.name = "CoworkVolumeError"; }
 }
@@ -382,6 +382,7 @@ export class CoworkVolumes {
         if (plan.protocolVersion !== 2) fail("filesystem_compatibility_required");
         if (volumes.some((v, index) => !["formatting", "probing"].includes(v.filesystemState) || plan.volumes[index]!.action !== (v.filesystemState === "formatting" ? "format-new" : "probe-existing"))) fail("recovery_required");
         if (plan.homeId !== homeId || !matchesFilesystemReceipt(plan, receipt) || this.filesystemAuthority!.authorize(request, homeId, volumes, plan.checkMode) !== true || this.filesystemAuthority!.verifyReceipt(request, plan, receipt, proof) !== true) fail("authority_denied");
+        if (filesystemReceiptNeedsRecovery(receipt)) fail("journal_recovery_required");
         for (const v of volumes) this.run("UPDATE cowork_volumes SET filesystem_state='ready',filesystem_journal_json=?,updated_at=? WHERE volume_id=?", JSON.stringify({ plan, receipt }), new Date().toISOString(), v.volumeId);
         return this.records(request.workspaceId);
       }, { mode: "immediate" });
@@ -407,7 +408,7 @@ export class CoworkVolumes {
     const { request, homeId } = this.admit("open", input), volumes = this.records(request.workspaceId);
     if (volumes.length !== 2 || volumes.some(v => v.filesystemState !== "ready" || v.filesystemJournal?.plan.protocolVersion !== 2 || !sameOwner(v.owner, request.owner) || !sameOwner(v.filesystemJournal?.plan.owner ?? null, request.owner))) return false;
     const plan = this.currentFilesystemPlan(request, volumes, volumes[0]!.filesystemJournal!.plan.operationId), receipt = volumes[0]!.filesystemJournal?.receipt;
-    if (plan.protocolVersion !== 2 || !receipt || plan.homeId !== homeId || !matchesFilesystemReceipt(plan, receipt) || volumes.some(v => JSON.stringify(v.filesystemJournal?.receipt) !== JSON.stringify(receipt))) return false;
+    if (plan.protocolVersion !== 2 || !receipt || plan.homeId !== homeId || !matchesFilesystemReceipt(plan, receipt) || filesystemReceiptNeedsRecovery(receipt) || volumes.some(v => JSON.stringify(v.filesystemJournal?.receipt) !== JSON.stringify(receipt))) return false;
     const checked = this.prepareChecked(volumes);
     try { return this.rs.transaction(() => {
       const admitted = this.admit("open", input), current = this.records(request.workspaceId);

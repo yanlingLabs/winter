@@ -130,7 +130,13 @@ stop ledger was added. Protocol v2 pins supported ext4 features and required
 `noinit_itable` mounting only for durable fresh-sparse zero provenance; lazy inode
 initialization is enabled for those new images. Normal probes validate headers,
 UUID and features with blkid/dumpe2fs; full read-only e2fsck is an explicit trusted
-repair/uncertain-shutdown mode. Legacy v1 history is preserved but cannot inherit
+repair/uncertain-shutdown mode. Live `needs_recovery` is a separately reported
+transient observation, not a persistent compatibility feature. Core refuses
+ready confirmation with `journal_recovery_required` until an approved journal
+replay path and fresh clean observation clear it; neither a normal header probe
+nor full read-only checking silently authorizes an unclean mount. Earlier v2
+receipts lacking explicit transient state remain readable history but require
+fresh observation for current readiness. Legacy v1 history is preserved but cannot inherit
 v2 feature/zero/mount authority: it reports `filesystem_compatibility_required`.
 DISCARD/punch-hole/compaction and physical free-space guards remain a separate
 native v1 gate; this journal and formatter do not implement them.
