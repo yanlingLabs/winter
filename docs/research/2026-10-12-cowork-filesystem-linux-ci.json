@@ -1,0 +1,11 @@
+{
+  "conclusion": "success",
+  "headSha": "85d5198eb29e4101a984dc5f76846f94fe14c8fa",
+  "status": "completed",
+  "url": "https://github.com/yanlingLabs/winter/actions/runs/38213351119",
+  "testsPassed": 8,
+  "platformSpecificSkipped": 1,
+  "actualLinuxFormattingCasesPassed": 5,
+  "scope": "New disposable regular files only; no production block device, authenticated native receipt producer, VM or activation proof",
+  "logSha256": "1644c5a156bd0a93586f94092c71af3bc2f5781cd988226723f5da9c42513d8b"
+}

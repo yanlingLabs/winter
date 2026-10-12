@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { downgradeRuntimeStateToV6, downgradeCoworkRuntimeStateToV7, openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
+import { downgradeRuntimeStateToV6, downgradeCoworkRuntimeStateToV7, openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, type RuntimeStateDb } from "../../src/runtime-state/db";
 import { CoworkRepository, relativeCoworkPath } from "../../src/cowork/repository";
 import { CoworkAuthority } from "../../src/cowork/authority";
 import { CoworkError, type CoworkErrorCode, type CapabilityCeiling, type SourceSelection } from "../../src/cowork/types";
@@ -129,7 +129,7 @@ test("legacy rollback refuses any populated Cowork authority without deleting re
   const { store, home, db } = open(), made = create(store);
   expect(() => downgradeRuntimeStateToV6(home)).toThrow("Cowork authority");
   expect(store.get(made.workspaceId)).toEqual(made.value.workspace);
-  expect(db.schemaVersion()).toBe(9);
+  expect(db.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);
   expect(db.integrity().ok).toBe(true);
 });
 
@@ -211,7 +211,7 @@ test("read-only GitHub credentials permit local checkout work but cannot authori
 test("empty current-schema rollback to v7 preserves run-home metadata and refuses populated Cowork state", () => {
   const { store, home, db } = open();
   db.db.run("INSERT INTO run_root_quarantine(root,recorded_at,detail_json) VALUES('/fixture/run','now','{}')");
-  expect(downgradeCoworkRuntimeStateToV7(home)).toEqual({ from: 9, to: 7 });
+  expect(downgradeCoworkRuntimeStateToV7(home)).toEqual({ from: RUNTIME_STATE_SCHEMA_VERSION, to: 7 });
   const raw = new Database(join(home, "runtimes/runtime-state.db"), { readonly: true });
   try {
     expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 7 });
