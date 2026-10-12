@@ -18,7 +18,7 @@ import { buttonOf, keyEvents, keyForChar, modifiersOf, parseCombo, type KeyPress
 import { PAGE_RUNTIME_SOURCE } from "./page-runtime/bundle.generated";
 import { redactText, redactUrl } from "./page-runtime/redact";
 import { pickerAdvice } from "./page-runtime/rules";
-import { comboShows, matchOption, noOptionSentence, pressTookEffect, WHOLE_VALUE_CAP } from "./page-runtime/widgets";
+import { ambiguousOptionSentence, comboShows, matchOption, noOptionSentence, pressTookEffect, WHOLE_VALUE_CAP } from "./page-runtime/widgets";
 import {
   PAGE_RUNTIME_CALL, type RtCheck, type RtCheckFacts, type RtClassify, type RtComboOptions, type RtCondition, type RtFindQuery, type RtFound, type RtHit, type RtInspect, type RtLink, type RtNode, type RtPoint, type RtSiteToolAnswer, type RtSiteTools, type RtSnapshot,
 } from "./page-runtime/protocol";
@@ -1253,7 +1253,7 @@ export class TabDriver {
   /** A ref → where to click in the top frame's viewport (CSS px), after the actionability check; `picker` names the
    *  native window pressing it would open (the engine refuses that). `guardMenu`: a right-click follows — the
    *  element's frame stops the browser's own context menu from opening (unless the page shows its own). */
-  async pointForRef(ref: number, o: { guardMenu?: boolean } = {}): Promise<{ x: number; y: number; picker?: string; check?: RtCheckFacts }> {
+  async pointForRef(ref: number, o: { guardMenu?: boolean } = {}): Promise<{ x: number; y: number; picker?: string; check?: RtCheckFacts; chooser?: true }> {
     const { rec, id, rtId } = this.resolve(ref);
     const guard = o.guardMenu === true ? { guardMenu: true } : {};
     const p = await this.callIn<RtPoint>(rec, "point", { id, scroll: true, ...guard }, { expectRt: rtId });
@@ -1269,7 +1269,7 @@ export class TabDriver {
         }
       }
     }
-    const picker = { ...(p.picker === undefined ? {} : { picker: p.picker }), ...(p.check === undefined ? {} : { check: p.check }) };
+    const picker = { ...(p.picker === undefined ? {} : { picker: p.picker }), ...(p.check === undefined ? {} : { check: p.check }), ...(p.chooser === true ? { chooser: true as const } : {}) };
     if (rec.parentId === undefined) return { x: p.x, y: p.y, ...picker };
     // In a child frame: every ancestor brings this point into its view, then the frame paints where it now is
     // before the click (an out-of-process frame is hit-tested by where it last painted).
@@ -1702,8 +1702,10 @@ export class TabDriver {
       if (!info.combo || !info.open) throw new Error(`[${ref}]: pressing the combo box did not open its list — state() shows what it did`);
     }
     const close = async (): Promise<void> => { if (opened) await this.press(parseCombo("escape"), 1).catch(() => undefined); };
-    const want = matchOption(info.options, value);
-    if (want === undefined) { await close(); throw new Error(`[${ref}]: ${noOptionSentence(value, info.options)}`); }
+    const m = matchOption(info.options, value);
+    if ("none" in m) { await close(); throw new Error(`[${ref}]: ${noOptionSentence(value, info.options)}`); }
+    if ("ambiguous" in m) { await close(); throw new Error(`[${ref}]: ${ambiguousOptionSentence(value, m.ambiguous)}`); }
+    const want = m.option;
     if (want.disabled === true) { await close(); throw new Error(`[${ref}]: the option "${want.text}" is disabled`); }
     if (info.options.find((x) => x.selected === true) === want && comboShows(info.value, want.text)) { await close(); return want.text; }
     const at = await this.pointForRef(this.refFor(rtId, want.id));

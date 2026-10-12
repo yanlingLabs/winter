@@ -58,6 +58,8 @@ const NO_VISION = "this model can't see images — use state()";
 const FOCUS_NOT_EDITABLE = "the focus is not a text field, so nothing was typed — click the field or pass { into }";
 /** How long a click waits for the page to open a file chooser from it (a button whose handler clicks a file input). */
 const FILE_CHOOSER_WAIT_MS = 150;
+/** How long setValue(ref, true | false) reads a check box for its press to take before calling it unconfirmed. */
+const CHECK_CONFIRM_MS = 2_500;
 
 /** What a tab primitive is, for the per-app policy (everything not here acts). */
 const OBSERVE_PRIMITIVES: ReadonlySet<string> = new Set(["state", "find", "screenshot", "waitFor", "waitForIdle", "url", "title", "text",
@@ -1060,11 +1062,11 @@ export class BrowserEngine {
   /** Where a pointer act lands. `press`: the act presses a button there — refused on a native picker control (a
    *  <select>, a date/time/color or file input, a label for one), whose window would open on the user's screen.
    *  `menu`: a right-click — the browser's own context menu must not open either (the page's own may). */
-  private async pointOf(scope: TabRunScope, b: Binding, driver: TabDriver, v: unknown, what: string, press = false, menu = false): Promise<{ x: number; y: number; check?: RtCheckFacts }> {
+  private async pointOf(scope: TabRunScope, b: Binding, driver: TabDriver, v: unknown, what: string, press = false, menu = false): Promise<{ x: number; y: number; check?: RtCheckFacts; chooser?: true }> {
     if (isRef(v)) {
       const p = await driver.pointForRef(v, menu ? { guardMenu: true } : {});
       if (press && p.picker !== undefined) throw new AutomationFailure("Refused", pickerSentence(v, p.picker));
-      return { x: p.x, y: p.y, ...(p.check === undefined ? {} : { check: p.check }) };
+      return { x: p.x, y: p.y, ...(p.check === undefined ? {} : { check: p.check }), ...(p.chooser === true ? { chooser: true as const } : {}) };
     }
     if (isPoint(v)) {
       this.requireVision(scope);
@@ -1081,14 +1083,16 @@ export class BrowserEngine {
   /** After a click: a check box, radio or switch that did not take the press is said (nothing when it did — a radio
    *  already on stays on); a file chooser the page opened from the click (a button whose handler clicks a hidden file
    *  input) is said, naming the input to upload() into — Winter intercepts the chooser, so nothing opened on screen. */
-  private async afterPress(scope: TabRunScope, driver: TabDriver, ref: number | undefined, check: RtCheckFacts | undefined, single: boolean, chooserBefore: boolean): Promise<void> {
+  private async afterPress(scope: TabRunScope, driver: TabDriver, ref: number | undefined, check: RtCheckFacts | undefined, single: boolean, chooserBefore: boolean, mayChoose: boolean): Promise<void> {
     if (ref !== undefined && check !== undefined && single) {
       const now = await driver.checkAfterPress(ref, check.kind, check.checked, 600, scope.signal);
       if (now !== undefined && !pressTookEffect(check.kind, check.checked, now)) {
-        scope.builder.daemonLine(`[${ref}] is still ${now ? "checked" : "unchecked"} after the click — the page did not take the press there; state() shows what it did`);
+        scope.builder.daemonLine(`[${ref}] still reads ${now ? "checked" : "unchecked"} after the click — the page may not have taken the press there; state() shows what it did`);
       }
     }
-    if (!chooserBefore && (driver.fileChooser !== undefined || await driver.waitFileChooser(FILE_CHOOSER_WAIT_MS, scope.signal))) {
+    // Waited for only after a press that may open one (`mayOpenChooser` in the page runtime: a button with a file input
+    // in its form or near it); a chooser already reported is said after any press.
+    if (!chooserBefore && (driver.fileChooser !== undefined || (mayChoose && await driver.waitFileChooser(FILE_CHOOSER_WAIT_MS, scope.signal)))) {
       const input = await driver.fileChooserInput();
       scope.builder.daemonLine(`the click opened the page's file chooser — Winter held it, so nothing opened on screen; ${input === undefined
         ? "upload(ref, paths) on its file input puts the files in"
@@ -1099,12 +1103,16 @@ export class BrowserEngine {
   /** What a key did, when the engine can tell: where the focus went (Tab), a check box's state (Space, Return), a field's
    *  selection (⌘A). Undefined: nothing to say beyond the press itself. */
   private async keyOutcome(scope: TabRunScope, driver: TabDriver, combo: string, target: { ref?: number; label?: string; editable: boolean },
-                           o: { isTab: boolean; selectAll: boolean; check?: { checked?: boolean; kind?: "checkbox" | "radio" }; repeat: number }): Promise<string | undefined> {
+                           o: { isTab: boolean; selectAll: boolean; check?: { checked?: boolean; kind?: "checkbox" | "radio" }; repeat: number; textBefore?: string | null }): Promise<string | undefined> {
     try {
       if (o.isTab) {
         const now = await driver.focusNow();
         if (now.ref === undefined) return target.ref === undefined ? `pressed ${combo} — the focus did not move (nothing on the page has it)` : `pressed ${combo} — the focus left ${target.label} (nothing on the page has it now)`;
-        if (now.ref === target.ref && o.repeat === 1) return `pressed ${combo} — the focus did not move (still ${target.label})`;
+        if (now.ref === target.ref) {
+          const after = o.textBefore === null || o.textBefore === undefined || target.ref === undefined ? null : await driver.readBack(target.ref);
+          if (after !== null && after !== o.textBefore) return `pressed ${combo} — ${target.label} took the key itself (its text changed; the focus stayed there)`;
+          if (o.repeat === 1) return `pressed ${combo} — the focus did not move (still ${target.label})`;
+        }
         return `pressed ${combo} — the focus is now on ${now.label}`;
       }
       if (o.check !== undefined && target.ref !== undefined && o.check.checked !== undefined) {
@@ -1196,7 +1204,7 @@ export class BrowserEngine {
         await driver.click(at, { button: args.button, count: args.count, modifiers: args.modifiers });
         scope.acted.add(b.targetId);
         const single = (args.button === undefined || args.button === "left") && (args.count === undefined || args.count === 1) && (args.modifiers === undefined || (Array.isArray(args.modifiers) && args.modifiers.length === 0));
-        await this.afterPress(scope, driver, isRef(args.target) ? args.target : undefined, at.check, single, chooserBefore);
+        await this.afterPress(scope, driver, isRef(args.target) ? args.target : undefined, at.check, single, chooserBefore, at.chooser === true);
         return undefined;
       }
       case "setValue": {
@@ -1210,9 +1218,10 @@ export class BrowserEngine {
             scope.live();
             await driver.click(at, {});
             scope.acted.add(b.targetId);
-            const now = await driver.checkAfterPress(args.ref, st.kind ?? "checkbox", st.checked === true, 600, scope.signal);
+            // A slow page may apply it late: read for a while, then say it is not confirmed (Uncertain), never "failed".
+            const now = await driver.checkAfterPress(args.ref, st.kind ?? "checkbox", st.checked === true, CHECK_CONFIRM_MS, scope.signal);
             if (now !== undefined && now !== args.value) {
-              throw new Error(`[${args.ref}] is still ${now ? "checked" : "unchecked"} after pressing it — the page did not take the press there; state() shows what it did`);
+              throw new AutomationFailure("Uncertain", `[${args.ref}] was pressed but still reads ${now ? "checked" : "unchecked"} after ${CHECK_CONFIRM_MS / 1000} s — the page may apply it late or not have taken the press; check state() before pressing it again`);
             }
           }
           scope.acted.add(b.targetId);
@@ -1269,10 +1278,12 @@ export class BrowserEngine {
         const isTab = k === "Tab" && (mods & ~MOD_SHIFT) === 0;
         const pressKey = (k === " " || k === "Enter") && mods === 0;
         const check = pressKey && target.ref !== undefined ? await driver.checkState(target.ref).catch(() => undefined) : undefined;
+        // A field that takes Tab itself (an editor inserting a tab): its text, to tell that from a page ignoring the key.
+        const textBefore = isTab && target.editable && target.ref !== undefined ? await driver.readBack(target.ref) : null;
         scope.live();
         await driver.press(press, repeat, scope.signal);
         scope.acted.add(b.targetId);
-        const outcome = await this.keyOutcome(scope, driver, args.combo, target, { isTab, selectAll: press.commands?.includes("selectAll") === true, check: check?.checkable === true ? check : undefined, repeat });
+        const outcome = await this.keyOutcome(scope, driver, args.combo, target, { isTab, selectAll: press.commands?.includes("selectAll") === true, check: check?.checkable === true ? check : undefined, repeat, textBefore });
         if (outcome !== undefined) scope.builder.text(outcome, { screen: true });
         else if (target.label !== undefined) scope.builder.text(`pressed ${args.combo} in ${target.label}`, { screen: true });
         return undefined;

@@ -46,7 +46,8 @@ export function capValue(s: string, cap: number): { value: string; length?: numb
 export function valueWithLength(ref: number, value: string, fullLength: number | undefined, cap: number, quoteFn: (s: string) => string): string {
   const length = Math.max(fullLength ?? 0, countPoints(value));
   if (length <= cap) return quoteFn(value);
-  const whole = cap < WHOLE_VALUE_CAP ? ` — state({within:${ref}}) shows it whole` : "";
+  const whole = cap >= WHOLE_VALUE_CAP ? ""
+    : length <= WHOLE_VALUE_CAP ? ` — state({within:${ref}}) shows it whole` : ` — state({within:${ref}}) shows its first ${WHOLE_VALUE_CAP}`;
   return `${quoteFn(`${prefixPoints(value, cap)}…`)} (${length} characters${whole})`;
 }
 
@@ -86,14 +87,26 @@ export interface OptionFacts { text: string; value?: string; disabled?: boolean;
 
 const fold = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
 
-/** The option a wanted text names: its visible text exactly (case and spacing aside), else its value, else the first
- *  whose text contains it. */
-export function matchOption<T extends OptionFacts>(options: readonly T[], want: string): T | undefined {
+/** The option a wanted text names: its visible text exactly (case and spacing aside), else its value exactly, else the
+ *  ONE option whose text starts with it, else the ONE whose text contains it. More than one at a step is ambiguous:
+ *  never a guess ("Small" must not pick "Extra Small" by chance). */
+export type OptionMatch<T> = { option: T } | { ambiguous: T[] } | { none: true };
+export function matchOption<T extends OptionFacts>(options: readonly T[], want: string): OptionMatch<T> {
   const w = fold(want);
-  if (w.length === 0) return undefined;
-  return options.find((o) => fold(o.text) === w)
-    ?? options.find((o) => o.value !== undefined && o.value.toLowerCase() === w)
-    ?? options.find((o) => fold(o.text).includes(w));
+  if (w.length === 0) return { none: true };
+  const exact = options.find((o) => fold(o.text) === w) ?? options.find((o) => o.value !== undefined && o.value.toLowerCase() === w);
+  if (exact !== undefined) return { option: exact };
+  for (const step of [(t: string) => t.startsWith(w), (t: string) => t.includes(w)]) {
+    const hits = options.filter((o) => step(fold(o.text)));
+    if (hits.length === 1) return { option: hits[0]! };
+    if (hits.length > 1) return { ambiguous: hits };
+  }
+  return { none: true };
+}
+
+/** The refusal when a wanted text names more than one option: the candidates (at most 10). */
+export function ambiguousOptionSentence(want: string, candidates: readonly OptionFacts[]): string {
+  return `"${capText(want, 60)}" matches more than one option: ${candidates.slice(0, 10).map((o) => `"${capText(o.text, 40)}"`).join(", ")}${candidates.length > 10 ? ` … and ${candidates.length - 10} more` : ""} — give the whole option text`;
 }
 
 const capText = (s: string, n: number): string => (s.length <= n ? s : `${sliceUnits(s, n)}…`);
@@ -104,9 +117,9 @@ export function noOptionSentence(want: string, options: readonly OptionFacts[]):
   return `no option "${capText(want, 60)}" — the options are: ${list}${options.length > 20 ? ` … and ${options.length - 20} more` : ""}`;
 }
 
-/** Does a combo box now show the option chosen? Its shown text names it (case and spacing aside). */
+/** Does a combo box now show the option chosen? Its shown text IS the option's (case and spacing aside) — never a
+ *  text that merely contains it ("Extra Small" does not show "Small"). */
 export function comboShows(shown: string | undefined, option: string): boolean {
-  const s = fold(shown ?? "");
   const o = fold(option);
-  return o.length > 0 && (s === o || s.includes(o));
+  return o.length > 0 && fold(shown ?? "") === o;
 }

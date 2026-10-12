@@ -16,7 +16,7 @@ import type {
 import { looksLikeUrl, looksSecret, REDACTED, redactText, redactUrl, redactUrlAttribute } from "./redact";
 import { classifyTarget, cssSelectorRefusal, isPaymentHost, isSecureField, isTextEntry as isTextEntryFacts, nativePicker, pickerValueHint, sliceUnits, TEXT_INPUT_TYPES, type ElementFacts } from "./rules";
 import { listSiteTools, modelContextOf, SiteToolCalls, type SiteToolOwner } from "./webmcp";
-import { capValue, checkedStateOf, matchOption, noOptionSentence, VALUE_CAP, WHOLE_VALUE_CAP, type CheckFacts, type OptionFacts } from "./widgets";
+import { ambiguousOptionSentence, capValue, checkedStateOf, matchOption, noOptionSentence, VALUE_CAP, WHOLE_VALUE_CAP, type CheckFacts, type OptionFacts } from "./widgets";
 
 type Any = Record<string, unknown>;
 
@@ -880,6 +880,19 @@ type Any = Record<string, unknown>;
     return undefined;
   };
   const tiny = (r: DOMRect): boolean => r.width < 4 || r.height < 4;
+  /** Could pressing `el` make the page open a file chooser (a button whose handler clicks a hidden file input)? A
+   *  button-like element (a button, a link, a role=button) with a file input in its form, or — outside a form — within
+   *  its nearest four ancestors. The engine waits for a chooser only after such a press. */
+  const mayOpenChooser = (el: Element): boolean => {
+    const role = roleOf(el);
+    if (role !== "button" && role !== "link" && role !== "menuitem") return false;
+    const FILE = "input[type=file]";
+    const form = el.closest("form");
+    if (form !== null) return form.querySelector(FILE) !== null;
+    let p: Element | null = el.parentElement;
+    for (let i = 0; i < 4 && p !== null; i++, p = p.parentElement) if (p.querySelector(FILE) !== null) return true;
+    return false;
+  };
   /** Does a press at `el`'s centre reach it (or its own label)? */
   const pressable = (el: Element): boolean => {
     const r = visibleRect(el);
@@ -932,9 +945,10 @@ type Any = Record<string, unknown>;
     const picker = pickerFor(el)?.what;
     // A check box's state before the press: the engine checks the press took (a page can take it elsewhere).
     const chk = node === el ? checkOf(el) : undefined;
+    const chooser = mayOpenChooser(el);
     const okAt = (): RtPoint => {
       if (arg.guardMenu === true) guardMenu();
-      return { ok: true, x, y, ...(picker === undefined ? {} : { picker }), ...(chk === undefined ? {} : { check: { kind: chk.kind, checked: chk.checked } }) };
+      return { ok: true, x, y, ...(picker === undefined ? {} : { picker }), ...(chk === undefined ? {} : { check: { kind: chk.kind, checked: chk.checked } }), ...(chooser ? { chooser: true as const } : {}) };
     };
     const hit = deepFromPoint(x, y);
     if (hit === null) return okAt();
@@ -1007,8 +1021,10 @@ type Any = Record<string, unknown>;
       const chosen: HTMLOptionElement[] = [];
       const facts: Array<OptionFacts & { el: HTMLOptionElement }> = [...el.options].map((o) => ({ el: o, text: collapse(o.label || o.text), value: o.value, disabled: o.disabled }));
       for (const raw of wants) {
-        const opt = matchOption(facts, raw);
-        if (opt === undefined) return { ok: false, reason: noOptionSentence(raw, facts) };
+        const m = matchOption(facts, raw);
+        if ("none" in m) return { ok: false, reason: noOptionSentence(raw, facts) };
+        if ("ambiguous" in m) return { ok: false, reason: ambiguousOptionSentence(raw, m.ambiguous) };
+        const opt = m.option;
         if (opt.disabled === true) return { ok: false, reason: `the option "${cap(opt.text, 60)}" is disabled` };
         chosen.push(opt.el);
       }

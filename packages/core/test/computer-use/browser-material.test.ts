@@ -8,8 +8,9 @@
 // plays what the runtime answers). The runtime's DOM glue itself runs only against a real Chromium (`e2e:browser`).
 import { describe, expect, test } from "bun:test";
 import type { TabHandle } from "../../src/computer-use/worker/bridge";
+import { AutomationFailure } from "../../src/computer-use/errors";
 import {
-  capValue, checkedStateOf, comboShows, countPoints, matchOption, noOptionSentence, prefixPoints, pressTookEffect, valueWithLength, WHOLE_VALUE_CAP,
+  ambiguousOptionSentence, capValue, checkedStateOf, comboShows, countPoints, matchOption, noOptionSentence, prefixPoints, pressTookEffect, valueWithLength, WHOLE_VALUE_CAP,
 } from "../../src/computer-use/browser/page-runtime/widgets";
 import { quote } from "../../src/computer-use/browser/state-format";
 import type { FakePage } from "./browser-fake-transport";
@@ -90,14 +91,19 @@ describe("the widget rules (pure, over Material-shaped facts)", () => {
 
   test("options: the visible text (case and spacing aside), else the value, else a containing text; the refusal names them", () => {
     const opts = [{ text: "English (United States)", value: "en-US" }, { text: "French", value: "fr" }, { text: "German", value: "de", disabled: true }];
-    expect(matchOption(opts, "  french ")?.value).toBe("fr");
-    expect(matchOption(opts, "EN-us")?.text).toBe("English (United States)");
-    expect(matchOption(opts, "united")?.value).toBe("en-US");
-    expect(matchOption(opts, "Klingon")).toBeUndefined();
-    expect(matchOption(opts, "  ")).toBeUndefined();
+    const pick = (want: string) => { const m = matchOption(opts, want); return "option" in m ? m.option.value : m; };
+    expect(pick("  french ")).toBe("fr");
+    expect(pick("EN-us")).toBe("en-US");
+    expect(pick("united")).toBe("en-US");
+    expect(pick("Klingon")).toEqual({ none: true });
+    expect(pick("  ")).toEqual({ none: true });
     expect(noOptionSentence("Klingon", opts)).toBe('no option "Klingon" — the options are: "English (United States)", "French", "German"');
     expect(noOptionSentence("x", [])).toBe('no option "x" — the options are: (it lists none)');
     expect(comboShows("  French ", "french")).toBe(true);
+    // Option texts containing one another, both ways: never "shown" by containment.
+    expect(comboShows("Extra Small", "Small")).toBe(false);
+    expect(comboShows("Small", "Extra Small")).toBe(false);
+    expect(comboShows("Extra Small", "extra  small")).toBe(true);
     expect(comboShows("English", "French")).toBe(false);
     expect(comboShows(undefined, "French")).toBe(false);
   });
@@ -113,6 +119,8 @@ describe("the widget rules (pure, over Material-shaped facts)", () => {
     // A within read's own cut has nowhere further to point.
     expect(valueWithLength(5, "b".repeat(WHOLE_VALUE_CAP), 9_000, WHOLE_VALUE_CAP, quote)).toBe(`"${"b".repeat(WHOLE_VALUE_CAP)}…" (9000 characters)`);
     expect(valueWithLength(5, "short", undefined, 200, quote)).toBe('"short"');
+    // Past 8,000 a within read shows only its first 8,000 — never "whole" (the app path's wording).
+    expect(valueWithLength(5, "c".repeat(200), 9_000, 200, quote)).toBe(`"${"c".repeat(200)}…" (9000 characters — state({within:5}) shows its first 8000)`);
   });
 });
 
@@ -143,6 +151,27 @@ describe("A: an ARIA select (a combo box whose list is drawn elsewhere)", () => 
   });
 });
 
+describe("A: options that contain one another", () => {
+  const SIZES = { 2: { value: "Extra Small", options: [{ id: 13, text: "Small" }, { id: 14, text: "Extra Small" }, { id: 15, text: "Small Business" }] } };
+  test("a combo box still showing \"Extra Small\" does not confirm \"Small\" (the page ignored the press)", async () => {
+    const { p } = await opened({ combos: { 2: { ...SIZES[2], stuck: true } } });
+    expect((await failure(p("setValue", { ref: 2, value: "Small" }))).message)
+      .toBe('[2]: pressed the option "Small" but the combo box shows "Extra Small" — state() shows what happened');
+  });
+
+  test("a partial text names an option only when it is the one match; an ambiguous one is refused naming the candidates", async () => {
+    expect(ambiguousOptionSentence("sm", [{ text: "Small" }, { text: "Small Business" }])).toBe('"sm" matches more than one option: "Small", "Small Business" — give the whole option text');
+    const opts = SIZES[2].options;
+    const m = matchOption(opts, "small b");
+    expect("option" in m && m.option.text).toBe("Small Business");
+    expect(matchOption(opts, "smal")).toEqual({ ambiguous: [opts[0]!, opts[2]!] });
+    expect(matchOption(opts, "xtra")).toEqual({ option: opts[1]! });
+    const { p } = await opened({ combos: SIZES });
+    expect((await failure(p("setValue", { ref: 2, value: "smal" }))).message)
+      .toBe('[2]: "smal" matches more than one option: "Small", "Small Business" — give the whole option text');
+  });
+});
+
 describe("B: check boxes and radios built over ARIA or a hidden native input", () => {
   test("click() toggles a role=checkbox and states() says checked; a press the page did not take is said", async () => {
     const { r, p } = await opened();
@@ -150,7 +179,7 @@ describe("B: check boxes and radios built over ARIA or a hidden native input", (
     expect(await p("state", { full: true, emit: false })).toContain('[3] check box "Accept the terms" (checked)');
     expect(r.text()).not.toContain("is still");
     await p("click", { target: 4 });
-    expect(r.text()).toContain("[4] is still unchecked after the click — the page did not take the press there; state() shows what it did");
+    expect(r.text()).toContain("[4] still reads unchecked after the click — the page may not have taken the press there; state() shows what it did");
     // A radio already on stays on (no line); another one is checked by its press.
     await p("click", { target: 7 });
     await p("click", { target: 8 });
@@ -164,8 +193,16 @@ describe("B: check boxes and radios built over ARIA or a hidden native input", (
     await p("setValue", { ref: 5, value: true });
     expect(presses().slice(before)).toEqual([{ x: 60, y: 30 }]); // [6]'s point, not the wrapper's
     expect(await p("state", { full: true, emit: false })).toContain('[6] check box "Notify me" (checked)');
+  });
+
+  test("setValue(ref, bool) on a slow page: a late flip is waited for; one that never comes is Uncertain, never a failure", async () => {
+    const slow = await opened({ lateChecks: { 3: 1_200 } });
+    await slow.p("setValue", { ref: 3, value: true });
+    expect(await slow.p("state", { full: true, emit: false })).toContain('[3] check box "Accept the terms" (checked)');
+    const { p } = await opened();
     const e = await failure(p("setValue", { ref: 4, value: true }));
-    expect(e.message).toBe("[4] is still unchecked after pressing it — the page did not take the press there; state() shows what it did");
+    expect((e as AutomationFailure).kind).toBe("Uncertain");
+    expect(e.message).toBe("[4] was pressed but still reads unchecked after 2.5 s — the page may apply it late or not have taken the press; check state() before pressing it again");
   });
 });
 
@@ -188,6 +225,21 @@ describe("C: keys say what they did", () => {
     await p("type", { text: "hello", into: 9 });
     await p("key", { combo: "cmd+a", into: 9 });
     expect(r.text()).toContain('pressed cmd+a in [9] text field "Title" — all 5 characters are selected');
+  });
+});
+
+describe("C/E follow-ups: a field that takes Tab, and the file-chooser wait only where one may open", () => {
+  test("a Tab the field takes itself is not reported as ignored", async () => {
+    const { r, p } = await opened({ tabInserts: [10] });
+    await p("key", { combo: "tab", into: 10 });
+    expect(r.text()).toContain('pressed tab — [10] text area "Description" took the key itself (its text changed; the focus stayed there)');
+    expect(r.text()).not.toContain("the focus did not move");
+  });
+
+  test("an ordinary click does not wait for a file chooser (a late one is not pinned on it)", async () => {
+    const { r, p } = await opened({ fileChooserButtons: {}, chooserFromAnyPress: 16 });
+    await p("click", { target: 11 });
+    expect(r.text()).not.toContain("the click opened the page's file chooser");
   });
 });
 

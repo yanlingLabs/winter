@@ -68,6 +68,12 @@ export interface FakePage {
   stuckFocus?: boolean;
   /** A button whose click handler clicks a file input (button id → the input's id): the page opens a file chooser. */
   fileChooserButtons?: Record<number, number>;
+  /** Check boxes (id → ms) the page toggles only that long after their press (a slow page). */
+  lateChecks?: Record<number, number>;
+  /** Any press makes the page open a file chooser for this input 30 ms later (no element is marked as one that may). */
+  chooserFromAnyPress?: number;
+  /** Fields (ids) that take Tab themselves (an editor inserting a tab character). */
+  tabInserts?: number[];
 }
 
 /** Every node of a tree, depth first. */
@@ -89,7 +95,10 @@ function checkedNow(t: FakeTab, n: RtNode): boolean {
 /** A press of a check box as the page takes it: a radio button ends checked, a check box flips (unless stuck). */
 function pressCheck(t: FakeTab, n: RtNode): void {
   if (t.page.stuckChecks?.includes(n.id) === true) return;
-  t.checks.set(n.id, checkKind(n) === "radio" ? true : !checkedNow(t, n));
+  const next = checkKind(n) === "radio" ? true : !checkedNow(t, n);
+  const late = t.page.lateChecks?.[n.id];
+  if (late !== undefined) { setTimeout(() => t.checks.set(n.id, next), late); return; }
+  t.checks.set(n.id, next);
 }
 
 /** Phase 4: the top frame's own window, as a fake page's tools name it. */
@@ -851,6 +860,8 @@ export class FakeCdpTransport implements CdpTransport {
     if (n === undefined) return;
     const input = t.page.fileChooserButtons?.[n.id];
     if (input !== undefined) queueMicrotask(() => this.emit(t, "Page.fileChooserOpened", { frameId: "top", mode: "selectSingle", backendNodeId: input }));
+    const any = t.page.chooserFromAnyPress;
+    if (any !== undefined) setTimeout(() => this.emit(t, "Page.fileChooserOpened", { frameId: "top", mode: "selectSingle", backendNodeId: any }), 30);
     if (isCheckNode(n)) pressCheck(t, n);
     const combo = t.page.combos?.[n.id];
     if (combo !== undefined && combo.noOpen !== true) t.combosOpen.add(n.id);
@@ -867,6 +878,10 @@ export class FakeCdpTransport implements CdpTransport {
   private keyAt(t: FakeTab, params: Record<string, unknown>): boolean {
     const focusedId = t.focused?.startsWith("top:") === true ? Number(t.focused.slice(4)) : t.page.focused;
     if (params.key === "Tab") {
+      if (focusedId !== undefined && t.page.tabInserts?.includes(focusedId) === true) {
+        t.values.set(`top:${focusedId}`, `${t.values.get(`top:${focusedId}`) ?? ""}\t`);
+        return true;
+      }
       const order = t.page.tabOrder;
       if (order !== undefined && order.length > 0 && t.page.stuckFocus !== true) {
         const i = focusedId === undefined ? -1 : order.indexOf(focusedId);
@@ -941,7 +956,8 @@ export class FakeCdpTransport implements CdpTransport {
         if (t.page.hidden?.includes(n.id) === true) return { ok: false, reason: "hidden" } satisfies RtPoint;
         const picker = frameId === "top" ? t.page.pickers?.[n.id] : undefined;
         const check = frameId === "top" && isCheckNode(n) ? { check: { kind: checkKind(n), checked: checkedNow(t, n) } } : {};
-        return { ok: true, x: 10 * n.id, y: 5 * n.id, ...(picker === undefined ? {} : { picker }), ...check } satisfies RtPoint;
+        const chooser = frameId === "top" && t.page.fileChooserButtons?.[n.id] !== undefined ? { chooser: true as const } : {};
+        return { ok: true, x: 10 * n.id, y: 5 * n.id, ...(picker === undefined ? {} : { picker }), ...check, ...chooser } satisfies RtPoint;
       }
       case "hitAt": {
         // An element's point is (10·id, 5·id) — the one there, if any.

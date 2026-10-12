@@ -55,7 +55,8 @@ export interface RtSnapshot {
 export type RtPoint =
   /** `picker`: the element (or the control a label forwards to) opens a native menu, picker or chooser window when
    *  pressed (the engine refuses pointer input). */
-  | { ok: true; x: number; y: number; picker?: string; check?: RtCheckFacts }
+  /** `chooser`: a press there may make the page open a file chooser (a button near a file input). */
+  | { ok: true; x: number; y: number; picker?: string; check?: RtCheckFacts; chooser?: true }
   | { ok: false; reason: "gone" | "hidden" | "disabled" | "offscreen" }
   | { ok: false; reason: "covered"; by: { id: RtId; role: string; name?: string } };
 
