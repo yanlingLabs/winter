@@ -129,7 +129,7 @@ test("legacy rollback refuses any populated Cowork authority without deleting re
   const { store, home, db } = open(), made = create(store);
   expect(() => downgradeRuntimeStateToV6(home)).toThrow("Cowork authority");
   expect(store.get(made.workspaceId)).toEqual(made.value.workspace);
-  expect(db.schemaVersion()).toBe(8);
+  expect(db.schemaVersion()).toBe(9);
   expect(db.integrity().ok).toBe(true);
 });
 
@@ -208,10 +208,10 @@ test("read-only GitHub credentials permit local checkout work but cannot authori
   code(() => authority.requireAutomaticPublication(made.workspaceId, made.value.sources[0]!.sourceId), "authority_denied");
 });
 
-test("empty v8 rollback to v7 preserves run-home metadata and refuses populated Cowork state", () => {
+test("empty current-schema rollback to v7 preserves run-home metadata and refuses populated Cowork state", () => {
   const { store, home, db } = open();
   db.db.run("INSERT INTO run_root_quarantine(root,recorded_at,detail_json) VALUES('/fixture/run','now','{}')");
-  expect(downgradeCoworkRuntimeStateToV7(home)).toEqual({ from: 8, to: 7 });
+  expect(downgradeCoworkRuntimeStateToV7(home)).toEqual({ from: 9, to: 7 });
   const raw = new Database(join(home, "runtimes/runtime-state.db"), { readonly: true });
   try {
     expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 7 });
