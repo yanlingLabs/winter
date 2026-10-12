@@ -1,0 +1,91 @@
+{
+  "builderCommit": "180d3effd7ddbb9406aeea0912f76c78ef20cf75",
+  "builderSha256": "de3a3cc18b7c589329787e03564914396100909ee8355e4925903c1f2edb930e",
+  "cpioBytes": 336631808,
+  "cpioSha256": "83abcaf8807966b8ae293c10bae4059ffc450076d68d7eb871fd5faf40e522e3",
+  "elfCount": 627,
+  "formatVersion": 1,
+  "guestExecutionVerified": false,
+  "gzipCompanion": {
+    "bytes": 117771928,
+    "decompressedSha256": "83abcaf8807966b8ae293c10bae4059ffc450076d68d7eb871fd5faf40e522e3",
+    "filename": "",
+    "kernelExecutionVerified": false,
+    "level": 9,
+    "mtime": 0,
+    "sha256": "37a5deb69bae2fbbdf534fa142b8efdcf75975fad5044160d7fdaf24ecfdd853",
+    "zlibVersion": "1.2.12"
+  },
+  "initPresent": false,
+  "inputHardlinksMaterializedAsIndependentFiles": 2,
+  "isolatedPythonInvocation": [
+    "/usr/bin/python3",
+    "-I",
+    "-S",
+    "/opt/winter/libexec/linux-supervisor.py"
+  ],
+  "packageLockSha256": "b0127b7a8f1fa2f8b2a06236cef26e1f1b297bacf9d70e800440df8747d93252",
+  "rootManifestSha256": "2a14c91bd7c6cabf331dfa4fbb879a7a12939455526ad346f7d993844279d114",
+  "runtimeSha256": "4eee5d4ce741b5e6aab0e8345f067d4fb9c08cdbb1c5b0a0aef22d36b3000c08",
+  "sdkSourceCommit": "39ba77ec333293cfcaabcf7eb29b4d7a58f24990",
+  "sharedCompartmentHeaderSha256": "54a5e68778f2232c1aafb8331e484e96f2bae86f4f0f4b538487de47664eb29e",
+  "sourceHelpers": {
+    "file-worker.c": {
+      "binarySha256": "8fc771e368d0023ac4a15c598e746ca4ebf01d8be7c4fcb56a01645ecc7260f2",
+      "compileFlags": [
+        "-target",
+        "aarch64-linux-musl",
+        "-static",
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-pthread",
+        "-s",
+        "-Wl,--build-id=none",
+        "-ffile-prefix-map=<SDK_SOURCE>=/winter-sdk"
+      ],
+      "sourceSha256": "cfedc4067f76847a95f33cca69e5e8da2b19109eb9af39a94f9456bd8bb1e474"
+    },
+    "linux-tool-compartment.c": {
+      "binarySha256": "8e25216ed26f59da65c8ac01de758631e7cc7e871994175da74ceb9cdb3bc2d1",
+      "compileFlags": [
+        "-target",
+        "aarch64-linux-musl",
+        "-static",
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-pthread",
+        "-s",
+        "-Wl,--build-id=none",
+        "-ffile-prefix-map=<SDK_SOURCE>=/winter-sdk"
+      ],
+      "sourceSha256": "22ae11806a84df88479720960c6fdbfe3b4e976bd40c6e89b62ddc9f9a02d409"
+    },
+    "process-worker.c": {
+      "binarySha256": "ea0cec51eafa0b8e320b8629d0e8009d9d50e83061f7e01f7dea490998baf156",
+      "compileFlags": [
+        "-target",
+        "aarch64-linux-musl",
+        "-static",
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-pthread",
+        "-s",
+        "-Wl,--build-id=none",
+        "-ffile-prefix-map=<SDK_SOURCE>=/winter-sdk"
+      ],
+      "sourceSha256": "674485959146485930743b9694caecf70bca3a97ff638b41c0dd2fe677e7035e"
+    }
+  },
+  "supervisorSourceSha256": "9487ef2623ef855424e5196d927a59f7e1aac453de9ad56ca9efbc513ea4f376",
+  "toolEnvironmentRoot": "/opt/winter/environment/base",
+  "vmAdmitted": false
+}

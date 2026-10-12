@@ -1,0 +1,74 @@
+{
+  "formatVersion": 1,
+  "snapshot": "20261011T000000Z",
+  "sdkCommit": "39ba77ec333293cfcaabcf7eb29b4d7a58f24990",
+  "bun": {
+    "version": "1.3.14",
+    "target": "bun-linux-arm64",
+    "archiveUrl": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-aarch64.zip",
+    "archiveSha256": "a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b",
+    "archiveEntry": "bun-linux-aarch64/bun",
+    "executableSha256": "37141662ebed915a2ab89313156e455e2a1374395f5f6760d06407f49406f086"
+  },
+  "zig": {
+    "version": "0.14.1",
+    "archiveSha256": "39f3dc5e79c22088ce878edc821dedb4ca5a1cd9f5ef915e9b3cc3053e8faefa"
+  },
+  "keys": [
+    {
+      "file": "debian-bookworm-archive.asc",
+      "fingerprint": "B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8",
+      "sha256": "c2a9a16fde95e037bafd0fa6b7e31f41b4ff1e85851de5558f19a2a2f0e955e2"
+    },
+    {
+      "file": "debian-bookworm-release.asc",
+      "fingerprint": "4D64FEC119C2029067D6E791F8D2585B8783D481",
+      "sha256": "521e9f6a9f9b92ee8d5ce74345e8cfd04028dae9db6f571259d584b293549824"
+    },
+    {
+      "file": "debian-bookworm-security.asc",
+      "fingerprint": "05AB90340C0C5E797F44A8C8254CF3B5AEC0A8F0",
+      "sha256": "74f81645b4e3156d1e9a88c8dd9259271b89c7099d64af89a2a6996b592faa1f"
+    },
+    {
+      "file": "debian-bullseye-security.asc",
+      "fingerprint": "AC530D520F2F3269F5E98313A48449044AAD5C5D",
+      "sha256": "716e79393c724d14ecba8be46e99ecbe1b689f67ceff3cb3cab28f6e69e8b8b8"
+    }
+  ],
+  "archives": [
+    {
+      "id": "bookworm",
+      "url": "https://snapshot.debian.org/archive/debian/20261011T000000Z",
+      "suite": "bookworm",
+      "inReleaseSha256": "77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa"
+    },
+    {
+      "id": "security",
+      "url": "https://snapshot.debian.org/archive/debian-security/20261011T000000Z",
+      "suite": "bookworm-security",
+      "inReleaseSha256": "af6f0df56cc8fb5e8ee8b9431cee886b7f7cb352f21b268fface12799d0de815"
+    }
+  ],
+  "packages": [
+    "bash",
+    "dash",
+    "coreutils",
+    "git",
+    "python3",
+    "e2fsprogs",
+    "ca-certificates"
+  ],
+  "builderCommit": "180d3effd7ddbb9406aeea0912f76c78ef20cf75",
+  "packageLockSha256": "b0127b7a8f1fa2f8b2a06236cef26e1f1b297bacf9d70e800440df8747d93252",
+  "expectedArtifact": {
+    "runtimeSha256": "4eee5d4ce741b5e6aab0e8345f067d4fb9c08cdbb1c5b0a0aef22d36b3000c08",
+    "cpioSha256": "83abcaf8807966b8ae293c10bae4059ffc450076d68d7eb871fd5faf40e522e3",
+    "rootManifestSha256": "2a14c91bd7c6cabf331dfa4fbb879a7a12939455526ad346f7d993844279d114",
+    "helperBinarySha256": {
+      "file-worker.c": "8fc771e368d0023ac4a15c598e746ca4ebf01d8be7c4fcb56a01645ecc7260f2",
+      "linux-tool-compartment.c": "8e25216ed26f59da65c8ac01de758631e7cc7e871994175da74ceb9cdb3bc2d1",
+      "process-worker.c": "ea0cec51eafa0b8e320b8629d0e8009d9d50e83061f7e01f7dea490998baf156"
+    }
+  }
+}
