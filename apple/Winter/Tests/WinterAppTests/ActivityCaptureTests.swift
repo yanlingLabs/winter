@@ -155,10 +155,18 @@ final class ActivityCaptureTests: XCTestCase {
     // `lsp` tool's), so a model trained on that shape sometimes emits it here. Such a call fails
     // the daemon's zod parse — but `tool_call` is emitted BEFORE execution, so the row still
     // renders and may as well say which file was meant.
+    //
+    // Since the Winter agent runtime (2026-09-26) `file_path` is also the runtime's own `Read` argument
+    // (`winter-agent-sdk/packages/runtime/src/tools/descriptors/read.ts`), so this is the shape live
+    // traffic takes — and such a call also carries its whole absolute path as `readPath` (2026-10-13),
+    // for EVERY file, not only images: the transcript resolves bare names against a read's folder
+    // (`transcriptSessionDirectories`), and only the tool row's thumbnail judges whether it is a picture
+    // (`toolCallReadImagePath`).
     func testReadDetailAcceptsFilePathAsBelt() {
         var s = openTurnState()
         s = SessionReducer.reduce(s, toolCall("read", seq: 3, argsJson: #"{"file_path":"/tmp/x.swift"}"#))
-        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "read", detail: "/tmp/x.swift", callId: "c3"))])
+        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "read", detail: "/tmp/x.swift", callId: "c3"),
+                                                      readPath: "/tmp/x.swift")])
     }
 
     func testGrepDetailExtractsPattern() {

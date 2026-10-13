@@ -725,7 +725,10 @@ final class ComposerImagesTests: XCTestCase {
         a.composerDraft = sent + "\nand then"
         XCTAssertTrue(a.attachChip(.image(ComposerImage(data: jpeg, mediaType: "image/jpeg"))))
         a.composerSendSucceeded(sentDraft: sent, sentAttachments: outgoing.sentAttachmentIDs)
-        XCTAssertEqual(a.composerDraft, "and then")
+        // Chips are inline (2026-10-13): the one attached meanwhile is its marker in the text, where the
+        // text view put it (marker + space, as `attachChip` does) — nothing of the SENT draft is left.
+        let kept = try XCTUnwrap(a.composerAttachments.items.first?.id)
+        XCTAssertEqual(a.composerDraft, "and then" + String(composerAttachmentMarker(kept)) + " ")
         XCTAssertEqual(a.composerChips.map(\.name), ["Image #1"], "the chip attached meanwhile stays (renumbered as the draft's first)")
         XCTAssertEqual(a.composerAttachments.items.first?.image, ComposerImage(data: jpeg, mediaType: "image/jpeg"))
 
