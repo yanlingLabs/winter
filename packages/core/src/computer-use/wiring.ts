@@ -22,10 +22,10 @@ import {
 } from "../settings";
 import { AppAdapters, type AppAdapter } from "./adapters";
 import { installedBrowser, systemAppResolver } from "./app-resolve";
-import { BrowserLink } from "./browser/cef-link/rpc";
+import { BrowserLink, type HeadlessLinkActions } from "./browser/cef-link/rpc";
 import { BrowserEngine } from "./browser/engine";
 import { BrowserBackendRegistry } from "./browser/registry";
-import { resolveWinterHeadless } from "./browser/headless/engines";
+import { resolveWinterHeadless, winterAppRequirementFor } from "./browser/headless/engines";
 import { HEADLESS_NAME, HeadlessPool, sweepHeadless, type HeadlessPoolDeps } from "./browser/headless/pool";
 import { processSatisfiesRequirement } from "./helper-verify";
 import { DiffBases } from "./diff-base";
@@ -59,7 +59,7 @@ export interface ComputerUseInjection {
   /** Phase 2: is a browser app installed (default: a LaunchServices lookup, never a launch)? */
   browserInstalled?: (bundleId: string) => boolean;
   /** Phase 4: the headless pool's engine seams (a fake helper on its pipe, no signature check) — tests only. */
-  headless?: Partial<Pick<HeadlessPoolDeps, "resolve" | "spawn" | "verify" | "memoryOf" | "idleExitMs" | "enabledPollMs" | "timeouts">>;
+  headless?: Partial<Pick<HeadlessPoolDeps, "resolve" | "spawn" | "verify" | "memoryOf" | "idleExitMs" | "enabledPollMs" | "timeouts" | "presentStartMs">>;
   /** Wake triggers (2026-10-12): FAKE backends in place of the real ones (the e2e drives a trigger through a real
    *  daemon), and the registry's timing seams. Never set in production. */
   wakeBackends?: WakeBackends;
@@ -271,15 +271,20 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       ...(fold.activeTabId === undefined ? {} : { activeTabId: fold.activeTabId }),
     };
   };
-  const browserLink = new BrowserLink({
-    registry: backends, log,
+  // Lane H3: the person's panel actions on headless tabs reach the pool (made just below).
+  const headlessActions: HeadlessLinkActions = {
+    list: (sessionId) => headless.panelTabs(sessionId),
+    act: (sessionId, tabId, action) => headless.panelAction(sessionId, tabId, action),
+  };
+  const browserLink: BrowserLink = new BrowserLink({
+    registry: backends, log, headless: headlessActions,
     tabUrl: (sessionId, tabId) => winterWebTabs(sessionId).tabs.find((t) => t.tabId === tabId)?.url,
   });
   // Phase 4: Winter's headless browser — the `headless` backend, its engine started on the first tab. A helper and a
   // cache an earlier daemon left behind go first (this daemon is starting: nothing of them can be in use).
   const telemetry = new AutomationTelemetry(deps.home);
   sweepHeadless(deps.home, { log });
-  const headless = new HeadlessPool({
+  const headless: HeadlessPool = new HeadlessPool({
     home: deps.home,
     enabled: () => computerUseHeadlessEnabledFrom(settings()),
     // A daemon off its profile's own home finds the helper only through `$WINTER_HEADLESS_APP` (never an installed one).
@@ -290,6 +295,12 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     ...(deps.inject?.headless?.idleExitMs === undefined ? {} : { idleExitMs: deps.inject.headless.idleExitMs }),
     ...(deps.inject?.headless?.enabledPollMs === undefined ? {} : { enabledPollMs: deps.inject.headless.enabledPollMs }),
     ...(deps.inject?.headless?.timeouts === undefined ? {} : { timeouts: deps.inject.headless.timeouts }),
+    // Lane H3: Winter.app's panel shows a headless tab (the browser link's feature `headless`); the helper accepts only
+    // Winter's own app as its viewer.
+    viewer: () => browserLink.headlessViewer(),
+    viewerMissing: () => browserLink.headlessViewerMissing(),
+    viewerRequirement: () => winterAppRequirementFor(deps.profile),
+    ...(deps.inject?.headless?.presentStartMs === undefined ? {} : { presentStartMs: deps.inject.headless.presentStartMs }),
     metric: (m) => telemetry.primitive(m),
     log,
   });
@@ -327,6 +338,12 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     headlessSessionEnded: (sessionId) => headless.disposeSession(sessionId),
     headlessReason: () => headless.reason,
     headlessLocalNetworkRefusedAt: (tabKey) => headless.localNetworkRefusedAt(tabKey),
+    headlessPresentMissing: () => headless.presentMissing(),
+    headlessHandBack: (tabKey) => headless.handBack(tabKey),
+    headlessHandoffOver: (tabKey) => headless.handoffOver(tabKey),
+    headlessView: (tabKey) => headless.view(tabKey),
+    headlessHeld: (tabKey) => headless.held(tabKey),
+    headlessHolds: (tabKey) => headless.holds(tabKey),
     // Wake triggers: the helper's input to a browser bound as an APP reaches its page as trusted DOM events — Winter's
     // own, never the user's action on a tab trigger (the service records it per app, from every session).
     ownAppInputAt: (bundleId, at) => service?.ownAppInputAt(bundleId, at) === true,

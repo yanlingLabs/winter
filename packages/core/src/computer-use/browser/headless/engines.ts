@@ -44,6 +44,19 @@ export function headlessRequirementFor(profile: WinterProfile, override: boolean
   return `identifier "${headlessBundleIdFor(profile)}" and ${anchor}`;
 }
 
+/** Winter.app's bundle id per profile: dist `com.winter.app`, dev `com.winter.app.dev` ("Winter Dev"). */
+export function winterAppBundleIdFor(profile: WinterProfile): string {
+  return profile === "dev" ? "com.winter.app.dev" : "com.winter.app";
+}
+
+/**
+ * Lane H3 — the code requirement Winter Headless holds the VIEWER of a presentation to (checked against the viewer's
+ * audit token on its first message): Winter's own app for this daemon's profile, signed by Winter's team.
+ */
+export function winterAppRequirementFor(profile: WinterProfile, teamId: string = WINTER_TEAM_ID): string {
+  return `identifier "${winterAppBundleIdFor(profile)}" and anchor apple generic and certificate leaf[subject.OU] = "${teamId}"`;
+}
+
 /** Where the Winter Headless app should be for this daemon. */
 export function winterHeadlessAppPath(profile: WinterProfile, env: NodeJS.ProcessEnv = process.env, execPath: string = process.execPath): { path: string; override: boolean } {
   const override = env.WINTER_HEADLESS_APP;

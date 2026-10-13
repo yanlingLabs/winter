@@ -38,6 +38,7 @@ import { HttpReader } from "./http-read";
 import { TransportError, type BackendId, type BrowserFamily, type CdpTransport, type TransportTab } from "./transport";
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
 import { HEADLESS_ENGINES } from "./headless/engines";
+import { HEADLESS_USER_HAS_TAB, HELD_TAB_PRIMITIVES } from "./headless/lease";
 import { HEADLESS_LAN_REFUSAL, isPrivateNetworkUrl } from "./headless/private-network";
 import { BODY_DEFAULT_CHARS, BODY_MAX_CHARS, isTextMime, redactBody } from "./body-redact";
 import { bytesLabel, CONSOLE_LEVELS, consoleLine, requestLine } from "./devtools";
@@ -115,6 +116,19 @@ export interface BrowserEngineDeps {
   headlessReason?(): string | undefined;
   /** When Winter Headless last refused a request of this tab to the local network (the pool's `localNetworkRefusedAt`). */
   headlessLocalNetworkRefusedAt?(tabKey: string): number | undefined;
+  /** Lane H3: why a headless tab can't be shown in Winter's panel now (undefined: it can) — `waitForUser` on one. */
+  headlessPresentMissing?(): string | undefined;
+  /** Lane H3: the person pressed Done on a shown headless tab — control returns to the agent and the panel's view goes. */
+  headlessHandBack?(tabKey: string): Promise<void>;
+  /** Lane H3: a `waitForUser` on a shown headless tab ended without Done — the tab stays with the person. */
+  headlessHandoffOver?(tabKey: string): void;
+  /** Lane H3: the view a headless tab's page is laid out in, once it differs from the agent's own (a tab shown in Winter's
+   *  panel follows the panel's size): how often it changed, its size, and whether a person is watching it now. */
+  headlessView?(tabKey: string): { epoch: number; width: number; height: number; watched: boolean } | undefined;
+  /** Lane H3: does the person hold this headless tab in Winter's panel now (what its page does is theirs)? */
+  headlessHeld?(tabKey: string): boolean;
+  /** Lane H3: how many times the person has held this headless tab, and when the latest hold began. */
+  headlessHolds?(tabKey: string): { count: number; since: number } | undefined;
   now?(): number;
   log?(line: string): void;
   /** Phase 4: the plain-HTTP page reader `browsers.read` uses (default: one on the system resolver and `fetch`). */
@@ -181,14 +195,15 @@ export function wakeHoldsFull(waiting: number, scope: "session" | "all"): string
 /** How long a failed headless navigation waits for the browser's local-network notice (it can trail the answer). */
 const HEADLESS_REFUSAL_GRACE_MS = 400;
 
-/** Phase 4 (the user's ruling on headless tabs): a headless tab is nobody's but the agent's — never handed over, never
- *  shown. */
-export const HEADLESS_KEEP = "a headless tab can't be handed to the user — nobody can see it; open the page with browsers.open(url) in Winter's browser to show them";
+/** Phase 4 (the user's ruling on headless tabs): a headless tab is nobody's but the agent's — never handed over. It can
+ *  be SHOWN to the user (lane H3: `waitForUser`, the page drawn in Winter's panel) and stays the agent's. */
+export const HEADLESS_KEEP = "a headless tab can't be handed to the user to keep — it stays in Winter's private browser; to show it to them, call waitForUser() on it (Winter's panel shows the live page), or open the page with browsers.open(url) in Winter's browser";
+/** Lane H3: the hand-off card for a headless tab offers only to show it — nothing of it can be done anywhere else. */
+export const HANDOFF_ASK_OPTIONS_HEADLESS = [{ id: "handoff_show", label: "Show me the tab" }] as const;
 /** What a headless tab can't do, by primitive (the same ruling; the headless browser never downloads and has no sound). */
 function headlessRefusal(primitive: string, args: Record<string, unknown>): string | undefined {
   switch (primitive) {
     case "keep": return HEADLESS_KEEP;
-    case "waitForUser": return "nobody can see a headless tab, so the user can't act in it — open the page with browsers.open(url) in Winter's browser and call waitForUser() there";
     case "download": return "Winter's headless browser doesn't download files — open the page with browsers.open(url) in Winter's browser to download it";
     case "mute": return args.on === false ? "a headless tab never plays sound" : undefined;
     default: return undefined;
@@ -325,6 +340,10 @@ export class BrowserEngine {
         scope.metric.headlessEngine = "winter";
         const refusal = headlessRefusal(primitive, args);
         if (refusal !== undefined) throw new AutomationFailure("NotAllowed", refusal);
+        // The person holds the tab in Winter's panel: nothing of it is the agent's — no read from what the driver already
+        // has (console, network, a state diff), no command — until they hand it back. Letting go, keeping it and waiting
+        // for the person still work.
+        if (this.deps.headlessHeld?.(b.tabKey) === true && !HELD_TAB_PRIMITIVES.has(primitive)) throw new AutomationFailure("TargetBusy", HEADLESS_USER_HAS_TAB);
       }
       const act = !OBSERVE_PRIMITIVES.has(primitive);
       // A site's own tool (WebMCP) is called only while the setting allows it — said before any card.
@@ -346,9 +365,23 @@ export class BrowserEngine {
       // user's).
       if (act) driver.beginOwnInput();
       try {
+        if (this.isHeadless(b.backend)) {
+          // Lane H3: the page was re-laid out in another size since the agent last looked (the panel's while the user
+          // watches, its own after) — a Point of an earlier screenshot is refused from here on; and the person held the
+          // tab in between — what its page logged and loaded meanwhile was theirs. Each said once, once the agent has the
+          // tab again.
+          driver.syncView(this.deps.headlessView?.(b.tabKey));
+          driver.noteHolds(this.deps.headlessHolds?.(b.tabKey));
+        }
         await driver.ensureAttached(scope.sessionId);
         scope.live();
+        for (const line of driver.takeNotes()) scope.builder.daemonLine(line);
         if (!BLOCKED_TAB_PRIMITIVES.has(primitive)) await this.siteFloor(scope, b, driver);
+        // Again, right before the work: the lock, the attach and a site card can each wait long enough for the person to
+        // take the tab over meanwhile.
+        if (this.isHeadless(b.backend) && this.deps.headlessHeld?.(b.tabKey) === true && !HELD_TAB_PRIMITIVES.has(primitive)) {
+          throw new AutomationFailure("TargetBusy", HEADLESS_USER_HAS_TAB);
+        }
         return await this.run(scope, b, driver, primitive, args);
       } finally {
         driver.busy--;
@@ -621,7 +654,8 @@ export class BrowserEngine {
       live.add(transport);
       if (this.hooked.has(transport)) continue;
       const off = [
-        transport.onEvent((e) => this.drivers.get(tabKeyOf(id, e.tabKey))?.onEvent(e)),
+        // A headless tab the person holds in Winter's panel: its page is followed, but what it does is theirs.
+        transport.onEvent((e) => this.drivers.get(tabKeyOf(id, e.tabKey))?.onEvent(e, { person: this.personHolds(id, e.tabKey) })),
         transport.onTabGone((tabKey, reason) => this.tabGone(id, tabKey, reason)),
         transport.onStop((tabKey) => this.stopPressed(id, tabKey)),
         // The hand-off's Done / Stop waiting in the browser itself (Winter for Chrome's toolbar popup).
@@ -812,6 +846,9 @@ export class BrowserEngine {
   }
 
   private isHeadless(backend: BackendId): boolean { return this.familyOf(backend) === "headless"; }
+  private personHolds(backend: BackendId, tabKey: string): boolean {
+    return this.deps.headlessHeld !== undefined && this.isHeadless(backend) && this.deps.headlessHeld(tabKey);
+  }
 
   private browserName(backend: BackendId): string {
     if (this.familyOf(backend) === "winter") return "Winter's browser";
@@ -1894,8 +1931,12 @@ export class BrowserEngine {
     }
     if (scope.userCard === undefined) throw new Error("this Winter can't hand a tab to the user");
     const winter = this.familyOf(b.backend) === "winter";
+    const headless = this.isHeadless(b.backend);
     const name = this.browserName(b.backend);
     const transport = driver.transport;
+    // A headless tab is shown in Winter's panel (lane H3): Winter.app must be there and able to.
+    const cannotShow = headless ? this.deps.headlessPresentMissing?.() ?? (this.deps.headlessHandBack === undefined ? "this Winter can't show a headless tab" : undefined) : undefined;
+    if (cannotShow !== undefined) throw new AutomationFailure("BrowserUnavailable", `waitForUser() shows a headless tab in Winter's panel, and ${cannotShow}`);
     if (transport.present === undefined) {
       throw winter
         ? new Error("Winter's built-in browser can't show a tab to the user until Winter is updated")
@@ -1905,7 +1946,7 @@ export class BrowserEngine {
     const t0 = this.now();
     // Let the tab go first, for every session: whatever the user does in it from here is theirs alone.
     await driver.handOff();
-    const ask = await scope.userCard(`${name} — ${host}: ${reason}. Winter waits while you do it.`, HANDOFF_ASK_OPTIONS, total);
+    const ask = await scope.userCard(`${name} — ${host}: ${reason}. Winter waits while you do it.`, headless ? HANDOFF_ASK_OPTIONS_HEADLESS : HANDOFF_ASK_OPTIONS, total);
     scope.live();
     if (!ask.approved) {
       scope.builder.daemonLine(`the user did not take over (${ask.by === "timeout" ? "no answer" : "declined"})`);
@@ -1913,29 +1954,53 @@ export class BrowserEngine {
     }
     if (ask.optionId !== "handoff_done") {
       const key = tabKeyOf(b.backend, b.tabKey);
-      try { await transport.present(b.tabKey, { sessionId: sid }); } catch (err) { throw transportFailure(err, name); }
-      scope.builder.daemonLine(winter ? `showed the tab to the user in Winter's window` : `brought the tab forward in ${name} for the user`);
-      const left = Math.max(1_000, total - (this.now() - t0));
-      let wait: { approved: boolean; optionId?: string; by?: string };
       try {
-        wait = await scope.userCard(`Waiting for you on ${host} in ${name} — press Done when you have finished.`, HANDOFF_WAIT_OPTIONS, left,
-          (answer) => { this.handoffAnswers.set(key, answer); });
-      } finally {
-        this.handoffAnswers.delete(key);
-        // The browser's own waiting mark goes (Winter for Chrome's badge and pill).
-        if (!winter) transport.overlay(b.tabKey, { active: false });
-      }
-      scope.live();
-      if (wait.by === "tab-gone") throw new AutomationFailure("TargetLost", "the tab was closed while Winter waited for the user");
-      if (!wait.approved) {
-        scope.builder.daemonLine(`the user ${wait.by === "timeout" ? "did not finish in time" : "stopped the wait"} — the tab stays with them`);
-        return { done: false };
+        try { await transport.present(b.tabKey, { sessionId: sid }); } catch (err) { throw transportFailure(err, name); }
+        scope.builder.daemonLine(winter ? `showed the tab to the user in Winter's window`
+          : headless ? "showed the headless tab to the user in Winter's panel (the same live page — they have it until they press Done)"
+            : `brought the tab forward in ${name} for the user`);
+        const left = Math.max(1_000, total - (this.now() - t0));
+        let wait: { approved: boolean; optionId?: string; by?: string };
+        try {
+          wait = await scope.userCard(`Waiting for you on ${host} in ${name} — press Done when you have finished.`, HANDOFF_WAIT_OPTIONS, left,
+            (answer) => { this.handoffAnswers.set(key, answer); });
+        } finally {
+          this.handoffAnswers.delete(key);
+          // The browser's own waiting mark goes (Winter for Chrome's badge and pill).
+          if (!winter) transport.overlay(b.tabKey, { active: false });
+        }
+        scope.live();
+        if (wait.by === "tab-gone") throw new AutomationFailure("TargetLost", "the tab was closed while Winter waited for the user");
+        if (!wait.approved) {
+          // A headless tab stays shown, the user's, until they hand it back in the panel (the agent's commands on it are
+          // TargetBusy meanwhile).
+          if (headless) this.deps.headlessHandoffOver?.(b.tabKey);
+          scope.builder.daemonLine(`the user ${wait.by === "timeout" ? "did not finish in time" : "stopped the wait"} — the tab stays with them`);
+          return { done: false };
+        }
+        // Done: a headless tab's control comes back and the panel's view goes, before the agent takes the tab again.
+        if (headless) await this.deps.headlessHandBack?.(b.tabKey);
+      } catch (err) {
+        // The wait ended by any other road — the script cancelled (Esc, an interrupt, its timeout), the tab gone, the
+        // show failing: nobody waits on the tab any more. A headless tab the person holds stays theirs, its panel offering
+        // Hand back — never a Done that would answer nothing and leave the tab held for good.
+        if (headless) this.deps.headlessHandoffOver?.(b.tabKey);
+        throw err;
       }
     }
     // Done: the tab is taken again — a fresh look (every earlier ref is stale).
     await driver.ensureAttached(sid);
     scope.live();
     scope.builder.daemonLine(`the user finished on ${host}`);
+    // Whatever page the user left it on is the agent's to read only past the site floor, as for any bound tab: a listed
+    // host is carded (or blocked) now, never while the user had it.
+    try {
+      await this.siteFloor(scope, b, driver);
+    } catch (err) {
+      if (!(err instanceof AutomationFailure) || err.kind !== "NotAllowed") throw err;
+      scope.builder.daemonLine(err.message);
+      return { done: true };
+    }
     await this.printState(scope, b.targetId, driver, { full: true, settle: true });
     return { done: true };
   }

@@ -65,6 +65,10 @@ let chromiumArgv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?> = {
 // The local-network rule, before any browser can exist (unset, CEF would refuse every request).
 WinterCEFHeadlessSetRequestRule(headlessRequestRefused)
 
+// A presentation's file-chooser answers must lie in `<home>/cache/headless-uploads`, beside this run's own cache root
+// (`<home>/cache/headless-cef/<random>`); with any other layout, every answer is refused.
+if let uploads = arguments.uploadsRoot { WinterHeadlessPresenter.setUploadsRoot(uploads) }
+
 guard WinterCEFInitializeHeadless(Int32(chromiumArguments.count), chromiumArgv, layout.frameworkDir,
                                   layout.mainBundle, layout.subprocessPath, arguments.cacheRoot) else {
     fail("CEF did not start: \(String(cString: WinterCEFLastError()))", code: 4)
@@ -112,6 +116,21 @@ enum HeadlessMain {
             guard linkId == link.linkId else { return }
             let closed = host.disposeContext(sessionId: sessionId)
             link.reply(cmdId: cmdId, .ok(.object(["closed": .number(Double(closed))])))
+        case .present(let linkId, let cmdId, let request):
+            guard linkId == link.linkId else { return }
+            let link = link
+            host.present(request, reply: HeadlessReplier { link.reply(cmdId: cmdId, $0) })
+        case .unpresent(let linkId, let cmdId, let tabId):
+            guard linkId == link.linkId else { return }
+            let stats = host.unpresent(tabId: tabId)
+            link.reply(cmdId: cmdId, .ok(.object(stats.mapValues { JSONValue.number($0) })))
+        case .control(let linkId, let cmdId, let tabId, let control):
+            guard linkId == link.linkId else { return }
+            if host.setControl(tabId: tabId, control: control) {
+                link.reply(cmdId: cmdId, .empty)
+            } else {
+                link.reply(cmdId: cmdId, .failure(code: .notLive, message: "the headless tab is not presented"))
+            }
         case .command(let command):
             guard command.linkId == link.linkId else { return }
             guard WinterCEFHeadlessReady() else {

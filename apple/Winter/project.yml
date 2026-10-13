@@ -78,6 +78,8 @@ targets:
       # (the iOS ruling: the accent stays out of the sidebar).
       - path: Assets.xcassets
     dependencies:
+      # Headless presentation (Sources/HeadlessPresent): the peer's audit token (`audit_token_to_pid`).
+      - sdk: libbsm.tbd
       - package: WinterKit
       # 2026-10-02: `AgentMessageEnvelope` (another session's message) lives in the shared kit so the
       # phone reads it with the same parser — the app imports `WinterSessionKit` for it directly rather
@@ -984,6 +986,13 @@ targets:
     platform: macOS
     sources:
       - path: Sources/HeadlessHelper
+      - path: Sources/HeadlessPresent/WinterPresentWire.h
+      - path: Sources/HeadlessPresent/WinterPresentAuth.h
+      - path: Sources/HeadlessPresent/WinterPresentAuth.m
+      # The presentation's third-party notices (flutter_cef's MIT notice among them) ship in the helper that runs the
+      # producer, as they do in Winter.app.
+      - path: Sources/HeadlessPresent/THIRD_PARTY.md
+        buildPhase: resources
       - path: Sources/CEF/WinterCEF.h
       - path: Sources/CEF/WinterCEF.mm
       - path: Sources/CEF/WinterCEFAssetResolve.h
@@ -997,6 +1006,7 @@ targets:
       - path: ../WinterKit/Sources/WinterKit/BrowserLink/CDPAllowlist.swift
       - path: ../WinterKit/Sources/WinterKit/BrowserLink/CDPTabGate.swift
     dependencies:
+      - sdk: libbsm.tbd
       - target: CefDllWrapper
       # Build order only: "Embed Winter's Chromium" copies them into this app's own Contents/Frameworks.
       - target: CEFHelperBase

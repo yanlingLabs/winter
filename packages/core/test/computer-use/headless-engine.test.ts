@@ -4,6 +4,7 @@
 // as TargetBusy, and the listing.
 import { describe, expect, test } from "bun:test";
 import { HEADLESS_KEEP } from "../../src/computer-use/browser/engine";
+import { PERSON_HELD_NOTE, VIEW_RESIZED_POINT } from "../../src/computer-use/browser/tab-driver";
 import { HEADLESS_LAN_REFUSAL } from "../../src/computer-use/browser/headless/private-network";
 import { TransportError } from "../../src/computer-use/browser/transport";
 import { AutomationFailure } from "../../src/computer-use/errors";
@@ -129,14 +130,13 @@ describe("the local network (refused; this Mac allowed)", () => {
 });
 
 describe("the tab lifecycle (closed at the turn's end, never handed over)", () => {
-  test("keep() is refused; waitForUser, download and unmuting are refused; mute() is fine", async () => {
+  test("keep() is refused; download and unmuting are refused; mute() is fine", async () => {
     const h = withHeadless();
     const r = h.run();
     const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
     const keep = await failure(h.engine.primitive(r.scope, tab.targetId, "keep", {}));
     expect((keep as AutomationFailure).kind).toBe("NotAllowed");
     expect(keep.message).toBe(HEADLESS_KEEP);
-    expect((await failure(h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "sign in" }))).message).toMatch(/^nobody can see a headless tab/);
     expect((await failure(h.engine.primitive(r.scope, tab.targetId, "download", { target: { url: "https://a.example/f.zip" } }))).message).toMatch(/^Winter's headless browser doesn't download files/);
     expect((await failure(h.engine.primitive(r.scope, tab.targetId, "mute", { on: false }))).message).toBe("a headless tab never plays sound");
     await h.engine.primitive(r.scope, tab.targetId, "mute", {});
@@ -249,3 +249,299 @@ describe("the engine option and the budget", () => {
     r.end();
   });
 });
+
+describe("waitForUser() on a headless tab (lane H3): shown in Winter's panel, the same live page", () => {
+  function handoff(o: { answer?: (summary: string) => string | false | undefined; missing?: string } = {}) {
+    const handedBack: string[] = [];
+    const over: string[] = [];
+    const h = withHeadless({
+      ...(o.answer === undefined ? {} : { answer: o.answer }),
+      engineDeps: {
+        headlessPresentMissing: () => o.missing,
+        headlessHandBack: async (k) => { handedBack.push(k); },
+        headlessHandoffOver: (k) => { over.push(k); },
+      },
+    });
+    return { h, handedBack, over };
+  }
+
+  test("Show me the tab → shown in the panel; Done → control handed back BEFORE the agent takes the tab again; its state printed", async () => {
+    const answers: string[] = [];
+    let handedBackBeforeAttach: boolean | undefined;
+    const { h, handedBack } = handoff({ answer: (s) => { answers.push(s); return s.startsWith("Winter's headless browser — ") ? "handoff_show" : "handoff_done"; } });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://accounts.example/login", browser: "headless" }) as TabHandle;
+    const key = keyOf(tab);
+    const attach = h.headless.attach.bind(h.headless);
+    h.headless.attach = async (k, a) => { if (handedBack.length > 0 && handedBackBeforeAttach === undefined) handedBackBeforeAttach = true; return attach(k, a); };
+    const out = await h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "sign in" });
+    expect(out).toEqual({ done: true });
+    // Only "Show me the tab": nothing of a headless tab can be done anywhere else.
+    expect(h.cards.map((c) => c.options?.map((x) => x.id))).toEqual([["handoff_show"], ["handoff_done"]]);
+    expect(answers[0]).toBe("Winter's headless browser — accounts.example: sign in. Winter waits while you do it.");
+    expect(h.headless.presented).toEqual([`${key}@s1`]);
+    expect(handedBack).toEqual([key]);
+    expect(handedBackBeforeAttach).toBe(true);
+    const text = r.text();
+    expect(text).toContain("showed the headless tab to the user in Winter's panel");
+    expect(text).toContain("the user finished on accounts.example");
+    r.end();
+  });
+
+  test("Done from the panel itself answers the wait", async () => {
+    const { h, handedBack } = handoff({ answer: (s) => (s.startsWith("Winter's headless browser — ") ? "handoff_show" : undefined) });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const waiting = h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "sign in" });
+    for (let i = 0; i < 50 && h.cards.length < 2; i++) await new Promise((res) => setTimeout(res, 5));
+    h.headless.pressDone(keyOf(tab), true);
+    expect(await waiting).toEqual({ done: true });
+    expect(handedBack).toEqual([keyOf(tab)]);
+    r.end();
+  });
+
+  test("Stop waiting: { done: false }, the tab stays with the person (the pool is told), nothing handed back", async () => {
+    const { h, handedBack, over } = handoff({ answer: (s) => (s.startsWith("Winter's headless browser — ") ? "handoff_show" : false) });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    expect(await h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "sign in" })).toEqual({ done: false });
+    expect(over).toEqual([keyOf(tab)]);
+    expect(handedBack).toEqual([]);
+    expect(r.text()).toContain("the tab stays with them");
+    r.end();
+  });
+
+  test("a wait the script cancels (Esc, an interrupt, its timeout) leaves the tab the person's, with Hand back — never a Done that answers nothing", async () => {
+    const { h, handedBack, over } = handoff({ answer: (s) => (s.startsWith("Winter's headless browser — ") ? "handoff_show" : undefined) });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const waiting = h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "sign in" });
+    for (let i = 0; i < 50 && h.cards.length < 2; i++) await new Promise((res) => setTimeout(res, 5));
+    expect(h.cards).toHaveLength(2);
+    r.abort.abort();
+    await failure(waiting);
+    expect(over).toEqual([keyOf(tab)]);
+    expect(handedBack).toEqual([]);
+    r.end();
+  });
+
+  test("Winter's panel can't show it (the app gone or too old): BrowserUnavailable with why, before any card", async () => {
+    const { h } = handoff({ missing: "Winter isn't running — ask the user to open Winter", answer: () => "handoff_show" });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const e = await failure(h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "sign in" }));
+    expect((e as AutomationFailure).kind).toBe("BrowserUnavailable");
+    expect(e.message).toBe("waitForUser() shows a headless tab in Winter's panel, and Winter isn't running — ask the user to open Winter");
+    expect(h.cards).toEqual([]);
+    r.end();
+  });
+
+  test("the person holding the tab reads as TargetBusy with the pool's sentence", async () => {
+    const h = withHeadless();
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const send = h.headless.send.bind(h.headless);
+    h.headless.send = async (k, m, p, o) => { if (m === "Runtime.callFunctionOn" || m === "Runtime.evaluate") throw new TransportError("capacity", "the user has this tab in Winter's panel — it is theirs until they hand it back; work in another tab meanwhile", { userHasTab: true }); return send(k, m, p, o); };
+    const e = await failure(h.engine.primitive(r.scope, tab.targetId, "text", {}));
+    expect((e as AutomationFailure).kind).toBe("TargetBusy");
+    expect(e.message).toBe("the user has this tab in Winter's panel — it is theirs until they hand it back; work in another tab meanwhile");
+    r.end();
+  });
+});
+
+describe("the panel's size (lane H3): a tab shown in Winter's panel is laid out in it while the user looks", () => {
+  test("a Point of a screenshot from before a size change is refused, refs keep working, and the next primitive says so once", async () => {
+    let view: { epoch: number; width: number; height: number; watched: boolean } | undefined;
+    const h = withHeadless({ engineDeps: { headlessView: () => view } });
+    h.headless.pages["https://a.example/"] = { url: "https://a.example/", title: "A", nodes: [{ id: 1, role: "main", children: [{ id: 2, role: "button", name: "Go" }] }] };
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const p = (primitive: string, args: Record<string, unknown> = {}) => h.engine.primitive(r.scope, tab.targetId, primitive, args);
+    await p("screenshot", { emit: false });
+    await p("click", { target: [5, 5] });
+    // The user watches in Winter's panel: the page is laid out in its size.
+    view = { epoch: 1, width: 704, height: 900, watched: true };
+    const e = await failure(p("click", { target: [5, 5] }));
+    expect((e as AutomationFailure).kind).toBe("NotAllowed");
+    expect(e.message).toBe(VIEW_RESIZED_POINT);
+    expect(e.message).toBe("the tab was resized while the user was looking — take a new screenshot before using a Point");
+    await p("click", { target: 2 }); // a ref is found where it is now
+    await p("screenshot", { emit: false });
+    await p("click", { target: [5, 5] }); // a screenshot of the new size works
+    expect(r.text().split("the view is now 704×900 while the user watches").length - 1).toBe(1);
+    // The presentation ended: the agent's own view is back — said once more, and the panel-size shot's Points refused.
+    view = { epoch: 2, width: 1280, height: 800, watched: false };
+    expect((await failure(p("click", { target: [5, 5] }))).message).toBe(VIEW_RESIZED_POINT);
+    expect(r.text()).toContain("the view is back to 1280×800 — the user stopped watching");
+    expect(r.text().split("the view is back to 1280×800").length - 1).toBe(1);
+    r.end();
+  });
+});
+
+describe("what the person does in a headless tab they hold is theirs (lane H3)", () => {
+  const str = (value: string) => ({ type: "string", value });
+  /** What the pool says when the person takes a tab over: the agent's attachment let go (the tab itself lives on). */
+  const stopped = (h: ReturnType<typeof withHeadless>, key: string): void => {
+    for (const l of [...(h.headless as unknown as { gone: Set<(k: string, r: string) => void> }).gone]) l(key, "stopped");
+  };
+  const userHasTab = (): never => { throw new TransportError("capacity", "the user has this tab in Winter's panel — it is theirs until they hand it back; work in another tab meanwhile", { userHasTab: true }); };
+
+  test("what the page logs and loads while the person holds the tab never reaches console() or network(); the agent is told once", async () => {
+    let held = false;
+    let holds: { count: number; since: number } | undefined;
+    const h = withHeadless({ engineDeps: { headlessHeld: () => held, headlessHolds: () => holds } });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const key = keyOf(tab);
+    const p = (primitive: string, args: Record<string, unknown> = {}) => h.engine.primitive(r.scope, tab.targetId, primitive, args);
+    h.headless.pageEvent(key, "Runtime.consoleAPICalled", { type: "log", timestamp: Date.now(), args: [str("from the agent's time")] });
+    h.headless.pageEvent(key, "Network.requestWillBeSent", { requestId: "a1", request: { url: "https://a.example/api", method: "GET" }, type: "Fetch", timestamp: 1 });
+    // The person holds it in Winter's panel: the page is followed, its console and network are theirs.
+    held = true;
+    holds = { count: 1, since: Date.now() };
+    h.headless.pageEvent(key, "Runtime.consoleAPICalled", { type: "log", timestamp: Date.now(), args: [str("from the person's time")] });
+    h.headless.pageEvent(key, "Network.requestWillBeSent", { requestId: "p1", request: { url: "https://a.example/login", method: "POST" }, type: "Fetch", timestamp: 2 });
+    h.headless.pageEvent(key, "Network.loadingFinished", { requestId: "p1", timestamp: 3, encodedDataLength: 10 });
+    held = false;
+    const logs = JSON.stringify(await p("console", { emit: false }));
+    expect(logs).toContain("from the agent's time");
+    expect(logs).not.toContain("from the person's time");
+    const net = JSON.stringify(await p("network", { emit: false }));
+    expect(net).toContain("https://a.example/api");
+    expect(net).not.toContain("/login");
+    expect(r.text().split(PERSON_HELD_NOTE).length - 1).toBe(1);
+    // A second hold is said again — once.
+    holds = { count: 2, since: Date.now() };
+    await p("console", { emit: false });
+    await p("console", { emit: false });
+    expect(r.text().split(PERSON_HELD_NOTE).length - 1).toBe(2);
+    r.end();
+  });
+
+  test("the person going onto a listed site raises no card while they hold the tab; the agent's next act on that page meets the floor", async () => {
+    let held = false;
+    const h = withHeadless({ policy: "ask", dangerousAdded: ["evil.example"], answer: () => false, engineDeps: { headlessHeld: () => held } });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const key = keyOf(tab);
+    const p = (primitive: string, args: Record<string, unknown> = {}) => h.engine.primitive(r.scope, tab.targetId, primitive, args);
+    held = true;
+    stopped(h, key);
+    const attach = h.headless.attach.bind(h.headless);
+    h.headless.attach = async () => userHasTab();
+    h.headless.navigateTo(key, "https://evil.example/");
+    const busy = await failure(p("text"));
+    expect((busy as AutomationFailure).kind).toBe("TargetBusy");
+    expect(h.cards).toEqual([]);
+    // Handed back: the page the person left is carded at the agent's next act (declined here: blocked).
+    held = false;
+    h.headless.attach = attach;
+    const e = await failure(p("text"));
+    expect(h.cards).toHaveLength(1);
+    expect(h.cards[0]!.summary).toContain("evil.example");
+    expect((e as AutomationFailure).kind).toBe("NotAllowed");
+    expect(e.message).toContain("dangerous-domains list");
+    r.end();
+  });
+
+  test("Done on a tab the user left on a listed site: the floor comes first, and nothing of the page is printed when it is refused", async () => {
+    let key = "";
+    const h = withHeadless({
+      policy: "ask", dangerousAdded: ["evil.example"],
+      answer: (summary) => {
+        if (summary.startsWith("Winter's headless browser — ")) return "handoff_show";
+        if (summary.startsWith("Waiting for you")) { h.headless.navigateTo(key, "https://evil.example/"); return "handoff_done"; }
+        return false;
+      },
+      engineDeps: { headlessPresentMissing: () => undefined, headlessHandBack: async () => {}, headlessHandoffOver: () => {} },
+    });
+    const opener = h.run();
+    const tab = await h.engine.global(opener.scope, "browsers.open", { url: "https://accounts.example/", browser: "headless" }) as TabHandle;
+    opener.end();
+    key = keyOf(tab);
+    const r = h.run();
+    expect(await h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "sign in" })).toEqual({ done: true });
+    expect(h.cards.map((c) => c.summary).at(-1)).toContain("evil.example");
+    const text = r.text();
+    expect(text).toContain("the user finished on accounts.example");
+    expect(text).toContain("dangerous-domains list");
+    expect(text).not.toContain("<screen-data");
+    r.end();
+  });
+});
+
+describe("the control lease (lane H3): nothing of a tab the person holds is the agent's until they hand it back", () => {
+  const READS: Array<[string, Record<string, unknown>]> = [
+    ["state", {}], ["text", {}], ["find", { query: "Go" }], ["screenshot", { emit: false }], ["html", {}], ["console", {}], ["network", {}],
+  ];
+  const stopped = (h: ReturnType<typeof withHeadless>, key: string): void => {
+    for (const l of [...(h.headless as unknown as { gone: Set<(k: string, r: string) => void> }).gone]) l(key, "stopped");
+  };
+
+  test("every read, every time, for the whole hold — even one the driver could answer from what it already has", async () => {
+    let held = false;
+    const h = withHeadless({ engineDeps: { headlessHeld: () => held } });
+    h.headless.pages["https://a.example/"] = { url: "https://a.example/", title: "A", nodes: [{ id: 1, role: "main", children: [{ id: 2, role: "button", name: "Go" }] }] };
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const p = (primitive: string, args: Record<string, unknown> = {}) => h.engine.primitive(r.scope, tab.targetId, primitive, args);
+    for (const [primitive, args] of READS) await p(primitive, args);
+    // The person takes it over — and the backend, here, would still answer: the engine refuses on its own.
+    held = true;
+    const sentBefore = h.headless.sent.length;
+    for (let round = 0; round < 3; round++) {
+      for (const [primitive, args] of READS) {
+        const e = await failure(p(primitive, args));
+        expect({ primitive, kind: (e as AutomationFailure).kind, message: e.message }).toEqual({ primitive, kind: "TargetBusy", message: "the user has this tab in Winter's panel — it is theirs until they hand it back; work in another tab meanwhile" });
+      }
+    }
+    expect(h.headless.sent.length).toBe(sentBefore);
+    // Keeping it for the next turn still works during the hold.
+    await p("handoff", {});
+    // Handed back: the agent reads again.
+    held = false;
+    stopped(h, keyOf(tab));
+    for (const [primitive, args] of READS) await p(primitive, args);
+    r.end();
+  });
+
+  test("a hold that begins while the agent is attaching: that attach does not count, and the next read is refused", async () => {
+    let held = false;
+    const h = withHeadless({ engineDeps: { headlessHeld: () => held } });
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
+    const key = keyOf(tab);
+    const p = (primitive: string, args: Record<string, unknown> = {}) => h.engine.primitive(r.scope, tab.targetId, primitive, args);
+    stopped(h, key); // let go (idle): the next read attaches afresh
+    const attach = h.headless.attach.bind(h.headless);
+    h.headless.attach = async (k, a) => {
+      const got = await attach(k, a);
+      // The person takes it over just as the attach is answered: the pool lets the agent's attachment go.
+      held = true;
+      stopped(h, key);
+      return got;
+    };
+    const e = await failure(p("text"));
+    expect((e as AutomationFailure).kind).toBe("TargetBusy");
+    h.headless.attach = attach;
+    expect(((await failure(p("console"))) as AutomationFailure).kind).toBe("TargetBusy");
+    r.end();
+  });
+
+  test("#7 a hold that begins while the primitive waits (here on a site card) is checked again right before the work", async () => {
+    let held = false;
+    const h = withHeadless({ policy: "ask", dangerousAdded: ["evil.example"], answer: () => { held = true; return "once"; }, engineDeps: { headlessHeld: () => held } });
+    const opener = h.run();
+    const tab = await h.engine.global(opener.scope, "browsers.open", { url: "https://evil.example/", browser: "headless" }) as TabHandle;
+    opener.end();
+    held = false;
+    const r = h.run();
+    const sent = h.headless.sent.length;
+    const e = await failure(h.engine.primitive(r.scope, tab.targetId, "text", {}));
+    expect(h.cards.length).toBeGreaterThanOrEqual(2);
+    expect((e as AutomationFailure).kind).toBe("TargetBusy");
+    expect(h.headless.sent.slice(sent).filter((x) => x.method === "Runtime.callFunctionOn")).toEqual([]);
+    r.end();
+  });
+});
+

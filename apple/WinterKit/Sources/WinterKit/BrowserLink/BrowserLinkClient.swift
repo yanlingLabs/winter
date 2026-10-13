@@ -20,6 +20,16 @@ public protocol BrowserLinkHandler: AnyObject {
     /// handler that hands each command to CEF before returning keeps the daemon's order (a mouse press
     /// before its release). Answer exactly once, now or later, through `reply`.
     func browserLinkCommand(_ command: BrowserLinkCommand, reply: BrowserLinkReplier)
+    /// Feature `headless`: one `headless.*` command (show, hide, the session's tabs), in the same order as the
+    /// others. Answer exactly once through `reply`.
+    func browserLinkHeadlessCommand(_ command: BrowserLinkHeadlessCommand, reply: BrowserLinkReplier)
+}
+
+public extension BrowserLinkHandler {
+    /// A handler that cannot show headless tabs refuses them (its app should not name the feature).
+    func browserLinkHeadlessCommand(_ command: BrowserLinkHeadlessCommand, reply: BrowserLinkReplier) {
+        reply(.failure(code: .notAllowed, message: "this Winter can't show a headless tab"))
+    }
 }
 
 /// The answer door for ONE command. A second answer is ignored, so a late completion racing a
@@ -292,6 +302,12 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
     }
 
     private func handle(_ params: JSONValue, linkId: String) async {
+        // Feature `headless`'s ops have their own parser (`BrowserLinkHeadlessCommand`): the ordinary one's `Op`
+        // stays closed, since Winter Headless compiles it and switches over every case.
+        if let op = params["op"]?.stringValue, BrowserLinkHeadlessCommand.handles(op: op) {
+            await handleHeadless(params, linkId: linkId)
+            return
+        }
         switch BrowserLinkCommand.parse(params) {
         case .failure(let unreadable):
             configuration.log("browser link: unreadable command — \(unreadable.reason)")
@@ -310,6 +326,64 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
                 }
             }
         }
+    }
+
+    /// A `headless.*` op: read by its own parser, answered with a failure when it does not read (as any other
+    /// command is), handed to the handler in arrival order when it does.
+    private func handleHeadless(_ params: JSONValue, linkId: String) async {
+        switch BrowserLinkHeadlessCommand.parse(params) {
+        case .failure(let unreadable):
+            configuration.log("browser link: unreadable command — \(unreadable.reason)")
+            if let commandLink = unreadable.linkId, let cmdId = unreadable.cmdId, commandLink == linkId {
+                outbox.push(.result(linkId: linkId, cmdId: cmdId,
+                                    reply: .failure(code: .notAllowed, message: unreadable.reason)))
+            }
+        case .success(let command):
+            guard command.linkId == linkId else { return }
+            let reply = replier(linkId: linkId, cmdId: command.cmdId)
+            await MainActor.run {
+                if let handler = handlerBox.handler {
+                    handler.browserLinkHeadlessCommand(command, reply: reply)
+                } else {
+                    reply(.failure(code: .notLive, message: "Winter's panel is not available"))
+                }
+            }
+        }
+    }
+
+    // MARK: - Feature `headless`: the person's actions
+
+    /// `browserLink.headless {linkId, sessionId, tabId?, action}` — one of the person's actions on a session's
+    /// headless tab, from the panel. Returns the tabs for `.list` (nil for every other action).
+    ///
+    /// Sent straight on the link's connection, NOT through the outbox: the daemon may answer only after it has
+    /// sent the app a `headless.show` and read its result, and that result leaves through the outbox — queued
+    /// behind this request, it could never be sent.
+    @discardableResult
+    public func headless(sessionId: String, tabId: String?, action: BrowserLinkHeadlessAction) async throws -> [BrowserLinkHeadlessTab]? {
+        guard let (client, linkId, features) = currentConnection else { throw BrowserLinkHeadlessError.notConnected }
+        guard features.contains("headless") else { throw BrowserLinkHeadlessError.unsupported }
+        var params: [String: JSONValue] = [
+            "linkId": .string(linkId), "sessionId": .string(sessionId), "action": .string(action.rawValue),
+        ]
+        if let tabId { params["tabId"] = .string(tabId) }
+        let answer: JSONValue
+        do {
+            answer = try await client.request(BrowserLinkProtocol.Method.headless, params: .object(params))
+        } catch let rpc as RpcError {
+            if rpc.isMethodNotFound { throw BrowserLinkHeadlessError.unsupported }
+            // A negative code below -32000 is the daemon's own refusal (`data.code` names it); the client's own
+            // failures (a dropped connection, a timeout) carry small negative codes of its own.
+            if rpc.code <= -32000 || rpc.data?["code"]?.stringValue != nil {
+                throw BrowserLinkHeadlessError.refused(code: rpc.data?["code"]?.stringValue, message: rpc.message)
+            }
+            throw BrowserLinkHeadlessError.failed(message: rpc.message)
+        } catch {
+            throw BrowserLinkHeadlessError.failed(message: "\(error)")
+        }
+        guard action == .list else { return nil }
+        let rows = answer["tabs"]?.arrayValue ?? []
+        return rows.compactMap(BrowserLinkHeadlessTab.read)
     }
 
     private func teardown(_ client: WinterClient, _ watcher: ConnectionWatcher) async {

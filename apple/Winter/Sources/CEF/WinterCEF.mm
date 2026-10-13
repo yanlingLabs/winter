@@ -4906,6 +4906,8 @@ BOOL WinterCEFDidShutdown(void) {
 // ---------------------------------------------------------------------------------------------------
 
 #include <atomic>
+#include <cmath>
+#include <cstdlib>
 
 #include "include/cef_cookie.h"
 #include "include/cef_render_handler.h"
@@ -4922,20 +4924,161 @@ bool g_headless = false;
 
 /// The view a headless browser reports. Paint goes nowhere: the engine reads pixels only through
 /// `Page.captureScreenshot`, which the compositor answers on its own.
+/// Presentation (`WinterCEFHeadlessSet*Observer`, `WinterCEFHeadlessSetPresentation`). Main (CEF UI) thread only.
+void (^g_headless_paint_observer)(int, int, IOSurfaceRef, int, int, double) = nil;
+void (^g_headless_popup_observer)(int, int, int, int, int, int) = nil;
+void (^g_headless_cursor_observer)(int, int) = nil;
+/// Version 2 of a presentation (`WinterPresentWire.h`): where the IME composition is drawn, the page's dialogs and file
+/// choosers. Main (CEF UI) thread only.
+void (^g_headless_ime_observer)(int, int, int, NSArray<NSValue *> *) = nil;
+void (^g_headless_dialog_opened_observer)(int, int, NSString *, NSString *, NSString *) = nil;
+void (^g_headless_dialog_closed_observer)(int) = nil;
+/// The shown page's address and title, by browser id (`WinterCEFHeadlessSetPageObserver`).
+void (^g_headless_page_observer)(int, NSString *, NSString *) = nil;
+BOOL (^g_headless_file_chooser_handler)(int, int, int, NSArray<NSString *> *) = nil;
+/// A window the page opens while the person holds the browser (`WinterCEFHeadlessSetPopupAdopter`), and every headless
+/// browser's close (`WinterCEFHeadlessSetClosedObserver`).
+NSView *(^g_headless_popup_adopter)(int, NSString *) = nil;
+void (^g_headless_closed_observer)(int) = nil;
+/// Every applied change of a headless browser's view (`WinterCEFHeadlessSetViewObserver`).
+void (^g_headless_view_observer)(int, int, int, double) = nil;
+/// The dialog each headless browser holds now (type 0 alert, 1 confirm, 2 prompt, 3 beforeunload), by browser id.
+struct HeadlessDialogInfo {
+  int type;
+  std::string message;
+  std::string defaultText;
+  std::string origin;  // the page that raised it, `scheme://host[:port]` (empty when unknown)
+};
+/// Each headless browser's main-frame address and title as last reported, by browser id.
+struct HeadlessPage {
+  std::string url;
+  std::string title;
+};
+std::map<int, HeadlessPage> &HeadlessPages() {
+  static auto *pages = new std::map<int, HeadlessPage>();
+  return *pages;
+}
+/// `scheme://host[:port]` of `url` — what a dialog names as its author; empty for a URL with no host (data:, about:).
+std::string HeadlessOriginOf(const std::string &url) {
+  @autoreleasepool {
+    NSURLComponents *c = [NSURLComponents componentsWithString:[NSString stringWithUTF8String:url.c_str()] ?: @""];
+    if (c.scheme.length == 0 || c.host.length == 0) return std::string();
+    // An IPv6 literal keeps its brackets (`http://[::1]:8080`): without them its port could not be told from the address.
+    NSString *host = [c.host containsString:@":"] && ![c.host hasPrefix:@"["] ? [NSString stringWithFormat:@"[%@]", c.host] : c.host;
+    NSString *origin = c.port != nil ? [NSString stringWithFormat:@"%@://%@:%@", c.scheme, host, c.port]
+                                     : [NSString stringWithFormat:@"%@://%@", c.scheme, host];
+    return std::string(origin.UTF8String ?: "");
+  }
+}
+std::map<int, HeadlessDialogInfo> &HeadlessDialogs() {
+  static auto *dialogs = new std::map<int, HeadlessDialogInfo>();
+  return *dialogs;
+}
+/// File choosers a presentation's viewer answers, by request id: the callback and its browser.
+struct HeadlessFileChooser {
+  int browserId;
+  CefRefPtr<CefFileDialogCallback> callback;
+};
+std::map<int, HeadlessFileChooser> &HeadlessFileChoosers() {
+  static auto *choosers = new std::map<int, HeadlessFileChooser>();
+  return *choosers;
+}
+int g_headless_next_file_chooser = 0;
+/// The headless browsers a presentation's person holds now (`WinterCEFHeadlessSetUserControl`): they may take focus — the
+/// page's input method events need a focused widget — which an automated tab otherwise refuses.
+std::set<int> &HeadlessUserControlled() {
+  static auto *ids = new std::set<int>();
+  return *ids;
+}
+/// An in-page drag the person started in a presented browser (HTML5 drag and drop: a list reordered, a card moved):
+/// run inside the browser itself — its drag data handed straight back as the drop target's, the person's moves its drag
+/// moves, their release its drop — since there is no window here for a system drag. By browser id.
+struct HeadlessDrag {
+  CefRefPtr<CefDragData> data;
+  cef_drag_operations_mask_t allowed = DRAG_OPERATION_NONE;
+  cef_drag_operations_mask_t current = DRAG_OPERATION_NONE;
+  bool inside = true;
+};
+std::map<int, HeadlessDrag> &HeadlessDrags() {
+  static auto *drags = new std::map<int, HeadlessDrag>();
+  return *drags;
+}
+
+/// The view a headless browser lays its page out in — its size in CSS pixels — and its device scale. Nobody watching:
+/// the agent's fixed view (`WinterCEFHeadlessViewWidth`×`Height` at 1). Shown in Winter's panel: the panel's size in
+/// points at the screen's backing scale (`WinterCEFHeadlessSetPresentation`).
+struct HeadlessGeometry {
+  int width = WinterCEFHeadlessViewWidth;
+  int height = WinterCEFHeadlessViewHeight;
+  double scale = 1.0;
+  bool operator==(const HeadlessGeometry &o) const { return width == o.width && height == o.height && scale == o.scale; }
+  bool operator!=(const HeadlessGeometry &o) const { return !(*this == o); }
+  /// A frame `pixelWidth`×`pixelHeight` device pixels big was painted at this geometry.
+  bool Paints(int pixelWidth, int pixelHeight) const {
+    return std::abs(static_cast<long>(std::lround(width * scale)) - pixelWidth) <= 1 &&
+           std::abs(static_cast<long>(std::lround(height * scale)) - pixelHeight) <= 1;
+  }
+};
+
+/// A browser's view as applied (what `GetViewRect`/`GetScreenInfo` answer), the one before it (frames the compositor
+/// painted before it caught up), the newest wish, and when the view last changed. Two changes in quick succession (a
+/// presentation ending at one scale and the next starting at another a few milliseconds later) left the browser painting
+/// NOTHING — measured: no `OnAcceleratedPaint` at all afterwards, whatever was asked of it — so a change (of size or scale
+/// alike) is applied at most once per `kHeadlessScaleSettle`; a later wish waits for the rest of it, and only the last
+/// one is applied. A live resize of the panel therefore re-lays the page out at most every 300 ms.
+struct HeadlessViewState {
+  HeadlessGeometry applied;
+  HeadlessGeometry previous;
+  HeadlessGeometry wanted;
+  CFAbsoluteTime changedAt = 0;
+  bool scheduled = false;
+};
+std::map<int, HeadlessViewState> &HeadlessViewStates() {
+  static auto *states = new std::map<int, HeadlessViewState>();
+  return *states;
+}
+const CFTimeInterval kHeadlessScaleSettle = 0.3;
+
+/// The view `browser` is laid out in now (the agent's fixed one for a browser nobody has shown).
+HeadlessGeometry HeadlessAppliedGeometry(CefRefPtr<CefBrowser> browser) {
+  if (!browser) return HeadlessGeometry();
+  auto it = HeadlessViewStates().find(browser->GetIdentifier());
+  return it == HeadlessViewStates().end() ? HeadlessGeometry() : it->second.applied;
+}
+
+/// The geometry a frame of `pixelWidth`×`pixelHeight` was painted at: the applied view when its size is that, else the
+/// one before it (a frame the compositor painted before it caught up), else the applied scale with the size the frame
+/// itself has.
+HeadlessGeometry HeadlessGeometryOfFrame(CefRefPtr<CefBrowser> browser, int pixelWidth, int pixelHeight) {
+  auto it = browser ? HeadlessViewStates().find(browser->GetIdentifier()) : HeadlessViewStates().end();
+  const HeadlessGeometry applied = it == HeadlessViewStates().end() ? HeadlessGeometry() : it->second.applied;
+  if (applied.Paints(pixelWidth, pixelHeight)) return applied;
+  if (it != HeadlessViewStates().end() && it->second.previous.Paints(pixelWidth, pixelHeight)) return it->second.previous;
+  HeadlessGeometry g = applied;
+  g.width = static_cast<int>(std::lround(pixelWidth / applied.scale));
+  g.height = static_cast<int>(std::lround(pixelHeight / applied.scale));
+  return g;
+}
+
+
 class WinterHeadlessRenderHandler : public CefRenderHandler {
  public:
   WinterHeadlessRenderHandler() = default;
 
   void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect &rect) override {
-    rect = CefRect(0, 0, WinterCEFHeadlessViewWidth, WinterCEFHeadlessViewHeight);
+    const HeadlessGeometry g = HeadlessAppliedGeometry(browser);
+    rect = CefRect(0, 0, g.width, g.height);
   }
 
+  /// The "screen" is the view itself (a page's `screen.width` is what it is laid out in), at the view's device scale.
   bool GetScreenInfo(CefRefPtr<CefBrowser> browser, CefScreenInfo &screen_info) override {
-    const CefRect screen(0, 0, WinterCEFHeadlessViewWidth, WinterCEFHeadlessViewHeight);
-    screen_info.Set(1.0f, 24, 8, false, screen, screen);
+    const HeadlessGeometry g = HeadlessAppliedGeometry(browser);
+    const CefRect screen(0, 0, g.width, g.height);
+    screen_info.Set(static_cast<float>(g.scale), 24, 8, false, screen, screen);
     return true;
   }
 
+  /// Not called: every headless browser renders accelerated (`OnAcceleratedPaint`).
   void OnPaint(CefRefPtr<CefBrowser> browser,
                PaintElementType type,
                const RectList &dirtyRects,
@@ -4943,13 +5086,76 @@ class WinterHeadlessRenderHandler : public CefRenderHandler {
                int width,
                int height) override {}
 
-  /// A drag the page starts has nowhere to go: no window, no pasteboard of the user's. Cancelled.
+  /// The borrowed frame goes to the presentation, if any, synchronously: it must be read before this returns. With it,
+  /// the view it was painted at (a popup's: the view's now).
+  void OnAcceleratedPaint(CefRefPtr<CefBrowser> browser,
+                          PaintElementType type,
+                          const RectList &dirtyRects,
+                          const CefAcceleratedPaintInfo &info) override {
+    if (!g_headless_paint_observer || !browser || !info.shared_texture_io_surface) return;
+    IOSurfaceRef surface = reinterpret_cast<IOSurfaceRef>(info.shared_texture_io_surface);
+    const HeadlessGeometry g = type == PET_POPUP
+        ? HeadlessAppliedGeometry(browser)
+        : HeadlessGeometryOfFrame(browser, static_cast<int>(IOSurfaceGetWidth(surface)), static_cast<int>(IOSurfaceGetHeight(surface)));
+    g_headless_paint_observer(browser->GetIdentifier(), type == PET_POPUP ? 1 : 0, surface, g.width, g.height, g.scale);
+  }
+
+  void OnPopupShow(CefRefPtr<CefBrowser> browser, bool show) override {
+    if (g_headless_popup_observer && browser) g_headless_popup_observer(browser->GetIdentifier(), show ? 1 : 0, 0, 0, 0, 0);
+  }
+
+  /// Where the IME composition's characters are drawn (view CSS pixels), for a presentation's candidate window.
+  void OnImeCompositionRangeChanged(CefRefPtr<CefBrowser> browser,
+                                    const CefRange &selected_range,
+                                    const RectList &character_bounds) override {
+    if (!g_headless_ime_observer || !browser) return;
+    NSMutableArray<NSValue *> *rects = [NSMutableArray arrayWithCapacity:character_bounds.size()];
+    for (const CefRect &r : character_bounds) [rects addObject:[NSValue valueWithRect:NSMakeRect(r.x, r.y, r.width, r.height)]];
+    g_headless_ime_observer(browser->GetIdentifier(), static_cast<int>(selected_range.from), static_cast<int>(selected_range.to), rects);
+  }
+
+  void OnPopupSize(CefRefPtr<CefBrowser> browser, const CefRect &rect) override {
+    if (g_headless_popup_observer && browser) {
+      g_headless_popup_observer(browser->GetIdentifier(), 2, rect.x, rect.y, rect.width, rect.height);
+    }
+  }
+
+  /// A drag the page starts goes nowhere for the agent (no window, no pasteboard of the user's): cancelled. For the
+  /// PERSON holding a presented browser it is an in-page drag, run inside the browser (`HeadlessDrags`): its data
+  /// enters as the drop target's at once, and the person's moves and release (`WinterCEFHeadlessSendInput`) carry it.
   bool StartDragging(CefRefPtr<CefBrowser> browser,
                      CefRefPtr<CefDragData> drag_data,
                      DragOperationsMask allowed_ops,
                      int x,
                      int y) override {
-    return false;
+    if (!browser || !drag_data || HeadlessUserControlled().count(browser->GetIdentifier()) == 0) return false;
+    const int id = browser->GetIdentifier();
+    CefRefPtr<CefDragData> data = drag_data->Clone();
+    data->ResetFileContents();  // file contents may not be dragged into a web view
+    HeadlessDrag &drag = HeadlessDrags()[id];
+    drag.data = data;
+    drag.allowed = allowed_ops;
+    drag.current = DRAG_OPERATION_NONE;
+    drag.inside = true;
+    CefRefPtr<CefBrowser> held = browser;
+    // After this callback: the drag source's own bookkeeping comes first.
+    dispatch_async(dispatch_get_main_queue(), ^{
+      auto it = HeadlessDrags().find(id);
+      if (it == HeadlessDrags().end()) return;
+      CefMouseEvent event;
+      event.x = x;
+      event.y = y;
+      held->GetHost()->DragTargetDragEnter(it->second.data, event, it->second.allowed);
+      held->GetHost()->DragTargetDragOver(event, it->second.allowed);
+    });
+    Log("in-page drag for the person in control (id=%d)", id);
+    return true;
+  }
+
+  void UpdateDragCursor(CefRefPtr<CefBrowser> browser, DragOperation operation) override {
+    if (!browser) return;
+    auto it = HeadlessDrags().find(browser->GetIdentifier());
+    if (it != HeadlessDrags().end()) it->second.current = static_cast<cef_drag_operations_mask_t>(operation);
   }
 
  private:
@@ -5085,6 +5291,113 @@ class WinterHeadlessClient : public WinterClient {
 
   CefRefPtr<CefRenderHandler> GetRenderHandler() override { return render_; }
 
+  /// The page's cursor, for a presentation (a windowless browser has no view of its own to set it on).
+  bool OnCursorChange(CefRefPtr<CefBrowser> browser,
+                      CefCursorHandle cursor,
+                      cef_cursor_type_t type,
+                      const CefCursorInfo &custom_cursor_info) override {
+    if (g_headless_cursor_observer && browser) g_headless_cursor_observer(browser->GetIdentifier(), type);
+    return true;  // handled: nothing to set it on here
+  }
+
+  /// An automated tab refuses focus (the base) — except while a presentation's person holds it: their IME needs it.
+  bool OnSetFocus(CefRefPtr<CefBrowser> browser, FocusSource source) override {
+    if (browser && HeadlessUserControlled().count(browser->GetIdentifier()) > 0) return false;
+    return WinterClient::OnSetFocus(browser, source);
+  }
+
+  void OnAddressChange(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, const CefString &url) override {
+    WinterClient::OnAddressChange(browser, frame, url);
+    if (!frame || !frame->IsMain()) return;
+    const std::string u = url.ToString();
+    PageChanged(browser, &u, nullptr);
+  }
+
+  void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString &title) override {
+    WinterClient::OnTitleChange(browser, title);
+    const std::string t = title.ToString();
+    PageChanged(browser, nullptr, &t);
+  }
+
+  void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
+    if (browser) {
+      if (g_headless_closed_observer) g_headless_closed_observer(browser->GetIdentifier());
+      HeadlessUserControlled().erase(browser->GetIdentifier());
+      HeadlessDrags().erase(browser->GetIdentifier());
+      HeadlessViewStates().erase(browser->GetIdentifier());
+      HeadlessPages().erase(browser->GetIdentifier());
+      DialogGone(browser);
+      WinterCEFHeadlessCancelFileChoosers(browser->GetIdentifier());
+    }
+    WinterClient::OnBeforeClose(browser);
+  }
+
+  /// Held for the engine as before (the base) — and, for a presentation, recorded and said, so the person in control
+  /// can answer it in Winter's panel (`WinterCEFHeadlessSetDialogObservers`).
+  bool OnJSDialog(CefRefPtr<CefBrowser> browser,
+                  const CefString &origin_url,
+                  JSDialogType dialog_type,
+                  const CefString &message_text,
+                  const CefString &default_prompt_text,
+                  CefRefPtr<CefJSDialogCallback> callback,
+                  bool &suppress_message) override {
+    const bool held = WinterClient::OnJSDialog(browser, origin_url, dialog_type, message_text, default_prompt_text, callback, suppress_message);
+    if (held && browser) {
+      DialogHeld(browser, dialog_type == JSDIALOGTYPE_ALERT ? 0 : dialog_type == JSDIALOGTYPE_CONFIRM ? 1 : 2, message_text, default_prompt_text,
+                 HeadlessOriginOf(origin_url.ToString()));
+    }
+    return held;
+  }
+
+  bool OnBeforeUnloadDialog(CefRefPtr<CefBrowser> browser,
+                            const CefString &message_text,
+                            bool is_reload,
+                            CefRefPtr<CefJSDialogCallback> callback) override {
+    const bool held = WinterClient::OnBeforeUnloadDialog(browser, message_text, is_reload, callback);
+    if (held && browser) {
+      CefRefPtr<CefFrame> main = browser->GetMainFrame();
+      DialogHeld(browser, 3, message_text, CefString(), main ? HeadlessOriginOf(main->GetURL().ToString()) : std::string());
+    }
+    return held;
+  }
+
+  void OnResetDialogState(CefRefPtr<CefBrowser> browser) override {
+    WinterClient::OnResetDialogState(browser);
+    DialogGone(browser);
+  }
+
+  void OnDialogClosed(CefRefPtr<CefBrowser> browser) override {
+    WinterClient::OnDialogClosed(browser);
+    DialogGone(browser);
+  }
+
+  /// A presentation's person in control answers a file chooser in Winter's panel (`WinterCEFHeadlessSetFileChooser
+  /// Handler`); anywhere else it is cancelled as before (the base: `upload()` intercepts the chooser over DevTools first).
+  bool OnFileDialog(CefRefPtr<CefBrowser> browser,
+                    FileDialogMode mode,
+                    const CefString &title,
+                    const CefString &default_file_path,
+                    const std::vector<CefString> &accept_filters,
+                    const std::vector<CefString> &accept_extensions,
+                    const std::vector<CefString> &accept_descriptions,
+                    CefRefPtr<CefFileDialogCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (g_headless_file_chooser_handler && browser && callback) {
+      const int requestId = ++g_headless_next_file_chooser;
+      NSMutableArray<NSString *> *accept = [NSMutableArray arrayWithCapacity:accept_filters.size()];
+      for (const CefString &filter : accept_filters) [accept addObject:StringOf(filter)];
+      const int m = mode == FILE_DIALOG_OPEN_MULTIPLE ? 1 : mode == FILE_DIALOG_OPEN_FOLDER ? 2 : mode == FILE_DIALOG_SAVE ? 3 : 0;
+      HeadlessFileChoosers()[requestId] = {browser->GetIdentifier(), callback};
+      if (g_headless_file_chooser_handler(browser->GetIdentifier(), requestId, m, accept)) {
+        Log("file-chooser for a presentation's viewer (request %d)", requestId);
+        return true;
+      }
+      HeadlessFileChoosers().erase(requestId);
+    }
+    return WinterClient::OnFileDialog(browser, mode, title, default_file_path, accept_filters, accept_extensions,
+                                      accept_descriptions, callback);
+  }
+
   /// A navigation (and each of its redirects) the local-network rule refuses is cancelled before it is sent. The
   /// `cefQuery` router's call is owed only to a navigation that proceeds, so it is made only then.
   bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
@@ -5160,6 +5473,26 @@ class WinterHeadlessClient : public WinterClient {
                      CefBrowserSettings &settings,
                      CefRefPtr<CefDictionaryValue> &extra_info,
                      bool *no_javascript_access) override {
+    // A window the PERSON opened (a user gesture) while holding the browser in Winter's panel — a sign-in window, as a
+    // rule: created by CEF itself, so the page keeps its `window.opener` and the flow completes, windowless and
+    // accelerated like every headless browser, in the opener's context; the helper adopts it as a tab of the opener's
+    // session and the daemon shows it beside its opener. Every other window is cancelled and reported, as before.
+    if (browser && user_gesture && g_headless_popup_adopter && HeadlessUserControlled().count(browser->GetIdentifier()) > 0) {
+      NSView *key = g_headless_popup_adopter(browser->GetIdentifier(), StringOf(target_url));
+      if (key != nil) {
+        windowInfo.SetAsWindowless(kNullWindowHandle);
+        windowInfo.shared_texture_enabled = true;
+        WinterCEFBrowserCreation *creation = [[WinterCEFBrowserCreation alloc] init];
+        creation.parent = key;
+        WinterCEFTabBridge *bridge = BridgeFor(key);
+        bridge.creation = creation;
+        settings.windowless_frame_rate = kHeadlessFrameRate;
+        settings.background_color = 0xFFFFFFFF;
+        client = new WinterHeadlessClient(creation, bridge, render_);
+        Log("headless window opened by the person in control (opener id=%d)", browser->GetIdentifier());
+        return false;
+      }
+    }
     const bool cancel = WinterClient::OnBeforePopup(browser, frame, popup_id, target_url, target_frame_name,
                                                     target_disposition, user_gesture, popupFeatures, windowInfo,
                                                     client, settings, extra_info, no_javascript_access);
@@ -5186,6 +5519,34 @@ class WinterHeadlessClient : public WinterClient {
   }
 
  private:
+  void DialogHeld(CefRefPtr<CefBrowser> browser, int type, const CefString &message, const CefString &defaultText,
+                  const std::string &origin) {
+    const int id = browser->GetIdentifier();
+    HeadlessDialogs()[id] = {type, message.ToString(), defaultText.ToString(), origin};
+    if (g_headless_dialog_opened_observer) {
+      g_headless_dialog_opened_observer(id, type, StringOf(message), StringOf(defaultText),
+                                        [NSString stringWithUTF8String:origin.c_str()] ?: @"");
+    }
+  }
+
+  /// The main frame's address and title, recorded and said (a presentation's viewer names the page by them).
+  void PageChanged(CefRefPtr<CefBrowser> browser, const std::string *url, const std::string *title) {
+    if (!browser) return;
+    HeadlessPage &page = HeadlessPages()[browser->GetIdentifier()];
+    if (url) page.url = *url;
+    if (title) page.title = *title;
+    if (g_headless_page_observer) {
+      g_headless_page_observer(browser->GetIdentifier(), [NSString stringWithUTF8String:page.url.c_str()] ?: @"",
+                               [NSString stringWithUTF8String:page.title.c_str()] ?: @"");
+    }
+  }
+
+  void DialogGone(CefRefPtr<CefBrowser> browser) {
+    if (!browser) return;
+    const int id = browser->GetIdentifier();
+    if (HeadlessDialogs().erase(id) > 0 && g_headless_dialog_closed_observer) g_headless_dialog_closed_observer(id);
+  }
+
   CefRefPtr<CefRenderHandler> render_;
 };
 
@@ -5228,6 +5589,11 @@ void CreateWindowlessBrowserNow(NSView *key, const std::string &url, CefRefPtr<C
   // `SetAsWindowless` also sets the Alloy runtime style (`cef_mac.h`). No parent: there is no view to attach
   // dialogs or menus to, and none is wanted.
   window_info.SetAsWindowless(kNullWindowHandle);
+
+  // Accelerated: CEF composites on the GPU and hands each frame over as an IOSurface, no CPU readback — and only a
+  // browser created this way can be PRESENTED later (`WinterCEFHeadlessSetPaintObserver`): the mode is fixed at
+  // creation, and a presentation must never recreate the page.
+  window_info.shared_texture_enabled = true;
 
   WinterCEFBrowserCreation *creation = [[WinterCEFBrowserCreation alloc] init];
   creation.parent = key;  // held for the length of the creation, as `CreateBrowserNow` does
@@ -5480,6 +5846,300 @@ void WinterCEFHeadlessDisposeAllContexts(void) {
 
 int WinterCEFHeadlessContextCount(void) {
   return static_cast<int>(HeadlessContexts().size());
+}
+
+void WinterCEFHeadlessSetPaintObserver(void (^observer)(int browserId, int type, IOSurfaceRef surface, int cssWidth,
+                                                        int cssHeight, double scale)) {
+  g_headless_paint_observer = [observer copy];
+}
+
+void WinterCEFHeadlessSetPopupObserver(void (^observer)(int browserId, int kind, int x, int y, int width, int height)) {
+  g_headless_popup_observer = [observer copy];
+}
+
+void WinterCEFHeadlessSetCursorObserver(void (^observer)(int browserId, int cursorType)) {
+  g_headless_cursor_observer = [observer copy];
+}
+
+void WinterCEFHeadlessSetImeObserver(void (^observer)(int browserId, int rangeStart, int rangeEnd, NSArray<NSValue *> *rects)) {
+  g_headless_ime_observer = [observer copy];
+}
+
+void WinterCEFHeadlessSetDialogObservers(void (^opened)(int browserId, int type, NSString *message, NSString *defaultText,
+                                                         NSString *origin),
+                                         void (^closed)(int browserId)) {
+  g_headless_dialog_opened_observer = [opened copy];
+  g_headless_dialog_closed_observer = [closed copy];
+}
+
+BOOL WinterCEFHeadlessCurrentDialog(NSView *key, int *type, NSString **message, NSString **defaultText, NSString **origin) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return NO;
+  auto it = HeadlessDialogs().find(browser->GetIdentifier());
+  if (it == HeadlessDialogs().end()) return NO;
+  if (type) *type = it->second.type;
+  if (message) *message = [NSString stringWithUTF8String:it->second.message.c_str()] ?: @"";
+  if (defaultText) *defaultText = [NSString stringWithUTF8String:it->second.defaultText.c_str()] ?: @"";
+  if (origin) *origin = [NSString stringWithUTF8String:it->second.origin.c_str()] ?: @"";
+  return YES;
+}
+
+void WinterCEFHeadlessSetPageObserver(void (^observer)(int browserId, NSString *url, NSString *title)) {
+  g_headless_page_observer = [observer copy];
+}
+
+BOOL WinterCEFHeadlessCurrentPage(NSView *key, NSString **url, NSString **title) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return NO;
+  auto it = HeadlessPages().find(browser->GetIdentifier());
+  if (it == HeadlessPages().end()) return NO;
+  if (url) *url = [NSString stringWithUTF8String:it->second.url.c_str()] ?: @"";
+  if (title) *title = [NSString stringWithUTF8String:it->second.title.c_str()] ?: @"";
+  return YES;
+}
+
+void WinterCEFHeadlessSetFileChooserHandler(BOOL (^handler)(int browserId, int requestId, int mode, NSArray<NSString *> *accept)) {
+  g_headless_file_chooser_handler = [handler copy];
+}
+
+void WinterCEFHeadlessResolveFileChooser(int requestId, NSArray<NSString *> *paths) {
+  auto it = HeadlessFileChoosers().find(requestId);
+  if (it == HeadlessFileChoosers().end()) return;
+  CefRefPtr<CefFileDialogCallback> callback = it->second.callback;
+  HeadlessFileChoosers().erase(it);
+  if (!callback) return;
+  if (paths.count == 0) {
+    callback->Cancel();
+    Log("file-chooser cancelled by the viewer (request %d)", requestId);
+    return;
+  }
+  std::vector<CefString> files;
+  for (NSString *path in paths) files.push_back(CefString(path.UTF8String));
+  callback->Continue(files);
+  Log("file-chooser answered by the viewer (request %d, %zu file(s))", requestId, files.size());
+}
+
+void WinterCEFHeadlessSetPopupAdopter(NSView *(^adopter)(int openerBrowserId, NSString *url)) {
+  g_headless_popup_adopter = [adopter copy];
+}
+
+void WinterCEFHeadlessSetClosedObserver(void (^observer)(int browserId)) {
+  g_headless_closed_observer = [observer copy];
+}
+
+void WinterCEFHeadlessSetUserControl(NSView *key, BOOL control) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  const int id = browser->GetIdentifier();
+  if (control) {
+    HeadlessUserControlled().insert(id);
+    return;
+  }
+  HeadlessUserControlled().erase(id);
+  // A drag the person had in progress ends with their control: cancelled, nothing dropped.
+  auto drag = HeadlessDrags().find(id);
+  if (drag != HeadlessDrags().end()) {
+    if (drag->second.inside) browser->GetHost()->DragTargetDragLeave();
+    HeadlessDrags().erase(drag);
+    browser->GetHost()->DragSourceEndedAt(-1, -1, DRAG_OPERATION_NONE);
+    browser->GetHost()->DragSourceSystemDragEnded();
+  }
+}
+
+void WinterCEFHeadlessCancelFileChoosers(int browserId) {
+  for (auto it = HeadlessFileChoosers().begin(); it != HeadlessFileChoosers().end();) {
+    if (browserId == 0 || it->second.browserId == browserId) {
+      if (it->second.callback) it->second.callback->Cancel();
+      it = HeadlessFileChoosers().erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void WinterCEFHeadlessIme(NSView *key, int kind, NSString *text, int selectionStart, int selectionEnd, int replacementStart,
+                          int replacementEnd) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  const CefString value((text ?: @"").UTF8String);
+  const CefRange replacement = replacementStart >= 0 && replacementEnd >= replacementStart
+      ? CefRange(static_cast<uint32_t>(replacementStart), static_cast<uint32_t>(replacementEnd)) : CefRange::InvalidRange();
+  switch (kind) {
+    case 1: {  // set composition: one plain underline under the marked text
+      std::vector<CefCompositionUnderline> underlines;
+      CefCompositionUnderline line;
+      line.range = CefRange(0, static_cast<uint32_t>(text.length));
+      line.color = 0xFF000000;
+      line.background_color = 0;
+      line.thick = 0;
+      line.style = CEF_CUS_SOLID;
+      underlines.push_back(line);
+      const CefRange selection = selectionStart >= 0 && selectionEnd >= selectionStart
+          ? CefRange(static_cast<uint32_t>(selectionStart), static_cast<uint32_t>(selectionEnd))
+          : CefRange(static_cast<uint32_t>(text.length), static_cast<uint32_t>(text.length));
+      host->ImeSetComposition(value, underlines, replacement, selection);
+      break;
+    }
+    case 2: host->ImeCommitText(value, replacement, 0); break;
+    case 3: host->ImeFinishComposingText(false); break;
+    case 4: host->ImeCancelComposition(); break;
+    default: break;
+  }
+}
+
+void WinterCEFHeadlessEdit(NSView *key, int command, NSString *text) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  CefRefPtr<CefFrame> frame = browser->GetFocusedFrame();
+  if (!frame) frame = browser->GetMainFrame();
+  switch (command) {
+    case 1: if (frame) frame->Copy(); break;
+    case 2: if (frame) frame->Cut(); break;
+    // A paste is the TEXT Winter.app read from the pasteboard on the user's ⌘V, put in at the caret: this process never
+    // reads the pasteboard itself.
+    case 3: if (text.length > 0) browser->GetHost()->ImeCommitText(CefString(text.UTF8String), CefRange::InvalidRange(), 0); break;
+    case 4: if (frame) frame->SelectAll(); break;
+    case 5: if (frame) frame->Undo(); break;
+    case 6: if (frame) frame->Redo(); break;
+    case 7: if (frame) frame->Delete(); break;
+    default: break;
+  }
+}
+
+
+/// The wish, applied: CEF re-reads the view (`GetViewRect`) and the screen (`GetScreenInfo`) and lays the SAME document
+/// out again — a resize and a device-pixel-ratio change, never a reload.
+void ApplyHeadlessView(CefRefPtr<CefBrowser> browser, HeadlessViewState &state) {
+  if (state.wanted == state.applied) return;
+  state.previous = state.applied;
+  state.applied = state.wanted;
+  state.changedAt = CFAbsoluteTimeGetCurrent();
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  host->NotifyScreenInfoChanged();
+  host->WasResized();
+  host->Invalidate(PET_VIEW);
+  if (g_headless_view_observer) {
+    g_headless_view_observer(browser->GetIdentifier(), state.applied.width, state.applied.height, state.applied.scale);
+  }
+}
+
+/// What a presentation may ask for: a size of at least `WinterCEFHeadlessViewMinWidth`×`MinHeight` CSS pixels and at most
+/// `WinterCEFHeadlessViewMaxPixels` device pixels a side, a scale in [1, 4]; nothing (≤ 0): the agent's fixed view.
+HeadlessGeometry HeadlessClampedGeometry(int cssWidth, int cssHeight, double scale) {
+  HeadlessGeometry g;
+  g.scale = std::isfinite(scale) && scale > 1.0 ? std::min(scale, 4.0) : 1.0;
+  if (cssWidth > 0 && cssHeight > 0) {
+    const int most = static_cast<int>(static_cast<double>(WinterCEFHeadlessViewMaxPixels) / g.scale);
+    g.width = std::min(std::max(cssWidth, static_cast<int>(WinterCEFHeadlessViewMinWidth)), most);
+    g.height = std::min(std::max(cssHeight, static_cast<int>(WinterCEFHeadlessViewMinHeight)), most);
+  }
+  return g;
+}
+
+void WinterCEFHeadlessSetPresentation(NSView *key, int cssWidth, int cssHeight, double scale, int frameRate) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  const int id = browser->GetIdentifier();
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  host->SetWindowlessFrameRate(frameRate > 0 ? frameRate : kHeadlessFrameRate);
+  HeadlessViewState &state = HeadlessViewStates()[id];
+  state.wanted = HeadlessClampedGeometry(cssWidth, cssHeight, scale);
+  if (state.wanted == state.applied) {
+    host->Invalidate(PET_VIEW);
+    return;
+  }
+  const CFTimeInterval wait = state.changedAt + kHeadlessScaleSettle - CFAbsoluteTimeGetCurrent();
+  if (wait <= 0) {
+    ApplyHeadlessView(browser, state);
+    return;
+  }
+  host->Invalidate(PET_VIEW);
+  if (state.scheduled) return;
+  state.scheduled = true;
+  __weak NSView *weakKey = key;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    auto it = HeadlessViewStates().find(id);
+    if (it == HeadlessViewStates().end()) return;
+    it->second.scheduled = false;
+    NSView *k = weakKey;
+    CefRefPtr<CefBrowser> current = k == nil ? nullptr : BrowserForParent(k);
+    if (!current || current->GetIdentifier() != id) return;
+    ApplyHeadlessView(current, it->second);
+  });
+}
+
+void WinterCEFHeadlessSetViewObserver(void (^observer)(int browserId, int cssWidth, int cssHeight, double scale)) {
+  g_headless_view_observer = [observer copy];
+}
+
+BOOL WinterCEFHeadlessViewGeometry(NSView *key, int *cssWidth, int *cssHeight, double *scale) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return NO;
+  const HeadlessGeometry g = HeadlessAppliedGeometry(browser);
+  if (cssWidth) *cssWidth = g.width;
+  if (cssHeight) *cssHeight = g.height;
+  if (scale) *scale = g.scale;
+  return YES;
+}
+
+void WinterCEFHeadlessSendInput(NSView *key, int kind, int x, int y, int dx, int dy, int button, int clickCount,
+                                unsigned modifiers, int windowsKeyCode, int nativeKeyCode, unsigned short character,
+                                unsigned short unmodifiedCharacter) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  CefMouseEvent mouse;
+  mouse.x = x;
+  mouse.y = y;
+  mouse.modifiers = modifiers;
+  // An in-page drag the person started (`StartDragging`): their moves are its moves, their release its drop.
+  auto drag = HeadlessDrags().find(browser->GetIdentifier());
+  if (drag != HeadlessDrags().end() && (kind == 1 || kind == 3 || kind == 5)) {
+    HeadlessDrag &d = drag->second;
+    if (kind == 1) {
+      if (!d.inside) {
+        host->DragTargetDragEnter(d.data, mouse, d.allowed);
+        d.inside = true;
+      }
+      host->DragTargetDragOver(mouse, d.allowed);
+    } else if (kind == 5) {
+      if (d.inside) host->DragTargetDragLeave();
+      d.inside = false;
+    } else {
+      cef_drag_operations_mask_t op = DRAG_OPERATION_NONE;
+      if (d.inside) {
+        host->DragTargetDrop(mouse);
+        op = d.current;
+      }
+      HeadlessDrags().erase(drag);
+      host->DragSourceEndedAt(x, y, op);
+      host->DragSourceSystemDragEnded();
+    }
+    return;
+  }
+  const cef_mouse_button_type_t which = button == 2 ? MBT_RIGHT : button == 1 ? MBT_MIDDLE : MBT_LEFT;
+  switch (kind) {
+    case 1: host->SendMouseMoveEvent(mouse, false); break;                       // move
+    case 2: host->SendMouseClickEvent(mouse, which, false, clickCount > 0 ? clickCount : 1); break;  // down
+    case 3: host->SendMouseClickEvent(mouse, which, true, clickCount > 0 ? clickCount : 1); break;   // up
+    case 4: host->SendMouseWheelEvent(mouse, dx, dy); break;                     // wheel
+    case 5: host->SendMouseMoveEvent(mouse, true); break;                        // leave
+    case 6: case 7: case 8: {                                                    // key down / up / char
+      CefKeyEvent event;
+      event.type = kind == 6 ? KEYEVENT_RAWKEYDOWN : kind == 7 ? KEYEVENT_KEYUP : KEYEVENT_CHAR;
+      event.modifiers = modifiers;
+      event.windows_key_code = windowsKeyCode;
+      event.native_key_code = nativeKeyCode;
+      event.character = character;
+      event.unmodified_character = unmodifiedCharacter;
+      event.is_system_key = false;
+      host->SendKeyEvent(event);
+      break;
+    }
+    case 9: host->SetFocus(x != 0); break;                                       // focus / blur
+    default: break;
+  }
 }
 
 NSString *WinterCEFHeadlessPrintingOutcome(const char *sessionId) {

@@ -198,6 +198,12 @@ export class TabDriver {
   private loadSeen?: string;
   private readonly pokes = new Set<() => void>();
   private readonly shots = new Map<string, ShotFrame>();
+  /** The tab's view as last synced (`syncView`): screenshots are stamped with it. */
+  private viewEpoch = 0;
+  /** The person's holds of the tab as last counted (`noteHolds`). */
+  private holdsSeen = 0;
+  /** Daemon lines owed to the agent's next primitive (`takeNotes`). */
+  private notes: string[] = [];
   private shotCounter = 0;
   /** The `uniqueId` each recently created context reported (`<session>:<id>` → uniqueId): the browser reports a world's
    *  creation BEFORE it answers the `Page.createIsolatedWorld` that made it, so the id is matched up afterwards. */
@@ -345,6 +351,9 @@ export class TabDriver {
     if (!isWakeHolder(sessionId)) this.lastUsed = this.now();
     if (this.attached) { await this.syncMode(); return; }
     this.attaching ??= (async () => {
+      // Let go meanwhile (the backend said "stopped" — a headless tab's person taking it over, an app parking its
+      // browser): this attach is not the tab held, whatever of it succeeded.
+      const detachesAtStart = this.detaches;
       // Only wake holders: attached watch-only from the start (an idle detach recovered, a wake armed on a tab its
       // session does not hold now).
       this.watchMode = this.watchOnlyWanted;
@@ -380,6 +389,7 @@ export class TabDriver {
           if (this.viewportWish !== undefined) await this.applyViewport(this.viewportWish).catch(() => undefined);
         }
         await this.loadTopFrame();
+        if (this.detaches !== detachesAtStart) throw new AutomationFailure("TargetBusy", "the tab was let go while Winter was taking it — try again");
         this.attached = true;
         this.handedOffAt = undefined;
       } finally {
@@ -618,18 +628,22 @@ export class TabDriver {
 
   // ── events ──────────────────────────────────────────────────────────────────────────────────────
 
-  onEvent(e: CdpEvent): void {
+  /** One event of the tab. `person`: the user holds the tab in Winter's panel (a headless tab, lane H3) — the page is still
+   *  followed (its frames, navigations, dialogs), but what it logs, loads or downloads meanwhile is the person's and never
+   *  reaches `console()`, `network()` or the state's download line. */
+  onEvent(e: CdpEvent, o: { person?: boolean } = {}): void {
     const p = e.params as Record<string, any>;
     const session = e.cdpSessionId;
+    const person = o.person === true;
     for (const l of [...this.listeners]) {
       try { l(e); } catch { /* a listener never breaks the driver */ }
     }
     switch (e.method) {
       case "Runtime.consoleAPICalled": case "Runtime.exceptionThrown": case "Log.entryAdded": case "Network.responseReceived":
-        this.devtools.onEvent(e.method, p, session, (id) => this.isWinterContext(id, session));
+        if (!person) this.devtools.onEvent(e.method, p, session, (id) => this.isWinterContext(id, session));
         break;
       case "Page.downloadWillBegin": {
-        if (this.capturing > 0) break; // the armed capture says what became of it
+        if (this.capturing > 0 || person) break; // the armed capture says what became of it; the person's is theirs
         const name = typeof p.suggestedFilename === "string" && p.suggestedFilename.length > 0 ? p.suggestedFilename : "a file";
         if (this.uncaughtDownloads.length < 5) this.uncaughtDownloads.push(name.slice(0, 120));
         break;
@@ -742,12 +756,12 @@ export class TabDriver {
       case "Network.requestWillBeSent":
         this.inflight.add(`${session ?? ""}:${String(p.requestId)}`);
         this.lastRequestAt = this.now();
-        this.devtools.onEvent(e.method, p, session, () => false);
+        if (!person) this.devtools.onEvent(e.method, p, session, () => false);
         break;
       case "Network.loadingFinished":
       case "Network.loadingFailed":
         this.inflight.delete(`${session ?? ""}:${String(p.requestId)}`);
-        this.devtools.onEvent(e.method, p, session, () => false);
+        if (!person) this.devtools.onEvent(e.method, p, session, () => false);
         break;
       case "Target.attachedToTarget": {
         const child = typeof p.sessionId === "string" ? p.sessionId : undefined;
@@ -1494,7 +1508,44 @@ export class TabDriver {
     const shot = shotId === undefined ? undefined : this.shots.get(shotId);
     if (shot === undefined) throw new AutomationFailure("NotAllowed", "a point is pixels in this tab's latest screenshot — take tab.screenshot() first, or use an element ref");
     if (shot.fullPage === true) throw new AutomationFailure("NotAllowed", "a full-page screenshot is for looking — take an ordinary screenshot() to act at a point, or use an element ref");
+    if ((shot.viewEpoch ?? 0) !== this.viewEpoch) throw new AutomationFailure("NotAllowed", VIEW_RESIZED_POINT);
     return toCss(shot, x, y);
+  }
+
+  /**
+   * Lane H3: the view a headless tab's page is laid out in, as the pool last heard it from the helper — a tab shown in
+   * Winter's panel is laid out in the panel's size while the person looks (watching too), and gets the agent's 1280×800
+   * back after. Called at the start of every primitive. A change since the last call (a new `epoch`): the Points of
+   * every screenshot taken before it are refused (`VIEW_RESIZED_POINT`) — refs keep working — and the one daemon line
+   * for the state header is answered, once.
+   */
+  syncView(view: { epoch: number; width: number; height: number; watched: boolean } | undefined): void {
+    const epoch = view?.epoch ?? 0;
+    if (epoch === this.viewEpoch) return;
+    this.viewEpoch = epoch;
+    if (view === undefined) return;
+    this.notes.push(view.watched ? `the view is now ${view.width}×${view.height} while the user watches`
+      : `the view is back to ${view.width}×${view.height} — the user stopped watching`);
+  }
+
+  /**
+   * Lane H3: the person's holds of a headless tab in Winter's panel, as the pool counts them (and when the latest
+   * began). A new one since the last call: what the browser replays on Winter's next attach from then on is hidden, as
+   * after a hand-off (`ensureAttached`), and the next primitive says once that the user had the tab — what the page
+   * logged and loaded meanwhile was theirs (`onEvent`'s `person`). Called at the start of every primitive.
+   */
+  noteHolds(holds: { count: number; since: number } | undefined): void {
+    if (holds === undefined || holds.count === this.holdsSeen) return;
+    this.holdsSeen = holds.count;
+    if (!this.attached) this.handedOffAt = Math.min(this.handedOffAt ?? holds.since, holds.since);
+    this.notes.push(PERSON_HELD_NOTE);
+  }
+
+  /** The daemon lines owed to the agent since its last primitive (each said once). */
+  takeNotes(): string[] {
+    const notes = this.notes;
+    this.notes = [];
+    return notes;
   }
 
   // ── Phase 3: element readers ───────────────────────────────────────────────────────────────────
@@ -2181,6 +2232,9 @@ export class TabDriver {
   /** One JPEG at the budget; its frame is kept so a Point maps back to CSS px. */
   async screenshot(budget: ScreenshotBudget, region: CssRect | undefined, quality: number, o: { fullPage?: boolean } = {}): Promise<{ shotId: string; imageBase64: string; width: number; height: number; css: CssRect }> {
     this.requireNoDialog("screenshot()");
+    // The view as known BEFORE the capture: a change that lands meanwhile makes the shot's Points refused (never the
+    // other way round).
+    const epoch = this.viewEpoch;
     const m = await this.send<{ cssVisualViewport: { pageX: number; pageY: number; clientWidth: number; clientHeight: number }; cssContentSize?: { width: number; height: number } }>("Page.getLayoutMetrics");
     const vv = m.cssVisualViewport;
     if (o.fullPage === true) return await this.fullPageShot(budget, quality, vv, m.cssContentSize);
@@ -2202,7 +2256,7 @@ export class TabDriver {
       scale *= Math.min(budget.maxLongEdge / Math.max(size.width, size.height), 0.97);
     }
     const shotId = `tshot${++this.shotCounter}`;
-    this.shots.set(shotId, { width: size!.width, height: size!.height, css });
+    this.shots.set(shotId, { width: size!.width, height: size!.height, css, viewEpoch: epoch });
     if (this.shots.size > 16) this.shots.delete(this.shots.keys().next().value!);
     return { shotId, imageBase64: shot!.data, width: size!.width, height: size!.height, css };
   }
@@ -2210,6 +2264,7 @@ export class TabDriver {
   /** The whole document (its height capped at FULL_PAGE_MAX_CSS), scaled to the budget. For looking only: a Point in it
    *  is refused (`pointForShot`). */
   private async fullPageShot(budget: ScreenshotBudget, quality: number, vv: { clientWidth: number; clientHeight: number }, content: { width: number; height: number } | undefined): Promise<{ shotId: string; imageBase64: string; width: number; height: number; css: CssRect }> {
+    const epoch = this.viewEpoch;
     const css: CssRect = { x: 0, y: 0, width: Math.max(1, Math.round(content?.width ?? vv.clientWidth)), height: Math.max(1, Math.min(FULL_PAGE_MAX_CSS, Math.round(content?.height ?? vv.clientHeight))) };
     let scale = scaleFor(css, this.dpr, budget);
     let shot: { data: string } | undefined;
@@ -2225,7 +2280,7 @@ export class TabDriver {
       scale *= Math.min(budget.maxLongEdge / Math.max(size.width, size.height), 0.97);
     }
     const shotId = `tshot${++this.shotCounter}`;
-    this.shots.set(shotId, { width: size!.width, height: size!.height, css, fullPage: true });
+    this.shots.set(shotId, { width: size!.width, height: size!.height, css, fullPage: true, viewEpoch: epoch });
     if (this.shots.size > 16) this.shots.delete(this.shots.keys().next().value!);
     return { shotId, imageBase64: shot!.data, width: size!.width, height: size!.height, css };
   }
@@ -2252,6 +2307,13 @@ export const WAKE_DIALOG_HOLD_MAX_MS = 10 * 60_000;
 
 /** A full-page screenshot's document height at most this (CSS px). */
 export const FULL_PAGE_MAX_CSS = 10_000;
+
+/** Lane H3: said once after the person held a headless tab in Winter's panel (their console and network were theirs). */
+export const PERSON_HELD_NOTE = "the user had this tab in Winter's panel since you last used it — what the page logged and loaded while they had it is left out of console() and network()";
+
+/** Lane H3: a Point of a screenshot taken before the tab's view changed (a headless tab shown in Winter's panel follows the
+ *  panel's size while the user looks, and gets the agent's view back after). */
+export const VIEW_RESIZED_POINT = "the tab was resized while the user was looking — take a new screenshot before using a Point";
 
 /** The user's own tab is never moved for a picture: `fullPage` lays the page out again, `within` would scroll. */
 export const USER_TAB_FULL_PAGE = "screenshot({ fullPage }) lays the page out again, which can move what the user sees — on the user's own tab Winter takes only what is in view: screenshot(), or text() for the whole page";

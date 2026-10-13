@@ -41,6 +41,15 @@ struct HeadlessArguments: Equatable {
     /// and a NetLog capture, `--log-net-log=<file>` with `--net-log-capture-mode=…`).
     let passthrough: [String]
 
+    /// Where a presentation's file-chooser answers must lie: `<home>/cache/headless-uploads`, beside the cache root the
+    /// daemon makes (`<home>/cache/headless-cef/<random>`). `nil` for any other layout — every answer is then refused.
+    var uploadsRoot: String? {
+        let root = URL(fileURLWithPath: cacheRoot).standardizedFileURL
+        let runs = root.deletingLastPathComponent()
+        guard runs.lastPathComponent == "headless-cef", root.lastPathComponent != "headless-cef" else { return nil }
+        return runs.deletingLastPathComponent().appendingPathComponent("headless-uploads", isDirectory: true).path
+    }
+
     /// Always on, whatever the daemon passes:
     ///  * `--use-mock-keychain` — never the user's Keychain: an in-memory stand-in, so no "Safe Storage" item is
     ///    read or created and no Keychain prompt can appear;

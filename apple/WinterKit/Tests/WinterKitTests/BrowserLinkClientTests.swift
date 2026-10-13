@@ -19,6 +19,28 @@ final class FakeLinkDaemon: WinterTransport, SentLineRecording, @unchecked Senda
     private let lock = NSLock()
     private var _sent: [String] = []
     private let attachAnswer: AttachAnswer
+    /// Feature `headless`: what a `browserLink.headless` request is answered with — the JSON after `"id":N,`
+    /// (`"result":{…}` or `"error":{…}`).
+    private var _headlessResponse = #""result":{}"#
+    var headlessResponse: String {
+        get { lock.withLock { _headlessResponse } }
+        set { lock.withLock { _headlessResponse = newValue } }
+    }
+    /// When set, `browserLink.headless` requests are held unanswered until `releaseHeadless()`.
+    private var _holdHeadless = false
+    private var heldHeadlessIds: [Int] = []
+    var holdHeadless: Bool {
+        get { lock.withLock { _holdHeadless } }
+        set { lock.withLock { _holdHeadless = newValue } }
+    }
+    func releaseHeadless() {
+        let (ids, response): ([Int], String) = lock.withLock {
+            _holdHeadless = false
+            defer { heldHeadlessIds = [] }
+            return (heldHeadlessIds, _headlessResponse)
+        }
+        for id in ids { feed(#"{"jsonrpc":"2.0","id":\#(id),\#(response)}"#) }
+    }
 
     var sent: [String] { lock.withLock { _sent } }
 
@@ -51,6 +73,12 @@ final class FakeLinkDaemon: WinterTransport, SentLineRecording, @unchecked Senda
             case .protocolMismatch:
                 feed(#"{"jsonrpc":"2.0","id":\#(id),"error":{"code":-32602,"message":"protocol","data":{"code":"protocol_mismatch","expected":99}}}"#)
             }
+        case BrowserLinkProtocol.Method.headless:
+            let held: Bool = lock.withLock {
+                if _holdHeadless { heldHeadlessIds.append(id); return true }
+                return false
+            }
+            if !held { feed(#"{"jsonrpc":"2.0","id":\#(id),\#(headlessResponse)}"#) }
         default:
             feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{}}"#)
         }
@@ -89,6 +117,26 @@ final class FakeLinkHandler: BrowserLinkHandler {
     func browserLinkCommand(_ command: BrowserLinkCommand, reply: BrowserLinkReplier) {
         commands.append(command)
         if let answer = answer(command) { reply(answer) } else { held.append(reply) }
+    }
+}
+
+/// A recording handler that also takes feature `headless`'s commands.
+@MainActor
+final class FakeHeadlessLinkHandler: BrowserLinkHandler {
+    var attached: [String] = []
+    var commands: [BrowserLinkCommand] = []
+    var headless: [BrowserLinkHeadlessCommand] = []
+    var answer: (BrowserLinkHeadlessCommand) -> BrowserLinkReply = { _ in .empty }
+
+    func browserLinkAttached(linkId: String) { attached.append(linkId) }
+    func browserLinkLost() {}
+    func browserLinkCommand(_ command: BrowserLinkCommand, reply: BrowserLinkReplier) {
+        commands.append(command)
+        reply(.empty)
+    }
+    func browserLinkHeadlessCommand(_ command: BrowserLinkHeadlessCommand, reply: BrowserLinkReplier) {
+        headless.append(command)
+        reply(answer(command))
     }
 }
 

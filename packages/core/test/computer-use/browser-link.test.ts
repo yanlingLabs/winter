@@ -22,7 +22,7 @@ import { SessionStore } from "../../src/sessions/store";
 import { loadSettings, type Settings } from "../../src/settings";
 import { FakeHelper } from "./fake-helper";
 
-const LINK_METHODS = [METHODS.browserLinkAttach, METHODS.browserLinkResult, METHODS.browserLinkEvents, METHODS.browserLinkTabGone, METHODS.browserLinkDownload];
+const LINK_METHODS = [METHODS.browserLinkAttach, METHODS.browserLinkResult, METHODS.browserLinkEvents, METHODS.browserLinkTabGone, METHODS.browserLinkDownload, METHODS.browserLinkHeadless];
 
 interface Note { method: string; params: { linkId: string; cmdId: string; op: string; params: Record<string, unknown>; reason?: string } }
 
@@ -30,8 +30,10 @@ interface Note { method: string; params: { linkId: string; cmdId: string; op: st
 function app(link: BrowserLink, conn: object = {}) {
   const notes: Note[] = [];
   const write = (m: Record<string, unknown>): void => { notes.push(m as unknown as Note); };
-  const call = (method: string, params: unknown): Record<string, unknown> => link.handle(conn, write, method, params);
-  return { conn, notes, call, last: (): Note => notes[notes.length - 1]! };
+  // Every method but `browserLink.headless` answers at once.
+  const call = (method: string, params: unknown): Record<string, unknown> => link.handle(conn, write, method, params) as Record<string, unknown>;
+  const callAsync = async (method: string, params: unknown): Promise<Record<string, unknown>> => await link.handle(conn, write, method, params);
+  return { conn, notes, call, callAsync, last: (): Note => notes[notes.length - 1]! };
 }
 
 describe("the browser link (daemon side)", () => {
@@ -55,13 +57,70 @@ describe("the browser link (daemon side)", () => {
     expect(link.connected).toBe(true);
   });
 
+  test("features: the app names `headless`, the daemon answers its own; only then is there a headless viewer, and only for the live link", async () => {
+    const registry = new BrowserBackendRegistry();
+    const link = new BrowserLink({ registry });
+    expect(link.headlessViewer()).toBeUndefined();
+    expect(link.headlessViewerMissing()).toBe("Winter isn't running — ask the user to open Winter");
+    const old = app(link);
+    const plain = old.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "0.124.0", pid: 1 });
+    expect(plain.features).toEqual(["headless", "watchOnly"]);
+    expect(link.headlessViewer()).toBeUndefined();
+    expect(link.headlessViewerMissing()).toBe("this Winter's app can't show a headless tab — ask the user to update Winter");
+    const a = app(link);
+    const { linkId } = a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "0.125.0", pid: 2, features: ["headless", "teleport"] }) as { linkId: string };
+    const viewer = link.headlessViewer()!;
+    expect(viewer).toBeDefined();
+    expect(link.headlessViewerMissing()).toBeUndefined();
+    // headless.show is a command like any other, settled by its result.
+    const shown = viewer.show({ sessionId: "s1", tabId: "w-1", service: "com.winter.headless.present.1.ab", nonce: "0123456789abcdef", producerRequirement: "req", control: true, purpose: "handoff", url: "https://a.example/", title: "A", uploadDir: "/h/cache/headless-uploads" });
+    const note = a.last();
+    expect(note.params).toMatchObject({ linkId, op: "headless.show", params: { sessionId: "s1", tabId: "w-1", nonce: "0123456789abcdef", purpose: "handoff", uploadDir: "/h/cache/headless-uploads" } });
+    a.call(METHODS.browserLinkResult, { linkId, cmdId: note.params.cmdId, ok: true, result: {} });
+    await shown;
+    const hidden = viewer.hide({ sessionId: "s1", tabId: "w-1", reason: "done" }).then(() => "answered", (e: unknown) => (e as { code?: string }).code);
+    expect(a.last().params).toMatchObject({ op: "headless.hide", params: { tabId: "w-1", reason: "done" } });
+    viewer.tabs({ sessionId: "s1", tabs: [{ tabId: "w-1", url: "https://a.example/", title: "A", presented: true, control: false }] });
+    expect(a.last().params).toMatchObject({ op: "headless.tabs", params: { sessionId: "s1", tabs: [{ tabId: "w-1", presented: true }] } });
+    viewer.update({ sessionId: "s1", tabId: "w-1", purpose: "watch" });
+    expect(a.last().params).toMatchObject({ op: "headless.update", params: { sessionId: "s1", tabId: "w-1", purpose: "watch" } });
+    // The link closing takes the viewer with it.
+    link.connectionClosed(a.conn);
+    expect(link.headlessViewer()).toBeUndefined();
+    expect(await hidden).toBe("disconnected");
+  });
+
+  test("browserLink.headless: the person's panel actions reach the pool — only from the live link that named the feature", async () => {
+    const registry = new BrowserBackendRegistry();
+    const acts: string[] = [];
+    const link = new BrowserLink({
+      registry,
+      headless: {
+        list: async (sid) => [{ tabId: "w-1", url: `https://${sid}.example/`, title: "T", presented: false, control: false }],
+        act: async (sid, tab, action) => { acts.push(`${sid}/${tab}/${action}`); },
+      },
+    });
+    const old = app(link);
+    const { linkId: oldId } = old.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "x", pid: 1 }) as { linkId: string };
+    await expect(old.callAsync(METHODS.browserLinkHeadless, { linkId: oldId, sessionId: "s1", tabId: "w-1", action: "watch" })).rejects.toThrow(/did not name the headless feature/);
+    const a = app(link);
+    const { linkId } = a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "x", pid: 2, features: ["headless"] }) as { linkId: string };
+    expect(await a.callAsync(METHODS.browserLinkHeadless, { linkId, sessionId: "s1", action: "list" })).toEqual({ tabs: [{ tabId: "w-1", url: "https://s1.example/", title: "T", presented: false, control: false }] });
+    expect(await a.callAsync(METHODS.browserLinkHeadless, { linkId, sessionId: "s1", tabId: "w-1", action: "takeOver" })).toEqual({});
+    expect(acts).toEqual(["s1/w-1/takeOver"]);
+    await expect(a.callAsync(METHODS.browserLinkHeadless, { linkId, sessionId: "s1", action: "watch" })).rejects.toThrow(/watch names a tab/);
+    await expect(a.callAsync(METHODS.browserLinkHeadless, { linkId, sessionId: "s1", tabId: "w-1", action: "teleport" })).rejects.toBeInstanceOf(BrowserLinkRpcError);
+    // The replaced link's id is not the live one any more.
+    await expect(old.callAsync(METHODS.browserLinkHeadless, { linkId: oldId, sessionId: "s1", tabId: "w-1", action: "watch" })).rejects.toThrow(/not the live browser link/);
+  });
+
   test("features: the app names `watchOnly`, the daemon answers its own; only then does tab.ensure carry a watch-only hold", async () => {
     const registry = new BrowserBackendRegistry();
     const link = new BrowserLink({ registry });
     // An app that names no feature: holds are full, whatever is asked.
     const old = app(link);
     const plain = old.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "0.124.0", pid: 1 });
-    expect(plain.features).toEqual(["watchOnly"]);
+    expect(plain.features).toEqual(["headless", "watchOnly"]);
     const t0 = registry.get("winter")!;
     expect(t0.watchOnlyHolds).toBe(false);
     void t0.attach("tab-1", { sessionId: "s1", watchOnly: true }).catch(() => undefined);
@@ -70,7 +129,7 @@ describe("the browser link (daemon side)", () => {
     // An app that names it (and one it does not know): only the shared one is in use.
     const a = app(link);
     const res = a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "0.125.0", pid: 2, features: ["watchOnly", "teleport"] }) as { linkId: string; features: string[] };
-    expect(res.features).toEqual(["watchOnly"]);
+    expect(res.features).toEqual(["headless", "watchOnly"]);
     const t = registry.get("winter")!;
     expect(t.watchOnlyHolds).toBe(true);
     void t.attach("tab-1", { sessionId: "s1", watchOnly: true }).catch(() => undefined);

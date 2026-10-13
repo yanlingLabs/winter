@@ -9,8 +9,10 @@ import Foundation
 // `browserLink.command {linkId, cmdId, op, params}` notifications; this side answers each with ONE
 // `browserLink.result` notification and sends `browserLink.events` / `browserLink.tabGone` of its own. Three
 // differences from Winter.app's link:
-//   * this side speaks first: `headless.hello {protocol, linkId, pid, version}` once CEF is up — the linkId is this
-//     process's, and every command must carry it;
+//   * this side speaks first: `headless.hello {protocol, linkId, pid, version, features}` once CEF is up — the linkId
+//     is this process's, and every command must carry it; `features` names what this helper can do beyond protocol 1
+//     (`HeadlessWire.features`: "present" — the presentation ops below), so a daemon never sends an op a helper of
+//     the same protocol cannot answer;
 //   * one more op, `context.dispose {sessionId}` → `{closed}`, read here before `BrowserLinkCommand.parse`
 //     (Winter.app's op set, and its protocol number, do not change);
 //   * `tab.ensure` WITH a `url` creates a missing tab; without one it never does (`HeadlessHost`).
@@ -29,10 +31,31 @@ enum HeadlessWire {
         static let events = BrowserLinkProtocol.Method.events
         static let tabGone = BrowserLinkProtocol.Method.tabGone
         static let notice = "headless.notice"
+        /// A presentation's viewer was accepted — the tab is really shown: `{linkId, tabId}`. A presentation that never
+        /// says so (no viewer came, or the one that came was refused) is the daemon's to end after its own wait.
+        static let presentationStarted = "headless.presentationStarted"
+        /// A presentation ended on the VIEWER's side (it said bye, it died): `{linkId, tabId, reason}`.
+        static let presentationEnded = "headless.presentationEnded"
+        /// A window the page opened while the person held `openerTabId` in Winter's panel (a sign-in window) is a tab
+        /// of its own: `{linkId, tabId, openerTabId, url}` — in the opener's session, never the agent's.
+        static let popupOpened = "headless.popupOpened"
+        /// The view a tab's page is laid out in changed, as applied — a shown tab laid out in the panel's size, the
+        /// agent's own back after: `{linkId, tabId, cssWidth, cssHeight, scale}`.
+        static let viewChanged = "headless.viewChanged"
     }
+
+    /// What this helper can do beyond protocol 1, said in `headless.hello`'s `features`.
+    static let features = ["present"]
 
     enum Op {
         static let contextDispose = "context.dispose"
+        /// Show a tab to Winter.app through the GPU (`HeadlessPresentProducer`): `{tabId, nonce (16 hex), viewerRequirement,
+        /// control, scale}` → `{service, cssWidth, cssHeight}`.
+        static let present = "headless.present"
+        /// `{tabId}` → what the presentation measured.
+        static let unpresent = "headless.unpresent"
+        /// `{tabId, control}`: the viewer may (or may no longer) send input.
+        static let control = "headless.control"
     }
 
     /// The longest command line read (the daemon's own cap on a command is 1 MiB).
@@ -42,6 +65,9 @@ enum HeadlessWire {
     enum Inbound: Equatable {
         case command(BrowserLinkCommand)
         case contextDispose(linkId: String, cmdId: String, sessionId: String)
+        case present(linkId: String, cmdId: String, HeadlessPresentRequest)
+        case unpresent(linkId: String, cmdId: String, tabId: String)
+        case control(linkId: String, cmdId: String, tabId: String, control: Bool)
         /// A command that named itself (`cmdId`) but could not be read: still owed a failure.
         case unreadable(linkId: String?, cmdId: String?, reason: String)
         /// Not a command at all — logged and dropped.
@@ -65,6 +91,40 @@ enum HeadlessWire {
                 return .unreadable(linkId: linkId, cmdId: cmdId, reason: "context.dispose needs sessionId")
             }
             return .contextDispose(linkId: linkId, cmdId: cmdId, sessionId: sessionId)
+        }
+        if let op = params["op"]?.stringValue, [Op.present, Op.unpresent, Op.control].contains(op) {
+            let linkId = params["linkId"]?.stringValue
+            let cmdId = params["cmdId"]?.stringValue
+            guard let linkId, let cmdId else {
+                return .unreadable(linkId: linkId, cmdId: cmdId, reason: "a command without linkId/cmdId")
+            }
+            let p = params["params"]
+            guard let tabId = p?["tabId"]?.stringValue, !tabId.isEmpty else {
+                return .unreadable(linkId: linkId, cmdId: cmdId, reason: "\(op) needs tabId")
+            }
+            switch op {
+            case Op.unpresent:
+                return .unpresent(linkId: linkId, cmdId: cmdId, tabId: tabId)
+            case Op.control:
+                guard case .bool(let control)? = p?["control"] else {
+                    return .unreadable(linkId: linkId, cmdId: cmdId, reason: "headless.control needs control")
+                }
+                return .control(linkId: linkId, cmdId: cmdId, tabId: tabId, control: control)
+            default:
+                guard let nonceText = p?["nonce"]?.stringValue, nonceText.count == 16, let nonce = UInt64(nonceText, radix: 16),
+                      let requirement = p?["viewerRequirement"]?.stringValue, !requirement.isEmpty else {
+                    return .unreadable(linkId: linkId, cmdId: cmdId, reason: "headless.present needs nonce (16 hex) and viewerRequirement")
+                }
+                var control = false
+                if case .bool(let c)? = p?["control"] { control = c }
+                var scale = 1.0
+                if case .number(let n)? = p?["scale"], n >= 1, n <= 4 { scale = n }
+                var uploadDir: String?
+                if let dir = p?["uploadDir"]?.stringValue, dir.hasPrefix("/"), !dir.contains("\0") { uploadDir = dir }
+                return .present(linkId: linkId, cmdId: cmdId,
+                                HeadlessPresentRequest(tabId: tabId, nonce: nonce, viewerRequirement: requirement, control: control, scale: scale,
+                                                       uploadDir: uploadDir))
+            }
         }
         switch BrowserLinkCommand.parse(params) {
         case .success(let command):
@@ -211,9 +271,43 @@ final class HeadlessOutbox {
         return lines
     }
 
+    /// A window the page opened is a tab of its own — after the events already pending.
+    func popupOpened(tabId: String, openerTabId: String, url: String) -> [Data] {
+        var lines = flush()
+        lines.append(Self.line(method: HeadlessWire.Method.popupOpened,
+                               params: ["linkId": .string(linkId), "tabId": .string(tabId), "openerTabId": .string(openerTabId),
+                                        "url": .string(HeadlessEventLimits.truncated(url, maxBytes: 8192))]))
+        return lines
+    }
+
+    /// A presentation's viewer was accepted — after the events already pending.
+    func presentationStarted(tabId: String) -> [Data] {
+        var lines = flush()
+        lines.append(Self.line(method: HeadlessWire.Method.presentationStarted,
+                               params: ["linkId": .string(linkId), "tabId": .string(tabId)]))
+        return lines
+    }
+
+    /// A tab's view changed — after the events already pending (those were painted in the old one).
+    func viewChanged(tabId: String, cssWidth: Int, cssHeight: Int, scale: Double) -> [Data] {
+        var lines = flush()
+        lines.append(Self.line(method: HeadlessWire.Method.viewChanged,
+                               params: ["linkId": .string(linkId), "tabId": .string(tabId), "cssWidth": .number(Double(cssWidth)),
+                                        "cssHeight": .number(Double(cssHeight)), "scale": .number(scale)]))
+        return lines
+    }
+
+    /// A presentation the viewer ended — after the events already pending.
+    func presentationEnded(tabId: String, reason: String) -> [Data] {
+        var lines = flush()
+        lines.append(Self.line(method: HeadlessWire.Method.presentationEnded,
+                               params: ["linkId": .string(linkId), "tabId": .string(tabId), "reason": .string(reason)]))
+        return lines
+    }
+
     func hello(pid: Int32, version: String?) -> Data {
         var params: [String: JSONValue] = ["protocol": .number(Double(HeadlessWire.protocolVersion)), "linkId": .string(linkId),
-                                           "pid": .number(Double(pid))]
+                                           "pid": .number(Double(pid)), "features": .array(HeadlessWire.features.map { .string($0) })]
         if let version { params["version"] = .string(version) }
         return Self.line(method: HeadlessWire.Method.hello, params: params)
     }

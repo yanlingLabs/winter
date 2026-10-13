@@ -54,7 +54,13 @@ export function imageSize(base64: string): { width: number; height: number } | u
 }
 
 /** One screenshot's frame: its image size and the viewport rectangle (CSS px) it shows. */
-export interface ShotFrame { width: number; height: number; css: CssRect; /** a full-page shot: for looking only */ fullPage?: true }
+export interface ShotFrame {
+  width: number; height: number; css: CssRect;
+  /** a full-page shot: for looking only */
+  fullPage?: true;
+  /** The tab's view as it was when the shot was taken (`TabDriver.syncView`): a Point of it is refused once that changed. */
+  viewEpoch?: number;
+}
 
 /** An image pixel → CSS px of the viewport. */
 export function toCss(shot: ShotFrame, x: number, y: number): { x: number; y: number } {

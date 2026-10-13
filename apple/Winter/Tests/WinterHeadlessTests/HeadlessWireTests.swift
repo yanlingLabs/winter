@@ -8,6 +8,37 @@ final class HeadlessWireTests: XCTestCase {
         XCTAssertEqual(inbound, .contextDispose(linkId: "h-1", cmdId: "c1", sessionId: "s_a"))
     }
 
+    func testAPresentationNamesItsOwnUploadsFolderAbsoluteOrNone() {
+        let named = HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c1","op":"headless.present","params":{"tabId":"w-1","nonce":"0123456789abcdef","viewerRequirement":"r","uploadDir":"/h/cache/headless-uploads/s_a"}}}"#))
+        XCTAssertEqual(named, .present(linkId: "h-1", cmdId: "c1", HeadlessPresentRequest(tabId: "w-1", nonce: 0x0123_4567_89ab_cdef, viewerRequirement: "r",
+                                                                                        control: false, scale: 1, uploadDir: "/h/cache/headless-uploads/s_a")))
+        let relative = HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c1","op":"headless.present","params":{"tabId":"w-1","nonce":"0123456789abcdef","viewerRequirement":"r","uploadDir":"cache/x"}}}"#))
+        XCTAssertEqual(relative, .present(linkId: "h-1", cmdId: "c1", HeadlessPresentRequest(tabId: "w-1", nonce: 0x0123_4567_89ab_cdef, viewerRequirement: "r",
+                                                                                           control: false, scale: 1, uploadDir: nil)))
+    }
+
+    func testPresentationOpsAreReadBeforeTheBrowserLinkParser() {
+        let present = HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c1","op":"headless.present","params":{"tabId":"w-1","nonce":"0123456789abcdef","viewerRequirement":"identifier \"x\"","control":true,"scale":2}}}"#))
+        XCTAssertEqual(present, .present(linkId: "h-1", cmdId: "c1", HeadlessPresentRequest(tabId: "w-1", nonce: 0x0123_4567_89ab_cdef,
+                                                                                          viewerRequirement: #"identifier "x""#, control: true, scale: 2)))
+        XCTAssertEqual(HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c2","op":"headless.unpresent","params":{"tabId":"w-1"}}}"#)),
+                       .unpresent(linkId: "h-1", cmdId: "c2", tabId: "w-1"))
+        XCTAssertEqual(HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c3","op":"headless.control","params":{"tabId":"w-1","control":false}}}"#)),
+                       .control(linkId: "h-1", cmdId: "c3", tabId: "w-1", control: false))
+    }
+
+    func testAPresentationWithoutItsNonceOrRequirementIsOwedAFailure() {
+        for params in [#"{"tabId":"w-1","viewerRequirement":"r"}"#, #"{"tabId":"w-1","nonce":"12","viewerRequirement":"r"}"#,
+                       #"{"tabId":"w-1","nonce":"0123456789abcdef"}"#] {
+            let inbound = HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c1","op":"headless.present","params":"# + params + "}}"))
+            XCTAssertEqual(inbound, .unreadable(linkId: "h-1", cmdId: "c1", reason: "headless.present needs nonce (16 hex) and viewerRequirement"), params)
+        }
+        let scale = HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c1","op":"headless.present","params":{"tabId":"w-1","nonce":"0123456789abcdef","viewerRequirement":"r","scale":9}}}"#))
+        guard case .present(_, _, let request) = scale else { return XCTFail("\(scale)") }
+        XCTAssertEqual(request.scale, 1, "a scale out of 1…4 is 1")
+        XCTAssertFalse(request.control, "no control unless asked")
+    }
+
     func testContextDisposeWithoutASessionIsOwedAFailure() {
         let inbound = HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c1","op":"context.dispose","params":{}}}"#))
         XCTAssertEqual(inbound, .unreadable(linkId: "h-1", cmdId: "c1", reason: "context.dispose needs sessionId"))
@@ -120,6 +151,33 @@ final class HeadlessWireTests: XCTestCase {
         XCTAssertEqual(value["params"]?["linkId"], .string("h-9"))
         XCTAssertEqual(value["params"]?["pid"], .number(42))
         XCTAssertEqual(value["params"]?["version"], .string("0.124.0"))
+        // What it can do beyond protocol 1: a daemon sends the presentation ops only to a helper that says "present".
+        XCTAssertEqual(value["params"]?["features"], .array([.string("present")]))
+    }
+
+    func testPresentationStartedFollowsThePendingEvents() throws {
+        let outbox = HeadlessOutbox(linkId: "h-1")
+        _ = outbox.event(.init(tabId: "w-1", method: "Page.loadEventFired", params: Data("{}".utf8), cdpSessionId: nil, strip: false))
+        let lines = outbox.presentationStarted(tabId: "w-1")
+        XCTAssertEqual(lines.count, 2, "the pending events go first")
+        let started = try XCTUnwrap(decode(lines[1]))
+        XCTAssertEqual(started["method"], .string("headless.presentationStarted"))
+        XCTAssertEqual(started["params"]?["tabId"], .string("w-1"))
+        XCTAssertEqual(started["params"]?["linkId"], .string("h-1"))
+    }
+
+    func testAViewChangeFollowsThePendingEvents() throws {
+        let outbox = HeadlessOutbox(linkId: "h-1")
+        _ = outbox.event(.init(tabId: "w-1", method: "Page.loadEventFired", params: Data("{}".utf8), cdpSessionId: nil, strip: false))
+        let lines = outbox.viewChanged(tabId: "w-1", cssWidth: 704, cssHeight: 900, scale: 2)
+        XCTAssertEqual(lines.count, 2, "the pending events (painted in the old view) go first")
+        let view = try XCTUnwrap(decode(lines[1]))
+        XCTAssertEqual(view["method"], .string("headless.viewChanged"))
+        XCTAssertEqual(view["params"]?["linkId"], .string("h-1"))
+        XCTAssertEqual(view["params"]?["tabId"], .string("w-1"))
+        XCTAssertEqual(view["params"]?["cssWidth"], .number(704))
+        XCTAssertEqual(view["params"]?["cssHeight"], .number(900))
+        XCTAssertEqual(view["params"]?["scale"], .number(2))
     }
 
     func testTabGoneFlushesFirst() throws {
@@ -181,6 +239,14 @@ final class HeadlessLayoutTests: XCTestCase {
     func testNoChromiumAnywhereIsNoLayout() {
         XCTAssertNil(HeadlessLayout.resolve(bundleURL: URL(fileURLWithPath: "/Applications/Winter.app/Contents/Helpers/Winter Headless.app"),
                                             exists: { _ in false }))
+    }
+
+    func testTheUploadsRootIsBesideTheCacheRootTheDaemonMakesAndNowhereElse() {
+        XCTAssertEqual(HeadlessArguments.parse(["h", "--winter-cache-root=/Users/u/.winter-dev/cache/headless-cef/ab12"])?.uploadsRoot,
+                       "/Users/u/.winter-dev/cache/headless-uploads")
+        // Any other layout: no uploads root, so every file-chooser answer is refused.
+        XCTAssertNil(HeadlessArguments.parse(["h", "--winter-cache-root=/tmp/x"])?.uploadsRoot)
+        XCTAssertNil(HeadlessArguments.parse(["h", "--winter-cache-root=/Users/u/.winter/cache/headless-cef"])?.uploadsRoot)
     }
 
     func testTheArgumentsNeedAnAbsoluteCacheRootAndPassOnlyDiagnostics() {

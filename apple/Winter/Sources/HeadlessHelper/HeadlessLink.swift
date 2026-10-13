@@ -133,6 +133,30 @@ final class HeadlessLink: HeadlessOutput, @unchecked Sendable {
         }
     }
 
+    func popupOpened(tabId: String, openerTabId: String, url: String) {
+        out.async { [self] in
+            for line in outbox.popupOpened(tabId: tabId, openerTabId: openerTabId, url: url) { write(line) }
+        }
+    }
+
+    func presentationStarted(tabId: String) {
+        out.async { [self] in
+            for line in outbox.presentationStarted(tabId: tabId) { write(line) }
+        }
+    }
+
+    func presentationEnded(tabId: String, reason: String) {
+        out.async { [self] in
+            for line in outbox.presentationEnded(tabId: tabId, reason: reason) { write(line) }
+        }
+    }
+
+    func viewChanged(tabId: String, cssWidth: Int, cssHeight: Int, scale: Double) {
+        out.async { [self] in
+            for line in outbox.viewChanged(tabId: tabId, cssWidth: cssWidth, cssHeight: cssHeight, scale: scale) { write(line) }
+        }
+    }
+
     /// The whole line, or the pipe is gone.
     private func write(_ line: Data) {
         guard !writeFailed else { return }

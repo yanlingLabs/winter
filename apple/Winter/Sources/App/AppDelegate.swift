@@ -862,6 +862,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// ComputerV2 Phase 4 (lane H3) — **a headless tab shown in the panel** (the browser link's `headless.show`): Winter's
+    /// own window comes to the session and its panel is revealed, where the presentation is drawn (`ShellPanel` shows
+    /// the store's newest presentation for the session it shows). Only Winter's window — nothing of another app's.
+    /// Like `presentBrowserTab`, the reveal hook is registered when the shell's root view first appears, so on the
+    /// app's first summon it runs one main-queue turn later.
+    func presentHeadlessTab(sessionId: String) {
+        summonAppWindow(navigatingTo: .session(sessionId))
+        guard let host = appWindow?.host else { return }
+        if let reveal = host.onRevealPanel {
+            reveal()
+        } else {
+            DispatchQueue.main.async { [weak host] in host?.onRevealPanel?() }
+        }
+    }
+
     func openOutputFileFromPanel(sessionId: String, path: String) {
         summonAppWindow(navigatingTo: .session(sessionId))
         appWindow?.host?.showOutputFile(URL(fileURLWithPath: path))
@@ -1764,6 +1779,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             browserLink = BrowserLink.start(home: AppProfile.winterHome, keychainService: AppProfile.keychainService)
             browserLink?.host.onPresent = { [weak self] sessionId, tabId in self?.presentBrowserTab(sessionId: sessionId, tabId: tabId) }
+            browserLink?.host.headless?.onShow = { [weak self] sessionId in self?.presentHeadlessTab(sessionId: sessionId) }
         }
         // The menu's state line and login-item checkbox are refreshed when the menu is OPENED (`MenuBarController`
         // observes `NSMenu.didBeginTrackingNotification`), not on a clock: nobody reads them while it is closed, and

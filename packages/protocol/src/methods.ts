@@ -497,12 +497,23 @@ export const ComputerUseStatusResult = z.object({
  *  `browserLink.command`, `browserLink.detached`.
  *
  *  FEATURES (the protocol stays 2): what each side can do beyond it, named at attach — the app in its params, the daemon
- *  in its answer; a side never uses a feature the other did not name. `watchOnly` (ComputerV2 wake triggers): `tab.ensure`
- *  takes `watchOnly: true` — a WATCH-ONLY hold, under which the app sets none of its native-UI holds (the page's dialogs,
- *  permission prompts, file choosers, downloads, context menus, keys and focus stay the user's), while a wake trigger
- *  waits on the tab for the user; a `tab.ensure` without it takes the tab's full hold back (a primitive), and one with
- *  it drops back. It still counts toward the app's ceiling on held tabs. */
-export const BROWSER_LINK_FEATURES = ["watchOnly"] as const;
+ *  in its answer; a side never uses a feature the other did not name.
+ *  - `headless` (ComputerV2 Phase 4, lane H3): the app can show a tab of Winter's HEADLESS browser in its panel — the
+ *    live page, drawn from Winter Headless's own GPU frames (the page never leaves the helper; nothing reloads) — and the
+ *    daemon can ask it to. Daemon → app ops on `browserLink.command`: `headless.show {sessionId, tabId, service, nonce,
+ *    producerRequirement, control, purpose, url, title, uploadDir}` (connect to that presentation and show it; `purpose`
+ *    "handoff" — the agent waits for the user, who has control —, "watch", or "popup" — a window the page opened while
+ *    the person held its opener, a sign-in window as a rule, theirs alone and closed when they let the opener go; files
+ *    the person picks for the page are copied into `uploadDir` first), `headless.hide {sessionId, tabId, reason}`,
+ *    `headless.tabs {sessionId, tabs}` (the session's headless tabs changed) and `headless.update {sessionId, tabId,
+ *    purpose}` (why a shown tab is shown changed: a watch the person took over became the agent's hand-off, or a
+ *    hand-off nobody waits on any more). App → daemon: `browserLink.headless` (below).
+ *  - `watchOnly` (ComputerV2 wake triggers): `tab.ensure` takes `watchOnly: true` — a WATCH-ONLY hold, under which the
+ *    app sets none of its native-UI holds (the page's dialogs, permission prompts, file choosers, downloads, context
+ *    menus, keys and focus stay the user's), while a wake trigger waits on the tab for the user; a `tab.ensure` without
+ *    it takes the tab's full hold back (a primitive), and one with it drops back. It still counts toward the app's
+ *    ceiling on held tabs. */
+export const BROWSER_LINK_FEATURES = ["headless", "watchOnly"] as const;
 export const BrowserLinkAttachParams = z.object({
   protocol: z.number().int(), appVersion: z.string().max(64), pid: z.number().int(),
   features: z.array(z.string().min(1).max(64)).max(16).optional(),
@@ -542,6 +553,21 @@ export const BrowserLinkDownloadParams = z.object({
   }),
 });
 export const BrowserLinkAckResult = z.object({});
+/** Feature `headless` — the person, in Winter's panel, acting on one of a session's HEADLESS tabs:
+ *  `list` (the session's headless tabs, fresh; no `tabId`), `watch` (show it, watch-only: the agent keeps working and
+ *  the person sees it live), `takeOver` (the person takes control: the agent's work in flight on that tab finishes
+ *  first, then every agent command on it is `TargetBusy` until it is handed back), `handBack` (control back to the
+ *  agent; the view stays, watch-only), `done` / `stopWaiting` (the answers to a `waitForUser` hand-off shown in the
+ *  panel), `close` (stop showing it; control, if held, goes back to the agent). */
+export const BrowserLinkHeadlessAction = z.enum(["list", "watch", "takeOver", "handBack", "done", "stopWaiting", "close"]);
+export const BrowserLinkHeadlessParams = z.object({
+  linkId: z.string().min(1),
+  sessionId: z.string().min(1).max(128),
+  tabId: z.string().min(1).max(256).optional(),
+  action: BrowserLinkHeadlessAction,
+});
+export const BrowserLinkHeadlessTab = z.object({ tabId: z.string(), url: z.string(), title: z.string(), presented: z.boolean(), control: z.boolean() });
+export const BrowserLinkHeadlessResult = z.object({ tabs: z.array(BrowserLinkHeadlessTab).optional() });
 /** Daemon → app notifications. `op`: tab.ensure, tab.release, tab.close, tabs.live, cdp.send, cdp.subscribe, overlay;
  *  protocol 2: tab.present, tab.mute, tab.downloads, tab.download. (Feature `watchOnly`: `tab.ensure`'s `watchOnly`.) */
 export const BrowserLinkCommandNotification = z.object({ linkId: z.string(), cmdId: z.string(), op: z.string(), params: z.record(z.string(), z.unknown()) });
@@ -3275,6 +3301,7 @@ export const METHODS = {
   browserLinkEvents: "browserLink.events",
   browserLinkTabGone: "browserLink.tabGone",
   browserLinkDownload: "browserLink.download",
+  browserLinkHeadless: "browserLink.headless",
   browserLinkCommand: "browserLink.command",
   browserLinkDetached: "browserLink.detached",
   sessionStageImage: "session.stageImage",

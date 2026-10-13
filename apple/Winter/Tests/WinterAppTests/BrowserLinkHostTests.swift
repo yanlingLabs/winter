@@ -683,6 +683,39 @@ final class BrowserLinkHostTests: XCTestCase {
             XCTAssertFalse(without.contains(decision), "\(decision) without its flag")
         }
     }
+
+    // MARK: - Feature `headless` (lane H3)
+
+    private func runHeadless(_ op: BrowserLinkHeadlessCommand.Op) -> Answer {
+        let answer = Answer()
+        host.browserLinkHeadlessCommand(BrowserLinkHeadlessCommand(linkId: "L1", cmdId: "h", op: op),
+                                        reply: BrowserLinkReplier { reply in
+                                            MainActor.assumeIsolated { answer.value = reply }
+                                        })
+        return answer
+    }
+
+    func testAHeadlessCommandWithNoStoreIsRefused() {
+        XCTAssertNil(host.headless)
+        XCTAssertEqual(failureCode(runHeadless(.tabs(sessionId: "s1", tabs: []))), .notAllowed)
+    }
+
+    func testAHeadlessCommandReachesTheStoreAndANewLinkClearsItsLists() {
+        let store = HeadlessPresentStore(device: nil)
+        host.headless = store
+        let tab = BrowserLinkHeadlessTab(tabId: "ht_1", url: "https://example.com/", title: "Example", presented: false, control: false)
+        XCTAssertEqual(runHeadless(.tabs(sessionId: "s1", tabs: [tab])).value, .empty)
+        XCTAssertEqual(store.tabsBySession["s1"], [tab])
+        XCTAssertEqual(runHeadless(.hide(sessionId: "s1", tabId: "ht_9", reason: "gone")).value, .empty)
+        host.browserLinkLost()
+        XCTAssertEqual(store.tabsBySession, [:])
+    }
+
+    func testAHeadlessCommandWhileQuittingIsRefused() {
+        host.headless = HeadlessPresentStore(device: nil)
+        runtime.quiesce()
+        XCTAssertEqual(failureCode(runHeadless(.tabs(sessionId: "s1", tabs: []))), .quiescent)
+    }
 }
 
 /// ComputerV2 Phase 2 — the browser link's CEF door, through the seams that need no CEF.
