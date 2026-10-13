@@ -39,6 +39,9 @@ enum SimKind {
     /// 0 an application, 1 a document (each launches), 2 a folder (launches nothing) — and an app of theirs starts
     /// `startAfter` ms later (something of theirs launched it), coming forward `forwardAfter` ms after its start.
     case finderLaunch(Int, startAfter: Double, forwardAfter: Double)
+    /// Hand-written plans only (round 19, the review's H1): an act of the agent's in flight on T raises T's window 78 on
+    /// desktop 300 — T is in front already, and macOS moves there: the agent's own doing.
+    case targetRaisedOnItsOtherDesktop
     case banner(pid_t)
     case prompt(Bool)
     // session s2 (inside the world's events)
@@ -89,6 +92,7 @@ enum SimKind {
         case .secureEntry(let on): return "Terminal's Secure Keyboard Entry \(on ? "on" : "off")"
         case .mainWindow(let a, let id): return "\(n(a))'s main window becomes \(id)"
         case .selfActivate(let a): return "\(n(a)) activates itself"
+        case .targetRaisedOnItsOtherDesktop: return "the agent's act in flight raises T's window on desktop 300"
         case .userOpens(let a, let ms): return "the user opens \(n(a)) (Spotlight, a launcher, a link — no switch input), it comes forward \(Int(ms)) ms later"
         case .userLaunch(let ms): return "the user launches an app (Spotlight), which comes forward \(Int(ms)) ms later"
         case .finderLaunch(let item, let start, let fwd):
@@ -816,6 +820,16 @@ final class SimRun {
                 w.onMainWindow?(a, id)
             }
             w.log("\(SimPid.name(a))'s main window becomes \(id)")
+        case .targetRaisedOnItsOtherDesktop:
+            // (The act's own raise, as the engine records it for an act's raising write — then the window server moves.)
+            core.noteGuardianCause(SimPid.target, raise: true)
+            w.lock.withLock {
+                guard let win = w.wins[78], let sp = win.space, sp != w.space || w.front != SimPid.target else { return }
+                w.mainWin[SimPid.target] = 78
+                w.agentCause(SimPid.target, raise: true)
+                w.change(to: SPlace(app: SimPid.target, space: sp), cause: .agentDirect(SimPid.target, "the agent's act raised its window on another desktop"),
+                         why: "the agent's act in flight raises T's window on desktop \(sp)")
+            }
         case .selfActivate(let a):
             w.lock.withLock {
                 // An app already in front does not activate itself again (nothing moves).
