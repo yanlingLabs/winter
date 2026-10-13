@@ -618,7 +618,8 @@ the change, run108; the world allows 120 ms, a stress sweep 400 ms) and Secure E
   makes that desktop their place, and the visit's end does not return them to where it began (1.19.0, the controller's
   ruling); it is judged once — its input used up there — so the visit's end and a later key read the same verdict. The
   visit's own way there is never such a switch: only once the visit had arrived (its app seen in front on a desktop
-  other than the one it began from — macOS activating it on their desktop before the switch lands is no arrival) and
+  other than the one it began from — their place's, else the one active then; macOS activating it on their desktop
+  before the switch lands is no arrival) and
   after that another app was seen in front on ANOTHER desktop, with no raise of the agent's on it in the last 1.5 s —
   they left it, or were returned (whatever that state's verdict: a late restore landing on their own desktop while they
   are there counts); another app in front on the visited desktop, the agent's own included, and the visited app moved
@@ -719,7 +720,9 @@ the change, run108; the world allows 120 ms, a stress sweep 400 ms) and Secure E
    a session tap): a system dialog is left alone and said, anything else is the agent's indirect effect, undone and
    said; else the user's (using up the latest input for that very app, else of the change's own kind).
 3. A click of theirs into its window (a claim, 1.5 s) after the agent's last cause on that app, or heard within 0.45 s
-   of the click (1.19.0: a click that activated nothing never covers the agent's own act a second later): the user's —
+   of the click (1.19.0: a click that activated nothing never covers the agent's own act a second later; within the
+   0.45 s band — the same every switch input gets — it can still cover an activation of the agent's after a click that
+   activated nothing, a hung Dock tile or a non-activating panel, an accepted residual): the user's —
    using up that click's input. And the activation that
    brings the window they clicked into forward with its app (the helper's bring at the release), landing late — within
    0.8 s of the bring, its claim used by an earlier landing — with no switch input of theirs since the click: the
@@ -728,8 +731,12 @@ the change, run108; the world allows 120 ms, a stress sweep 400 ms) and Secure E
    of round 19, H1: an act in flight raising another of its windows on another desktop is the agent's).
 4. A desktop change that follows their own move into that app, with no cause of the agent's on it since — nor a raise
    of the agent's on it, the front app's included, unless an unused switch instant of theirs after that raise explains
-   it — for that app or for none, of a kind that fits (an app switch fits a desktop change of the app already in front)
-   — and is used up by it (1.19.0, H1 and the final review's HIGH 2): the user's.
+   it — for that app or for none, of a kind that fits (an app switch fits a desktop change of the app already in front
+   only when it is a ⌘ release whose Tab the tap did not see — never a seen ⌘-Tab, which picked its app) — and is used
+   up by it (1.19.0, H1 and the final review's HIGH 2): the user's. An accepted residual: a bare ⌘ tap with no key looks
+   like such a release (seed 1068's missed Tab), so it can adopt the agent's raise of the front app onto its other
+   desktop — bounded: only after the raise, within 0.7 s of the release and 1.5 s of their own move into the app, and
+   used up once.
 5. Switch-capable input of theirs after the agent's last RAISING cause on that app — and after its last cause of any
    kind, unless the change is heard within 0.45 s of the input (an act's cause landing between their input and the
    switch's landing never outranks it): the user's. Pairing: an input for that very app first (a click on its window),
