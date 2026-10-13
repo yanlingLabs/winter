@@ -223,16 +223,29 @@ extension CUCore {
 
     /// The ring and the pill for one watch: only while its app is frontmost and its window is that app's front window on
     /// screen (the active Space); the element's frame for the ring.
+    ///
+    /// The front window is the app's top layer-0 window — or, when one of the app's own windows is above it, the bound
+    /// window still, if accessibility says it is the app's key window. macOS attaches a window to a window being
+    /// captured, in the captured app and just above it (Winter's own view of it resuming does that), and a popover sits
+    /// there too: neither takes the front from the window the user is in. The live run's ring vanished 1.4 s after the
+    /// user brought the watched window forward, the moment the session's view resumed capturing it.
     func presentWatch(_ s: CUWatcher.Subject, state: CUWatchLiveState) async -> CUWatchShown? {
-        guard sys.frontmostPid() == s.pid,
-              let top = sys.windowStack().first(where: { $0.pid == s.pid && $0.layer == 0 }), top.id == s.windowID
-        else { return nil }
+        guard sys.frontmostPid() == s.pid else { return nil }
+        let stack = sys.windowStack()
+        guard let bound = stack.first(where: { $0.id == s.windowID }) else { return nil }
+        if stack.first(where: { $0.pid == s.pid && $0.layer == 0 })?.id != s.windowID {
+            let window = state.get(s.watchId)?.window
+            let key = try? await queues.run(s.pid) { [self] () -> Bool? in
+                windowIsKeyInApp(pid: s.pid, windowID: s.windowID, window: window)
+            }
+            guard key == true else { return nil }
+        }
         let ax = self.ax
         let frame: CGRect? = s.element == nil ? nil : (try? await queues.run(s.pid) { () -> CGRect? in
             guard let e = s.element, ax.isAlive(e) else { return nil }
             return ax.frame(e)
         }) ?? nil
-        return CUWatchShown(watchId: s.watchId, kind: s.condition.kind, label: s.label, elementFrame: frame, windowFrame: top.frame)
+        return CUWatchShown(watchId: s.watchId, kind: s.condition.kind, label: s.label, elementFrame: frame, windowFrame: bound.frame)
     }
 
     // MARK: pure-ish helpers

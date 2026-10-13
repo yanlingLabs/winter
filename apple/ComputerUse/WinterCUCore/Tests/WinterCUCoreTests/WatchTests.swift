@@ -821,4 +821,37 @@ final class WatcherLiveSeamTests: XCTestCase {
         shown = await core.presentWatch(subject, state: watcher.liveState!)
         XCTAssertNil(shown, "another window of the app is in front of it")
     }
+
+    /// The live run's flake (round 19's full run): the session's view resumed capturing the watched window once the user
+    /// brought it forward, macOS attached its window to the captured one — in the app, layer 0, just above it — and the
+    /// ring went 1.4 s later, with the user still in the watched window.
+    func testAWindowTheAppAttachesAboveTheBoundOneLeavesTheRingWhileTheBoundWindowIsKey() async throws {
+        _ = try await arm("wk_1", .init(kind: "clicked", ref: ref(button)))
+        let subject = CUWatcher.Subject(watchId: "wk_1", connection: 1, sessionId: "s1", pid: pid, windowID: 77, appName: "Mail",
+                                        condition: .clicked(ref: 1), target: target, element: button, elementWindowID: nil, label: "Send")
+        sys.front = pid
+        let attached = FakeSystem.window(79, pid: pid, CGRect(x: -6, y: -6, width: 812, height: 612), owner: "Mail")
+        sys.stack = [attached, sys.windows[77]!]
+        var shown = await core.presentWatch(subject, state: watcher.liveState!)
+        XCTAssertNil(shown, "the app tells accessibility of no key window: the stack alone decides, as before")
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window])
+        shown = await core.presentWatch(subject, state: watcher.liveState!)
+        XCTAssertEqual(shown?.windowFrame, CGRect(x: 0, y: 0, width: 800, height: 600), "drawn, on the BOUND window's frame")
+        XCTAssertEqual(shown?.elementFrame, CGRect(x: 10, y: 10, width: 60, height: 20))
+        // Another window of the app is its key window: the user is there, not in the watched one.
+        let other = fakeElement(4_105)
+        ax.windowIDs[AXIdentity(element: other)] = 78
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: other])
+        shown = await core.presentWatch(subject, state: watcher.liveState!)
+        XCTAssertNil(shown, "another window is the app's key window")
+        // The bound window off this desktop (not in the on-screen stack): nothing, whatever accessibility says.
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window])
+        sys.stack = [attached]
+        shown = await core.presentWatch(subject, state: watcher.liveState!)
+        XCTAssertNil(shown, "the bound window is not on screen")
+        sys.front = 1
+        sys.stack = [attached, sys.windows[77]!]
+        shown = await core.presentWatch(subject, state: watcher.liveState!)
+        XCTAssertNil(shown, "the user is in another app")
+    }
 }

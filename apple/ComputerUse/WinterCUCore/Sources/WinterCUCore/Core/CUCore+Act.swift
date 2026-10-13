@@ -2012,12 +2012,20 @@ extension CUCore {
     /// can't be read.
     func boundWindowIsKeyInApp(_ t: CUTarget) -> Bool? {
         guard let w = try? windowElement(t) else { return nil }
-        if let f = ax.element(ax.application(t.pid), kAXFocusedWindowAttribute) {
+        return windowIsKeyInApp(pid: t.pid, windowID: t.windowID, window: w)
+    }
+
+    /// Whether window `windowID` of `pid` (its element `window`, when known) is the app's key (focused) window, as the
+    /// app tells accessibility; nil when it can't be read.
+    func windowIsKeyInApp(pid: pid_t, windowID: CGWindowID, window: AXUIElement?) -> Bool? {
+        if let f = ax.element(ax.application(pid), kAXFocusedWindowAttribute) {
             // By window id: two element objects for one window need not compare equal.
-            if let id = ax.windowID(f) { return id == t.windowID }
-            return CFEqual(f, w)
+            if let id = ax.windowID(f) { return id == windowID }
+            guard let window else { return nil }
+            return CFEqual(f, window)
         }
-        return ax.bool(w, kAXFocusedAttribute)
+        guard let window else { return nil }
+        return ax.bool(window, kAXFocusedAttribute)
     }
 
     enum FocusRelation { case onIt, elsewhere, unknown }
