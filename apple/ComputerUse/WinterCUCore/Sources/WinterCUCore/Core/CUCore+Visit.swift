@@ -538,12 +538,17 @@ extension CUCore {
             CUVisitReport(visitId: v.id, targetId: s.targetId, app: s.appName, why: s.why.rawValue, actions: actions, ms: ms,
                           returned: returned, userMoved: userMoved, detail: detail)
         }
-        let now = userView()
+        var now = userView()
         // What is in front is judged FIRST (a visit, a hold and rung 4 judge what is in front first): a switch of theirs
         // into the visited desktop that landed but is not heard yet is theirs, and the end does not return them to where
         // the visit began (round 19, the controller's ruling — the survey's ordinary seed 35: their ⌃-arrow landed 3 ms
         // before the end, the return was issued, and its landing was then undone over the place the switch had made).
-        if guardianLock.withLock({ guardianCore.active }) { _ = judgeMove(now, since: nil, path: "a desktop visit's end") }
+        // (Then read again — the review of round 19, L2: what is decided below is decided on what is in front after the
+        // judge, never on a view read before it.)
+        if guardianLock.withLock({ guardianCore.active }) {
+            _ = judgeMove(now, since: nil, path: "a desktop visit's end")
+            now = userView()
+        }
         let sawUserMove = guardianLock.withLock { guardianCore.visitSawUserInput }
         // Where they are now is where they went (their place as the guardian has it) — not the visit's own switch landing
         // after their move (found by the model-based test: their ⌘-Tab onto the visited desktop was taken for the
