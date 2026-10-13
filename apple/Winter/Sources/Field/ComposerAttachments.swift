@@ -41,6 +41,9 @@ enum ComposerAttachmentKind: Equatable {
 struct ComposerAttachment: Identifiable, Equatable {
     let id: Int
     let kind: ComposerAttachmentKind
+    /// Unique across drafts and windows (ids restart with every fresh draft) — what a pasted image's
+    /// thumbnail is cached under, so two screenshots never share one.
+    let key: String
 
     /// The image half, or `nil` for a file.
     var image: ComposerImage? {
@@ -69,7 +72,7 @@ struct ComposerAttachmentDraft: Equatable {
     mutating func add(_ kind: ComposerAttachmentKind) -> Int {
         let id = nextID
         nextID += 1
-        items.append(ComposerAttachment(id: id, kind: kind))
+        items.append(ComposerAttachment(id: id, kind: kind, key: UUID().uuidString))
         return id
     }
 

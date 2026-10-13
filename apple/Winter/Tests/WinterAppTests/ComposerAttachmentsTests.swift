@@ -48,6 +48,17 @@ final class ComposerAttachmentsTests: XCTestCase {
         XCTAssertEqual(draft.removeLast()?.id, c, "Backspace takes the LAST chip")
         XCTAssertEqual(draft.items.map(\.id), [b])
         XCTAssertEqual(draft.add(.file(path: "/x")), 4, "an id is never reused")
+        // Two drafts' first pasted images never share a thumbnail cache key (ids restart per draft).
+        var other = ComposerAttachmentDraft()
+        other.add(.image(ComposerImage(data: png, mediaType: "image/png")))
+        func dataKey(_ d: ComposerAttachmentDraft) -> String? {
+            for chip in composerChipModels(d) {
+                if case .image(let source, _) = chip.visual, case .data = source { return source.key }
+            }
+            return nil
+        }
+        XCTAssertNotNil(dataKey(draft))
+        XCTAssertNotEqual(dataKey(draft), dataKey(other))
     }
 
     func testChipModelsNameEachKind() {

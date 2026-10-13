@@ -122,6 +122,7 @@ struct AttachmentChip: View {
     var onRemove: (() -> Void)? = nil
 
     @State private var thumbnail: NSImage?
+    @State private var fileIcon: NSImage?
     @State private var unreadable = false
     @State private var isHovered = false
 
@@ -185,10 +186,16 @@ struct AttachmentChip: View {
                             .foregroundStyle(Theme.textMuted)
                     )
             }
-        case .file(let path):
-            Image(nsImage: attachmentFileIcon(path))
-                .resizable()
-                .aspectRatio(contentMode: .fit)
+        case .file:
+            if let fileIcon {
+                Image(nsImage: fileIcon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                Image(systemName: "doc")
+                    .font(Typography.body())
+                    .foregroundStyle(Theme.textMuted)
+            }
         }
     }
 
@@ -215,6 +222,11 @@ struct AttachmentChip: View {
     }
 
     private func loadThumbnail() async {
+        if case .file(let path) = model.visual {
+            // Looked up once per chip (the transcript re-renders on every streamed chunk), never in `body`.
+            fileIcon = attachmentFileIcon(path)
+            return
+        }
         guard case .image(let source, _) = model.visual else { return }
         if let hit = AttachmentThumbnails.cached(source) {
             thumbnail = hit
@@ -270,7 +282,7 @@ func composerChipModels(_ draft: ComposerAttachmentDraft) -> [AttachmentChipMode
                                        visual: .image(source: .path(path), fallbackName: "Image #\(n)"), attachmentID: item.id)
         case .image(.data(let data)):
             return AttachmentChipModel(id: "a\(item.id)", name: "Image #\(n)",
-                                       visual: .image(source: .data(key: "draft-\(item.id)", bytes: AttachmentImageBytes(data.data)),
+                                       visual: .image(source: .data(key: item.key, bytes: AttachmentImageBytes(data.data)),
                                                       fallbackName: "Image #\(n)"), attachmentID: item.id)
         case .file(let path):
             return AttachmentChipModel(id: "a\(item.id)", name: attachmentDisplayName(path), visual: .file(path: path),

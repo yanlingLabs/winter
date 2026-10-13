@@ -706,7 +706,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     private func submit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         // Attachments alone are a message too (their placeholders are its text).
-        guard !trimmed.isEmpty || !adapter.composerAttachments.isEmpty else { return }
+        guard !trimmed.isEmpty || !self.adapter.composerAttachments.isEmpty else { return }
         let wasRunning = session.state.turnRunning
         let sid = sessionId
         let client = feed.client
