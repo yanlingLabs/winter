@@ -507,6 +507,17 @@ final class HeadlessPresentChromeTests: XCTestCase {
         XCTAssertEqual(C.accessibilityValue(control: false), "Watching — Winter has control")
     }
 
+    func testThePanelsListSaysWhatARowDoes() {
+        let watched = BrowserLinkHeadlessTab(tabId: "t", url: "http://127.0.0.1:47615/", title: "Winter drill — sign in", presented: false, control: false)
+        XCTAssertEqual(C.tabLabel(watched), "Winter drill — sign in — 127.0.0.1")
+        XCTAssertEqual(C.listHeading(count: 1), "Winter's headless tab")
+        XCTAssertEqual(C.listHeading(count: 3), "Winter's headless tabs (3)")
+        XCTAssertEqual(C.tabRowAction(watched, pending: false), "Watch")
+        XCTAssertEqual(C.tabRowAction(watched, pending: true), "Opening…")
+        let held = BrowserLinkHeadlessTab(tabId: "t", url: "", title: "", presented: false, control: true)
+        XCTAssertEqual(C.tabRowAction(held, pending: false), "Yours — show")
+    }
+
     func testTheOfferedTabsLeaveOutTheShownOnes() {
         let tabs = [BrowserLinkHeadlessTab(tabId: "t1", url: "", title: "", presented: false, control: false),
                     BrowserLinkHeadlessTab(tabId: "t2", url: "", title: "", presented: true, control: false)]
@@ -654,7 +665,7 @@ final class HeadlessPresentStoreTests: XCTestCase {
             await withCheckedContinuation { gate.values.append($0) }
             return [BrowserLinkHeadlessTab(tabId: "old", url: "", title: "", presented: false, control: false)]
         }
-        store.refreshTabsIfNeeded(sessionId: "s_1")
+        store.refreshTabs(sessionId: "s_1")
         for _ in 0..<200 where gate.values.isEmpty { try await Task.sleep(nanoseconds: 5_000_000) }
         // The daemon pushes a newer list while the fetch is out …
         let fresh = [BrowserLinkHeadlessTab(tabId: "new", url: "", title: "", presented: true, control: false)]
@@ -665,26 +676,66 @@ final class HeadlessPresentStoreTests: XCTestCase {
         XCTAssertEqual(store.tabsBySession["s_1"]?.map(\.tabId), ["new"])
     }
 
-    func testTheListIsFetchedOncePerLink() async throws {
+    func testTheListIsFetchedEachTimeThePanelShowsTheSessionOneAtATime() async throws {
+        // Drill A (2026-10-13): fetched once per link, a panel opened later showed whatever the store last had — and a
+        // fetch that failed was never made again.
         let store = try store()
         let lists = Recorded<BrowserLinkHeadlessAction>()
+        let gate = Recorded<CheckedContinuation<Void, Never>>()
         store.sendAction = { _, tabId, action in
             XCTAssertNil(tabId)
             lists.values.append(action)
+            await withCheckedContinuation { gate.values.append($0) }
+            return [BrowserLinkHeadlessTab(tabId: "ht_\(lists.values.count)", url: "", title: "", presented: false, control: false)]
+        }
+        store.refreshTabs(sessionId: "s_1")
+        for _ in 0..<200 where gate.values.isEmpty { try await Task.sleep(nanoseconds: 5_000_000) }
+        // A second opening while the first fetch is out asks nothing more.
+        store.refreshTabs(sessionId: "s_1")
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(lists.values, [.list])
+        gate.values.removeFirst().resume()
+        for _ in 0..<200 where store.tabsBySession["s_1"] == nil { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(store.tabsBySession["s_1"]?.map(\.tabId), ["ht_1"])
+        // The panel shows the session again: asked again, and the answer replaces the list.
+        store.refreshTabs(sessionId: "s_1")
+        for _ in 0..<200 where gate.values.isEmpty { try await Task.sleep(nanoseconds: 5_000_000) }
+        gate.values.removeFirst().resume()
+        for _ in 0..<200 where store.tabsBySession["s_1"]?.first?.tabId != "ht_2" { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(lists.values, [.list, .list])
+        XCTAssertEqual(store.tabsBySession["s_1"]?.map(\.tabId), ["ht_2"])
+    }
+
+    func testAFailedFetchKeepsTheListAndTheNextOpeningAsksAgain() async throws {
+        let store = try store()
+        let calls = Recorded<Int>()
+        store.sendAction = { _, _, _ in
+            calls.values.append(calls.values.count)
+            if calls.values.count == 1 { throw BrowserLinkHeadlessError.notConnected }
             return [BrowserLinkHeadlessTab(tabId: "ht_1", url: "", title: "", presented: false, control: false)]
         }
-        store.refreshTabsIfNeeded(sessionId: "s_1")
-        store.refreshTabsIfNeeded(sessionId: "s_1")
-        for _ in 0..<200 where store.tabsBySession["s_1"] == nil {
-            try await Task.sleep(nanoseconds: 5_000_000)
-        }
-        XCTAssertEqual(lists.values, [.list])
+        store.refreshTabs(sessionId: "s_1")
+        for _ in 0..<200 where calls.values.isEmpty { try await Task.sleep(nanoseconds: 5_000_000) }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertNil(store.tabsBySession["s_1"])
+        store.refreshTabs(sessionId: "s_1")
+        for _ in 0..<200 where store.tabsBySession["s_1"] == nil { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(calls.values.count, 2)
         XCTAssertEqual(store.tabsBySession["s_1"]?.map(\.tabId), ["ht_1"])
-        store.linkChanged()
-        store.refreshTabsIfNeeded(sessionId: "s_1")
-        for _ in 0..<200 where lists.values.count < 2 {
-            try await Task.sleep(nanoseconds: 5_000_000)
+    }
+
+    func testAFetchSentOnAnOldLinkNeverLandsOnTheNewOne() async throws {
+        let store = try store()
+        let gate = Recorded<CheckedContinuation<Void, Never>>()
+        store.sendAction = { _, _, _ in
+            await withCheckedContinuation { gate.values.append($0) }
+            return [BrowserLinkHeadlessTab(tabId: "old", url: "", title: "", presented: false, control: false)]
         }
-        XCTAssertEqual(lists.values, [.list, .list])
+        store.refreshTabs(sessionId: "s_1")
+        for _ in 0..<200 where gate.values.isEmpty { try await Task.sleep(nanoseconds: 5_000_000) }
+        store.linkChanged()
+        gate.values.removeFirst().resume()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertNil(store.tabsBySession["s_1"])
     }
 }

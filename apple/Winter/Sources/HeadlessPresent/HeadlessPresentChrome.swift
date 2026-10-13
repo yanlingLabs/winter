@@ -138,6 +138,17 @@ struct HeadlessPresentChromeState: Equatable {
         return title
     }
 
+    /// The heading over the panel's list of the session's headless tabs.
+    static func listHeading(count: Int) -> String {
+        count == 1 ? "Winter's headless tab" : "Winter's headless tabs (\(count))"
+    }
+
+    /// What choosing a row of the list does (or that it is on its way).
+    static func tabRowAction(_ tab: BrowserLinkHeadlessTab, pending: Bool) -> String {
+        if pending { return "Opening…" }
+        return tab.control ? "Yours — show" : "Watch"
+    }
+
     /// The tabs the panel offers to watch: those not already shown here.
     static func offeredTabs(_ tabs: [BrowserLinkHeadlessTab], shownTabIds: Set<String>) -> [BrowserLinkHeadlessTab] {
         tabs.filter { !shownTabIds.contains($0.tabId) }

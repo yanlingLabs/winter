@@ -150,51 +150,65 @@ struct HeadlessPresentContent: View {
     }
 }
 
-/// When the session has headless tabs and none is shown: a small control at the foot of the panel listing them;
-/// choosing one asks the daemon to show it (watch-only).
-struct HeadlessTabsOffer: View {
+/// When the session has headless tabs and none is shown: the panel's list of them, a row per tab ("title — host"),
+/// choosing one asks the daemon to show it (watch-only). It is a row of the panel's own layout, between the chrome band
+/// and the content — never drawn over the content, which may be a live browser view that would cover it (Drill A,
+/// 2026-10-13: the list was an overlay on the panel's web tab and the person never saw it). Nothing while there is none.
+struct HeadlessTabsList: View {
     @ObservedObject var store: HeadlessPresentStore
     let sessionId: String
 
     var body: some View {
         let tabs = store.offeredTabs(for: sessionId)
-        if !tabs.isEmpty || store.listNotice[sessionId] != nil {
-            VStack(spacing: 6) {
-                if let notice = store.listNotice[sessionId] {
+        let notice = store.listNotice[sessionId]
+        if !tabs.isEmpty || notice != nil {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(HeadlessPresentChromeState.listHeading(count: tabs.count))
+                    .font(Typography.caption())
+                    .foregroundStyle(Theme.textMuted)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 2)
+                ForEach(tabs) { tab in
+                    Button {
+                        store.watch(sessionId: sessionId, tabId: tab.tabId)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: tab.control ? "hand.point.up.left" : "eye")
+                                .font(Typography.label())
+                                .foregroundStyle(Theme.textMuted)
+                                .accessibilityHidden(true)
+                            Text(HeadlessPresentChromeState.tabLabel(tab))
+                                .font(Typography.label(.medium))
+                                .foregroundStyle(Theme.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Text(HeadlessPresentChromeState.tabRowAction(tab, pending: store.watchPending.contains(tab.tabId)))
+                                .font(Typography.caption())
+                                .foregroundStyle(Theme.textMuted)
+                        }
+                        .padding(.horizontal, 8)
+                        .frame(height: panelTabPillSize.height)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(ShellChromeButtonStyle())
+                    .disabled(store.watchPending.contains(tab.tabId))
+                    .help("Show this tab of Winter's headless browser here")
+                }
+                if let notice {
                     Text(notice)
                         .font(Typography.caption())
                         .foregroundStyle(Theme.textPrimary)
                         .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                }
-                if !tabs.isEmpty {
-                    Menu {
-                        ForEach(tabs) { tab in
-                            Button(HeadlessPresentChromeState.tabLabel(tab)) {
-                                store.watch(sessionId: sessionId, tabId: tab.tabId)
-                            }
-                            .disabled(store.watchPending.contains(tab.tabId))
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "eye")
-                                .font(Typography.label())
-                            Text(tabs.count == 1 ? "Watch Winter's headless tab" : "Watch one of Winter's \(tabs.count) headless tabs")
-                                .font(Typography.label(.medium))
-                        }
-                        .foregroundStyle(Theme.textPrimary)
-                        .padding(.horizontal, 12)
-                        .frame(height: panelTabPillSize.height)
-                        .contentShape(Rectangle())
-                    }
-                    .menuStyle(.button)
-                    .buttonStyle(ShellChromeButtonStyle(isSelected: true))
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("Show a tab Winter is using in its headless browser")
+                        .padding(.horizontal, 8)
                 }
             }
-            .padding(10)
+            .padding(.horizontal, panelTabPillInset)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(Theme.hairline).frame(height: panelDividerWidth)
+            }
         }
     }
 }

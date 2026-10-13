@@ -11,6 +11,8 @@
 //   http://crash.test/        — it answers, then exits 1 (a crash of the whole browser)
 //   http://renderer.test/     — it answers, then reports the tab gone `crashed` (one renderer)
 //   http://events.test/       — it answers, then sends events for the tab (one off the allowlist, one for an unknown tab)
+//   http://loads-late.test/   — it answers, then its page "loads" 400 ms later: tabs.live reads a new title for it from
+//                               then on, and a Page.loadEventFired for the tab is sent
 //   http://wedge.test/        — it answers, then never answers a cdp.send for that tab (a page busy-looping in its
 //                               renderer: everything else, tabs.live included, is still answered)
 //   http://hang.test/         — it answers, then — from that tab's first cdp.send on — answers nothing at all (the
@@ -54,7 +56,7 @@ const linkId = "h-fake";
 const keepAlive = setInterval(() => {}, 1 << 30);
 // Anything that goes wrong in the fake is said on stderr in the helper's own log form (the pool logs those lines).
 process.on("uncaughtException", (err) => { process.stderr.write(`WinterHeadless: fake helper error: ${String((err as Error)?.stack ?? err).slice(0, 500).replace(/\n/g, " | ")}\n`); process.exitCode = 3; });
-const tabs = new Map<string, { sessionId: string; url: string }>();
+const tabs = new Map<string, { sessionId: string; url: string; loaded?: boolean }>();
 
 const send = (method: string, params: Record<string, unknown>): void => { process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`); };
 const reply = (cmdId: string, result: unknown): void => send("browserLink.result", { linkId, cmdId, ok: true, result });
@@ -120,6 +122,12 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
           send("headless.notice", { linkId, tabId: "w-unknown", kind: "popup" });
         }, 20);
       }
+      if (t.url === "http://loads-late.test/") {
+        setTimeout(() => {
+          t.loaded = true;
+          send("browserLink.events", { linkId, events: [{ tabId, method: "Page.loadEventFired", params: { timestamp: 1 } }] });
+        }, 400);
+      }
       if (t.url === "http://events.test/") {
         setTimeout(() => send("browserLink.events", { linkId, events: [
           { tabId, method: "Page.loadEventFired", params: { timestamp: 1 } },
@@ -142,7 +150,7 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
       }, 300);
       return;
     }
-    case "tabs.live": return reply(cmdId, { tabs: [...tabs].map(([tabId, t]) => ({ tabId, sessionId: t.sessionId, url: t.url, title: `live ${t.url}`, held: true })) });
+    case "tabs.live": return reply(cmdId, { tabs: [...tabs].map(([tabId, t]) => ({ tabId, sessionId: t.sessionId, url: t.url, title: t.loaded === true ? `loaded ${t.url}` : `live ${t.url}`, held: true })) });
     case "cdp.send": {
       if (!tabs.has(String(p.tabId))) return fail(cmdId, "tab_gone", "the headless tab is gone");
       if (tabs.get(String(p.tabId))!.url === "http://wedge.test/") return; // never answered

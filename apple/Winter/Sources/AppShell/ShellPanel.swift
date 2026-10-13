@@ -313,6 +313,13 @@ struct ShellPanel: View {
                 .frame(height: panelDividerWidth)
                 .overlay(Theme.hairline)
 
+            // Lane H3: the session's headless tabs, listed to watch while none is shown — a row of the layout, never an
+            // overlay on the content (a live browser view would cover it). Fetched each time the panel shows the session;
+            // the daemon's pushes keep it current meanwhile.
+            if presented == nil, let sessionId = host?.panelSessionId {
+                HeadlessTabsList(store: headless, sessionId: sessionId)
+            }
+
             // panel-cef Task 6a: the content slot Plan A left as `Color.clear`. `.id(tabId)` is
             // load-bearing rather than tidy — a different tab must arrive as a REBUILD, not as an
             // update. browser-runtime T4 changed what that buys without changing the requirement:
@@ -332,15 +339,9 @@ struct ShellPanel: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // Lane H3: the session's headless tabs, offered to watch when none is shown.
-            .overlay(alignment: .bottom) {
-                if presented == nil, let sessionId = host?.panelSessionId {
-                    HeadlessTabsOffer(store: headless, sessionId: sessionId)
-                }
-            }
-            .task(id: host?.panelSessionId) {
-                headless.refreshTabsIfNeeded(sessionId: host?.panelSessionId)
-            }
+        }
+        .task(id: host?.panelSessionId) {
+            headless.refreshTabs(sessionId: host?.panelSessionId)
         }
         // review round 2, Important 2 (Task 2, plan-mandated fix, adjudicated by the user): a
         // BACKGROUND LAYER that ignores the safe area, not a clip on the content — `ShellSidebar

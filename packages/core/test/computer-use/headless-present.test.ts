@@ -247,6 +247,21 @@ describe("watch and take over from the panel", () => {
     expect(r.panel.lists.every((l) => l.sessionId === "s1")).toBe(true);
   });
 
+  test("the panel's list is pushed with each page's address and title as the helper reads them then, and again when a page loads", async () => {
+    // Drill A (2026-10-13): the one push came at tab.ensure's answer, before the page had its title — and nothing pushed
+    // again when it loaded.
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "http://loads-late.test/" });
+    await until("the list pushed at creation", () => r.panel.lists.length === 1);
+    // Read from the helper when pushed (`tabs.live`), not the title tab.ensure answered with.
+    expect(r.panel.lists[0]).toEqual({ sessionId: "s1", tabs: [{ tabId: t.tabKey, url: "http://loads-late.test/", title: "live http://loads-late.test/", presented: false, control: false }] });
+    await until("the list pushed again once the page loaded", () => r.panel.lists.length === 2);
+    expect(r.panel.lists[1]!.tabs[0]!.title).toBe("loaded http://loads-late.test/");
+    // Nothing else pushes: no polling.
+    await new Promise((res) => setTimeout(res, 300));
+    expect(r.panel.lists).toHaveLength(2);
+  });
+
   test("the session's runtime ending and the helper stopping end its presentations and tell the panel", async () => {
     const r = rig();
     const t = await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
