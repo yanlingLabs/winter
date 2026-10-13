@@ -60,6 +60,7 @@ describe("the chrome group: launch and rig", () => {
     expect(args).toContain("--use-mock-keychain");
     expect(args).toContain("--password-store=basic");
     expect(args).toContain("--no-first-run");
+    expect(args).toContain("--disable-features=MediaRouter");
     expect(args.at(-1)).toBe("http://127.0.0.1:5555/material.html");
     expect(chromeLaunchArgs({ key: "fr", lang: "fr", start: "inspect" }, "/tmp/p", "x").at(-1)).toBe("chrome://inspect/#remote-debugging");
     expect(localStateFor({ key: "d", lang: "fr", start: "material", remoteDebugging: true })).toEqual({ devtools: { remote_debugging: { "user-enabled": true } } });

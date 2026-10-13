@@ -78,6 +78,9 @@ export function chromeLaunchArgs(need: ChromeNeed, profile: string, pageUrl: str
   return [
     `--user-data-dir=${profile}`, "--no-first-run", "--no-default-browser-check", "--use-mock-keychain", "--password-store=basic",
     "--disable-sync", "--disable-background-networking", "--disable-component-update", "--disable-default-apps", "--mute-audio",
+    // No Cast / mDNS discovery: run 3 (2026-10-13) raised macOS's "find devices on local networks?" prompt the first
+    // time an instance was brought to the front.
+    "--disable-features=MediaRouter",
     `--lang=${need.lang}`, "--window-size=1100,900", "--window-position=80,60", ...(need.extraArgs ?? []), start,
   ];
 }
