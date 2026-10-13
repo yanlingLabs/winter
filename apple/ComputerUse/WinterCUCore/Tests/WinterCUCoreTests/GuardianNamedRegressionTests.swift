@@ -294,4 +294,14 @@ final class GuardianNamedRegressionTests: XCTestCase {
         let folder = verdicts(await legs(2))
         XCTAssertEqual(Set(folder), ["left"], "a folder launches nothing and is no launcher: left in front and said — \(folder)")
     }
+
+    /// The review of round 19, H1, in the simulated world: the user clicks T's background window (the helper brings it,
+    /// T@100 lands — theirs); 400 ms later the agent's act in flight raises T's window on desktop 300 and macOS moves
+    /// there — the agent's (I4: undone), never "the window they clicked into", which counts only on the clicked window's
+    /// desktop, once, and never after a raise of the agent's since the click.
+    func testH1_TheClicksBringNeverCoversTheAgentsRaiseOnAnotherDesktop() async {
+        let runs = await scenario("r19-h1-bring-other-desktop", seeds: 1...12, [(300, .agentBusy(8, gapMs: 60)), (500, .click(77)),
+                                                                              (900, .targetRaisedOnItsOtherDesktop), (4_000, .quiet)])
+        XCTAssertTrue(runs.allSatisfy { $0.trace.contains { $0.contains("raises T's window on desktop 300 → T@300") } }, "the raise happened")
+    }
 }
