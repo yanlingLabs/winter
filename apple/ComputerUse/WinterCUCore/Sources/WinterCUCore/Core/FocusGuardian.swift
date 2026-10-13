@@ -1262,7 +1262,15 @@ public struct CUFocusGuardianCore: Sendable {
         // before it was heard — the click's mark is spent, never promoted later (round 18 — found with the attempt below:
         // their click into T landed, their earlier Dock click's S landed after it, T was heard late, and a ⌘-Tab back to T
         // within the click's window took the stale mark for work).
-        if let p = pendingWork, p.app == pid, front != pid { pendingWork = nil }
+        // (Round 19, L8 — the review of round 18: the front as of the activation's OWN moment, not the hearing's.) When no
+        // switch input of theirs came after the click, what is in front at the hearing came from input BEFORE it and
+        // landed after T: at T's own moment T was in front — they were working in it then (the landing counts, so an act in
+        // flight on T stops — the mid-act seed 6 with an ordinary target: the click's mark was spent unseen and the act's
+        // keys went on into T) — and they have moved on since (the mark is spent, never promoted later).
+        if let p = pendingWork, p.app == pid, front != pid {
+            if input.lastAt <= p.at { workMarks[pid, default: 0] += 1 }
+            pendingWork = nil
+        }
         guard front == pid, !isTouched(pid, now: now), exemptions[pid] == nil, !(visiting(now: now) && pid == visitApp) else { return }
         if let w = userWorkingApp, w != pid { userWorkingApp = nil }
         // A PENDING click mark (its app's activation not landed yet) ends only when a switch input of theirs came AFTER the
