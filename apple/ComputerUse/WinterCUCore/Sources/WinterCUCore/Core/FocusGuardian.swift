@@ -799,6 +799,9 @@ public struct CUFocusGuardianCore: Sendable {
         if lastSeen != current { lastSeenSince = now }
         lastSeen = current
         if let a = q.app { seenFront[a] = now }
+        if visiting(now: now), let a = q.app {
+            if a == visitApp { if !visitArrived { visitArrived = true } } else if visitArrived { visitLeft = true }
+        }
         if let app = q.app, app == place.app, q.space == nil || place.space == nil || q.space == place.space {
             // Their place's desktop not known (an activation heard late, of an app with windows on several): it is this one.
             if active, view.space == nil, let sp = q.space { view.space = sp }
@@ -1014,8 +1017,18 @@ public struct CUFocusGuardianCore: Sendable {
         let onlyLate = (late > -.infinity && !isTouchedByTheAgent(app, q: q, now: now)) || exemption(app, now: now) != nil
         if let i = input.explanation(from: from, after: cause, raiseAfter: raiseCause, now: upTo,
                                      app: appMoved, desktop: desktopMoved, front: app, seconds: !onlyLate) {
-            // On the visited desktop, their input in the visited app is no move away: the visit's end decides.
-            if visit, let a = app, a == visitApp { return (.visit, nil) }
+            // A switch of theirs INTO the visited desktop (after the visit's own way there) makes it their place, and the
+            // visit's end does not return them to where it began (the controller's ruling, round 19: "a swipe the user makes
+            // into the visited desktop makes that desktop the user's place, and the visit's end must not return them to U").
+            // Judged ONCE: its instant is used up here, so the visit's end and a later key read the same verdict (the
+            // ordinary target's seed 49: judged the visit's with the instant left unused, the end returned them to U, and a
+            // key a moment later judged the same state theirs on that instant).
+            // (Only once the visit had arrived and they had left the visited desktop since: its own way there, landing, is
+            // the visit's — found by the survey of seed 1050, a ⌘ release whose Tab the tap missed explained the way there.)
+            if visit, let a = app, a == visitApp {
+                guard visitLeft else { return (.visit, nil) }
+                return (.user("their switch into the visited desktop during a desktop visit — their place now"), .instant(i, keep: false))
+            }
             // (The app the consented foreground is bringing forward: their input may have been for another app landing
             // right after — it stays a short second explanation, as for an untouched app; found by the model-based test.)
             let consentApp = exemption(app, now: now) != nil
@@ -1102,6 +1115,8 @@ public struct CUFocusGuardianCore: Sendable {
         visitUntil = now + maxSeconds
         visitStartedAt = now
         visitSawUserInput = false
+        visitArrived = false
+        visitLeft = false
         // What was judged before it is judged again: what the visit brings up is its own (I5), never a theft undone in
         // the middle of it (found by the model-based test: an app judged the agent's indirect effect a moment before the
         // visit, heard again during it, was undone over the visit's switch).
@@ -1110,6 +1125,12 @@ public struct CUFocusGuardianCore: Sendable {
     }
 
     /// The open visit runs on: its visit mode lasts until `until` (the safety cap, re-armed as work starts and ends).
+    /// During the open visit: the visited app was seen in front (its way there landed), and something else was seen in
+    /// front after that (the user left the visited desktop, or was returned) — only then is a switch of theirs into the
+    /// visited desktop THEIR move, never the visit's own way there (round 19).
+    private var visitArrived = false
+    private var visitLeft = false
+
     public mutating func extendVisit(until: TimeInterval) {
         guard visitApp != nil else { return }
         visitUntil = until

@@ -120,7 +120,11 @@ final class Round18GuardianTests: XCTestCase {
         var g = CUFocusGuardianCore()
         g.begin(view: CUGuardedView(app: 1, space: 100))
         g.beginVisit(app: 6000, user: 1, now: 10.0)
-        g.noteSwitch(now: 10.2, .desktop)  // their ⌃-arrow into the visited desktop
+        g.noteSwitch(now: 10.2, .desktop)  // their ⌃-arrow…
+        // …BEFORE the visit's own way there (round 19, the controller's ruling: a switch of theirs into the visited desktop
+        // AFTER the visit's way there makes it their place — this test keeps the no-move end's case: input the visit's own
+        // move came after).
+        g.noteCause(6000, raise: true, now: 10.22)
         let during = g.judge(CUMoveQuery(app: 6000, space: 300), now: 10.25)
         guard case .visit = during else { return XCTFail("during the visit: the visit's — \(during)") }
         XCTAssertFalse(g.endVisit(now: 10.3), "the visit's end: they did not move")

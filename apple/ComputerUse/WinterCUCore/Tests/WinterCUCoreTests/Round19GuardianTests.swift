@@ -58,4 +58,25 @@ final class Round19GuardianTests: XCTestCase {
             XCTAssertEqual(tLands.isUsers, !laterInput, "the bring of T landing after S (input after the click: \(laterInput)) — \(tLands)")
         }
     }
+
+    /// The controller's ruling (round 19, the ordinary target's seed 49): a swipe the user makes into the visited desktop —
+    /// after the visit's own way there — makes that desktop their place, and the visit's end does not return them to U.
+    /// Judged once: the visit's end and a later key read the same verdict on the same instant. The visit's own way there
+    /// is never taken for their switch (the survey's seed 1050).
+    func testASwipeIntoTheVisitedDesktopIsTheirPlaceAndTheEndKeepsThemThere() {
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 100))
+        g.beginVisit(app: 6000, user: 1, now: 10.0)
+        g.noteCause(6000, raise: true, now: 10.05)          // the visit's own way there…
+        if case .user = g.judge(CUMoveQuery(app: 6000, space: 300), now: 10.3) { XCTFail("the way there is the visit's") }
+        _ = g.judge(CUMoveQuery(app: 1, space: 100), now: 10.4)  // …then they are back on their own desktop
+        g.noteSwitch(now: 10.5, .desktop)                    // their swipe into the visited desktop
+        let during = g.judge(CUMoveQuery(app: 6000, space: 300), now: 10.6)
+        XCTAssertTrue(during.isUsers, "their swipe into the visited desktop: their place — \(during)")
+        XCTAssertEqual(g.view.app, 6000, "their place is the visited app on its desktop")
+        XCTAssertTrue(g.endVisit(now: 10.8), "the visit's end: they moved — no return to where it began")
+        let key = g.judge(CUMoveQuery(app: 6000, space: 300), now: 10.9)
+        if case .agent = key { XCTFail("a key a moment later reads the same verdict — \(key)") }
+        XCTAssertEqual(g.view.app, 6000)
+    }
 }
