@@ -103,13 +103,9 @@ final class GuardianModelTests: XCTestCase {
 
     /// The ordinary target's (`sim.editor`, round 14's standing second check) known-failing seeds in its surveyed range
     /// 1–60 (the ratchet below runs the whole range), each pinned to its violation class.
-    /// Round 19 (the review of round 19, MEDIUM 1): the world's empty-desktop click brought T forward even when T is not
-    /// Finder; brought to Finder, it surfaced seed 49 — an ENGINE bug left pinned: during session s2's visit their swipe
-    /// into the visited desktop was judged the visit's, the visit's end returned them to U, and a key a moment later judged
-    /// the same state theirs on the swipe's unused instant (two verdicts for one change).
-    static let ordinaryTargetKnownFailing: [Int: String] = [
-        49: "I3: the user's key went to T2, but they are at U — a visit's return over their swipe into the visited desktop, then the swipe taken as theirs",
-    ]
+    /// (Round 19: the ordinary target's 49, pinned when the world's Finder fix surfaced it, came off once the engine judged
+    /// a switch of theirs into the visited desktop once — their place, the visit's end leaving them there.)
+    static let ordinaryTargetKnownFailing: [Int: String] = [:]
 
     /// (Round 16's fixed-seed lists — 1008, 1011, 1017, 1038, 1049, 1051, 1055, 1057, 1059, 1063, 1067, 1073 and, with an
     /// ordinary target, 36, 49, 51, 58 — and the ordinary target's seeds 1–12 are subsumed by the ratchet's whole ranges.)
