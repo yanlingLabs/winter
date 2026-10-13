@@ -73,7 +73,7 @@ extension CUCore {
         // Vivaldi snapshot, Comet — a bundle list misses them) — never an Electron or CEF app, which has no remote-debugging
         // page to protect and would pay the scan on every act, its own `<scheme>://inspect` route refused (review of
         // round 12, MEDIUM #5).
-        guard t.bundleId.map(CUChromium.bundleIds.contains) == true || (t.isChromium && isWebBrowser(t)) else { return }
+        guard CUChromium.isBrowser(bundleId: t.bundleId, chromium: t.isChromium, declaresWeb: { isWebBrowser(t) }) else { return }
         let refusal = CUError.refused(.remoteDebugging, Self.remoteDebuggingSentence)
         // A capture-only bind (no accessibility) still sends point clicks: judged by the window server's titles.
         guard t.accessible else {

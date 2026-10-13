@@ -82,7 +82,9 @@ extension CUCore {
         // included (review of round 14, LOW #3).
         defer { refreshSecureTypingBase(t) }
         // However it ends (a failed act may have sent input): the after-act picture windows run from its return.
-        defer { if t.lastActionMs != nil { t.lastActReturnedMs = clock.nowMs() } }
+        // (Only when this act sent input — its input time moved; a refused or no-op act leaves the last one's window.)
+        let inputBefore = t.lastActionMs
+        defer { if let now = t.lastActionMs, now != inputBefore { t.lastActReturnedMs = clock.nowMs() } }
         let acted = try await actWithVisits(p, t, token)
         var outcome = acted.0
         let inVisit = acted.1

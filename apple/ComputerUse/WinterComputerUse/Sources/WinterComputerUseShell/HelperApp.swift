@@ -57,6 +57,9 @@ import WinterCUPresentation
         let viewHub = ViewHub(capture: LiveFrameCaptureFactory(), geometry: LiveWindowGeometry(), snapshotter: LiveWindowSnapshotter(),
                               clock: LiveViewClock())
         let coordinator = HelperCoordinator(presentation: presentation, escapeTap: escapeTap, viewHub: viewHub)
+        // The browsers' accessibility flags Winter sets are recorded in its run dir; what a helper that ended without
+        // clearing them left there is cleared now (only for the very process that still runs with it on).
+        CUCore.startAccessibilityFlagRecord(home: identity.home)
         let core = CUCore(events: coordinator)
         // Esc closes the open desktop visit at once (the user returned), before the daemon hears it.
         coordinator.onEscape = { [weak core] in Task { await core?.closeAllVisits() } }
@@ -109,6 +112,8 @@ import WinterCUPresentation
 
     public func applicationWillTerminate(_ notification: Notification) {
         server?.stop()
+        // A quit, the idle quit and SIGTERM all end here: the accessibility flags Winter set in browsers go off with it.
+        CUCore.releaseAccessibilityFlags()
     }
 
     private func fail(_ message: String) -> Never {

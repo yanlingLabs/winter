@@ -53,9 +53,6 @@ export function valueWithLength(ref: number, value: string, fullLength: number |
 
 // ── check boxes, radios, switches ─────────────────────────────────────────────────────────────────
 
-/** What a checkable control's state is read from: the element's own `aria-checked`, and the native check box or radio
- *  that carries it — the element itself (`nativeIsSelf`), or one it wraps or labels (a page that draws its own box over
- *  a hidden native input). */
 /**
  * The roles whose accessible name is their content when nothing else names them (ARIA's "name from content"): their
  * subtree is not read again as text. Check boxes and radios are among them — a `<div role="checkbox">Accept the
@@ -72,6 +69,9 @@ export function nameFromContent(role: string | undefined): boolean {
   return role !== undefined && NAME_FROM_CONTENT_ROLES.has(role);
 }
 
+/** What a checkable control's state is read from: the element's own `aria-checked`, and the native check box or radio
+ *  that carries it — the element itself (`nativeIsSelf`), or one it wraps or labels (a page that draws its own box over
+ *  a hidden native input). */
 export interface CheckFacts {
   ariaChecked: string | null;
   native?: { checked: boolean; indeterminate: boolean };

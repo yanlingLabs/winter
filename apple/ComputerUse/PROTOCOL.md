@@ -1175,13 +1175,20 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   not wholly selected, say so (the watch was armed only for keys with no `into`; `key("tab", { into })` said "pressed tab" with the focus unmoved).
 - Floor F with no page URL to read (the page absent from the tree): the bound window's title, or its selected tab's, naming the inspect page
   refuses the act (a key went through with chrome://inspect shown).
-- `AXEnhancedUserInterface`, its cost and its end (the controller's ruling): it is what VoiceOver sets — per PROCESS, kept while the process runs
-  until a client turns it off. It moves and resizes nothing itself, and Winter never moves a browser's windows; its known side effect is that
-  window frame changes made through accessibility can animate or land in steps (window managers turn it off around their own moves). Chrome
-  builds and keeps the accessibility tree of every tab of that process while it is on (CPU and memory); the user's browsing in it is otherwise
-  unchanged. So Winter turns it on only when the page did not appear otherwise, only when it was OFF (never over another client's — VoiceOver, a
-  window manager), and turns it off again when the last target in that process is released (a release, a session's end, a lost target) —
-  unless VoiceOver is running then (it may have asked for it since). The next bind turns it on again.
+- `AXEnhancedUserInterface`, its cost and its end (the controller's ruling, and the review's): it is what VoiceOver sets — per PROCESS, kept
+  while the process runs until a client turns it off. It moves and resizes nothing itself, and Winter never moves a browser's windows; its
+  known side effect is that window frame changes made through accessibility can animate or land in steps (window managers turn it off around
+  their own moves). Chrome builds and keeps the accessibility tree of every tab of that process while it is on (CPU and memory); the user's
+  browsing in it is otherwise unchanged. "A browser" here is Floor F's own test (a known bundle, or a Chromium app that declares http(s): Brave
+  Beta, Opera GX, Comet — never Electron or CEF). Winter sets it only when the page did not appear otherwise, and it is WINTER'S only when the
+  app answered the read just before with OFF (Chrome for Testing 156 answers it: false, then true once set — measured; an app that does not
+  answer still gets it, never as Winter's). Winter's flag goes off again — re-read ON just before (unanswered or off: left as it is), and never
+  while VoiceOver, Switch Control, Full Keyboard Access or Voice Control is on — when the last target in that process is released (a release,
+  a session's end, a lost target) and when the helper ends (a quit, the idle quit, SIGTERM: `applicationWillTerminate`). The flags Winter set
+  are recorded as `{pid, process start time}` in `<home>/run/computer-use-ax-flags.json` (0600); a helper that ended without clearing them (a
+  crash, a kill) is followed by one that, at its start, clears each only in THAT process (same pid AND start time) still answering ON, then
+  drops the record. Residual: another assistive tool macOS does not name (a keyboard-driven clicker reading the tree) that came to rely on a
+  flag Winter set may lose it at Winter's release until it sets it again.
 - The after-act picture window (1.17.0's ~1.5 s, and its label's) runs from when the act's RESULT returned, not from its input: an act whose
   answer came seconds later (Chrome activated itself and was put back) had its window spent before the next screenshot.
 - A Chromium window on ANOTHER desktop may not update its accessibility (nor its picture) until it is seen: an act's "nothing changed" there

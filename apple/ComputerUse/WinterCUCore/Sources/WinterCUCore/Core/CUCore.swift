@@ -339,7 +339,10 @@ public final class CUCore: @unchecked Sendable {
 
         let privatePath = p.privatePath ?? true
         let ax = self.ax, sys = self.sys
-        if chromium, let running = app.running { try await queues.run(pid) { CUChromium.enableAccessibilityOnce(running) } }
+        if chromium, let running = app.running {
+            let browser = CUChromium.isBrowser(bundleId: app.bundleIdentifier, chromium: true, declaresWeb: { CUApps.isWebBrowser(bundleURL: running.bundleURL) })
+            try await queues.run(pid) { CUChromium.enableAccessibilityOnce(running, browser: browser) }
+        }
         let found = try await CUBindWait.run(launched: launched, deadlineMs: launched ? 8000 : 3000, CUBindWait.Effects(
             read: { [queues] in
                 try await queues.run(pid) { [self] in
@@ -905,6 +908,17 @@ public final class CUCore: @unchecked Sendable {
             + elsewhere.map { CUTargetWindow(id: $0.id, title: $0.title, focused: false) })
     }
 
+    /// The helper starts: the record of the browsers' accessibility flags Winter set lives at `<home>/run/` (0600), and
+    /// what an earlier helper left there is reconciled (`CUChromium.startRecording`).
+    public static func startAccessibilityFlagRecord(home: String) {
+        let run = (home as NSString).appendingPathComponent("run")
+        try? FileManager.default.createDirectory(atPath: run, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        CUChromium.startRecording(at: (run as NSString).appendingPathComponent("computer-use-ax-flags.json"))
+    }
+
+    /// The helper ends (a quit, the idle quit, SIGTERM): every accessibility flag Winter set in a browser, released.
+    public static func releaseAccessibilityFlags() { CUChromium.releaseAllLive() }
+
     public func targetRelease(_ p: TargetReleaseParams) async throws -> TargetReleaseResult {
         if let t = remove(p.targetId) {
             cursor(t, "done")
@@ -1071,8 +1085,9 @@ public final class CUCore: @unchecked Sendable {
             }
             // Within moments of an act, a Chromium page on another desktop may not have updated its accessibility yet:
             // the states found are unverified (finding D).
+            // (First: the daemon caps the note, and this one's pointer must survive.)
             if let acted = t.afterActFromMs, clock.nowMs() - acted < Self.offDesktopLagFindMs, pageMayLagOffDesktop(t) {
-                notes.append(Self.offDesktopLagSentence(t.appName))
+                notes.insert(Self.offDesktopLagSentence(t.appName), at: 0)
             }
             return TargetFindResult(elements: CUFinder.find(p.query, in: roots, formatter: formatter), page: page,
                                     note: notes.isEmpty ? nil : notes.joined(separator: "; "))

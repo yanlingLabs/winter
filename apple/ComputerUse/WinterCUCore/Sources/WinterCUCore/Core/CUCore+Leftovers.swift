@@ -405,9 +405,9 @@ extension CUCore {
                     // The field took the key itself (a tab character, a field that indents): said as that — never as
                     // the page ignoring it.
                     if let now = ax.string(f, kAXValueAttribute), now != v {
-                        return "the keyboard focus stayed in its field after \(a.combo), and the field's text changed (it took the key itself, as a tab character or an indent) — click the next field you mean, or pass { into }"
+                        return "the keyboard focus stayed in its field after \(a.combo), and the field's text changed (it took the key itself, as a tab character or an indent) — click the next field you mean\(a.into == nil ? ", or pass { into }" : "")"
                     }
-                    return "the keyboard focus did not move after \(a.combo) (the page may not have taken the key) — click the field you mean, or pass { into }"
+                    return "the keyboard focus did not move after \(a.combo) (the page may not have taken the key) — click the field you mean\(a.into == nil ? ", or pass { into }" : "")"
                 case .toggle:
                     return "the focused check box did not change after \(a.combo) (the page may not have taken the key) — click(ref) presses it"
                 case .selectAll(_, _, let len):
@@ -425,7 +425,8 @@ extension CUCore {
 
     /// What says an act or key changed nothing (the helper's own words for it).
     static let nothingChangedClaims = ["nothing changed that accessibility can see", "had no effect accessibility can see", "no visible effect",
-                                       "may not have taken the key", "did not change after", "did not move after", "still reads"]
+                                       "may not have taken the key", "did not change after", "did not move after", "still reads",
+                                       "did not change to it"]
 
     /// The caveat a "nothing changed" answer gets when the window is a Chromium app's on ANOTHER desktop: such a page may
     /// not update its accessibility (nor its picture) until it is seen, so the claim may predate the act's effect (the
