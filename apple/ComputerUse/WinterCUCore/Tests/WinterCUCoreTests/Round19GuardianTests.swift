@@ -149,4 +149,124 @@ final class Round19GuardianTests: XCTestCase {
         XCTAssertFalse(raised.isUsers, "the agent's raise of the front app on another desktop is never theirs — \(raised)")
         XCTAssertEqual(g.view, CUGuardedView(app: t, space: 100), "their place stays T@100")
     }
+
+    // MARK: the final review of round 19
+
+    /// HIGH 1 (a probe): L1's timeline with an early sighting of the visited app on the user's own desktop (macOS
+    /// activates it before the desktop switch lands). That sighting is no arrival, and the real arrival on the visited
+    /// desktop is never "their switch into it".
+    func testAnEarlySightingOfTheVisitedAppOnTheirDesktopIsNoArrival() {
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 100))
+        g.beginVisit(app: 6000, user: 1, now: 10.0)
+        g.noteSwitch(now: 10.05, .app, target: 6000)
+        g.noteSwitch(now: 10.08, .desktop)
+        g.noteCause(6000, raise: true, now: 10.1)
+        g.noteSwitch(now: 10.15, .desktop)
+        _ = g.judge(CUMoveQuery(app: 6000, space: 100), now: 10.2)   // activated before the desktop switch landed
+        let arrival = g.judge(CUMoveQuery(app: 6000, space: 300), now: 10.3)
+        guard case .visit = arrival else { return XCTFail("the visit's way there: the visit's — \(arrival)") }
+        // The visited desktop is 300, not where the early sighting was: their return to their own desktop leaves it, and
+        // their swipe back into it is theirs.
+        _ = g.judge(CUMoveQuery(app: 1, space: 100), now: 10.4)
+        g.noteSwitch(now: 11.0, .desktop)
+        let swipe = g.judge(CUMoveQuery(app: 6000, space: 300), now: 11.1)
+        XCTAssertTrue(swipe.isUsers, "their swipe into the visited desktop — \(swipe)")
+    }
+
+    /// The same probe ended at the arrival: the visit's end returns them.
+    func testAnEarlySightingOfTheVisitedAppLeavesTheEndReturningThem() {
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 100))
+        g.beginVisit(app: 6000, user: 1, now: 10.0)
+        g.noteSwitch(now: 10.05, .app, target: 6000)
+        g.noteCause(6000, raise: true, now: 10.1)
+        g.noteSwitch(now: 10.15, .desktop)
+        _ = g.judge(CUMoveQuery(app: 6000, space: 100), now: 10.2)
+        _ = g.judge(CUMoveQuery(app: 6000, space: 300), now: 10.3)
+        XCTAssertFalse(g.endVisit(now: 10.5), "the visit's end: they did not move")
+    }
+
+    /// HIGH 1's variant: after the arrival, the agent's act moves the visited app to another desktop, then the visit's own
+    /// return to it on the visited desktop, with input of the user's alive — no leaving, never adopted.
+    func testTheAgentMovingTheVisitedAppAwayIsNoLeaving() {
+        let t: pid_t = 6000
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 100))
+        g.beginVisit(app: t, user: 1, now: 10.0)
+        g.noteCause(t, raise: true, now: 10.05)
+        _ = g.judge(CUMoveQuery(app: t, space: 300), now: 10.3)     // the arrival
+        g.noteCause(t, raise: true, now: 10.4)                       // the agent's act moves T to desktop 400
+        _ = g.judge(CUMoveQuery(app: t, space: 400), now: 10.45)
+        g.noteSwitch(now: 10.5, .desktop)                            // input of theirs alive…
+        g.noteCause(t, raise: true, now: 10.55)                      // …the visit brings T back on the visited desktop
+        g.noteSwitch(now: 10.58, .desktop)
+        let back = g.judge(CUMoveQuery(app: t, space: 300), now: 10.6)
+        guard case .visit = back else { return XCTFail("the visit's return to its own desktop: the visit's — \(back)") }
+        XCTAssertEqual(g.view, CUGuardedView(app: 1, space: 100))
+    }
+
+    /// HIGH 2 (a probe): H1's front-app timeline, then their click on S's window 2 ms after the agent's raise. That input
+    /// is S's, not T's: T on desktop 300 stays the agent's.
+    func testTheirClickOnAnotherAppNeverCoversTheAgentsRaise() {
+        let u: pid_t = 1, t: pid_t = 5252, s: pid_t = 710
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: u, space: 100))
+        g.noteCause(t, now: 9.9)
+        g.noteSwitch(now: 10.0, .app, target: t)
+        g.userClicked(app: t, space: 100, now: 10.0)
+        g.noteClickBring(t, clickAt: 10.0, space: 100, now: 10.001)
+        XCTAssertTrue(g.judge(CUMoveQuery(app: t, space: 100), now: 10.01).isUsers)
+        g.noteFrontAfterglow(t, raise: true, now: 10.45)
+        g.noteSwitch(now: 10.452, .app, target: s)                   // their click on S's window
+        let raised = g.judge(CUMoveQuery(app: t, space: 300), now: 10.46)
+        XCTAssertFalse(raised.isUsers, "their click on S's window never explains T's desktop — \(raised)")
+        XCTAssertEqual(g.view, CUGuardedView(app: t, space: 100))
+    }
+
+    /// Seed 1068's shape: their swipe makes T@300 their place, an act on the front T raises, then their ⌘ release (its
+    /// Tab unseen) takes T to its window on desktop 100 — theirs, and the input is used up by it.
+    func testTheirSwitchAfterTheAgentsRaiseKeepsTheFollowOnTheirs() {
+        let t: pid_t = 5252
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 400))
+        g.noteCause(t, raise: true, now: 9.95)                       // (the agent's on T: touched)
+        g.noteSwitch(now: 10.0, .desktop)
+        XCTAssertTrue(g.judge(CUMoveQuery(app: t, space: 300), now: 10.1).isUsers, "their swipe")
+        g.noteFrontAfterglow(t, raise: true, now: 10.5)              // the act on the front T raises
+        g.noteSwitch(now: 10.6, .app)                                // their ⌘ release, no Tab seen
+        let moved = g.judge(CUMoveQuery(app: t, space: 100), now: 10.65)
+        XCTAssertTrue(moved.isUsers, "their switch after the raise — \(moved)")
+        g.noteFrontAfterglow(t, raise: true, now: 10.7)
+        let again = g.judge(CUMoveQuery(app: t, space: 300), now: 10.75)
+        XCTAssertFalse(again.isUsers, "the input was used up — \(again)")
+    }
+
+    /// Seed 49's shape (the ordinary target): during a visit, a late restore landing on their own desktop counts as
+    /// leaving the visited desktop, whatever its verdict, so their swipe back into it is theirs and the end keeps them.
+    func testALateRestoreLandingOnTheirDesktopLeavesTheVisitedOne() {
+        let t2: pid_t = 6000, s: pid_t = 710
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: s, space: 100))
+        g.beginVisit(app: t2, user: s, now: 10.0)
+        g.noteCause(t2, raise: true, now: 10.01)
+        _ = g.judge(CUMoveQuery(app: t2, space: 300), now: 10.02)    // the arrival
+        _ = g.judge(CUMoveQuery(app: s, space: 100), now: 10.1)      // a late restore of S lands on their desktop
+        g.noteSwitch(now: 11.4, .desktop)                            // their swipe back into the visited desktop
+        let swipe = g.judge(CUMoveQuery(app: t2, space: 300), now: 11.6)
+        XCTAssertTrue(swipe.isUsers, "their swipe into the visited desktop — \(swipe)")
+        XCTAssertTrue(g.endVisit(now: 11.9), "the visit's end keeps them there")
+    }
+
+    /// MEDIUM (a probe): their click into T that activated nothing (a ⌘-click into its background window) leaves a claim;
+    /// the agent's AXFocused write a second later is not covered by it.
+    func testAStaleClaimNeverCoversTheAgentsLaterCause() {
+        let t: pid_t = 5252
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 100))
+        g.userClicked(app: t, space: 100, now: 10.0)
+        g.noteCause(t, now: 11.0)                                     // the write
+        let landed = g.judge(CUMoveQuery(app: t, space: 100), now: 11.05)
+        XCTAssertFalse(landed.isUsers, "the agent's write, not their old click — \(landed)")
+    }
 }
