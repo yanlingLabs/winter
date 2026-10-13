@@ -820,7 +820,13 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             // A click into a window that activated nothing (a drag out of a background window) still claims that app's
             // activation for the claim's window (the contract: the engine can't tell a drag at the mouse-down).
             let dragClaim = s.claim && s.dest == nil && s.target == pid && t - s.at <= 1_500 + self.nextHearing()
-            guard i != excluding, s.visible, !s.claim || dragClaim, !s.pending, dragClaim || t - s.at <= s.lifeMs, t >= s.at else { return false }
+            // (Round 19 — the mid-act survey's ordinary seed 56: a click on THIS app's window or Dock tile whose own landing
+            // has not come yet still explains it coming forward — §4.12: "A click on another app's window: ONE input, an
+            // app switch for THAT app"; "a Dock click is input for the tile's app, claimed" (1.9.8). The app came forward
+            // 69 ms after their click on its tile, before the Dock's own landing; the engine can't tell the two apart.)
+            let pendingClaim = s.claim && s.dest == pid && s.target == pid && s.landedAt == nil
+            guard i != excluding, s.visible, !s.claim || dragClaim || pendingClaim, !s.pending, dragClaim || t - s.at <= s.lifeMs,
+                  t >= s.at else { return false }
             if let target = s.target, target != pid { return false }
             return (s.app && app) || (s.desktop && desktop)
         }
