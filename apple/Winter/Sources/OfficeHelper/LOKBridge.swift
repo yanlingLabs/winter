@@ -5729,82 +5729,79 @@ final class LOKBridge: OfficeDocumentBridge {
         // NO setPart — see this section's own header, fact 1.
         postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
 
-        // **Retry-on-empty, with a bounded pump budget.** `.uno:SelectAll` is dispatched through
-        // `postUnoCommand`, whose effect this bridge has been burned by three times for landing on a
-        // deferred internal queue rather than synchronously — the identical shape
-        // `selectionTextOnDedicatedThread` (`.uno:GoToCell`) and
-        // `selectSlidePlaceholderOnDedicatedThread` (Tab-driven selection) both already pay for.
+        // **Retry-on-empty, bounded by WALL-CLOCK time given to LibreOffice's own main loop — not
+        // by a count of our own calls.** `.uno:SelectAll` is ASYNCHRONOUS here: `doc_postUnoCommand`
+        // appends `SynchronMode=false`, and the `notifyWhenFinished` override to SYNCHRON never
+        // applies on the agent view (no callback registered there, so no listener — see
+        // `handleCallback`'s `.unoCommandResult` arm). The posted request is executed by LO's OWN
+        // main-loop thread (the one LOK starts at boot; it is also what flushes callbacks — which
+        // is why `OfficeRuntime`'s close barrier sees `ModifiedStatus=false` arrive "on its own
+        // schedule"), and only once that thread is scheduled AND wins the SolarMutex from us.
         //
-        // **What prompted it, and what is and is NOT proven — corrected after review, because the
-        // first version of this comment told a mechanism story the instrument below cannot support.**
-        //  - PROMPT: one full unscoped suite run had the single-unconditional-pump version return
-        //    `""` for a document whose saved `content.xml` assertions, in that same drill, passed.
-        //    So the file was fine and the READ was empty. That observation is real.
-        //  - NOT PROVEN: that this loop fixes it. The `""` has never recurred, and — see the
-        //    evidence line's own note below — no run has ever needed more than ONE pump, so the
-        //    extra headroom this loop adds over the old code has never once been exercised. Whether
-        //    2-5 further pumps would have rescued that read is **unobserved**.
-        //  - WITHDRAWN: the original "load-dependent" story. The measured pattern is deterministic,
-        //    not load-shaped (again, see below).
-        //  - OPEN, and named as a residual rather than quietly closed by this loop: the original
-        //    `""` is still unexplained.
+        // **The old budget measured the wrong thing.** It was five back-to-back pumps (cheap 64x64
+        // paints) on THIS thread — a few milliseconds during which this thread re-takes the
+        // SolarMutex for every call. That says nothing about whether LO's thread has run. Quiet
+        // runs mostly got away with it (0-1 pumps, sometimes 2-3); a loaded full-app-suite run
+        // (2026-10-13, 4,441 tests) did not: three `OfficeDocsCommandTests` read `""` for
+        // non-empty documents after all five pumps and refused with "the outcome is UNKNOWN".
+        // The traces show both halves of the mechanism: in the `.odt` create drill NO callback at
+        // all was flushed between the before-read and the after-read (LO's thread never ran
+        // during the whole verb — the paste's own `ModifiedStatus=true` only arrived after it
+        // returned), and in the replace drill the whole-document selection callback arrived just
+        // AFTER the read had given up — the SelectAll did execute, too late.
         //
-        // Kept regardless, because it strictly dominates the old code — the old one pumped exactly
-        // once and read once; this reads first (which the measured pattern shows is often enough on
-        // its own) and then pumps up to five times — at the cost of one extra `getTextSelection` on
-        // the common path.
+        // So the loop now yields REAL time between pumps (`usleep`, during which this thread holds
+        // no SolarMutex), with a short exponential backoff, up to `docsSelectAllReadBudgetNanos`.
+        // The first pump is still immediate, so the common path is unchanged (0 or 1 pumps, no
+        // sleep at all).
         //
         // **Not self-restoring, deliberately**: `""` remains reachable — a genuinely empty document
-        // simply costs the whole budget in cheap 64x64 tile paints and still answers `""`. This
-        // stops at the FIRST non-empty read rather than looping until some assertion passes.
+        // pays the whole time budget and still answers `""`. There is no synchronous observable
+        // that tells "SelectAll has not run yet" from "the document is empty" (`getTextSelection`
+        // answers `""` for both, and the command-result callback is unreachable here), so the cost
+        // of an empty document is the price of not misreading a full one. This stops at the FIRST
+        // non-empty read rather than looping until some assertion passes.
         //
         // Why an empty read matters at all: every write verb reads twice (before, to compute the
         // expected result; after, to verify it). A spurious `""` on either read makes the two
-        // disagree, so the verb REFUSES with "the outcome is UNKNOWN" — loud, not silent, but a
-        // false alarm on a write that actually succeeded is its own harm.
+        // disagree, so the verb REFUSES with "the outcome is UNKNOWN" — and a spurious `""` on the
+        // BEFORE read also changes what is written (`append` drops its paragraph separator when
+        // `before` is empty), so it is not merely a false alarm.
         var text = readSelectionTextOnDedicatedThread(doc)
         var pumps = 0
-        while text.isEmpty, pumps < Self.docsSelectAllReadMaxPumps {
-            pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
-            text = readSelectionTextOnDedicatedThread(doc)
-            pumps += 1
-        }
-        if pumps > 0 {
-            // Permanent evidence line — and it counts **PUMPS**, deliberately, not "attempts". The
-            // first version counted attempts, which made every observed line read `needed 2
-            // attempt(s)`; a reviewer correctly pointed out that this is ONE pump, i.e. exactly what
-            // the old unconditional-pump code did, so the line could not distinguish this loop from
-            // the code it replaced. Counting pumps makes the comparison direct: **`pumps=1` is
-            // old-code-equivalent; only `pumps >= 2` is this loop doing something the old code could
-            // not.**
-            //
-            // Measured, counted rather than inferred, on a clean 15-drill run (`pkill`ed first, 0
-            // leaked helpers): those drills perform **29** whole-document reads and produce **14**
-            // lines — so 15 reads needed no pump at all, 14 needed exactly one, and **none needed
-            // two or more**. ⟹ this loop has never once done anything the old unconditional-pump
-            // code could not, which is why its efficacy against the original `""` is unobserved.
-            //
-            // (An earlier version of this note claimed the pattern was "first read of a document
-            // needs 0, every later read needs exactly 1". That is ALMOST right and therefore worth
-            // striking: `testLiveDocsReplaceIsCaseSensitiveAndAWrongCaseSearchChangesNothing`
-            // performs 4 reads and logs only 2, so at least one non-first read also needed no pump.
-            // No mechanism is claimed here beyond the counts above.)
-            //
-            // `empty=` still distinguishes a real read from a retried-and-still-empty one.
+        if text.isEmpty {
+            let started = DispatchTime.now().uptimeNanoseconds
+            var pauseMicros: UInt32 = Self.docsSelectAllReadFirstPauseMicros
+            while true {
+                pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
+                text = readSelectionTextOnDedicatedThread(doc)
+                pumps += 1
+                if !text.isEmpty { break }
+                if DispatchTime.now().uptimeNanoseconds - started >= Self.docsSelectAllReadBudgetNanos { break }
+                usleep(pauseMicros)
+                pauseMicros = min(pauseMicros * 2, Self.docsSelectAllReadMaxPauseMicros)
+            }
+            // Permanent evidence line. `pumps=1` is the old single-pump code's equivalent; anything
+            // above it is this loop waiting on LO's own thread, and `ms=` says for how long.
+            // `empty=true` is either a genuinely empty document or the budget running out.
+            let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
             FileHandle.standardError.write(Data(
-                "[LOKBridge docs] SelectAll read needed \(pumps) pump(s), empty=\(text.isEmpty)\n".utf8))
+                "[LOKBridge docs] SelectAll read needed \(pumps) pump(s), ms=\(String(format: "%.1f", elapsedMs)), empty=\(text.isEmpty)\n".utf8))
         }
         doc.handle.pointee.pClass.pointee.resetSelection?(doc.handle)
         return text
     }
 
-    /// `docsReadTextOnDedicatedThread`'s own pump budget — the number of extra pumps AFTER the first
-    /// unpumped read, so the worst case is 5 pumps and 6 `getTextSelection` calls. Sized like
-    /// `slidePlaceholderPositionAttempts`/`docsUnoResultAttempts` rather than independently derived;
-    /// this mechanism has not earned its own number, and no observed run has ever needed more than
-    /// ONE pump, so the number is headroom rather than a measured requirement. Each pump is one cheap
-    /// 64x64 tile paint, so a genuinely empty document pays five of those and nothing else.
-    private static let docsSelectAllReadMaxPumps = 5
+    /// `docsReadTextOnDedicatedThread`'s wall-clock budget for LO's own main loop to execute the
+    /// posted `.uno:SelectAll`. A TIME, because what is being waited on is another thread being
+    /// scheduled, which no count of this thread's own calls can stand in for (that was the flaky
+    /// version's defect). 750 ms is far above every quiet-run need (which is 0-1 immediate pumps)
+    /// and leaves room for a CPU-saturated machine; it is also exactly what a genuinely empty
+    /// document costs per read, which is why it is not larger.
+    private static let docsSelectAllReadBudgetNanos: UInt64 = 750_000_000
+    /// Backoff between pumps once the immediate pump has not been enough: 1, 2, 4 ... ms, capped.
+    private static let docsSelectAllReadFirstPauseMicros: UInt32 = 1_000
+    private static let docsSelectAllReadMaxPauseMicros: UInt32 = 50_000
 
     /// Shared entry guard for every `docs` verb: the document must be open AND must be a Writer text
     /// document. `.notTextDocument` mirrors `.notSpreadsheet`/`.notPresentation` — composed from this
