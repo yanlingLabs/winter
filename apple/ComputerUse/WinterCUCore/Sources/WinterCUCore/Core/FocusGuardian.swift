@@ -808,6 +808,7 @@ public struct CUFocusGuardianCore: Sendable {
         if visiting(now: now), let a = q.app, a == visitApp {
             if !visitArrived { visitArrived = true; visitSpace = q.space } else if visitSpace == nil { visitSpace = q.space }
         }
+        if visiting(now: now), visitArrived, let s = q.space, let vs = visitSpace, s != vs { visitLeft = true }
         if let app = q.app, app == place.app, q.space == nil || place.space == nil || q.space == place.space {
             // Their place's desktop not known (an activation heard late, of an app with windows on several): it is this one.
             if active, view.space == nil, let sp = q.space { view.space = sp }
@@ -831,7 +832,6 @@ public struct CUFocusGuardianCore: Sendable {
             // its end took them to the dialog that was in front when it began).
             // (Not the visit's own way back to the app they were in when it began.)
             if previous != current, visiting(now: now), app != visitApp, app != visitUser { visitSawUserInput = true }
-            noteVisitLeft(q, now: now)
             judged = nil
             lastReason = CUMoveOwner.theirPlace.words
             return .theirPlace
@@ -871,7 +871,6 @@ public struct CUFocusGuardianCore: Sendable {
         switch owner {
         case .user:
             if visiting(now: now) { visitSawUserInput = true }
-            noteVisitLeft(q, now: now)
             view = CUGuardedView(app: q.app ?? view.app, space: q.space ?? view.space)
             viewAt = now
             if let a = q.app { thefts[a] = nil }
@@ -1021,9 +1020,12 @@ public struct CUFocusGuardianCore: Sendable {
            let bs = b.space, q.space == bs, lastAnyRaise(a) <= b.clickAt {
             return (.user("the window they clicked into, brought forward with its app"), .clickBring(a))
         }
-        // (Never after a raise of the agent's on the app since their move — the review of round 19, H1: the act in flight
-        // raising its window on another desktop takes the desktop there, and that is the agent's.)
-        if let a = app, a == place.app, viewAt >= now - Self.followOnWindow, cause <= viewAt, lastAnyRaise(a) <= viewAt {
+        // (Never after a raise of the agent's on the app since their move with no switch input of theirs after it — the
+        // review of round 19, H1: the act in flight raising its window on another desktop takes the desktop there, and that
+        // is the agent's; input of theirs after the raise keeps it theirs — the survey's seed 1068: their ⌘ release, its
+        // Tab unseen, after an act on the front app.)
+        if let a = app, a == place.app, viewAt >= now - Self.followOnWindow, cause <= viewAt,
+           lastAnyRaise(a) <= viewAt || input.lastAt > lastAnyRaise(a) {
             if visit, a == visitApp { return (.visit, nil) }
             return (.user("the desktop change that came with their own move into it"), .oldest(app: appMoved, desktop: desktopMoved))
         }
@@ -1142,18 +1144,14 @@ public struct CUFocusGuardianCore: Sendable {
     }
 
     /// The open visit runs on: its visit mode lasts until `until` (the safety cap, re-armed as work starts and ends).
-    /// During the open visit: the visited app was seen in front (its way there landed, on `visitSpace`), and after that the
-    /// user's place was seen on another DESKTOP (they left the visited desktop, or were returned — their place, or a move
-    /// judged theirs) — only then is a switch of theirs into the visited desktop THEIR move, never the visit's own way
-    /// there (round 19). Another app in front on the visited desktop, the agent's own included, is no leaving (the review
-    /// of round 19, M1).
+    /// During the open visit: the visited app was seen in front (its way there landed, on `visitSpace`), and after that
+    /// another DESKTOP was seen in front (they left the visited desktop, or were returned — whatever its verdict: the
+    /// survey's ordinary seed 49, a late restore landing on their own desktop judged the visit's while they were there) —
+    /// only then is a switch of theirs into the visited desktop THEIR move, never the visit's own way there (round 19).
+    /// Another app in front on the visited desktop, the agent's own included, is no leaving (the review of round 19, M1).
     private var visitArrived = false
     private var visitLeft = false
     private var visitSpace: UInt64?
-
-    private mutating func noteVisitLeft(_ q: CUMoveQuery, now: TimeInterval) {
-        if visiting(now: now), visitArrived, let s = q.space, let vs = visitSpace, s != vs { visitLeft = true }
-    }
 
     public mutating func extendVisit(until: TimeInterval) {
         guard visitApp != nil else { return }
