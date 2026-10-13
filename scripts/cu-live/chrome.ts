@@ -47,6 +47,10 @@ export interface ChromeNeed {
   /** Bring it to the front ONCE after launch, as the user would have (then their app is put back): a browser the user
    *  has used, against one launched in the background and never shown in front. */
   shownOnce?: boolean;
+  /** Bind it first (Winter switches the browser's accessibility on), THEN bring it to the front once as the user and
+   *  put their app back: the second live run (2026-10-13) found the page's controls absent from the tree of a browser
+   *  that never came to the front after the switch, and present in one that did (the full-screen row). */
+  bindThenShow?: boolean;
   /** More launch switches (a diagnostic: `--disable-backgrounding-occluded-windows`). */
   extraArgs?: string[];
 }
@@ -170,7 +174,7 @@ const SELECT_ROLES = ["combo box", "pop up button", "popup button", "pop-up butt
 const CHECK_ROLES = ["check box", "checkbox"];
 
 /** The probes' instance: shown in front once after launch, as a browser the user has used. */
-const MATERIAL: ChromeNeed = { key: "material-shown", lang: "en", start: "material", shownOnce: true };
+const MATERIAL: ChromeNeed = { key: "material-bound-shown", lang: "en", start: "material", bindThenShow: true };
 
 /** Does the page reach accessibility at all, per way of launching? (The first live run, 2026-10-13: a Chrome for
  *  Testing launched behind the user's app, never in front, showed an empty web area for 10 s and more.) */
@@ -193,7 +197,8 @@ report({ webReadyMs: ms, webArea: /web area/.test(s) });`,
 const SCENARIOS_: Scenario[] = [
   webAccessRow({ key: "material-background", lang: "en", start: "material" }, "launched behind your app, never in front"),
   webAccessRow({ key: "material-noocclusion", lang: "en", start: "material", extraArgs: ["--disable-backgrounding-occluded-windows"] }, "the same, with --disable-backgrounding-occluded-windows"),
-  webAccessRow(MATERIAL, "shown in front once after launch, then behind your app"),
+  webAccessRow({ key: "material-shown", lang: "en", start: "material", shownOnce: true }, "shown in front once after launch, then behind your app"),
+  webAccessRow(MATERIAL, "bound first (accessibility switched on), THEN shown in front once, then behind your app"),
   {
     name: "chrome app: bind Chrome for Testing on the Material page (reads its controls)", group: "chrome", chrome: MATERIAL,
     code: `
@@ -379,44 +384,62 @@ step("end");`,
       const [before, after, later] = shots;
       const painted = page(ctx).some((e) => e.ev === "paint");
       const afterText = stepOutput(ctx.output, "after");
-      const honest = /may predate the last action/.test(afterText) && /screenshot\(\{ live: true/.test(afterText);
+      const predates = /may predate the last action/.test(afterText) && /screenshot\(\{ live: true/.test(afterText);
+      const staleSaid = /stale since [^:]*: captured .* not redrawing it there/.test(afterText);
+      const honest = predates || staleSaid;
       const shows = after !== undefined && after.sentinelPixels >= SENTINEL_MIN_PIXELS;
       const desc = shots.map((s) => `${s.width}x${s.height} sentinel ${s.sentinelPixels}`).join("; ");
       return [
         ok(ctx),
         check("the window was off this desktop (the bind says so)", /another desktop|another Space|off this desktop|capture only|not on this desktop/i.test(ctx.output), short(ctx.output.slice(0, 600))),
-        check("the click landed in the page (it painted)", painted, JSON.stringify(page(ctx).slice(-5))),
+        check("the click landed in the page (it painted)", painted, `click: ${fact(ctx, "click")}; page: ${JSON.stringify(page(ctx).slice(-5))}`),
         check("three screenshots were returned", shots.length >= 3, desc),
         check("the picture BEFORE the click shows no sentinel", before !== undefined && before.sentinelPixels < SENTINEL_MIN_PIXELS, desc),
         check("the picture right AFTER the click shows the result, or says it may predate the action and names screenshot({ live: true })", shows || honest,
-          `${shows ? "shows it" : "stale"}; ${honest ? "said so" : "said nothing"}: ${short(afterText)} | ${desc}`),
+          `${shows ? "shows it" : "stale"}; ${predates ? "said it may predate the action (the fix's note)" : staleSaid ? "said only the older stale label (no 'may predate', no live: true)" : "said nothing"}: ${short(afterText)} | ${desc} | click: ${fact(ctx, "click")}`),
+        check("(the fix's own words) a stale picture right after the act says it may predate it and names screenshot({ live: true })", shows || predates, short(afterText)),
         check("(measured) 3 s later the picture shows it", later !== undefined && later.sentinelPixels >= SENTINEL_MIN_PIXELS, desc),
       ];
     },
   },
   {
     name: "chrome fr (Floor F): an act on chrome://inspect is refused — UI in French", group: "chrome",
-    chrome: { key: "fr-inspect", lang: "fr", start: "inspect" },
+    // Chrome opens no chrome:// page from its command line (the first run showed a new tab): the page is reached as a
+    // person would, through the address bar (the browser's own UI, which Floor F leaves alone).
+    chrome: { key: "fr-inspect", lang: "fr", start: "material", bindThenShow: true },
     code: `
 const w = await cft();
-const s = await w.state({ full: true, emit: false });
-print(s.slice(0, 4000));
-report({ refs: (s.match(/\\[\\d+\\]/g) || []).length, capture: /capture only/i.test(s) });
-const box = (await w.find({ role: "check box" }, { emit: false }))[0];
-const link = (await w.find({ role: "link" }, { emit: false }))[0];
-report({ box: box && box.name, link: link && link.name });
-if (box) await attempt("click the check box", () => w.click(box.ref));
-else if (link) await attempt("click a link", () => w.click(link.ref));
+const bar = (await w.find({ role: "text field" }, { emit: false })).find((e) => /adresse|address/i.test(e.name || ""));
+report({ bar: bar && bar.name });
+await attempt("type the address", () => w.setValue(bar.ref, "chrome://inspect/#remote-debugging"));
+await attempt("go", () => w.key("return", { into: bar.ref }));
+let s = "";
+const t0 = Date.now();
+while (Date.now() - t0 < 10000) { s = await w.state({ full: true, emit: false }); if (/web area/.test(s) && /inspect/i.test(s.split("\\n")[0] + s)) { if (/\\] web area[^\\n]*\\n\\s+\\[/.test(s)) break; } await sleep(500); }
+print(s.slice(0, 5000));
+report({ refs: (s.match(/\\[\\d+\\]/g) || []).length, capture: /capture only/i.test(s), header: s.split("\\n")[0], onInspect: /inspect/i.test(s) });
+// The elements INSIDE the page (indented under its web area line): a check box first, else a button, else a link.
+const lines = s.split("\\n");
+const at = lines.findIndex((l) => /\\] web area/.test(l));
+const depth = at < 0 ? 0 : lines[at].search(/\\S/);
+const inside = [];
+for (let i = at + 1; at >= 0 && i < lines.length && lines[i].search(/\\S/) > depth; i++) inside.push(lines[i].trim());
+const pickRole = (role) => inside.find((l) => new RegExp("^\\\\[\\\\d+\\\\] " + role + "\\\\b").test(l));
+const target = pickRole("check box") || pickRole("button") || pickRole("link");
+report({ insidePage: inside.length, target: target || null });
+if (target) await attempt("act in the page", () => w.click(Number(/\\[(\\d+)\\]/.exec(target)[1])));
 await attempt("key tab", () => w.key("tab"));
 step("end");`,
     verify: (ctx) => {
-      const acted = fact(ctx, "click the check box") || fact(ctx, "click a link");
+      const acted = fact(ctx, "act in the page");
       const tab = fact(ctx, "key tab");
       const refused = (s: string): boolean => /^Refused: /.test(s) && /remote debugging/i.test(s);
       return [
         ok(ctx),
-        check("reading the inspect page is allowed (state lists elements; not capture-only)", Number(ctx.facts.refs) > 3 && ctx.facts.capture !== true, `refs ${String(ctx.facts.refs)}`),
-        check("a click on an element of the inspect page is Refused (remote debugging)", refused(acted), acted || "nothing to click was found"),
+        check("the run reached chrome://inspect through the address bar", fact(ctx, "type the address") === "ok" && fact(ctx, "go") === "ok" && ctx.facts.onInspect === true && Number(ctx.facts.insidePage) > 0,
+          `bar ${fact(ctx, "bar")}; ${fact(ctx, "type the address")}; ${fact(ctx, "go")}; ${String(ctx.facts.insidePage)} elements in the page; ${fact(ctx, "header")}`),
+        check("reading the inspect page is allowed (state lists its elements; not capture-only)", Number(ctx.facts.insidePage) > 0 && ctx.facts.capture !== true, `refs ${String(ctx.facts.refs)}`),
+        check("a click on an element of the inspect page is Refused (remote debugging)", refused(acted), `${fact(ctx, "target")}: ${acted || "nothing in the page to click"}`),
         check("a key with the inspect page shown is Refused (remote debugging)", refused(tab), tab),
         check("remote debugging did not come on (no DevToolsActivePort in the profile)", ctx.chrome?.devToolsActivePort === false, JSON.stringify(ctx.chrome)),
         check("the browser showed French (the run set its AppleLanguages)", ctx.chrome?.lang === "fr", JSON.stringify(ctx.chrome)),

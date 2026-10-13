@@ -1223,6 +1223,8 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         await sleep(500);
       }
       if (result.status === "fail") failedOutputs.set(result.name, output.slice(0, 6_000));
+      // The chrome group's evidence, whole: the script's output and what the page saw.
+      if (needsChrome(s)) log(`chrome row "${s.name}" — output:\n${output}\npage events: ${JSON.stringify(chromeRig?.pageSince(since) ?? [])}\nbrowser: ${JSON.stringify(chromeRig?.observe() ?? null)}`);
       return { result, facts, output, since, end };
     };
 
@@ -1244,7 +1246,13 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
       } else {
         chromeRig = new ChromeRig({
           app, root, webDir: join(REPO_ROOT, "scripts", "cu-live", "fixture-web"), tool: built.tool, log, sh: (cmd, args) => sh(cmd, args),
-          activateUser: () => activateUser(), activateAsUser: async (pid) => { await bringToFront(pid, "Chrome for Testing (shown once, as the user)", undefined, true); }, abortIfInput, own, disown,
+          activateUser: () => activateUser(), activateAsUser: async (pid) => { await bringToFront(pid, "Chrome for Testing (shown once, as the user)", undefined, true); },
+          bindOnce: async () => {
+            const fresh = await freshSession();
+            const r = await runTurn(fresh.client, fresh.sid, computerV2Message(scriptOf({ code: `await apps.open("com.google.chrome.for.testing", { emit: false });` }), 30_000), 90_000);
+            if (r.isError) throw new Error(`binding Chrome for Testing failed: ${r.output.slice(-200)}`);
+          },
+          abortIfInput, own, disown,
         });
         chromeRig.start();
         log(`chrome group: ${app}, page ${chromeRig.pageUrl}`);
