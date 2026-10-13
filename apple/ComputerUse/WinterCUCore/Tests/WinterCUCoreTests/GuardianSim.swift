@@ -44,6 +44,9 @@ enum SimPid {
     static let spotlight: pid_t = 780
     /// T's content process (a web view's): an event posted to it reaches T (round 18 — I6 in flight watches it).
     static let targetContent: pid_t = 5253
+    /// Finder, when T is another app (round 19): a click on the empty desktop brings FINDER forward (PROTOCOL §4.12: "A
+    /// click on the empty desktop: Finder's") — with Finder as T, that is T itself.
+    static let finder: pid_t = 5300
     static let own: pid_t = getpid()
 
     static func name(_ pid: pid_t) -> String {
@@ -63,6 +66,7 @@ enum SimPid {
         case coreServices: return "CSUIA"
         case dock: return "Dock"
         case spotlight: return "SPL"
+        case finder: return "F"
         case own: return "helper"
         default: return pid >= 800 && pid < 900 ? "L\(pid)" : "pid \(pid)"
         }
@@ -304,6 +308,8 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
                                     SimPid.visited: "sim.visited", SimPid.held: "sim.held", SimPid.coreServices: "com.apple.coreservices.uiagent",
                                     SimPid.spotlight: "com.apple.Spotlight"]
     var front: pid_t = SimPid.user
+    /// The Finder process: T when T is Finder, else its own (round 19 — the empty desktop's app).
+    var finderPid: pid_t = SimPid.target
     var space1: UInt64 = 100
     var focusDisplay = 1
     var space: UInt64 { focusDisplay == 2 ? 400 : space1 }

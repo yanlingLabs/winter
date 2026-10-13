@@ -351,6 +351,14 @@ final class SimRun {
             // T is an ordinary app (round 14's queue item 1): its acts open T, the default browser (S) and the mail app
             // only; X is Terminal — a third party's app, outside every act's reach.
             world.bundles[SimPid.safari] = "com.apple.Safari"
+            // (Round 19 — sim fidelity: T is not Finder, so its process is not Finder's either; Finder runs on its own,
+            // with no window, and a click on the empty desktop brings IT forward — PROTOCOL §4.12: "A click on the empty
+            // desktop: Finder's". The world had brought T forward and named T's process Finder.)
+            world.bundles[SimPid.target] = plan.targetBundle
+            world.finderPid = SimPid.finder
+            world.running.insert(SimPid.finder)
+            world.bundles[SimPid.finder] = "com.apple.finder"
+            world.zOrder.append(SimPid.finder)
             world.bundles[SimPid.third] = "com.apple.Terminal"
             world.targetScope = [plan.targetBundle, "com.apple.Safari", "com.apple.mail"]
             core.isWebBrowserOverride = { _ in false }
@@ -816,8 +824,9 @@ final class SimRun {
             guard let h = hit else {
                 // The empty desktop: Finder comes forward on this desktop.
                 guard p.x < 1600 else { return (nil, nil, nil, nil) }
-                let d = SPlace(app: SimPid.target, space: w.space1)
-                return (nil, d, SimSwitch(at: t, app: true, desktop: false, target: SimPid.target, claim: true, dest: SimPid.target), nil)
+                // (Finder — T only when T is Finder: round 19, PROTOCOL §4.12 "A click on the empty desktop: Finder's".)
+                let d = SPlace(app: w.finderPid, space: w.space1)
+                return (nil, d, SimSwitch(at: t, app: true, desktop: false, target: w.finderPid, claim: true, dest: w.finderPid), nil)
             }
             if h.pid == SimPid.own { return (h, nil, nil, nil) }
             if h.id == 701 {
