@@ -112,11 +112,14 @@ struct ComposerTextView: NSViewRepresentable {
     /// chips with them while the composer is hidden under it. `nil` (the default) leaves the caret's own.
     var onHorizontalKey: ((_ left: Bool) -> Bool)? = nil
 
-    /// Code-mode image input (`ComposerImages.swift`): paste of image data / image files and drops of
-    /// image files become `[Image #n]` attachments while `isEnabled()` answers true. `nil` (the
-    /// default) — or `isEnabled() == false` — leaves paste and drop exactly as AppKit does them, so
-    /// every surface that does not opt in (the orb's field) is byte-identical.
-    var imageIntake: ComposerImageIntake? = nil
+    /// Composer attachments (`ComposerAttachments.swift`): pasted image data, and pasted or dropped files and
+    /// folders, become attachments — chips in the surface's strip — while `isEnabled()` answers true; Backspace
+    /// at the very start of the text removes the last one. `nil` (the default) — or `isEnabled() == false` —
+    /// leaves paste and drop exactly as AppKit does them, so every surface that does not opt in (the orb's
+    /// field) is byte-identical.
+    var imageIntake: ComposerAttachmentIntake? = nil
+    /// The "+" button's handle on this text view (`ComposerAttachPicker`) — registered when the view is built.
+    var attachPicker: ComposerAttachPicker? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -176,6 +179,7 @@ struct ComposerTextView: NSViewRepresentable {
         textView.onTypingRefocus = onTypingRefocus
         textView.onEscape = onEscape
         textView.imageIntake = imageIntake
+        attachPicker?.textView = textView
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = false
@@ -213,6 +217,7 @@ struct ComposerTextView: NSViewRepresentable {
         // against a new attachment would keep interrupting the previous session.
         textView.onEscape = onEscape
         textView.imageIntake = imageIntake
+        if let attachPicker, attachPicker.textView !== textView { attachPicker.textView = textView }
         // Keep the live view in step if the size changes across an update — otherwise the font
         // would be whatever `makeNSView` happened to set the first time this view was built.
         if textView.font?.pointSize != fontSize {
@@ -395,40 +400,60 @@ final class CommandTextView: NSTextView {
         super.insertText(insertString, replacementRange: replacementRange)
     }
 
-    // MARK: Code-mode image input
+    // MARK: Composer attachments
 
     /// See `ComposerTextView.imageIntake`.
-    var imageIntake: ComposerImageIntake?
+    var imageIntake: ComposerAttachmentIntake?
 
     /// The intake, only while it is live — every override below falls through to AppKit otherwise.
-    private var liveImageIntake: ComposerImageIntake? {
+    private var liveIntake: ComposerAttachmentIntake? {
         guard let imageIntake, imageIntake.isEnabled() else { return nil }
         return imageIntake
     }
 
+    /// Whether this composer takes attachments right now (a code session) — the "+" button asks the same.
+    var composerAttachmentsEnabled: Bool { liveIntake != nil }
+
     override func paste(_ sender: Any?) {
-        if takeComposerImages(from: .general) { return }
+        if takeComposerAttachments(from: .general) { return }
         super.paste(sender)
     }
 
+    /// Backspace with the caret at the very start of the text (nothing selected) removes the last chip — the
+    /// strip sits just above, so "delete what is before the caret" reaches it. Everywhere else, AppKit's own.
+    override func deleteBackward(_ sender: Any?) {
+        if let intake = liveIntake, selectedRange() == NSRange(location: 0, length: 0), intake.removeLast() { return }
+        super.deleteBackward(sender)
+    }
+
     /// The paste/drop decision, on a pasteboard handed in (so a test never touches the user's general
-    /// pasteboard). `true` = handled here: placeholders were inserted, or image DATA was refused (its
-    /// reason is on the surface's notice line; there is no text to fall back to). `false` = AppKit's
-    /// own paste/drop runs — no live intake, no image on the pasteboard, or image FILES whose every
-    /// attach was refused (a text-only model, too large): their paths are typed as before, beside the
-    /// notice, instead of the paste silently doing nothing.
-    func takeComposerImages(from pasteboard: NSPasteboard) -> Bool {
-        guard let intake = liveImageIntake, let images = composerImages(from: pasteboard) else { return false }
-        if insertComposerImages(images, intake: intake) { return true }
+    /// pasteboard). `true` = handled here: attachments were added, or image DATA was refused (its reason is on
+    /// the surface's notice line; there is no text to fall back to). `false` = AppKit's own paste/drop runs —
+    /// no live intake, nothing attachable on the pasteboard, or files whose every attach was refused (a
+    /// text-only model): their paths are typed as before, beside the notice, instead of the paste silently
+    /// doing nothing.
+    func takeComposerAttachments(from pasteboard: NSPasteboard) -> Bool {
+        guard liveIntake != nil, let kinds = composerAttachments(from: pasteboard) else { return false }
+        if takeComposerAttachments(kinds) { return true }
         let hasFiles = !((pasteboard.readObjects(forClasses: [NSURL.self],
                                                  options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []).isEmpty
         return !hasFiles
     }
 
+    /// Attach each, in order — a refused one (its reason on the notice line) does not stop the rest. Answers
+    /// whether anything was attached. Also the "+" picker's door (`ComposerAttachPicker`).
+    @discardableResult
+    func takeComposerAttachments(_ kinds: [ComposerAttachmentKind]) -> Bool {
+        guard let intake = liveIntake else { return false }
+        var any = false
+        for kind in kinds where intake.attach(kind) { any = true }
+        return any
+    }
+
     /// A plain-text view does not enable Paste for image-only pasteboard content (a screenshot), so
     /// ⌘V would never reach `paste(_:)` — enabled here exactly when the intake would take it.
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
-        if item.action == #selector(paste(_:)), liveImageIntake != nil, composerPasteboardMayHaveImage(.general) {
+        if item.action == #selector(paste(_:)), liveIntake != nil, composerPasteboardMayHaveAttachment(.general) {
             return true
         }
         return super.validateUserInterfaceItem(item)
@@ -436,38 +461,21 @@ final class CommandTextView: NSTextView {
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         let op = super.draggingEntered(sender)
-        if op.isEmpty, liveImageIntake != nil, composerPasteboardMayHaveImage(sender.draggingPasteboard) { return .copy }
+        if liveIntake != nil, composerPasteboardMayHaveAttachment(sender.draggingPasteboard) { return .copy }
         return op
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
         let op = super.draggingUpdated(sender)
-        if op.isEmpty, liveImageIntake != nil, composerPasteboardMayHaveImage(sender.draggingPasteboard) { return .copy }
+        if liveIntake != nil, composerPasteboardMayHaveAttachment(sender.draggingPasteboard) { return .copy }
         return op
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        if liveImageIntake != nil, composerImages(from: sender.draggingPasteboard) != nil {
-            let point = convert(sender.draggingLocation, from: nil)
-            setSelectedRange(NSRange(location: characterIndexForInsertion(at: point), length: 0))
+        if liveIntake != nil, composerPasteboardMayHaveAttachment(sender.draggingPasteboard) {
             window?.makeFirstResponder(self)
-            if takeComposerImages(from: sender.draggingPasteboard) { return true }
+            if takeComposerAttachments(from: sender.draggingPasteboard) { return true }
         }
         return super.performDragOperation(sender)
-    }
-
-    /// Attach each image in order and insert the placeholders at the caret, space-separated. The first
-    /// refusal stops the rest — its reason is already on the surface's notice line. Answers whether
-    /// anything was inserted.
-    @discardableResult
-    private func insertComposerImages(_ images: [ComposerImage], intake: ComposerImageIntake) -> Bool {
-        var tokens: [String] = []
-        for image in images {
-            guard let token = intake.attach(image) else { break }
-            tokens.append(token)
-        }
-        guard !tokens.isEmpty else { return false }
-        insertText(tokens.joined(separator: " "), replacementRange: selectedRange())
-        return true
     }
 }

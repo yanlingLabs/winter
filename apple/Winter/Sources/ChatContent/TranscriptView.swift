@@ -129,7 +129,8 @@ struct TranscriptView: View {
             let base = index * TranscriptCellSpec.idStride
             var cells: [(id: Int, content: TranscriptCellContent)] = []
             if !exchange.prompt.isEmpty || exchange.promptEnvelope != nil {
-                cells.append((base, .prompt(text: exchange.prompt, envelope: exchange.promptEnvelope)))
+                cells.append((base, .prompt(text: exchange.prompt, envelope: exchange.promptEnvelope,
+                                            attachments: exchange.promptAttachments)))
             }
             // ComputerV2 wake triggers: the daemon's note that Winter continued (never a user bubble).
             if let notice = exchange.notice {
@@ -479,7 +480,7 @@ private final class TranscriptLayoutMemo {
 
 /// What one cell draws — a value, so a cell can be told apart from what it was without running its body.
 private enum TranscriptCellContent: Equatable {
-    case prompt(text: String, envelope: AgentMessageEnvelope?)
+    case prompt(text: String, envelope: AgentMessageEnvelope?, attachments: PromptAttachments)
     /// A non-pill activity row. `isExpanded` is the tool run's open state; `cards` is the card state an interaction
     /// card draws from (nil for every other row, so typing in a card does not rebuild them).
     case group(index: Int, group: ActivityGroup, isExpanded: Bool, cards: TranscriptCardState?)
@@ -566,8 +567,8 @@ private struct TranscriptCell: View {
         let _ = { transcriptCellBodyEvaluations += 1 }()
         #endif
         switch content {
-        case .prompt(let text, let envelope):
-            TranscriptUserBubble(text: text, tint: tint, envelope: envelope)
+        case .prompt(let text, let envelope, let attachments):
+            TranscriptUserBubble(text: text, tint: tint, envelope: envelope, attachments: attachments)
         case .group(let index, let group, _, _):
             activityGroupRow(group, index: index)
         case .pillRow(let items, _):

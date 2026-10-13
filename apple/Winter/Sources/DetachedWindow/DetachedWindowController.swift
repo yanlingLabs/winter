@@ -705,7 +705,8 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// the composer's notice line and sends nothing.
     private func submit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        // Attachments alone are a message too (their placeholders are its text).
+        guard !trimmed.isEmpty || !adapter.composerAttachments.isEmpty else { return }
         let wasRunning = session.state.turnRunning
         let sid = sessionId
         let client = feed.client
@@ -721,20 +722,23 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
             // Whether this daemon announced (hello) that it takes a FILE's own path in `images`: if not, the path
             // goes in the text, as it always did for an older daemon.
             let originalPaths = await client.supportsOriginalImagePaths
-            guard let outgoing = await adapter.composerTextForSend(trimmed, originalPaths: originalPaths, stage: stage) else { return }
+            // Likewise for `files` (`attachment-files`): an older daemon is sent each file's path in the text.
+            let attachmentFiles = await client.supportsAttachmentFiles
+            guard let outgoing = await adapter.composerTextForSend(trimmed, originalPaths: originalPaths,
+                                                                   attachmentFiles: attachmentFiles, stage: stage) else { return }
             // A FILE attachment is never staged, so the daemon's checks of it (its model backstop, a file that
             // vanished or sits where macOS keeps it from the daemon) answer HERE, on the send. An unreadable file is
             // read by this app instead and staged (`composerSend`); any other refusal's sentence lands on the
             // composer's notice line, beside the draft that stays put.
             let ok = await adapter.composerSend(outgoing, send: { out in
                 if wasRunning {
-                    _ = try await client.steer(sessionId: sid, text: out.text, images: out.images)
+                    _ = try await client.steer(sessionId: sid, text: out.text, images: out.images, files: out.files)
                 } else {
-                    _ = try await client.send(sessionId: sid, text: out.text, images: out.images)
+                    _ = try await client.send(sessionId: sid, text: out.text, images: out.images, files: out.files)
                 }
             }, stage: stage)
             // Clears only what was sent — edits made during the round trip stay.
-            if ok { adapter.composerSendSucceeded(sentDraft: text) }
+            if ok { adapter.composerSendSucceeded(sentDraft: text, sentAttachments: outgoing.sentAttachmentIDs) }
             // failure: text stays in the composer — the draft is never lost (spec §6 parity)
         }
     }
