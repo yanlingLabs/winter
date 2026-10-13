@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { CoworkCurrentContextResolver, CoworkContextResolverError, COWORK_SHARED_INSTRUCTION_VIEW, type CoworkInstructionReadRequest, type CoworkInstructionReadResult, type CoworkProtectedInstructionReader } from "../../src/cowork/current-context-resolver";
+import { CoworkCurrentContextResolver, CoworkContextResolverError, COWORK_SHARED_INSTRUCTION_VIEW, type CoworkInstructionReadRequest, type CoworkInstructionReadResult, type CoworkInstructionFile, type CoworkInstructionTier, type CoworkProtectedInstructionReader } from "../../src/cowork/current-context-resolver";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -62,10 +62,10 @@ function fixture(kind: "folder" | "githubRepository" = "githubRepository") {
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 function reply(request: CoworkInstructionReadRequest): CoworkInstructionReadResult {
-  const make = (requestedPath: string, admittedPath: string, text: string) => ({ requestedPath, admittedPath, text, sha256: sha(text) });
-  const blocks = [make(request.scopes.shared.path, `${COWORK_SHARED_INSTRUCTION_VIEW}/WINTER.md`, "shared guidance"),
-    make(`${request.scopes.source.root}/WINTER.md`, `${request.scopes.source.root}/WINTER.md`, "source guidance")];
-  return { request: structuredClone(request), blocks, files: blocks.map(b => ({ ...b, depth: 0 })) };
+  const make = (requestedPath: string, admittedPath: string, text: string, tier: CoworkInstructionTier) => ({ requestedPath, admittedPath, text, sha256: sha(text), tier });
+  const blocks = [make(request.scopes.shared.path, `${COWORK_SHARED_INSTRUCTION_VIEW}/WINTER.md`, "shared guidance", "workspace"),
+    make(`${request.scopes.source.root}/WINTER.md`, `${request.scopes.source.root}/WINTER.md`, "source guidance", "project")];
+  return { request: structuredClone(request), tiers: "admitted-only", blocks, files: blocks.map(b => ({ ...b, depth: 0 })) };
 }
 function resolver(f: ReturnType<typeof fixture>, read: CoworkProtectedInstructionReader["read"], timeoutMs?: number) {
   return new CoworkCurrentContextResolver({ ...f.deps, reader: { read }, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
@@ -100,7 +100,7 @@ test("current policy/source and guidance edits refresh, while personal/memory sc
 test("each request plans current in-source cwd and refuses an old reader scope", async () => {
   const f = fixture(), seen: string[] = [];
   const r = resolver(f, async request => { const value = reply(request), cwd = request.scopes.source.cwd; seen.push(cwd);
-    const entry = { requestedPath: `${cwd}/WINTER.md`, admittedPath: `${cwd}/WINTER.md`, text: `guidance for ${cwd}`, sha256: sha(`guidance for ${cwd}`) };
+    const entry = { requestedPath: `${cwd}/WINTER.md`, admittedPath: `${cwd}/WINTER.md`, text: `guidance for ${cwd}`, sha256: sha(`guidance for ${cwd}`), tier: "project" as const };
     value.blocks.push(entry); value.files.push({ ...entry, depth: 0 }); return value;
   });
   await r.resolve(f.lookup); const changed = { ...f.lookup, cwd: `${coworkGuestSourceRoot(f.initial)}/other`, attempt: 2 };
@@ -111,7 +111,7 @@ test("normal requested guidance aliases preserve Code ordering with admitted pat
   const f = fixture();
   const result = await resolver(f, async request => { const value = reply(request), root = request.scopes.source.root;
     value.blocks[1]!.admittedPath = `${root}/guidance/source.txt`; value.files[1]!.admittedPath = `${root}/guidance/source.txt`;
-    const extra = { requestedPath: `${root}/.winter/WINTER.md`, admittedPath: `${root}/guidance/local.txt`, text: "local", sha256: sha("local") };
+    const extra = { requestedPath: `${root}/.winter/WINTER.md`, admittedPath: `${root}/guidance/local.txt`, text: "local", sha256: sha("local"), tier: "project" as const };
     value.blocks.push(extra); value.files.push({ ...extra, depth: 0 }); return value;
   }).resolve(f.lookup);
   expect(result.instructions.indexOf(`${f.lookup.cwd.split("/live/")[0]}/WINTER.md)`)).toBeLessThan(result.instructions.indexOf(`${f.lookup.cwd.split("/live/")[0]}/.winter/WINTER.md)`));
@@ -120,7 +120,7 @@ test("empty required shared guidance and confined raw imports are accepted, expa
   const f = fixture();
   const result = await resolver(f, async request => { const value = reply(request), shared = value.files[0]!;
     shared.text = "@notes.md"; shared.sha256 = sha(shared.text);
-    value.files.splice(1, 0, { requestedPath: `${COWORK_SHARED_INSTRUCTION_VIEW}/notes.md`, admittedPath: `${COWORK_SHARED_INSTRUCTION_VIEW}/notes.md`, text: "import guidance", sha256: sha("import guidance"), depth: 1, importerPath: shared.requestedPath });
+    value.files.splice(1, 0, { requestedPath: `${COWORK_SHARED_INSTRUCTION_VIEW}/notes.md`, admittedPath: `${COWORK_SHARED_INSTRUCTION_VIEW}/notes.md`, text: "import guidance", sha256: sha("import guidance"), depth: 1, tier: "workspace", importerPath: shared.requestedPath, importerAdmittedPath: shared.admittedPath });
     value.blocks[0]!.text = ""; value.blocks[0]!.sha256 = sha(""); return value;
   }).resolve(f.lookup);
   expect(result.instructions).toContain("Shared user-edited workspace guidance");
@@ -156,7 +156,7 @@ test("imports cannot cross guidance roots, duplicate, cycle, exceed depth or lea
   const f = fixture();
   for (const kind of ["foreign", "cycle", "depth", "late-subtree", "alias-cycle"] as const) {
     await rejected(resolver(f, async request => { const v = reply(request), root = request.scopes.source.root;
-      const file = { requestedPath: `${root}/notes.md`, admittedPath: `${root}/notes.md`, text: "notes", sha256: sha("notes"), depth: 1, importerPath: v.files[1]!.requestedPath };
+      const file = { requestedPath: `${root}/notes.md`, admittedPath: `${root}/notes.md`, text: "notes", sha256: sha("notes"), tier: "project" as const, depth: 1, importerPath: v.files[1]!.requestedPath, importerAdmittedPath: v.files[1]!.admittedPath };
       if (kind === "foreign") file.requestedPath = `${COWORK_SHARED_INSTRUCTION_VIEW}/notes.md`;
       if (kind === "cycle") file.requestedPath = v.files[1]!.requestedPath;
       if (kind === "depth") file.depth = 6;
@@ -273,4 +273,114 @@ test("final raw UTF8 bound includes host boundaries and facts and never truncate
   const f = fixture();
   await rejected(resolver(f, async request => { const v = reply(request), text = "é".repeat(Math.floor((COWORK_CONTEXT_MAX_BYTES - Buffer.byteLength(f.plan().facts)) / 2)); v.blocks[0]!.text = text; v.blocks[0]!.sha256 = sha(text); return v; }).resolve(f.lookup));
   await rejected(resolver(f, async request => { const v = reply(request); v.blocks[0]!.text = "nul\0text"; v.blocks[0]!.sha256 = sha(v.blocks[0]!.text); return v; }).resolve(f.lookup));
+});
+
+function diamond(request: CoworkInstructionReadRequest): CoworkInstructionReadResult {
+  const value = reply(request), root = request.scopes.source.root, top = value.files[1]!;
+  const read = (name: string, parent: CoworkInstructionFile, text: string): CoworkInstructionFile => ({
+    requestedPath: `${root}/${name}`, admittedPath: `${root}/${name}`, text, sha256: sha(text), tier: parent.tier,
+    depth: parent.depth + 1, importerPath: parent.requestedPath, importerAdmittedPath: parent.admittedPath,
+  });
+  top.text = "ROOT @./b.md @./c.md @./WINTER.local.md"; top.sha256 = sha(top.text);
+  const b = read("b.md", top, "B @./d.md"), d1 = read("d.md", b, "D");
+  const c = read("c.md", top, "C @./d.md"), d2 = read("d.md", c, "D");
+  const local = read("WINTER.local.md", top, "LOCAL");
+  value.files.push(b, d1, c, d2, local);
+  const localBlock = { requestedPath: local.requestedPath, admittedPath: local.admittedPath, text: "LOCAL\n", sha256: sha("LOCAL\n"), tier: "local" as const };
+  value.blocks[1]!.text = "ROOT B D C D LOCAL\n"; value.blocks[1]!.sha256 = sha(value.blocks[1]!.text);
+  value.blocks.push(localBlock); value.files.push({ ...localBlock, text: "LOCAL", sha256: sha("LOCAL"), depth: 0 });
+  return value;
+}
+test("completed diamonds and imported-then-local top-level reads retain consistent occurrence provenance", async () => {
+  const f = fixture(); let observed!: CoworkInstructionReadResult;
+  const snapshot = await resolver(f, async request => { observed = diamond(request); return observed; }).resolve(f.lookup);
+  expect(snapshot.instructions).toContain("ROOT B D C D LOCAL\n"); expect(snapshot.instructions).toContain("/WINTER.local.md)");
+  expect(observed.files.filter(file => file.requestedPath.endsWith("/d.md"))).toHaveLength(2);
+  expect(observed.files.filter(file => file.requestedPath.endsWith("/WINTER.local.md")).map(file => file.tier)).toEqual(["project", "local"]);
+});
+test("consistent aliases may read the same admitted file in completed sibling occurrences", async () => {
+  const f = fixture();
+  const snapshot = await resolver(f, async request => {
+    const value = reply(request), root = request.scopes.source.root, parent = value.files[1]!;
+    for (const name of ["alias-one.md", "alias-two.md"]) value.files.push({ requestedPath: `${root}/${name}`, admittedPath: `${root}/actual.md`, text: "SAME", sha256: sha("SAME"), tier: "project", depth: 1, importerPath: parent.requestedPath, importerAdmittedPath: parent.admittedPath });
+    return value;
+  }).resolve(f.lookup);
+  expect(snapshot.facts).toBe(f.plan().facts);
+});
+for (const kind of ["retarget", "conflict", "hash", "admitted-conflict", "parent-requested", "parent-admitted", "finished-parent", "depth-jump", "ancestor-admitted", "ancestor-requested", "tier", "foreign-root"] as const) {
+  test(`occurrence ${kind} refuses despite a well-formed owning scope`, async () => {
+    const f = fixture();
+    await rejected(resolver(f, async request => {
+      const value = diamond(request), root = request.scopes.source.root, second = value.files[5]!;
+      if (kind === "retarget") second.admittedPath = `${root}/changed.md`;
+      if (kind === "conflict") { second.text = "CHANGED"; second.sha256 = sha(second.text); }
+      if (kind === "hash") second.sha256 = "0".repeat(64);
+      if (kind === "admitted-conflict") { second.requestedPath = `${root}/d-alias.md`; second.text = "CHANGED"; second.sha256 = sha(second.text); }
+      if (kind === "parent-requested") second.importerPath = `${root}/b.md`;
+      if (kind === "parent-admitted") second.importerAdmittedPath = `${root}/wrong-parent.md`;
+      if (kind === "finished-parent") { second.depth = 1; second.importerPath = value.files[2]!.requestedPath; second.importerAdmittedPath = value.files[2]!.admittedPath; }
+      if (kind === "depth-jump") value.files[2]!.depth = 3;
+      if (kind === "ancestor-admitted") { second.requestedPath = `${root}/ancestor-alias.md`; second.admittedPath = value.files[1]!.admittedPath; second.text = value.files[1]!.text; second.sha256 = sha(second.text); }
+      if (kind === "ancestor-requested") { second.requestedPath = value.files[1]!.requestedPath; second.admittedPath = value.files[1]!.admittedPath; second.text = value.files[1]!.text; second.sha256 = sha(second.text); }
+      if (kind === "tier") second.tier = "local";
+      if (kind === "foreign-root") second.admittedPath = `${COWORK_SHARED_INSTRUCTION_VIEW}/d.md`;
+      return value;
+    }).resolve(f.lookup));
+  });
+}
+test("repeated import-then-top-level data must agree despite its tier changing to local", async () => {
+  const f = fixture();
+  await rejected(resolver(f, async request => { const value = diamond(request), last = value.files.at(-1)!; last.text = "EDITED BETWEEN READS"; last.sha256 = sha(last.text); return value; }).resolve(f.lookup));
+});
+test("top-level requested/admitted/tier sequence remains exactly one-to-one with Code blocks", async () => {
+  const f = fixture();
+  for (const kind of ["missing", "duplicate", "reorder", "tier", "admitted"] as const) {
+    await rejected(resolver(f, async request => { const value = diamond(request), last = value.files.at(-1)!;
+      if (kind === "missing") value.files.pop();
+      if (kind === "duplicate") value.files.push({ ...last });
+      if (kind === "reorder") value.files = [last, ...value.files.slice(0, -1)];
+      if (kind === "tier") last.tier = "project";
+      if (kind === "admitted") last.admittedPath += "-different";
+      return value;
+    }).resolve(f.lookup));
+  }
+});
+test("explicit admitted-only and no personal tier are descriptor-validated before any snapshot", async () => {
+  const f = fixture(); let getterCalls = 0;
+  for (const kind of ["all", "missing", "block-user", "file-user", "shared-project", "source-workspace", "getter"] as const) {
+    await rejected(resolver(f, async request => { const value = reply(request);
+      if (kind === "all") (value as unknown as { tiers: string }).tiers = "all";
+      if (kind === "missing") delete (value as Partial<CoworkInstructionReadResult>).tiers;
+      if (kind === "block-user") (value.blocks[1] as unknown as { tier: string }).tier = "user";
+      if (kind === "file-user") (value.files[1] as unknown as { tier: string }).tier = "user";
+      if (kind === "shared-project") value.blocks[0]!.tier = "project";
+      if (kind === "source-workspace") value.blocks[1]!.tier = "workspace";
+      if (kind === "getter") Object.defineProperty(value, "tiers", { get() { getterCalls++; return "admitted-only"; } });
+      return value;
+    }).resolve(f.lookup));
+  }
+  expect(getterCalls).toBe(0);
+});
+test("occurrence count and cumulative repeated-text bounds prevent fan-out expansion", async () => {
+  const f = fixture();
+  for (const kind of ["count", "bytes"] as const) {
+    await rejected(resolver(f, async request => { const value = reply(request), parent = value.files[1]!, root = request.scopes.source.root;
+      const text = kind === "bytes" ? "x".repeat(100_000) : "small";
+      const leaf: CoworkInstructionFile = { requestedPath: `${root}/repeat.md`, admittedPath: `${root}/repeat.md`, text, sha256: sha(text), tier: "project", depth: 1, importerPath: parent.requestedPath, importerAdmittedPath: parent.admittedPath };
+      value.files.push(...Array.from({ length: kind === "count" ? 255 : 3 }, () => ({ ...leaf }))); return value;
+    }).resolve(f.lookup));
+  }
+});
+test("aliased immediate parents bind requested AND admitted identities and depth five remains allowed", async () => {
+  const f = fixture();
+  const snapshot = await resolver(f, async request => { const value = reply(request), root = request.scopes.source.root;
+    value.blocks[1]!.admittedPath = `${root}/actual-top.md`; value.files[1]!.admittedPath = `${root}/actual-top.md`;
+    let parent = value.files[1]!;
+    for (let depth = 1; depth <= 5; depth++) {
+      const next: CoworkInstructionFile = { requestedPath: `${root}/link-${depth}.md`, admittedPath: `${root}/actual-${depth}.md`, text: "IMPORT", sha256: sha("IMPORT"), tier: parent.tier, depth, importerPath: parent.requestedPath, importerAdmittedPath: parent.admittedPath };
+      value.files.push(next); parent = next;
+    }
+    return value;
+  }).resolve(f.lookup);
+  expect(snapshot.revision).toMatch(/^context:[a-f0-9]{64}$/);
 });
