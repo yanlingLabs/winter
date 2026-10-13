@@ -198,3 +198,37 @@ test("100 current sources stay bounded and deterministic across registration ord
   f.ready(f.add("githubRepository", "replacement"));
   expect(f.records.sources(f.workspaceId)).toHaveLength(101); expect(f.plan().sources).toHaveLength(100);
 });
+
+test.each(["plan", "no-git-publish", "remote-readonly", "no-write"] as const)("configured automatic completion is unavailable for %s with literal neutral facts", condition => {
+  const f = fixture();
+  if (condition === "plan") {
+    f.db.db.run("UPDATE cowork_conversations SET policy='plan',revision=revision+1 WHERE session_id='logical-parent'");
+    f.registration.admittedSources[0]!.access = "read-only";
+  }
+  if (condition === "no-git-publish" || condition === "no-write") f.records.updatePolicy(
+    { principalId: "fixture", requestId: "narrow-publication", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId,
+    { ceiling: { ...caps, ...(condition === "no-git-publish" ? { hostServices: [] } : { toolClasses: ["read", "execute"] }) } });
+  if (condition === "remote-readonly") f.remote.writable = false;
+  const plan = f.plan();
+  const policyFact = condition === "plan" ? "Conversation policy: plan; workspace default policy: auto." : "Conversation policy: auto; workspace default policy: auto.";
+  const ceilingFact = condition === "no-git-publish"
+    ? "Effective ceiling: read=true; write=true; execute=true; host services=0; connectors=0; network=internet."
+    : condition === "no-write"
+      ? "Effective ceiling: read=true; write=false; execute=true; host services=1; connectors=0; network=internet."
+      : "Effective ceiling: read=true; write=true; execute=true; host services=1; connectors=0; network=internet.";
+  const sourceFact = condition === "plan" ? "Source source_4: githubRepository; present; ready; admitted at /workspace/repos/repo-one; read-only."
+    : "Source source_4: githubRepository; present; ready; admitted at /workspace/repos/repo-one; read-write.";
+  expect(plan.facts).toBe(["Cowork current host context", "Platform: Linux; parent query registration: active.",
+    "Workspace: workspace_1; workspace state: retained; readiness: starting.", policyFact, ceilingFact, sourceFact,
+    "Automatic completion unavailable in this conversation; respect current session policy/task limits and report blocked publication.",
+    "Publication candidates pending host task/ref approval: none.",
+    "Publication still requires the host Git broker's current task, source and ref authorization. This plan grants no authority; main/default/protected branches, merges, force-pushes and other separately controlled actions remain separately authorized.",
+    "Plain guidance is separate from executable configuration trust; this plan does not admit settings, hooks, plugins or MCP configuration."].join("\n"));
+  expect(plan.publication).toEqual({ configured: "github-only-feature-branches", githubOnly: true, completion: "unavailable", publicationCandidateSourceIds: [] });
+  expect(f.records.policy(f.workspaceId).publication).toBe("github-only-feature-branches");
+  if (condition === "remote-readonly") {
+    expect(plan.sources[0]?.access).toBe("read-write");
+    expect(f.authority.requireSource(f.workspaceId, f.initial.sourceId, true).sourceId).toBe(f.initial.sourceId);
+    f.remote.writable = true; expect(f.plan().publication.completion).toBe("feature-commit-and-push");
+  }
+});

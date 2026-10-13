@@ -62,8 +62,12 @@ rendered-context bounds.
 
 Publication default mirrors `CoworkRepository.githubOnly`: a removing folder
 still counts until detached. Added folders narrow automatic publication immediately.
-For the configured GitHub-only policy, facts generate the feature-commit/push
-completion obligation, subject to task/guidance narrowing and current host authority.
+For the configured GitHub-only policy, an active feature-commit/push completion
+obligation requires at least one current publication candidate and remains subject
+to task/guidance narrowing and current host authority. Without a candidate, the
+plan reports automatic completion unavailable, distinct from a manual policy,
+and directs respect for current session/task limits and reporting blocked publication.
+The unavailable fact is neutral about local commits; plan policy remains read-only.
 Removing a seed paragraph does not erase that policy. Candidate repositories still
 need the Git broker's task/source/ref/destination checks; this plan grants nothing
 and cannot execute publication. Local read-write GitHub checkout admission requires
@@ -71,7 +75,9 @@ readable repository authority, while **remote push** additionally requires writa
 repository authority. A remote write revocation removes publication candidates
 without revoking local checkout access. No source labels/titles, private host roots,
 credential/store locations or standalone grant/authority handles enter visible
-facts/output. Guest paths retain their canonical admitted-root spellings; private
+facts/output. A folder grantRef appears only as a canonical admitted guest path
+segment, never as guest-supplied host authority. Guest paths retain their
+canonical admitted-root spellings; private
 identity metadata is only hashed for change detection. Facts and revision have a
 literal golden regression and deterministic ordering. SDK pins, protocol events,
 release versions and production availability remain unchanged.

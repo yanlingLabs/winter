@@ -33,7 +33,7 @@ export interface CoworkCurrentContextPlan {
   revision: string;
   facts: string;
   sources: ReadonlyArray<Readonly<{ sourceId: string; kind: WorkspaceSource["kind"]; state: WorkspaceSource["state"]; desired: WorkspaceSource["desired"]; admitted: boolean; root?: string; access?: "read-only" | "read-write" }>>;
-  publication: Readonly<{ configured: WorkspacePolicy["publication"]; githubOnly: boolean; completion: "feature-commit-and-push" | "manual"; publicationCandidateSourceIds: readonly string[] }>;
+  publication: Readonly<{ configured: WorkspacePolicy["publication"]; githubOnly: boolean; completion: "feature-commit-and-push" | "unavailable" | "manual"; publicationCandidateSourceIds: readonly string[] }>;
   instructionScopes: Readonly<{
     owner: "protected-guest-router";
     shared: Readonly<{ path: "/workspace/.winter/WINTER.md"; required: true; imports: "guidance-only" }>;
@@ -130,15 +130,17 @@ export function planCoworkCurrentContext(value: CoworkContextRecords, requested:
   // Mirror CoworkRepository.githubOnly: a removing folder still counts until detached.
   const githubOnly = sources.some(source => source.kind === "githubRepository" && source.desired === "present") && !sources.some(source => source.kind === "folder");
   const automatic = p.publication === "github-only-feature-branches" && githubOnly;
-  const publication = Object.freeze({ configured: p.publication, githubOnly, completion: automatic ? "feature-commit-and-push" as const : "manual" as const,
+  const completion = automatic ? eligible.length > 0 ? "feature-commit-and-push" as const : "unavailable" as const : "manual" as const;
+  const publication = Object.freeze({ configured: p.publication, githubOnly, completion,
     publicationCandidateSourceIds: Object.freeze(automatic ? eligible : []) });
   const facts = ["Cowork current host context", "Platform: Linux; parent query registration: active.",
     `Workspace: ${w.workspaceId}; workspace state: ${w.state}; readiness: ${w.power}.`,
     `Conversation policy: ${b.policy}; workspace default policy: ${p.defaultPolicy}.`,
     `Effective ceiling: read=${effective.toolClasses.includes("read")}; write=${effective.toolClasses.includes("write")}; execute=${effective.toolClasses.includes("execute")}; host services=${effective.hostServices.length}; connectors=${effective.connectors.length}; network=${effective.network}.`,
     ...sources.map(source => `Source ${source.sourceId}: ${source.kind}; ${source.desired}; ${source.state}; ${source.admitted ? `admitted at ${source.root}; ${source.access}` : "not admitted in the current view"}.`),
-    automatic ? "Completion default: commit and push completed authorized changes to feature branches unless task-specific instructions or guidance narrow the requested behavior. Removing shared guidance does not disable this host policy."
-      : "Completion default: manual publication; no automatic commit/push obligation applies.",
+    completion === "feature-commit-and-push" ? "Completion default: commit and push completed authorized changes to feature branches unless task-specific instructions or guidance narrow the requested behavior. Removing shared guidance does not disable this host policy."
+      : completion === "unavailable" ? "Automatic completion unavailable in this conversation; respect current session policy/task limits and report blocked publication."
+        : "Completion default: manual publication; no automatic commit/push obligation applies.",
     `Publication candidates pending host task/ref approval: ${publication.publicationCandidateSourceIds.join(",") || "none"}.`,
     "Publication still requires the host Git broker's current task, source and ref authorization. This plan grants no authority; main/default/protected branches, merges, force-pushes and other separately controlled actions remain separately authorized.",
     "Plain guidance is separate from executable configuration trust; this plan does not admit settings, hooks, plugins or MCP configuration."].join("\n");
