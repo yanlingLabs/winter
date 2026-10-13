@@ -41,6 +41,7 @@ final class CUTarget: @unchecked Sendable {
     private var _shots: [CUShotSpace] = []
     private var shotSeq = 0
     private var _lastActionMs: Double?
+    private var _lastActReturnedMs: Double?
 
     /// Recent screenshots' coordinate spaces, oldest first.
     var shots: [CUShotSpace] { lock.lock(); defer { lock.unlock() }; return _shots }
@@ -48,6 +49,18 @@ final class CUTarget: @unchecked Sendable {
     var lastActionMs: Double? {
         get { lock.lock(); defer { lock.unlock() }; return _lastActionMs }
         set { lock.lock(); _lastActionMs = newValue; lock.unlock() }
+    }
+    /// Clock time the last act's RESULT was returned (after its notes, a guardian restore, a background open): the
+    /// after-act picture windows run from here — an act whose answer came seconds after its input (the leftover probes,
+    /// 2026-10-13: Chrome activated itself and was put back) had its window spent before the next screenshot.
+    var lastActReturnedMs: Double? {
+        get { lock.lock(); defer { lock.unlock() }; return _lastActReturnedMs }
+        set { lock.lock(); _lastActReturnedMs = newValue; lock.unlock() }
+    }
+    /// When the after-act windows start: the act's result returned, else (no result yet) its input.
+    var afterActFromMs: Double? {
+        guard let acted = lastActionMs else { return nil }
+        return max(acted, lastActReturnedMs ?? acted)
     }
 
     /// The app's real windows when this target last looked (bind, then each state), to name new ones.

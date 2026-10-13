@@ -22,7 +22,10 @@
  *            launches its own and quits it), --safari-webkit-prefs (the same with three Safari WebKitPreferences keys NO,
  *            restored exactly; needs --yes-restart-safari),
  *            --freshness-copy-to <dir> (or $CU_LIVE_FRESHNESS_COPY_DIR): also copy freshness.json there,
- *            --helper-app <path to "Winter Computer Use Dev.app"> (else $WINTER_COMPUTER_USE_APP, else dist/dev/)
+ *            --helper-app <path to "Winter Computer Use Dev.app"> (else $WINTER_COMPUTER_USE_APP, else dist/dev/),
+ *            --chrome (also the `chrome` group, chrome.ts: the leftovers' probes on Chrome for Testing bound as an app —
+ *            launched on temp profiles, never the user's Chrome; `--only chrome` runs only them;
+ *            $WINTER_TEST_CHROME_APP names the .app, else Playwright's chromium-1248 build)
  *
  * WHAT RUNS (all isolated — nothing touches ~/.winter*, the Keychain, or the user's own daemon and helper):
  *   - a temp home `$TMPDIR/winter-cu-live-*`, and `winter-core-live` on it: the real daemon, compiled from
@@ -69,6 +72,8 @@ import {
 import { REAL_APP_SCENARIOS, realAppsPreflight, withRealDir, type RealAppsRun } from "./real-apps";
 import { adapterScenarios, adaptersDryRun } from "./adapters";
 import { expectedCardSummary, FIXTURE_APP, HELPER_OWNER, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage, type ImageStats, type ProbeEvent, type PromptObservation, type Scenario } from "./scenarios";
+import { CFT_DEFAULT_APP, CHROME_SCENARIOS, describeChromePlan, needsChrome, runningChromeForTesting, type ChromeObservation } from "./chrome";
+import { ChromeRig } from "./chrome-rig";
 import { DEFAULT_GENERIC_APPS, describePlan, GENERIC_PRELUDE, genericScenario, offSpacePlan, offSpaceSkipReason, onDesktopPlan, visualSkipReason, parseApps, resolveApp, restorePlan, SCRIPTS, type GenericApp, type ResolveDeps } from "./generic";
 
 // ── thresholds (env overrides) ───────────────────────────────────────────────────────────────────────────────────
@@ -84,16 +89,17 @@ const LIMITS = {
 const WATCH_AFTER_MS = 3_000;
 const MONITOR_INTERVAL_MS = 20;
 
-interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string; report?: string; script?: string; unattended: boolean; noDoneWindow: boolean; maxWaitMs: number; idleMs: number; countdownMs: number;
+interface Options { chrome: boolean; dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string; report?: string; script?: string; unattended: boolean; noDoneWindow: boolean; maxWaitMs: number; idleMs: number; countdownMs: number;
   safariFreshness: boolean; safariPrefs: boolean; yesRestartSafari: boolean; freshnessCopyTo?: string }
 
 function parseOptions(argv: string[]): Options {
-  const o: Options = { dryRun: false, realApps: false, yes: false, keepTemp: false, unattended: false, noDoneWindow: false, maxWaitMs: 3 * 3_600_000, idleMs: UNATTENDED_IDLE_MS, countdownMs: COUNTDOWN_MS,
+  const o: Options = { chrome: false, dryRun: false, realApps: false, yes: false, keepTemp: false, unattended: false, noDoneWindow: false, maxWaitMs: 3 * 3_600_000, idleMs: UNATTENDED_IDLE_MS, countdownMs: COUNTDOWN_MS,
     safariFreshness: false, safariPrefs: false, yesRestartSafari: false, ...(process.env.CU_LIVE_FRESHNESS_COPY_DIR ? { freshnessCopyTo: process.env.CU_LIVE_FRESHNESS_COPY_DIR } : {}) };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--dry-run") o.dryRun = true;
     else if (a === "--real-apps") o.realApps = true;
+    else if (a === "--chrome") o.chrome = true;
     else if (a === "--yes") o.yes = true;
     else if (a === "--keep-temp") o.keepTemp = true;
     else if (a === "--only") o.only = argv[++i];
@@ -193,6 +199,28 @@ function homeIn(root: string): string {
 }
 
 /** `cu-live-tool image-stats` on every screenshot the live daemon wrote since `since` (`<home>/cu-live-shots`). */
+/** The chrome group's browser: `$WINTER_TEST_CHROME_APP`, else Playwright's build. */
+function chromeAppPath(): string {
+  return process.env.WINTER_TEST_CHROME_APP ?? join(homedir(), CFT_DEFAULT_APP);
+}
+
+/** Whether the chrome group is in this run: `--chrome`, or an `--only` naming it. */
+function chromeSelected(o: Pick<Options, "chrome" | "only">): boolean {
+  return o.chrome || (o.only ?? "").toLowerCase().split("|").some((p) => p.includes("chrome"));
+}
+
+/** What the rig saw of the browser, plus — for a French one — the helper instance's own Floor F lexicon line. */
+function withObservation(rig: ChromeRig, lang: string, helperPid: number | undefined): { chrome?: ChromeObservation } {
+  const seen = rig.observe();
+  if (seen === undefined) return {};
+  if (lang !== "en" && helperPid !== undefined) {
+    const r = sh("/usr/bin/log", ["show", "--last", "15m", "--style", "compact", "--predicate", `processID == ${helperPid} AND eventMessage CONTAINS "Floor F"`]);
+    const line = r.stdout.split("\n").filter((l) => l.includes("Floor F")).at(-1);
+    if (line !== undefined) seen.lexiconLine = line.trim().slice(0, 300);
+  }
+  return { chrome: seen };
+}
+
 function shotsSince(tool: string, home: string, since: number): ImageStats[] {
   const dir = join(home, "cu-live-shots");
   let files: string[] = [];
@@ -471,6 +499,22 @@ async function dryRun(built: Built, o: Options, results: ScenarioResult[]): Prom
     ? { name: "plan: the start", group: "plan", status: "fail", ms: 0, checks: [check("cu-live-tool front gave a reading", false)] }
     : { name: "plan: the start", group: "plan", status: "pass", ms: 0, checks: [check("cu-live-tool front gave a reading", true)], note: `${unusable === undefined ? "" : `NOT NOW (${unusable.what}); once it is usable: `}${describeStartPlan(startPlan(reading))}; ${o.unattended ? `waits for ${o.idleMs / 1000} s with no HARDWARE input (a listen-only tap; synthetic events and HID tickles never count), then a ${o.countdownMs / 1000} s countdown banner any input postpones` : "starts at once"}; a "don't touch the Mac" banner for the whole run` });
   // The freshness measurement's plan (no screen).
+  // The chrome group's plan (no screen, no launch): its browser, the page, and what each instance and row does.
+  if (chromeSelected(o)) {
+    const app = chromeAppPath();
+    const found = existsSync(join(app, "Contents", "Info.plist"));
+    const bundle = found ? sh("plutil", ["-extract", "CFBundleIdentifier", "raw", join(app, "Contents", "Info.plist")]).stdout.trim() : "";
+    const running = runningChromeForTesting(sh("ps", ["-axo", "pid=,command="]).stdout);
+    const page = join(REPO_ROOT, "scripts", "cu-live", "fixture-web", "material.html");
+    const checks = [
+      check("Chrome for Testing is installed there, with its bundle id", found && bundle === "com.google.chrome.for.testing", `${app}: ${bundle || "missing"}`),
+      check("the Material page is in fixture-web", existsSync(page), page),
+      check("Chrome for Testing's AppleLanguages is unset (the French launches set it and delete it again)", sh("defaults", ["read", "com.google.chrome.for.testing", "AppleLanguages"]).status !== 0),
+    ];
+    results.push({ name: "chrome: preflight (dry)", group: "chrome", status: statusOf(checks), ms: 0, checks,
+      note: running.length > 0 ? `a Chrome for Testing runs now (pid ${running.join(", ")}): a live run would refuse the group until it is gone` : "no Chrome for Testing running now" });
+    for (const line of describeChromePlan(found ? app : undefined)) results.push({ name: "plan: chrome", group: "plan", status: "pass", ms: 0, checks: [check("planned", true)], note: line });
+  }
   for (const line of describeFreshnessPlan({ safari: o.safariFreshness, safariPrefs: o.safariPrefs })) {
     results.push({ name: `plan: freshness ${line.startsWith("Safari") ? "Safari" : "fixture"}`, group: "plan", status: "pass", ms: 0, checks: [check("planned", true)], note: line });
   }
@@ -735,6 +779,8 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   /** Connections of the fresh sessions some scenarios (and their prepare turns) use. */
   const extraClients: DaemonClient[] = [];
   let realApps: RealAppsRun | undefined;
+  /** The `chrome` group's browser instances and page server (`chrome-rig.ts`), when a chrome scenario runs. */
+  let chromeRig: ChromeRig | undefined;
   let baseline: FocusBaseline | undefined;
   let offspaceMethod = "?";
   let activateUser: () => Promise<void> = async () => { throw new Error("the helper is not up yet"); };
@@ -1020,6 +1066,12 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
       let result: ScenarioResult;
       try {
         abortIfInput();
+        // The chrome group: the Chrome for Testing instance it needs (launched on a temp profile, the user's app put
+        // back in front) — setup, never asserted.
+        if (needsChrome(s)) {
+          if (chromeRig === undefined) throw new Error("the chrome group's rig is not up");
+          await chromeRig.ensure(s.chrome);
+        }
         for (const c of s.before ?? []) await postCommand(built.tool, f, c.role, c.cmd, c.args ?? {});
         // SETUP, not asserted: the focus and input checks start after it.
         for (const step of s.prepare ?? []) {
@@ -1125,6 +1177,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           shots: shotsSince(built.tool, home, since),
           ...(rig === undefined ? {} : { prompt: rig.observation }),
           ...(wake === undefined ? {} : { wake }),
+          ...(chromeRig === undefined || !needsChrome(s) ? {} : { page: chromeRig.pageSince(since), ...withObservation(chromeRig, s.chrome.lang, helperPid) }),
         });
         if (s.session === "ask") checks.push(...cardChecks(turn.cards, s.foregroundCard === true));
         // A wake row's windows stay open across the wake turn (review L7): the user's switch to the fixture held, and
@@ -1170,14 +1223,46 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         await sleep(500);
       }
       if (result.status === "fail") failedOutputs.set(result.name, output.slice(0, 6_000));
+      // The chrome group's evidence, whole: the script's output and what the page saw.
+      if (needsChrome(s)) log(`chrome row "${s.name}" — output:\n${output}\npage events: ${JSON.stringify(chromeRig?.pageSince(since) ?? [])}\nbrowser: ${JSON.stringify(chromeRig?.observe() ?? null)}`);
       return { result, facts, output, since, end };
     };
 
     // `--script <file>`: run ONE ad-hoc ComputerV2 script (after the prelude) on the fixture and print its output —
     // for working out what a scenario sees. Nothing else runs.
-    const scenarios: Scenario[] = o.script !== undefined
+    let scenarios: Scenario[] = o.script !== undefined
       ? [{ name: `script ${o.script}`, group: "script", code: readFileSync(o.script, "utf8"), verify: (ctx) => [check("ran", !ctx.isError, ctx.output.slice(-300))] }]
-      : [...SCENARIOS, ...WAKE_SCENARIOS, ...adapterScenarios({ door: (m, p) => helperCall(built, socket, home, m, p), ...(o.realApps && realApps !== undefined ? { realDir: realApps.dir } : {}) }), ...(o.realApps && realApps !== undefined ? REAL_APP_SCENARIOS.map((r) => withRealDir(r, realApps!.dir)) : [])].filter((s) => o.only === undefined || o.only.toLowerCase().split("|").some((part) => s.name.toLowerCase().includes(part)));
+      : [...SCENARIOS, ...WAKE_SCENARIOS, ...(chromeSelected(o) ? CHROME_SCENARIOS : []), ...adapterScenarios({ door: (m, p) => helperCall(built, socket, home, m, p), ...(o.realApps && realApps !== undefined ? { realDir: realApps.dir } : {}) }), ...(o.realApps && realApps !== undefined ? REAL_APP_SCENARIOS.map((r) => withRealDir(r, realApps!.dir)) : [])].filter((s) => o.only === undefined || o.only.toLowerCase().split("|").some((part) => s.name.toLowerCase().includes(part)));
+    // The chrome group's preflight: Chrome for Testing is there, and none is running (a second instance would make a
+    // bind by bundle id ambiguous — and it may be someone else's); then the page server.
+    if (scenarios.some(needsChrome)) {
+      const app = chromeAppPath();
+      const running = runningChromeForTesting(sh("ps", ["-axo", "pid=,command="]).stdout);
+      const why = !existsSync(app) ? `Chrome for Testing is not at ${app} (set WINTER_TEST_CHROME_APP)`
+        : running.length > 0 ? `Chrome for Testing is already running (pid ${running.join(", ")}) — the group never shares a browser` : undefined;
+      if (why !== undefined) {
+        results.push({ name: "chrome: preflight", group: "chrome", status: "fail", ms: 0, checks: [check("Chrome for Testing is there and not running", false, why)] });
+        scenarios = scenarios.filter((x) => !needsChrome(x));
+      } else {
+        chromeRig = new ChromeRig({
+          app, root, webDir: join(REPO_ROOT, "scripts", "cu-live", "fixture-web"), outDir: OUT_DIR, tool: built.tool, log, sh: (cmd, args) => sh(cmd, args),
+          activateUser: () => activateUser(), activateAsUser: async (pid) => { await bringToFront(pid, "Chrome for Testing (shown once, as the user)", undefined, true); },
+          bindOnce: async () => {
+            const fresh = await freshSession();
+            const r = await runTurn(fresh.client, fresh.sid, computerV2Message(scriptOf({ code: `await apps.open("com.google.chrome.for.testing", { emit: false });` }), 30_000), 90_000);
+            if (r.isError) throw new Error(`binding Chrome for Testing failed: ${r.output.slice(-200)}`);
+          },
+          turn: async (code) => {
+            const fresh = await freshSession();
+            const r = await runTurn(fresh.client, fresh.sid, computerV2Message(scriptOf({ code }), 30_000), 90_000);
+            if (r.isError) throw new Error(`the setup turn failed: ${r.output.slice(-200)}`);
+          },
+          abortIfInput, own, disown,
+        });
+        chromeRig.start();
+        log(`chrome group: ${app}, page ${chromeRig.pageUrl}`);
+      }
+    }
     for (const s of scenarios) {
       const r = await runScenario(s);
       if (o.script !== undefined) log(`script output:\n${r.output}`);
@@ -1309,6 +1394,8 @@ report({ ok: true });`, 40_000), 100_000);
       });
     }
     restores.clear();
+    // The chrome group: quit its browser (full screen and dialogs go with it), put AppleLanguages back, stop the server.
+    if (chromeRig !== undefined) await step("quit Chrome for Testing, removed its AppleLanguages, stopped the page server", () => chromeRig!.cleanup());
     if (realApps !== undefined) await step("closed what the real-apps scenarios opened", () => realApps!.cleanup());
     for (const role of ["main", "user"] as const) {
       // A stop can land after the `open` and before the fixture logged `launched`: wait for its pid (a few seconds) rather than leave it up.

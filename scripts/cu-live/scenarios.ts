@@ -12,6 +12,7 @@
 // Handles persist across calls in the session's runtime (`win()` binds a window once and keeps it).
 import { check, eventsSince, lastValue, MARKER, MIXED_TEXT, type Check, type FixtureEvent } from "./lib";
 import type { WakeObservation } from "./wake";
+import type { ChromeNeed, ChromeObservation, PageEvent } from "./chrome";
 
 export const FIXTURE_APP = "Winter CU Fixture";
 export const FIXTURE_BUNDLE = "dev.cu-live.fixture";
@@ -45,6 +46,10 @@ export interface VerifyContext {
   prompt?: PromptObservation;
   /** A `wake` scenario (`wake.ts`): what the runner saw of the wake trigger after the action (absent otherwise). */
   wake?: WakeObservation;
+  /** A `chrome` scenario (`chrome.ts`): what its page POSTed to the runner since the scenario started… */
+  page?: readonly PageEvent[];
+  /** …and what the runner saw of the browser instance (its profile, remote debugging, the dialog). */
+  chrome?: ChromeObservation;
 }
 
 /**
@@ -137,6 +142,11 @@ export interface Scenario {
    * and runs `cleanup` (ComputerV2 code, after the prelude) as one more turn in the same session.
    */
   wake?: { userClicks?: string; window?: string; stamp?: "user" | "winter"; withinMs: number; cleanup?: string };
+  /**
+   * THE CHROME GROUP (`chrome.ts`): the Chrome for Testing instance this scenario needs — the runner launches it on a
+   * temp profile (a fresh one whenever the key changes), puts the user's app back in front, and adds `CHROME_PRELUDE`.
+   */
+  chrome?: ChromeNeed;
   verify(ctx: VerifyContext): Check[];
 }
 

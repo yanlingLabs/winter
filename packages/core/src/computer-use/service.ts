@@ -1055,7 +1055,8 @@ export class ComputerV2Service {
     ctx.builder.markScreenRead();
     // The page changed since the last state(), or the read was cut short: the helper's fixed words, said even
     // with emit:false (a model reading only the value would miss it).
-    const note = helperDetail(res.note, 400);
+    // (600: the off-desktop note — its screenshot pointer first — fits beside the other two whole.)
+    const note = helperDetail(res.note, 600);
     if (note !== undefined) ctx.builder.daemonLine(note);
     if (args.emit !== false) {
       ctx.builder.text(res.elements.length === 0 ? `(nothing in ${t.name} matches)` : res.elements.map(elementLine).join("\n"), { screen: true });

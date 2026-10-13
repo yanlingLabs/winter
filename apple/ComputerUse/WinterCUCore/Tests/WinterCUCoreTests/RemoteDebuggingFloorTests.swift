@@ -96,6 +96,28 @@ final class RemoteDebuggingFloorTests: XCTestCase {
         XCTAssertFalse(CUCore.isInspectPage("https://inspect.example.com"))
     }
 
+    /// The leftover probes (2026-10-13): with the page absent from the tree (the browser built none), a key went
+    /// through while chrome://inspect was shown. With no page URL to read, the window's title or its selected tab's
+    /// naming the inspect page refuses it; an ordinary page's title does not.
+    func testWithNoPageInTheTreeTheInspectPageIsKnownByItsTitles() {
+        world()
+        let strip = fakeElement(99_020), tab = fakeElement(99_021), otherTab = fakeElement(99_022)
+        ax.put(window, [kAXChildrenAttribute: [toolbarButton, strip], kAXTitleAttribute: ""])   // no web area: the page not in the tree
+        ax.add(strip, role: kAXTabGroupRole, extra: [kAXParentAttribute: window, kAXChildrenAttribute: [otherTab, tab]])
+        ax.add(otherTab, role: kAXRadioButtonRole, subrole: "AXTabButton", title: "Material Probe", extra: [kAXParentAttribute: strip, kAXValueAttribute: false])
+        ax.add(tab, role: kAXRadioButtonRole, subrole: "AXTabButton", title: "Inspect with Chrome Developer Tools", extra: [kAXParentAttribute: strip, kAXValueAttribute: true])
+        XCTAssertThrowsError(try core.floorCheckRemoteDebugging(params(.key(CUKeyAction(combo: "tab"))), target)) {
+            XCTAssertTrue(isRemoteDebuggingRefusal($0), "\($0)")
+        }
+        // The window server's title alone does it too ("… – Google Chrome for Testing", a localized dash).
+        ax.put(tab, [kAXValueAttribute: false])
+        XCTAssertNoThrow(try core.floorCheckRemoteDebugging(params(.key(CUKeyAction(combo: "tab"))), target), "an ordinary tab selected")
+        sys.windows[77]?.title = "Inspect with Chrome Developer Tools – Google Chrome for Testing"
+        XCTAssertThrowsError(try core.floorCheckRemoteDebugging(params(.key(CUKeyAction(combo: "tab"))), target)) {
+            XCTAssertTrue(isRemoteDebuggingRefusal($0), "\($0)")
+        }
+    }
+
     func testTheBrowsersOwnUIStaysUsableToLeaveThePage() {
         world()
         XCTAssertNoThrow(try core.floorCheckRemoteDebugging(params(.click(CUClickAction(ref: ref(toolbarButton)))), target))

@@ -468,6 +468,77 @@ final class LeftoversTests: XCTestCase {
         XCTAssertTrue(r.detail?.contains("the focused check box did not change after space") ?? false, r.detail ?? "")
     }
 
+    // MARK: the leftover probes on a real Chrome (2026-10-13)
+
+    /// Chrome reads a `<div role="combobox">` select as a combo box whose value it calls settable: one with none of a
+    /// text entry's attributes is a select (opened and its option pressed), never a value written that does nothing.
+    func testAComboBoxThatTakesNoTypedTextIsASelectEvenWhenItsValueReadsSettable() {
+        world()
+        let combo = fakeElement(98_090), search = fakeElement(98_091)
+        ax.put(form, [kAXChildrenAttribute: ax.elements(form, kAXChildrenAttribute) + [combo, search]])
+        ax.add(combo, role: kAXComboBoxRole, title: "Size", frame: CGRect(x: 60, y: 420, width: 200, height: 30),
+               extra: [kAXParentAttribute: form, kAXValueAttribute: "Medium"])
+        ax.makeSettable(combo, kAXValueAttribute)
+        ax.add(search, role: kAXComboBoxRole, title: "Search", frame: CGRect(x: 300, y: 420, width: 200, height: 30),
+               extra: [kAXParentAttribute: form, kAXValueAttribute: "", kAXNumberOfCharactersAttribute: 0,
+                       kAXSelectedTextRangeAttribute: AXValueCreate(.cfRange, [CFRange(location: 0, length: 0)])!])
+        ax.makeSettable(search, kAXValueAttribute)
+        XCTAssertTrue(core.isWebSelect(combo), "no text entry's attributes: a select, settable or not")
+        XCTAssertFalse(core.isWebSelect(search), "an editable combo box (a search with suggestions) is typed into")
+        XCTAssertTrue(core.isWebSelect(select), "a pop-up button stays a select")
+    }
+
+    /// A key with `{ into }` is watched like one with the focus already there: Tab that left it where it was says so.
+    func testATabIntoAFieldThatLeftTheFocusWhereItWasSaysSo() async throws {
+        world()
+        let title = fakeElement(98_092)
+        ax.put(form, [kAXChildrenAttribute: ax.elements(form, kAXChildrenAttribute) + [title]])
+        ax.add(title, role: kAXTextFieldRole, title: "Title", frame: CGRect(x: 60, y: 460, width: 300, height: 24),
+               extra: [kAXParentAttribute: form, kAXValueAttribute: "Hello", kAXFocusedAttribute: true])
+        ax.focus(pid: pid, on: title)
+        let r = try await act(.key(CUKeyAction(combo: "tab", into: ref(title))))
+        XCTAssertTrue(r.detail?.contains("the keyboard focus did not move after tab (the page may not have taken the key) — click the field you mean") ?? false, r.detail ?? "")
+        XCTAssertFalse(r.detail?.contains("or pass { into }") ?? true, "into was passed: not offered again")
+        // …and one that moved it says nothing of the kind.
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            ax.put(title, [kAXFocusedAttribute: false])
+            ax.put(radios[0], [kAXFocusedAttribute: true])
+            ax.focus(pid: pid, on: radios[0])
+        }
+        let moved = try await act(.key(CUKeyAction(combo: "tab", into: ref(title))))
+        XCTAssertFalse(moved.detail?.contains("did not move") ?? false, moved.detail ?? "")
+    }
+
+    /// Chrome answers AXManualAccessibility as unsupported: a Chromium BROWSER whose page did not appear gets
+    /// AXEnhancedUserInterface; an Electron or CEF app never does, and a page that appears stops it.
+    func testChromiumAccessibilityFallsBackToEnhancedUserInterfaceForABrowserOnly() {
+        var set: [String] = []
+        let r = CUChromium.enableAccessibility(browser: true, enhancedBefore: { false }, set: { set.append($0) }, pageReady: { false }, pause: { _ in })
+        XCTAssertEqual(r.set, ["AXManualAccessibility", "AXEnhancedUserInterface"])
+        XCTAssertTrue(r.ours, "read off just before: Winter's")
+        XCTAssertEqual(set, ["AXManualAccessibility", "AXEnhancedUserInterface"])
+        set = []
+        XCTAssertEqual(CUChromium.enableAccessibility(browser: false, set: { set.append($0) }, pageReady: { false }, pause: { _ in }).set, ["AXManualAccessibility"])
+        XCTAssertEqual(set, ["AXManualAccessibility"], "Electron: never the VoiceOver switch")
+        set = []
+        var polls = 0
+        XCTAssertEqual(CUChromium.enableAccessibility(browser: true, set: { set.append($0) }, pageReady: { polls += 1; return polls >= 3 }, pause: { _ in }).set, ["AXManualAccessibility"])
+        XCTAssertEqual(set, ["AXManualAccessibility"], "a page that appeared: nothing more")
+        // Unanswered before: set (the page needs it), never Winter's to turn off.
+        let unknown = CUChromium.enableAccessibility(browser: true, enhancedBefore: { nil }, set: { _ in }, pageReady: { false }, pause: { _ in })
+        XCTAssertEqual(unknown.set.last, "AXEnhancedUserInterface")
+        XCTAssertFalse(unknown.ours)
+    }
+
+    /// One "browser" for Floor F and the accessibility switch: a known bundle, or a Chromium app that declares the web.
+    func testABrowserIsAKnownBundleOrAChromiumAppThatDeclaresTheWeb() {
+        XCTAssertTrue(CUChromium.isBrowser(bundleId: "com.google.chrome.for.testing", chromium: true, declaresWeb: { false }))
+        XCTAssertTrue(CUChromium.isBrowser(bundleId: "com.operasoftware.OperaGX", chromium: true, declaresWeb: { true }), "Opera GX, Brave Beta, Comet…")
+        XCTAssertFalse(CUChromium.isBrowser(bundleId: "com.tinyspeck.slackmacgap", chromium: true, declaresWeb: { false }), "an Electron app")
+        XCTAssertFalse(CUChromium.isBrowser(bundleId: "com.apple.Safari", chromium: false, declaresWeb: { true }), "WebKit")
+    }
+
     // MARK: a key into an open panel
 
     func testAKeyIntoAPanelThatOpenedNothingSaysSo() async throws {
@@ -544,5 +615,136 @@ final class LeftoversTests: XCTestCase {
         XCTAssertEqual(CUCore.afterActFreshness("live: …", app: "Chrome", previous: (7, 1000, 1000), digest: 8, now: 2500, actedMs: 2000), "live: …")
         XCTAssertEqual(CUCore.afterActFreshness("likely current: …", app: "Chrome", previous: (7, 1000, 1000), digest: 7, now: 60_000, actedMs: 2000),
                        "likely current: …", "an act long ago: as it was")
+    }
+
+    // MARK: the after-act window runs from the act's return (probe 5, 2026-10-13)
+
+    /// An act whose answer came late (Chrome activated itself and was put back): the picture right after it still waits
+    /// and says it may predate the act — its window runs from the act's RETURN, not its input.
+    func testTheAfterActWindowRunsFromTheActsReturn() throws {
+        let label = "stale since 3 s ago: …"
+        // Input at 2000, the answer returned at 5000, the picture at 5500: within the window from the return.
+        XCTAssertTrue(CUCore.afterActFreshness(label, app: "Chrome", previous: (7, 1000, 1000), digest: 7, now: 5500, actedMs: 2000, returnedMs: 5000)
+            .contains("this picture may predate the last action"))
+        // From the input alone it would have been spent.
+        XCTAssertEqual(CUCore.afterActFreshness(label, app: "Chrome", previous: (7, 1000, 1000), digest: 7, now: 5500, actedMs: 2000), label)
+        // The wait itself: input long ago, returned just now — the picture is waited for.
+        world()
+        sys.windows[88]?.onScreen = false
+        let before = WebPressTests.image(gray: 200), after = WebPressTests.image(gray: 60)
+        var shots = 0
+        core.privateCaptureOverride = { _, _ in shots += 1; return shots <= 2 ? before : after }
+        let budget = CUImageBudget(maxLongEdge: 400, quality: 0.8)
+        let first = try XCTUnwrap(core.offScreenStill(target, nil, budget))
+        let now = CUSystemClock().nowMs()
+        _ = target.noteOffScreenShot(digest: CUCore.contentDigest(first.jpeg), at: now - 4_000)
+        target.lastActionMs = now - 3_000
+        target.lastActReturnedMs = now
+        let shot = try XCTUnwrap(core.offScreenAfterAct(target, nil, budget))
+        XCTAssertNotEqual(CUCore.contentDigest(shot.jpeg), CUCore.contentDigest(first.jpeg), "waited for the act's picture")
+    }
+
+    func testAnActsReturnIsStampedOnTheTarget() async throws {
+        world()
+        XCTAssertNil(target.lastActReturnedMs)
+        try await act(.click(CUClickAction(ref: ref(fileButton))))
+        let returned = try XCTUnwrap(target.lastActReturnedMs)
+        XCTAssertGreaterThanOrEqual(returned, try XCTUnwrap(target.lastActionMs))
+        XCTAssertEqual(target.afterActFromMs, returned)
+    }
+
+    /// An act that sent nothing (refused before any input) leaves the last act's window as it was.
+    func testARefusedActStampsNoReturn() async throws {
+        world()
+        target.lastActionMs = 1_000
+        do { try await act(.key(CUKeyAction(combo: "x", into: ref(radios[0])))); XCTFail("a key into a radio is refused") } catch {}
+        XCTAssertNil(target.lastActReturnedMs, "no input sent: no new window")
+        XCTAssertEqual(target.lastActionMs, 1_000)
+    }
+
+    // MARK: a Chromium page on another desktop may lag (finding D)
+
+    func testANothingChangedAnswerOffDesktopIsUnverified() {
+        for d in ["clicked “Paint”, and nothing changed that accessibility can see — check with state()",
+                  "the focused check box did not change after space (the page may not have taken the key) — click(ref) presses it",
+                  "the keyboard focus did not move after tab (the page may not have taken the key)",
+                  "pressed the option “Small” of [3] combo box “Size”, but the select did not change to it (Medium) — check state() before choosing again"] {
+            let c = CUCore.offDesktopLagCaveat(d, app: "Google Chrome")
+            XCTAssertEqual(c, "Google Chrome's page is on another desktop, where it may not update its accessibility until it is seen — what it reads may predate the action, so this is unverified; screenshot({ live: true, reason }) shows the window now", d)
+        }
+        XCTAssertNil(CUCore.offDesktopLagCaveat("pressed [4] “Submit”", app: "Google Chrome"), "a plain success claims nothing changed")
+        XCTAssertNil(CUCore.offDesktopLagCaveat(nil, app: "Google Chrome"))
+    }
+
+    func testOnlyAChromiumWindowOffThisDesktopLags() {
+        world()
+        XCTAssertFalse(core.pageMayLagOffDesktop(target), "on this desktop")
+        // Off this desktop: not on screen, and not among the windows accessibility lists here.
+        sys.windows[88]?.onScreen = false
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [AXUIElement]()])
+        XCTAssertTrue(core.pageMayLagOffDesktop(target))
+        let safari = CUTarget(id: "t2", sessionId: "s", pid: pid, bundleId: "com.apple.Safari", appName: "Safari",
+                              isChromium: false, mirror: false, windowID: 88, windowTitle: "Dashboard")
+        XCTAssertFalse(core.pageMayLagOffDesktop(safari), "WebKit: not this rule")
+    }
+
+    // MARK: AXEnhancedUserInterface goes off with the process's last target
+
+    func testEnhancedUserInterfaceIsTurnedOffOnlyWhenWinterTurnedItOnAndItStillReadsOn() {
+        // Already on (another client's): never set, so never Winter's to turn off.
+        var set: [String] = []
+        let r = CUChromium.enableAccessibility(browser: true, enhancedBefore: { true }, set: { set.append($0) }, pageReady: { false }, pause: { _ in })
+        XCTAssertEqual(r.set, ["AXManualAccessibility"])
+        XCTAssertFalse(r.ours)
+        var off: [Bool] = []
+        XCTAssertFalse(CUChromium.releaseEnhanced(pid: 777_001, assistiveOn: false, readNow: { true }, set: { off.append($0) }), "not Winter's")
+        // Winter's: off with the last target, once, re-read on just before; the next bind switches it on again.
+        CUChromium.noteEnhancedForTesting(pid: 777_002, start: 1)
+        XCTAssertTrue(CUChromium.releaseEnhanced(pid: 777_002, assistiveOn: false, readNow: { true }, set: { off.append($0) }))
+        XCTAssertEqual(off, [false])
+        XCTAssertFalse(CUChromium.isEnabledForTesting("777002:1.0"), "the next bind switches it on again")
+        XCTAssertFalse(CUChromium.releaseEnhanced(pid: 777_002, assistiveOn: false, readNow: { true }, set: { off.append($0) }), "once")
+        // An assistive client on (VoiceOver, Switch Control, Full Keyboard Access, Voice Control): left on.
+        CUChromium.noteEnhancedForTesting(pid: 777_003, start: 1)
+        XCTAssertFalse(CUChromium.releaseEnhanced(pid: 777_003, assistiveOn: true, readNow: { true }, set: { off.append($0) }))
+        // The app does not answer the read, or reads it off already: left as it is.
+        CUChromium.noteEnhancedForTesting(pid: 777_004, start: 1)
+        XCTAssertFalse(CUChromium.releaseEnhanced(pid: 777_004, assistiveOn: false, readNow: { nil }, set: { off.append($0) }))
+        CUChromium.noteEnhancedForTesting(pid: 777_005, start: 1)
+        XCTAssertFalse(CUChromium.releaseEnhanced(pid: 777_005, assistiveOn: false, readNow: { false }, set: { off.append($0) }))
+        XCTAssertEqual(off, [false])
+    }
+
+    /// The helper ending releases every flag Winter set; the record file (0600) mirrors them, so a helper that died
+    /// with them set lets the next one clear them — only in THAT process (pid and start time), still on.
+    func testTheFlagsAreRecordedReleasedAtTheEndAndReconciledAtTheNextStart() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cu-axflags-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("computer-use-ax-flags.json").path
+        let saved = CUChromium.recordPath
+        CUChromium.recordPath = path
+        defer { CUChromium.recordPath = saved }
+        CUChromium.noteEnhancedForTesting(pid: 778_001, start: 100)
+        CUChromium.noteEnhancedForTesting(pid: 778_002, start: 200)
+        XCTAssertEqual(CUChromium.loadRecords(path: path), [.init(pid: 778_001, start: 100), .init(pid: 778_002, start: 200)])
+        let mode = try FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.intValue, 0o600)
+        // The end: both released (both still read on), the file gone.
+        var turned: [pid_t] = []
+        let off = CUChromium.releaseAll(assistiveOn: false, readNow: { _ in true }, set: { pid, _ in turned.append(pid) })
+        XCTAssertEqual(Set(off), [778_001, 778_002])
+        XCTAssertEqual(Set(turned), [778_001, 778_002])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        // A helper that died: its records reconciled — the same process still on → off; a reused pid (another start) →
+        // left; a process gone → left; one reading off → left.
+        let left: [CUChromium.EnhancedRecord] = [.init(pid: 1, start: 10), .init(pid: 2, start: 20), .init(pid: 3, start: 30), .init(pid: 4, start: 40)]
+        let starts: [pid_t: Double] = [1: 10, 2: 99, 4: 40]
+        var cleared: [pid_t] = []
+        let done = CUChromium.reconcile(left, startOf: { starts[$0] }, assistiveOn: false, readNow: { $0 == 4 ? false : true },
+                                        set: { pid, on in XCTAssertFalse(on); cleared.append(pid) })
+        XCTAssertEqual(done, [1])
+        XCTAssertEqual(cleared, [1])
+        XCTAssertEqual(CUChromium.reconcile(left, startOf: { starts[$0] }, assistiveOn: true, readNow: { _ in true }, set: { _, _ in XCTFail("an assistive client is on") }), [])
     }
 }

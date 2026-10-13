@@ -12,12 +12,23 @@ extension CUCore {
     /// A page's select: a combo box, or a pop-up button (Chromium's select-only combo box).
     static let webSelectRoles: Set<String> = [kAXComboBoxRole, kAXPopUpButtonRole]
 
-    /// A web page's select: a pop-up button, or a combo box whose value can't be written (an editable combo box — a
-    /// search with suggestions — is typed into instead), in web content.
+    /// A web page's select: a pop-up button, or a combo box that takes no typed text — its value can't be written, or
+    /// it has none of a text entry's attributes (an editable combo box — a search with suggestions — is typed into
+    /// instead), in web content. (The leftover probes, 2026-10-13: Chrome reads a `<div role="combobox">` select as a
+    /// combo box whose value it calls settable; the write did nothing and setValue said "set the value".)
     func isWebSelect(_ e: AXUIElement) -> Bool {
         let role = ax.string(e, kAXRoleAttribute) ?? ""
         guard Self.webSelectRoles.contains(role), isWebContent(e) else { return false }
-        return role == kAXPopUpButtonRole || !ax.isSettable(e, kAXValueAttribute)
+        return role == kAXPopUpButtonRole || !ax.isSettable(e, kAXValueAttribute) || !takesTypedText(e)
+    }
+
+    /// The attributes only an element that takes typed text has (WebKit and Chromium give them to text fields, text
+    /// areas and editable combo boxes alone).
+    static let typedTextAttributes = [kAXNumberOfCharactersAttribute, kAXSelectedTextRangeAttribute, kAXInsertionPointLineNumberAttribute]
+
+    /// Does `e` take typed text (a text entry's attributes)?
+    func takesTypedText(_ e: AXUIElement) -> Bool {
+        Self.typedTextAttributes.contains { ax.attribute(e, $0) != nil }
     }
 
     /// `e`'s descendants, breadth first, `depth` levels and at most `max` of them (`e` itself not included).
@@ -315,7 +326,12 @@ extension CUCore {
         let plain = chord.modifiers.isEmpty || chord.modifiers == [.shift]
         let watched = (plain && chord.key == .named(.tab)) || (chord.modifiers.isEmpty && chord.key == .named(.space))
             || (chord.modifiers == [.command] && chord.key == .character("a"))
-        guard a.into == nil, watched, let f = reportedFocus(t), isWebContent(f) else { return nil }
+        // With `into`, the element named is where the key goes once its focus is placed (the act refuses otherwise):
+        // watched the same as a focus already there (the leftover probes, 2026-10-13: `key("tab", { into })` into a
+        // real Chrome page left the focus where it was and the answer said only "pressed tab" — the watch was armed for
+        // keys with no `into` alone).
+        let named: AXUIElement? = a.into.flatMap { try? element($0, in: t) }
+        guard watched, let f = a.into == nil ? reportedFocus(t) : named, isWebContent(f) else { return nil }
         let focusId: AXIdentity? = AXIdentity(element: f)
         if plain, chord.key == .named(.tab) { return KeyWatch(kind: .tab(f, ax.string(f, kAXValueAttribute)), focus: focusId) }
         if chord.modifiers.isEmpty, chord.key == .named(.space), isToggleControl(f) {
@@ -373,7 +389,10 @@ extension CUCore {
             switch w.kind {
             case .tab: return focus != w.focus
             case .toggle(let e, let v): return ax.string(e, kAXValueAttribute) != v || focus != w.focus
-            case .selectAll(let e, let r, _): return selectionRange(e) != r || focus != w.focus
+            case .selectAll(let e, let r, let len):
+                // With `into` the focusing press itself moves the caret: only the whole text selected counts then.
+                guard a.into == nil else { return (selectionRange(e)?.length ?? 0) >= len || focus != w.focus }
+                return selectionRange(e) != r || focus != w.focus
             case .panel(let e, let fp, let f, let v, let sel):
                 return panelFingerprint(e, app: ax.application(t.pid)) != fp || focus != f || ax.string(e, kAXValueAttribute) != v
                     || panelSelection(e) != sel
@@ -386,9 +405,9 @@ extension CUCore {
                     // The field took the key itself (a tab character, a field that indents): said as that — never as
                     // the page ignoring it.
                     if let now = ax.string(f, kAXValueAttribute), now != v {
-                        return "the keyboard focus stayed in its field after \(a.combo), and the field's text changed (it took the key itself, as a tab character or an indent) — click the next field you mean, or pass { into }"
+                        return "the keyboard focus stayed in its field after \(a.combo), and the field's text changed (it took the key itself, as a tab character or an indent) — click the next field you mean\(a.into == nil ? ", or pass { into }" : "")"
                     }
-                    return "the keyboard focus did not move after \(a.combo) (the page may not have taken the key) — click the field you mean, or pass { into }"
+                    return "the keyboard focus did not move after \(a.combo) (the page may not have taken the key) — click the field you mean\(a.into == nil ? ", or pass { into }" : "")"
                 case .toggle:
                     return "the focused check box did not change after \(a.combo) (the page may not have taken the key) — click(ref) presses it"
                 case .selectAll(_, _, let len):
@@ -400,6 +419,34 @@ extension CUCore {
             clock.pause(ms: 50)
         }
         return nil
+    }
+
+    // MARK: a Chromium page on another desktop (finding D)
+
+    /// What says an act or key changed nothing (the helper's own words for it).
+    static let nothingChangedClaims = ["nothing changed that accessibility can see", "had no effect accessibility can see", "no visible effect",
+                                       "may not have taken the key", "did not change after", "did not move after", "still reads",
+                                       "did not change to it"]
+
+    /// The caveat a "nothing changed" answer gets when the window is a Chromium app's on ANOTHER desktop: such a page may
+    /// not update its accessibility (nor its picture) until it is seen, so the claim may predate the act's effect (the
+    /// leftover probes, 2026-10-13: Chrome full screen on its own Space — the page toggled while the answer said the
+    /// press did nothing, and find() read the box unchecked). Nil when the detail claims no such thing. Pure.
+    static func offDesktopLagCaveat(_ detail: String?, app: String) -> String? {
+        guard let d = detail, nothingChangedClaims.contains(where: { d.contains($0) }) else { return nil }
+        return offDesktopLagSentence(app)
+    }
+
+    /// How long after an act find() says its states may lag (a Chromium page on another desktop).
+    static let offDesktopLagFindMs: Double = 10_000
+
+    static func offDesktopLagSentence(_ app: String) -> String {
+        "\(app)'s page is on another desktop, where it may not update its accessibility until it is seen — what it reads may predate the action, so this is unverified; screenshot({ live: true, reason }) shows the window now"
+    }
+
+    /// Does `t`'s page lag on another desktop (a Chromium-family window off this desktop)?
+    func pageMayLagOffDesktop(_ t: CUTarget) -> Bool {
+        t.isChromium && isOffThisDesktop(t)
     }
 
     // MARK: an off-desktop picture right after an act
@@ -417,13 +464,13 @@ extension CUCore {
     /// changes. Never moves anything.
     func offScreenAfterAct(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget,
                            token: CUCancellation.Token? = nil) throws -> CUCapturedImage? {
-        guard let acted = t.lastActionMs, clock.nowMs() - acted < Self.offScreenAfterActWindowMs else {
+        guard let acted = t.lastActionMs, let from = t.afterActFromMs, clock.nowMs() - from < Self.offScreenAfterActWindowMs else {
             return try offScreenStill(t, region, budget)
         }
         let previous = t.lastOffScreenShot
         guard let previous, previous.atMs < acted else {
             // No picture from before the act to compare with: a moment after the act, at least.
-            let since = clock.nowMs() - acted
+            let since = clock.nowMs() - from
             if since < Self.offScreenAfterActMinMs {
                 // In steps, the call's cancel (Esc) checked between them.
                 var left = Self.offScreenAfterActMinMs - since
@@ -451,15 +498,18 @@ extension CUCore {
     /// The freshness label of a picture taken within moments of an act, extended: one unchanged since before the act
     /// may predate it (an app may not redraw a window on another desktop until it is seen) — said, with the way out;
     /// a first picture says how soon after the act it was taken. Any other label as it is. Pure.
+    /// `returnedMs`: when the act's result was returned (the window runs from there; nil: from the act's input).
     static func afterActFreshness(_ label: String, app: String, previous: (digest: Int, atMs: Double, changedAtMs: Double)?,
-                                  digest: Int, now: Double, actedMs: Double?) -> String {
-        guard let acted = actedMs, now - acted < offScreenAfterActWindowMs + offScreenAfterActWaitMs + 1000, now >= acted else { return label }
+                                  digest: Int, now: Double, actedMs: Double?, returnedMs: Double? = nil) -> String {
+        guard let acted = actedMs else { return label }
+        let from = max(acted, returnedMs ?? acted)
+        guard now - from < offScreenAfterActWindowMs + offScreenAfterActWaitMs + 1000, now >= acted else { return label }
         let way = "screenshot({ live: true, reason }) takes one where the window is (the user is asked first)"
         if let previous, previous.atMs < acted, previous.digest == digest {
             return label + " — this picture may predate the last action: \(app) may not redraw a window on another desktop until it is seen; \(way)"
         }
         if previous == nil {
-            return label + " — taken \(Int((now - acted).rounded())) ms after the last action, with no earlier picture to compare: it may predate the action; \(way)"
+            return label + " — taken \(Int((now - from).rounded())) ms after the last action, with no earlier picture to compare: it may predate the action; \(way)"
         }
         return label
     }

@@ -73,7 +73,7 @@ extension CUCore {
         // Vivaldi snapshot, Comet — a bundle list misses them) — never an Electron or CEF app, which has no remote-debugging
         // page to protect and would pay the scan on every act, its own `<scheme>://inspect` route refused (review of
         // round 12, MEDIUM #5).
-        guard t.bundleId.map(CUChromium.bundleIds.contains) == true || (t.isChromium && isWebBrowser(t)) else { return }
+        guard CUChromium.isBrowser(bundleId: t.bundleId, chromium: t.isChromium, declaresWeb: { isWebBrowser(t) }) else { return }
         let refusal = CUError.refused(.remoteDebugging, Self.remoteDebuggingSentence)
         // A capture-only bind (no accessibility) still sends point clicks: judged by the window server's titles.
         guard t.accessible else {
@@ -107,13 +107,48 @@ extension CUCore {
         let inspect: Bool
         if let ref = Self.primaryRef(p.action), let e = try? element(ref, in: t) {
             inspect = Self.isInspectPage(webAreaURL(around: e))
+        } else if let url = pageSignature(t)?.url {
+            inspect = Self.isInspectPage(url)
         } else {
-            inspect = Self.isInspectPage(pageSignature(t)?.url)
+            // No page URL to read (its tree not built, or not readable — the leftover probes, 2026-10-13: a key went
+            // through with chrome://inspect shown, the browser's page absent from the tree): the window's title, else
+            // its SELECTED tab's, naming the inspect page counts (fail closed on what the window shows).
+            inspect = inspectShownByTitles(t)
         }
         if inspect {
             CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): an inspect page — refused")
             throw refusal
         }
+    }
+
+    /// The bound window's title, or the title of a tab selected in its own tab bar, is the inspect page's.
+    func inspectShownByTitles(_ t: CUTarget) -> Bool {
+        if Self.isInspectPageTitle(sys.window(id: t.windowID)?.title) { return true }
+        guard let win = try? windowElement(t) else { return false }
+        if Self.isInspectPageTitle(ax.string(win, kAXTitleAttribute)) { return true }
+        return selectedTabTitles(win).contains { Self.isInspectPageTitle($0) }
+    }
+
+    /// The titles of the tabs selected in the window's own tab bars (tab groups outside any web area). Bounded.
+    func selectedTabTitles(_ win: AXUIElement, maxNodes: Int = 400) -> [String] {
+        var queue = [win]
+        var seen = 0
+        var out: [String] = []
+        while !queue.isEmpty, seen < maxNodes {
+            let n = queue.removeFirst()
+            seen += 1
+            let role = ax.string(n, kAXRoleAttribute)
+            if role == "AXWebArea" { continue }
+            if role == kAXTabGroupRole {
+                for tab in ax.elements(n, kAXChildrenAttribute) where ax.string(tab, kAXSubroleAttribute) == "AXTabButton" || ax.string(tab, kAXRoleAttribute) == kAXRadioButtonRole {
+                    let selected = ax.bool(tab, kAXSelectedAttribute) == true || ax.attribute(tab, kAXValueAttribute).flatMap(AX.boolValue) == true
+                    if selected, let title = ax.string(tab, kAXTitleAttribute) ?? ax.string(tab, kAXDescriptionAttribute) { out.append(title) }
+                }
+                continue
+            }
+            queue.append(contentsOf: ax.elements(n, kAXChildrenAttribute))
+        }
+        return out
     }
 
     /// The URL of the web area `e` is in (nil when it is in none: the browser's own UI).

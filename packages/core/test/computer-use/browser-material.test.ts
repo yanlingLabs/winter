@@ -10,7 +10,7 @@ import { describe, expect, test } from "bun:test";
 import type { TabHandle } from "../../src/computer-use/worker/bridge";
 import { AutomationFailure } from "../../src/computer-use/errors";
 import {
-  ambiguousOptionSentence, capValue, checkedStateOf, comboShows, countPoints, matchOption, noOptionSentence, prefixPoints, pressTookEffect, valueWithLength, WHOLE_VALUE_CAP,
+  ambiguousOptionSentence, capValue, checkedStateOf, comboShows, countPoints, matchOption, nameFromContent, NAME_FROM_CONTENT_ROLES, noOptionSentence, prefixPoints, pressTookEffect, valueWithLength, WHOLE_VALUE_CAP,
 } from "../../src/computer-use/browser/page-runtime/widgets";
 import { quote } from "../../src/computer-use/browser/state-format";
 import type { FakePage } from "./browser-fake-transport";
@@ -71,6 +71,17 @@ async function opened(page: Partial<FakePage> = {}) {
 }
 
 describe("the widget rules (pure, over Material-shaped facts)", () => {
+  test("a check box or radio is named by its content (ARIA name from content), as buttons and options are", () => {
+    // <div role="checkbox" aria-checked="false">Accept the terms</div> reads `check box "Accept the terms"` — before
+    // (the leftover probes on a real Chromium, 2026-10-13) it read `check box (unchecked)` with its text as a child,
+    // and find({ name: "Accept the terms" }) missed it.
+    for (const role of ["checkbox", "radio", "switch", "button", "link", "option", "menuitemcheckbox", "menuitemradio"]) expect(nameFromContent(role)).toBe(true);
+    // Never a field, a select or a container: their content is their value or their children.
+    for (const role of ["textbox", "searchbox", "combobox", "listbox", "group", "list", "dialog", "slider", "spinbutton"]) expect(nameFromContent(role)).toBe(false);
+    expect(nameFromContent(undefined)).toBe(false);
+    expect(NAME_FROM_CONTENT_ROLES.has("checkbox") && NAME_FROM_CONTENT_ROLES.has("radio")).toBe(true);
+  });
+
   test("checked: a native control's own state; a wrapper's aria-checked, else the native input it wraps or labels", () => {
     expect(checkedStateOf({ ariaChecked: "true" })).toBe("checked");
     expect(checkedStateOf({ ariaChecked: "false" })).toBe("unchecked");

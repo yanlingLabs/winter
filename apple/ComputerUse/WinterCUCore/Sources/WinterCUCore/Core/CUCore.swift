@@ -339,7 +339,10 @@ public final class CUCore: @unchecked Sendable {
 
         let privatePath = p.privatePath ?? true
         let ax = self.ax, sys = self.sys
-        if chromium, let running = app.running { try await queues.run(pid) { CUChromium.enableAccessibilityOnce(running) } }
+        if chromium, let running = app.running {
+            let browser = CUChromium.isBrowser(bundleId: app.bundleIdentifier, chromium: true, declaresWeb: { CUApps.isWebBrowser(bundleURL: running.bundleURL) })
+            try await queues.run(pid) { CUChromium.enableAccessibilityOnce(running, browser: browser) }
+        }
         let found = try await CUBindWait.run(launched: launched, deadlineMs: launched ? 8000 : 3000, CUBindWait.Effects(
             read: { [queues] in
                 try await queues.run(pid) { [self] in
@@ -905,6 +908,17 @@ public final class CUCore: @unchecked Sendable {
             + elsewhere.map { CUTargetWindow(id: $0.id, title: $0.title, focused: false) })
     }
 
+    /// The helper starts: the record of the browsers' accessibility flags Winter set lives at `<home>/run/` (0600), and
+    /// what an earlier helper left there is reconciled (`CUChromium.startRecording`).
+    public static func startAccessibilityFlagRecord(home: String) {
+        let run = (home as NSString).appendingPathComponent("run")
+        try? FileManager.default.createDirectory(atPath: run, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        CUChromium.startRecording(at: (run as NSString).appendingPathComponent("computer-use-ax-flags.json"))
+    }
+
+    /// The helper ends (a quit, the idle quit, SIGTERM): every accessibility flag Winter set in a browser, released.
+    public static func releaseAccessibilityFlags() { CUChromium.releaseAllLive() }
+
     public func targetRelease(_ p: TargetReleaseParams) async throws -> TargetReleaseResult {
         if let t = remove(p.targetId) {
             cursor(t, "done")
@@ -1068,6 +1082,12 @@ public final class CUCore: @unchecked Sendable {
             }
             if let unread, unread > 0 {
                 notes.append("the read was cut short (at least \(unread) elements not read), so matches past it are missing — state({ within }) reads a part")
+            }
+            // Within moments of an act, a Chromium page on another desktop may not have updated its accessibility yet:
+            // the states found are unverified (finding D).
+            // (First: the daemon caps the note, and this one's pointer must survive.)
+            if let acted = t.afterActFromMs, clock.nowMs() - acted < Self.offDesktopLagFindMs, pageMayLagOffDesktop(t) {
+                notes.insert(Self.offDesktopLagSentence(t.appName), at: 0)
             }
             return TargetFindResult(elements: CUFinder.find(p.query, in: roots, formatter: formatter), page: page,
                                     note: notes.isEmpty ? nil : notes.joined(separator: "; "))
@@ -1297,7 +1317,8 @@ public final class CUCore: @unchecked Sendable {
         let check = "to see what is really there, read it (state() or find() text, or something the app counts, such as a word count)"
         let label = Self.freshnessLabel(app: t.appName, where_: where_, check: check, previous: previous, digest: digest, now: now,
                                         actedMs: t.lastActionMs, appActivityMs: monitor.lastNotificationMs(pid: t.pid))
-        return Self.afterActFreshness(label, app: t.appName, previous: previous, digest: digest, now: now, actedMs: t.lastActionMs)
+        return Self.afterActFreshness(label, app: t.appName, previous: previous, digest: digest, now: now, actedMs: t.lastActionMs,
+                                      returnedMs: t.lastActReturnedMs)
     }
 
     /// FNV-1a over every byte. Pure.
@@ -1599,6 +1620,8 @@ public final class CUCore: @unchecked Sendable {
         if !used {
             monitor.unwatch(pid: pid)
             queues.forget(pid)
+            // The AXEnhancedUserInterface Winter turned on in a Chromium browser goes off with its last target.
+            CUChromium.releaseEnhancedLive(pid: pid)
         }
     }
 

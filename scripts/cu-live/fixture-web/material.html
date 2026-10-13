@@ -1,0 +1,227 @@
+<!doctype html>
+<!--
+  The leftover probes' Material-STYLE page: our own minimal markup of the ARIA patterns component libraries use (no
+  library code) — the shapes `packages/core/test/computer-use/browser-material.test.ts` scripts and WinterCUCore's
+  LeftoversTests model as an accessibility tree, here as a real page for a real Chromium:
+    - ARIA selects: a role=combobox showing its value, its zero-size text stand-in in the same container, and its
+      role=listbox drawn in an overlay container at the end of <body> while open;
+    - check boxes: role=checkbox + aria-checked; a wrapper over a covered native input + its label; a label over a
+      ZERO-SIZE native input;
+    - radios: native inputs, covered, inside wrappers with their labels;
+    - a text field (⌘A), a "Select file" button whose handler clicks a hidden file input (in a form), a plain button
+      with no file input anywhere near it, and a "Paint" button that draws the suite's #FF00FF sentinel (absent before).
+  Everything the page sees is POSTed to `/log` (the runner's server) as one JSON object: the page's own truth, which
+  the probes compare with what Winter said.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Material Probe</title>
+<style>
+  body { font: 15px -apple-system, Helvetica, sans-serif; margin: 24px; background: #fafafa; color: #222; }
+  .row { margin: 14px 0; display: flex; align-items: center; gap: 12px; }
+  .field { position: relative; display: inline-block; }
+  .select { display: inline-block; min-width: 180px; padding: 8px 12px; border: 1px solid #888; border-radius: 4px; background: #fff; cursor: pointer; }
+  .select:focus { outline: 2px solid #3f51b5; }
+  .stand-in { position: absolute; left: 0; top: 0; width: 0; height: 0; border: 0; padding: 0; opacity: 0; }
+  .overlay { position: absolute; top: 0; left: 0; width: 0; height: 0; }
+  [role=listbox] { position: fixed; background: #fff; border: 1px solid #888; box-shadow: 0 2px 8px rgba(0,0,0,.25); z-index: 10; min-width: 180px; }
+  [role=option] { padding: 8px 12px; cursor: pointer; }
+  [role=option][aria-selected=true] { background: #e8eaf6; }
+  [role=option]:hover { background: #eee; }
+  .aria-check { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px; }
+  .aria-check .box { width: 16px; height: 16px; border: 2px solid #555; border-radius: 2px; display: inline-block; }
+  .aria-check[aria-checked=true] .box { background: #3f51b5; border-color: #3f51b5; }
+  .mdc { position: relative; display: inline-block; width: 20px; height: 20px; }
+  .mdc input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 1; }
+  .mdc .bg { position: absolute; inset: 2px; border: 2px solid #555; border-radius: 2px; }
+  .mdc input:checked + .bg { background: #3f51b5; border-color: #3f51b5; }
+  .mdc.radio .bg { border-radius: 50%; }
+  .zero { width: 0; height: 0; margin: 0; padding: 0; border: 0; opacity: 0; position: absolute; }
+  .zero-label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+  .zero-label .box { width: 16px; height: 16px; border: 2px solid #555; display: inline-block; }
+  .zero-label input:checked + .box { background: #3f51b5; }
+  input[type=text] { padding: 6px 8px; font-size: 15px; width: 240px; }
+  button { padding: 8px 14px; font-size: 15px; }
+  #paint-area { width: 320px; height: 140px; border: 1px dashed #aaa; margin-top: 8px; }
+  #paint-area.painted { background: #FF00FF; }
+  .far { margin-top: 40px; }
+</style>
+</head>
+<body>
+<h1>Material Probe</h1>
+
+<div class="row">
+  <span id="size-label">Size</span>
+  <div class="field">
+    <div id="size" class="select" role="combobox" tabindex="0" aria-haspopup="listbox" aria-expanded="false" aria-controls="size-list" aria-labelledby="size-label"><span class="value">Medium</span></div>
+    <input id="size-stand-in" class="stand-in" type="text" tabindex="-1" value="Medium">
+  </div>
+</div>
+
+<div class="row">
+  <span id="lang-label">Language</span>
+  <div class="field">
+    <div id="lang" class="select" role="combobox" tabindex="0" aria-haspopup="listbox" aria-expanded="false" aria-controls="lang-list" aria-labelledby="lang-label"><span class="value">English</span></div>
+  </div>
+</div>
+
+<div class="row">
+  <div id="terms" class="aria-check" role="checkbox" aria-checked="false" tabindex="0"><span class="box"></span><span>Accept the terms</span></div>
+</div>
+
+<div class="row">
+  <div id="agree" class="aria-check" role="checkbox" aria-checked="false" tabindex="0"><span class="box"></span><span>I agree to the <a href="#terms" id="terms-link">Terms of Service</a></span></div>
+</div>
+
+<div class="row">
+  <div class="mdc" id="notify-wrap"><input type="checkbox" id="notify"><div class="bg"></div></div>
+  <label for="notify">Notify me</label>
+</div>
+
+<div class="row">
+  <label class="zero-label" id="mature-label"><input type="checkbox" id="mature" class="zero"><span class="box"></span><span>Mature content</span></label>
+</div>
+
+<div class="row" role="radiogroup" aria-label="Visibility">
+  <div class="mdc radio"><input type="radio" name="vis" id="vis-public" value="public" checked><div class="bg"></div></div><label for="vis-public">Public</label>
+  <div class="mdc radio"><input type="radio" name="vis" id="vis-unlisted" value="unlisted"><div class="bg"></div></div><label for="vis-unlisted">Unlisted</label>
+  <div class="mdc radio"><input type="radio" name="vis" id="vis-private" value="private"><div class="bg"></div></div><label for="vis-private">Private</label>
+</div>
+
+<div class="row">
+  <label for="title">Title</label>
+  <input type="text" id="title" value="Hello Material probe">
+  <label for="subtitle">Subtitle</label>
+  <input type="text" id="subtitle" value="">
+</div>
+
+<form id="upload-form" onsubmit="return false" class="row">
+  <button type="button" id="select-file">Select file</button>
+  <input type="file" id="file-input" style="display:none">
+  <span id="file-name">No file chosen</span>
+</form>
+
+<div class="row">
+  <button type="button" id="paint">Paint</button>
+</div>
+<div id="paint-area"></div>
+
+<div class="far">
+  <section><div><div><div><div>
+    <button type="button" id="plain">Plain action</button>
+  </div></div></div></div></section>
+</div>
+
+<div class="overlay" id="overlay"></div>
+
+<script>
+(() => {
+  const log = (ev, data) => {
+    const body = JSON.stringify(Object.assign({ t: Date.now(), ev }, data || {}));
+    try { if (!navigator.sendBeacon("/log", body)) fetch("/log", { method: "POST", body, keepalive: true }); } catch (e) { /* the page still works without a server */ }
+  };
+  const OPTIONS = {
+    size: ["Small", "Extra Small", "Medium", "Large", "Extra Large"],
+    lang: ["English", "French", "German"],
+  };
+  const overlay = document.getElementById("overlay");
+  let open = null;
+  function closeList() {
+    if (open === null) return;
+    open.list.remove();
+    open.combo.setAttribute("aria-expanded", "false");
+    log("select.closed", { id: open.combo.id });
+    open = null;
+  }
+  function choose(combo, text) {
+    combo.querySelector(".value").textContent = text;
+    const standIn = document.getElementById(combo.id + "-stand-in");
+    if (standIn !== null) standIn.value = text;
+    log("select.value", { id: combo.id, value: text });
+    closeList();
+    combo.focus();
+  }
+  function openList(combo) {
+    if (open !== null && open.combo === combo) return;
+    closeList();
+    const list = document.createElement("div");
+    list.setAttribute("role", "listbox");
+    list.id = combo.id + "-list";
+    list.setAttribute("aria-labelledby", combo.getAttribute("aria-labelledby"));
+    const r = combo.getBoundingClientRect();
+    list.style.left = r.left + "px";
+    list.style.top = (r.bottom + 2) + "px";
+    const current = combo.querySelector(".value").textContent;
+    for (const text of OPTIONS[combo.id]) {
+      const o = document.createElement("div");
+      o.setAttribute("role", "option");
+      o.id = combo.id + "-opt-" + text.replace(/\s+/g, "-").toLowerCase();
+      o.setAttribute("aria-selected", text === current ? "true" : "false");
+      o.textContent = text;
+      o.addEventListener("click", (e) => { e.stopPropagation(); choose(combo, text); });
+      list.appendChild(o);
+    }
+    overlay.appendChild(list);
+    combo.setAttribute("aria-expanded", "true");
+    open = { combo, list };
+    log("select.opened", { id: combo.id });
+  }
+  for (const id of ["size", "lang"]) {
+    const combo = document.getElementById(id);
+    combo.addEventListener("click", (e) => { e.stopPropagation(); open !== null && open.combo === combo ? closeList() : openList(combo); });
+    combo.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") { e.preventDefault(); openList(combo); }
+      if (e.key === "Escape") closeList();
+    });
+  }
+  // The zero-size stand-in: a press on it presses its select (as the libraries wire it).
+  document.getElementById("size-stand-in").addEventListener("click", (e) => { e.stopPropagation(); openList(document.getElementById("size")); });
+  document.addEventListener("click", () => closeList());
+
+  const terms = document.getElementById("terms");
+  const toggleTerms = () => {
+    const now = terms.getAttribute("aria-checked") !== "true";
+    terms.setAttribute("aria-checked", now ? "true" : "false");
+    log("check", { id: "terms", checked: now });
+  };
+  terms.addEventListener("click", toggleTerms);
+  terms.addEventListener("keydown", (e) => { if (e.key === " ") { e.preventDefault(); toggleTerms(); } });
+  const agree = document.getElementById("agree");
+  agree.addEventListener("click", (e) => {
+    if (e.target.closest("a") !== null) { e.preventDefault(); log("link", { id: "terms-link" }); return; }
+    const now = agree.getAttribute("aria-checked") !== "true";
+    agree.setAttribute("aria-checked", now ? "true" : "false");
+    log("check", { id: "agree", checked: now });
+  });
+  for (const id of ["notify", "mature", "vis-public", "vis-unlisted", "vis-private"]) {
+    document.getElementById(id).addEventListener("change", (e) => log("check", { id, checked: e.target.checked }));
+  }
+
+  const title = document.getElementById("title");
+  const sel = (el) => ({ id: el.id, start: el.selectionStart, end: el.selectionEnd, length: el.value.length });
+  title.addEventListener("select", () => log("selection", sel(title)));
+  document.addEventListener("selectionchange", () => { if (document.activeElement === title) log("selection", sel(title)); });
+  title.addEventListener("input", () => log("input", { id: "title", value: title.value }));
+
+  document.addEventListener("focusin", (e) => log("focus", { id: e.target.id || e.target.tagName }));
+  document.addEventListener("keydown", (e) => log("key", { key: e.key, meta: e.metaKey, target: e.target.id || e.target.tagName, trusted: e.isTrusted }), true);
+
+  const fileInput = document.getElementById("file-input");
+  document.getElementById("select-file").addEventListener("click", (e) => {
+    log("button", { id: "select-file", trusted: e.isTrusted, activation: navigator.userActivation ? navigator.userActivation.isActive : null });
+    fileInput.click();
+    log("file.requested", {});
+  });
+  fileInput.addEventListener("change", () => { document.getElementById("file-name").textContent = fileInput.files.length + " file(s)"; log("file.change", { count: fileInput.files.length }); });
+  fileInput.addEventListener("cancel", () => log("file.cancel", {}));
+  document.getElementById("plain").addEventListener("click", (e) => log("button", { id: "plain", trusted: e.isTrusted }));
+  document.getElementById("paint").addEventListener("click", (e) => {
+    document.getElementById("paint-area").classList.add("painted");
+    log("paint", { trusted: e.isTrusted });
+  });
+  window.addEventListener("load", () => log("ready", { url: location.pathname, lang: navigator.language }));
+})();
+</script>
+</body>
+</html>

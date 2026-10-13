@@ -17,7 +17,7 @@ import { looksLikeUrl, looksSecret, REDACTED, redactText, redactUrl, redactUrlAt
 import { classifyTarget, cssSelectorRefusal, isPaymentHost, isSecureField, isTextEntry as isTextEntryFacts, nativePicker, pickerValueHint, sliceUnits, TEXT_INPUT_TYPES, type ElementFacts } from "./rules";
 import { listSiteTools, modelContextOf, SiteToolCalls, type SiteToolOwner } from "./webmcp";
 import { WAKE_OVERLAY_TAG, WATCH_LOCATOR_ATTRS, wakeWatcher, type WatchLocator, type WatchSpec } from "./watch";
-import { ambiguousOptionSentence, capValue, checkedStateOf, matchOption, noOptionSentence, VALUE_CAP, WHOLE_VALUE_CAP, type CheckFacts, type OptionFacts } from "./widgets";
+import { ambiguousOptionSentence, capValue, checkedStateOf, matchOption, NAME_FROM_CONTENT_ROLES, noOptionSentence, VALUE_CAP, WHOLE_VALUE_CAP, type CheckFacts, type OptionFacts } from "./widgets";
 
 type Any = Record<string, unknown>;
 
@@ -162,7 +162,7 @@ type Any = Record<string, unknown>;
   const INTERACTIVE = new Set(["button", "link", "textbox", "searchbox", "checkbox", "radio", "switch", "combobox", "listbox", "option", "menuitem",
     "menuitemcheckbox", "menuitemradio", "tab", "slider", "spinbutton", "treeitem"]);
   /** Roles whose name is their content: their subtree is not read again as text. */
-  const NAME_FROM_CONTENT = new Set(["button", "link", "heading", "tab", "option", "menuitem", "menuitemcheckbox", "menuitemradio", "treeitem", "cell", "columnheader", "rowheader", "switch"]);
+  const NAME_FROM_CONTENT = NAME_FROM_CONTENT_ROLES;
   const LANDMARK = new Set(["main", "navigation", "banner", "contentinfo", "complementary", "region", "form", "search"]);
   const CONTAINERS = new Set(["list", "table", "grid", "treegrid", "row", "dialog", "alertdialog", "alert", "menu", "menubar", "tablist", "tabpanel",
     "tree", "toolbar", "group", "listbox", "status", "log", "article", "figure", "feed"]);
@@ -445,10 +445,11 @@ type Any = Record<string, unknown>;
       if (role === "textbox" && (child as HTMLElement).isContentEditable === true) continue;
       // A combo box whose value is what it shows: that text is its value, not read again (one with a field inside is walked).
       if (role === "combobox" && node.value !== undefined && child.querySelector("input, textarea, [contenteditable]") === null) continue;
-      // A name read from the content is not read again as text — unless (a table cell) it holds controls.
+      // A name read from the content is not read again as text — unless (a table cell, or a check box or radio whose
+      // text holds a link: "I agree to the Terms") it holds controls.
       if (role !== undefined && NAME_FROM_CONTENT.has(role)) {
-        const cellLike = role === "cell" || role === "columnheader" || role === "rowheader";
-        if (!cellLike || child.querySelector(INTERACTIVE_SELECTOR) === null) continue;
+        const holdsControls = role === "cell" || role === "columnheader" || role === "rowheader" || role === "checkbox" || role === "radio";
+        if (!holdsControls || child.querySelector(INTERACTIVE_SELECTOR) === null) continue;
       }
       const kids: RtNode[] = [];
       const inner = newRun();
