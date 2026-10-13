@@ -1,3 +1,4 @@
+import { coworkGuestSourceRoot } from "./guest-paths";
 import { randomUUID } from "node:crypto";
 import type { PermissionMode, SpawnedRuntimeProcess } from "@yanlinglabs/winter-agent-sdk";
 import { permissionModeFor } from "../runtime-sdk/mode-options";
@@ -91,7 +92,7 @@ export class CoworkGuestRuntimeSupervisor {
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(bootId) || typeof identity.resume !== "boolean" || typeof identity.model !== "string" || !identity.model || identity.model.length > 200 || /[\0\r\n]/.test(identity.model)) throw new CoworkError("authority_denied");
     const store = `/workspace/.winter/conversations/${safeSegment(sessionId)}`;
     const relativeCwd = relativeCoworkPath(binding.relativeCwd);
-    const sourceRoot = source.kind === "folder" ? `/workspace/folders/${safeSegment(source.detail.grantRef)}` : `/workspace/repos/${safeSegment(source.detail.repositoryId)}`;
+    const sourceRoot = coworkGuestSourceRoot(source);
     const cwd = `${sourceRoot}${relativeCwd === "." ? "" : `/${relativeCwd}`}`;
     const capturedCapabilities = freezeCeiling(capabilities);
     const launch: Readonly<GuestRuntimeLaunch> = Object.freeze({ protocolVersion: 1, limits: GUEST_RUNTIME_TRANSPORT_LIMITS, launchId: randomUUID(),
