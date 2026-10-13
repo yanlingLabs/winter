@@ -268,4 +268,16 @@ final class GuardianNamedRegressionTests: XCTestCase {
             XCTAssertFalse(o.isUsers, "never adopted: \(o)")
         }
     }
+
+    /// R18-a's Finder legs (round 19): the user launches from a Finder window right after an act of the agent's — a
+    /// double-click on an application, a document, or a folder (which launches nothing and is no launcher) — and every
+    /// invariant holds; the plan meets all three.
+    func testR18a_TheFinderLegsOfTheInteractiveLauncher() async {
+        let runs = await scenario("r18a-finder-legs", seeds: 1...40, [(300, .typing(2)), (3_000, .agentClick(.field)), (3_100, .userLaunch(700)),
+                                                                     (7_000, .quiet)])
+        for item in ["an application", "a document", "a folder"] {
+            XCTAssertTrue(runs.contains { $0.trace.contains { $0.contains("the user double-clicks \(item) in Finder's window") } },
+                          "a double-click on \(item) in some run")
+        }
+    }
 }
