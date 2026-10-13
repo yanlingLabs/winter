@@ -138,14 +138,25 @@ final class GuardianModelTests: XCTestCase {
     /// a checked range of the ratchet too (round 18).
     static let defaultRatchetRange = 1...20
 
+    /// The mid-act click's own known-failing seeds (round 19: the ratchet runs every range with it too — the user clicking
+    /// into T while an act on it runs, at `midActStandingChance` per act). Each is pinned to its `knownFailing` class.
+    static let midActKnownFailing: Set<Int> = [1022, 1062]
+    static let midActStandingChance = "0.2"
+
     func testTheRatchetTheWholeSurveyedRangesPassButForTheKnownFailing() throws {
         // (A seed takes ~8 s, mostly waiting: the ranges run as child processes of this bundle, in parallel.)
         let known = Dictionary(Self.knownFailing.map { ($0.seed, $0.what) }, uniquingKeysWith: { a, _ in a })
+        let midAct = known.filter { Self.midActKnownFailing.contains($0.key) }
         let ordinary = Dictionary(Self.ordinaryTargetKnownFailing.map { ($0, "") }, uniquingKeysWith: { a, _ in a })
-        for (target, range, known) in [(nil, Self.ratchetRange, known), (nil, Self.defaultRatchetRange, known),
-                                       ("sim.editor", Self.ordinaryRatchetRange, ordinary)] as [(String?, ClosedRange<Int>, [Int: String])] {
-            let what = target.map { "with an ordinary target (\($0))" } ?? "with Finder as the target"
-            let failing = try Self.surveyInChildren(target: target, seeds: range)
+        let off = "0", on = Self.midActStandingChance
+        for (target, range, known, mid) in [(nil, Self.ratchetRange, known, off), (nil, Self.defaultRatchetRange, known, off),
+                                            ("sim.editor", Self.ordinaryRatchetRange, ordinary, off),
+                                            (nil, Self.ratchetRange, midAct, on), (nil, Self.defaultRatchetRange, midAct, on),
+                                            ("sim.editor", Self.ordinaryRatchetRange, ordinary, on)]
+                as [(String?, ClosedRange<Int>, [Int: String], String)] {
+            let what = (target.map { "with an ordinary target (\($0))" } ?? "with Finder as the target")
+                + (mid == off ? "" : ", the user clicking into T mid-act (\(mid) per act)")
+            let failing = try Self.surveyInChildren(target: target, seeds: range, extraEnv: ["WINTER_CU_SIM_MID_ACT": mid])
             // (R18 L6: the in-flight invariant had chances across the whole range — summed over its children.)
             XCTAssertGreaterThan(Self.lastSurveyInFlightChances, 0, "RATCHET: \(what), seeds \(range): the user never began working in T during an act")
             for (seed, v) in failing.sorted(by: { $0.key < $1.key }) {

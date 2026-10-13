@@ -210,7 +210,8 @@ final class SimRun {
     /// The user's click into T during an act (round 18): armed per act from its own generator, so the plans' draws stay.
     var midActArmed = false
     lazy var midActRng = SimRNG(plan.seed ^ 0x1D_AC75)
-    /// How often an act is armed for it (WINTER_CU_SIM_MID_ACT; 0 — off — until the engine's gaps it found are closed).
+    /// How often an act is armed for it (WINTER_CU_SIM_MID_ACT; 0 — off — by default: the ratchet runs every surveyed range
+    /// at 0.2 too, a standing run since round 19, while the hand-written plans keep their own steps).
     static let midActChance = Double(ProcessInfo.processInfo.environment["WINTER_CU_SIM_MID_ACT"] ?? "") ?? 0
 
     /// The user clicks into T's window a few ms after the act's first event to T (once per armed act).
