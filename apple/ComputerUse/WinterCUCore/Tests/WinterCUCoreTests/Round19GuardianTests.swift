@@ -80,6 +80,23 @@ final class Round19GuardianTests: XCTestCase {
         XCTAssertEqual(g.view.app, 6000)
     }
 
+    /// The review of round 19, L1 (the survey's seed 1050): the visit's own way there is never their switch, even with
+    /// input of theirs alive while it lands — a ⌘-Tab's release, a ⌃-arrow — until the visit has arrived AND they have
+    /// left its desktop. The visit's end then returns them to where it began.
+    func testTheVisitsOwnWayThereIsNeverTheirSwitchWithTheirInputAlive() {
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 100))
+        g.beginVisit(app: 6000, user: 1, now: 10.0)
+        g.noteSwitch(now: 10.05, .app, target: 6000)         // input of theirs alive during the way there…
+        g.noteSwitch(now: 10.08, .desktop)
+        g.noteCause(6000, raise: true, now: 10.1)           // (the visit's switch)
+        g.noteSwitch(now: 10.15, .desktop)                   // …and after the visit's last cause
+        let arrival = g.judge(CUMoveQuery(app: 6000, space: 300), now: 10.3)
+        guard case .visit = arrival else { return XCTFail("the visit's way there: the visit's — \(arrival)") }
+        XCTAssertEqual(g.view, CUGuardedView(app: 1, space: 100), "their place is still where the visit began")
+        XCTAssertFalse(g.endVisit(now: 10.5), "the visit's end: they did not move")
+    }
+
     /// The review of round 19, M1 (a probe): the visit arrives at T@300, the agent opens S on 300, the user ⌘-Tabs back
     /// to T on 300 — they never left the visited DESKTOP, so it is no switch of theirs "into" it: the visit's.
     func testAnotherAppOnTheVisitedDesktopIsNoLeavingIt() {
