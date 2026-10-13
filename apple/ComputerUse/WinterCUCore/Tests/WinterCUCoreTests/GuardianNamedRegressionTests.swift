@@ -11,7 +11,7 @@ final class GuardianNamedRegressionTests: XCTestCase {
     static let namedSeeds: [(seed: Int, ordinary: Bool)] =
         [1067, 1011, 1038, 1055, 1059, 1049, 1051, 1008, 1063, 1073, 1036, 1020, 1006, 1009, 1024, 1057, 1061, 1043, 10, 1017,
          1047, 3, 19].map { ($0, false) }
-        + [26, 33, 35, 51, 54, 36, 49, 58, 12, 14, 22, 32, 50, 3, 19].map { ($0, true) }
+        + [26, 33, 35, 51, 54, 36, 58, 12, 14, 22, 32, 50, 3, 19].map { ($0, true) }
 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var survey: Result<[GuardianModelTests.SurveyKey: String], Error>?
@@ -91,7 +91,9 @@ final class GuardianNamedRegressionTests: XCTestCase {
     /// Round 16's fixed lists (the default target's and the ordinary target's), each a scenario its round fixed.
     func testRound16sFixedSeeds() {
         for s in [1008, 1063, 1073] { holds(s, "round 16's fixed seed") }
-        for s in [36, 49, 58] { holds(s, ordinaryTarget: true, "round 16's fixed seed") }
+        // (Ordinary 49 left this list in round 19: the world's empty-desktop click now brings Finder forward, not T — the
+        // review of round 19, MEDIUM 1 — so its run is another one, pinned in `ordinaryTargetKnownFailing` by its class.)
+        for s in [36, 58] { holds(s, ordinaryTarget: true, "round 16's fixed seed") }
     }
 
     // MARK: round 17

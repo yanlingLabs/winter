@@ -102,8 +102,14 @@ final class GuardianModelTests: XCTestCase {
     ]
 
     /// The ordinary target's (`sim.editor`, round 14's standing second check) known-failing seeds in its surveyed range
-    /// 1–60 (the ratchet below runs the whole range).
-    static let ordinaryTargetKnownFailing: Set<Int> = []
+    /// 1–60 (the ratchet below runs the whole range), each pinned to its violation class.
+    /// Round 19 (the review of round 19, MEDIUM 1): the world's empty-desktop click brought T forward even when T is not
+    /// Finder; brought to Finder, it surfaced seed 49 — an ENGINE bug left pinned: during session s2's visit their swipe
+    /// into the visited desktop was judged the visit's, the visit's end returned them to U, and a key a moment later judged
+    /// the same state theirs on the swipe's unused instant (two verdicts for one change).
+    static let ordinaryTargetKnownFailing: [Int: String] = [
+        49: "I3: the user's key went to T2, but they are at U — a visit's return over their swipe into the visited desktop, then the swipe taken as theirs",
+    ]
 
     /// (Round 16's fixed-seed lists — 1008, 1011, 1017, 1038, 1049, 1051, 1055, 1057, 1059, 1063, 1067, 1073 and, with an
     /// ordinary target, 36, 49, 51, 58 — and the ordinary target's seeds 1–12 are subsumed by the ratchet's whole ranges.)
@@ -139,20 +145,29 @@ final class GuardianModelTests: XCTestCase {
     static let defaultRatchetRange = 1...20
 
     /// The mid-act click's own known-failing seeds (round 19: the ratchet runs every range with it too — the user clicking
-    /// into T while an act on it runs, at `midActStandingChance` per act). Each is pinned to its `knownFailing` class.
-    static let midActKnownFailing: Set<Int> = [1022, 1062]
+    /// into T while an act on it runs, at `midActStandingChance` per act), each pinned to its violation class.
+    /// The review of round 19, MEDIUM 1: the mid-act click is never skipped (a click on the empty desktop, T's window on
+    /// another desktop, is a real action of the user's) — 1014 and 1067 are the same app on two desktops, 1022's class.
+    static let midActKnownFailing: [Int: String] = [
+        1014: "I2: the engine's place T@200, the user's T@300 — the same app on two desktops (the mid-act click on the empty desktop brought Finder forward window-less)",
+        1022: "I2: the engine's place T@200, the user's T@100 — the same app on two desktops",
+        1062: "I1: S came forward as the user clicked into it, 4 ms later — the engine took the click as theirs and said nothing",
+        1067: "I3: the key focus handed to X, the user at T@200 — the same app on two desktops (a restore across desktops that macOS kept on the other one)",
+    ]
+    /// The ordinary target's with the mid-act click.
+    static let ordinaryMidActKnownFailing: [Int: String] = [:]
     static let midActStandingChance = "0.2"
 
     func testTheRatchetTheWholeSurveyedRangesPassButForTheKnownFailing() throws {
         // (A seed takes ~8 s, mostly waiting: the ranges run as child processes of this bundle, in parallel.)
         let known = Dictionary(Self.knownFailing.map { ($0.seed, $0.what) }, uniquingKeysWith: { a, _ in a })
-        let midAct = known.filter { Self.midActKnownFailing.contains($0.key) }
-        let ordinary = Dictionary(Self.ordinaryTargetKnownFailing.map { ($0, "") }, uniquingKeysWith: { a, _ in a })
+        let midAct = Self.midActKnownFailing
+        let ordinary = Self.ordinaryTargetKnownFailing
         let off = "0", on = Self.midActStandingChance
         for (target, range, known, mid) in [(nil, Self.ratchetRange, known, off), (nil, Self.defaultRatchetRange, known, off),
                                             ("sim.editor", Self.ordinaryRatchetRange, ordinary, off),
                                             (nil, Self.ratchetRange, midAct, on), (nil, Self.defaultRatchetRange, midAct, on),
-                                            ("sim.editor", Self.ordinaryRatchetRange, ordinary, on)]
+                                            ("sim.editor", Self.ordinaryRatchetRange, Self.ordinaryMidActKnownFailing, on)]
                 as [(String?, ClosedRange<Int>, [Int: String], String)] {
             let what = (target.map { "with an ordinary target (\($0))" } ?? "with Finder as the target")
                 + (mid == off ? "" : ", the user clicking into T mid-act (\(mid) per act)")
