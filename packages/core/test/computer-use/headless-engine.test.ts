@@ -527,4 +527,21 @@ describe("the control lease (lane H3): nothing of a tab the person holds is the 
     expect(((await failure(p("console"))) as AutomationFailure).kind).toBe("TargetBusy");
     r.end();
   });
+
+  test("#7 a hold that begins while the primitive waits (here on a site card) is checked again right before the work", async () => {
+    let held = false;
+    const h = withHeadless({ policy: "ask", dangerousAdded: ["evil.example"], answer: () => { held = true; return "once"; }, engineDeps: { headlessHeld: () => held } });
+    const opener = h.run();
+    const tab = await h.engine.global(opener.scope, "browsers.open", { url: "https://evil.example/", browser: "headless" }) as TabHandle;
+    opener.end();
+    held = false;
+    const r = h.run();
+    const sent = h.headless.sent.length;
+    const e = await failure(h.engine.primitive(r.scope, tab.targetId, "text", {}));
+    expect(h.cards.length).toBeGreaterThanOrEqual(2);
+    expect((e as AutomationFailure).kind).toBe("TargetBusy");
+    expect(h.headless.sent.slice(sent).filter((x) => x.method === "Runtime.callFunctionOn")).toEqual([]);
+    r.end();
+  });
 });
+

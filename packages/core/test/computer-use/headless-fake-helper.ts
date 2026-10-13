@@ -27,6 +27,10 @@
 //   http://viewer-leaves.test/ — presented, its viewer is accepted and then leaves 150 ms later (`presentationEnded`)
 //   http://opens-window.test/ — presented, its page opens a window once its viewer is accepted (`headless.popupOpened`,
 //                               a tab of the fake's own minting at http://window.test/)
+//   http://slow-unpresent.test/ — presented; its headless.unpresent is answered 300 ms late
+//   http://unpresent-fails.test/ — presented; its headless.unpresent fails (as a helper that did not answer in time)
+//   http://window-leaves.test/ — presented, its page opens a window once its viewer is accepted, and the viewer then
+//                               leaves (`presentationEnded`) 150 ms later
 //   http://control-fails.test/ — presented; giving the person control fails (as a helper that answered too late)
 //   http://control-refused.test/ — presented; taking control back is refused (the helper no longer has the presentation)
 //   http://notice-held.test/  — presented, its page tries the local network once its viewer is accepted (the person's
@@ -168,7 +172,7 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
         setTimeout(() => {
           if (presented.get(tabId) !== p.nonce) return;
           send("headless.presentationStarted", { linkId, tabId });
-          if (t.url === "http://opens-window.test/") {
+          if (t.url === "http://opens-window.test/" || t.url === "http://window-leaves.test/") {
             const windowId = `w-${Math.random().toString(16).slice(2, 14).padEnd(12, "0")}`;
             tabs.set(windowId, { sessionId: t.sessionId, url: "http://window.test/" });
             setTimeout(() => send("headless.popupOpened", { linkId, tabId: windowId, openerTabId: tabId, url: "http://window.test/" }), 20);
@@ -181,7 +185,7 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
               send("headless.viewChanged", { linkId, tabId, cssWidth: 0, cssHeight: 900, scale: 1 });
             }, 10);
           }
-          if (t.url === "http://viewer-leaves.test/") {
+          if (t.url === "http://viewer-leaves.test/" || t.url === "http://window-leaves.test/") {
             setTimeout(() => {
               if (presented.get(tabId) !== p.nonce) return;
               presented.delete(tabId);
@@ -193,6 +197,16 @@ function handle(m: { params: { linkId: string; cmdId: string; op: string; params
       return;
     }
     case "headless.unpresent": {
+      const url = tabs.get(String(p.tabId))?.url;
+      if (url === "http://unpresent-fails.test/") return fail(cmdId, "timeout", "the helper did not answer in time");
+      if (url === "http://slow-unpresent.test/") {
+        setTimeout(() => {
+          presented.delete(String(p.tabId));
+          if (logFile !== undefined) appendFileSync(logFile, `${JSON.stringify({ op: "unpresent-answered", params: {} })}\n`);
+          reply(cmdId, { frames: 0 });
+        }, 300);
+        return;
+      }
       presented.delete(String(p.tabId));
       reply(cmdId, { frames: 0 });
       if (tabs.get(String(p.tabId))?.url === "http://resizes.test/") send("headless.viewChanged", { linkId, tabId: String(p.tabId), cssWidth: 1280, cssHeight: 800, scale: 1 });

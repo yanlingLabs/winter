@@ -5,13 +5,13 @@
 // turn's end closing a tab the person holds, the panel's list, the page laid out in the panel's size, and a helper or app
 // without the feature.
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HeadlessShowParams, HeadlessTabRow } from "../../src/computer-use/browser/cef-link/cef-transport";
 import type { HeadlessViewer } from "../../src/computer-use/browser/cef-link/rpc";
 import { headlessRequirementFor, winterAppRequirementFor } from "../../src/computer-use/browser/headless/engines";
-import { HEADLESS_USER_HAS_TAB, headlessUploadDir, HeadlessPool, type HeadlessPoolDeps } from "../../src/computer-use/browser/headless/pool";
+import { HEADLESS_USER_HAS_TAB, headlessSessionUploadDir, HeadlessPool, type HeadlessPoolDeps } from "../../src/computer-use/browser/headless/pool";
 import { spawnEngineProcess } from "../../src/computer-use/browser/headless/winter-engine";
 import { TransportError } from "../../src/computer-use/browser/transport";
 import { AutomationFailure } from "../../src/computer-use/errors";
@@ -93,7 +93,7 @@ describe("the hand-off (waitForUser): the tab shown in Winter's panel, the perso
     expect(r.panel.shown).toHaveLength(1);
     expect(r.panel.shown[0]).toMatchObject({
       sessionId: "s1", tabId: t.tabKey, nonce: present.params.nonce, producerRequirement: REQUIREMENT, control: true, purpose: "handoff",
-      url: "https://accounts.example/", uploadDir: headlessUploadDir(r.home),
+      url: "https://accounts.example/", uploadDir: headlessSessionUploadDir(r.home, "s1"),
     });
     expect(r.panel.shown[0]!.service).toMatch(/^com\.winter\.headless\.present\./);
     // The person holds it: every agent command on it is refused, typed, with the sentence the model reads.
@@ -298,6 +298,107 @@ describe("the control lease holds until the helper has taken the person's contro
     expect(r.panel.hidden.map((h) => h.tabId)).toEqual([t.tabKey]);
     expect(r.pool.held(t.tabKey)).toBe(false);
     await r.pool.send(t.tabKey, "Page.enable");
+  });
+});
+
+describe("the lease to the end (the final review's MEDIUMs)", () => {
+  test("#1 the lease lasts until the helper confirmed the view ended: an agent command meanwhile is refused, and nothing reaches the helper before the unpresent", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "http://slow-unpresent.test/" });
+    await r.pool.present(t.tabKey, { sessionId: "s1" });
+    const ending = r.pool.handBack(t.tabKey);
+    expect(isUserHasTab(await failure(r.pool.send(t.tabKey, "Page.enable")))).toBe(true);
+    expect(r.pool.held(t.tabKey)).toBe(true);
+    await ending;
+    expect(r.pool.held(t.tabKey)).toBe(false);
+    await r.pool.send(t.tabKey, "Page.enable");
+    const ops = r.commands().map((c) => c.op);
+    expect(ops.indexOf("unpresent-answered")).toBeGreaterThan(-1);
+    expect(ops.lastIndexOf("headless.unpresent")).toBeLessThan(ops.indexOf("unpresent-answered"));
+    // The agent's only command after the take-over came once the helper had confirmed.
+    expect(ops.slice(ops.indexOf("headless.present"), ops.indexOf("unpresent-answered")).includes("cdp.send")).toBe(false);
+  });
+
+  test("#1 a helper that does not confirm the view ended: the panel's view goes, but the tab is not handed to the agent", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "http://unpresent-fails.test/" });
+    await r.pool.present(t.tabKey, { sessionId: "s1" });
+    await r.pool.handBack(t.tabKey);
+    expect(r.panel.hidden.map((h) => h.tabId)).toEqual([t.tabKey]);
+    expect(isUserHasTab(await failure(r.pool.send(t.tabKey, "Page.enable")))).toBe(true);
+  });
+
+  test("#2 an agent command answered after the take-over stopped waiting for it is refused: the answer is the person's page", async () => {
+    const r = rig({ drainMs: 50 });
+    const t = await r.pool.createTab({ sessionId: "s1", url: "http://slow-send.test/" });
+    await r.pool.panelAction("s1", t.tabKey, "watch");
+    const late = failure(r.pool.send(t.tabKey, "Runtime.evaluate"));
+    await new Promise((res) => setTimeout(res, 20));
+    await r.pool.panelAction("s1", t.tabKey, "takeOver");
+    expect(r.pool.held(t.tabKey)).toBe(true);
+    expect(isUserHasTab(await late)).toBe(true);
+    expect(r.commands().some((c) => c.op === "answered")).toBe(true);
+  });
+
+  test("#3 a tab the person holds is listed with the address and title it had, marked held — the helper is not asked about it", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
+    await r.pool.listTabs({ sessionId: "s1" });
+    const before = (await r.pool.listTabs({ sessionId: "s1" }))[0]!;
+    await r.pool.panelAction("s1", t.tabKey, "watch");
+    await r.pool.panelAction("s1", t.tabKey, "takeOver");
+    const asked = r.commands().filter((c) => c.op === "tabs.live").length;
+    const held = (await r.pool.listTabs({ sessionId: "s1" }))[0]!;
+    expect(r.commands().filter((c) => c.op === "tabs.live").length).toBe(asked);
+    expect(held.url).toBe(before.url);
+    expect(held.title).toBe(`${before.title} — held by the user in Winter's panel`);
+  });
+
+  test("#4 a sign-in window goes with its opener's view when the viewer ends it", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "http://window-leaves.test/" });
+    await r.pool.present(t.tabKey, { sessionId: "s1" });
+    await until("the window shown", () => r.panel.shown.some((x) => x.purpose === "popup"));
+    const w = r.panel.shown.find((x) => x.purpose === "popup")!;
+    await until("the window closed with the view", () => r.commands().some((c) => c.op === "tab.close" && c.params.tabId === w.tabId));
+    expect(r.pool.tabCount("s1")).toBe(1);
+  });
+
+  test("#9 the turn's end closing a tab while control is being taken waits for the person to let it go", async () => {
+    const r = rig({ drainMs: 1_000 });
+    const t = await r.pool.createTab({ sessionId: "s1", url: "http://slow-send.test/" });
+    await r.pool.panelAction("s1", t.tabKey, "watch");
+    void r.pool.send(t.tabKey, "Runtime.evaluate").catch(() => undefined);
+    await new Promise((res) => setTimeout(res, 20));
+    const taking = r.pool.panelAction("s1", t.tabKey, "takeOver");
+    await new Promise((res) => setTimeout(res, 20));
+    await r.pool.closeTab(t.tabKey);
+    expect(r.commands().some((c) => c.op === "tab.close")).toBe(false);
+    await taking;
+    await r.pool.panelAction("s1", t.tabKey, "handBack");
+    await until("closed once let go", () => r.commands().some((c) => c.op === "tab.close"));
+  });
+
+  test("#10 a helper known to lack the feature is said so while none runs", async () => {
+    const r = rig({ mode: "no-present" });
+    await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
+    process.kill(r.pool.pid!, "SIGKILL");
+    await until("the helper gone", () => r.pool.pid === undefined);
+    expect(r.pool.presentMissing()).toBe("Winter's headless browser is too old to show a tab — ask the user to update Winter");
+  });
+
+  test("#5 each session's file choosers are answered from its own uploads folder, removed with its context", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
+    await r.pool.panelAction("s1", t.tabKey, "watch");
+    const present = r.commands().find((c) => c.op === "headless.present")!;
+    expect(present.params.uploadDir).toBe(headlessSessionUploadDir(r.home, "s1"));
+    expect(r.panel.shown[0]!.uploadDir).toBe(headlessSessionUploadDir(r.home, "s1"));
+    expect(statSync(headlessSessionUploadDir(r.home, "s1")).mode & 0o777).toBe(0o700);
+    expect(headlessSessionUploadDir(r.home, "s2")).not.toBe(headlessSessionUploadDir(r.home, "s1"));
+    writeFileSync(join(headlessSessionUploadDir(r.home, "s1"), "copy.txt"), "x");
+    r.pool.disposeSession("s1");
+    expect(existsSync(headlessSessionUploadDir(r.home, "s1"))).toBe(false);
   });
 });
 

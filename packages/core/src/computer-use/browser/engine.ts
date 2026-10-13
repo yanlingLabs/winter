@@ -377,6 +377,11 @@ export class BrowserEngine {
         scope.live();
         for (const line of driver.takeNotes()) scope.builder.daemonLine(line);
         if (!BLOCKED_TAB_PRIMITIVES.has(primitive)) await this.siteFloor(scope, b, driver);
+        // Again, right before the work: the lock, the attach and a site card can each wait long enough for the person to
+        // take the tab over meanwhile.
+        if (this.isHeadless(b.backend) && this.deps.headlessHeld?.(b.tabKey) === true && !HELD_TAB_PRIMITIVES.has(primitive)) {
+          throw new AutomationFailure("TargetBusy", HEADLESS_USER_HAS_TAB);
+        }
         return await this.run(scope, b, driver, primitive, args);
       } finally {
         driver.busy--;

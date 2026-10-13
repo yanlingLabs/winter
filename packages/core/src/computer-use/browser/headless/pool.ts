@@ -87,6 +87,13 @@ const NOTICE_LINES: Record<HeadlessNoticeKind, string> = {
   "local-network": "computer-use: a page in Winter's headless browser tried to reach the local network — refused before anything was sent",
 };
 
+/** A view the helper did not confirm ending is asked again this many times, `HEADLESS_UNPRESENT_RETRY_MS` × the attempt
+ *  apart; the tab stays the person's meanwhile. */
+export const HEADLESS_UNPRESENT_RETRIES = 5;
+export const HEADLESS_UNPRESENT_RETRY_MS = 2_000;
+/** How the agent's tab listing names a tab the person holds (its address and title kept from before they took it). */
+export const HELD_BY_THE_USER = "held by the user in Winter's panel";
+
 export interface HeadlessPoolDeps {
   home: string;
   /** `computerUse.headless.enabled` (read live). */
@@ -153,6 +160,8 @@ interface Presentation {
   handoffPending: boolean;
   /** The turn's end closed the tab while the person held it: closed when they let it go. */
   closeWhenReleased: boolean;
+  /** Being ended (`endPresentation`): the lease still holds until the helper has confirmed the view is gone. */
+  ending?: Promise<void>;
 }
 
 type ExitReason = "idle" | "stop" | "crash" | "disabled" | "memory";
@@ -164,6 +173,12 @@ export function headlessCacheRoot(home: string): string { return join(home, "cac
 /** `<home>/cache/headless-uploads`: copies of files the person chose for a presented page's file chooser — the only folder
  *  Winter Headless reads a chosen file from. Removed when the helper exits and at boot. */
 export function headlessUploadDir(home: string): string { return join(home, "cache", "headless-uploads"); }
+/** One session's own folder under it (`headlessUploadDir`): what its presentations' file choosers are answered from —
+ *  no other session's copies are ever readable to its pages. Removed when the session's context is disposed. The id
+ *  is a session id (`s_…`); anything else gets a folder name of its own digits and letters only. */
+export function headlessSessionUploadDir(home: string, sessionId: string): string {
+  return join(headlessUploadDir(home), sessionId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 80) || "_");
+}
 
 /**
  * The boot sweep: a helper the previous daemon left (named in the pid file, still alive, and started when the file
@@ -190,6 +205,9 @@ export class HeadlessPool implements CdpTransport {
   readonly backend = "headless";
   readonly family = "headless" as const;
   private proc: WinterHeadlessProcess | undefined;
+  /** What the last helper said it can do (its hello): while none runs, a helper known to lack `present` is said so at
+   *  once rather than after the person asked for a view. */
+  private lastSeenPresent: boolean | undefined;
   private launching: Promise<WinterHeadlessProcess> | undefined;
   /** Each helper run's own cache directory, removed when it exits (and again, for a stop, at once). */
   private readonly runDirs = new Map<WinterHeadlessProcess, string>();
@@ -311,6 +329,7 @@ export class HeadlessPool implements CdpTransport {
       throw this.abandon(proc, "Winter's headless browser is from another version of Winter — reinstall Winter");
     }
     this.launchedAt = this.now();
+    this.lastSeenPresent = proc.has("present");
     this.deps.log?.(`computer-use: Winter's headless browser started (pid ${proc.pid}, ${this.launchedAt - t0} ms)`);
     this.metric("headless.launch", this.launchedAt - t0, { headlessEngine: r.engine, ...(hello.version === undefined ? {} : { headlessVersion: hello.version }) });
     this.watchEnabled();
@@ -497,6 +516,8 @@ export class HeadlessPool implements CdpTransport {
   disposeSession(sessionId: string): void {
     const mine = [...this.tabs.values()].filter((t) => t.sessionId === sessionId);
     for (const t of mine) { this.tabs.delete(t.tabKey); this.forgetPresentation(t, "the session ended"); this.emitGone(t.tabKey, "closed"); }
+    // The copies of files the session's person handed its pages go with its context.
+    try { rmSync(headlessSessionUploadDir(this.deps.home, sessionId), { recursive: true, force: true }); } catch { /* the next boot sweeps it */ }
     const proc = this.proc;
     if (proc?.alive === true) {
       void this.closingWhile(this.command(proc, "context.dispose", { sessionId })).catch((err: unknown) => this.deps.log?.(`computer-use: disposing a headless context failed (${err instanceof Error ? err.message : "error"})`));
@@ -622,7 +643,7 @@ export class HeadlessPool implements CdpTransport {
     const t = this.tabs.get(tabKey);
     if (t === undefined) return;
     // The person holds it in Winter's panel: it closes when they let it go (`releaseControl`, `endPresentation`).
-    if (t.presentation?.control === true) {
+    if (t.presentation !== undefined && (t.presentation.control || t.presentation.taking || t.presentation.yielded === true)) {
       t.presentation.closeWhenReleased = true;
       return;
     }
@@ -649,7 +670,7 @@ export class HeadlessPool implements CdpTransport {
     // A tab the turn's end closed while the person held it is no longer the agent's to find; a window the person opened
     // never was.
     return mine.filter((t) => t.presentation?.closeWhenReleased !== true && t.openerTabKey === undefined)
-      .map((t) => ({ tabKey: t.tabKey, url: t.url, title: t.title, active: false, agent: true, sessionId: t.sessionId }));
+      .map((t) => ({ tabKey: t.tabKey, url: t.url, title: this.held(t.tabKey) ? `${t.title} — ${HELD_BY_THE_USER}` : t.title, active: false, agent: true, sessionId: t.sessionId }));
   }
 
   /** The open tabs (of one session), their URL and title read fresh from the helper when it answers. */
@@ -658,11 +679,14 @@ export class HeadlessPool implements CdpTransport {
     if (proc?.alive !== true) return [];
     const mine = [...this.tabs.values()].filter((t) => t.proc === proc && (sessionId === undefined || t.sessionId === sessionId));
     if (mine.length === 0) return [];
+    // A tab the person holds keeps the address and title it had when they took it: what they do there is theirs. When
+    // every tab asked about is held, the helper is not asked at all.
+    if (mine.every((t) => this.held(t.tabKey))) return mine;
     try {
       const r = await this.command(proc, "tabs.live", {}) as { tabs?: Array<{ tabId?: unknown; url?: unknown; title?: unknown }> };
       for (const row of r?.tabs ?? []) {
         const t = typeof row.tabId === "string" ? this.tabs.get(row.tabId) : undefined;
-        if (t === undefined) continue;
+        if (t === undefined || this.held(t.tabKey)) continue;
         if (typeof row.url === "string") t.url = row.url;
         if (typeof row.title === "string") t.title = row.title;
       }
@@ -682,17 +706,25 @@ export class HeadlessPool implements CdpTransport {
   private agentTab(tabKey: string): PoolTab {
     const t = this.live(tabKey);
     const p = t.presentation;
-    if (p !== undefined && (p.control || p.taking || p.yielded === true)) throw new TransportError("capacity", HEADLESS_USER_HAS_TAB, { userHasTab: true });
+    if (p !== undefined && (p.control || p.taking || p.yielded === true)) {
+      throw new TransportError("capacity", HEADLESS_USER_HAS_TAB, { userHasTab: true });
+    }
     return t;
   }
 
-  /** One agent command on `t`, counted while it is in flight (a take-over waits for it). */
+  /** One agent command on `t`, counted while it is in flight (a take-over waits for it). Tagged with the person's hold
+   *  count when it is sent: an answer that comes back after a hold began (a take-over that stopped waiting for it at its
+   *  drain's end) is the person's page, never the agent's, and is refused. */
   private async agentCommand<T>(t: PoolTab, run: () => Promise<T>): Promise<T> {
+    const holds = t.personHolds?.count ?? 0;
     t.inflight++;
-    try { return await run(); } finally {
+    let r: T;
+    try { r = await run(); } finally {
       t.inflight--;
       if (t.inflight === 0) for (const w of [...this.drainWaiters]) w();
     }
+    if ((t.personHolds?.count ?? 0) !== holds) throw new TransportError("capacity", HEADLESS_USER_HAS_TAB, { userHasTab: true });
+    return r;
   }
 
   /** When a page in this tab last tried to reach the local network and the helper refused it (undefined: never). */
@@ -735,7 +767,8 @@ export class HeadlessPool implements CdpTransport {
     if (missing !== undefined) return missing;
     if (this.deps.viewer?.() === undefined) return "Winter isn't running — ask the user to open Winter";
     const proc = this.proc;
-    if (proc?.alive === true && proc.version !== undefined && !proc.has("present")) return "Winter's headless browser is too old to show a tab — ask the user to update Winter";
+    const lacks = proc?.alive === true ? proc.version !== undefined && !proc.has("present") : this.lastSeenPresent === false;
+    if (lacks) return "Winter's headless browser is too old to show a tab — ask the user to update Winter";
     return undefined;
   }
 
@@ -881,8 +914,12 @@ export class HeadlessPool implements CdpTransport {
         if (t.openerTabKey === undefined) await this.yieldToPerson(t);
       }
       if (t.presentation !== p) throw new AutomationFailure("TargetBusy", "the tab's presentation changed meanwhile — try again");
+      // The session's own uploads folder: the only place this presentation's file choosers are answered from (the helper
+      // accepts nothing outside it).
+      const uploadDir = headlessSessionUploadDir(this.deps.home, t.sessionId);
+      mkdirSync(uploadDir, { recursive: true, mode: 0o700 });
       const r = await this.command(t.proc, "headless.present", {
-        tabId: t.tabKey, nonce, viewerRequirement: this.deps.viewerRequirement?.() ?? "", control, scale: 1,
+        tabId: t.tabKey, nonce, viewerRequirement: this.deps.viewerRequirement?.() ?? "", control, scale: 1, uploadDir,
       }) as { service?: unknown };
       if (typeof r?.service !== "string" || r.service.length === 0) throw new Error("the headless browser named no presentation service");
       p.service = r.service;
@@ -890,7 +927,7 @@ export class HeadlessPool implements CdpTransport {
       p.taking = false;
       const show: HeadlessShowParams = {
         sessionId: t.sessionId, tabId: t.tabKey, service: r.service, nonce, producerRequirement: engine.requirement, control, purpose,
-        url: t.url, title: t.title, uploadDir: headlessUploadDir(this.deps.home),
+        url: t.url, title: t.title, uploadDir,
       };
       await viewer.show(show);
       if (!(await this.waitStarted(p))) throw new Error("Winter's panel did not connect to it in time");
@@ -1047,13 +1084,56 @@ export class HeadlessPool implements CdpTransport {
   private async endPresentation(t: PoolTab, reason: string, o: { hide?: boolean } = {}): Promise<void> {
     const p = t.presentation;
     if (p === undefined) return;
-    t.presentation = undefined;
-    if (p.control || p.yielded === true) this.deps.log?.(`computer-use: headless tab ${t.tabKey}: control back with the agent (the view ended: ${reason})`);
-    await this.closeWindowsOf(t);
+    if (p.ending !== undefined) return p.ending;
+    p.ending = this.ending(t, p, reason, o);
+    return p.ending;
+  }
+
+  /** `endPresentation`'s work. The lease holds (the presentation stays `t.presentation`, marked `ending`) until the
+   *  helper has confirmed the view is gone — never an agent command answered while the viewer can still type. A helper
+   *  that can't confirm (a time-out, a refusal other than "not presented"): the view goes from the panel, but the tab is
+   *  NOT handed to the agent — it stays refused until a retry is confirmed, or the helper or the tab goes. */
+  private async ending(t: PoolTab, p: Presentation, reason: string, o: { hide?: boolean }): Promise<void> {
     for (const w of [...p.startWaiters]) w(false);
-    if (t.proc.alive) {
-      try { await this.command(t.proc, "headless.unpresent", { tabId: t.tabKey }); } catch { /* it may have ended already */ }
+    await this.closeWindowsOf(t);
+    const confirmed = await this.unpresented(t);
+    if (!confirmed) {
+      this.deps.log?.(`computer-use: headless tab ${t.tabKey}: the helper did not confirm the view ended — the tab stays the person's until it does`);
+      if (o.hide !== false) {
+        try { await this.deps.viewer?.()?.hide({ sessionId: t.sessionId, tabId: t.tabKey, reason }); } catch { /* the panel may be gone */ }
+      }
+      this.retryUnpresent(t, p, reason, 1);
+      return;
     }
+    await this.ended(t, p, reason, o);
+  }
+
+  /** `headless.unpresent` acknowledged — or moot (the tab is not presented there, the helper or the tab is gone). */
+  private async unpresented(t: PoolTab): Promise<boolean> {
+    if (!t.proc.alive || this.tabs.get(t.tabKey) !== t) return true;
+    try {
+      await this.command(t.proc, "headless.unpresent", { tabId: t.tabKey });
+      return true;
+    } catch (err) {
+      return err instanceof TransportError && err.code === "tab_gone";
+    }
+  }
+
+  private retryUnpresent(t: PoolTab, p: Presentation, reason: string, attempt: number): void {
+    const timer = setTimeout(() => {
+      void (async () => {
+        if (t.presentation !== p) return;
+        if (await this.unpresented(t)) { await this.ended(t, p, reason, { hide: false }); return; }
+        if (attempt < HEADLESS_UNPRESENT_RETRIES) this.retryUnpresent(t, p, reason, attempt + 1);
+      })();
+    }, HEADLESS_UNPRESENT_RETRY_MS * attempt);
+    (timer as { unref?: () => void }).unref?.();
+  }
+
+  /** The view is gone at the helper: the presentation is over, control is the agent's again. */
+  private async ended(t: PoolTab, p: Presentation, reason: string, o: { hide?: boolean }): Promise<void> {
+    if (t.presentation === p) t.presentation = undefined;
+    if (p.control || p.yielded === true) this.deps.log?.(`computer-use: headless tab ${t.tabKey}: control back with the agent (the view ended: ${reason})`);
     if (o.hide !== false) {
       try { await this.deps.viewer?.()?.hide({ sessionId: t.sessionId, tabId: t.tabKey, reason }); } catch { /* the panel may be gone */ }
     }
@@ -1094,6 +1174,8 @@ export class HeadlessPool implements CdpTransport {
     t.presentation = undefined;
     if (p.control || p.yielded === true) this.deps.log?.(`computer-use: headless tab ${t.tabKey}: control back with the agent (the viewer ended it: ${e.reason})`);
     for (const w of [...p.startWaiters]) w(false);
+    // A window the person opened from it (a sign-in window) goes with it, as on every other end of the view.
+    void this.closeWindowsOf(t).catch(() => undefined);
     if (p.handoffPending) this.userDone(t.tabKey, false);
     if (p.closeWhenReleased && this.tabs.get(t.tabKey) === t) {
       this.tabs.delete(t.tabKey);
