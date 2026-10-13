@@ -55,7 +55,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { METHODS, type SessionEvent } from "../../packages/protocol/src/index";
 import { COMPUTER_WAKE_CLIENT_NAME } from "../../packages/core/src/computer-use/wakes/types";
-import { onScreenIds, USER_CLICK_METHOD, WAKE_SCENARIOS, type WakeObservation } from "./wake";
+import { onScreenIds, onScreenSummary, USER_CLICK_METHOD, WAKE_SCENARIOS, type WakeObservation } from "./wake";
 import { resolvePlatformPackageWinter } from "../../packages/core/src/runtime-sdk/executable";
 import { buildAll, FIXTURE_MAIN, OUT_DIR, REPO_ROOT, type Built } from "./build";
 import { describeFreshnessPlan, freshnessTable } from "./freshness";
@@ -68,7 +68,7 @@ import {
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, withRealDir, type RealAppsRun } from "./real-apps";
 import { adapterScenarios, adaptersDryRun } from "./adapters";
-import { expectedCardSummary, HELPER_OWNER, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage, type ImageStats, type ProbeEvent, type PromptObservation, type Scenario } from "./scenarios";
+import { expectedCardSummary, FIXTURE_APP, HELPER_OWNER, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage, type ImageStats, type ProbeEvent, type PromptObservation, type Scenario } from "./scenarios";
 import { DEFAULT_GENERIC_APPS, describePlan, GENERIC_PRELUDE, genericScenario, offSpacePlan, offSpaceSkipReason, onDesktopPlan, visualSkipReason, parseApps, resolveApp, restorePlan, SCRIPTS, type GenericApp, type ResolveDeps } from "./generic";
 
 // ── thresholds (env overrides) ───────────────────────────────────────────────────────────────────────────────────
@@ -976,6 +976,8 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         await watchFor(1_500);
         ring = [...helperWindows()].filter((id) => !before.has(id));
         obs.ringWindows = ring.length;
+        // Too few: what of the fixture's was over the watched window, for the report (ids, layers and sizes only).
+        if (ring.length < 2) obs.fixtureWindows = onScreenSummary(sh(built.tool, ["windows", FIXTURE_APP]).stdout);
         abortIfInput();  // never move the pointer over a person's hand
         const r = helperCall(built, socket, home, USER_CLICK_METHOD, { pid: f.mainPid!, name: plan.userClicks, ...(plan.stamp === undefined ? {} : { stamp: plan.stamp }) });
         if (r.error !== undefined) throw new Error(`${USER_CLICK_METHOD} failed: ${JSON.stringify(r.error).slice(0, 160)}`);
