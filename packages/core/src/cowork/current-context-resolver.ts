@@ -106,12 +106,14 @@ function block(value: unknown, raw: boolean): CoworkInstructionFile {
   for (const key of ["importerPath", "importerAdmittedPath"]) if (Object.hasOwn(v, key)) v[key] = path(v[key]);
   return v as unknown as CoworkInstructionFile;
 }
-function validate(value: unknown, request: CoworkInstructionReadRequest): { blocks: CoworkInstructionBlock[]; files: CoworkInstructionFile[] } {
+/** Internal pure data normalization; it does not authorize the canonical host request or read files. */
+export function normalizeCoworkInstructionReadResult(value: unknown, request: CoworkInstructionReadRequest): CoworkInstructionReadResult {
   const result = closed(value, ["request", "tiers", "blocks", "files"]), echo = closed(result.request, ["readId", "registration", "scopes", "sharedImportRoot"]);
   if (result.tiers !== "admitted-only") return fail();
   // Normalize all nested echo data through the fixed host-created request shape before comparison.
   if (typeof echo.readId !== "string" || echo.readId !== request.readId || echo.sharedImportRoot !== request.sharedImportRoot) return fail();
-  if (canonical(registration(echo.registration)) !== canonical(request.registration)) return fail();
+  const owner = registration(echo.registration);
+  if (canonical(owner) !== canonical(request.registration)) return fail();
   const scopes = closed(echo.scopes, ["owner", "shared", "source"]);
   scopes.shared = closed(scopes.shared, ["path", "required", "imports"]);
   scopes.source = closed(scopes.source, ["sourceId", "root", "cwd", "discovery", "executableConfiguration"]);
@@ -172,7 +174,7 @@ function validate(value: unknown, request: CoworkInstructionReadRequest): { bloc
     lineage.push({ file, root });
   }
   if (canonical(topOrder) !== canonical([...top.keys()])) return fail();
-  return { blocks, files };
+  return { request: { readId: echo.readId, registration: owner, scopes: scopes as unknown as CoworkInstructionReadRequest["scopes"], sharedImportRoot: COWORK_SHARED_INSTRUCTION_VIEW }, tiers: "admitted-only", blocks, files };
 }
 function render(blocks: CoworkInstructionBlock[], shared: string, readId: string): { instructions: string; token: string } {
   const token = randomUUID();
@@ -222,7 +224,7 @@ export class CoworkCurrentContextResolver {
       if (controller.signal.aborted) throw new CoworkContextResolverError("context_cancelled");
       // Descriptor/ownKeys traps on returned objects can execute during validation. Finish all
       // external result inspection, sanitization and rendering BEFORE the last authority guard.
-      const admitted = validate(result, request), rendered = render(admitted.blocks, request.scopes.shared.path, request.readId);
+      const admitted = normalizeCoworkInstructionReadResult(result, request), rendered = render(admitted.blocks, request.scopes.shared.path, request.readId);
       if (bytes(plan.facts) + bytes(rendered.instructions) > COWORK_CONTEXT_MAX_BYTES) return fail();
       const snapshot = Object.freeze({ facts: plan.facts, instructions: rendered.instructions,
         revision: `context:${digest(canonical({ facts: plan.facts, instructions: rendered.instructions, provenance: admitted.files, planRevision: plan.revision, registration: before, renderToken: rendered.token }))}` });
