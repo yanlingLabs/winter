@@ -15,16 +15,20 @@ export interface CoworkInstructionReadRequest {
   scopes: CoworkCurrentContextPlan["instructionScopes"];
   sharedImportRoot: typeof COWORK_SHARED_INSTRUCTION_VIEW;
 }
+export type CoworkInstructionTier = "workspace" | "project" | "local";
 export interface CoworkInstructionBlock {
-  requestedPath: string; admittedPath: string; text: string; sha256: string;
+  requestedPath: string; admittedPath: string; text: string; tier: CoworkInstructionTier;
+  /** SHA-256 of decoded UTF-8 text, matching Runtime SDK textSha256 semantics. */
+  sha256: string;
 }
 export interface CoworkInstructionFile extends CoworkInstructionBlock {
-  depth: number; importerPath?: string;
+  depth: number; importerPath?: string; importerAdmittedPath?: string;
 }
 /** Blocks are expanded by the protected reader using the accepted instruction loader semantics.
- * Raw files bind provenance/linkage; host hashes do NOT prove expansion or physical containment. */
+ * Decoded source text binds provenance/linkage; host hashes do NOT prove expansion or physical containment. */
 export interface CoworkInstructionReadResult {
   request: CoworkInstructionReadRequest;
+  tiers: "admitted-only";
   blocks: CoworkInstructionBlock[];
   files: CoworkInstructionFile[];
 }
@@ -93,16 +97,18 @@ function registration(value: unknown): CoworkContextRegistration {
   return frozen(v as unknown as CoworkContextRegistration);
 }
 function block(value: unknown, raw: boolean): CoworkInstructionFile {
-  const v = closed(value, ["requestedPath", "admittedPath", "text", "sha256", ...(raw ? ["depth"] : [])], raw ? ["importerPath"] : []);
+  const v = closed(value, ["requestedPath", "admittedPath", "text", "sha256", "tier", ...(raw ? ["depth"] : [])], raw ? ["importerPath", "importerAdmittedPath"] : []);
   v.requestedPath = path(v.requestedPath); v.admittedPath = path(v.admittedPath);
   if (typeof v.text !== "string" || v.text.includes("\0") || bytes(v.text) > COWORK_CONTEXT_MAX_BYTES
     || typeof v.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(v.sha256) || digest(v.text) !== v.sha256) return fail();
+  if (typeof v.tier !== "string" || !["workspace", "project", "local"].includes(v.tier)) return fail();
   if (raw && (!Number.isSafeInteger(v.depth) || (v.depth as number) < 0 || (v.depth as number) > 5)) return fail();
-  if (Object.hasOwn(v, "importerPath")) v.importerPath = path(v.importerPath);
+  for (const key of ["importerPath", "importerAdmittedPath"]) if (Object.hasOwn(v, key)) v[key] = path(v[key]);
   return v as unknown as CoworkInstructionFile;
 }
 function validate(value: unknown, request: CoworkInstructionReadRequest): { blocks: CoworkInstructionBlock[]; files: CoworkInstructionFile[] } {
-  const result = closed(value, ["request", "blocks", "files"]), echo = closed(result.request, ["readId", "registration", "scopes", "sharedImportRoot"]);
+  const result = closed(value, ["request", "tiers", "blocks", "files"]), echo = closed(result.request, ["readId", "registration", "scopes", "sharedImportRoot"]);
+  if (result.tiers !== "admitted-only") return fail();
   // Normalize all nested echo data through the fixed host-created request shape before comparison.
   if (typeof echo.readId !== "string" || echo.readId !== request.readId || echo.sharedImportRoot !== request.sharedImportRoot) return fail();
   if (canonical(registration(echo.registration)) !== canonical(request.registration)) return fail();
@@ -116,10 +122,10 @@ function validate(value: unknown, request: CoworkInstructionReadRequest): { bloc
   const files = array(result.files, COWORK_INSTRUCTION_MAX_FILES).map(v => block(v, true));
   if (blocks.length === 0 || files.length === 0 || blocks[0]!.requestedPath !== request.scopes.shared.path) return fail();
   if ([...blocks, ...files].reduce((sum, f) => sum + bytes(f.text), 0) > COWORK_CONTEXT_MAX_BYTES * 2) return fail();
-  const source = request.scopes.source, allowed = new Map<string, number>();
+  const source = request.scopes.source, allowed = new Map<string, { rank: number; tier: CoworkInstructionTier }>();
   let dir = source.root, order = 0;
   for (;;) {
-    for (const name of ["WINTER.md", ".winter/WINTER.md", "WINTER.local.md"]) allowed.set(posix.join(dir, name), ++order);
+    for (const name of ["WINTER.md", ".winter/WINTER.md", "WINTER.local.md"]) allowed.set(posix.join(dir, name), { rank: ++order, tier: name === "WINTER.local.md" ? "local" : "project" });
     if (dir === source.cwd) break;
     const suffix = source.cwd.slice(dir.length + 1).split("/")[0];
     if (!suffix || !within(source.cwd, source.root)) return fail();
@@ -130,33 +136,40 @@ function validate(value: unknown, request: CoworkInstructionReadRequest): { bloc
   for (const b of blocks) {
     if (top.has(b.requestedPath)) return fail();
     if (b.requestedPath === request.scopes.shared.path) {
-      if (top.size !== 0 || !within(b.admittedPath, request.sharedImportRoot)) return fail();
+      if (top.size !== 0 || b.tier !== "workspace" || !within(b.admittedPath, request.sharedImportRoot)) return fail();
     } else {
-      const rank = allowed.get(b.requestedPath);
-      if (rank === undefined || rank <= previous || !within(b.admittedPath, source.root)) return fail();
-      previous = rank;
+      const entry = allowed.get(b.requestedPath);
+      if (entry === undefined || entry.rank <= previous || b.tier !== entry.tier || !within(b.admittedPath, source.root)) return fail();
+      previous = entry.rank;
     }
     top.set(b.requestedPath, b);
   }
-  const seen = new Map<string, { file: CoworkInstructionFile; root: string }>(), actual = new Set<string>();
-  const topOrder: string[] = [], lineage: string[] = [];
+  const requested = new Map<string, CoworkInstructionFile>(), admitted = new Map<string, CoworkInstructionFile>();
+  const topOrder: string[] = [], lineage: Array<{ file: CoworkInstructionFile; root: string }> = [];
   for (const file of files) {
-    if (seen.has(file.requestedPath) || actual.has(file.admittedPath)) return fail();
     let root: string;
     if (file.depth === 0) {
       const b = top.get(file.requestedPath);
-      if (!b || b.admittedPath !== file.admittedPath || file.importerPath !== undefined) return fail();
+      if (!b || b.admittedPath !== file.admittedPath || b.tier !== file.tier || file.importerPath !== undefined || file.importerAdmittedPath !== undefined) return fail();
       root = file.requestedPath === request.scopes.shared.path ? request.sharedImportRoot : source.root;
-      topOrder.push(file.requestedPath);
+      topOrder.push(file.requestedPath); lineage.length = 0;
     } else {
-      const parent = file.importerPath === undefined ? undefined : seen.get(file.importerPath);
-      if (!parent || file.depth !== parent.file.depth + 1 || lineage[file.depth - 1] !== file.importerPath) return fail();
+      // Strict DFS pre-order: only the current occurrence's active parent can own this read.
+      if (file.depth > lineage.length) return fail();
+      lineage.length = file.depth;
+      const parent = lineage[file.depth - 1];
+      if (!parent || file.importerPath !== parent.file.requestedPath || file.importerAdmittedPath !== parent.file.admittedPath || file.tier !== parent.file.tier) return fail();
       root = parent.root;
       if (!within(file.requestedPath, root)) return fail();
     }
     if (!within(file.admittedPath, root)) return fail();
-    lineage.length = file.depth; lineage.push(file.requestedPath);
-    seen.set(file.requestedPath, { file, root }); actual.add(file.admittedPath);
+    // SDK cycles are admitted-identity ancestors, not repeats in completed sibling branches.
+    if (lineage.some(({ file: ancestor }) => file.admittedPath === ancestor.admittedPath || file.requestedPath === ancestor.requestedPath)) return fail();
+    const priorRequested = requested.get(file.requestedPath), priorAdmitted = admitted.get(file.admittedPath);
+    if (priorRequested && (priorRequested.admittedPath !== file.admittedPath || priorRequested.sha256 !== file.sha256 || priorRequested.text !== file.text)) return fail();
+    if (priorAdmitted && (priorAdmitted.sha256 !== file.sha256 || priorAdmitted.text !== file.text)) return fail();
+    requested.set(file.requestedPath, file); admitted.set(file.admittedPath, file);
+    lineage.push({ file, root });
   }
   if (canonical(topOrder) !== canonical([...top.keys()])) return fail();
   return { blocks, files };
