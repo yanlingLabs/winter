@@ -532,7 +532,9 @@ ruling, round 17): the oracle — `GuardianSim*`, `GuardianSimRun`, `GuardianMod
 world's fakes (`FakeAX`, `RecordingPoster`, the fakes' user key) change only in commits of their own, each citing a ruling,
 never with engine code; and the WHOLE surveyed seed ranges pass but for a known-failing list that only shrinks (the
 ratchet — since 1.18.0 the default seeds 1–20 too, each known-failing seed pinned to its violation class, and a child
-of the survey that crashes or hangs fails it). Its world has the helper's own windows, the
+of the survey that crashes or hangs fails it; since 1.19.0 every range runs a second time with the user clicking into
+the target's window while an act on it runs, against its own known-failing list, and the named regression tests' seeds
+run once, in child processes, each test asserting its scenario's trace signature or verdict). Its world has the helper's own windows, the
 menu bar and status items, notification banners, picture in picture, non-activating panels, the empty desktop, a
 second display, launches of the user's and the agent's, system dialogs, activation latency (~0.3 s across desktops),
 refused activations, asynchronous restores, NSWorkspace's notifications late and reordered (measured: within 13 ms of
@@ -754,7 +756,15 @@ and that app's change makes the change the agent's; a self-activation at the ver
 input whose landing the engine took for the agent's (the consented foreground, a raise) stays unused for its life; two
 landings before the engine heard the first are one change to it; a restore issued before the engine heard of a change
 decides nothing between that change's answers; a ⌘-Tab or ⌃-arrow under Secure Event Input with the modifiers unseen
-into a touched app is undone (the tap sees nothing). Unmeasured: hardware-origin modifiers under Secure Event Input
+into a touched app is undone (the tap sees nothing); and WHERE a seen ⌘-Tab landed (round 19, the review of round 18's
+L5 — a deliberate widening of the launch rule's "a ⌘-Tab landing on it"): the release comes 10–70 ms before the landing,
+an activation's notification carries no time and may be heard after the next change, and the CPS tap that names the
+activated app runs only while a script runs — the model-based test's seed 1017 has the launched app come forward 3 ms
+BEFORE the ⌘-Tab's release and be heard after it, so "the activation that follows the release" would name the wrong
+change. The seen ⌘-Tab's instant therefore counts as targeted at whatever app comes forward while it is alive and
+unused (an unused instant lives up to 10 s; a ⌘-Tab that switched anything is used by that change), and the oracle reads
+it the same way, keeping both answers where it can't tell. A wrong narrowing would undo a move of the user's; the
+widening can only adopt or leave an app the user may have chosen. Unmeasured: hardware-origin modifiers under Secure Event Input
 (run107 measured posted ones); and — UNVERIFIED (the review of round 18) — that SkyLight keeps the user's app as the
 front PROCESS during a focus blip's focus records: the menu command's pre-press re-check (round 17's H2) reads the front
 process, so it depends on that.
