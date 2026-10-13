@@ -51,6 +51,11 @@ export interface ChromeNeed {
    *  put their app back: the second live run (2026-10-13) found the page's controls absent from the tree of a browser
    *  that never came to the front after the switch, and present in one that did (the full-screen row). */
   bindThenShow?: boolean;
+  /** Its window goes full screen (its own Space) through its own full-screen button, pressed by a ComputerV2 turn in a
+   *  session of its own, after launch — the user is put back on their desktop after. */
+  fullScreen?: boolean;
+  /** Finding A's diagnosis after launch (`ChromeRig.diagnose`): the browser's own tree read step by step. */
+  diagnose?: boolean;
   /** More launch switches (a diagnostic: `--disable-backgrounding-occluded-windows`). */
   extraArgs?: string[];
 }
@@ -70,6 +75,9 @@ export interface ChromeObservation {
   /** The helper's own Floor F lexicon line, when it logged one during the run. */
   lexiconLine?: string;
   note?: string;
+  /** Finding A's diagnosis, step by step (the independent reader), and the step after which the page was there. */
+  diag?: Array<{ step: string; webAreas?: number; webChildren?: number; manual?: unknown; enhanced?: unknown; trusted?: unknown; error?: string }>;
+  readableAfter?: string;
 }
 
 /** The launch arguments (after `open -n -g -a <app> --args`). Never the default profile; a mock keychain. */
@@ -176,32 +184,52 @@ async function one(app, q, roles) {
 const SELECT_ROLES = ["combo box", "pop up button", "popup button", "pop-up button"];
 const CHECK_ROLES = ["check box", "checkbox"];
 
-/** The probes' instance: shown in front once after launch, as a browser the user has used. */
-const MATERIAL: ChromeNeed = { key: "material-bound-shown", lang: "en", start: "material", bindThenShow: true };
+/** The turn that sends a bound browser's window full screen (its own Space), through its own button. */
+export const FULL_SCREEN_TURN = `
+const w = await apps.open(${JSON.stringify(CFT_BUNDLE)}, { emit: false });
+const btn = (await w.find({ role: "full screen button" }, { emit: false }))[0];
+if (!btn) throw new Error("no full screen button");
+await w.action(btn.ref, "press");
+await sleep(2500);`;
 
-/** Does the page reach accessibility at all, per way of launching? (The first live run, 2026-10-13: a Chrome for
- *  Testing launched behind the user's app, never in front, showed an empty web area for 10 s and more.) */
-function webAccessRow(need: ChromeNeed, what: string): Scenario {
-  return {
-    name: `chrome app (diagnostic): does the page reach accessibility — ${what}`, group: "chrome", chrome: need,
-    code: `
+/** The windowed instance: launched behind the user's app and diagnosed (finding A) — the probes run there too. */
+const WINDOWED: ChromeNeed = { key: "material-windowed", lang: "en", start: "material", diagnose: true };
+/** The full-screen instance (its own Space): the one way the first runs found the page readable. */
+const FULLSCREEN: ChromeNeed = { key: "material-fullscreen", lang: "en", start: "material", fullScreen: true };
+const MATERIAL = WINDOWED;
+
+/** Finding A's row: the rig's step-by-step diagnosis (the browser's OWN tree, an independent reader), then the helper's
+ *  view, then two of the browser's own UI acts that rebuild a page's view (Reload, then the window's zoom button). */
+const FINDING_A_ROW: Scenario = {
+  name: "chrome app (finding A): a windowed browser behind your app — is the page in the browser's own tree, and in the helper's?", group: "chrome", chrome: WINDOWED,
+  code: `
 const w = await cft();
-const ms = await webReady(w, 12000);
-const s = await w.state({ full: true, emit: false });
-print(s.slice(0, 2500));
-report({ webReadyMs: ms, webArea: /web area/.test(s) });`,
-    verify: (ctx) => [
-      ok(ctx),
-      check(`the page's controls are in the accessibility tree within 12 s (took ${String(ctx.facts.webReadyMs)} ms)`, Number(ctx.facts.webReadyMs) >= 0, short(ctx.output.slice(-1500))),
-    ],
-  };
+report({ helperFirstMs: await webReady(w, 6000) });
+if ((await webReady(w, 0)) < 0) {
+  const reload = (await w.find({ role: "button" }, { emit: false })).find((e) => /^(Reload|Actualiser)$/.test(e.name || ""));
+  if (reload) { await attempt("press Reload", () => w.click(reload.ref)); report({ helperAfterReloadMs: await webReady(w, 6000) }); }
 }
+if ((await webReady(w, 0)) < 0) {
+  const zoom = (await w.find({ role: "zoom button" }, { emit: false }))[0];
+  if (zoom) { await attempt("press zoom", () => w.action(zoom.ref, "press")); report({ helperAfterZoomMs: await webReady(w, 6000) }); }
+}
+const s = await w.state({ full: true, emit: false });
+print(s.slice(0, 2500));`,
+  verify: (ctx) => {
+    const d = ctx.chrome?.diag ?? [];
+    const steps = d.map((x) => `${x.step}: ${String(x.webAreas)} web area(s), ${String(x.webChildren)} children (manual ${String(x.manual)}, enhanced ${String(x.enhanced)})`).join(" | ");
+    const helper = [["at once", ctx.facts.helperFirstMs], ["after Reload", ctx.facts.helperAfterReloadMs], ["after zoom", ctx.facts.helperAfterZoomMs]].filter(([, v]) => v !== undefined).map(([k, v]) => `${String(k)}: ${Number(v) >= 0 ? `${String(v)} ms` : "no page"}`).join("; ");
+    return [
+      ok(ctx),
+      check("the independent reader could read the browser (Accessibility access)", d.length > 0 && d.every((x) => x.trusted === true), steps || "no diagnosis ran"),
+      check(`the browser's OWN tree held the page${ctx.chrome?.readableAfter === undefined ? "" : ` (after: ${ctx.chrome.readableAfter})`}`, ctx.chrome?.readableAfter !== undefined, steps),
+      check(`the helper read the page (${helper})`, Number(ctx.facts.helperFirstMs) >= 0 || Number(ctx.facts.helperAfterReloadMs) >= 0 || Number(ctx.facts.helperAfterZoomMs) >= 0, helper),
+    ];
+  },
+};
 
 const SCENARIOS_: Scenario[] = [
-  webAccessRow({ key: "material-background", lang: "en", start: "material" }, "launched behind your app, never in front"),
-  webAccessRow({ key: "material-noocclusion", lang: "en", start: "material", extraArgs: ["--disable-backgrounding-occluded-windows"] }, "the same, with --disable-backgrounding-occluded-windows"),
-  webAccessRow({ key: "material-shown", lang: "en", start: "material", shownOnce: true }, "shown in front once after launch, then behind your app"),
-  webAccessRow(MATERIAL, "bound first (accessibility switched on), THEN shown in front once, then behind your app"),
+  FINDING_A_ROW,
   {
     name: "chrome app: bind Chrome for Testing on the Material page (reads its controls)", group: "chrome", chrome: MATERIAL,
     code: `
@@ -358,29 +386,24 @@ step("end");`,
   {
     // A FRESH instance (its window then goes full screen = its own Space, through its own full-screen button, as the
     // generic off-Space check does for an app the run launched). The page paints the sentinel only on the click.
-    name: "chrome app (off-desktop): after a click in a Chrome window on another desktop, the next screenshot shows it — or says it may predate it", group: "chrome",
-    chrome: { key: "material-offspace", lang: "en", start: "material" },
+    name: "chrome app (off-desktop): after an act in a Chrome window on another desktop, the next screenshot shows it — or says it may predate it", group: "chrome",
+    chrome: { key: "material-offspace", lang: "en", start: "material", fullScreen: true },
     session: "fresh",
-    prepare: [
-      { turn: `
-const w = await apps.open(${JSON.stringify(CFT_BUNDLE)}, { emit: false });
-const btn = (await w.find({ role: "full screen button" }, { emit: false }))[0];
-if (!btn) throw new Error("no full screen button");
-await w.action(btn.ref, "press");
-await sleep(2500);` },
-      { returnUser: true },
-    ],
+    // The act is Space INTO the Paint button — one accessibility press, no desktop visit (the second run's click asked
+    // for a visit and the runner refused it). A plain click is tried LAST, for its own fact (a refused visit is held
+    // for the app in this session).
     code: `
 const w = await apps.open(${JSON.stringify(CFT_BUNDLE)});
 const paint = (await w.find({ role: "button", name: "Paint" }, { emit: false })).find((e) => e.name === "Paint");
 step("before");
 await w.screenshot();
-await attempt("click", () => w.click(paint.ref));
+await attempt("act", () => w.key("space", { into: paint.ref }));
 step("after");
 await w.screenshot();
 await sleep(3000);
 step("later");
 await w.screenshot();
+await attempt("click", () => w.click(paint.ref));
 step("end");`,
     verify: (ctx) => {
       const shots = ctx.shots.filter((s) => s.error === undefined);
@@ -395,11 +418,12 @@ step("end");`,
       return [
         ok(ctx),
         check("the window was off this desktop (the bind says so)", /another desktop|another Space|off this desktop|capture only|not on this desktop/i.test(ctx.output), short(ctx.output.slice(0, 600))),
-        check("the click landed in the page (it painted)", painted, `click: ${fact(ctx, "click")}; page: ${JSON.stringify(page(ctx).slice(-5))}`),
+        check("the act landed in the page (it painted)", painted, `act: ${fact(ctx, "act")}; page: ${JSON.stringify(page(ctx).slice(-5))}`),
+        check("(fact) a plain click there afterwards: answered", fact(ctx, "click") !== "", `click: ${fact(ctx, "click")}`),
         check("three screenshots were returned", shots.length >= 3, desc),
-        check("the picture BEFORE the click shows no sentinel", before !== undefined && before.sentinelPixels < SENTINEL_MIN_PIXELS, desc),
-        check("the picture right AFTER the click shows the result, or says it may predate the action and names screenshot({ live: true })", shows || honest,
-          `${shows ? "shows it" : "stale"}; ${predates ? "said it may predate the action (the fix's note)" : staleSaid ? "said only the older stale label (no 'may predate', no live: true)" : "said nothing"}: ${short(afterText)} | ${desc} | click: ${fact(ctx, "click")}`),
+        check("the picture BEFORE the act shows no sentinel", before !== undefined && before.sentinelPixels < SENTINEL_MIN_PIXELS, desc),
+        check("the picture right AFTER the act shows the result, or says it may predate the action and names screenshot({ live: true })", shows || honest,
+          `${shows ? "shows it" : "stale"}; ${predates ? "said it may predate the action (the fix's note)" : staleSaid ? "said only the older stale label (no 'may predate', no live: true)" : "said nothing"}: ${short(afterText)} | ${desc} | act: ${fact(ctx, "act")}`),
         check("(the fix's own words) a stale picture right after the act says it may predate it and names screenshot({ live: true })", shows || predates, short(afterText)),
         check("(measured) 3 s later the picture shows it", later !== undefined && later.sentinelPixels >= SENTINEL_MIN_PIXELS, desc),
       ];
@@ -409,7 +433,10 @@ step("end");`,
     name: "chrome fr (Floor F): an act on chrome://inspect is refused — UI in French", group: "chrome",
     // Chrome opens no chrome:// page from its command line (the first run showed a new tab): the page is reached as a
     // person would, through the address bar (the browser's own UI, which Floor F leaves alone).
-    chrome: { key: "fr-inspect", lang: "fr", start: "material", bindThenShow: true },
+    // Full screen: the one way the page was readable in the first runs (finding A); a desktop visit an act may need is
+    // allowed (the card answered "switch", a consented move).
+    chrome: { key: "fr-inspect", lang: "fr", start: "material", fullScreen: true },
+    desktopSwitch: { answer: "allow", afterMs: 1_500 }, allowExcursionMs: 20_000, maxExcursions: 12,
     code: `
 const w = await cft();
 const bar = (await w.find({ role: "text field" }, { emit: false })).find((e) => /adresse|address/i.test(e.name || ""));
@@ -479,6 +506,15 @@ step("end");`,
     },
   },
 ];
+
+/** The app-leg probes (1, 2, 3) once more on the FULL-SCREEN instance — a desktop visit an act may need is allowed. */
+const PROBE_NAMES = ["bind Chrome for Testing", "mat-select", "Material check boxes", "Tab, Space and cmd+a", "\"Select file\""];
+const FULLSCREEN_ROWS: Scenario[] = SCENARIOS_.filter((x) => x.chrome === WINDOWED && PROBE_NAMES.some((n) => x.name.includes(n))).map((x) => ({
+  ...x, name: x.name.replace(/^chrome app:/, "chrome app (full screen):"), chrome: FULLSCREEN,
+  desktopSwitch: { answer: "allow" as const, afterMs: 1_500 }, allowExcursionMs: 20_000, maxExcursions: 12,
+}));
+// Order: the windowed instance (finding A, then its probes), the full-screen probes, off-desktop redraw, Floor F.
+SCENARIOS_.splice(SCENARIOS_.findIndex((x) => x.chrome?.key === "material-offspace"), 0, ...FULLSCREEN_ROWS);
 
 /** The group's scenarios, each with the chrome prelude after the suite's. */
 export const CHROME_SCENARIOS: Scenario[] = SCENARIOS_.map((s) => ({ ...s, prelude: `${PRELUDE}\n${CHROME_PRELUDE}` }));

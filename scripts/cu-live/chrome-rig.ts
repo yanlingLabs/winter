@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  CFT_BUNDLE, CFT_PROCESS, chromeLaunchArgs, chromePidFrom, localStateFor, MATERIAL_PAGE, pageEventsSince, parseDevToolsActivePort,
+  CFT_BUNDLE, CFT_PROCESS, chromeLaunchArgs, FULL_SCREEN_TURN, chromePidFrom, localStateFor, MATERIAL_PAGE, pageEventsSince, parseDevToolsActivePort,
   type ChromeNeed, type ChromeObservation, type PageEvent,
 } from "./chrome";
 import { onScreenIds } from "./wake";
@@ -26,11 +26,18 @@ export interface ChromeRigDeps {
   activateAsUser(pid: number): Promise<void>;
   /** Binds the browser once in a session of its own (Winter switches its accessibility on). */
   bindOnce(): Promise<void>;
+  /** Runs one ComputerV2 turn (after the suite's prelude) in a session of its own; throws on an error. */
+  turn(code: string): Promise<void>;
+  /** The suite's build folder (the independent reader is built there). */
+  outDir: string;
   /** Throws when the run must stop (real input, a prompt, a signal). */
   abortIfInput(): void;
   own(pid: number): void;
   disown(pid: number): void;
 }
+
+/** One step of the finding-A diagnosis: what the browser's own tree held then (the independent reader). */
+export interface DiagStep { step: string; at: number; webAreas?: number; webChildren?: number; manual?: unknown; enhanced?: unknown; trusted?: unknown; error?: string }
 
 interface Instance {
   need: ChromeNeed;
@@ -41,6 +48,9 @@ interface Instance {
   dialogVia?: string;
   connectionAnswered?: boolean;
   note?: string;
+  diag?: DiagStep[];
+  /** The step after which the browser's tree held the page (undefined: never). */
+  readableAfter?: string;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -52,6 +62,7 @@ export class ChromeRig {
   /** The French launches set Chrome for Testing's AppleLanguages (it was absent before — checked). */
   private langSet = false;
   private seq = 0;
+  private axprobeBin?: string;
 
   constructor(private readonly d: ChromeRigDeps) {}
 
@@ -87,6 +98,7 @@ export class ChromeRig {
       pid: c.pid, lang: c.need.lang, profile: c.profile, devToolsActivePort: existsSync(join(c.profile, "DevToolsActivePort")),
       ...(c.dialogRaised === undefined ? {} : { dialogRaised: c.dialogRaised }), ...(c.dialogVia === undefined ? {} : { dialogVia: c.dialogVia }),
       ...(c.connectionAnswered === undefined ? {} : { connectionAnswered: c.connectionAnswered }), ...(c.note === undefined ? {} : { note: c.note }),
+      ...(c.diag === undefined ? {} : { diag: c.diag }), ...(c.readableAfter === undefined ? {} : { readableAfter: c.readableAfter }),
     };
   }
 
@@ -161,9 +173,69 @@ export class ChromeRig {
       await sleep(1_500);
     }
     if (need.remoteDebugging === true) await this.raiseDialog(inst);
+    if (need.diagnose === true) await this.diagnose(inst);
+    if (need.fullScreen === true) {
+      await this.d.turn(FULL_SCREEN_TURN);
+      await sleep(1_000);
+    }
     await sleep(800);
     await this.d.activateUser();
     await sleep(500);
+  }
+
+  /** The independent reader (built once from `swift/AXProbe`, into the suite's out folder). */
+  private axprobe(args: string[]): Record<string, unknown> {
+    if (this.axprobeBin === undefined) {
+      const bin = join(this.d.outDir, "cu-live-axprobe");
+      const r = this.d.sh("swiftc", ["-O", "-o", bin, join(this.d.webDir, "..", "swift", "AXProbe", "main.swift")]);
+      if (r.status !== 0) throw new Error(`building cu-live-axprobe failed: ${r.stderr.trim().slice(0, 300)}`);
+      this.axprobeBin = bin;
+    }
+    const r = this.d.sh(this.axprobeBin, args);
+    try { return JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "{}") as Record<string, unknown>; } catch { return { error: (r.stderr || r.stdout).trim().slice(0, 200) }; }
+  }
+
+  private look(inst: Instance, step: string): DiagStep {
+    const o = this.axprobe(["web", String(inst.pid)]);
+    const wins = Array.isArray(o.windows) ? o.windows as Array<{ webAreas?: number; webChildren?: number }> : [];
+    const d: DiagStep = { step, at: Date.now(), webAreas: wins.reduce((n, w) => n + (w.webAreas ?? 0), 0), webChildren: wins.reduce((n, w) => n + (w.webChildren ?? 0), 0),
+      manual: o.manual, enhanced: o.enhanced, trusted: o.trusted, ...(typeof o.error === "string" ? { error: o.error } : {}) };
+    (inst.diag ??= []).push(d);
+    this.d.log(`finding A — ${step}: ${JSON.stringify(d)}`);
+    if (inst.readableAfter === undefined && (d.webChildren ?? 0) > 0) inst.readableAfter = step;
+    return d;
+  }
+
+  /**
+   * Finding A: a windowed browser behind the user's app showed the helper no page. In order, until its OWN tree holds
+   * the page: before any client, after the helper's bind (it sets AXManualAccessibility), after a second
+   * AXManualAccessibility from this reader, after AXEnhancedUserInterface (what VoiceOver sets), in front (as the user),
+   * and behind again. Each step's tree is read by the independent reader; the row then reads it through the helper.
+   */
+  private async diagnose(inst: Instance): Promise<void> {
+    const readable = (): boolean => inst.readableAfter !== undefined;
+    this.look(inst, "launched, no client yet");
+    await this.d.bindOnce();
+    await sleep(3_000);
+    this.look(inst, "after the helper's bind (AXManualAccessibility), 3 s");
+    if (!readable()) {
+      const r = this.axprobe(["set", String(inst.pid), "AXManualAccessibility", "true"]);
+      await sleep(3_000);
+      this.look(inst, `after AXManualAccessibility again from a second client (error ${String(r.error)}), 3 s`);
+    }
+    if (!readable()) {
+      await this.d.activateAsUser(inst.pid);
+      await sleep(2_500);
+      this.look(inst, "in front (as the user's switch), 2.5 s");
+      await this.d.activateUser();
+      await sleep(2_500);
+      this.look(inst, "behind your app again, 2.5 s");
+    }
+    if (!readable()) {
+      const r = this.axprobe(["set", String(inst.pid), "AXEnhancedUserInterface", "true"]);
+      await sleep(3_000);
+      this.look(inst, `after AXEnhancedUserInterface = true (error ${String(r.error)}), 3 s`);
+    }
   }
 
   /** Remote debugging is on (Local State): connect to its endpoint as an outside app would — Chrome asks "Allow remote

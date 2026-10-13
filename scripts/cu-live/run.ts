@@ -1245,12 +1245,17 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         scenarios = scenarios.filter((x) => !needsChrome(x));
       } else {
         chromeRig = new ChromeRig({
-          app, root, webDir: join(REPO_ROOT, "scripts", "cu-live", "fixture-web"), tool: built.tool, log, sh: (cmd, args) => sh(cmd, args),
+          app, root, webDir: join(REPO_ROOT, "scripts", "cu-live", "fixture-web"), outDir: OUT_DIR, tool: built.tool, log, sh: (cmd, args) => sh(cmd, args),
           activateUser: () => activateUser(), activateAsUser: async (pid) => { await bringToFront(pid, "Chrome for Testing (shown once, as the user)", undefined, true); },
           bindOnce: async () => {
             const fresh = await freshSession();
             const r = await runTurn(fresh.client, fresh.sid, computerV2Message(scriptOf({ code: `await apps.open("com.google.chrome.for.testing", { emit: false });` }), 30_000), 90_000);
             if (r.isError) throw new Error(`binding Chrome for Testing failed: ${r.output.slice(-200)}`);
+          },
+          turn: async (code) => {
+            const fresh = await freshSession();
+            const r = await runTurn(fresh.client, fresh.sid, computerV2Message(scriptOf({ code }), 30_000), 90_000);
+            if (r.isError) throw new Error(`the setup turn failed: ${r.output.slice(-200)}`);
           },
           abortIfInput, own, disown,
         });

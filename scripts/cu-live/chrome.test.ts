@@ -100,7 +100,7 @@ describe("the chrome group: launch and rig", () => {
 
 describe("the chrome group: scenarios", () => {
   test("every row needs a browser, carries the chrome prelude, compiles, and never binds the user's Chrome", () => {
-    expect(CHROME_SCENARIOS.length).toBe(12);
+    expect(CHROME_SCENARIOS.length).toBe(14);
     for (const s of CHROME_SCENARIOS) {
       expect(needsChrome(s)).toBe(true);
       expect(s.group).toBe("chrome");
@@ -111,11 +111,18 @@ describe("the chrome group: scenarios", () => {
       expect(`${s.code}${JSON.stringify(s.prepare ?? [])}`).not.toMatch(/com\.google\.Chrome\b|"Google Chrome"/);
     }
     // A fresh instance whenever the need changes: the French ones and the off-desktop one never reuse the English page's.
-    expect(new Set(CHROME_SCENARIOS.map((s) => s.chrome!.key))).toEqual(new Set(["material-background", "material-noocclusion", "material-shown", "material-bound-shown", "material-offspace", "fr-inspect", "fr-dialog"]));
+    expect(new Set(CHROME_SCENARIOS.map((s) => s.chrome!.key))).toEqual(new Set(["material-windowed", "material-fullscreen", "material-offspace", "fr-inspect", "fr-dialog"]));
     // The probes run on the instance shown in front once; the diagnostics compare the ways of launching.
-    expect(byName("mat-select").chrome).toMatchObject({ key: "material-bound-shown", bindThenShow: true });
-    expect(byName("--disable-backgrounding").chrome!.extraArgs).toEqual(["--disable-backgrounding-occluded-windows"]);
-    expect(chromeLaunchArgs(byName("--disable-backgrounding").chrome!, "/p", "u")).toContain("--disable-backgrounding-occluded-windows");
+    // Finding A's diagnosis runs on the windowed instance the probes then use; the probes run again full screen, where a
+    // desktop visit an act may need is allowed (a consented move, bounded).
+    expect(byName("finding A").chrome).toMatchObject({ key: "material-windowed", diagnose: true });
+    expect(byName("chrome app: mat-select").chrome!.key).toBe("material-windowed");
+    const full = CHROME_SCENARIOS.filter((x) => x.name.startsWith("chrome app (full screen):"));
+    expect(full).toHaveLength(5);
+    for (const f of full) expect(f).toMatchObject({ chrome: { key: "material-fullscreen", fullScreen: true }, desktopSwitch: { answer: "allow" }, allowExcursionMs: 20_000 });
+    expect(byName("off-desktop").chrome).toMatchObject({ fullScreen: true });
+    expect(byName("off-desktop").code).toContain('w.key("space", { into: paint.ref })');
+    expect(chromeLaunchArgs({ key: "x", lang: "en", start: "material", extraArgs: ["--a"] }, "/p", "u")).toContain("--a");
     expect(byName("Autoriser").chrome).toEqual({ key: "fr-dialog", lang: "fr", start: "material", remoteDebugging: true });
   });
 
@@ -203,9 +210,10 @@ describe("the chrome group: scenarios", () => {
     const out = bindLine + await runScript(scriptOf(s), plain);
     const painted: PageEvent[] = [{ t: 1, ev: "paint" }];
     expect(failing(s.verify(ctxOf(out, painted, { shots: [shot(0), shot(40_000), shot(40_000)] })))).toEqual([]);
+    expect(out.indexOf("=== act")).toBeLessThan(out.indexOf("=== click"));   // the no-visit act first, the click last
     // Stale and silent: the subject's failure.
     expect(failing(s.verify(ctxOf(out, painted, { shots: [shot(0), shot(0), shot(40_000)] })))).toContain(
-      "the picture right AFTER the click shows the result, or says it may predate the action and names screenshot({ live: true })");
+      "the picture right AFTER the act shows the result, or says it may predate the action and names screenshot({ live: true })");
     // Stale and said.
     const said = out.replace("=== after\n", "=== after\nscreenshot — this picture may predate the last action: Google Chrome for Testing may not redraw a window on another desktop until it is seen; screenshot({ live: true, reason }) shows it now\n");
     expect(failing(s.verify(ctxOf(said, painted, { shots: [shot(0), shot(0), shot(40_000)] })))).toEqual([]);
