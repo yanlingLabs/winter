@@ -1143,7 +1143,8 @@ public struct CUFocusGuardianCore: Sendable {
     /// The user agreed to be taken to `app`'s desktop from `user`'s: until `endVisit` (or the deadline — `maxSeconds`,
     /// the primitive's own, else `visitMaxSeconds`), its own switches are neither undone nor adopted. Both apps count as
     /// touched while it lasts (the way there and the way back are the agent's), the target for the causal window after.
-    public mutating func beginVisit(app: pid_t, user: pid_t? = nil, now: TimeInterval, maxSeconds: TimeInterval = visitMaxSeconds) {
+    public mutating func beginVisit(app: pid_t, user: pid_t? = nil, now: TimeInterval, maxSeconds: TimeInterval = visitMaxSeconds,
+                                    from activeSpace: UInt64? = nil) {
         if visitApp != nil { endVisit(now: now) }
         visitApp = app
         visitUser = user
@@ -1153,7 +1154,9 @@ public struct CUFocusGuardianCore: Sendable {
         visitArrived = false
         visitLeft = false
         visitSpace = nil
-        visitFromSpace = view.space
+        // (Their place's desktop not known — an activation heard late: the desktop active when the visit began, else the
+        // last one seen; the re-review of round 19.)
+        visitFromSpace = view.space ?? activeSpace ?? lastSeen?.space
         // What was judged before it is judged again: what the visit brings up is its own (I5), never a theft undone in
         // the middle of it (found by the model-based test: an app judged the agent's indirect effect a moment before the
         // visit, heard again during it, was undone over the visit's switch).
@@ -1606,7 +1609,10 @@ struct CUSwitchInput {
         let pending = pendingTabs(now: upTo)
         return instants.last { i in
             i.at > after && i.at <= upTo && upTo - i.at <= i.life && !pending.contains(i.at)
-                && (i.target == app || (i.target == nil && (Self.fits(i.kind, app: moved, desktop: desktop) || (!moved && i.kind == .app))))
+                && (i.target == app || (i.target == nil && (Self.fits(i.kind, app: moved, desktop: desktop)
+                    // (The widening is only a ⌘ release whose Tab the tap did NOT see — the survey's seed 1068 — never a
+                    // seen ⌘-Tab, which lands on the app it picked: the re-review of round 19, HIGH.)
+                    || (!moved && i.kind == .app && i.life == Self.secureLife && !seenTabs.contains(i.at)))))
         }?.at
     }
 

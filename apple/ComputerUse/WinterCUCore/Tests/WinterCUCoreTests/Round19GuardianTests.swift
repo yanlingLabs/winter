@@ -234,7 +234,8 @@ final class Round19GuardianTests: XCTestCase {
         g.noteSwitch(now: 10.0, .desktop)
         XCTAssertTrue(g.judge(CUMoveQuery(app: t, space: 300), now: 10.1).isUsers, "their swipe")
         g.noteFrontAfterglow(t, raise: true, now: 10.5)              // the act on the front T raises
-        g.noteSwitch(now: 10.6, .app)                                // their ⌘ release, no Tab seen
+        g.inputEvent(type: .flagsChanged, flags: .maskCommand, now: 10.55)  // their ⌘ release, no Tab seen
+        g.inputEvent(type: .flagsChanged, flags: [], now: 10.6)
         let moved = g.judge(CUMoveQuery(app: t, space: 100), now: 10.65)
         XCTAssertTrue(moved.isUsers, "their switch after the raise — \(moved)")
         g.noteFrontAfterglow(t, raise: true, now: 10.7)
@@ -268,5 +269,46 @@ final class Round19GuardianTests: XCTestCase {
         g.noteCause(t, now: 11.0)                                     // the write
         let landed = g.judge(CUMoveQuery(app: t, space: 100), now: 11.05)
         XCTAssertFalse(landed.isUsers, "the agent's write, not their old click — \(landed)")
+    }
+
+    // MARK: the re-review of round 19
+
+    /// HIGH (a probe): their click brings T@100, the agent's act raises the front T onto desktop 300, their ⌘-Tab — its
+    /// Tab SEEN — is released, T@300 is heard, then S lands. The seen ⌘-Tab picked S: T@300 stays the agent's, and S is
+    /// theirs.
+    func testASeenCommandTabNeverCoversTheAgentsRaiseOfTheFrontApp() {
+        let u: pid_t = 1, t: pid_t = 5252, s: pid_t = 710
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: u, space: 100))
+        g.noteCause(t, now: 9.9)
+        g.noteSwitch(now: 10.0, .app, target: t)
+        g.userClicked(app: t, space: 100, now: 10.0)
+        g.noteClickBring(t, clickAt: 10.0, space: 100, now: 10.001)
+        XCTAssertTrue(g.judge(CUMoveQuery(app: t, space: 100), now: 10.01).isUsers)
+        g.noteFrontAfterglow(t, raise: true, now: 10.45)
+        g.inputEvent(type: .flagsChanged, flags: .maskCommand, now: 10.46)
+        g.inputEvent(type: .keyDown, flags: .maskCommand, keycode: 48, now: 10.47)
+        g.inputEvent(type: .flagsChanged, flags: [], now: 10.5)
+        let raised = g.judge(CUMoveQuery(app: t, space: 300), now: 10.52)
+        XCTAssertFalse(raised.isUsers, "their seen ⌘-Tab picked another app — \(raised)")
+        let sLands = g.judge(CUMoveQuery(app: s, space: 100), now: 10.6)
+        XCTAssertTrue(sLands.isUsers, "S, their ⌘-Tab's pick — \(sLands)")
+    }
+
+    /// A visit begun while their place's desktop is not known: the desktop active then is where it began, so the visited
+    /// app's early sighting there is no arrival.
+    func testAVisitBegunWithTheirDesktopUnknownUsesTheActiveOne() {
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: nil))
+        g.beginVisit(app: 6000, user: 1, now: 10.0, from: 100)
+        g.noteSwitch(now: 10.05, .app, target: 6000)
+        g.noteCause(6000, raise: true, now: 10.1)
+        g.noteSwitch(now: 10.15, .desktop)
+        _ = g.judge(CUMoveQuery(app: 6000, space: 100), now: 10.2)   // activated before the desktop switch landed
+        _ = g.judge(CUMoveQuery(app: 6000, space: 300), now: 10.3)   // the arrival
+        _ = g.judge(CUMoveQuery(app: 1, space: 100), now: 10.4)      // they go back to their own desktop
+        g.noteSwitch(now: 11.0, .desktop)
+        let swipe = g.judge(CUMoveQuery(app: 6000, space: 300), now: 11.1)
+        XCTAssertTrue(swipe.isUsers, "their swipe into the visited desktop (300, not the early sighting's 100) — \(swipe)")
     }
 }

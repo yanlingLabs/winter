@@ -265,7 +265,7 @@ extension CUCore {
         // after it can make a change theirs.
         guardianLock.withLock {
             guardianCore.beginVisit(app: t.pid, user: before.front, now: base.startedAt,
-                                    maxSeconds: max(Self.visitModeSeconds(maxMs: maxMs), visitCapMs / 1000))
+                                    maxSeconds: max(Self.visitModeSeconds(maxMs: maxMs), visitCapMs / 1000), from: before.space)
         }
         CULog.act.notice("visit \(v.id, privacy: .public) (\(why.rawValue, privacy: .public)): taking the user to \(t.appName, privacy: .public)'s desktop for window \(t.windowID, privacy: .public) (\(element == nil ? "the app alone: no element" : "its element raised", privacy: .public))")
         noteGuardianCause(t.pid, raise: true)
@@ -548,6 +548,8 @@ extension CUCore {
         // the guardian has not judged — a switch of theirs back during the judge, unjudged, had the end pull them to the
         // place the first judge made.)
         if guardianLock.withLock({ guardianCore.active }) {
+            // (Bounded: a view that changes on every one of the three passes leaves its last read unjudged — the decision
+            // below is then made on a view the guardian has not judged; the re-review of round 19.)
             for _ in 0..<3 {
                 _ = judgeMove(now, since: nil, path: "a desktop visit's end")
                 let after = userView()
