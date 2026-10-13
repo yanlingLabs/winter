@@ -201,9 +201,15 @@ await row("3", "mat-select: the open list's options are readable (click opens it
   state = await P("state", { full: true, emit: false }) as string;
 });
 
-await row("3", "(finding) a role=checkbox named by its content reads WITH its name (ARIA name from content)", async (ev) => {
-  ev.line = lineOf(state, /check box/);
+await row("3", "a role=checkbox named by its content reads WITH its name, and find({ name }) hits it (finding C, fixed)", async (ev) => {
+  ev.line = lineOf(state, /check box "Accept/);
   expect(/check box "Accept the terms"/.test(state), "the check box carries its name", state.split("\n").filter((l) => /check box|Accept the terms/.test(l)).join("\n"));
+  const found = await P("find", { query: { name: "Accept the terms" }, emit: false }) as Array<{ role: string; name?: string }>;
+  ev.found = found;
+  expect(found.some((e) => e.role === "check box" && e.name === "Accept the terms"), "find({ name }) returns the check box", JSON.stringify(found));
+  // A box whose text holds a link: named by its text, and the link stays a ref of its own.
+  ev.agree = state.split("\n").filter((l) => /I agree|Terms of Service/.test(l));
+  expect(/check box "I agree to the Terms of Service"/.test(state) && /link "Terms of Service"/.test(state), "the agree box is named and its link stays reachable", (ev.agree as string[]).join("\n"));
 });
 
 for (const [name, re, id] of [

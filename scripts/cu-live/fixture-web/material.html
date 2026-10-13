@@ -71,6 +71,10 @@
 </div>
 
 <div class="row">
+  <div id="agree" class="aria-check" role="checkbox" aria-checked="false" tabindex="0"><span class="box"></span><span>I agree to the <a href="#terms" id="terms-link">Terms of Service</a></span></div>
+</div>
+
+<div class="row">
   <div class="mdc" id="notify-wrap"><input type="checkbox" id="notify"><div class="bg"></div></div>
   <label for="notify">Notify me</label>
 </div>
@@ -183,6 +187,13 @@
   };
   terms.addEventListener("click", toggleTerms);
   terms.addEventListener("keydown", (e) => { if (e.key === " ") { e.preventDefault(); toggleTerms(); } });
+  const agree = document.getElementById("agree");
+  agree.addEventListener("click", (e) => {
+    if (e.target.closest("a") !== null) { e.preventDefault(); log("link", { id: "terms-link" }); return; }
+    const now = agree.getAttribute("aria-checked") !== "true";
+    agree.setAttribute("aria-checked", now ? "true" : "false");
+    log("check", { id: "agree", checked: now });
+  });
   for (const id of ["notify", "mature", "vis-public", "vis-unlisted", "vis-private"]) {
     document.getElementById(id).addEventListener("change", (e) => log("check", { id, checked: e.target.checked }));
   }
