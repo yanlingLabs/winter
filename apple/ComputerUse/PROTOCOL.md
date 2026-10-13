@@ -534,7 +534,14 @@ never with engine code; and the WHOLE surveyed seed ranges pass but for a known-
 ratchet — since 1.18.0 the default seeds 1–20 too, each known-failing seed pinned to its violation class, and a child
 of the survey that crashes or hangs fails it; since 1.19.0 every range runs a second time with the user clicking into
 the target's window while an act on it runs, against its own known-failing list, and the named regression tests' seeds
-run once, in child processes, each test asserting its scenario's trace signature or verdict). Its world has the helper's own windows, the
+run once, in child processes, each test asserting its scenario's trace signature or verdict). Round 19's oracle widenings,
+stated with what they flip: an act refused because the user works in T is kept as right when their work there ended only
+by T leaving the front for a moment no notification showed the engine — bounded to a departure no longer than a
+notification can be late in the world (120 ms; 400 ms in the stress sweep) — which turned five mid-act seeds from
+failing to passing when it came (1032, 1052, 1069 and, with an ordinary target, 31 and 60) and, on this version's engine
+and world, two (1069 and ordinary 60: the other three pass without it); a click on an app's window or Dock tile whose own
+landing has not come yet explains that app coming forward (the ordinary target's mid-act 56). The world's click on the
+empty desktop brings Finder forward — with an ordinary target Finder is its own process — never T. Its world has the helper's own windows, the
 menu bar and status items, notification banners, picture in picture, non-activating panels, the empty desktop, a
 second display, launches of the user's and the agent's, system dialogs, activation latency (~0.3 s across desktops),
 refused activations, asynchronous restores, NSWorkspace's notifications late and reordered (measured: within 13 ms of
@@ -762,9 +769,11 @@ an activation's notification carries no time and may be heard after the next cha
 activated app runs only while a script runs — the model-based test's seed 1017 has the launched app come forward 3 ms
 BEFORE the ⌘-Tab's release and be heard after it, so "the activation that follows the release" would name the wrong
 change. The seen ⌘-Tab's instant therefore counts as targeted at whatever app comes forward while it is alive and
-unused (an unused instant lives up to 10 s; a ⌘-Tab that switched anything is used by that change), and the oracle reads
-it the same way, keeping both answers where it can't tell. A wrong narrowing would undo a move of the user's; the
-widening can only adopt or leave an app the user may have chosen. Unmeasured: hardware-origin modifiers under Secure Event Input
+unused, and the oracle reads it the same way, keeping both answers where it can't tell. THE RESIDUAL, plainly: a ⌘-Tab
+after the launch that changed nothing (it landed on the app already in front), or whose change has not been heard yet,
+stays alive and unused for up to 10 s, and an app the AGENT launched that comes forward in that time is adopted as the
+user's place (`targetedExplanation` takes it) — a move of the agent's taken for theirs. It was weighed against the other
+error: a narrowing that misses the real landing undoes a move of the user's. Unmeasured: hardware-origin modifiers under Secure Event Input
 (run107 measured posted ones); and — UNVERIFIED (the review of round 18) — that SkyLight keeps the user's app as the
 front PROCESS during a focus blip's focus records: the menu command's pre-press re-check (round 17's H2) reads the front
 process, so it depends on that.
