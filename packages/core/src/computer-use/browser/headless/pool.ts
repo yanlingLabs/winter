@@ -874,16 +874,24 @@ export class HeadlessPool implements CdpTransport {
     }
   }
 
-  /** The panel hears the session's tab list (debounced; best effort). */
+  /**
+   * The panel hears the session's tab list (debounced; best effort): opened, closed, shown, held — and each page's
+   * address and title as the helper reads them NOW (`liveTabs`; a held tab keeps what it had), so a tab pushed the moment
+   * it was created (before its page loaded) is not listed untitled for good: its load pushes again (`event`).
+   */
   private pushTabs(sessionId: string): void {
     if (this.deps.viewer === undefined || this.tabsPush.has(sessionId)) return;
     const timer = setTimeout(() => {
       this.tabsPush.delete(sessionId);
-      const viewer = this.deps.viewer?.();
-      if (viewer === undefined) return;
-      const rows = [...this.tabs.values()].filter((t) => t.sessionId === sessionId && t.presentation?.closeWhenReleased !== true && t.openerTabKey === undefined)
-        .map((t) => this.row(t));
-      viewer.tabs({ sessionId, tabs: rows });
+      if (this.deps.viewer?.() === undefined) return;
+      void this.liveTabs(sessionId).catch(() => []).then(() => {
+        // The rows as they are once the helper answered (a tab closed meanwhile is not listed).
+        const viewer = this.deps.viewer?.();
+        if (viewer === undefined) return;
+        const rows = [...this.tabs.values()].filter((t) => t.sessionId === sessionId && t.presentation?.closeWhenReleased !== true && t.openerTabKey === undefined)
+          .map((t) => this.row(t));
+        viewer.tabs({ sessionId, tabs: rows });
+      });
     }, 100);
     (timer as { unref?: () => void }).unref?.();
     this.tabsPush.set(sessionId, timer);
@@ -1211,7 +1219,10 @@ export class HeadlessPool implements CdpTransport {
   onStop(): () => void { return () => {}; }
 
   private event(proc: WinterHeadlessProcess, e: CdpEvent): void {
-    if (this.tabs.get(e.tabKey)?.proc !== proc) return;
+    const t = this.tabs.get(e.tabKey);
+    if (t?.proc !== proc) return;
+    // A page of the tab's own top frame loaded or moved: the panel's list says its address and title again.
+    if (e.cdpSessionId === undefined && (e.method === "Page.loadEventFired" || e.method === "Page.navigatedWithinDocument")) this.pushTabs(t.sessionId);
     for (const l of [...this.eventListeners]) {
       try { l(e); } catch { /* a listener never breaks the pool */ }
     }

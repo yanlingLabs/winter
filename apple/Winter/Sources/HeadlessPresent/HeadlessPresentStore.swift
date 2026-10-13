@@ -46,10 +46,12 @@ final class HeadlessPresentStore: ObservableObject {
     private static let log = Logger(subsystem: "com.winter.app", category: "headless-present")
 
     private let device: MTLDevice?
-    /// Sessions whose list was fetched on this link (a fresh link fetches again).
-    private var listed: Set<String> = []
+    /// Sessions whose list is being fetched now (one fetch at a time per session).
+    private var listing: Set<String> = []
     /// Each session's list version: bumped by every push, so a fetch answered after a newer push never overwrites it.
     private var listGeneration: [String: Int] = [:]
+    /// Bumped when the link changes: a fetch sent on the old link never lands on the new one.
+    private var linkEpoch = 0
 
     init(device: MTLDevice? = MTLCreateSystemDefaultDevice()) {
         self.device = device
@@ -139,8 +141,9 @@ final class HeadlessPresentStore: ObservableObject {
     /// does not ride the link, and they end by themselves when the helper goes.
     func linkChanged() {
         tabsBySession = [:]
-        listed = []
+        listing = []
         listGeneration = [:]
+        linkEpoch += 1
         watchPending = []
     }
 
@@ -201,15 +204,22 @@ final class HeadlessPresentStore: ObservableObject {
         }
     }
 
-    /// Fetch the session's headless tabs once per link (the daemon also pushes them whenever they change).
-    func refreshTabsIfNeeded(sessionId: String?) {
-        guard let sessionId, !listed.contains(sessionId), let send = sendAction else { return }
-        listed.insert(sessionId)
+    /// Fetch the session's headless tabs — each time the panel shows the session (it opens, or the session changes under
+    /// it), so the list is the daemon's as of now, with each page's current address and title. One fetch per opening, at
+    /// most one in flight per session, nothing on a timer; between openings the daemon's pushes keep it current (a tab
+    /// opened, closed, shown, held, or its page loaded). A fetch that fails leaves the list as it was, and the next
+    /// opening asks again (Drill A, 2026-10-13: the list was fetched once per link, and a failed fetch never again).
+    func refreshTabs(sessionId: String?) {
+        guard let sessionId, !listing.contains(sessionId), let send = sendAction else { return }
+        listing.insert(sessionId)
         let generation = listGeneration[sessionId, default: 0]
+        let epoch = linkEpoch
         Task { @MainActor [weak self] in
-            guard let tabs = try? await send(sessionId, nil, .list), let self else { return }
+            let tabs = try? await send(sessionId, nil, .list)
+            guard let self, self.linkEpoch == epoch else { return }
+            self.listing.remove(sessionId)
             // A push that came in meanwhile is newer than this answer.
-            guard self.listGeneration[sessionId, default: 0] == generation else { return }
+            guard let tabs, self.listGeneration[sessionId, default: 0] == generation else { return }
             self.tabsBySession[sessionId] = tabs
         }
     }

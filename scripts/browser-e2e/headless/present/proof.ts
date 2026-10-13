@@ -29,7 +29,7 @@
 // (`headless.popupOpened`), presentable, and gone as a tab when the page closes it.
 //
 //   bun scripts/browser-e2e/headless/present/proof.ts --app "<Winter Headless Dev.app>" [--cycles 8] [--panel 704x900] [--report <file>]
-//     [--skip dialog,ime,files,window,drag]   leave out version 2's steps (to tell which one a failure follows)
+//     [--skip dialog,ime,files,window,window-view,drag]   leave out version 2's steps (to tell which one a failure follows)
 //     [--helper-log]              print the helper's stderr when something failed
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -83,6 +83,7 @@ const sentinel = (port: number): string => `<!doctype html><title>sentinel</titl
 <div id=m></div><div id=spin></div>
 <div id=f><input id=a placeholder=agent><input id=b placeholder=user><select id=s><option>one</option><option>two</option><option>three</option></select>
 <input id=c placeholder=ime><input id=file type=file accept=".txt,text/plain"><button id=open onclick="window.open('/window', 'signin', 'width=480,height=600')">Sign in</button>
+<button id=open2 onclick="window.open('/window-static', 'signin2', 'width=480,height=420')">Sign in (static)</button>
 <div id=dragme draggable=true style="width:80px;height:30px;background:#c80">drag me</div>
 <div id=dropzone style="width:200px;height:60px;background:#08c;margin-top:10px">drop here</div></div>
 <pre id=state style="position:absolute;left:20px;top:300px"></pre>
@@ -138,6 +139,11 @@ const server = Bun.serve({
 <script>setTimeout(() => { window.opener && window.opener.postMessage("signed in from the window", "*"); }, 300);
 // On to ANOTHER SITE (127.0.0.1 → localhost: another renderer process) while it is shown, as a sign-in redirect does.
 setTimeout(() => { location.href = location.href.replace("127.0.0.1", "localhost").replace("/window", "/window-2"); }, 900);</script>`, { headers: { "content-type": "text/html" } });
+    }
+    if (path === "/window-static") {
+      // A sign-in window with NOTHING moving (as the drill's): once painted, it paints again only when asked to.
+      return new Response(`<!doctype html><title>Static sign-in</title><style>body{margin:0;background:#522;color:#fff;font:20px system-ui}</style>
+<h1>Sign in</h1><input id=u placeholder="user name">`, { headers: { "content-type": "text/html" } });
     }
     if (path === "/window-2") {
       return new Response(`<!doctype html><title>Signed in</title><style>body{margin:0;background:#252;color:#fff;font:20px system-ui}
@@ -781,6 +787,54 @@ try {
         String(hopPage?.url ?? "").includes("//localhost:") && String(hopPage?.url ?? "").includes("/window-2"),
       `opened ${JSON.stringify(opened?.params ?? null)}; the opener heard "${String(now.fromWindow)}"; ${windowFrames} frame(s) of it, ${afterHopFrames} more after it went on to another site (its viewer last told ${String(hopPage?.url ?? "nothing")}); its tab ${closed || "never went"}`);
     await oracle("a window the person opened", { b: userText, s: "two" });
+  }
+
+  // ── a STATIC window (nothing moving on it, as a real sign-in page) laid out in the panel's size at once ──
+  // The drill (2026-10-13): the window's first frames after the panel's view was applied were the capturer's old
+  // 1280×800 box with the new layout letterboxed inside it, and — the page painting nothing more — they stayed until the
+  // person clicked. Winter.app asks for the panel's view as soon as it is welcomed; the frames must follow with no input.
+  if (!skip.includes("window-view")) {
+    const { viewer } = await present(true);
+    await viewer.until("welcome");
+    // As in the panel: the opener already laid out in the panel's view when the person opens the window.
+    await atView(viewer, panelW, panelH, 2);
+    const oBox = await rect("open2");
+    const mark = events.length;
+    viewer.send({ cmd: "click", x: oBox.x + 8, y: oBox.y + oBox.height / 2 });
+    const opened = await wait((m) => m.method === "headless.popupOpened" && events.indexOf(m) >= mark, 10_000, "headless.popupOpened").catch(() => undefined);
+    const windowId = String(opened?.params.tabId ?? "");
+    let laidOut = "never presented";
+    let ok = false;
+    if (opened !== undefined) {
+      // Shown at once, as the daemon does (its present asks for scale 1, as for any tab), the panel's view asked for as
+      // soon as the viewer is welcomed — while the window may still be loading.
+      const nonce = nonceHex();
+      const r = await command("headless.present", { tabId: windowId, nonce, viewerRequirement, control: true, scale: 1, uploadDir: sessionUploads });
+      const wv = new ViewerProc(String(r.service), nonce);
+      await wv.until("welcome").catch(() => undefined);
+      try {
+        const ms = await atView(wv, panelW, panelH, 2, 3_000);
+        laidOut = `the panel's ${panelW}×${panelH} at 2 drawn ${ms.toFixed(0)} ms after it was asked, with no input`;
+        // The panel resized while it shows the still page: the new view drawn with no input either.
+        const [w2, h2] = [panelW - 100, panelH - 60];
+        const ms2 = await atView(wv, w2, h2, 2, 3_000);
+        laidOut += `; resized to ${w2}×${h2}, drawn ${ms2.toFixed(0)} ms after it was asked`;
+        // And the frame on screen now IS that view (not an older generation drawn after it).
+        await Bun.sleep(400);
+        const last = wv.events.filter((e) => e.event === "generation").at(-1);
+        ok = last?.cssWidth === w2 && last?.cssHeight === h2 && last?.width === w2 * 2;
+        if (!ok) laidOut += `; but the last generation is ${JSON.stringify(last ?? null)}`;
+      } catch {
+        const st = await wv.stats().catch(() => undefined);
+        laidOut = `no frame of the panel's view in 3 s with no input; generations: ${JSON.stringify(wv.events.filter((e) => e.event === "generation").slice(-4))}; ${String(st?.frames ?? "?")} frame(s) read`;
+      }
+      wv.send({ cmd: "bye" });
+      await wv.exited();
+      await command("tab.close", { tabId: windowId }).catch(() => undefined);
+    }
+    await endPresentation(viewer);
+    check("a static window the person opens is drawn in the panel's size and scale as soon as the panel asks, with no input", ok, laidOut);
+    await oracle("a static window the person opened", { b: userText, s: "two" });
   }
 
   // ── version 2: an in-page drag by the person (HTML5 drag and drop), run inside the browser ──
