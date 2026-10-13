@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import type { FixtureEvent } from "./lib";
 import { scriptOf, type VerifyContext } from "./scenarios";
-import { NO_WAKE_MS, noWakeChecks, onScreenIds, USER_CLICK_METHOD, WAKE_SCENARIOS, WAKE_WITHIN_MS, wakeFiredChecks, type WakeObservation } from "./wake";
+import { NO_WAKE_MS, noWakeChecks, onScreenIds, onScreenSummary, USER_CLICK_METHOD, WAKE_SCENARIOS, WAKE_WITHIN_MS, wakeFiredChecks, type WakeObservation } from "./wake";
 
 const compiles = (code: string): void => {
   expect(() => new Function("apps", "screen", "print", "sleep", "show", `return (async () => {${code}})`)).not.toThrow();
@@ -47,6 +47,10 @@ describe("the wake group", () => {
   test("the helper's windows on screen, from cu-live-tool's lines", () => {
     expect([...onScreenIds('{"id":4,"onScreen":true}\n{"id":5,"onScreen":false}\nnot json\n{"id":"6","onScreen":true}\n')]).toEqual([4]);
     expect(onScreenIds("").size).toBe(0);
+    // Front first, on-screen only: what the report says of the fixture when the ring was not counted.
+    expect(onScreenSummary('{"id":148143,"layer":0,"onScreen":true,"bounds":[6,35,652,434]}\n{"id":147739,"layer":0,"onScreen":true,"bounds":[12,41,640,422]}\n'
+      + '{"id":147753,"layer":0,"onScreen":false,"bounds":[0,0,1512,982]}\nnot json\n')).toBe("148143 L0 652×434, 147739 L0 640×422");
+    expect(onScreenSummary("")).toBe("");
   });
 
   test("a real wake passes every check", () => {
@@ -73,5 +77,21 @@ describe("the wake group", () => {
     expect(failing(noWakeChecks({ ...quiet, events: [] }))).toEqual(["a real click carrying Winter's own mark reached Submit (the fixture's own log)"]);
     expect(failing(noWakeChecks({ ...quiet, wake: { ...quietWake, cleanedUp: false } }))).toEqual(["the trigger was cancelled afterwards, and its ring went with it"]);
     expect(failing(noWakeChecks({ ...quiet, wake: { ...quietWake, ringWindows: 0 } }))).toEqual(["the ring and the pill were drawn while the fixture was in front"]);
+  });
+
+  test("a ring never counted (the full run's flake): the report names the fixture's windows and judges no ring gone or kept", () => {
+    const quietWake: WakeObservation = { ringWindows: 0, fixtureWindows: "148143 L0 652×434, 147739 L0 640×422", clicked: true, cleanedUp: true, ringGone: false };
+    const checks = noWakeChecks(ctx({ wake: quietWake }));
+    expect(failing(checks)).toEqual(["the ring and the pill were drawn while the fixture was in front", "the trigger was cancelled afterwards, and its ring went with it"]);
+    const detail = (name: string): string | undefined => (checks.find((c) => c.name === name) as { detail?: string } | undefined)?.detail;
+    expect(detail("the ring and the pill were drawn while the fixture was in front"))
+      .toBe("0 new helper window(s) on screen — the fixture's windows then, front first: 148143 L0 652×434, 147739 L0 640×422");
+    expect(detail("the trigger was cancelled afterwards, and its ring went with it")).toBe("cleanup ran, ring never drawn, so not judged");
+    // Counted, then left behind: still said as before.
+    const kept = noWakeChecks(ctx({ wake: { ringWindows: 2, clicked: true, cleanedUp: true, ringGone: false } }));
+    expect((kept.find((c) => c.name === "the trigger was cancelled afterwards, and its ring went with it") as { detail?: string }).detail).toBe("cleanup ran, ring still on screen");
+    // No listing taken (an older runner): the count alone, as before.
+    expect((wakeFiredChecks(ctx({ wake: { ...woke, ringWindows: 1 } })).find((c) => c.name === "the ring and the pill were drawn while the fixture was in front") as { detail?: string }).detail)
+      .toBe("1 new helper window(s) on screen");
   });
 });

@@ -16,6 +16,9 @@ import type { Scenario, VerifyContext } from "./scenarios";
 export interface WakeObservation {
   /** NEW on-screen windows of the helper once the fixture was in front (the ring and the pill: 2). */
   ringWindows?: number;
+  /** When fewer than 2 were counted: the fixture's own windows on screen then, front first (`onScreenSummary`) — a
+   *  window over the watched one hides the ring (the full run's flake: the window macOS attaches to a captured one). */
+  fixtureWindows?: string;
   /** Those windows were gone again after the trigger ended. */
   ringGone?: boolean;
   /** The live-test helper found the element and posted the click. */
@@ -50,7 +53,23 @@ export function onScreenIds(stdout: string): Set<number> {
   }));
 }
 
+/** `cu-live-tool windows <owner>`'s lines → the windows on screen, front first, as "id L<layer> <w>×<h>". */
+export function onScreenSummary(stdout: string): string {
+  return stdout.split("\n").flatMap((l) => {
+    try {
+      const w = JSON.parse(l) as { id?: unknown; layer?: unknown; onScreen?: unknown; bounds?: unknown };
+      if (typeof w.id !== "number" || w.onScreen !== true) return [];
+      const b = Array.isArray(w.bounds) ? w.bounds as unknown[] : [];
+      return [`${w.id} L${String(w.layer ?? "?")} ${String(b[2] ?? "?")}×${String(b[3] ?? "?")}`];
+    } catch { return []; }
+  }).join(", ");
+}
+
 const armedId = (ctx: VerifyContext): unknown => ctx.facts.armed;
+
+/** The ring check's detail: how many were counted, and what of the fixture's was on screen when too few were. */
+const ringDetail = (w: WakeObservation | undefined): string =>
+  `${w?.ringWindows ?? 0} new helper window(s) on screen${w?.fixtureWindows === undefined ? "" : ` — the fixture's windows then, front first: ${w.fixtureWindows || "none"}`}`;
 const WAKE_ID = /^wk_[0-9a-f]{12}$/;
 
 export function wakeFiredChecks(ctx: VerifyContext): Check[] {
@@ -59,7 +78,7 @@ export function wakeFiredChecks(ctx: VerifyContext): Check[] {
   const msg = w?.message ?? "";
   return [
     check("the trigger was armed on Submit", !ctx.isError && typeof id === "string" && WAKE_ID.test(id), ctx.output.slice(-300)),
-    check("the ring and the pill were drawn while the fixture was in front", (w?.ringWindows ?? 0) >= 2, `${w?.ringWindows ?? 0} new helper window(s) on screen`),
+    check("the ring and the pill were drawn while the fixture was in front", (w?.ringWindows ?? 0) >= 2, ringDetail(w)),
     check("the user's click reached Submit (the fixture's own log)", w?.clicked === true
       && eventsSince(ctx.events, ctx.since, "button").some((e) => e.id === "submit"), w?.clicked === true ? "no button submit event" : "the helper found no Submit to click"),
     check("the session was woken by a computer-wake turn", w?.clientName === COMPUTER_WAKE_CLIENT_NAME && msg.includes("<computer-wake>"),
@@ -76,12 +95,13 @@ export function noWakeChecks(ctx: VerifyContext): Check[] {
   const w = ctx.wake;
   return [
     check("the trigger was armed on Submit", !ctx.isError && typeof id === "string" && WAKE_ID.test(id), ctx.output.slice(-300)),
-    check("the ring and the pill were drawn while the fixture was in front", (w?.ringWindows ?? 0) >= 2, `${w?.ringWindows ?? 0} new helper window(s) on screen`),
+    check("the ring and the pill were drawn while the fixture was in front", (w?.ringWindows ?? 0) >= 2, ringDetail(w)),
     check("a real click carrying Winter's own mark reached Submit (the fixture's own log)", w?.clicked === true
       && eventsSince(ctx.events, ctx.since, "button").some((e) => e.id === "submit"), w?.clicked === true ? "no button submit event" : "the helper found no Submit to click"),
     check("Winter's own click never woke the session", w !== undefined && w.message === undefined, (w?.message ?? "").slice(0, 300)),
     check("the trigger was cancelled afterwards, and its ring went with it", w?.cleanedUp === true && w.ringGone === true,
-      `cleanup ${w?.cleanedUp === true ? "ran" : "failed"}, ring ${w?.ringGone === true ? "gone" : "still on screen"}`),
+      // A ring never counted is not judged gone or kept (the full run's report said "still on screen" of an empty list).
+      `cleanup ${w?.cleanedUp === true ? "ran" : "failed"}, ring ${(w?.ringWindows ?? 0) === 0 ? "never drawn, so not judged" : w?.ringGone === true ? "gone" : "still on screen"}`),
   ];
 }
 
