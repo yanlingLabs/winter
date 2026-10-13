@@ -617,7 +617,10 @@ the change, run108; the world allows 120 ms, a stress sweep 400 ms) and Secure E
   themselves: a switch of theirs INTO the visited desktop after the visit's own way there (a swipe, a ⌃-arrow, a ⌘-Tab)
   makes that desktop their place, and the visit's end does not return them to where it began (1.19.0, the controller's
   ruling); it is judged once — its input used up there — so the visit's end and a later key read the same verdict. The
-  visit's own way there is never such a switch (only once the visit had arrived and they had left the visited desktop),
+  visit's own way there is never such a switch: only once the visit had arrived (its app seen in front, on the visited
+  desktop) and after that their place was seen on ANOTHER desktop — they left it, or were returned (their place, or a
+  move judged theirs); another app in front on the visited desktop, the agent's own included, is no leaving it (the
+  review of round 19, M1),
   and the visit's end judges what is in front FIRST, so a switch of theirs that landed but is not heard yet is found
   before any return is issued.
 - **I2′ — the user's ruling, NOT YET ENFORCED (round 10's MEDIUM #6; tried in round 12, reverted).** When an app was left
@@ -682,7 +685,9 @@ the change, run108; the world allows 120 ms, a stress sweep 400 ms) and Secure E
 - **I5.** Every path that can see the user's front app or desktop change — the guardian's activation and desktop
   observers, a focus blip's make-key step, each of its keys, its end and its waits, the reroute, a background click's
   preparation, the act's after-check and late check, a bind, `useWindow`, an AppleScript, making the bound window main,
-  a restore's retries, a desktop visit's start, watch and return, the held foreground's and rung 4's start — asks this
+  a restore's retries, a desktop visit's start, watch and return, the held foreground's and rung 4's start, the guarded
+  `AXFocused` write's check (1.19.0, the review of round 19's M3: it undid a click of the user's into the target that
+  landed during the write, before the guardian had heard it) — asks this
   one rule with the time its own operation began, and nothing else. One state gets one verdict until new input of the
   user's or a new cause of the agent's arrives; a state judged again counts only the facts from before it was first
   seen (input, causes, hardware) — kept while that state stays in front unchanged, even when its verdict was cleared (a
@@ -710,8 +715,14 @@ the change, run108; the world allows 120 ms, a stress sweep 400 ms) and Secure E
    LATEST — makes it the user's (I1); else, the agent active and no hardware input of theirs since its last cause (with
    a session tap): a system dialog is left alone and said, anything else is the agent's indirect effect, undone and
    said; else the user's (using up the latest input for that very app, else of the change's own kind).
-3. A click of theirs into its window (a claim, 1.5 s): the user's — using up that click's input.
-4. A desktop change that follows their own move into that app, with no cause of the agent's on it since: the user's.
+3. A click of theirs into its window (a claim, 1.5 s): the user's — using up that click's input. And the activation that
+   brings the window they clicked into forward with its app (the helper's bring at the release), landing late — within
+   0.8 s of the bring, its claim used by an earlier landing — with no switch input of theirs since the click: the
+   user's, ONLY on the clicked window's own desktop (the release records it), only with no raise of the agent's on that
+   app since the click (a cause, or for the front app an act's raise), and used up by its one landing (1.19.0; the review
+   of round 19, H1: an act in flight raising another of its windows on another desktop is the agent's).
+4. A desktop change that follows their own move into that app, with no cause of the agent's on it since — nor a raise
+   of the agent's on it, the front app's included (1.19.0, H1): the user's.
 5. Switch-capable input of theirs after the agent's last RAISING cause on that app — and after its last cause of any
    kind, unless the change is heard within 0.45 s of the input (an act's cause landing between their input and the
    switch's landing never outranks it): the user's. Pairing: an input for that very app first (a click on its window),
