@@ -265,7 +265,7 @@ extension CUCore {
         // after it can make a change theirs.
         guardianLock.withLock {
             guardianCore.beginVisit(app: t.pid, user: before.front, now: base.startedAt,
-                                    maxSeconds: max(Self.visitModeSeconds(maxMs: maxMs), visitCapMs / 1000))
+                                    maxSeconds: max(Self.visitModeSeconds(maxMs: maxMs), visitCapMs / 1000), from: before.space)
         }
         CULog.act.notice("visit \(v.id, privacy: .public) (\(why.rawValue, privacy: .public)): taking the user to \(t.appName, privacy: .public)'s desktop for window \(t.windowID, privacy: .public) (\(element == nil ? "the app alone: no element" : "its element raised", privacy: .public))")
         noteGuardianCause(t.pid, raise: true)
@@ -538,7 +538,25 @@ extension CUCore {
             CUVisitReport(visitId: v.id, targetId: s.targetId, app: s.appName, why: s.why.rawValue, actions: actions, ms: ms,
                           returned: returned, userMoved: userMoved, detail: detail)
         }
-        let now = userView()
+        var now = userView()
+        // What is in front is judged FIRST (a visit, a hold and rung 4 judge what is in front first): a switch of theirs
+        // into the visited desktop that landed but is not heard yet is theirs, and the end does not return them to where
+        // the visit began (round 19, the controller's ruling — the survey's ordinary seed 35: their ⌃-arrow landed 3 ms
+        // before the end, the return was issued, and its landing was then undone over the place the switch had made).
+        // (Then read again, and what changed meanwhile judged too — the review of round 19, L2, and its final review: what is
+        // decided below is decided on what is in front after the judge, never on a view read before it, and never on one
+        // the guardian has not judged — a switch of theirs back during the judge, unjudged, had the end pull them to the
+        // place the first judge made.)
+        if guardianLock.withLock({ guardianCore.active }) {
+            // (Bounded: a view that changes on every one of the three passes leaves its last read unjudged — the decision
+            // below is then made on a view the guardian has not judged; the re-review of round 19.)
+            for _ in 0..<3 {
+                _ = judgeMove(now, since: nil, path: "a desktop visit's end")
+                let after = userView()
+                if after == now { break }
+                now = after
+            }
+        }
         let sawUserMove = guardianLock.withLock { guardianCore.visitSawUserInput }
         // Where they are now is where they went (their place as the guardian has it) — not the visit's own switch landing
         // after their move (found by the model-based test: their ⌘-Tab onto the visited desktop was taken for the

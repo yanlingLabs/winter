@@ -102,8 +102,10 @@ final class GuardianModelTests: XCTestCase {
     ]
 
     /// The ordinary target's (`sim.editor`, round 14's standing second check) known-failing seeds in its surveyed range
-    /// 1–60 (the ratchet below runs the whole range).
-    static let ordinaryTargetKnownFailing: Set<Int> = []
+    /// 1–60 (the ratchet below runs the whole range), each pinned to its violation class.
+    /// (Round 19: the ordinary target's 49, pinned when the world's Finder fix surfaced it, came off once the engine judged
+    /// a switch of theirs into the visited desktop once — their place, the visit's end leaving them there.)
+    static let ordinaryTargetKnownFailing: [Int: String] = [:]
 
     /// (Round 16's fixed-seed lists — 1008, 1011, 1017, 1038, 1049, 1051, 1055, 1057, 1059, 1063, 1067, 1073 and, with an
     /// ordinary target, 36, 49, 51, 58 — and the ordinary target's seeds 1–12 are subsumed by the ratchet's whole ranges.)
@@ -138,14 +140,37 @@ final class GuardianModelTests: XCTestCase {
     /// a checked range of the ratchet too (round 18).
     static let defaultRatchetRange = 1...20
 
+    /// The mid-act click's own known-failing seeds (round 19: the ratchet runs every range with it too — the user clicking
+    /// into T while an act on it runs, at `midActStandingChance` per act), each pinned to its violation class.
+    /// The review of round 19, MEDIUM 1: the mid-act click is never skipped (a click on the empty desktop, T's window on
+    /// another desktop, is a real action of the user's) — 1014 is the same app on two desktops, 1022's class.
+    /// The baseline (the review of round 19, M2 — the controller's ruling): this list is what fails on the HONEST,
+    /// un-narrowed generator, so {1014, 1022, 1062, 1067} was its starting baseline, and it only shrinks from here — 1067
+    /// left it on the engine's fix of the guarded AXFocused write (its own mechanism, not 1022's class: the write's check
+    /// undid the user's click into T that landed during it).
+    static let midActKnownFailing: [Int: String] = [
+        1014: "I2: the engine's place T@200, the user's T@300 — the same app on two desktops (the mid-act click on the empty desktop brought Finder forward window-less)",
+        1022: "I2: the engine's place T@200, the user's T@100 — the same app on two desktops",
+        1062: "I1: S came forward as the user clicked into it, 4 ms later — the engine took the click as theirs and said nothing",
+    ]
+    /// The ordinary target's with the mid-act click.
+    static let ordinaryMidActKnownFailing: [Int: String] = [:]
+    static let midActStandingChance = "0.2"
+
     func testTheRatchetTheWholeSurveyedRangesPassButForTheKnownFailing() throws {
         // (A seed takes ~8 s, mostly waiting: the ranges run as child processes of this bundle, in parallel.)
         let known = Dictionary(Self.knownFailing.map { ($0.seed, $0.what) }, uniquingKeysWith: { a, _ in a })
-        let ordinary = Dictionary(Self.ordinaryTargetKnownFailing.map { ($0, "") }, uniquingKeysWith: { a, _ in a })
-        for (target, range, known) in [(nil, Self.ratchetRange, known), (nil, Self.defaultRatchetRange, known),
-                                       ("sim.editor", Self.ordinaryRatchetRange, ordinary)] as [(String?, ClosedRange<Int>, [Int: String])] {
-            let what = target.map { "with an ordinary target (\($0))" } ?? "with Finder as the target"
-            let failing = try Self.surveyInChildren(target: target, seeds: range)
+        let midAct = Self.midActKnownFailing
+        let ordinary = Self.ordinaryTargetKnownFailing
+        let off = "0", on = Self.midActStandingChance
+        for (target, range, known, mid) in [(nil, Self.ratchetRange, known, off), (nil, Self.defaultRatchetRange, known, off),
+                                            ("sim.editor", Self.ordinaryRatchetRange, ordinary, off),
+                                            (nil, Self.ratchetRange, midAct, on), (nil, Self.defaultRatchetRange, midAct, on),
+                                            ("sim.editor", Self.ordinaryRatchetRange, Self.ordinaryMidActKnownFailing, on)]
+                as [(String?, ClosedRange<Int>, [Int: String], String)] {
+            let what = (target.map { "with an ordinary target (\($0))" } ?? "with Finder as the target")
+                + (mid == off ? "" : ", the user clicking into T mid-act (\(mid) per act)")
+            let failing = try Self.surveyInChildren(target: target, seeds: range, extraEnv: ["WINTER_CU_SIM_MID_ACT": mid])
             // (R18 L6: the in-flight invariant had chances across the whole range — summed over its children.)
             XCTAssertGreaterThan(Self.lastSurveyInFlightChances, 0, "RATCHET: \(what), seeds \(range): the user never began working in T during an act")
             for (seed, v) in failing.sorted(by: { $0.key < $1.key }) {
@@ -181,18 +206,30 @@ final class GuardianModelTests: XCTestCase {
     /// was cut short is a failure, never a pass.
     static func surveyInChildren(target: String?, seeds: ClosedRange<Int>, chunk: Int = 6, deadline: TimeInterval = childDeadline,
                                  extraEnv: [String: String] = [:]) throws -> [Int: String] {
+        let chunks = stride(from: seeds.lowerBound, through: seeds.upperBound, by: chunk).map { start in
+            (target: target, seeds: start...min(start + chunk - 1, seeds.upperBound))
+        }
+        let failing = try surveyInChildren(chunks, deadline: deadline, extraEnv: extraEnv, naming: "\(seeds)")
+        return Dictionary(failing.map { ($0.key.seed, $0.value) }, uniquingKeysWith: { a, _ in a })
+    }
+
+    /// The same over any list of chunks, each with its own target (round 19, M3: the named regression tests' seeds, one
+    /// child each, all at once). A failing seed's key is its target (nil: Finder) and its number.
+    static func surveyInChildren(_ chunks: [(target: String?, seeds: ClosedRange<Int>)], deadline: TimeInterval = childDeadline,
+                                 extraEnv: [String: String] = [:], naming: String) throws -> [SurveyKey: String] {
+        let seeds = naming
         let bundle = Bundle(for: GuardianModelTests.self).bundlePath
-        var children: [(process: Process, out: Pipe, err: Pipe, seeds: ClosedRange<Int>)] = []
-        for start in stride(from: seeds.lowerBound, through: seeds.upperBound, by: chunk) {
+        var children: [(process: Process, out: Pipe, err: Pipe, seeds: ClosedRange<Int>, target: String?)] = []
+        for c in chunks {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
             p.arguments = ["xctest", "-XCTest", "WinterCUCoreTests.GuardianModelTests/testTheInvariantsHoldOverRandomInterleavings", bundle]
             var env = ProcessInfo.processInfo.environment
             env["WINTER_CU_SIM_SURVEY"] = "1"
-            env["WINTER_CU_SIM_FIRST_SEED"] = "\(start)"
-            env["WINTER_CU_SIM_SEEDS"] = "\(min(chunk, seeds.upperBound - start + 1))"
+            env["WINTER_CU_SIM_FIRST_SEED"] = "\(c.seeds.lowerBound)"
+            env["WINTER_CU_SIM_SEEDS"] = "\(c.seeds.count)"
             env["WINTER_CU_SIM_STEPS"] = "\(steps)"
-            env["WINTER_CU_SIM_TARGET"] = target
+            env["WINTER_CU_SIM_TARGET"] = c.target
             env["WINTER_CU_SIM_ONLY_SEED"] = nil
             for (k, v) in extraEnv { env[k] = v }
             p.environment = env
@@ -200,10 +237,10 @@ final class GuardianModelTests: XCTestCase {
             p.standardOutput = out
             p.standardError = err
             try p.run()
-            children.append((p, out, err, start...min(start + chunk - 1, seeds.upperBound)))
+            children.append((p, out, err, c.seeds, c.target))
         }
         let lock = NSLock()
-        var texts: [String] = []
+        var texts: [(target: String?, text: String)] = []
         var broken: [String] = []
         let group = DispatchGroup()
         for c in children {
@@ -222,7 +259,7 @@ final class GuardianModelTests: XCTestCase {
                 hung.cancel()
                 let text = String(decoding: data, as: UTF8.self)
                 lock.withLock {
-                    texts.append(text)
+                    texts.append((c.target, text))
                     // Every child must report its own survey line and exit cleanly; one that crashed or was cut short is a
                     // failure — with its stderr kept, for the report.
                     let reported = text.split(separator: "\n").contains { $0.hasPrefix("SURVEY: ") }
@@ -235,7 +272,7 @@ final class GuardianModelTests: XCTestCase {
             }
         }
         group.wait()
-        let lines = texts.flatMap { $0.split(separator: "\n").map(String.init) }
+        let lines = texts.flatMap { $0.text.split(separator: "\n").map(String.init) }
         lastSurveyInFlightChances = lines.compactMap { l -> Int? in
             guard let r = l.range(of: " times the user began working in T during an act") else { return nil }
             return Int(l[..<r.lowerBound].split(separator: " ").last ?? "")
@@ -243,14 +280,18 @@ final class GuardianModelTests: XCTestCase {
         guard broken.isEmpty else {
             throw CUError.unsupported("the survey of seeds \(seeds): \(broken.sorted().joined(separator: "; "))")
         }
-        var failing: [Int: String] = [:]
-        for l in lines where l.hasPrefix("SURVEY seed ") {
-            let rest = l.dropFirst("SURVEY seed ".count)
-            guard let colon = rest.firstIndex(of: ":"), let seed = Int(rest[..<colon]) else { continue }
-            failing[seed] = String(rest[rest.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+        var failing: [SurveyKey: String] = [:]
+        for t in texts {
+            for l in t.text.split(separator: "\n") where l.hasPrefix("SURVEY seed ") {
+                let rest = l.dropFirst("SURVEY seed ".count)
+                guard let colon = rest.firstIndex(of: ":"), let seed = Int(rest[..<colon]) else { continue }
+                failing[SurveyKey(target: t.target, seed: seed)] = String(rest[rest.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            }
         }
         return failing
     }
+
+    struct SurveyKey: Hashable { var target: String?; var seed: Int }
 
     /// The ratchet's runner itself (the review of round 17's probe): a child that crashes mid-chunk fails the survey — never
     /// a pass — and so does a child that hangs (killed at its deadline, naming its seeds).

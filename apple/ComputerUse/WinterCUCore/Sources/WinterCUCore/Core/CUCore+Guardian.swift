@@ -1091,6 +1091,9 @@ extension CUCore {
             return
         }
         guard sys.frontmostPid() != p.pid else { return }
+        // (Its landing is the click's — round 19, the guardian's `noteClickBring`.)
+        let clickedSpace = sys.windowSpaces(p.wid)?.first ?? sys.activeSpace()
+        guardianLock.withLock { guardianCore.noteClickBring(p.pid, clickAt: p.time, space: clickedSpace, now: clock.nowSeconds()) }
         let bring = { [weak self] in
             guard let self else { return }
             if let w = self.targetWindowElement(pid: p.pid, windowID: p.wid) { try? self.ax.perform(w, kAXRaiseAction) }

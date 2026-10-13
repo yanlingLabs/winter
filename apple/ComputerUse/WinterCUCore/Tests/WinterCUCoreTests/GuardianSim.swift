@@ -44,6 +44,9 @@ enum SimPid {
     static let spotlight: pid_t = 780
     /// T's content process (a web view's): an event posted to it reaches T (round 18 — I6 in flight watches it).
     static let targetContent: pid_t = 5253
+    /// Finder, when T is another app (round 19): a click on the empty desktop brings FINDER forward (PROTOCOL §4.12: "A
+    /// click on the empty desktop: Finder's") — with Finder as T, that is T itself.
+    static let finder: pid_t = 5300
     static let own: pid_t = getpid()
 
     static func name(_ pid: pid_t) -> String {
@@ -63,6 +66,7 @@ enum SimPid {
         case coreServices: return "CSUIA"
         case dock: return "Dock"
         case spotlight: return "SPL"
+        case finder: return "F"
         case own: return "helper"
         default: return pid >= 800 && pid < 900 ? "L\(pid)" : "pid \(pid)"
         }
@@ -304,6 +308,8 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
                                     SimPid.visited: "sim.visited", SimPid.held: "sim.held", SimPid.coreServices: "com.apple.coreservices.uiagent",
                                     SimPid.spotlight: "com.apple.Spotlight"]
     var front: pid_t = SimPid.user
+    /// The Finder process: T when T is Finder, else its own (round 19 — the empty desktop's app).
+    var finderPid: pid_t = SimPid.target
     var space1: UInt64 = 100
     var focusDisplay = 1
     var space: UInt64 { focusDisplay == 2 ? 400 : space1 }
@@ -398,10 +404,23 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// once its activation lands (within 0.5 s).
     var userWorkingIn: pid_t?
     var pendingWork: (app: pid_t, until: Double)?
+    /// The app their work ended in by LEAVING THE FRONT, and whether the engine could have seen it leave: an activation
+    /// notification heard while another app was in front (round 19 — the mid-act seeds 1069 and, with an ordinary target,
+    /// 60: T left the front for a moment and was back before any notification was heard; §4.12, what can't be attributed:
+    /// "the guardian hears of an activation only when told, with no time on it"). A new mark forgets it.
+    /// Bounded (the review of round 19, LOW 3): it counts only for a departure that lasted no longer than NSWorkspace's
+    /// notification can be late in this world ("measured: within 13 ms of the change, run108; the world allows 120 ms, a
+    /// stress sweep 400 ms" — §4.12) — `back`: when T came to the front again.
+    var workLeft: (app: pid_t, at: Double, seen: Bool, back: Double?)?
+    /// Whether their work in `pid` ended only by a departure from the front too short for any notification to show it.
+    func unseenWorkLeave(_ pid: pid_t) -> Bool {
+        guard let l = workLeft, l.app == pid, !l.seen, let b = l.back, front == pid else { return false }
+        return b - l.at <= (Self.stress ? 400 : 120)
+    }
     /// The world's answer: is the user working in `pid` now?
     func userWorks(in pid: pid_t) -> Bool {
         lock.withLock {
-            if let p = pendingWork, front == p.app, now <= p.until { userWorkingIn = p.app; workBegan(p.app); pendingWork = nil }
+            if let p = pendingWork, front == p.app, now <= p.until { userWorkingIn = p.app; workLeft = nil; workBegan(p.app); pendingWork = nil }
             return userWorkingIn == pid && front == pid
         }
     }
@@ -412,7 +431,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             // into T and T's activation, does not take the click back — §4.12 I6, a click counts once its own activation
             // lands; round 18, found by the in-flight exercise's mid-act click, seed 1.)
             if front == app {
-                userWorkingIn = app; workBegan(app)
+                userWorkingIn = app; workLeft = nil; workBegan(app)
                 if pendingWork?.app == app { pendingWork = nil }
             } else {
                 pendingWork = (app, now + 500)
@@ -747,8 +766,12 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             } else {
                 cands.formUnion(cands.filter { $0.expected == cur }.map { _ in SimCand(place: cur, expected: cur, held: nil) })
             }
-            leftApps.remove(front)
-            log("  (their \(how) in \(SimPid.name(front)), left in front: their place now)")
+            // (Round 19 — the mid-act seed 1026: input that beat the hearing leaves the app LEFT, so their next use of it,
+            // heard, makes it their place — §4.12: "a restore never pulls the user out of an app left in front once they
+            // have typed, clicked or scrolled in it: their input there makes it their place". The engine, which took the old
+            // place on the race, adopted it at that next use, and the oracle had already forgotten the app was left.)
+            if heard { leftApps.remove(front) }
+            log("  (their \(how) in \(SimPid.name(front)), left in front: their place now\(heard ? "" : " — or not yet, the engine had not heard of it"))")
         }
     }
 
@@ -805,7 +828,13 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             // A click into a window that activated nothing (a drag out of a background window) still claims that app's
             // activation for the claim's window (the contract: the engine can't tell a drag at the mouse-down).
             let dragClaim = s.claim && s.dest == nil && s.target == pid && t - s.at <= 1_500 + self.nextHearing()
-            guard i != excluding, s.visible, !s.claim || dragClaim, !s.pending, dragClaim || t - s.at <= s.lifeMs, t >= s.at else { return false }
+            // (Round 19 — the mid-act survey's ordinary seed 56: a click on THIS app's window or Dock tile whose own landing
+            // has not come yet still explains it coming forward — §4.12: "A click on another app's window: ONE input, an
+            // app switch for THAT app"; "a Dock click is input for the tile's app, claimed" (1.9.8). The app came forward
+            // 69 ms after their click on its tile, before the Dock's own landing; the engine can't tell the two apart.)
+            let pendingClaim = s.claim && s.dest == pid && s.target == pid && s.landedAt == nil
+            guard i != excluding, s.visible, !s.claim || dragClaim || pendingClaim, !s.pending, dragClaim || t - s.at <= s.lifeMs,
+                  t >= s.at else { return false }
             if let target = s.target, target != pid { return false }
             return (s.app && app) || (s.desktop && desktop)
         }
@@ -1072,8 +1101,9 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             if hasLeft(cause) || (visitBack && leftApps.contains(n.app)) { leftApps.insert(n.app) } else { leftApps.remove(n.app) }
             if case .untouched(_, .leftAlone, _, _) = cause { leftOnly.insert(n.app) } else if !visitBack { leftOnly.remove(n.app) }
             let oldFront = front, oldSpace = space
-            if let p = pendingWork, n.app == p.app, now <= p.until { userWorkingIn = p.app; workBegan(p.app); pendingWork = nil }
-            if let w = userWorkingIn, n.app != w { userWorkingIn = nil }  // they left the app they were working in
+            if let p = pendingWork, n.app == p.app, now <= p.until { userWorkingIn = p.app; workLeft = nil; workBegan(p.app); pendingWork = nil }
+            if let l = workLeft, l.back == nil, n.app == l.app { workLeft?.back = now }
+            if let w = userWorkingIn, n.app != w { userWorkingIn = nil; workLeft = (w, now, false, nil) }  // they left the app they were working in
             if n.space == 400 { focusDisplay = 2 } else { focusDisplay = 1; space1 = n.space }
             if let w = appWindow(n.app, onSpace: n.space), mainWin[n.app] != w.id {
                 mainWin[n.app] = w.id
@@ -1196,6 +1226,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     func notifyActivation(_ pid: pid_t) {
         lock.withLock {
             pendingNotes -= 1
+            if let l = workLeft, !l.seen, front != l.app { workLeft?.seen = true }
             if let o = owedNote, o.pid == pid, o.episode == episode, front == pid { dueNotes.append((pid, o.at)); owedNote = nil }
         }
         core?.onActivation(pid: pid)
@@ -1493,6 +1524,10 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     var dockLaunches: Bool?
     func dockItemLaunches(at point: CGPoint, dockPid: pid_t) -> Bool? { lock.withLock { dockLaunches } }
     func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? { lock.withLock { dockTileApp } }
+    /// What the item under a Finder double-click would do (R18-a; round 19, the Finder legs): true — an application or a
+    /// document (it launches); false — a folder (it opens in Finder, nothing launches); nil — it can't be read.
+    var finderLaunches: Bool?
+    func finderItemLaunches(at point: CGPoint, finderPid: pid_t) -> Bool? { lock.withLock { finderLaunches } }
 }
 
 extension SimPid {

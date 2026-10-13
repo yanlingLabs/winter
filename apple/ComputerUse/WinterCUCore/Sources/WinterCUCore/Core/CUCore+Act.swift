@@ -2084,9 +2084,14 @@ extension CUCore {
         }
         // A plain native field, no history of activating: the write, under the guard.
         let before = userView()
+        noteSyntheticActivation(t.pid)  // the write can activate the app: an activation right after it is not theirs by itself
         try? ax.set(e, kAXFocusedAttribute, kCFBooleanTrue)
         let after = view(after: before, settleMs: stepSettleMs)
-        if after != before {
+        // Judged by the one rule first, like every act's after-check (the review of round 19, M3 — the survey's mid-act seed
+        // 1067: the user's click into the target landed while the write ran, and the write was blamed and undone over it,
+        // a restore issued before the guardian had even heard the activation): a move of theirs is left alone, and the
+        // app is not remembered as activating on the write.
+        if after != before, !leftAlone(after, since: nil, from: before, path: "focusing the field over accessibility: the after-check") {
             rememberFocusWriteActivates(t)  // use the press route first for this app from now on
             t.addViewNote(viewMoved(before, after, t, route: "focusing the field over accessibility", late: false))
         }
