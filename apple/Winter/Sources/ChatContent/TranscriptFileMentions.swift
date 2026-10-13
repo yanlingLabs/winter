@@ -321,10 +321,9 @@ struct TranscriptResolvedMention: Equatable {
 /// PURE, the resolution recipe — two stat passes, so a relative name can resolve inside a folder the SAME
 /// reply names:
 ///   1. `anchoredPaths`: every absolute and `~/` candidate, resolved.
-///   2. `baseDirectories(kinds:)`: the session's working directory, then the turn's context directories
-///      (`contextDirectories` — its attachments' folders, its tool calls' paths), then every folder pass 1
-///      found and every found file's own folder — deduplicated, capped at
-///      `transcriptFileMentionBaseDirectoryCap`.
+///   2. `baseDirectories(kinds:)`: the session's working directory, then every folder pass 1 found and every
+///      found file's own folder, then the session's context directories (`contextDirectories` — attachments'
+///      folders, tool calls' paths) — deduplicated, capped at `transcriptFileMentionBaseDirectoryCap`.
 ///   3. `relativePaths(bases:)`: every relative candidate joined to every base (`./` and `../` only to the
 ///      working directory — they say "here").
 ///   4. `resolve(kinds:)`: the answer, from both passes' stats. A relative candidate resolves only when
@@ -352,7 +351,8 @@ struct TranscriptMentionResolver {
             bases.append(path)
         }
         add(baseDirectory)
-        for directory in contextDirectories { add(directory) }
+        // What this reply names comes before what the session named earlier: under the cap, the reply's own
+        // folders are never crowded out.
         for path in anchoredPaths {
             switch kinds[path] {
             case .directory?: add(path)
@@ -360,6 +360,7 @@ struct TranscriptMentionResolver {
             case nil: break
             }
         }
+        for directory in contextDirectories { add(directory) }
         return bases
     }
 

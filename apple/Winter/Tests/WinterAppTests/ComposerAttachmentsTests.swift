@@ -341,7 +341,7 @@ final class ComposerAttachmentsTests: XCTestCase {
         let view = composerView(a)
         view.string = "see "
         view.setSelectedRange(NSRange(location: 4, length: 0))
-        view.takeComposerAttachments([.image(.file(path: "/Users/me/a.png")), .file(path: "/tmp")])
+        view.takeComposerAttachments([.image(ComposerImage(data: png, mediaType: "image/png")), .file(path: "/tmp")])
         XCTAssertEqual(view.composerText, "see \(m(1)) \(m(2)) ")
         let board = NSPasteboard(name: NSPasteboard.Name("winter.test.\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
