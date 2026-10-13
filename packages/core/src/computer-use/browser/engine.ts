@@ -373,10 +373,17 @@ export class BrowserEngine {
           driver.syncView(this.deps.headlessView?.(b.tabKey));
           driver.noteHolds(this.deps.headlessHolds?.(b.tabKey));
         }
-        await driver.ensureAttached(scope.sessionId);
-        scope.live();
-        for (const line of driver.takeNotes()) scope.builder.daemonLine(line);
-        if (!BLOCKED_TAB_PRIMITIVES.has(primitive)) await this.siteFloor(scope, b, driver);
+        // A primitive that works while the person holds the tab (letting it go, keeping it, waiting for them — Drill B,
+        // 2026-10-13: a waitForUser on a tab the person had taken over threw TargetBusy at this attach) runs without
+        // taking the tab: the pool refuses the agent's attach for the whole hold, and nothing of the page is the agent's
+        // to read or card meanwhile. waitForUser's own Done attaches again, once the tab is handed back.
+        const heldPass = this.isHeadless(b.backend) && this.deps.headlessHeld?.(b.tabKey) === true && HELD_TAB_PRIMITIVES.has(primitive);
+        if (!heldPass) {
+          await driver.ensureAttached(scope.sessionId);
+          scope.live();
+          for (const line of driver.takeNotes()) scope.builder.daemonLine(line);
+          if (!BLOCKED_TAB_PRIMITIVES.has(primitive)) await this.siteFloor(scope, b, driver);
+        }
         // Again, right before the work: the lock, the attach and a site card can each wait long enough for the person to
         // take the tab over meanwhile.
         if (this.isHeadless(b.backend) && this.deps.headlessHeld?.(b.tabKey) === true && !HELD_TAB_PRIMITIVES.has(primitive)) {
