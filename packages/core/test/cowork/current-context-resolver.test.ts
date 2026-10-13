@@ -214,6 +214,61 @@ test("a final registration callback cannot mutate canonical records after the au
   }, reader: { read: async (request: CoworkInstructionReadRequest) => { const value = reply(request); armed = true; return value; } } };
   await rejected(new CoworkCurrentContextResolver(deps).resolve(f.lookup)); expect(injected).toBe(true);
 });
+test("a reader result descriptor trap cannot change publication after the last authority guard", async () => {
+  const f = fixture(); let injected = false;
+  const pending = resolver(f, async request => new Proxy(reply(request), {
+    getOwnPropertyDescriptor(target, key) {
+      if (!injected) {
+        injected = true;
+        f.records.updatePolicy({ principalId: "fixture", requestId: "result-proxy-race", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, { publication: "manual" });
+      }
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+  })).resolve(f.lookup);
+  await rejected(pending);
+  expect(injected).toBe(true); expect(f.records.policy(f.workspaceId).publication).toBe("manual");
+});
+test("rejected reader getters are never invoked during normalization", async () => {
+  const f = fixture(); let calls = 0;
+  await rejected(resolver(f, async request => {
+    const value = reply(request);
+    Object.defineProperty(value.blocks[0], "text", { enumerable: true, get() { calls++; return "forged guidance"; } });
+    return value;
+  }).resolve(f.lookup));
+  expect(calls).toBe(0);
+});
+test("reader abort cleanup cannot change publication after the final authority guard", async () => {
+  const f = fixture(); let injected = false;
+  await rejected(resolver(f, async (request, options) => {
+    options.signal.addEventListener("abort", () => {
+      injected = true;
+      f.records.updatePolicy({ principalId: "fixture", requestId: "cleanup-race", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, { publication: "manual" });
+    }, { once: true });
+    return reply(request);
+  }).resolve(f.lookup));
+  expect(injected).toBe(true);
+});
+test("no external result traps run after the final canonical guard", async () => {
+  const f = fixture(); let traps = 0, inspected = false, afterGuard = -1, arrayGets = 0;
+  const wrap = <T extends object>(value: T): T => new Proxy(value, {
+    ownKeys(target) { traps++; inspected = true; return Reflect.ownKeys(target); },
+    getOwnPropertyDescriptor(target, key) { traps++; inspected = true; return Reflect.getOwnPropertyDescriptor(target, key); },
+  });
+  const deps = { ...f.deps, currentRegistration(query: string) {
+    const value = f.deps.currentRegistration(query); if (inspected) afterGuard = traps; return value;
+  }, reader: { read: async (request: CoworkInstructionReadRequest) => {
+    const value = reply(request);
+    value.blocks = new Proxy(value.blocks.map(wrap), {
+      get() { arrayGets++; throw new Error("external array Get must not execute"); },
+      ownKeys(target) { traps++; inspected = true; return Reflect.ownKeys(target); },
+      getOwnPropertyDescriptor(target, key) { traps++; inspected = true; return Reflect.getOwnPropertyDescriptor(target, key); },
+    });
+    value.files = wrap(value.files.map(wrap)); return wrap(value);
+  } } };
+  const snapshot = await new CoworkCurrentContextResolver(deps).resolve(f.lookup);
+  expect(snapshot.facts).toBe(f.plan().facts); expect(traps).toBeGreaterThan(0);
+  expect(afterGuard).toBe(traps); expect(arrayGets).toBe(0);
+});
 test("final raw UTF8 bound includes host boundaries and facts and never truncates", async () => {
   const f = fixture();
   await rejected(resolver(f, async request => { const v = reply(request), text = "é".repeat(Math.floor((COWORK_CONTEXT_MAX_BYTES - Buffer.byteLength(f.plan().facts)) / 2)); v.blocks[0]!.text = text; v.blocks[0]!.sha256 = sha(text); return v; }).resolve(f.lookup));

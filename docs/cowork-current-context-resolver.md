@@ -12,8 +12,16 @@ a fresh host read ID, a copied full owning registration (logical/backend session
 generation, workspace, authenticated boot/incarnation/epoch and admitted view),
 and the exact current instruction scopes. Guest IDs/cwd are lookup hints, not
 authority. The result must echo that request exactly. Both the full registration
-and canonical plan are checked across the await; a final planner check follows
-external registration callbacks. Drift refuses without a partial or cached result.
+and canonical plan are checked across the await. Returned objects are normalized,
+validated and rendered before the final owning-registration/current-plan guard:
+Proxy descriptor traps can execute even though accessor fields are refused. The
+reader timer and normal abort cleanup are completed before that guard, including
+reader-installed abort listeners. The last planner check follows external
+registration callbacks, uses the upstream cancellation signal, and only the
+already sanitized primitive snapshot is returned afterward. Descriptor validation
+extracts fresh plain records/arrays with typed primitive fields; rejected getters
+are not invoked (unlike clone-first getter behavior). Drift refuses without a
+partial or cached result.
 This does not create global atomicity over independent mutable authority providers
 or prove detection of all concurrent/ABA changes.
 
@@ -77,9 +85,17 @@ continues to refuse required-context RPC. Their independently reviewed extension
 protected reader/transport/native view and durable ownership proofs remain gates.
 
 Source verification: `bun test ./packages/core/test/cowork/current-context-resolver.test.ts ./packages/core/test/cowork/current-context.test.ts ./packages/core/test/cowork/guest-runtime.test.ts`
-passes 79 tests with one existing candidate-runtime skip and 1147 assertions.
+passes 83 tests with one existing candidate-runtime skip and 1110 assertions.
 `bun run typecheck:core` passes. `bun build ./packages/core/src/cowork/current-context-resolver.ts --target=bun --outfile=out/current-context-resolver/resolver.js`
 emits an inert bundle (96 modules); the bundle was not executed or admitted.
 Logs/bundle are retained under the ignored `out/current-context-resolver` tree,
 not in the source commit. Tests use isolated canonical databases and synthetic
 readers; they do not read guest files or start a guest runtime/native service.
+
+The final-boundary correction has red-to-green regressions for a valid reader
+Proxy mutating publication from a descriptor trap, and a reader abort listener
+mutating publication during normal cleanup. Zero-call accessor and counting-Proxy
+regressions pin descriptor-only extraction (including array length) and no result
+trap calls after the final guard. Their red/green logs remain in the ignored
+evidence tree as `validation-race-{red,green}.log` and
+`cleanup-race-{red,green}.log`. No clone-first getter execution was introduced.

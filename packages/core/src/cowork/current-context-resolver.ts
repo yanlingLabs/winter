@@ -50,11 +50,15 @@ function closed(value: unknown, required: string[], optional: string[] = []): Re
   return Object.fromEntries(Object.entries(fields).map(([key, field]) => [key, field.value]));
 }
 function array(value: unknown, max: number): unknown[] {
-  if (!Array.isArray(value) || value.length > max || Reflect.ownKeys(value).length !== value.length + 1) return fail();
-  const fields = Object.getOwnPropertyDescriptors(value);
-  if (Object.values(fields).some(field => !("value" in field))) return fail();
-  return Array.from({ length: value.length }, (_, i) => fields[String(i)]!.value);
+  if (!Array.isArray(value)) return fail();
+  const fields = Object.getOwnPropertyDescriptors(value) as unknown as Record<string, PropertyDescriptor>, length = fields["length"];
+  if (!length || !("value" in length) || !Number.isSafeInteger(length.value) || length.value < 0 || length.value > max
+    || Reflect.ownKeys(fields).length !== length.value + 1 || Object.values(fields).some(field => !("value" in field))) return fail();
+  const count = length.value as number;
+  if (Array.from({ length: count }, (_, i) => Object.hasOwn(fields, String(i))).some(present => !present)) return fail();
+  return Array.from({ length: count }, (_, i) => fields[String(i)]!.value);
 }
+
 function path(value: unknown): string {
   if (typeof value !== "string" || bytes(value) > 4096 || !value.startsWith("/") || /[\\\0\r\n]/.test(value)
     || posix.normalize(value) !== value || value.split("/").includes("..")) return fail();
@@ -180,6 +184,7 @@ export class CoworkCurrentContextResolver {
   async resolve(lookup: CoworkContextLookup, options: { signal?: AbortSignal } = {}): Promise<Readonly<CoworkCurrentContextSnapshot>> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined, rejectWait!: (error: CoworkContextResolverError) => void;
+    let readerCleaned = false;
     const stopped = new Promise<never>((_, reject) => { rejectWait = reject; });
     // Cancellation can occur during synchronous canonical reads, before the await is installed.
     void stopped.catch(() => {});
@@ -202,17 +207,26 @@ export class CoworkCurrentContextResolver {
       });
       const result = await Promise.race([pending, stopped]);
       if (controller.signal.aborted) throw new CoworkContextResolverError("context_cancelled");
-      if (canonical(registration(this.deps.currentRegistration(this.query))) !== canonical(before)) return fail();
-      const after = this.planner.plan(lookup, { signal: controller.signal });
-      if (after.revision !== plan.revision) return fail();
+      // Descriptor/ownKeys traps on returned objects can execute during validation. Finish all
+      // external result inspection, sanitization and rendering BEFORE the last authority guard.
       const admitted = validate(result, request), rendered = render(admitted.blocks, request.scopes.shared.path, request.readId);
-      if (bytes(after.facts) + bytes(rendered.instructions) > COWORK_CONTEXT_MAX_BYTES) return fail();
-      if (controller.signal.aborted) throw new CoworkContextResolverError("context_cancelled");
-      return Object.freeze({ facts: after.facts, instructions: rendered.instructions,
-        revision: `context:${digest(canonical({ facts: after.facts, instructions: rendered.instructions, provenance: admitted.files, planRevision: after.revision, registration: before, renderToken: rendered.token }))}` });
+      if (bytes(plan.facts) + bytes(rendered.instructions) > COWORK_CONTEXT_MAX_BYTES) return fail();
+      const snapshot = Object.freeze({ facts: plan.facts, instructions: rendered.instructions,
+        revision: `context:${digest(canonical({ facts: plan.facts, instructions: rendered.instructions, provenance: admitted.files, planRevision: plan.revision, registration: before, renderToken: rendered.token }))}` });
+      // Normal reader abort listeners are external callbacks too. Finish them before the final
+      // canonical read; finally's abort is then idempotent and cannot run new cleanup callbacks.
+      if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
+      readerCleaned = true; controller.abort();
+      if (options.signal?.aborted) throw new CoworkContextResolverError("context_cancelled");
+      if (canonical(registration(this.deps.currentRegistration(this.query))) !== canonical(before)) return fail();
+      const after = this.planner.plan(lookup, { signal: options.signal });
+      if (after.revision !== plan.revision) return fail();
+      if (options.signal?.aborted) throw new CoworkContextResolverError("context_cancelled");
+      return snapshot; // Primitive-only sanitized snapshot; no external result inspection follows.
     } catch (error) {
       if (error instanceof CoworkContextResolverError) throw new CoworkContextResolverError(error.code);
-      if (controller.signal.aborted) throw new CoworkContextResolverError(options.signal?.aborted ? "context_cancelled" : "context_timed_out");
+      if (options.signal?.aborted) throw new CoworkContextResolverError("context_cancelled");
+      if (controller.signal.aborted && !readerCleaned) throw new CoworkContextResolverError("context_timed_out");
       throw new CoworkContextResolverError("context_unavailable");
     } finally {
       controller.abort();
