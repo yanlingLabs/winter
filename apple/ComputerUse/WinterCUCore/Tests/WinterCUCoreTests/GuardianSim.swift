@@ -747,8 +747,12 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             } else {
                 cands.formUnion(cands.filter { $0.expected == cur }.map { _ in SimCand(place: cur, expected: cur, held: nil) })
             }
-            leftApps.remove(front)
-            log("  (their \(how) in \(SimPid.name(front)), left in front: their place now)")
+            // (Round 19 — the mid-act seed 1026: input that beat the hearing leaves the app LEFT, so their next use of it,
+            // heard, makes it their place — §4.12: "a restore never pulls the user out of an app left in front once they
+            // have typed, clicked or scrolled in it: their input there makes it their place". The engine, which took the old
+            // place on the race, adopted it at that next use, and the oracle had already forgotten the app was left.)
+            if heard { leftApps.remove(front) }
+            log("  (their \(how) in \(SimPid.name(front)), left in front: their place now\(heard ? "" : " — or not yet, the engine had not heard of it"))")
         }
     }
 
