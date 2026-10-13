@@ -48,7 +48,7 @@ final class Round19GuardianTests: XCTestCase {
             g.noteCause(t, now: 9.95)                          // (the agent's act on T is running)
             g.noteSwitch(now: 10.0, .app, target: t)           // …then into T's window
             g.userClicked(app: t, space: 100, now: 10.0)
-            g.noteClickBring(t, clickAt: 10.0, now: 10.001)    // the helper brings T's window forward at the release
+            g.noteClickBring(t, clickAt: 10.0, space: 100, now: 10.001)    // the helper brings T's window forward at the release
             XCTAssertTrue(g.judge(CUMoveQuery(app: t, space: 100), now: 10.004).isUsers, "T's first landing: their click")
             g.noteCause(t, now: 10.006)                        // the agent's act on T goes on (in flight)
             if laterInput { g.noteSwitch(now: 10.007, .app, target: s) }  // a click on S's tile after the click into T
@@ -78,5 +78,41 @@ final class Round19GuardianTests: XCTestCase {
         let key = g.judge(CUMoveQuery(app: 6000, space: 300), now: 10.9)
         if case .agent = key { XCTFail("a key a moment later reads the same verdict — \(key)") }
         XCTAssertEqual(g.view.app, 6000)
+    }
+
+    /// The review of round 19, H1 (an I1 violation, found by a probe): the user clicks T's background window on desktop
+    /// 100, the helper brings it, and T@100 lands — theirs. 450 ms later the agent's act in flight on T raises T's window
+    /// on desktop 300 and macOS moves there: the agent's, never "the window they clicked into" — the bring counts only on
+    /// the clicked window's own desktop, only once, and never after a raise of the agent's on T since the click.
+    func testTheBringNeverCoversTheAgentsRaiseOnAnotherDesktop() {
+        let u: pid_t = 1, t: pid_t = 5252
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: u, space: 100))
+        g.noteCause(t, now: 9.9)                           // (the agent's act on T is running)
+        g.noteSwitch(now: 10.0, .app, target: t)
+        g.userClicked(app: t, space: 100, now: 10.0)
+        g.noteClickBring(t, clickAt: 10.0, space: 100, now: 10.001)
+        XCTAssertTrue(g.judge(CUMoveQuery(app: t, space: 100), now: 10.01).isUsers, "T@100 lands: their click")
+        g.noteCause(t, raise: true, now: 10.45)            // the act raises T's window on desktop 300
+        let raised = g.judge(CUMoveQuery(app: t, space: 300), now: 10.46)
+        XCTAssertFalse(raised.isUsers, "the agent's raise on another desktop is never the click's — \(raised)")
+        XCTAssertEqual(g.view, CUGuardedView(app: t, space: 100), "their place stays T@100")
+    }
+
+    /// The same timeline with T in front when the act raises its window (the act on the front app — an afterglow raise,
+    /// not a cause): neither the click's bring nor "the desktop change that came with their own move into it" covers it.
+    func testTheBringNeverCoversTheAgentsRaiseOfTheFrontAppOnAnotherDesktop() {
+        let u: pid_t = 1, t: pid_t = 5252
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: u, space: 100))
+        g.noteCause(t, now: 9.9)
+        g.noteSwitch(now: 10.0, .app, target: t)
+        g.userClicked(app: t, space: 100, now: 10.0)
+        g.noteClickBring(t, clickAt: 10.0, space: 100, now: 10.001)
+        XCTAssertTrue(g.judge(CUMoveQuery(app: t, space: 100), now: 10.01).isUsers, "T@100 lands: their click")
+        g.noteFrontAfterglow(t, raise: true, now: 10.45)  // the act on the front T raises its window on desktop 300
+        let raised = g.judge(CUMoveQuery(app: t, space: 300), now: 10.46)
+        XCTAssertFalse(raised.isUsers, "the agent's raise of the front app on another desktop is never theirs — \(raised)")
+        XCTAssertEqual(g.view, CUGuardedView(app: t, space: 100), "their place stays T@100")
     }
 }
