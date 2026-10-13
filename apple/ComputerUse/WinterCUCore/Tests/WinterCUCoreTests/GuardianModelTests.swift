@@ -143,12 +143,15 @@ final class GuardianModelTests: XCTestCase {
     /// The mid-act click's own known-failing seeds (round 19: the ratchet runs every range with it too — the user clicking
     /// into T while an act on it runs, at `midActStandingChance` per act), each pinned to its violation class.
     /// The review of round 19, MEDIUM 1: the mid-act click is never skipped (a click on the empty desktop, T's window on
-    /// another desktop, is a real action of the user's) — 1014 and 1067 are the same app on two desktops, 1022's class.
+    /// another desktop, is a real action of the user's) — 1014 is the same app on two desktops, 1022's class.
+    /// The baseline (the review of round 19, M2 — the controller's ruling): this list is what fails on the HONEST,
+    /// un-narrowed generator, so {1014, 1022, 1062, 1067} was its starting baseline, and it only shrinks from here — 1067
+    /// left it on the engine's fix of the guarded AXFocused write (its own mechanism, not 1022's class: the write's check
+    /// undid the user's click into T that landed during it).
     static let midActKnownFailing: [Int: String] = [
         1014: "I2: the engine's place T@200, the user's T@300 — the same app on two desktops (the mid-act click on the empty desktop brought Finder forward window-less)",
         1022: "I2: the engine's place T@200, the user's T@100 — the same app on two desktops",
         1062: "I1: S came forward as the user clicked into it, 4 ms later — the engine took the click as theirs and said nothing",
-        1067: "I3: the key focus handed to X, the user at T@200 — the same app on two desktops (a restore across desktops that macOS kept on the other one)",
     ]
     /// The ordinary target's with the mid-act click.
     static let ordinaryMidActKnownFailing: [Int: String] = [:]
