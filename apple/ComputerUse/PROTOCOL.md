@@ -897,6 +897,9 @@ acts: it only looks.
   “Submit”", "… when you change “Name”", "… when “Uploading” goes away"; the window-wide kinds name nothing ("Winter
   continues when this window changes") — never the text the model waits for, never its note. Click-through, never key,
   never activating, `sharingType = .none` (never in a capture); followed every 0.5 s while shown, gone with the watch.
+  The front window is the app's top normal-level window on screen — or the watched window still, when a window of the
+  app's own is above it and accessibility says the watched window is the app's key window: the window macOS attaches
+  above a window being captured (Winter's own view of it resuming does that) and a popover never take the ring away.
 
 ## 5. Errors
 
