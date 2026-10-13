@@ -415,6 +415,14 @@ public struct CUFocusGuardianCore: Sendable {
         restoredAt[pid] = now
     }
 
+    /// The helper brought the window the user clicked into forward with its app (a click into a bound target's background
+    /// window, at the button's release): `clickAt` is the click's own moment. Its landing is the CLICK's (round 19).
+    public mutating func noteClickBring(_ pid: pid_t, clickAt: TimeInterval, now: TimeInterval) {
+        clickBrings = clickBrings.filter { now - $0.value.at <= Self.restoreLateWindow }
+        clickBrings[pid] = (now, clickAt)
+    }
+    private var clickBrings: [pid_t: (at: TimeInterval, clickAt: TimeInterval)] = [:]
+
     /// An app a restore re-activated, coming forward after the user's place moved away from it since: the restore's late
     /// landing (I2) — touched, so it is undone (back to where they went).
     func restoreLate(_ app: pid_t, now: TimeInterval) -> TimeInterval? {
@@ -987,6 +995,14 @@ public struct CUFocusGuardianCore: Sendable {
             // The click's own instant is used up by this change (one input, one change — found by the model-based test:
             // left unused, it made the app's return a moment after the user had left it "theirs").
             return (.user("they clicked into its window"), input.targeted(a, upTo: upTo).map { .instant($0, keep: false) })
+        }
+        // The activation that brings the window they clicked into forward, landing late (within the restore-late window, its claim used)
+        // with no switch input of theirs since the click: their click's — whatever came between was the landing of input
+        // from BEFORE it (round 19 — found with the model-based test's mid-act click, ordinary seed 31: their Dock click on
+        // S, then their click into T; T came forward, S landed from the Dock click, then the bring of T's window landed and
+        // was undone as the agent's, its claim and instant used by T's first landing).
+        if let a = app, let b = clickBrings[a], now - b.at <= Self.restoreLateWindow, input.lastAt <= b.clickAt, !(visit && a == visitApp) {
+            return (.user("the window they clicked into, brought forward with its app"), nil)
         }
         if let a = app, a == place.app, viewAt >= now - Self.followOnWindow, cause <= viewAt {
             if visit, a == visitApp { return (.visit, nil) }

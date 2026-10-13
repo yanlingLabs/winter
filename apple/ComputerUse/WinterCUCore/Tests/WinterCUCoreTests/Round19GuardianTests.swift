@@ -28,4 +28,29 @@ final class Round19GuardianTests: XCTestCase {
         XCTAssertEqual(b.workMarks[t, default: 0], before, "they may have moved on before T landed: nothing counts")
         XCTAssertFalse(b.userIsWorking(in: t, front: t, now: 10.5))
     }
+
+    /// The helper's bring of the window the user clicked into (a bound target's background window, brought forward with its
+    /// app at the button's release) is the CLICK's: landing late, after another app came forward from their EARLIER input
+    /// (a Dock click before the click), it is theirs — never undone as the agent's (round 19, the mid-act survey's ordinary
+    /// seed 31: the act on T went on after the click, the claim and the click's instant were used by T's first landing).
+    /// A switch input of theirs after the click makes it no longer the click's.
+    func testTheBringOfTheClickedWindowIsTheClicks() {
+        let u: pid_t = 1, t: pid_t = 5252, s: pid_t = 710
+        for laterInput in [false, true] {
+            var g = CUFocusGuardianCore()
+            g.begin(view: CUGuardedView(app: u, space: 100))
+            g.noteSwitch(now: 9.9, .app, target: s)            // their click on S's Dock tile…
+            g.noteCause(t, now: 9.95)                          // (the agent's act on T is running)
+            g.noteSwitch(now: 10.0, .app, target: t)           // …then into T's window
+            g.userClicked(app: t, space: 100, now: 10.0)
+            g.noteClickBring(t, clickAt: 10.0, now: 10.001)    // the helper brings T's window forward at the release
+            XCTAssertTrue(g.judge(CUMoveQuery(app: t, space: 100), now: 10.004).isUsers, "T's first landing: their click")
+            g.noteCause(t, now: 10.006)                        // the agent's act on T goes on (in flight)
+            if laterInput { g.noteSwitch(now: 10.007, .app, target: s) }  // a click on S's tile after the click into T
+            XCTAssertTrue(g.judge(CUMoveQuery(app: s, space: 100), now: 10.01).isUsers, "S landed: their Dock click")
+            g.noteCause(t, now: 10.012)
+            let tLands = g.judge(CUMoveQuery(app: t, space: 100), now: 10.02)
+            XCTAssertEqual(tLands.isUsers, !laterInput, "the bring of T landing after S (input after the click: \(laterInput)) — \(tLands)")
+        }
+    }
 }
