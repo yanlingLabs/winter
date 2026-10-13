@@ -1136,7 +1136,7 @@ export async function startDaemon(opts: {
    */
   const agentProvider = opts.agentProvider ?? null;
   // The daemon's ONE quota ledger — the router's, so a per-provider instance reports into the same
-  // place `daemon.status`/`sync.config` read. An inert manager only for a boot with no router at all.
+  // place the `quota.state` RPC reads. An inert manager only for a boot with no router at all.
   const quota: QuotaManager = internalRouter?.quota ?? new QuotaManager();
 
   // Fix wave (pre-merge review, finding 4b): the ONE `RebindableProvider.refresh` retry lever,

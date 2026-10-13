@@ -302,8 +302,8 @@ const MAX_SUGGESTED_OPTIONS = 4;
  * so those suggestions are dropped rather than being silently persisted to disk.
  *
  * **Every minted rule is round-tripped through the rules store's own `parseRule` first.** Choosing
- * a rule-bearing option makes `approval.respond` APPEND that literal string to
- * `<root>/.winter/permissions.local.json`; a rule in a grammar Winter cannot parse would be written,
+ * a rule-bearing option makes `approval.respond` save that literal string through
+ * `agent/saved-answers.ts` (`sdk/settings.json`, or the trusted project's `.winter/settings.local.json`); a rule in a grammar Winter cannot parse would be written,
  * warned about once, and thereafter ignored — inert litter in the user's rules file, offered under
  * a label promising it would silence future calls. Winter's rule vocabulary is Winter's (both are
  * CC's), so this filter is a guard against drift, not a translation layer.
@@ -914,8 +914,8 @@ async function raiseCard(
   // `bash` alone. Per the 0.0.17 changelog that rule is not "don't ask me again": an allow rule
   // naming an EXACT host is standing consent for that host WHEREVER IT RESOLVES, and it turns the
   // private-address/DNS-rebinding check off for it permanently. No card wording asks for that, and
-  // choosing it here would also APPEND it to `.winter/permissions.local.json` (`approval.respond`'s
-  // `PermissionRules.append`, the one rules-store writer). Dropping it at card-construction time is
+  // choosing it here would also save it as a standing rule (`approval.respond` via
+  // `agent/saved-answers.ts`: `sdk/settings.json` or the project's `.winter/settings.local.json`). Dropping it at card-construction time is
   // the single place that closes both halves: the respond handler resolves an `optionId` against the
   // options THIS record stored (an unknown id persists nothing), and `updatedPermissionsFor` reads
   // the same list. `undefined` is the plain approve/deny card every non-`bash` tool already gets.
