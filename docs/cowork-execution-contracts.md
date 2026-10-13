@@ -58,6 +58,8 @@ own key-recovery rules; they are not first-version prerequisites.
 
 Cowork supports `plan`, `dont-ask`, `ask`, `accept-edits`, `auto` and `bypass`, with `auto` as the ordinary starting policy. The Project has a grant/capability ceiling and a default policy; each conversation records its own policy. Effective authority intersects current Project grants, conversation restrictions, operation-specific approvals and saved schedule/delegation bounds. These policies are not a linear privilege ranking.
 
+Accepted product decision, 2026-10-12: Cowork retains Code's `bypass` behavior. `permissionModeFor("bypass")` maps to guest `bypassPermissions`, with `allowDangerouslySkipPermissions: true` and no ordinary approval prompts. Do not remove this policy for Cowork or add a Cowork-specific warning. Mandatory VM/tool views, admitted roots, hidden stores/run homes, host credential custody and device/proc restrictions remain enforced with the permission gate disabled; the approval policy does not grant additional filesystem or host authority.
+
 The following defaults apply after hard denials and explicit applicable rules:
 
 | Policy | Admitted reads | Ordinary workspace edits | Other admitted guest actions | Shared workspace instruction edit |
