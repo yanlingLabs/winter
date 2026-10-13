@@ -5025,19 +5025,37 @@ struct HeadlessGeometry {
 /// presentation ending at one scale and the next starting at another a few milliseconds later) left the browser painting
 /// NOTHING — measured: no `OnAcceleratedPaint` at all afterwards, whatever was asked of it — so a change (of size or scale
 /// alike) is applied at most once per `kHeadlessScaleSettle`; a later wish waits for the rest of it, and only the last
-/// one is applied. A live resize of the panel therefore re-lays the page out at most every 300 ms.
+/// one is applied. A live resize of the panel therefore re-lays the page out at most every 300 ms. A browser's creation
+/// and its first frame count as changes too: a sign-in window the person opened, shown in the panel at once and asked
+/// for the panel's view ~150 ms after it was created, painted ONE letterboxed frame and then nothing — `Invalidate`
+/// included — until the person clicked in it (Drill A, 2026-10-13; reproduced by the presentation proof's static window).
 struct HeadlessViewState {
   HeadlessGeometry applied;
   HeadlessGeometry previous;
   HeadlessGeometry wanted;
   CFAbsoluteTime changedAt = 0;
   bool scheduled = false;
+  /// Frames of another view since the last change: refreshes asked for (bounded), and one waiting to be asked.
+  int staleRefreshes = 0;
+  bool refreshPending = false;
+  /// The browser painted its first frame (its creation and its first frame count as changes for the settle).
+  bool painted = false;
 };
 std::map<int, HeadlessViewState> &HeadlessViewStates() {
   static auto *states = new std::map<int, HeadlessViewState>();
   return *states;
 }
 const CFTimeInterval kHeadlessScaleSettle = 0.3;
+
+/// A frame painted at another view than the applied one, after a change: CEF's capturer keeps its old size (its
+/// resolution follows the renderer's frame metadata only AFTER that frame activated, and asks for no capture then), so
+/// the new layout comes letterboxed into the old box — and on a page with nothing moving (a sign-in window) no later
+/// paint ever replaces it: the person saw the window small, black bars beside it, until they clicked in it (Drill A,
+/// 2026-10-13). Each such frame asks for a refresh of the view (`Invalidate`, a capture at the capturer's size now)
+/// `kHeadlessStaleRefreshDelay` later, at most `kHeadlessStaleRefreshMax` times per change; a frame of the applied view
+/// ends it.
+const CFTimeInterval kHeadlessStaleRefreshDelay = 0.05;
+const int kHeadlessStaleRefreshMax = 40;
 
 /// The view `browser` is laid out in now (the agent's fixed one for a browser nobody has shown).
 HeadlessGeometry HeadlessAppliedGeometry(CefRefPtr<CefBrowser> browser) {
@@ -5094,10 +5112,39 @@ class WinterHeadlessRenderHandler : public CefRenderHandler {
                           const CefAcceleratedPaintInfo &info) override {
     if (!g_headless_paint_observer || !browser || !info.shared_texture_io_surface) return;
     IOSurfaceRef surface = reinterpret_cast<IOSurfaceRef>(info.shared_texture_io_surface);
+    const int pixelWidth = static_cast<int>(IOSurfaceGetWidth(surface));
+    const int pixelHeight = static_cast<int>(IOSurfaceGetHeight(surface));
     const HeadlessGeometry g = type == PET_POPUP
         ? HeadlessAppliedGeometry(browser)
-        : HeadlessGeometryOfFrame(browser, static_cast<int>(IOSurfaceGetWidth(surface)), static_cast<int>(IOSurfaceGetHeight(surface)));
+        : HeadlessGeometryOfFrame(browser, pixelWidth, pixelHeight);
     g_headless_paint_observer(browser->GetIdentifier(), type == PET_POPUP ? 1 : 0, surface, g.width, g.height, g.scale);
+    if (type == PET_VIEW) RefreshIfStale(browser, pixelWidth, pixelHeight);
+  }
+
+  /// A frame of another view than the applied one: a refresh asked for shortly (`kHeadlessStaleRefreshDelay`), bounded.
+  static void RefreshIfStale(CefRefPtr<CefBrowser> browser, int pixelWidth, int pixelHeight) {
+    const int id = browser->GetIdentifier();
+    auto it = HeadlessViewStates().find(id);
+    if (it == HeadlessViewStates().end()) return;
+    HeadlessViewState &state = it->second;
+    if (!state.painted) {
+      state.painted = true;
+      state.changedAt = std::max(state.changedAt, CFAbsoluteTimeGetCurrent());
+    }
+    if (state.applied.Paints(pixelWidth, pixelHeight)) {
+      state.staleRefreshes = 0;
+      return;
+    }
+    if (state.refreshPending || state.staleRefreshes >= kHeadlessStaleRefreshMax) return;
+    state.refreshPending = true;
+    state.staleRefreshes++;
+    CefRefPtr<CefBrowser> held = browser;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kHeadlessStaleRefreshDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      auto again = HeadlessViewStates().find(id);
+      if (again == HeadlessViewStates().end()) return;  // the browser closed meanwhile
+      again->second.refreshPending = false;
+      if (held->IsValid() && held->GetHost()) held->GetHost()->Invalidate(PET_VIEW);
+    });
   }
 
   void OnPopupShow(CefRefPtr<CefBrowser> browser, bool show) override {
@@ -5317,6 +5364,12 @@ class WinterHeadlessClient : public WinterClient {
     WinterClient::OnTitleChange(browser, title);
     const std::string t = title.ToString();
     PageChanged(browser, nullptr, &t);
+  }
+
+  /// The browser's creation counts as a change of its view (`HeadlessViewState`): its first view change waits the settle.
+  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
+    WinterClient::OnAfterCreated(browser);
+    if (browser) HeadlessViewStates()[browser->GetIdentifier()].changedAt = CFAbsoluteTimeGetCurrent();
   }
 
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
@@ -6015,6 +6068,7 @@ void ApplyHeadlessView(CefRefPtr<CefBrowser> browser, HeadlessViewState &state) 
   state.previous = state.applied;
   state.applied = state.wanted;
   state.changedAt = CFAbsoluteTimeGetCurrent();
+  state.staleRefreshes = 0;
   CefRefPtr<CefBrowserHost> host = browser->GetHost();
   host->NotifyScreenInfoChanged();
   host->WasResized();
@@ -6037,6 +6091,29 @@ HeadlessGeometry HeadlessClampedGeometry(int cssWidth, int cssHeight, double sca
   return g;
 }
 
+/// The newest wish applied once the settle is over — measured again when the wait ends (the browser's first frame may
+/// have moved it on meanwhile).
+void ScheduleHeadlessView(NSView *key, int id, CFTimeInterval wait) {
+  HeadlessViewState &state = HeadlessViewStates()[id];
+  if (state.scheduled) return;
+  state.scheduled = true;
+  __weak NSView *weakKey = key;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    auto it = HeadlessViewStates().find(id);
+    if (it == HeadlessViewStates().end()) return;
+    it->second.scheduled = false;
+    NSView *k = weakKey;
+    CefRefPtr<CefBrowser> current = k == nil ? nullptr : BrowserForParent(k);
+    if (!current || current->GetIdentifier() != id) return;
+    const CFTimeInterval more = it->second.changedAt + kHeadlessScaleSettle - CFAbsoluteTimeGetCurrent();
+    if (more > 0.001) {
+      ScheduleHeadlessView(k, id, more);
+      return;
+    }
+    ApplyHeadlessView(current, it->second);
+  });
+}
+
 void WinterCEFHeadlessSetPresentation(NSView *key, int cssWidth, int cssHeight, double scale, int frameRate) {
   CefRefPtr<CefBrowser> browser = BrowserForParent(key);
   if (!browser) return;
@@ -6055,18 +6132,7 @@ void WinterCEFHeadlessSetPresentation(NSView *key, int cssWidth, int cssHeight, 
     return;
   }
   host->Invalidate(PET_VIEW);
-  if (state.scheduled) return;
-  state.scheduled = true;
-  __weak NSView *weakKey = key;
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-    auto it = HeadlessViewStates().find(id);
-    if (it == HeadlessViewStates().end()) return;
-    it->second.scheduled = false;
-    NSView *k = weakKey;
-    CefRefPtr<CefBrowser> current = k == nil ? nullptr : BrowserForParent(k);
-    if (!current || current->GetIdentifier() != id) return;
-    ApplyHeadlessView(current, it->second);
-  });
+  ScheduleHeadlessView(key, id, wait);
 }
 
 void WinterCEFHeadlessSetViewObserver(void (^observer)(int browserId, int cssWidth, int cssHeight, double scale)) {
