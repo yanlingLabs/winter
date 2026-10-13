@@ -166,7 +166,10 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
     // Only the kernel's: one forged by a peer would make us drop a reference we never got. A real one carries a user
     // reference of its own on the dead name, given back whether or not it is still our producer's.
     mach_port_name_t name = MACH_PORT_NULL;
-    if (!WinterPresentKernelDeadName(header, &name)) return;
+    if (!WinterPresentKernelDeadName(header, &name)) {
+      mach_msg_destroy(header);  // a forged one: whatever rights it carried go with it
+      return;
+    }
     os_unfair_lock_lock(&_lock);
     const BOOL ours = !_closed && name == _producer;
     os_unfair_lock_unlock(&_lock);
@@ -204,12 +207,26 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
     case WinterPresentMsgPool: {
       if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX) || header->msgh_size < sizeof(WinterPresentPoolMsg)) break;
       WinterPresentPoolMsg *m = (WinterPresentPoolMsg *)header;
-      if (m->body.msgh_descriptor_count != WinterPresentPoolSlots) break;
+      if (m->body.msgh_descriptor_count != WinterPresentPoolSlots) {
+        mach_msg_destroy(header);
+        [self endWithReason:@"the presenting browser sent pictures Winter can't read"];
+        return;
+      }
       id<MTLTexture> textures[WinterPresentPoolSlots] = {nil};
-      BOOL ok = YES;
-      for (int i = 0; i < WinterPresentPoolSlots; i++) {
+      BOOL ok = m->pixelWidth > 0 && m->pixelHeight > 0 && m->pixelWidth <= 16384 && m->pixelHeight <= 16384;
+      for (int i = 0; i < WinterPresentPoolSlots && ok; i++) {
+        // A port descriptor carrying a send right, and a surface the size the pool says — anything else is not a pool.
+        if (m->surfaces[i].type != MACH_MSG_PORT_DESCRIPTOR || m->surfaces[i].name == MACH_PORT_NULL) {
+          ok = NO;
+          continue;
+        }
         IOSurfaceRef surface = IOSurfaceLookupFromMachPort(m->surfaces[i].name);
         if (surface == NULL) {
+          ok = NO;
+          continue;
+        }
+        if ((int32_t)IOSurfaceGetWidth(surface) != m->pixelWidth || (int32_t)IOSurfaceGetHeight(surface) != m->pixelHeight) {
+          CFRelease(surface);
           ok = NO;
           continue;
         }
@@ -224,7 +241,11 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
         if (textures[i] == nil) ok = NO;
       }
       mach_msg_destroy(header);  // the surface rights: the textures hold the surfaces now
-      if (!ok) return;           // destroyed already: never twice
+      if (!ok) {
+        // Destroyed already (never twice). Without its pictures the view would freeze on the last one: it ends, said why.
+        [self endWithReason:@"the presenting browser's pictures could not be shown"];
+        return;
+      }
       os_unfair_lock_lock(&_lock);
       _generation = m->generation;
       _scale = m->scale >= 1.0 && m->scale <= 4.0 ? m->scale : 1.0;
@@ -439,12 +460,15 @@ static NSArray<NSString *> *PresentPieces(NSString *text, NSUInteger max) {
 }
 
 - (BOOL)sendEdit:(uint32_t)command text:(NSString *)text {
+  // A paste goes as ONE paste: its pieces flagged `WinterPresentEditMore` but the last, put in whole by the producer.
+  if (command == WinterPresentEditPaste && text.length > WinterPresentPasteMax) return NO;
   NSArray<NSString *> *pieces = command == WinterPresentEditPaste ? PresentPieces(text ?: @"", WinterPresentTextMax) : @[ @"" ];
-  for (NSString *piece in pieces) {
+  for (NSUInteger i = 0; i < pieces.count; i++) {
+    NSString *piece = pieces[i];
     WinterPresentEditMsg m;
     memset(&m, 0, offsetof(WinterPresentEditMsg, text));
     m.header.msgh_id = WinterPresentMsgEdit;
-    m.command = command;
+    m.command = command | (i + 1 < pieces.count ? (uint32_t)WinterPresentEditMore : 0);
     [piece getCharacters:(unichar *)m.text range:NSMakeRange(0, piece.length)];
     m.length = (uint32_t)piece.length;
     m.sequence = [self nextSequence];

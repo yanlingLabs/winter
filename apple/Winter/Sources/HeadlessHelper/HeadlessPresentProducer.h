@@ -18,6 +18,7 @@ NS_ASSUME_NONNULL_BEGIN
           viewerRequirement:(NSString *)viewerRequirement
                     control:(BOOL)control
                       scale:(double)scale
+                 uploadsDir:(nullable NSString *)uploadsDir
                     started:(void (^)(void))started
                       ended:(void (^)(NSString *reason))ended NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
@@ -40,6 +41,13 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Is `path` a regular file inside `root` (both resolved, no link followed at the end), as a viewer's answer must be?
 + (BOOL)path:(NSString *)path isUploadInside:(NSString *)root;
+
+/// Is `dir` (a presentation's own uploads folder) a real folder inside `root` (the helper's uploads root)?
++ (BOOL)directory:(NSString *)dir isInside:(NSString *)root;
+
+/// A file-chooser answer for a chooser of `mode` (`WinterPresentFileOpen` …): may it name `count` files? One for a single
+/// open, any for a multiple one, none for a folder or a save (Winter hands a page files only).
++ (BOOL)answerOf:(NSUInteger)count fitsMode:(int)mode;
 
 @end
 

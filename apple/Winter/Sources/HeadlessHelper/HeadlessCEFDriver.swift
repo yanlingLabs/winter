@@ -73,6 +73,9 @@ struct HeadlessPresentRequest: Equatable, Sendable {
     let viewerRequirement: String
     let control: Bool
     let scale: Double
+    /// This presentation's uploads folder (the session's own, `<home>/cache/headless-uploads/<session>`): the only place a
+    /// file-chooser answer may name a file from. Nil (a daemon that named none): every answer is refused.
+    var uploadDir: String? = nil
 }
 
 struct HeadlessPresentFailure: Error, Equatable {

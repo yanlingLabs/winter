@@ -54,6 +54,8 @@ const work = mkdtempSync(join(tmpdir(), "winter-present-proof-"));
 // `<home>/cache/headless-uploads`, beside it.
 const cacheRoot = join(work, "home", "cache", "headless-cef", "run");
 const uploads = join(work, "home", "cache", "headless-uploads");
+// The session's own folder (the daemon's `headlessSessionUploadDir`): the only one its presentations accept files from.
+const sessionUploads = join(uploads, "s_proof");
 
 // ── the viewer: built and ad-hoc signed here; accepted by its cdhash ─────────────────────────────────────────────────
 const viewerBin = join(work, "viewer");
@@ -99,6 +101,8 @@ document.getElementById("file").addEventListener("change", (e) => {
   if (f) f.text().then((t) => { S.files = f.name + ":" + f.size + ":" + t; });
 });
 document.addEventListener("visibilitychange", () => { S.visibilityChanges++; S.hidden = document.hidden; });
+S.cInputs = 0;
+document.getElementById("c").addEventListener("input", () => { S.cInputs++; });
 S.resizes = 0;
 window.addEventListener("resize", () => { S.resizes++; });
 const tick = (() => { let n = 0; return () => ++n; })();
@@ -256,7 +260,8 @@ const nonceHex = (): string => [...crypto.getRandomValues(new Uint8Array(8))].ma
 async function present(control: boolean): Promise<{ viewer: ViewerProc; nonce: string; requestedAt: number }> {
   const nonce = nonceHex();
   const requestedAt = performance.now();
-  const r = await command("headless.present", { tabId: "w-1", nonce, viewerRequirement, control, scale: 2 });
+  mkdirSync(sessionUploads, { recursive: true, mode: 0o700 });
+  const r = await command("headless.present", { tabId: "w-1", nonce, viewerRequirement, control, scale: 2, uploadDir: sessionUploads });
   const viewer = new ViewerProc(String(r.service), nonce);
   return { viewer, nonce, requestedAt };
 }
@@ -598,9 +603,15 @@ try {
 
   // ── version 2: a file chooser answered in the panel with a copy in the uploads folder; anywhere else refused ──
   if (!skip.includes("files")) {
-    mkdirSync(join(uploads, "u1"), { recursive: true, mode: 0o700 });
-    const staged = join(uploads, "u1", "hello.txt");
+    mkdirSync(join(sessionUploads, "u1"), { recursive: true, mode: 0o700 });
+    const staged = join(sessionUploads, "u1", "hello.txt");
     writeFileSync(staged, "hello from the person", { mode: 0o600 });
+    // Another session's copy, in the same uploads root: never this presentation's to hand over.
+    mkdirSync(join(uploads, "s_other", "u2"), { recursive: true, mode: 0o700 });
+    const othersCopy = join(uploads, "s_other", "u2", "theirs.txt");
+    writeFileSync(othersCopy, "another session's file", { mode: 0o600 });
+    const staged2 = join(sessionUploads, "u1", "second.txt");
+    writeFileSync(staged2, "a second file", { mode: 0o600 });
     const fBox = await rect("file");
     const { viewer } = await present(true);
     await viewer.until("welcome");
@@ -615,13 +626,124 @@ try {
     await Bun.sleep(600);
     const second = await sentinelState();
     const asks = viewer.events.filter((e) => e.event === "fileChooser").length;
+    // Another session's copy (inside the uploads root, not this presentation's folder): refused.
+    viewer.send({ cmd: "files", paths: [othersCopy] });
+    viewer.send({ cmd: "click", x: fBox.x + 8, y: fBox.y + fBox.height / 2 });
+    for (const end = Date.now() + 5_000; Date.now() < end && viewer.events.filter((e) => e.event === "fileChooser").length < 3;) await Bun.sleep(50);
+    await Bun.sleep(600);
+    const third = await sentinelState();
+    // Two files for a single-file chooser: refused whole.
+    viewer.send({ cmd: "files", paths: [staged, staged2] });
+    viewer.send({ cmd: "click", x: fBox.x + 8, y: fBox.y + fBox.height / 2 });
+    for (const end = Date.now() + 5_000; Date.now() < end && viewer.events.filter((e) => e.event === "fileChooser").length < 4;) await Bun.sleep(50);
+    await Bun.sleep(600);
+    const fourth = await sentinelState();
     await endPresentation(viewer);
+    check("a copy in ANOTHER session's uploads folder is refused: only this presentation's own folder is read",
+      third.fileChanges === first.fileChanges && third.files === first.files, `${String(third.fileChanges)} change(s), the page read "${String(third.files)}"`);
+    check("an answer that does not fit its chooser (two files for a single one) is refused whole",
+      fourth.fileChanges === first.fileChanges && fourth.files === first.files, `${String(fourth.fileChanges)} change(s)`);
     check("a file chooser is asked of the person in the panel and answered with a copy in the uploads folder",
       asked !== undefined && Number(asked.mode) === 0 && (asked.accept as string[]).includes(".txt") && first.files === "hello.txt:21:hello from the person",
       `asked ${JSON.stringify(asked ?? null)}; the page read "${String(first.files)}"`);
     check("an answer naming a file outside the uploads folder is refused: the page gets nothing",
       asks === 2 && second.fileChanges === first.fileChanges && second.files === first.files, `${asks} chooser(s) asked; ${String(second.fileChanges)} change(s)`);
     await oracle("a file chooser", { b: userText, s: "two" });
+  }
+
+  // ── the final review's producer and consumer checks: one paste, the caps, input and prompts with control gone, a late
+  //    file answer, malformed and forged messages ──
+  if (!skip.includes("hardening")) {
+    const cBox = await rect("c");
+    const fBox = await rect("file");
+    {
+      const { viewer } = await present(true);
+      await viewer.until("welcome");
+      viewer.send({ cmd: "click", x: cBox.x + 10, y: cBox.y + cBox.height / 2 });
+      await Bun.sleep(250);
+      const before = await sentinelState();
+      viewer.send({ cmd: "edit", command: 3, text: "p".repeat(2500) });  // three pieces on the wire
+      await Bun.sleep(500);
+      const after = await sentinelState();
+      check("a paste in pieces goes in as ONE paste (one input event, the whole text)",
+        String(after.c).length === String(before.c).length + 2500 && Number(after.cInputs) === Number(before.cInputs) + 1,
+        `the field grew by ${String(after.c).length - String(before.c).length}, ${Number(after.cInputs) - Number(before.cInputs)} input event(s)`);
+      viewer.send({ cmd: "pasteRaw", pieces: 65, units: 1024, char: "q" });
+      await Bun.sleep(500);
+      viewer.send({ cmd: "edit", command: 3, text: "r".repeat(70_000) });
+      const consumerRefused = await viewer.untilMatch("edit", (e) => e.sent === false, 3_000).then(() => true, () => false);
+      await Bun.sleep(300);
+      const capped = await sentinelState();
+      const ps = await command("headless.unpresent", { tabId: "w-1" });
+      viewer.send({ cmd: "bye" });
+      await viewer.exited();
+      check("a paste over 64K units is refused whole: by the viewer before it sends, by the helper if it arrives",
+        consumerRefused && !String(capped.c).includes("q") && !String(capped.c).includes("r") && Number(ps.pastesRefused) >= 1,
+        `viewer refused: ${consumerRefused}; helper refused ${String(ps.pastesRefused)}, put in ${String(ps.pastes)}`);
+    }
+    {
+      // Watch only: the viewer's input reaches nothing.
+      const before = await sentinelState();
+      const { viewer } = await present(false);
+      await viewer.until("welcome");
+      for (let i = 0; i < 4; i++) { viewer.send({ cmd: "press" }); await Bun.sleep(100); }
+      viewer.send({ cmd: "edit", command: 3, text: "nope" });
+      await Bun.sleep(400);
+      const ps = await command("headless.unpresent", { tabId: "w-1" });
+      viewer.send({ cmd: "bye" });
+      await viewer.exited();
+      const after = await sentinelState();
+      check("without control, the viewer's keys and edits are dropped", after.keys === before.keys && after.c === before.c && Number(ps.inputs) === 0,
+        `keys ${String(before.keys)} → ${String(after.keys)}, the producer counted ${String(ps.inputs)} input(s)`);
+    }
+    {
+      // A prompt the person was shown and did not answer is withdrawn when control goes back; it stays the agent's.
+      const { viewer } = await present(true);
+      await viewer.until("welcome");
+      await cdp("Runtime.evaluate", { expression: "setTimeout(() => { window.p3 = prompt('held?', ''); }, 0); 1", contextId: world, returnByValue: true });
+      const shown = await viewer.until("dialog", 5_000).catch(() => undefined);
+      await command("headless.control", { tabId: "w-1", control: false });
+      const withdrawn = await viewer.until("dialogDone", 3_000).then(() => true, () => false);
+      // The held prompt is the agent's again: it answers it (the page is paused until someone does).
+      await cdp("Page.handleJavaScriptDialog", { accept: true, promptText: "agent" });
+      await Bun.sleep(200);
+      // A file chooser asked, then control goes back, then the viewer's late answer: the page gets nothing.
+      await command("headless.control", { tabId: "w-1", control: true });
+      const changes = Number((await sentinelState()).fileChanges);
+      viewer.send({ cmd: "click", x: fBox.x + 8, y: fBox.y + fBox.height / 2 });
+      const asks = viewer.events.filter((e) => e.event === "fileChooser").length;
+      for (const end = Date.now() + 5_000; Date.now() < end && viewer.events.filter((e) => e.event === "fileChooser").length <= asks;) await Bun.sleep(50);
+      await command("headless.control", { tabId: "w-1", control: false });
+      mkdirSync(join(sessionUploads, "u3"), { recursive: true, mode: 0o700 });
+      const late = join(sessionUploads, "u3", "late.txt");
+      writeFileSync(late, "too late", { mode: 0o600 });
+      viewer.send({ cmd: "files", paths: [late] });
+      await Bun.sleep(600);
+      const lateState = await sentinelState();
+      await endPresentation(viewer);
+      const p3 = ((await cdp("Runtime.evaluate", { expression: "window.p3", contextId: world, returnByValue: true })) as { result?: { value?: string } }).result?.value;
+      check("a prompt shown to the person is withdrawn when control goes back, and stays the agent's to answer", shown !== undefined && withdrawn && p3 === "agent",
+        `shown ${shown !== undefined}, withdrawn ${withdrawn}, answered "${String(p3)}"`);
+      check("a file answer that comes after control went back is not handed to the page", Number(lateState.fileChanges) === changes,
+        `${String(lateState.fileChanges)} change(s), ${changes} before`);
+    }
+    {
+      // Malformed and forged messages: the producer and the consumer ignore them and the presentation goes on.
+      const { viewer } = await present(true);
+      await viewer.until("welcome");
+      await Bun.sleep(300);
+      const f0 = Number((await viewer.stats()).frames);
+      viewer.send({ cmd: "malformed" });
+      viewer.send({ cmd: "forge" });
+      const forged = await viewer.until("forged", 3_000).catch(() => undefined);
+      await Bun.sleep(800);
+      const vs = await viewer.stats();
+      await endPresentation(viewer);
+      check("malformed messages to the helper and forged ones to the viewer (a dead-name not the kernel's, a frame from another peer) are ignored; the presentation goes on",
+        Boolean(forged?.deadSent) && Boolean(forged?.frameSent) && vs.ended === "" && Number(vs.forgedFramesShown) === 0 && Number(vs.frames) > f0,
+        `forged sent ${JSON.stringify(forged ?? null)}; ended "${String(vs.ended)}"; forged frames shown ${String(vs.forgedFramesShown)}; frames ${f0} → ${String(vs.frames)}`);
+    }
+    await oracle("the hardening checks", { s: "two" });
   }
 
   // ── version 2: a window the person opens — created with its opener kept, a tab of its own, closed by its page ──

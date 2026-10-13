@@ -119,8 +119,11 @@ enum HeadlessWire {
                 if case .bool(let c)? = p?["control"] { control = c }
                 var scale = 1.0
                 if case .number(let n)? = p?["scale"], n >= 1, n <= 4 { scale = n }
+                var uploadDir: String?
+                if let dir = p?["uploadDir"]?.stringValue, dir.hasPrefix("/"), !dir.contains("\0") { uploadDir = dir }
                 return .present(linkId: linkId, cmdId: cmdId,
-                                HeadlessPresentRequest(tabId: tabId, nonce: nonce, viewerRequirement: requirement, control: control, scale: scale))
+                                HeadlessPresentRequest(tabId: tabId, nonce: nonce, viewerRequirement: requirement, control: control, scale: scale,
+                                                       uploadDir: uploadDir))
             }
         }
         switch BrowserLinkCommand.parse(params) {

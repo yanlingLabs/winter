@@ -32,6 +32,13 @@
 #include <unistd.h>
 
 #import "WinterPresentConsumer.h"
+#include <mach/notify.h>
+
+// The proof's own doors into the consumer (never used by Winter.app): a raw message to the producer, and the receive
+// port its messages arrive on (to forge one the consumer must ignore).
+@interface WinterPresentConsumer (ProofDoors)
+- (BOOL)sendToProducer:(mach_msg_header_t *)header size:(mach_msg_size_t)size;
+@end
 
 static double Ms(uint64_t ticks) {
   static mach_timebase_info_data_t base;
@@ -64,7 +71,7 @@ static void Emit(NSDictionary *object) {
   id<MTLBuffer> _probe;     // one BGRA pixel at the marker
   int _probeX, _probeY;     // CSS pixels
   int _lagMs;
-  uint64_t _frames, _droppedReported, _lastSequence, _outOfOrder, _lastGeneration;
+  uint64_t _frames, _droppedReported, _lastSequence, _outOfOrder, _lastGeneration, _forgedSeen;
   NSMutableArray<NSNumber *> *_frameAge, *_transport, *_copy, *_inputToPixel, *_gpuRead;
   // The key presses: the page's marker is green after an even count, magenta after an odd one.
   uint64_t _presses;
@@ -106,6 +113,7 @@ static void Emit(NSDictionary *object) {
 
 - (void)presentConsumer:(WinterPresentConsumer *)consumer frame:(WinterPresentFrame *)frame {
   if (_firstFrameAt == 0) _firstFrameAt = frame.receivedAt;
+  if (frame.sequence >= 900000000) _forgedSeen++;
   if (frame.sequence <= _lastSequence) _outOfOrder++;
   _lastSequence = frame.sequence;
   _droppedReported += frame.droppedBefore;
@@ -337,7 +345,8 @@ static void Emit(NSDictionary *object) {
     else if ([kind isEqualToString:@"finish"]) [self.consumer finishComposing];
     else if ([kind isEqualToString:@"cancel"]) [self.consumer cancelComposition];
   } else if ([cmd isEqualToString:@"edit"]) {
-    [self.consumer sendEdit:[c[@"command"] unsignedIntValue] text:c[@"text"]];
+    const BOOL sent = [self.consumer sendEdit:[c[@"command"] unsignedIntValue] text:c[@"text"]];
+    Emit(@{@"event" : @"edit", @"sent" : @(sent)});
   } else if ([cmd isEqualToString:@"answerDialogs"]) {
     _dialogAnswer = c;
   } else if ([cmd isEqualToString:@"files"]) {
@@ -354,6 +363,62 @@ static void Emit(NSDictionary *object) {
     [self.consumer setViewWidth:0 height:0 scale:[c[@"value"] doubleValue]];
   } else if ([cmd isEqualToString:@"view"]) {
     [self.consumer setViewWidth:[c[@"width"] intValue] height:[c[@"height"] intValue] scale:[c[@"scale"] doubleValue]];
+  } else if ([cmd isEqualToString:@"pasteRaw"]) {
+    // A paste of `pieces` pieces of `units` UTF-16 units each, sent as the consumer sends one (each but the last flagged
+    // "more"), straight on the wire — to reach the producer's own cap, which the consumer would refuse first.
+    const int pieces = [c[@"pieces"] intValue], units = MIN([c[@"units"] intValue], (int)WinterPresentTextMax);
+    NSString *fill = [c[@"char"] isKindOfClass:[NSString class]] ? c[@"char"] : @"x";
+    for (int i = 0; i < pieces; i++) {
+      WinterPresentEditMsg m;
+      memset(&m, 0, sizeof(m));
+      m.header.msgh_id = WinterPresentMsgEdit;
+      m.command = WinterPresentEditPaste | (i + 1 < pieces ? (uint32_t)WinterPresentEditMore : 0);
+      for (int k = 0; k < units; k++) m.text[k] = [fill characterAtIndex:0];
+      m.length = (uint32_t)units;
+      m.sequence = 800000000 + (uint64_t)i;
+      if (![self.consumer sendToProducer:&m.header size:(mach_msg_size_t)((offsetof(WinterPresentEditMsg, text) + units * 2 + 3) & ~3u)]) break;
+    }
+  } else if ([cmd isEqualToString:@"malformed"]) {
+    // What a confused or hostile viewer could send: short messages, unknown ids, a release of a slot from no generation.
+    struct { mach_msg_header_t header; uint32_t junk[2]; } shortMsg;
+    const mach_msg_id_t ids[] = {WinterPresentMsgRelease, WinterPresentMsgInput, WinterPresentMsgResize, WinterPresentMsgIme,
+                                 WinterPresentMsgEdit, WinterPresentMsgDialogReply, WinterPresentMsgFileReply, 0x57500099};
+    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+      memset(&shortMsg, 0xff, sizeof(shortMsg));
+      shortMsg.header.msgh_id = ids[i];
+      [self.consumer sendToProducer:&shortMsg.header size:(mach_msg_size_t)sizeof(mach_msg_header_t)];
+    }
+    WinterPresentReleaseMsg bogus;
+    memset(&bogus, 0, sizeof(bogus));
+    bogus.header.msgh_id = WinterPresentMsgRelease;
+    bogus.generation = 0xdeadbeef;
+    bogus.slot = 7;
+    [self.consumer sendToProducer:&bogus.header size:sizeof(bogus)];
+  } else if ([cmd isEqualToString:@"forge"]) {
+    // Messages to the CONSUMER's own port from someone who is not its producer (this process): a dead-name notification
+    // that is not the kernel's, and a frame — both must be ignored (the presentation goes on, the frame never shown).
+    mach_port_t port = (mach_port_t)[[self.consumer valueForKey:@"_port"] unsignedIntValue];
+    mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
+    mach_dead_name_notification_t dead;
+    memset(&dead, 0, sizeof(dead));
+    dead.not_header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    dead.not_header.msgh_size = sizeof(dead);
+    dead.not_header.msgh_remote_port = port;
+    dead.not_header.msgh_id = MACH_NOTIFY_DEAD_NAME;
+    dead.not_port = (mach_port_name_t)[[self.consumer valueForKey:@"_producer"] unsignedIntValue];
+    kern_return_t k1 = mach_msg(&dead.not_header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(dead), 0, MACH_PORT_NULL, 100, MACH_PORT_NULL);
+    WinterPresentFrameMsg frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    frame.header.msgh_size = sizeof(frame);
+    frame.header.msgh_remote_port = port;
+    frame.header.msgh_id = WinterPresentMsgFrame;
+    frame.generation = _lastGeneration;
+    frame.slot = 0;
+    frame.sequence = 900000000;
+    kern_return_t k2 = mach_msg(&frame.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(frame), 0, MACH_PORT_NULL, 100, MACH_PORT_NULL);
+    mach_port_deallocate(mach_task_self(), port);
+    Emit(@{@"event" : @"forged", @"deadSent" : @(k1 == KERN_SUCCESS), @"frameSent" : @(k2 == KERN_SUCCESS)});
   } else if ([cmd isEqualToString:@"stats"]) {
     [self emitStats];
   } else if ([cmd isEqualToString:@"bye"]) {
@@ -374,6 +439,8 @@ static void Emit(NSDictionary *object) {
     @"reusedInFlight" : @(self.consumer.reusedInFlight),
     @"staleFrames" : @(self.consumer.staleFrames),
     @"pools" : @(self.consumer.pools),
+    @"forgedFramesShown" : @(_forgedSeen),
+    @"ended" : _endReason ?: @"",
     @"presses" : @(_presses),
     @"inputToPixelCount" : @(_inputToPixel.count),
     @"inputToPixelP50" : @(Pct(_inputToPixel, 0.5)), @"inputToPixelP95" : @(Pct(_inputToPixel, 0.95)), @"inputToPixelP99" : @(Pct(_inputToPixel, 0.99)),

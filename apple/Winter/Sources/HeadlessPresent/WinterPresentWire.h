@@ -239,6 +239,11 @@ enum {
   WinterPresentEditRedo = 6,
   WinterPresentEditDelete = 7,
 };
+/// OR-ed into `WinterPresentEditMsg.command` on every piece of a paste but its last: the producer gathers the pieces and
+/// puts the whole text in as ONE paste when the last arrives (never a paste with a hole, never a run of small ones).
+enum { WinterPresentEditMore = 0x100 };
+/// The longest paste, in UTF-16 units: longer is refused whole.
+enum { WinterPresentPasteMax = 64 * WinterPresentTextMax };
 
 typedef struct {
   mach_msg_header_t header;

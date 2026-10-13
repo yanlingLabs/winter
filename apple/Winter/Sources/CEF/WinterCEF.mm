@@ -4963,8 +4963,10 @@ std::string HeadlessOriginOf(const std::string &url) {
   @autoreleasepool {
     NSURLComponents *c = [NSURLComponents componentsWithString:[NSString stringWithUTF8String:url.c_str()] ?: @""];
     if (c.scheme.length == 0 || c.host.length == 0) return std::string();
-    NSString *origin = c.port != nil ? [NSString stringWithFormat:@"%@://%@:%@", c.scheme, c.host, c.port]
-                                     : [NSString stringWithFormat:@"%@://%@", c.scheme, c.host];
+    // An IPv6 literal keeps its brackets (`http://[::1]:8080`): without them its port could not be told from the address.
+    NSString *host = [c.host containsString:@":"] && ![c.host hasPrefix:@"["] ? [NSString stringWithFormat:@"[%@]", c.host] : c.host;
+    NSString *origin = c.port != nil ? [NSString stringWithFormat:@"%@://%@:%@", c.scheme, host, c.port]
+                                     : [NSString stringWithFormat:@"%@://%@", c.scheme, host];
     return std::string(origin.UTF8String ?: "");
   }
 }

@@ -8,6 +8,15 @@ final class HeadlessWireTests: XCTestCase {
         XCTAssertEqual(inbound, .contextDispose(linkId: "h-1", cmdId: "c1", sessionId: "s_a"))
     }
 
+    func testAPresentationNamesItsOwnUploadsFolderAbsoluteOrNone() {
+        let named = HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c1","op":"headless.present","params":{"tabId":"w-1","nonce":"0123456789abcdef","viewerRequirement":"r","uploadDir":"/h/cache/headless-uploads/s_a"}}}"#))
+        XCTAssertEqual(named, .present(linkId: "h-1", cmdId: "c1", HeadlessPresentRequest(tabId: "w-1", nonce: 0x0123_4567_89ab_cdef, viewerRequirement: "r",
+                                                                                        control: false, scale: 1, uploadDir: "/h/cache/headless-uploads/s_a")))
+        let relative = HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c1","op":"headless.present","params":{"tabId":"w-1","nonce":"0123456789abcdef","viewerRequirement":"r","uploadDir":"cache/x"}}}"#))
+        XCTAssertEqual(relative, .present(linkId: "h-1", cmdId: "c1", HeadlessPresentRequest(tabId: "w-1", nonce: 0x0123_4567_89ab_cdef, viewerRequirement: "r",
+                                                                                           control: false, scale: 1, uploadDir: nil)))
+    }
+
     func testPresentationOpsAreReadBeforeTheBrowserLinkParser() {
         let present = HeadlessWire.parse(line(#"{"method":"browserLink.command","params":{"linkId":"h-1","cmdId":"c1","op":"headless.present","params":{"tabId":"w-1","nonce":"0123456789abcdef","viewerRequirement":"identifier \"x\"","control":true,"scale":2}}}"#))
         XCTAssertEqual(present, .present(linkId: "h-1", cmdId: "c1", HeadlessPresentRequest(tabId: "w-1", nonce: 0x0123_4567_89ab_cdef,

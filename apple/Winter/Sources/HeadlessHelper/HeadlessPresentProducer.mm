@@ -117,15 +117,21 @@ static double Percentile(NSArray<NSNumber *> *values, double p) {
   id<MTLTexture> _textures[WinterPresentPoolSlots];
   BOOL _leased[WinterPresentPoolSlots];
 
-  // Version 2: the dialog shown to the viewer (0: none) and the file choosers it was asked.
+  // Version 2: the dialog shown to the viewer (0: none) and the file choosers it was asked (and each one's mode).
   uint32_t _dialogId, _nextDialogId;
   NSMutableSet<NSNumber *> *_fileRequests;
+  NSMutableDictionary<NSNumber *, NSNumber *> *_fileModes;
+  // This presentation's own uploads folder (the session's): the only place an answer may name a file from.
+  NSString *_uploadsDir;
+  // A paste arriving in pieces (`WinterPresentEditMore`), put in whole when its last piece comes.
+  NSMutableString *_paste;
+  uint64_t _pasteSequence;
 
   BOOL _popupVisible;
   int _popupX, _popupY, _popupWidth, _popupHeight;  // CSS pixels
   id<MTLTexture> _popup;                            // the popup's last frame, owned
 
-  uint64_t _sequence, _frames, _dropped, _droppedSinceFrame, _inputs, _lastInputSequence, _resizes;
+  uint64_t _sequence, _frames, _dropped, _droppedSinceFrame, _inputs, _lastInputSequence, _resizes, _pastes, _pasteRefused;
   // The first frame after the viewer was accepted (or after a scale change), awaited: a page with nothing moving paints
   // only when asked, so the view is asked again until a frame comes (`-kickSoon`).
   BOOL _awaitingFrame;
@@ -141,9 +147,12 @@ static double Percentile(NSArray<NSNumber *> *values, double p) {
           viewerRequirement:(NSString *)viewerRequirement
                     control:(BOOL)control
                       scale:(double)scale
+                 uploadsDir:(nullable NSString *)uploadsDir
                     started:(void (^)(void))started
                       ended:(void (^)(NSString *))ended {
   if ((self = [super init])) {
+    _uploadsDir = [uploadsDir copy];
+    _fileModes = [NSMutableDictionary dictionary];
     _key = key;
     _browserId = browserId;
     _nonce = nonce;
@@ -160,6 +169,25 @@ static double Percentile(NSArray<NSNumber *> *values, double p) {
 
 + (void)setUploadsRoot:(NSString *)root {
   g_uploadsRoot = [root copy];
+}
+
++ (BOOL)directory:(NSString *)dir isInside:(NSString *)root {
+  if (dir.length == 0 || root.length == 0 || ![dir isAbsolutePath]) return NO;
+  char resolvedRoot[PATH_MAX], resolvedDir[PATH_MAX];
+  if (realpath(root.fileSystemRepresentation, resolvedRoot) == NULL) return NO;
+  if (realpath(dir.fileSystemRepresentation, resolvedDir) == NULL) return NO;
+  struct stat st;
+  if (lstat(dir.fileSystemRepresentation, &st) != 0 || !S_ISDIR(st.st_mode)) return NO;  // never a link to a folder
+  const size_t n = strlen(resolvedRoot);
+  return strncmp(resolvedDir, resolvedRoot, n) == 0 && resolvedDir[n] == '/';
+}
+
++ (BOOL)answerOf:(NSUInteger)count fitsMode:(int)mode {
+  switch (mode) {
+    case WinterPresentFileOpen: return count <= 1;
+    case WinterPresentFileOpenMultiple: return YES;
+    default: return count == 0;  // a folder or a save: Winter hands a page files only
+  }
 }
 
 + (BOOL)path:(NSString *)path isUploadInside:(NSString *)root {
@@ -233,6 +261,7 @@ static double Percentile(NSArray<NSNumber *> *values, double p) {
     [self offerHeldDialog];
   } else {
     // Control goes back to the agent: what the viewer was asked and has not answered is withdrawn.
+    _paste = nil;
     [self withdrawDialog];
     [self cancelFileChoosers];
   }
@@ -258,6 +287,8 @@ static NSUInteger TaskPortCount(void) {
     @"dropped" : @(_dropped),
     @"generations" : @(_generation),
     @"resizes" : @(_resizes),
+    @"pastes" : @(_pastes),
+    @"pastesRefused" : @(_pasteRefused),
     // The last generation's view: what the viewer was last shown.
     @"cssWidth" : @(_poolCssWidth),
     @"cssHeight" : @(_poolCssHeight),
@@ -291,7 +322,10 @@ static NSUInteger TaskPortCount(void) {
     // Only the kernel's (anyone can look the service up and send one): a forged one would make us drop a reference
     // we never got. A real one carries a reference of its own on the dead name, given back whatever the name.
     mach_port_name_t name = MACH_PORT_NULL;
-    if (!WinterPresentKernelDeadName(header, &name)) return;
+    if (!WinterPresentKernelDeadName(header, &name)) {
+      mach_msg_destroy(header);  // a forged one: whatever rights it carried go with it
+      return;
+    }
     const BOOL viewer = name == _viewer;
     mach_port_deallocate(mach_task_self(), name);
     // The viewer's port died: the viewer is gone. The tab is not.
@@ -321,6 +355,7 @@ static NSUInteger TaskPortCount(void) {
     case WinterPresentMsgInput: {
       if (header->msgh_size < sizeof(WinterPresentInputMsg) || !_control) break;
       const WinterPresentInputMsg *m = (const WinterPresentInputMsg *)header;
+      _paste = nil;
       _inputs++;
       _lastInputSequence = m->sequence;
       WinterCEFHeadlessSendInput(_key, (int)m->kind, m->x, m->y, m->dx, m->dy, m->button, m->clickCount, m->modifiers,
@@ -361,12 +396,35 @@ static NSUInteger TaskPortCount(void) {
     case WinterPresentMsgEdit: {
       if (!_control || header->msgh_size < offsetof(WinterPresentEditMsg, text)) break;
       const WinterPresentEditMsg *m = (const WinterPresentEditMsg *)header;
-      if (m->command < WinterPresentEditCopy || m->command > WinterPresentEditDelete) break;
+      const BOOL more = (m->command & WinterPresentEditMore) != 0;
+      const uint32_t command = m->command & ~(uint32_t)WinterPresentEditMore;
+      if (command < WinterPresentEditCopy || command > WinterPresentEditDelete || (more && command != WinterPresentEditPaste)) break;
       const uint32_t fits = (uint32_t)((header->msgh_size - offsetof(WinterPresentEditMsg, text)) / sizeof(uint16_t));
       _inputs++;
       _lastInputSequence = m->sequence;
-      WinterCEFHeadlessEdit(_key, (int)m->command,
-                            m->command == WinterPresentEditPaste ? WireText(m->text, MIN(m->length, fits), WinterPresentTextMax) : nil);
+      if (command != WinterPresentEditPaste) {
+        _paste = nil;  // a paste never finished is dropped, never put in by halves
+        WinterCEFHeadlessEdit(_key, (int)command, nil);
+        break;
+      }
+      // A paste: its pieces gathered, the whole put in once — or nothing, past the cap.
+      // A piece that does not follow the last one at once (one in between was never delivered) starts afresh: the
+      // unfinished paste before it is dropped.
+      if (_paste == nil || m->sequence != _pasteSequence + 1) _paste = [NSMutableString string];
+      _pasteSequence = m->sequence;
+      [_paste appendString:WireText(m->text, MIN(m->length, fits), WinterPresentTextMax)];
+      if (_paste.length > WinterPresentPasteMax) {
+        _paste = nil;
+        _pasteRefused++;
+        break;
+      }
+      if (more) break;
+      NSString *whole = _paste;
+      _paste = nil;
+      if (whole.length > 0) {
+        _pastes++;
+        WinterCEFHeadlessEdit(_key, WinterPresentEditPaste, whole);
+      }
       break;
     }
     case WinterPresentMsgDialogReply: {
@@ -384,10 +442,14 @@ static NSUInteger TaskPortCount(void) {
       const WinterPresentFileReplyMsg *m = (const WinterPresentFileReplyMsg *)header;
       if (![_fileRequests containsObject:@(m->requestId)]) break;
       [_fileRequests removeObject:@(m->requestId)];
+      const int mode = _fileModes[@(m->requestId)].intValue;
+      [_fileModes removeObjectForKey:@(m->requestId)];
       const uint32_t fits = (uint32_t)(header->msgh_size - offsetof(WinterPresentFileReplyMsg, paths));
       const uint32_t length = MIN(MIN(m->length, fits), (uint32_t)WinterPresentFilePathsMax);
       NSMutableArray<NSString *> *paths = [NSMutableArray array];
       BOOL refused = NO;
+      // Only this presentation's own uploads folder, itself inside the helper's uploads root.
+      NSString *dir = _uploadsDir != nil && [WinterHeadlessPresenter directory:_uploadsDir isInside:g_uploadsRoot] ? _uploadsDir : nil;
       if (_control && m->accept != 0) {
         uint32_t at = 0;
         while (at < length) {
@@ -395,7 +457,7 @@ static NSUInteger TaskPortCount(void) {
           const size_t n = strnlen(start, length - at);
           if (n == length - at) break;  // not NUL-terminated within the message: dropped
           NSString *path = [NSString stringWithUTF8String:start];
-          if (path == nil || ![WinterHeadlessPresenter path:path isUploadInside:g_uploadsRoot]) {
+          if (path == nil || dir == nil || ![WinterHeadlessPresenter path:path isUploadInside:dir]) {
             refused = YES;
           } else {
             [paths addObject:path];
@@ -403,7 +465,11 @@ static NSUInteger TaskPortCount(void) {
           at += (uint32_t)n + 1;
         }
       }
-      if (refused) NSLog(@"WinterHeadless: a file-chooser answer named a file outside the uploads folder — refused");
+      if (!refused && ![WinterHeadlessPresenter answerOf:paths.count fitsMode:mode]) {
+        refused = YES;
+        NSLog(@"WinterHeadless: a file-chooser answer did not fit its chooser (%lu file(s) for mode %d) — refused", (unsigned long)paths.count, mode);
+      }
+      if (refused) NSLog(@"WinterHeadless: a file-chooser answer was refused — the page gets nothing");
       // Anything refused cancels the whole answer: the page gets the person's choice or nothing.
       WinterCEFHeadlessResolveFileChooser((int)m->requestId, refused ? nil : paths);
       break;
@@ -560,6 +626,7 @@ static NSUInteger TaskPortCount(void) {
   m.acceptLength = (uint32_t)n;
   if (mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m), 0, MACH_PORT_NULL, 100, MACH_PORT_NULL) != KERN_SUCCESS) return NO;
   [_fileRequests addObject:@(requestId)];
+  _fileModes[@(requestId)] = @(mode);
   return YES;
 }
 
@@ -567,6 +634,7 @@ static NSUInteger TaskPortCount(void) {
 - (void)cancelFileChoosers {
   for (NSNumber *requestId in _fileRequests) WinterCEFHeadlessResolveFileChooser(requestId.intValue, nil);
   [_fileRequests removeAllObjects];
+  [_fileModes removeAllObjects];
 }
 
 - (void)hello:(mach_msg_header_t *)header token:(audit_token_t)token {
@@ -580,11 +648,19 @@ static NSUInteger TaskPortCount(void) {
     mach_msg_destroy(header);
     return;  // the service stays up for the real viewer; the daemon unpresents on its own timeout
   }
+  // A viewer whose death this presentation could not hear of is refused: its pool would stay leased to a ghost. `sync`
+  // 1: a viewer already dead is reported at once, as a dead-name notification of its own.
+  mach_port_t previous = MACH_PORT_NULL;
+  const kern_return_t notify = mach_port_request_notification(mach_task_self(), header->msgh_remote_port, MACH_NOTIFY_DEAD_NAME, 1,
+                                                              _port, MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous);
+  if (previous != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), previous);
+  if (notify != KERN_SUCCESS) {
+    NSLog(@"WinterHeadless: a presentation viewer was refused (its end could not be watched: %d)", notify);
+    mach_msg_destroy(header);
+    return;
+  }
   _viewer = header->msgh_remote_port;  // the send right the HELLO carried is ours now
   _viewerToken = token;
-  mach_port_t previous = MACH_PORT_NULL;
-  mach_port_request_notification(mach_task_self(), _viewer, MACH_NOTIFY_DEAD_NAME, 0, _port, MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous);
-  if (previous != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), previous);
 
   WinterPresentWelcomeMsg welcome = {};
   welcome.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
@@ -667,6 +743,10 @@ static NSUInteger TaskPortCount(void) {
   for (int i = 0; i < WinterPresentPoolSlots; i++) {
     _surfaces[i] = IOSurfaceCreate((__bridge CFDictionaryRef)props);
     if (_surfaces[i] == NULL) {
+      // The send rights already made for the slots before it are never sent: given back here.
+      for (int j = 0; j < i; j++) {
+        if (pool.surfaces[j].name != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), pool.surfaces[j].name);
+      }
       [self releasePool];
       return NO;
     }
