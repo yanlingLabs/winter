@@ -1084,10 +1084,15 @@ final class FieldStateAdapter: ObservableObject {
 
     // MARK: - Composer attachments (`ComposerAttachments.swift`, `ComposerImages.swift`)
 
-    /// The current draft's attachments — images and files, the chips in the strip above the text — beside
-    /// `composerDraft`, for as long as the draft lives (a session switch carries the draft, and so its
-    /// attachments). What a send carried is dropped once it is sent (`composerSendSucceeded`).
+    /// The current draft's attachments — images and files — beside `composerDraft`, whose text holds each one's
+    /// chip as a marker character where the user put it (`composerAttachmentMarker`). Held for as long as the
+    /// draft lives (a session switch carries the draft, and so its attachments), including a chip deleted from the
+    /// text, so undo can bring it back (`ComposerAttachmentDraft.prune`). What a send carried is dropped once it is
+    /// sent (`composerSendSucceeded`).
     @Published var composerAttachments = ComposerAttachmentDraft()
+
+    /// Whether the draft's TEXT holds a chip — what makes attachments alone a message.
+    var composerHasAttachments: Bool { !composerAttachments.live(in: composerDraft).isEmpty }
 
     /// The composer's one-line notice — why an attachment was not taken ("The selected model doesn't
     /// support images", too large) or why a submit's staging was refused (the daemon's own
@@ -1114,28 +1119,26 @@ final class FieldStateAdapter: ObservableObject {
     var composerImageIntake: ComposerAttachmentIntake {
         ComposerAttachmentIntake(
             isEnabled: { [weak self] in self?.composerAttachmentsEnabled ?? false },
-            attach: { [weak self] kind in self?.attachComposerAttachment(kind) ?? false },
-            removeLast: { [weak self] in self?.composerAttachments.removeLast() != nil }
+            attach: { [weak self] kind in self?.attachComposerAttachment(kind) },
+            chip: { [weak self] id, text in self?.composerChip(id: id, text: text) },
+            placeholder: { [weak self] id, text in self?.composerAttachments.placeholder(id: id, in: text) },
+            draftToken: { [weak self] in self?.composerAttachments.token ?? "" }
         )
     }
 
-    /// The chips the surface's strip draws, in order.
-    var composerChips: [AttachmentChipModel] { composerChipModels(composerAttachments) }
+    /// What one chip draws, numbered against `text` — `nil` once the draft no longer holds it.
+    func composerChip(id: Int, text: String) -> AttachmentChipModel? {
+        guard let item = composerAttachments.item(id: id) else { return nil }
+        return composerChipModel(item, number: composerAttachments.placeholderNumbers(in: text)[id] ?? 1)
+    }
 
-    /// What a composer card is handed: the chips, their ×, and whether "+" is live.
+    /// The chips the draft's text holds, in order.
+    var composerChips: [AttachmentChipModel] { composerChipModels(composerAttachments, text: composerDraft) }
+
+    /// What a composer card is handed: whether "+" is live, and why not.
     var composerAttachmentsControl: ComposerAttachmentsControl {
-        ComposerAttachmentsControl(
-            chips: composerChips,
-            onRemove: { [weak self] chip in if let id = chip.attachmentID { self?.removeComposerAttachment(id: id) } },
-            isEnabled: composerAttachmentsEnabled,
-            disabledReason: Self.composerAttachDisabledReason
-        )
-    }
-
-    /// A chip's ×.
-    func removeComposerAttachment(id: Int) {
-        composerAttachments.remove(id: id)
-        composerNotice = nil
+        ComposerAttachmentsControl(isEnabled: composerAttachmentsEnabled,
+                                   disabledReason: Self.composerAttachDisabledReason)
     }
 
     /// The model in force for the attach-time check: the row's own (with any optimistic pick
@@ -1145,57 +1148,61 @@ final class FieldStateAdapter: ObservableObject {
             ?? (modelCatalogue.defaultModel.isEmpty ? nil : modelCatalogue.defaultModel)
     }
 
-    /// Attach one to the draft (`true`), or refuse (`false`) with the reason on `composerNotice`. A FILE needs
-    /// only to still exist (the daemon checks it again at send); an IMAGE is held to the image rules
-    /// (`attachComposerImage`).
-    func attachComposerAttachment(_ kind: ComposerAttachmentKind) -> Bool {
+    /// Attach one to the draft and answer its id — the text view puts its chip in the text — or refuse (`nil`)
+    /// with the reason on `composerNotice`. A FILE needs only to still exist (the daemon checks it again at send);
+    /// an IMAGE is held to the image rules (`attachComposerImage`).
+    func attachComposerAttachment(_ kind: ComposerAttachmentKind) -> Int? {
         switch kind {
         case .image(let image):
             return attachComposerImage(image)
         case .file(let path):
             guard composerPathIsFileOrFolder(path) else {
                 composerNotice = composerFileUnreadableMessage
-                return false
+                return nil
             }
             composerNotice = nil
-            composerAttachments.add(kind)
-            return true
+            return addComposerAttachment(kind)
         }
     }
 
-    /// Attach one image to the draft (`true`), or refuse (`false`) with the reason on `composerNotice`: the
+    /// Adds one, first letting go of chips long deleted from the text (kept only for undo).
+    private func addComposerAttachment(_ kind: ComposerAttachmentKind) -> Int? {
+        composerAttachments.prune(keeping: composerDraft)
+        return composerAttachments.add(kind)
+    }
+
+    /// Attach one image to the draft (its id), or refuse (`nil`) with the reason on `composerNotice`: the
     /// selected model takes no image (the exact message), or it is over the cap (image data past one request
     /// line, or a file past 64 MiB). An empty catalogue is refreshed so the NEXT attach can be checked; this one is
     /// let through, and the daemon refuses at submit if it must.
     @discardableResult
-    func attachComposerImage(_ image: ComposerImage) -> Bool {
+    func attachComposerImage(_ image: ComposerImage) -> Int? {
         if modelCatalogue.models.isEmpty { onRefreshModelCatalogue() }
         guard composerModelAcceptsImages(model: composerImageModel, catalogue: modelCatalogue) else {
             composerNotice = composerImageUnsupportedMessage
-            return false
+            return nil
         }
         switch image {
         case .data(let data):
             // Image data that cannot fit one request even after the downscale (`composerImage(fromImageData:)`).
             guard data.data.count <= composerImageMaxBytes else {
                 composerNotice = composerImageTooLargeMessage
-                return false
+                return nil
             }
         case .file(let path):
             // The user's own file is never read or copied; only its size is checked against what the
             // runtime's Read tool will prepare (the daemon checks it again at send).
             guard let size = composerRegularFileSize(path) else {
                 composerNotice = composerImageFileUnreadableMessage
-                return false
+                return nil
             }
             guard size <= composerImageFileMaxBytes else {
                 composerNotice = composerImageFileTooLargeMessage
-                return false
+                return nil
             }
         }
         composerNotice = nil
-        composerAttachments.add(.image(image))
-        return true
+        return addComposerAttachment(.image(image))
     }
 
     /// **Every code-mode submit site's one door** (`ShellSessionHost.submit`,
@@ -1213,11 +1220,12 @@ final class FieldStateAdapter: ObservableObject {
     func composerTextForSend(_ text: String, originalPaths: Bool = true, attachmentFiles: Bool = true,
                              stage: (ComposerImageData) async throws -> StagedImage) async -> ComposerOutgoing? {
         if let row = currentSessionRow(), !composerImageInputEnabled(row: row) {
-            guard composerAttachments.isEmpty else {
+            guard composerAttachments.live(in: text).isEmpty else {
                 composerNotice = composerAttachmentsNotHereMessage
                 return nil
             }
-            return text.isEmpty ? nil : ComposerOutgoing(text: text, images: [])
+            let plain = composerTextWithoutMarkers(text)
+            return plain.isEmpty ? nil : ComposerOutgoing(text: plain, images: [])
         }
         do {
             let outgoing = try await resolveComposerAttachments(text, draft: composerAttachments, originalPaths: originalPaths,
@@ -1316,8 +1324,10 @@ final class FieldStateAdapter: ObservableObject {
             remaining = composerDraft
         }
         composerDraft = remaining
-        // Only the chips the message carried go: one attached during the round trip stays.
+        // Only the chips the message carried go: one attached during the round trip stays — and so does nothing
+        // the remaining text does not hold (a sent draft's deleted chips were kept only for its undo).
         composerAttachments.remove(ids: sentAttachments)
+        composerAttachments.prune(keeping: remaining, retaining: 0)
         composerNotice = nil
     }
 

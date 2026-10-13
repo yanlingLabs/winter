@@ -5,28 +5,27 @@ import WinterProtocol
 
 // MARK: - Composer attachments (2026-10-13)
 //
-// A CODE session's composer holds its attachments BESIDE the typed text, never inside it: each one is a chip
-// in a strip above the text (`ComposerAttachmentStrip`), with a hover × to remove it, and Backspace at the very
-// start of the text removes the last one. Two kinds:
+// A CODE session's composer holds its attachments INSIDE the typed text, where the user put them: each one is a
+// chip in the line — a text attachment drawn as the shared chip (`ComposerChipAttachmentCell`, TextKit 1) — with
+// a hover × to remove it; Backspace and Delete take it like any character, and undo brings it back. Two kinds:
 //
 //   - an IMAGE (`ComposerImage`, `ComposerImages.swift`): the user's own image file, or image data staged at
 //     submit — exactly the code-mode image input of 2026-09-29/10-10;
 //   - a FILE: any other file or folder (a PDF, a .docx, a code file, a folder…) — its absolute path.
 //
-// Only at submit does the draft become the wire's shape (`resolveComposerAttachments`): the chips' placeholders,
-// images first and then files, each numbered from 1 in strip order, on one line ABOVE the typed text —
-// `[Image #1] [File #1]\nexplain these` — with `images` and `files` naming the paths. So the wire contract is
-// the one every daemon and client already speaks: the daemon substitutes the paths for the model
-// (`modelTextOf`), the stored message keeps the placeholders, and the bubble draws a chip per placeholder.
-// A daemon without the `attachment-files` hello feature is sent each file's path in the text instead; one
-// without `image-original-paths` (or a stage answer without `imagesOnSend`) likewise for images.
+// The draft (`FieldStateAdapter.composerDraft`) is a plain String; each chip is ONE private-use character in it,
+// its MARKER (`composerAttachmentMarker`, U+E000 + the attachment's id) — one UTF-16 unit, like the U+FFFC the
+// text view holds in its place, so a range in one is the same range in the other. The attachments themselves
+// live beside the draft (`ComposerAttachmentDraft`), and stay there while their chip is out of the text so
+// undo (or a paste of a cut chip) can bring it back; what a draft SENDS is only what its text holds.
 //
-// Why a strip and not inline text attachments: the user asked for ONE chip design (thumbnail or icon, a name,
-// a hover ×) shared by the composer and the sent bubble. The composer's `NSTextView` lays out with TextKit 1, so
-// an inline chip would be an `NSTextAttachmentCell` drawn by hand — a second implementation of the chip, with
-// hover tracking, glyph-rect hit testing, and copy/undo/serialisation all re-plumbed through the text storage.
-// The strip keeps the text plain (copy, cut, undo and caret movement are AppKit's, untouched) and renders the
-// same SwiftUI `AttachmentChip` in both places.
+// At submit (`resolveComposerAttachments`) each marker becomes its placeholder AT ITS POSITION — images and files
+// each numbered from 1 in the order they first appear (`look at [Image #1] and compare [File #1]`) — with
+// `images` and `files` naming the paths. So the wire contract is the one every daemon and client already speaks:
+// the daemon substitutes the paths for the model (`modelTextOf`), the stored message keeps the placeholders, and
+// the bubble draws a chip at each placeholder. A daemon without the `attachment-files` hello feature is sent each
+// file's path in the text instead; one without `image-original-paths` (or a stage answer without
+// `imagesOnSend`) likewise for images.
 
 /// What one composer attachment is.
 enum ComposerAttachmentKind: Equatable {
@@ -58,25 +57,61 @@ struct ComposerAttachment: Identifiable, Equatable {
     }
 }
 
-/// One draft's attachments, in strip order.
+/// The first private-use code point a chip's marker uses; a marker is `base + id`.
+let composerAttachmentMarkerBase: UInt32 = 0xE000
+/// The last id a marker can carry (the BMP private-use area ends at U+F8FF) — far past any draft.
+let composerAttachmentMaxID = Int(0xF8FF - composerAttachmentMarkerBase)
+
+/// The marker character for an attachment id — what the draft String holds where its chip is.
+func composerAttachmentMarker(_ id: Int) -> Character {
+    Character(Unicode.Scalar(composerAttachmentMarkerBase + UInt32(id))!)
+}
+
+/// The attachment id a character marks, or `nil` for any other character.
+func composerAttachmentID(marker: Character) -> Int? {
+    guard marker.unicodeScalars.count == 1, let scalar = marker.unicodeScalars.first else { return nil }
+    let value = scalar.value
+    guard value > composerAttachmentMarkerBase, value <= 0xF8FF else { return nil }
+    return Int(value - composerAttachmentMarkerBase)
+}
+
+/// The ids of every marker in `text`, in order (a chip pasted twice appears twice).
+func composerAttachmentMarkerIDs(in text: String) -> [Int] {
+    text.compactMap(composerAttachmentID(marker:))
+}
+
+/// `text` without its markers — what a surface that cannot take attachments shows or sends.
+func composerTextWithoutMarkers(_ text: String) -> String {
+    String(text.filter { composerAttachmentID(marker: $0) == nil })
+}
+
+/// One draft's attachments: every one attached and not yet sent or dropped, by id. Which of them the message
+/// carries, and in what order, is the TEXT's business (`live(in:)`).
 struct ComposerAttachmentDraft: Equatable {
     private(set) var items: [ComposerAttachment] = []
     private var nextID = 1
+    /// Names this draft, for a copied chip: a paste restores a chip only into the draft it was cut from.
+    let token = UUID().uuidString
+
+    /// At most this many attachments are kept OUT of the text (for undo) — the oldest go first.
+    static let retainedOutOfTextMax = 32
 
     var isEmpty: Bool { items.isEmpty }
-    var imageCount: Int { items.filter { $0.image != nil }.count }
-    var fileCount: Int { items.filter { $0.filePath != nil }.count }
 
-    /// Appends one attachment and answers its id.
+    /// The attachment with this id, if the draft still holds it.
+    func item(id: Int) -> ComposerAttachment? { items.first { $0.id == id } }
+
+    /// Appends one attachment and answers its id — `nil` past `composerAttachmentMaxID` ids in one draft.
     @discardableResult
-    mutating func add(_ kind: ComposerAttachmentKind) -> Int {
+    mutating func add(_ kind: ComposerAttachmentKind) -> Int? {
+        guard nextID <= composerAttachmentMaxID else { return nil }
         let id = nextID
         nextID += 1
         items.append(ComposerAttachment(id: id, kind: kind, key: UUID().uuidString))
         return id
     }
 
-    /// The chip's × — answers whether anything was removed.
+    /// Drops one — answers whether anything was removed.
     @discardableResult
     mutating func remove(id: Int) -> Bool {
         guard let i = items.firstIndex(where: { $0.id == id }) else { return false }
@@ -84,24 +119,54 @@ struct ComposerAttachmentDraft: Equatable {
         return true
     }
 
-    /// Backspace at the start of the text: the last chip goes. `nil` when there is none.
-    @discardableResult
-    mutating func removeLast() -> ComposerAttachment? {
-        items.popLast()
-    }
-
     /// Drops these (a sent message's), keeping every other one — attached during the send's round trip.
     mutating func remove(ids: Set<Int>) {
         items.removeAll { ids.contains($0.id) }
     }
 
-    /// The number each attachment's placeholder will carry when sent: images and files each count from 1, in
-    /// strip order. Keyed by attachment id.
-    var placeholderNumbers: [Int: Int] {
+    /// Keeps what `text` holds, and of the rest (chips deleted, kept for undo) only the newest
+    /// `retainedOutOfTextMax`. `retaining: 0` keeps only what the text holds.
+    mutating func prune(keeping text: String, retaining: Int = retainedOutOfTextMax) {
+        let inText = Set(composerAttachmentMarkerIDs(in: text))
+        let outOfText = items.filter { !inText.contains($0.id) }.map(\.id)
+        let dropped = Set(outOfText.dropLast(max(0, retaining)))
+        if !dropped.isEmpty { items.removeAll { dropped.contains($0.id) } }
+    }
+
+    /// The attachments `text` carries, each once, in the order their chips first appear.
+    func live(in text: String) -> [ComposerAttachment] {
+        var seen = Set<Int>()
+        return composerAttachmentMarkerIDs(in: text).compactMap { id in
+            guard seen.insert(id).inserted else { return nil }
+            return item(id: id)
+        }
+    }
+
+    /// The number each attachment's placeholder carries when `text` is sent: images and files each count from 1,
+    /// in the order they first appear in the text. Keyed by attachment id.
+    func placeholderNumbers(in text: String) -> [Int: Int] {
         var images = 0, files = 0
         var out: [Int: Int] = [:]
-        for item in items {
+        for item in live(in: text) {
             if item.image != nil { images += 1; out[item.id] = images } else { files += 1; out[item.id] = files }
+        }
+        return out
+    }
+
+    /// The placeholder a chip stands for in `text` (`[Image #2]`), or `nil` when the draft no longer holds it.
+    func placeholder(id: Int, in text: String) -> String? {
+        guard let item = item(id: id), let n = placeholderNumbers(in: text)[id] else { return nil }
+        return item.image != nil ? composerImageToken(n) : composerFileToken(n)
+    }
+
+    /// `text` with each marker replaced by its placeholder; a marker the draft no longer holds goes.
+    func serialized(_ text: String) -> String {
+        let numbers = placeholderNumbers(in: text)
+        var out = ""
+        for character in text {
+            guard let id = composerAttachmentID(marker: character) else { out.append(character); continue }
+            guard let item = item(id: id), let n = numbers[id] else { continue }
+            out += item.image != nil ? composerImageToken(n) : composerFileToken(n)
         }
         return out
     }
@@ -129,15 +194,6 @@ struct ComposerOutgoing: Equatable {
     var originalImagePaths: [Int: String] = [:]
 }
 
-/// The text a draft sends: its placeholders on one line (images, then files), then the typed text. A draft with
-/// no attachment is its text, unchanged.
-func composerMessageText(_ text: String, imageNumbers: Int, fileNumbers: Int) -> String {
-    let tokens = (0..<imageNumbers).map { composerImageToken($0 + 1) } + (0..<fileNumbers).map { composerFileToken($0 + 1) }
-    guard !tokens.isEmpty else { return text }
-    let line = tokens.joined(separator: " ")
-    return text.isEmpty ? line : line + "\n" + text
-}
-
 /// At most this many attachments — images and files TOGETHER — ride one message (`USER_MESSAGE_ATTACHMENTS_MAX`),
 /// so a message's paths stay far inside the daemon's per-event cap.
 let composerAttachmentsPerMessageMax = 20
@@ -151,22 +207,24 @@ func substituteComposerAttachmentTokens(_ text: String, images: [Int: String], f
     rewriteAttachmentTokenText(text) { kind, n in kind == .image ? images[n] : files[n] }
 }
 
-/// **The one submit-time helper** every code-mode submit site goes through: the draft (typed `text` plus its
-/// attachments) as the wire's message. Each IMAGE resolves to the path the model is given — a FILE image is its
-/// own path, DATA is staged raw through `stage` — and each FILE attachment is its own path. When every stage
-/// answered `imagesOnSend` (and, for a file image, the daemon announced `originalPaths`) the images ride in
-/// `images` beside their placeholders, else their paths go into the text; likewise files ride in `files` only
-/// when the daemon announced `attachmentFiles`. The first refusal throws — the caller sends nothing. A draft with
-/// no attachment comes back as its text, with nothing staged.
+/// **The one submit-time helper** every code-mode submit site goes through: the draft's `text` — its chips as
+/// markers — as the wire's message, each chip's placeholder where the chip was (`ComposerAttachmentDraft
+/// .serialized`). Each IMAGE resolves to the path the model is given — a FILE image is its own path, DATA is
+/// staged raw through `stage` — and each FILE attachment is its own path. When every stage answered
+/// `imagesOnSend` (and, for a file image, the daemon announced `originalPaths`) the images ride in `images` beside
+/// their placeholders, else their paths go into the text; likewise files ride in `files` only when the daemon
+/// announced `attachmentFiles`. The first refusal throws — the caller sends nothing. A text without markers comes
+/// back as it is, with nothing staged.
 func resolveComposerAttachments(_ text: String, draft: ComposerAttachmentDraft, originalPaths: Bool = true,
                                 attachmentFiles: Bool = true,
                                 stage: (ComposerImageData) async throws -> StagedImage) async throws -> ComposerOutgoing {
-    let imageItems = draft.items.filter { $0.image != nil }
-    let fileItems = draft.items.filter { $0.filePath != nil }
+    let live = draft.live(in: text)
+    let imageItems = live.filter { $0.image != nil }
+    let fileItems = live.filter { $0.filePath != nil }
     if imageItems.count > composerImagesPerMessageMax { throw ComposerImagesRefusal(message: composerImagesPerMessageMaxMessage) }
     if fileItems.count > composerFilesPerMessageMax { throw ComposerImagesRefusal(message: composerFilesPerMessageMaxMessage) }
-    if draft.items.count > composerAttachmentsPerMessageMax { throw ComposerImagesRefusal(message: composerAttachmentsPerMessageMaxMessage) }
-    let message = composerMessageText(text, imageNumbers: imageItems.count, fileNumbers: fileItems.count)
+    if live.count > composerAttachmentsPerMessageMax { throw ComposerImagesRefusal(message: composerAttachmentsPerMessageMaxMessage) }
+    let message = draft.serialized(text)
 
     var imageRefs: [SessionEvent.UserMessageImageRef] = []
     var originals: [Int: String] = [:]
@@ -199,7 +257,7 @@ func resolveComposerAttachments(_ text: String, draft: ComposerAttachmentDraft, 
     let sent = inlineImages.isEmpty && inlineFiles.isEmpty
         ? message : substituteComposerAttachmentTokens(message, images: inlineImages, files: inlineFiles)
     return ComposerOutgoing(text: sent, images: imageRefs, files: fileRefs,
-                            sentAttachmentIDs: Set(draft.items.map(\.id)), originalImagePaths: originals)
+                            sentAttachmentIDs: Set(live.map(\.id)), originalImagePaths: originals)
 }
 
 // MARK: - Intake (paste, drop, the "+" picker)
@@ -248,15 +306,21 @@ func composerAttachments(from pasteboard: NSPasteboard) -> [ComposerAttachmentKi
     return composerImages(from: pasteboard).map { $0.map(ComposerAttachmentKind.image) }
 }
 
-/// What a composer surface hands `ComposerTextView` so its paste/drop (and the "+" picker) can attach.
+/// What a composer surface hands `ComposerTextView` so its paste/drop (and the "+" picker) can attach, and its
+/// chips can draw.
 struct ComposerAttachmentIntake {
     /// Read at paste/drop time: `false` (not a code session) leaves AppKit's own behaviour untouched.
     let isEnabled: () -> Bool
-    /// Attach one: `true` when it was attached, `false` when refused (the surface has already shown why, in its
-    /// composer notice line).
-    let attach: (ComposerAttachmentKind) -> Bool
-    /// Backspace at the start of the text: remove the last chip. `true` when one was removed.
-    let removeLast: () -> Bool
+    /// Attach one: its id, for the text view to put its chip in the text — or `nil` when refused (the surface
+    /// has already shown why, in its composer notice line).
+    let attach: (ComposerAttachmentKind) -> Int?
+    /// What the chip of an attachment draws, numbered against `text` (the draft as it now reads) — `nil` once the
+    /// draft no longer holds it.
+    let chip: (_ id: Int, _ text: String) -> AttachmentChipModel?
+    /// The placeholder a chip stands for in `text` (`[Image #1]`) — what a copy puts on the pasteboard.
+    let placeholder: (_ id: Int, _ text: String) -> String?
+    /// The draft's own name (`ComposerAttachmentDraft.token`): a copied chip pastes back as a chip only here.
+    let draftToken: () -> String
 }
 
 /// The "+" button's job, handed to the text view: the button lives in SwiftUI chrome, the intake and the

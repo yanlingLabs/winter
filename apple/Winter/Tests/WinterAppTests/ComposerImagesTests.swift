@@ -33,17 +33,17 @@ final class ComposerImagesTests: XCTestCase {
         XCTAssertEqual(out, "/t/winter-session-s/images/image_4.png vs [Image #2] vs /t/winter-session-s/images/image_4.png ✓")
     }
 
-    func testResolveStagesTheDataInStripOrderAndPutsThePlaceholdersAboveTheText() async throws {
+    func testResolveStagesTheDataInTextOrderAndPutsThePlaceholdersWhereTheChipsAre() async throws {
         var draft = ComposerAttachmentDraft()
         draft.add(.image(ComposerImage(data: png, mediaType: "image/png")))
         draft.add(.image(ComposerImage(data: jpeg, mediaType: "image/jpeg")))
         var staged: [String] = []
-        let out = try await resolveComposerAttachments("see these", draft: draft) { image in
+        let out = try await resolveComposerAttachments(chipText(draft, "see these"), draft: draft) { image in
             staged.append(image.mediaType)
             return StagedImage(path: "/t/image_\(staged.count).png", imagesOnSend: true)
         }
         XCTAssertEqual(staged, ["image/png", "image/jpeg"])
-        XCTAssertEqual(out.text, "[Image #1] [Image #2]\nsee these", "the message keeps its placeholders; only the model is given the paths")
+        XCTAssertEqual(out.text, "[Image #1] [Image #2] see these", "the message keeps its placeholders; only the model is given the paths")
         XCTAssertEqual(out.images, [SessionEvent.UserMessageImageRef(n: 1, path: "/t/image_1.png"),
                                     SessionEvent.UserMessageImageRef(n: 2, path: "/t/image_2.png")])
         XCTAssertEqual(out.sentAttachmentIDs, Set(draft.items.map(\.id)))
@@ -56,9 +56,9 @@ final class ComposerImagesTests: XCTestCase {
     /// More than 20 images is refused before anything is staged, with the daemon's sentence.
     func testMoreThanTwentyImagesIsRefusedBeforeStaging() async {
         let a = adapter(mode: "code")
-        for _ in 0..<21 { XCTAssertTrue(a.composerImageIntake.attach(.image(ComposerImage(data: png, mediaType: "image/png")))) }
+        for _ in 0..<21 { XCTAssertTrue(a.attachChip(.image(ComposerImage(data: png, mediaType: "image/png")))) }
         var staged = 0
-        let sent = await a.composerTextForSend("x") { _ in staged += 1; return StagedImage(path: "/t/x.png", imagesOnSend: true) }
+        let sent = await a.composerTextForSend(a.composerDraft + "x") { _ in staged += 1; return StagedImage(path: "/t/x.png", imagesOnSend: true) }
         XCTAssertNil(sent, "nothing is sent")
         XCTAssertEqual(staged, 0, "nothing is staged")
         XCTAssertEqual(a.composerNotice, "A message can carry at most 20 images")
@@ -71,11 +71,11 @@ final class ComposerImagesTests: XCTestCase {
         draft.add(.image(ComposerImage(data: png, mediaType: "image/png")))
         draft.add(.image(ComposerImage(data: png, mediaType: "image/png")))
         var k = 0
-        let out = try await resolveComposerAttachments("and", draft: draft) { _ in
+        let out = try await resolveComposerAttachments(chipText(draft, "and"), draft: draft) { _ in
             k += 1
             return StagedImage(path: "/t/image_\(k).png", imagesOnSend: k == 1)
         }
-        XCTAssertEqual(out.text, "/t/image_1.png /t/image_2.png\nand")
+        XCTAssertEqual(out.text, "/t/image_1.png /t/image_2.png and")
         XCTAssertEqual(out.images, [])
     }
 
@@ -371,8 +371,8 @@ final class ComposerImagesTests: XCTestCase {
         let bytes = generatedPNG(width: 16, height: 16, noise: false)
         try bytes.write(to: shot)
         let a = adapter(mode: "code")
-        XCTAssertTrue(a.composerImageIntake.attach(.image(.file(path: shot.path))))
-        let outgoingMaybe = await a.composerTextForSend("look") { _ in XCTFail("a file is never staged up front"); return StagedImage(path: "", imagesOnSend: true) }
+        XCTAssertTrue(a.attachChip(.image(.file(path: shot.path))))
+        let outgoingMaybe = await a.composerTextForSend(a.composerDraft + "look") { _ in XCTFail("a file is never staged up front"); return StagedImage(path: "", imagesOnSend: true) }
         let outgoing = try XCTUnwrap(outgoingMaybe)
         XCTAssertEqual(outgoing.images, [SessionEvent.UserMessageImageRef(n: 1, path: shot.path)])
         var sends: [ComposerOutgoing] = []
@@ -383,7 +383,7 @@ final class ComposerImagesTests: XCTestCase {
         }, stage: { data in staged.append(data); return StagedImage(path: "/t/image_1.png", imagesOnSend: true) })
         XCTAssertTrue(ok)
         XCTAssertEqual(sends.map(\.images), [outgoing.images, [SessionEvent.UserMessageImageRef(n: 1, path: "/t/image_1.png")]])
-        XCTAssertEqual(sends.last?.text, "[Image #1]\nlook")
+        XCTAssertEqual(sends.last?.text, "[Image #1] look")
         XCTAssertEqual(staged, [ComposerImageData(data: bytes, mediaType: "image/png")], "the file's own bytes, raw")
         XCTAssertNil(a.composerNotice, "transparent — nothing to tell the user")
     }
@@ -394,8 +394,8 @@ final class ComposerImagesTests: XCTestCase {
         let one = dir.appendingPathComponent("one.png"), two = dir.appendingPathComponent("two.png"), fine = dir.appendingPathComponent("fine.png")
         for url in [one, two, fine] { try generatedPNG(width: 8, height: 8, noise: false).write(to: url) }
         let a = adapter(mode: "code")
-        for url in [one, fine, two] { XCTAssertTrue(a.composerImageIntake.attach(.image(.file(path: url.path)))) }
-        let outgoingMaybe = await a.composerTextForSend("") { _ in StagedImage(path: "", imagesOnSend: true) }
+        for url in [one, fine, two] { XCTAssertTrue(a.attachChip(.image(.file(path: url.path)))) }
+        let outgoingMaybe = await a.composerTextForSend(a.composerDraft) { _ in StagedImage(path: "", imagesOnSend: true) }
         let outgoing = try XCTUnwrap(outgoingMaybe)
         var sends: [ComposerOutgoing] = []
         var k = 0
@@ -415,8 +415,8 @@ final class ComposerImagesTests: XCTestCase {
         let shot = dir.appendingPathComponent("shot.png")
         try generatedPNG(width: 8, height: 8, noise: false).write(to: shot)
         let a = adapter(mode: "code")
-        XCTAssertTrue(a.composerImageIntake.attach(.image(.file(path: shot.path))))
-        let outgoingMaybe = await a.composerTextForSend("") { _ in StagedImage(path: "", imagesOnSend: true) }
+        XCTAssertTrue(a.attachChip(.image(.file(path: shot.path))))
+        let outgoingMaybe = await a.composerTextForSend(a.composerDraft) { _ in StagedImage(path: "", imagesOnSend: true) }
         let outgoing = try XCTUnwrap(outgoingMaybe)
         try FileManager.default.removeItem(at: shot) // gone before the send
         var sends = 0
@@ -430,8 +430,8 @@ final class ComposerImagesTests: XCTestCase {
 
     func testOtherRefusalsAreNotRetriedAndTheirSentenceIsShownOnlyWhenAttachmentsRodeAlong() async throws {
         let a = adapter(mode: "code")
-        XCTAssertTrue(a.composerImageIntake.attach(.image(ComposerImage(data: png, mediaType: "image/png"))))
-        let withImagesMaybe = await a.composerTextForSend("") { _ in StagedImage(path: "/t/image_1.png", imagesOnSend: true) }
+        XCTAssertTrue(a.attachChip(.image(ComposerImage(data: png, mediaType: "image/png"))))
+        let withImagesMaybe = await a.composerTextForSend(a.composerDraft) { _ in StagedImage(path: "/t/image_1.png", imagesOnSend: true) }
         let withImages = try XCTUnwrap(withImagesMaybe)
         var sends = 0
         var ok = await a.composerSend(withImages, send: { _ in sends += 1; throw self.rpcFailure("image_input_unsupported", message: "The selected model doesn't support images") },
@@ -455,24 +455,24 @@ final class ComposerImagesTests: XCTestCase {
     func testAnOlderDaemonIsSentAFilesPathInTheText() async throws {
         var draft = ComposerAttachmentDraft()
         draft.add(.image(.file(path: "/Users/me/My Shot.png")))
-        let older = try await resolveComposerAttachments("see", draft: draft, originalPaths: false) { _ in XCTFail("a file is never staged"); return StagedImage(path: "", imagesOnSend: true) }
-        XCTAssertEqual(older.text, "/Users/me/My Shot.png\nsee")
+        let older = try await resolveComposerAttachments(chipText(draft, "see"), draft: draft, originalPaths: false) { _ in XCTFail("a file is never staged"); return StagedImage(path: "", imagesOnSend: true) }
+        XCTAssertEqual(older.text, "/Users/me/My Shot.png see")
         XCTAssertEqual(older.images, [])
-        let current = try await resolveComposerAttachments("see", draft: draft, originalPaths: true) { _ in StagedImage(path: "", imagesOnSend: true) }
-        XCTAssertEqual(current.text, "[Image #1]\nsee")
+        let current = try await resolveComposerAttachments(chipText(draft, "see"), draft: draft, originalPaths: true) { _ in StagedImage(path: "", imagesOnSend: true) }
+        XCTAssertEqual(current.text, "[Image #1] see")
         XCTAssertEqual(current.images, [SessionEvent.UserMessageImageRef(n: 1, path: "/Users/me/My Shot.png")])
         XCTAssertEqual(current.originalImagePaths, [1: "/Users/me/My Shot.png"])
         // Data alone does not depend on the capability: its path is one the daemon staged.
         var data = ComposerAttachmentDraft()
         data.add(.image(ComposerImage(data: png, mediaType: "image/png")))
-        let staged = try await resolveComposerAttachments("", draft: data, originalPaths: false) { _ in StagedImage(path: "/t/image_1.png", imagesOnSend: true) }
+        let staged = try await resolveComposerAttachments(chipText(data, ""), draft: data, originalPaths: false) { _ in StagedImage(path: "/t/image_1.png", imagesOnSend: true) }
         XCTAssertEqual(staged.images.count, 1)
         XCTAssertEqual(staged.originalImagePaths, [:])
         // The adapter's door passes the capability through.
         let a = adapter(mode: "code")
         a.composerAttachments = draft
-        let viaAdapter = await a.composerTextForSend("see", originalPaths: false) { _ in StagedImage(path: "", imagesOnSend: true) }
-        XCTAssertEqual(viaAdapter?.text, "/Users/me/My Shot.png\nsee")
+        let viaAdapter = await a.composerTextForSend(chipText(draft, "see"), originalPaths: false) { _ in StagedImage(path: "", imagesOnSend: true) }
+        XCTAssertEqual(viaAdapter?.text, "/Users/me/My Shot.png see")
         XCTAssertEqual(viaAdapter?.images, [])
     }
 
@@ -526,16 +526,16 @@ final class ComposerImagesTests: XCTestCase {
 
     func testAttachAddsAChipInOrder() {
         let a = adapter(mode: "code")
-        XCTAssertTrue(a.composerImageIntake.attach(.image(ComposerImage(data: png, mediaType: "image/png"))))
-        XCTAssertTrue(a.composerImageIntake.attach(.image(ComposerImage(data: jpeg, mediaType: "image/jpeg"))))
+        XCTAssertTrue(a.attachChip(.image(ComposerImage(data: png, mediaType: "image/png"))))
+        XCTAssertTrue(a.attachChip(.image(ComposerImage(data: jpeg, mediaType: "image/jpeg"))))
         XCTAssertEqual(a.composerChips.map(\.name), ["Image #1", "Image #2"])
         XCTAssertNil(a.composerNotice)
-        XCTAssertEqual(a.composerDraft, "", "the text is never touched — the chips live beside it")
+        XCTAssertEqual(composerAttachmentMarkerIDs(in: a.composerDraft), [1, 2], "each chip is in the text, in order")
     }
 
     func testATextOnlyModelRefusesAtAttachTimeWithTheExactMessage() {
         let a = adapter(mode: "code", images: false)
-        XCTAssertFalse(a.composerImageIntake.attach(.image(ComposerImage(data: png, mediaType: "image/png"))))
+        XCTAssertFalse(a.attachChip(.image(ComposerImage(data: png, mediaType: "image/png"))))
         XCTAssertEqual(a.composerNotice, "The selected model doesn't support images")
         XCTAssertTrue(a.composerAttachments.isEmpty)
         // An optimistic switch to a model the catalogue says takes images is honoured at once.
@@ -544,20 +544,20 @@ final class ComposerImagesTests: XCTestCase {
                      SyncConfigModelInfo(id: "x/vision", providerId: "x", displayName: "V", facingName: nil, efforts: [], supportsImages: true)],
             defaultEffort: "", clientEfforts: [])
         a.pendingModel = .value("x/vision")
-        XCTAssertTrue(a.composerImageIntake.attach(.image(ComposerImage(data: png, mediaType: "image/png"))))
+        XCTAssertTrue(a.attachChip(.image(ComposerImage(data: png, mediaType: "image/png"))))
         XCTAssertNil(a.composerNotice, "a successful attach clears the notice")
     }
 
     func testAnUnlistedModelIsLeftToTheDaemon() {
         let a = adapter(mode: "code", model: "somewhere/unlisted")
-        XCTAssertTrue(a.composerImageIntake.attach(.image(ComposerImage(data: png, mediaType: "image/png"))))
+        XCTAssertTrue(a.attachChip(.image(ComposerImage(data: png, mediaType: "image/png"))))
     }
 
     func testOverTheCapIsRefused() {
         let a = adapter(mode: "code")
         var big = png
         big.append(Data(count: composerImageMaxBytes))
-        XCTAssertFalse(a.composerImageIntake.attach(.image(ComposerImage(data: big, mediaType: "image/png"))))
+        XCTAssertFalse(a.attachChip(.image(ComposerImage(data: big, mediaType: "image/png"))))
         XCTAssertEqual(a.composerNotice, composerImageTooLargeMessage)
         XCTAssertEqual(composerImageTooLargeMessage, "The image is too large to attach")
     }
@@ -568,12 +568,12 @@ final class ComposerImagesTests: XCTestCase {
         let shot = dir.appendingPathComponent("shot.png")
         try png.write(to: shot)
         let a = adapter(mode: "code")
-        XCTAssertTrue(a.composerImageIntake.attach(.image(.file(path: shot.path))))
+        XCTAssertTrue(a.attachChip(.image(.file(path: shot.path))))
         XCTAssertNil(a.composerNotice)
         XCTAssertEqual(a.composerChips.map(\.name), ["shot.png"], "an image file's chip is named by the file")
         // Submit: the path itself goes in `images`; nothing is staged.
-        let sent = await a.composerTextForSend("look") { _ in XCTFail("a file is never staged"); return StagedImage(path: "", imagesOnSend: true) }
-        XCTAssertEqual(sent?.text, "[Image #1]\nlook")
+        let sent = await a.composerTextForSend(a.composerDraft + "look") { _ in XCTFail("a file is never staged"); return StagedImage(path: "", imagesOnSend: true) }
+        XCTAssertEqual(sent?.text, "[Image #1] look")
         XCTAssertEqual(sent?.images, [SessionEvent.UserMessageImageRef(n: 1, path: shot.path)])
     }
 
@@ -585,14 +585,14 @@ final class ComposerImagesTests: XCTestCase {
         let over = dir.appendingPathComponent("over.png"); try png.write(to: over)
         XCTAssertEqual(Darwin.truncate(over.path, off_t(composerImageFileMaxBytes) + 1), 0)
         let a = adapter(mode: "code")
-        XCTAssertTrue(a.composerImageIntake.attach(.image(.file(path: exact.path))), "exactly 64 MiB is inclusive")
-        XCTAssertFalse(a.composerImageIntake.attach(.image(.file(path: over.path))))
+        XCTAssertTrue(a.attachChip(.image(.file(path: exact.path))), "exactly 64 MiB is inclusive")
+        XCTAssertFalse(a.attachChip(.image(.file(path: over.path))))
         XCTAssertEqual(a.composerNotice, "Image files must be 64 MB or smaller")
-        XCTAssertFalse(a.composerImageIntake.attach(.image(.file(path: dir.appendingPathComponent("gone.png").path))))
+        XCTAssertFalse(a.attachChip(.image(.file(path: dir.appendingPathComponent("gone.png").path))))
         XCTAssertEqual(a.composerNotice, composerImageFileUnreadableMessage)
         // The text-only-model refusal is the same exact message for a file.
         let text = adapter(mode: "code", images: false)
-        XCTAssertFalse(text.composerImageIntake.attach(.image(.file(path: exact.path))))
+        XCTAssertFalse(text.attachChip(.image(.file(path: exact.path))))
         XCTAssertEqual(text.composerNotice, "The selected model doesn't support images")
     }
 
@@ -604,7 +604,7 @@ final class ComposerImagesTests: XCTestCase {
         draft.add(.image(ComposerImage(data: png, mediaType: "image/png")))
         draft.add(.image(.file(path: "/Users/me/b.heic")))
         var staged: [String] = []
-        let out = try await resolveComposerAttachments("", draft: draft) { data in
+        let out = try await resolveComposerAttachments(chipText(draft, ""), draft: draft) { data in
             staged.append(data.mediaType)
             return StagedImage(path: "/t/image_1.png", imagesOnSend: true)
         }
@@ -615,15 +615,15 @@ final class ComposerImagesTests: XCTestCase {
             SessionEvent.UserMessageImageRef(n: 2, path: "/t/image_1.png"),
             SessionEvent.UserMessageImageRef(n: 3, path: "/Users/me/b.heic"),
         ])
-        let older = try await resolveComposerAttachments("hi", draft: draft) { _ in StagedImage(path: "/t/image_9.png", imagesOnSend: false) }
-        XCTAssertEqual(older.text, "/Users/me/My Shot.png /t/image_9.png /Users/me/b.heic\nhi")
+        let older = try await resolveComposerAttachments(chipText(draft, "hi"), draft: draft) { _ in StagedImage(path: "/t/image_9.png", imagesOnSend: false) }
+        XCTAssertEqual(older.text, "/Users/me/My Shot.png /t/image_9.png /Users/me/b.heic hi")
         XCTAssertEqual(older.images, [])
     }
 
     func testComposerTextForSendRefusesWithTheDaemonsSentence() async {
         let a = adapter(mode: "code")
-        XCTAssertTrue(a.composerImageIntake.attach(.image(ComposerImage(data: png, mediaType: "image/png"))))
-        let refused = await a.composerTextForSend("look") { _ in
+        XCTAssertTrue(a.attachChip(.image(ComposerImage(data: png, mediaType: "image/png"))))
+        let refused = await a.composerTextForSend(a.composerDraft + "look") { _ in
             throw RpcError(code: -32602, message: "The selected model doesn't support images")
         }
         XCTAssertNil(refused, "a refusal sends nothing")
@@ -676,8 +676,7 @@ final class ComposerImagesTests: XCTestCase {
     }
 
     /// A refused image FILE (a text-only model) still types its path — AppKit's paste runs beside the
-    /// notice; an accepted one becomes a chip and the text is untouched; refused image DATA is handled
-    /// (nothing to type).
+    /// notice; an accepted one becomes a chip IN the text; refused image DATA is handled (nothing to type).
     func testRefusedImageFilesFallBackToAppKitsPaste() throws {
         let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -689,22 +688,22 @@ final class ComposerImagesTests: XCTestCase {
         board.writeObjects([shot as NSURL])
 
         var refusals = 0
-        let refusing = textView(intake: ComposerAttachmentIntake(isEnabled: { true }, attach: { _ in refusals += 1; return false }, removeLast: { false }))
+        let refusing = textView(intake: makeTestIntake(attach: { _ in refusals += 1; return nil }))
         XCTAssertFalse(refusing.takeComposerAttachments(from: board), "refused files → AppKit types the path")
         XCTAssertEqual(refusals, 1)
         XCTAssertEqual(refusing.string, "")
 
         var taken: [ComposerAttachmentKind] = []
-        let accepting = textView(intake: ComposerAttachmentIntake(isEnabled: { true }, attach: { taken.append($0); return true }, removeLast: { false }))
+        let accepting = textView(intake: makeTestIntake(attach: { taken.append($0); return taken.count }))
         XCTAssertTrue(accepting.takeComposerAttachments(from: board))
         XCTAssertEqual(taken, [.image(.file(path: shot.path))])
-        XCTAssertEqual(accepting.string, "", "a chip, never text")
+        XCTAssertEqual(accepting.composerText, String(composerAttachmentMarker(1)) + " ", "a chip in the text, never its path")
 
         board.clearContents()
         board.setData(generatedPNG(width: 8, height: 8, noise: false), forType: .png)
         XCTAssertTrue(refusing.takeComposerAttachments(from: board), "refused image data has no text to fall back to")
 
-        let off = textView(intake: ComposerAttachmentIntake(isEnabled: { false }, attach: { _ in XCTFail("never asked"); return false }, removeLast: { false }))
+        let off = textView(intake: makeTestIntake(enabled: false, attach: { _ in XCTFail("never asked"); return nil }))
         XCTAssertFalse(off.takeComposerAttachments(from: board), "not a code session → AppKit's paste, untouched")
     }
 
@@ -717,14 +716,14 @@ final class ComposerImagesTests: XCTestCase {
         XCTAssertTrue(a.beginComposerSubmit())
         a.endComposerSubmit()
 
-        XCTAssertTrue(a.composerImageIntake.attach(.image(ComposerImage(data: png, mediaType: "image/png"))))
-        a.composerDraft = "look"
+        XCTAssertTrue(a.attachChip(.image(ComposerImage(data: png, mediaType: "image/png"))))
+        a.composerDraft += "look"
         let sent = a.composerDraft
         let outgoingMaybe = await a.composerTextForSend(sent) { _ in StagedImage(path: "/t/image_1.png", imagesOnSend: true) }
         let outgoing = try XCTUnwrap(outgoingMaybe)
         // Typed and attached during the round trip:
         a.composerDraft = sent + "\nand then"
-        XCTAssertTrue(a.composerImageIntake.attach(.image(ComposerImage(data: jpeg, mediaType: "image/jpeg"))))
+        XCTAssertTrue(a.attachChip(.image(ComposerImage(data: jpeg, mediaType: "image/jpeg"))))
         a.composerSendSucceeded(sentDraft: sent, sentAttachments: outgoing.sentAttachmentIDs)
         XCTAssertEqual(a.composerDraft, "and then")
         XCTAssertEqual(a.composerChips.map(\.name), ["Image #1"], "the chip attached meanwhile stays (renumbered as the draft's first)")
@@ -740,12 +739,19 @@ final class ComposerImagesTests: XCTestCase {
     func testAttachmentsCarriedIntoANonCodeSessionStayAndSayWhy() async {
         let a = adapter(mode: "chat")
         a.composerAttachments = { var d = ComposerAttachmentDraft(); d.add(.image(ComposerImage(data: png, mediaType: "image/png"))); return d }()
-        let sent = await a.composerTextForSend("see") { _ in XCTFail("never staged"); return StagedImage(path: "", imagesOnSend: true) }
+        let sent = await a.composerTextForSend(String(composerAttachmentMarker(1)) + " see") { _ in
+            XCTFail("never staged"); return StagedImage(path: "", imagesOnSend: true)
+        }
         XCTAssertNil(sent, "nothing is sent")
         XCTAssertEqual(a.composerNotice, "Attachments work in Code sessions — this chat can't take them")
         XCTAssertEqual(a.composerAttachments.items.count, 1, "the chips stay")
         a.resetComposerAttachments()
         let plain = await a.composerTextForSend("see") { _ in XCTFail("never staged"); return StagedImage(path: "", imagesOnSend: true) }
         XCTAssertEqual(plain, ComposerOutgoing(text: "see", images: []))
+        // A chip whose attachment is gone sends as nothing at all, never as its private-use character.
+        let stale = await a.composerTextForSend(String(composerAttachmentMarker(7)) + "see") { _ in
+            XCTFail("never staged"); return StagedImage(path: "", imagesOnSend: true)
+        }
+        XCTAssertEqual(stale?.text, "see")
     }
 }

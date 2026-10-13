@@ -8,7 +8,7 @@ import WinterProtocol
 // MARK: - Code-mode image input (2026-09-29; raw image paths 2026-10-10)
 //
 // In a CODE session, pasting image data or an image file, dropping image files, or picking one with the
-// composer's "+" attaches an IMAGE to the draft — a chip in the strip above the text (`ComposerAttachments.swift`,
+// composer's "+" attaches an IMAGE to the draft — a chip in the text, at the caret (`ComposerAttachments.swift`,
 // which also holds the draft, the intake and the submit-time resolution; any other file is a FILE attachment).
 // There are two kinds of image, and neither is ever resized or copied by default (the runtime's Read tool
 // prepares any image for the model itself):

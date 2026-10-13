@@ -107,7 +107,7 @@ struct TranscriptUserBubble: View {
     /// "From session …" header (and the summary, subtly) rides above the body.
     var envelope: AgentMessageEnvelope? = nil
     /// Composer attachments (2026-10-13): the paths behind the prompt's placeholders. Each placeholder that has
-    /// one is drawn as the composer's own chip, in a row above the prose, and leaves the prose (`promptDisplay`).
+    /// one is drawn as the composer's own chip, inline where it is (`promptDisplay`, `PromptBodyView`).
     var attachments = PromptAttachments()
     @Environment(\.transcriptUserMessageStyle) private var style
     @Environment(\.transcriptSessionTitle) private var sessionTitle
@@ -137,21 +137,9 @@ struct TranscriptUserBubble: View {
     /// each role actually renders as.
     var proseRole: TranscriptProseRole { .sans }
 
-    /// The chips and the prose they leave — derived from `text` and `attachments`.
-    var display: PromptDisplay { promptDisplay(text, attachments: attachments) }
-
-    private var displayText: String {
-        display.text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// The chips row: the composer's chip, without its ×, wrapping like the tool pills.
-    @ViewBuilder
-    private func chipsRow(_ chips: [AttachmentChipModel]) -> some View {
-        if !chips.isEmpty {
-            PillFlowLayout(spacing: 6, lineSpacing: 6) {
-                ForEach(chips) { AttachmentChip(model: $0) }
-            }
-        }
+    /// The prose and the chips in it — derived from `text` and `attachments`.
+    var display: PromptDisplay {
+        promptDisplay(text.trimmingCharacters(in: .whitespacesAndNewlines), attachments: attachments)
     }
 
     var body: some View {
@@ -168,10 +156,8 @@ struct TranscriptUserBubble: View {
             VStack(alignment: .leading, spacing: 0) {
                 senderBlock
                     .padding(.bottom, envelope == nil ? 0 : 22)
-                chipsRow(display.chips)
-                    .padding(.bottom, display.chips.isEmpty ? 0 : (displayText.isEmpty ? 12 : 10))
-                if !displayText.isEmpty {
-                    RuledUserMessageText(text: displayText, tint: tint, role: proseRole)
+                if !display.isEmpty {
+                    RuledUserMessageText(display: display, tint: tint, role: proseRole)
                 }
                 Rectangle()
                     .fill(Theme.textPrimary.opacity(0.85)) // white: the window is dark-only
@@ -186,10 +172,8 @@ struct TranscriptUserBubble: View {
     private var content: some View {
         VStack(alignment: .leading, spacing: 8) {
             senderBlock
-            chipsRow(display.chips)
-            if !displayText.isEmpty {
-                TranscriptFormattedMessageText(text: displayText, tint: tint, role: proseRole,
-                                               fillsAvailableWidth: false)
+            if !display.isEmpty {
+                PromptBodyView(display: display, tint: tint, role: proseRole, fillsAvailableWidth: false)
                     .foregroundStyle(.primary)
             }
         }
@@ -204,9 +188,21 @@ struct TranscriptUserBubble: View {
 /// text shows with "Show less" under it. A message only a little over the limit is never clamped
 /// (`collapseSlack`): hiding three lines behind a button is worse than showing them.
 struct RuledUserMessageText: View {
-    let text: String
+    /// The message, its chips in place (`promptDisplay`).
+    let display: PromptDisplay
     let tint: Color
     let role: TranscriptProseRole
+
+    init(display: PromptDisplay, tint: Color, role: TranscriptProseRole) {
+        self.display = display
+        self.tint = tint
+        self.role = role
+    }
+
+    /// A message with no attachments.
+    init(text: String, tint: Color, role: TranscriptProseRole) {
+        self.init(display: promptDisplay(text, attachments: PromptAttachments()), tint: tint, role: role)
+    }
 
     static let collapsedHeight: CGFloat = 200
     static let collapseSlack: CGFloat = 60
@@ -224,7 +220,7 @@ struct RuledUserMessageText: View {
     private var isCollapsed: Bool { Self.isCollapsible(fullHeight: fullHeight) && !isExpanded }
 
     private var message: some View {
-        TranscriptFormattedMessageText(text: text, tint: tint, role: role, fillsAvailableWidth: true)
+        PromptBodyView(display: display, tint: tint, role: role, fillsAvailableWidth: true)
             .foregroundStyle(.primary)
             .transcriptRuledUserMessageWeight()
             .frame(maxWidth: .infinity, alignment: .leading)
