@@ -805,8 +805,8 @@ public struct CUFocusGuardianCore: Sendable {
         if lastSeen != current { lastSeenSince = now }
         lastSeen = current
         if let a = q.app { seenFront[a] = now }
-        if visiting(now: now), let a = q.app {
-            if a == visitApp { if !visitArrived { visitArrived = true } } else if visitArrived { visitLeft = true }
+        if visiting(now: now), let a = q.app, a == visitApp {
+            if !visitArrived { visitArrived = true; visitSpace = q.space } else if visitSpace == nil { visitSpace = q.space }
         }
         if let app = q.app, app == place.app, q.space == nil || place.space == nil || q.space == place.space {
             // Their place's desktop not known (an activation heard late, of an app with windows on several): it is this one.
@@ -831,6 +831,7 @@ public struct CUFocusGuardianCore: Sendable {
             // its end took them to the dialog that was in front when it began).
             // (Not the visit's own way back to the app they were in when it began.)
             if previous != current, visiting(now: now), app != visitApp, app != visitUser { visitSawUserInput = true }
+            noteVisitLeft(q, now: now)
             judged = nil
             lastReason = CUMoveOwner.theirPlace.words
             return .theirPlace
@@ -870,6 +871,7 @@ public struct CUFocusGuardianCore: Sendable {
         switch owner {
         case .user:
             if visiting(now: now) { visitSawUserInput = true }
+            noteVisitLeft(q, now: now)
             view = CUGuardedView(app: q.app ?? view.app, space: q.space ?? view.space)
             viewAt = now
             if let a = q.app { thefts[a] = nil }
@@ -1131,6 +1133,7 @@ public struct CUFocusGuardianCore: Sendable {
         visitSawUserInput = false
         visitArrived = false
         visitLeft = false
+        visitSpace = nil
         // What was judged before it is judged again: what the visit brings up is its own (I5), never a theft undone in
         // the middle of it (found by the model-based test: an app judged the agent's indirect effect a moment before the
         // visit, heard again during it, was undone over the visit's switch).
@@ -1139,11 +1142,18 @@ public struct CUFocusGuardianCore: Sendable {
     }
 
     /// The open visit runs on: its visit mode lasts until `until` (the safety cap, re-armed as work starts and ends).
-    /// During the open visit: the visited app was seen in front (its way there landed), and something else was seen in
-    /// front after that (the user left the visited desktop, or was returned) — only then is a switch of theirs into the
-    /// visited desktop THEIR move, never the visit's own way there (round 19).
+    /// During the open visit: the visited app was seen in front (its way there landed, on `visitSpace`), and after that the
+    /// user's place was seen on another DESKTOP (they left the visited desktop, or were returned — their place, or a move
+    /// judged theirs) — only then is a switch of theirs into the visited desktop THEIR move, never the visit's own way
+    /// there (round 19). Another app in front on the visited desktop, the agent's own included, is no leaving (the review
+    /// of round 19, M1).
     private var visitArrived = false
     private var visitLeft = false
+    private var visitSpace: UInt64?
+
+    private mutating func noteVisitLeft(_ q: CUMoveQuery, now: TimeInterval) {
+        if visiting(now: now), visitArrived, let s = q.space, let vs = visitSpace, s != vs { visitLeft = true }
+    }
 
     public mutating func extendVisit(until: TimeInterval) {
         guard visitApp != nil else { return }

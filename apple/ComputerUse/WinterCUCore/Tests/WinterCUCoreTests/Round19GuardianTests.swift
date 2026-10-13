@@ -80,6 +80,23 @@ final class Round19GuardianTests: XCTestCase {
         XCTAssertEqual(g.view.app, 6000)
     }
 
+    /// The review of round 19, M1 (a probe): the visit arrives at T@300, the agent opens S on 300, the user ⌘-Tabs back
+    /// to T on 300 — they never left the visited DESKTOP, so it is no switch of theirs "into" it: the visit's.
+    func testAnotherAppOnTheVisitedDesktopIsNoLeavingIt() {
+        let t: pid_t = 6000, s: pid_t = 7000
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 100))
+        g.beginVisit(app: t, user: 1, now: 10.0)
+        g.noteCause(t, raise: true, now: 10.05)
+        if case .user = g.judge(CUMoveQuery(app: t, space: 300), now: 10.3) { XCTFail("the way there is the visit's") }
+        g.noteCause(s, raise: true, now: 10.4)              // the agent opens S on the visited desktop
+        _ = g.judge(CUMoveQuery(app: s, space: 300), now: 10.45)
+        g.noteSwitch(now: 10.6, .app, target: t)             // their ⌘-Tab back to T, on the same desktop
+        let back = g.judge(CUMoveQuery(app: t, space: 300), now: 10.65)
+        guard case .visit = back else { return XCTFail("still on the visited desktop: the visit's — \(back)") }
+        XCTAssertEqual(g.view, CUGuardedView(app: 1, space: 100), "their place is still where the visit began")
+    }
+
     /// The review of round 19, H1 (an I1 violation, found by a probe): the user clicks T's background window on desktop
     /// 100, the helper brings it, and T@100 lands — theirs. 450 ms later the agent's act in flight on T raises T's window
     /// on desktop 300 and macOS moves there: the agent's, never "the window they clicked into" — the bring counts only on
