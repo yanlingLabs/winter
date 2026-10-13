@@ -380,16 +380,21 @@ struct ActivityItem: Equatable {
     /// shows in monospace beside the text result. The 100-character `detail` cannot hold a script, so
     /// it rides here, as `writtenLines` does, set when the call arrives. `nil` for every other tool.
     var scriptCode: String? = nil { didSet { stamp = ChangeStamp.next() } }
+    /// A `read` call's whole `file_path` (2026-10-13), uncut — the 100-character `detail` may clip it, and
+    /// the tool row draws the image a read looked at from this (`toolRunReadImages`). `nil` for every other
+    /// tool and for a path that is not absolute.
+    var readPath: String? = nil { didSet { stamp = ChangeStamp.next() } }
 
     /// Names this item's CONTENT as of its last change: fresh at creation, replaced by every mutation
     /// of a field above, copied with the value. Two items with the same stamp are therefore the same
     /// content, which is what lets `==` answer without walking up to 64 KiB of result text.
     private(set) var stamp: UInt64 = ChangeStamp.next()
 
-    init(kind: Kind, writtenLines: Int? = nil, scriptCode: String? = nil) {
+    init(kind: Kind, writtenLines: Int? = nil, scriptCode: String? = nil, readPath: String? = nil) {
         self.kind = kind
         self.writtenLines = writtenLines
         self.scriptCode = scriptCode
+        self.readPath = readPath
     }
 
     /// Content equality, with a shortcut: the same stamp is the same content (see `stamp`). SwiftUI
@@ -398,12 +403,12 @@ struct ActivityItem: Equatable {
     /// Debug build of Winter Dev hung at 99% CPU inside it). Items that differ in stamp fall back to the
     /// field-by-field comparison, so independently built equal items still compare equal.
     static func == (a: ActivityItem, b: ActivityItem) -> Bool {
-        a.stamp == b.stamp || (a.kind == b.kind && a.writtenLines == b.writtenLines && a.scriptCode == b.scriptCode)
+        a.stamp == b.stamp || contentEquals(a, b)
     }
 
     /// The field-by-field comparison alone (tests: the cost the stamp shortcut avoids).
     static func contentEquals(_ a: ActivityItem, _ b: ActivityItem) -> Bool {
-        a.kind == b.kind && a.writtenLines == b.writtenLines && a.scriptCode == b.scriptCode
+        a.kind == b.kind && a.writtenLines == b.writtenLines && a.scriptCode == b.scriptCode && a.readPath == b.readPath
     }
 }
 
@@ -934,6 +939,11 @@ enum SessionReducer {
                let e = s.exchanges.indices.last, let i = s.exchanges[e].activity.indices.last,
                s.exchanges[e].activity[i].toolCallId == v.callId {
                 s.exchanges[e].activity[i].scriptCode = code
+            }
+            if v.name.lowercased() == "read", let path = readToolPath(argsJson: v.argsJson),
+               let e = s.exchanges.indices.last, let i = s.exchanges[e].activity.indices.last,
+               s.exchanges[e].activity[i].toolCallId == v.callId {
+                s.exchanges[e].activity[i].readPath = path
             }
         case .toolReviewProgress(let v):
             // Any thread: a subagent's call is reviewed too, and the callId is unique to the call.
@@ -1629,6 +1639,15 @@ enum SessionReducer {
     }
 
     /// How many lines a `write` call's `content` holds (a trailing newline does not start another).
+    /// A `read` call's `file_path`, whole, when it is absolute (≤ 4096 characters, one line) — `nil` otherwise.
+    static func readToolPath(argsJson: String) -> String? {
+        guard let data = argsJson.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let path = obj["file_path"] as? String, path.hasPrefix("/"), path.count <= 4096,
+              !path.contains(where: \.isNewline) else { return nil }
+        return path
+    }
+
     static func writtenLineCount(argsJson: String) -> Int? {
         guard let data = argsJson.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

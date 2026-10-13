@@ -429,71 +429,94 @@ enum MessageTextFormatter {
             backgroundColor: nil,
             lineSpacing: lineSpacing
         )
-        let bold = inlineAttributes(
-            font: Typography.converted(baseFont, toHaveTrait: .boldFontMask),
-            foregroundColor: foregroundColor,
-            lineSpacing: lineSpacing
-        )
-        let italic = inlineAttributes(
-            font: Typography.converted(baseFont, toHaveTrait: .italicFontMask),
-            foregroundColor: foregroundColor,
-            lineSpacing: lineSpacing
-        )
-        var strike = base
-        strike[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
         var link = base
         link[.foregroundColor] = NSColor.linkColor
         link[.underlineStyle] = NSUnderlineStyle.single.rawValue
+        let context = InlineRenderContext(code: code, math: math, link: link, fileLink: fileLink,
+                                          fileLinkColor: fileLinkColor)
+        appendInline(text, base: base, context: context, depth: 0, to: result)
+        return result
+    }
 
+    /// The attributes of an inline run that do not depend on the emphasis around it.
+    private struct InlineRenderContext {
+        let code: [NSAttributedString.Key: Any]
+        let math: [NSAttributedString.Key: Any]
+        let link: [NSAttributedString.Key: Any]
+        let fileLink: ((String) -> URL?)?
+        let fileLinkColor: NSColor?
+    }
+
+    /// How deep emphasis nests before its content is taken as plain text — far past anything a reply
+    /// writes (`***bold italic***` is two), and a bound on pathological input.
+    private static let maxInlineNesting = 4
+
+    /// `base` with its font given `trait` (bold, italic) — what an emphasis span's content is set in, so
+    /// `***both***` is bold AND italic.
+    private static func emphasised(_ base: [NSAttributedString.Key: Any],
+                                   trait: NSFontTraitMask) -> [NSAttributedString.Key: Any] {
+        var attributes = base
+        if let font = base[.font] as? NSFont {
+            attributes[.font] = Typography.converted(font, toHaveTrait: trait)
+        }
+        return attributes
+    }
+
+    /// One run of inline markdown, appended in `base`. Emphasis (`**`, `__`, `*`, `_`, `~~`) RECURSES
+    /// (2026-10-13): its content is walked again with the emphasis as its base, so a code span or a link
+    /// inside **bold** renders — and links — as one (`` **`~/Downloads/a folder/`** `` drew its backticks
+    /// and was split at its spaces before). `inlineFileMentionQueries` walks the same way.
+    private static func appendInline(_ text: String,
+                                     base: [NSAttributedString.Key: Any],
+                                     context: InlineRenderContext,
+                                     depth: Int,
+                                     to result: NSMutableAttributedString) {
+        let fileLink = context.fileLink
+        let fileLinkColor = context.fileLinkColor
         var cursor = text.startIndex
         var plainStart = cursor
         while cursor < text.endIndex {
             if let token = inlineToken(in: text, at: cursor) {
                 appendLinkingPaths(String(text[plainStart..<cursor]), attributes: base,
                                    fileLink: fileLink, color: fileLinkColor, to: result)
-                let attributes: [NSAttributedString.Key: Any]
-                switch token.kind {
-                case .code:
-                    attributes = code
-                case .math:
-                    attributes = math
-                case .bold:
-                    attributes = bold
-                case .italic:
-                    attributes = italic
-                case .strike:
-                    attributes = strike
-                case .link:
-                    attributes = link
-                }
-                let content = token.kind == .math
-                    ? renderMathExpression(token.content)
-                    : token.content
                 switch token.kind {
                 case .math:
-                    result.append(NSAttributedString(string: content, attributes: attributes))
+                    result.append(NSAttributedString(string: renderMathExpression(token.content),
+                                                     attributes: context.math))
                 case .code:
                     // A code span naming a file links WHOLE (spaces included — the user's own
                     // checkout paths carry them); otherwise any path tokens inside it link alone.
-                    if let fileLink, let whole = transcriptCodeSpanPathCandidate(content),
+                    if let fileLink, let whole = transcriptCodeSpanPathCandidate(token.content),
                        let url = fileLink(whole.path) {
                         result.append(NSAttributedString(
-                            string: content, attributes: fileLinked(attributes, url: url, color: fileLinkColor)))
+                            string: token.content, attributes: fileLinked(context.code, url: url, color: fileLinkColor)))
                     } else {
-                        appendLinkingPaths(content, attributes: attributes, fileLink: fileLink,
+                        appendLinkingPaths(token.content, attributes: context.code, fileLink: fileLink,
                                            color: fileLinkColor, to: result)
                     }
                 case .link:
-                    var linked = attributes
+                    var linked = context.link
                     if let fileLink, let target = token.target,
                        let candidate = transcriptLinkTargetPathCandidate(target),
                        let url = fileLink(candidate.path) {
-                        linked = fileLinked(attributes, url: url, color: fileLinkColor)
+                        linked = fileLinked(context.link, url: url, color: fileLinkColor)
                     }
-                    result.append(NSAttributedString(string: content, attributes: linked))
+                    result.append(NSAttributedString(string: token.content, attributes: linked))
                 case .bold, .italic, .strike:
-                    appendLinkingPaths(content, attributes: attributes, fileLink: fileLink,
-                                       color: fileLinkColor, to: result)
+                    var inner: [NSAttributedString.Key: Any]
+                    switch token.kind {
+                    case .bold: inner = emphasised(base, trait: .boldFontMask)
+                    case .italic: inner = emphasised(base, trait: .italicFontMask)
+                    default:
+                        inner = base
+                        inner[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+                    }
+                    if depth < maxInlineNesting {
+                        appendInline(token.content, base: inner, context: context, depth: depth + 1, to: result)
+                    } else {
+                        appendLinkingPaths(token.content, attributes: inner, fileLink: fileLink,
+                                           color: fileLinkColor, to: result)
+                    }
                 }
                 cursor = token.end
                 plainStart = cursor
@@ -504,7 +527,6 @@ enum MessageTextFormatter {
 
         appendLinkingPaths(String(text[plainStart...]), attributes: base, fileLink: fileLink,
                            color: fileLinkColor, to: result)
-        return result
     }
 
     /// Transcript file links (2026-09-30): append `run` in `attributes`, with every path the file
@@ -548,6 +570,12 @@ enum MessageTextFormatter {
     /// the renderer links cannot disagree. Math spans are skipped, as the renderer never links them.
     static func inlineFileMentionQueries(_ text: String) -> [String] {
         var queries: [String] = []
+        collectFileMentionQueries(text, depth: 0, into: &queries)
+        return queries
+    }
+
+    /// `appendInline`'s walk, collecting instead of drawing — emphasis recurses exactly as it does there.
+    private static func collectFileMentionQueries(_ text: String, depth: Int, into queries: inout [String]) {
         func collect(_ run: String) {
             queries.append(contentsOf: transcriptPathMentions(inRun: run).map(\.path))
         }
@@ -570,7 +598,11 @@ enum MessageTextFormatter {
                         queries.append(candidate.path)
                     }
                 case .bold, .italic, .strike:
-                    collect(token.content)
+                    if depth < maxInlineNesting {
+                        collectFileMentionQueries(token.content, depth: depth + 1, into: &queries)
+                    } else {
+                        collect(token.content)
+                    }
                 }
                 cursor = token.end
                 plainStart = cursor
@@ -579,7 +611,6 @@ enum MessageTextFormatter {
             }
         }
         collect(String(text[plainStart...]))
-        return queries
     }
 
     private enum InlineTokenKind {
@@ -753,14 +784,6 @@ enum MessageTextFormatter {
             attributes[.backgroundColor] = backgroundColor
         }
         return attributes
-    }
-
-    private static func inlineAttributes(
-        font: NSFont,
-        foregroundColor: NSColor,
-        lineSpacing: CGFloat
-    ) -> [NSAttributedString.Key: Any] {
-        baseAttributes(font: font, foregroundColor: foregroundColor, lineSpacing: lineSpacing)
     }
 
     // `styledFont` and `mathFont` MOVED to `App/Typography.swift` (2026-08-13 typography pass)
