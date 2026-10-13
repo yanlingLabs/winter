@@ -1102,6 +1102,30 @@ final class KeyboardTargetTests: XCTestCase {
         _ = try core.focusField(f2, target)
     }
 
+    /// The review of round 19, M3 (the survey's mid-act seed 1067): the user's click into the target lands while the
+    /// guarded AXFocused write runs. The write's check judges by the one rule like every act's after-check: their move,
+    /// left alone — no restore over it (the seed: one issued 7 ms after their click, before the guardian had heard the
+    /// activation, then their keys into the target judged the agent's), and the app is not remembered as activating on it.
+    /// With no click, the same change is still the write's (the test above).
+    func testTheUsersClickLandingDuringTheFocusWriteIsLeftAlone() throws {
+        let f = nativeField()
+        core.switchInputObservableOverride = true
+        core.startGuardian(privatePath: true)
+        defer { core.stopGuardian() }
+        core.noteGuardianCause(pid)  // the agent's act on the target is running
+        ax.onSet = { [unowned self] what in
+            guard what.hasSuffix(":\(kAXFocusedAttribute)") else { return }
+            core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: core.clock.nowSeconds())
+            core.noteSwitchInput(now: core.clock.nowSeconds(), .app, target: pid)  // what the click handler records
+            sys.front = pid
+        }
+        sys.windows[77]?.onScreen = false
+        _ = try core.focusField(f, target)
+        XCTAssertTrue(sys.activated.isEmpty, "never pulled back out of the app they clicked into — \(sys.activated)")
+        XCTAssertFalse(target.takeViewNotes().contains { $0.contains("activated itself") }, "not said as the write's doing")
+        XCTAssertFalse(core.appActivatesOnFocusWrite(target), "not remembered")
+    }
+
     func testAWebFieldIsPressedNotWritten() throws {
         safari(fieldOwner: pid)
         ax.focus(pid: pid, on: nil)
