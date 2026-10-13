@@ -260,7 +260,10 @@ final class SimRun {
         ax.makeSettable(tWindow, kAXMainAttribute)
         ax.add(field, role: kAXTextFieldRole, frame: CGRect(x: 520, y: 60, width: 200, height: 24), extra: [kAXWindowAttribute: tWindow])
         ax.put(ax.application(SimPid.target), [kAXWindowsAttribute: [tWindow]])
-        ax.focus(pid: SimPid.target, on: field)
+        // (Round 19, M2 — round 17's H1 exercised: T's field starts UNFOCUSED and settable, so an act that names it places
+        // the focus first — a press or click, else the write — and waits for it in simulated time; the focus lands a few
+        // ms after the write or the click, as an app's does.)
+        ax.makeSettable(field, kAXFocusedAttribute)
         _ = win(78, SimPid.target, 97_008)
         let vWindow = win(61, SimPid.visited, 97_010)
         ax.put(ax.application(SimPid.visited), [kAXWindowsAttribute: [vWindow], kAXFocusedWindowAttribute: vWindow])
@@ -297,6 +300,13 @@ final class SimRun {
         // (Round 18, round 17's H1 exercised: the user clicks into T while an act on it runs — scheduled from the act's own
         // first event to T, a few ms on, so it lands during the act's next wait.)
         let midAct = { w.onMidAct?() }
+        // (Round 19, M2: the field's focus lands 5–60 ms after the write or the click that places it — its own generator.)
+        var focusRng = SimRNG(plan.seed ^ 0xF0C5_1A2D)
+        let field = self.field
+        let focusLands = {
+            let ms = focusRng.double(5, 60)
+            w.schedule(after: ms, "T's field takes the focus") { ax.focus(pid: SimPid.target, on: field); w.log("T's field has the focus") }
+        }
         let inFlightCheck = { (what: String) in
             // (Sticky: once they started working in T during the act, it holds after they leave T too — the review of
             // round 17, M1.)
@@ -320,6 +330,7 @@ final class SimRun {
             // (Not AXFrontmost: an activation of T is a restore of the user's place — the guardian's, judged by I1–I5 — never
             // the act's input.)
             if isT(parts[0]), parts[1] != "AXFrontmost" { inFlightCheck("accessibility write \(parts[1])"); midAct() }
+            if parts[0] == "97002", parts[1] == kAXFocusedAttribute { focusLands() }
             if parts[1] == "AXFrontmost", let pid = pid_t(parts[0]) {
                 w.engineActivates(pid, how: "AXFrontmost", refusable: false)
             } else if parts[1] == "AXMain", let id = byToken[String(parts[0])] {
@@ -379,6 +390,11 @@ final class SimRun {
         core.userViewSettleMs = 20
         core.restoreDeadlineMs = 2_000
         core.restoreRetryMs = 120
+        // (Round 19, M2: the focus and press-watch waits at their live values, in simulated time.)
+        core.focusWaitNativeMs = 150
+        core.focusWaitWebMs = 400
+        core.pressSettleMs = 500
+        core.webPressWatchMs = 800
         core.appleScriptOverride = { _, _ in
             var left = w.lock.withLock { w.scriptMs }
             while left > 0 { let d = min(left, 50); w.advance(by: d); left -= d }
@@ -402,6 +418,9 @@ final class SimRun {
         let watched: Set<CGEventType> = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseDragged,
                                          .rightMouseDragged, .otherMouseDragged, .scrollWheel, .mouseMoved]
         poster.onPost = { e in
+            if e.type == .leftMouseDown, e.pid == SimPid.target, CGRect(x: 520, y: 60, width: 200, height: 24).contains(e.location) {
+                focusLands()
+            }
             if watched.contains(e.type), e.pid == SimPid.target || w.isContentProcess(e.pid, of: SimPid.target) {
                 inFlightCheck(e.type == .keyDown ? "key" : e.type == .leftMouseDown ? "click" : "event \(e.type.rawValue)")
                 midAct()
@@ -1100,7 +1119,13 @@ final class SimRun {
         }
         switch step.kind {
         case .agentType(let n):
-            await act(.type(CUTypeAction(text: String(repeating: "x", count: n))), "c\(step.seed)")
+            // (Round 19, M2: half the typing names T's field — the focus is placed first; from its own generator, so the
+            // plans' draws stay.)
+            var f = SimRNG(step.seed ^ 0xF0C5)
+            let into = f.chance(0.5) ? target.refs.ref(for: AXIdentity(element: field)) : nil
+            await act(.type(CUTypeAction(text: String(repeating: "x", count: n), into: into)), "c\(step.seed)")
+            // The app moves its focus off the field now and then (a later act names it again).
+            if f.chance(0.3) { ax.focus(pid: SimPid.target, on: nil); w.log("T's field loses the focus") }
         case .agentClick(let what, let ms):
             // (An act refused because the user works in T opens nothing.)
             if what == .opener, !w.userWorks(in: tpid) {
