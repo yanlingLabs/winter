@@ -1503,6 +1503,10 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     var dockLaunches: Bool?
     func dockItemLaunches(at point: CGPoint, dockPid: pid_t) -> Bool? { lock.withLock { dockLaunches } }
     func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? { lock.withLock { dockTileApp } }
+    /// What the item under a Finder double-click would do (R18-a; round 19, the Finder legs): true — an application or a
+    /// document (it launches); false — a folder (it opens in Finder, nothing launches); nil — it can't be read.
+    var finderLaunches: Bool?
+    func finderItemLaunches(at point: CGPoint, finderPid: pid_t) -> Bool? { lock.withLock { finderLaunches } }
 }
 
 extension SimPid {

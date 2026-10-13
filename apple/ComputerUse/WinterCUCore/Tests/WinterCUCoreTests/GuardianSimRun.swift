@@ -701,8 +701,24 @@ final class SimRun {
             var lr = SimRNG(step.seed ^ 0x1A_0C4E)
             let fromDock = lr.chance(0.35)
             let startDelay = lr.double(20, 120)
+            // (Round 19, the Finder legs of R18-a: with Finder as T, now and then from a Finder window — a double-click on
+            // an application or a document, which launches, or on a folder, which launches nothing and must not count; the
+            // app still starts — something else of theirs launched it, a launch no launcher of theirs explains. Its own
+            // generator, so the plans' draws stay.)
+            var fr = SimRNG(step.seed ^ 0xF1_DE12)
+            let finderItem: Int? = !fromDock && plan.targetBundle == "com.apple.finder" && fr.chance(0.3) ? fr.int(3) : nil
+            var fclick = SimRNG(fr.next())
             w.schedule(after: 260, fromDock ? "a click on a Dock tile of an app not running" : "Return") { [unowned self] in
-                if fromDock {
+                let finderPoint = CGPoint(x: 700, y: 210)
+                if let item = finderItem, w.lock.withLock({ w.clickTarget(at: finderPoint)?.id }) == 77 {
+                    let launches = item < 2
+                    w.log("the user double-clicks \(["an application", "a document", "a folder"][item]) in Finder's window")
+                    w.lock.withLock { w.finderLaunches = launches }
+                    self.click(at: finderPoint, clickCount: 2, r: &fclick)
+                    w.lock.withLock { w.finderLaunches = nil }
+                    // (Only a launching item is an interactive launcher — R18-a; a folder is none.)
+                    if launches { w.lock.withLock { w.launcherInputs.append(w.now) } }
+                } else if fromDock {
                     w.hardware(observable: true)
                     w.launchCapable()
                     w.log("the user clicks the Dock tile of an app that is not running")
@@ -798,7 +814,7 @@ final class SimRun {
     /// A physical click at `p`: the tap sees it (and the guardian's click handler runs), then the window server delivers
     /// it — activating the app whose window takes it, or nothing (a status item, a banner — whose app activates the
     /// subject a moment later —, Picture in Picture, a non-activating panel, the helper's own panel, a ⌘-click, a drag).
-    func click(at p: CGPoint, flags: CGEventFlags = [], drag: Bool = false, r: inout SimRNG) {
+    func click(at p: CGPoint, flags: CGEventFlags = [], drag: Bool = false, clickCount: Int64 = 1, r: inout SimRNG) {
         let w = world
         let (hit, dest, sw, subject) = w.lock.withLock { () -> (SimWin?, SPlace?, SimSwitch?, pid_t?) in
             let hit = w.clickTarget(at: p)
@@ -835,7 +851,7 @@ final class SimRun {
             core.onPhysicalMouseUp(at: CGPoint(x: p.x + 40, y: p.y + 30), userData: 0, now: clock.nowSeconds())
         } else {
             _ = w.within(.userClick(dest ?? here)) {
-                let r = core.onPhysicalClick(at: p, userData: 0, flags: flags, now: clock.nowSeconds())
+                let r = core.onPhysicalClick(at: p, userData: 0, flags: flags, clickCount: clickCount, now: clock.nowSeconds())
                 core.onPhysicalMouseUp(at: p, userData: 0, now: clock.nowSeconds())
                 return r
             }
