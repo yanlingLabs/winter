@@ -613,7 +613,13 @@ the change, run108; the world allows 120 ms, a stress sweep 400 ms) and Secure E
   changed under their own app is put back too. A visit's return goes to the guardian's place (never a theft that was
   in front when it began, never the visit's own late landing after their move); a hold's give-back and rung 4's go to
   the guardian's place, only while the held app still has the front. No restore runs while a desktop visit is open (the
-  visit's own return aside): the visit owns the view, and its end brings the user back.
+  visit's own return aside): the visit owns the view, and its end brings the user back — except where they went
+  themselves: a switch of theirs INTO the visited desktop after the visit's own way there (a swipe, a ⌃-arrow, a ⌘-Tab)
+  makes that desktop their place, and the visit's end does not return them to where it began (1.19.0, the controller's
+  ruling); it is judged once — its input used up there — so the visit's end and a later key read the same verdict. The
+  visit's own way there is never such a switch (only once the visit had arrived and they had left the visited desktop),
+  and the visit's end judges what is in front FIRST, so a switch of theirs that landed but is not heard yet is found
+  before any return is issued.
 - **I2′ — the user's ruling, NOT YET ENFORCED (round 10's MEDIUM #6; tried in round 12, reverted).** When an app was left
   in front around the agent's action (an `.unexplained` verdict — the user may have opened it) and then the agent's app
   jumps in, the restore returns the user to THAT app — what was in front just before — never to an older place. A
