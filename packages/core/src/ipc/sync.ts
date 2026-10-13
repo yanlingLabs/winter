@@ -536,6 +536,11 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
     // The thinking pill (2026-10-05): a `thinking_delta` is TRANSIENT — it is never in a log, so a pushed
     // one is a protocol violation. A `thinking_block` IS in a daemon chat log (pulled to the phone and
     // re-pushed by a fork, like `siteIcons` above): schema-bounded, display-only, accepted as is.
+    // ComputerV2 wake triggers: a daemon CODE/DISPATCH session's own record (`computer-use/wakes/`) — a chat log never
+    // carries one, so a pushed one is refused rather than stored for the Mac to draw a pill from.
+    if (event.type === "wake_armed" || event.type === "wake_ended") {
+      throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} is a ${event.type} — chat sessions carry none; nothing was appended`);
+    }
     if (event.type === "thinking_delta") {
       throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} is a thinking_delta, which is transient and never in a log; nothing was appended`);
     }

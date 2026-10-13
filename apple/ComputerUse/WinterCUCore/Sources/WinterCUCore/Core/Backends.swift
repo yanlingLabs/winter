@@ -126,6 +126,13 @@ protocol CUSystemBackend: AnyObject {
     /// The running app whose Dock tile is under `point` (the Dock, `dockPid`, read over accessibility: the tile's
     /// `AXURL` is the app's bundle), if any — so a Dock click is input for THAT app.
     func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t?
+    /// What a click in the Dock where no RUNNING app's tile is would do (R18-a): true — the tile of an app that is not
+    /// running (it launches it) or Launchpad; false — the Trash, a stack, a folder, a minimized window, a separator; nil —
+    /// unreadable (an accessibility timeout), never a launcher.
+    func dockItemLaunches(at point: CGPoint, dockPid: pid_t) -> Bool?
+    /// What a double-click in a Finder window at `point` opens (R18-a): true — an application or a document; false — a
+    /// folder (it opens in Finder); nil — unreadable.
+    func finderItemLaunches(at point: CGPoint, finderPid: pid_t) -> Bool?
 }
 
 extension CUSystemBackend {
@@ -133,9 +140,57 @@ extension CUSystemBackend {
     func isRegularApp(_ pid: pid_t) -> Bool? { nil }
     func runningPid(bundleId: String) -> pid_t? { nil }
     func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? { nil }
+    func dockItemLaunches(at point: CGPoint, dockPid: pid_t) -> Bool? { nil }
+    func finderItemLaunches(at point: CGPoint, finderPid: pid_t) -> Bool? { nil }
 }
 
 final class CULiveSystem: CUSystemBackend {
+    /// The file URL of the item under `point` in `pid`'s accessibility tree (its own `AXURL`, or its parent's — a Finder
+    /// icon's name sits in its row or cell); `.failure` when accessibility did not answer.
+    private func itemURL(at point: CGPoint, pid: pid_t) -> Result<URL?, Error> {
+        struct Unread: Error {}
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.1)  // the session tap's thread: never held up by a busy app
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &hit) == .success, var item = hit else {
+            return .failure(Unread())
+        }
+        for _ in 0..<3 {
+            AXUIElementSetMessagingTimeout(item, 0.1)
+            var raw: CFTypeRef?
+            let e = AXUIElementCopyAttributeValue(item, "AXURL" as CFString, &raw)
+            if e == .success, let v = raw {
+                let url: URL? = CFGetTypeID(v) == CFURLGetTypeID() ? (v as! URL) : (v as? String).flatMap(URL.init(string:))
+                return .success(url)
+            }
+            if e == .cannotComplete { return .failure(Unread()) }
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(item, kAXParentAttribute as CFString, &parent) == .success, let p = parent,
+                  CFGetTypeID(p) == AXUIElementGetTypeID() else { return .success(nil) }
+            item = p as! AXUIElement
+        }
+        return .success(nil)
+    }
+
+    func dockItemLaunches(at point: CGPoint, dockPid: pid_t) -> Bool? {
+        guard case .success(let u) = itemURL(at: point, pid: dockPid) else { return nil }
+        guard let url = u?.standardizedFileURL.resolvingSymlinksInPath(), url.pathExtension == "app" else { return false }
+        // Launchpad is drawn by the Dock itself (no process of its own): a click on its tile opens it — a launcher.
+        let running = NSWorkspace.shared.runningApplications.contains {
+            !$0.isTerminated && $0.bundleURL?.standardizedFileURL.resolvingSymlinksInPath() == url
+        }
+        return !running
+    }
+
+    func finderItemLaunches(at point: CGPoint, finderPid: pid_t) -> Bool? {
+        guard case .success(let u) = itemURL(at: point, pid: finderPid) else { return nil }
+        guard let url = u, url.isFileURL else { return false }
+        if url.pathExtension == "app" { return true }
+        var dir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &dir) else { return nil }
+        return !dir.boolValue  // a document opens in its app; a folder opens in Finder
+    }
+
     func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? {
         let dock = AXUIElementCreateApplication(dockPid)
         AXUIElementSetMessagingTimeout(dock, 0.1)  // the session tap's thread: never held up by a busy Dock

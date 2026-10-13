@@ -3344,6 +3344,136 @@
         "ok"
       ],
       "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "threadId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "const": "wake_armed"
+        },
+        "wakeId": {
+          "type": "string",
+          "pattern": "^wk_[0-9a-f]{12}$"
+        },
+        "condition": {
+          "type": "string",
+          "enum": [
+            "clicked",
+            "submitted",
+            "navigated",
+            "appeared",
+            "gone",
+            "changed",
+            "titled"
+          ]
+        },
+        "targetLabel": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "elementLabel": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "expiresAt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "seq",
+        "sessionId",
+        "ts",
+        "threadId",
+        "type",
+        "wakeId",
+        "condition",
+        "targetLabel",
+        "expiresAt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "threadId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "const": "wake_ended"
+        },
+        "wakeId": {
+          "type": "string",
+          "pattern": "^wk_[0-9a-f]{12}$"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "fired",
+            "lost",
+            "expired",
+            "cancelled",
+            "restart",
+            "disabled"
+          ]
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "woken": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "seq",
+        "sessionId",
+        "ts",
+        "threadId",
+        "type",
+        "wakeId",
+        "reason",
+        "at",
+        "woken"
+      ],
+      "additionalProperties": false
     }
   ]
 }

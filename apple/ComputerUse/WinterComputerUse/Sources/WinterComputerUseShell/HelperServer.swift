@@ -452,6 +452,8 @@ public final class HelperServer: @unchecked Sendable {
                 await group.next()
                 group.cancelAll()
             }
+            // Its watches end with it (silently: the daemon reads the close as the helper gone).
+            dispatcher.connectionClosed(id)
             // The daemon that used these sessions is gone: drop their per-session state, as `session.ended` does.
             for sessionId in orphaned.sorted() {
                 _ = try? await dispatcher.handle(method: "session.ended", params: .object(["sessionId": .string(sessionId)]))

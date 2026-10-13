@@ -465,7 +465,7 @@ final class TranscriptBrandTests: XCTestCase {
         // Exact, not a floor (fix round 1, review M3): `> 10` against 12 files quietly tolerated
         // deleting two of them, which would have made the ban pass by scanning less.
         XCTAssertEqual(scanned, try chatContentSources().count)
-        XCTAssertEqual(scanned, 14, "ChatContent's file count changed — confirm the new file is scanned")
+        XCTAssertEqual(scanned, 15, "ChatContent's file count changed — confirm the new file is scanned")
     }
 
     /// **The fence on IMPORTANT-1's fix itself.** The two pins above prove `HairlineElevated` is a
@@ -500,13 +500,13 @@ final class TranscriptBrandTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(elevatedSites, 10,
+        XCTAssertEqual(elevatedSites, 11,
                        "the question separator, the code-block rim, the latest pill, the "
                        + "interaction card's own rim, the pending box's option separators, its "
                        + "header pills, the inline sidebars' divider, the floating cards' rim, "
                        + "the reply's image-thumbnail rim (transcript file links, 2026-09-30) and "
-                       + "the 'Show earlier turns' pill (2026-10-10) "
-                       + "— all ten, or this pin is passing because the rules stopped "
+                       + "the 'Show earlier turns' pill (2026-10-10) and the wake trigger's "
+                       + "waiting pill (2026-10-12) — all eleven, or this pin is passing because the rules stopped "
                        + "being drawn at all")
     }
 

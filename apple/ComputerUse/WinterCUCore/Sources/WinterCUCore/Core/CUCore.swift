@@ -682,6 +682,10 @@ public final class CUCore: @unchecked Sendable {
     var workWatcherPort: CFMachPort?
     /// When a scroll last had the window under the pointer read for I6 (guarded by `guardianLock`).
     var lastScrollWorkCheck: TimeInterval = -.infinity
+    /// When the user's last scroll GESTURE began (a began-phase event), for R18-b's scroll-as-use (under `guardianLock`).
+    var scrollGestureBeganAt: TimeInterval?
+    /// `kCGScrollPhaseBegan`.
+    static let scrollPhaseBegan: Int64 = 1
     /// A test's stand-in for the live tap: called to start, it answers how to stop (nil: could not start).
     var workWatcherStarter: (() -> (() -> Void)?)?
     var cpsTapPort: CFMachPort?

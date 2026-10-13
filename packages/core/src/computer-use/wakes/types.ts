@@ -113,5 +113,6 @@ export const WAKE_LIMITS = {
   ownInputGraceMs: 500,
 } as const;
 
-/** The `user_message` client name a wake turn carries (`sessions/turn-origins.ts`'s automated origins include it). */
-export const COMPUTER_WAKE_CLIENT_NAME = "computer-wake";
+/** The `user_message` client name a wake turn carries (`sessions/turn-origins.ts`'s automated origins include it).
+ *  Defined beside `DISPATCH_WAKE_CLIENT_NAME` in the protocol, which clients read; re-exported here. */
+export { COMPUTER_WAKE_CLIENT_NAME } from "@yanlinglabs/winter-protocol";

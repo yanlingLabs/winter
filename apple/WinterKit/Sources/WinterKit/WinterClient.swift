@@ -440,6 +440,8 @@ extension SessionEvent {
         case .panelCommand(let v): return v.seq
         case .providerLoginProgress(let v): return v.seq
         case .providerLoginFinished(let v): return v.seq
+        case .wakeArmed(let v): return v.seq
+        case .wakeEnded(let v): return v.seq
         }
     }
 
@@ -505,6 +507,8 @@ extension SessionEvent {
         case .panelCommand(let v): return v.sessionId
         case .providerLoginProgress(let v): return v.sessionId
         case .providerLoginFinished(let v): return v.sessionId
+        case .wakeArmed(let v): return v.sessionId
+        case .wakeEnded(let v): return v.sessionId
         }
     }
 }

@@ -11,11 +11,12 @@
 // from the daemon but its op arguments. The one call into the page's own code it makes, besides input events, is
 // WebMCP's `executeTool` (`webmcp.ts`), and only for the model's `tab.callTool()`.
 import type {
-  RtCheck, RtCheckFacts, RtClassify, RtComboOptions, RtCondition, RtFindQuery, RtFound, RtHit, RtId, RtInspect, RtLink, RtNode, RtPoint, RtSnapshot,
+  RtCheck, RtCheckFacts, RtClassify, RtComboOptions, RtCondition, RtFindQuery, RtFound, RtHit, RtId, RtInspect, RtLink, RtNode, RtPoint, RtSnapshot, RtWatchLocate,
 } from "./protocol";
 import { looksLikeUrl, looksSecret, REDACTED, redactText, redactUrl, redactUrlAttribute } from "./redact";
 import { classifyTarget, cssSelectorRefusal, isPaymentHost, isSecureField, isTextEntry as isTextEntryFacts, nativePicker, pickerValueHint, sliceUnits, TEXT_INPUT_TYPES, type ElementFacts } from "./rules";
 import { listSiteTools, modelContextOf, SiteToolCalls, type SiteToolOwner } from "./webmcp";
+import { WAKE_OVERLAY_TAG, WATCH_LOCATOR_ATTRS, wakeWatcher, type WatchLocator, type WatchSpec } from "./watch";
 import { ambiguousOptionSentence, capValue, checkedStateOf, matchOption, noOptionSentence, VALUE_CAP, WHOLE_VALUE_CAP, type CheckFacts, type OptionFacts } from "./widgets";
 
 type Any = Record<string, unknown>;
@@ -126,7 +127,7 @@ type Any = Record<string, unknown>;
 
   // Never part of the page as a reader sees it: scripts and styles — and Winter for Chrome's own overlay (the glow,
   // the agent cursor, the Stop button it injects into a driven tab).
-  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "META", "LINK", "TITLE", "SVG", "PATH", "BR", "HR", "WBR", "WINTER-AGENT-OVERLAY"]);
+  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "META", "LINK", "TITLE", "SVG", "PATH", "BR", "HR", "WBR", "WINTER-AGENT-OVERLAY", WAKE_OVERLAY_TAG.toUpperCase()]);
   const styleOf = (el: Element): CSSStyleDeclaration | undefined => { try { return getComputedStyle(el); } catch { return undefined; } };
   /** Hidden from a reader: not rendered, hidden by ARIA, or a hidden input. `contents` boxes are walked through. */
   const hidden = (el: Element, st: CSSStyleDeclaration | undefined): boolean => {
@@ -822,7 +823,7 @@ type Any = Record<string, unknown>;
   /** Winter for Chrome's own overlay (and anything in it) is never what a point hits, nor what covers an element. */
   const isOverlay = (el: Element): boolean => {
     for (let n: Node | null = el; n !== null; n = n.parentNode ?? (n instanceof ShadowRoot ? n.host : null)) {
-      if (n instanceof Element && n.tagName === "WINTER-AGENT-OVERLAY") return true;
+      if (n instanceof Element && (n.tagName === "WINTER-AGENT-OVERLAY" || n.tagName === WAKE_OVERLAY_TAG.toUpperCase())) return true;
     }
     return false;
   };
@@ -1263,6 +1264,45 @@ type Any = Record<string, unknown>;
   const siteCalls = new SiteToolCalls();
   const siteOwner = (): SiteToolOwner => ({ window, origin: location.origin });
 
+  // ── wake triggers (`watch.ts`) ──────────────────────────────────────────────────────────────────────
+  // The daemon reads the element HERE (its role and name, redacted as in state(); the secure-field floor), then arms
+  // the shared watcher in this world — or hands its locator to Winter for Chrome, which arms the same watcher in its
+  // own isolated world with no debugger.
+  const elementFor = (id: unknown): Element | undefined => {
+    const node = nodeOf(id);
+    return node instanceof Element ? node : node instanceof Text ? node.parentElement ?? undefined : undefined;
+  };
+  const locatorOf = (el: Element): WatchLocator => {
+    const path: Array<[string, number, number]> = [];
+    let cur: Element = el;
+    for (let depth = 0; depth < 512; depth++) {
+      const parent: Node | null = cur.parentNode;
+      const siblings = parent instanceof Element || parent instanceof Document || parent instanceof DocumentFragment ? [...parent.children] : [cur];
+      const tag = cur.tagName;
+      path.unshift([tag, siblings.filter((s) => s.tagName === tag).indexOf(cur), parent instanceof ShadowRoot ? 1 : 0]);
+      if (parent instanceof ShadowRoot) cur = parent.host;
+      else if (parent instanceof Element) cur = parent;
+      else break;
+    }
+    const attrs: Record<string, string> = {};
+    for (const k of WATCH_LOCATOR_ATTRS) {
+      const v = el.getAttribute(k);
+      if (v !== null && v.length <= 500) attrs[k] = v;
+    }
+    return { doc: performance.timeOrigin, path, tag: el.tagName, attrs };
+  };
+  const watchLocate = (arg: { id: RtId }): RtWatchLocate => {
+    const el = elementFor(arg.id);
+    if (el === undefined) return { ok: false, reason: "gone" };
+    if (inPaymentFrame || isSecure(el)) return { ok: false, reason: "secure" };
+    const role = roleOf(el);
+    const name = nameOf(el, role);
+    return {
+      ok: true, element: { role: role === undefined ? el.tagName.toLowerCase() : roleWord(role, el), name: name === undefined ? "" : cap(redactText(name), 120) },
+      locator: locatorOf(el), top: window.top === window,
+    };
+  };
+
   // ── the entry ───────────────────────────────────────────────────────────────────────────────────
   const call = (op: string, arg: unknown, self: unknown): unknown => {
     const a = (arg ?? null) as Any | null;
@@ -1297,6 +1337,18 @@ type Any = Record<string, unknown>;
       case "siteTools": return listSiteTools(modelContextOf(document), siteOwner(), { describe: a?.describe === true });
       case "callSiteTool": return siteCalls.call(modelContextOf(document), siteOwner(), a as { name: string; input: unknown; callId: string });
       case "cancelSiteTool": return siteCalls.cancel(a?.callId);
+      case "watchLocate": return watchLocate(a as { id: RtId });
+      case "watchArm": {
+        const w = a as { spec: WatchSpec; id?: RtId };
+        const el = w.id === undefined ? undefined : elementFor(w.id);
+        if (el !== undefined && (inPaymentFrame || isSecure(el))) throw new Error("secure_field");
+        return wakeWatcher({ op: "arm", sink: "queue", spec: w.spec, ...(el === undefined ? {} : { element: el }) });
+      }
+      case "watchWait": return wakeWatcher({
+        op: "wait", ack: Number(a?.ack ?? 0), maxMs: Number(a?.maxMs ?? 0), ...(typeof a?.world === "string" ? { world: a.world } : {}),
+        ...(Array.isArray(a?.live) ? { live: (a.live as unknown[]).filter((x): x is string => typeof x === "string") } : {}),
+      });
+      case "watchDisarm": return wakeWatcher({ op: "disarm", watchId: String(a?.watchId ?? "") });
       default: throw new Error(`unknown op ${op}`);
     }
   };

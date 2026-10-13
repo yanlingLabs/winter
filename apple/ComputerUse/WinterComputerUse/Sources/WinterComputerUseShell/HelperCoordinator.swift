@@ -11,6 +11,8 @@ public enum HelperNotification: Equatable, Sendable {
     case permissionsChanged(accessibility: Bool, screenRecording: Bool)
     /// A desktop visit closed (whatever its outcome): the daemon counts every one.
     case desktopVisited(CUDesktopVisitEvent)
+    /// A watch fired or was lost (a wake trigger, §4.13): the daemon wakes the session.
+    case watchEvent(CUWatchEvent)
 
     public var method: String {
         switch self {
@@ -18,6 +20,7 @@ public enum HelperNotification: Equatable, Sendable {
         case .targetLost: return "targetLost"
         case .permissionsChanged: return "permissionsChanged"
         case .desktopVisited: return "desktopVisited"
+        case .watchEvent: return "watchEvent"
         }
     }
 
@@ -38,6 +41,13 @@ public enum HelperNotification: Equatable, Sendable {
             ]
             if let callId = e.callId { o["callId"] = .string(callId) }
             if r.userMoved == true { o["userMoved"] = .bool(true) }
+            return .object(o)
+        case .watchEvent(let e):
+            var o: [String: JSONValue] = [
+                "watchId": .string(e.watchId), "outcome": .string(e.outcome.rawValue), "at": .number(e.at.rounded()),
+            ]
+            if let d = e.detail { o["detail"] = .string(d) }
+            if let r = e.reason { o["reason"] = .string(r) }
             return .object(o)
         }
     }
@@ -60,6 +70,8 @@ public enum HelperNotification: Equatable, Sendable {
 
     private let presentation: CUPresentation
     private let escapeTap: CUEscapeTap
+    /// The wake triggers' rings and pills (§4.13).
+    private let watchRings: CUWatchRingPresenting
     public let viewHub: ViewHub
     private var idleTimer: IdleQuitTimer?
     /// Where notifications go (the server's broadcast). Called on the main actor.
@@ -67,6 +79,8 @@ public enum HelperNotification: Equatable, Sendable {
 
     public private(set) var openConnections: Set<Int> = []
     public private(set) var activeScripts: Set<String> = []
+    /// Watches armed (wake triggers): each keeps the helper running, as a bound target does.
+    public private(set) var armedWatches = 0
     private var armed = false
     private var bound: [BoundTarget: (appName: String, mirror: Bool)] = [:]
     private var lastPermissions: (accessibility: Bool, screenRecording: Bool)?
@@ -74,11 +88,13 @@ public enum HelperNotification: Equatable, Sendable {
     private let prompts: CUDesktopPrompting
     private var promptWaiters: [String: CheckedContinuation<CUDesktopPromptAnswer, Error>] = [:]
 
-    public init(presentation: CUPresentation, escapeTap: CUEscapeTap, viewHub: ViewHub, prompts: CUDesktopPrompting? = nil) {
+    public init(presentation: CUPresentation, escapeTap: CUEscapeTap, viewHub: ViewHub, prompts: CUDesktopPrompting? = nil,
+                watchRings: CUWatchRingPresenting? = nil) {
         self.presentation = presentation
         self.escapeTap = escapeTap
         self.viewHub = viewHub
         self.prompts = prompts ?? CUDesktopPromptController.live()
+        self.watchRings = watchRings ?? CUWatchRingController.live()
         // No floating mirror in the helper any more (the mirror lives in Winter.app's window). Off as well as
         // never asked for: the presentation layer re-shows a mirror on a cursor event for a target whose mirror
         // was once requested, and this switch is what guarantees it never does.
@@ -95,10 +111,10 @@ public enum HelperNotification: Equatable, Sendable {
     }
 
     public var boundTargetCount: Int { bound.count }
-    /// What keeps the helper running: a bound target (a mirror exists only for one) or a running script. A
-    /// connected daemon alone does not — it keeps one persistent connection, reads the close as "helper gone"
-    /// and relaunches the helper on its next call.
-    public var isBusy: Bool { !bound.isEmpty || !activeScripts.isEmpty }
+    /// What keeps the helper running: a bound target (a mirror exists only for one), a running script or an armed watch
+    /// (a wake trigger may wait for hours, its target long released by the script). A connected daemon alone does not —
+    /// it keeps one persistent connection, reads the close as "helper gone" and relaunches the helper on its next call.
+    public var isBusy: Bool { !bound.isEmpty || !activeScripts.isEmpty || armedWatches > 0 }
 
     /// Starts the idle countdown over (the quit found work still in flight).
     public func restartIdleCountdown() {
@@ -260,5 +276,26 @@ public enum HelperNotification: Equatable, Sendable {
     /// A desktop visit closed: the daemon hears it (`desktopVisited`).
     public func desktopVisited(_ visit: CUDesktopVisitEvent) {
         notify(.desktopVisited(visit))
+    }
+
+    // MARK: Watches (wake triggers)
+
+    /// How many watches are armed: the idle quit waits while any is.
+    public func setArmedWatches(_ count: Int) {
+        guard count != armedWatches else { return }
+        armedWatches = max(0, count)
+        refreshIdle()
+    }
+
+    /// A watch fired or was lost: the daemon hears it.
+    public func watchEvent(_ event: CUWatchEvent) {
+        notify(.watchEvent(event))
+    }
+
+    /// The rings and pills to draw now (only watches whose window is frontmost on the active Space).
+    public func showWatches(_ shown: [CUWatchShown]) {
+        watchRings.show(shown.map {
+            CUWatchRing(watchId: $0.watchId, kind: $0.kind, label: $0.label, elementFrame: $0.elementFrame, windowFrame: $0.windowFrame)
+        })
     }
 }

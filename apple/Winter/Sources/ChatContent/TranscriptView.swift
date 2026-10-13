@@ -1,5 +1,33 @@
 import SwiftUI
 
+/// The transcript's place in its window: it takes exactly the room it is offered, like a colour fill, and never asks its
+/// scroll view how big it would like to be.
+///
+/// The live freeze (2026-10-12, Winter Dev, the shell window on a 34-event computer-use session): the main thread sat at
+/// 99% in SwiftUI's run-loop commit observer for minutes. A sixth of every sample was the column's own stack PROBING the
+/// transcript's `ScrollView` for its size (`StackLayout … resize` → `ScrollViewLayoutComputer.Engine.sizeThatFits`), and a
+/// scroll view answers that by measuring its content: `LazyStack.measureEstimates` over every cell the lazy stack holds.
+/// That made the lazy stack's own churn — `LazyLayoutViewCache.updateItemPhases`, cells entering the placed set
+/// (`initialPlacement`) every pass — an input to the LAYOUT OF THE WHOLE COLUMN, re-run from the window's fixed frame down
+/// on every pass. The transcript has no size of its own to offer (it fills the column whatever it holds), so nothing above
+/// it is allowed to depend on what it holds: this layout answers a size probe from the proposal alone and only hands the
+/// scroll view the final, exact size when it places it.
+///
+/// What this does NOT claim: the churn inside the lazy stack is SwiftUI's own, and the trigger that started it was not
+/// reproduced outside the user's window (the replayed session at 24 sizes, the real shell, a pointer swept over it).
+/// This removes the one app-owned edge that fed it back into the rest of the window.
+struct TranscriptViewport: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        proposal.replacingUnspecifiedDimensions()
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for subview in subviews {
+            subview.place(at: bounds.origin, anchor: .topLeading, proposal: ProposedViewSize(bounds.size))
+        }
+    }
+}
+
 /// Spec §3: autoscroll only follows when the user is already near the bottom — v1 yanked
 /// unconditionally on every streaming chunk (donor ChatRootView.swift:514-522); this is the
 /// one deliberate improvement over the transplant.
@@ -52,14 +80,17 @@ struct TranscriptView: View {
 
     var body: some View {
         // The reader lets the follower make its far moves through SwiftUI (`TranscriptFollower.farJump`).
-        ScrollViewReader { proxy in
-            transcriptScroll(proxy: proxy)
-                .onAppear {
-                    follower.onLanded = onLanded
-                    follower.farJump = { [layoutMemo] in
-                        if let last = layoutMemo.lastCellID { proxy.scrollTo(last, anchor: .bottom) }
+        // `TranscriptViewport`: the column never asks the scroll view how big it would like to be (see its doc).
+        TranscriptViewport {
+            ScrollViewReader { proxy in
+                transcriptScroll(proxy: proxy)
+                    .onAppear {
+                        follower.onLanded = onLanded
+                        follower.farJump = { [layoutMemo] in
+                            if let last = layoutMemo.lastCellID { proxy.scrollTo(last, anchor: .bottom) }
+                        }
                     }
-                }
+            }
         }
         // The pill-themed tool pills read this to show a call under safety review (`PillToolRunHeader`).
         .environment(\.reviewingCallIds, adapter.reviewingCallIds)
@@ -99,6 +130,10 @@ struct TranscriptView: View {
             var cells: [(id: Int, content: TranscriptCellContent)] = []
             if !exchange.prompt.isEmpty || exchange.promptEnvelope != nil {
                 cells.append((base, .prompt(text: exchange.prompt, envelope: exchange.promptEnvelope)))
+            }
+            // ComputerV2 wake triggers: the daemon's note that Winter continued (never a user bubble).
+            if let notice = exchange.notice {
+                cells.append((base + TranscriptCellSpec.noticeOffset, .notice(notice)))
             }
             let finalReply = streamingText == nil ? layout.finalReply : nil
             for (offset, entry) in layout.entries.enumerated() {
@@ -453,6 +488,8 @@ private enum TranscriptCellContent: Equatable {
     case reply(text: String, showsCopy: Bool)
     case streaming(String)
     case stopped
+    /// A daemon note on the exchange — Winter continued after a wake trigger (`Exchange.notice`).
+    case notice(String)
 }
 
 private struct TranscriptCellSpec: Identifiable {
@@ -461,6 +498,7 @@ private struct TranscriptCellSpec: Identifiable {
     /// reducer keeps 200 activity items).
     static let idStride = 100_000
     static let firstEntryOffset = 1
+    static let noticeOffset = 99_997
     static let stoppedOffset = 99_998
     static let streamingOffset = 99_999
 
@@ -544,6 +582,8 @@ private struct TranscriptCell: View {
             TranscriptAssistantMessage(text: text, isStreaming: true, role: .assistant)
         case .stopped:
             TranscriptStoppedRow()
+        case .notice(let text):
+            TranscriptWakeNoticeRow(text: text)
         }
     }
 

@@ -3565,6 +3565,24 @@ final class ShellSessionHost: ObservableObject {
         // (`FieldStateAdapter.onInterrupt` is optional and nil everywhere else, so no pre-existing
         // window changes). Both surfaces come through this one closure.
         adapter.onInterrupt = { [weak self] in self?.interruptAttachedTurn() }
+        // ComputerV2 wake triggers: the "Waiting for you" pill's [Stop waiting].
+        adapter.onStopWaiting = { [weak self] wakeId in
+            guard let self else { return "this window closed" }
+            return await self.stopWaiting(wakeId)
+        }
+    }
+
+    /// ComputerV2 wake triggers (2026-10-12): the user's [Stop waiting] on the attached session's pill —
+    /// `computerUse.wakes.cancel`. The pill leaves when the daemon's `wake_ended` lands; a failure comes back as the
+    /// sentence the pill shows. `attachedSessionId` read FRESH.
+    func stopWaiting(_ wakeId: String) async -> String? {
+        guard let live = attachment, let sid = attachedSessionId else { return "Winter isn't connected" }
+        do {
+            _ = try await live.feed.client.cancelWake(sessionId: sid, wakeId: wakeId)
+            return nil
+        } catch {
+            return wakeStopFailure(error)
+        }
     }
 
     /// office-live-ux Job 1 — **stop the attached session's running turn.** The composer's stop

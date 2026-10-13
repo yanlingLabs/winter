@@ -421,7 +421,10 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     // `thinking_delta` via the transients, 12 → 13).
     // 29 → 30 (the reviewing pill, 2026-10-08: `tool_review_progress` via the transients, 13 → 14 — the phone's
     // WinterSessionClient decodes frames as untyped JSON and its fold ignores an unknown type).
-    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(30);
+    // 30 → 32 (ComputerV2 wake triggers, 2026-10-12: `wake_armed`/`wake_ended` via HISTORY_EVENT_TYPES, 13 → 15 — an
+    // old phone decodes them opaquely and its fold `default: break`s on them).
+    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(32);
+    expect(REMOTE_STREAM_EVENT_TYPES.has("wake_armed")).toBe(true);
     expect(REMOTE_STREAM_EVENT_TYPES.has("tool_review_progress")).toBe(true);
     expect(REMOTE_STREAM_EVENT_TYPES.has("thinking_block")).toBe(true);
     expect(REMOTE_STREAM_EVENT_TYPES.has("thinking_delta")).toBe(true);

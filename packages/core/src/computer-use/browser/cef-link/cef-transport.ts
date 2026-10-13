@@ -191,9 +191,14 @@ export class CefTransport implements CdpTransport {
     return out;
   }
 
-  async attach(tabKey: string, opts: { sessionId: string }): Promise<{ viewport: [w: number, h: number]; dpr: number }> {
+  /** Feature `watchOnly` (wake triggers): the app can hold a tab with none of its native-UI holds. */
+  get watchOnlyHolds(): boolean { return this.appFeatures.has("watchOnly"); }
+
+  async attach(tabKey: string, opts: { sessionId: string; watchOnly?: boolean }): Promise<{ viewport: [w: number, h: number]; dpr: number }> {
     const url = this.opts.tabUrl?.(opts.sessionId, tabKey);
-    const r = await this.ensure({ sessionId: opts.sessionId, tabId: tabKey, ...(url === undefined ? {} : { url }) }) as { viewport?: [number, number]; dpr?: number };
+    // A watch-only hold only to an app that named the feature (an older one would take it for a full hold).
+    const watchOnly = opts.watchOnly === true && this.watchOnlyHolds;
+    const r = await this.ensure({ sessionId: opts.sessionId, tabId: tabKey, ...(url === undefined ? {} : { url }), ...(watchOnly ? { watchOnly: true } : {}) }) as { viewport?: [number, number]; dpr?: number };
     this.tabSession.set(tabKey, opts.sessionId);
     const vp = Array.isArray(r?.viewport) && r.viewport.length === 2 ? r.viewport : [0, 0];
     return { viewport: [Number(vp[0]) || 0, Number(vp[1]) || 0], dpr: typeof r?.dpr === "number" && r.dpr > 0 ? r.dpr : 1 };

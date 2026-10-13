@@ -138,9 +138,9 @@ final class BrowserLinkHostTests: XCTestCase {
     /// Run one command and return what it answered (`nil` while it has not).
     private final class Answer { var value: BrowserLinkReply? }
 
-    private func run(_ op: BrowserLinkCommand.Op, cmdId: String = "c") -> Answer {
+    private func run(_ op: BrowserLinkCommand.Op, cmdId: String = "c", watchOnly: Bool = false) -> Answer {
         let answer = Answer()
-        host.browserLinkCommand(BrowserLinkCommand(linkId: "L1", cmdId: cmdId, op: op),
+        host.browserLinkCommand(BrowserLinkCommand(linkId: "L1", cmdId: cmdId, op: op, watchOnly: watchOnly),
                                 reply: BrowserLinkReplier { reply in
                                     MainActor.assumeIsolated { answer.value = reply }
                                 })
@@ -516,6 +516,40 @@ final class BrowserLinkHostTests: XCTestCase {
         // Taken again later: suppressed again.
         _ = run(.tabEnsure(sessionId: "s1", tabId: "t1", url: nil))
         XCTAssertEqual(link.nativeUI[ObjectIdentifier(container)], BrowserNativeUIPolicy.flags(held: true))
+    }
+
+    // MARK: - Feature `watchOnly` (wake triggers)
+
+    /// A WATCH-ONLY hold sets none of the native-UI flags (the tab's dialogs, prompts, file choosers, downloads,
+    /// menus, keys and focus stay the user's); a primitive's full hold takes them back, and the tab drops back after —
+    /// the same hold all along, counted toward the ceiling.
+    func testAWatchOnlyHoldSetsNoNativeUIAndAFullHoldTakesItBack() {
+        let answer = run(.tabEnsure(sessionId: "s1", tabId: "t1", url: "https://example.com/"), watchOnly: true)
+        let container = runtime.container(forTabId: "t1")!
+        link.browserIds[ObjectIdentifier(container)] = 7
+        clock.tick()
+        guard case .ok = answer.value else { return XCTFail("\(String(describing: answer.value))") }
+        XCTAssertEqual(link.nativeUI[ObjectIdentifier(container)], 0, "a watch-only hold holds no native UI")
+        XCTAssertEqual(host.heldTabIds, ["t1"], "but it is a hold all the same")
+        XCTAssertNotNil(runtime.holds["t1"])
+        XCTAssertNotNil(link.eventObservers[ObjectIdentifier(container)], "its CDP still flows (the watch is polled)")
+
+        guard case .ok = run(.tabEnsure(sessionId: "s1", tabId: "t1", url: nil)).value else { return XCTFail("upgrade") }
+        XCTAssertEqual(link.nativeUI[ObjectIdentifier(container)], BrowserNativeUIPolicy.flags(held: true))
+        guard case .ok = run(.tabEnsure(sessionId: "s1", tabId: "t1", url: nil), watchOnly: true).value else { return XCTFail("downgrade") }
+        XCTAssertEqual(link.nativeUI[ObjectIdentifier(container)], 0)
+        XCTAssertEqual(host.heldTabIds, ["t1"])
+    }
+
+    func testWatchOnlyHoldsCountTowardTheCeiling() {
+        for i in 0..<BrowserLinkHost.maxHeldTabs {
+            let answer = run(.tabEnsure(sessionId: "s", tabId: "t\(i)", url: nil), watchOnly: true)
+            link.browserIds[ObjectIdentifier(runtime.container(forTabId: "t\(i)")!)] = 7
+            clock.tick()
+            guard case .ok = answer.value else { return XCTFail("t\(i)") }
+        }
+        XCTAssertEqual(failureCode(run(.tabEnsure(sessionId: "s", tabId: "one-too-many", url: nil), watchOnly: true)), .notAllowed)
+        XCTAssertEqual(failureCode(run(.tabEnsure(sessionId: "s", tabId: "another", url: nil))), .notAllowed)
     }
 
     func testMuteReachesTheTabsBrowser() {

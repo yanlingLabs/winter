@@ -35,7 +35,12 @@ public enum BrowserLinkProtocol {
     /// `headless` (ComputerV2 Phase 4, lane H3): the app's panel can show a tab of Winter's HEADLESS browser — the
     /// live page drawn from Winter Headless's own GPU frames (`headless.show`/`headless.hide`/`headless.tabs`), and
     /// the person's actions on it go back as `browserLink.headless`.
-    public static let features = ["headless"]
+    /// `watchOnly` (ComputerV2 wake triggers): `tab.ensure` may carry `watchOnly: true` — a WATCH-ONLY hold, under which
+    /// the app sets none of its native-UI holds (`BrowserNativeUIPolicy`): the tab's dialogs, permission prompts, file
+    /// choosers, downloads, context menus, keys and focus stay the user's while a wake trigger waits on it. A
+    /// `tab.ensure` without it takes the full hold back; one with it drops back. It still counts toward the held-tab
+    /// ceiling.
+    public static let features = ["headless", "watchOnly"]
 
     public enum Method {
         public static let attach = "browserLink.attach"

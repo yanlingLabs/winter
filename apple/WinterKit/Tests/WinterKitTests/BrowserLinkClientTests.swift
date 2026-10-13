@@ -218,6 +218,29 @@ final class BrowserLinkClientTests: XCTestCase {
         // Never a session attach on this connection.
         XCTAssertFalse(daemon.methods.contains("hub.attach"))
         XCTAssertFalse(daemon.methods.contains { $0.hasPrefix("session.") })
+        // The app names its features; a daemon that names none leaves none in use.
+        XCTAssertEqual(attach?["features"] as? [String], BrowserLinkProtocol.features)
+        XCTAssertEqual(link.daemonFeatures, [])
+    }
+
+    /// Feature `watchOnly`: the features in use are the ones BOTH sides named.
+    func testTheFeaturesInUseAreTheOnesBothSidesNamed() async throws {
+        let daemon = FakeLinkDaemon(attach: .link("L1", features: ["watchOnly", "teleport"]))
+        let handler = FakeLinkHandler()
+        let link = makeLink(Daemons([daemon]), handler: handler)
+        link.start()
+        await eventually("attached") { handler.attached == ["L1"] }
+        XCTAssertEqual(link.daemonFeatures, ["watchOnly"])
+
+        // An app configured to name none sends no `features` at all (an older daemon's schema never sees the key).
+        let quiet = FakeLinkDaemon(attach: .link("L2", features: ["watchOnly"]))
+        let other = FakeLinkHandler()
+        let plain = makeLink(Daemons([quiet]), handler: other) { $0.features = [] }
+        plain.start()
+        await eventually("attached") { other.attached == ["L2"] }
+        let attach = quiet.requests("browserLink.attach").first?["params"] as? [String: Any]
+        XCTAssertNil(attach?["features"])
+        XCTAssertEqual(plain.daemonFeatures, [])
     }
 
     func testACommandReachesTheHandlerAndItsAnswerIsOneResult() async throws {
@@ -633,6 +656,14 @@ final class BrowserLinkCommandTests: XCTestCase {
                        .tabEnsure(sessionId: "s", tabId: "t", url: "https://x/"))
         XCTAssertEqual(try op(#"{"linkId":"L","cmdId":"c","op":"tab.ensure","params":{"sessionId":"s","tabId":"t"}}"#),
                        .tabEnsure(sessionId: "s", tabId: "t", url: nil))
+        // Feature `watchOnly`: a watch-only hold is read beside the op; anything else is a full hold.
+        let watch = try parse(#"{"linkId":"L","cmdId":"c","op":"tab.ensure","params":{"sessionId":"s","tabId":"t","watchOnly":true}}"#).get()
+        XCTAssertEqual(watch.op, .tabEnsure(sessionId: "s", tabId: "t", url: nil))
+        XCTAssertTrue(watch.watchOnly)
+        XCTAssertFalse(try parse(#"{"linkId":"L","cmdId":"c","op":"tab.ensure","params":{"sessionId":"s","tabId":"t","watchOnly":false}}"#).get().watchOnly)
+        XCTAssertFalse(try parse(#"{"linkId":"L","cmdId":"c","op":"tab.ensure","params":{"sessionId":"s","tabId":"t","watchOnly":"yes"}}"#).get().watchOnly)
+        XCTAssertFalse(try parse(#"{"linkId":"L","cmdId":"c","op":"tab.ensure","params":{"sessionId":"s","tabId":"t"}}"#).get().watchOnly)
+        XCTAssertFalse(try parse(#"{"linkId":"L","cmdId":"c","op":"tab.release","params":{"tabId":"t","watchOnly":true}}"#).get().watchOnly)
         XCTAssertEqual(try op(#"{"linkId":"L","cmdId":"c","op":"tab.release","params":{"tabId":"t"}}"#), .tabRelease(tabId: "t"))
         XCTAssertEqual(try op(#"{"linkId":"L","cmdId":"c","op":"tab.close","params":{"tabId":"t"}}"#), .tabClose(tabId: "t"))
         XCTAssertEqual(try op(#"{"linkId":"L","cmdId":"c","op":"tabs.live","params":{}}"#), .tabsLive)

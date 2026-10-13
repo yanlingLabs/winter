@@ -1076,7 +1076,11 @@ function escapeFloorHitIn(command: string, home: string | undefined, cwd?: strin
   for (const { needle, writeOnly } of floorNeedles(bareHome)) {
     let at = c.indexOf(needle);
     while (at >= 0) {
-      if (!writeOnly || at > writeStart) return "Winter's own state under its home";
+      // A write-only fenced directory is matched as a whole path segment: a name that merely starts the same
+      // (`<home>/computer-use-notes.txt`, `<home>/cache.bak`) is another path. A glob or anything else after it still
+      // counts (`<home>/cache*` would expand to it).
+      const extendsName = writeOnly && /[a-z0-9_.-]/.test(c.charAt(at + needle.length));
+      if (!extendsName && (!writeOnly || at > writeStart)) return "Winter's own state under its home";
       at = c.indexOf(needle, at + 1);
     }
   }

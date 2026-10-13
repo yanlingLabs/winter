@@ -64,7 +64,7 @@ describe("the browser link (daemon side)", () => {
     expect(link.headlessViewerMissing()).toBe("Winter isn't running — ask the user to open Winter");
     const old = app(link);
     const plain = old.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "0.124.0", pid: 1 });
-    expect(plain.features).toEqual(["headless"]);
+    expect(plain.features).toEqual(["headless", "watchOnly"]);
     expect(link.headlessViewer()).toBeUndefined();
     expect(link.headlessViewerMissing()).toBe("this Winter's app can't show a headless tab — ask the user to update Winter");
     const a = app(link);
@@ -112,6 +112,30 @@ describe("the browser link (daemon side)", () => {
     await expect(a.callAsync(METHODS.browserLinkHeadless, { linkId, sessionId: "s1", tabId: "w-1", action: "teleport" })).rejects.toBeInstanceOf(BrowserLinkRpcError);
     // The replaced link's id is not the live one any more.
     await expect(old.callAsync(METHODS.browserLinkHeadless, { linkId: oldId, sessionId: "s1", tabId: "w-1", action: "watch" })).rejects.toThrow(/not the live browser link/);
+  });
+
+  test("features: the app names `watchOnly`, the daemon answers its own; only then does tab.ensure carry a watch-only hold", async () => {
+    const registry = new BrowserBackendRegistry();
+    const link = new BrowserLink({ registry });
+    // An app that names no feature: holds are full, whatever is asked.
+    const old = app(link);
+    const plain = old.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "0.124.0", pid: 1 });
+    expect(plain.features).toEqual(["headless", "watchOnly"]);
+    const t0 = registry.get("winter")!;
+    expect(t0.watchOnlyHolds).toBe(false);
+    void t0.attach("tab-1", { sessionId: "s1", watchOnly: true }).catch(() => undefined);
+    expect(old.last().params).toMatchObject({ op: "tab.ensure", params: { sessionId: "s1", tabId: "tab-1" } });
+    expect(old.last().params.params.watchOnly).toBeUndefined();
+    // An app that names it (and one it does not know): only the shared one is in use.
+    const a = app(link);
+    const res = a.call(METHODS.browserLinkAttach, { protocol: BROWSER_LINK_PROTOCOL, appVersion: "0.125.0", pid: 2, features: ["watchOnly", "teleport"] }) as { linkId: string; features: string[] };
+    expect(res.features).toEqual(["headless", "watchOnly"]);
+    const t = registry.get("winter")!;
+    expect(t.watchOnlyHolds).toBe(true);
+    void t.attach("tab-1", { sessionId: "s1", watchOnly: true }).catch(() => undefined);
+    expect(a.last().params).toMatchObject({ op: "tab.ensure", params: { sessionId: "s1", tabId: "tab-1", watchOnly: true } });
+    void t.attach("tab-1", { sessionId: "s1" }).catch(() => undefined);
+    expect(a.last().params.params.watchOnly).toBeUndefined();
   });
 
   test("a command goes out as a notification and its result settles it; a late or foreign result is dropped and answered {}", async () => {

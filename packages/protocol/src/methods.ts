@@ -325,6 +325,10 @@ export const SessionListResult = z.object({
     // NOT the same absence as `runtimeKind`'s (a daemon can know the leg from `legOf` while this
     // daemon build predates threading the record through to `session.list` at all).
     providerId: z.string().min(1).optional(),
+    // ComputerV2 wake triggers (2026-10-12): how many triggers the session's model has ARMED now (`wakeWhen` — Winter
+    // waits for the user to click, submit, …) — the session list's "waiting for you" mark. Absent when none (or on an
+    // older daemon); kept live by the `wake_armed`/`wake_ended` pair, which every harness receives.
+    wakesArmed: z.number().int().positive().optional(),
   })),
 });
 
@@ -459,6 +463,9 @@ export const ComputerUseStatusResult = z.object({
   headlessEnabled: z.boolean(),
   /** Phase 4: sites' own agent tools (WebMCP) are discovered and callable (`computerUse.webmcp`, default true). */
   webmcp: z.boolean(),
+  /** Wake triggers (2026-10-12): a script may arm `wakeWhen` (`computerUse.wakes`, default true). Optional: an
+   *  older daemon does not say. */
+  wakes: z.boolean().optional(),
   helper: z.object({
     installed: z.boolean(),
     running: z.boolean(),
@@ -490,15 +497,23 @@ export const ComputerUseStatusResult = z.object({
  *  `browserLink.command`, `browserLink.detached`.
  *
  *  FEATURES (the protocol stays 2): what each side can do beyond it, named at attach — the app in its params, the daemon
- *  in its answer; a side never uses a feature the other did not name. `headless` (ComputerV2 Phase 4, lane H3): the app
- *  can show a tab of Winter's HEADLESS browser in its panel — the live page, drawn from Winter Headless's own GPU frames
- *  (the page never leaves the helper; nothing reloads) — and the daemon can ask it to. Daemon → app ops on
- *  `browserLink.command`: `headless.show {sessionId, tabId, service, nonce, producerRequirement, control, purpose,
- *  url, title, uploadDir}` (connect to that presentation and show it; `purpose` "handoff" — the agent waits for the
- *  user, who has control —, "watch", or "popup" — a window the page opened while the person held its opener, a
- *  sign-in window as a rule, theirs alone and closed when they let the opener go; files the person picks for the page are copied into `uploadDir` first), `headless.hide {sessionId, tabId, reason}`, `headless.tabs {sessionId, tabs}` (the session's
- *  headless tabs changed). App → daemon: `browserLink.headless` (below). */
-export const BROWSER_LINK_FEATURES = ["headless"] as const;
+ *  in its answer; a side never uses a feature the other did not name.
+ *  - `headless` (ComputerV2 Phase 4, lane H3): the app can show a tab of Winter's HEADLESS browser in its panel — the
+ *    live page, drawn from Winter Headless's own GPU frames (the page never leaves the helper; nothing reloads) — and the
+ *    daemon can ask it to. Daemon → app ops on `browserLink.command`: `headless.show {sessionId, tabId, service, nonce,
+ *    producerRequirement, control, purpose, url, title, uploadDir}` (connect to that presentation and show it; `purpose`
+ *    "handoff" — the agent waits for the user, who has control —, "watch", or "popup" — a window the page opened while
+ *    the person held its opener, a sign-in window as a rule, theirs alone and closed when they let the opener go; files
+ *    the person picks for the page are copied into `uploadDir` first), `headless.hide {sessionId, tabId, reason}`,
+ *    `headless.tabs {sessionId, tabs}` (the session's headless tabs changed) and `headless.update {sessionId, tabId,
+ *    purpose}` (why a shown tab is shown changed: a watch the person took over became the agent's hand-off, or a
+ *    hand-off nobody waits on any more). App → daemon: `browserLink.headless` (below).
+ *  - `watchOnly` (ComputerV2 wake triggers): `tab.ensure` takes `watchOnly: true` — a WATCH-ONLY hold, under which the
+ *    app sets none of its native-UI holds (the page's dialogs, permission prompts, file choosers, downloads, context
+ *    menus, keys and focus stay the user's), while a wake trigger waits on the tab for the user; a `tab.ensure` without
+ *    it takes the tab's full hold back (a primitive), and one with it drops back. It still counts toward the app's
+ *    ceiling on held tabs. */
+export const BROWSER_LINK_FEATURES = ["headless", "watchOnly"] as const;
 export const BrowserLinkAttachParams = z.object({
   protocol: z.number().int(), appVersion: z.string().max(64), pid: z.number().int(),
   features: z.array(z.string().min(1).max(64)).max(16).optional(),
@@ -554,7 +569,7 @@ export const BrowserLinkHeadlessParams = z.object({
 export const BrowserLinkHeadlessTab = z.object({ tabId: z.string(), url: z.string(), title: z.string(), presented: z.boolean(), control: z.boolean() });
 export const BrowserLinkHeadlessResult = z.object({ tabs: z.array(BrowserLinkHeadlessTab).optional() });
 /** Daemon → app notifications. `op`: tab.ensure, tab.release, tab.close, tabs.live, cdp.send, cdp.subscribe, overlay;
- *  protocol 2: tab.present, tab.mute, tab.downloads, tab.download. */
+ *  protocol 2: tab.present, tab.mute, tab.downloads, tab.download. (Feature `watchOnly`: `tab.ensure`'s `watchOnly`.) */
 export const BrowserLinkCommandNotification = z.object({ linkId: z.string(), cmdId: z.string(), op: z.string(), params: z.record(z.string(), z.unknown()) });
 export const BrowserLinkDetachedNotification = z.object({ linkId: z.string(), reason: z.literal("replaced") });
 
@@ -595,8 +610,18 @@ export const ComputerUseSetSettingsParams = z.object({
   privateEventPath: z.boolean().optional(),
   headlessEnabled: z.boolean().optional(),
   webmcp: z.boolean().optional(),
+  /** Wake triggers (2026-10-12): `computerUse.wakes`. Off ends every armed trigger (`disabled`). */
+  wakes: z.boolean().optional(),
 });
 export const ComputerUseSetSettingsResult = z.object({ ok: z.literal(true) });
+/** ComputerV2 wake triggers (2026-10-12): the Mac's [Stop waiting] on a session's "Waiting for you" pill — ends one
+ *  trigger the session's model armed (`cancelled`, no wake). LOCAL ROLE ONLY, like every `computerUse.*` door.
+ *  `cancelled: false` when the trigger had already ended (or never belonged to that session). */
+export const ComputerUseWakesCancelParams = z.object({
+  sessionId: z.string().min(1),
+  wakeId: z.string().regex(/^wk_[0-9a-f]{12}$/),
+});
+export const ComputerUseWakesCancelResult = z.object({ ok: z.literal(true), cancelled: z.boolean() });
 
 /** Code-mode image input (2026-09-29, raw paths 2026-10-10): a composer image that has NO file of its
  *  own (clipboard data, a screenshot in the clipboard), STAGED as it is into the session's own temp
@@ -3269,6 +3294,7 @@ export const METHODS = {
   computerUseAppsList: "computerUse.apps.list",
   computerUseAppsSet: "computerUse.apps.set",
   computerUseSetSettings: "computerUse.setSettings",
+  computerUseWakesCancel: "computerUse.wakes.cancel",
   // ComputerV2 Phase 2: Winter.app's browser link. HARNESS role only.
   browserLinkAttach: "browserLink.attach",
   browserLinkResult: "browserLink.result",
