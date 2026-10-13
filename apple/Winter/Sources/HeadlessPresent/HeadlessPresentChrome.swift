@@ -84,12 +84,38 @@ struct HeadlessPresentChromeState: Equatable {
         return "The live view ended — \(trimmed)"
     }
 
-    /// The bar's first line: the page's title, else its host, else its URL, else a generic name.
+    /// The bar's first line: the page's title, else its host, else its URL, else "—" (a page with no address yet).
     static func titleLine(title: String, url: String) -> String {
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if !t.isEmpty { return t }
         if let host = host(of: url) { return host }
-        return url.isEmpty ? "Headless tab" : url
+        return url.isEmpty ? noAddress : url
+    }
+
+    /// What the bar shows for a page with no address (never the address it had before).
+    static let noAddress = "—"
+
+    /// The page's real origin for the bar — scheme, host and a port when there is one (`https://accounts.example.com`) —
+    /// so a title can never pass for another site; "—" for a page with none.
+    static func originLine(url: String) -> String {
+        guard let c = URLComponents(string: url), let scheme = c.scheme, let host = c.host, !host.isEmpty else {
+            return url.isEmpty ? noAddress : url
+        }
+        let shownHost = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
+        return c.port.map { "\(scheme)://\(shownHost):\($0)" } ?? "\(scheme)://\(shownHost)"
+    }
+
+    /// The bar's two text lines. While the person can type into the page (they hold control) and for a window the page
+    /// opened (a sign-in window), the REAL origin comes first and the page's title second — a long or crafted title can
+    /// never push the site out of sight. Otherwise the title first and the host beside it (nil when they are the same).
+    static func barText(title: String, url: String, purpose: BrowserLinkHeadlessPurpose, control: Bool) -> (first: String, second: String?) {
+        if purpose == .popup || control {
+            let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (originLine(url: url), t.isEmpty ? nil : t)
+        }
+        let first = titleLine(title: title, url: url)
+        guard let host = host(of: url), host != first else { return (first, nil) }
+        return (first, host)
     }
 
     /// The page's host for the bar (nil for an about: page or an unreadable URL).

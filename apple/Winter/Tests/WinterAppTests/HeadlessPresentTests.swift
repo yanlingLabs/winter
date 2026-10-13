@@ -204,6 +204,46 @@ final class HeadlessPresentKeysTests: XCTestCase {
 
 @MainActor
 final class HeadlessPresentUploadsTests: XCTestCase {
+
+    func testACopyStoppedPartwayRemovesWhatItWrote() throws {
+        let (root, dir) = try uploadsFolder()
+        let a = try source("a.txt", "first"), b = try source("b.txt", "second")
+        let cancel = HeadlessPresentUploads.Cancel()
+        let result = HeadlessPresentUploads.copy([a, b], into: dir, root: root, cancel: cancel, willCopy: { index in
+            if index == 1 { cancel.cancel() }  // the chooser went away after the first file was written
+        })
+        XCTAssertEqual(result, .failure(.cancelled))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir), [], "nothing left behind")
+    }
+
+    func testCopiesNobodyCanUseAreRemovedFolderAndAll() throws {
+        let (root, dir) = try uploadsFolder()
+        let a = try source("a.txt", "first")
+        guard case .success(let paths) = HeadlessPresentUploads.copy([a], into: dir, root: root) else { return XCTFail("should copy") }
+        HeadlessPresentUploads.remove(paths, in: dir)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir), [])
+        // Never anything outside the folder it was given.
+        let outside = try source("keep.txt", "keep")
+        HeadlessPresentUploads.remove([outside.path], in: dir)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path))
+    }
+
+    private func uploadsFolder() throws -> (root: String, dir: String) {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("hp-uploads-\(UUID().uuidString)")
+        let dir = base.appendingPathComponent("headless-uploads/s_test")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: base) }
+        return (base.appendingPathComponent("headless-uploads").path, dir.path)
+    }
+
+    private func source(_ name: String, _ text: String) throws -> URL {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("hp-src-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: base) }
+        let url = base.appendingPathComponent(name)
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
     typealias U = HeadlessPresentUploads
 
     func testTheUploadsFolderIsTheRootOrInsideIt() {
@@ -362,6 +402,28 @@ final class HeadlessPresentUploadsTests: XCTestCase {
 
 @MainActor
 final class HeadlessPresentChromeTests: XCTestCase {
+
+    func testTheRealOriginComesFirstWheneverThePersonCanTypeAndForASignInWindow() {
+        let long = String(repeating: "Bank of the Trusted — sign in securely ", count: 6)
+        let typing = HeadlessPresentChromeState.barText(title: long, url: "https://evil.example:8443/login", purpose: .watch, control: true)
+        XCTAssertEqual(typing.first, "https://evil.example:8443")
+        XCTAssertEqual(typing.second, long.trimmingCharacters(in: .whitespaces))
+        let popup = HeadlessPresentChromeState.barText(title: "Sign in", url: "https://accounts.example/oauth", purpose: .popup, control: false)
+        XCTAssertEqual(popup.first, "https://accounts.example")
+        let handoff = HeadlessPresentChromeState.barText(title: "Sign in", url: "https://accounts.example/", purpose: .handoff, control: true)
+        XCTAssertEqual(handoff.first, "https://accounts.example")
+        // Only watching: the title first, the host beside it.
+        let watching = HeadlessPresentChromeState.barText(title: "News", url: "https://news.example/", purpose: .watch, control: false)
+        XCTAssertEqual(watching.first, "News")
+        XCTAssertEqual(watching.second, "news.example")
+        XCTAssertEqual(HeadlessPresentChromeState.originLine(url: "http://[::1]:8080/x"), "http://[::1]:8080")
+    }
+
+    func testAPageWithNoAddressShowsNoneNeverAnOldOne() {
+        XCTAssertEqual(HeadlessPresentChromeState.titleLine(title: "", url: ""), "—")
+        XCTAssertEqual(HeadlessPresentChromeState.originLine(url: ""), "—")
+        XCTAssertEqual(HeadlessPresentChromeState.barText(title: "", url: "", purpose: .popup, control: true).first, "—")
+    }
     typealias C = HeadlessPresentChromeState
 
     func testConnectingOffersNothingButClose() {
@@ -426,7 +488,7 @@ final class HeadlessPresentChromeTests: XCTestCase {
         XCTAssertEqual(C.titleLine(title: "Sign in", url: "https://accounts.example.com/x"), "Sign in")
         XCTAssertEqual(C.titleLine(title: "  ", url: "https://accounts.example.com/x"), "accounts.example.com")
         XCTAssertEqual(C.titleLine(title: "", url: "about:blank"), "about:blank")
-        XCTAssertEqual(C.titleLine(title: "", url: ""), "Headless tab")
+        XCTAssertEqual(C.titleLine(title: "", url: ""), "—")
         XCTAssertEqual(C.tabLabel(BrowserLinkHeadlessTab(tabId: "t", url: "https://a.example/", title: "A", presented: false, control: false)),
                        "A — a.example")
     }
@@ -468,6 +530,13 @@ final class HeadlessPresentStoreTests: XCTestCase {
               purpose: .watch, url: "https://example.com/", title: "Example", uploadDir: uploadDir)
     }
 
+    /// A show's answer (the connect runs off the main thread).
+    private func showAnswer(_ store: HeadlessPresentStore, _ show: BrowserLinkHeadlessCommand.Show) async -> BrowserLinkReply {
+        await withCheckedContinuation { continuation in
+            store.show(show) { continuation.resume(returning: $0) }
+        }
+    }
+
     private func store() throws -> HeadlessPresentStore {
         guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
         let store = HeadlessPresentStore(device: device)
@@ -475,11 +544,11 @@ final class HeadlessPresentStoreTests: XCTestCase {
         return store
     }
 
-    func testAShowNamingAnotherFolderIsRefusedAndShowsNothing() throws {
+    func testAShowNamingAnotherFolderIsRefusedAndShowsNothing() async throws {
         let store = try store()
         let shown = Recorded<String>()
         store.onShow = { shown.values.append($0) }
-        guard case .failure(let code, _, _) = store.show(show(uploadDir: "/h/cache/elsewhere")) else {
+        guard case .failure(let code, _, _) = await showAnswer(store, show(uploadDir: "/h/cache/elsewhere")) else {
             return XCTFail("should be refused")
         }
         XCTAssertEqual(code, .notAllowed)
@@ -487,19 +556,19 @@ final class HeadlessPresentStoreTests: XCTestCase {
         XCTAssertEqual(shown.values, [])
     }
 
-    func testAShowWithNoUploadsFolderIsRefused() throws {
+    func testAShowWithNoUploadsFolderIsRefused() async throws {
         let store = try store()
         store.uploadsRoot = nil
-        guard case .failure(let code, _, _) = store.show(show()) else { return XCTFail("should be refused") }
+        guard case .failure(let code, _, _) = await showAnswer(store, show()) else { return XCTFail("should be refused") }
         XCTAssertEqual(code, .notAllowed)
     }
 
-    func testAShowWhoseServiceIsNotThereFailsWithItsReason() throws {
+    func testAShowWhoseServiceIsNotThereFailsWithItsReason() async throws {
         let store = try store()
         let shown = Recorded<String>()
         store.onShow = { shown.values.append($0) }
         // Nobody checked this name in: the bootstrap lookup fails at once, no helper involved.
-        guard case .failure(let code, let message, _) = store.show(show()) else { return XCTFail("should fail") }
+        guard case .failure(let code, let message, _) = await showAnswer(store, show()) else { return XCTFail("should fail") }
         XCTAssertEqual(code, .notLive)
         XCTAssertTrue(message.contains("not there"), message)
         XCTAssertTrue(store.presentations.isEmpty)

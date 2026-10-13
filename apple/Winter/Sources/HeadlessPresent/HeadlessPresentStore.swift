@@ -73,7 +73,7 @@ final class HeadlessPresentStore: ObservableObject {
     func handle(_ command: BrowserLinkHeadlessCommand, reply: BrowserLinkReplier) {
         switch command.op {
         case .show(let show):
-            reply(self.show(show))
+            self.show(show) { reply($0) }
         case .hide(let sessionId, let tabId, _):
             hide(sessionId: sessionId, tabId: tabId)
             reply(.empty)
@@ -90,28 +90,43 @@ final class HeadlessPresentStore: ObservableObject {
     }
 
     /// `headless.show`: connect, then show. The reply is `{}` once the HELLO went out, a failure otherwise.
-    func show(_ show: BrowserLinkHeadlessCommand.Show) -> BrowserLinkReply {
+    /// The connect (a bootstrap lookup and the HELLO) runs on the presentation's own queue, never the main thread;
+    /// `done` is called on the main thread.
+    func show(_ show: BrowserLinkHeadlessCommand.Show, done: @escaping @MainActor (BrowserLinkReply) -> Void) {
         guard let root = uploadsRoot, HeadlessPresentUploads.isInside(show.uploadDir, root: root) else {
-            return .failure(code: .notAllowed, message: "headless.show: uploadDir is not Winter's uploads folder")
+            done(.failure(code: .notAllowed, message: "headless.show: uploadDir is not Winter's uploads folder"))
+            return
         }
         guard let device else {
-            return .failure(code: .notLive, message: "this Mac has no Metal device to draw the page with")
+            done(.failure(code: .notLive, message: "this Mac has no Metal device to draw the page with"))
+            return
         }
         // A second show for the same tab replaces the first.
         for old in presentations where old.tabId == show.tabId { old.close() }
         presentations.removeAll { $0.tabId == show.tabId }
 
         let presentation = HeadlessPresentation(show: show, device: device, uploadsRoot: root)
-        if let error = presentation.connect() {
-            presentation.close()
-            return .failure(code: .notLive, message: "Winter couldn't show the headless tab: \(error)")
+        presentation.connect { [weak self] error in
+            if let error {
+                presentation.close()
+                done(.failure(code: .notLive, message: "Winter couldn't show the headless tab: \(error)"))
+                return
+            }
+            guard let self, !presentation.closed else {
+                presentation.close()
+                done(.failure(code: .notLive, message: "Winter couldn't show the headless tab: it went away meanwhile"))
+                return
+            }
+            // A newer show for the same tab while this one connected: the newer one stands.
+            for old in self.presentations where old.tabId == show.tabId { old.close() }
+            self.presentations.removeAll { $0.tabId == show.tabId }
+            presentation.onEnded = { [weak self] ended in self?.presentationEnded(ended) }
+            self.presentations.append(presentation)
+            Self.log.notice("\(show.sessionId, privacy: .public) \(show.tabId, privacy: .public) shown (\(show.purpose.rawValue, privacy: .public), \(show.control ? "the person has control" : "watch-only", privacy: .public))")
+            self.watchPending.remove(show.tabId)
+            self.onShow?(show.sessionId)
+            done(.empty)
         }
-        presentation.onEnded = { [weak self] ended in self?.presentationEnded(ended) }
-        presentations.append(presentation)
-        Self.log.notice("\(show.sessionId, privacy: .public) \(show.tabId, privacy: .public) shown (\(show.purpose.rawValue, privacy: .public), \(show.control ? "the person has control" : "watch-only", privacy: .public))")
-        watchPending.remove(show.tabId)
-        onShow?(show.sessionId)
-        return .empty
     }
 
     /// `headless.hide`: close it (BYE) and let the panel go back to its tabs.

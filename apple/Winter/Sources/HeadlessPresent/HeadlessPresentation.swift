@@ -52,9 +52,13 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
     private let bridge: HeadlessPresentBridge
     private let uploadsRoot: String?
 
-    /// The view showing it now (it presents dialogs and choosers on its window).
+    /// The view showing it now (it presents dialogs and choosers on its window). A view going away (the panel switched
+    /// to another session, the window closed) takes its sheets with it: the dialog or chooser goes back to the head of
+    /// the queue, unanswered, and is shown again when a view comes back — never left over another session's panel.
     weak var view: HeadlessPresentView? {
-        didSet { if view != nil { presentNextPrompt() } }
+        didSet {
+            if view != nil { presentNextPrompt() } else { suspendPrompts() }
+        }
     }
     /// The store's hook: the presentation ended by itself.
     var onEnded: ((HeadlessPresentation) -> Void)?
@@ -74,8 +78,12 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
         case files(WinterPresentFileChooser)
     }
     private var prompts: [Prompt] = []
-    private var activeDialog: (id: UInt32, alert: NSAlert, window: NSWindow)?
-    private var activeChooser: (id: UInt32, panel: NSOpenPanel)?
+    private var activeDialog: (dialog: WinterPresentDialog, alert: NSAlert, window: NSWindow)?
+    private var activeChooser: (chooser: WinterPresentFileChooser, panel: NSOpenPanel)?
+    /// Sheets being taken down to be shown again later (`suspendPrompts`): their completions re-queue, never answer.
+    private var suspending = false
+    /// The file copies running for the page's choosers: stopped when the chooser goes away.
+    private var copies: [UInt32: HeadlessPresentUploads.Cancel] = [:]
     private var noticeWork: DispatchWorkItem?
     private(set) var closed = false
 
@@ -90,7 +98,10 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
         self.uploadsRoot = uploadsRoot
         queue = DispatchQueue(label: "com.winter.headless.present", qos: .userInteractive)
         inputQueue = DispatchQueue(label: "com.winter.headless.present.input", qos: .userInteractive)
-        renderer = HeadlessPresentRenderer(queue: queue, device: device)
+        // The renderer draws on a queue of its own: waiting for a drawable never holds up the consumer's control messages
+        // (a dialog, control going back, the end) on `queue`.
+        renderer = HeadlessPresentRenderer(queue: DispatchQueue(label: "com.winter.headless.present.render", qos: .userInteractive),
+                                           device: device)
         bridge = HeadlessPresentBridge(renderer: renderer)
         consumer = WinterPresentConsumer(service: show.service, nonce: show.nonce, producerRequirement: show.producerRequirement,
                                          device: device, queue: queue, delegate: bridge)
@@ -98,13 +109,14 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
         bridge.presentation = self
     }
 
-    /// Look the service up and say HELLO. nil on success, else why not.
-    func connect() -> String? {
+    /// Look the service up and say HELLO — on the presentation's own queue, never the main thread — then `done` on the
+    /// main thread: nil on success, else why not.
+    func connect(_ done: @escaping @MainActor (String?) -> Void) {
         let consumer = ConsumerRef(consumer)
-        return queue.sync { () -> String? in
+        queue.async {
             var error: NSString?
-            if consumer.consumer.connectWithError(&error) { return nil }
-            return (error as String?) ?? "the presentation could not be reached"
+            let why: String? = consumer.consumer.connectWithError(&error) ? nil : ((error as String?) ?? "the presentation could not be reached")
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(why) } }
         }
     }
 
@@ -150,7 +162,8 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
     /// The producer named the shown page (after the welcome, and on every change of address or title).
     fileprivate func pageChanged(url: String, title: String) {
         guard !closed, url != self.url || title != self.title else { return }
-        if !url.isEmpty { self.url = url }
+        // An empty address is shown as none ("—"), never as the address the tab had before.
+        self.url = url
         self.title = title
         view?.presentationChanged()
     }
@@ -194,7 +207,7 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
 
     fileprivate func dialogDone(_ dialogId: UInt32) {
         prompts.removeAll { if case .dialog(let d) = $0 { return d.dialogId == dialogId }; return false }
-        if let active = activeDialog, active.id == dialogId {
+        if let active = activeDialog, active.dialog.dialogId == dialogId {
             activeDialog = nil
             // Closed without an answer: the dialog went away by another route.
             active.window.endSheet(active.alert.window, returnCode: .abort)
@@ -205,7 +218,7 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
         guard !closed else { return }
         if chooser.mode == UInt32(WinterPresentFileOpenFolder) || chooser.mode == UInt32(WinterPresentFileSave) {
             // Only files can be handed to the page: a folder pick or a save is answered as cancelled.
-            consumer.reply(toFileChooser: chooser.requestId, paths: nil)
+            replyToChooser(chooser.requestId, paths: nil)
             showNotice(chooser.mode == UInt32(WinterPresentFileSave)
                        ? "The page asked to save a file — Winter's headless browser can't save files"
                        : "The page asked for a folder — Winter can hand it files only")
@@ -365,20 +378,23 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
             alert.informativeText = dialog.message
             alert.addButton(withTitle: "OK")
         }
-        let consumer = self.consumer
+        let consumer = ConsumerRef(self.consumer)
         let dialogId = dialog.dialogId
-        activeDialog = (dialogId, alert, window)
+        activeDialog = (dialog, alert, window)
         alert.beginSheetModal(for: window) { [weak self] response in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                let wasActive = self.activeDialog?.id == dialogId
+                let wasActive = self.activeDialog?.dialog.dialogId == dialogId
                 if wasActive { self.activeDialog = nil }
-                // `.abort`: closed without an answer (the dialog went away, the presentation ended).
+                // `.abort`: closed without an answer (the dialog went away, the presentation ended, or the view went —
+                // then it waits for the next view).
                 if response != .abort, wasActive, !self.closed {
                     let accept = response == .alertFirstButtonReturn
-                    consumer.reply(toDialog: dialogId, accept: accept, text: accept ? field?.stringValue : nil)
+                    let text = accept ? field?.stringValue : nil
+                    // The Mach send off the main thread, in order with the person's input.
+                    self.inputQueue.async { consumer.consumer.reply(toDialog: dialogId, accept: accept, text: text) }
                 }
-                self.presentNextPrompt()
+                if !self.suspending { self.presentNextPrompt() }
             }
         }
     }
@@ -393,41 +409,58 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
         let types = HeadlessPresentUploads.contentTypes(accept: chooser.accept)
         if !types.isEmpty { panel.allowedContentTypes = types }
         let requestId = chooser.requestId
-        activeChooser = (requestId, panel)
+        activeChooser = (chooser, panel)
         panel.beginSheetModal(for: window) { [weak self] response in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                let wasActive = self.activeChooser?.id == requestId
+                let wasActive = self.activeChooser?.chooser.requestId == requestId
                 if wasActive { self.activeChooser = nil }
+                if self.suspending { return }  // re-queued by `suspendPrompts`: shown again with the next view
                 guard wasActive, !self.closed else { self.presentNextPrompt(); return }
                 if response == .OK, !panel.urls.isEmpty {
                     self.copyAndReply(requestId: requestId, urls: panel.urls)
                 } else {
-                    self.consumer.reply(toFileChooser: requestId, paths: nil)
+                    self.replyToChooser(requestId, paths: nil)
                 }
                 self.presentNextPrompt()
             }
         }
     }
 
-    /// The chosen files copied where the helper may read them (off the main thread), then the copies' paths.
-    private func copyAndReply(requestId: UInt32, urls: [URL]) {
+    /// A chooser's answer, sent off the main thread in order with the person's input.
+    private func replyToChooser(_ requestId: UInt32, paths: [String]?) {
         let consumer = ConsumerRef(self.consumer)
+        inputQueue.async { consumer.consumer.reply(toFileChooser: requestId, paths: paths) }
+    }
+
+    /// The chosen files copied where the helper may read them (off the main thread), then the copies' paths. A copy the
+    /// chooser stopped waiting for (control went back, the presentation ended) stops, removes what it wrote, and answers
+    /// nothing; one that finishes when nobody can use it any more is removed.
+    private func copyAndReply(requestId: UInt32, urls: [URL]) {
         guard let root = uploadsRoot else {
-            consumer.consumer.reply(toFileChooser: requestId, paths: nil)
+            replyToChooser(requestId, paths: nil)
             showNotice(HeadlessPresentUploads.Failure.notTheUploadsFolder.message)
             return
         }
         let uploadDir = self.uploadDir
+        let cancel = HeadlessPresentUploads.Cancel()
+        copies[requestId] = cancel
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result = HeadlessPresentUploads.copy(urls, into: uploadDir, root: root)
+            let result = HeadlessPresentUploads.copy(urls, into: uploadDir, root: root, cancel: cancel)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    let wanted = self?.copies.removeValue(forKey: requestId) != nil && !cancel.isCancelled && self?.closed == false
+                        && self?.control == true
                     switch result {
+                    case .success(let paths) where wanted:
+                        self?.replyToChooser(requestId, paths: paths)
                     case .success(let paths):
-                        consumer.consumer.reply(toFileChooser: requestId, paths: paths)
+                        HeadlessPresentUploads.remove(paths, in: uploadDir)
+                    case .failure(.cancelled):
+                        break
                     case .failure(let failure):
-                        consumer.consumer.reply(toFileChooser: requestId, paths: nil)
+                        guard wanted else { return }
+                        self?.replyToChooser(requestId, paths: nil)
                         self?.showNotice(failure.message)
                     }
                 }
@@ -435,10 +468,30 @@ final class HeadlessPresentation: ObservableObject, Identifiable {
         }
     }
 
+    /// The view went: its sheets come down unanswered and wait, at the head of the queue, for the next view.
+    private func suspendPrompts() {
+        var back: [Prompt] = []
+        suspending = true
+        if let active = activeDialog {
+            activeDialog = nil
+            back.append(.dialog(active.dialog))
+            active.window.endSheet(active.alert.window, returnCode: .abort)
+        }
+        if let active = activeChooser {
+            activeChooser = nil
+            back.append(.files(active.chooser))
+            active.panel.cancel(nil)
+        }
+        suspending = false
+        prompts.insert(contentsOf: back, at: 0)
+    }
+
     /// Everything waiting for the person goes away unanswered (control went back, the presentation ended): a sheet
     /// on screen is closed without a reply — the producer withdraws its own dialog then.
     private func teardownPrompts() {
         prompts.removeAll()
+        for cancel in copies.values { cancel.cancel() }
+        copies.removeAll()
         if let active = activeDialog {
             activeDialog = nil
             active.window.endSheet(active.alert.window, returnCode: .abort)

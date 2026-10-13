@@ -24,18 +24,23 @@ struct HeadlessPresentChromeBar: View {
                 .frame(width: panelChromeButtonSize, height: panelChromeButtonSize)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
+                let text = HeadlessPresentChromeState.barText(title: presentation.title, url: presentation.url,
+                                                              purpose: presentation.purpose, control: presentation.control)
                 HStack(spacing: 6) {
-                    Text(HeadlessPresentChromeState.titleLine(title: presentation.title, url: presentation.url))
+                    // The first line keeps its room (the real origin while the person types, or a sign-in window):
+                    // the second gives way to it, never the other way round.
+                    Text(text.first)
                         .font(Typography.label(.medium))
                         .foregroundStyle(Theme.textPrimary)
                         .lineLimit(1)
-                        .truncationMode(.tail)
-                    if let host = HeadlessPresentChromeState.host(of: presentation.url),
-                       host != HeadlessPresentChromeState.titleLine(title: presentation.title, url: presentation.url) {
-                        Text(host)
+                        .truncationMode(.middle)
+                        .layoutPriority(1)
+                    if let second = text.second {
+                        Text(second)
                             .font(Typography.caption())
                             .foregroundStyle(Theme.textMuted)
                             .lineLimit(1)
+                            .truncationMode(.tail)
                             .layoutPriority(-1)
                     }
                 }

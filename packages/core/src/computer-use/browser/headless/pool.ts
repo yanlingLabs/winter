@@ -130,7 +130,7 @@ interface PoolTab {
   /** Shown in Winter's panel. */
   presentation?: Presentation;
   /** A window the page opened while the person held this tab's opener (a sign-in window): the person's alone — never
-   *  listed to the agent, shown beside its opener, closed when the person lets the opener go. */
+   *  listed to the agent, shown in the panel in front of its opener, closed when the person lets the opener go. */
   openerTabKey?: string;
   /** The size the page is laid out in, as the helper applied it (`headless.viewChanged`; absent: the agent's own,
    *  `HEADLESS_AGENT_VIEW`) and how many times it changed: a shown tab follows the panel's size, and gets the agent's
@@ -1055,7 +1055,7 @@ export class HeadlessPool implements CdpTransport {
 
   /**
    * A window the page opened while the person held `opener` in the panel (`headless.popupOpened` — a sign-in window, as
-   * a rule): a tab of the opener's session that only the person uses, shown in the panel beside its opener with them in
+   * a rule): a tab of the opener's session that only the person uses, shown in the panel in front of its opener with them in
    * control. The opener no longer held, or the budget spent: closed at once.
    */
   private async adoptWindow(proc: WinterHeadlessProcess, e: { tabKey: string; openerTabKey: string; url: string }): Promise<void> {

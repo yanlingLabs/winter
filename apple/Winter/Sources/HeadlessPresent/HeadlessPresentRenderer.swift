@@ -15,8 +15,9 @@ import QuartzCore
 ///   frame's slot is released at once (nothing ever read it). Only the newest frame is drawn.
 /// - **Own copy**: a resize, a backing-scale change or a view that comes back redraws from the copy at once,
 ///   without waiting for the producer's next paint.
-/// - **Thread**: everything here runs on `queue` — the consumer's delegate queue, so a frame is handled where it
-///   arrives — except `setViewport`/`attach`, which the main thread calls and which only hand values over.
+/// - **Thread**: everything here runs on `queue` — the renderer's OWN queue, never the consumer's (waiting for a
+///   drawable must not hold up a dialog, control going back or the end) — except `frame` (the consumer's queue, which
+///   only hands the frame over) and `setViewport`/`attach` (the main thread, which only hand values over).
 ///
 /// The view (`HeadlessPresentView`) owns nothing of this: a session hop that dismantles it detaches its layer and
 /// the renderer keeps the copy for the next one.
@@ -124,8 +125,12 @@ final class HeadlessPresentRenderer: @unchecked Sendable {
 
     // MARK: - On `queue`
 
-    /// A new frame from the producer (the consumer's delegate, on `queue`).
+    /// A new frame from the producer (the consumer's delegate, on the consumer's queue): handed to `queue`.
     func frame(_ frame: WinterPresentFrame) {
+        queue.async { [weak self] in self?.take(frame) }
+    }
+
+    private func take(_ frame: WinterPresentFrame) {
         if let superseded = pending {
             supersededFrames += 1
             consumer?.releaseSlot(superseded.slot, generation: superseded.generation)

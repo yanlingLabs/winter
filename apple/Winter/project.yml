@@ -989,6 +989,10 @@ targets:
       - path: Sources/HeadlessPresent/WinterPresentWire.h
       - path: Sources/HeadlessPresent/WinterPresentAuth.h
       - path: Sources/HeadlessPresent/WinterPresentAuth.m
+      # The presentation's third-party notices (flutter_cef's MIT notice among them) ship in the helper that runs the
+      # producer, as they do in Winter.app.
+      - path: Sources/HeadlessPresent/THIRD_PARTY.md
+        buildPhase: resources
       - path: Sources/CEF/WinterCEF.h
       - path: Sources/CEF/WinterCEF.mm
       - path: Sources/CEF/WinterCEFAssetResolve.h

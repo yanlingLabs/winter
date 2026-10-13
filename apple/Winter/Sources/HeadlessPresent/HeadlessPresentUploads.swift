@@ -4,8 +4,8 @@ import UniformTypeIdentifiers
 
 /// ComputerV2 Phase 4 (lane H3) — **files the person chooses for a headless page.**
 ///
-/// Winter Headless reads a chosen file ONLY from `<home>/cache/headless-uploads/` (its file reply accepts no other
-/// path), and the page never reaches the person's disk. So when a page asks for files, Winter.app shows its own open
+/// Winter Headless reads a chosen file ONLY from the presentation's own folder, `<home>/cache/headless-uploads/<session>/`
+/// (its file reply accepts no other path), and the page never reaches the person's disk. So when a page asks for files, Winter.app shows its own open
 /// panel, COPIES each chosen file's contents into a fresh folder of its own there — `<uploadDir>/<16 random
 /// hex>/<file name>` — and hands the helper the copies' paths:
 ///   * the source is opened with `O_NOFOLLOW` and must be a regular file (a link is never followed, a device or a
@@ -13,8 +13,20 @@ import UniformTypeIdentifiers
 ///   * each copy is a NEW file (`O_CREAT|O_EXCL|O_NOFOLLOW`, 0600) in a NEW folder (0700) created under a checked
 ///     `uploadDir`, written from the source's contents — never a hard link to it, never a rename of it;
 ///   * at most `maxTotalBytes` in all, judged on the open descriptors before anything is copied;
-///   * a name keeps only its last component, with separators and control characters replaced.
+///   * a name keeps only its last component, with separators and control characters replaced;
+///   * nothing is left behind that the page was not handed: a copy that fails partway, or is cancelled (the chooser went
+///     away, control went back), removes everything it wrote; copies that finish after nobody can use them are removed
+///     by their caller (`remove`). The session's folder goes with its context (the daemon), and the whole uploads folder
+///     at the daemon's boot and the helper's exit.
 enum HeadlessPresentUploads {
+
+    /// A running copy's stop flag: set from any thread (the chooser went away), read between chunks.
+    final class Cancel: @unchecked Sendable {
+        private let lock = NSLock()
+        private var flag = false
+        func cancel() { lock.withLock { flag = true } }
+        var isCancelled: Bool { lock.withLock { flag } }
+    }
 
     /// The most a chooser's copies may weigh, together.
     static let maxTotalBytes: Int64 = 200 * 1024 * 1024
@@ -28,6 +40,8 @@ enum HeadlessPresentUploads {
         case unreadable(name: String)
         /// The copy itself failed (disk full, the folder vanished).
         case copyFailed(name: String, errno: Int32)
+        /// Stopped: the chooser went away (control went back, the presentation ended) while it ran.
+        case cancelled
 
         var message: String {
             switch self {
@@ -35,6 +49,7 @@ enum HeadlessPresentUploads {
             case .tooLarge: return "Those files are too large to hand to the page (200 MB at most in all)"
             case .unreadable(let name): return "Winter couldn't read “\(name)” — choose a regular file"
             case .copyFailed(let name, _): return "Winter couldn't copy “\(name)” for the page"
+            case .cancelled: return "The page no longer asks for files"
             }
         }
     }
@@ -139,7 +154,8 @@ enum HeadlessPresentUploads {
     /// Copy `sources` into fresh folders under `uploadDir` (checked inside `root`); the copies' paths, in order.
     /// Blocking: call it off the main thread.
     static func copy(_ sources: [URL], into uploadDir: String, root: String,
-                     maxTotalBytes: Int64 = maxTotalBytes) -> Result<[String], Failure> {
+                     maxTotalBytes: Int64 = maxTotalBytes, cancel: Cancel? = nil,
+                     willCopy: ((Int) -> Void)? = nil) -> Result<[String], Failure> {
         guard isInside(uploadDir, root: root) else { return .failure(.notTheUploadsFolder) }
         let dir = URL(fileURLWithPath: uploadDir).standardizedFileURL.path
         // The folder: made when it is missing (0700), refused when it is a link or not a folder.
@@ -172,29 +188,60 @@ enum HeadlessPresentUploads {
             if total > maxTotalBytes { return .failure(.tooLarge(bytes: total)) }
         }
 
+        // What this copy made (folder, file name): removed again if it does not finish.
+        var made: [(folder: String, name: String?)] = []
+        func undo(_ failure: Failure) -> Result<[String], Failure> {
+            for m in made.reversed() {
+                if let name = m.name {
+                    let fd = openat(dirFd, m.folder, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                    if fd >= 0 {
+                        unlinkat(fd, name, 0)
+                        close(fd)
+                    }
+                }
+                unlinkat(dirFd, m.folder, AT_REMOVEDIR)
+            }
+            return .failure(failure)
+        }
         var paths: [String] = []
-        for o in opened {
+        for (index, o) in opened.enumerated() {
+            willCopy?(index)
+            if cancel?.isCancelled == true { return undo(.cancelled) }
             let folder = randomHex()
-            guard mkdirat(dirFd, folder, 0o700) == 0 else { return .failure(.copyFailed(name: o.name, errno: errno)) }
+            guard mkdirat(dirFd, folder, 0o700) == 0 else { return undo(.copyFailed(name: o.name, errno: errno)) }
+            made.append((folder, nil))
             let folderFd = openat(dirFd, folder, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            guard folderFd >= 0 else { return .failure(.copyFailed(name: o.name, errno: errno)) }
+            guard folderFd >= 0 else { return undo(.copyFailed(name: o.name, errno: errno)) }
             defer { close(folderFd) }
             let out = openat(folderFd, o.name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            guard out >= 0 else { return .failure(.copyFailed(name: o.name, errno: errno)) }
-            let copied = copyContents(from: o.fd, to: out, limit: o.size)
+            guard out >= 0 else { return undo(.copyFailed(name: o.name, errno: errno)) }
+            made[made.count - 1].name = o.name
+            let copied = copyContents(from: o.fd, to: out, limit: o.size, cancel: cancel)
             let closeResult = close(out)
-            guard copied, closeResult == 0 else {
-                unlinkat(folderFd, o.name, 0)
-                return .failure(.copyFailed(name: o.name, errno: errno))
-            }
+            if cancel?.isCancelled == true { return undo(.cancelled) }
+            guard copied, closeResult == 0 else { return undo(.copyFailed(name: o.name, errno: errno)) }
             paths.append(dir + "/" + folder + "/" + o.name)
         }
         return .success(paths)
     }
 
+    /// Copies nobody will use any more (they finished after the chooser went away): each file and the fresh folder it
+    /// was made in, removed — only ones under `uploadDir`, and never through a link.
+    static func remove(_ paths: [String], in uploadDir: String) {
+        let dir = URL(fileURLWithPath: uploadDir).standardizedFileURL.path
+        for path in paths {
+            let folder = (path as NSString).deletingLastPathComponent
+            guard (folder as NSString).deletingLastPathComponent == dir else { continue }
+            var st = stat()
+            guard lstat(folder, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR else { continue }
+            unlink(path)
+            rmdir(folder)
+        }
+    }
+
     /// The source's bytes into `out`, at most `limit` of them (a file that grew after it was measured is cut where
     /// it was measured — the cap holds).
-    private static func copyContents(from source: Int32, to out: Int32, limit: Int64) -> Bool {
+    private static func copyContents(from source: Int32, to out: Int32, limit: Int64, cancel: Cancel? = nil) -> Bool {
         // The source was opened non-blocking (a FIFO swapped in never hangs the open); reading a regular file
         // is unaffected, but clear it anyway.
         _ = fcntl(source, F_SETFL, fcntl(source, F_GETFL) & ~O_NONBLOCK)
@@ -203,6 +250,7 @@ enum HeadlessPresentUploads {
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 16)
         defer { buffer.deallocate() }
         while remaining > 0 {
+            if cancel?.isCancelled == true { return false }
             let n = read(source, buffer, Int(min(Int64(size), remaining)))
             if n < 0 { if errno == EINTR { continue }; return false }
             if n == 0 { break }
