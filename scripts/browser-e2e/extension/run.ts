@@ -446,13 +446,24 @@ async function wakeRow(t: CdpTransport, base: string, profile: string): Promise<
 
 // ── the run ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/** A unix socket path is at most 103 bytes (`sockaddr_un`), and the host refuses a longer one. The per-process test
+ *  root under `$TMPDIR` (`winter-test-XXXXXX`) pushed `<home>/run/browser.sock` past it, so the run dir lives directly
+ *  in the per-user temp dir (`getconf DARWIN_USER_TEMP_DIR`) and is removed at the end like before. */
+const SOCKET_PATH_MAX = 103;
+function socketSafeTempDir(): string {
+  const dir = spawnSync("getconf", ["DARWIN_USER_TEMP_DIR"], { encoding: "utf8" }).stdout?.trim() ?? "";
+  return dir.length > 0 && existsSync(dir) ? realpathSync(dir) : realpathSync(tmpdir());
+}
+
 async function main(): Promise<void> {
   const exe = chromeBinary();
   if (!existsSync(exe)) throw new Error(`WINTER_TEST_CHROME (${process.env.WINTER_TEST_CHROME}) is not Chrome for Testing`);
   facts.chrome = run(exe, ["--version"]).stdout.trim();
   mkdirSync(OUT, { recursive: true });
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "wfc-e2e-")));
-  const home = join(root, "home");
+  const root = realpathSync(mkdtempSync(join(socketSafeTempDir(), "wfc-e2e-")));
+  const home = join(root, "h");
+  const socket = join(home, "run", "browser.sock");
+  if (Buffer.byteLength(socket) > SOCKET_PATH_MAX) throw new Error(`the daemon's socket path would be ${Buffer.byteLength(socket)} bytes (limit ${SOCKET_PATH_MAX}): ${socket}`);
   const profile = join(root, "profile");
   mkdirSync(home, { recursive: true });
   mkdirSync(profile, { recursive: true });
