@@ -523,6 +523,10 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
     if (event.type === "user_message" && event.images !== undefined) {
       throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} is a user_message with images — chat sessions carry none; nothing was appended`);
     }
+    // Code-mode file attachments: `user_message.files` names files on this Mac, for a code session — never a phone's.
+    if (event.type === "user_message" && event.files !== undefined) {
+      throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} is a user_message with files — chat sessions carry none; nothing was appended`);
+    }
     // `tool_result.siteIcons` is the daemon's own stamp (`runtime-sdk/site-icons.ts`) — urls a Mac
     // client FETCHES, so a list a remote caller supplies must never be stored. But the daemon's own chat
     // logs carry it (the runtime's WebFetch/WebSearch report icons in chat too), `sync.pull` copies them

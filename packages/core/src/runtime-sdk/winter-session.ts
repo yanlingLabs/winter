@@ -96,7 +96,7 @@
 // spawns (finding 3), and no push can reach the closed queue in between.
 import type { AgentInfo, McpServerConfig, Options, Query } from "@yanlinglabs/winter-agent-sdk";
 import { canonicalMcpServerUrl } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
-import type { NewSessionEvent, SessionEvent, UserMessageImageRef } from "@yanlinglabs/winter-protocol";
+import type { NewSessionEvent, SessionEvent, UserMessageFileRef, UserMessageImageRef } from "@yanlinglabs/winter-protocol";
 import { modelTextOf } from "../sessions/model-text";
 import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, type ProjectedBatch, type Projector, type ProtocolSdkMessage } from "../projector";
 import { PROJECTOR_PASSTHROUGH_CLIENT } from "../projector/index";
@@ -359,7 +359,7 @@ export function unconsumedUserMessages(events: readonly SessionEvent[]): string[
     if (e.type === "user_message") {
       if ((e as { clientName?: string }).clientName === PROJECTOR_PASSTHROUGH_CLIENT) continue;
       // Code-mode image input: what is OWED is the text the model is given — each `[Image #n]`
-      // replaced by its staged path (`modelTextOf`); the log keeps the placeholders.
+      // (and `[File #n]`) replaced by its path (`modelTextOf`); the log keeps the placeholders.
       owed.push(modelTextOf(e));
     } else if (e.type === "turn_started") {
       owed.pop();   // the nearest preceding unpaired message is this turn's
@@ -396,8 +396,8 @@ export interface WinterSession {
   readonly heldDeliveries: readonly string[];
   /** `images` (code-mode image input, already validated by the caller): the `user_message` is
    *  appended with `text` as written and `images`; the child is pushed `modelTextOf` of the two. */
-  send(text: string, clientName?: string, images?: readonly UserMessageImageRef[]): Promise<{ seq: number; queued: boolean }>;
-  steer(text: string, clientName?: string, images?: readonly UserMessageImageRef[]): Promise<{ seq: number; injected: boolean }>;
+  send(text: string, clientName?: string, images?: readonly UserMessageImageRef[], files?: readonly UserMessageFileRef[]): Promise<{ seq: number; queued: boolean }>;
+  steer(text: string, clientName?: string, images?: readonly UserMessageImageRef[], files?: readonly UserMessageFileRef[]): Promise<{ seq: number; injected: boolean }>;
   /** `discardQueued` (`TaskStop`, user ruling 2026-10-04): the texts queued behind the stopped turn are
    *  dropped instead of waiting for the next inbound action — the ones the daemon holds, and (agent SDK
    *  0.0.44) the pushes the child holds pending, cleared BEFORE the interrupt; `discarded` counts both.
@@ -615,13 +615,13 @@ class WinterSessionImpl implements WinterSession {
     this.assertNotEnded();
   }
 
-  async send(text: string, clientName = "session", images?: readonly UserMessageImageRef[]): Promise<{ seq: number; queued: boolean }> {
+  async send(text: string, clientName = "session", images?: readonly UserMessageImageRef[], files?: readonly UserMessageFileRef[]): Promise<{ seq: number; queued: boolean }> {
     this.assertNotEnded();
     await this.quiesce();
     // WS-19 (W19-7): the pre-turn gate, BEFORE the open and before the append — a refusal here
     // leaves the session exactly as it was, with no child and no orphan `user_message`.
     await this.deps.beforeTurn?.();
-    if (this.handoff !== undefined) return { seq: this.holdForHandoff(text, clientName, images), queued: true };
+    if (this.handoff !== undefined) return { seq: this.holdForHandoff(text, clientName, images, files), queued: true };
     // Open FIRST: a refused open (the binary is gone) then leaves no orphan `user_message`, and a
     // delivery held while resumable is appended by `open()` BEFORE this text — chronological.
     await this.open();
@@ -632,10 +632,10 @@ class WinterSessionImpl implements WinterSession {
       // of the log pairs them the way they ran) and this one waits its turn.
       this.beginAndPush(this.pending.shift()!, this.inc!);
     }
-    const seq = this.appendUser(text, clientName, images);
+    const seq = this.appendUser(text, clientName, images, files);
     // What the child is given (and what the projector's echo window must match): the placeholders
     // replaced by their paths. The log keeps `text` as written.
-    const modelText = modelTextOf({ text, images });
+    const modelText = modelTextOf({ text, images, files });
     if (this.inFlight > 0) {
       // P8b-5/39: held until the running turn's `result` arrives. Its `user_message` is in the log;
       // its turn is begun when it is pushed, not now.
@@ -646,19 +646,19 @@ class WinterSessionImpl implements WinterSession {
     return { seq, queued: false };
   }
 
-  async steer(text: string, clientName = "steer", images?: readonly UserMessageImageRef[]): Promise<{ seq: number; injected: boolean }> {
+  async steer(text: string, clientName = "steer", images?: readonly UserMessageImageRef[], files?: readonly UserMessageFileRef[]): Promise<{ seq: number; injected: boolean }> {
     this.assertNotEnded();
     await this.quiesce();
     await this.deps.beforeTurn?.();
     // I-5: a steer during a pending handoff is not injected into the SOURCE's turn: it is the target's.
-    if (this.handoff !== undefined) return { seq: this.holdForHandoff(text, clientName, images), injected: false };
+    if (this.handoff !== undefined) return { seq: this.holdForHandoff(text, clientName, images, files), injected: false };
     await this.open();
-    const seq = this.appendUser(text, clientName, images);
+    const seq = this.appendUser(text, clientName, images, files);
     const wasRunning = this.inFlight > 0;
     this.drainPaused = false;
     // P8b-38: a steered-in message is owed a terminal unless the child folds it into the running turn
     // (agent SDK 0.0.44, at that turn's next tool round — `onFold`), so it is a begun turn too.
-    this.beginAndPush(modelTextOf({ text, images }), this.inc!);
+    this.beginAndPush(modelTextOf({ text, images, files }), this.inc!);
     return { seq, injected: wasRunning };
   }
 
@@ -928,9 +928,9 @@ class WinterSessionImpl implements WinterSession {
 
   /** I-5: the text is in the log (unconsumed: no `turn_started` pairs it), so the next incarnation --
    *  on the target -- pushes it (`deps.unconsumed`). Nothing reaches the source child. */
-  private holdForHandoff(text: string, clientName: string, images?: readonly UserMessageImageRef[]): number {
+  private holdForHandoff(text: string, clientName: string, images?: readonly UserMessageImageRef[], files?: readonly UserMessageFileRef[]): number {
     this.heldForHandoff++;
-    return this.appendUser(text, clientName, images);
+    return this.appendUser(text, clientName, images, files);
   }
 
   idle(): Promise<void> {
@@ -1383,7 +1383,7 @@ class WinterSessionImpl implements WinterSession {
     inc.attachment?.refresh();
   }
 
-  private appendUser(text: string, clientName: string, images?: readonly UserMessageImageRef[]): number {
+  private appendUser(text: string, clientName: string, images?: readonly UserMessageImageRef[], files?: readonly UserMessageFileRef[]): number {
     // C2 (lane C, 2026-09-22): a turn pushed while another ran has its `turn_started` held by the
     // projector until that turn ends (turn boundaries in order). Any still held is announced HERE,
     // before this message lands, so a `turn_started` is never separated from its own message by a
@@ -1392,6 +1392,7 @@ class WinterSessionImpl implements WinterSession {
     return this.deps.append({
       type: "user_message", sessionId: this.sessionId, threadId: MAIN_THREAD, text, clientName,
       ...(images !== undefined && images.length > 0 ? { images: images.map((i) => ({ n: i.n, path: i.path })) } : {}),
+      ...(files !== undefined && files.length > 0 ? { files: files.map((f) => ({ n: f.n, path: f.path })) } : {}),
     }).seq;
   }
 

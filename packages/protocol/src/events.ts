@@ -74,6 +74,20 @@ export const UserMessageImageRef = z.object({
 });
 export type UserMessageImageRef = z.infer<typeof UserMessageImageRef>;
 
+/** Code-mode file attachments (2026-10-13): at most this many `[File #n]` files ride one `user_message`
+ *  (and one `session.send`/`session.steer` — the daemon refuses more, typed `file_reference_invalid`). */
+export const USER_MESSAGE_FILES_MAX = 20;
+/** The refusal past `USER_MESSAGE_FILES_MAX`. */
+export const USER_MESSAGE_FILES_MAX_MESSAGE = `A message can carry at most ${USER_MESSAGE_FILES_MAX} files`;
+/** One `[File #n]` placeholder's file or folder: `n` is the number in the message text's token, `path` the
+ *  user's own absolute path (any type, a folder too). The model is given the path in the token's place; the
+ *  file itself is never read, copied or staged by the daemon. Same path bound as an image's. */
+export const UserMessageFileRef = z.object({
+  n: z.number().int().positive(),
+  path: z.string().min(1).max(USER_MESSAGE_IMAGE_PATH_MAX),
+});
+export type UserMessageFileRef = z.infer<typeof UserMessageFileRef>;
+
 export const UserMessageEvent = Base.extend({
   type: z.literal("user_message"),
   threadId: z.string().min(1),
@@ -87,6 +101,10 @@ export const UserMessageEvent = Base.extend({
    *  `USER_MESSAGE_IMAGE_PATH_MAX` chars), so it stays inside `session.history`/the remote stream's
    *  per-event caps. */
   images: z.array(UserMessageImageRef).min(1).max(USER_MESSAGE_IMAGES_MAX).optional(),
+  /** Code-mode file attachments: the user's file or folder behind each `[File #n]` in `text`. Like `images`,
+   *  only the MODEL sees the paths (`modelTextOf` substitutes them); the Mac's bubble draws a chip per
+   *  token. Absent on every message without files (never an empty array); ≤ `USER_MESSAGE_FILES_MAX`. */
+  files: z.array(UserMessageFileRef).min(1).max(USER_MESSAGE_FILES_MAX).optional(),
 });
 
 const ThreadBase = Base.extend({ threadId: z.string().min(1) });

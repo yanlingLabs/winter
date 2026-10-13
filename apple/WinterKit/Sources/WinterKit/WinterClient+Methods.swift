@@ -779,20 +779,29 @@ extension WinterClient {
     /// (`stageImage`) or the user's own original image file. `text` keeps the placeholders — the user's
     /// message shows them — and the daemon gives the MODEL the paths. Only a daemon whose `stageImage`
     /// answered `imagesOnSend` takes them; an empty list omits the key.
-    public func send(sessionId: String, text: String, images: [SessionEvent.UserMessageImageRef] = []) async throws -> Int {
-        let r = try await request("session.send", params: obj(["sessionId": .string(sessionId), "text": .string(text), "images": imagesParam(images)]))
+    ///
+    /// `files` (code-mode file attachments, 2026-10-13): each `[File #n]` placeholder's file or folder — the user's
+    /// own path. Send them only to a daemon that announced `supportsAttachmentFiles`; an empty list omits the key.
+    public func send(sessionId: String, text: String, images: [SessionEvent.UserMessageImageRef] = [],
+                     files: [SessionEvent.UserMessageFileRef] = []) async throws -> Int {
+        let r = try await request("session.send", params: obj(["sessionId": .string(sessionId), "text": .string(text),
+                                                               "images": refsParam(images.map { ($0.n, $0.path) }),
+                                                               "files": refsParam(files.map { ($0.n, $0.path) })]))
         guard let seq = r["seq"]?.intValue else { throw RpcError(code: -3, message: "invalid result from server for session.send") }
         return seq
     }
 
-    /// `images`: as `send`'s.
-    public func steer(sessionId: String, text: String, images: [SessionEvent.UserMessageImageRef] = []) async throws -> Bool {
-        try await request("session.steer", params: obj(["sessionId": .string(sessionId), "text": .string(text), "images": imagesParam(images)]))["injected"]?.boolValue ?? false
+    /// `images` and `files`: as `send`'s.
+    public func steer(sessionId: String, text: String, images: [SessionEvent.UserMessageImageRef] = [],
+                      files: [SessionEvent.UserMessageFileRef] = []) async throws -> Bool {
+        try await request("session.steer", params: obj(["sessionId": .string(sessionId), "text": .string(text),
+                                                        "images": refsParam(images.map { ($0.n, $0.path) }),
+                                                        "files": refsParam(files.map { ($0.n, $0.path) })]))["injected"]?.boolValue ?? false
     }
 
-    /// `nil` (the key omitted) for no images — an older daemon never sees it.
-    private func imagesParam(_ images: [SessionEvent.UserMessageImageRef]) -> JSONValue? {
-        images.isEmpty ? nil : .array(images.map { .object(["n": .number(Double($0.n)), "path": .string($0.path)]) })
+    /// `nil` (the key omitted) for no refs — an older daemon never sees it.
+    private func refsParam(_ refs: [(n: Int, path: String)]) -> JSONValue? {
+        refs.isEmpty ? nil : .array(refs.map { .object(["n": .number(Double($0.n)), "path": .string($0.path)]) })
     }
 
     /// ComputerV2 wake triggers (2026-10-12): the session pill's [Stop waiting] — ends one trigger the session's model

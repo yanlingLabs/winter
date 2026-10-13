@@ -26,6 +26,13 @@ public actor WinterClient {
     /// for an older daemon (which drops `images`, or refuses a path it did not stage).
     public var supportsOriginalImagePaths: Bool { daemonFeatures.contains(Self.featureImageOriginalPaths) }
 
+    /// `hello.features`' name for "`session.send`/`steer` take `files`" (`DAEMON_FEATURE_ATTACHMENT_FILES`).
+    public static let featureAttachmentFiles = "attachment-files"
+
+    /// Whether this daemon takes `[File #n]` attachments in `files`. False from a daemon that did not announce it:
+    /// the composer then puts each path in the text itself (an older daemon's schema would strip `files`).
+    public var supportsAttachmentFiles: Bool { daemonFeatures.contains(Self.featureAttachmentFiles) }
+
     /// One request, encoded exactly as it goes on the wire: compact JSON, and — the part that matters — slashes
     /// NOT escaped. `JSONEncoder` writes every `/` as `\/` by default, and base64 is full of them: a 5.76 MB
     /// white TIFF (all 0xFF bytes, so all slashes) encoded to a 15.36 MB line and the daemon dropped the

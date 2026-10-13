@@ -284,6 +284,40 @@ final class MethodWrapperTests: XCTestCase {
             try await client.send(sessionId: "s_1", text: "plain")
         }
         XCTAssertNil((plainReq["params"] as? [String: Any])?["images"], "no images → no key")
+        XCTAssertNil((plainReq["params"] as? [String: Any])?["files"], "no files → no key")
+    }
+
+    /// Code-mode file attachments (2026-10-13): `files` rides beside `images` as `[{n, path}]` on send and steer,
+    /// omitted when empty; `supportsAttachmentFiles` reads the hello's `attachment-files`.
+    func testSendAndSteerCarryFilesOnlyWhenPresentAndTheHelloAnnouncesThem() async throws {
+        let (older, _) = try await connected()
+        let olderSupports = await older.supportsAttachmentFiles
+        XCTAssertFalse(olderSupports)
+        XCTAssertEqual(WinterClient.featureAttachmentFiles, "attachment-files")
+
+        let t = ScriptedTransport()
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "wrap-test")
+        async let c: Void = client.connect()
+        let hello = try await waitForSent(t, count: 1)[0]
+        t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"ok":true,"serverVersion":"x","protocolVersion":0,"features":["image-original-paths","attachment-files"]}}"#)
+        try await c
+        let supports = await client.supportsAttachmentFiles
+        XCTAssertTrue(supports)
+
+        let files = [SessionEvent.UserMessageFileRef(n: 2, path: "/Users/me/My Report.pdf"),
+                     SessionEvent.UserMessageFileRef(n: 1, path: "/Users/me/app")]
+        let (sendReq, _) = try await roundTrip(t, sentIndex: 1, result: #"{"seq":4}"#) {
+            try await client.send(sessionId: "s_1", text: "[File #2] [File #1]", files: files)
+        }
+        let sendParams = sendReq["params"] as? [String: Any]
+        XCTAssertNil(sendParams?["images"])
+        let sent = sendParams?["files"] as? [[String: Any]]
+        XCTAssertEqual(sent?.map { $0["n"] as? Int }, [2, 1])
+        XCTAssertEqual(sent?.map { $0["path"] as? String }, ["/Users/me/My Report.pdf", "/Users/me/app"])
+        let (steerReq, _) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"injected":true}"#) {
+            try await client.steer(sessionId: "s_1", text: "[File #2]", files: [files[0]])
+        }
+        XCTAssertEqual(((steerReq["params"] as? [String: Any])?["files"] as? [[String: Any]])?.first?["n"] as? Int, 2)
     }
 
     /// Chat Slice D task 1: `session.setModel`'s wire shape — a set carries the string; a clear

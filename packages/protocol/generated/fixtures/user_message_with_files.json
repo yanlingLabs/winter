@@ -1,0 +1,25 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "type": "user_message",
+  "threadId": "main",
+  "text": "[Image #1] [File #2] [File #1]\nread these",
+  "clientName": "orb",
+  "images": [
+    {
+      "n": 1,
+      "path": "/Users/me/Desktop/shot.png"
+    }
+  ],
+  "files": [
+    {
+      "n": 2,
+      "path": "/Users/me/Documents/My Report.pdf"
+    },
+    {
+      "n": 1,
+      "path": "/Users/me/Projects/app"
+    }
+  ]
+}

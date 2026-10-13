@@ -479,7 +479,7 @@ describe("session.send / session.steer — images (code-mode image input)", () =
     const hello = await probe.hello(tokens.harness, "probe");
     expect(hello.result.features).toContain(DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS);
     expect(DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS).toBe("image-original-paths");
-    expect(HelloResult.parse(hello.result).features).toEqual([DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS]);
+    expect(HelloResult.parse(hello.result).features).toContain(DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS);
     expect(HelloResult.parse({ ok: true, serverVersion: "0.0.1", protocolVersion: PROTOCOL_VERSION }).features).toBeUndefined();
     probe.close();
   });

@@ -8,7 +8,7 @@ import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
   HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE,
   ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams, ComputerUseWakesCancelParams,
-  DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
+  DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, DAEMON_FEATURE_ATTACHMENT_FILES, FILE_REFERENCE_INVALID, FILE_SESSION_NOT_CODE, type UserMessageFileRef, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
   SessionHistoryParams,
   ApprovalListParams,
@@ -92,7 +92,7 @@ import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
 import { recordNamesSelection } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
 import { imagesAcceptedBy, rowForTag, toolSearchSupportedBy } from "../runtime-sdk/provider-selection";
-import { StageImageRefusal, stageSessionImage, validateImageRefs } from "../agent/stage-image";
+import { StageImageRefusal, stageSessionImage, validateFileRefs, validateImageRefs } from "../agent/stage-image";
 import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type ModelTag } from "../runtime-sdk/model-tag";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -1229,6 +1229,28 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     }
   }
 
+  /**
+   * Code-mode file attachments (2026-10-13): `session.send`/`session.steer`'s `files`, checked beside the
+   * images and BEFORE anything is resumed or appended. Same doors as `checkedImageRefs` — a local client
+   * only, a code session only — but no model-capability check (the model is given a path, as text) and
+   * every entry held to `validateFileRefs` (any file or folder the Read tool may read).
+   */
+  function checkedFileRefs(sessionId: string, text: string, files: readonly UserMessageFileRef[] | undefined, role: string | undefined): UserMessageFileRef[] | undefined {
+    if (files === undefined || files.length === 0) return undefined;
+    if (role !== "harness") throw new RpcFailure(ERR.INVALID_PARAMS, "files can only be sent by a local client", { code: FILE_REFERENCE_INVALID });
+    let meta: ReturnType<SessionStore["meta"]>;
+    try { meta = opts.store.meta(sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
+    if ((meta.mode ?? "code") !== "code") {
+      throw new RpcFailure(ERR.INVALID_PARAMS, "files can only be added to code sessions", { code: FILE_SESSION_NOT_CODE });
+    }
+    try {
+      return validateFileRefs(text, files, { winterHome: opts.winterHome });
+    } catch (err) {
+      if (err instanceof StageImageRefusal) throw new RpcFailure(ERR.INVALID_PARAMS, err.message, { code: err.code, ...(err.n === undefined ? {} : { n: err.n }) });
+      throw new RpcFailure(ERR.INTERNAL, "could not check the message's files", { code: FILE_REFERENCE_INVALID });
+    }
+  }
+
   async function ensureWinterSession(sessionId: string): Promise<LegSession | undefined> {
     if (opts.winter === undefined) return undefined;
     try { return await opts.winter.ensure(sessionId); } catch (err) { rpcFromWinterRefusal(err); }
@@ -2058,7 +2080,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       if (p.role === "harness") harnessConns.add(socket.data);
       // `features`: what this daemon can do that a client must know BEFORE it relies on it (an older daemon
       // omits the field, and the client then falls back).
-      return { ok: true, serverVersion: opts.serverVersion, protocolVersion: PROTOCOL_VERSION, features: [DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS] };
+      return { ok: true, serverVersion: opts.serverVersion, protocolVersion: PROTOCOL_VERSION, features: [DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, DAEMON_FEATURE_ATTACHMENT_FILES] };
     }
 
     if (socket.data.authedRole === null) throw new RpcFailure(ERR.UNAUTHORIZED, "hello required first");
@@ -2329,6 +2351,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // Code-mode image input: `text` is stored as written (`[Image #n]` placeholders); only the
         // model is given the paths. Checked before any resume, import or append.
         const images = checkedImageRefs(p.sessionId, p.text, p.images, socket.data.authedRole);
+        const files = checkedFileRefs(p.sessionId, p.text, p.files, socket.data.authedRole);
         // P8b Task 16: a session on the Winter leg — a live driver, or a record that says "winter"
         // and is resumed here — takes its own path. The attachment check mirrors `hub.send`'s own
         // (same message, same plain Error → INTERNAL), and the driver appends the `user_message`
@@ -2343,7 +2366,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           if (winterSession !== undefined) {
             try {
               // A driver replaced while it was starting took nothing: the message goes to its successor, once.
-              const sent = await withReplacementRetry(winterSession, () => ensureWinterSession(p.sessionId), (s) => s.send(p.text, socket.data.clientName, images));
+              const sent = await withReplacementRetry(winterSession, () => ensureWinterSession(p.sessionId), (s) => s.send(p.text, socket.data.clientName, images, files));
               return { seq: sent.seq };
             } catch (err) { rpcFromWinterRefusal(err); }
           }
@@ -2374,7 +2397,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const imported = await ensureWinterSession(p.sessionId);
           if (imported !== undefined) {
             try {
-              const sent = await withReplacementRetry(imported, () => ensureWinterSession(p.sessionId), (s) => s.send(p.text, socket.data.clientName, images));
+              const sent = await withReplacementRetry(imported, () => ensureWinterSession(p.sessionId), (s) => s.send(p.text, socket.data.clientName, images, files));
               return { seq: sent.seq };
             } catch (err) { rpcFromWinterRefusal(err); }
           }
@@ -2383,17 +2406,18 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // No driver table at all (a bare test server): the message lands in the log, exactly as it
         // always has on a no-engine daemon. With a table present every path above either ran the
         // turn or refused typed — this line is never a production no-op (fix wave F2).
-        const seq = hub.send(socket.data.hubClient, p.sessionId, p.text, images);
+        const seq = hub.send(socket.data.hubClient, p.sessionId, p.text, images, files);
         return { seq };
       }
       case METHODS.sessionSteer: {
         const p = parseParams(SessionSteerParams, params);
         const images = checkedImageRefs(p.sessionId, p.text, p.images, socket.data.authedRole);
+        const files = checkedFileRefs(p.sessionId, p.text, p.files, socket.data.authedRole);
         {
           const winterSession = await ensureWinterSession(p.sessionId);
           if (winterSession !== undefined) {
             try {
-              const steered = await withReplacementRetry(winterSession, () => ensureWinterSession(p.sessionId), (s) => s.steer(p.text, undefined, images));
+              const steered = await withReplacementRetry(winterSession, () => ensureWinterSession(p.sessionId), (s) => s.steer(p.text, undefined, images, files));
               return { ok: true, injected: steered.injected };
             } catch (err) { rpcFromWinterRefusal(err); }
           }

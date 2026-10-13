@@ -26,10 +26,11 @@ import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node
 import {
   IMAGE_DATA_INVALID, IMAGE_FILE_EXTENSIONS, IMAGE_FILE_MAX_BYTES, IMAGE_FILE_TOO_LARGE_MESSAGE, IMAGE_FILE_UNREADABLE, IMAGE_REFERENCE_INVALID, IMAGE_STAGE_FAILED, USER_MESSAGE_IMAGES_MAX, USER_MESSAGE_IMAGES_MAX_MESSAGE, type UserMessageImageRef, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
   STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, type STAGE_IMAGE_MEDIA_TYPES,
+  FILE_REFERENCE_INVALID, FILE_UNREADABLE, USER_MESSAGE_FILES_MAX, USER_MESSAGE_FILES_MAX_MESSAGE, type UserMessageFileRef,
 } from "@yanlinglabs/winter-protocol";
 import { sandboxConfigFor } from "../runtime-sdk/mode-options";
 import { protectedReadDenial } from "../runtime-sdk/protected-paths";
-import { imageTokenNumbers } from "../sessions/model-text";
+import { fileTokenNumbers, imageTokenNumbers } from "../sessions/model-text";
 import { sessionTmpDirPath } from "./session-tmp";
 
 export type StageImageMediaType = (typeof STAGE_IMAGE_MEDIA_TYPES)[number];
@@ -423,4 +424,58 @@ export function validateImageRefs(
     if (real !== ref.path) refuse(notStaged);
   }
   return images.map((i) => ({ n: i.n, path: i.path }));
+}
+
+/**
+ * `session.send`/`session.steer`'s `files` check (code-mode file attachments, 2026-10-13) — every entry,
+ * before anything is appended. A `[File #n]` names the user's OWN file or folder, of any type, by its absolute
+ * path; the model is given the path and reads it with its own tools, so the daemon reads nothing here — it
+ * only proves the path is one the model could be meant to see:
+ *   - as SPELLED: absolute, free of control and direction-changing characters (`UNSAFE_PATH_CHARS`) and of
+ *     leading or trailing whitespace — refused, never stripped (a stripped path names a different file);
+ *   - not in the runtime Read tool's read-deny set (`readDeniedByRuntime`), as spelled AND resolved;
+ *   - its `realpath` resolves (else `file_unreadable`, carrying `n`) to a regular file or a directory —
+ *     `stat`, never `open`, so a FIFO or socket is refused without ever being waited on.
+ * Each `n` is unique and its `[File #n]` appears in `text`; at most `USER_MESSAGE_FILES_MAX` entries. Answers
+ * the refs to store, as spelled (`undefined` for none), or throws a `StageImageRefusal` whose message names
+ * the placeholder, never the path.
+ */
+export function validateFileRefs(
+  text: string,
+  files: readonly UserMessageFileRef[] | undefined,
+  ctx: ImageRefContext = {},
+): UserMessageFileRef[] | undefined {
+  if (files === undefined || files.length === 0) return undefined;
+  const home = ctx.winterHome === "" ? undefined : ctx.winterHome;
+  const refuse = (why: string, n?: number): never => { throw new StageImageRefusal(FILE_REFERENCE_INVALID, why, false, n); };
+  if (files.length > USER_MESSAGE_FILES_MAX) refuse(USER_MESSAGE_FILES_MAX_MESSAGE);
+  const inText = new Set(fileTokenNumbers(text));
+  const seen = new Set<number>();
+  for (const ref of files) {
+    if (seen.has(ref.n)) refuse(`[File #${ref.n}] is named more than once`, ref.n);
+    seen.add(ref.n);
+    if (!inText.has(ref.n)) refuse(`[File #${ref.n}] does not appear in the message`, ref.n);
+  }
+  const denied = "is one of Winter's own run, runtime or configuration files, which sessions cannot read";
+  for (const ref of files) {
+    const invalid = (why: string): never => refuse(`[File #${ref.n}] ${why}`, ref.n);
+    if (!isAbsolute(ref.path)) invalid("is not an absolute path");
+    if (UNSAFE_PATH_CHARS.test(ref.path)) invalid("has a path with control or direction-changing characters");
+    if (ref.path !== ref.path.trim()) invalid("has a path with leading or trailing whitespace");
+    const spelled = resolve(ref.path);
+    if (home !== undefined && readDeniedByRuntime(spelled, home)) invalid(denied);
+    let real: string;
+    try { real = realpathSync(ref.path); } catch {
+      throw new StageImageRefusal(
+        FILE_UNREADABLE,
+        `[File #${ref.n}] could not be found — it may have moved, or macOS may be keeping its folder from Winter (System Settings ▸ Privacy & Security ▸ Files & Folders)`,
+        false, ref.n,
+      );
+    }
+    if (home !== undefined && readDeniedByRuntime(real, home)) invalid(denied);
+    let st;
+    try { st = statSync(real); } catch { return invalid("could not be checked"); }
+    if (!st.isFile() && !st.isDirectory()) invalid("is neither a file nor a folder");
+  }
+  return files.map((f) => ({ n: f.n, path: f.path }));
 }
