@@ -1103,6 +1103,9 @@ final class FieldStateAdapter: ObservableObject {
     /// Whether the composer takes attachments right now: a CODE session only, fail-closed on a row not loaded.
     var composerAttachmentsEnabled: Bool { composerImageInputEnabled(row: currentSessionRow()) }
 
+    /// The notice when a draft with chips is sent in a session that cannot take them (a chat the draft followed into).
+    let composerAttachmentsNotHereMessage = "Attachments work in Code sessions — this chat can't take them"
+
     /// The "+" button's tooltip when it is off — chat (or any non-code session) cannot take attachments.
     static let composerAttachDisabledReason = "Attachments work in code sessions — chats can't take files or images"
 
@@ -1203,14 +1206,17 @@ final class FieldStateAdapter: ObservableObject {
     /// daemon's own sentence on `composerNotice`, and then NOTHING is sent. A draft with no attachment comes
     /// back as its text.
     ///
-    /// A draft carried into a session that is NOT code (a hop or an in-place switch keeps the draft)
-    /// sends its text alone and drops its attachments, silently — attachments are a code-session
-    /// feature, and a refusal there would only block the message. A row not loaded yet is left to
-    /// the daemon.
+    /// A draft carried into a session that is NOT code (a hop or an in-place switch keeps the draft) with
+    /// attachments sends NOTHING: the notice line says why (`composerAttachmentsNotHereMessage`) and the text and
+    /// chips stay, for the user to remove the chips (×) or take the draft to a code session. With no attachment
+    /// its text goes as is. A row not loaded yet is left to the daemon.
     func composerTextForSend(_ text: String, originalPaths: Bool = true, attachmentFiles: Bool = true,
                              stage: (ComposerImageData) async throws -> StagedImage) async -> ComposerOutgoing? {
         if let row = currentSessionRow(), !composerImageInputEnabled(row: row) {
-            composerAttachments = ComposerAttachmentDraft()
+            guard composerAttachments.isEmpty else {
+                composerNotice = composerAttachmentsNotHereMessage
+                return nil
+            }
             return text.isEmpty ? nil : ComposerOutgoing(text: text, images: [])
         }
         do {

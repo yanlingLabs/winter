@@ -79,6 +79,11 @@ export type UserMessageImageRef = z.infer<typeof UserMessageImageRef>;
 export const USER_MESSAGE_FILES_MAX = 20;
 /** The refusal past `USER_MESSAGE_FILES_MAX`. */
 export const USER_MESSAGE_FILES_MAX_MESSAGE = `A message can carry at most ${USER_MESSAGE_FILES_MAX} files`;
+/** Images and files TOGETHER: at most this many on one `user_message` (the daemon refuses more on send/steer,
+ *  typed `file_reference_invalid`). With each path ≤ `USER_MESSAGE_IMAGE_PATH_MAX`, a message's paths are at most
+ *  80 KiB — inside `session.history`/the remote stream's 160 KiB per-event cap with room for the text. */
+export const USER_MESSAGE_ATTACHMENTS_MAX = 20;
+export const USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE = `A message can carry at most ${USER_MESSAGE_ATTACHMENTS_MAX} attachments`;
 /** One `[File #n]` placeholder's file or folder: `n` is the number in the message text's token, `path` the
  *  user's own absolute path (any type, a folder too). The model is given the path in the token's place; the
  *  file itself is never read, copied or staged by the daemon. Same path bound as an image's. */

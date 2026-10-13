@@ -101,6 +101,31 @@ final class ComposerAttachmentsTests: XCTestCase {
         XCTAssertEqual(out.files, [])
     }
 
+    /// The older-daemon fallback substitutes images and files in ONE pass: a path that spells a token is never
+    /// rewritten again.
+    func testInlineSubstitutionIsOnePassOverBothKinds() async throws {
+        var draft = ComposerAttachmentDraft()
+        draft.add(.image(.file(path: "/Users/me/[File #1].png")))
+        draft.add(.file(path: "/Users/me/[Image #1] notes.txt"))
+        let out = try await resolveComposerAttachments("x", draft: draft, originalPaths: false, attachmentFiles: false, stage: noStage)
+        XCTAssertEqual(out.text, "/Users/me/[File #1].png /Users/me/[Image #1] notes.txt\nx")
+        XCTAssertEqual(substituteComposerAttachmentTokens("[File #1] [Image #2] [Image #1]", images: [1: "/a [File #1]"], files: [1: "/f"]),
+                       "/f [Image #2] /a [File #1]")
+    }
+
+    /// Images and files TOGETHER are at most 20 (the daemon's `USER_MESSAGE_ATTACHMENTS_MAX`).
+    func testMoreThanTwentyAttachmentsTogetherIsRefused() async throws {
+        var draft = ComposerAttachmentDraft()
+        for _ in 0..<15 { draft.add(.file(path: "/tmp")) }
+        for _ in 0..<6 { draft.add(.image(.file(path: "/a.png"))) }
+        do {
+            _ = try await resolveComposerAttachments("x", draft: draft, stage: noStage)
+            XCTFail("21 together must be refused")
+        } catch let refusal as ComposerImagesRefusal {
+            XCTAssertEqual(refusal.message, "A message can carry at most 20 attachments")
+        }
+    }
+
     func testMoreThanTwentyFilesIsRefused() async {
         let a = adapter()
         let dir = FileManager.default.temporaryDirectory.path

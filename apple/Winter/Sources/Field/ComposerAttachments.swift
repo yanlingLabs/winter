@@ -138,11 +138,17 @@ func composerMessageText(_ text: String, imageNumbers: Int, fileNumbers: Int) ->
     return text.isEmpty ? line : line + "\n" + text
 }
 
-/// `text` with each `[File #n]` that `paths` knows replaced by its path — for a daemon without `attachment-files`.
-func substituteComposerFileTokens(_ text: String, paths: [Int: String]) -> String {
-    var out = text
-    for (n, path) in paths { out = out.replacingOccurrences(of: composerFileToken(n), with: path) }
-    return out
+/// At most this many attachments — images and files TOGETHER — ride one message (`USER_MESSAGE_ATTACHMENTS_MAX`),
+/// so a message's paths stay far inside the daemon's per-event cap.
+let composerAttachmentsPerMessageMax = 20
+/// The daemon's own sentence for that refusal (`USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE`).
+let composerAttachmentsPerMessageMaxMessage = "A message can carry at most 20 attachments"
+
+/// `text` with each `[Image #n]` that `images` knows and each `[File #n]` that `files` knows replaced by its path —
+/// for a daemon that would drop them. ONE pass over both grammars (as the daemon's `modelTextOf`), so a substituted
+/// path that happens to spell a token is never rewritten again.
+func substituteComposerAttachmentTokens(_ text: String, images: [Int: String], files: [Int: String]) -> String {
+    rewriteAttachmentTokenText(text) { kind, n in kind == .image ? images[n] : files[n] }
 }
 
 /// **The one submit-time helper** every code-mode submit site goes through: the draft (typed `text` plus its
@@ -159,7 +165,8 @@ func resolveComposerAttachments(_ text: String, draft: ComposerAttachmentDraft, 
     let fileItems = draft.items.filter { $0.filePath != nil }
     if imageItems.count > composerImagesPerMessageMax { throw ComposerImagesRefusal(message: composerImagesPerMessageMaxMessage) }
     if fileItems.count > composerFilesPerMessageMax { throw ComposerImagesRefusal(message: composerFilesPerMessageMaxMessage) }
-    var message = composerMessageText(text, imageNumbers: imageItems.count, fileNumbers: fileItems.count)
+    if draft.items.count > composerAttachmentsPerMessageMax { throw ComposerImagesRefusal(message: composerAttachmentsPerMessageMaxMessage) }
+    let message = composerMessageText(text, imageNumbers: imageItems.count, fileNumbers: fileItems.count)
 
     var imageRefs: [SessionEvent.UserMessageImageRef] = []
     var originals: [Int: String] = [:]
@@ -177,18 +184,21 @@ func resolveComposerAttachments(_ text: String, draft: ComposerAttachmentDraft, 
             if !staged.imagesOnSend { imagesOnSend = false }
         }
     }
+    var fileRefs = fileItems.enumerated().map { SessionEvent.UserMessageFileRef(n: $0.offset + 1, path: $0.element.filePath!) }
+    // What the daemon cannot take goes into the text — both kinds in ONE pass.
+    var inlineImages: [Int: String] = [:], inlineFiles: [Int: String] = [:]
     if !imageRefs.isEmpty && !imagesOnSend {
-        message = substituteComposerImageTokens(message, paths: Dictionary(uniqueKeysWithValues: imageRefs.map { ($0.n, $0.path) }))
+        inlineImages = Dictionary(uniqueKeysWithValues: imageRefs.map { ($0.n, $0.path) })
         imageRefs = []
         originals = [:]
     }
-
-    var fileRefs = fileItems.enumerated().map { SessionEvent.UserMessageFileRef(n: $0.offset + 1, path: $0.element.filePath!) }
     if !fileRefs.isEmpty && !attachmentFiles {
-        message = substituteComposerFileTokens(message, paths: Dictionary(uniqueKeysWithValues: fileRefs.map { ($0.n, $0.path) }))
+        inlineFiles = Dictionary(uniqueKeysWithValues: fileRefs.map { ($0.n, $0.path) })
         fileRefs = []
     }
-    return ComposerOutgoing(text: message, images: imageRefs, files: fileRefs,
+    let sent = inlineImages.isEmpty && inlineFiles.isEmpty
+        ? message : substituteComposerAttachmentTokens(message, images: inlineImages, files: inlineFiles)
+    return ComposerOutgoing(text: sent, images: imageRefs, files: fileRefs,
                             sentAttachmentIDs: Set(draft.items.map(\.id)), originalImagePaths: originals)
 }
 

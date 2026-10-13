@@ -86,6 +86,16 @@ enum AttachmentThumbnails {
         return image
     }
 
+    private static let icons = NSCache<NSString, NSImage>()
+
+    /// A file chip's icon, looked up off the main thread once per path and kept.
+    static func fileIcon(_ path: String) async -> NSImage {
+        if let hit = icons.object(forKey: path as NSString) { return hit }
+        let icon = await Task.detached(priority: .utility) { attachmentFileIcon(path) }.value
+        icons.setObject(icon, forKey: path as NSString)
+        return icon
+    }
+
     /// PURE ImageIO: never a full decode of a big file — the source is opened without caching, the file's own
     /// embedded thumbnail is used when it has one, and otherwise ImageIO decodes at the reduced size directly.
     nonisolated static func makeThumbnail(_ source: AttachmentThumbnailSource, maxPixels: Int = AttachmentChipMetrics.thumbnailPixels) -> CGImage? {
@@ -107,9 +117,8 @@ enum AttachmentThumbnails {
 }
 
 /// A file's system icon — by its path when it exists, else by its extension's type (a file since moved still
-/// shows what KIND it was).
-@MainActor
-func attachmentFileIcon(_ path: String) -> NSImage {
+/// shows what KIND it was). Touches the disk: called off the main thread (`AttachmentThumbnails.fileIcon`).
+nonisolated func attachmentFileIcon(_ path: String) -> NSImage {
     if FileManager.default.fileExists(atPath: path) { return NSWorkspace.shared.icon(forFile: path) }
     let ext = (path as NSString).pathExtension
     let type = ext.isEmpty ? UTType.data : (UTType(filenameExtension: ext) ?? .data)
@@ -224,7 +233,7 @@ struct AttachmentChip: View {
     private func loadThumbnail() async {
         if case .file(let path) = model.visual {
             // Looked up once per chip (the transcript re-renders on every streamed chunk), never in `body`.
-            fileIcon = attachmentFileIcon(path)
+            fileIcon = await AttachmentThumbnails.fileIcon(path)
             return
         }
         guard case .image(let source, _) = model.visual else { return }

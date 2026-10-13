@@ -8,7 +8,7 @@ import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
   HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE,
   ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams, ComputerUseWakesCancelParams,
-  DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, DAEMON_FEATURE_ATTACHMENT_FILES, FILE_REFERENCE_INVALID, FILE_SESSION_NOT_CODE, type UserMessageFileRef, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
+  DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, DAEMON_FEATURE_ATTACHMENT_FILES, FILE_REFERENCE_INVALID, USER_MESSAGE_ATTACHMENTS_MAX, USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE, FILE_SESSION_NOT_CODE, type UserMessageFileRef, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
   SessionHistoryParams,
   ApprovalListParams,
@@ -1233,15 +1233,20 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    * Code-mode file attachments (2026-10-13): `session.send`/`session.steer`'s `files`, checked beside the
    * images and BEFORE anything is resumed or appended. Same doors as `checkedImageRefs` — a local client
    * only, a code session only — but no model-capability check (the model is given a path, as text) and
-   * every entry held to `validateFileRefs` (any file or folder the Read tool may read).
+   * every entry held to `validateFileRefs` (any file or folder the Read tool may read). Images and files together
+   * are at most `USER_MESSAGE_ATTACHMENTS_MAX` (`imageCount` is the message's images), which keeps a message's
+   * paths inside the per-event cap.
    */
-  function checkedFileRefs(sessionId: string, text: string, files: readonly UserMessageFileRef[] | undefined, role: string | undefined): UserMessageFileRef[] | undefined {
+  function checkedFileRefs(sessionId: string, text: string, files: readonly UserMessageFileRef[] | undefined, role: string | undefined, imageCount: number): UserMessageFileRef[] | undefined {
     if (files === undefined || files.length === 0) return undefined;
     if (role !== "harness") throw new RpcFailure(ERR.INVALID_PARAMS, "files can only be sent by a local client", { code: FILE_REFERENCE_INVALID });
     let meta: ReturnType<SessionStore["meta"]>;
     try { meta = opts.store.meta(sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
     if ((meta.mode ?? "code") !== "code") {
       throw new RpcFailure(ERR.INVALID_PARAMS, "files can only be added to code sessions", { code: FILE_SESSION_NOT_CODE });
+    }
+    if (files.length + imageCount > USER_MESSAGE_ATTACHMENTS_MAX) {
+      throw new RpcFailure(ERR.INVALID_PARAMS, USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE, { code: FILE_REFERENCE_INVALID });
     }
     try {
       return validateFileRefs(text, files, { winterHome: opts.winterHome });
@@ -2351,7 +2356,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // Code-mode image input: `text` is stored as written (`[Image #n]` placeholders); only the
         // model is given the paths. Checked before any resume, import or append.
         const images = checkedImageRefs(p.sessionId, p.text, p.images, socket.data.authedRole);
-        const files = checkedFileRefs(p.sessionId, p.text, p.files, socket.data.authedRole);
+        const files = checkedFileRefs(p.sessionId, p.text, p.files, socket.data.authedRole, images?.length ?? 0);
         // P8b Task 16: a session on the Winter leg — a live driver, or a record that says "winter"
         // and is resumed here — takes its own path. The attachment check mirrors `hub.send`'s own
         // (same message, same plain Error → INTERNAL), and the driver appends the `user_message`
@@ -2412,7 +2417,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.sessionSteer: {
         const p = parseParams(SessionSteerParams, params);
         const images = checkedImageRefs(p.sessionId, p.text, p.images, socket.data.authedRole);
-        const files = checkedFileRefs(p.sessionId, p.text, p.files, socket.data.authedRole);
+        const files = checkedFileRefs(p.sessionId, p.text, p.files, socket.data.authedRole, images?.length ?? 0);
         {
           const winterSession = await ensureWinterSession(p.sessionId);
           if (winterSession !== undefined) {

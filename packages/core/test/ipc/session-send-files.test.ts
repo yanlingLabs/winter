@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ConnWriter, DAEMON_FEATURE_ATTACHMENT_FILES, DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, ERR, FILE_REFERENCE_INVALID, FILE_SESSION_NOT_CODE, FILE_UNREADABLE,
-  LineDecoder, METHODS, PROTOCOL_VERSION, SessionEvent, SessionSendParams, SessionSteerParams, USER_MESSAGE_FILES_MAX, encodeLine, type WritableSocket,
+  LineDecoder, METHODS, PROTOCOL_VERSION, SessionEvent, SessionSendParams, SessionSteerParams, USER_MESSAGE_ATTACHMENTS_MAX, USER_MESSAGE_FILES_MAX, encodeLine, type WritableSocket,
 } from "@yanlinglabs/winter-protocol";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { startIpcServer } from "../../src/ipc/server";
@@ -67,6 +67,7 @@ class TestClient {
 }
 
 const TEXT_TAG = loadCatalog().models.find((m) => !m.inputModalities.value.includes("image"))!.key;
+const IMAGE_TAG = loadCatalog().models.find((m) => m.inputModalities.value.includes("image"))!.key;
 
 describe("model text — [File #n]", () => {
   test("files are substituted beside images, in one pass; unknown tokens stay as typed", () => {
@@ -202,6 +203,27 @@ describe("session.send / session.steer — files (code-mode file attachments)", 
     }
     expect(store.read(sid).length).toBe(before);
     c.close();
+  });
+
+  test("images and files TOGETHER are at most 20 — refused typed before anything is appended", async () => {
+    const b = await boot();
+    const sid = b.store.createSession("global", { model: IMAGE_TAG });
+    expect((await b.c.request(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 })).error).toBeUndefined();
+    const dir = userDir();
+    const shot = join(dir, "shot.png");
+    writeFileSync(shot, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]), Buffer.alloc(64)]));
+    const before = b.store.read(sid).length;
+    const files = Array.from({ length: USER_MESSAGE_ATTACHMENTS_MAX }, (_, i) => ({ n: i + 1, path: dir }));
+    const text = files.map((f) => `[File #${f.n}]`).join(" ") + " [Image #1]";
+    for (const method of [METHODS.sessionSend, METHODS.sessionSteer]) {
+      const res = await b.c.request(method, { sessionId: sid, text, files, images: [{ n: 1, path: shot }] });
+      expect({ method, code: res.error?.data?.code, message: res.error?.message }).toEqual({ method, code: FILE_REFERENCE_INVALID, message: "A message can carry at most 20 attachments" });
+    }
+    expect(b.store.read(sid).length).toBe(before);
+    // 19 files + 1 image is fine.
+    const ok = await b.c.request(METHODS.sessionSend, { sessionId: sid, text, files: files.slice(1).map((f) => ({ ...f })), images: [{ n: 1, path: shot }] });
+    expect(ok.error).toBeUndefined();
+    b.c.close();
   });
 
   test("a path that does not resolve is file_unreadable with data.n, naming the placeholder, never the path", async () => {

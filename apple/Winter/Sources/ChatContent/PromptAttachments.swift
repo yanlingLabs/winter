@@ -50,14 +50,22 @@ private let attachmentTokenRegex = try! NSRegularExpression(pattern: #"\[(Image|
 
 /// Every `[Image #n]` / `[File #n]` in `text`, rewritten by `renumber` (`nil` leaves that token as typed).
 func rewriteAttachmentTokens(_ text: String, _ renumber: (AttachmentTokenKind, Int) -> Int?) -> String {
+    rewriteAttachmentTokenText(text) { kind, n in
+        renumber(kind, n).map { kind == .image ? composerImageToken($0) : composerFileToken($0) }
+    }
+}
+
+/// ONE pass over `text`: each `[Image #n]` / `[File #n]` for which `replacement` answers a string becomes that
+/// string; any other is left as typed. Replacements are never scanned again.
+func rewriteAttachmentTokenText(_ text: String, _ replacement: (AttachmentTokenKind, Int) -> String?) -> String {
     let ns = text as NSString
     var out = ""
     var cursor = 0
     for m in attachmentTokenRegex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
         let kind: AttachmentTokenKind = ns.substring(with: m.range(at: 1)) == "Image" ? .image : .file
-        guard let n = Int(ns.substring(with: m.range(at: 2))), let new = renumber(kind, n) else { continue }
+        guard let n = Int(ns.substring(with: m.range(at: 2))), let new = replacement(kind, n) else { continue }
         out += ns.substring(with: NSRange(location: cursor, length: m.range.location - cursor))
-        out += kind == .image ? composerImageToken(new) : composerFileToken(new)
+        out += new
         cursor = m.range.location + m.range.length
     }
     out += ns.substring(from: cursor)

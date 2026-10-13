@@ -735,14 +735,17 @@ final class ComposerImagesTests: XCTestCase {
         XCTAssertEqual(a.composerDraft, "")
     }
 
-    /// Attachments carried into a chat session (the draft follows a switch) are dropped and the text
-    /// goes literally — no staging, no error.
-    func testAttachmentsCarriedIntoANonCodeSessionAreDroppedSilently() async {
+    /// Attachments carried into a chat session (the draft follows a switch) send nothing: the notice says why and
+    /// the text and chips stay. With no chip the text goes as is.
+    func testAttachmentsCarriedIntoANonCodeSessionStayAndSayWhy() async {
         let a = adapter(mode: "chat")
         a.composerAttachments = { var d = ComposerAttachmentDraft(); d.add(.image(ComposerImage(data: png, mediaType: "image/png"))); return d }()
         let sent = await a.composerTextForSend("see") { _ in XCTFail("never staged"); return StagedImage(path: "", imagesOnSend: true) }
-        XCTAssertEqual(sent, ComposerOutgoing(text: "see", images: []))
-        XCTAssertTrue(a.composerAttachments.isEmpty)
-        XCTAssertNil(a.composerNotice)
+        XCTAssertNil(sent, "nothing is sent")
+        XCTAssertEqual(a.composerNotice, "Attachments work in Code sessions — this chat can't take them")
+        XCTAssertEqual(a.composerAttachments.items.count, 1, "the chips stay")
+        a.resetComposerAttachments()
+        let plain = await a.composerTextForSend("see") { _ in XCTFail("never staged"); return StagedImage(path: "", imagesOnSend: true) }
+        XCTAssertEqual(plain, ComposerOutgoing(text: "see", images: []))
     }
 }
