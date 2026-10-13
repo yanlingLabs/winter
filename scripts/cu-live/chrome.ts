@@ -44,6 +44,11 @@ export interface ChromeNeed {
   /** Local State's `devtools.remote_debugging.user-enabled` (what chrome://inspect's own check box sets): the runner
    *  then connects to it, which raises "Allow remote debugging?". */
   remoteDebugging?: boolean;
+  /** Bring it to the front ONCE after launch, as the user would have (then their app is put back): a browser the user
+   *  has used, against one launched in the background and never shown in front. */
+  shownOnce?: boolean;
+  /** More launch switches (a diagnostic: `--disable-backgrounding-occluded-windows`). */
+  extraArgs?: string[];
 }
 
 /** What the runner saw of the browser around one scenario. */
@@ -69,7 +74,7 @@ export function chromeLaunchArgs(need: ChromeNeed, profile: string, pageUrl: str
   return [
     `--user-data-dir=${profile}`, "--no-first-run", "--no-default-browser-check", "--use-mock-keychain", "--password-store=basic",
     "--disable-sync", "--disable-background-networking", "--disable-component-update", "--disable-default-apps", "--mute-audio",
-    `--lang=${need.lang}`, "--window-size=1100,900", "--window-position=80,60", start,
+    `--lang=${need.lang}`, "--window-size=1100,900", "--window-position=80,60", ...(need.extraArgs ?? []), start,
   ];
 }
 
@@ -134,10 +139,18 @@ const short = (s: string): string => s.replace(/\s+/g, " ").trim().slice(0, 400)
 
 /** The prelude every chrome script adds after the suite's: the browser's handle, steps, and attempts that report. */
 export const CHROME_PRELUDE = `
-var CH = (typeof CH !== "undefined" && CH) || new Map();
-async function cft() {
-  if (!CH.has("w")) CH.set("w", await apps.open(${JSON.stringify(CFT_BUNDLE)}, { emit: false }));
-  return CH.get("w");
+// Bound again in every script (binding the same window again prints only what changed): the group quits and launches
+// instances between rows, and a handle kept from an earlier one is TargetLost.
+async function cft() { return await apps.open(${JSON.stringify(CFT_BUNDLE)}, { emit: false }); }
+/** How long until the page's controls reach accessibility (polled up to \`ms\`), or -1. */
+async function webReady(w, ms) {
+  const t0 = Date.now();
+  for (;;) {
+    const s = await w.state({ full: true, emit: false });
+    if (/web area/.test(s) && /Select file/.test(s)) return Date.now() - t0;
+    if (Date.now() - t0 > ms) return -1;
+    await sleep(500);
+  }
 }
 function step(name) { print("=== " + name); }
 async function attempt(name, fn) {
@@ -156,13 +169,36 @@ async function one(app, q, roles) {
 const SELECT_ROLES = ["combo box", "pop up button", "popup button", "pop-up button"];
 const CHECK_ROLES = ["check box", "checkbox"];
 
-const MATERIAL: ChromeNeed = { key: "material", lang: "en", start: "material" };
+/** The probes' instance: shown in front once after launch, as a browser the user has used. */
+const MATERIAL: ChromeNeed = { key: "material-shown", lang: "en", start: "material", shownOnce: true };
+
+/** Does the page reach accessibility at all, per way of launching? (The first live run, 2026-10-13: a Chrome for
+ *  Testing launched behind the user's app, never in front, showed an empty web area for 10 s and more.) */
+function webAccessRow(need: ChromeNeed, what: string): Scenario {
+  return {
+    name: `chrome app (diagnostic): does the page reach accessibility — ${what}`, group: "chrome", chrome: need,
+    code: `
+const w = await cft();
+const ms = await webReady(w, 12000);
+const s = await w.state({ full: true, emit: false });
+print(s.slice(0, 2500));
+report({ webReadyMs: ms, webArea: /web area/.test(s) });`,
+    verify: (ctx) => [
+      ok(ctx),
+      check(`the page's controls are in the accessibility tree within 12 s (took ${String(ctx.facts.webReadyMs)} ms)`, Number(ctx.facts.webReadyMs) >= 0, short(ctx.output.slice(-1500))),
+    ],
+  };
+}
 
 const SCENARIOS_: Scenario[] = [
+  webAccessRow({ key: "material-background", lang: "en", start: "material" }, "launched behind your app, never in front"),
+  webAccessRow({ key: "material-noocclusion", lang: "en", start: "material", extraArgs: ["--disable-backgrounding-occluded-windows"] }, "the same, with --disable-backgrounding-occluded-windows"),
+  webAccessRow(MATERIAL, "shown in front once after launch, then behind your app"),
   {
     name: "chrome app: bind Chrome for Testing on the Material page (reads its controls)", group: "chrome", chrome: MATERIAL,
     code: `
 const w = await cft();
+report({ webReadyMs: await webReady(w, 8000) });
 const s = await w.state({ full: true, emit: false });
 print(s.slice(0, 6000));
 report({ boundName: w.name, boundId: w.bundleId, hasSize: /Size/.test(s), hasTerms: /Accept the terms/.test(s), hasSelectFile: /Select file/.test(s) });`,
@@ -177,6 +213,7 @@ report({ boundName: w.name, boundId: w.bundleId, hasSize: /Size/.test(s), hasTer
     name: "chrome app: mat-select — options readable and selectable (exact match, ambiguity and no match refused)", group: "chrome", chrome: MATERIAL,
     code: `
 const w = await cft();
+await webReady(w, 8000);
 const size = await one(w, "Size", ${JSON.stringify(SELECT_ROLES)});
 report({ sizeRole: size && size.role, sizeValue0: size && size.value });
 await attempt("set Small", () => w.setValue(size.ref, "Small"));
@@ -214,6 +251,7 @@ report({ sizeAfterLarge: s2 && s2.value });`,
     name: "chrome app: Material check boxes and radios — a click ticks them, find() says checked", group: "chrome", chrome: MATERIAL,
     code: `
 const w = await cft();
+await webReady(w, 8000);
 const targets = [["Accept the terms", ${JSON.stringify(CHECK_ROLES)}, "terms"], ["Notify me", ${JSON.stringify(CHECK_ROLES)}, "notify"], ["Mature content", ${JSON.stringify(CHECK_ROLES)}, "mature"], ["Unlisted", ["radio"], "unlisted"]];
 for (const [name, roles, key] of targets) {
   const e = await one(w, name, roles);
@@ -240,6 +278,7 @@ for (const [name, roles, key] of targets) {
     name: "chrome app: Tab, Space and cmd+a into the Material page — the page and the answer agree", group: "chrome", chrome: MATERIAL,
     code: `
 const w = await cft();
+await webReady(w, 8000);
 const title = await one(w, "Title", ["text field"]);
 const terms = await one(w, "Accept the terms", ${JSON.stringify(CHECK_ROLES)});
 report({ titleRef: title && title.ref, termsRef: terms && terms.ref });
@@ -268,6 +307,7 @@ step("end");`,
     name: "chrome app: a web \"Select file\" button — the chooser opens, or the answer names key(\"return\", { into })", group: "chrome", chrome: MATERIAL,
     code: `
 const w = await cft();
+await webReady(w, 8000);
 const btn = await one(w, "Select file", ["button"]);
 const w0 = await w.windows();
 await attempt("click", () => w.click(btn.ref));

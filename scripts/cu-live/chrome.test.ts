@@ -29,7 +29,8 @@ function fakeApp(els: Array<{ ref: number; role: string; name: string; value?: s
   };
   const app = {
     name: "Google Chrome for Testing", bundleId: CFT_BUNDLE,
-    state: async () => els.map((e) => `[${e.ref}] ${e.role} "${e.name}"${e.value ? ` value="${e.value}"` : ""}`).join("\n"),
+    // (The page's web area is there: `webReady` returns at once.)
+    state: async () => `[0] web area "Material Probe" · Select file\n` + els.map((e) => `[${e.ref}] ${e.role} "${e.name}"${e.value ? ` value="${e.value}"` : ""}`).join("\n"),
     find: async (q: string | { role?: string; name?: string }) => els.filter((e) => typeof q === "string" ? e.name.includes(q) : (q.role === undefined || e.role === q.role) && (q.name === undefined || e.name === q.name)),
     click: act("click"), key: act("key"), setValue: act("setValue"), action: act("action"),
     windows: async () => [{ id: 1, title: "Material Probe", focused: true }],
@@ -98,7 +99,7 @@ describe("the chrome group: launch and rig", () => {
 
 describe("the chrome group: scenarios", () => {
   test("every row needs a browser, carries the chrome prelude, compiles, and never binds the user's Chrome", () => {
-    expect(CHROME_SCENARIOS.length).toBe(8);
+    expect(CHROME_SCENARIOS.length).toBe(11);
     for (const s of CHROME_SCENARIOS) {
       expect(needsChrome(s)).toBe(true);
       expect(s.group).toBe("chrome");
@@ -109,7 +110,11 @@ describe("the chrome group: scenarios", () => {
       expect(`${s.code}${JSON.stringify(s.prepare ?? [])}`).not.toMatch(/com\.google\.Chrome\b|"Google Chrome"/);
     }
     // A fresh instance whenever the need changes: the French ones and the off-desktop one never reuse the English page's.
-    expect(new Set(CHROME_SCENARIOS.map((s) => s.chrome!.key))).toEqual(new Set(["material", "material-offspace", "fr-inspect", "fr-dialog"]));
+    expect(new Set(CHROME_SCENARIOS.map((s) => s.chrome!.key))).toEqual(new Set(["material-background", "material-noocclusion", "material-shown", "material-offspace", "fr-inspect", "fr-dialog"]));
+    // The probes run on the instance shown in front once; the diagnostics compare the ways of launching.
+    expect(byName("mat-select").chrome).toMatchObject({ key: "material-shown", shownOnce: true });
+    expect(byName("--disable-backgrounding").chrome!.extraArgs).toEqual(["--disable-backgrounding-occluded-windows"]);
+    expect(chromeLaunchArgs(byName("--disable-backgrounding").chrome!, "/p", "u")).toContain("--disable-backgrounding-occluded-windows");
     expect(byName("Autoriser").chrome).toEqual({ key: "fr-dialog", lang: "fr", start: "material", remoteDebugging: true });
   });
 

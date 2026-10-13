@@ -1244,7 +1244,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
       } else {
         chromeRig = new ChromeRig({
           app, root, webDir: join(REPO_ROOT, "scripts", "cu-live", "fixture-web"), tool: built.tool, log, sh: (cmd, args) => sh(cmd, args),
-          activateUser: () => activateUser(), abortIfInput, own, disown,
+          activateUser: () => activateUser(), activateAsUser: async (pid) => { await bringToFront(pid, "Chrome for Testing (shown once, as the user)", undefined, true); }, abortIfInput, own, disown,
         });
         chromeRig.start();
         log(`chrome group: ${app}, page ${chromeRig.pageUrl}`);

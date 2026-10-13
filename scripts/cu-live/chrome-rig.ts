@@ -22,6 +22,8 @@ export interface ChromeRigDeps {
   sh(cmd: string, args: string[]): { status: number | null; stdout: string; stderr: string };
   /** Puts the user's app back in front (on their Space). */
   activateUser(): Promise<void>;
+  /** Brings `pid` to the front AS THE USER would (the live-test helper's test.activate asUser). */
+  activateAsUser(pid: number): Promise<void>;
   /** Throws when the run must stop (real input, a prompt, a signal). */
   abortIfInput(): void;
   own(pid: number): void;
@@ -144,6 +146,11 @@ export class ChromeRig {
       await this.until("the Material page's ready message", 20_000, () => this.pageLog.some((e) => e.ev === "ready" && (e.at ?? 0) >= launchedAt) || undefined);
     } else {
       await this.until("a Chrome for Testing window on screen", 15_000, () => this.windows().size > 0 || undefined);
+      await sleep(1_500);
+    }
+    if (need.shownOnce === true) {
+      // As a browser the user has used: in front once (as their switch), then their app again.
+      await this.d.activateAsUser(pid);
       await sleep(1_500);
     }
     if (need.remoteDebugging === true) await this.raiseDialog(inst);
