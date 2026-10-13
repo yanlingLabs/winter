@@ -455,6 +455,10 @@ struct Exchange: Equatable {
     /// the user bubble wears the sender's header (and the summary, when it carried one) instead of
     /// showing the wrapper's XML. `nil` for everything a person typed.
     var promptEnvelope: AgentMessageEnvelope? = nil { didSet { stamp = ChangeStamp.next() } }
+    /// Composer attachments (2026-10-13): the path behind each `[Image #n]` / `[File #n]` in `prompt`, from the
+    /// `user_message`'s `images`/`files` (a folded steer's renumbered past the prompt's own). The bubble draws
+    /// each as a chip (`promptDisplay`). Empty for a prompt without attachments.
+    var promptAttachments = PromptAttachments() { didSet { stamp = ChangeStamp.next() } }
     /// ComputerV2 wake triggers (2026-10-12): a daemon note on this exchange — "Winter continued: you clicked
     /// “Submit for review” in Chrome" — set when a `computer-wake` message opened it (or was folded into it). Built
     /// from the `wake_armed`/`wake_ended` pair, never from the message, whose text is for the model. `nil` otherwise.
@@ -867,7 +871,9 @@ enum SessionReducer {
             if s.turnRunning, let last = s.exchanges.indices.last, s.exchanges[last].reply.isEmpty {
                 // Mid-turn steer: same turn, same exchange — the prompt grows (one turn = one exchange).
                 // A steer from another session folds in as a readable line carrying its sender.
-                let steer = envelope.map { "[\($0.senderLabel())] \($0.body)" } ?? v.text
+                // A steer's own attachments join the prompt's, renumbered past them (`PromptAttachments.fold`).
+                let steer = envelope.map { "[\($0.senderLabel())] \($0.body)" }
+                    ?? s.exchanges[last].promptAttachments.fold(steerText: v.text, PromptAttachments(v))
                 s.exchanges[last].prompt += "\n↳ \(steer)"
                 // Wave-5 gate item 2: surface the queued message separately from the fold above
                 // so the UI can show it as visibly "queued" rather than silently absorbed.
@@ -875,6 +881,7 @@ enum SessionReducer {
             } else {
                 var opened = Exchange(prompt: envelope?.body ?? v.text, reply: "")
                 opened.promptEnvelope = envelope
+                if envelope == nil { opened.promptAttachments = PromptAttachments(v) }
                 s.exchanges.append(opened)
                 // orb-scope Part 2 / Important-2 fix: a NEW exchange is exactly a new-turn start —
                 // stamp who initiated it, UNLESS `clientName` is one of the engine's OWN bookkeeping

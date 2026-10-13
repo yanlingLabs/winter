@@ -290,12 +290,18 @@ struct NewChatControlButton: View {
     let systemImage: String
     let label: String
     var font: Font = Typography.control(.medium)
+    /// `nil` keeps the dead `Button {}` these placeholders have carried; the composer's "+" is the first live one
+    /// (2026-10-13). Switched off (`isDisabled`) it is drawn dimmed and does nothing, its `label` (the reason)
+    /// still on hover — so this is NOT `.disabled`, which would also silence the tooltip.
+    var action: (() -> Void)? = nil
+    /// Drawn dimmed and inert, `label` (the reason) still on hover.
+    var isDisabled = false
 
     var body: some View {
-        Button {} label: {
+        Button { if !isDisabled { action?() } } label: {
             Image(systemName: systemImage)
                 .font(font)
-                .foregroundStyle(Theme.textMuted)
+                .foregroundStyle(Theme.textMuted.opacity(isDisabled ? 0.4 : 1))
                 .frame(width: 26, height: 26)
                 .contentShape(Rectangle())
         }

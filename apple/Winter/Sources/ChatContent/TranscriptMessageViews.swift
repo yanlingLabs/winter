@@ -106,6 +106,9 @@ struct TranscriptUserBubble: View {
     /// Set when `text` is the body of ANOTHER session's message (`Exchange.promptEnvelope`): a small
     /// "From session …" header (and the summary, subtly) rides above the body.
     var envelope: AgentMessageEnvelope? = nil
+    /// Composer attachments (2026-10-13): the paths behind the prompt's placeholders. Each placeholder that has
+    /// one is drawn as the composer's own chip, in a row above the prose, and leaves the prose (`promptDisplay`).
+    var attachments = PromptAttachments()
     @Environment(\.transcriptUserMessageStyle) private var style
     @Environment(\.transcriptSessionTitle) private var sessionTitle
 
@@ -134,8 +137,21 @@ struct TranscriptUserBubble: View {
     /// each role actually renders as.
     var proseRole: TranscriptProseRole { .sans }
 
+    /// The chips and the prose they leave — derived from `text` and `attachments`.
+    var display: PromptDisplay { promptDisplay(text, attachments: attachments) }
+
     private var displayText: String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
+        display.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The chips row: the composer's chip, without its ×, wrapping like the tool pills.
+    @ViewBuilder
+    private func chipsRow(_ chips: [AttachmentChipModel]) -> some View {
+        if !chips.isEmpty {
+            PillFlowLayout(spacing: 6, lineSpacing: 6) {
+                ForEach(chips) { AttachmentChip(model: $0) }
+            }
+        }
     }
 
     var body: some View {
@@ -152,6 +168,8 @@ struct TranscriptUserBubble: View {
             VStack(alignment: .leading, spacing: 0) {
                 senderBlock
                     .padding(.bottom, envelope == nil ? 0 : 22)
+                chipsRow(display.chips)
+                    .padding(.bottom, display.chips.isEmpty ? 0 : (displayText.isEmpty ? 12 : 10))
                 if !displayText.isEmpty {
                     RuledUserMessageText(text: displayText, tint: tint, role: proseRole)
                 }
@@ -166,8 +184,9 @@ struct TranscriptUserBubble: View {
     }
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             senderBlock
+            chipsRow(display.chips)
             if !displayText.isEmpty {
                 TranscriptFormattedMessageText(text: displayText, tint: tint, role: proseRole,
                                                fillsAvailableWidth: false)

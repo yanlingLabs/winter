@@ -1082,31 +1082,60 @@ final class FieldStateAdapter: ObservableObject {
         advisorModel = AppModel.readAdvisorModelFromSettings()
     }
 
-    // MARK: - Code-mode image input (`ComposerImages.swift`)
+    // MARK: - Composer attachments (`ComposerAttachments.swift`, `ComposerImages.swift`)
 
-    /// The current draft's image attachments — beside `composerDraft`, for as long as the draft
-    /// lives (a session switch carries the draft, and so its attachments). Dropped on a successful
-    /// send (`resetComposerImages`).
-    @Published var composerImages = ComposerImageDraft()
+    /// The current draft's attachments — images and files, the chips in the strip above the text — beside
+    /// `composerDraft`, for as long as the draft lives (a session switch carries the draft, and so its
+    /// attachments). What a send carried is dropped once it is sent (`composerSendSucceeded`).
+    @Published var composerAttachments = ComposerAttachmentDraft()
 
-    /// The composer's one-line notice — why an image was not attached ("The selected model doesn't
+    /// The composer's one-line notice — why an attachment was not taken ("The selected model doesn't
     /// support images", too large) or why a submit's staging was refused (the daemon's own
     /// sentence). Rendered by the surface in the composer cluster; `nil` shows nothing.
     @Published var composerNotice: String?
 
     /// The session ROW this adapter's composer is talking to, read FRESH at call time (the house
     /// rule: a hop re-targets rather than acting on the session just left). Wired by each surface
-    /// that can host a code session (the shell, detached windows); the default `nil` keeps image
-    /// intake OFF — the orb's dispatch-only field never wires it.
+    /// that can host a code session (the shell, detached windows); the default `nil` keeps
+    /// attachments OFF — the orb's dispatch-only field never wires it.
     var currentSessionRow: () -> SessionSummary? = { nil }
+
+    /// Whether the composer takes attachments right now: a CODE session only, fail-closed on a row not loaded.
+    var composerAttachmentsEnabled: Bool { composerImageInputEnabled(row: currentSessionRow()) }
+
+    /// The notice when a draft with chips is sent in a session that cannot take them (a chat the draft followed into).
+    let composerAttachmentsNotHereMessage = "Attachments work in Code sessions — this chat can't take them"
+
+    /// The "+" button's tooltip when it is off — chat (or any non-code session) cannot take attachments.
+    static let composerAttachDisabledReason = "Attachments work in code sessions — chats can't take files or images"
 
     /// What the composer's text view is handed: live only for a code session (read at paste/drop
     /// time, so a row that loads after attach turns it on, and a session switch turns it off).
-    var composerImageIntake: ComposerImageIntake {
-        ComposerImageIntake(
-            isEnabled: { [weak self] in composerImageInputEnabled(row: self?.currentSessionRow()) },
-            attach: { [weak self] image in self?.attachComposerImage(image) }
+    var composerImageIntake: ComposerAttachmentIntake {
+        ComposerAttachmentIntake(
+            isEnabled: { [weak self] in self?.composerAttachmentsEnabled ?? false },
+            attach: { [weak self] kind in self?.attachComposerAttachment(kind) ?? false },
+            removeLast: { [weak self] in self?.composerAttachments.removeLast() != nil }
         )
+    }
+
+    /// The chips the surface's strip draws, in order.
+    var composerChips: [AttachmentChipModel] { composerChipModels(composerAttachments) }
+
+    /// What a composer card is handed: the chips, their ×, and whether "+" is live.
+    var composerAttachmentsControl: ComposerAttachmentsControl {
+        ComposerAttachmentsControl(
+            chips: composerChips,
+            onRemove: { [weak self] chip in if let id = chip.attachmentID { self?.removeComposerAttachment(id: id) } },
+            isEnabled: composerAttachmentsEnabled,
+            disabledReason: Self.composerAttachDisabledReason
+        )
+    }
+
+    /// A chip's ×.
+    func removeComposerAttachment(id: Int) {
+        composerAttachments.remove(id: id)
+        composerNotice = nil
     }
 
     /// The model in force for the attach-time check: the row's own (with any optimistic pick
@@ -1116,60 +1145,84 @@ final class FieldStateAdapter: ObservableObject {
             ?? (modelCatalogue.defaultModel.isEmpty ? nil : modelCatalogue.defaultModel)
     }
 
-    /// Attach one image to the draft and answer its placeholder, or refuse (`nil`) with the reason
-    /// on `composerNotice`: the selected model takes no image (the exact message), or it is over the
-    /// cap (image data past one request line, or a file past 64 MiB). An empty catalogue is refreshed so the NEXT attach can be checked; this one is let
-    /// through, and the daemon's `session.stageImage` refuses at submit if it must.
-    func attachComposerImage(_ image: ComposerImage) -> String? {
+    /// Attach one to the draft (`true`), or refuse (`false`) with the reason on `composerNotice`. A FILE needs
+    /// only to still exist (the daemon checks it again at send); an IMAGE is held to the image rules
+    /// (`attachComposerImage`).
+    func attachComposerAttachment(_ kind: ComposerAttachmentKind) -> Bool {
+        switch kind {
+        case .image(let image):
+            return attachComposerImage(image)
+        case .file(let path):
+            guard composerPathIsFileOrFolder(path) else {
+                composerNotice = composerFileUnreadableMessage
+                return false
+            }
+            composerNotice = nil
+            composerAttachments.add(kind)
+            return true
+        }
+    }
+
+    /// Attach one image to the draft (`true`), or refuse (`false`) with the reason on `composerNotice`: the
+    /// selected model takes no image (the exact message), or it is over the cap (image data past one request
+    /// line, or a file past 64 MiB). An empty catalogue is refreshed so the NEXT attach can be checked; this one is
+    /// let through, and the daemon refuses at submit if it must.
+    @discardableResult
+    func attachComposerImage(_ image: ComposerImage) -> Bool {
         if modelCatalogue.models.isEmpty { onRefreshModelCatalogue() }
         guard composerModelAcceptsImages(model: composerImageModel, catalogue: modelCatalogue) else {
             composerNotice = composerImageUnsupportedMessage
-            return nil
+            return false
         }
         switch image {
         case .data(let data):
             // Image data that cannot fit one request even after the downscale (`composerImage(fromImageData:)`).
             guard data.data.count <= composerImageMaxBytes else {
                 composerNotice = composerImageTooLargeMessage
-                return nil
+                return false
             }
         case .file(let path):
             // The user's own file is never read or copied; only its size is checked against what the
             // runtime's Read tool will prepare (the daemon checks it again at send).
             guard let size = composerRegularFileSize(path) else {
                 composerNotice = composerImageFileUnreadableMessage
-                return nil
+                return false
             }
             guard size <= composerImageFileMaxBytes else {
                 composerNotice = composerImageFileTooLargeMessage
-                return nil
+                return false
             }
         }
         composerNotice = nil
-        return ComposerImageDraft.token(composerImages.add(image, draftText: composerDraft))
+        composerAttachments.add(.image(image))
+        return true
     }
 
     /// **Every code-mode submit site's one door** (`ShellSessionHost.submit`,
-    /// `DetachedWindowController.submit`): what to actually send — each live `[Image #n]` resolved to
-    /// its path: a FILE is its own original path (nothing staged), image DATA is staged raw through
-    /// `stage` (`session.stageImage` on that surface's own client and session); the text keeps its
-    /// placeholders and `images` names the paths (the model sees the paths, the message bubble the
-    /// placeholders), or, from a daemon without `imagesOnSend`, the paths are substituted into the text
-    /// (`resolveComposerImages`) — or `nil` when staging was refused, with the daemon's own sentence on
-    /// `composerNotice`, and then NOTHING is sent. A draft with no live placeholder
-    /// comes back as is, with no images.
+    /// `DetachedWindowController.submit`): what to actually send — the typed `text` with the draft's
+    /// attachments as placeholders and paths (`resolveComposerAttachments`): a FILE image is its own original
+    /// path (nothing staged), image DATA is staged raw through `stage` (`session.stageImage` on that surface's
+    /// own client and session), a FILE attachment is its own path; or `nil` when staging was refused, with the
+    /// daemon's own sentence on `composerNotice`, and then NOTHING is sent. A draft with no attachment comes
+    /// back as its text.
     ///
-    /// A draft carried into a session that is NOT code (a hop or an in-place switch keeps the draft)
-    /// sends its text literally and drops its attachments, silently — images are a code-session
-    /// feature, and a refusal there would only block the message. A row not loaded yet is left to
-    /// the daemon.
-    func composerTextForSend(_ text: String, originalPaths: Bool = true, stage: (ComposerImageData) async throws -> StagedImage) async -> ComposerOutgoing? {
+    /// A draft carried into a session that is NOT code (a hop or an in-place switch keeps the draft) with
+    /// attachments sends NOTHING: the notice line says why (`composerAttachmentsNotHereMessage`) and the text and
+    /// chips stay, for the user to remove the chips (×) or take the draft to a code session. With no attachment
+    /// its text goes as is. A row not loaded yet is left to the daemon.
+    func composerTextForSend(_ text: String, originalPaths: Bool = true, attachmentFiles: Bool = true,
+                             stage: (ComposerImageData) async throws -> StagedImage) async -> ComposerOutgoing? {
         if let row = currentSessionRow(), !composerImageInputEnabled(row: row) {
-            composerImages = ComposerImageDraft()
-            return ComposerOutgoing(text: text, images: [])
+            guard composerAttachments.isEmpty else {
+                composerNotice = composerAttachmentsNotHereMessage
+                return nil
+            }
+            return text.isEmpty ? nil : ComposerOutgoing(text: text, images: [])
         }
         do {
-            return try await resolveComposerImages(text, draft: composerImages, originalPaths: originalPaths, stage: stage)
+            let outgoing = try await resolveComposerAttachments(text, draft: composerAttachments, originalPaths: originalPaths,
+                                                                attachmentFiles: attachmentFiles, stage: stage)
+            return outgoing.text.isEmpty ? nil : outgoing
         } catch let error as RpcError {
             composerNotice = error.message
         } catch let refusal as ComposerImagesRefusal {
@@ -1181,17 +1234,18 @@ final class FieldStateAdapter: ObservableObject {
     }
 
     /// **Every code-mode submit site's SEND** (after `composerTextForSend`): sends `outgoing` through `send`, and
-    /// — one fallback — when the daemon answers `image_file_unreadable` for a FILE attachment (a folder macOS
-    /// keeps from the daemon, a temporary screenshot path that has since gone), reads that file HERE (this app
-    /// holds the drag's access), stages its bytes (`stage`), swaps the placeholder's path for the staged one and
-    /// sends again — transparently, once per such file. Answers whether the message went. On any other
-    /// refusal, or a file this app cannot read either, nothing more is tried: the daemon's own sentence goes on
-    /// the notice line when the message carried images, and the draft stays in the composer.
+    /// — one fallback — when the daemon answers `image_file_unreadable` for an image FILE (a folder macOS keeps
+    /// from the daemon, a temporary screenshot path that has since gone), reads that file HERE (this app holds the
+    /// drag's access), stages its bytes (`stage`), swaps the placeholder's path for the staged one and sends
+    /// again — transparently, once per such file. Answers whether the message went. On any other refusal, or a
+    /// file this app cannot read either, nothing more is tried: the daemon's own sentence goes on the notice line
+    /// when the message carried attachments, and the draft (text and chips) stays in the composer.
     func composerSend(_ outgoing: ComposerOutgoing,
                       send: (ComposerOutgoing) async throws -> Void,
                       stage: (ComposerImageData) async throws -> StagedImage) async -> Bool {
         var current = outgoing
         var staged = Set<Int>()
+        let carriesAttachments = !outgoing.sentAttachmentIDs.isEmpty
         while true {
             do {
                 try await send(current)
@@ -1200,18 +1254,20 @@ final class FieldStateAdapter: ObservableObject {
                 guard error.data?["code"]?.stringValue == composerImageFileUnreadableCode,
                       let n = error.data?["n"]?.intValue, !staged.contains(n),
                       let index = current.images.firstIndex(where: { $0.n == n }),
-                      case .file(let path)? = composerImages.images[n], path == current.images[index].path,
+                      let path = current.originalImagePaths[n], path == current.images[index].path,
                       let image = composerStagedImage(fromFileAt: path),
                       case .data(let data) = image
                 else {
-                    if !current.images.isEmpty { composerNotice = error.message }
+                    if carriesAttachments { composerNotice = error.message }
                     return false
                 }
                 do {
                     let result = try await stage(data)
-                    current = ComposerOutgoing(text: current.text, images: current.images.enumerated().map { i, ref in
-                        i == index ? SessionEvent.UserMessageImageRef(n: ref.n, path: result.path) : ref
-                    })
+                    var images = current.images
+                    images[index] = SessionEvent.UserMessageImageRef(n: n, path: result.path)
+                    current = ComposerOutgoing(text: current.text, images: images, files: current.files,
+                                               sentAttachmentIDs: current.sentAttachmentIDs,
+                                               originalImagePaths: current.originalImagePaths)
                     staged.insert(n)
                 } catch let stageError as RpcError {
                     composerNotice = stageError.message
@@ -1221,15 +1277,15 @@ final class FieldStateAdapter: ObservableObject {
                     return false
                 }
             } catch {
-                if !current.images.isEmpty { composerNotice = "couldn't send — try again" }
+                if carriesAttachments { composerNotice = "couldn't send — try again" }
                 return false
             }
         }
     }
 
     /// A sent draft's attachments go with it, and so does any notice about it.
-    func resetComposerImages() {
-        composerImages = ComposerImageDraft()
+    func resetComposerAttachments() {
+        composerAttachments = ComposerAttachmentDraft()
         composerNotice = nil
     }
 
@@ -1248,9 +1304,9 @@ final class FieldStateAdapter: ObservableObject {
 
     /// After a successful send, clear ONLY what was sent. `sentDraft` is the draft as it was at Enter:
     /// if the user kept typing during the staging round trip, the text they added after it stays in
-    /// the composer (an untouched draft clears as before), and only the attachments the sent text
-    /// referenced — and nothing still referenced by what remains — are dropped.
-    func composerSendSucceeded(sentDraft: String) {
+    /// the composer (an untouched draft clears as before), and only the attachments the message carried
+    /// (`sentAttachments`, `ComposerOutgoing.sentAttachmentIDs`) are dropped.
+    func composerSendSucceeded(sentDraft: String, sentAttachments: Set<Int> = []) {
         let remaining: String
         if composerDraft == sentDraft {
             remaining = ""
@@ -1260,9 +1316,8 @@ final class FieldStateAdapter: ObservableObject {
             remaining = composerDraft
         }
         composerDraft = remaining
-        let stillUsed = Set(composerImageTokenNumbers(in: remaining))
-        composerImages.remove(composerImageTokenNumbers(in: sentDraft).filter { !stillUsed.contains($0) })
-        if remaining.isEmpty && composerImages.isEmpty { composerImages = ComposerImageDraft() }
+        // Only the chips the message carried go: one attached during the round trip stays.
+        composerAttachments.remove(ids: sentAttachments)
         composerNotice = nil
     }
 

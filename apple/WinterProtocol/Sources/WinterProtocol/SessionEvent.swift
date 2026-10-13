@@ -105,6 +105,14 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public init(n: Int, path: String) { self.n = n; self.path = path }
     }
 
+    /// Code-mode file attachments (2026-10-13): one `[File #n]` placeholder's file or folder — the user's own
+    /// absolute path (`UserMessageFileRef`, `packages/protocol/src/events.ts`).
+    public struct UserMessageFileRef: Codable, Equatable, Sendable {
+        public let n: Int
+        public let path: String
+        public init(n: Int, path: String) { self.n = n; self.path = path }
+    }
+
     public struct UserMessage: Codable, Equatable, Sendable {
         public let seq: Int
         public let sessionId: String
@@ -116,12 +124,15 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         /// Code-mode image input: the staged file behind each `[Image #n]` in `text` (only the model
         /// sees the paths). Absent on every message without images, and stays absent on re-encode.
         public let images: [UserMessageImageRef]?
+        /// Code-mode file attachments: the file or folder behind each `[File #n]` in `text` (only the model
+        /// sees the paths; the Mac's bubble draws a chip per token). Absent on every message without files.
+        public let files: [UserMessageFileRef]?
         // Public init so a Swift PRODUCER (WinterChatKit's phone ChatEngine) can construct this event
         // — the synthesized memberwise init is `internal`. Additive; no wire/shape change.
         public init(seq: Int, sessionId: String, ts: Int, threadId: String, text: String, clientName: String,
-                    images: [UserMessageImageRef]? = nil) {
+                    images: [UserMessageImageRef]? = nil, files: [UserMessageFileRef]? = nil) {
             self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
-            self.text = text; self.clientName = clientName; self.images = images
+            self.text = text; self.clientName = clientName; self.images = images; self.files = files
         }
     }
 

@@ -34,6 +34,9 @@ const fixtures: Record<string, unknown> = {
   // it. Two entries, out of order and with distinct n, so a Swift decode that drops or reorders
   // them fails this fixture's content check.
   "user_message_with_images": { ...base, type: "user_message", threadId: "main", text: "compare [Image #2] with [Image #1]", clientName: "orb", images: [{ n: 2, path: "/tmp/winter-session-s_1/images/image_2.png" }, { n: 1, path: "/tmp/winter-session-s_1/images/image_1.jpg" }] },
+  // Code-mode file attachments (2026-10-13): `files` beside `images` — two out-of-order entries, one a
+  // folder, so a Swift decode that drops or reorders them fails this fixture's content check.
+  "user_message_with_files": { ...base, type: "user_message", threadId: "main", text: "[Image #1] [File #2] [File #1]\nread these", clientName: "orb", images: [{ n: 1, path: "/Users/me/Desktop/shot.png" }], files: [{ n: 2, path: "/Users/me/Documents/My Report.pdf" }, { n: 1, path: "/Users/me/Projects/app" }] },
   "turn_started": { ...base, threadId: "main", type: "turn_started" },
   "assistant_message": { ...base, threadId: "main", type: "assistant_message", text: "done ✓" },
   "assistant_delta": { ...base, threadId: "main", type: "assistant_delta", delta: "wor" },

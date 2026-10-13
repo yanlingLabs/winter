@@ -5,7 +5,7 @@ import { z } from "zod";
 // cycle whose `z.enum(...)` const would be in the TDZ at events.ts's evaluation. Re-exported by the
 // package index either way, so `@yanlinglabs/winter-protocol` consumers see no difference.
 import { NDJSON_MAX_LINE_BYTES } from "./ndjson";
-import { SessionEvent, UserMessageImageRef, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, DIFF_ID_SHAPE } from "./events";
+import { SessionEvent, UserMessageImageRef, UserMessageFileRef, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, DIFF_ID_SHAPE } from "./events";
 
 export const PROTOCOL_VERSION = 0;
 
@@ -43,6 +43,11 @@ export const HelloResult = z.object({
  *  client holding a FILE attachment sends it as a path only when the daemon says so; otherwise it
  *  substitutes the path into the message text, as it always did for an older daemon. */
 export const DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS = "image-original-paths";
+/** `hello`'s `features`: `session.send`/`steer` take `files` — `[File #n]` placeholders naming the user's own
+ *  files or folders (2026-10-13). A client sends `files` only when the daemon says so; otherwise it puts each
+ *  path in the text itself (an older daemon's send schema would STRIP `files`, and the model would see the
+ *  bare placeholder). */
+export const DAEMON_FEATURE_ATTACHMENT_FILES = "attachment-files";
 
 /** The phone transport's hard per-frame ceiling, mirroring Swift's `maxFrameBytes` default
  *  (`IrohListener.swift` / `IrohDialer.swift`). An oversized frame does NOT produce an error — the
@@ -374,10 +379,21 @@ export const SessionHistoryResult = z.object({
  *  `image_session_not_code`, a non-local caller `image_reference_invalid`. Omitted (or empty) = no
  *  images. The array length is checked by the handler (typed), not here. */
 export const SessionSendImagesParam = z.array(UserMessageImageRef).optional();
+/** Code-mode file attachments (2026-10-13, hello feature `DAEMON_FEATURE_ATTACHMENT_FILES`): `text` keeps its
+ *  `[File #n]` placeholders and `files` names each one's path — the user's own file or folder, any type. The
+ *  daemon hands the MODEL the text with every placeholder replaced by its path and stores the `user_message`
+ *  with the placeholders and `files`. Every entry is checked before anything is appended (typed refusals,
+ *  never echoing a path): a local caller only, a code session only (`file_session_not_code`), an absolute
+ *  path with no control or direction-changing character and no edge whitespace, that resolves (`realpath`)
+ *  to a regular file or a directory (`file_unreadable` with `data.n` when it cannot be resolved), outside the
+ *  runtime Read tool's read-deny set; `n` unique and `[File #n]` in `text`; at most `USER_MESSAGE_FILES_MAX`.
+ *  Nothing is read, copied or staged, and no model capability is required. Omitted (or empty) = no files. */
+export const SessionSendFilesParam = z.array(UserMessageFileRef).optional();
 export const SessionSendParams = z.object({
   sessionId: z.string(),
   text: z.string().min(1),
   images: SessionSendImagesParam,
+  files: SessionSendFilesParam,
 });
 export const SessionSendResult = z.object({ seq: z.number().int() });
 
@@ -706,6 +722,14 @@ export const IMAGE_REFERENCE_INVALID = "image_reference_invalid";
  *  the bytes, stages them, and retries; the terminal client reports the message, which names the folder
  *  access that may be missing. */
 export const IMAGE_FILE_UNREADABLE = "image_file_unreadable";
+/** `session.send`/`session.steer`'s `files` refusals (2026-10-13). `file_reference_invalid`: a caller other
+ *  than a local client, a relative or unsafe path, a path in the Read tool's read-deny set, something that is
+ *  neither a regular file nor a directory, a repeated `n`, an `n` with no `[File #n]` in the text, or too many
+ *  entries. `file_session_not_code`: the session is not a code session. `file_unreadable` (`data.n`): the path
+ *  does not resolve — it moved, or macOS keeps its folder from the daemon. */
+export const FILE_REFERENCE_INVALID = "file_reference_invalid";
+export const FILE_SESSION_NOT_CODE = "file_session_not_code";
+export const FILE_UNREADABLE = "file_unreadable";
 export const SessionStageImageParams = z.object({
   sessionId: z.string().min(1),
   mediaType: z.enum(STAGE_IMAGE_MEDIA_TYPES),
@@ -745,7 +769,7 @@ export const BgKillResult = z.object({ ok: z.literal(true) });
 export const BgKillAllParams = z.object({ sessionId: z.string() });
 export const BgKillAllResult = z.object({ ok: z.literal(true), killed: z.number().int().nonnegative() });
 
-export const SessionSteerParams = z.object({ sessionId: z.string(), text: z.string().min(1), images: SessionSendImagesParam });
+export const SessionSteerParams = z.object({ sessionId: z.string(), text: z.string().min(1), images: SessionSendImagesParam, files: SessionSendFilesParam });
 export const SessionSteerResult = z.object({ ok: z.literal(true), injected: z.boolean() });
 export const SessionInterruptParams = z.object({ sessionId: z.string() });
 export const SessionInterruptResult = z.object({ ok: z.literal(true), wasRunning: z.boolean() });

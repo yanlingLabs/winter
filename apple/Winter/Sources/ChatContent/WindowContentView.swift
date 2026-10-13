@@ -329,15 +329,23 @@ struct WindowContentView<Accessory: View>: View {
                         PillChromeComposer(adapter: adapter)
                             .transition(.blurReplace)
                     } else {
-                        ComposerTextView(
-                            text: adapter.draftBinding,
-                            onSubmit: { adapter.onSubmit(adapter.composerDraft) },
-                            usesAdaptiveColors: true,
-                            // Code-mode image input — live only while the adapter's wired session
-                            // row is a code session (the detached window wires it; the orb does not).
-                            imageIntake: adapter.composerImageIntake
-                        )
-                        .frame(height: 88)
+                        VStack(spacing: 6) {
+                            // Composer attachments: the same chip strip as the card's, above the text.
+                            if !adapter.composerAttachments.isEmpty {
+                                ComposerAttachmentStrip(chips: adapter.composerChips,
+                                                        onRemove: adapter.composerAttachmentsControl.onRemove)
+                                    .frame(height: composerAttachmentsRowHeight(chipCount: adapter.composerAttachments.items.count))
+                            }
+                            ComposerTextView(
+                                text: adapter.draftBinding,
+                                onSubmit: { adapter.onSubmit(adapter.composerDraft) },
+                                usesAdaptiveColors: true,
+                                // Composer attachments — live only while the adapter's wired session
+                                // row is a code session (the detached window wires it; the orb does not).
+                                imageIntake: adapter.composerImageIntake
+                            )
+                            .frame(height: 88)
+                        }
                         .transition(.blurReplace)
                     }
 
@@ -464,10 +472,12 @@ struct WindowContentView<Accessory: View>: View {
             model: composerModelControl,
             stripEdge: .above,
             workingDirectory: currentSidebarSessionSummary?.cwd,
+            // Attachments alone are sendable (their placeholders are the message's text).
             sendBlockedReason: adapter.composerDraft
-                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil,
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && adapter.composerAttachments.isEmpty ? "" : nil,
             stop: composerStopControl,
-            imageIntake: adapter.composerImageIntake
+            imageIntake: adapter.composerImageIntake,
+            attachments: adapter.composerAttachmentsControl
         )
     }
 

@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 87, "expected 87 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 88, "expected 88 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 
@@ -500,6 +500,35 @@ final class RoundTripTests: XCTestCase {
         XCTAssertNil(without.images)
         let withoutObj = try JSONSerialization.jsonObject(with: JSONEncoder().encode(SessionEvent.userMessage(without))) as? [String: Any]
         XCTAssertNil(withoutObj?["images"], "an absent images must stay absent on re-encode")
+    }
+
+    /// Code-mode file attachments (2026-10-13): `user_message.files` is additive/optional beside `images` —
+    /// `user_message_with_files.json` (two entries out of order, one a folder, a space in a name) vs. the
+    /// pre-existing fixtures (absent). Content, order, and absent-stays-absent.
+    func testUserMessageFilesOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "user_message_with_files", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing user_message_with_files.json fixture")
+        }
+        guard case .userMessage(let with) = try JSONDecoder().decode(SessionEvent.self, from: Data(contentsOf: withURL)) else { return XCTFail() }
+        XCTAssertEqual(with.text, "[Image #1] [File #2] [File #1]\nread these", "the text keeps its placeholders")
+        XCTAssertEqual(with.images, [SessionEvent.UserMessageImageRef(n: 1, path: "/Users/me/Desktop/shot.png")])
+        XCTAssertEqual(with.files, [
+            SessionEvent.UserMessageFileRef(n: 2, path: "/Users/me/Documents/My Report.pdf"),
+            SessionEvent.UserMessageFileRef(n: 1, path: "/Users/me/Projects/app"),
+        ])
+        let reencoded = try JSONEncoder().encode(SessionEvent.userMessage(with))
+        guard case .userMessage(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(with, redecoded)
+
+        for name in ["user_message", "user_message_with_images"] {
+            guard let url = Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Fixtures") else {
+                return XCTFail("missing \(name).json fixture")
+            }
+            guard case .userMessage(let without) = try JSONDecoder().decode(SessionEvent.self, from: Data(contentsOf: url)) else { return XCTFail() }
+            XCTAssertNil(without.files, name)
+            let obj = try JSONSerialization.jsonObject(with: JSONEncoder().encode(SessionEvent.userMessage(without))) as? [String: Any]
+            XCTAssertNil(obj?["files"], "an absent files must stay absent on re-encode (\(name))")
+        }
     }
 
     /// diff-tabs T4: `PanelTabKind.diff` is a NEW ENUM CASE (not just a new field) on the wire's

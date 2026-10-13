@@ -100,7 +100,7 @@ import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import type { SkillStore } from "../agent/skills";
 import { startWinterSession, unconsumedUserMessages, withRunHome, withRuntimeVersion, withSessionMcpServers, type CompactOptions, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
-import type { UserMessageImageRef } from "@yanlinglabs/winter-protocol";
+import type { UserMessageFileRef, UserMessageImageRef } from "@yanlinglabs/winter-protocol";
 import { RunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeFor, type RunHomeInput } from "@yanlinglabs/winter-runtime-sdk";
 import { projectScopeTrusted, type RunHomeSessionFacts } from "./run-home-input";
 import { readWinterTasks } from "./tasks-reader";
@@ -191,8 +191,8 @@ export interface LegSession {
   readonly pendingSends: readonly string[];
   readonly heldDeliveries: readonly string[];
   /** `images`: see `WinterSession.send` — appended with `text` as written, the child given the paths. */
-  send(text: string, clientName?: string, images?: readonly UserMessageImageRef[]): Promise<{ seq: number; queued: boolean }>;
-  steer(text: string, clientName?: string, images?: readonly UserMessageImageRef[]): Promise<{ seq: number; injected: boolean }>;
+  send(text: string, clientName?: string, images?: readonly UserMessageImageRef[], files?: readonly UserMessageFileRef[]): Promise<{ seq: number; queued: boolean }>;
+  steer(text: string, clientName?: string, images?: readonly UserMessageImageRef[], files?: readonly UserMessageFileRef[]): Promise<{ seq: number; injected: boolean }>;
   interrupt(opts?: { discardQueued?: boolean }): Promise<{ wasRunning: boolean; discarded?: number }>;
   /** Agent SDK 0.0.44: the live child folds a mid-turn push into its running turn — see
    *  `WinterSession.foldsQueuedInput`. Optional so a test double need not implement it (read as false). */
