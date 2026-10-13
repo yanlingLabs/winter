@@ -408,7 +408,15 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// notification heard while another app was in front (round 19 — the mid-act seeds 1069 and, with an ordinary target,
     /// 60: T left the front for a moment and was back before any notification was heard; §4.12, what can't be attributed:
     /// "the guardian hears of an activation only when told, with no time on it"). A new mark forgets it.
-    var workLeft: (app: pid_t, seen: Bool)?
+    /// Bounded (the review of round 19, LOW 3): it counts only for a departure that lasted no longer than NSWorkspace's
+    /// notification can be late in this world ("measured: within 13 ms of the change, run108; the world allows 120 ms, a
+    /// stress sweep 400 ms" — §4.12) — `back`: when T came to the front again.
+    var workLeft: (app: pid_t, at: Double, seen: Bool, back: Double?)?
+    /// Whether their work in `pid` ended only by a departure from the front too short for any notification to show it.
+    func unseenWorkLeave(_ pid: pid_t) -> Bool {
+        guard let l = workLeft, l.app == pid, !l.seen, let b = l.back, front == pid else { return false }
+        return b - l.at <= (Self.stress ? 400 : 120)
+    }
     /// The world's answer: is the user working in `pid` now?
     func userWorks(in pid: pid_t) -> Bool {
         lock.withLock {
@@ -1094,7 +1102,8 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             if case .untouched(_, .leftAlone, _, _) = cause { leftOnly.insert(n.app) } else if !visitBack { leftOnly.remove(n.app) }
             let oldFront = front, oldSpace = space
             if let p = pendingWork, n.app == p.app, now <= p.until { userWorkingIn = p.app; workLeft = nil; workBegan(p.app); pendingWork = nil }
-            if let w = userWorkingIn, n.app != w { userWorkingIn = nil; workLeft = (w, false) }  // they left the app they were working in
+            if let l = workLeft, l.back == nil, n.app == l.app { workLeft?.back = now }
+            if let w = userWorkingIn, n.app != w { userWorkingIn = nil; workLeft = (w, now, false, nil) }  // they left the app they were working in
             if n.space == 400 { focusDisplay = 2 } else { focusDisplay = 1; space1 = n.space }
             if let w = appWindow(n.app, onSpace: n.space), mainWin[n.app] != w.id {
                 mainWin[n.app] = w.id
