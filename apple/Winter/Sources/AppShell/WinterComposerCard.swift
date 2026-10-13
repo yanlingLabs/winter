@@ -106,21 +106,14 @@ func composerStripContentAlignment(_ edge: WinterComposerStripEdge) -> Alignment
 
 /// PURE: the strip surface's height — the composer, plus the band it protrudes by. Written down so
 /// "the band grows, the composer does not" is a thing that can be asserted rather than only seen.
-func composerStripSurfaceHeight(_ band: CGFloat, attachmentsRow: CGFloat = 0) -> CGFloat {
-    newChatComposerHeight + attachmentsRow + band
+func composerStripSurfaceHeight(_ band: CGFloat) -> CGFloat {
+    newChatComposerHeight + band
 }
 
-/// PURE: how much taller the composer grows to hold its attachment chips — one chip row and the gap under
-/// it, or nothing at all with no chip (the composer's resting height never changes).
-func composerAttachmentsRowHeight(chipCount: Int) -> CGFloat {
-    chipCount == 0 ? 0 : AttachmentChipMetrics.height + 10
-}
-
-/// What a surface hands the composer card for its attachments (2026-10-13): the chips to draw above the text,
-/// the ×, and whether the "+" picker is live (a code session) — with the reason it is not, for its tooltip.
+/// What a surface hands the composer card for its attachments (2026-10-13): whether the "+" picker is live (a
+/// code session) — with the reason it is not, for its tooltip. The chips themselves are IN the text
+/// (`ComposerChipAttachmentCell`), so the composer never grows for them.
 struct ComposerAttachmentsControl {
-    let chips: [AttachmentChipModel]
-    let onRemove: (AttachmentChipModel) -> Void
     let isEnabled: Bool
     let disabledReason: String
 }
@@ -486,15 +479,13 @@ struct WinterComposerCard: View {
     /// `nil` — the new-chat page, which only ever creates chat sessions — leaves paste/drop as AppKit
     /// does them. Whether it is LIVE is the intake's own call-time question, never a mode check here.
     var imageIntake: ComposerAttachmentIntake? = nil
-    /// Composer attachments: the chip strip and the "+" button's state. `nil` — the new-chat page, which only
-    /// ever creates chat sessions — draws no strip and leaves "+" off, with its reason on hover.
+    /// Composer attachments: the "+" button's state. `nil` — the new-chat page, which only ever creates chat
+    /// sessions — leaves "+" off, with its reason on hover.
     var attachments: ComposerAttachmentsControl? = nil
 
     @State private var isHovered = false
     /// The "+" button's handle on the text view, which registers itself when built.
     @State private var attachPicker = ComposerAttachPicker()
-
-    private var attachmentsRowHeight: CGFloat { composerAttachmentsRowHeight(chipCount: attachments?.chips.count ?? 0) }
 
     /// The chrome THIS card renders, derived from its own inputs.
     ///
@@ -561,12 +552,6 @@ struct WinterComposerCard: View {
 
     private func composerBox(accessory: AnyView?, modelRow: ComposerModelRow) -> some View {
         VStack(spacing: 0) {
-            // The chips sit ABOVE the text, inside the composer's own face, which grows by exactly their row.
-            if let attachments, !attachments.chips.isEmpty {
-                ComposerAttachmentStrip(chips: attachments.chips, onRemove: attachments.onRemove)
-                    .padding(.horizontal, 16)
-                    .frame(height: attachmentsRowHeight, alignment: .bottom)
-            }
             Group {
                 if isEnabled {
                     ComposerTextView(
@@ -621,11 +606,11 @@ struct WinterComposerCard: View {
             }
             .frame(height: 54)
             .padding(.horizontal, 16)
-            .padding(.top, attachmentsRowHeight == 0 ? 20 : 10)
+            .padding(.top, 20)
 
             controlRow(accessory: accessory, modelRow: modelRow)
         }
-        .frame(height: newChatComposerHeight + attachmentsRowHeight)
+        .frame(height: newChatComposerHeight)
         // Where the composer's face is, in window space — Dispatch's pulse grows outward from this
         // exact outline (`ComposerFaceFrameKey`, read by `DispatchSurface`). Nobody else listens.
         .background {
@@ -685,7 +670,7 @@ struct WinterComposerCard: View {
                         .strokeBorder(Theme.hairline.opacity(0.5),
                                       lineWidth: shellSidebarHairlineWidth)
                 )
-                .frame(height: composerStripSurfaceHeight(strip.height, attachmentsRow: attachmentsRowHeight))
+                .frame(height: composerStripSurfaceHeight(strip.height))
                 .overlay(alignment: composerStripContentAlignment(stripEdge)) {
                     // Pinned to the GROWING edge, so the row sits in the band that protrudes rather
                     // than anywhere else on the surface, and clipped so it can never spill past it.

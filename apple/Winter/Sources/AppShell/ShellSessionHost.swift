@@ -3632,9 +3632,9 @@ final class ShellSessionHost: ObservableObject {
     /// staging refusal shows on the composer's notice line and sends nothing.
     private func submit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Attachments alone are a message too (their placeholders are its text).
-        guard let live = attachment, let sid = attachedSessionId,
-              !trimmed.isEmpty || !live.adapter.composerAttachments.isEmpty else { return }
+        // Attachments alone are a message too: each chip is a character of the draft (a marker, its
+        // placeholder on the wire), so a draft of chips is never empty.
+        guard let live = attachment, let sid = attachedSessionId, !trimmed.isEmpty else { return }
         let wasRunning = live.session.state.turnRunning
         let client = live.feed.client
         let adapter = live.adapter

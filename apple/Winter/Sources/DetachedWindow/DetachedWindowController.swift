@@ -705,8 +705,9 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// the composer's notice line and sends nothing.
     private func submit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Attachments alone are a message too (their placeholders are its text).
-        guard !trimmed.isEmpty || !self.adapter.composerAttachments.isEmpty else { return }
+        // Attachments alone are a message too: each chip is a character of the draft (a marker, its
+        // placeholder on the wire), so a draft of chips is never empty.
+        guard !trimmed.isEmpty else { return }
         let wasRunning = session.state.turnRunning
         let sid = sessionId
         let client = feed.client

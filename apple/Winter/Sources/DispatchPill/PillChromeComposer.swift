@@ -32,13 +32,6 @@ struct PillChromeComposer: View {
         let shape = RoundedRectangle(
             cornerRadius: dispatchPillCornerRadius(height: fieldHeight + DispatchPillMetrics.composerVerticalPadding),
             style: .continuous)
-        VStack(alignment: .leading, spacing: 8) {
-        // Composer attachments (a code session in a pill-themed window): the same chip strip, floating above the pill.
-        if !adapter.composerAttachments.isEmpty {
-            ComposerAttachmentStrip(chips: adapter.composerChips, onRemove: adapter.composerAttachmentsControl.onRemove)
-                .frame(height: composerAttachmentsRowHeight(chipCount: adapter.composerAttachments.items.count))
-                .padding(.leading, DispatchPillMetrics.leadingPadding)
-        }
         HStack(alignment: .bottom, spacing: DispatchPillMetrics.rowSpacing) {
             ZStack(alignment: .topLeading) {
                 if stopping && draft.isEmpty {
@@ -72,7 +65,7 @@ struct PillChromeComposer: View {
             .padding(.vertical, DispatchPillMetrics.fieldBottomInset)
             PillSendStopButton(
                 isRunning: adapter.turnRunning,
-                canSend: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !adapter.composerAttachments.isEmpty,
+                canSend: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                 isStopping: stopping,
                 onSend: { adapter.onSubmit(adapter.composerDraft) },
                 onStop: { adapter.beginStop(); adapter.onInterrupt?() }
@@ -97,7 +90,6 @@ struct PillChromeComposer: View {
             }
         }
         .shadow(color: .black.opacity(0.6), radius: 14, y: 4)
-        }
         // Below the floating composer the transcript would show through the gap to the window's
         // edge (a rule under a message read as a rim) — that strip is the window's black, edge to
         // edge, behind the composer's lower half.

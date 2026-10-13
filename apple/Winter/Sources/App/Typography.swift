@@ -102,6 +102,10 @@ enum Typography {
     static let landingBody: Font = .body
     /// Landing-page fine print.
     static let landingCaption: Font = .caption
+    /// Attachment chips (2026-10-13): the name, and the chip's glyphs, at a size DERIVED from the text an
+    /// inline chip sits in (`AttachmentChipSize.inline(for:)`) — the strip chip passes `captionSize`.
+    static func attachmentChip(ofSize size: CGFloat, _ weight: Font.Weight = .regular) -> Font { sans(size, weight) }
+
     /// Chip and status-capsule labels (`ActivityChip`, sidebar count chips).
     static let chipLabel: Font = .caption2
 

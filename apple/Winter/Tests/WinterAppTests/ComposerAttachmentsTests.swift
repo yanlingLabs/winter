@@ -5,10 +5,36 @@ import WinterKit
 @testable import Winter
 import WinterProtocol
 
-/// Composer attachments (2026-10-13): the draft's chips (insert, × remove, Backspace), the submit-time
-/// serialisation to `[Image #n]` / `[File #n]` placeholders with `images` / `files`, the older-daemon fallbacks,
-/// a refused send keeping the draft, file intake from a pasteboard, the "+" gate, and the transcript side — the
-/// reducer carrying a message's attachments onto its exchange and the bubble's chips.
+/// Test seams shared by the composer suites: attach as the text view does — the attachment, and its chip (its
+/// marker) at the end of the draft.
+extension FieldStateAdapter {
+    @discardableResult
+    func attachChip(_ kind: ComposerAttachmentKind) -> Bool {
+        guard let id = composerImageIntake.attach(kind) else { return false }
+        composerDraft += String(composerAttachmentMarker(id)) + " "
+        return true
+    }
+}
+
+/// A draft's chips (every attachment it holds, in order), then `text` — what the composer would hold.
+func chipText(_ draft: ComposerAttachmentDraft, _ text: String) -> String {
+    (draft.items.map { String(composerAttachmentMarker($0.id)) } + (text.isEmpty ? [] : [text])).joined(separator: " ")
+}
+
+/// An intake with no adapter behind it: every id is a chip named "chip <id>", placeholders are `[File #id]`.
+@MainActor
+func makeTestIntake(enabled: Bool = true, draft: String = "test-draft",
+                    attach: @escaping (ComposerAttachmentKind) -> Int?) -> ComposerAttachmentIntake {
+    ComposerAttachmentIntake(isEnabled: { enabled }, attach: attach,
+                             chip: { id, _ in AttachmentChipModel(id: "a\(id)", name: "chip \(id)", visual: .file(path: "/tmp")) },
+                             placeholder: { id, _ in composerFileToken(id) }, draftToken: { draft })
+}
+
+/// Composer attachments (2026-10-13; inline since the same day): chips IN the composer's text — the draft's markers,
+/// the submit-time serialisation to `[Image #n]` / `[File #n]` placeholders AT each chip's position with `images` /
+/// `files`, the older-daemon fallbacks, a refused send keeping the draft, the text view's own behaviour (insert at
+/// the caret, Backspace, the ×, undo/redo, caret movement, copy/cut/paste, the line metrics), file intake from a
+/// pasteboard, the "+" gate, and the transcript side — the reducer and the bubble's inline chips.
 @MainActor
 final class ComposerAttachmentsTests: XCTestCase {
     private let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13])
@@ -34,31 +60,48 @@ final class ComposerAttachmentsTests: XCTestCase {
 
     private let noStage: (ComposerImageData) async throws -> StagedImage = { _ in StagedImage(path: "/t/image_1.png", imagesOnSend: true) }
 
+    private func m(_ id: Int) -> String { String(composerAttachmentMarker(id)) }
+
     // MARK: - The draft
 
-    func testInsertRemoveAndBackspaceOrder() {
-        var draft = ComposerAttachmentDraft()
-        let a = draft.add(.file(path: "/Users/me/a.pdf"))
-        let b = draft.add(.image(ComposerImage(data: png, mediaType: "image/png")))
-        let c = draft.add(.file(path: "/Users/me/src"))
-        XCTAssertEqual([a, b, c], [1, 2, 3], "ids climb")
-        XCTAssertEqual(draft.placeholderNumbers, [a: 1, b: 1, c: 2], "images and files each count from 1, in strip order")
-        XCTAssertTrue(draft.remove(id: a))
-        XCTAssertFalse(draft.remove(id: a), "a second × on the same chip is a no-op")
-        XCTAssertEqual(draft.removeLast()?.id, c, "Backspace takes the LAST chip")
-        XCTAssertEqual(draft.items.map(\.id), [b])
-        XCTAssertEqual(draft.add(.file(path: "/x")), 4, "an id is never reused")
-        // Two drafts' first pasted images never share a thumbnail cache key (ids restart per draft).
-        var other = ComposerAttachmentDraft()
-        other.add(.image(ComposerImage(data: png, mediaType: "image/png")))
-        func dataKey(_ d: ComposerAttachmentDraft) -> String? {
-            for chip in composerChipModels(d) {
-                if case .image(let source, _) = chip.visual, case .data = source { return source.key }
-            }
-            return nil
+    func testMarkersAreOneCharacterAndOneUTF16Unit() {
+        for id in [1, 2, 300, composerAttachmentMaxID] {
+            let marker = composerAttachmentMarker(id)
+            XCTAssertEqual(composerAttachmentID(marker: marker), id)
+            XCTAssertEqual(String(marker).utf16.count, 1, "the same length as the U+FFFC the text view holds")
         }
-        XCTAssertNotNil(dataKey(draft))
-        XCTAssertNotEqual(dataKey(draft), dataKey(other))
+        XCTAssertNil(composerAttachmentID(marker: "a"))
+        XCTAssertNil(composerAttachmentID(marker: Character(Unicode.Scalar(composerAttachmentMarkerBase)!)), "id 0 is no chip")
+        XCTAssertEqual(composerAttachmentMarkerIDs(in: "a\(m(2))b\(m(1))c\(m(2))"), [2, 1, 2])
+        XCTAssertEqual(composerTextWithoutMarkers("a\(m(2)) b"), "a b")
+    }
+
+    func testTheDraftNumbersChipsByWhereTheyAreInTheText() {
+        var draft = ComposerAttachmentDraft()
+        let a = draft.add(.file(path: "/Users/me/a.pdf"))!
+        let b = draft.add(.image(ComposerImage(data: png, mediaType: "image/png")))!
+        let c = draft.add(.file(path: "/Users/me/src"))!
+        XCTAssertEqual([a, b, c], [1, 2, 3], "ids climb")
+        let text = "first \(m(c)) then \(m(b)) and \(m(a)) and \(m(c)) again"
+        XCTAssertEqual(draft.live(in: text).map(\.id), [c, b, a], "first appearance, each once")
+        XCTAssertEqual(draft.placeholderNumbers(in: text), [c: 1, b: 1, a: 2], "images and files each count from 1, by position")
+        XCTAssertEqual(draft.serialized(text), "first [File #1] then [Image #1] and [File #2] and [File #1] again")
+        XCTAssertEqual(draft.placeholder(id: a, in: text), "[File #2]")
+        XCTAssertEqual(draft.serialized("gone \(m(9)) chip"), "gone  chip", "a marker the draft does not hold goes")
+        XCTAssertTrue(draft.remove(id: a))
+        XCTAssertFalse(draft.remove(id: a), "a second removal is a no-op")
+        XCTAssertEqual(draft.add(.file(path: "/x")), 4, "an id is never reused")
+        // Two drafts never share a token (a copied chip pastes back only into its own).
+        XCTAssertNotEqual(draft.token, ComposerAttachmentDraft().token)
+    }
+
+    func testChipsOutOfTheTextAreKeptForUndoThenLetGo() {
+        var draft = ComposerAttachmentDraft()
+        for _ in 0..<5 { draft.add(.file(path: "/x")) }
+        draft.prune(keeping: "\(m(2))", retaining: 2)
+        XCTAssertEqual(draft.items.map(\.id), [2, 4, 5], "the text's chip, and the newest two deleted ones")
+        draft.prune(keeping: "", retaining: 0)
+        XCTAssertTrue(draft.isEmpty)
     }
 
     func testChipModelsNameEachKind() {
@@ -67,28 +110,34 @@ final class ComposerAttachmentsTests: XCTestCase {
         draft.add(.image(ComposerImage(data: png, mediaType: "image/png")))
         draft.add(.file(path: "/Users/me/Documents/My Report.pdf"))
         draft.add(.file(path: "/Users/me/Projects/app"))
-        let chips = composerChipModels(draft)
+        let chips = composerChipModels(draft, text: chipText(draft, ""))
         XCTAssertEqual(chips.map(\.name), ["Screen Shot.png", "Image #2", "My Report.pdf", "app"])
         XCTAssertEqual(chips.map(\.attachmentID), [1, 2, 3, 4])
         XCTAssertEqual(chips[0].visual, .image(source: .path("/Users/me/Desktop/Screen Shot.png"), fallbackName: "Image #1"))
         XCTAssertEqual(chips[2].visual, .file(path: "/Users/me/Documents/My Report.pdf"))
+        // Pasted data is named by its number, which follows the chip's position.
+        let swapped = composerChipModels(draft, text: "\(m(2)) \(m(1))")
+        XCTAssertEqual(swapped.map(\.name), ["Image #1", "Screen Shot.png"])
     }
 
     // MARK: - Serialising to placeholders
 
-    func testFilesSerialiseToFilePlaceholdersAfterTheImages() async throws {
+    func testEachChipBecomesItsPlaceholderWhereItIs() async throws {
         var draft = ComposerAttachmentDraft()
-        draft.add(.file(path: "/Users/me/My Report.pdf"))
-        draft.add(.image(.file(path: "/Users/me/shot.png")))
-        draft.add(.file(path: "/Users/me/app"))
-        let out = try await resolveComposerAttachments("explain these", draft: draft, stage: noStage)
-        XCTAssertEqual(out.text, "[Image #1] [File #1] [File #2]\nexplain these")
+        let report = draft.add(.file(path: "/Users/me/My Report.pdf"))!
+        let shot = draft.add(.image(.file(path: "/Users/me/shot.png")))!
+        let app = draft.add(.file(path: "/Users/me/app"))!
+        let out = try await resolveComposerAttachments("compare \(m(shot)) with \(m(report))\nand explain \(m(app))",
+                                                       draft: draft, stage: noStage)
+        XCTAssertEqual(out.text, "compare [Image #1] with [File #1]\nand explain [File #2]")
         XCTAssertEqual(out.images, [SessionEvent.UserMessageImageRef(n: 1, path: "/Users/me/shot.png")])
         XCTAssertEqual(out.files, [SessionEvent.UserMessageFileRef(n: 1, path: "/Users/me/My Report.pdf"),
                                    SessionEvent.UserMessageFileRef(n: 2, path: "/Users/me/app")])
+        XCTAssertEqual(out.sentAttachmentIDs, [report, shot, app])
         // Attachments alone are a message: the placeholders are its whole text.
-        let bare = try await resolveComposerAttachments("", draft: draft, stage: noStage)
-        XCTAssertEqual(bare.text, "[Image #1] [File #1] [File #2]")
+        let bare = try await resolveComposerAttachments("\(m(shot)) \(m(app))", draft: draft, stage: noStage)
+        XCTAssertEqual(bare.text, "[Image #1] [File #1]")
+        XCTAssertEqual(bare.sentAttachmentIDs, [shot, app], "a chip deleted from the text is not sent")
     }
 
     /// A daemon without the `attachment-files` hello feature would strip `files`: each path goes in the text.
@@ -96,8 +145,8 @@ final class ComposerAttachmentsTests: XCTestCase {
         var draft = ComposerAttachmentDraft()
         draft.add(.file(path: "/Users/me/My Report.pdf"))
         draft.add(.file(path: "/Users/me/app"))
-        let out = try await resolveComposerAttachments("read", draft: draft, attachmentFiles: false, stage: noStage)
-        XCTAssertEqual(out.text, "/Users/me/My Report.pdf /Users/me/app\nread")
+        let out = try await resolveComposerAttachments(chipText(draft, "read"), draft: draft, attachmentFiles: false, stage: noStage)
+        XCTAssertEqual(out.text, "/Users/me/My Report.pdf /Users/me/app read")
         XCTAssertEqual(out.files, [])
     }
 
@@ -107,8 +156,9 @@ final class ComposerAttachmentsTests: XCTestCase {
         var draft = ComposerAttachmentDraft()
         draft.add(.image(.file(path: "/Users/me/[File #1].png")))
         draft.add(.file(path: "/Users/me/[Image #1] notes.txt"))
-        let out = try await resolveComposerAttachments("x", draft: draft, originalPaths: false, attachmentFiles: false, stage: noStage)
-        XCTAssertEqual(out.text, "/Users/me/[File #1].png /Users/me/[Image #1] notes.txt\nx")
+        let out = try await resolveComposerAttachments(chipText(draft, "x"), draft: draft, originalPaths: false,
+                                                       attachmentFiles: false, stage: noStage)
+        XCTAssertEqual(out.text, "/Users/me/[File #1].png /Users/me/[Image #1] notes.txt x")
         XCTAssertEqual(substituteComposerAttachmentTokens("[File #1] [Image #2] [Image #1]", images: [1: "/a [File #1]"], files: [1: "/f"]),
                        "/f [Image #2] /a [File #1]")
     }
@@ -119,7 +169,7 @@ final class ComposerAttachmentsTests: XCTestCase {
         for _ in 0..<15 { draft.add(.file(path: "/tmp")) }
         for _ in 0..<6 { draft.add(.image(.file(path: "/a.png"))) }
         do {
-            _ = try await resolveComposerAttachments("x", draft: draft, stage: noStage)
+            _ = try await resolveComposerAttachments(chipText(draft, "x"), draft: draft, stage: noStage)
             XCTFail("21 together must be refused")
         } catch let refusal as ComposerImagesRefusal {
             XCTAssertEqual(refusal.message, "A message can carry at most 20 attachments")
@@ -129,8 +179,8 @@ final class ComposerAttachmentsTests: XCTestCase {
     func testMoreThanTwentyFilesIsRefused() async {
         let a = adapter()
         let dir = FileManager.default.temporaryDirectory.path
-        for _ in 0..<21 { XCTAssertTrue(a.composerImageIntake.attach(.file(path: dir))) }
-        let sent = await a.composerTextForSend("x", stage: noStage)
+        for _ in 0..<21 { XCTAssertTrue(a.attachChip(.file(path: dir))) }
+        let sent = await a.composerTextForSend(a.composerDraft + "x", stage: noStage)
         XCTAssertNil(sent)
         XCTAssertEqual(a.composerNotice, "A message can carry at most 20 files")
     }
@@ -143,63 +193,31 @@ final class ComposerAttachmentsTests: XCTestCase {
         let doc = dir.appendingPathComponent("notes.docx")
         try Data("x".utf8).write(to: doc)
         let a = adapter(images: false)
-        XCTAssertTrue(a.composerImageIntake.attach(.file(path: doc.path)))
-        XCTAssertTrue(a.composerImageIntake.attach(.file(path: dir.path)), "a folder is a file attachment too")
-        XCTAssertFalse(a.composerImageIntake.attach(.file(path: dir.appendingPathComponent("gone.txt").path)))
+        XCTAssertTrue(a.attachChip(.file(path: doc.path)))
+        XCTAssertTrue(a.attachChip(.file(path: dir.path)), "a folder is a file attachment too")
+        XCTAssertFalse(a.attachChip(.file(path: dir.appendingPathComponent("gone.txt").path)))
         XCTAssertEqual(a.composerNotice, composerFileUnreadableMessage)
         XCTAssertEqual(a.composerChips.map(\.name), ["notes.docx", dir.lastPathComponent])
-    }
-
-    func testTheChipsXRemovesItsAttachmentAndItNeverReachesTheMessage() async throws {
-        let a = adapter()
-        XCTAssertTrue(a.composerImageIntake.attach(.image(ComposerImage(data: png, mediaType: "image/png"))))
-        XCTAssertTrue(a.composerImageIntake.attach(.file(path: "/")))
-        let first = try XCTUnwrap(a.composerChips.first)
-        a.composerAttachmentsControl.onRemove(first)
-        XCTAssertEqual(a.composerChips.map(\.name), ["/"])
-        var staged = 0
-        let out = await a.composerTextForSend("hi") { _ in staged += 1; return StagedImage(path: "/t/x.png", imagesOnSend: true) }
-        XCTAssertEqual(staged, 0, "the removed image is never staged")
-        XCTAssertEqual(out?.text, "[File #1]\nhi")
-        XCTAssertEqual(out?.images, [])
-    }
-
-    func testBackspaceAtTheStartRemovesTheLastChipOnlyThere() {
-        let a = adapter()
-        XCTAssertTrue(a.composerImageIntake.attach(.file(path: "/")))
-        XCTAssertTrue(a.composerImageIntake.attach(.file(path: "/tmp")))
-        let view = CommandTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
-        view.imageIntake = a.composerImageIntake
-        view.string = "ab"
-        view.setSelectedRange(NSRange(location: 2, length: 0))
-        view.deleteBackward(nil)
-        XCTAssertEqual(view.string, "a", "mid-text Backspace is AppKit's")
-        XCTAssertEqual(a.composerAttachments.items.count, 2)
-        view.setSelectedRange(NSRange(location: 0, length: 0))
-        view.deleteBackward(nil)
-        XCTAssertEqual(view.string, "a", "the text is untouched")
-        XCTAssertEqual(a.composerChips.map(\.name), ["/"], "the LAST chip went")
-        view.deleteBackward(nil)
-        view.deleteBackward(nil) // no chip left: AppKit's own (nothing before the caret)
-        XCTAssertTrue(a.composerAttachments.isEmpty)
-        XCTAssertEqual(view.string, "a")
+        XCTAssertTrue(a.composerHasAttachments)
     }
 
     func testARefusedSendKeepsTheTextAndTheChips() async throws {
         let a = adapter()
-        XCTAssertTrue(a.composerImageIntake.attach(.file(path: "/tmp")))
-        a.composerDraft = "keep me"
-        let outMaybe = await a.composerTextForSend(a.composerDraft, stage: noStage)
+        XCTAssertTrue(a.attachChip(.file(path: "/tmp")))
+        a.composerDraft += "keep me"
+        let draft = a.composerDraft
+        let outMaybe = await a.composerTextForSend(draft, stage: noStage)
         let out = try XCTUnwrap(outMaybe)
+        XCTAssertEqual(out.text, "[File #1] keep me")
         let ok = await a.composerSend(out, send: { _ in throw RpcError(code: -32602, message: "[File #1] could not be found") }, stage: noStage)
         XCTAssertFalse(ok)
         XCTAssertEqual(a.composerNotice, "[File #1] could not be found")
-        XCTAssertEqual(a.composerDraft, "keep me")
-        XCTAssertEqual(a.composerAttachments.items.count, 1)
+        XCTAssertEqual(a.composerDraft, draft, "the text keeps its chip")
+        XCTAssertEqual(a.composerChips.count, 1)
         // …and once it goes, both clear.
         let wentOK = await a.composerSend(out, send: { _ in }, stage: noStage)
         XCTAssertTrue(wentOK)
-        a.composerSendSucceeded(sentDraft: "keep me", sentAttachments: out.sentAttachmentIDs)
+        a.composerSendSucceeded(sentDraft: draft, sentAttachments: out.sentAttachmentIDs)
         XCTAssertEqual(a.composerDraft, "")
         XCTAssertTrue(a.composerAttachments.isEmpty)
     }
@@ -211,9 +229,178 @@ final class ComposerAttachmentsTests: XCTestCase {
             XCTAssertEqual(control.isEnabled, live, mode)
             XCTAssertEqual(control.disabledReason, "Attachments work in code sessions — chats can't take files or images")
         }
-        XCTAssertEqual(composerAttachmentsRowHeight(chipCount: 0), 0, "no chip, no growth")
-        XCTAssertEqual(composerAttachmentsRowHeight(chipCount: 3), AttachmentChipMetrics.height + 10)
-        XCTAssertEqual(composerStripSurfaceHeight(10, attachmentsRow: 42), newChatComposerHeight + 52)
+        XCTAssertEqual(composerStripSurfaceHeight(10), newChatComposerHeight + 10, "chips never grow the composer")
+    }
+
+    // MARK: - The text view
+
+    /// What a text view needs to undo outside a window.
+    @MainActor
+    private final class UndoHost: NSObject, NSTextViewDelegate {
+        let manager = UndoManager()
+        func undoManager(for view: NSTextView) -> UndoManager? { manager }
+    }
+
+    private func composerView(_ a: FieldStateAdapter, undo: UndoHost? = nil) -> CommandTextView {
+        let view = CommandTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
+        _ = view.layoutManager // TextKit 1, as the composer runs
+        view.isRichText = false
+        view.allowsUndo = true
+        view.font = Typography.sansNS(ofSize: Typography.composerFieldSize)
+        view.imageIntake = a.composerImageIntake
+        if let undo {
+            undo.manager.groupsByEvent = false
+            view.delegate = undo
+        }
+        return view
+    }
+
+    private func undoably(_ undo: UndoHost, _ edit: () -> Void) {
+        undo.manager.beginUndoGrouping()
+        edit()
+        undo.manager.endUndoGrouping()
+    }
+
+    func testAChipIsOneCharacterAtTheCaretAndTheDraftSpellsItAsItsMarker() throws {
+        let a = adapter()
+        let view = composerView(a)
+        view.string = "look at  please"
+        view.setSelectedRange(NSRange(location: 8, length: 0))
+        XCTAssertTrue(view.takeComposerAttachments([.file(path: "/tmp")]))
+        XCTAssertEqual(view.composerText, "look at \(m(1)) please", "at the caret, spaced from the words, never doubled")
+        XCTAssertEqual(view.string, "look at \u{FFFC} please")
+        XCTAssertEqual(view.selectedRange(), NSRange(location: 9, length: 0), "the caret ends after it")
+        XCTAssertTrue(view.textStorage?.attribute(.attachment, at: 8, effectiveRange: nil) is ComposerChipAttachment)
+        // The draft round-trips through the storage.
+        let other = composerView(a)
+        other.setComposerText(view.composerText)
+        XCTAssertEqual(other.composerText, view.composerText)
+        XCTAssertTrue(other.textStorage?.attribute(.attachment, at: 8, effectiveRange: nil) is ComposerChipAttachment)
+        // Several at once go in a row; one between words gets a space either side.
+        view.setSelectedRange(NSRange(location: 4, length: 0))
+        XCTAssertTrue(view.takeComposerAttachments([.file(path: "/tmp"), .file(path: "/")]))
+        XCTAssertEqual(view.composerText, "look \(m(2)) \(m(3)) at \(m(1)) please")
+    }
+
+    func testTheCaretMovesOverAChipAsOneCharacter() {
+        let a = adapter()
+        let view = composerView(a)
+        view.string = "ab"
+        view.setSelectedRange(NSRange(location: 1, length: 0))
+        view.insertComposerChips([a.composerImageIntake.attach(.file(path: "/tmp"))].compactMap { $0 })
+        XCTAssertEqual(view.composerText, "a \(m(1)) b")
+        view.setSelectedRange(NSRange(location: 2, length: 0))
+        view.moveRight(nil)
+        XCTAssertEqual(view.selectedRange().location, 3, "one step crosses the whole chip")
+        view.moveLeft(nil)
+        XCTAssertEqual(view.selectedRange().location, 2)
+    }
+
+    func testBackspaceDeletesTheChipAndUndoRedoBringItBack() throws {
+        let a = adapter()
+        let undo = UndoHost()
+        let view = composerView(a, undo: undo)
+        view.string = "hi"
+        view.setSelectedRange(NSRange(location: 2, length: 0))
+        undoably(undo) { view.takeComposerAttachments([.file(path: "/tmp")]) }
+        XCTAssertEqual(view.composerText, "hi \(m(1)) ")
+        view.setSelectedRange(NSRange(location: 4, length: 0))
+        undoably(undo) { view.deleteBackward(nil) }
+        XCTAssertEqual(view.composerText, "hi  ", "Backspace takes the chip like any character")
+        a.composerDraft = view.composerText
+        XCTAssertFalse(a.composerHasAttachments, "…and its attachment with it")
+        XCTAssertNotNil(a.composerAttachments.item(id: 1), "kept beside the draft for undo")
+        undo.manager.undo()
+        XCTAssertEqual(view.composerText, "hi \(m(1)) ", "undo brings the same chip back")
+        undo.manager.redo()
+        XCTAssertEqual(view.composerText, "hi  ")
+        undo.manager.undo()
+        // Forward Delete, too.
+        view.setSelectedRange(NSRange(location: 3, length: 0))
+        undoably(undo) { view.deleteForward(nil) }
+        XCTAssertEqual(view.composerText, "hi  ")
+    }
+
+    func testTheChipsXRemovesItAndItsSpaceUndoably() {
+        let a = adapter()
+        let undo = UndoHost()
+        let view = composerView(a, undo: undo)
+        undoably(undo) { view.takeComposerAttachments([.file(path: "/tmp"), .file(path: "/")]) }
+        undoably(undo) { view.insertText("go", replacementRange: view.selectedRange()) }
+        XCTAssertEqual(view.composerText, "\(m(1)) \(m(2)) go")
+        undoably(undo) { view.removeComposerChip(at: 0) }
+        XCTAssertEqual(view.composerText, "\(m(2)) go")
+        undo.manager.undo()
+        XCTAssertEqual(view.composerText, "\(m(1)) \(m(2)) go")
+        view.removeComposerChip(at: 7) // not a chip: nothing happens
+        XCTAssertEqual(view.composerText, "\(m(1)) \(m(2)) go")
+    }
+
+    func testCopyPutsThePlaceholdersOnThePasteboardAndPasteBringsTheChipsBack() throws {
+        let a = adapter()
+        let view = composerView(a)
+        view.string = "see "
+        view.setSelectedRange(NSRange(location: 4, length: 0))
+        view.takeComposerAttachments([.image(ComposerImage(data: png, mediaType: "image/png")), .file(path: "/tmp")])
+        XCTAssertEqual(view.composerText, "see \(m(1)) \(m(2)) ")
+        let board = NSPasteboard(name: NSPasteboard.Name("winter.test.\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        view.setSelectedRange(NSRange(location: 0, length: 7))
+        XCTAssertTrue(view.writeComposerChips(to: board))
+        XCTAssertEqual(board.string(forType: .string), "see [Image #1] [File #1]", "plain text elsewhere: the placeholders")
+        XCTAssertNotNil(board.data(forType: CommandTextView.composerChipsPasteboardType))
+        // Back into the same draft: chips again.
+        view.setSelectedRange(NSRange(location: (view.string as NSString).length, length: 0))
+        XCTAssertTrue(view.pasteComposerChips(from: board))
+        XCTAssertEqual(view.composerText, "see \(m(1)) \(m(2)) see \(m(1)) \(m(2))")
+        // Into ANOTHER draft: not ours to restore — AppKit pastes the placeholder text.
+        let elsewhere = composerView(adapter())
+        XCTAssertFalse(elsewhere.pasteComposerChips(from: board))
+        // An attachment the draft no longer holds comes back as its placeholder.
+        a.composerAttachments.remove(id: 2)
+        let again = composerView(a)
+        XCTAssertTrue(again.pasteComposerChips(from: board))
+        XCTAssertEqual(again.composerText, "see \(m(1)) [File #1]")
+        // A selection with no chip is AppKit's own copy.
+        view.setSelectedRange(NSRange(location: 0, length: 3))
+        XCTAssertFalse(view.writeComposerChips(to: board))
+    }
+
+    func testCutTakesTheChipsOutUndoably() {
+        let a = adapter()
+        let undo = UndoHost()
+        let view = composerView(a, undo: undo)
+        undoably(undo) { view.takeComposerAttachments([.file(path: "/tmp")]) }
+        view.setSelectedRange(NSRange(location: 0, length: 1))
+        let board = NSPasteboard(name: NSPasteboard.Name("winter.test.\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        undoably(undo) { XCTAssertTrue(view.cutComposerChips(to: board)) }
+        XCTAssertEqual(view.composerText, " ")
+        XCTAssertEqual(board.string(forType: .string), "[File #1]")
+        undo.manager.undo()
+        XCTAssertEqual(view.composerText, "\(m(1)) ")
+    }
+
+    /// The chip is as tall as the text's own box and sits on its descender — a line with chips is no taller.
+    func testAnInlineChipFitsTheLine() throws {
+        let font = Typography.sansNS(ofSize: Typography.composerFieldSize)
+        let size = AttachmentChipSize.inline(for: font)
+        XCTAssertEqual(size.height, ceil(font.ascender - font.descender))
+        XCTAssertLessThan(size.thumbnailSide, size.height)
+        XCTAssertEqual(AttachmentChipSize.baselineOffset(for: font), font.descender)
+        let a = adapter()
+        let view = composerView(a)
+        view.takeComposerAttachments([.file(path: "/tmp")])
+        let attachment = try XCTUnwrap(view.textStorage?.attribute(.attachment, at: 0, effectiveRange: nil) as? ComposerChipAttachment)
+        let cell = try XCTUnwrap(attachment.attachmentCell as? ComposerChipAttachmentCell)
+        XCTAssertEqual(cell.cellSize().height, size.height, accuracy: 0.5)
+        XCTAssertGreaterThan(cell.cellSize().width, size.height, "a thumbnail and a name")
+        XCTAssertEqual(cell.cellBaselineOffset().y, font.descender)
+        // The × sits inside the chip, at its trailing end.
+        let frame = NSRect(x: 10, y: 0, width: 80, height: size.height)
+        let x = attachmentChipInlineRemoveRect(in: frame)
+        XCTAssertTrue(frame.contains(x))
+        XCTAssertEqual(x.maxX, frame.maxX - 2)
     }
 
     // MARK: - Intake from a pasteboard
@@ -259,17 +446,29 @@ final class ComposerAttachmentsTests: XCTestCase {
         XCTAssertEqual(exchange.promptAttachments, PromptAttachments(images: [1: "/a.png"], files: [1: "/r.pdf", 2: "/b.txt"]))
     }
 
-    func testTheBubbleDrawsKnownPlaceholdersAsChipsAndKeepsTheRest() {
+    func testTheBubbleDrawsKnownPlaceholdersAsChipsInPlaceAndKeepsTheRest() {
         let attachments = PromptAttachments(images: [1: "/tmp/winter-session-s_1/images/image_1.png", 2: "/Users/me/shot.png"],
                                             files: [1: "/Users/me/My Report.pdf"])
-        let display = promptDisplay("[Image #1] [Image #2] [File #1]\ncompare [Image #2] with [Image #7]\n\nthanks", attachments: attachments)
-        XCTAssertEqual(display.chips.map(\.name), ["Image #1", "shot.png", "My Report.pdf"], "a staged copy reads Image #n; each placeholder once")
-        XCTAssertEqual(display.text, "compare with [Image #7]\n\nthanks", "an unknown placeholder stays text; a chips-only line goes")
-        XCTAssertEqual(display.chips[0].visual, .image(source: .path("/tmp/winter-session-s_1/images/image_1.png"), fallbackName: "Image #1"))
+        let display = promptDisplay("look at [Image #1] then [File #1]\ncompare [Image #2] with [Image #7]\n\n**thanks**",
+                                    attachments: attachments)
+        XCTAssertEqual(display.chips.map(\.name), ["Image #1", "My Report.pdf", "shot.png"], "a staged copy reads Image #n; each placeholder once")
+        guard display.segments.count == 2, case .inline(let lines) = display.segments[0],
+              case .prose(let prose) = display.segments[1] else {
+            return XCTFail("two chip lines, then prose: \(display.segments)")
+        }
+        XCTAssertEqual(lines.count, 2)
+        XCTAssertEqual(lines[0], [.text("look at "), .chip(display.chips[0]), .text(" then "), .chip(display.chips[1])],
+                       "each chip where its placeholder was")
+        XCTAssertEqual(lines[1], [.text("compare "), .chip(display.chips[2]), .text(" with [Image #7]")],
+                       "an unknown placeholder stays text")
+        XCTAssertEqual(prose, "\n**thanks**", "lines with no chip stay markdown")
         XCTAssertNil(display.chips[0].attachmentID, "a sent message's chip has no × to wire")
-        // No attachments: the text exactly as it was.
+        // No attachments: the text exactly as it was, one prose segment.
         XCTAssertEqual(promptDisplay("[Image #1] typed by hand", attachments: PromptAttachments()),
-                       PromptDisplay(chips: [], text: "[Image #1] typed by hand"))
+                       PromptDisplay(segments: [.prose("[Image #1] typed by hand")], chips: []))
+        XCTAssertTrue(promptDisplay("[Image #1]", attachments: PromptAttachments(images: [1: "/a.png"])).segments.count == 1)
+        XCTAssertFalse(promptDisplay("[Image #1]", attachments: PromptAttachments(images: [1: "/a.png"])).isEmpty,
+                       "a message that is only a chip still draws")
         XCTAssertTrue(attachmentPathIsStagedImage("/var/folders/x/T/winter-session-s_1/images/image_3.jpg"))
         XCTAssertFalse(attachmentPathIsStagedImage("/Users/me/images/image_3.jpg"))
     }
