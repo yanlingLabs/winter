@@ -35,6 +35,10 @@ enum SimKind {
     case userOpens(pid_t, Double)
     /// The user launches an app themselves (Spotlight: the keys, then Return); it comes forward `after` ms later.
     case userLaunch(Double)
+    /// Hand-written plans only (round 19, the review's MEDIUM 2): the user double-clicks an item in T's (Finder's) window —
+    /// 0 an application, 1 a document (each launches), 2 a folder (launches nothing) — and an app of theirs starts
+    /// `startAfter` ms later (something of theirs launched it), coming forward `forwardAfter` ms after its start.
+    case finderLaunch(Int, startAfter: Double, forwardAfter: Double)
     case banner(pid_t)
     case prompt(Bool)
     // session s2 (inside the world's events)
@@ -87,6 +91,8 @@ enum SimKind {
         case .selfActivate(let a): return "\(n(a)) activates itself"
         case .userOpens(let a, let ms): return "the user opens \(n(a)) (Spotlight, a launcher, a link — no switch input), it comes forward \(Int(ms)) ms later"
         case .userLaunch(let ms): return "the user launches an app (Spotlight), which comes forward \(Int(ms)) ms later"
+        case .finderLaunch(let item, let start, let fwd):
+            return "the user double-clicks \(["an application", "a document", "a folder"][item]) in Finder; an app of theirs starts \(Int(start)) ms later, forward \(Int(fwd)) ms after"
         case .banner(let a): return "a notification banner about \(n(a)) appears"
         case .prompt(let on): return "the helper's prompt panel \(on ? "shows" : "hides")"
         case .visit(let ms): return "session s2 visits T2's desktop for \(Int(ms)) ms"
@@ -763,6 +769,45 @@ final class SimRun {
                                  why: "\(SimPid.name(pid)) comes forward (the user launched it)")
                     }
                 }
+                }
+            }
+        case .finderLaunch(let item, let startAfter, let forwardAfter):
+            var fclick = SimRNG(step.seed)
+            let finderPoint = CGPoint(x: 700, y: 210)
+            guard w.lock.withLock({ w.clickTarget(at: finderPoint)?.id }) == 77 else {
+                w.log("the user would double-click in Finder's window, but it is not under the pointer"); break
+            }
+            let launches = item < 2
+            w.log("the user double-clicks \(["an application", "a document", "a folder"][item]) in Finder's window")
+            w.lock.withLock { w.finderLaunches = launches }
+            click(at: finderPoint, clickCount: 2, r: &fclick)
+            w.lock.withLock { w.finderLaunches = nil }
+            // (Only a launching item is an interactive launcher — R18-a; a folder is none.)
+            if launches { w.lock.withLock { w.launcherInputs.append(w.now) } }
+            w.schedule(after: startAfter, "an app of the user's starts") { [unowned self] in
+                let pid = w.lock.withLock { () -> pid_t in
+                    self.userLaunchSeq += 1
+                    let pid = 950 + self.userLaunchSeq
+                    let wid = UInt32(9_500 + Int(pid))
+                    w.running.insert(pid)
+                    w.bundles[pid] = "sim.user.launched.\(pid)"
+                    w.startedAt[pid] = w.now
+                    w.wins[wid] = SimWin(id: wid, pid: pid, frame: CGRect(x: 300, y: 600, width: 300, height: 200), space: w.space1)
+                    w.mainWin[pid] = wid
+                    w.zOrder.append(pid)
+                    w.userLaunches[pid] = w.now
+                    w.noteLaunchStart(pid)
+                    return pid
+                }
+                w.log("the user's app \(SimPid.name(pid)) starts")
+                w.schedule(after: 30, "NSWorkspace: \(SimPid.name(pid)) launched") { [unowned self] in self.core.onAppLaunched(pid: pid) }
+                w.schedule(after: forwardAfter, "\(SimPid.name(pid)) comes forward (the user launched it)") {
+                    w.lock.withLock {
+                        let n = w.landingPlace(pid)
+                        guard n.app != w.front || n.space != w.space else { return }
+                        w.change(to: n, cause: w.untouchedCause(pid, indirect: false, why: "the user's own launch", newPlace: n),
+                                 why: "\(SimPid.name(pid)) comes forward (the user launched it)")
+                    }
                 }
             }
         case .mainWindow(let a, let id):
