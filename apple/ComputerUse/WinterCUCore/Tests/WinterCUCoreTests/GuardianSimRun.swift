@@ -222,13 +222,6 @@ final class SimRun {
         let after = midActRng.double(1, 15)
         var r = SimRNG(midActRng.next())
         w.schedule(after: after, "the user clicks into T mid-act") { [unowned self] in
-            // (Round 19 — the mid-act seeds 1014, and 35 and 55 with an ordinary target: INTO T's window, so only when it is
-            // under the pointer; with T's window on another desktop the click landed on the empty desktop and brought T
-            // forward window-less — not the scenario, a click into T's window during the act.)
-            guard w.lock.withLock({ w.clickTarget(at: CGPoint(x: 700, y: 210))?.id }) == 77 else {
-                w.log("the user would click into T mid-act, but its window is not under the pointer")
-                return
-            }
             w.log("the user clicks into T while the agent's act on it runs")
             self.click(at: CGPoint(x: 700, y: 210), r: &r)
         }
