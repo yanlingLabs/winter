@@ -198,6 +198,27 @@ describe("watch and take over from the panel", () => {
     expect(r.panel.hidden).toEqual([]); // the panel closed it itself
   });
 
+  test("Drill B: a hand-off on a tab the person took over — the SAME view, its Done answers the wait and ends the view", async () => {
+    const r = rig();
+    const t = await r.pool.createTab({ sessionId: "s1", url: "https://a.example/" });
+    await r.pool.panelAction("s1", t.tabKey, "watch");
+    await r.pool.panelAction("s1", t.tabKey, "takeOver");
+    expect(r.pool.held(t.tabKey)).toBe(true);
+    const answers: Array<[string, boolean]> = [];
+    r.pool.onUserDone((k, done) => answers.push([k, done]));
+    await r.pool.present(t.tabKey, { sessionId: "s1" });
+    expect(r.panel.shown).toHaveLength(1);
+    expect(r.commands().filter((c) => c.op === "headless.present")).toHaveLength(1);
+    expect(r.panel.updates).toEqual([{ sessionId: "s1", tabId: t.tabKey, purpose: "handoff" }]);
+    expect(isUserHasTab(await failure(r.pool.send(t.tabKey, "Page.enable")))).toBe(true);
+    await r.pool.panelAction("s1", t.tabKey, "done");
+    expect(answers).toEqual([[t.tabKey, true]]);
+    await r.pool.handBack(t.tabKey);
+    expect(r.panel.hidden).toEqual([{ sessionId: "s1", tabId: t.tabKey, reason: "done" }]);
+    expect(r.pool.held(t.tabKey)).toBe(false);
+    await r.pool.send(t.tabKey, "Page.enable");
+  });
+
   test("the turn's end closes a tab the person holds only once they let it go", async () => {
     const r = rig();
     const gone: string[] = [];

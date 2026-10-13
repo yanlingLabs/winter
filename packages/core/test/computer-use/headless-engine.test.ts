@@ -528,6 +528,75 @@ describe("the control lease (lane H3): nothing of a tab the person holds is the 
     r.end();
   });
 
+  /** A tab the person already holds (they watched it, then took it over): the pool refuses the agent's attach. */
+  const heldRig = (answer: (summary: string) => string | false) => {
+    const state = { held: false, handBacks: 0, overs: 0 };
+    const h = withHeadless({
+      policy: "ask", answer,
+      engineDeps: {
+        headlessHeld: () => state.held, headlessPresentMissing: () => undefined,
+        headlessHandBack: async () => { state.handBacks++; state.held = false; }, headlessHandoffOver: () => { state.overs++; },
+      },
+    });
+    return { h, state };
+  };
+  const takeOver = (h: ReturnType<typeof withHeadless>, state: { held: boolean }, key: string): void => {
+    state.held = true;
+    stopped(h, key);
+    const attach = h.headless.attach.bind(h.headless);
+    h.headless.attach = async (k, a) => {
+      if (state.held) throw new TransportError("capacity", "the user has this tab in Winter's panel — it is theirs until they hand it back; work in another tab meanwhile", { userHasTab: true });
+      return attach(k, a);
+    };
+  };
+  const BUSY = "the user has this tab in Winter's panel — it is theirs until they hand it back; work in another tab meanwhile";
+
+  test("Drill B: waitForUser on a tab the person already holds gives its card, shows the SAME view, and Done takes the tab back", async () => {
+    const { h, state } = heldRig((summary) => (summary.startsWith("Winter's headless browser — ") ? "handoff_show" : summary.startsWith("Waiting for you") ? "handoff_done" : false));
+    const opener = h.run();
+    const tab = await h.engine.global(opener.scope, "browsers.open", { url: "https://accounts.example/", browser: "headless" }) as TabHandle;
+    opener.end();
+    takeOver(h, state, keyOf(tab));
+    const r = h.run();
+    // Every other primitive is still the person's.
+    for (const primitive of ["text", "state", "click", "goto"]) {
+      const e = await failure(h.engine.primitive(r.scope, tab.targetId, primitive, primitive === "goto" ? { url: "https://b.example/" } : primitive === "click" ? { target: 1 } : {}));
+      expect({ primitive, kind: (e as AutomationFailure).kind, message: e.message }).toEqual({ primitive, kind: "TargetBusy", message: BUSY });
+    }
+    expect(await h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "the agent waits on a tab you already hold" })).toEqual({ done: true });
+    expect(h.cards.map((c) => c.summary)).toEqual([
+      "Winter's headless browser — accounts.example: the agent waits on a tab you already hold. Winter waits while you do it.",
+      "Waiting for you on accounts.example in Winter's headless browser — press Done when you have finished.",
+    ]);
+    // The pool's present (which reuses the person's view) was asked once; Done handed the tab back, then the agent read it.
+    expect(h.headless.presented).toEqual([`${keyOf(tab)}@${r.scope.sessionId}`]);
+    expect(state.handBacks).toBe(1);
+    expect(r.text()).toContain("the user finished on accounts.example");
+    await h.engine.primitive(r.scope, tab.targetId, "text", {});
+    r.end();
+  });
+
+  test("Drill B: Stop waiting on a tab the person already holds gives {done:false}; it stays theirs and every other primitive stays TargetBusy", async () => {
+    const { h, state } = heldRig((summary) => (summary.startsWith("Winter's headless browser — ") ? "handoff_show" : false));
+    const opener = h.run();
+    const tab = await h.engine.global(opener.scope, "browsers.open", { url: "https://accounts.example/", browser: "headless" }) as TabHandle;
+    opener.end();
+    takeOver(h, state, keyOf(tab));
+    const r = h.run();
+    expect(await h.engine.primitive(r.scope, tab.targetId, "waitForUser", { reason: "sign in" })).toEqual({ done: false });
+    expect(h.headless.presented).toHaveLength(1);
+    expect(state.overs).toBe(1);
+    expect(state.handBacks).toBe(0);
+    expect(r.text()).toContain("the tab stays with them");
+    for (const primitive of ["text", "console", "screenshot"]) {
+      const e = await failure(h.engine.primitive(r.scope, tab.targetId, primitive, primitive === "screenshot" ? { emit: false } : {}));
+      expect({ primitive, kind: (e as AutomationFailure).kind, message: e.message }).toEqual({ primitive, kind: "TargetBusy", message: BUSY });
+    }
+    // Letting go still works while they hold it.
+    await h.engine.primitive(r.scope, tab.targetId, "handoff", {});
+    r.end();
+  });
+
   test("#7 a hold that begins while the primitive waits (here on a site card) is checked again right before the work", async () => {
     let held = false;
     const h = withHeadless({ policy: "ask", dangerousAdded: ["evil.example"], answer: () => { held = true; return "once"; }, engineDeps: { headlessHeld: () => held } });
