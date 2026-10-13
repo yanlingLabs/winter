@@ -398,10 +398,15 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// once its activation lands (within 0.5 s).
     var userWorkingIn: pid_t?
     var pendingWork: (app: pid_t, until: Double)?
+    /// The app their work ended in by LEAVING THE FRONT, and whether the engine could have seen it leave: an activation
+    /// notification heard while another app was in front (round 19 — the mid-act seeds 1069 and, with an ordinary target,
+    /// 60: T left the front for a moment and was back before any notification was heard; §4.12, what can't be attributed:
+    /// "the guardian hears of an activation only when told, with no time on it"). A new mark forgets it.
+    var workLeft: (app: pid_t, seen: Bool)?
     /// The world's answer: is the user working in `pid` now?
     func userWorks(in pid: pid_t) -> Bool {
         lock.withLock {
-            if let p = pendingWork, front == p.app, now <= p.until { userWorkingIn = p.app; workBegan(p.app); pendingWork = nil }
+            if let p = pendingWork, front == p.app, now <= p.until { userWorkingIn = p.app; workLeft = nil; workBegan(p.app); pendingWork = nil }
             return userWorkingIn == pid && front == pid
         }
     }
@@ -412,7 +417,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             // into T and T's activation, does not take the click back — §4.12 I6, a click counts once its own activation
             // lands; round 18, found by the in-flight exercise's mid-act click, seed 1.)
             if front == app {
-                userWorkingIn = app; workBegan(app)
+                userWorkingIn = app; workLeft = nil; workBegan(app)
                 if pendingWork?.app == app { pendingWork = nil }
             } else {
                 pendingWork = (app, now + 500)
@@ -1076,8 +1081,8 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             if hasLeft(cause) || (visitBack && leftApps.contains(n.app)) { leftApps.insert(n.app) } else { leftApps.remove(n.app) }
             if case .untouched(_, .leftAlone, _, _) = cause { leftOnly.insert(n.app) } else if !visitBack { leftOnly.remove(n.app) }
             let oldFront = front, oldSpace = space
-            if let p = pendingWork, n.app == p.app, now <= p.until { userWorkingIn = p.app; workBegan(p.app); pendingWork = nil }
-            if let w = userWorkingIn, n.app != w { userWorkingIn = nil }  // they left the app they were working in
+            if let p = pendingWork, n.app == p.app, now <= p.until { userWorkingIn = p.app; workLeft = nil; workBegan(p.app); pendingWork = nil }
+            if let w = userWorkingIn, n.app != w { userWorkingIn = nil; workLeft = (w, false) }  // they left the app they were working in
             if n.space == 400 { focusDisplay = 2 } else { focusDisplay = 1; space1 = n.space }
             if let w = appWindow(n.app, onSpace: n.space), mainWin[n.app] != w.id {
                 mainWin[n.app] = w.id
@@ -1200,6 +1205,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     func notifyActivation(_ pid: pid_t) {
         lock.withLock {
             pendingNotes -= 1
+            if let l = workLeft, !l.seen, front != l.app { workLeft?.seen = true }
             if let o = owedNote, o.pid == pid, o.episode == episode, front == pid { dueNotes.append((pid, o.at)); owedNote = nil }
         }
         core?.onActivation(pid: pid)

@@ -1110,7 +1110,13 @@ final class SimRun {
                 // the work mark before every focus placement and key. Never when they don't work in it at the refusal either.)
                 // (Sticky: right too when they worked in it at any moment of the act and have left since — the review of
                 // round 17, M1.)
-                if refusedForWork, !working, !w.userWorks(in: tpid), !w.lock.withLock({ w.actWorkSeen }) {
+                // (Round 19: right too when their work in T ended only by T leaving the front for a moment the engine never
+                // saw — every notification heard since found T in front again; refusing is the safe side of I6.)
+                let unseenLeave = w.lock.withLock { w.workLeft.map { $0.app == tpid && !$0.seen } ?? false && w.front == tpid }
+                if refusedForWork, unseenLeave {
+                    w.log("  (refused: their work in T ended only by a departure from the front the engine never saw — kept as right)")
+                    w.lock.withLock { w.stats.handsOff += 1 }
+                } else if refusedForWork, !working, !w.userWorks(in: tpid), !w.lock.withLock({ w.actWorkSeen }) {
                     w.lock.withLock { w.fail("I6: the act was refused as \"the user is working in it\", but they are not (only switched there, or left it)") }
                 } else if refusedForWork {
                     w.lock.withLock { w.stats.handsOff += 1 }
