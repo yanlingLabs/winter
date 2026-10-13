@@ -554,6 +554,10 @@ final class LOKBridge: OfficeDocumentBridge {
         /// texts themselves — a document body has no business in an error string, and the wire caps
         /// would refuse it) plus a short, already-composed description of what was attempted.
         case docsVerificationFailed(docId: String, what: String, expectedLength: Int, actualLength: Int)
+        /// 2026-10-13 — `insert`/`append`'s positioning dispatch (`.uno:GoToStartOfDoc`/
+        /// `GoToEndOfDoc`) was not observed to land within its time budget, so the paste was NOT
+        /// run. Unlike `docsVerificationFailed`, the outcome is KNOWN: nothing was written.
+        case docsPositioningUnconfirmed(docId: String, what: String)
         /// office-format — `docs format`'s `style` named a paragraph style this document's own
         /// catalogue does not contain. Refused BEFORE any dispatch, because the alternative is a
         /// SILENT no-op: `SwDocShell::ExecStyleSheet`'s `getByName` throws on an unknown name, the
@@ -708,6 +712,10 @@ final class LOKBridge: OfficeDocumentBridge {
                     + "document back (expected \(expectedLength) characters, found \(actualLength)) — "
                     + "the outcome is UNKNOWN and the document may have been changed. Re-read it before "
                     + "retrying."
+            case .docsPositioningUnconfirmed(let docId, let what):
+                return "\(what) in \(docId) was not done: Winter could not confirm the cursor had reached "
+                    + "the right place in the document in time, so it pasted nothing and the document is "
+                    + "unchanged. Retrying is safe."
             }
         }
     }
@@ -895,6 +903,11 @@ final class LOKBridge: OfficeDocumentBridge {
     /// is itself the serialization mechanism, for this exactly as much as for the LOK calls
     /// themselves.
     private var documents: [String: OpenDocument] = [:]
+
+    /// The view each open document's current job last asserted, keyed by its native handle —
+    /// written only by `setViewOnDedicatedThread`, read by `postUnoCommandPinnedOnDedicatedThread`,
+    /// dropped on close. Same thread-confinement rule as `documents`.
+    private var assertedViewIds: [UnsafeMutableRawPointer: Int32] = [:]
 
     /// `installRoot` is the directory containing `Frameworks/` and `Resources/` as real (non-
     /// symlinked) siblings — either `<app>/Contents/Resources/LibreOffice` (production, resolved
@@ -1566,7 +1579,7 @@ final class LOKBridge: OfficeDocumentBridge {
         guard doc.kind == .text else { throw SaveError.notTextDocument(docId: docId, kind: doc.kind) }
 
         let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        setViewOnDedicatedThread(doc, agentViewId)
         // NO setPart — for a text document `setPart` is `GotoPage`, a caret move, not a scoping call
         // (research L6; the same reason `docsReadTextOnDedicatedThread` omits it).
 
@@ -1662,7 +1675,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// every match selected without replacing anything.
     private func docsSelectForFormatOnDedicatedThread(_ doc: OpenDocument, docId: String, viewId: Int32,
                                                       find: String?) throws {
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, viewId)
+        setViewOnDedicatedThread(doc, viewId)
         if let find {
             postUnoCommandOnDedicatedThread(
                 doc, ".uno:ExecuteSearch",
@@ -1767,7 +1780,7 @@ final class LOKBridge: OfficeDocumentBridge {
             throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
         }
         let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        setViewOnDedicatedThread(doc, agentViewId)
 
         guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide,
                                                           tabCount: placeholder.tabCount) != nil else {
@@ -2097,6 +2110,7 @@ final class LOKBridge: OfficeDocumentBridge {
 
     private func closeOnDedicatedThread(docId: String) {
         guard let doc = documents.removeValue(forKey: docId) else { return }
+        assertedViewIds[UnsafeMutableRawPointer(doc.handle)] = nil
         // Office Stage B Task 6 — explicit destroyView for the agent view BEFORE `destroy`. Cited
         // at the vendored pin: `doc_destroyView` calls `LOKClipboardFactory::
         // releaseClipboardForView(nId)` (a SPECIFIC view id), while `doc_destroy` only ever calls
@@ -2133,7 +2147,7 @@ final class LOKBridge: OfficeDocumentBridge {
         // Asserted UNCONDITIONALLY, first, every job — see `postKeyOnDedicatedThread`'s own header
         // for why this bridge never tries to track "did the current view already happen to match"
         // instead.
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         // Fix round 3 (IMPORTANT-A) — a SECOND, separate hazard in the same LOK function, not closed
         // by `setView` alone: `getAlternativeViewForPaint` (`desktop/source/lib/init.cxx:4387-4414`)
         // searches every open view-shell for one already sitting at the requested part/mode with a
@@ -2288,7 +2302,7 @@ final class LOKBridge: OfficeDocumentBridge {
     private func saveAsOnDedicatedThread(docId: String, seq: UInt64, part: Int) throws -> String {
         let measureT0 = DispatchTime.now()
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         if doc.kind != .text {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
         }
@@ -2333,7 +2347,7 @@ final class LOKBridge: OfficeDocumentBridge {
         // `postUnoCommand` call in this bridge; the tripwire's own live wait is what proves it lands
         // in practice, not an assumption about ordering.
         ".uno:Save".withCString { commandPtr in
-            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+            postUnoCommandPinnedOnDedicatedThread(doc, commandPtr, nil, false)
         }
         // office-responsive Job 1 — the per-save LOK-thread occupancy trace. Unconditional, one
         // line per real save, matching `handleCallback`'s own always-on raw-callback trace: a save
@@ -2413,7 +2427,7 @@ final class LOKBridge: OfficeDocumentBridge {
         }
         guard isStillArmed() else { return nil }
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         if doc.kind != .text {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: doc.lastKnownPart))
         }
@@ -2508,7 +2522,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// what the whole round-2/round-3 cross-document proof rests on.
     private func postKeyOnDedicatedThread(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         if doc.kind != .text {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
         }
@@ -2544,7 +2558,7 @@ final class LOKBridge: OfficeDocumentBridge {
     private func postMouseOnDedicatedThread(docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
                                             count: Int, buttons: Int, modifiers: Int) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         if doc.kind != .text {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
         }
@@ -2571,7 +2585,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// document `setPart` is `GotoPage`, a caret move, not a scoping call.
     private func postExtTextInputOnDedicatedThread(docId: String, part: Int, type: OfficeExtTextInputType, text: String) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         if doc.kind != .text {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
         }
@@ -2600,7 +2614,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// part left over from unrelated paint traffic could answer with the WRONG selection.
     private func clipboardCopyOnDedicatedThread(docId: String, part: Int) throws -> String {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         if doc.kind != .text {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
         }
@@ -2622,7 +2636,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// covering BOTH the read and the cut) already makes correct.
     private func clipboardCutOnDedicatedThread(docId: String, part: Int) throws -> String {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         if doc.kind != .text {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
         }
@@ -2636,7 +2650,7 @@ final class LOKBridge: OfficeDocumentBridge {
             text = ""
         }
         ".uno:Cut".withCString { commandPtr in
-            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+            postUnoCommandPinnedOnDedicatedThread(doc, commandPtr, nil, false)
         }
         return text
     }
@@ -2659,7 +2673,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// than silently swallowed the way `postKeyEvent`'s `void` return forces `keyEventOk` to be.
     private func clipboardPasteOnDedicatedThread(docId: String, part: Int, text: String) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         if doc.kind != .text {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
         }
@@ -2716,10 +2730,10 @@ final class LOKBridge: OfficeDocumentBridge {
     /// characterization in this suite was measured against the null one.
     private func undoOnDedicatedThread(docId: String, repair: Bool) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         guard repair else {
             ".uno:Undo".withCString { commandPtr in
-                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+                postUnoCommandPinnedOnDedicatedThread(doc, commandPtr, nil, false)
             }
             return
         }
@@ -2733,10 +2747,10 @@ final class LOKBridge: OfficeDocumentBridge {
     /// (`sw/…/docundo.cxx:523`, `sc/…/tabvwshb.cxx:778` `bIsUndo == false`, `sd/…/viewshel.cxx:1455`).
     private func redoOnDedicatedThread(docId: String, repair: Bool) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         guard repair else {
             ".uno:Redo".withCString { commandPtr in
-                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+                postUnoCommandPinnedOnDedicatedThread(doc, commandPtr, nil, false)
             }
             return
         }
@@ -2771,7 +2785,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// nothing while reporting success. That is exactly the guard-degrades-silently class.
     private func undoDepthOnDedicatedThread(docId: String) throws -> (undo: Int, redo: Int) {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         func count(_ command: String) throws -> Int {
             guard let cString = command.withCString({ commandPtr in
                 doc.handle.pointee.pClass.pointee.getCommandValues?(doc.handle, commandPtr)
@@ -2900,7 +2914,7 @@ final class LOKBridge: OfficeDocumentBridge {
         // land THERE — on the user's own primary view, an actual silent EDIT, not merely a silent
         // read the way the sibling read-path hazards were.
         guard let agentViewId = doc.agentViewId, agentViewId >= 0 else { throw SaveError.noAgentView(docId) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        setViewOnDedicatedThread(doc, agentViewId)
         if doc.kind != .text {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
         }
@@ -3083,7 +3097,7 @@ final class LOKBridge: OfficeDocumentBridge {
            let gotoString = String(data: gotoData, encoding: .utf8) {
             ".uno:GoToCell".withCString { commandPtr in
                 gotoString.withCString { argsPtr in
-                    doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, argsPtr, false)
+                    postUnoCommandPinnedOnDedicatedThread(doc, commandPtr, argsPtr, false)
                 }
             }
         }
@@ -3133,12 +3147,24 @@ final class LOKBridge: OfficeDocumentBridge {
         // do not themselves pump LOK's internal queue; only some OTHER LOK call does) applied once
         // more, not a new mechanism — and it stays bounded and cheap, one more throwaway 64x64 tile
         // paint, spent only on the path that already burned its full read budget.
+        //
+        // **2026-10-13 — the retries now wait in TIME, not in a count.** Four immediate attempts
+        // were a few milliseconds of this thread re-taking the SolarMutex, which says nothing about
+        // whether LibreOffice's own main-loop thread (the one that actually executes the posted
+        // `.uno:GoToCell`) has run — the same defect a loaded full-app run exposed in the `docs`
+        // read (see `OfficeDispatchPacing`). The first retry is still immediate; later ones sleep
+        // first, up to `goToCellBudgetNanos`.
         var text = readSelectionTextOnDedicatedThread(doc)
         var attempts = 1
-        while text == baseline && attempts < Self.goToCellVerificationAttempts {
-            pumpDedicatedThreadForPendingDispatch(doc, viewId: viewId, part: part)
-            text = readSelectionTextOnDedicatedThread(doc)
-            attempts += 1
+        var waitedNanos: UInt64 = 0
+        if text == baseline {
+            let outcome = OfficeDispatchPacing.poll(budgetNanos: Self.goToCellBudgetNanos) {
+                pumpDedicatedThreadForPendingDispatch(doc, viewId: viewId, part: part)
+                text = readSelectionTextOnDedicatedThread(doc)
+                return text != baseline
+            }
+            attempts += outcome.attempts
+            waitedNanos = outcome.elapsedNanos
         }
         if attempts > 1 {
             // Evidence line for task-3-report.md's before/after — how often the race actually
@@ -3147,8 +3173,8 @@ final class LOKBridge: OfficeDocumentBridge {
             // `/dev/null` in production (`OfficeHelperSupervisor` never sets `standardError`), so
             // this line — the evidence trail for a race this arc has spent three rounds on — was
             // being written to nothing on every real user's machine.
-            diagnostic("[LOKBridge sheets] GoToCell(\(range)) needed \(attempts) attempt(s) before "
-                       + "the selection changed (or the budget was exhausted)")
+            diagnostic("[LOKBridge sheets] GoToCell(\(range)) needed \(attempts) attempt(s) over "
+                       + "\(Self.millis(waitedNanos)) ms before the selection changed (or the budget was exhausted)")
         }
         if text == baseline {
             // Best-effort straggler flush (round 4) — see the comment above the loop. Only spent on
@@ -3200,7 +3226,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// OFF-toggle, in that function's `defer`, has nothing after it to pump on its behalf.
     private func toggleFormulaOnDedicatedThread(_ doc: OpenDocument, pump: (viewId: Int32, part: Int)? = nil) {
         ".uno:ToggleFormula".withCString { commandPtr in
-            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+            postUnoCommandPinnedOnDedicatedThread(doc, commandPtr, nil, false)
         }
         if let pump {
             pumpDedicatedThreadForPendingDispatch(doc, viewId: pump.viewId, part: pump.part)
@@ -3394,7 +3420,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// that point on. The caller always passes the SAME view it already asserted before dispatching
     /// `.uno:GoToCell` in the first place, so this is never a new assertion, only a repeated one.
     private func pumpDedicatedThreadForPendingDispatch(_ doc: OpenDocument, viewId: Int32, part: Int) {
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, viewId)
+        setViewOnDedicatedThread(doc, viewId)
         var buffer = [UInt8](repeating: 0, count: Self.pumpTileByteCount)
         buffer.withUnsafeMutableBufferPointer { rawBuffer in
             doc.handle.pointee.pClass.pointee.paintPartTile?(
@@ -3479,7 +3505,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// compared between runs rather than being meaningful only inside one.
     private func paintProbeHashOnDedicatedThread(_ doc: OpenDocument, viewId: Int32, part: Int,
                                                  rect: (x: Int32, y: Int32, width: Int32, height: Int32)) -> UInt64 {
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, viewId)
+        setViewOnDedicatedThread(doc, viewId)
         var buffer = [UInt8](repeating: 0, count: Self.formulaProbeByteCount)
         buffer.withUnsafeMutableBufferPointer { rawBuffer in
             doc.handle.pointee.pClass.pointee.paintPartTile?(
@@ -3551,17 +3577,14 @@ final class LOKBridge: OfficeDocumentBridge {
     private static let formulaProbeByteCount = 512 * 512 * 4
     private static let formulaProbeMaxTwips = (width: 30_000, height: 15_000)
 
-    /// `selectionTextOnDedicatedThread`'s own `.uno:GoToCell` poll budget — the ONE
-    /// `postUnoCommand` this file still verifies via a poll loop (`.uno:ToggleFormula`'s own attempt
-    /// at the identical pattern was tried and abandoned — see `toggleFormulaOnDedicatedThread`'s own
-    /// header for why no signal exists for it to poll). Small deliberately, not generous:
-    /// `sheetsInfoOnDedicatedThread`'s `(0, 0)` disambiguation fallback pays this cost for a
-    /// genuinely empty sheet (`""` read equals `""` baseline, so the loop never sees a difference to
-    /// stop early on and burns the full budget every time) — a large budget would make that fallback
-    /// slow for no correctness benefit on exactly the sheets most likely to trigger it. Each attempt
-    /// is a real, if cheap, LOK call (a 64x64 tile paint), not a clock tick, so this is a real cost
-    /// per attempt, unlike a bounded wall-clock retry would be.
-    private static let goToCellVerificationAttempts = 4
+    /// `selectionTextOnDedicatedThread`'s own `.uno:GoToCell` wait — a wall-clock budget since
+    /// 2026-10-13, replacing `goToCellVerificationAttempts = 4` (four immediate attempts; see the
+    /// loop's own comment for why a count was the wrong unit). Small deliberately, not generous:
+    /// a read whose target text EQUALS the baseline — `sheetsInfoOnDedicatedThread`'s `(0, 0)`
+    /// fallback on a genuinely empty sheet, or re-reading the range just read — never sees a
+    /// difference to stop early on and pays the whole budget. 300 ms keeps that cost small while
+    /// still giving LibreOffice's own thread real time on a loaded machine.
+    private static let goToCellBudgetNanos: UInt64 = 300_000_000
     /// office-agent-tools T4 — `sheetsManageSheetOnDedicatedThread`'s own verification budget. See
     /// that function's own header for why this is separate from, and larger than,
     /// `goToCellVerificationAttempts`: a structural sheet insert/delete/rename is a heavier
@@ -3703,7 +3726,7 @@ final class LOKBridge: OfficeDocumentBridge {
     private func sheetsInfoOnDedicatedThread(docId: String) throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
 
         let names = sheetNamesOnDedicatedThread(doc)
         let activeIndex = Int(doc.handle.pointee.pClass.pointee.getPart?(doc.handle) ?? 0)
@@ -3735,7 +3758,7 @@ final class LOKBridge: OfficeDocumentBridge {
     private func sheetHasA1ContentOnDedicatedThread(docId: String, part: Int) throws -> Bool {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        setViewOnDedicatedThread(doc, agentViewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
         let text = selectionTextOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part, range: "A1", formulas: false)
         return !text.isEmpty
@@ -3784,7 +3807,7 @@ final class LOKBridge: OfficeDocumentBridge {
     private func sheetsReadOnDedicatedThread(docId: String, sheet: String, range: String, formulas: Bool) throws -> (rows: [[String]], displayRestoreVerified: Bool) {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
 
         let names = sheetNamesOnDedicatedThread(doc)
         guard let part = names.firstIndex(of: sheet) else {
@@ -3792,7 +3815,7 @@ final class LOKBridge: OfficeDocumentBridge {
         }
 
         let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        setViewOnDedicatedThread(doc, agentViewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
 
         let outcome = FormulaRestoreOutcome()
@@ -3912,7 +3935,7 @@ final class LOKBridge: OfficeDocumentBridge {
                                             cellAddresses: [String], cellValues: [String]) throws -> Int {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
 
         let names = sheetNamesOnDedicatedThread(doc)
         guard let part = names.firstIndex(of: sheet) else {
@@ -3920,7 +3943,7 @@ final class LOKBridge: OfficeDocumentBridge {
         }
 
         let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        setViewOnDedicatedThread(doc, agentViewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
 
         // Second fix-round review (Important #2 + Minor 3) — every per-cell failure
@@ -4289,7 +4312,7 @@ final class LOKBridge: OfficeDocumentBridge {
                                                op: OfficeSheetsResizeOp, selectionRange: String) throws -> (usedEndColumn: Int, usedEndRow: Int) {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
 
         let names = sheetNamesOnDedicatedThread(doc)
         guard let part = names.firstIndex(of: sheet) else {
@@ -4297,7 +4320,7 @@ final class LOKBridge: OfficeDocumentBridge {
         }
 
         let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        setViewOnDedicatedThread(doc, agentViewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
 
         // `selectionRange` is always `"<first>:<last>"` (`OfficeCommandConsumer.handleSheetsResize`'s
@@ -4335,7 +4358,7 @@ final class LOKBridge: OfficeDocumentBridge {
         case (.col, .delete): command = ".uno:DeleteColumns"
         }
         command.withCString { commandPtr in
-            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+            postUnoCommandPinnedOnDedicatedThread(doc, commandPtr, nil, false)
         }
         // Best-effort pump — the SAME throwaway `paintPartTile` primitive `.uno:GoToCell`'s own poll
         // already trusts, giving LOK's dispatcher one more turn before the used-range read below,
@@ -4464,7 +4487,7 @@ final class LOKBridge: OfficeDocumentBridge {
                                                      name: String, newName: String?) throws -> [String] {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         let before = sheetNamesOnDedicatedThread(doc)
 
         // Fix-round review (item 5, "provably safe on the task's own evidence, since refusals never
@@ -4703,7 +4726,7 @@ final class LOKBridge: OfficeDocumentBridge {
                                                align: OfficeSheetsAlign?, width: Double?) throws -> [String] {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
 
         let names = sheetNamesOnDedicatedThread(doc)
         guard let part = names.firstIndex(of: sheet) else {
@@ -4711,7 +4734,7 @@ final class LOKBridge: OfficeDocumentBridge {
         }
 
         let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        setViewOnDedicatedThread(doc, agentViewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
 
         var applied: [String] = []
@@ -4739,7 +4762,7 @@ final class LOKBridge: OfficeDocumentBridge {
                 // Normalize first, unconditionally — see this function's own header for why this
                 // makes the whole operation deterministic regardless of toggle-vs-absolute.
                 ".uno:NumberFormatStandard".withCString { commandPtr in
-                    doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+                    postUnoCommandPinnedOnDedicatedThread(doc, commandPtr, nil, false)
                 }
                 if numberFormat != .general {
                     let presetCommand: String
@@ -4751,7 +4774,7 @@ final class LOKBridge: OfficeDocumentBridge {
                     case .date: presetCommand = ".uno:NumberFormatDate"
                     }
                     presetCommand.withCString { commandPtr in
-                        doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+                        postUnoCommandPinnedOnDedicatedThread(doc, commandPtr, nil, false)
                     }
                 }
                 applied.append("numberFormat")
@@ -4852,7 +4875,7 @@ final class LOKBridge: OfficeDocumentBridge {
     private func selectSlidePlaceholderOnDedicatedThread(docId: String, slide: Int, tabCount: Int) throws -> OfficeTwipsRect? {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        setViewOnDedicatedThread(doc, agentViewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(slide))
 
         func clearObservedRect() {
@@ -4985,7 +5008,7 @@ final class LOKBridge: OfficeDocumentBridge {
         pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
         postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
         pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        setViewOnDedicatedThread(doc, agentViewId)
         doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(doc.handle, 0, Int32(OfficeExtTextInputType.input.rawValue), text)
         doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(doc.handle, 0, Int32(OfficeExtTextInputType.end.rawValue), "")
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.escape))
@@ -4995,7 +5018,7 @@ final class LOKBridge: OfficeDocumentBridge {
     private func slidesInfoOnDedicatedThread(docId: String) throws -> [OfficeSlideInfo] {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .presentation else { throw SaveError.notPresentation(docId: docId, kind: doc.kind) }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
 
         let partCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
         var slides: [OfficeSlideInfo] = []
@@ -5022,7 +5045,7 @@ final class LOKBridge: OfficeDocumentBridge {
         // LAST slide it touched — restore the primary view as current before returning, matching
         // `sheetsInfoOnDedicatedThread`'s own "a read-only probe must never leave things parked
         // somewhere a later call did not expect" discipline (that function's own header).
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         return slides
     }
 
@@ -5043,7 +5066,7 @@ final class LOKBridge: OfficeDocumentBridge {
         }
         let title = try readField(tabCount: 1)
         let body = try readField(tabCount: 2)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         return (title: title, body: body)
     }
 
@@ -5218,15 +5241,15 @@ final class LOKBridge: OfficeDocumentBridge {
         if !applied.isEmpty {
             let readBack = try slidesReadOnDedicatedThread(docId: docId, slide: slide)
             if let title, applied.contains("title"), let got = readBack.title, got != title {
-                doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+                setViewOnDedicatedThread(doc, doc.viewId)
                 throw SaveError.slideTextVerificationFailed(docId: docId, slide: slide, field: "title")
             }
             if let body, applied.contains("body"), let got = readBack.body, got != body {
-                doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+                setViewOnDedicatedThread(doc, doc.viewId)
                 throw SaveError.slideTextVerificationFailed(docId: docId, slide: slide, field: "body")
             }
         }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         return applied
     }
 
@@ -5424,7 +5447,7 @@ final class LOKBridge: OfficeDocumentBridge {
         expectedHashes.insert(movingHash, at: to)
 
         destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(from))
         pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: from)
 
@@ -5453,7 +5476,7 @@ final class LOKBridge: OfficeDocumentBridge {
             FileHandle.standardError.write(Data(
                 "[LOKBridge slides] reorder needed \(attempts) attempt(s) before verification succeeded (or the budget was exhausted)\n".utf8))
         }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         guard ok else {
             throw SaveError.writeVerificationFailed(docId: docId, address: "reorder(\(from + 1) -> \(to + 1))")
         }
@@ -5502,7 +5525,7 @@ final class LOKBridge: OfficeDocumentBridge {
         }
 
         destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(slide))
         pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: slide)
         postUnoCommandOnDedicatedThread(doc, ".uno:DeletePage", [:], notifyWhenFinished: true)
@@ -5526,7 +5549,7 @@ final class LOKBridge: OfficeDocumentBridge {
             FileHandle.standardError.write(Data(
                 "[LOKBridge slides] delete needed \(attempts) attempt(s) before verification succeeded (or the budget was exhausted)\n".utf8))
         }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         guard ok else {
             throw SaveError.writeVerificationFailed(docId: docId, address: "delete_slide(\(slide + 1))")
         }
@@ -5600,7 +5623,7 @@ final class LOKBridge: OfficeDocumentBridge {
         let predecessorIndex = max(0, targetIndex == 0 ? 0 : targetIndex - 1)
 
         destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(predecessorIndex))
         pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: predecessorIndex)
         postUnoCommandOnDedicatedThread(doc, ".uno:InsertPage", [:], notifyWhenFinished: true)
@@ -5647,7 +5670,7 @@ final class LOKBridge: OfficeDocumentBridge {
             FileHandle.standardError.write(Data(
                 "[LOKBridge slides] add needed \(attempts) attempt(s) before verification succeeded (or the budget was exhausted)\n".utf8))
         }
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        setViewOnDedicatedThread(doc, doc.viewId)
         guard ok else {
             throw SaveError.writeVerificationFailed(docId: docId, address: "add_slide(at \(targetIndex + 1))")
         }
@@ -5723,88 +5746,91 @@ final class LOKBridge: OfficeDocumentBridge {
     /// A `nil` from `getTextSelection` is NOT an error — `SwXTextDocument::getSelection()` always
     /// constructs a `SwTransferable` for a live `SwWrtShell`, so "nothing selected" surfaces as `""`
     /// (research §3.1). An empty document legitimately reads `""`.
-    private func docsReadTextOnDedicatedThread(_ doc: OpenDocument, docId: String) throws -> String {
+    /// `keepSelection: true` leaves the agent view's whole-document selection in place instead of
+    /// resetting it — `docsInsertOnDedicatedThread` uses that selection as its observable that the
+    /// positioning dispatch has landed (see there). Every other caller resets, as before.
+    private func docsReadTextOnDedicatedThread(_ doc: OpenDocument, docId: String,
+                                               keepSelection: Bool = false) throws -> String {
         let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        setViewOnDedicatedThread(doc, agentViewId)
         // NO setPart — see this section's own header, fact 1.
         postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
 
-        // **Retry-on-empty, with a bounded pump budget.** `.uno:SelectAll` is dispatched through
-        // `postUnoCommand`, whose effect this bridge has been burned by three times for landing on a
-        // deferred internal queue rather than synchronously — the identical shape
-        // `selectionTextOnDedicatedThread` (`.uno:GoToCell`) and
-        // `selectSlidePlaceholderOnDedicatedThread` (Tab-driven selection) both already pay for.
+        // **Retry-on-empty, bounded by WALL-CLOCK time given to LibreOffice's own main loop — not
+        // by a count of our own calls.** `.uno:SelectAll` is ASYNCHRONOUS here: `doc_postUnoCommand`
+        // appends `SynchronMode=false`, and the `notifyWhenFinished` override to SYNCHRON never
+        // applies on the agent view (no callback registered there, so no listener — see
+        // `handleCallback`'s `.unoCommandResult` arm). The posted request is executed by LO's OWN
+        // main-loop thread (the one LOK starts at boot; it is also what flushes callbacks — which
+        // is why `OfficeRuntime`'s close barrier sees `ModifiedStatus=false` arrive "on its own
+        // schedule"), and only once that thread is scheduled AND wins the SolarMutex from us.
         //
-        // **What prompted it, and what is and is NOT proven — corrected after review, because the
-        // first version of this comment told a mechanism story the instrument below cannot support.**
-        //  - PROMPT: one full unscoped suite run had the single-unconditional-pump version return
-        //    `""` for a document whose saved `content.xml` assertions, in that same drill, passed.
-        //    So the file was fine and the READ was empty. That observation is real.
-        //  - NOT PROVEN: that this loop fixes it. The `""` has never recurred, and — see the
-        //    evidence line's own note below — no run has ever needed more than ONE pump, so the
-        //    extra headroom this loop adds over the old code has never once been exercised. Whether
-        //    2-5 further pumps would have rescued that read is **unobserved**.
-        //  - WITHDRAWN: the original "load-dependent" story. The measured pattern is deterministic,
-        //    not load-shaped (again, see below).
-        //  - OPEN, and named as a residual rather than quietly closed by this loop: the original
-        //    `""` is still unexplained.
+        // **The old budget measured the wrong thing.** It was five back-to-back pumps (cheap 64x64
+        // paints) on THIS thread — a few milliseconds during which this thread re-takes the
+        // SolarMutex for every call. That says nothing about whether LO's thread has run. Quiet
+        // runs mostly got away with it (0-1 pumps, sometimes 2-3); a loaded full-app-suite run
+        // (2026-10-13, 4,441 tests) did not: three `OfficeDocsCommandTests` read `""` for
+        // non-empty documents after all five pumps and refused with "the outcome is UNKNOWN".
+        // The traces show both halves of the mechanism: in the `.odt` create drill NO callback at
+        // all was flushed between the before-read and the after-read (LO's thread never ran
+        // during the whole verb — the paste's own `ModifiedStatus=true` only arrived after it
+        // returned), and in the replace drill the whole-document selection callback arrived just
+        // AFTER the read had given up — the SelectAll did execute, too late.
         //
-        // Kept regardless, because it strictly dominates the old code — the old one pumped exactly
-        // once and read once; this reads first (which the measured pattern shows is often enough on
-        // its own) and then pumps up to five times — at the cost of one extra `getTextSelection` on
-        // the common path.
+        // So the loop now yields REAL time between pumps (`OfficeDispatchPacing.poll`: this thread
+        // sleeps, holding no SolarMutex), with a short exponential backoff, up to
+        // `docsSelectAllReadBudgetNanos`. The first pump is still immediate, so the common path is
+        // unchanged (0 or 1 pumps, no sleep at all).
         //
         // **Not self-restoring, deliberately**: `""` remains reachable — a genuinely empty document
-        // simply costs the whole budget in cheap 64x64 tile paints and still answers `""`. This
-        // stops at the FIRST non-empty read rather than looping until some assertion passes.
+        // pays the whole time budget and still answers `""`. There is no synchronous observable
+        // that tells "SelectAll has not run yet" from "the document is empty" (`getTextSelection`
+        // answers `""` for both, and the command-result callback is unreachable here), so the cost
+        // of an empty document is the price of not misreading a full one. This stops at the FIRST
+        // non-empty read rather than looping until some assertion passes.
         //
         // Why an empty read matters at all: every write verb reads twice (before, to compute the
         // expected result; after, to verify it). A spurious `""` on either read makes the two
-        // disagree, so the verb REFUSES with "the outcome is UNKNOWN" — loud, not silent, but a
-        // false alarm on a write that actually succeeded is its own harm.
+        // disagree, so the verb REFUSES with "the outcome is UNKNOWN" — and a spurious `""` on the
+        // BEFORE read also changes what is written (`append` drops its paragraph separator when
+        // `before` is empty), so it is not merely a false alarm.
         var text = readSelectionTextOnDedicatedThread(doc)
-        var pumps = 0
-        while text.isEmpty, pumps < Self.docsSelectAllReadMaxPumps {
-            pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
-            text = readSelectionTextOnDedicatedThread(doc)
-            pumps += 1
-        }
-        if pumps > 0 {
-            // Permanent evidence line — and it counts **PUMPS**, deliberately, not "attempts". The
-            // first version counted attempts, which made every observed line read `needed 2
-            // attempt(s)`; a reviewer correctly pointed out that this is ONE pump, i.e. exactly what
-            // the old unconditional-pump code did, so the line could not distinguish this loop from
-            // the code it replaced. Counting pumps makes the comparison direct: **`pumps=1` is
-            // old-code-equivalent; only `pumps >= 2` is this loop doing something the old code could
-            // not.**
-            //
-            // Measured, counted rather than inferred, on a clean 15-drill run (`pkill`ed first, 0
-            // leaked helpers): those drills perform **29** whole-document reads and produce **14**
-            // lines — so 15 reads needed no pump at all, 14 needed exactly one, and **none needed
-            // two or more**. ⟹ this loop has never once done anything the old unconditional-pump
-            // code could not, which is why its efficacy against the original `""` is unobserved.
-            //
-            // (An earlier version of this note claimed the pattern was "first read of a document
-            // needs 0, every later read needs exactly 1". That is ALMOST right and therefore worth
-            // striking: `testLiveDocsReplaceIsCaseSensitiveAndAWrongCaseSearchChangesNothing`
-            // performs 4 reads and logs only 2, so at least one non-first read also needed no pump.
-            // No mechanism is claimed here beyond the counts above.)
-            //
-            // `empty=` still distinguishes a real read from a retried-and-still-empty one.
+        if text.isEmpty {
+            let outcome = OfficeDispatchPacing.poll(budgetNanos: Self.docsSelectAllReadBudgetNanos) {
+                pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
+                text = readSelectionTextOnDedicatedThread(doc)
+                return !text.isEmpty
+            }
+            // Permanent evidence line. `pumps=1` is the old single-pump code's equivalent; anything
+            // above it is this loop waiting on LO's own thread, and `ms=` says for how long.
+            // `empty=true` is either a genuinely empty document or the budget running out.
             FileHandle.standardError.write(Data(
-                "[LOKBridge docs] SelectAll read needed \(pumps) pump(s), empty=\(text.isEmpty)\n".utf8))
+                "[LOKBridge docs] SelectAll read needed \(outcome.attempts) pump(s), ms=\(Self.millis(outcome.elapsedNanos)), empty=\(text.isEmpty)\n".utf8))
         }
-        doc.handle.pointee.pClass.pointee.resetSelection?(doc.handle)
+        if !keepSelection {
+            doc.handle.pointee.pClass.pointee.resetSelection?(doc.handle)
+        }
         return text
     }
 
-    /// `docsReadTextOnDedicatedThread`'s own pump budget — the number of extra pumps AFTER the first
-    /// unpumped read, so the worst case is 5 pumps and 6 `getTextSelection` calls. Sized like
-    /// `slidePlaceholderPositionAttempts`/`docsUnoResultAttempts` rather than independently derived;
-    /// this mechanism has not earned its own number, and no observed run has ever needed more than
-    /// ONE pump, so the number is headroom rather than a measured requirement. Each pump is one cheap
-    /// 64x64 tile paint, so a genuinely empty document pays five of those and nothing else.
-    private static let docsSelectAllReadMaxPumps = 5
+    /// `docsInsertOnDedicatedThread`'s wall-clock budget for its positioning dispatch to land.
+    /// Unlike the read's budget, nothing legitimate ever burns it — the selection it watches
+    /// always collapses once the command runs — so it costs time only when LibreOffice's thread
+    /// is genuinely late, and then the alternative is refusing the verb.
+    private static let docsPositioningBudgetNanos: UInt64 = 750_000_000
+
+    /// One decimal place of milliseconds, for the evidence lines.
+    private static func millis(_ nanos: UInt64) -> String {
+        String(format: "%.1f", Double(nanos) / 1_000_000)
+    }
+
+    /// `docsReadTextOnDedicatedThread`'s wall-clock budget for LO's own main loop to execute the
+    /// posted `.uno:SelectAll`. A TIME, because what is being waited on is another thread being
+    /// scheduled, which no count of this thread's own calls can stand in for (that was the flaky
+    /// version's defect). 750 ms is far above every quiet-run need (which is 0-1 immediate pumps)
+    /// and leaves room for a CPU-saturated machine; it is also exactly what a genuinely empty
+    /// document costs per read, which is why it is not larger.
+    private static let docsSelectAllReadBudgetNanos: UInt64 = 750_000_000
 
     /// Shared entry guard for every `docs` verb: the document must be open AND must be a Writer text
     /// document. `.notTextDocument` mirrors `.notSpreadsheet`/`.notPresentation` — composed from this
@@ -5973,7 +5999,7 @@ final class LOKBridge: OfficeDocumentBridge {
         let before = try docsReadTextOnDedicatedThread(doc, docId: docId)
         let counted = Self.docsCountOccurrences(of: find, in: before)
         let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        setViewOnDedicatedThread(doc, agentViewId)
 
         if var cleared = documents[docId] {
             cleared.lastUnoCommandResult = nil
@@ -6056,9 +6082,21 @@ final class LOKBridge: OfficeDocumentBridge {
     ///
     /// Positioning is `.uno:GoToStartOfDoc`/`.uno:GoToEndOfDoc` — neither declares `Asynchron;` in
     /// its slot and neither takes any argument at all (research §6.4), so the malformed-argument
-    /// failure class does not apply to them. `resetSelection` runs FIRST regardless: `doc_paste`
-    /// REPLACES the current selection, and this bridge's own read path leaves the whole document
-    /// selected.
+    /// failure class does not apply to them.
+    ///
+    /// **The positioning is WAITED FOR, not assumed (2026-10-13).** It is posted asynchronously like
+    /// every `postUnoCommand` here, and the old code followed it with ONE immediate pump and pasted —
+    /// so on a loaded machine the paste could run before the cursor had moved, at whatever position
+    /// the agent view's cursor happened to be. The observable this uses: the before-read is taken
+    /// with `keepSelection: true`, so a non-empty document is left WHOLLY SELECTED on the agent
+    /// view, and `GoToStartOfDoc`/`GoToEndOfDoc` collapse that selection when they run (they move
+    /// without extending — measured, see `docsReadTextOnDedicatedThread`'s header). So "the agent
+    /// view's selection is empty again" means "the positioning has landed", and the paste waits
+    /// for exactly that, on `OfficeDispatchPacing.poll`'s yielding, time-bounded wait. If it never
+    /// lands within the budget the selection is reset and the verb REFUSES with
+    /// `docsPositioningUnconfirmed` — nothing has been pasted, so the document is unchanged; pasting
+    /// anyway would replace the whole document (`doc_paste` replaces the selection). An empty
+    /// document has nothing selected and only one position, so it is not waited on.
     ///
     /// `asNewParagraph` prepends a real `\n` to the pasted bytes rather than dispatching
     /// `.uno:InsertPara` — that command was located but its Execute handler was NOT vetted in the
@@ -6070,13 +6108,33 @@ final class LOKBridge: OfficeDocumentBridge {
     private func docsInsertOnDedicatedThread(docId: String, text: String, atStart: Bool,
                                              asNewParagraph: Bool) throws -> Int {
         let doc = try requireTextDocumentOnDedicatedThread(docId)
-        let before = try docsReadTextOnDedicatedThread(doc, docId: docId)
+        let before = try docsReadTextOnDedicatedThread(doc, docId: docId, keepSelection: true)
         let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
-        doc.handle.pointee.pClass.pointee.resetSelection?(doc.handle)
+        setViewOnDedicatedThread(doc, agentViewId)
+        if before.isEmpty {
+            // Nothing selected to watch collapse, and only one place to paste. Reset anyway, as
+            // before, in case a late SelectAll from the read lands now.
+            doc.handle.pointee.pClass.pointee.resetSelection?(doc.handle)
+        }
         postUnoCommandOnDedicatedThread(doc, atStart ? ".uno:GoToStartOfDoc" : ".uno:GoToEndOfDoc",
                                         [:], notifyWhenFinished: true)
-        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
+        if before.isEmpty {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
+        } else {
+            let landed = OfficeDispatchPacing.poll(budgetNanos: Self.docsPositioningBudgetNanos) {
+                pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
+                return readSelectionTextOnDedicatedThread(doc).isEmpty
+            }
+            if landed.attempts > 1 || !landed.satisfied {
+                FileHandle.standardError.write(Data(
+                    "[LOKBridge docs] \(atStart ? "GoToStartOfDoc" : "GoToEndOfDoc") needed \(landed.attempts) pump(s), ms=\(Self.millis(landed.elapsedNanos)), landed=\(landed.satisfied)\n".utf8))
+            }
+            guard landed.satisfied else {
+                doc.handle.pointee.pClass.pointee.resetSelection?(doc.handle)
+                throw SaveError.docsPositioningUnconfirmed(
+                    docId: docId, what: atStart ? "inserting at the start" : "appending at the end")
+            }
+        }
 
         // A brand-new empty document has one empty paragraph; prepending a break there would leave a
         // stray blank first paragraph, so the break is only added when there is real text to append
@@ -6131,9 +6189,45 @@ final class LOKBridge: OfficeDocumentBridge {
         }
         command.withCString { commandPtr in
             argsString.withCString { argsPtr in
-                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, argsPtr, notifyWhenFinished)
+                postUnoCommandPinnedOnDedicatedThread(doc, commandPtr, argsPtr, notifyWhenFinished)
             }
         }
+    }
+
+    /// The ONE door for `setView` in this file: asserts the view and records it as the view this
+    /// job means to act as, so every later `postUnoCommand` in the same job can be pinned to it
+    /// (`postUnoCommandPinnedOnDedicatedThread`).
+    private func setViewOnDedicatedThread(_ doc: OpenDocument, _ viewId: Int32) {
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, viewId)
+        assertedViewIds[UnsafeMutableRawPointer(doc.handle)] = viewId
+    }
+
+    /// The ONE door for `postUnoCommand` in this file. When the view this job asserted is the AGENT
+    /// view, the dispatch is first re-targeted at it through a REAL view switch — see
+    /// `OfficeDispatchPacing.viewSwitchesToTarget` for the mechanism: `setView` on a view that is
+    /// already current never touches the desktop's active frame, and the active frame — not the
+    /// current view — is what `postUnoCommand` dispatches to. Measured harm without this: in the
+    /// 2026-10-13 loaded run, an agent `docs` read's `.uno:SelectAll` selected the PERSON's whole
+    /// document (primary-view `TEXT_SELECTION_START/END/TEXT_SELECTION` callbacks, types 3/4/2, in
+    /// `testLiveOnePasteWithNewlinesBecomesSeveralRealParagraphs`) and the agent's own read came
+    /// back empty.
+    ///
+    /// The switches run back to back with the post, inside the same job, so nothing else on THIS
+    /// thread can intervene. Residual, disclosed: LibreOffice's own main-loop thread can still take
+    /// the SolarMutex between the last `setView` and `postUnoCommand` (two C calls; the C API has no
+    /// way to hold the mutex across them) and re-activate another frame in that window. The
+    /// `docs` verbs' re-read verification still catches a dispatch that lands elsewhere.
+    ///
+    /// Primary-view dispatches (save, undo, cut, slide structure) are deliberately left as they
+    /// were: pinning them would mean switching through the agent view for every human command.
+    private func postUnoCommandPinnedOnDedicatedThread(_ doc: OpenDocument, _ command: UnsafePointer<CChar>,
+                                                       _ args: UnsafePointer<CChar>?, _ notifyWhenFinished: Bool) {
+        if let target = assertedViewIds[UnsafeMutableRawPointer(doc.handle)], target != doc.viewId {
+            for viewId in OfficeDispatchPacing.viewSwitchesToTarget(target, primary: doc.viewId) {
+                doc.handle.pointee.pClass.pointee.setView?(doc.handle, viewId)
+            }
+        }
+        doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, command, args, notifyWhenFinished)
     }
 
     // MARK: - Callback translation
