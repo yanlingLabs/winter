@@ -185,7 +185,7 @@ final class BrowserLinkHeadlessTests: XCTestCase {
         await eventually("attached") { handler.attached == ["L1"] }
 
         let attach = try XCTUnwrap(daemon.requests("browserLink.attach").first?["params"] as? [String: Any])
-        XCTAssertEqual(attach["features"] as? [String], ["headless"])
+        XCTAssertEqual(attach["features"] as? [String], BrowserLinkProtocol.features)
         // Only what BOTH sides named.
         XCTAssertEqual(link.daemonFeatures, ["headless"])
     }
