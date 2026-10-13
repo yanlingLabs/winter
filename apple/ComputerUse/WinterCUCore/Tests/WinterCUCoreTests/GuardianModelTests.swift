@@ -181,18 +181,30 @@ final class GuardianModelTests: XCTestCase {
     /// was cut short is a failure, never a pass.
     static func surveyInChildren(target: String?, seeds: ClosedRange<Int>, chunk: Int = 6, deadline: TimeInterval = childDeadline,
                                  extraEnv: [String: String] = [:]) throws -> [Int: String] {
+        let chunks = stride(from: seeds.lowerBound, through: seeds.upperBound, by: chunk).map { start in
+            (target: target, seeds: start...min(start + chunk - 1, seeds.upperBound))
+        }
+        let failing = try surveyInChildren(chunks, deadline: deadline, extraEnv: extraEnv, naming: "\(seeds)")
+        return Dictionary(failing.map { ($0.key.seed, $0.value) }, uniquingKeysWith: { a, _ in a })
+    }
+
+    /// The same over any list of chunks, each with its own target (round 19, M3: the named regression tests' seeds, one
+    /// child each, all at once). A failing seed's key is its target (nil: Finder) and its number.
+    static func surveyInChildren(_ chunks: [(target: String?, seeds: ClosedRange<Int>)], deadline: TimeInterval = childDeadline,
+                                 extraEnv: [String: String] = [:], naming: String) throws -> [SurveyKey: String] {
+        let seeds = naming
         let bundle = Bundle(for: GuardianModelTests.self).bundlePath
-        var children: [(process: Process, out: Pipe, err: Pipe, seeds: ClosedRange<Int>)] = []
-        for start in stride(from: seeds.lowerBound, through: seeds.upperBound, by: chunk) {
+        var children: [(process: Process, out: Pipe, err: Pipe, seeds: ClosedRange<Int>, target: String?)] = []
+        for c in chunks {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
             p.arguments = ["xctest", "-XCTest", "WinterCUCoreTests.GuardianModelTests/testTheInvariantsHoldOverRandomInterleavings", bundle]
             var env = ProcessInfo.processInfo.environment
             env["WINTER_CU_SIM_SURVEY"] = "1"
-            env["WINTER_CU_SIM_FIRST_SEED"] = "\(start)"
-            env["WINTER_CU_SIM_SEEDS"] = "\(min(chunk, seeds.upperBound - start + 1))"
+            env["WINTER_CU_SIM_FIRST_SEED"] = "\(c.seeds.lowerBound)"
+            env["WINTER_CU_SIM_SEEDS"] = "\(c.seeds.count)"
             env["WINTER_CU_SIM_STEPS"] = "\(steps)"
-            env["WINTER_CU_SIM_TARGET"] = target
+            env["WINTER_CU_SIM_TARGET"] = c.target
             env["WINTER_CU_SIM_ONLY_SEED"] = nil
             for (k, v) in extraEnv { env[k] = v }
             p.environment = env
@@ -200,10 +212,10 @@ final class GuardianModelTests: XCTestCase {
             p.standardOutput = out
             p.standardError = err
             try p.run()
-            children.append((p, out, err, start...min(start + chunk - 1, seeds.upperBound)))
+            children.append((p, out, err, c.seeds, c.target))
         }
         let lock = NSLock()
-        var texts: [String] = []
+        var texts: [(target: String?, text: String)] = []
         var broken: [String] = []
         let group = DispatchGroup()
         for c in children {
@@ -222,7 +234,7 @@ final class GuardianModelTests: XCTestCase {
                 hung.cancel()
                 let text = String(decoding: data, as: UTF8.self)
                 lock.withLock {
-                    texts.append(text)
+                    texts.append((c.target, text))
                     // Every child must report its own survey line and exit cleanly; one that crashed or was cut short is a
                     // failure — with its stderr kept, for the report.
                     let reported = text.split(separator: "\n").contains { $0.hasPrefix("SURVEY: ") }
@@ -235,7 +247,7 @@ final class GuardianModelTests: XCTestCase {
             }
         }
         group.wait()
-        let lines = texts.flatMap { $0.split(separator: "\n").map(String.init) }
+        let lines = texts.flatMap { $0.text.split(separator: "\n").map(String.init) }
         lastSurveyInFlightChances = lines.compactMap { l -> Int? in
             guard let r = l.range(of: " times the user began working in T during an act") else { return nil }
             return Int(l[..<r.lowerBound].split(separator: " ").last ?? "")
@@ -243,14 +255,18 @@ final class GuardianModelTests: XCTestCase {
         guard broken.isEmpty else {
             throw CUError.unsupported("the survey of seeds \(seeds): \(broken.sorted().joined(separator: "; "))")
         }
-        var failing: [Int: String] = [:]
-        for l in lines where l.hasPrefix("SURVEY seed ") {
-            let rest = l.dropFirst("SURVEY seed ".count)
-            guard let colon = rest.firstIndex(of: ":"), let seed = Int(rest[..<colon]) else { continue }
-            failing[seed] = String(rest[rest.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+        var failing: [SurveyKey: String] = [:]
+        for t in texts {
+            for l in t.text.split(separator: "\n") where l.hasPrefix("SURVEY seed ") {
+                let rest = l.dropFirst("SURVEY seed ".count)
+                guard let colon = rest.firstIndex(of: ":"), let seed = Int(rest[..<colon]) else { continue }
+                failing[SurveyKey(target: t.target, seed: seed)] = String(rest[rest.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            }
         }
         return failing
     }
+
+    struct SurveyKey: Hashable { var target: String?; var seed: Int }
 
     /// The ratchet's runner itself (the review of round 17's probe): a child that crashes mid-chunk fails the survey — never
     /// a pass — and so does a child that hangs (killed at its deadline, naming its seeds).
