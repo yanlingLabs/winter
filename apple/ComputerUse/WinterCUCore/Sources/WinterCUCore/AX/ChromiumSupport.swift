@@ -41,8 +41,8 @@ enum CUChromium {
     private static var cache: [String: Bool] = [:]
     private static var enabled: Set<String> = []
 
-    /// Sets `AXManualAccessibility` once per process launch, then gives the renderer a moment to build its
-    /// tree (polling for any web area, at most ~1 s). Runs on the pid queue.
+    /// Switches the app's accessibility tree on once per process launch, then gives the renderer a moment to build it
+    /// (polling for any web area). Runs on the pid queue.
     static func enableAccessibilityOnce(_ app: NSRunningApplication) {
         let key = "\(app.processIdentifier):\(app.launchDate?.timeIntervalSince1970 ?? 0)"
         lock.lock()
@@ -50,12 +50,39 @@ enum CUChromium {
         enabled.insert(key)
         lock.unlock()
         let element = AX.app(app.processIdentifier)
-        try? AX.set(element, "AXManualAccessibility", kCFBooleanTrue)
-        for _ in 0..<10 {
-            usleep(100_000)
-            if let win = AX.element(element, kAXFocusedWindowAttribute) ?? AX.elements(element, kAXWindowsAttribute).first,
-               hasWebArea(win, depth: 0) { return }
+        let set = enableAccessibility(browser: app.bundleIdentifier.map(bundleIds.contains) ?? false,
+                                      set: { name in try? AX.set(element, name, kCFBooleanTrue) },
+                                      pageReady: {
+                                          guard let win = AX.element(element, kAXFocusedWindowAttribute) ?? AX.elements(element, kAXWindowsAttribute).first else { return false }
+                                          return hasWebArea(win, depth: 0)
+                                      },
+                                      pause: { usleep(useconds_t($0) * 1000) })
+        if set.count > 1 {
+            CULog.bind.notice("\(app.localizedName ?? "a Chromium browser", privacy: .public): no page after AXManualAccessibility — AXEnhancedUserInterface set")
         }
+    }
+
+    /// The switches set, in order: `AXManualAccessibility` (Electron's and CEF's; Chrome answers it as unsupported),
+    /// then — for a Chromium BROWSER whose page did not appear within ~1 s — `AXEnhancedUserInterface`, the one Chrome
+    /// builds its web tree on (what VoiceOver sets). The leftover probes (2026-10-13): Chrome for Testing 156, windowed
+    /// behind the user's app, answered AXManualAccessibility with kAXErrorAttributeUnsupported and showed no page —
+    /// before, in front, behind again — until AXEnhancedUserInterface, after which its page was there within 3 s.
+    /// Pure but for its effects: `set`, `pageReady` and `pause` are the world's.
+    static func enableAccessibility(browser: Bool, set: (String) -> Void, pageReady: () -> Bool, pause: (Int) -> Void) -> [String] {
+        var done = ["AXManualAccessibility"]
+        set("AXManualAccessibility")
+        for _ in 0..<10 {
+            pause(100)
+            if pageReady() { return done }
+        }
+        guard browser else { return done }
+        done.append("AXEnhancedUserInterface")
+        set("AXEnhancedUserInterface")
+        for _ in 0..<20 {
+            pause(100)
+            if pageReady() { return done }
+        }
+        return done
     }
 
     private static func hasWebArea(_ e: AXUIElement, depth: Int) -> Bool {

@@ -12,12 +12,23 @@ extension CUCore {
     /// A page's select: a combo box, or a pop-up button (Chromium's select-only combo box).
     static let webSelectRoles: Set<String> = [kAXComboBoxRole, kAXPopUpButtonRole]
 
-    /// A web page's select: a pop-up button, or a combo box whose value can't be written (an editable combo box — a
-    /// search with suggestions — is typed into instead), in web content.
+    /// A web page's select: a pop-up button, or a combo box that takes no typed text — its value can't be written, or
+    /// it has none of a text entry's attributes (an editable combo box — a search with suggestions — is typed into
+    /// instead), in web content. (The leftover probes, 2026-10-13: Chrome reads a `<div role="combobox">` select as a
+    /// combo box whose value it calls settable; the write did nothing and setValue said "set the value".)
     func isWebSelect(_ e: AXUIElement) -> Bool {
         let role = ax.string(e, kAXRoleAttribute) ?? ""
         guard Self.webSelectRoles.contains(role), isWebContent(e) else { return false }
-        return role == kAXPopUpButtonRole || !ax.isSettable(e, kAXValueAttribute)
+        return role == kAXPopUpButtonRole || !ax.isSettable(e, kAXValueAttribute) || !takesTypedText(e)
+    }
+
+    /// The attributes only an element that takes typed text has (WebKit and Chromium give them to text fields, text
+    /// areas and editable combo boxes alone).
+    static let typedTextAttributes = [kAXNumberOfCharactersAttribute, kAXSelectedTextRangeAttribute, kAXInsertionPointLineNumberAttribute]
+
+    /// Does `e` take typed text (a text entry's attributes)?
+    func takesTypedText(_ e: AXUIElement) -> Bool {
+        Self.typedTextAttributes.contains { ax.attribute(e, $0) != nil }
     }
 
     /// `e`'s descendants, breadth first, `depth` levels and at most `max` of them (`e` itself not included).
@@ -315,7 +326,12 @@ extension CUCore {
         let plain = chord.modifiers.isEmpty || chord.modifiers == [.shift]
         let watched = (plain && chord.key == .named(.tab)) || (chord.modifiers.isEmpty && chord.key == .named(.space))
             || (chord.modifiers == [.command] && chord.key == .character("a"))
-        guard a.into == nil, watched, let f = reportedFocus(t), isWebContent(f) else { return nil }
+        // With `into`, the element named is where the key goes once its focus is placed (the act refuses otherwise):
+        // watched the same as a focus already there (the leftover probes, 2026-10-13: `key("tab", { into })` into a
+        // real Chrome page left the focus where it was and the answer said only "pressed tab" — the watch was armed for
+        // keys with no `into` alone).
+        let named: AXUIElement? = a.into.flatMap { try? element($0, in: t) }
+        guard watched, let f = a.into == nil ? reportedFocus(t) : named, isWebContent(f) else { return nil }
         let focusId: AXIdentity? = AXIdentity(element: f)
         if plain, chord.key == .named(.tab) { return KeyWatch(kind: .tab(f, ax.string(f, kAXValueAttribute)), focus: focusId) }
         if chord.modifiers.isEmpty, chord.key == .named(.space), isToggleControl(f) {
@@ -373,7 +389,10 @@ extension CUCore {
             switch w.kind {
             case .tab: return focus != w.focus
             case .toggle(let e, let v): return ax.string(e, kAXValueAttribute) != v || focus != w.focus
-            case .selectAll(let e, let r, _): return selectionRange(e) != r || focus != w.focus
+            case .selectAll(let e, let r, let len):
+                // With `into` the focusing press itself moves the caret: only the whole text selected counts then.
+                guard a.into == nil else { return (selectionRange(e)?.length ?? 0) >= len || focus != w.focus }
+                return selectionRange(e) != r || focus != w.focus
             case .panel(let e, let fp, let f, let v, let sel):
                 return panelFingerprint(e, app: ax.application(t.pid)) != fp || focus != f || ax.string(e, kAXValueAttribute) != v
                     || panelSelection(e) != sel

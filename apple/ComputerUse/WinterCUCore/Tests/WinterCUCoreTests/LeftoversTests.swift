@@ -468,6 +468,63 @@ final class LeftoversTests: XCTestCase {
         XCTAssertTrue(r.detail?.contains("the focused check box did not change after space") ?? false, r.detail ?? "")
     }
 
+    // MARK: the leftover probes on a real Chrome (2026-10-13)
+
+    /// Chrome reads a `<div role="combobox">` select as a combo box whose value it calls settable: one with none of a
+    /// text entry's attributes is a select (opened and its option pressed), never a value written that does nothing.
+    func testAComboBoxThatTakesNoTypedTextIsASelectEvenWhenItsValueReadsSettable() {
+        world()
+        let combo = fakeElement(98_090), search = fakeElement(98_091)
+        ax.put(form, [kAXChildrenAttribute: ax.elements(form, kAXChildrenAttribute) + [combo, search]])
+        ax.add(combo, role: kAXComboBoxRole, title: "Size", frame: CGRect(x: 60, y: 420, width: 200, height: 30),
+               extra: [kAXParentAttribute: form, kAXValueAttribute: "Medium"])
+        ax.makeSettable(combo, kAXValueAttribute)
+        ax.add(search, role: kAXComboBoxRole, title: "Search", frame: CGRect(x: 300, y: 420, width: 200, height: 30),
+               extra: [kAXParentAttribute: form, kAXValueAttribute: "", kAXNumberOfCharactersAttribute: 0,
+                       kAXSelectedTextRangeAttribute: AXValueCreate(.cfRange, [CFRange(location: 0, length: 0)])!])
+        ax.makeSettable(search, kAXValueAttribute)
+        XCTAssertTrue(core.isWebSelect(combo), "no text entry's attributes: a select, settable or not")
+        XCTAssertFalse(core.isWebSelect(search), "an editable combo box (a search with suggestions) is typed into")
+        XCTAssertTrue(core.isWebSelect(select), "a pop-up button stays a select")
+    }
+
+    /// A key with `{ into }` is watched like one with the focus already there: Tab that left it where it was says so.
+    func testATabIntoAFieldThatLeftTheFocusWhereItWasSaysSo() async throws {
+        world()
+        let title = fakeElement(98_092)
+        ax.put(form, [kAXChildrenAttribute: ax.elements(form, kAXChildrenAttribute) + [title]])
+        ax.add(title, role: kAXTextFieldRole, title: "Title", frame: CGRect(x: 60, y: 460, width: 300, height: 24),
+               extra: [kAXParentAttribute: form, kAXValueAttribute: "Hello", kAXFocusedAttribute: true])
+        ax.focus(pid: pid, on: title)
+        let r = try await act(.key(CUKeyAction(combo: "tab", into: ref(title))))
+        XCTAssertTrue(r.detail?.contains("the keyboard focus did not move after tab (the page may not have taken the key)") ?? false, r.detail ?? "")
+        // …and one that moved it says nothing of the kind.
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            ax.put(title, [kAXFocusedAttribute: false])
+            ax.put(radios[0], [kAXFocusedAttribute: true])
+            ax.focus(pid: pid, on: radios[0])
+        }
+        let moved = try await act(.key(CUKeyAction(combo: "tab", into: ref(title))))
+        XCTAssertFalse(moved.detail?.contains("did not move") ?? false, moved.detail ?? "")
+    }
+
+    /// Chrome answers AXManualAccessibility as unsupported: a Chromium BROWSER whose page did not appear gets
+    /// AXEnhancedUserInterface; an Electron or CEF app never does, and a page that appears stops it.
+    func testChromiumAccessibilityFallsBackToEnhancedUserInterfaceForABrowserOnly() {
+        var set: [String] = []
+        XCTAssertEqual(CUChromium.enableAccessibility(browser: true, set: { set.append($0) }, pageReady: { false }, pause: { _ in }),
+                       ["AXManualAccessibility", "AXEnhancedUserInterface"])
+        XCTAssertEqual(set, ["AXManualAccessibility", "AXEnhancedUserInterface"])
+        set = []
+        XCTAssertEqual(CUChromium.enableAccessibility(browser: false, set: { set.append($0) }, pageReady: { false }, pause: { _ in }), ["AXManualAccessibility"])
+        XCTAssertEqual(set, ["AXManualAccessibility"], "Electron: never the VoiceOver switch")
+        set = []
+        var polls = 0
+        XCTAssertEqual(CUChromium.enableAccessibility(browser: true, set: { set.append($0) }, pageReady: { polls += 1; return polls >= 3 }, pause: { _ in }), ["AXManualAccessibility"])
+        XCTAssertEqual(set, ["AXManualAccessibility"], "a page that appeared: nothing more")
+    }
+
     // MARK: a key into an open panel
 
     func testAKeyIntoAPanelThatOpenedNothingSaysSo() async throws {
