@@ -1799,12 +1799,12 @@ final class LOKBridge: OfficeDocumentBridge {
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.f2))
         pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: slide)
         postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
-        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: slide)
 
         // An EMPTY placeholder gives `.uno:SelectAll` nothing to select, so every command below
         // would be a no-op indistinguishable from success. Escape back out before refusing, so the
-        // agent view is not left parked in edit mode.
-        let selected = readSelectionTextOnDedicatedThread(doc)
+        // agent view is not left parked in edit mode. Waited for in wall-clock time, so a SelectAll
+        // LibreOffice runs late is not mistaken for an empty placeholder (see the helper).
+        let selected = slidesSelectedTextAfterSelectAllOnDedicatedThread(doc, agentViewId: agentViewId, part: slide)
         guard !selected.isEmpty else {
             doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.escape))
             doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.escape))
@@ -4952,10 +4952,10 @@ final class LOKBridge: OfficeDocumentBridge {
     /// internal-dispatch shape as the positioning fix right above, one layer later in the same
     /// mechanism: `.uno:SelectAll` is `postUnoCommand`-driven (fire-and-forget, this bridge's own
     /// established "may not land synchronously" class), so a pump between it and the read is not
-    /// optional ceremony, it is what makes the read see the selection SelectAll just made. One pump,
-    /// not a poll-until-non-empty loop — an empty read here can be a GENUINELY empty placeholder,
-    /// which this bridge has no way to distinguish from "SelectAll hasn't landed yet" by content
-    /// alone, so this gives the queue one honest chance to drain rather than guessing from the result.
+    /// optional ceremony, it is what makes the read see the selection SelectAll just made.
+    /// **No longer one pump (2026-10-13)**: the wait is now WALL-CLOCK time given to LibreOffice's own
+    /// main loop (`slidesSelectedTextAfterSelectAllOnDedicatedThread`), the same fix and the same
+    /// trade the `docs` read got in the office-flake merge — see there.
     /// **Deletion-red proof (office-agent-tools T6, 2026-08-24)**: skipped the `.uno:SelectAll`
     /// dispatch itself (not just its pump), rebuilt, reran the live `info`/`read` drill — every
     /// title/body came back "(empty title placeholder)"/"(empty)": the PLACEHOLDER WAS FOUND
@@ -4968,12 +4968,58 @@ final class LOKBridge: OfficeDocumentBridge {
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.f2))
         pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
         postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
-        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
-        let text = readSelectionTextOnDedicatedThread(doc)
+        let text = slidesSelectedTextAfterSelectAllOnDedicatedThread(doc, agentViewId: agentViewId, part: part)
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.escape))
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.escape))
         return text
     }
+
+    /// The read half of every slides F2 + `.uno:SelectAll` dance: the placeholder's selected text, once
+    /// LibreOffice's own main loop has run the posted SelectAll — waited for in WALL-CLOCK time, never
+    /// by a count of this thread's own calls.
+    ///
+    /// **Why (2026-10-13, the loaded full app-suite run on main 52418c7cf)**: this used to be ONE pump
+    /// then a synchronous `getTextSelection`, the count-not-time pattern the office-flake merge removed
+    /// from the `docs` read (`docsReadTextOnDedicatedThread`'s own account of the mechanism: SelectAll
+    /// is posted asynchronously and runs on LO's thread only once that thread is scheduled and wins the
+    /// SolarMutex). `testLiveSetTextTitleOnlyAndBodyOnlyLeaveTheOtherFieldUntouchedProvenBySaveAndIndependentReopen`
+    /// read slide 2's body as `""` from a reopen whose saved `content.xml` still held "second bullet":
+    /// the trace shows the body's F2 cursor (type 24), the read, and only THEN the agent view's
+    /// SelectAll selection (type 25 `"1134, 2089, 3776, 717"`) — the command ran, too late. Since the
+    /// same merge every agent `postUnoCommand` is also preceded by a real primary -> agent view switch,
+    /// more work for LO's thread ahead of the SelectAll, which made a late landing likelier under load.
+    /// The same race would make `slides format` refuse a filled placeholder as `slidePlaceholderEmpty`.
+    ///
+    /// The first read is immediate (the common, quiet path: no sleep). An empty read then pumps and
+    /// re-reads on `OfficeDispatchPacing.poll`'s yielding backoff, stopping at the first non-empty read,
+    /// up to `slidesSelectAllReadBudgetNanos`. **The disclosed price, the docs read's own**: there is no
+    /// synchronous observable that tells "SelectAll has not run yet" from "this placeholder is empty"
+    /// (`getTextSelection` answers `""` for both), so a genuinely EMPTY placeholder pays the whole
+    /// budget and still answers `""` — once per empty field on `read`, once per empty-titled slide on
+    /// `info`, once on a `format` that then correctly refuses. That is the cost of never misreading a
+    /// filled one.
+    private func slidesSelectedTextAfterSelectAllOnDedicatedThread(_ doc: OpenDocument, agentViewId: Int32,
+                                                                   part: Int) -> String {
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
+        var text = readSelectionTextOnDedicatedThread(doc)
+        guard text.isEmpty else { return text }
+        let outcome = OfficeDispatchPacing.poll(budgetNanos: Self.slidesSelectAllReadBudgetNanos) {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
+            text = readSelectionTextOnDedicatedThread(doc)
+            return !text.isEmpty
+        }
+        // Permanent evidence line, the docs read's twin: `empty=true` is either a genuinely empty
+        // placeholder or the budget running out; `ms=` says how long LO's thread was waited on.
+        FileHandle.standardError.write(Data(
+            "[LOKBridge slides] SelectAll read (slide \(part)) needed \(outcome.attempts) more pump(s), ms=\(Self.millis(outcome.elapsedNanos)), empty=\(text.isEmpty)\n".utf8))
+        return text
+    }
+
+    /// `slidesSelectedTextAfterSelectAllOnDedicatedThread`'s wall-clock budget for LO's own main loop
+    /// to run the posted `.uno:SelectAll` — the `docs` read's figure (`docsSelectAllReadBudgetNanos`)
+    /// and reasoning: far above every quiet-run need, room for a saturated machine, and exactly what
+    /// one genuinely empty placeholder costs, which is why it is not larger.
+    private static let slidesSelectAllReadBudgetNanos: UInt64 = 750_000_000
 
     /// The write half of `readSelectedShapeTextOnDedicatedThread`'s own edit-mode dance: F2,
     /// select-all, then REPLACE the selection with `text` via ext-text-input — this bridge's own
