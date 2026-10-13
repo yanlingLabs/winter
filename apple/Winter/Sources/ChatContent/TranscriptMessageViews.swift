@@ -1399,8 +1399,9 @@ func toolRunReadImages(_ entries: [ToolRunEntry]) -> [String] {
         .filter { seen.insert($0).inserted }
 }
 
-/// How many read images a COLLAPSED row draws — the rest are reachable by expanding.
-let maxCollapsedReadImages = 6
+/// How many read images a COLLAPSED row draws (a sideways-scrolling row of compact thumbnails) — the rest are
+/// reachable by expanding.
+let maxCollapsedReadImages = 12
 
 /// What the collapsed row draws: the first `max` images, plus a note naming what it withholds.
 func toolRunCollapsedReadImages(_ images: [String],

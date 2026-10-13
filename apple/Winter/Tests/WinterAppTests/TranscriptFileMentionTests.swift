@@ -448,7 +448,8 @@ final class TranscriptFileMentionTests: XCTestCase {
         let run = [ToolRunEntry(name: "read", calls: [readCall("/d/p7.jpg"), readCall("/d/p8.jpg"),
                                                      readCall("/d/p7.jpg"), readCall("/d/doc.pdf", output: "[PDF]")])]
         XCTAssertEqual(toolRunReadImages(run), ["/d/p7.jpg", "/d/p8.jpg"])
-        let bounded = toolRunCollapsedReadImages((0..<9).map { "/d/\($0).png" })
+        XCTAssertNil(toolRunCollapsedReadImages((0..<8).map { "/d/\($0).png" }).note, "the report's eight reads all show")
+        let bounded = toolRunCollapsedReadImages((0..<15).map { "/d/\($0).png" })
         XCTAssertEqual(bounded.images.count, maxCollapsedReadImages)
         XCTAssertEqual(bounded.note, "… 3 more images — expand to see them")
         XCTAssertNil(toolRunCollapsedReadImages(["/d/a.png"]).note)
