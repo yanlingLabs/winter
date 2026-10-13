@@ -269,15 +269,29 @@ final class GuardianNamedRegressionTests: XCTestCase {
         }
     }
 
-    /// R18-a's Finder legs (round 19): the user launches from a Finder window right after an act of the agent's — a
-    /// double-click on an application, a document, or a folder (which launches nothing and is no launcher) — and every
-    /// invariant holds; the plan meets all three.
+    /// R18-a's Finder legs (round 19; the review of round 19, MEDIUM 2 — the test must DISCRIMINATE): the agent presses a link in
+    /// T (Finder: its act reaches any app), the user double-clicks an item in Finder's window, then the agent's bind
+    /// launches an app of its own (an opener act reaching only that app), and an app of the user's starts 350 ms after
+    /// the double-click. No input of theirs came between the agent's LATEST act and the start, so the launch rule's (1)
+    /// is decided by the interactive launcher alone — after the latest act that reaches the app (R18-a): an application or
+    /// a document makes the launch THEIRS (adopted); a folder launches nothing and is no launcher — the app is left in
+    /// front and said, never adopted.
     func testR18a_TheFinderLegsOfTheInteractiveLauncher() async {
-        let runs = await scenario("r18a-finder-legs", seeds: 1...40, [(300, .typing(2)), (3_000, .agentClick(.field)), (3_100, .userLaunch(700)),
-                                                                     (7_000, .quiet)])
-        for item in ["an application", "a document", "a folder"] {
-            XCTAssertTrue(runs.contains { $0.trace.contains { $0.contains("the user double-clicks \(item) in Finder's window") } },
-                          "a double-click on \(item) in some run")
+        func legs(_ item: Int) async -> [SimRun] {
+            await scenario("r18a-finder-leg-\(item)", [(300, .typing(2)), (3_000, .agentClick(.link)),
+                                                       (3_800, .finderLaunch(item, startAfter: 350, forwardAfter: 600)),
+                                                       (3_950, .agentBindLaunch(5_000)), (9_000, .quiet)])
         }
+        func verdicts(_ runs: [SimRun]) -> [String] {
+            runs.map { r in
+                r.trace.first { $0.contains("UL1 activated: front UL1") }.map { $0.contains("— the user's:") ? "theirs" : $0.contains("left alone") ? "left" : "other: " + $0 } ?? "never seen"
+            }
+        }
+        for item in [0, 1] {
+            let v = verdicts(await legs(item))
+            XCTAssertEqual(Set(v), ["theirs"], "a double-click on \(["an application", "a document"][item]) launches: their launch — \(v)")
+        }
+        let folder = verdicts(await legs(2))
+        XCTAssertEqual(Set(folder), ["left"], "a folder launches nothing and is no launcher: left in front and said — \(folder)")
     }
 }
