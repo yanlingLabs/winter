@@ -1069,6 +1069,11 @@ public final class CUCore: @unchecked Sendable {
             if let unread, unread > 0 {
                 notes.append("the read was cut short (at least \(unread) elements not read), so matches past it are missing — state({ within }) reads a part")
             }
+            // Within moments of an act, a Chromium page on another desktop may not have updated its accessibility yet:
+            // the states found are unverified (finding D).
+            if let acted = t.afterActFromMs, clock.nowMs() - acted < Self.offDesktopLagFindMs, pageMayLagOffDesktop(t) {
+                notes.append(Self.offDesktopLagSentence(t.appName))
+            }
             return TargetFindResult(elements: CUFinder.find(p.query, in: roots, formatter: formatter), page: page,
                                     note: notes.isEmpty ? nil : notes.joined(separator: "; "))
         }
@@ -1297,7 +1302,8 @@ public final class CUCore: @unchecked Sendable {
         let check = "to see what is really there, read it (state() or find() text, or something the app counts, such as a word count)"
         let label = Self.freshnessLabel(app: t.appName, where_: where_, check: check, previous: previous, digest: digest, now: now,
                                         actedMs: t.lastActionMs, appActivityMs: monitor.lastNotificationMs(pid: t.pid))
-        return Self.afterActFreshness(label, app: t.appName, previous: previous, digest: digest, now: now, actedMs: t.lastActionMs)
+        return Self.afterActFreshness(label, app: t.appName, previous: previous, digest: digest, now: now, actedMs: t.lastActionMs,
+                                      returnedMs: t.lastActReturnedMs)
     }
 
     /// FNV-1a over every byte. Pure.
@@ -1599,6 +1605,8 @@ public final class CUCore: @unchecked Sendable {
         if !used {
             monitor.unwatch(pid: pid)
             queues.forget(pid)
+            // The AXEnhancedUserInterface Winter turned on in a Chromium browser goes off with its last target.
+            CUChromium.releaseEnhancedLive(pid: pid)
         }
     }
 

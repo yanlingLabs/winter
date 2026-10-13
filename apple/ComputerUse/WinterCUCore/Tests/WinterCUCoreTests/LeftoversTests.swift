@@ -602,4 +602,87 @@ final class LeftoversTests: XCTestCase {
         XCTAssertEqual(CUCore.afterActFreshness("likely current: …", app: "Chrome", previous: (7, 1000, 1000), digest: 7, now: 60_000, actedMs: 2000),
                        "likely current: …", "an act long ago: as it was")
     }
+
+    // MARK: the after-act window runs from the act's return (probe 5, 2026-10-13)
+
+    /// An act whose answer came late (Chrome activated itself and was put back): the picture right after it still waits
+    /// and says it may predate the act — its window runs from the act's RETURN, not its input.
+    func testTheAfterActWindowRunsFromTheActsReturn() throws {
+        let label = "stale since 3 s ago: …"
+        // Input at 2000, the answer returned at 5000, the picture at 5500: within the window from the return.
+        XCTAssertTrue(CUCore.afterActFreshness(label, app: "Chrome", previous: (7, 1000, 1000), digest: 7, now: 5500, actedMs: 2000, returnedMs: 5000)
+            .contains("this picture may predate the last action"))
+        // From the input alone it would have been spent.
+        XCTAssertEqual(CUCore.afterActFreshness(label, app: "Chrome", previous: (7, 1000, 1000), digest: 7, now: 5500, actedMs: 2000), label)
+        // The wait itself: input long ago, returned just now — the picture is waited for.
+        world()
+        sys.windows[88]?.onScreen = false
+        let before = WebPressTests.image(gray: 200), after = WebPressTests.image(gray: 60)
+        var shots = 0
+        core.privateCaptureOverride = { _, _ in shots += 1; return shots <= 2 ? before : after }
+        let budget = CUImageBudget(maxLongEdge: 400, quality: 0.8)
+        let first = try XCTUnwrap(core.offScreenStill(target, nil, budget))
+        let now = CUSystemClock().nowMs()
+        _ = target.noteOffScreenShot(digest: CUCore.contentDigest(first.jpeg), at: now - 4_000)
+        target.lastActionMs = now - 3_000
+        target.lastActReturnedMs = now
+        let shot = try XCTUnwrap(core.offScreenAfterAct(target, nil, budget))
+        XCTAssertNotEqual(CUCore.contentDigest(shot.jpeg), CUCore.contentDigest(first.jpeg), "waited for the act's picture")
+    }
+
+    func testAnActsReturnIsStampedOnTheTarget() async throws {
+        world()
+        XCTAssertNil(target.lastActReturnedMs)
+        try await act(.click(CUClickAction(ref: ref(fileButton))))
+        let returned = try XCTUnwrap(target.lastActReturnedMs)
+        XCTAssertGreaterThanOrEqual(returned, try XCTUnwrap(target.lastActionMs))
+        XCTAssertEqual(target.afterActFromMs, returned)
+    }
+
+    // MARK: a Chromium page on another desktop may lag (finding D)
+
+    func testANothingChangedAnswerOffDesktopIsUnverified() {
+        for d in ["clicked “Paint”, and nothing changed that accessibility can see — check with state()",
+                  "the focused check box did not change after space (the page may not have taken the key) — click(ref) presses it",
+                  "the keyboard focus did not move after tab (the page may not have taken the key)"] {
+            let c = CUCore.offDesktopLagCaveat(d, app: "Google Chrome")
+            XCTAssertEqual(c, "Google Chrome's page is on another desktop, where it may not update its accessibility until it is seen — what it reads may predate the action, so this is unverified; screenshot({ live: true, reason }) shows the window now", d)
+        }
+        XCTAssertNil(CUCore.offDesktopLagCaveat("pressed [4] “Submit”", app: "Google Chrome"), "a plain success claims nothing changed")
+        XCTAssertNil(CUCore.offDesktopLagCaveat(nil, app: "Google Chrome"))
+    }
+
+    func testOnlyAChromiumWindowOffThisDesktopLags() {
+        world()
+        XCTAssertFalse(core.pageMayLagOffDesktop(target), "on this desktop")
+        // Off this desktop: not on screen, and not among the windows accessibility lists here.
+        sys.windows[88]?.onScreen = false
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [AXUIElement]()])
+        XCTAssertTrue(core.pageMayLagOffDesktop(target))
+        let safari = CUTarget(id: "t2", sessionId: "s", pid: pid, bundleId: "com.apple.Safari", appName: "Safari",
+                              isChromium: false, mirror: false, windowID: 88, windowTitle: "Dashboard")
+        XCTAssertFalse(core.pageMayLagOffDesktop(safari), "WebKit: not this rule")
+    }
+
+    // MARK: AXEnhancedUserInterface goes off with the process's last target
+
+    func testEnhancedUserInterfaceIsTurnedOffOnlyWhenWinterTurnedItOn() {
+        // Already on (another client's): never set, so never Winter's to turn off.
+        var set: [String] = []
+        XCTAssertEqual(CUChromium.enableAccessibility(browser: true, enhancedAlreadyOn: { true }, set: { set.append($0) }, pageReady: { false }, pause: { _ in }),
+                       ["AXManualAccessibility"])
+        XCTAssertEqual(set, ["AXManualAccessibility"])
+        var turnedOff: [Bool] = []
+        XCTAssertFalse(CUChromium.releaseEnhanced(pid: 777_001, voiceOverOn: false, set: { turnedOff.append($0) }), "not Winter's")
+        // Winter's: off with the last target, once; the next bind switches it on again.
+        CUChromium.noteEnhancedForTesting(pid: 777_002, key: "777002:1")
+        XCTAssertTrue(CUChromium.releaseEnhanced(pid: 777_002, voiceOverOn: false, set: { turnedOff.append($0) }))
+        XCTAssertEqual(turnedOff, [false])
+        XCTAssertFalse(CUChromium.isEnabledForTesting("777002:1"), "the next bind switches it on again")
+        XCTAssertFalse(CUChromium.releaseEnhanced(pid: 777_002, voiceOverOn: false, set: { turnedOff.append($0) }), "once")
+        // VoiceOver running: left on (it may have asked for it since).
+        CUChromium.noteEnhancedForTesting(pid: 777_003, key: "777003:1")
+        XCTAssertFalse(CUChromium.releaseEnhanced(pid: 777_003, voiceOverOn: true, set: { turnedOff.append($0) }))
+        XCTAssertEqual(turnedOff, [false])
+    }
 }

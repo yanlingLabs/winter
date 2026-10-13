@@ -81,6 +81,8 @@ extension CUCore {
         // What it typed is the agent's (Secure Event Input's typing evidence) — refreshed however the act ends, a failed one
         // included (review of round 14, LOW #3).
         defer { refreshSecureTypingBase(t) }
+        // However it ends (a failed act may have sent input): the after-act picture windows run from its return.
+        defer { if t.lastActionMs != nil { t.lastActReturnedMs = clock.nowMs() } }
         let acted = try await actWithVisits(p, t, token)
         var outcome = acted.0
         let inVisit = acted.1
@@ -101,6 +103,11 @@ extension CUCore {
                 logAct(p, t, failed: error)
                 throw error
             }
+        }
+        // A Chromium page on another desktop may not have updated its accessibility: a "nothing changed" is unverified.
+        if let caveat = Self.offDesktopLagCaveat(outcome.detail, app: t.appName), t.isChromium,
+           try await queues.run(t.pid, { [self] in pageMayLagOffDesktop(t) }) {
+            outcome.detail = [outcome.detail, caveat].compactMap { $0 }.joined(separator: "; ")
         }
         CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): \(Self.routeName(outcome.rung), privacy: .public)\(outcome.detail.map { " — " + $0 } ?? "", privacy: .public)")
         // What the guardian did or saw meanwhile goes out on its own (daemon lines), never inside the act's own line.

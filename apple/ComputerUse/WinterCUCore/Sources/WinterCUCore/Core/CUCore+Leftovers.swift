@@ -421,6 +421,33 @@ extension CUCore {
         return nil
     }
 
+    // MARK: a Chromium page on another desktop (finding D)
+
+    /// What says an act or key changed nothing (the helper's own words for it).
+    static let nothingChangedClaims = ["nothing changed that accessibility can see", "had no effect accessibility can see", "no visible effect",
+                                       "may not have taken the key", "did not change after", "did not move after", "still reads"]
+
+    /// The caveat a "nothing changed" answer gets when the window is a Chromium app's on ANOTHER desktop: such a page may
+    /// not update its accessibility (nor its picture) until it is seen, so the claim may predate the act's effect (the
+    /// leftover probes, 2026-10-13: Chrome full screen on its own Space — the page toggled while the answer said the
+    /// press did nothing, and find() read the box unchecked). Nil when the detail claims no such thing. Pure.
+    static func offDesktopLagCaveat(_ detail: String?, app: String) -> String? {
+        guard let d = detail, nothingChangedClaims.contains(where: { d.contains($0) }) else { return nil }
+        return offDesktopLagSentence(app)
+    }
+
+    /// How long after an act find() says its states may lag (a Chromium page on another desktop).
+    static let offDesktopLagFindMs: Double = 10_000
+
+    static func offDesktopLagSentence(_ app: String) -> String {
+        "\(app)'s page is on another desktop, where it may not update its accessibility until it is seen — what it reads may predate the action, so this is unverified; screenshot({ live: true, reason }) shows the window now"
+    }
+
+    /// Does `t`'s page lag on another desktop (a Chromium-family window off this desktop)?
+    func pageMayLagOffDesktop(_ t: CUTarget) -> Bool {
+        t.isChromium && isOffThisDesktop(t)
+    }
+
     // MARK: an off-desktop picture right after an act
 
     /// An act within this long before an off-screen picture: the picture is waited for, bounded.
@@ -436,13 +463,13 @@ extension CUCore {
     /// changes. Never moves anything.
     func offScreenAfterAct(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget,
                            token: CUCancellation.Token? = nil) throws -> CUCapturedImage? {
-        guard let acted = t.lastActionMs, clock.nowMs() - acted < Self.offScreenAfterActWindowMs else {
+        guard let acted = t.lastActionMs, let from = t.afterActFromMs, clock.nowMs() - from < Self.offScreenAfterActWindowMs else {
             return try offScreenStill(t, region, budget)
         }
         let previous = t.lastOffScreenShot
         guard let previous, previous.atMs < acted else {
             // No picture from before the act to compare with: a moment after the act, at least.
-            let since = clock.nowMs() - acted
+            let since = clock.nowMs() - from
             if since < Self.offScreenAfterActMinMs {
                 // In steps, the call's cancel (Esc) checked between them.
                 var left = Self.offScreenAfterActMinMs - since
@@ -470,15 +497,18 @@ extension CUCore {
     /// The freshness label of a picture taken within moments of an act, extended: one unchanged since before the act
     /// may predate it (an app may not redraw a window on another desktop until it is seen) — said, with the way out;
     /// a first picture says how soon after the act it was taken. Any other label as it is. Pure.
+    /// `returnedMs`: when the act's result was returned (the window runs from there; nil: from the act's input).
     static func afterActFreshness(_ label: String, app: String, previous: (digest: Int, atMs: Double, changedAtMs: Double)?,
-                                  digest: Int, now: Double, actedMs: Double?) -> String {
-        guard let acted = actedMs, now - acted < offScreenAfterActWindowMs + offScreenAfterActWaitMs + 1000, now >= acted else { return label }
+                                  digest: Int, now: Double, actedMs: Double?, returnedMs: Double? = nil) -> String {
+        guard let acted = actedMs else { return label }
+        let from = max(acted, returnedMs ?? acted)
+        guard now - from < offScreenAfterActWindowMs + offScreenAfterActWaitMs + 1000, now >= acted else { return label }
         let way = "screenshot({ live: true, reason }) takes one where the window is (the user is asked first)"
         if let previous, previous.atMs < acted, previous.digest == digest {
             return label + " — this picture may predate the last action: \(app) may not redraw a window on another desktop until it is seen; \(way)"
         }
         if previous == nil {
-            return label + " — taken \(Int((now - acted).rounded())) ms after the last action, with no earlier picture to compare: it may predate the action; \(way)"
+            return label + " — taken \(Int((now - from).rounded())) ms after the last action, with no earlier picture to compare: it may predate the action; \(way)"
         }
         return label
     }

@@ -1175,3 +1175,17 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   not wholly selected, say so (the watch was armed only for keys with no `into`; `key("tab", { into })` said "pressed tab" with the focus unmoved).
 - Floor F with no page URL to read (the page absent from the tree): the bound window's title, or its selected tab's, naming the inspect page
   refuses the act (a key went through with chrome://inspect shown).
+- `AXEnhancedUserInterface`, its cost and its end (the controller's ruling): it is what VoiceOver sets — per PROCESS, kept while the process runs
+  until a client turns it off. It moves and resizes nothing itself, and Winter never moves a browser's windows; its known side effect is that
+  window frame changes made through accessibility can animate or land in steps (window managers turn it off around their own moves). Chrome
+  builds and keeps the accessibility tree of every tab of that process while it is on (CPU and memory); the user's browsing in it is otherwise
+  unchanged. So Winter turns it on only when the page did not appear otherwise, only when it was OFF (never over another client's — VoiceOver, a
+  window manager), and turns it off again when the last target in that process is released (a release, a session's end, a lost target) —
+  unless VoiceOver is running then (it may have asked for it since). The next bind turns it on again.
+- The after-act picture window (1.17.0's ~1.5 s, and its label's) runs from when the act's RESULT returned, not from its input: an act whose
+  answer came seconds later (Chrome activated itself and was put back) had its window spent before the next screenshot.
+- A Chromium window on ANOTHER desktop may not update its accessibility (nor its picture) until it is seen: an act's "nothing changed" there
+  (no visible effect, a key not taken, a box that did not change) gets "…'s page is on another desktop, where it may not update its
+  accessibility until it is seen — what it reads may predate the action, so this is unverified; screenshot({ live: true, reason }) shows the
+  window now", and `find()` within 10 s of an act there says the same in its note. Measured: Chrome full screen on its own Space — the page
+  toggled while the answer said the press did nothing, and find() read the box unchecked.
