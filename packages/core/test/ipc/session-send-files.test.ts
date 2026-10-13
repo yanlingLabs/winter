@@ -261,13 +261,28 @@ describe("session.send / session.steer — files (code-mode file attachments)", 
     phone.close(); c.close();
   });
 
-  test("history and the remote stream carry files like images: the field passes as stored", async () => {
+  test("history and the remote stream give the phone each image and file by NAME — no `/` ever reaches a remote client", async () => {
     const { store, c, sid } = await session();
     const dir = userDir();
-    await c.request(METHODS.sessionSend, { sessionId: sid, text: "[File #1]", files: [{ n: 1, path: dir }] });
-    const m = readHistoryPage(store, { sessionId: sid }).events.find((e) => e.type === "user_message") as Extract<SessionEvent, { type: "user_message" }>;
-    expect(m.files).toEqual([{ n: 1, path: dir }]);
-    expect((filterRemoteStreamEvent(m) as typeof m).files).toEqual([{ n: 1, path: dir }]);
+    writeFileSync(join(dir, "My Report.pdf"), "x");
+    mkdirSync(join(dir, "app"));
+    await c.request(METHODS.sessionSend, { sessionId: sid, text: "[File #2] [File #1]", files: [{ n: 2, path: join(dir, "My Report.pdf") }, { n: 1, path: join(dir, "app") + "/" }] });
+    const stored = store.read(sid).find((e) => e.type === "user_message") as Extract<SessionEvent, { type: "user_message" }>;
+    expect(stored.files).toEqual([{ n: 2, path: join(dir, "My Report.pdf") }, { n: 1, path: join(dir, "app") + "/" }]);
+    const fromHistory = readHistoryPage(store, { sessionId: sid }).events.find((e) => e.type === "user_message") as typeof stored;
+    const live = filterRemoteStreamEvent(stored) as typeof stored;
+    for (const view of [fromHistory, live]) {
+      expect(view.files).toEqual([{ n: 2, path: "My Report.pdf" }, { n: 1, path: "app" }]);
+      expect(SessionEvent.safeParse(view).success).toBe(true); // the phone kit decodes `{n, path}` as before
+    }
+    // Both fields, any spelling: nothing with a `/` survives either phone path.
+    const base = { type: "user_message" as const, sessionId: sid, seq: 99, ts: 1, threadId: "main", text: "[Image #1] [File #1]", clientName: "orb" };
+    const event = { ...base, images: [{ n: 1, path: "/Users/me/a b/shot.png" }], files: [{ n: 1, path: "/" }] } as SessionEvent;
+    const phone = filterRemoteStreamEvent(event) as typeof stored;
+    for (const ref of [...phone.images!, ...phone.files!]) expect(ref.path).not.toContain("/");
+    expect(phone.images).toEqual([{ n: 1, path: "shot.png" }]);
+    expect(phone.files).toEqual([{ n: 1, path: "file" }]);
+    expect(JSON.stringify(phone)).not.toContain("/Users/");
     c.close();
   });
 

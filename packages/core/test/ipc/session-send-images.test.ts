@@ -554,14 +554,17 @@ describe("session.send / session.steer — images (code-mode image input)", () =
     phone.close(); c.close();
   });
 
-  test("history and the remote stream carry images like any field, bounded by the schema and the caps", async () => {
+  test("history and the remote stream carry images by NAME only (never a Mac path), bounded by the schema and the caps", async () => {
     const { store, c, sid, path } = await staged();
     await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path }] });
+    const name = path.split("/").pop()!;
     const page = readHistoryPage(store, { sessionId: sid });
     const m = page.events.find((e) => e.type === "user_message") as Extract<SessionEvent, { type: "user_message" }>;
-    expect(m.images).toEqual([{ n: 1, path }]);
+    expect(m.images).toEqual([{ n: 1, path: name }]);
     expect(m.text).toBe("[Image #1]");
-    expect((filterRemoteStreamEvent(m) as typeof m).images).toEqual([{ n: 1, path }]);
+    const stored = store.read(sid).find((e) => e.type === "user_message") as typeof m;
+    expect(stored.images).toEqual([{ n: 1, path }]); // the log (and the Mac) keep the path
+    expect((filterRemoteStreamEvent(stored) as typeof m).images).toEqual([{ n: 1, path: name }]);
     // The schema bounds the array and each path; the per-string cap holds whatever a path is.
     const base = { type: "user_message", sessionId: sid, seq: 1, ts: 1, threadId: "main", text: "x", clientName: "orb" };
     expect(SessionEvent.safeParse({ ...base, images: Array.from({ length: USER_MESSAGE_IMAGES_MAX + 1 }, (_, i) => ({ n: i + 1, path: "/p" })) }).success).toBe(false);

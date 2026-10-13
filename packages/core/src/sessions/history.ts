@@ -188,13 +188,20 @@ export function capEvent(event: SessionEvent, outputCap: number = DEFAULT_OUTPUT
   return capJson(event, tighterCap) as SessionEvent;
 }
 
+/** What the phone is shown of an attachment's path: its last component, never a `/` (a bare `/` reads "file"). */
+export function phoneAttachmentName(path: string): string {
+  const name = path.split("/").filter((part) => part.length > 0).pop() ?? "";
+  return name.length > 0 ? name : "file";
+}
+
 /** The thinking pill (2026-10-05, review r1): what the PHONE gets of a reasoning event. Until the
  *  phone has a view that shows a block's body, its `text` is withheld — the pill reads only
  *  `blockId`/`kind`/`title`/`truncated`/`durationMs` — so a session heavy with raw reasoning (DeepSeek's
  *  full chain of thought, up to 20,000 units a block) does not fill the 256 KiB history page or the
  *  live stream. The session log keeps the text, and the Mac (a harness connection) still gets it.
  *  Applied on BOTH phone paths (`readHistoryPage` and `filterRemoteStreamEvent`), so a block re-read
- *  from history is the same bytes it was live. Every other event comes back as the same reference. */
+ *  from history is the same bytes it was live. A user message's attachment paths are cut to names (below); every
+ *  other event comes back as the same reference. */
 export function phoneViewOf(event: SessionEvent, log?: () => readonly SessionEvent[] | undefined): SessionEvent {
   // ComputerV2 wake triggers (spine R-W3): a `computer-wake` message's text is the MODEL's — its own note and the
   // `<screen-data>` fence markup — never the phone's. It gets one daemon line built from the pair on the session's log
@@ -203,6 +210,16 @@ export function phoneViewOf(event: SessionEvent, log?: () => readonly SessionEve
     let events: readonly SessionEvent[] | undefined;
     try { events = log?.(); } catch { events = undefined; }
     return { ...event, text: computerWakePhoneLine(event.text, event.seq, events) };
+  }
+  // Composer attachments (controller ruling 2026-10-13): the phone never receives a Mac path. Each `images` /
+  // `files` entry keeps its `n` and its `path` KEY (the phone kit decodes `{n, path}` with `path` required), but
+  // the value is the file's NAME alone — enough for a chip, nothing about where it lives on the Mac.
+  if (event.type === "user_message" && (event.images !== undefined || event.files !== undefined)) {
+    return {
+      ...event,
+      ...(event.images === undefined ? {} : { images: event.images.map((r) => ({ n: r.n, path: phoneAttachmentName(r.path) })) }),
+      ...(event.files === undefined ? {} : { files: event.files.map((r) => ({ n: r.n, path: phoneAttachmentName(r.path) })) }),
+    };
   }
   if (event.type === "thinking_block") return event.text.length === 0 ? event : { ...event, text: "" };
   if (event.type === "thinking_delta" && event.text !== undefined) {

@@ -46,4 +46,8 @@
 - Same contract as images: `text` keeps `[File #n]`, `user_message.files: [{n, path}]` (`UserMessageFileRef`, ≤ `USER_MESSAGE_FILES_MAX` 20, path ≤ 4096), the model is given the path (`modelTextOf`). Any type, folders too; nothing is read, copied or staged, and no model capability is needed.
 - `checkedFileRefs` (`ipc/server.ts`) → `validateFileRefs` (`agent/stage-image.ts`), before any resume/append: harness role only (`file_reference_invalid`); code only (`file_session_not_code`); `n` unique, in `text`, ≤ 20; absolute, no `UNSAFE_PATH_CHARS` or edge whitespace; not in Read's read-deny set as spelled AND resolved; `realpath` resolves (else `file_unreadable`, `data.n`); `stat` a regular file or directory (never `open`, so a FIFO is refused unblocked). No refusal echoes a path.
 - Skew: hello `features` adds `attachment-files` (`DAEMON_FEATURE_ATTACHMENT_FILES`, `WinterClient.supportsAttachmentFiles`); without it the Mac substitutes the paths into the text. `sync.push` refuses a `user_message` with `files`.
-- Producers: `hub.send`, `WinterSession.appendUser` (send, steer, `holdForHandoff`), `LegSession.send/steer`'s 4th argument. The phone sees `files` like `images` — passed through `session.history` and the remote stream as stored (Mac paths included; neither is reduced to a name today).
+- Producers: `hub.send`, `WinterSession.appendUser` (send, steer, `holdForHandoff`), `LegSession.send/steer`'s 4th argument.
+
+## The phone never gets a Mac path
+
+- `phoneViewOf` (`sessions/history.ts`, both phone paths: `session.history` and the remote stream filter) cuts every `images` AND `files` entry to `{n, path: <basename>}` (`phoneAttachmentName`; a bare `/` reads `file`). The `path` KEY stays because the phone kit decodes `{n, path}` with `path` required; the log and the Mac keep the full path. Pinned by `test/ipc/session-send-files.test.ts` (no `/` reaches a remote client).
