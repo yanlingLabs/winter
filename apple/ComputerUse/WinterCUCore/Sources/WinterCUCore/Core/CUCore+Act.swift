@@ -175,6 +175,7 @@ extension CUCore {
             try token.check()
             t.arrivalWaitedMs = 0  // the arrival gate's budget is per act, and its wait ends on this act's cancel
             t.actToken = token
+            t.arrivalAskedThisAct = false
             try floorCheckPrivacy(t)
             try floorCheckRemoteDebugging(p, t)
             try saveFloorBeforeAct(p, t)

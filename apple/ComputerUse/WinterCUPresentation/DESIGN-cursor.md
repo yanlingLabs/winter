@@ -94,7 +94,10 @@ react before the arrow arrived. The waiting input is an AX press, a posted click
   - the budget starts again at each act and each reticle.
 - **No ask while not drawn.** The presentation reports, through `onCursorDrawn`, whether each target's cursor is
   drawn where the user can see it: shown, not covered, Reduce Motion off. While the engine knows it is not, it does
-  not ask, so a busy main thread costs nothing there. A target it has no word on is asked.
+  not ask about an act's later events, so a busy main thread costs nothing there.
+  - An act's first gated event is always asked, within the bound. That report may predate the act's own event, for
+    example an overlay just shown again whose ticker had stopped.
+  - A target the engine has no report on is asked.
 - **Esc.** The wait runs in 20 ms steps and ends on the act's cancel. Every gated site checks the cancel before
   anything irreversible: input, a focus move, rung 4's activation, a background open of a link.
 - **Input that already landed.** A row selected in a panel, or an AX scroll, sends its event with `arrive: false`:

@@ -257,20 +257,33 @@ final class CursorArrivalGateTests: XCTestCase {
         XCTAssertEqual(shell.asks.map(\.kind), ["target"], "its budget spent: the press asks nothing")
     }
 
-    @MainActor func testNoAskWhileThePresentationSaysTheCursorIsNotDrawn() async throws {
+    /// The board's "not drawn" spares the main thread every later event of an act, never its first: that word may
+    /// predate the act's own event (the overlay just shown again).
+    @MainActor func testNoAskForLaterEventsWhileTheCursorIsNotDrawn() async throws {
         world()
-        shell.arrivalFor = ["target": 0.2]
+        shell.arrivalFor = ["target": 0.1, "press": 0.1]
         core.cursorDrawn(sessionId: "s", pid: pid, windowID: 77, false)  // its window off screen, covered, Reduce Motion
         try await pressOK()
-        XCTAssertTrue(shell.asks.isEmpty, "the main thread is not asked at all")
-        XCTAssertEqual(clock.waited, 0)
+        XCTAssertEqual(shell.asks.map(\.kind), ["target"], "the act's first event asked; its press did not")
         core.cursorDrawn(sessionId: "s", pid: pid, windowID: 77, true)
         try await pressOK()
-        XCTAssertEqual(shell.asks.map(\.kind), ["target", "press"])
-        XCTAssertEqual(clock.waited, 200, accuracy: 0.001)
+        XCTAssertEqual(shell.asks.map(\.kind), ["target", "target", "press"])
         core.cursorDrawn(sessionId: "other", pid: pid, windowID: 77, false)
         try await pressOK()
-        XCTAssertEqual(shell.asks.count, 4, "another session's word is its own")
+        XCTAssertEqual(shell.asks.count, 5, "another session's word is its own")
+    }
+
+    /// Hidden, then shown (the user switches to its desktop, it is uncovered, it is bound again): the board still says
+    /// "not drawn" when the next act starts — its first event is asked anyway, and waited for.
+    @MainActor func testACursorShownAgainIsWaitedForOnTheActsFirstEvent() async throws {
+        world()
+        core.cursorDrawn(sessionId: "s", pid: pid, windowID: 77, false)
+        shell.arrivalFor = ["target": 0.2]  // the presentation now draws it, 0.2 s from the element
+        let start = clock.now
+        try await pressOK()
+        XCTAssertEqual(shell.asks.map(\.kind), ["target"])
+        XCTAssertEqual(clock.waited, 200, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(pressedAtMs) - start, 200, accuracy: 0.001, "the press lands when the arrow does")
     }
 
     func testOnlyPlaceBoundKindsAreGated() {

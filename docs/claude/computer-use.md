@@ -116,8 +116,8 @@ before it. Otherwise the page would react before the arrow got there.
   real click.
 - **The bound.** At most `cursorArrivalCapMs` = 400 ms per place: a reticle and its press share it, and the main-queue
   answer counts toward it.
-- **No ask while not drawn.** No ask while the presentation reports the cursor not drawn (`onCursorDrawn` →
-  `CUCore.cursorDrawn`).
+- **No ask while not drawn.** No ask for an act's later events while the presentation reports the cursor not
+  drawn (`onCursorDrawn` → `CUCore.cursorDrawn`). The act's first gated event is always asked.
 - **Esc.** The wait ends on the act's cancel, and every gated site checks the token before its input, focus move,
   rung-4 activation or background open.
 - **Input already landed.** It is shown with `arrive: false`, which skips the gate.

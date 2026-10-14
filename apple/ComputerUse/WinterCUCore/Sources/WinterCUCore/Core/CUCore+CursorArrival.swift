@@ -16,14 +16,21 @@ extension CUCore {
     /// so a busy main thread can't hold the act either: the budget starts again at the act's start and at each reticle
     /// ("target"), and the event after it (the press on that element) shares it.
     ///
-    /// No ask at all when the presentation said this target's cursor is not drawn where the user can see it (off screen,
-    /// another desktop, covered, Reduce Motion: `cursorDrawn`), or when the act was already cancelled. The wait itself
+    /// No ask when the act was already cancelled, nor — after the act's first gated event — when the presentation said
+    /// this target's cursor is not drawn where the user can see it (off screen, another desktop, covered, Reduce Motion:
+    /// `cursorDrawn`). The wait itself
     /// ends early on the act's cancel (an Esc): the caller's next `token.check()` then stops the act before its input.
     func awaitCursorArrival(_ t: CUTarget, kind: String) {
         if kind == "target" { t.arrivalWaitedMs = 0 }
         let budget = cursorArrivalCapMs - t.arrivalWaitedMs
-        guard budget > 0, events != nil, !Thread.isMainThread, t.actToken?.isCancelled != true,
-              cursorBoard.mayBeDrawn(sessionId: t.sessionId, pid: t.pid, windowID: t.windowID) else { return }
+        guard budget > 0, events != nil, !Thread.isMainThread, t.actToken?.isCancelled != true else { return }
+        // The act's FIRST gated event is always asked (bounded): the board's "not drawn" was written before this act's
+        // event reached the main thread, and a hidden overlay's ticker stops — a target just shown again (the user
+        // switched to its desktop, it was uncovered, it was bound again) would skip its wait. Later events of the act
+        // trust the board.
+        let first = !t.arrivalAskedThisAct
+        t.arrivalAskedThisAct = true
+        guard first || cursorBoard.mayBeDrawn(sessionId: t.sessionId, pid: t.pid, windowID: t.windowID) else { return }
         let started = clock.nowMs()
         let answer = ArrivalAnswer()
         let (session, pid, wid) = (t.sessionId, t.pid, t.windowID)
