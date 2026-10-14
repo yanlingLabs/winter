@@ -125,7 +125,9 @@ describe("the chrome group: scenarios", () => {
     expect(byName("off-desktop").desktopSwitch).toEqual({ answer: "allow", afterMs: 1_500 });
     expect(byName("the focus through Tab").chromeTrace).toBe(true);
     // The off-desktop caveat makes a "nothing happened" answer honest about a key that worked.
-    expect(keyVerdict(true, "the selection did not change after cmd+a (the page may not have taken the key); Chrome's page is on another desktop, where it may not update its accessibility until it is seen — what it reads may predate the action, so this is unverified").ok).toBe(true);
+    const caveat = "the selection did not change after cmd+a (the page may not have taken the key); Chrome's page is on another desktop, where it may not update its accessibility until it is seen — what it reads may predate the action, so this is unverified";
+    expect(keyVerdict(true, caveat, true).ok).toBe(true);
+    expect(keyVerdict(true, caveat).ok).toBe(false);   // a windowed row: the caveat changes nothing
     expect(chromeLaunchArgs({ key: "x", lang: "en", start: "material", extraArgs: ["--a"] }, "/p", "u")).toContain("--a");
     expect(byName("Autoriser").chrome).toEqual({ key: "fr-dialog", lang: "fr", start: "material", remoteDebugging: true });
   });

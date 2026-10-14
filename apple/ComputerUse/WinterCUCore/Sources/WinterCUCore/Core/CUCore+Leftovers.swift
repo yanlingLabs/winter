@@ -13,25 +13,32 @@ extension CUCore {
     static let webSelectRoles: Set<String> = [kAXComboBoxRole, kAXPopUpButtonRole]
 
     /// A web page's select: a pop-up button, or a combo box that takes no typed text — its value can't be written, or
-    /// it has none of a text entry's attributes (an editable combo box — a search with suggestions — is typed into
-    /// instead), in web content. (The leftover probes, 2026-10-13: Chrome reads a `<div role="combobox">` select as a
-    /// combo box whose value it calls settable; the write did nothing and setValue said "set the value".)
+    /// it names no editable ancestor (`takesTypedText`; an editable combo box — a search with suggestions — is typed into
+    /// instead), in web content. (The leftover probes: Chrome reads a `<div role="combobox">` select as a combo box whose
+    /// value it calls settable and which carries a text field's text attributes; the write did nothing.)
     func isWebSelect(_ e: AXUIElement) -> Bool {
         let role = ax.string(e, kAXRoleAttribute) ?? ""
         guard Self.webSelectRoles.contains(role), isWebContent(e) else { return false }
         return role == kAXPopUpButtonRole || !ax.isSettable(e, kAXValueAttribute) || !takesTypedText(e)
     }
 
-    /// The attributes only an element that takes typed text has: its editable ancestor (itself, for a field). Not the
+    /// The attributes only an element that takes typed text NAMES: its editable ancestor (itself, for a field). Not the
     /// text attributes — Chrome gives `AXNumberOfCharacters`, `AXSelectedTextRange` and `AXInsertionPointLineNumber` to a
     /// select-only `<div role="combobox">` too (measured on Chrome for Testing 156, 2026-10-14: the Size select had all
-    /// three, its value settable, and no editable ancestor; the Title field had `AXEditableAncestor` and
-    /// `AXHighestEditableAncestor`).
+    /// three, its value settable, and no editable ancestor; the Title field named `AXEditableAncestor` and
+    /// `AXHighestEditableAncestor`). Safari's select-only combo box is unmeasured.
     static let typedTextAttributes = ["AXEditableAncestor", "AXHighestEditableAncestor"]
+    /// The text attributes — the rule before the measurement, used only when the element's attribute names can't be read.
+    static let textEntryAttributes = [kAXNumberOfCharactersAttribute, kAXSelectedTextRangeAttribute, kAXInsertionPointLineNumberAttribute]
 
-    /// Does `e` take typed text (an editable ancestor — itself, for a field)?
+    /// Does `e` take typed text? By the attributes it NAMES (read twice: a failed read is unknown, never "none" — a
+    /// field never turns into a select on a read that failed); still unknown, by the text attributes (a field reads as
+    /// one, as it did before the measurement).
     func takesTypedText(_ e: AXUIElement) -> Bool {
-        Self.typedTextAttributes.contains { ax.attribute(e, $0) != nil }
+        for _ in 0..<2 {
+            if let names = ax.attributeNames(e) { return Self.typedTextAttributes.contains { names.contains($0) } }
+        }
+        return Self.textEntryAttributes.contains { ax.attribute(e, $0) != nil }
     }
 
     /// `e`'s descendants, breadth first, `depth` levels and at most `max` of them (`e` itself not included).

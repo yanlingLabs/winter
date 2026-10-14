@@ -1167,5 +1167,10 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 - A web combo box is a select when it has no editable ancestor (`AXEditableAncestor` / `AXHighestEditableAncestor` — a field is its
   own), whatever text attributes it carries: Chrome for Testing 156 gives a select-only `<div role="combobox">` `AXNumberOfCharacters`,
   `AXSelectedTextRange` and `AXInsertionPointLineNumber` too (measured), so 1.20.0's rule left it a value write that did nothing.
+  The element's attribute NAMES are read (twice: a failed read is unknown, never "none"); still unknown, the text-attribute rule decides, so
+  a field never turns into a select on a read that failed. Safari's select-only combo box is unmeasured (WebKit's attributes for it not
+  read on a real page yet).
+- A picture's label names the app in at most 60 characters, so the label and its after-act tail always fit the daemon's 800 (the daemon
+  now keeps a target screenshot's detail to 800 characters and an act's to 1,000: the 300 cut the "may predate the last action" tail).
 - Measured, no change: `key("tab", { into })` into a background Chrome page moves the focus (the app's focus on the next field ~120 ms
   after the key) while the page fires no focus event (its window is not key) — the answer saying nothing of it was right.

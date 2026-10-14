@@ -97,7 +97,7 @@ export class ChromeRig {
     const c = this.current;
     if (c === undefined) return undefined;
     return {
-      pid: c.pid, lang: c.need.lang, profile: c.profile, devToolsActivePort: existsSync(join(c.profile, "DevToolsActivePort")),
+      pid: c.pid, lang: c.need.lang, profile: c.profile, ...(c.need.fullScreen === true ? { fullScreen: true } : {}), devToolsActivePort: existsSync(join(c.profile, "DevToolsActivePort")),
       ...(c.dialogRaised === undefined ? {} : { dialogRaised: c.dialogRaised }), ...(c.dialogVia === undefined ? {} : { dialogVia: c.dialogVia }),
       ...(c.connectionAnswered === undefined ? {} : { connectionAnswered: c.connectionAnswered }), ...(c.note === undefined ? {} : { note: c.note }),
       ...(c.diag === undefined ? {} : { diag: c.diag }), ...(c.attrs === undefined ? {} : { attrs: c.attrs }), ...(c.trace === undefined ? {} : { trace: c.trace }), ...(c.readableAfter === undefined ? {} : { readableAfter: c.readableAfter }),

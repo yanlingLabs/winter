@@ -62,6 +62,13 @@ enum AX {
         return CGRect(origin: pt, size: sz)
     }
 
+    /// The attributes the element names (nil when the read failed — never "none").
+    static func attributeNames(_ e: AXUIElement) -> [String]? {
+        var names: CFArray?
+        guard AXUIElementCopyAttributeNames(e, &names) == .success else { return nil }
+        return names as? [String]
+    }
+
     /// One round trip for many attributes. Missing or failing attributes are simply absent.
     static func copyMultiple(_ e: AXUIElement, _ names: [String]) -> [String: CFTypeRef]? {
         var values: CFArray?

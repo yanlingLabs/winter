@@ -75,6 +75,8 @@ export interface ChromeObservation {
   /** The helper's own Floor F lexicon line, when it logged one during the run. */
   lexiconLine?: string;
   note?: string;
+  /** The instance's window went full screen (another desktop): the off-desktop caveat may stand in for a verdict. */
+  fullScreen?: boolean;
   /** Finding A's diagnosis, step by step (the independent reader), and the step after which the page was there. */
   diag?: Array<{ step: string; webAreas?: number; webChildren?: number; manual?: unknown; enhanced?: unknown; trusted?: unknown; error?: string }>;
   /** The diagnostic row: the attributes of the Size combo box and the Title field, and the focus trace (50 ms). */
@@ -142,10 +144,11 @@ export function saysNothingHappened(text: string): boolean {
 }
 
 /** Probe 1's verdict for one key: what the page saw against what the answer said. */
-export function keyVerdict(effect: boolean, answer: string): { ok: boolean; verdict: string } {
+export function keyVerdict(effect: boolean, answer: string, offDesktop = false): { ok: boolean; verdict: string } {
   const honest = saysNothingHappened(answer);
-  // The off-desktop caveat (finding D): "nothing happened" stated as unverified is honest whatever the page did.
-  if (honest && /so this is unverified/.test(answer)) return { ok: true, verdict: effect ? "worked; the answer said it could not verify (off-desktop caveat)" : "did nothing; the answer said so, unverified (off-desktop caveat)" };
+  // The off-desktop caveat (finding D): "nothing happened" stated as unverified is honest whatever the page did — in an
+  // off-desktop row only (a windowed row's answer never needs it, so there it changes nothing).
+  if (offDesktop && honest && /so this is unverified/.test(answer)) return { ok: true, verdict: effect ? "worked; the answer said it could not verify (off-desktop caveat)" : "did nothing; the answer said so, unverified (off-desktop caveat)" };
   if (effect && !honest) return { ok: true, verdict: "worked, and the answer did not say otherwise" };
   if (!effect && honest) return { ok: true, verdict: "did nothing in the page, and the answer SAID so" };
   if (effect && honest) return { ok: false, verdict: "worked in the page, but the answer said nothing happened" };
@@ -355,9 +358,10 @@ step("end");`,
       const focus = ev.filter((e) => e.ev === "focus").map((e) => String(e.id));
       // The focus after the Tab: a focus event, or (a background window fires none) the page's activeElement.
       const active = ev.filter((e) => e.ev === "active").map((e) => String(e.id));
-      const tab = keyVerdict(focus.includes("subtitle") || active.at(0) === "subtitle", stepOutput(ctx.output, "tab"));
-      const space = keyVerdict(ev.some((e) => e.ev === "check" && e.id === "terms"), stepOutput(ctx.output, "space"));
-      const all = keyVerdict(ev.some((e) => e.ev === "selection" && e.id === "title" && e.start === 0 && Number(e.length) > 0 && e.end === e.length), stepOutput(ctx.output, "cmd+a"));
+      const off = ctx.chrome?.fullScreen === true;
+      const tab = keyVerdict(focus.includes("subtitle") || active.at(0) === "subtitle", stepOutput(ctx.output, "tab"), off);
+      const space = keyVerdict(ev.some((e) => e.ev === "check" && e.id === "terms"), stepOutput(ctx.output, "space"), off);
+      const all = keyVerdict(ev.some((e) => e.ev === "selection" && e.id === "title" && e.start === 0 && Number(e.length) > 0 && e.end === e.length), stepOutput(ctx.output, "cmd+a"), off);
       return [
         ok(ctx),
         check(`Tab: ${tab.verdict}`, tab.ok && fact(ctx, "tab") === "ok", `${short(stepOutput(ctx.output, "tab"))} | page focus: ${focus.join(" → ")} | active after Tab: ${active.join(", ")}`),

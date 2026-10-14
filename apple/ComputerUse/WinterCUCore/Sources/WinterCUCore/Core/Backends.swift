@@ -10,6 +10,8 @@ protocol CUAXBackend: AnyObject {
     func application(_ pid: pid_t) -> AXUIElement
     func attribute(_ e: AXUIElement, _ name: String) -> CFTypeRef?
     func copyMultiple(_ e: AXUIElement, _ names: [String]) -> [String: CFTypeRef]?
+    /// The attributes the element names; nil when the read failed (unknown — never taken for "none").
+    func attributeNames(_ e: AXUIElement) -> [String]?
     func actions(_ e: AXUIElement) -> [String]
     func isSettable(_ e: AXUIElement, _ name: String) -> Bool
     func set(_ e: AXUIElement, _ name: String, _ value: CFTypeRef) throws
@@ -57,6 +59,7 @@ final class CULiveAX: CUAXBackend {
     func application(_ pid: pid_t) -> AXUIElement { AX.app(pid) }
     func attribute(_ e: AXUIElement, _ name: String) -> CFTypeRef? { AX.attribute(e, name) }
     func copyMultiple(_ e: AXUIElement, _ names: [String]) -> [String: CFTypeRef]? { AX.copyMultiple(e, names) }
+    func attributeNames(_ e: AXUIElement) -> [String]? { AX.attributeNames(e) }
     func actions(_ e: AXUIElement) -> [String] { AX.actions(e) }
     func isSettable(_ e: AXUIElement, _ name: String) -> Bool { AX.isSettable(e, name) }
     func set(_ e: AXUIElement, _ name: String, _ value: CFTypeRef) throws { try AX.set(e, name, value) }

@@ -1315,10 +1315,17 @@ public final class CUCore: @unchecked Sendable {
         let previous = t.noteOffScreenShot(digest: digest, at: now)
         let where_ = elsewhere ? "on another desktop (another Space or full screen)" : "while it is not on screen (minimized or hidden)"
         let check = "to see what is really there, read it (state() or find() text, or something the app counts, such as a word count)"
-        let label = Self.freshnessLabel(app: t.appName, where_: where_, check: check, previous: previous, digest: digest, now: now,
+        let app = Self.labelAppName(t.appName)
+        let label = Self.freshnessLabel(app: app, where_: where_, check: check, previous: previous, digest: digest, now: now,
                                         actedMs: t.lastActionMs, appActivityMs: monitor.lastNotificationMs(pid: t.pid))
-        return Self.afterActFreshness(label, app: t.appName, previous: previous, digest: digest, now: now, actedMs: t.lastActionMs,
+        return Self.afterActFreshness(label, app: app, previous: previous, digest: digest, now: now, actedMs: t.lastActionMs,
                                       returnedMs: t.lastActReturnedMs)
+    }
+
+    /// The app's name as a picture's label says it (three times): at most 60 characters, so the label with its
+    /// after-act tail stays inside the daemon's 800 (`SCREENSHOT_DETAIL_CAP`) whatever the app calls itself. Pure.
+    static func labelAppName(_ name: String) -> String {
+        name.count <= 60 ? name : String(name.prefix(59)) + "…"
     }
 
     /// FNV-1a over every byte. Pure.

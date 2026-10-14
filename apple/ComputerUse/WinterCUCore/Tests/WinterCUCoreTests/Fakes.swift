@@ -120,6 +120,14 @@ final class FakeAX: CUAXBackend {
         onRead?("\(token(e)):\(name)")
         return attrs[AXIdentity(element: e)]?[name]
     }
+    /// Element tokens whose attribute-name read fails, and how many more times (a failed read: nil).
+    var namesFailures: [Int32: Int] = [:]
+    func attributeNames(_ e: AXUIElement) -> [String]? {
+        let t = token(e)
+        if let n = namesFailures[t], n > 0 { namesFailures[t] = n - 1; return nil }
+        guard let d = attrs[AXIdentity(element: e)] else { return nil }
+        return Array(d.keys)
+    }
     func copyMultiple(_ e: AXUIElement, _ names: [String]) -> [String: CFTypeRef]? {
         let d = attrs[AXIdentity(element: e)] ?? [:]
         var out: [String: CFTypeRef] = [:]
