@@ -21,10 +21,10 @@ interface Subscription {
   subscriptionId: string; connection: CoworkConnection; principalId: string; ids: string[];
   deadline: number; leaseExpiresAt: string; seq: number; sink: CoworkWatchSink;
   snapshots: string[]; signatures: Map<string, string>;
-  dirty: boolean; commits: number; refetchRequired: boolean; hintNotBefore: number; retries: number;
+  dirty: boolean; commits: number; refetchRequired: boolean; hintNotBefore: number; firstDirtyAt: number | null; lastReadAt: number | null; retries: number;
   expiry?: ReturnType<typeof setTimeout>; maintenance?: ReturnType<typeof setInterval>;
 }
-const MAX_IDS = 32, MAX_CONNECTION_WATCHES = 4, MAX_COALESCED_COMMITS = 128, COALESCE_MS = 100, MAX_READ_RETRIES = 2;
+const MAX_IDS = 32, MAX_CONNECTION_WATCHES = 4, MAX_COALESCED_COMMITS = 128, COALESCE_MS = 100, MAX_WAIT_MS = 500, MAX_READ_RETRIES = 2;
 const digest = (snapshot: CoworkWorkspace, position: number) => createHash("sha256").update(JSON.stringify([snapshot, position])).digest("hex");
 
 /** Ephemeral delivery only. Canonical snapshots/outbox remain in runtime-state.db.
@@ -46,6 +46,7 @@ export class CoworkWorkspaceWatches {
     if (this.unsubscribe) return;
     this.unsubscribe = this.db.onCommittedWrite(() => {
       for (const watch of this.subscriptions.values()) {
+        if (!watch.dirty) watch.firstDirtyAt = this.now();
         watch.dirty = true;
         watch.hintNotBefore = this.now() + COALESCE_MS; watch.retries = 0;
         // One counter and at most32 IDs, never an unbounded event/payload queue.
@@ -65,7 +66,7 @@ export class CoworkWorkspaceWatches {
     const watch: Subscription = { subscriptionId: `watch_${randomUUID()}`, connection: { ...connection }, principalId: current.principalId,
       ids: [...ids], deadline: 0, leaseExpiresAt: "", seq: 0, sink, snapshots: [...ids],
       signatures: new Map(current.workspaces.map(({ snapshot, position }) => [snapshot.workspaceId, digest(snapshot, position)])),
-      dirty: false, commits: 0, refetchRequired: false, hintNotBefore: 0, retries: 0 };
+      dirty: false, commits: 0, refetchRequired: false, hintNotBefore: 0, firstDirtyAt: null, lastReadAt: null, retries: 0 };
     this.subscriptions.set(watch.subscriptionId, watch);
     this.observe();
     this.extend(watch);
@@ -129,9 +130,8 @@ export class CoworkWorkspaceWatches {
     for (const watch of [...this.subscriptions.values()]) this.maintainOne(watch);
   }
   private schedule(): void {
-    if (this.closed || !this.subscriptions.size) return;
-    if (this.queued) clearTimeout(this.queued);
-    // Trailing100ms coalescing; dirty state survives resets and transport backpressure.
+    if (this.closed || !this.subscriptions.size || this.queued) return;
+    // Keep the earlier wakeup. Trailing coalescing is capped by each scope's first dirty time.
     this.queued = setTimeout(() => { this.queued = undefined; this.flush(); }, COALESCE_MS);
     this.queued.unref();
   }
@@ -148,8 +148,12 @@ export class CoworkWorkspaceWatches {
       if (connectionId !== undefined && watch.connection.connectionId !== connectionId) continue;
       if (!watch.dirty && !watch.snapshots.length) continue;
       if (this.now() >= watch.deadline) { this.end(watch, "expired"); continue; }
-      if (!watch.snapshots.length && this.now() < watch.hintNotBefore) { this.schedule(); continue; }
+      const now = this.now();
+      if (watch.lastReadAt !== null && now - watch.lastReadAt < COALESCE_MS) { this.schedule(); continue; }
+      if (!watch.snapshots.length && now < watch.hintNotBefore &&
+          (watch.firstDirtyAt === null || now - watch.firstDirtyAt < MAX_WAIT_MS)) { this.schedule(); continue; }
       try {
+        watch.lastReadAt = now;
         // Recheck every enrolled workspace and current host principal at each delivery.
         const current = this.authorized(watch);
         let blocked = false;
@@ -161,14 +165,14 @@ export class CoworkWorkspaceWatches {
         }
         if (blocked || !this.subscriptions.has(watch.subscriptionId) || !watch.dirty) continue;
         const changed = current.workspaces.filter(({ snapshot, position }) => watch.signatures.get(snapshot.workspaceId) !== digest(snapshot, position));
-        if (!changed.length) { watch.dirty = false; watch.commits = 0; watch.refetchRequired = false; watch.retries = 0; continue; }
+        if (!changed.length) { watch.dirty = false; watch.firstDirtyAt = null; watch.commits = 0; watch.refetchRequired = false; watch.retries = 0; continue; }
         const revisions = changed.map(({ snapshot }) => {
           const { workspaceId, configRevision, grantRevision, instructionRevision, leaseEpoch } = snapshot;
           return { workspaceId, configRevision, grantRevision, instructionRevision, leaseEpoch };
         });
         if (this.send(watch, { phase: "change", revisions, refetchRequired: watch.refetchRequired }) !== "sent") continue;
         for (const { snapshot, position } of changed) watch.signatures.set(snapshot.workspaceId, digest(snapshot, position));
-        watch.dirty = false; watch.commits = 0; watch.refetchRequired = false; watch.retries = 0;
+        watch.dirty = false; watch.firstDirtyAt = null; watch.commits = 0; watch.refetchRequired = false; watch.retries = 0;
       } catch (error) {
         if (this.authorityFailure(error)) this.end(watch, "authority_revoked");
         else this.retryRead(watch);
@@ -180,6 +184,7 @@ export class CoworkWorkspaceWatches {
   }
   private retryRead(watch: Subscription): void {
     // Bounded timer retries; preserve debt for the next commit/drain/renew and lease expiry.
+    if (!watch.dirty) watch.firstDirtyAt = this.now();
     watch.dirty = true; watch.refetchRequired = true;
     watch.hintNotBefore = this.now() + COALESCE_MS;
     if (watch.retries < MAX_READ_RETRIES) { watch.retries++; this.schedule(); }

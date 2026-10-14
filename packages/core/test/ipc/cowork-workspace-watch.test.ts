@@ -215,3 +215,22 @@ test("W6: authority refusal never retries even if a malformed response claims re
     expect(delays).toEqual([20_000]); expect(attempts).toBe(1); await lease.detach();
   } finally { globalThis.setTimeout = originalTimer; }
 });
+test("W1b: live Unix hints arrive during2s of50ms writes instead of waiting for quiet", async () => {
+  const f = await boot(), observed: Array<{ at: number; frame: CoworkWatchFrame }> = [];
+  const client = await WinterClient.connect({ socketPath: join(f.home, "run/core.sock"), token: daemon!.tokens.harness, clientName: "steady-writer", onEvent: () => {}, onWorkspaceWatch: frame => observed.push({ at: performance.now(), frame }) }); clients.push(client);
+  const lease = await client.watchWorkspaces(f.ids); await until(() => observed.some(value => value.frame.phase === "snapshot"));
+  const start = performance.now();
+  for (let index = 0; index < 40; index++) {
+    await client.cowork("workspace.update", { workspaceId: f.ids[0]!, requestId: `live-steady-${index}`, expectedRevision: index + 1, title: `Steady-${index}` });
+    await Bun.sleep(50);
+  }
+  const end = performance.now(), changes = observed.filter(value => value.frame.phase === "change");
+  expect(changes.length).toBeGreaterThanOrEqual(3);
+  expect(changes[0]!.at - start).toBeLessThan(650); //500ms deadline + ordinary host scheduler/RPC slack
+  expect(changes[0]!.at).toBeLessThan(end - 1000);
+  console.log(JSON.stringify({ kind: "workspace-watch-live-fairness-v1", commits: 40, intervalMs: 50,
+    firstHintMs: Math.round((changes[0]!.at - start) * 1000) / 1000, hintsDuringBurst: changes.length,
+    burstMs: Math.round((end - start) * 1000) / 1000 }));
+  await until(() => observed.some(value => value.frame.phase === "change" && value.frame.revisions[0]?.configRevision === 41));
+  await lease.detach();
+}, 10_000);

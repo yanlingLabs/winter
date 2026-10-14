@@ -14,8 +14,12 @@ expiry and 20,000ms recommended renewal interval. Notifications use the separate
 JSON-RPC method `workspace.watch`, with `snapshot`, `change` and `ended` phases and
 an independent ephemeral sequence starting at 1. Snapshot is emitted once per ID
 and carries the same safe complete/summary projection as `workspace.get`.
-Changes are coalesced by a trailing 100 ms timer; a dirty scope remains pending
-through timer resets and slow-writer pauses. Idle drain calls return before safe
+Changes are coalesced by a 100 ms trailing window with a 500 ms maximum wait; a dirty scope remains pending
+through later commits and slow-writer pauses. The clean-to-dirty timestamp is
+retained until canonical delivery/no-change resolution, and an already armed
+earlier timer is kept. Snapshot/read attempts stay at least 100 ms apart, including
+after transient read failure; the 500 ms deadline does not weaken authorization
+or discharge dirty state after a blocked send. Idle drain calls return before safe
 snapshot/authorization reads when no dirty state or initial snapshot is pending.
 Changes carry only current workspace revisions; consumers refetch canonical
 `workspace.get`/detail pages, even for lifecycle/operation changes whose desired
@@ -151,3 +155,33 @@ retry tests exercise client scheduling/failure classification against the actual
 isolated Unix lease; the malformed decoder test is a bounded local socket double,
 not canonical daemon execution evidence. Logs/receipts are retained under
 `out/workspace-watch/w-correction-*`.
+
+
+## W1b fair delivery correction
+
+The pure trailing debounce at `b19198ea1b52130cf6b63aaf1e8f13d560b16fb4`
+could defer hints indefinitely under sustained commits. This narrow successor
+preserves `145d3eaf` and `b19198ea`, captures `firstDirtyAt` on clean-to-dirty,
+keeps already armed wakeups, and permits delivery at the earlier of trailing quiet
+or 500 ms from first dirty. Every actual safe read still checks current authority
+and is spaced by at least 100 ms; backpressure/transient errors retain pending
+state/refetch debt. W2–W7 behavior and authority/transport limits are preserved.
+
+The fairness regression uses the production timer callbacks with a controlled
+monotonic clock and actual canonical DB writes every 50 ms for 2 seconds. It
+asserts delivery by the exact 500 ms deadline while writes continue, minimum read/
+delivery spacing, and final revision delivery. A separate real-time Unix RPC
+regression also writes every 50 ms for 2 seconds and checks delivery during the
+burst (650 ms observation bound includes ordinary host scheduler/RPC slack). These
+are local source/RPC checks; paired transport, VM and activation remain unproven.
+
+W1b verification: 102 focused Core tests / 1,028 assertions pass without skips,
+including controlled and live Unix fairness and the actual 20-second renewal.
+Core TypeScript and whitespace checks pass. Other source/consumer/protocol files
+are unchanged from the accepted b191 correction. The live fairness log retains
+its measured first-hint delay and count during the burst; target timing is not a
+hard host scheduler latency guarantee. No PR/push or activation occurred.
+
+A retained separate live run observed firstHintMs=513.395, four hints during a
+2,124.150 ms burst of 40 writes; the controlled callback test separately proves
+the exact 500 ms scheduling deadline and 100 ms minimum canonical read spacing.

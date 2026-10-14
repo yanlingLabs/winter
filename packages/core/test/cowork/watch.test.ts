@@ -28,6 +28,31 @@ function fixture(count = 1) {
   const watch = (scope = ids, conn = connection) => service.watch(conn, { workspaceIds: scope }, sink);
   return { db, records, service, frames, host, ids, sink, watch, flushNow, setPrincipal: (value?: string) => { principal = value; }, block: (value: boolean) => { blocked = value; }, clock: (value: number, date = wall) => { mono = value; wall = date; } };
 }
+/** Controlled monotonic clock + actual production queued callbacks, not manual flushes. */
+function controlledTimers(f: ReturnType<typeof fixture>) {
+  let now = 0;
+  const originalSet = globalThis.setTimeout, originalClear = globalThis.clearTimeout;
+  const queued = new Map<ReturnType<typeof setTimeout>, { at: number; run: () => void }>();
+  f.service.watches.flush = f.flushNow;
+  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+    const timer = originalSet(() => {}, 1_000_000); timer.unref();
+    queued.set(timer, { at: now + (args[1] ?? 0), run: () => { if (typeof args[0] === "function") args[0](); } });
+    return timer;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: ReturnType<typeof setTimeout>) => { queued.delete(timer); originalClear(timer); }) as typeof clearTimeout;
+  return {
+    advance(to: number) {
+      while (true) {
+        const entry = [...queued.entries()].filter(([, task]) => task.at <= to).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!entry) break;
+        queued.delete(entry[0]); originalClear(entry[0]); now = entry[1].at; f.clock(now); entry[1].run();
+      }
+      now = to; f.clock(now);
+    },
+    now: () => now,
+    restore() { for (const timer of queued.keys()) originalClear(timer); queued.clear(); globalThis.setTimeout = originalSet; globalThis.clearTimeout = originalClear; },
+  };
+}
 const last = (frames: Frame[]) => frames.at(-1)!;
 test("canonical safe snapshots, shared DB writers, concurrent Projects, no conversations or redaction leaks", () => {
   const f = fixture(2), lease = f.watch(); f.service.watches.flush();
@@ -197,15 +222,40 @@ test("W5: raw autocommit is invisible; rolled-back savepoint may signal but neve
   f.clock(200); f.flushNow(); expect(f.frames).toEqual([]); expect(f.records.get(f.ids[0]!).title).toBe("Raw");
 });
 test("W3: transient database errors schedule at most two retry timers before holding dirty state", () => {
-  const f = fixture(); f.watch(); f.flushNow(); f.frames.length = 0;
-  const read = f.records.sources.bind(f.records); f.records.sources = () => { throw new Error("SQLITE_BUSY"); };
-  f.records.updateTitle({ principalId: "local", requestId: "bounded", expectedRevision: 1 }, f.ids[0]!, "Pending");
-  const original = globalThis.setTimeout; let retryTimers = 0;
-  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => { if (args[1] === 100) retryTimers++; return original(...args); }) as typeof setTimeout;
+  const f = fixture(), timers = controlledTimers(f);
   try {
-    for (const time of [100, 200, 300, 400]) { f.clock(time); f.flushNow(); }
-    expect(retryTimers).toBe(2); expect(f.frames).toEqual([]); expect(f.service.watches.size).toBe(1);
-    f.records.sources = read; f.clock(500); f.flushNow();
+    f.watch(); timers.advance(100); f.frames.length = 0;
+    const read = f.records.sources.bind(f.records); let reads = 0;
+    f.records.sources = () => { reads++; throw new Error("SQLITE_BUSY"); };
+    timers.advance(150);
+    f.records.updateTitle({ principalId: "local", requestId: "bounded", expectedRevision: 1 }, f.ids[0]!, "Pending");
+    timers.advance(900);
+    expect(reads).toBe(3); expect(f.frames).toEqual([]); expect(f.service.watches.size).toBe(1);
+    f.records.sources = read; timers.advance(1000); f.flushNow();
     expect(last(f.frames)).toMatchObject({ phase: "change", refetchRequired: true });
-  } finally { globalThis.setTimeout = original; }
+  } finally { f.service.close(); timers.restore(); }
+});
+test("W1b: actual queued callbacks deliver during50ms commits for2s, within500ms max wait", () => {
+  const f = fixture(), timers = controlledTimers(f), delivered: Array<{ at: number; frame: Frame }> = [];
+  const sink = { send(frame: Frame): "sent" { delivered.push({ at: timers.now(), frame }); return "sent"; } };
+  const sourceRead = f.records.sources.bind(f.records), readAttempts: number[] = [];
+  f.records.sources = id => { readAttempts.push(timers.now()); return sourceRead(id); };
+  try {
+    f.service.watch(connection, { workspaceIds: f.ids }, sink); timers.advance(100);
+    const firstDirtyAt = 150;
+    for (let index = 0; index < 40; index++) {
+      timers.advance(firstDirtyAt + index * 50);
+      f.records.updateTitle({ principalId: "local", requestId: `steady-${index}`, expectedRevision: index + 1 }, f.ids[0]!, `Steady-${index}`);
+    }
+    const changes = delivered.filter(value => value.frame.phase === "change");
+    expect(changes.length).toBeGreaterThanOrEqual(3);
+    expect(changes[0]!.at).toBeLessThanOrEqual(firstDirtyAt + 500);
+    expect(changes[0]!.at).toBeLessThan(2150); // delivered while writes were still continuing
+    for (let index = 1; index < changes.length; index++) expect(changes[index]!.at - changes[index - 1]!.at).toBeGreaterThanOrEqual(100);
+    timers.advance(2250);
+    const final = delivered.at(-1)!.frame;
+    expect(final).toMatchObject({ phase: "change", revisions: [{ configRevision: 41 }] });
+    const distinctReadTimes = [...new Set(readAttempts)];
+    for (let index = 1; index < distinctReadTimes.length; index++) expect(distinctReadTimes[index]! - distinctReadTimes[index - 1]!).toBeGreaterThanOrEqual(100);
+  } finally { f.service.close(); timers.restore(); }
 });
