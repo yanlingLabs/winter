@@ -32,6 +32,8 @@ import WinterProtocol
             case "workspace.source.list": return try json(["sources": [source], "nextCursor": NSNull()])
             case "workspace.policy.get": return try json(["policy": policy, "entries": [], "nextCursor": NSNull()])
             case "workspace.operation.get": return try json(["operationId": "operation", "workspaceId": "workspace", "revision": revision, "status": "pending", "terminal": false])
+            // An older metadata-only daemon must not be mistaken for an instruction initializer.
+            case "workspace.instructions.get", "workspace.instructions.provenance": throw RpcError(code: -32601, message: "Method not found")
             default:
                 if failMutation { throw NSError(domain: "lost-response", code: 1) }
                 revision += 1

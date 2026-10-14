@@ -78,6 +78,9 @@ struct CoworkWorkspaceView: View {
                             Text("Default approvals: \(policy.defaultPolicy.rawValue)")
                             Text(workspace.automaticPublication ? "GitHub feature-branch publication is automatic." : "Publication is manual or does not currently apply.")
                         }
+                        if let guidance = model.guidance, guidance.workspaceId == workspace.workspaceId {
+                            guidanceEditor(guidance)
+                        }
                         HStack {
                             Text("Sources").font(.headline)
                             Spacer()
@@ -123,6 +126,85 @@ struct CoworkWorkspaceView: View {
             Text(revoke ? "Access will be revoked even if this is the last source. The workspace will retain an unavailable source and dependent work will be blocked." : "Dependent work is blocked immediately. The backend still needs to acknowledge detachment; workspace data is retained.")
         }
         .sheet(isPresented: $showingCreate) { creation }
+    }
+
+    private func guidanceEditor(_ state: CoworkWorkspaceModel.Guidance) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Shared WINTER.md").font(.headline)
+                Spacer()
+                Button("Refresh instructions", systemImage: "arrow.clockwise") { Task { await model.refreshInstructions(workspaceId: state.workspaceId) } }
+                    .disabled(model.guidanceBusy)
+            }
+            Text("These instructions are shared by every conversation and subagent in this workspace. Host permissions are managed separately.")
+                .font(.callout).foregroundStyle(.secondary)
+            if model.guidanceBusy { ProgressView("Updating shared instructions…") }
+            if let current = state.current {
+                Text("Instruction revision \(current.instructionRevision) · \(current.bytes) bytes").font(.caption)
+                Label(state.available ? "Conversation refresh required" : "Shared instructions unavailable",
+                      systemImage: state.available ? "arrow.triangle.2.circlepath" : "exclamationmark.triangle")
+                    .font(.callout).foregroundStyle(.orange)
+            } else {
+                Text("Shared instructions unavailable. Refresh to load the existing workspace file.")
+                    .foregroundStyle(.secondary)
+            }
+            if let message = state.message { Text(message).font(.callout).textSelection(.enabled) }
+            if let receipt = state.receipt {
+                Text("Host save recorded at instruction revision \(receipt.value.instructionRevision).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let draft = state.draft {
+                TextEditor(text: Binding(get: { model.guidance?.workspaceId == state.workspaceId ? (model.guidance?.draft ?? draft) : draft },
+                                         set: { model.editInstructions($0, workspaceId: state.workspaceId) }))
+                    .font(.system(.body, design: .monospaced)).frame(minHeight: 180)
+                    .accessibilityLabel("Shared workspace instructions draft")
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                let valid = draft.utf8.count <= CoworkWorkspaceModel.instructionMaxBytes && !draft.contains("\0")
+                Text("\(draft.utf8.count) / \(CoworkWorkspaceModel.instructionMaxBytes) UTF-8 bytes\(state.hasUnsavedChanges ? " · unsaved draft" : "")")
+                    .font(.caption).foregroundStyle(valid ? Color.secondary : Color.red)
+                if !valid { Text("The draft exceeds the file limit or contains a NUL character.").font(.caption).foregroundStyle(.red) }
+                HStack {
+                    Button("Save instructions") {
+                        Task { await model.saveInstructions(workspaceId: state.workspaceId, expectedDraft: draft,
+                                                           expectedRevision: state.current?.instructionRevision, expectedDigest: state.current?.digest) }
+                    }
+                        .disabled(model.guidanceBusy || !state.canSave || !valid)
+                    if state.hasUnconfirmedSave {
+                        Button("Retry pending save") { Task { await model.retryInstructionSave(workspaceId: state.workspaceId, requestId: state.pendingRequestId) } }.disabled(model.guidanceBusy)
+                    }
+                }
+            }
+            if state.conflict {
+                Text("The shared file changed. Compare the current content with your retained draft before saving.")
+                    .foregroundStyle(.orange)
+                if state.available, let current = state.currentContent {
+                    DisclosureGroup("Current shared content") {
+                        ScrollView { Text(current).font(.system(.body, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                            .frame(maxHeight: 180)
+                    }
+                    HStack {
+                        Button("Keep my draft against this version") { model.reviewInstructionConflict(keepDraft: true, workspaceId: state.workspaceId, expectedRevision: state.current?.instructionRevision, expectedDigest: state.current?.digest) }
+                        Button("Use current content") { model.reviewInstructionConflict(keepDraft: false, workspaceId: state.workspaceId, expectedRevision: state.current?.instructionRevision, expectedDigest: state.current?.digest) }
+                    }.disabled(model.guidanceBusy || state.hasUnconfirmedSave)
+                }
+            }
+            if let pending = state.pendingContent {
+                DisclosureGroup("Content of the unconfirmed save") {
+                    ScrollView { Text(pending).font(.system(.body, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                        .frame(maxHeight: 180)
+                }
+            }
+            if let provenance = state.provenance {
+                DisclosureGroup("Instruction provenance") {
+                    ForEach(Array(provenance.entries.enumerated()), id: \.offset) { _, entry in
+                        Text(entry.guestPath).textSelection(.enabled)
+                        Text(entry.digest).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    }
+                    Text("Repository instruction discovery is unavailable until Cowork execution is ready.").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }.padding().frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var creation: some View {
