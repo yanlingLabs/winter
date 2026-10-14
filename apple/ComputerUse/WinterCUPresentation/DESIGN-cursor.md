@@ -92,6 +92,13 @@ react before the arrow arrived. The waiting input is an AX press, a posted click
   - the main queue's answer counts toward it;
   - a reticle and the press on its element share one budget;
   - the budget starts again at each act and each reticle.
+- **No ask while not drawn.** The presentation reports, through `onCursorDrawn`, whether each target's cursor is
+  drawn where the user can see it: shown, not covered, Reduce Motion off. While the engine knows it is not, it does
+  not ask, so a busy main thread costs nothing there. A target it has no word on is asked.
+- **Esc.** The wait runs in 20 ms steps and ends on the act's cancel. Every gated site checks the cancel before
+  anything irreversible: input, a focus move, rung 4's activation, a background open of a link.
+- **Input that already landed.** A row selected in a panel, or an AX scroll, sends its event with `arrive: false`:
+  it only shows what was done, with no wait.
 - **Test cores.** The cap is 0 there, so there is no gate.
 - **Why 0.4 s.** Glides last 0.14–0.55 s. At 0.4 s, any reach up to about 300 pt has landed. A 1000 pt reach is
   within about 3% of its point, and the press's own short wait after its reticle makes up the rest.

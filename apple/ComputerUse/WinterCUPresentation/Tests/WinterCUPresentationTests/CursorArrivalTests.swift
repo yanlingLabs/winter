@@ -149,4 +149,42 @@ import XCTest
         controller.sessionEnded(sessionId: "s")
         XCTAssertEqual(arrival(), 0, "its session ended")
     }
+
+    // MARK: - Drawn or not (the engine skips its ask while not)
+
+    func testTheDrawnFlagFollowsWhatTheUserCanSee() {
+        var heard: [Bool] = []
+        controller.onCursorDrawn = { s, target, drawn in
+            XCTAssertEqual(s, "s")
+            XCTAssertEqual(target, self.ref)
+            heard.append(drawn)
+        }
+        cursor(200, 200, .move)
+        XCTAssertEqual(heard, [true], "shown over its window")
+        controller.refresh()
+        XCTAssertEqual(heard, [true], "told once per change")
+
+        windows.windows[1] = WindowSnapshot(frame: CGRect(x: 100, y: 100, width: 800, height: 400), isOnScreen: false)
+        controller.refresh()
+        XCTAssertEqual(heard, [true, false], "its window left the screen (minimized, another desktop)")
+        windows.windows[1] = WindowSnapshot(frame: CGRect(x: 100, y: 100, width: 800, height: 400), isOnScreen: true)
+        controller.refresh()
+        XCTAssertEqual(heard, [true, false, true])
+
+        accessibility.reduceMotion = true
+        controller.refresh()
+        XCTAssertEqual(heard, [true, false, true, false], "Reduce Motion: nothing travels, nothing to wait for")
+        accessibility.reduceMotion = false
+        controller.refresh()
+        controller.sessionEnded(sessionId: "s")
+        XCTAssertEqual(heard, [true, false, true, false, true, false], "its session ended")
+    }
+
+    func testACoveredCursorIsNotDrawn() {
+        var heard: [Bool] = []
+        controller.onCursorDrawn = { _, _, drawn in heard.append(drawn) }
+        windows.above[1] = [StackWindow(id: 9, pid: 600, layer: 0, bounds: CGRect(x: 150, y: 150, width: 300, height: 200))]
+        cursor(200, 200, .move)
+        XCTAssertEqual(heard, [false], "another app's window covers it")
+    }
 }

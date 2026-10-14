@@ -204,6 +204,17 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertEqual(rig.presentation.arrivalAsks.map(\.1), [notes])
     }
 
+    /// The presentation's word on a cursor being drawn reaches the engine's side (pid and window), so its gate can skip
+    /// the main-queue ask while the overlay is hidden.
+    func testTheCursorDrawnFlagIsForwardedToTheEngine() {
+        let rig = Rig()
+        var heard: [String] = []
+        rig.coordinator.cursorDrawn = { s, pid, wid, drawn in heard.append("\(s) \(pid) \(wid) \(drawn)") }
+        rig.presentation.onCursorDrawn?("s_1", notes, false)
+        rig.presentation.onCursorDrawn?("s_1", notes, true)
+        XCTAssertEqual(heard, ["s_1 10 20 false", "s_1 10 20 true"])
+    }
+
     func testEveryCursorStateTheEngineSendsReachesThePresentation() {
         let rig = Rig()
         rig.coordinator.targetBound(sessionId: "s_1", pid: 10, windowID: 20, appName: "Notes", mirror: false)

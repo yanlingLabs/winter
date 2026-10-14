@@ -42,6 +42,9 @@ import Foundation
     private var lastCursorAt: [TargetKey: TimeInterval] = [:]
     /// What each overlay was last handed: an identical frame is not handed again (a still cursor draws nothing).
     private var appliedToOverlay: [TargetKey: (frame: CursorFrame, style: CursorStyle)] = [:]
+    /// Whether each target's cursor is drawn where the user can see it, as last told to `onCursorDrawn`.
+    private var publishedDrawn: [TargetKey: Bool] = [:]
+    var onCursorDrawn: ((String, CUWindowRef, Bool) -> Void)?
     /// The last cursor event or window move: tracking runs at full rate for `fastTrackingHold` after it.
     private var lastMotion: TimeInterval = -.infinity
     private var trackingInterval: TimeInterval?
@@ -258,6 +261,7 @@ import Foundation
             lastCursorAt[key] = nil
         }
         updateOcclusion(now: now)
+        publishDrawn()
         pushCursorFrames(now: now)
 
         let busy = !shownMirrors.isEmpty || !shownOverlays.isEmpty || state.hasPendingTimers
@@ -305,6 +309,20 @@ import Foundation
                 }
             }
         }
+    }
+
+    /// Tells `onCursorDrawn` each change in whether a target's cursor is drawn where the user can see it: its overlay
+    /// shown, not covered, Reduce Motion off (the arrival gate's answer can be more than 0 only then). A cursor gone
+    /// is not drawn.
+    private func publishDrawn() {
+        let reduceMotion = accessibility.reduceMotion
+        var drawn: [TargetKey: Bool] = [:]
+        for key in cursors.keys {
+            drawn[key] = shownOverlays.contains(key) && occluded[key] != true && !reduceMotion
+        }
+        for (key, was) in publishedDrawn where drawn[key] == nil && was { onCursorDrawn?(key.sessionId, key.target, false) }
+        for (key, now) in drawn where publishedDrawn[key] != now { onCursorDrawn?(key.sessionId, key.target, now) }
+        publishedDrawn = drawn
     }
 
     /// Logs why a target's overlay is hidden, once per reason.
@@ -372,6 +390,7 @@ import Foundation
         cursors[key] = nil
         windowFrames[key] = nil
         occluded[key] = nil
+        if publishedDrawn.removeValue(forKey: key) == true { onCursorDrawn?(key.sessionId, key.target, false) }
         announced.remove(key)
         dropped.remove(key)
         hiddenReason[key] = nil

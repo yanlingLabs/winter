@@ -74,6 +74,8 @@ public enum HelperNotification: Equatable, Sendable {
     private let watchRings: CUWatchRingPresenting
     public let viewHub: ViewHub
     private var idleTimer: IdleQuitTimer?
+    /// Where the presentation's word on a target's cursor being drawn goes (the engine's `cursorDrawn`). Main actor.
+    public var cursorDrawn: ((_ sessionId: String, _ pid: pid_t, _ windowID: CGWindowID, _ drawn: Bool) -> Void)?
     /// Where notifications go (the server's broadcast). Called on the main actor.
     public var notify: (HelperNotification) -> Void = { _ in }
 
@@ -99,6 +101,10 @@ public enum HelperNotification: Equatable, Sendable {
         // never asked for: the presentation layer re-shows a mirror on a cursor event for a target whose mirror
         // was once requested, and this switch is what guarantees it never does.
         presentation.mirrorsEnabled = false
+        // Whether each target's cursor is drawn where the user can see it: the engine's arrival gate asks nothing while not.
+        presentation.onCursorDrawn = { [weak self] sessionId, target, drawn in
+            self?.cursorDrawn?(sessionId, target.pid, target.windowID, drawn)
+        }
         escapeTap.onEscape = { [weak self] in
             MainActor.assumeIsolated { self?.escapePressed() }
         }

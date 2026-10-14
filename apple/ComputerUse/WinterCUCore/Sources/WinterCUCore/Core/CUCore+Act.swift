@@ -90,6 +90,8 @@ extension CUCore {
         let inVisit = acted.1
         // A link the daemon opens itself (its own door: the opener's access and consent).
         var linkOpen: String?
+        // An Esc (the call's cancel) during the cursor's arrival: nothing is opened, by the helper or by the daemon.
+        if outcome.pendingOpen != nil { try token.check() }
         if p.linkOpensViaDaemon == true, outcome.openLinkHost != nil, let paths = outcome.pendingOpen, paths.count == 1 {
             linkOpen = paths[0]
             outcome.pendingOpen = nil
@@ -171,7 +173,8 @@ extension CUCore {
         do {
             // A cancel that arrived while this act waited behind others stops it here.
             try token.check()
-            t.arrivalWaitedMs = 0  // the arrival gate's budget is per act
+            t.arrivalWaitedMs = 0  // the arrival gate's budget is per act, and its wait ends on this act's cancel
+            t.actToken = token
             try floorCheckPrivacy(t)
             try floorCheckRemoteDebugging(p, t)
             try saveFloorBeforeAct(p, t)
@@ -577,16 +580,18 @@ extension CUCore {
                 }
                 announceTarget(t, info, pressing: true)
                 cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
+                try token.check()
                 CULog.act.notice("click in \(t.appName, privacy: .public): its press from another desktop was unconfirmed — clicked where it is, not pressed again")
                 return try clickWebElement(e, info, ref: ref, p, t, token, pressIgnored: true, why: "the accessibility press from the other desktop had no visible effect")
             }
             t.noteTargeted(e, at: clock.nowMs())
             announceTarget(t, info, pressing: button == .left)
+            try token.check()  // an Esc during the cursor's arrival: nothing pressed, selected or clicked
             // A row (or an item of a list) in a sheet or panel — an open panel's file list: selected over accessibility
             // (dogfood, round 13: a click on a file row in Chrome's open panel reported success, the row was not
             // selected and Open stayed disabled — the panel is AppKit, a click into a background sheet only makes it key).
             if button == .left, count == 1, flags.isEmpty, inSheetOrPanel(e, t), let selected = selectInPanel(e, t) {
-                cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
+                cursor(t, "press", at: info.center, count: 1, button: button.rawValue, arrive: false)  // already selected
                 return ActOutcome(rung: .accessibility, detail: selected)
             }
             var announced = false
@@ -594,6 +599,7 @@ extension CUCore {
             // An app whose web content ignored accessibility presses twice: its web buttons are clicked.
             if webPress, info.actions.contains(kAXPressAction), prefersWebClicks(t) {
                 cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
+                try token.check()
                 CULog.act.notice("click in \(t.appName, privacy: .public): its web content ignores accessibility presses — a window-targeted click")
                 return try clickWebElement(e, info, ref: ref, p, t, token, pressIgnored: false,
                                            why: "\(t.appName)'s web page ignores accessibility presses")
@@ -1332,6 +1338,7 @@ extension CUCore {
         enforceFocus(p, t)  // believe-active before any focus write, so the app does not activate itself
         let (e, g) = try textTarget(into: a.into, t, text: a.text)
         cursor(t, "type", at: e.flatMap { ElementInfo($0, ax).center })
+        try token.check()
         return receiving(e, t, try typeText(a.text, into: e, p, t, token, g))
     }
 
@@ -1339,6 +1346,7 @@ extension CUCore {
         enforceFocus(p, t)
         let (e, g) = try textTarget(into: a.into, t, text: a.text)
         cursor(t, "type", at: e.flatMap { ElementInfo($0, ax).center })
+        try token.check()
         return receiving(e, t, try pasteText(a.text, format: a.format ?? .text, p, t, token, g))
     }
 
@@ -1352,6 +1360,7 @@ extension CUCore {
             let info = ElementInfo(el, ax)
             if info.secure { throw secureRefusal() }
             announceTarget(t, info, pressing: false)
+            try t.actToken?.check()  // an Esc during the cursor's arrival: the focus is not moved
             try placeFocus(el, t, ref: into)
             t.noteTargeted(el, at: clock.nowMs())
             g.explicit = el
@@ -2413,6 +2422,7 @@ extension CUCore {
                 e = reportedFocus(t)
             } else {
                 announceTarget(t, info, pressing: false)
+                try token.check()  // an Esc during the cursor's arrival: the focus is not moved
                 try placeFocus(el, t, ref: into)
                 t.noteTargeted(el, at: clock.nowMs())
                 g.explicit = el
@@ -2426,6 +2436,7 @@ extension CUCore {
         if textual { e = try requireTypableFocus(t, g) ?? e }
         if !t.accessible { e = nil }  // capture-only: keys go to the window, not to a reported element
         cursor(t, "key", at: e.flatMap { ElementInfo($0, ax).center }, text: a.combo)
+        try token.check()
         // Keys go to the app's key window: make it the bound one first (in the background, never the front).
         // Resolve the route once (the menu lookup walks the menu bar), then press it `repeat` times.
         let plan = try chordPlan(chord, p, t, g)
@@ -3013,7 +3024,7 @@ extension CUCore {
             try token.check()
             do {
                 if let how = try axScroll(area: scrollArea(from: e), element: e, direction: a.direction, pages: pages) {
-                    cursor(t, "scroll", at: info.center, text: a.direction.rawValue)
+                    cursor(t, "scroll", at: info.center, text: a.direction.rawValue, arrive: false)  // already scrolled
                     CULog.act.notice("scroll in \(t.appName, privacy: .public): AX \(how, privacy: .public)")
                     return ActOutcome(rung: .accessibility, detail: Self.scrollDetail(how, elsewhere: offScreenSubject(t)))
                 }
@@ -3058,7 +3069,7 @@ extension CUCore {
         let area = e.flatMap { scrollArea(from: $0) } ?? largestScrollArea(in: t)
         do {
             if let how = try axScroll(area: area, element: e, direction: direction, pages: pages) {
-                cursor(t, "scroll", at: point, text: direction.rawValue)
+                cursor(t, "scroll", at: point, text: direction.rawValue, arrive: false)  // already scrolled
                 CULog.act.notice("scroll in \(t.appName, privacy: .public) (off screen): AX \(how, privacy: .public)")
                 return ActOutcome(rung: .accessibility, detail: Self.scrollDetail(how, elsewhere: subject))
             }
@@ -3248,6 +3259,7 @@ extension CUCore {
         let to = try point(a.to, "to")
         if let subject = offScreenSubject(t) {
             if let fromInfo { announceTarget(t, fromInfo, pressing: false) }
+            try token.check()
             return try eventsElsewhere(p, t, token, cursor: CursorEvent(kind: "drag", point: from, dragTo: to), what: "the drag",
                                        subject: subject) { synth, route in
                 // (Each step checked like the on-screen routes': the user's work stops it, the button released where it
@@ -3350,6 +3362,7 @@ extension CUCore {
         let words = CURoleWords.actionWords(name)
         let button = name == kAXShowMenuAction ? "right" : "left"
         announceTarget(t, info, pressing: Self.pressLike.contains(name))
+        try token.check()  // an Esc during the cursor's arrival: no action performed
         var shown: (count: Int, button: String)?
         // An app may list an action it then refuses (Finder lists AXOpen on its icons): once refused, the
         // action's pointer equivalent is used straight away, and one without an equivalent leaves state.
@@ -3927,12 +3940,14 @@ extension CUCore {
             cursor(t, "foreground", at: sys.cursorLocation(), text: "on", remember: false)
             defer { cursor(t, "foreground", at: sys.cursorLocation(), text: "off", remember: false) }
             send(event, t)
+            try token.check()  // an Esc during the cursor's arrival: the app is not brought forward
             return try inForeground(t) {
                 _ = try body(.hid, check)
                 return ActOutcome(rung: .foreground, detail: d.detail)
             }
         case .privatePath:
             send(event, t)
+            try token.check()
             CUUserInputGuard.waitForQuiet()
             // No focus records here (the user's ruling: the focus blip is for menu validation only, never for
             // typing, clicks or reads): window-targeted events after the synthetic activation.
@@ -3944,6 +3959,7 @@ extension CUCore {
             return ActOutcome(rung: .privatePath, detail: d.detail)
         case .accessibility, .processEvents:
             send(event, t)
+            try token.check()  // an Esc during the cursor's arrival: no focus change, no input
             if focus { syntheticFocus(t) }
             _ = try body(.publicPid) { [self] _, _ in try token.check(); try refuseIfUserWorkMarked(t) }
             return ActOutcome(rung: .processEvents, detail: d.detail)

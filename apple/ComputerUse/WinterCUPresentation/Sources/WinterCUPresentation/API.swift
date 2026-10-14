@@ -38,6 +38,10 @@ public struct CUWindowRef: Sendable, Hashable {
     /// 0 when no overlay cursor is drawn there (window off screen or on another desktop, cursor covered or hidden),
     /// under Reduce Motion, or when the cursor already rests at the point.
     func cursorArrival(sessionId: String, target: CUWindowRef) -> TimeInterval
+    /// Told on the main actor whenever whether a target's agent cursor is DRAWN where the user can see it changes —
+    /// its overlay shown (window on screen, on this desktop), not covered, Reduce Motion off. While it is false the
+    /// arrival gate's answer is 0, so the engine need not ask (and a busy main thread costs it nothing).
+    var onCursorDrawn: ((_ sessionId: String, _ target: CUWindowRef, _ drawn: Bool) -> Void)? { get set }
     /// The session's turn ended → fade its mirrors (also auto-fade 30 s after the last cursor/action on a target).
     func turnEnded(sessionId: String)
     func sessionEnded(sessionId: String)

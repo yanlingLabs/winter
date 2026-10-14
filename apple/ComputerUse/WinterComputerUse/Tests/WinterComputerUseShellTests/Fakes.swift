@@ -164,6 +164,7 @@ final class Counter: @unchecked Sendable {
     /// What `cursorArrival` answers, and who asked.
     var arrival: TimeInterval = 0
     var arrivalAsks: [(String, CUWindowRef)] = []
+    var onCursorDrawn: ((String, CUWindowRef, Bool) -> Void)?
 
     func showMirror(sessionId: String, target: CUWindowRef) { calls.append(.show(sessionId, target)) }
     func hideMirror(sessionId: String, target: CUWindowRef) { calls.append(.hide(sessionId, target)) }

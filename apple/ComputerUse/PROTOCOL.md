@@ -1170,3 +1170,5 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   its press share that budget. It is 0 when no overlay cursor is drawn (the window off screen, on another desktop,
   covered), under Reduce Motion, or when the cursor already rests there.
 - A `target.act` can take up to ~0.4 s longer per element it lands on. The press pulse now plays with the real click.
+- An Esc during the wait (the call's `cancel`) stops the act before its input, focus move, rung-4 activation or
+  background link open, and answers `cancelled`.
