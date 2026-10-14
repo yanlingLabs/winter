@@ -209,7 +209,11 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   of view; then the window's chrome outside a web page, then subtrees inside the page, then the focus's path, then
   the page itself (never folded wholesale while anything else can be). Only an outline row is ever `collapsed` (and
   keeps its sub-rows folded); WebKit's blanket `AXDisclosing = 0` is not read as collapsed.
-- `find`: `query` is a string or `{role?, name?, text?}`. A window with no accessibility answers `[]`. `page` is
+- `find`: `query` is a string or `{role?, name?, text?}`. A string, or a `text` with no `name`, also matches a run
+  of consecutive static-text siblings read as one line (as `target.waitFor` reads them, §4.6: no link, button or
+  field inside a run, never a secure element), answering the run's element where the matched text begins — the
+  piece that shows it, never the container, which may hold unrelated controls; a `role` must hold for that element.
+  A window with no accessibility answers `[]`. `page` is
   the window's page number (as the state header says it); `note` says when the page changed since the last
   whole-window `snapshot`, or the read was cut short.
 - A `snapshot`'s header ends with `page N` (the window's page, numbered: it goes up when the page's URL — an
@@ -1178,7 +1182,9 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   "Published", " - ", "public"), so no single element ever contained the phrase.
 - `waitFor`'s (and a watch's `appeared` / `gone` text) match now also reads each run of consecutive static-text siblings
   as one line, joined as they are and with spaces, whitespace runs folded; a run never spans a link, a button or a field,
-  and never reads a secure element.
+  and never reads a secure element. `find` reads the same runs for a string query or a `text` without `name`, answering
+  the element where the matched text begins (`find("Status: Published")` → the "Status:" element); a phrase inside one
+  element stays that element's own match.
 - A `wait_timeout`'s `seen` names an open dialog — an element with the subrole `AXDialog`, `AXSystemDialog`,
   `AXApplicationDialog` or `AXApplicationAlertDialog`, a sheet, or (said as "it looks like a dialog") a web area whose
   only content is one named, non-landmark group holding a button and the focus — with up to two of its texts and three

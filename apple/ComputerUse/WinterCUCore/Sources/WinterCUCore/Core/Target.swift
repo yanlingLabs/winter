@@ -310,14 +310,14 @@ enum CUWaitEvaluator {
 
     static func met(_ c: CUWaitCondition, _ o: Observation) -> Bool {
         let nodes = o.roots.flatMap { $0.flattened() }
-        var runs: [String]?
+        var runs: [CUFinder.TextRun]?
         func hasText(_ t: String) -> Bool {
             let want = norm(t)
             guard !want.isEmpty else { return false }
             if nodes.contains(where: { n in
                 [n.name, n.isSecure ? nil : n.value].contains { $0.map { norm($0).contains(want) } ?? false }
             }) { return true }
-            if runs == nil { runs = textRuns(nodes) }
+            if runs == nil { runs = CUFinder.textRuns(nodes) }
             return runs!.contains { $0.contains(want) }
         }
         if let t = c.text, !hasText(t) { return false }
@@ -332,35 +332,8 @@ enum CUWaitEvaluator {
         return c.text != nil || c.ref != nil || c.gone != nil || c.title != nil
     }
 
-    /// Folded, with every run of whitespace one space.
-    static func norm(_ s: String) -> String {
-        CUFinder.fold(s).split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-    }
-
-    /// The text a page shows in pieces: each run of consecutive static-text siblings, read as one line — joined as they
-    /// are and joined with spaces (both normalised). Measured on the Chrome Web Store dashboard (2026-10-14): its
-    /// "Status: Published - public" is five static texts ("Status:", " ", "Published", " - ", "public"), so a wait for
-    /// "Status: Published" matched no single element. Only static text joins: a run never spans a link, a button or a
-    /// field, so unrelated controls side by side never read as one sentence. Secure elements never take part.
-    static func textRuns(_ nodes: [CUNode]) -> [String] {
-        var out: [String] = []
-        for parent in nodes where parent.children.count > 1 {
-            var run: [String] = []
-            func flush() {
-                if run.count > 1 {
-                    out.append(norm(run.joined()))
-                    out.append(norm(run.joined(separator: " ")))
-                }
-                run.removeAll()
-            }
-            for c in parent.children {
-                guard c.role == "AXStaticText", !c.isSecure, let piece = c.value ?? c.name else { flush(); continue }
-                run.append(piece)
-            }
-            flush()
-        }
-        return out
-    }
+    /// Folded, with every run of whitespace one space (`CUFinder.norm`).
+    static func norm(_ s: String) -> String { CUFinder.norm(s) }
 
     /// What `wait_timeout` reports as seen: the window, its element count, the focus — and, when a dialog is open, the
     /// dialog by its words and that the page behind it may be hidden from accessibility while it is open (measured on

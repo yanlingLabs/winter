@@ -108,6 +108,26 @@ final class MatchingTests: XCTestCase {
         XCTAssertTrue(CUWaitEvaluator.met(CUWaitCondition(gone: .text("Status: Published")), pending))
     }
 
+    /// find() reads the same runs: it answers the run's element where the matched text begins.
+    func testFindMatchesAcrossAStatusSplitIntoStaticTexts() {
+        let page = [Self.storeWindow([Self.storeHeader()])]
+        func refs(_ q: CUFindQuery) -> [Int] { CUFinder.find(q, in: page).map(\.ref) }
+        XCTAssertEqual(refs(.text("Status: Published")), [987], "the run's first element: where the phrase begins")
+        XCTAssertEqual(refs(.text("status:   published - public")), [987])
+        XCTAssertEqual(refs(.text("Published - public")), [989], "a phrase starting mid-run answers the piece it starts in")
+        XCTAssertEqual(refs(.text("public ID: flfk")), [991])
+        XCTAssertEqual(refs(.text("public")), [991], "a phrase inside one piece is that element's own match, once")
+        XCTAssertEqual(refs(.fields(role: nil, name: nil, text: "Status: Published")), [987])
+        XCTAssertEqual(refs(.fields(role: "static text", name: nil, text: "Status: Published")), [987])
+        XCTAssertEqual(refs(.fields(role: "button", name: nil, text: "Status: Published")), [], "the role must hold too")
+        XCTAssertEqual(refs(.fields(role: nil, name: "Status: Published", text: nil)), [], "a run has no name")
+        XCTAssertEqual(refs(.text("Save draft Publish")), [], "buttons never join a run")
+        XCTAssertEqual(refs(.text("Winter for Chrome Status")), [], "a run never spans a heading or a link")
+        XCTAssertEqual(refs(.text("Status: Pending review")), [])
+        let summary = CUFinder.find(.text("Status: Published"), in: page).first
+        XCTAssertEqual(summary, CUElementSummary(ref: 987, role: "static text", name: "Status:"))
+    }
+
     func testARunNeverReadsASecureField() {
         let row = CUNode(ref: 1, role: "AXGroup", children: [
             CUNode(ref: 2, role: "AXStaticText", name: "Code:"),
@@ -117,6 +137,8 @@ final class MatchingTests: XCTestCase {
         let o = CUWaitEvaluator.Observation(roots: [row], windowTitle: "w", focusedRef: nil)
         XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(text: "4242"), o))
         XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(text: "Code: 4242"), o))
+        XCTAssertTrue(CUFinder.find(.text("Code: 4242"), in: [row]).isEmpty)
+        XCTAssertTrue(CUFinder.find(.text("4242 ok"), in: [row]).isEmpty, "a secure element ends a run, never joins it")
     }
 
     /// The live timeout: with the dialog up the wait for the status behind it can't be met, and `seen` now says why.
