@@ -14,11 +14,12 @@ expiry and 20,000ms recommended renewal interval. Notifications use the separate
 JSON-RPC method `workspace.watch`, with `snapshot`, `change` and `ended` phases and
 an independent ephemeral sequence starting at 1. Snapshot is emitted once per ID
 and carries the same safe complete/summary projection as `workspace.get`.
-Changes are coalesced by a 100 ms trailing window with a 500 ms maximum wait; a dirty scope remains pending
+Changes are coalesced by a 100 ms trailing window and become eligible after
+500 ms of continuous dirty state; a dirty scope remains pending
 through later commits and slow-writer pauses. The clean-to-dirty timestamp is
 retained until canonical delivery/no-change resolution, and an already armed
 earlier timer is kept. Snapshot/read attempts stay at least 100 ms apart, including
-after transient read failure; the 500 ms deadline does not weaken authorization
+after transient read failure; the 500 ms eligibility threshold does not weaken authorization
 or discharge dirty state after a blocked send. Idle drain calls return before safe
 snapshot/authorization reads when no dirty state or initial snapshot is pending.
 Changes carry only current workspace revisions; consumers refetch canonical
@@ -162,14 +163,17 @@ not canonical daemon execution evidence. Logs/receipts are retained under
 The pure trailing debounce at `b19198ea1b52130cf6b63aaf1e8f13d560b16fb4`
 could defer hints indefinitely under sustained commits. This narrow successor
 preserves `145d3eaf` and `b19198ea`, captures `firstDirtyAt` on clean-to-dirty,
-keeps already armed wakeups, and permits delivery at the earlier of trailing quiet
-or 500 ms from first dirty. Every actual safe read still checks current authority
+keeps already armed wakeups, and permits a read at trailing quiet or after
+500 ms from first dirty. The 100 ms callback cadence can place delivery on the next
+tick: within 600 ms in a healthy, unblocked scope, before ordinary host scheduler
+and transport delay. Read failures/backpressure retain debt and can extend observed
+delivery; this is not a universal wall-clock latency guarantee. Every actual safe read still checks current authority
 and is spaced by at least 100 ms; backpressure/transient errors retain pending
 state/refetch debt. W2–W7 behavior and authority/transport limits are preserved.
 
 The fairness regression uses the production timer callbacks with a controlled
 monotonic clock and actual canonical DB writes every 50 ms for 2 seconds. It
-asserts delivery by the exact 500 ms deadline while writes continue, minimum read/
+asserts delivery by 500 ms in that aligned schedule while writes continue, minimum read/
 delivery spacing, and final revision delivery. A separate real-time Unix RPC
 regression also writes every 50 ms for 2 seconds and checks delivery during the
 burst (650 ms observation bound includes ordinary host scheduler/RPC slack). These
@@ -184,4 +188,22 @@ hard host scheduler latency guarantee. No PR/push or activation occurred.
 
 A retained separate live run observed firstHintMs=513.395, four hints during a
 2,124.150 ms burst of 40 writes; the controlled callback test separately proves
-the exact 500 ms scheduling deadline and 100 ms minimum canonical read spacing.
+the aligned 500 ms delivery and 100 ms minimum canonical read spacing.
+
+
+## Phase-offset precision follow-up
+
+No production code changes. The aligned fairness regression still requires delivery
+by 500 ms in its particular schedule. A separate controlled regression preserves
+the initial snapshot backpressure and queued timer phase: start at 0, blocked snapshot
+at 100, commit at 150 arms 250, drain at 200 sends the snapshot and clears dirty state,
+then new dirty state at 225. Sustained 50 ms commits retain callbacks at 250, 350,
+450, 550, 650, 750. The first change arrives at 750: 525 ms after first dirty, within
+the 600 ms healthy/unblocked cadence bound. Minimum 100 ms read/delivery spacing,
+per-delivery authorization and all W1–W7 controls remain unchanged. OS scheduling,
+read failure and transport backpressure are separate sources of delay.
+
+Follow-up validation: all 21 watch regressions / 190 assertions pass without
+skips, including the retained aligned 500 ms test and the new 525 ms phase-offset
+case. Core TypeScript and whitespace checks pass. Production blobs are unchanged
+from the accepted `44967c257c769db112ce0c61213af9c6b3d1daf0` source.

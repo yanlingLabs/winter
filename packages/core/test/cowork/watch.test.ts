@@ -259,3 +259,32 @@ test("W1b: actual queued callbacks deliver during50ms commits for2s, within500ms
     for (let index = 1; index < distinctReadTimes.length; index++) expect(distinctReadTimes[index]! - distinctReadTimes[index - 1]!).toBeGreaterThanOrEqual(100);
   } finally { f.service.close(); timers.restore(); }
 });
+test("W1b phase offset: blocked initial snapshot/drain retains cadence; change arrives within600ms", () => {
+  const f = fixture(), timers = controlledTimers(f), delivered: Array<{ at: number; frame: Frame }> = [];
+  let blocked = true;
+  const sink = { send(frame: Frame): "sent" | "blocked" {
+    if (blocked && frame.phase !== "ended") return "blocked";
+    delivered.push({ at: timers.now(), frame }); return "sent";
+  } };
+  try {
+    f.service.watch(connection, { workspaceIds: f.ids }, sink);
+    timers.advance(100); expect(delivered).toEqual([]);
+    timers.advance(150);
+    f.records.updateTitle({ principalId: "local", requestId: "before-drain", expectedRevision: 1 }, f.ids[0]!, "Before Drain");
+    timers.advance(200); blocked = false; f.flushNow();
+    expect(delivered[0]).toMatchObject({ at: 200, frame: { phase: "snapshot", workspace: { configRevision: 2 } } });
+    const firstDirtyAt = 225;
+    for (let index = 0; index < 40; index++) {
+      timers.advance(firstDirtyAt + index * 50);
+      f.records.updateTitle({ principalId: "local", requestId: `offset-${index}`, expectedRevision: index + 2 }, f.ids[0]!, `Offset-${index}`);
+    }
+    const changes = delivered.filter(value => value.frame.phase === "change");
+    expect(changes[0]!.at).toBe(750);
+    expect(changes[0]!.at - firstDirtyAt).toBe(525);
+    expect(changes[0]!.at - firstDirtyAt).toBeLessThanOrEqual(600);
+    expect(changes[0]!.at).toBeLessThan(2175); // sustained writes are still ongoing
+    for (let index = 1; index < changes.length; index++) expect(changes[index]!.at - changes[index - 1]!.at).toBeGreaterThanOrEqual(100);
+    timers.advance(2400);
+    expect(delivered.at(-1)!.frame).toMatchObject({ phase: "change", revisions: [{ configRevision: 42 }] });
+  } finally { f.service.close(); timers.restore(); }
+});
