@@ -47,7 +47,6 @@ final class DesktopPromptPanel: NSPanel {
     private let model: CUDesktopPromptModel
     private let state: DesktopIslandState
     private let clock: CUClock = SystemClock()
-    private let icon: NSImage?
     private let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     private let panel: DesktopPromptPanel
     private var shown = false
@@ -55,10 +54,8 @@ final class DesktopPromptPanel: NSPanel {
 
     init(_ model: CUDesktopPromptModel) {
         self.model = model
-        state = DesktopIslandState(secondsLeft: model.secondsLeft(now: SystemClock().now),
-                                   fraction: model.fractionLeft(now: SystemClock().now))
-        icon = Self.icon(bundleId: model.bundleId)
-        panel = DesktopPromptPanel(contentRect: CGRect(x: 0, y: 0, width: DesktopIslandGeometry.width, height: 160))
+        state = DesktopIslandState(secondsLeft: model.secondsLeft(now: SystemClock().now))
+        panel = DesktopPromptPanel(contentRect: CGRect(x: 0, y: 0, width: DesktopIslandGeometry.width, height: 120))
         super.init()
         // Its window name (the window list's), so a reader of the list can tell this panel from the helper's others.
         panel.title = model.title
@@ -68,7 +65,6 @@ final class DesktopPromptPanel: NSPanel {
     func show(countdown: String, slot: Int) {
         let now = clock.now
         state.secondsLeft = model.secondsLeft(now: now)
-        state.fraction = model.fractionLeft(now: now)
         guard !shown || slot != self.slot else { return }
         self.slot = slot
         place(slot: slot)
@@ -97,8 +93,8 @@ final class DesktopPromptPanel: NSPanel {
         let frame = screen?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
         let geometry = DesktopIslandGeometry.make(housing: screen.flatMap(Self.housing),
                                                   menuBarHeight: frame.maxY - (screen?.visibleFrame.maxY ?? frame.maxY),
-                                                  contentHeight: contentHeight(), slot: slot)
-        let view = DesktopIslandView(model: model, geometry: geometry, icon: icon, state: state, reduceMotion: reduceMotion)
+                                                  slot: slot)
+        let view = DesktopIslandView(model: model, geometry: geometry, state: state, reduceMotion: reduceMotion)
         let host = FirstClickHostingView(rootView: view)
         host.sizingOptions = []
         panel.contentView = host
@@ -111,13 +107,6 @@ final class DesktopPromptPanel: NSPanel {
         panel.setFrame(CGRect(x: frame.midX - width / 2, y: top - height, width: width, height: height), display: true)
     }
 
-    /// The open island's content height below the top inset, measured once at its width.
-    private func contentHeight() -> CGFloat {
-        let measure = NSHostingView(rootView: DesktopIslandContent(model: model, icon: icon, state: state)
-            .frame(width: DesktopIslandGeometry.width))
-        return ceil(measure.fittingSize.height)
-    }
-
     /// The camera housing's size on `screen`, nil when it has none.
     static func housing(of screen: NSScreen) -> CGSize? {
         let top = screen.safeAreaInsets.top
@@ -126,11 +115,4 @@ final class DesktopPromptPanel: NSPanel {
         return width > 0 ? CGSize(width: width, height: top) : nil
     }
 
-    /// The app's own icon, looked up by bundle id (so the island shows the real app, not a name the model chose).
-    static func icon(bundleId: String) -> NSImage? {
-        guard !bundleId.isEmpty, let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else {
-            return nil
-        }
-        return NSWorkspace.shared.icon(forFile: url.path)
-    }
 }

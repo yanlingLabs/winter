@@ -216,27 +216,35 @@ import XCTest
         XCTAssertEqual(m.fractionLeft(now: 500), 0, "never below empty")
     }
 
-    func testItHangsOutOfTheCameraHousingWhenTheScreenHasOne() {
-        let g = DesktopIslandGeometry.make(housing: CGSize(width: 185, height: 32), menuBarHeight: 32,
-                                           contentHeight: 120, slot: 0)
+    func testItGrowsOutOfTheCameraHousingWhenTheScreenHasOne() {
+        let g = DesktopIslandGeometry.make(housing: CGSize(width: 185, height: 32), menuBarHeight: 32, slot: 0)
         XCTAssertTrue(g.attached)
         XCTAssertEqual(g.closed, CGSize(width: 185, height: 32), "it springs out of the housing itself")
         XCTAssertEqual(g.topInset, 32, "nothing is drawn behind the camera")
-        XCTAssertEqual(g.size, CGSize(width: 420, height: 152))
-        let wide = DesktopIslandGeometry.make(housing: CGSize(width: 360, height: 32), menuBarHeight: 32,
-                                              contentHeight: 120, slot: 0)
-        XCTAssertEqual(wide.size.width, 480, "always wider than the housing")
+        XCTAssertEqual(g.size, CGSize(width: 360, height: 82))
+        let wide = DesktopIslandGeometry.make(housing: CGSize(width: 260, height: 32), menuBarHeight: 32, slot: 0)
+        XCTAssertEqual(wide.size.width, 410, "always wider than the housing")
     }
 
     func testWithoutAHousingItHangsUnderTheTopEdgeAndASecondPromptFloats() {
-        let g = DesktopIslandGeometry.make(housing: nil, menuBarHeight: 24, contentHeight: 120, slot: 0)
+        let g = DesktopIslandGeometry.make(housing: nil, menuBarHeight: 24, slot: 0)
         XCTAssertTrue(g.attached)
         XCTAssertEqual(g.closed.height, 24)
-        XCTAssertEqual(g.size.height, 144)
-        let second = DesktopIslandGeometry.make(housing: CGSize(width: 185, height: 32), menuBarHeight: 32,
-                                                contentHeight: 120, slot: 1)
+        XCTAssertEqual(g.size.height, 74)
+        let second = DesktopIslandGeometry.make(housing: CGSize(width: 185, height: 32), menuBarHeight: 32, slot: 1)
         XCTAssertFalse(second.attached)
         XCTAssertEqual(second.topInset, 0)
-        XCTAssertEqual(second.size.height, 120)
+        XCTAssertEqual(second.size.height, 50)
+    }
+
+    func testTheEarsCurveIntoTheTopEdgeAndTheFloatingIslandHasNone() {
+        let rect = CGRect(x: 0, y: 0, width: 380, height: 82)
+        let attached = IslandShape(bottomRadius: 22, ear: 10, floating: false).path(in: rect)
+        XCTAssertTrue(attached.contains(CGPoint(x: 1, y: 0.2)), "the ear meets the top edge at the panel's side")
+        XCTAssertFalse(attached.contains(CGPoint(x: 1, y: 8)), "below the edge the ear curves away (concave)")
+        XCTAssertTrue(attached.contains(CGPoint(x: 190, y: 81)))
+        XCTAssertFalse(attached.contains(CGPoint(x: 11, y: 81)), "round bottom corner")
+        let floating = IslandShape(bottomRadius: 22, ear: 0, floating: true).path(in: rect)
+        XCTAssertFalse(floating.contains(CGPoint(x: 1, y: 1)), "round top corner when it floats")
     }
 }
