@@ -2,7 +2,7 @@
 // diffs, the site floor's rows and rule matching, upload paths, the screenshot scale mapping, key combos, URL checks,
 // the committed page-runtime bundle (stale = fail), and the tool description with and without vision.
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderPageRuntimeModule } from "../../../../scripts/build-page-runtime";
@@ -322,6 +322,16 @@ describe("upload paths", () => {
     expect(swiftSet("protectedFolderNames")).toEqual([...PROTECTED_FOLDER_NAMES].sort());
     expect(swiftSet("protectedConfigNames")).toEqual([...PROTECTED_CONFIG_NAMES].sort());
     expect(swiftSet("secretLibraryFolders")).toEqual([...SECRET_LIBRARY_FOLDERS].sort());
+  });
+  test("a hard-linked file is refused plainly — another name of it may be a secret", () => {
+    const { cwd, r } = roots();
+    const elsewhere = mkdtempSync(join(tmpdir(), "winter-up-key-"));
+    writeFileSync(join(elsewhere, "id_ed25519"), "k");
+    linkSync(join(elsewhere, "id_ed25519"), join(cwd, "innocent.txt"));
+    let message = "";
+    try { checkUploadPaths("innocent.txt", r); } catch (e) { message = (e as Error).message; }
+    expect(message).toContain("innocent.txt has another hard link to it, so where it really lives can't be told — it can't be uploaded");
+    expect(message).not.toContain("copy");
   });
   test("secret paths: any case; the save floor's names anywhere", () => {
     expect(isSecretPath("/USERS/U/.SSH/id_ed25519", "/Users/u")).toBe(true);

@@ -29,6 +29,7 @@ final class LeftoversTests: XCTestCase {
     var poster: RecordingPoster!
     var core: CUCore!
     var target: CUTarget!
+    var clip: PasteAndQueueTests.FakePasteboard!
 
     private func token(_ e: AXUIElement) -> String { var p: pid_t = 0; AXUIElementGetPid(e, &p); return "\(p)" }
     private func ref(_ e: AXUIElement) -> Int { target.refs.ref(for: AXIdentity(element: e)) }
@@ -99,8 +100,9 @@ final class LeftoversTests: XCTestCase {
         sys.stack = [w]
         sys.front = 1
         poster = RecordingPoster()
+        clip = PasteAndQueueTests.FakePasteboard([])
         core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: poster, ax: ax, sys: sys,
-                      pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+                      pasteboard: { [unowned self] in clip }, startMonitors: false)
         target = CUTarget(id: "t1", sessionId: "s", pid: pid, bundleId: "com.example.browser", appName: "Browser",
                           isChromium: true, mirror: false, windowID: 88, windowTitle: "Dashboard")
         core.registerForTesting(target, windowElement: window)
@@ -936,7 +938,7 @@ final class LeftoversTests: XCTestCase {
         let (sheet2, files2) = openPanel()
         _ = try await act(.type(CUTypeAction(text: "pkg.zip", into: ref(files2))))
         let said = await refusal(.click(CUClickAction(ref: ref(ax.element(sheet2, kAXDefaultButtonAttribute)!))))
-        XCTAssertTrue(said?.contains("can't be read, and text was typed into it") ?? false, said ?? "pressed")
+        XCTAssertTrue(said?.contains("can't be read after Winter typed or clicked in it") ?? false, said ?? "pressed")
         XCTAssertTrue(said?.contains("the user can pick the file themselves") ?? false)
         _ = (files, sheet)
     }
@@ -957,12 +959,12 @@ final class LeftoversTests: XCTestCase {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("winter-canon-\(UUID().uuidString)")
         let home = root.appendingPathComponent("u")
         try FileManager.default.createDirectory(at: home.appendingPathComponent(".aws"), withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: home.appendingPathComponent("Downloads"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("work"), withIntermediateDirectories: true)
         try "k".write(to: home.appendingPathComponent(".aws/credentials"), atomically: true, encoding: .utf8)
-        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent("Downloads/creds"), withDestinationURL: home.appendingPathComponent(".aws"))
+        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent("work/creds"), withDestinationURL: home.appendingPathComponent(".aws"))
         defer { try? FileManager.default.removeItem(at: root) }
         let h = home.path
-        XCTAssertTrue(CUFloors.isProtectedPanelPath(h + "/Downloads/creds/credentials", home: h), "a symlink into a hidden folder")
+        XCTAssertTrue(CUFloors.isProtectedPanelPath(h + "/work/creds/credentials", home: h), "a symlink into a hidden folder")
         XCTAssertTrue(CUFloors.isProtectedPanelPath(h.uppercased() + "/.AWS/CREDENTIALS", home: h), "another case")
         XCTAssertTrue(CUFloors.isProtectedPanelPath("/System/Volumes/Data" + h + "/.aws/credentials", home: h), "the Data volume's firmlink")
         XCTAssertTrue(CUFloors.isProtectedPanelPath("../.aws/credentials", home: h), "a relative climb, no folder known")
@@ -971,6 +973,110 @@ final class LeftoversTests: XCTestCase {
         XCTAssertFalse(CUFloors.isProtectedPanelPath("../Downloads/pkg.zip", home: h, base: h + "/Downloads"))
         XCTAssertFalse(CUFloors.isProtectedPanelPath(h + "/Downloads/pkg.zip", home: h))
         XCTAssertTrue(CUFloors.isProtectedPanelPath("/USERS/someone/.SSH/ID_RSA", home: "/Users/u"), "the save list, any case")
+    }
+
+    // MARK: the third security pass
+
+    func testCmdVOfAProtectedClipboardIntoAPanelIsJudgedBeforeSending() async throws {
+        world()
+        let (_, files) = openPanel()
+        clip.items = [[NSPasteboard.PasteboardType.string.rawValue: Data((NSHomeDirectory() + "/.aws/credentials").utf8)]]
+        let said = await refusal(.key(CUKeyAction(combo: "cmd+v")))
+        XCTAssertTrue(said?.contains("the text names a protected location") ?? false, said ?? "pasted")
+        XCTAssertTrue(poster.entries.filter { $0.type == .keyDown }.isEmpty, "nothing sent")
+        // A harmless start is recorded: what is typed after it is judged with it.
+        clip.items = [[NSPasteboard.PasteboardType.string.rawValue: Data("~/Library/Key".utf8)]]
+        _ = await refusal(.key(CUKeyAction(combo: "cmd+v")))
+        let rest = await refusal(.type(CUTypeAction(text: "chains/login.keychain-db", into: ref(files))))
+        XCTAssertTrue(rest?.contains("the text names a protected location") ?? false, rest ?? "typed")
+        // A copied file.
+        world()
+        _ = openPanel()
+        clip.fileURLs = ["file:///Users/someone/.ssh/id_ed25519"]
+        let file = await refusal(.key(CUKeyAction(combo: "cmd+v")))
+        XCTAssertTrue(file?.contains("the clipboard holds a protected location") ?? false, file ?? "pasted")
+    }
+
+    /// The agent shows hidden files (⌘⇧.) and opens a disclosure triangle, then selects an item with no URL under ".ssh":
+    /// its path from its disclosing rows decides; and with nothing readable after the agent's acts, the choice fails closed.
+    private func outlinePanel(parent: String?, child: String?) -> (sheet: AXUIElement, triangle: AXUIElement, open: AXUIElement) {
+        let (sheet, files) = openPanel()
+        let outline = fakeElement(98_160), parentRow = fakeElement(98_161), childRow = fakeElement(98_162), cell = fakeElement(98_163), triangle = fakeElement(98_164)
+        ax.add(outline, role: kAXOutlineRole, title: "list view", frame: CGRect(x: 120, y: 80, width: 560, height: 300),
+               extra: [kAXParentAttribute: sheet, kAXChildrenAttribute: [parentRow, childRow], kAXSelectedRowsAttribute: [childRow]])
+        ax.add(parentRow, role: kAXRowRole, title: parent, frame: CGRect(x: 120, y: 80, width: 560, height: 20), extra: [kAXParentAttribute: outline, kAXChildrenAttribute: [triangle]])
+        ax.add(triangle, role: kAXDisclosureTriangleRole, frame: CGRect(x: 122, y: 82, width: 12, height: 12), extra: [kAXParentAttribute: parentRow])
+        ax.setActions(triangle, [kAXPressAction])
+        ax.add(childRow, role: kAXRowRole, frame: CGRect(x: 120, y: 100, width: 560, height: 20),
+               extra: [kAXParentAttribute: outline, kAXChildrenAttribute: [cell], kAXDisclosedByRowAttribute: parentRow])
+        ax.add(cell, role: kAXCellRole, title: child, frame: CGRect(x: 140, y: 100, width: 300, height: 20), extra: [kAXParentAttribute: childRow])
+        ax.put(sheet, [kAXChildrenAttribute: ax.elements(sheet, kAXChildrenAttribute).filter { !CFEqual($0, files) } + [outline]])
+        ax.focus(pid: pid, on: outline)
+        return (sheet, triangle, ax.element(sheet, kAXDefaultButtonAttribute)!)
+    }
+
+    func testHiddenFilesAndADisclosureTriangleThenOpenIsJudgedByTheRowsPath() async throws {
+        world()
+        let (_, triangle, open) = outlinePanel(parent: ".ssh", child: "id_ed25519")
+        _ = await refusal(.key(CUKeyAction(combo: "cmd+shift+.")))
+        _ = await refusal(.click(CUClickAction(ref: ref(triangle))))
+        let said = await refusal(.click(CUClickAction(ref: ref(open))))
+        XCTAssertTrue(said?.contains("panel would choose a protected location") ?? false, said ?? "pressed")
+        XCTAssertTrue(said?.contains(".ssh/id_ed25519") ?? false, said ?? "")
+    }
+
+    func testAfterTheAgentsClicksAChoiceThatCantBeReadFailsClosed() async throws {
+        world()
+        let (_, triangle, open) = outlinePanel(parent: nil, child: nil)
+        let theirs = await refusal(.click(CUClickAction(ref: ref(open))))
+        XCTAssertNil(theirs, "the user's own navigation: unreadable passes")
+        world()
+        let (_, triangle2, open2) = outlinePanel(parent: nil, child: nil)
+        _ = await refusal(.click(CUClickAction(ref: ref(triangle2))))
+        let said = await refusal(.click(CUClickAction(ref: ref(open2))))
+        XCTAssertTrue(said?.contains("the user can pick the file themselves") ?? false, said ?? "pressed")
+        _ = (triangle, open)
+    }
+
+    func testAChoosingKeyWhoseFocusIsntShownInThePanelIsJudgedAsAChoice() async throws {
+        world()
+        let (_, files) = openPanel()
+        _ = selectItem(in: files, url: "file:///Users/someone/.ssh/id_ed25519")
+        ax.focus(pid: pid, on: select)  // the app reports a focus outside the sheet
+        let said = await refusal(.key(CUKeyAction(combo: "return")))
+        XCTAssertTrue(said?.contains("panel would choose a protected location") ?? false, said ?? "pressed")
+    }
+
+    func testADragByNameOrOfAFileItemWithNoPath() async throws {
+        world()
+        let (_, files) = openPanel()
+        let item = selectItem(in: files, url: "file:///Users/someone/Downloads/pkg.zip")
+        ax.drop(item, kAXURLAttribute)
+        ax.put(item, [kAXTitleAttribute: ".ssh"])
+        let byName = await refusal(.drag(CUDragAction(from: CUDragEnd(ref: ref(item)), to: CUDragEnd(ref: ref(fileButton)))))
+        XCTAssertTrue(byName?.contains("the drag's source is a protected location") ?? false, byName ?? "dragged")
+        ax.put(item, [kAXTitleAttribute: "pkg.zip"])
+        let noPath = await refusal(.drag(CUDragAction(from: CUDragEnd(ref: ref(item)), to: CUDragEnd(ref: ref(fileButton)))))
+        XCTAssertTrue(noPath?.contains("a file whose path can't be read") ?? false, noPath ?? "dragged")
+    }
+
+    /// The helper never stats or resolves anything in a place macOS guards with a privacy prompt.
+    func testTheResolverNeverTouchesPrivacyGuardedPlaces() {
+        let saved = CUFloors.resolveProbe
+        var asked: [String] = []
+        CUFloors.resolveProbe = { p in asked.append(p); return p.hasPrefix("/Users/u/work") ? nil : (p == "/Users/u" || p == "/Users" ? p : nil) }
+        defer { CUFloors.resolveProbe = saved }
+        let home = "/Users/u"
+        for p in ["/Users/u/Downloads/link/creds", "/Users/u/Desktop/a/b", "/Users/u/Documents/x", "/Users/u/Library/Mobile Documents/com~apple~CloudDocs/x",
+                  "/Users/u/Library/CloudStorage/Dropbox/x", "/Volumes/Backup/x", "/System/Volumes/Data/Users/u/Downloads/x", "/USERS/U/DOWNLOADS/x"] {
+            _ = CUFloors.isProtectedPanelPath(p, home: home)
+        }
+        XCTAssertFalse(asked.isEmpty, "something outside them was resolved")
+        let touched = asked.filter { CUFloors.noTouch($0, home: home) }
+        XCTAssertEqual(touched, [], "\(asked)")
+        // Judged lexically there: a protected name still counts.
+        XCTAssertTrue(CUFloors.isProtectedPanelPath("/Users/u/Downloads/.ssh/id_rsa", home: home))
+        XCTAssertTrue(CUFloors.isProtectedPanelPath("sub/.hidden/x", home: home, base: "/Users/u/Downloads"), "names-only with a folder known")
     }
 
     func testProtectedPanelPaths() {
@@ -1001,7 +1107,7 @@ final class LeftoversTests: XCTestCase {
     func testCaretMovesCopyQuickLookAndHiddenFilesAreNotJudged() async throws {
         world()
         _ = openPanel()
-        for combo in ["left", "cmd+down", "cmd+c", "space", "cmd+shift+."] {
+        for combo in ["left", "cmd+left", "cmd+c", "space", "cmd+shift+."] {
             let r = try await act(.key(CUKeyAction(combo: combo)))
             XCTAssertFalse(r.detail?.contains("nothing new appeared") ?? false, "\(combo): \(r.detail ?? "")")
         }

@@ -10,6 +10,12 @@ protocol CUPasteboardIO: AnyObject {
     /// Replaces the contents; returns the new change count.
     func write(_ items: [[String: Data]]) -> Int
     func readString() -> String?
+    /// The file URLs on it (a copied file in Finder), as strings.
+    func readFileURLs() -> [String]
+}
+
+extension CUPasteboardIO {
+    func readFileURLs() -> [String] { [] }
 }
 
 /// Markers clipboard managers honour (nspasteboard.org): Winter's own contents are short-lived and may be
@@ -89,6 +95,9 @@ final class CUSystemPasteboard: CUPasteboardIO {
     }
 
     func readString() -> String? { pb.string(forType: .string) }
+    func readFileURLs() -> [String] {
+        (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []).map(\.absoluteString)
+    }
 }
 
 /// The clipboard dance around one paste, with the key press and the evidence wait injected so the ordering

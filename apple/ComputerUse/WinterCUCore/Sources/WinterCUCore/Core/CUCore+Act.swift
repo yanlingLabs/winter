@@ -385,6 +385,10 @@ extension CUCore {
     // MARK: dispatch (pid queue)
 
     func perform(_ p: TargetActParams, on t: CUTarget, token: CUCancellation.Token) throws -> ActOutcome {
+        // Any act of the agent's in a file panel arms its fail-closed choice — after this act's own checks (a choosing
+        // press on a panel only the user navigated is judged as theirs).
+        let actedIn = panelOfAct(p.action, t)
+        defer { notePanelAct(actedIn, t) }
         switch p.action {
         case .click(let a):
             try refuseProtectedChoice(p.action, t)
@@ -404,6 +408,10 @@ extension CUCore {
             return o
         case .key(let a):
             try refuseProtectedChoice(p.action, t)
+            if let chord = try? CUKeyChord.parse(a.combo), chord.modifiers == [.command], case .character(let v) = chord.key,
+               Character(String(v).lowercased()) == "v" {
+                try refuseProtectedClipboard(into: a.into.flatMap { try? element($0, in: t) }, t)
+            }
             // One typing key into a panel: judged with what was typed there before it (a path keyed character by character).
             if let chord = try? CUKeyChord.parse(a.combo), Self.producesText(chord), case .character(let ch) = chord.key,
                !chord.modifiers.contains(.command) {

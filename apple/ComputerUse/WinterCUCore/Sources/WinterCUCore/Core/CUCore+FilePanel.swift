@@ -21,8 +21,29 @@ extension CUFloors {
     /// `packages/core/src/computer-use/browser/upload-paths.ts` (a test keeps the two the same).
     public static let secretLibraryFolders: Set<String> = ["Keychains", "Cookies"]
 
-    /// A path's canonical form: ~ expanded, . and .. resolved, symlinks resolved on its longest existing prefix (realpath
-    /// reads no file's content), a `/System/Volumes/Data` firmlink prefix dropped. Nil for a relative path with no `base`.
+    /// How a path is resolved (realpath); replaceable by tests, which also record what it is asked.
+    nonisolated(unsafe) static var resolveProbe: (String) -> String? = { p in
+        guard let r = realpath(p, nil) else { return nil }
+        defer { free(r) }
+        return String(cString: r)
+    }
+
+    /// Places the helper never stats or resolves — macOS asks the user before an app reads its Desktop, Documents,
+    /// Downloads, iCloud Drive or a cloud provider's folder, a removable or network volume (the third security pass:
+    /// the helper must never raise a privacy prompt). A path in one is judged LEXICALLY. Pure.
+    static func noTouch(_ path: String, home: String) -> Bool {
+        let lp = path.lowercased()
+        let h = lexicalHome(home).lowercased()
+        let roots = ["/volumes", "/network", "/net", "/home", "/system/volumes/data/volumes"]
+            + ["desktop", "documents", "downloads", "library/mobile documents", "library/cloudstorage"].map { h + "/" + $0 }
+        return roots.contains { lp == $0 || lp.hasPrefix($0 + "/") }
+    }
+
+    static func lexicalHome(_ home: String) -> String { (home as NSString).standardizingPath }
+
+    /// A path's canonical form: ~ expanded, . and .. resolved, a `/System/Volumes/Data` firmlink prefix dropped, symlinks
+    /// resolved on its longest existing prefix OUTSIDE the places in `noTouch` (realpath reads no file's content). Nil for
+    /// a relative path with no `base`.
     static func canonicalPath(_ raw: String, home: String, base: String? = nil) -> String? {
         var p = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !p.isEmpty else { return nil }
@@ -31,20 +52,24 @@ extension CUFloors {
             guard let base else { return nil }
             p = base + "/" + p
         }
-        // . and .. first, lexically (as the panel's Go to folder does), then the links on what exists.
+        // . and .. first, lexically (as the panel's Go to folder does), and the Data volume's firmlink.
         var parts: [String] = []
         for c in p.split(separator: "/").map(String.init) {
             if c == "." || c.isEmpty { continue }
             if c == ".." { if !parts.isEmpty { parts.removeLast() }; continue }
             parts.append(c)
         }
+        if parts.count >= 3, parts[0].lowercased() == "system", parts[1].lowercased() == "volumes", parts[2].lowercased() == "data" {
+            parts.removeFirst(3)
+        }
+        // Then the links, on the longest prefix that exists and lies outside every no-touch place.
         var head = parts
         var tail: [String] = []
         var resolved: String? = nil
         while !head.isEmpty {
-            if let r = realpath("/" + head.joined(separator: "/"), nil) {
-                resolved = String(cString: r)
-                free(r)
+            let prefix = "/" + head.joined(separator: "/")
+            if !noTouch(prefix, home: home), let r = resolveProbe(prefix) {
+                resolved = r
                 break
             }
             tail.insert(head.removeLast(), at: 0)
@@ -57,6 +82,13 @@ extension CUFloors {
         return out
     }
 
+    /// A relative path judged by its names alone, conservatively: any hidden name or protected name in it. Pure.
+    static func namesOnlyProtected(_ path: String) -> Bool {
+        let names = path.split(separator: "/").map { String($0).lowercased() }.filter { $0 != "." && $0 != ".." }
+        return names.contains { n in n.hasPrefix(".") || lowered(protectedFolderNames).contains(n) || lowered(secretLibraryFolders).contains(n) }
+            || names.last.map { lowered(shellStartupNames).contains($0) || lowered(protectedConfigNames).contains($0) } == true
+    }
+
     /// A path a file panel must not be pointed at (canonical form, any case): the save floor's names anywhere (a shell
     /// startup file, an agent config file, a folder of `protectedFolderNames`, fish's config), or — under the home — any
     /// folder or file whose name starts with "." or `Library/Keychains` / `Library/Cookies`. A relative path with no folder
@@ -64,11 +96,9 @@ extension CUFloors {
     public static func isProtectedPanelPath(_ path: String, home: String = NSHomeDirectory(), base: String? = nil) -> Bool {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        guard let canon = canonicalPath(trimmed, home: home, base: base) else {
-            let names = trimmed.split(separator: "/").map { String($0).lowercased() }.filter { $0 != "." && $0 != ".." }
-            return names.contains { n in n.hasPrefix(".") || lowered(protectedFolderNames).contains(n) || lowered(secretLibraryFolders).contains(n) }
-                || names.last.map { lowered(shellStartupNames).contains($0) || lowered(protectedConfigNames).contains($0) } == true
-        }
+        // A relative path: its names alone always count too, the panel's folder known or not.
+        if !trimmed.hasPrefix("/") && !trimmed.hasPrefix("~"), namesOnlyProtected(trimmed) { return true }
+        guard let canon = canonicalPath(trimmed, home: home, base: base) else { return false }
         let lp = canon.lowercased()
         let names = lp.split(separator: "/").map(String.init)
         if let last = names.last, lowered(shellStartupNames).contains(last) || lowered(protectedConfigNames).contains(last) { return true }
@@ -180,6 +210,19 @@ extension CUCore {
         if replacing { panelTyped[t.id] = CUPanelTyped(panel: AXIdentity(element: root), text: text) } else { noteTyped(text, into: root, t) }
     }
 
+    /// ⌘V into a sheet or panel: what the clipboard holds (put there by anything — a shell's pbcopy) is judged like typed
+    /// text before the key is sent, and recorded; file URLs on it are judged each (the third security pass).
+    func refuseProtectedClipboard(into e: AXUIElement?, _ t: CUTarget) throws {
+        guard t.accessible, let target = e ?? reportedFocus(t), let root = panelRoot(target, t) else { return }
+        let pb = pasteboard()
+        if let hit = pb.readFileURLs().first(where: { CUFloors.panelChoiceIsProtected($0) }) {
+            CULog.act.notice("key in \(t.appName, privacy: .public): the clipboard holds a protected file — cmd+V refused")
+            throw CUError.refused(.savePath, "the clipboard holds \(Self.panelPathWords) (\u{201C}\(hit.prefix(80))\u{201D}) and ⌘V would put it into \(t.appName)'s panel — nothing was sent; ask the user to choose it")
+        }
+        try refuseProtectedPanelText(pb.readString() ?? "", into: target, t)
+        _ = root
+    }
+
     /// 2. After text went into a sheet or panel: the VALUE each field now holds (the one named and the focus) judged
     /// whole; a protected one is cleared (when the field takes a value) and refused.
     func refuseProtectedPanelValue(_ named: AXUIElement?, _ t: CUTarget) throws {
@@ -225,6 +268,20 @@ extension CUCore {
         }
     }
 
+    /// An act that would choose if it lands in a panel, its target not resolved there.
+    func possibleChoice(_ a: CUAction, _ t: CUTarget) -> Bool {
+        switch a {
+        case .click(let c):
+            guard (c.count ?? 1) >= 2 else { return false }
+            let e: AXUIElement? = c.ref.flatMap { try? element($0, in: t) } ?? attemptPoint(a, t).flatMap { elementAt($0, in: t) }
+            return e == nil
+        case .key(let k):
+            return (try? CUKeyChord.parse(k.combo)).map(Self.choosingChord) ?? false
+        default:
+            return false
+        }
+    }
+
     /// Return, Enter, ⌘O, ⌘↓ (open the selection) — with nothing else held. Pure.
     static func choosingChord(_ c: CUKeyChord) -> Bool {
         if c.modifiers.isEmpty { return [.named(.returnKey), .named(.keypadEnter)].contains(c.key) }
@@ -251,6 +308,43 @@ extension CUCore {
 
     static let panelReadCap = 600
 
+    /// A row's or item's name: its own title, description or value, else its first named descendant's (two levels).
+    func panelItemName(_ e: AXUIElement) -> String? {
+        var queue: [(AXUIElement, Int)] = [(e, 0)]
+        while !queue.isEmpty {
+            let (c, d) = queue.removeFirst()
+            for name in [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute] {
+                if let v = ax.string(c, name)?.trimmingCharacters(in: .whitespaces), !v.isEmpty { return v.components(separatedBy: ", ").first }
+            }
+            if d < 2 { queue += ax.elements(c, kAXChildrenAttribute).map { ($0, d + 1) } }
+        }
+        return nil
+    }
+
+    /// The agent acted in a panel (any act: a click, a key, the sidebar, ⌘⇧., a disclosure triangle): from then on a
+    /// choice there that can't be read fails closed (the third security pass — only the user's own navigation passes).
+    func panelOfAct(_ a: CUAction, _ t: CUTarget) -> AXIdentity? {
+        guard t.accessible else { return nil }
+        var e: AXUIElement? = nil
+        switch a {
+        case .click(let c): e = c.ref.flatMap { try? element($0, in: t) } ?? attemptPoint(a, t).flatMap { elementAt($0, in: t) }
+        case .key(let k): e = k.into.flatMap { try? element($0, in: t) } ?? reportedFocus(t)
+        default: e = Self.primaryRef(a).flatMap { try? element($0, in: t) } ?? reportedFocus(t)
+        }
+        return e.flatMap { panelRoot($0, t) }.map { AXIdentity(element: $0) }
+    }
+
+    func notePanelAct(_ id: AXIdentity?, _ t: CUTarget) {
+        guard let id else { return }
+        if panelTyped[t.id]?.panel != id { panelTyped[t.id] = CUPanelTyped(panel: id, text: "") }
+    }
+
+    /// A sheet open on the bound window (its first `AXSheet` child), when there is one.
+    func openSheet(_ t: CUTarget) -> AXUIElement? {
+        guard let w = try? windowElement(t) else { return nil }
+        return ax.elements(w, kAXChildrenAttribute).first { ax.string($0, kAXRoleAttribute) == kAXSheetRole }
+    }
+
     /// What the panel would choose, as read: the URLs, file names and titles of its selected items (and of `item`, a
     /// double-clicked one), its text fields' values (a file name, the Go to folder field), its pop-ups' values (the folder
     /// shown). `determined`: the whole panel was read and something besides its pop-ups was there to judge.
@@ -273,7 +367,26 @@ extension CUCore {
                 if d < depth { queue += ax.elements(c, kAXChildrenAttribute).map { ($0, d + 1) } }
             }
         }
-        if let item { describe(item, depth: 3) }
+        // An item with no URL: its path from its own name and its disclosing rows' (an outline's or a column view's
+        // parents) — judged by its names (`.ssh/id_ed25519`).
+        func rowPath(_ e: AXUIElement) {
+            var row: AXUIElement? = e
+            for _ in 0..<3 {
+                guard let r = row else { break }
+                if ax.string(r, kAXRoleAttribute) == kAXRowRole { break }
+                row = ax.element(r, kAXParentAttribute)
+            }
+            guard let r = row, ax.string(r, kAXRoleAttribute) == kAXRowRole else { return }
+            var names: [String] = []
+            var cur: AXUIElement? = r
+            for _ in 0..<32 {
+                guard let c = cur else { break }
+                if let n = panelItemName(c) { names.insert(n, at: 0) }
+                cur = ax.element(c, kAXDisclosedByRowAttribute)
+            }
+            if !names.isEmpty { out.append(names.joined(separator: "/")); substantive = true }
+        }
+        if let item { describe(item, depth: 3); rowPath(item) }
         var queue: [AXUIElement] = [root]
         var seen = 0
         while !queue.isEmpty, seen < Self.panelReadCap {
@@ -286,7 +399,7 @@ extension CUCore {
                 if role != kAXPopUpButtonRole { substantive = true }
             }
             for name in [kAXSelectedRowsAttribute, kAXSelectedChildrenAttribute] {
-                for sel in ax.elements(c, name).prefix(20) { describe(sel, depth: 3) }
+                for sel in ax.elements(c, name).prefix(20) { describe(sel, depth: 3); rowPath(sel) }
             }
             queue += ax.elements(c, kAXChildrenAttribute)
         }
@@ -296,7 +409,8 @@ extension CUCore {
     /// The choice check on a panel: anything it would choose protected → refused; nothing readable after text was sent
     /// into it (this act — `sending` — or earlier, since its last choice) → refused, failing closed. A successful check
     /// starts the panel's typed text afresh.
-    func refuseProtectedChoiceIn(_ root: AXUIElement, item: AXUIElement?, _ t: CUTarget, extra: [String] = [], sending: Bool = false) throws {
+    func refuseProtectedChoiceIn(_ root: AXUIElement, item: AXUIElement?, _ t: CUTarget, extra: [String] = [], sending: Bool = false,
+                                 unresolved: Bool = false) throws {
         let (values, determined) = panelChoices(root, item: item)
         let typed = typedInto(root, t)
         let base = panelFolder(root)
@@ -307,7 +421,7 @@ extension CUCore {
         }
         // Failing closed: text went into this panel and what it would choose can't be read — nothing to judge at all, or
         // the pending text is relative to a folder (or a field's hidden start) that can't be seen.
-        let sent = sending || typed != nil
+        let sent = sending || typed != nil || unresolved
         let pending = (extra + [typed ?? ""]).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let unjudgeable = pending.isEmpty || pending.contains { p in
             let s = p.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -315,14 +429,20 @@ extension CUCore {
         }
         if !determined && sent && unjudgeable && base == nil {
             CULog.act.notice("act in \(t.appName, privacy: .public): what the panel would choose can't be read after text went into it — refused")
-            throw CUError.refused(.savePath, "what \(t.appName)'s panel would choose can't be read, and text was typed into it — nothing was pressed (Winter can't check it isn't \(Self.panelPathWords)); the user can pick the file themselves")
+            throw CUError.refused(.savePath, "what \(t.appName)'s panel would choose can't be read after Winter typed or clicked in it — nothing was pressed (Winter can't check it isn't \(Self.panelPathWords)); the user can pick the file themselves")
         }
         if let rec = panelTyped[t.id], rec.panel == AXIdentity(element: root) { panelTyped[t.id]?.text = "" }
     }
 
     /// 3. Before an act that makes a sheet or panel choose.
     func refuseProtectedChoice(_ a: CUAction, _ t: CUTarget) throws {
-        guard let (item, root) = choosingAct(a, t) else { return }
+        guard let (item, root) = choosingAct(a, t) else {
+            // An act that may choose but whose target can't be placed (a double-click at a point nothing answers for, a
+            // choosing key with the focus not shown in the panel) while a panel sheet is open: judged as a choice in it.
+            guard t.accessible, let sheet = openSheet(t), possibleChoice(a, t) else { return }
+            try refuseProtectedChoiceIn(sheet, item: nil, t, unresolved: true)
+            return
+        }
         let isItem: Bool = { if case .click(let c) = a { return (c.count ?? 1) >= 2 }; if case .action = a { return true }; return false }()
         try refuseProtectedChoiceIn(root, item: isItem ? item : nil, t)
     }
@@ -348,8 +468,20 @@ extension CUCore {
             url(c)
             if d < 2 { queue += ax.elements(c, kAXChildrenAttribute).map { ($0, d + 1) } }
         }
-        guard let hit = urls.first(where: { u in URL(string: u)?.isFileURL == true && CUFloors.panelChoiceIsProtected(u) }) else { return }
-        CULog.act.notice("drag in \(t.appName, privacy: .public): its source is a protected file — refused")
-        throw CUError.refused(.savePath, "the drag's source is \(Self.panelPathWords) (\u{201C}\(hit.prefix(80))\u{201D}) — nothing was dragged; ask the user to move it themselves")
+        // Its name too (a protected name needs no path), and a file-like source — an item in Finder or a panel — whose
+        // path can't be read fails closed.
+        let name = panelItemName(source)
+        let hit = urls.first(where: { u in URL(string: u)?.isFileURL == true && CUFloors.panelChoiceIsProtected(u) })
+            ?? name.flatMap { CUFloors.panelChoiceIsProtected($0) ? $0 : nil }
+        if let hit {
+            CULog.act.notice("drag in \(t.appName, privacy: .public): its source is a protected file — refused")
+            throw CUError.refused(.savePath, "the drag's source is \(Self.panelPathWords) (\u{201C}\(hit.prefix(80))\u{201D}) — nothing was dragged; ask the user to move it themselves")
+        }
+        let fileLike = (panelRoot(source, t) != nil || t.bundleId == "com.apple.finder")
+            && [kAXRowRole, kAXCellRole, kAXImageRole, kAXStaticTextRole, kAXGroupRole].contains(ax.string(source, kAXRoleAttribute) ?? "")
+        if fileLike, !urls.contains(where: { URL(string: $0)?.isFileURL == true }) {
+            CULog.act.notice("drag in \(t.appName, privacy: .public): a file item whose path can't be read — refused")
+            throw CUError.refused(.savePath, "the drag's source is a file whose path can't be read, so Winter can't check it isn't \(Self.panelPathWords) — nothing was dragged; the user can move it themselves")
+        }
     }
 }

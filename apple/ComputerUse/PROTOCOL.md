@@ -1195,6 +1195,19 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   was sent into that panel, it fails CLOSED ("the user can pick the file themselves") — with nothing typed (the user's own
   navigation) it goes ahead; (4) a `drag` whose source is a file item (an `AXURL` on it, two parents or two levels of
   children) is refused for a protected file before anything moves.
+- The third security pass: ⌘V into a sheet or panel judges the clipboard's string (with the field's value and the panel's
+  typed text) and each file URL on it before the key is sent, and records the string as typed; ANY agent act in a panel
+  (a click, a key, the sidebar, ⌘⇧., a disclosure triangle) arms its fail-closed choice — only the user's own navigation
+  (no agent act there since it opened) passes unreadable; an item with no URL gets a path from its row and its
+  `AXDisclosedByRow` parents (`.ssh/id_ed25519`); a double-click whose point nothing answers for, or a choosing key with
+  the focus not shown in the panel, while a sheet is open on the bound window, is judged as a choice in that sheet and
+  fails closed when unreadable; a drag's source is judged by its name too, and a file item in Finder or a panel whose
+  path can't be read is refused; a relative path's names always count, the panel's folder known or not. The resolver
+  never stats or resolves anything under `~/Desktop`, `~/Documents`, `~/Downloads`, `~/Library/Mobile Documents`,
+  `~/Library/CloudStorage`, `/Volumes`, `/Network`, `/net` or `/home` (macOS would ask the user before the helper reads
+  there): such a path is judged LEXICALLY. Residual: a symlink planted INSIDE one of those folders (e.g.
+  `~/Downloads/x` → `~/.ssh`) is not followed, so a path through it is judged by its own names only. `upload` refuses a
+  file with another hard link (`nlink > 1`), at the check and again at the private copy's open.
 - Still UNMEASURED on the remote view: which pid accessibility reports for the service-drawn panel's elements (the
   routing needs the service's), whether a Go to folder field it opens is in the app's tree at all (the floors' typed-text
   record covers one that isn't), whether the panel says its folder (`AXDocument`/`AXURL` — relative text is otherwise

@@ -96,6 +96,9 @@ export function checkUploadFiles(input: unknown, roots: UploadRoots): CheckedUpl
     if (path === undefined) throw new AutomationFailure("NotAllowed", `${shown}: no such file`);
     const st = statSync(path);
     if (!st.isFile()) throw new AutomationFailure("NotAllowed", `${shown} is not a regular file`);
+    // A hard link is the same file under another name (one in the working folder may be ~/.ssh's key): where it really
+    // lives can't be told, so it is refused plainly — never with the copy advice (the third security pass).
+    if (st.nlink > 1) throw new AutomationFailure("NotAllowed", `${shown} has another hard link to it, so where it really lives can't be told — it can't be uploaded`);
     // The floors first, wherever the file is: a protected file is refused plainly — never with the copy advice below,
     // which would be a recipe for taking it out (the review of the open panel, MED-3).
     if (inside(path, home)) throw new AutomationFailure("NotAllowed", `${shown} is inside Winter's own home — it can't be uploaded`);
@@ -141,6 +144,7 @@ export function stageUploads(files: readonly CheckedUpload[], home: string, sess
       }
       const st = fstatSync(src);
       if (!st.isFile() || st.dev !== f.dev || st.ino !== f.ino) throw new AutomationFailure("NotAllowed", `${basename(f.path)} changed while it was being uploaded — try again`);
+      if (st.nlink > 1) throw new AutomationFailure("NotAllowed", `${basename(f.path)} has another hard link to it, so where it really lives can't be told — it can't be uploaded`);
       const dest = join(dir, name);
       dst = openSync(dest, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       for (;;) {
