@@ -78,6 +78,7 @@ struct CoworkWorkspaceView: View {
                             Text("Default approvals: \(policy.defaultPolicy.rawValue)")
                             Text(workspace.automaticPublication ? "GitHub feature-branch publication is automatic." : "Publication is manual or does not currently apply.")
                         }
+                        CoworkSchedulesView(model: model.schedules, workspace: workspace, policyRevision: model.policy?.revision)
                         HStack {
                             Text("Sources").font(.headline)
                             Spacer()

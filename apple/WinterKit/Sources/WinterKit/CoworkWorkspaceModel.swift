@@ -7,7 +7,10 @@ import WinterProtocol
     public typealias Call = @MainActor (String, SessionEvent.JSONValue) async throws -> SessionEvent.JSONValue
     @Published public private(set) var capabilities = CoworkCapabilities()
     @Published public private(set) var workspaces: [CoworkWorkspace] = []
-    @Published public private(set) var selected: CoworkWorkspace?
+    @Published public private(set) var selected: CoworkWorkspace? {
+        // Invalidate before any asynchronous navigation/refresh read can return.
+        didSet { schedules.bind(workspaceId: nil) }
+    }
     @Published public private(set) var sources: [CoworkSource] = []
     @Published public private(set) var policy: CoworkPolicySummary?
     @Published public private(set) var busy = false
@@ -15,6 +18,8 @@ import WinterProtocol
     @Published public private(set) var operation: CoworkOperation?
     @Published public private(set) var lastMutationRecorded = false
     private var selectedId: String?
+    /// Separate bounded metadata consumer; workspace policy/source discovery remains independent.
+    public private(set) lazy var schedules = CoworkSchedulesModel(call: call)
     private let call: Call
     private var requestIds: [String: String] = [:]
     public init(call: @escaping Call) { self.call = call }
