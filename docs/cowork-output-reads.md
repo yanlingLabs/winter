@@ -50,12 +50,18 @@ initialization refused forever, including the shared `cowork/workspaces/<id>/sha
 outputs` ancestors of every other session in the workspace. The journal follows the
 guidance-mutation pattern (journal commit, filesystem effect, finishing commit):
 
-1. After the unchanged preflight and before any mkdir, one scoped durable
-   transaction rechecks workspace, active binding, the committed session, HomeIdentity
-   and retained state, then inserts a `cowork_output_directory_intents` row for every
-   path of the canonical chain (`cowork` through `…/shared/outputs/<session-id>`) that
-   has no `cowork_output_directories` record. The home itself keeps its existing
-   handling.
+1. After the unchanged preflight, a read-only pre-walk of the canonical chain runs
+   from the home down through the same held O_NOFOLLOW descriptors, with no mkdir,
+   no sync and no checkpoint, applying the walk's own owner/mode/device/record/
+   admission checks. A directory that exists unrecorded with no recorded or admitted
+   identity and no intent committed by an earlier call is foreign: the call refuses
+   with `file_unavailable` BEFORE any intent is written. The first component that
+   does not exist (ENOENT) and everything below it are the "absent" paths. Then one
+   scoped durable transaction rechecks workspace, active binding, the committed
+   session, HomeIdentity and retained state and inserts a
+   `cowork_output_directory_intents` row only for those absent paths that have no
+   `cowork_output_directories` record and no intent yet (`cowork` through
+   `…/shared/outputs/<session-id>`). The home itself keeps its existing handling.
 2. The walk is otherwise unchanged. A directory that already exists UNRECORDED is
    admitted only if all hold: an intent row for exactly that relative path and the
    current HomeIdentity was committed by an EARLIER call (an intent inserted by the
@@ -75,10 +81,15 @@ guidance-mutation pattern (journal commit, filesystem effect, finishing commit):
    because a leftover intent could otherwise bless a foreign directory that appears
    there later. Intents for directories it did create stay, so the retry (same
    session, a restarted process or another session in the workspace) adopts them.
-   After a hard crash this cleanup does not run: stale intents are harmless unless a
-   same-user process also creates a 0700 same-device directory at exactly that
-   internal path. That residual is documented, not eliminated, because the journal
-   records intent, not the created inode.
+   Because only absent paths are ever journaled, a foreign directory that already
+   exists is never given an intent, even if the process dies before the cleanup runs.
+   The pre-walk refusal and the absent-only journal each independently keep that
+   invariant; both are kept. The residual is narrower: a hard crash AFTER the journal
+   commit leaves intents for paths that were absent at that time, and a same-user
+   process that later creates a 0700 same-device directory at exactly such an internal
+   path would have it adopted by the next call. A same-user racer that wins before the
+   mkdir of a live call is refused and its fresh intent forgotten. The journal records
+   intent, not the created inode, so this is documented, not eliminated.
 
 Nothing is ever deleted or renamed on disk. The reader never consults the journal.
 A non-empty journal makes the explicit schema downgrade refuse like any populated
@@ -210,6 +221,13 @@ after success, and the journal transaction rechecking the committed-session gate
 The cross-device case substitutes the fstat device for the exact inode, as the
 existing device-anchor regression does; it performs no mount. A foreign-owner case is
 not testable without a second user and relies on the unchanged uid check.
+
+Hardening: the journal only ever contains paths that were absent when a read-only
+pre-walk looked, so a hard crash can no longer leave an intent at a path where a
+foreign directory already stood (regressions with the cleanup blocked by a SQLite
+trigger assert zero intent rows, including a foreign directory below a journaled
+ancestor, and a racer directory that appears after the pre-walk is refused and its
+fresh intent forgotten).
 
 Schema15 is still unreleased, so the journal table is part of migration 15 (head of
 the reverse-dependency table list). `output-fs.ts` and `fd-fs.ts` are byte-identical

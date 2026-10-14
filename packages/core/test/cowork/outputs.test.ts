@@ -19,6 +19,7 @@ function refusal(fn: () => unknown, code: CoworkErrorCode) { try { fn(); throw n
 const native = process.platform === "darwin" && process.arch === "arm64" && process.env.WINTER_COWORK_OUTPUT_FS_FIXTURE === "1" ? test : test.skip;
 const count = (f: ReturnType<typeof fixture>, table: string) => (f.db.db.query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 const intents = (f: ReturnType<typeof fixture>) => f.db.db.query<{ relative_path: string }, []>("SELECT relative_path FROM cowork_output_directory_intents ORDER BY relative_path").all().map(row => row.relative_path);
+const BLOCK_FORGET = "CREATE TRIGGER keep_output_intents BEFORE DELETE ON cowork_output_directory_intents BEGIN SELECT RAISE(ABORT,'injected crash'); END"; // a hard crash never runs the cleanup
 const CHAIN = 6, RECORDED = CHAIN + 1; // cowork, workspaces, <ws>, shared, outputs, <session>; the home itself is recorded too
 function intend(f: ReturnType<typeof fixture>, relative: string) { f.db.db.run("INSERT INTO cowork_output_directory_intents VALUES(?,?,?)", [relative, f.records.recordedHomeIdentity(), new Date().toISOString()]); }
 function request(f: ReturnType<typeof fixture>, locationId: string, relativePath = "file.bin") { return { workspaceId: f.workspaceId, locationId, expectedLocationRevision: 1, relativePath }; }
@@ -63,12 +64,12 @@ native("initializer requires committed session, no outer transaction, canonical 
  expect(existsSync(f.root)).toBe(false);
  (f.store as unknown as { db: Database }).db.run("UPDATE sessions SET last_seq=1 WHERE session_id=?", [f.sessionId]);
  f.db.transaction(() => refusal(() => f.outputs.initialize(f.workspaceId, f.sessionId, f.store), "authority_denied")); expect(existsSync(f.root)).toBe(false);
+ f.db.db.run(BLOCK_FORGET); // even a crash that skips the cleanup must find nothing to bless: the foreign path is never journaled
  mkdirSync(f.root, { recursive: true, mode: 0o700 }); writeFileSync(join(f.root, "foreign.bin"), "foreign"); refusal(() => f.outputs.initialize(f.workspaceId, f.sessionId, f.store), "file_unavailable");
  expect(f.db.db.query("SELECT COUNT(*) AS n FROM cowork_output_locations").get()).toEqual({ n: 0 });
- // The refused attempt must not leave an intent that would bless the foreign directory on the next call.
- expect(intents(f)).toEqual([]); expect(count(f, "cowork_output_directories")).toBe(0);
+ expect(count(f, "cowork_output_directory_intents")).toBe(0); expect(count(f, "cowork_output_directories")).toBe(0);
  refusal(() => f.outputs.initialize(f.workspaceId, f.sessionId, f.store), "file_unavailable"); expect(readFileSync(join(f.root, "foreign.bin"), "utf8")).toBe("foreign");
- expect(count(f, "cowork_output_locations")).toBe(0); expect(intents(f)).toEqual([]);
+ expect(count(f, "cowork_output_locations")).toBe(0); expect(count(f, "cowork_output_directory_intents")).toBe(0);
 });
 native("missing recorded root never recreates or reenrolls; missing content is a distinct result", () => {
  const f = fixture(), location = f.initialize(), input = request(f, location.locationId);
@@ -133,7 +134,7 @@ native("a failed first attempt does not poison the workspace: a second session i
 native("crash between the intent commit and the first mkdir is harmless and retries", () => {
  // A real crash would skip the best-effort forgetting of intents; a trigger makes that cleanup fail the same way.
  let fault = true; const f = fixture(phase => { if (fault && phase === "intents-recorded") throw new Error("crash"); });
- f.db.db.run("CREATE TRIGGER keep_output_intents BEFORE DELETE ON cowork_output_directory_intents BEGIN SELECT RAISE(ABORT,'injected crash'); END");
+ f.db.db.run(BLOCK_FORGET);
  refusal(() => f.initialize(), "file_unavailable"); expect(existsSync(join(f.home, "cowork"))).toBe(false); expect(intents(f)).toHaveLength(CHAIN);
  expect(count(f, "cowork_output_locations")).toBe(0); expect(count(f, "cowork_output_directories")).toBe(0);
  fault = false; f.db.db.run("DROP TRIGGER keep_output_intents"); f.initialize();
@@ -141,7 +142,7 @@ native("crash between the intent commit and the first mkdir is harmless and retr
 });
 native("a crash after a partial walk leaves intents plus some directories; the retry adopts them and creates the rest", () => {
  let opened = 0, fault = true; const f = fixture(phase => { if (fault && phase === "directory-opened" && ++opened === 3) throw new Error("crash"); });
- f.db.db.run("CREATE TRIGGER keep_output_intents BEFORE DELETE ON cowork_output_directory_intents BEGIN SELECT RAISE(ABORT,'injected crash'); END");
+ f.db.db.run(BLOCK_FORGET);
  refusal(() => f.initialize(), "file_unavailable"); expect(existsSync(join(f.home, "cowork/workspaces", f.workspaceId))).toBe(true); expect(existsSync(join(f.home, "cowork/workspaces", f.workspaceId, "shared"))).toBe(false);
  fault = false; f.db.db.run("DROP TRIGGER keep_output_intents"); f.initialize(); expect(existsSync(f.root)).toBe(true); expect(count(f, "cowork_output_directories")).toBe(RECORDED); expect(intents(f)).toEqual([]);
 });
@@ -162,6 +163,21 @@ native("an unrecorded directory is adopted only with a journaled intent and a sa
  try { refused(); } finally { mocked.mockRestore(); }
  expect(count(f, "cowork_output_directories")).toBe(0);
  f.outputs.initialize(f.workspaceId, f.sessionId, f.store); expect(count(f, "cowork_output_locations")).toBe(1); expect(intents(f)).toEqual([]);
+});
+native("a foreign directory below a journaled ancestor is refused before any intent is written, with forgetting blocked", () => {
+ const f = fixture(); f.db.db.run(BLOCK_FORGET);
+ mkdirSync(join(f.home, "cowork"), { mode: 0o700 }); intend(f, "cowork"); // an earlier attempt's leftover: adoptable
+ mkdirSync(join(f.home, "cowork/workspaces"), { mode: 0o700 }); // no intent: foreign
+ refusal(() => f.initialize(), "file_unavailable");
+ expect(intents(f)).toEqual(["cowork"]); // nothing was written by this call, though the absent suffix below was about to be journaled
+ expect(existsSync(join(f.home, "cowork/workspaces", f.workspaceId))).toBe(false); expect(count(f, "cowork_output_directories")).toBe(0);
+ refusal(() => f.initialize(), "file_unavailable"); expect(intents(f)).toEqual(["cowork"]);
+});
+native("a foreign directory that appears after the pre-walk is refused and its fresh intent forgotten", () => {
+ let raced = false; const f = fixture(phase => { if (phase === "intents-recorded" && !raced) { raced = true; mkdirSync(join(f.home, "cowork"), { mode: 0o700 }); } });
+ refusal(() => f.initialize(), "file_unavailable"); expect(existsSync(join(f.home, "cowork"))).toBe(true);
+ expect(intents(f)).toEqual([]); expect(count(f, "cowork_output_directories")).toBe(0); // the racer's directory is not blessed for a retry
+ refusal(() => f.initialize(), "file_unavailable"); expect(intents(f)).toEqual([]);
 });
 native("the journal transaction rechecks the committed session and leaves neither intents nor directories when refused", () => {
  const f = fixture(); let calls = 0; const sessions = { hasCommittedSession: (id: string) => ++calls <= 1 && f.store.hasCommittedSession(id) }; // true for the preflight only

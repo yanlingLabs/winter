@@ -78,7 +78,9 @@ export class CoworkOutputs {
     if (!create || (!created && !admitted && !adopt && relative !== ".")) fail();
     return true;
   }
-  private tree(workspaceId: string, sessionId: string, create = false, journal?: Journal): Tree & { newEntries: Entry[] } {
+  /** `absent`, when given, makes this a read-only PROBE of the create walk: nothing is made, synced or checkpointed;
+   * the first component that does not exist (ENOENT) and every later one are collected into it and the walk stops. */
+  private tree(workspaceId: string, sessionId: string, create = false, journal?: Journal, absent?: Set<string>): Tree & { newEntries: Entry[] } {
     const homeId = this.records.recordedHomeIdentity(), entries: Entry[] = [], newEntries: Entry[] = [];
     const close = () => { for (const entry of entries.splice(0).reverse()) closeSync(entry.fd); };
     const remember = (fd: number, parent: number, name: string, relative: string | null) => {
@@ -91,12 +93,19 @@ export class CoworkOutputs {
       const home = entries.at(-1)!; home.relative = ".";
       if (home.identity.uid !== process.geteuid?.() || home.identity.mode !== 0o700) fail();
       if (this.directoryRecord(".", home.identity, create, false, homeId)) newEntries.push(home);
-      let relative = "";
-      for (const name of this.root(workspaceId, sessionId).split("/")) {
-        relative = relative ? `${relative}/${name}` : name;
-        const parent = fd, parentEntry = entries.at(-1)!, created = create ? mkdirAt(parent, name, 0o700) : false;
-        if (created) journal?.created.add(relative);
-        fd = openDirAt(parent, name); const entry = remember(fd, parent, name, relative);
+      const names = this.root(workspaceId, sessionId).split("/"), chain = this.chain(workspaceId, sessionId);
+      for (const [index, name] of names.entries()) {
+        const relative = chain[index]!;
+        const parent = fd, parentEntry = entries.at(-1)!; let created = false;
+        if (absent) {
+          try { fd = openDirAt(parent, name); }
+          catch (error) { if (error instanceof FdError && error.code === "ENOENT") { for (const later of chain.slice(index)) absent.add(later); break; } throw error; }
+        } else {
+          created = create ? mkdirAt(parent, name, 0o700) : false;
+          if (created) journal?.created.add(relative);
+          fd = openDirAt(parent, name);
+        }
+        const entry = remember(fd, parent, name, relative);
         if (entry.identity.uid !== process.geteuid?.() || entry.identity.mode !== 0o700) fail();
         // Adopt an existing UNRECORDED directory only as the leftover of an earlier attempt that journaled its intent
         // before any mkdir: opened under the held parent without following links (above), self-owned, mode 0700 (above)
@@ -105,8 +114,8 @@ export class CoworkOutputs {
         const isNew = this.directoryRecord(relative, entry.identity, create, created, homeId, adopt);
         if (isNew) newEntries.push(entry);
         // An adopted directory's earlier attempt may have failed at exactly this sync, so it is made durable again.
-        if (created || (isNew && adopt)) { fullSyncInstructionFd(fd); fullSyncInstructionFd(parent); }
-        this.checkpoint("directory-opened");
+        if (!absent && (created || (isNew && adopt))) { fullSyncInstructionFd(fd); fullSyncInstructionFd(parent); }
+        if (!absent) this.checkpoint("directory-opened");
       }
       return { entries, directory: fd, newEntries, close };
     } catch (error) { close(); if (error instanceof CoworkError) throw error; return fail(); }
@@ -125,10 +134,19 @@ export class CoworkOutputs {
   private chain(workspaceId: string, sessionId: string): string[] {
     let relative = ""; return this.root(workspaceId, sessionId).split("/").map(name => (relative = relative ? `${relative}/${name}` : name));
   }
-  /** Intent journal, step one: durably record every not-yet-recorded directory of the chain BEFORE any mkdir. Returns the
-   * paths whose intent already existed (committed by an earlier attempt: their directory may be an unrecorded leftover)
-   * and the ones inserted now (a directory already standing there is foreign and stays refused). */
-  private journal(workspaceId: string, sessionId: string, sessions: CoworkCommittedSessions, homeId: string): { prior: Set<string>; fresh: Set<string> } {
+  /** Read-only pre-walk of the create walk (held-fd openDirAt, O_NOFOLLOW, no mkdir, nothing synced). It applies every
+   * walk check to the directories that exist, so a FOREIGN unrecorded directory (no recorded/admitted identity, no
+   * intent committed by an earlier call) is refused here, before any intent is written. Returns the paths that do not
+   * exist yet: the first missing component and everything below it. */
+  private absent(workspaceId: string, sessionId: string, homeId: string): Set<string> {
+    const absent = new Set<string>(), prior = new Set(this.chain(workspaceId, sessionId).filter(relative => this.hasIntent(relative, homeId)));
+    const probe = this.tree(workspaceId, sessionId, true, { prior, created: new Set() }, absent);
+    try { return absent; } finally { probe.close(); }
+  }
+  /** Intent journal, step one: durably record the ABSENT, not-yet-recorded directories of the chain BEFORE any mkdir.
+   * Returns the paths whose intent already existed (committed by an earlier attempt: their directory may be an
+   * unrecorded leftover) and the ones inserted now (a directory already standing there is foreign and stays refused). */
+  private journal(workspaceId: string, sessionId: string, sessions: CoworkCommittedSessions, homeId: string, absent: ReadonlySet<string>): { prior: Set<string>; fresh: Set<string> } {
     const prior = new Set<string>(), fresh = new Set<string>(), chain = this.chain(workspaceId, sessionId);
     durableCoworkTransaction(this.records.rs, () => {
       this.workspace(workspaceId); this.binding(workspaceId, sessionId, true);
@@ -137,7 +155,7 @@ export class CoworkOutputs {
       for (const relative of chain) {
         if (this.one("SELECT 1 FROM cowork_output_directories WHERE relative_path=?", relative)) continue;
         if (this.one("SELECT 1 FROM cowork_output_directory_intents WHERE relative_path=? AND home_id=?", relative, homeId)) prior.add(relative);
-        else { this.run("INSERT OR IGNORE INTO cowork_output_directory_intents VALUES(?,?,?)", relative, homeId, new Date().toISOString()); fresh.add(relative); }
+        else if (absent.has(relative)) { this.run("INSERT OR IGNORE INTO cowork_output_directory_intents VALUES(?,?,?)", relative, homeId, new Date().toISOString()); fresh.add(relative); }
       }
     });
     return { prior, fresh };
@@ -153,7 +171,8 @@ export class CoworkOutputs {
    * for an already bound, committed logical conversation. Cross-store ordering is
    * synchronous: store.createSession commit precedes this call; no caller-owned
    * transaction, await, reentrant lifecycle change or unverified session inventory.
-   * Every directory of the chain is journaled (intent rows, one durable commit) BEFORE the first mkdir and the intents
+   * A read-only pre-walk refuses a foreign existing directory before anything is written; then every ABSENT directory
+   * of the chain is journaled (intent rows, one durable commit) BEFORE the first mkdir and the intents
    * are removed in the owner commit that records the directories. A retry therefore adopts only what an earlier attempt
    * journaled and left unrecorded (failure or crash); a directory that merely exists, with no earlier intent, is foreign
    * and refused, as is any link, non-0700, foreign-owned or cross-device entry. Nothing is ever deleted or renamed. */
@@ -163,7 +182,7 @@ export class CoworkOutputs {
     if (!sessions || typeof sessions.hasCommittedSession !== "function" || sessions.hasCommittedSession(sessionId) !== true || this.records.get(workspaceId).state !== "retained") fail("authority_denied");
     if (this.one("SELECT 1 FROM cowork_output_locations WHERE session_id=?", sessionId)) throw new CoworkError("request_conflict");
     const homeId = this.records.recordedHomeIdentity(); let intents: { prior: Set<string>; fresh: Set<string> };
-    try { intents = this.journal(workspaceId, sessionId, sessions, homeId); } catch (error) { if (error instanceof CoworkError) throw error; return fail(); }
+    try { intents = this.journal(workspaceId, sessionId, sessions, homeId, this.absent(workspaceId, sessionId, homeId)); } catch (error) { if (error instanceof CoworkError) throw error; return fail(); }
     const created = new Set<string>(); let tree: (Tree & { newEntries: Entry[] }) | undefined;
     try {
       this.checkpoint("intents-recorded");
