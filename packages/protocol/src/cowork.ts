@@ -75,7 +75,20 @@ export const CoworkScheduleOccurrence = z.object({ occurrenceId: Id, scheduleId:
 export type CoworkScheduleDefinition = z.infer<typeof CoworkScheduleDefinition>;
 export type CoworkSchedule = z.infer<typeof CoworkSchedule>;
 export type CoworkScheduleOccurrence = z.infer<typeof CoworkScheduleOccurrence>;
+/** Host shared guidance is bounded UTF-8 user content, never capability authority. */
+export const COWORK_INSTRUCTION_MAX_BYTES = 65536;
+const Digest = z.string().regex(/^[a-f0-9]{64}$/);
+export const CoworkInstructionUpdate = WorkspaceId.extend({ requestId: Id, expectedInstructionRevision: Revision, expectedDigest: Digest,
+  content: z.string().refine(value => !value.includes("\0") && new TextEncoder().encode(value).length <= COWORK_INSTRUCTION_MAX_BYTES && new TextDecoder("utf-8", { ignoreBOM: true }).decode(new TextEncoder().encode(value)) === value),
+}).strict();
+export const CoworkInstructionMetadata = z.object({ workspaceId: Id, instructionRevision: Revision, digest: Digest, bytes: z.number().int().min(0).max(COWORK_INSTRUCTION_MAX_BYTES), refreshState: z.literal("refresh-required") }).strict();
+export const CoworkInstructionRead = CoworkInstructionMetadata.extend({ contentBase64: z.string().max(87384), encoding: z.literal("utf-8") }).strict();
+export const CoworkInstructionProvenance = CoworkInstructionMetadata.extend({ entries: z.array(z.object({ kind: z.literal("workspace"), guestPath: z.literal("/workspace/.winter/WINTER.md"), digest: Digest }).strict()).length(1), sourceDiscovery: z.literal("unavailable") }).strict();
+export const CoworkInstructionReceipt = receipt(CoworkInstructionMetadata);
 export const COWORK_RPC = {
+  "workspace.instructions.get": { params: WorkspaceId, result: CoworkInstructionRead },
+  "workspace.instructions.provenance": { params: WorkspaceId, result: CoworkInstructionProvenance },
+  "workspace.instructions.update": { params: CoworkInstructionUpdate, result: CoworkInstructionReceipt },
   "workspace.schedule.create": { params: WorkspaceId.extend({ requestId: Id, definition: CoworkScheduleDefinition }).strict(), result: CoworkSchedule },
   "workspace.schedule.list": { params: WorkspaceId.extend({ cursor: Id.optional(), limit: z.number().int().min(1).max(100).default(100) }).strict(), result: z.object({ schedules: z.array(CoworkSchedule).max(100), nextCursor: Id.nullable() }).strict() },
   "workspace.schedule.cancel": { params: WorkspaceId.extend({ scheduleId: Id, expectedRevision: Revision }).strict(), result: CoworkSchedule },
@@ -112,6 +125,7 @@ export type CoworkWorkspace = z.infer<typeof CoworkWorkspace>;
 export type CoworkSource = z.infer<typeof CoworkSource>;
 export type CoworkWorkspacePolicy = z.infer<typeof CoworkWorkspacePolicy>;
 export const COWORK_METHODS = {
+  workspaceInstructionsGet: "workspace.instructions.get", workspaceInstructionsProvenance: "workspace.instructions.provenance", workspaceInstructionsUpdate: "workspace.instructions.update",
   workspaceScheduleCreate: "workspace.schedule.create", workspaceScheduleList: "workspace.schedule.list", workspaceScheduleCancel: "workspace.schedule.cancel", workspaceScheduleStatus: "workspace.schedule.status",
   workspaceCapabilitiesGet: "workspace.capabilities.get", workspaceSelectionPrepareFolder: "workspace.selection.prepareFolder", workspaceSelectionRevoke: "workspace.selection.revoke",
   workspaceList: "workspace.list", workspaceGet: "workspace.get", workspaceCreate: "workspace.create", workspaceUpdate: "workspace.update",

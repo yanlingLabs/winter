@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { COWORK_RPC, CoworkSource as SourceDto, CoworkCompleteWorkspace as WorkspaceDto, CoworkSummaryWorkspace as SummaryDto, CoworkWorkspacePolicy as PolicyDto, CoworkPolicySummary as PolicySummaryDto, CoworkWorkspaceRecord as WorkspaceRecordDto, type CoworkMethod, type CoworkResult } from "@yanlinglabs/winter-protocol";
 import { CoworkAuthority, intersectCeilings, type CoworkGrantResolver, type CoworkPrincipal } from "./authority";
+import { CoworkInstructions, type InstructionAgentApproval } from "./instructions";
 import { CoworkSchedules } from "./schedules";
 import { CoworkRepository } from "./repository";
 import { CoworkError, type CapabilityCeiling, type MutationContext, type MutationReceipt, type SourceSelection, type WorkspaceSource, type WorkspacePolicy, type Workspace } from "./types";
@@ -57,9 +58,11 @@ export function assertRemoteMayUseWorkspace(records: CoworkRepository, authority
 export class CoworkWorkspaceService {
   private readonly authority: CoworkAuthority;
   readonly schedules: CoworkSchedules;
-  constructor(readonly records: CoworkRepository, private readonly host: CoworkHostPorts = disabledCoworkHost, scheduleNow?: () => number) {
+  readonly instructions?: CoworkInstructions;
+  constructor(readonly records: CoworkRepository, private readonly host: CoworkHostPorts = disabledCoworkHost, scheduleNow?: () => number, instructionHome?: string, instructionApproval?: InstructionAgentApproval) {
     this.authority = new CoworkAuthority(records, host.grants);
     this.schedules = new CoworkSchedules(records, host.grants, scheduleNow);
+    if (instructionHome) this.instructions = new CoworkInstructions(records, instructionHome, host.grants, instructionApproval);
   }
   beginShutdown(): void { this.schedules.beginShutdown(); }
   private snapshot(principal: CoworkPrincipal, workspaceId: string) {
@@ -201,6 +204,15 @@ export class CoworkWorkspaceService {
   close(): void { this.beginShutdown(); this.host.selections?.close(); }
   private execute(principal: CoworkPrincipal, method: CoworkMethod, raw: unknown, connection: CoworkConnection): unknown {
     switch (method) {
+      case "workspace.instructions.get": case "workspace.instructions.provenance": case "workspace.instructions.update": {
+        // Initially Mac-local. Paired reads require explicit four-mirror admission;
+        // guest edits have a distinct authenticated content-bound approval port.
+        if (principal.kind !== "local-user" || connection.role === "remote") throw new CoworkError("authority_denied");
+        if (!this.instructions) throw new CoworkError("unsupported_topology");
+        if (method === "workspace.instructions.update") return this.instructions.update(principal, COWORK_RPC[method].params.parse(raw));
+        const p = COWORK_RPC[method].params.parse(raw);
+        return method === "workspace.instructions.get" ? this.instructions.get(principal, p.workspaceId) : this.instructions.provenance(principal, p.workspaceId);
+      }
       case "workspace.schedule.create": case "workspace.schedule.cancel": case "workspace.schedule.list": case "workspace.schedule.status": {
         // Local metadata surface only until paired ownership and saved remote scope are admitted.
         if (principal.kind !== "local-user" || connection.role === "remote") throw new CoworkError("authority_denied");

@@ -227,3 +227,30 @@ extension CoworkRequest where Result == CoworkPreparedFolder {
 extension CoworkRequest where Result == CoworkSelectionRevocation {
     public static func revokeSelection(_ selectionId: String) -> Self { Self("workspace.selection.revoke", ["selectionId": .string(selectionId)]) }
 }
+
+/// Mac-local canonical shared guidance; plain content never establishes host grants.
+public struct CoworkInstructionMetadata: Codable, Equatable, Sendable {
+    public let workspaceId: String, digest: String, refreshState: String
+    public let instructionRevision: Int, bytes: Int
+}
+public struct CoworkInstructionRead: Codable, Equatable, Sendable {
+    public let workspaceId: String, digest: String, refreshState: String, contentBase64: String, encoding: String
+    public let instructionRevision: Int, bytes: Int
+}
+public struct CoworkInstructionProvenance: Codable, Equatable, Sendable {
+    public struct Entry: Codable, Equatable, Sendable { public let kind: String, guestPath: String, digest: String }
+    public let workspaceId: String, digest: String, refreshState: String, sourceDiscovery: String
+    public let instructionRevision: Int, bytes: Int
+    public let entries: [Entry]
+}
+extension CoworkRequest where Result == CoworkInstructionRead {
+    public static func instructions(workspaceId: String) -> Self { Self("workspace.instructions.get", ["workspaceId": .string(workspaceId)]) }
+}
+extension CoworkRequest where Result == CoworkInstructionProvenance {
+    public static func instructionProvenance(workspaceId: String) -> Self { Self("workspace.instructions.provenance", ["workspaceId": .string(workspaceId)]) }
+}
+extension CoworkRequest where Result == CoworkReceipt<CoworkInstructionMetadata> {
+    public static func updateInstructions(workspaceId: String, requestId: String, expectedInstructionRevision: Int, expectedDigest: String, content: String) -> Self {
+        Self("workspace.instructions.update", ["workspaceId": .string(workspaceId), "requestId": .string(requestId), "expectedInstructionRevision": .number(Double(expectedInstructionRevision)), "expectedDigest": .string(expectedDigest), "content": .string(content)])
+    }
+}

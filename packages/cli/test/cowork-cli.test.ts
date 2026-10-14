@@ -178,3 +178,12 @@ test("workspace schedule metadata CLI is strict, bounded and never accepts a gue
   expect(() => parseCoworkArgs("workspace", ["schedule", "list", "workspace-one", "--cwd", "/workspace/source"])).toThrow("Unsupported option");
   expect(() => parseCoworkArgs("project", ["schedule", "list", "project-one"])).toThrow("Unknown workspace/Project command");
 });
+
+test("shared guidance parser carries only content/revision/digest and renders terminal controls safely", () => {
+  const args = ["instructions", "update", "workspace", "--instruction-revision", "2", "--digest", "a".repeat(64), "--content", "shared", "--request-id", "request"];
+  expect(route("workspace", args)).toEqual({ method: "workspace.instructions.update", params: { workspaceId: "workspace", requestId: "request", expectedInstructionRevision: 2, expectedDigest: "a".repeat(64), content: "shared" }, json: false });
+  expect(() => route("workspace", [...args, "--path", "/untrusted"])).toThrow("Unsupported option");
+  const get = route("workspace", ["instructions", "get", "workspace"]);
+  const lines = formatCoworkResult(get, { workspaceId: "workspace", instructionRevision: 2, digest: "a".repeat(64), bytes: 3, refreshState: "refresh-required", contentBase64: Buffer.from("\u001b[2J").toString("base64"), encoding: "utf-8" });
+  expect(lines.join("\n")).not.toContain("\u001b"); expect(lines.join("\n")).toContain("\\u001b");
+});

@@ -2915,7 +2915,7 @@ export async function startDaemon(opts: {
     : undefined;
   const liveEffort = liveSelection ? () => liveSelection().reasoningEffort ?? "" : undefined;
 
-  coworkService = runtime ? new CoworkWorkspaceService(new CoworkRepository(runtime.db), opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db), opts.coworkScheduleNow) : undefined;
+  coworkService = runtime ? new CoworkWorkspaceService(new CoworkRepository(runtime.db), opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db), opts.coworkScheduleNow, winterHome, { broker: approvalBroker, emit: (sessionId, event) => { hub.append(sessionId, event); } }) : undefined;
   coworkService?.schedules.recover();
   coworkService?.schedules.tick();
   const coworkEvents = coworkService ? new CoworkWorkspaceEvents(coworkService.records, store, hub) : undefined;

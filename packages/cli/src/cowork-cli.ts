@@ -16,6 +16,8 @@ export const COWORK_CLI_USAGE = `usage:
   winter workspace schedule list <workspaceId> [--limit N] [--cursor TOKEN] [--json]
   winter workspace schedule create <workspaceId> --definition-json JSON --request-id ID [--json]
   winter workspace schedule status|cancel <workspaceId> <scheduleId> [--revision N] [--json]
+  winter workspace instructions get|provenance <workspaceId> [--json]
+  winter workspace instructions update <workspaceId> --instruction-revision N --digest SHA256 --content TEXT --request-id ID [--json]
   winter workspace operation get <workspaceId> <operationId> [--json]
 
 Creation is unavailable. Source provisioning is gated by the daemon; add commands
@@ -93,6 +95,15 @@ export function parseCoworkArgs(surface: "workspace" | "project", args: string[]
     } else if (sub === "status") { arity(4); method = "workspace.schedule.status"; params = { workspaceId: id, scheduleId: extra }; allowed = []; }
     else if (sub === "cancel") { arity(4); method = "workspace.schedule.cancel"; params = { workspaceId: id, scheduleId: extra, expectedRevision: number("--revision") }; allowed = ["--revision"]; }
     else throw new Error("Unknown workspace schedule command");
+  } else if (verb === "instructions" && surface === "workspace") {
+    arity(3);
+    if (sub === "get" || sub === "provenance") {
+      method = sub === "get" ? "workspace.instructions.get" : "workspace.instructions.provenance";
+      params = { workspaceId: id }; allowed = [];
+    } else if (sub === "update") {
+      method = "workspace.instructions.update"; params = { workspaceId: id, requestId: flags["--request-id"], expectedInstructionRevision: number("--instruction-revision"), expectedDigest: flags["--digest"], content: flags["--content"] };
+      allowed = ["--request-id", "--instruction-revision", "--digest", "--content"];
+    } else throw new Error("Unknown workspace instructions command");
   } else if (verb === "operation" && sub === "get" && surface === "workspace") {
     arity(4); method = "workspace.operation.get"; params = { workspaceId: id, operationId: extra }; allowed = [];
   } else if (verb === "create") throw new Error("Cowork creation is unavailable; production provisioning and host selection issuance remain gated");
@@ -125,6 +136,12 @@ export function formatCoworkResult(route: CoworkCliRoute, result: CoworkCliResul
   if ("schedules" in result) return [...result.schedules.map(value => `${value.scheduleId}: ${value.state}; revision ${value.revision}; next due ${value.nextDue ?? "none"}`), ...(result.nextCursor ? [`Next cursor: ${result.nextCursor}`] : [])];
   if ("schedule" in result) return [`${result.schedule.scheduleId}: ${result.schedule.state}; guest execution ${result.execution}`, ...result.occurrences.map(value => `${value.occurrenceId}: ${value.state}; blocked ${value.reason ?? "none"}; missed ${value.missedCount}`)];
   if ("scheduleId" in result) return [`Schedule ${result.scheduleId}: ${result.state}; revision ${result.revision}; metadata recorded; guest execution unavailable`];
+  if ("digest" in result) {
+    const lines = [`Shared guidance revision ${result.instructionRevision}; SHA-256 ${result.digest}; ${result.bytes} byte(s); ${result.refreshState}`];
+    if ("contentBase64" in result) lines.push(visible(Buffer.from(result.contentBase64, "base64").toString("utf8")));
+    if ("sourceDiscovery" in result) lines.push(`Source discovery: ${result.sourceDiscovery}`, ...result.entries.map(entry => `${entry.kind}: ${entry.guestPath}; SHA-256 ${entry.digest}`));
+    return lines;
+  }
   if ("workspaces" in result) return [...(result.workspaces.length ? result.workspaces.flatMap(workspaceLines) : ["(no workspaces)"]), ...(result.nextCursor ? [`Next cursor: ${result.nextCursor}`] : [])];
   if ("projects" in result) return [...(result.projects.length ? result.projects.flatMap(project => workspaceLines(project.workspace)) : ["(no Projects)"]), ...(result.nextCursor ? [`Next cursor: ${result.nextCursor}`] : [])];
   if ("workspace" in result) return workspaceLines(result.workspace);
@@ -132,7 +149,8 @@ export function formatCoworkResult(route: CoworkCliRoute, result: CoworkCliResul
   if ("operationId" in result) {
     if ("value" in result) {
       const lines = [`Operation ${result.operationId} recorded at configuration revision ${result.revision}; guest effects are not confirmed`, `Check: winter workspace operation get ${result.workspaceId} ${result.operationId}`], value = result.value;
-      if ("detailState" in value && value.detailState === "summary") lines.push(`Policy details: summary (${value.detailReason}); publication: ${value.policySummary.publication}; network: ${value.policySummary.network}`, `Capability details omitted; counts: ${JSON.stringify(value.policySummary.capabilityCounts)}`, `Read: winter workspace policy get ${result.workspaceId} --revision ${value.policySummary.revision}`);
+      if ("digest" in value) lines.push(`Shared guidance revision ${value.instructionRevision}; SHA-256 ${value.digest}; ${value.refreshState}`);
+      else if ("detailState" in value && value.detailState === "summary") lines.push(`Policy details: summary (${value.detailReason}); publication: ${value.policySummary.publication}; network: ${value.policySummary.network}`, `Capability details omitted; counts: ${JSON.stringify(value.policySummary.capabilityCounts)}`, `Read: winter workspace policy get ${result.workspaceId} --revision ${value.policySummary.revision}`);
       else if ("ceiling" in value) lines.push(...policyLines(value));
       else if ("sourceId" in value) lines.push(`Source ${value.sourceId}: ${value.state} · ${value.desired}`);
       else if ("title" in value) lines.push(`Title: ${visible(value.title)}`);

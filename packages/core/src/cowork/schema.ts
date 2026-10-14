@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 /** Reverse dependency order also permits removing an unused additive schema on explicit rollback. */
-export const COWORK_TABLES = ["cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
+export const COWORK_TABLES = ["cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
 
 /** Host authority only. A guest manifest or rebuilt session index never populates these tables. */
 export function migrateCoworkSchema(db: Database): void {
@@ -164,4 +164,25 @@ export function migrateCoworkScheduleSchema(db: Database): void {
   );
   CREATE UNIQUE INDEX IF NOT EXISTS cowork_schedule_pending ON cowork_schedule_occurrences(schedule_id) WHERE state='pending';
   CREATE UNIQUE INDEX IF NOT EXISTS cowork_schedule_active ON cowork_schedule_occurrences(schedule_id) WHERE state IN ('claimed','dispatching','uncertain');`);
+}
+
+/** Canonical host shared guidance and crash-visible file replacement debt. */
+export function migrateCoworkInstructionSchema(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS cowork_instruction_directories (
+    relative_path TEXT PRIMARY KEY, identity_json TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS cowork_instructions (
+    workspace_id TEXT PRIMARY KEY REFERENCES cowork_workspaces(workspace_id),
+    home_id TEXT NOT NULL REFERENCES cowork_home_identity(home_id),
+    file_identity_json TEXT NOT NULL, digest TEXT NOT NULL CHECK(length(digest)=64),
+    bytes INTEGER NOT NULL CHECK(bytes>=0 AND bytes<=65536), pending_operation TEXT,
+    refresh_state TEXT NOT NULL CHECK(refresh_state IN ('refresh-required','unavailable'))
+  );
+  CREATE TABLE IF NOT EXISTS cowork_instruction_mutations (
+    operation_id TEXT PRIMARY KEY REFERENCES cowork_operations(operation_id),
+    workspace_id TEXT NOT NULL REFERENCES cowork_instructions(workspace_id),
+    expected_revision INTEGER NOT NULL CHECK(expected_revision>0),
+    before_digest TEXT NOT NULL CHECK(length(before_digest)=64), after_digest TEXT NOT NULL CHECK(length(after_digest)=64),
+    temporary_name TEXT NOT NULL, file_identity_json TEXT NOT NULL, after_bytes INTEGER NOT NULL CHECK(after_bytes>=0 AND after_bytes<=65536)
+  );`);
 }
