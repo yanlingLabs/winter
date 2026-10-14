@@ -1943,6 +1943,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       },
       drain(socket) {
         socket.data?.writer?.onDrain();
+        if (socket.data) opts.cowork?.watches.flush(socket.data.connId);
       },
       close(socket) {
         if (!socket.data) return; // rejected at cap before data was set (sentinel null)
@@ -2085,7 +2086,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     if (Object.hasOwn(COWORK_RPC, method)) {
       if (!opts.cowork) throw new RpcFailure(ERR.INVALID_PARAMS, "Cowork unavailable", { code: "unsupported_topology" });
       try {
-        const result = opts.cowork.call({ role: socket.data.authedRole, connectionId: socket.data.connId }, method as CoworkMethod, params ?? {});
+        const connection = { role: socket.data.authedRole, connectionId: socket.data.connId };
+        if (method === "workspace.watch") return opts.cowork.watch(connection, params ?? {}, { send(frame) {
+          // Workspace frames have their own notification identity; never route through session/$system.
+          const bytes = encodeLine({ jsonrpc: "2.0", method: "workspace.watch", params: frame });
+          if (bytes.length > 256 * 1024) return "closed";
+          const writer = socket.data.writer;
+          if (frame.phase !== "ended" && writer.bufferedBytes > 128 * 1024) return "blocked";
+          return writer.enqueue(bytes) ? "sent" : "closed";
+        } });
+        const result = opts.cowork.call(connection, method as CoworkMethod, params ?? {});
         opts.coworkEvents?.drain();
         return result;
       }
@@ -5118,7 +5128,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // would run against a store its owner closes right after this returns — see `pendingReaps`).
       for (const cancel of pendingReaps) cancel();
       pendingReaps.clear();
-      enforcement.stop(); mcpOAuthDoors?.dispose(); server.stop(true); opts.cowork?.close();
+      enforcement.stop(); mcpOAuthDoors?.dispose(); opts.cowork?.close(); server.stop(true);
     },
   };
 }

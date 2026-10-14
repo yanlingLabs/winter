@@ -1,5 +1,5 @@
 import {
-  LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, SessionEvent, COWORK_RPC, type CoworkMethod, type CoworkParams, type CoworkResult,
+  LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, SessionEvent, COWORK_RPC, CoworkWatchFrame, WORKSPACE_WATCH_RENEW_MS, type CoworkMethod, type CoworkParams, type CoworkResult,
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, HelloResult, SessionCreateResult, SessionAttachResult, SessionSendResult, SessionStageImageResult, SessionListResult,
   SessionAddDirResult, SessionSetCwdResult, TrustDirResult,
   BgListResult, BgPeekResult, BgKillResult, BgKillAllResult,
@@ -69,10 +69,14 @@ export interface ConnectOptions {
   role?: "harness" | "admin";
   timeoutMs?: number;
   onEvent: (event: SessionEvent) => void;
+  /** Separate ephemeral stream, never a session/$system event. */
+  onWorkspaceWatch?: (frame: CoworkWatchFrame) => void;
+  onWorkspaceWatchError?: (subscriptionId: string, error: unknown) => void;
 }
 
 export class WinterClient {
   private decoder = new LineDecoder();
+  private disconnected = false;
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   private socket!: Awaited<ReturnType<typeof Bun.connect>>;
@@ -81,6 +85,9 @@ export class WinterClient {
   /** What the daemon said it can do in its `hello` answer (`HelloResult.features`) — empty from a daemon that
    *  predates the field. Asked BEFORE a client relies on a capability (`supportsOriginalImagePaths`). */
   private features = new Set<string>();
+  private watchRenewals = new Map<string, ReturnType<typeof setTimeout>>();
+  private endedWatches = new Set<string>();
+  private watchError?: ConnectOptions["onWorkspaceWatchError"];
 
   private constructor(timeoutMs = 5000) {
     this.timeoutMs = timeoutMs;
@@ -88,6 +95,7 @@ export class WinterClient {
 
   static async connect(opts: ConnectOptions): Promise<WinterClient> {
     const client = new WinterClient(opts.timeoutMs ?? 5000);
+    client.watchError = opts.onWorkspaceWatchError;
     client.socket = await Bun.connect({
       unix: opts.socketPath,
       socket: {
@@ -105,6 +113,16 @@ export class WinterClient {
               // when they go through the socket rather than writing the Keychain themselves.
               if (msg.error) p.reject(Object.assign(new Error(`${msg.error.message} (code ${msg.error.code})`), { rpc: msg.error }));
               else p.resolve(msg.result);
+            } else if (msg.method === "workspace.watch") {
+              const parsed = CoworkWatchFrame.safeParse(msg.params);
+              if (parsed.success) {
+                if (parsed.data.phase === "ended") {
+                  client.endedWatches.add(parsed.data.subscriptionId);
+                  if (client.endedWatches.size > 4) client.endedWatches.delete(client.endedWatches.values().next().value!);
+                  client.stopWatchRenewal(parsed.data.subscriptionId);
+                }
+                opts.onWorkspaceWatch?.(parsed.data);
+              }
             } else if (msg.method === METHODS.event) {
               const parsed = SessionEvent.safeParse(msg.params);
               if (parsed.success) opts.onEvent(parsed.data);
@@ -116,6 +134,8 @@ export class WinterClient {
           client.writer.onDrain();
         },
         close() {
+          client.disconnected = true;
+          for (const id of [...client.watchRenewals.keys()]) client.stopWatchRenewal(id);
           for (const p of client.pending.values()) p.reject(new Error("connection closed"));
           client.pending.clear();
         },
@@ -147,6 +167,7 @@ export class WinterClient {
   }
 
   request(method: string, params?: unknown): Promise<any> {
+    if (this.disconnected) return Promise.reject(new Error("connection closed"));
     const id = this.nextId++;
     // orb-regressions fix round 1 (2026-07-29): `params ?? {}` — JSON.stringify DROPS a key whose
     // value is undefined, so a params-less call used to emit a frame with no `params` key at all.
@@ -204,6 +225,42 @@ export class WinterClient {
   async cowork<M extends CoworkMethod>(method: M, params: CoworkParams<M>): Promise<CoworkResult<M>> {
     const checked = COWORK_RPC[method].params.parse(params);
     return this.validated(COWORK_RPC[method].result, await this.request(method, checked), method) as CoworkResult<M>;
+  }
+
+  private stopWatchRenewal(subscriptionId: string): void {
+    const timer = this.watchRenewals.get(subscriptionId);
+    if (timer) clearTimeout(timer);
+    this.watchRenewals.delete(subscriptionId);
+  }
+  private scheduleWatchRenewal(subscriptionId: string): void {
+    if (this.disconnected || this.endedWatches.has(subscriptionId)) return;
+    this.stopWatchRenewal(subscriptionId);
+    const timer = setTimeout(async () => {
+      if (this.watchRenewals.get(subscriptionId) !== timer) return;
+      try {
+        await this.cowork("workspace.watch.renew", { subscriptionId });
+        // Detach/disconnect/terminal may have cancelled while renewal was pending.
+        if (this.watchRenewals.get(subscriptionId) === timer) this.scheduleWatchRenewal(subscriptionId);
+      } catch (error) {
+        this.stopWatchRenewal(subscriptionId);
+        this.watchError?.(subscriptionId, error);
+      }
+    }, WORKSPACE_WATCH_RENEW_MS);
+    timer.unref();
+    this.watchRenewals.set(subscriptionId, timer);
+  }
+  /** Fresh local watch, automatically renewed every20 seconds. Reconnect must call again;
+   * this client never replays stale subscriptions or converts hints to durable state. */
+  async watchWorkspaces(workspaceIds: string[]) {
+    const lease = await this.cowork("workspace.watch", { workspaceIds });
+    this.scheduleWatchRenewal(lease.subscriptionId);
+    return { ...lease,
+      renew: () => this.cowork("workspace.watch.renew", { subscriptionId: lease.subscriptionId }),
+      detach: async () => {
+        this.stopWatchRenewal(lease.subscriptionId);
+        return this.cowork("workspace.watch.detach", { subscriptionId: lease.subscriptionId });
+      },
+    };
   }
 
   async createSession(scope: string, opts?: { cwd?: string; approvalPolicy?: ApprovalPolicy }): Promise<{ sessionId: string; trusted: boolean }> {
@@ -503,5 +560,9 @@ export class WinterClient {
   async workflowGet(runId: string): Promise<{ run: WorkflowRunView }> {
     return this.validated(WorkflowGetResult, await this.request(METHODS.workflowGet, { runId }), METHODS.workflowGet);
   }
-  close(): void { this.socket.end(); }
+  close(): void {
+    this.disconnected = true;
+    for (const id of [...this.watchRenewals.keys()]) this.stopWatchRenewal(id);
+    this.socket.end();
+  }
 }
