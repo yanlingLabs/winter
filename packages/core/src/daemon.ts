@@ -1,3 +1,4 @@
+import { CoworkWorkspaceEvents } from "./cowork/workspace-events";
 import { createMacCoworkHost } from "./cowork/mac-host";
 import { CoworkRepository } from "./cowork/repository";
 import { CoworkWorkspaceService, type CoworkHostPorts } from "./cowork/service";
@@ -2917,10 +2918,13 @@ export async function startDaemon(opts: {
   coworkService = runtime ? new CoworkWorkspaceService(new CoworkRepository(runtime.db), opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db), opts.coworkScheduleNow) : undefined;
   coworkService?.schedules.recover();
   coworkService?.schedules.tick();
+  const coworkEvents = coworkService ? new CoworkWorkspaceEvents(coworkService.records, store, hub) : undefined;
+  coworkEvents?.start();
   const server: IpcServer = startIpcServer({
     socketPath: dirs.socketPath,
     serverVersion: CORE_VERSION,
     cowork: coworkService,
+    coworkEvents,
     tokens: authority,
     store,
     hub,
@@ -3140,6 +3144,7 @@ export async function startDaemon(opts: {
       sessionMessaging?.beginShutdown(); // no SendMessage resumes a session into a daemon that is going away
       computerUseRuntime.stop(); // no automation worker outlives the daemon; the helper connection closes
       browserHostServer.stop(); // Winter for Chrome's connections close (its transports read disconnected); browser.sock goes
+      coworkEvents?.stop();
       server.stop(); coworkService?.close(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
       for (const w of sdkWatchers) w.stop();

@@ -1,0 +1,13 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "type": "workspace_instructions_changed",
+  "workspaceId": "w_one",
+  "workspaceChangeId": "change_five",
+  "operationId": "op_five",
+  "workspaceRevision": 7,
+  "instructionRevision": 2,
+  "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "refreshState": "current"
+}

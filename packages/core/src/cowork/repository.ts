@@ -3,6 +3,9 @@ import type { ApprovalPolicy } from "@yanlinglabs/winter-protocol";
 import type { RuntimeStateDb } from "../runtime-state/db";
 import { CoworkError, isTerminalOperationStatus, type OperationStatus, type CapabilityCeiling, type ConversationBinding, type GuestEpoch, type MutationContext, type MutationReceipt, type PublicationPolicy, type SourceSelection, type Workspace, type WorkspacePolicy, type WorkspaceSource } from "./types";
 
+export interface WorkspaceChange {
+  changeId: string; workspaceId: string; operationId: string; revision: number; kind: string; payload: unknown;
+}
 type Row = Record<string, any>;
 const POLICIES = new Set(["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"]);
 const id = (value: string) => { if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(value)) throw new CoworkError("invalid_request"); return value; };
@@ -100,6 +103,20 @@ export class CoworkRepository {
   }
   private publish(workspaceId: string, operationId: string, kind: string, payload: unknown): void {
     const changeId = this.mint("change"), current = this.get(workspaceId);
+    // Capture safe metadata at COMMIT, never re-project a later source/policy state into an older change.
+    const data = payload as Record<string, unknown>;
+    if (kind === "workspace_sources_changed") {
+      const selected = typeof data.sourceId === "string" ? [this.source(workspaceId, data.sourceId)] : this.sources(workspaceId);
+      payload = { phase: data.incarnationId ? "acknowledged" : "requested", sources: selected.map(value => ({
+        sourceId: value.sourceId, sourceRevision: value.revision, desired: value.desired, state: value.state,
+        ackRevision: value.ackRevision, restartRequired: value.restartRequired,
+        reason: value.reason === null ? null : value.reason === "access_revoked" ? "access_revoked" : "source_unavailable",
+      })) };
+    } else if (kind === "workspace_policy_changed") {
+      const policy = this.policy(workspaceId);
+      payload = { policyRevision: policy.revision, defaultRevision: policy.defaultRevision, publicationRevision: policy.publicationRevision,
+        defaultPolicy: policy.defaultPolicy, publication: policy.publication, phase: "metadata" };
+    }
     this.run("INSERT INTO cowork_outbox(change_id,workspace_id,operation_id,revision,kind,payload_json,created_at) VALUES(?,?,?,?,?,?,?)", changeId, workspaceId, operationId, current.configRevision, kind, canonical(payload), this.now());
     this.run("INSERT INTO cowork_outbox_deliveries(change_id,session_id,state) SELECT ?,session_id,'pending' FROM cowork_conversations WHERE workspace_id=? AND state!='deleted'", changeId, workspaceId);
   }
@@ -262,8 +279,15 @@ export class CoworkRepository {
     const current = this.sources(workspaceId).filter(value => value.state !== "detached");
     return current.some(value => value.kind === "githubRepository" && value.desired === "present") && !current.some(value => value.kind === "folder");
   }
-  pendingChanges(sessionId: string): Array<{ changeId: string; workspaceId: string; revision: number; kind: string; payload: unknown }> {
-    return this.all("SELECT o.* FROM cowork_outbox o JOIN cowork_outbox_deliveries d USING(change_id) WHERE d.session_id=? AND d.state='pending' ORDER BY o.sequence", id(sessionId)).map(row => ({ changeId: row.change_id, workspaceId: row.workspace_id, revision: row.revision, kind: row.kind, payload: JSON.parse(row.payload_json) }));
+  /** Canonical bound logical conversations with outstanding work; no synthetic system session. */
+  pendingChangeSessions(): string[] {
+    return this.all("SELECT DISTINCT d.session_id FROM cowork_outbox_deliveries d JOIN cowork_conversations c USING(session_id) WHERE d.state='pending' AND c.state!='deleted' ORDER BY d.session_id").map(row => row.session_id);
+  }
+  conversationWorkspace(sessionId: string): string | undefined {
+    return this.one("SELECT workspace_id FROM cowork_conversations WHERE session_id=?", id(sessionId))?.workspace_id;
+  }
+  pendingChanges(sessionId: string, limit = Number.MAX_SAFE_INTEGER): WorkspaceChange[] {
+    return this.all("SELECT o.* FROM cowork_outbox o JOIN cowork_outbox_deliveries d USING(change_id) WHERE d.session_id=? AND d.state='pending' ORDER BY o.sequence LIMIT ?", id(sessionId), Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.floor(limit)))).map(row => ({ changeId: row.change_id, workspaceId: row.workspace_id, operationId: row.operation_id, revision: row.revision, kind: row.kind, payload: JSON.parse(row.payload_json) }));
   }
   acknowledgeChange(sessionId: string, changeId: string, eventSeq: number): void {
     if (!Number.isSafeInteger(eventSeq) || eventSeq < 1) throw new CoworkError("invalid_request");

@@ -18,6 +18,11 @@ const fixtures: Record<string, unknown> = {
   // Winter Phase 8c (P8c-5): the runtime annotation fields extend this SAME canonical fixture
   // (never a second one — the Swift round-trip test pins the exact fixture COUNT, and
   // `session_created_with_mode` just below already covers the old/additive-field shape).
+  "workspace_sources_changed": { ...base, type: "workspace_sources_changed", workspaceId: "w_one", workspaceChangeId: "change_one", operationId: "op_one", workspaceRevision: 4, phase: "requested", sources: [{ sourceId: "source_one", sourceRevision: 2, desired: "present", state: "unavailable", ackRevision: null, restartRequired: true, reason: "access_revoked" }] },
+  "workspace_policy_changed": { ...base, type: "workspace_policy_changed", workspaceId: "w_one", workspaceChangeId: "change_two", operationId: "op_two", workspaceRevision: 5, policyRevision: 2, defaultRevision: 2, publicationRevision: 1, defaultPolicy: "plan", publication: "manual", phase: "metadata" },
+  "workspace_operation_changed": { ...base, type: "workspace_operation_changed", workspaceId: "w_one", workspaceChangeId: "change_three", operationId: "op_one", workspaceRevision: 5, status: "superseded", terminal: true, supersededBy: "op_two" },
+  "workspace_instructions_changed": { ...base, type: "workspace_instructions_changed", workspaceId: "w_one", workspaceChangeId: "change_five", operationId: "op_five", workspaceRevision: 7, instructionRevision: 2, digest: "a".repeat(64), refreshState: "current" },
+  "workspace_metadata_changed": { ...base, type: "workspace_metadata_changed", workspaceId: "w_one", workspaceChangeId: "change_four", operationId: "op_four", workspaceRevision: 6, change: "display" },
   "session_created": {
     ...base, type: "session_created", scope: "global",
     runtimeKind: "winter-agent", providerId: "openai", modelRef: "openai/gpt-5.6-sol",

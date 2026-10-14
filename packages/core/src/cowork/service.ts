@@ -188,6 +188,15 @@ export class CoworkWorkspaceService {
     // Conservative inner budget leaves room for paired JSON escaping/base64 and outer envelope.
     if (Buffer.byteLength(JSON.stringify(result), "utf8") > RESPONSE_BUDGET) throw new CoworkError("response_too_large");
   }
+  /** Revalidated at every remote read/replay/live delivery; pairing alone is not workspace scope. */
+  requireSessionRead(connection: CoworkConnection, sessionId: string, eventWorkspaceId?: string): void {
+    const workspaceId = this.records.conversationWorkspace(sessionId);
+    if (!workspaceId && !eventWorkspaceId) return;
+    if (!workspaceId || (eventWorkspaceId && workspaceId !== eventWorkspaceId)) throw new CoworkError("authority_denied");
+    const principal = this.host.principal(connection);
+    if (connection.role !== "remote" || principal?.kind !== "paired-user") throw new CoworkError("authority_denied");
+    assertRemoteMayUseWorkspace(this.records, this.authority, principal, workspaceId);
+  }
   closeConnection(connectionId: number): void { this.host.selections?.closeConnection(connectionId); }
   close(): void { this.beginShutdown(); this.host.selections?.close(); }
   private execute(principal: CoworkPrincipal, method: CoworkMethod, raw: unknown, connection: CoworkConnection): unknown {

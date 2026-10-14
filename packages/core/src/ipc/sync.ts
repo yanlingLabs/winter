@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { ERR, SessionEvent, SESSION_TITLE_MAX_CHARS, type SyncConfigResult, type SyncHeadsResult, type SyncMemoryResult, type SyncPullParams, type SyncPullResult, type SyncPushParams, type SyncPushResult } from "@yanlinglabs/winter-protocol";
+import { HOST_WORKSPACE_EVENT_TYPES, ERR, SessionEvent, SESSION_TITLE_MAX_CHARS, type SyncConfigResult, type SyncHeadsResult, type SyncMemoryResult, type SyncPullParams, type SyncPullResult, type SyncPushParams, type SyncPushResult } from "@yanlinglabs/winter-protocol";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { assistantMemoryDirFor } from "../agent/memory-dir";
 import { EXA_API_KEY_SECRET } from "../agent/exa-key";
@@ -434,6 +434,7 @@ function parseBatch(buf: Buffer): SyncedEntry[] {
         `sync.push line ${i + 1} is not a valid SessionEvent (${parsed.error.issues.map((iss) => iss.path.join(".") || "(root)").join(", ")}) — nothing was appended`,
       );
     }
+    if (HOST_WORKSPACE_EVENT_TYPES.has(parsed.data.type)) throw new SyncRpcError(ERR.INVALID_PARAMS, "sync.push cannot author host workspace events");
     entries.push({ raw, event: parsed.data });
   }
   return entries;

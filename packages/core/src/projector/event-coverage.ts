@@ -99,6 +99,7 @@ export const SUBAGENT_TRANSCRIPT_INCLUDE = {
   plan_resolved: false,
   checkpoint: false,
   task_notification: false,
+  workspace_sources_changed: false, workspace_policy_changed: false, workspace_operation_changed: false, workspace_metadata_changed: false, workspace_instructions_changed: false,
   session_created: false,
   session_titled: false,
   harness_attached: false,
@@ -267,6 +268,7 @@ export const PROJECTED_EVENT_COVERAGE = {
   reasoning_item: false,
   // Live non-projector producers, untouched by the Winter leg (Winter map §3, "27 with non-engine
   // producers that keep working untouched").
+  workspace_sources_changed: false, workspace_policy_changed: false, workspace_operation_changed: false, workspace_metadata_changed: false, workspace_instructions_changed: false,
   session_created: false,
   session_titled: false,
   harness_attached: false,

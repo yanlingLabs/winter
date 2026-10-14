@@ -1,8 +1,8 @@
 import { Database } from "bun:sqlite";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { openSync, closeSync, fsyncSync, appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
-import { SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
+import { HOST_WORKSPACE_EVENT_TYPES, SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { hasOpenPanelTabs } from "../panel/store";
 import type { SessionDirs } from "./dirs";
@@ -663,6 +663,14 @@ export class SessionStore {
     return row.last_seq;
   }
 
+  /** Outbox ACK must follow durable log bytes, not just an index update or live delivery. */
+  flushLog(sessionId: string): void {
+    const row = this.db.query("SELECT scope FROM sessions WHERE session_id=?").get(sessionId) as { scope: string } | null;
+    if (!row) throw new Error("unknown session");
+    const fd = openSync(this.logPath(row.scope, sessionId), "r");
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+  }
+
   read(sessionId: string, fromSeq = 0): SessionEvent[] {
     const row = this.db.query("SELECT scope FROM sessions WHERE session_id = ?").get(sessionId) as
       | { scope: string } | null;
@@ -1185,6 +1193,7 @@ export class SessionStore {
     const expectedFirst = row.last_seq + 1;
     for (let i = 0; i < entries.length; i++) {
       const { raw, event } = entries[i]!;
+      if (HOST_WORKSPACE_EVENT_TYPES.has(event.type) || HOST_WORKSPACE_EVENT_TYPES.has(JSON.parse(raw).type)) throw new Error("appendSynced: host workspace events are not importable");
       if (event.sessionId !== sessionId) throw new Error(`event ${i} belongs to session ${event.sessionId}, not ${sessionId}`);
       if (event.seq !== expectedFirst + i) throw new Error(`event ${i} has seq ${event.seq}, expected ${expectedFirst + i}`);
       if (raw.includes("\n")) throw new Error(`event ${i} raw line contains a newline`); // would forge extra log lines

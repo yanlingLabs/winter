@@ -1,3 +1,4 @@
+import type { CoworkWorkspaceEvents } from "../cowork/workspace-events";
 import { COWORK_RPC, COWORK_REMOTE_METHODS, type CoworkMethod } from "@yanlinglabs/winter-protocol";
 import { CoworkWorkspaceService } from "../cowork/service";
 import { CoworkError } from "../cowork/types";
@@ -226,6 +227,7 @@ export type InternalSessionCreator = (input: InternalSessionCreateInput) => Prom
 
 export interface IpcServerOptions {
   cowork?: CoworkWorkspaceService;
+  coworkEvents?: CoworkWorkspaceEvents;
   socketPath: string;
   serverVersion: string;
   tokens: TokenAuthority;
@@ -829,8 +831,10 @@ export const REMOTE_ELIGIBLE_SESSION_MODES = new Set(["code", "dispatch", "chat"
  *  `sessionId` with no other mode check, and ask_user.respond in particular is exactly the RPC the
  *  AskQuestion tool resolves through. Chat Slice D task 1 added session.setModel to this set too;
  *  provider-correctness T4 added session.setEffort beside it. */
-function assertRemoteMayUseSession(store: SessionStore, role: string | undefined | null, sessionId: string): void {
+function assertRemoteMayUseSession(store: SessionStore, role: string | undefined | null, sessionId: string, cowork?: CoworkWorkspaceService, connectionId = 0): void {
   if (role !== "remote") return;
+  try { cowork?.requireSessionRead({ role, connectionId }, sessionId); }
+  catch { throw new RpcFailure(ERR.UNAUTHORIZED, "Workspace access denied"); }
   let mode: string | undefined;
   try { mode = store.meta(sessionId).mode; } catch { return; } // unknown id → let the handler's own error win
   const effectiveMode = mode ?? "code";
@@ -2080,7 +2084,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
 
     if (Object.hasOwn(COWORK_RPC, method)) {
       if (!opts.cowork) throw new RpcFailure(ERR.INVALID_PARAMS, "Cowork unavailable", { code: "unsupported_topology" });
-      try { return opts.cowork.call({ role: socket.data.authedRole, connectionId: socket.data.connId }, method as CoworkMethod, params ?? {}); }
+      try {
+        const result = opts.cowork.call({ role: socket.data.authedRole, connectionId: socket.data.connId }, method as CoworkMethod, params ?? {});
+        opts.coworkEvents?.drain();
+        return result;
+      }
       catch (error) {
         if (error instanceof CoworkError) throw new RpcFailure(error.code === "authority_denied" ? ERR.UNAUTHORIZED : ERR.INVALID_PARAMS, "Cowork request refused", { code: error.code, ...(error.currentRevision === undefined ? {} : { currentRevision: error.currentRevision }) });
         if (error instanceof z.ZodError) throw new RpcFailure(ERR.INVALID_PARAMS, "Invalid Cowork request", { code: "invalid_request" });
@@ -2210,7 +2218,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // is daemon-side, not phone-side, and why the set is an allowlist rather than a
         // `mode !== "chat"` special case.
         return socket.data.authedRole === "remote"
-          ? { sessions: sessions.filter((s) => REMOTE_ELIGIBLE_SESSION_MODES.has(s.mode ?? "code")) }
+          ? { sessions: sessions.filter((s) => {
+            if (!REMOTE_ELIGIBLE_SESSION_MODES.has(s.mode ?? "code")) return false;
+            try { opts.cowork?.requireSessionRead({ role: "remote", connectionId: socket.data.connId }, s.sessionId); return true; }
+            catch { return false; }
+          }) }
           : { sessions };
       }
       case METHODS.sessionDispatch: {
@@ -2246,7 +2258,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionAttach: {
         const p = parseParams(SessionAttachParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         // This `deliver` is the ONE event path to a remote-role connection: `harnessConns` (the
         // session_created / session_titled / plugin_tile_updated broadcast set) admits role
         // "harness" only, and plugin pushes need a plugin-role hello. So the remote policy below
@@ -2266,6 +2278,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             // then bound the serialized size. Harness/admin connections are untouched — they
             // still receive every event byte-identically.
             if (remoteFilter !== undefined) {
+              // Check current canonical scope before every frame, including replay after revoke.
+              try {
+                opts.cowork?.requireSessionRead({ role: "remote", connectionId: socket.data.connId }, p.sessionId,
+                  "workspaceId" in event ? event.workspaceId : undefined);
+                if ("workspaceId" in event && !opts.cowork) return false;
+              } catch { return false; }
+
               const allowed = remoteFilter(event);
               // Filtered, not failed: return `true` so hub.attach's replay loop keeps going and
               // still advances its lastSeq past this event. `false` means "this client is dead"
@@ -2326,7 +2345,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionHistory: {
         const p = parseParams(SessionHistoryParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         try {
           return readHistoryPage(opts.store, { sessionId: p.sessionId, beforeSeq: p.beforeSeq, limit: p.limit });
         } catch (e) {
@@ -2336,7 +2355,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionSend: {
         const p = parseParams(SessionSendParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         if (!socket.data.hubClient) throw new RpcFailure(ERR.NOT_FOUND, "attach to the session first");
         // Code-mode image input: `text` is stored as written (`[Image #n]` placeholders); only the
         // model is given the paths. Checked before any resume, import or append.
@@ -2415,7 +2434,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionInterrupt: {
         const p = parseParams(SessionInterruptParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         // P8b Task 16: only a LIVE driver has anything to interrupt; a resumable Winter session has
         // no child, so the answer is "nothing was running" without spawning one to say so.
         {
@@ -2439,7 +2458,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // renewal. `watch: false` is never refused: stopping must always work.
         const p = parseParams(SessionMirrorParams, params);
         if (!p.watch) return { ok: true, mirror: false };
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         try { opts.store.meta(p.sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
         // Only the session this connection is attached to — the phone's Gateway connection follows its attach,
         // so a mirror can never be watched for a session the phone is not looking at.
@@ -2458,7 +2477,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionCompact: {
         const p = parseParams(SessionCompactParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         // 2026-10-07: the session compacts ITSELF. `/compact [instructions]` goes through the session's own
         // driver exactly as a typed message would — queued behind a running turn, an idle session resumed
         // for it — and the runtime runs it as its built-in command (never a model turn; the model never sees
@@ -3358,7 +3377,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.approvalRespond: {
         const p = parseParams(ApprovalRespondParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         // SP-approvals Task 5: BEFORE resolving, look up the pending approval's stored options via
         // Task 4's `pendingMeta` — a non-consuming read (see its own doc comment), so this lookup
         // can never itself count as an answer for the `resolve()` call right below. Gated on
@@ -3530,12 +3549,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // SP3 T4b: queryable pending-approval state (remote-allowlisted so a phone can render live
         // approval cards it missed in the replay window). No broker (agent disabled) → no pending.
         const p = parseParams(ApprovalListParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         return { pending: opts.broker?.list(p.sessionId) ?? [] };
       }
       case METHODS.askUserRespond: {
         const p = parseParams(AskUserRespondParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         return opts.questions?.respond(p.sessionId, p.callId, p.answers, socket.data.clientName, p.notes) ?? { ok: true, alreadyResolved: true };
       }
       case METHODS.taskList: {
@@ -3704,7 +3723,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // display/data-hygiene hole rather than reopening the pin.
       case METHODS.sessionSetModel: {
         const p = parseParams(SessionSetModelParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         let targetMode: string | undefined;
         try { targetMode = opts.store.meta(p.sessionId).mode; } catch { /* unknown id — NOT_FOUND below wins */ }
         if (targetMode === "dispatch" && p.model !== null) {
@@ -3816,7 +3835,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // effect on what the session actually runs).
       case METHODS.sessionSetEffort: {
         const p = parseParams(SessionSetEffortParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         // Read ONCE, regardless of null-ness (the dispatch check below needs the mode even for a
         // clear attempt). An unknown sessionId leaves this undefined and is left to
         // `store.setEffort` to report — that keeps NOT_FOUND coming from one place regardless of
@@ -3885,7 +3904,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // parsing and the remote gate.
       case METHODS.sessionSetActivity: {
         const p = parseParams(SessionSetActivityParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         const res = setSessionActivity(setActivityDeps, p.sessionId, p.activity);
         if (!res.ok) {
           throw new RpcFailure(res.kind === "not_found" ? ERR.NOT_FOUND : ERR.INVALID_PARAMS, res.error);
@@ -3901,7 +3920,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // FOUND first, participation, locked, denylist, remove-primary) lives once, in `set-dirs.ts`.
       case METHODS.sessionSetDirs: {
         const p = parseParams(SessionSetDirsParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         const res = setSessionDirs(setDirsDeps, p.sessionId, p.op, p.path);
         if (!res.ok) {
           throw new RpcFailure(res.kind === "not_found" ? ERR.NOT_FOUND : ERR.INVALID_PARAMS, res.error);
@@ -3928,12 +3947,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.syncPull: {
         const p = parseParams(SyncPullParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         return syncPull(opts.store, p);
       }
       case METHODS.syncPush: {
         const p = parseParams(SyncPushParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         return syncPush({
           store: opts.store,
           buffers: syncBuffers,
