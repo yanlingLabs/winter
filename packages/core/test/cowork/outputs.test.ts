@@ -17,6 +17,10 @@ afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
 function fixture(checkpoint: (phase: string) => void = () => {}) { const f = outputFixture(checkpoint); cleanup.push(() => f.close()); return f; }
 function refusal(fn: () => unknown, code: CoworkErrorCode) { try { fn(); throw new Error("expected refusal"); } catch (error) { expect(error).toBeInstanceOf(CoworkError); expect((error as CoworkError).code).toBe(code); expect((error as Error).message).toBe(code); } }
 const native = process.platform === "darwin" && process.arch === "arm64" && process.env.WINTER_COWORK_OUTPUT_FS_FIXTURE === "1" ? test : test.skip;
+const count = (f: ReturnType<typeof fixture>, table: string) => (f.db.db.query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+const intents = (f: ReturnType<typeof fixture>) => f.db.db.query<{ relative_path: string }, []>("SELECT relative_path FROM cowork_output_directory_intents ORDER BY relative_path").all().map(row => row.relative_path);
+const CHAIN = 6, RECORDED = CHAIN + 1; // cowork, workspaces, <ws>, shared, outputs, <session>; the home itself is recorded too
+function intend(f: ReturnType<typeof fixture>, relative: string) { f.db.db.run("INSERT INTO cowork_output_directory_intents VALUES(?,?,?)", [relative, f.records.recordedHomeIdentity(), new Date().toISOString()]); }
 function request(f: ReturnType<typeof fixture>, locationId: string, relativePath = "file.bin") { return { workspaceId: f.workspaceId, locationId, expectedLocationRevision: 1, relativePath }; }
 test("schema15 is additive, empty output authority cannot be inferred from ordinary OUTDIR", () => {
  const f = fixture(); expect(f.db.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION); expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(15); expect(f.db.integrity().ok).toBe(true);
@@ -59,8 +63,12 @@ native("initializer requires committed session, no outer transaction, canonical 
  expect(existsSync(f.root)).toBe(false);
  (f.store as unknown as { db: Database }).db.run("UPDATE sessions SET last_seq=1 WHERE session_id=?", [f.sessionId]);
  f.db.transaction(() => refusal(() => f.outputs.initialize(f.workspaceId, f.sessionId, f.store), "authority_denied")); expect(existsSync(f.root)).toBe(false);
- mkdirSync(f.root, { recursive: true, mode: 0o700 }); refusal(() => f.outputs.initialize(f.workspaceId, f.sessionId, f.store), "file_unavailable");
+ mkdirSync(f.root, { recursive: true, mode: 0o700 }); writeFileSync(join(f.root, "foreign.bin"), "foreign"); refusal(() => f.outputs.initialize(f.workspaceId, f.sessionId, f.store), "file_unavailable");
  expect(f.db.db.query("SELECT COUNT(*) AS n FROM cowork_output_locations").get()).toEqual({ n: 0 });
+ // The refused attempt must not leave an intent that would bless the foreign directory on the next call.
+ expect(intents(f)).toEqual([]); expect(count(f, "cowork_output_directories")).toBe(0);
+ refusal(() => f.outputs.initialize(f.workspaceId, f.sessionId, f.store), "file_unavailable"); expect(readFileSync(join(f.root, "foreign.bin"), "utf8")).toBe("foreign");
+ expect(count(f, "cowork_output_locations")).toBe(0); expect(intents(f)).toEqual([]);
 });
 native("missing recorded root never recreates or reenrolls; missing content is a distinct result", () => {
  const f = fixture(), location = f.initialize(), input = request(f, location.locationId);
@@ -104,10 +112,62 @@ native("actual file mutation/replacement and directory rename races fail before 
   refusal(() => f.outputs.read(outputUser, { ...input, expectedGeneration: stat.generation, offset: 0 }), attack === "ancestor" ? "file_unavailable" : "stale_file");
  }
 });
-native("initializer interrupted before owner commit leaves unknown data refused after restart", () => {
- const f = fixture(phase => { if (phase === "before-owner-commit") throw new Error("crash"); }); refusal(() => f.initialize(), "file_unavailable");
- expect(existsSync(f.root)).toBe(true); expect(f.db.db.query("SELECT COUNT(*) AS n FROM cowork_output_locations").get()).toEqual({ n: 0 });
- const restarted = new CoworkOutputs(f.records, f.home, f.grants); refusal(() => restarted.initialize(f.workspaceId, f.sessionId, f.store), "file_unavailable");
+native("initializer interrupted before owner commit leaves a journaled leftover that a retry adopts, also after a restart", () => {
+ let fault = true; const f = fixture(phase => { if (fault && phase === "before-owner-commit") throw new Error("crash"); }); refusal(() => f.initialize(), "file_unavailable");
+ expect(existsSync(f.root)).toBe(true); expect(count(f, "cowork_output_locations")).toBe(0); expect(count(f, "cowork_output_directories")).toBe(0);
+ expect(intents(f)).toHaveLength(CHAIN); // the leftover is journaled, not authority
+ fault = false; const restarted = new CoworkOutputs(f.records, f.home, f.grants); restarted.initialize(f.workspaceId, f.sessionId, f.store);
+ expect(count(f, "cowork_output_locations")).toBe(1); expect(count(f, "cowork_output_directories")).toBe(RECORDED); expect(intents(f)).toEqual([]);
+ writeFileSync(join(f.root, "file.bin"), "adopted"); const location = restarted.list(outputUser, { workspaceId: f.workspaceId }).locations[0]!;
+ expect(restarted.stat(outputUser, request(f, location.locationId)).bytes).toBe(7);
+ refusal(() => restarted.initialize(f.workspaceId, f.sessionId, f.store), "request_conflict");
+});
+native("a failed first attempt does not poison the workspace: a second session initializes and the first can still retry", () => {
+ let fault = true; const f = fixture(phase => { if (fault && phase === "before-owner-commit") throw new Error("crash"); }); refusal(() => f.initialize(), "file_unavailable"); fault = false;
+ const second = f.bind("bind-second"); f.outputs.initialize(f.workspaceId, second, f.store);
+ expect(count(f, "cowork_output_locations")).toBe(1); expect(count(f, "cowork_output_directories")).toBe(RECORDED);
+ expect(intents(f)).toEqual([f.root.slice(f.root.indexOf("cowork/"))]); // only the first session's own unrecorded root still waits for its retry
+ f.outputs.initialize(f.workspaceId, f.sessionId, f.store); expect(count(f, "cowork_output_locations")).toBe(2); expect(count(f, "cowork_output_directories")).toBe(RECORDED + 1); expect(intents(f)).toEqual([]);
+ expect(f.outputs.list(outputUser, { workspaceId: f.workspaceId }).locations).toHaveLength(2);
+});
+native("crash between the intent commit and the first mkdir is harmless and retries", () => {
+ // A real crash would skip the best-effort forgetting of intents; a trigger makes that cleanup fail the same way.
+ let fault = true; const f = fixture(phase => { if (fault && phase === "intents-recorded") throw new Error("crash"); });
+ f.db.db.run("CREATE TRIGGER keep_output_intents BEFORE DELETE ON cowork_output_directory_intents BEGIN SELECT RAISE(ABORT,'injected crash'); END");
+ refusal(() => f.initialize(), "file_unavailable"); expect(existsSync(join(f.home, "cowork"))).toBe(false); expect(intents(f)).toHaveLength(CHAIN);
+ expect(count(f, "cowork_output_locations")).toBe(0); expect(count(f, "cowork_output_directories")).toBe(0);
+ fault = false; f.db.db.run("DROP TRIGGER keep_output_intents"); f.initialize();
+ expect(existsSync(f.root)).toBe(true); expect(count(f, "cowork_output_locations")).toBe(1); expect(intents(f)).toEqual([]);
+});
+native("a crash after a partial walk leaves intents plus some directories; the retry adopts them and creates the rest", () => {
+ let opened = 0, fault = true; const f = fixture(phase => { if (fault && phase === "directory-opened" && ++opened === 3) throw new Error("crash"); });
+ f.db.db.run("CREATE TRIGGER keep_output_intents BEFORE DELETE ON cowork_output_directory_intents BEGIN SELECT RAISE(ABORT,'injected crash'); END");
+ refusal(() => f.initialize(), "file_unavailable"); expect(existsSync(join(f.home, "cowork/workspaces", f.workspaceId))).toBe(true); expect(existsSync(join(f.home, "cowork/workspaces", f.workspaceId, "shared"))).toBe(false);
+ fault = false; f.db.db.run("DROP TRIGGER keep_output_intents"); f.initialize(); expect(existsSync(f.root)).toBe(true); expect(count(f, "cowork_output_directories")).toBe(RECORDED); expect(intents(f)).toEqual([]);
+});
+native("an unrecorded directory is adopted only with a journaled intent and a safe identity", () => {
+ const f = fixture(), cowork = join(f.home, "cowork"), refused = () => refusal(() => f.outputs.initialize(f.workspaceId, f.sessionId, f.store), "file_unavailable");
+ mkdirSync(cowork, { mode: 0o700 }); refused(); expect(intents(f)).toEqual([]); // exists, no intent: foreign
+ intend(f, "cowork"); // an earlier attempt journaled it …
+ chmodSync(cowork, 0o755); refused(); expect(count(f, "cowork_output_locations")).toBe(0); expect(count(f, "cowork_output_directories")).toBe(0); // … but a 0755 directory is never adopted
+ rmSync(cowork, { recursive: true }); mkdirSync(join(f.home, "elsewhere")); symlinkSync(join(f.home, "elsewhere"), cowork); refused(); // … nor a link, which is not followed
+ expect(fs.readdirSync(join(f.home, "elsewhere"))).toEqual([]); expect(fs.lstatSync(cowork).isSymbolicLink()).toBe(true);
+ rmSync(cowork); writeFileSync(cowork, "not a directory"); refused(); expect(readFileSync(cowork, "utf8")).toBe("not a directory");
+ rmSync(cowork); mkdirSync(cowork, { mode: 0o700 }); // the same journaled path, now a safe directory: adopted
+ const rootStat = fs.statSync(cowork, { bigint: true }), original = fs.fstatSync;
+ const mocked = spyOn(fs, "fstatSync").mockImplementation(((fd: number, options?: any) => { // a different device than the held parent
+  const actual = original(fd, options) as unknown as fs.BigIntStats;
+  return options?.bigint && actual.ino === rootStat.ino && actual.dev === rootStat.dev ? Object.assign(Object.create(Object.getPrototypeOf(actual)), actual, { dev: rootStat.dev + 1n }) : actual;
+ }) as typeof fs.fstatSync);
+ try { refused(); } finally { mocked.mockRestore(); }
+ expect(count(f, "cowork_output_directories")).toBe(0);
+ f.outputs.initialize(f.workspaceId, f.sessionId, f.store); expect(count(f, "cowork_output_locations")).toBe(1); expect(intents(f)).toEqual([]);
+});
+native("the journal transaction rechecks the committed session and leaves neither intents nor directories when refused", () => {
+ const f = fixture(); let calls = 0; const sessions = { hasCommittedSession: (id: string) => ++calls <= 1 && f.store.hasCommittedSession(id) }; // true for the preflight only
+ refusal(() => f.outputs.initialize(f.workspaceId, f.sessionId, sessions as any), "authority_denied"); expect(calls).toBe(2);
+ expect(intents(f)).toEqual([]); expect(existsSync(join(f.home, "cowork"))).toBe(false);
+ f.records.abandonConversation(f.sessionId); refusal(() => f.outputs.initialize(f.workspaceId, f.sessionId, f.store), "authority_denied"); expect(intents(f)).toEqual([]);
 });
 native("opaque inventory pagination, cross-scope, archived and deleted conversation retention", () => {
  const f = fixture(), first = f.initialize(), secondSession = f.bind("bind-second"); f.outputs.initialize(f.workspaceId, secondSession, f.store);
@@ -133,14 +193,16 @@ native("short read during an actual truncation refuses incomplete content", () =
 test("schema14 upgrades to15 preserving existing workspace/HomeIdentity and default Code settings", () => {
  const f = fixture(), before = f.records.get(f.workspaceId), homeId = f.records.recordedHomeIdentity();
  const settings = () => ["synchronous", "fullfsync", "checkpoint_fullfsync"].map(name => f.db.db.query<Record<string, number>, []>(`PRAGMA ${name}`).get()![name]); const prior = settings();
- f.db.db.run("DROP TABLE cowork_output_locations"); f.db.db.run("DROP TABLE cowork_output_directories"); f.db.db.run("PRAGMA user_version=14");
- const upgraded = openRuntimeStateDb(f.home); try { expect(upgraded.schemaVersion()).toBe(15); const records = new CoworkRepository(upgraded); expect(records.get(f.workspaceId)).toEqual(before); expect(records.recordedHomeIdentity()).toBe(homeId); expect(upgraded.integrity().ok).toBe(true); } finally { upgraded.close(); }
+ f.db.db.run("DROP TABLE cowork_output_locations"); f.db.db.run("DROP TABLE cowork_output_directories"); f.db.db.run("DROP TABLE cowork_output_directory_intents"); f.db.db.run("PRAGMA user_version=14");
+ const upgraded = openRuntimeStateDb(f.home); try { expect(upgraded.schemaVersion()).toBe(15); const records = new CoworkRepository(upgraded); expect(records.get(f.workspaceId)).toEqual(before); expect(records.recordedHomeIdentity()).toBe(homeId); expect(upgraded.integrity().ok).toBe(true); expect(upgraded.db.query("SELECT COUNT(*) AS n FROM cowork_output_directory_intents").get()).toEqual({ n: 0 }); } finally { upgraded.close(); }
  expect(settings()).toEqual(prior);
 });
-native("owner transaction failure rolls back root authority and refuses orphan enrollment", () => {
+native("owner transaction failure rolls back root authority; once the fault clears the retry adopts the leftover", () => {
  const f = fixture(); f.db.db.run("CREATE TRIGGER refuse_output_owner BEFORE INSERT ON cowork_output_locations BEGIN SELECT RAISE(ABORT,'injected owner crash'); END");
  refusal(() => f.initialize(), "file_unavailable"); expect(f.db.db.query("SELECT COUNT(*) AS n FROM cowork_output_locations").get()).toEqual({ n: 0 }); expect(f.db.db.query("SELECT COUNT(*) AS n FROM cowork_output_directories").get()).toEqual({ n: 0 });
- expect(existsSync(f.root)).toBe(true); f.db.db.run("DROP TRIGGER refuse_output_owner"); refusal(() => f.initialize(), "file_unavailable");
+ expect(existsSync(f.root)).toBe(true); expect(intents(f)).toHaveLength(CHAIN); f.db.db.run("DROP TRIGGER refuse_output_owner");
+ const location = f.initialize(); expect(count(f, "cowork_output_locations")).toBe(1); expect(count(f, "cowork_output_directories")).toBe(RECORDED); expect(intents(f)).toEqual([]);
+ writeFileSync(join(f.root, "file.bin"), "ok"); expect(f.outputs.stat(outputUser, request(f, location.locationId)).bytes).toBe(2);
 });
 
 native("service refuses nested directory and file devices against the canonical output root", () => {

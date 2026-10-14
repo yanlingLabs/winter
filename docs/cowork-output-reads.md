@@ -8,8 +8,9 @@ or implement a file browser/export UI. Native VM/egress and GUI/testhost holds r
 ## Canonical ownership and initialization
 
 Schema15 adds `cowork_output_directories` (recorded HomeIdentity and actual directory
-identity) and `cowork_output_locations` (opaque location, home/workspace/conversation,
-exact owned relative root and immutable location revision1). The only layout is
+identity), `cowork_output_locations` (opaque location, home/workspace/conversation,
+exact owned relative root and immutable location revision1) and
+`cowork_output_directory_intents` (an initialization journal, below; not authority). The only layout is
 `<canonical-home>/cowork/workspaces/<workspace-id>/shared/outputs/<session-id>`.
 Neither ordinary `<home>/outputs/<session-id>` nor cwd-derived MEMDIR is a fallback.
 
@@ -32,13 +33,56 @@ Initialization walks every absolute home ancestor using held O_NOFOLLOW director
 descriptors. The supplied home and recorded backing directories must be user-owned
 0700. New directories are synced with the unchanged reviewed file/directory helper
 before one scoped durable SQLite owner commit. An existing ancestor may be reused
-only when an independent canonical instruction/volume identity matches it. Unknown
-preexisting workspace/output/session directories are refused. Missing identity,
-replaced roots or crash-created unrecorded directories require recovery; the reader
-never enrolls/recreates them. Commit failure leaves conservative orphan storage,
-not authority. Separate conversation deletion retains its tombstone and outputs;
-workspace deletion/deleting state denies reads. Archived workspace content remains
-available to the local user.
+only when an independent canonical instruction/volume identity matches it, or when
+it is the journaled leftover of an earlier attempt (next section). Any other
+preexisting workspace/output/session directory is refused. Missing identity or a
+replaced root requires recovery; the reader never enrolls/recreates anything.
+Separate conversation deletion retains its tombstone and outputs; workspace
+deletion/deleting state denies reads. Archived workspace content remains available
+to the local user.
+
+### Initialization intent journal
+
+Directory creation precedes the owner commit, so any failure between the first mkdir
+and that commit (an fsync error, a refused recheck, SQLITE_BUSY, a full disk, a
+constraint abort, a crash) used to leave unrecorded directories that every later
+initialization refused forever, including the shared `cowork/workspaces/<id>/shared/
+outputs` ancestors of every other session in the workspace. The journal follows the
+guidance-mutation pattern (journal commit, filesystem effect, finishing commit):
+
+1. After the unchanged preflight and before any mkdir, one scoped durable
+   transaction rechecks workspace, active binding, the committed session, HomeIdentity
+   and retained state, then inserts a `cowork_output_directory_intents` row for every
+   path of the canonical chain (`cowork` through `…/shared/outputs/<session-id>`) that
+   has no `cowork_output_directories` record. The home itself keeps its existing
+   handling.
+2. The walk is otherwise unchanged. A directory that already exists UNRECORDED is
+   admitted only if all hold: an intent row for exactly that relative path and the
+   current HomeIdentity was committed by an EARLIER call (an intent inserted by the
+   current call never blesses a directory that was already standing, so an unknown
+   preexisting directory is still refused); it was opened through the held parent
+   descriptor with O_NOFOLLOW; it is owned by the daemon user with mode exactly 0700;
+   it is on its held parent's device; and the existing instruction/volume admission is
+   otherwise unchanged. Its parent is already held and recorded or admitted by the
+   same walk. Admitted directories are synced again (the failed attempt may have
+   failed at that very sync), join the new entries and are rechecked by the same final
+   tree assertion as created ones. Symlinks, non-directories, 0755 or other modes,
+   foreign owners and cross-device entries remain `file_unavailable`.
+3. The owner commit inserts the directory and location rows as before and deletes the
+   intent rows of every now-recorded path, in the same transaction.
+4. If the call fails, the in-memory set of directories it created is known: intents it
+   inserted for directories it never created are removed (database only, best effort),
+   because a leftover intent could otherwise bless a foreign directory that appears
+   there later. Intents for directories it did create stay, so the retry (same
+   session, a restarted process or another session in the workspace) adopts them.
+   After a hard crash this cleanup does not run: stale intents are harmless unless a
+   same-user process also creates a 0700 same-device directory at exactly that
+   internal path. That residual is documented, not eliminated, because the journal
+   records intent, not the created inode.
+
+Nothing is ever deleted or renamed on disk. The reader never consults the journal.
+A non-empty journal makes the explicit schema downgrade refuse like any populated
+Cowork table.
 
 ## Local API and bounds
 
@@ -100,7 +144,7 @@ Actual disposable owned file/SQLite/Unix-RPC tests use
 `WINTER_COWORK_OUTPUT_FS_FIXTURE=1` on Darwin arm64. They cover binary/max-size
 chunks, reopen, special/link/traversal refusal, missing/replaced roots, file and
 ancestor races, truncation, stale generations, cross-scope inventory, canonical
-commit rollback/orphans, retained conversation data and final authority checks
+commit rollback, journaled-leftover adoption, retained conversation data and final authority checks
 against a second SQLite connection. The FIFO fixture invokes `/usr/bin/mkfifo`
 only under its disposable root; no worker/VM/native admission runs.
 
@@ -146,4 +190,27 @@ port. The regression fails against the unchanged original3a production file and
 passes against the correction; the restored real-file stat/read positive also
 passes. Focused output/helper/RPC/protocol suite:22 pass,0 fail,256 assertions.
 Core no-emit typecheck passes. Original helper/fullsync/durable hashes remain exact.
-Initialization/orphan behavior is unchanged pending the separate full review.
+Initialization/orphan behavior was unchanged at this point; the intent journal above
+supersedes the original conservative-orphan behavior (review finding O-W1).
+
+## Initialization intent journal correction (review finding O-W1)
+
+The original initializer created directories before the owner commit, so any
+non-crash failure in that window left unrecorded directories that every later
+initialization (same conversation or any other in the workspace) refused with
+`file_unavailable`. The two source tests asserted that permanent refusal. They now
+assert the opposite: after the injected fault clears, a retry succeeds (the
+before-owner-commit fault and the owner-insert trigger abort), also from a restarted
+owner instance, and a second conversation in the same workspace initializes after a
+failed first attempt. New regressions cover a crash between the intent commit and
+the first mkdir, a crash after a partial walk, an unrecorded directory with no intent
+(still refused and not blessed by a retry), and, with an intent, a 0755 directory, a
+symlink, a regular file and a different-device entry (all refused), intents removed
+after success, and the journal transaction rechecking the committed-session gate.
+The cross-device case substitutes the fstat device for the exact inode, as the
+existing device-anchor regression does; it performs no mount. A foreign-owner case is
+not testable without a second user and relies on the unchanged uid check.
+
+Schema15 is still unreleased, so the journal table is part of migration 15 (head of
+the reverse-dependency table list). `output-fs.ts` and `fd-fs.ts` are byte-identical
+to the freeze above; no ABI, protocol, read-path or RPC change.

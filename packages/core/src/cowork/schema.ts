@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 /** Reverse dependency order also permits removing an unused additive schema on explicit rollback. */
-export const COWORK_TABLES = ["cowork_output_locations", "cowork_output_directories", "cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
+export const COWORK_TABLES = ["cowork_output_directory_intents", "cowork_output_locations", "cowork_output_directories", "cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
 
 /** Host authority only. A guest manifest or rebuilt session index never populates these tables. */
 export function migrateCoworkSchema(db: Database): void {
@@ -197,7 +197,12 @@ export function migrateCoworkScheduleQuarantineSchema(db: Database): void {
 
 /** Recorded host-backed output locations; neither directory contents nor manifests create authority. */
 export function migrateCoworkOutputSchema(db: Database): void {
-  db.exec(`CREATE TABLE IF NOT EXISTS cowork_output_directories (
+  // A journal of directories initialization is ABOUT to create, committed durably before the filesystem effect.
+  // An intent is not authority: it only lets a retry adopt its own unrecorded crash/failure leftover.
+  db.exec(`CREATE TABLE IF NOT EXISTS cowork_output_directory_intents (
+    relative_path TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES cowork_home_identity(home_id), created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS cowork_output_directories (
     relative_path TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES cowork_home_identity(home_id), identity_json TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS cowork_output_locations (
