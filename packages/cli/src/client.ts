@@ -1,5 +1,5 @@
 import {
-  LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, SessionEvent, COWORK_RPC, CoworkWatchFrame, WORKSPACE_WATCH_RENEW_MS, type CoworkMethod, type CoworkParams, type CoworkResult,
+  LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, SessionEvent, COWORK_RPC, CoworkWatchFrame, WORKSPACE_WATCH_RENEW_MS, WORKSPACE_WATCH_LEASE_MS, type CoworkMethod, type CoworkParams, type CoworkResult,
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, HelloResult, SessionCreateResult, SessionAttachResult, SessionSendResult, SessionStageImageResult, SessionListResult,
   SessionAddDirResult, SessionSetCwdResult, TrustDirResult,
   BgListResult, BgPeekResult, BgKillResult, BgKillAllResult,
@@ -87,6 +87,7 @@ export class WinterClient {
   private features = new Set<string>();
   private watchRenewals = new Map<string, ReturnType<typeof setTimeout>>();
   private endedWatches = new Set<string>();
+  private watchDeadlines = new Map<string, number>();
   private watchError?: ConnectOptions["onWorkspaceWatchError"];
 
   private constructor(timeoutMs = 5000) {
@@ -122,6 +123,9 @@ export class WinterClient {
                   client.stopWatchRenewal(parsed.data.subscriptionId);
                 }
                 opts.onWorkspaceWatch?.(parsed.data);
+              } else {
+                const id = typeof msg.params?.subscriptionId === "string" ? msg.params.subscriptionId.slice(0, 200) : "unknown";
+                client.watchError?.(id, new Error("invalid workspace watch frame"));
               }
             } else if (msg.method === METHODS.event) {
               const parsed = SessionEvent.safeParse(msg.params);
@@ -231,29 +235,47 @@ export class WinterClient {
     const timer = this.watchRenewals.get(subscriptionId);
     if (timer) clearTimeout(timer);
     this.watchRenewals.delete(subscriptionId);
+    this.watchDeadlines.delete(subscriptionId);
   }
-  private scheduleWatchRenewal(subscriptionId: string): void {
+  private scheduleWatchRenewal(subscriptionId: string, delayMs = WORKSPACE_WATCH_RENEW_MS, attempt = 0): void {
     if (this.disconnected || this.endedWatches.has(subscriptionId)) return;
-    this.stopWatchRenewal(subscriptionId);
+    const deadline = this.watchDeadlines.get(subscriptionId);
+    if (deadline === undefined || performance.now() + delayMs >= deadline) { this.stopWatchRenewal(subscriptionId); return; }
+    const prior = this.watchRenewals.get(subscriptionId);
+    if (prior) clearTimeout(prior);
     const timer = setTimeout(async () => {
       if (this.watchRenewals.get(subscriptionId) !== timer) return;
+      const renewalStarted = performance.now();
+      if (renewalStarted >= deadline) { this.stopWatchRenewal(subscriptionId); return; }
       try {
         await this.cowork("workspace.watch.renew", { subscriptionId });
         // Detach/disconnect/terminal may have cancelled while renewal was pending.
-        if (this.watchRenewals.get(subscriptionId) === timer) this.scheduleWatchRenewal(subscriptionId);
+        if (this.watchRenewals.get(subscriptionId) === timer) {
+          this.watchDeadlines.set(subscriptionId, renewalStarted + WORKSPACE_WATCH_LEASE_MS);
+          this.scheduleWatchRenewal(subscriptionId);
+        }
       } catch (error) {
-        this.stopWatchRenewal(subscriptionId);
         this.watchError?.(subscriptionId, error);
+        const rpc = (error as { rpc?: { code?: number; data?: { code?: string; retryable?: boolean } } })?.rpc;
+        const refused = rpc?.code === -32001 || ["authority_denied", "not_found", "unsupported_topology"].includes(rpc?.data?.code ?? "");
+        const retryable = !refused && (!rpc || rpc.code === -32603 || rpc.data?.code === "recovery_required" || rpc.data?.retryable === true);
+        if (this.watchRenewals.get(subscriptionId) === timer && retryable && attempt < 2 && !this.disconnected && !this.endedWatches.has(subscriptionId)) {
+          this.scheduleWatchRenewal(subscriptionId, 1000 * (attempt + 1), attempt + 1);
+        } else this.stopWatchRenewal(subscriptionId);
       }
-    }, WORKSPACE_WATCH_RENEW_MS);
+    }, delayMs);
     timer.unref();
     this.watchRenewals.set(subscriptionId, timer);
   }
   /** Fresh local watch, automatically renewed every20 seconds. Reconnect must call again;
    * this client never replays stale subscriptions or converts hints to durable state. */
   async watchWorkspaces(workspaceIds: string[]) {
+    const started = performance.now();
     const lease = await this.cowork("workspace.watch", { workspaceIds });
-    this.scheduleWatchRenewal(lease.subscriptionId);
+    if (!this.disconnected && !this.endedWatches.has(lease.subscriptionId)) {
+      this.watchDeadlines.set(lease.subscriptionId, started + WORKSPACE_WATCH_LEASE_MS);
+      this.scheduleWatchRenewal(lease.subscriptionId);
+    }
     return { ...lease,
       renew: () => this.cowork("workspace.watch.renew", { subscriptionId: lease.subscriptionId }),
       detach: async () => {

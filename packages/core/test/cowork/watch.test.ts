@@ -22,9 +22,11 @@ function fixture(count = 1) {
     grants: { folder: () => undefined, repository: () => ({ readable: true, writable: true, revoked: false }) },
     selection: () => selection, creationCeiling: () => ceiling, requireProvisioning: () => { throw new CoworkError("unsupported_topology"); } };
   const service = new CoworkWorkspaceService(records, host, undefined, undefined, undefined, { monotonicNow: () => mono, wallNow: () => wall, automaticMaintenance: false }); services.push(service);
+  const flushNow = service.watches.flush.bind(service.watches);
+  service.watches.flush = connectionId => { mono += 100; flushNow(connectionId); };
   const sink = { send(frame: Frame): "sent" | "blocked" { if (blocked && frame.phase !== "ended") return "blocked"; frames.push(frame); return "sent"; } };
   const watch = (scope = ids, conn = connection) => service.watch(conn, { workspaceIds: scope }, sink);
-  return { db, records, service, frames, host, ids, sink, watch, setPrincipal: (value?: string) => { principal = value; }, block: (value: boolean) => { blocked = value; }, clock: (value: number, date = wall) => { mono = value; wall = date; } };
+  return { db, records, service, frames, host, ids, sink, watch, flushNow, setPrincipal: (value?: string) => { principal = value; }, block: (value: boolean) => { blocked = value; }, clock: (value: number, date = wall) => { mono = value; wall = date; } };
 }
 const last = (frames: Frame[]) => frames.at(-1)!;
 test("canonical safe snapshots, shared DB writers, concurrent Projects, no conversations or redaction leaks", () => {
@@ -146,4 +148,64 @@ test("legacy maximum JSON escaping/capabilities become explicit bounded snapshot
     if (frame.workspace.detailState === "summary") expect(frame.workspace.policySummary.capabilityCounts).toEqual({ toolClasses: 256, hostServices: 256, connectors: 256 });
   }
   expect(encodeLine({ jsonrpc: "2.0", method: "workspace.watch", params: frame }).length).toBeLessThan(256 * 1024);
+});
+test("W1: trailing100ms retains latest hint and idle drain performs no authorized snapshot reads", () => {
+  const f = fixture(); f.watch(); f.flushNow(); f.frames.length = 0;
+  const read = f.records.sources.bind(f.records); let reads = 0;
+  f.records.sources = id => { reads++; return read(id); };
+  f.flushNow(); expect(reads).toBe(0);
+  f.records.updateTitle({ principalId: "local", requestId: "first", expectedRevision: 1 }, f.ids[0]!, "First");
+  f.clock(99); f.flushNow(); expect(reads).toBe(0); expect(f.frames).toEqual([]);
+  f.records.updateTitle({ principalId: "local", requestId: "last", expectedRevision: 2 }, f.ids[0]!, "Last");
+  f.clock(198); f.flushNow(); expect(f.frames).toEqual([]);
+  f.clock(199); f.flushNow(); expect(last(f.frames)).toMatchObject({ phase: "change", revisions: [{ configRevision: 3 }] });
+});
+test("W2: oversize snapshot ends unavailable with a bounded terminal frame", () => {
+  const f = fixture();
+  f.service.watch(connection, { workspaceIds: f.ids }, { send(frame) {
+    if (frame.phase !== "ended") return "oversize";
+    f.frames.push(frame); return "sent";
+  } });
+  f.flushNow(); expect(f.service.watches.size).toBe(0);
+  expect(f.frames).toHaveLength(1); expect(last(f.frames)).toMatchObject({ phase: "ended", reason: "unavailable", seq: 1 });
+  expect(encodeLine({ jsonrpc: "2.0", method: "workspace.watch", params: last(f.frames) }).length).toBeLessThan(1024);
+});
+test("W3: transient read keeps debt/refetch requirement and successful retry emits the latest revision", () => {
+  const f = fixture(); f.watch(); f.flushNow(); f.frames.length = 0;
+  const read = f.records.sources.bind(f.records); let failing = true;
+  f.records.sources = id => { if (failing) throw new Error("SQLITE_BUSY"); return read(id); };
+  f.records.updateTitle({ principalId: "local", requestId: "retry", expectedRevision: 1 }, f.ids[0]!, "Latest");
+  f.clock(100); f.flushNow(); expect(f.frames).toEqual([]); expect(f.service.watches.size).toBe(1);
+  failing = false; f.clock(200); f.flushNow();
+  expect(last(f.frames)).toMatchObject({ phase: "change", refetchRequired: true, revisions: [{ configRevision: 2 }] });
+});
+test("W4: overflow from unrelated transactions does not hint unchanged subscribed workspaces", () => {
+  const f = fixture(2); f.watch([f.ids[0]!]); f.flushNow(); f.frames.length = 0;
+  for (let index = 0; index < 129; index++) f.records.updateTitle({ principalId: "local", requestId: `unrelated-${index}`, expectedRevision: index + 1 }, f.ids[1]!, `Other-${index}`);
+  f.clock(100); f.flushNow(); expect(f.frames).toEqual([]);
+  f.records.updateTitle({ principalId: "local", requestId: "related", expectedRevision: 1 }, f.ids[0]!, "Observed");
+  f.clock(200); f.flushNow(); expect(last(f.frames)).toMatchObject({ phase: "change", refetchRequired: false, revisions: [{ workspaceId: f.ids[0], configRevision: 2 }] });
+});
+test("W5: raw autocommit is invisible; rolled-back savepoint may signal but never fabricates a changed snapshot", () => {
+  const f = fixture(); f.watch(); f.flushNow(); f.frames.length = 0;
+  f.db.db.run("UPDATE cowork_workspaces SET title='Raw' WHERE workspace_id=?", f.ids);
+  f.flushNow(); expect(f.frames).toEqual([]);
+  f.db.transaction(() => { try { f.db.transaction(() => { f.db.db.run("UPDATE cowork_workspaces SET title='Rolled' WHERE workspace_id=?", f.ids); throw new Error("savepoint"); }); } catch {} });
+  f.clock(100); f.flushNow(); expect(last(f.frames).phase).toBe("change"); // catches prior raw change only
+  f.frames.length = 0;
+  f.db.transaction(() => { try { f.db.transaction(() => { f.db.db.run("UPDATE cowork_workspaces SET title='Rolled' WHERE workspace_id=?", f.ids); throw new Error("savepoint"); }); } catch {} });
+  f.clock(200); f.flushNow(); expect(f.frames).toEqual([]); expect(f.records.get(f.ids[0]!).title).toBe("Raw");
+});
+test("W3: transient database errors schedule at most two retry timers before holding dirty state", () => {
+  const f = fixture(); f.watch(); f.flushNow(); f.frames.length = 0;
+  const read = f.records.sources.bind(f.records); f.records.sources = () => { throw new Error("SQLITE_BUSY"); };
+  f.records.updateTitle({ principalId: "local", requestId: "bounded", expectedRevision: 1 }, f.ids[0]!, "Pending");
+  const original = globalThis.setTimeout; let retryTimers = 0;
+  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => { if (args[1] === 100) retryTimers++; return original(...args); }) as typeof setTimeout;
+  try {
+    for (const time of [100, 200, 300, 400]) { f.clock(time); f.flushNow(); }
+    expect(retryTimers).toBe(2); expect(f.frames).toEqual([]); expect(f.service.watches.size).toBe(1);
+    f.records.sources = read; f.clock(500); f.flushNow();
+    expect(last(f.frames)).toMatchObject({ phase: "change", refetchRequired: true });
+  } finally { globalThis.setTimeout = original; }
 });

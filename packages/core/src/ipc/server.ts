@@ -2090,7 +2090,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (method === "workspace.watch") return opts.cowork.watch(connection, params ?? {}, { send(frame) {
           // Workspace frames have their own notification identity; never route through session/$system.
           const bytes = encodeLine({ jsonrpc: "2.0", method: "workspace.watch", params: frame });
-          if (bytes.length > 256 * 1024) return "closed";
+          if (bytes.length > 256 * 1024) return "oversize";
           const writer = socket.data.writer;
           if (frame.phase !== "ended" && writer.bufferedBytes > 128 * 1024) return "blocked";
           return writer.enqueue(bytes) ? "sent" : "closed";

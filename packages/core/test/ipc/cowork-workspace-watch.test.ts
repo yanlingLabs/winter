@@ -161,3 +161,57 @@ test("consumer never installs renewal when detach or disconnect wins before watc
     finally { globalThis.setTimeout = timer; }
   }
 });
+test("W6: malformed local watch frames surface a sanitized consumer error", async () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-watch-decoder-")); homes.push(home);
+  const path = join(home, "decoder.sock"), errors: Array<[string, unknown]> = [];
+  const server = Bun.listen<{ decoder: LineDecoder }>({ unix: path, socket: {
+    open(socket) { socket.data = { decoder: new LineDecoder() }; },
+    data(socket, bytes) { for (const line of socket.data.decoder.push(bytes)) {
+      const request = JSON.parse(line);
+      socket.write(encodeLine({ jsonrpc: "2.0", id: request.id, result: { ok: true, protocolVersion: PROTOCOL_VERSION, serverVersion: "fixture" } }));
+      socket.write(encodeLine({ jsonrpc: "2.0", method: "workspace.watch", params: { subscriptionId: "watch_fixture", phase: "snapshot", seq: "invalid" } }));
+    } },
+  } });
+  try {
+    const client = await WinterClient.connect({ socketPath: path, token: "fixture-only", clientName: "decoder", onEvent: () => {}, onWorkspaceWatchError: (id, error) => errors.push([id, error]) }); clients.push(client);
+    await until(() => errors.length === 1);
+    expect(errors[0]![0]).toBe("watch_fixture"); expect((errors[0]![1] as Error).message).toBe("invalid workspace watch frame");
+    client.close();
+  } finally { server.stop(true); }
+});
+test("W6: automatic renewal has at most two bounded retries, then succeeds on the existing Unix lease", async () => {
+  const f = await boot(), errors: unknown[] = [];
+  const client = await WinterClient.connect({ socketPath: join(f.home, "run/core.sock"), token: daemon!.tokens.harness, clientName: "retry", onEvent: () => {}, onWorkspaceWatchError: (_id, error) => errors.push(error) }); clients.push(client);
+  const originalRequest = client.request.bind(client); let attempts = 0;
+  client.request = async (method, params) => {
+    if (method === "workspace.watch.renew" && ++attempts <= 2) throw new Error("fixture transient transport failure");
+    return originalRequest(method, params);
+  };
+  const originalTimer = globalThis.setTimeout, delays: number[] = [];
+  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+    if ([20_000, 1000, 2000].includes(args[1] ?? 0)) { delays.push(args[1]!); return originalTimer(args[0], 5, ...args.slice(2)); }
+    return originalTimer(...args);
+  }) as typeof setTimeout;
+  try {
+    const lease = await client.watchWorkspaces(f.ids);
+    await until(() => attempts === 3); await lease.detach();
+    expect(delays.slice(0, 3)).toEqual([20_000, 1000, 2000]); expect(errors).toHaveLength(2);
+    expect(attempts).toBe(3);
+  } finally { globalThis.setTimeout = originalTimer; }
+});
+test("W6: authority refusal never retries even if a malformed response claims retryable", async () => {
+  const f = await boot(), observer = await connect(f.home), originalRequest = observer.client.request.bind(observer.client); let attempts = 0;
+  observer.client.request = async (method, params) => {
+    if (method === "workspace.watch.renew") { attempts++; throw Object.assign(new Error("refused"), { rpc: { code: -32001, data: { code: "authority_denied", retryable: true } } }); }
+    return originalRequest(method, params);
+  };
+  const originalTimer = globalThis.setTimeout, delays: number[] = [];
+  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+    if ([20_000, 1000, 2000].includes(args[1] ?? 0)) { delays.push(args[1]!); return originalTimer(args[0], 5, ...args.slice(2)); }
+    return originalTimer(...args);
+  }) as typeof setTimeout;
+  try {
+    const lease = await observer.client.watchWorkspaces(f.ids); await until(() => attempts === 1); await Bun.sleep(30);
+    expect(delays).toEqual([20_000]); expect(attempts).toBe(1); await lease.detach();
+  } finally { globalThis.setTimeout = originalTimer; }
+});

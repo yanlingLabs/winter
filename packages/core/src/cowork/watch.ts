@@ -5,7 +5,7 @@ import { CoworkError } from "./types";
 import type { CoworkConnection } from "./service";
 
 export interface CoworkWatchSink {
-  send(frame: CoworkWatchFrame): "sent" | "blocked" | "closed";
+  send(frame: CoworkWatchFrame): "sent" | "blocked" | "closed" | "oversize";
 }
 export interface CoworkWatchRead {
   principalId: string;
@@ -21,10 +21,10 @@ interface Subscription {
   subscriptionId: string; connection: CoworkConnection; principalId: string; ids: string[];
   deadline: number; leaseExpiresAt: string; seq: number; sink: CoworkWatchSink;
   snapshots: string[]; signatures: Map<string, string>;
-  dirty: boolean; commits: number; refetchRequired: boolean;
+  dirty: boolean; commits: number; refetchRequired: boolean; hintNotBefore: number; retries: number;
   expiry?: ReturnType<typeof setTimeout>; maintenance?: ReturnType<typeof setInterval>;
 }
-const MAX_IDS = 32, MAX_CONNECTION_WATCHES = 4, MAX_COALESCED_COMMITS = 128;
+const MAX_IDS = 32, MAX_CONNECTION_WATCHES = 4, MAX_COALESCED_COMMITS = 128, COALESCE_MS = 100, MAX_READ_RETRIES = 2;
 const digest = (snapshot: CoworkWorkspace, position: number) => createHash("sha256").update(JSON.stringify([snapshot, position])).digest("hex");
 
 /** Ephemeral delivery only. Canonical snapshots/outbox remain in runtime-state.db.
@@ -47,6 +47,7 @@ export class CoworkWorkspaceWatches {
     this.unsubscribe = this.db.onCommittedWrite(() => {
       for (const watch of this.subscriptions.values()) {
         watch.dirty = true;
+        watch.hintNotBefore = this.now() + COALESCE_MS; watch.retries = 0;
         // One counter and at most32 IDs, never an unbounded event/payload queue.
         watch.commits = Math.min(MAX_COALESCED_COMMITS + 1, watch.commits + 1);
         if (watch.commits > MAX_COALESCED_COMMITS) watch.refetchRequired = true;
@@ -64,7 +65,7 @@ export class CoworkWorkspaceWatches {
     const watch: Subscription = { subscriptionId: `watch_${randomUUID()}`, connection: { ...connection }, principalId: current.principalId,
       ids: [...ids], deadline: 0, leaseExpiresAt: "", seq: 0, sink, snapshots: [...ids],
       signatures: new Map(current.workspaces.map(({ snapshot, position }) => [snapshot.workspaceId, digest(snapshot, position)])),
-      dirty: false, commits: 0, refetchRequired: false };
+      dirty: false, commits: 0, refetchRequired: false, hintNotBefore: 0, retries: 0 };
     this.subscriptions.set(watch.subscriptionId, watch);
     this.observe();
     this.extend(watch);
@@ -75,8 +76,12 @@ export class CoworkWorkspaceWatches {
     const watch = this.owned(connection, subscriptionId);
     if (this.now() >= watch.deadline) { this.end(watch, "expired"); throw new CoworkError("authority_denied"); }
     try { this.checkAuthority(watch); }
-    catch { this.end(watch, "authority_revoked"); throw new CoworkError("authority_denied"); }
+    catch (error) {
+      if (this.authorityFailure(error)) { this.end(watch, "authority_revoked"); throw new CoworkError("authority_denied"); }
+      this.retryRead(watch); throw new CoworkError("recovery_required");
+    }
     this.extend(watch);
+    if (watch.dirty) this.schedule();
     return this.lease(watch);
   }
   detach(connection: CoworkConnection, subscriptionId: string) {
@@ -115,28 +120,35 @@ export class CoworkWorkspaceWatches {
   private maintainOne(watch: Subscription): void {
     if (!this.subscriptions.has(watch.subscriptionId)) return;
     if (this.now() >= watch.deadline) { this.end(watch, "expired"); return; }
-    try { this.checkAuthority(watch); } catch { this.end(watch, "authority_revoked"); }
+    try { this.checkAuthority(watch); } catch (error) {
+      if (this.authorityFailure(error)) this.end(watch, "authority_revoked");
+      else this.retryRead(watch);
+    }
   }
   maintain(): void {
     for (const watch of [...this.subscriptions.values()]) this.maintainOne(watch);
   }
   private schedule(): void {
-    if (this.queued || this.closed || !this.subscriptions.size) return;
-    // A macrotask lets the RPC acceptance result precede the first notification.
-    this.queued = setTimeout(() => { this.queued = undefined; this.flush(); }, 0);
+    if (this.closed || !this.subscriptions.size) return;
+    if (this.queued) clearTimeout(this.queued);
+    // Trailing100ms coalescing; dirty state survives resets and transport backpressure.
+    this.queued = setTimeout(() => { this.queued = undefined; this.flush(); }, COALESCE_MS);
     this.queued.unref();
   }
-  private send(watch: Subscription, body: Record<string, unknown>): "sent" | "blocked" | "closed" {
+  private send(watch: Subscription, body: Record<string, unknown>): "sent" | "blocked" | "closed" | "oversize" {
     const frame = CoworkWatchFrame.parse({ ...body, subscriptionId: watch.subscriptionId, seq: watch.seq + 1, leaseExpiresAt: watch.leaseExpiresAt });
     const result = watch.sink.send(frame);
     if (result === "sent") watch.seq++;
     if (result === "closed") this.release(watch);
+    if (result === "oversize" && body.phase !== "ended") this.end(watch, "unavailable");
     return result;
   }
   flush(connectionId?: number): void {
     for (const watch of [...this.subscriptions.values()]) {
       if (connectionId !== undefined && watch.connection.connectionId !== connectionId) continue;
+      if (!watch.dirty && !watch.snapshots.length) continue;
       if (this.now() >= watch.deadline) { this.end(watch, "expired"); continue; }
+      if (!watch.snapshots.length && this.now() < watch.hintNotBefore) { this.schedule(); continue; }
       try {
         // Recheck every enrolled workspace and current host principal at each delivery.
         const current = this.authorized(watch);
@@ -148,19 +160,29 @@ export class CoworkWorkspaceWatches {
           watch.signatures.set(workspaceId, digest(value.snapshot, value.position));
         }
         if (blocked || !this.subscriptions.has(watch.subscriptionId) || !watch.dirty) continue;
-        const changed = current.workspaces.filter(({ snapshot, position }) => watch.refetchRequired || watch.signatures.get(snapshot.workspaceId) !== digest(snapshot, position));
-        if (!changed.length) { watch.dirty = false; watch.commits = 0; continue; }
+        const changed = current.workspaces.filter(({ snapshot, position }) => watch.signatures.get(snapshot.workspaceId) !== digest(snapshot, position));
+        if (!changed.length) { watch.dirty = false; watch.commits = 0; watch.refetchRequired = false; watch.retries = 0; continue; }
         const revisions = changed.map(({ snapshot }) => {
           const { workspaceId, configRevision, grantRevision, instructionRevision, leaseEpoch } = snapshot;
           return { workspaceId, configRevision, grantRevision, instructionRevision, leaseEpoch };
         });
         if (this.send(watch, { phase: "change", revisions, refetchRequired: watch.refetchRequired }) !== "sent") continue;
         for (const { snapshot, position } of changed) watch.signatures.set(snapshot.workspaceId, digest(snapshot, position));
-        watch.dirty = false; watch.commits = 0; watch.refetchRequired = false;
+        watch.dirty = false; watch.commits = 0; watch.refetchRequired = false; watch.retries = 0;
       } catch (error) {
-        this.end(watch, error instanceof CoworkError && ["authority_denied", "not_found"].includes(error.code) ? "authority_revoked" : "unavailable");
+        if (this.authorityFailure(error)) this.end(watch, "authority_revoked");
+        else this.retryRead(watch);
       }
     }
+  }
+  private authorityFailure(error: unknown): boolean {
+    return error instanceof CoworkError && ["authority_denied", "not_found"].includes(error.code);
+  }
+  private retryRead(watch: Subscription): void {
+    // Bounded timer retries; preserve debt for the next commit/drain/renew and lease expiry.
+    watch.dirty = true; watch.refetchRequired = true;
+    watch.hintNotBefore = this.now() + COALESCE_MS;
+    if (watch.retries < MAX_READ_RETRIES) { watch.retries++; this.schedule(); }
   }
   private release(watch: Subscription): void {
     this.subscriptions.delete(watch.subscriptionId);

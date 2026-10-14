@@ -432,7 +432,9 @@ export function openRuntimeStateDb(home: string, opts: { readonly?: boolean; cre
       const tx = opened.transaction(fn);
       const mode = txOpts?.mode ?? "deferred";
       const result = mode === "immediate" ? tx.immediate() : mode === "exclusive" ? tx.exclusive() : tx();
-      // Only successful outer commits. Nested savepoints/rollbacks and pure reads never publish.
+      // Successful outer transaction() commits only; raw db/autocommit is not observed.
+      // total_changes includes rolled-back savepoint writes, so a caught inner rollback may
+      // signal the successful outer commit. Consumers must filter current canonical state.
       // Observers cannot make an already committed mutation appear to have failed.
       if (outer && committedWriteListeners.size && changes() !== before) {
         for (const listener of committedWriteListeners) { try { listener(); } catch { /* advisory hint; refetch remains authoritative */ } }
