@@ -188,3 +188,55 @@ import XCTest
         XCTAssertEqual(answers, [.expired])
     }
 }
+
+/// The island (user ruling 2026-10-14): its one line, the app's name and bundle id apart, the ring's share of time
+/// left, and where it hangs — out of the camera housing, under the top edge without one, floating for a second prompt.
+@MainActor final class DesktopIslandTests: XCTestCase {
+    private func model(app: String = "Google Chrome", bundle: String = "com.google.Chrome",
+                       timeoutMs: Int = 60_000) -> CUDesktopPromptModel {
+        CUDesktopPromptModel(CUDesktopPromptRequest(promptId: "p", sessionId: "s", app: app, bundleId: bundle,
+                                                    reason: "", timeoutMs: timeoutMs), now: 100)
+    }
+
+    func testTheIslandSaysOneShortLineAndNamesTheAppAndItsBundleIdApart() {
+        let m = model()
+        XCTAssertEqual(m.headline, "Winter needs your view for a sec")
+        XCTAssertEqual(m.appName, "Google Chrome")
+        XCTAssertEqual(m.bundleId, "com.google.Chrome")
+        XCTAssertEqual(model(app: "", bundle: "").appName, "the app")
+        XCTAssertEqual(model(bundle: "com.evil\u{202E}emorhC").bundleId, "com.evil emorhC", "sanitized like the app line")
+    }
+
+    func testTheRingEmptiesWithTheCountdown() {
+        let m = model(timeoutMs: 40_000)
+        XCTAssertEqual(m.duration, 40)
+        XCTAssertEqual(m.fractionLeft(now: 100), 1)
+        XCTAssertEqual(m.fractionLeft(now: 110), 0.75, accuracy: 1e-9)
+        XCTAssertEqual(m.fractionLeft(now: 140), 0)
+        XCTAssertEqual(m.fractionLeft(now: 500), 0, "never below empty")
+    }
+
+    func testItHangsOutOfTheCameraHousingWhenTheScreenHasOne() {
+        let g = DesktopIslandGeometry.make(housing: CGSize(width: 185, height: 32), menuBarHeight: 32,
+                                           contentHeight: 120, slot: 0)
+        XCTAssertTrue(g.attached)
+        XCTAssertEqual(g.closed, CGSize(width: 185, height: 32), "it springs out of the housing itself")
+        XCTAssertEqual(g.topInset, 32, "nothing is drawn behind the camera")
+        XCTAssertEqual(g.size, CGSize(width: 420, height: 152))
+        let wide = DesktopIslandGeometry.make(housing: CGSize(width: 360, height: 32), menuBarHeight: 32,
+                                              contentHeight: 120, slot: 0)
+        XCTAssertEqual(wide.size.width, 480, "always wider than the housing")
+    }
+
+    func testWithoutAHousingItHangsUnderTheTopEdgeAndASecondPromptFloats() {
+        let g = DesktopIslandGeometry.make(housing: nil, menuBarHeight: 24, contentHeight: 120, slot: 0)
+        XCTAssertTrue(g.attached)
+        XCTAssertEqual(g.closed.height, 24)
+        XCTAssertEqual(g.size.height, 144)
+        let second = DesktopIslandGeometry.make(housing: CGSize(width: 185, height: 32), menuBarHeight: 32,
+                                                contentHeight: 120, slot: 1)
+        XCTAssertFalse(second.attached)
+        XCTAssertEqual(second.topInset, 0)
+        XCTAssertEqual(second.size.height, 120)
+    }
+}

@@ -1,8 +1,9 @@
 import AppKit
+import SwiftUI
 
 /// The desktop-switch prompt's panel: never key or main, never activates the helper, never in a capture
 /// (`sharingType = .none`), on every Space — so it is on the user's CURRENT desktop, a full-screen app's
-/// included — above ordinary windows, at the top centre of the screen the user is on.
+/// included — above the menu bar, hanging from the top centre of the screen the user is on.
 final class DesktopPromptPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
@@ -11,7 +12,8 @@ final class DesktopPromptPanel: NSPanel {
         super.init(contentRect: contentRect, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = true
+        // The island draws its own shadow (the panel's would follow the whole panel while it springs open).
+        hasShadow = false
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         isMovable = false
@@ -22,95 +24,51 @@ final class DesktopPromptPanel: NSPanel {
         sharingType = .none
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle, .stationary]
     }
-}
 
-/// A button that takes the first click on a panel that is never key, without activating the helper.
-final class FirstClickButton: NSButton {
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    /// Left where it is put: the island sits over the menu bar, which AppKit would otherwise push it below.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
 @MainActor struct AppKitDesktopPromptFactory: DesktopPromptSurfaceFactory {
     func make(_ model: CUDesktopPromptModel) -> DesktopPromptSurface { AppKitDesktopPrompt(model) }
 }
 
+/// One prompt as an island (`DesktopIslandView`) in its own panel.
 @MainActor final class AppKitDesktopPrompt: NSObject, DesktopPromptSurface {
-    var onSwitch: (() -> Void)?
-    var onRefuse: (() -> Void)?
+    var onSwitch: (() -> Void)? {
+        get { state.onSwitch }
+        set { state.onSwitch = newValue }
+    }
+    var onRefuse: (() -> Void)? {
+        get { state.onRefuse }
+        set { state.onRefuse = newValue }
+    }
 
-    static let width: CGFloat = 400
-    static let margin: CGFloat = 12
-    static let gap: CGFloat = 10
-
+    private let model: CUDesktopPromptModel
+    private let state: DesktopIslandState
+    private let clock: CUClock = SystemClock()
+    private let icon: NSImage?
+    private let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     private let panel: DesktopPromptPanel
-    private let countdownLabel = NSTextField(labelWithString: "")
     private var shown = false
     private var slot = -1
 
     init(_ model: CUDesktopPromptModel) {
-        panel = DesktopPromptPanel(contentRect: CGRect(x: 0, y: 0, width: Self.width, height: 160))
+        self.model = model
+        state = DesktopIslandState(secondsLeft: model.secondsLeft(now: SystemClock().now),
+                                   fraction: model.fractionLeft(now: SystemClock().now))
+        icon = Self.icon(bundleId: model.bundleId)
+        panel = DesktopPromptPanel(contentRect: CGRect(x: 0, y: 0, width: DesktopIslandGeometry.width, height: 160))
         super.init()
-        let effect = NSVisualEffectView()
-        effect.material = .hudWindow
-        effect.blendingMode = .behindWindow
-        effect.state = .active
-        effect.wantsLayer = true
-        effect.layer?.cornerRadius = 14
-        effect.layer?.masksToBounds = true
-
-        let title = NSTextField(labelWithString: model.title)
-        title.font = .systemFont(ofSize: 14, weight: .semibold)
-        let appLine = NSTextField(labelWithString: model.appLine)
-        appLine.font = .systemFont(ofSize: 11)
-        appLine.textColor = .secondaryLabelColor
-        appLine.lineBreakMode = .byTruncatingMiddle
-        let reason = NSTextField(wrappingLabelWithString: model.reason)
-        reason.font = .systemFont(ofSize: 12)
-        reason.maximumNumberOfLines = 4
-        reason.preferredMaxLayoutWidth = Self.width - 32
-        reason.isHidden = model.reason.isEmpty
-        let back = NSTextField(labelWithString: model.backLine)
-        back.font = .systemFont(ofSize: 12)
-        back.textColor = .secondaryLabelColor
-        countdownLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-
-        let refuse = FirstClickButton(title: "Don't switch", target: self, action: #selector(refuseClicked))
-        refuse.bezelStyle = .rounded
-        let go = FirstClickButton(title: "Switch now", target: self, action: #selector(switchClicked))
-        go.bezelStyle = .rounded
-        go.bezelColor = .controlAccentColor
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: [countdownLabel, spacer, refuse, go])
-        buttons.orientation = .horizontal
-        buttons.spacing = 8
-
-        let stack = NSStackView(views: [title, appLine, reason, back, buttons])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        buttons.translatesAutoresizingMaskIntoConstraints = false
-        effect.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: effect.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
-            stack.widthAnchor.constraint(equalToConstant: Self.width),
-            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
-        ])
-        panel.contentView = effect
         // Its window name (the window list's), so a reader of the list can tell this panel from the helper's others.
         panel.title = model.title
         panel.setAccessibilityLabel(model.title)
     }
 
-    @objc private func switchClicked() { onSwitch?() }
-    @objc private func refuseClicked() { onRefuse?() }
-
     func show(countdown: String, slot: Int) {
-        countdownLabel.stringValue = countdown
+        let now = clock.now
+        state.secondsLeft = model.secondsLeft(now: now)
+        state.fraction = model.fractionLeft(now: now)
         guard !shown || slot != self.slot else { return }
         self.slot = slot
         place(slot: slot)
@@ -118,6 +76,8 @@ final class FirstClickButton: NSButton {
             shown = true
             if NSApp.isHidden { NSApp.unhideWithoutActivation() }
             panel.orderFrontRegardless()
+            // Drawn closed first, then sprung open on the next turn of the run loop.
+            DispatchQueue.main.async { [state] in state.open = true }
         }
     }
 
@@ -129,15 +89,48 @@ final class FirstClickButton: NSButton {
         panel.close()
     }
 
-    /// Top centre of the screen the pointer is on (where the user is), below the menu bar, `slot` panels down.
+    /// Hangs from the top centre of the screen the pointer is on (where the user is), out of its camera housing
+    /// when it has one; a second prompt floats `slot` islands down.
     private func place(slot: Int) {
-        panel.contentView?.layoutSubtreeIfNeeded()
-        let size = panel.contentView?.fittingSize ?? CGSize(width: Self.width, height: 160)
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main ?? NSScreen.screens.first
-        let visible = screen?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
-        let top = visible.maxY - Self.margin - CGFloat(slot) * (size.height + Self.gap)
-        let frame = CGRect(x: visible.midX - size.width / 2, y: top - size.height, width: size.width, height: size.height)
-        panel.setFrame(frame, display: true)
+        let frame = screen?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let geometry = DesktopIslandGeometry.make(housing: screen.flatMap(Self.housing),
+                                                  menuBarHeight: frame.maxY - (screen?.visibleFrame.maxY ?? frame.maxY),
+                                                  contentHeight: contentHeight(), slot: slot)
+        let view = DesktopIslandView(model: model, geometry: geometry, icon: icon, state: state, reduceMotion: reduceMotion)
+        let host = FirstClickHostingView(rootView: view)
+        host.sizingOptions = []
+        panel.contentView = host
+        let m = DesktopIslandGeometry.margin
+        let width = geometry.size.width + 2 * m
+        let height = geometry.size.height + m + (geometry.attached ? 0 : m)
+        // Slot 0 hangs from the top edge; each later one floats below the island above it.
+        let top = slot == 0 ? frame.maxY
+            : frame.maxY - CGFloat(slot) * (geometry.size.height + DesktopIslandGeometry.gap) - m
+        panel.setFrame(CGRect(x: frame.midX - width / 2, y: top - height, width: width, height: height), display: true)
+    }
+
+    /// The open island's content height below the top inset, measured once at its width.
+    private func contentHeight() -> CGFloat {
+        let measure = NSHostingView(rootView: DesktopIslandContent(model: model, icon: icon, state: state)
+            .frame(width: DesktopIslandGeometry.width))
+        return ceil(measure.fittingSize.height)
+    }
+
+    /// The camera housing's size on `screen`, nil when it has none.
+    static func housing(of screen: NSScreen) -> CGSize? {
+        let top = screen.safeAreaInsets.top
+        guard top > 0, let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea else { return nil }
+        let width = screen.frame.width - left.width - right.width
+        return width > 0 ? CGSize(width: width, height: top) : nil
+    }
+
+    /// The app's own icon, looked up by bundle id (so the island shows the real app, not a name the model chose).
+    static func icon(bundleId: String) -> NSImage? {
+        guard !bundleId.isEmpty, let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else {
+            return nil
+        }
+        return NSWorkspace.shared.icon(forFile: url.path)
     }
 }

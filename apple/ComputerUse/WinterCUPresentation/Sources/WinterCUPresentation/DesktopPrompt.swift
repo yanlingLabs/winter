@@ -57,8 +57,16 @@ public struct CUDesktopPromptModel: Sendable, Equatable {
     /// The model's reason, one sanitized line ("" when none).
     public let reason: String
     public let backLine = "Winter will bring you back right after."
+    /// The island's one short line (user ruling 2026-10-14: a black island at the top of the screen).
+    public let headline = "Winter needs your view for a sec"
+    /// The app's name alone ("Safari"), and its bundle id ("com.apple.Safari", "" when none): the island shows both,
+    /// so a look-alike app cannot borrow a trusted name.
+    public let appName: String
+    public let bundleId: String
     /// When the countdown runs out (the clock's seconds).
     public let deadline: TimeInterval
+    /// How long the countdown runs in all, for the island's ring.
+    public let duration: TimeInterval
     public private(set) var answer: CUDesktopPromptAnswer?
 
     /// `now`: the controller's (monotonic) clock; `wallMs`: the wall clock in epoch ms, against which `expiresAt` —
@@ -71,6 +79,8 @@ public struct CUDesktopPromptModel: Sendable, Equatable {
         title = "Switch to \(name)'s desktop?"
         let bundle = Self.sanitize(r.bundleId, max: Self.nameMax)
         appLine = bundle.isEmpty ? name : "\(name) (\(bundle))"
+        appName = name
+        bundleId = bundle
         reason = Self.sanitize(r.reason, max: Self.reasonMax)
         let ms: Double
         if let expiresAt = r.expiresAt {
@@ -79,6 +89,13 @@ public struct CUDesktopPromptModel: Sendable, Equatable {
             ms = Double(min(max(r.timeoutMs, Self.timeoutRange.lowerBound), Self.timeoutRange.upperBound))
         }
         deadline = now + ms / 1000
+        duration = ms / 1000
+    }
+
+    /// The share of the countdown still left, 1 → 0 (the island's ring).
+    public func fractionLeft(now: TimeInterval) -> Double {
+        guard duration > 0 else { return 0 }
+        return min(1, max(0, (deadline - now) / duration))
     }
 
     /// Whole seconds left, rounded up (0 once it ran out).
