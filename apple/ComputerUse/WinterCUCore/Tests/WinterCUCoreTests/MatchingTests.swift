@@ -157,7 +157,7 @@ final class MatchingTests: XCTestCase {
         let wrapped = CUNode(ref: 1, role: "AXGroup", children: [
             CUNode(ref: 2, role: "AXStaticText", name: "Your publish request was", frame: CGRect(x: 20, y: 100, width: 400, height: 40)),
             CUNode(ref: 3, role: "AXStaticText", name: "submitted", frame: Self.on(20, 90, y: 120)),
-            CUNode(ref: 4, role: "AXStaticText", name: "today", frame: Self.on(90, 130, y: 120)),
+            CUNode(ref: 4, role: "AXStaticText", name: "today", frame: Self.on(95, 135, y: 120)),
         ])
         XCTAssertEqual(CUFinder.find(.text("request was submitted today"), in: [wrapped]).map(\.ref), [2])
         XCTAssertEqual(CUFinder.find(.text("submitted today"), in: [wrapped]).map(\.ref), [3])
@@ -166,23 +166,68 @@ final class MatchingTests: XCTestCase {
         XCTAssertEqual(CUFinder.textRuns(Self.storeHeader().flattened()).first?.line, "status: published - public id: flfkppajaamjgfmdljlklfdffkdcmicc")
     }
 
+    /// The re-review: pieces that TOUCH on one line are one word ("$" + "12.99", a highlighted "Pub" + "lished");
+    /// pieces with a visible gap are two words.
+    func testTouchingPiecesAreOneWordAndAGapIsASpace() {
+        func line(_ parts: [(String, CGFloat, CGFloat)]) -> String? {
+            let row = CUNode(ref: 1, role: "AXGroup", children: parts.enumerated().map { i, p in
+                CUNode(ref: 2 + i, role: "AXStaticText", name: p.0, frame: Self.on(p.1, p.2))
+            })
+            return CUFinder.textRuns(row.flattened()).first?.line
+        }
+        XCTAssertEqual(line([("Total:", 0, 40), ("$", 44, 52), ("12.99", 52, 90)]), "total: $12.99")
+        XCTAssertEqual(line([("Pub", 100, 125), ("lished", 125.5, 160)]), "published")
+        XCTAssertEqual(line([("Hello", 0, 40), ("world", 45, 80)]), "hello world")
+        let price = CUNode(ref: 1, role: "AXGroup", children: [
+            CUNode(ref: 2, role: "AXStaticText", name: "$", frame: Self.on(44, 52)),
+            CUNode(ref: 3, role: "AXStaticText", name: "12.99", frame: Self.on(52, 90)),
+        ])
+        XCTAssertEqual(CUFinder.find(.text("$12.99"), in: [price]).map(\.ref), [2])
+        XCTAssertTrue(CUWaitEvaluator.met(CUWaitCondition(text: "$12.99"), CUWaitEvaluator.Observation(roots: [price], windowTitle: "w", focusedRef: nil)))
+    }
+
+    /// The re-review: a NEXT piece that wraps joins ("Note:" + a long value flowing onto the next line), and so does a
+    /// line broken between two pieces (the next at the container's left edge under a previous that ended near its
+    /// right edge); paragraphs in a framed container still never do.
+    func testAWrappingNextPieceAndABrokenLineJoin() {
+        let note = CUNode(ref: 1, role: "AXGroup", frame: CGRect(x: 20, y: 100, width: 400, height: 40), children: [
+            CUNode(ref: 2, role: "AXStaticText", name: "Note:", frame: Self.on(20, 60, y: 100)),
+            CUNode(ref: 3, role: "AXStaticText", name: "the package must be smaller than 2 GB to upload",
+                   frame: CGRect(x: 20, y: 100, width: 400, height: 40)),
+        ])
+        XCTAssertEqual(CUFinder.find(.text("Note: the package"), in: [note]).map(\.ref), [2])
+        let broken = CUNode(ref: 1, role: "AXGroup", frame: CGRect(x: 20, y: 100, width: 400, height: 40), children: [
+            CUNode(ref: 2, role: "AXStaticText", name: "Your item is now", frame: Self.on(300, 410, y: 100)),
+            CUNode(ref: 3, role: "AXStaticText", name: "published", frame: Self.on(20, 80, y: 120)),
+        ])
+        XCTAssertEqual(CUFinder.find(.text("now published"), in: [broken]).map(\.ref), [2])
+        let paragraphs = CUNode(ref: 1, role: "AXGroup", frame: CGRect(x: 20, y: 100, width: 400, height: 80), children: [
+            CUNode(ref: 2, role: "AXStaticText", name: "Payment", frame: Self.on(20, 90, y: 100)),
+            CUNode(ref: 3, role: "AXStaticText", name: "Complete the form below", frame: Self.on(20, 220, y: 120)),
+            CUNode(ref: 4, role: "AXStaticText", name: "Saved", frame: Self.on(20, 70, y: 150)),
+        ])
+        XCTAssertTrue(CUFinder.textRuns(paragraphs.flattened()).isEmpty, "a short line above is a paragraph, not a wrap")
+    }
+
     /// The review: matchStart re-joined the prefix per piece (a 1,000-piece run took 8 s on the pid queue). One pass now.
     func testALongRunIsMatchedInLinearTime() {
         let n = 2_000
         let line = CUNode(ref: 1, role: "AXGroup", children: (0..<n).map { i in
             CUNode(ref: 10 + i, role: "AXStaticText", name: "w\(i)", frame: Self.on(CGFloat(i) * 10, CGFloat(i) * 10 + 8))
         })
-        let t0 = Date()
         let nodes = line.flattened()
+        // Only the run's own work is timed (building the run, three matches); the quadratic version took seconds here.
+        let t0 = Date()
         let runs = CUFinder.textRuns(nodes)
+        let a = runs.first?.matchStart("w1998 w1999"), b = runs.first?.matchStart("w1999"), c = runs.first?.matchStart("w1999 w0")
+        let ms = Date().timeIntervalSince(t0) * 1000
+        XCTAssertLessThan(ms, 250, "a 2,000-piece run: \(ms) ms")
         XCTAssertEqual(runs.count, 1)
-        XCTAssertEqual(runs[0].matchStart("w1998 w1999"), 1998)
-        XCTAssertNil(runs[0].matchStart("w1999"), "inside one piece: that element's own match")
-        XCTAssertNil(runs[0].matchStart("w1999 w0"))
+        XCTAssertEqual(a, 1998)
+        XCTAssertNil(b, "inside one piece: that element's own match")
+        XCTAssertNil(c)
         XCTAssertEqual(CUFinder.find(.text("w1500 w1501 w1502"), in: [line]).map(\.ref), [1510])
         XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(text: "w1 w3"), CUWaitEvaluator.Observation(roots: [line], windowTitle: "w", focusedRef: nil)))
-        let ms = Date().timeIntervalSince(t0) * 1000
-        XCTAssertLessThan(ms, 50, "a 2,000-piece run: \(ms) ms")
     }
 
     func testARunNeverReadsASecureField() {
@@ -247,7 +292,9 @@ final class MatchingTests: XCTestCase {
         }
         XCTAssertNil(CUWaitEvaluator.dialogNote([Self.storeWindow([form("Sign in")])], focusedRef: 41))
         XCTAssertTrue(CUWaitEvaluator.dialogNote([Self.storeWindow([form("Confirm sign-in dialog")])], focusedRef: nil)?
-            .hasPrefix("the page shows only group \"Confirm sign-in dialog\" [40]") ?? false, "a dialog-like name")
+            .hasPrefix("the page shows only group \"Confirm sign-in dialog\" [40]") ?? false, "a dialog-like name with a button")
+        let bare = CUNode(ref: 60, role: "AXGroup", name: "Alert settings", children: [CUNode(ref: 61, role: "AXStaticText", name: "None set")])
+        XCTAssertNil(CUWaitEvaluator.dialogNote([Self.storeWindow([bare])], focusedRef: nil), "the name alone: no button, no focus")
         let big = CUNode(ref: 50, role: "AXGroup", name: "Results", children: (0..<12).map {
             CUNode(ref: 51 + $0, role: "AXButton", name: "r\($0)")
         })

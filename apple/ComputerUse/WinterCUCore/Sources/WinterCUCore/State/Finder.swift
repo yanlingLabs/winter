@@ -56,14 +56,15 @@ public enum CUFinder {
     /// A run of consecutive static-text siblings (two or more) on one visual line, read as one line.
     struct TextRun {
         var refs: [Int]
-        /// The pieces folded and joined — a space added where neither side has one at the boundary, so words never
-        /// glue — with every run of whitespace one space and none at the ends. Built once, in one pass.
+        /// The pieces folded and joined — at a boundary with no whitespace on either side, a space unless their frames
+        /// show them touching on one line (one word in two pieces: "$" + "12.99", a highlighted "Pub" + "lished"), so
+        /// separate words never glue — with every run of whitespace one space and none at the ends. One pass.
         var line: String
         /// Where each piece begins in `line`, in unicode scalars (non-decreasing; a piece that is only whitespace begins
         /// where the space it folded into does).
         var starts: [Int]
 
-        init(refs: [Int], pieces: [String]) {
+        init(refs: [Int], pieces: [String], frames: [CGRect?] = []) {
             self.refs = refs
             var out = String.UnicodeScalarView()
             var count = 0
@@ -72,9 +73,11 @@ public enum CUFinder {
             starts.reserveCapacity(pieces.count)
             for (k, raw) in pieces.enumerated() {
                 let piece = raw.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil)
-                // Two pieces with no whitespace between them are two words: a space between, never glued.
+                // Two pieces with no whitespace between them are two words — a space between, never glued — unless they
+                // touch on one line: then they are one word split in two.
                 if k > 0, let f = piece.unicodeScalars.first, !f.properties.isWhitespace,
-                   let l = pieces[k - 1].unicodeScalars.last, !l.properties.isWhitespace {
+                   let l = pieces[k - 1].unicodeScalars.last, !l.properties.isWhitespace,
+                   !CUFinder.touching(k - 1 < frames.count ? frames[k - 1] : nil, k < frames.count ? frames[k] : nil) {
                     pendingSpace = true
                 }
                 var began = false
@@ -120,16 +123,35 @@ public enum CUFinder {
     /// Two pieces read as one line: both frames known, overlapping vertically (or with near-equal middles), the next
     /// beginning to the right of the previous one — or continuing the last line of a previous piece that wrapped (it is
     /// taller than one line and the next sits on its bottom line). Block elements stacked one under the other never do.
-    static func sameLine(_ prev: CGRect?, _ next: CGRect?) -> Bool {
+    static func sameLine(_ prev: CGRect?, _ next: CGRect?, container: CGRect? = nil) -> Bool {
         guard let p = prev, let n = next, p.height > 0, n.height > 0 else { return false }
         let overlap = min(p.maxY, n.maxY) - max(p.minY, n.minY)
         let lineHeight = min(p.height, n.height)
         let tol: CGFloat = 2
         let onOneLine = overlap >= lineHeight * 0.5 || abs(p.midY - n.midY) <= lineHeight * 0.25
-        if onOneLine, p.height <= n.height * 1.5 { return n.minX >= p.maxX - tol }
+        let nextWraps = n.height > p.height * 1.5, prevWraps = p.height > n.height * 1.5
+        if onOneLine, !prevWraps, !nextWraps { return n.minX >= p.maxX - tol }
         // A wrapped previous piece: the next one continues on its bottom line.
-        if p.height > n.height * 1.5 { return n.midY >= p.maxY - n.height && n.midY <= p.maxY + tol }
+        if prevWraps { return n.midY >= p.maxY - n.height && n.midY <= p.maxY + tol }
+        // A wrapping next piece ("Note:" + a long value): it begins on the previous piece's line, to its right, and
+        // flows on — its box starts on that line and reaches past the previous piece.
+        if nextWraps { return abs(n.minY - p.minY) <= p.height * 0.5 && n.maxX > p.maxX }
+        // The line broke between the two: the next begins the next line at the container's left edge, right under
+        // the previous one, which ended near its right edge. Left-to-right only (no text direction is read: a
+        // right-to-left wrap stays two lines).
+        if let c = container, c.width > 0 {
+            let gap = n.minY - p.maxY
+            return gap >= -tol && gap <= lineHeight * 0.5
+                && n.minX <= c.minX + tol && p.maxX >= c.maxX - lineHeight * 3
+        }
         return false
+    }
+
+    /// Two pieces touching on one line: one word in two pieces (the next begins within 1.5 pt of the previous's end).
+    static func touching(_ prev: CGRect?, _ next: CGRect?) -> Bool {
+        guard let p = prev, let n = next, p.height > 0, n.height > 0 else { return false }
+        let overlap = min(p.maxY, n.maxY) - max(p.minY, n.minY)
+        return overlap >= min(p.height, n.height) * 0.5 && abs(n.minX - p.maxX) <= 1.5
     }
 
     /// Every run of consecutive static-text siblings on one visual line: the text a page shows in pieces. Measured on
@@ -145,22 +167,24 @@ public enum CUFinder {
         for parent in nodes where parent.children.count > 1 {
             var refs: [Int] = []
             var pieces: [String] = []
+            var frames: [CGRect?] = []
             var lastFrame: CGRect?
             var hasText = false
             func flush() {
-                if pieces.count > 1 { out.append(TextRun(refs: refs, pieces: pieces)) }
-                refs.removeAll(); pieces.removeAll(); lastFrame = nil; hasText = false
+                if pieces.count > 1 { out.append(TextRun(refs: refs, pieces: pieces, frames: frames)) }
+                refs.removeAll(); pieces.removeAll(); frames.removeAll(); lastFrame = nil; hasText = false
             }
             for c in parent.children {
                 guard c.role == "AXStaticText", !c.isSecure, let piece = c.value ?? c.name else { flush(); continue }
                 let blank = piece.allSatisfy(\.isWhitespace)
                 if !blank {
-                    if hasText, !sameLine(lastFrame, c.frame) { flush() }
+                    if hasText, !sameLine(lastFrame, c.frame, container: parent.frame) { flush() }
                     hasText = true
                     lastFrame = c.frame
                 }
                 refs.append(c.ref)
                 pieces.append(piece)
+                frames.append(c.frame)
             }
             flush()
         }

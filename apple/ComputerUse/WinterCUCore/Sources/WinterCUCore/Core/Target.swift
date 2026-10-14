@@ -353,7 +353,7 @@ enum CUWaitEvaluator {
 
     /// "a dialog "Success" is open ("Your publish request was submitted"; button "OK") — …" for the first dialog in the
     /// tree below its roots: an element with a dialog subrole, a sheet — or, said as only looking like one, a web area whose
-    /// only content is one named group (not a landmark) with a dialog-like name, or small (under 12 elements) holding a
+    /// only content is one named group (not a landmark) with a dialog-like name and a button or the focus, or small (under 12 elements) holding a
     /// button and the keyboard focus and no field to type into (how Chrome's tree read live while a page's modal dialog
     /// was up: it printed as a group, the page left out). Nil when none. Pure.
     static func dialogNote(_ roots: [CUNode], focusedRef: Int?) -> String? {
@@ -364,12 +364,14 @@ enum CUWaitEvaluator {
                   !(n.subrole.map { $0.hasPrefix("AXLandmark") || $0.hasPrefix("AXDocument") || $0 == "AXTabPanel" } ?? false)
             else { return false }
             let inside = n.flattened()
-            if dialogLikeName(name) { return true }
+            let button = inside.dropFirst().contains { $0.role == "AXButton" }
+            let focus = focusedRef.map { f in inside.contains { $0.ref == f } } == true
+            // A dialog-like name with something of a dialog's: a button or the focus (the name alone is a heading's).
+            if dialogLikeName(name) { return button || focus }
             // A small group holding a button and the focus, and nothing to type into: a login or search form wrapped in
             // a named group is no dialog (the review of this branch).
             return inside.count < shapeMaxElements
-                && inside.dropFirst().contains { $0.role == "AXButton" }
-                && focusedRef.map { f in inside.contains { $0.ref == f } } == true
+                && button && focus
                 && !inside.contains { entryRoles.contains($0.role) || $0.isSecure }
         }
         var dialog: CUNode?
