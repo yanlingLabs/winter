@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { CoworkRepository } from "../../src/cowork/repository";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -140,4 +141,25 @@ native("owner transaction failure rolls back root authority and refuses orphan e
  const f = fixture(); f.db.db.run("CREATE TRIGGER refuse_output_owner BEFORE INSERT ON cowork_output_locations BEGIN SELECT RAISE(ABORT,'injected owner crash'); END");
  refusal(() => f.initialize(), "file_unavailable"); expect(f.db.db.query("SELECT COUNT(*) AS n FROM cowork_output_locations").get()).toEqual({ n: 0 }); expect(f.db.db.query("SELECT COUNT(*) AS n FROM cowork_output_directories").get()).toEqual({ n: 0 });
  expect(existsSync(f.root)).toBe(true); f.db.db.run("DROP TRIGGER refuse_output_owner"); refusal(() => f.initialize(), "file_unavailable");
+});
+
+native("service refuses nested directory and file devices against the canonical output root", () => {
+ const f = fixture(), location = f.initialize(), nested = join(f.root, "nested"), path = join(nested, "file.bin"); mkdirSync(nested); writeFileSync(path, "ordinary");
+ const input = request(f, location.locationId, "nested/file.bin"), local = { role: "harness", connectionId: 1 };
+ const positive = f.service.call(local, "workspace.file.stat", input); expect(positive.bytes).toBe(8);
+ const rootStat = fs.statSync(f.root, { bigint: true }), nestedStat = fs.statSync(nested, { bigint: true }), fileStat = fs.statSync(path, { bigint: true }), original = fs.fstatSync;
+ for (const changed of ["nested-and-file", "file-only"] as const) {
+  let observed = 0;
+  const mocked = spyOn(fs, "fstatSync").mockImplementation(((fd: number, options?: any) => {
+   const actual = original(fd, options) as unknown as fs.Stats | fs.BigIntStats;
+   if (options?.bigint && (actual as fs.BigIntStats).dev === rootStat.dev && ((changed === "nested-and-file" && (actual as fs.BigIntStats).ino === nestedStat.ino) || (actual as fs.BigIntStats).ino === fileStat.ino)) {
+    observed++; return Object.assign(Object.create(Object.getPrototypeOf(actual)), actual, { dev: rootStat.dev + 1n });
+   }
+   return actual;
+  }) as typeof fs.fstatSync);
+  try { refusal(() => f.service.call(local, "workspace.file.stat", input), "file_unavailable"); expect(observed).toBeGreaterThan(0); }
+  finally { mocked.mockRestore(); }
+ }
+ expect(f.service.call(local, "workspace.file.stat", input)).toEqual(positive);
+ const read = f.service.call(local, "workspace.file.read", { ...input, expectedGeneration: positive.generation }); expect(Buffer.from(read.contentBase64, "base64").toString()).toBe("ordinary");
 });

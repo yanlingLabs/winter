@@ -130,3 +130,20 @@ Ordinary-memory command:
 ```sh
 bun test packages/core/test/agent/memory-dir.test.ts packages/core/test/agent/memory-dir-assistant.test.ts packages/core/test/agent/context-memory-dir.test.ts packages/core/test/agent/memory-file-ops.test.ts
 ```
+
+## Device-anchor correction after the original source freeze
+
+The original `3a866384` compared the file device against its last nested directory
+and checked nested-directory owner only. Injected metadata D1 canonical root →D2
+nested directory/file therefore passed. The successor captures the canonical
+output-root device immediately after its recorded tree walk, requires every nested
+directory to match that same anchor and compares the final file against it.
+
+The service regression spies on fstat metadata for exact actual nested/file inodes,
+substituting D1+1 for both nested/file or for the file only. It performs no mount,
+cross-filesystem operation, privileged action, new helper ABI or production fault
+port. The regression fails against the unchanged original3a production file and
+passes against the correction; the restored real-file stat/read positive also
+passes. Focused output/helper/RPC/protocol suite:22 pass,0 fail,256 assertions.
+Core no-emit typecheck passes. Original helper/fullsync/durable hashes remain exact.
+Initialization/orphan behavior is unchanged pending the separate full review.

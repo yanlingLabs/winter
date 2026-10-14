@@ -169,19 +169,20 @@ export class CoworkOutputs {
     this.user(principal, request.workspaceId);
     const row = this.owner(request.workspaceId, request.locationId, request.expectedLocationRevision);
     const parts = CoworkOutputPath.parse(request.relativePath).split("/"), filename = parts.pop()!;
-    const tree = this.tree(request.workspaceId, row.session_id); let fd = -1;
+    const tree = this.tree(request.workspaceId, row.session_id);
+    const outputDevice = tree.entries.at(-1)!.identity.device; let fd = -1;
     try {
       let parent = tree.directory;
       for (const name of parts) {
         const child = openDirAt(parent, name);
-        try { const actual = identity(child); if (actual.uid !== process.geteuid?.()) fail(); tree.entries.push({ fd: child, parent, name, relative: null, identity: actual }); }
+        try { const actual = identity(child); if (actual.uid !== process.geteuid?.() || actual.device !== outputDevice) fail(); tree.entries.push({ fd: child, parent, name, relative: null, identity: actual }); }
         catch (error) { closeSync(child); throw error; }
         parent = child;
       }
       this.assertTree(tree); this.checkpoint("before-file-open"); fd = openOutputAt(parent, filename);
       const before = fstatSync(fd, { bigint: true }), generation = this.stamp(before, row);
       // Refuse cross-device entries instead of treating an unexpected mount as backing content.
-      if (String(before.dev) !== tree.entries.at(-1)!.identity.device) fail();
+      if (String(before.dev) !== outputDevice) fail();
       this.checkpoint("file-opened"); const result = body(fd, row, generation, Number(before.size));
       this.checkpoint("after-file-read");
       if (this.stamp(fstatSync(fd, { bigint: true }), row) !== generation) fail("stale_file");
