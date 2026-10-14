@@ -78,10 +78,14 @@ test("source ACK/operation transitions hint even when configRevision is unchange
 test("post-commit observer suppresses rollback/read and coalesces nested outer commit; listener cannot reject commit", () => {
   const f = fixture(); f.watch(); f.service.watches.flush(); f.frames.length = 0;
   let commits = 0; const off = f.db.onCommittedWrite(() => { commits++; });
-  expect(() => f.db.transaction(() => { f.records.updateTitle({ principalId: "local", requestId: "rollback", expectedRevision: 1 }, f.ids[0]!, "Bad"); throw new Error("rollback"); })).toThrow("rollback");
+  // Public canonical mutations still reject an existing caller transaction.
+  expect(() => f.db.transaction(() => f.records.updateTitle({ principalId: "local", requestId: "nested-denied", expectedRevision: 1 }, f.ids[0]!, "Bad"))).toThrow("authority_denied");
+  // Actual fixture SQL tests listener rollback/savepoint behavior without weakening
+  // canonical repository ownership or invoking a nested durability wrapper.
+  expect(() => f.db.transaction(() => { f.db.db.run("UPDATE cowork_workspaces SET title='Bad' WHERE workspace_id=?", [f.ids[0]!]); throw new Error("rollback"); })).toThrow("rollback");
   f.service.watches.flush(); expect(f.frames).toEqual([]); expect(commits).toBe(0); expect(f.records.get(f.ids[0]!).title).toBe("Fixture");
   f.db.transaction(() => f.records.get(f.ids[0]!)); expect(commits).toBe(0);
-  f.db.transaction(() => f.records.updateTitle({ principalId: "local", requestId: "outer", expectedRevision: 1 }, f.ids[0]!, "Good"));
+  f.db.transaction(() => f.db.transaction(() => f.db.db.run("UPDATE cowork_workspaces SET title='Good',config_revision=config_revision+1 WHERE workspace_id=?", [f.ids[0]!] )));
   expect(commits).toBe(1); f.service.watches.flush(); expect(last(f.frames).phase).toBe("change"); off();
   const throws = f.db.onCommittedWrite(() => { throw new Error("observer"); });
   expect(() => f.records.updateTitle({ principalId: "local", requestId: "observer", expectedRevision: 2 }, f.ids[0]!, "Committed")).not.toThrow();

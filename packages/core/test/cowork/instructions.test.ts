@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, renameSync, symlinkSync, linkSync, statfsSync, readdirSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, renameSync, symlinkSync, linkSync, statfsSync, readdirSync, existsSync, fstatSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { CoworkInstructionUpdate, CoworkInstructionRead, CoworkInstructionProvenance, CoworkInstructionMetadata, COWORK_INSTRUCTION_MAX_BYTES } from "@yanlinglabs/winter-protocol";
@@ -174,11 +174,21 @@ native("immediate pre-rename editor conflict aborts known unapplied debt and nex
  expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 0 }); expect(readdirSync(f.root).filter(name => name.startsWith("instruction-") && name.endsWith(".tmp"))).toEqual([]);
  const value = new CoworkInstructions(f.records, f.home, grants).get(user, f.workspaceId); expect(Buffer.from(value.contentBase64, "base64").toString()).toBe("editor wins"); expect(value.instructionRevision).toBe(2);
 });
-native("directory validation fault closes the just-opened descriptor", () => {
- let fault = false; const f = fixture(phase => { if (phase === "directory-opened" && fault) throw new Error("identity fault"); }); f.owner.initialize(f.workspaceId, "old");
- const before = readdirSync("/dev/fd").length; fault = true;
- for (let i = 0; i < 10; i++) refusal(() => f.owner.get(user, f.workspaceId), "recovery_required");
- expect(readdirSync("/dev/fd").length).toBe(before);
+native("directory validation fault closes its actual just-opened root descriptor", () => {
+ const root = statSync("/", { bigint: true });
+ const holdsRoot = (fd: number) => { try { const value = fstatSync(fd, { bigint: true }); return value.isDirectory() && value.dev === root.dev && value.ino === root.ino; } catch { return false; } };
+ const rootFds = () => readdirSync("/dev/fd").map(Number).filter(holdsRoot);
+ let fault = false, before = new Set<number>(), opened: number[] = [];
+ const f = fixture(phase => { if (phase === "directory-opened" && fault) { opened = rootFds().filter(fd => !before.has(fd)); throw new Error("identity fault"); } }); f.owner.initialize(f.workspaceId, "old"); fault = true;
+ // Other asynchronous sockets can close between observations; global FD count
+ // is not ownership evidence. Track the root vnode opened by this exact call.
+ for (let i = 0; i < 10; i++) {
+  before = new Set(rootFds()); opened = [];
+  refusal(() => f.owner.get(user, f.workspaceId), "recovery_required");
+  expect(opened).toHaveLength(1);
+  try { const current = fstatSync(opened[0]!, { bigint: true }); expect(current.isDirectory() && current.dev === root.dev && current.ino === root.ino).toBe(false); }
+  catch (error) { expect(error).toMatchObject({ code: "EBADF" }); }
+ }
 });
 
 native("known no-rename abort refuses changed canonical mutation and preserves original conflict and temp", () => {

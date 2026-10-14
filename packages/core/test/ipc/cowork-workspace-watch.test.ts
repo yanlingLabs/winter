@@ -6,6 +6,7 @@ import { COWORK_RPC, ConnWriter, LineDecoder, PROTOCOL_VERSION, encodeLine, type
 import { WinterClient } from "../../../cli/src/client";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";
+import { CoworkInstructions } from "../../src/cowork/instructions";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { runtimeStateOnline } from "../../src/runtime-state/wiring";
 import type { CoworkHostPorts } from "../../src/cowork/service";
@@ -234,3 +235,24 @@ test("W1b: live Unix hints arrive during2s of50ms writes instead of waiting for 
   await until(() => observed.some(value => value.frame.phase === "change" && value.frame.revisions[0]?.configRevision === 41));
   await lease.detach();
 }, 10_000);
+
+const instructionFiles = process.platform === "darwin" && process.arch === "arm64" && process.env.WINTER_COWORK_INSTRUCTION_FS_FIXTURE === "1" ? test : test.skip;
+instructionFiles("composed real guidance mutation notifies local workspace watch with revision only", async () => {
+ const f = await boot(), workspaceId = f.ids[0]!;
+ // Trusted disposable provisioning only; no production issuer or RPC seed.
+ const owner = new CoworkInstructions(f.records, f.home, { folder: () => undefined, repository: () => undefined });
+ owner.initialize(workspaceId, "private-guidance-first");
+ const observer = await connect(f.home), lease = await observer.client.watchWorkspaces([workspaceId]);
+ await until(() => observer.frames.length === 1);
+ const initial = await observer.client.cowork("workspace.instructions.get", { workspaceId });
+ const content = "private-guidance-composed-update";
+ const receipt = await observer.client.cowork("workspace.instructions.update", { workspaceId, requestId: "composed-guidance", expectedInstructionRevision: initial.instructionRevision, expectedDigest: initial.digest, content });
+ expect(receipt.value.instructionRevision).toBe(2);
+ await until(() => observer.frames.some(frame => frame.phase === "change"));
+ expect(observer.frames.at(-1)).toMatchObject({ phase: "change", revisions: [{ workspaceId, configRevision: 2, instructionRevision: 2 }] });
+ expect(JSON.stringify(observer.frames)).not.toContain(content); expect(JSON.stringify(observer.frames)).not.toContain(Buffer.from(content).toString("base64"));
+ const current = await observer.client.cowork("workspace.instructions.get", { workspaceId });
+ expect(Buffer.from(current.contentBase64, "base64").toString()).toBe(content);
+ expect(f.records.rs.db.query("SELECT count(*) AS n FROM cowork_conversations").get()).toEqual({ n: 0 });
+ await lease.detach();
+});
