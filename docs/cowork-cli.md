@@ -52,6 +52,53 @@ publication is displayed as a policy default; blocked provisioning is reported
 as the daemon's typed refusal. Mutation receipts identify their operation and
 revision without claiming effective guest mounts or execution.
 
+## Shared guidance
+
+`winter workspace instructions get WORKSPACE` prints the current shared guidance
+revision, SHA-256 digest and size (and the text, with terminal controls escaped);
+`instructions provenance WORKSPACE` lists the discovered guidance sources. Both are
+workspace-only reads.
+
+`instructions update` replaces the shared guidance (`WINTER.md`) and takes:
+
+```sh
+winter workspace instructions update WORKSPACE \
+  --instruction-revision N --digest SHA256 --request-id ID \
+  (--content TEXT | --stdin | --content-file FILE) [--allow-empty] [--json]
+```
+
+- `--instruction-revision` and `--digest` are required and name the guidance being
+  replaced, exactly as `instructions get` printed them, not the new text. A stale pair
+  is a `revision_conflict`; the CLI never refreshes or retries.
+- `--request-id` is required and is the replay identity (see below).
+- Exactly one content source. `--content TEXT` is the inline form. `--content-file FILE`
+  reads a regular file (relative to the caller's cwd; a symlink to a regular file works,
+  FIFOs, devices and directories are refused). `--stdin` reads raw bytes until EOF.
+  `--stdin` and `--content-file` keep the text out of argv, shell history and `ps`.
+- Content is at most 65536 UTF-8 bytes with no NUL; BOM, CRLF and the final newline are
+  sent exactly as read. Oversized, non-UTF-8 and NUL input is refused without echoing it.
+- Zero-byte `--stdin` or `--content-file` input is refused, so a failed pipeline stage
+  cannot blank the guidance. `--allow-empty` (only with `--stdin` or `--content-file`)
+  makes the clear deliberate; `--content ""` also clears. Whitespace-only input is content.
+- On a terminal, `--stdin` prints a one-line hint on stderr (end with Ctrl-D). An unreadable
+  file reports a fixed message and its errno code (for example `(ENOENT)`), never the path.
+- All validation and input reading finish before any connection, so a refused command
+  never touches the daemon.
+
+```sh
+winter workspace instructions get workspace_example
+winter workspace instructions update workspace_example --instruction-revision 2 --digest "$DIGEST" --request-id guidance_1 --content-file ./WINTER.md
+generate-guidance | winter workspace instructions update workspace_example --instruction-revision 2 --digest "$DIGEST" --request-id guidance_1 --stdin
+```
+
+The request ID names the canonical `workspace.instructions.update` request, not the input
+mode. Every mode sends the same RPC with the resolved text as `content`, so an exact
+retry may switch between `--content`, `--content-file` and `--stdin` as long as the
+workspace, revision, digest and resulting bytes are identical; the daemon then returns the
+recorded receipt. Any difference, including a trailing newline (`echo` adds one, `printf`
+does not), is a `request_conflict`: use a new request ID for a new change. Details:
+[shared-guidance CLI inputs](research/2026-10-14-guidance-cli-input.md).
+
 Verification uses private homes, isolated coordination/Git configuration,
 file-secret stores and no agent backend. Source identities are synthetic; no
 folder, GitHub account, real credentials, worker or VM is provisioned. Child CLI
@@ -60,9 +107,10 @@ before connecting or autolaunching anything.
 
 ```sh
 cd packages/cli
-bun test test/cowork-cli.test.ts test/main.test.ts test/cli-verb-gates.test.ts \
-  test/memory-cli.test.ts test/credentials-cli.test.ts test/cli-autolaunch.test.ts
-# 117 tests, 1904 assertions passed.
+bun test test/cowork-cli.test.ts test/cowork-guidance-input.test.ts test/main.test.ts \
+  test/cli-verb-gates.test.ts test/memory-cli.test.ts test/credentials-cli.test.ts \
+  test/cli-autolaunch.test.ts
+# 134 tests, 2059 assertions passed.
 
 # From repository root
 bun run typecheck:cli
