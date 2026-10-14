@@ -454,6 +454,11 @@ extension CUCore {
         "\(app)'s page is on another desktop, where it may not update its accessibility until it is seen — what it reads may predate the action, so this is unverified; screenshot({ live: true, reason }) shows the window now"
     }
 
+    /// What a `waitFor` that timed out says when the page is a Chromium one on another desktop: what it read may be stale.
+    static func offDesktopWaitSentence(_ app: String) -> String {
+        "\(app)'s page is on another desktop, where it may not update its accessibility until it is seen — what the wait read may be out of date; screenshot({ live: true, reason }) shows the window now"
+    }
+
     /// Does `t`'s page lag on another desktop (a Chromium-family window off this desktop)?
     func pageMayLagOffDesktop(_ t: CUTarget) -> Bool {
         t.isChromium && isOffThisDesktop(t)

@@ -752,6 +752,47 @@ final class LeftoversTests: XCTestCase {
         XCTAssertFalse(core.pageMayLagOffDesktop(safari), "WebKit: not this rule")
     }
 
+    // MARK: a waitFor that times out says what stood in its way (the Web Store's "Success" dialog, 2026-10-14)
+
+    private func waitTimeout(_ text: String) async throws -> String {
+        do {
+            _ = try await core.targetWaitFor(TargetWaitForParams(targetId: "t1", cond: CUWaitCondition(text: text), timeoutMs: 150, callId: "w"))
+            XCTFail("met")
+            return ""
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "wait_timeout", e.message)
+            guard case .string(let seen)? = e.data?["seen"] else { XCTFail("no seen"); return "" }
+            return seen
+        }
+    }
+
+    /// The page's modal dialog is up — Chrome's web area holds only it — and the window is on another desktop by the
+    /// timeout: `seen` names the dialog and says the read may be out of date. On this desktop it says only the dialog.
+    func testAWaitTimeoutNamesTheDialogAndAnOffDesktopPagesStaleness() async throws {
+        world()
+        // Chrome's tree as read live with the "Success" dialog up: the web area holds only the dialog. (The live reader
+        // walks real accessibility, so the fake's tree comes through the read override.)
+        let dialog = fakeElement(98_050), words = fakeElement(98_051), ok = fakeElement(98_052)
+        let read = [CUNode(ref: ref(window), role: kAXWindowRole, name: "Dashboard", children: [
+            CUNode(ref: ref(web), role: "AXWebArea", children: [
+                CUNode(ref: ref(dialog), role: kAXGroupRole, subrole: "AXApplicationDialog", name: "Success", children: [
+                    CUNode(ref: ref(words), role: kAXStaticTextRole, name: "Your publish request was submitted"),
+                    CUNode(ref: ref(ok), role: kAXButtonRole, name: "OK"),
+                ]),
+            ]),
+        ])]
+        core.stateReadOverride = { _ in read }
+        var seen = try await waitTimeout("Status: Published")
+        XCTAssertTrue(seen.contains("a dialog \"Success\" [\(ref(dialog))] is open (\"Your publish request was submitted\"; button \"OK\") — the page behind it is not in the accessibility tree while it is open, so what you wait for may be behind it: answer or close the dialog, then wait again"), seen)
+        XCTAssertFalse(seen.contains("another desktop"), "on this desktop: no staleness note")
+        // Off this desktop (not on screen, not among the windows accessibility lists here): the read may be stale.
+        sys.windows[88]?.onScreen = false
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [AXUIElement]()])
+        seen = try await waitTimeout("Status: Published")
+        XCTAssertTrue(seen.hasSuffix(" — " + CUCore.offDesktopWaitSentence("Browser")), seen)
+        XCTAssertTrue(seen.contains("a dialog \"Success\""), seen)
+    }
+
     // MARK: AXEnhancedUserInterface goes off with the process's last target
 
     func testEnhancedUserInterfaceIsTurnedOffOnlyWhenWinterTurnedItOnAndItStillReadsOn() {

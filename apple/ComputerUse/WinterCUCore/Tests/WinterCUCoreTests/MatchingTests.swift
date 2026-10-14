@@ -55,6 +55,107 @@ final class MatchingTests: XCTestCase {
         XCTAssertEqual(CUWaitEvaluator.seen(o), "window \"New Message\" · 6 elements · focused [3]")
     }
 
+    /// The Chrome Web Store dashboard (live, 2026-10-14), as Chrome's tree read it: the item's header with its status in
+    /// five static texts, and the same web area while the "Success" dialog is up (only the dialog is in the tree).
+    private static func storeHeader(status: String = "Published") -> CUNode {
+        CUNode(ref: 983, role: "AXGroup", name: "Winter for Chrome", children: [
+            CUNode(ref: 984, role: "AXHeading", name: "Winter for Chrome", value: "1", children: [
+                CUNode(ref: 985, role: "AXLink", name: "Winter for Chrome", children: [
+                    CUNode(ref: 986, role: "AXStaticText", name: "Winter for Chrome"),
+                ]),
+            ]),
+            CUNode(ref: 987, role: "AXStaticText", name: "Status:"),
+            CUNode(ref: 988, role: "AXStaticText", value: " "),
+            CUNode(ref: 989, role: "AXStaticText", name: status),
+            CUNode(ref: 990, role: "AXStaticText", name: "-", value: " - "),
+            CUNode(ref: 991, role: "AXStaticText", name: "public"),
+            CUNode(ref: 992, role: "AXStaticText", name: "ID:", value: "ID: "),
+            CUNode(ref: 993, role: "AXStaticText", name: "flfkppajaamjgfmdljlklfdffkdcmicc"),
+            CUNode(ref: 995, role: "AXButton", name: "Save draft", states: .disabled),
+            CUNode(ref: 997, role: "AXButton", name: "Publish", states: .disabled),
+        ])
+    }
+
+    private static func storeWindow(_ page: [CUNode]) -> CUNode {
+        CUNode(ref: 1, role: "AXWindow", name: "Store Listing - Google Chrome", children: [
+            CUNode(ref: 7, role: "AXToolbar", children: [CUNode(ref: 10, role: "AXButton", name: "Reload")]),
+            CUNode(ref: 230, role: "AXWebArea", name: "Store Listing", children: page),
+        ])
+    }
+
+    private static let successDialog = CUNode(ref: 953, role: "AXGroup", name: "Success", children: [
+        CUNode(ref: 954, role: "AXHeading", name: "Success", value: "2", children: [
+            CUNode(ref: 955, role: "AXGroup"),
+            CUNode(ref: 956, role: "AXStaticText", name: "Success"),
+        ]),
+        CUNode(ref: 958, role: "AXStaticText", name: "Your publish request was submitted"),
+        CUNode(ref: 960, role: "AXButton", name: "OK", states: .focused, actions: ["AXPress"]),
+    ])
+
+    func testWaitTextMatchesAcrossAStatusSplitIntoStaticTexts() {
+        let o = CUWaitEvaluator.Observation(roots: [Self.storeWindow([Self.storeHeader()])], windowTitle: "Store Listing", focusedRef: 230)
+        for t in ["Status: Published", "status: published - public", "Status:  Published", "Published - public ID: flfk", "public"] {
+            XCTAssertTrue(CUWaitEvaluator.met(CUWaitCondition(text: t), o), t)
+        }
+        XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(text: "Status: Pending review"), o))
+        XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(gone: .text("Status: Published")), o), "gone reads the same runs")
+        XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(text: "Save draft Publish"), o), "buttons never join a run")
+        XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(text: "Winter for Chrome Status"), o),
+                       "a run never spans a heading or a link")
+        let pending = CUWaitEvaluator.Observation(roots: [Self.storeWindow([Self.storeHeader(status: "Pending review")])],
+                                                  windowTitle: "Store Listing", focusedRef: nil)
+        XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(text: "Status: Published"), pending))
+        XCTAssertTrue(CUWaitEvaluator.met(CUWaitCondition(gone: .text("Status: Published")), pending))
+    }
+
+    func testARunNeverReadsASecureField() {
+        let row = CUNode(ref: 1, role: "AXGroup", children: [
+            CUNode(ref: 2, role: "AXStaticText", name: "Code:"),
+            CUNode(ref: 3, role: "AXStaticText", subrole: "AXSecureTextField", value: "4242"),
+            CUNode(ref: 4, role: "AXStaticText", name: "ok"),
+        ])
+        let o = CUWaitEvaluator.Observation(roots: [row], windowTitle: "w", focusedRef: nil)
+        XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(text: "4242"), o))
+        XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(text: "Code: 4242"), o))
+    }
+
+    /// The live timeout: with the dialog up the wait for the status behind it can't be met, and `seen` now says why.
+    func testAWaitTimeoutNamesTheDialogThatHidesThePage() {
+        let o = CUWaitEvaluator.Observation(roots: [Self.storeWindow([Self.successDialog])], windowTitle: "Store Listing", focusedRef: 960)
+        XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(text: "Status: Published"), o), "the page is not in the tree")
+        XCTAssertTrue(CUWaitEvaluator.met(CUWaitCondition(text: "publish request was submitted"), o), "the dialog's own text is")
+        XCTAssertEqual(CUWaitEvaluator.seen(o),
+                       "window \"Store Listing\" · 10 elements · focused [960] — the page shows only group \"Success\" [953] (\"Your publish request was submitted\"; button \"OK\") — it looks like a dialog: while a page's dialog is open the browser leaves the page behind it out of the accessibility tree, so what you wait for may be behind it; answer or close it, then wait again")
+        // The same dialog with the subrole Chromium and WebKit give role="dialog": named a dialog outright.
+        var d = Self.successDialog
+        d.subrole = "AXApplicationDialog"
+        let byKind = CUWaitEvaluator.Observation(roots: [Self.storeWindow([d, CUNode(ref: 999, role: "AXGroup")])], windowTitle: "Store Listing", focusedRef: 960)
+        XCTAssertEqual(CUWaitEvaluator.dialogNote(byKind.roots, focusedRef: 960),
+                       "a dialog \"Success\" [953] is open (\"Your publish request was submitted\"; button \"OK\") — the page behind it is not in the accessibility tree while it is open, so what you wait for may be behind it: answer or close the dialog, then wait again")
+        // A dialog over a page that is still in the tree: it may hide it.
+        let over = CUWaitEvaluator.Observation(roots: [Self.storeWindow([Self.storeHeader(), d])], windowTitle: "Store Listing", focusedRef: 960)
+        XCTAssertTrue(CUWaitEvaluator.dialogNote(over.roots, focusedRef: 960)?.contains("what is behind it may be hidden from accessibility while it is open") ?? false)
+        XCTAssertTrue(CUWaitEvaluator.met(CUWaitCondition(text: "Status: Published"), over))
+        // No dialog: the old digest, unchanged.
+        let page = CUWaitEvaluator.Observation(roots: [Self.storeWindow([Self.storeHeader()])], windowTitle: "Store Listing", focusedRef: nil)
+        XCTAssertNil(CUWaitEvaluator.dialogNote(page.roots, focusedRef: nil),
+                     "a page whose only content is a named group with buttons is no dialog unless the focus is in it")
+        XCTAssertNil(CUWaitEvaluator.dialogNote(page.roots, focusedRef: 230))
+        XCTAssertEqual(CUWaitEvaluator.seen(page), "window \"Store Listing\" · 17 elements")
+    }
+
+    func testAPageWhoseOnlyContentIsALandmarkIsNoDialog() {
+        let main = CUNode(ref: 5, role: "AXGroup", subrole: "AXLandmarkMain", name: "Main", children: [
+            CUNode(ref: 6, role: "AXButton", name: "Go"),
+        ])
+        XCTAssertNil(CUWaitEvaluator.dialogNote([Self.storeWindow([main])], focusedRef: 6))
+        let sheet = CUNode(ref: 1, role: "AXWindow", name: "Doc", children: [
+            CUNode(ref: 2, role: "AXSheet", children: [CUNode(ref: 3, role: "AXStaticText", value: "Save changes?"), CUNode(ref: 4, role: "AXButton", name: "Don't Save")]),
+        ])
+        XCTAssertEqual(CUWaitEvaluator.dialogNote([sheet], focusedRef: nil),
+                       "a dialog [2] is open (\"Save changes?\"; button \"Don't Save\") — what is behind it may be hidden from accessibility while it is open, so what you wait for may be behind it: answer or close the dialog, then wait again")
+    }
+
     // MARK: menus
 
     struct FakeMenu: CUMenuNode {

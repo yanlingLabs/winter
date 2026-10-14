@@ -1414,7 +1414,14 @@ public final class CUCore: @unchecked Sendable {
             lastSeen = seen
             let elapsed = clock.nowMs() - start
             if met { return TargetWaitForResult(met: true, waitedMs: Int(elapsed.rounded())) }
-            if elapsed >= timeout { throw CUError.waitTimeout(seen: lastSeen, waitedMs: Int(elapsed.rounded())) }
+            if elapsed >= timeout {
+                // A Chromium page on another desktop may not update its accessibility until it is seen (finding D):
+                // the timeout says what it read may be out of date instead of passing for the page's truth.
+                if try await queues.run(t.pid, { [self] in pageMayLagOffDesktop(t) }) {
+                    lastSeen += " — " + Self.offDesktopWaitSentence(t.appName)
+                }
+                throw CUError.waitTimeout(seen: lastSeen, waitedMs: Int(elapsed.rounded()))
+            }
             // Notification-driven, with a 100 ms backstop.
             let mark = monitor.lastNotificationMs(pid: t.pid)
             let sig = CUWindowServer.signature(pid: t.pid)
