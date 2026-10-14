@@ -1,3 +1,4 @@
+import { authorityFixtureSessions } from "./committed-sessions";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -83,7 +84,7 @@ test("conversation targets retain existing standalone identity and pause on arch
   const f = fixture();
   const epoch = f.records.beginIncarnation(f.made.workspaceId, "fixture-epoch", 1);
   f.records.acknowledgeSource(epoch, f.definition.sourceId, 1, "ready");
-  f.records.bindConversation({ principalId: "fixture", requestId: "binding", expectedRevision: 1 }, f.made.workspaceId, { sessionId: "fixture-conversation", sourceId: f.definition.sourceId });
+  f.records.bindConversation({ principalId: "fixture", requestId: "binding", expectedRevision: 1 }, f.made.workspaceId, { sessionId: "fixture-conversation", sourceId: f.definition.sourceId }, authorityFixtureSessions("fixture-conversation"));
   const a = f.create({ ...f.definition, target: { kind: "conversation", sessionId: "fixture-conversation" } });
   f.time(1000); f.schedules.tick(); const row = f.schedules.status(a.workspaceId, a.scheduleId).occurrences[0]!;
   f.db.db.run("UPDATE cowork_conversations SET state='archived' WHERE session_id='fixture-conversation'"); f.schedules.tick();
@@ -92,7 +93,7 @@ test("conversation targets retain existing standalone identity and pause on arch
   expect(f.schedules.status(a.workspaceId, a.scheduleId).occurrences[0]!.reason).toBe("authority_denied");
   const standalone = f.records.create({ principalId: "fixture", requestId: "standalone" }, { ownership: "standalone", title: "Standalone", sources: [{ kind: "folder", label: "Fixture", access: "read-write", detail: { grantRef: "fixture-grant", rootIdentity: "fixture-root" } }], ceiling: caps });
   const source = standalone.value.sources[0]!; const own = f.records.beginIncarnation(standalone.workspaceId, "standalone-epoch", 1); f.records.acknowledgeSource(own, source.sourceId, 1, "ready");
-  f.records.bindConversation({ principalId: "fixture", requestId: "own-binding", expectedRevision: 1 }, standalone.workspaceId, { sessionId: standalone.value.workspace.ownerId, sourceId: source.sourceId });
+  f.records.bindConversation({ principalId: "fixture", requestId: "own-binding", expectedRevision: 1 }, standalone.workspaceId, { sessionId: standalone.value.workspace.ownerId, sourceId: source.sourceId }, authorityFixtureSessions(standalone.value.workspace.ownerId));
   const created = f.schedules.create("fixture", standalone.workspaceId, "own-schedule", { ...f.definition, sourceId: source.sourceId, target: { kind: "conversation", sessionId: standalone.value.workspace.ownerId } });
   expect(created.definition.target).toEqual({ kind: "conversation", sessionId: standalone.value.workspace.ownerId });
   expect(() => f.schedules.create("fixture", standalone.workspaceId, "project-fresh", { ...created.definition, target: { kind: "project", projectId: standalone.value.workspace.ownerId } })).toThrow("authority_denied");

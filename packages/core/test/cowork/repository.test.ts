@@ -239,3 +239,12 @@ test("multi-source supersession emits one durable terminal receipt and later sou
   expect(reopened.operation(made.workspaceId, replaced.operationId)).toMatchObject({ status: "pending", terminal: false });
   code(() => reopened.operation("other-workspace", made.operationId), "not_found");
 });
+
+test("canonical HomeIdentity lookup inside a read transaction never creates authority", () => {
+  const { store, db } = open();
+  db.transaction(() => { code(() => store.recordedHomeIdentity(), "recovery_required"); code(() => store.homeIdentity(), "authority_denied"); });
+  expect(db.db.query("SELECT count(*) AS n FROM cowork_home_identity").get()).toEqual({ n: 0 });
+  create(store); const recorded = store.recordedHomeIdentity();
+  db.transaction(() => { expect(store.recordedHomeIdentity()).toBe(recorded); code(() => store.homeIdentity(), "authority_denied"); });
+  expect(store.homeIdentity()).toBe(recorded); expect(db.db.query("SELECT count(*) AS n FROM cowork_home_identity").get()).toEqual({ n: 1 });
+});

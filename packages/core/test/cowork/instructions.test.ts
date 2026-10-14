@@ -32,7 +32,7 @@ export function instructionFixture(checkpoint: (phase: string) => void = () => {
   const service = new CoworkWorkspaceService(records, host, undefined, home);
   return { home, db, records, store, hub, broker, get owner() { return owner(); }, workspaceId, root, path, host, service,
     input(content: string, requestId = "change"): InstructionUpdate { const value = owner().get(user, workspaceId); return { workspaceId, content, requestId, expectedInstructionRevision: value.instructionRevision, expectedDigest: value.digest }; },
-    bind() { const epoch = records.beginIncarnation(workspaceId, "fixture-incarnation", records.get(workspaceId).configRevision), sourceId = made.value.sources[0]!.sourceId; records.acknowledgeSource(epoch, sourceId, 1, "ready"); const sessionId = store.createSession("global", { mode: "code" }); records.bindConversation({ principalId: "user", requestId: "bind", expectedRevision: records.get(workspaceId).configRevision }, workspaceId, { sessionId, sourceId }); return { kind: "runtime" as const, id: "runtime", sessionId, workspaceId }; },
+    bind() { const epoch = records.beginIncarnation(workspaceId, "fixture-incarnation", records.get(workspaceId).configRevision), sourceId = made.value.sources[0]!.sourceId; records.acknowledgeSource(epoch, sourceId, 1, "ready"); const sessionId = store.createSession("global", { mode: "code" }); records.bindConversation({ principalId: "user", requestId: "bind", expectedRevision: records.get(workspaceId).configRevision }, workspaceId, { sessionId, sourceId }, store); return { kind: "runtime" as const, id: "runtime", sessionId, workspaceId }; },
   };
 }
 const fixture = instructionFixture;

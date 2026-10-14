@@ -58,12 +58,23 @@ export class CoworkRepository {
   private one(sql: string, ...args: any[]): Row | null { return this.rs.db.query<Row, any[]>(sql).get(...args); }
   private all(sql: string, ...args: any[]): Row[] { return this.rs.db.query<Row, any[]>(sql).all(...args); }
   private run(sql: string, ...args: any[]) { return this.rs.db.run(sql, args); }
+  private homeIdentityWithinTransaction(): string {
+    // Only our scoped durable entry points call this; never reuse a caller's
+    // transaction or start a nested durability wrapper from a source binding.
+    if (!this.rs.db.inTransaction) throw new CoworkError("authority_denied");
+    const existing = this.one("SELECT home_id FROM cowork_home_identity WHERE singleton=1");
+    if (existing) return existing.home_id;
+    const homeId = this.mint("home"); this.run("INSERT INTO cowork_home_identity VALUES (1,?,?)", homeId, this.now()); return homeId;
+  }
+  /** Pure canonical lookup usable within a planner or mutation transaction.
+   * Missing authority is refused; this method never provisions an identity. */
+  recordedHomeIdentity(): string {
+    const existing = this.one("SELECT home_id FROM cowork_home_identity WHERE singleton=1");
+    if (!existing) throw new CoworkError("recovery_required");
+    return existing.home_id;
+  }
   homeIdentity(): string {
-    return durableCoworkTransaction(this.rs, () => {
-      const existing = this.one("SELECT home_id FROM cowork_home_identity WHERE singleton=1");
-      if (existing) return existing.home_id;
-      const homeId = this.mint("home"); this.run("INSERT INTO cowork_home_identity VALUES (1,?,?)", homeId, this.now()); return homeId;
-    });
+    return durableCoworkTransaction(this.rs, () => this.homeIdentityWithinTransaction());
   }
   get(workspaceId: string): Workspace {
     const row = this.one("SELECT * FROM cowork_workspaces WHERE workspace_id=?", id(workspaceId));
@@ -171,6 +182,7 @@ export class CoworkRepository {
         if (current.state !== "retained" && !(narrowing && current.state !== "deleted")) throw new CoworkError("authority_denied");
       }
       context.admitMutation?.();
+      this.homeIdentityWithinTransaction();
       const result = body(), current = this.get(result.workspaceId), operationId = this.mint("operation"), at = this.now();
       const receipt: MutationReceipt<T> = { operationId, workspaceId: current.workspaceId, revision: current.configRevision, value: result.value };
       context.validateReceipt?.(receipt);

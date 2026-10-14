@@ -33,7 +33,10 @@ export class CoworkFolderGrants {
     if (!match || !value.path.startsWith("/") || value.path.length > 4096 || value.path.includes("\0")) throw new CoworkError("authority_denied");
     const device = match[1]!, inode = match[2]!;
     if (this.query("SELECT 1 FROM cowork_folder_grants WHERE workspace_id=? AND root_device=? AND root_inode=? AND state='active'", source.workspaceId, device, inode)) throw new CoworkError("authority_denied");
-    const homeId = this.records.homeIdentity(), at = new Date().toISOString();
+    // The canonical mutation has already established HomeIdentity in this same
+    // durable transaction. Reading it here must not invoke a nested writer.
+    const homeId = this.records.recordedHomeIdentity();
+    const at = new Date().toISOString();
     this.records.rs.db.run(`INSERT INTO cowork_folder_grants(
       grant_ref,home_id,workspace_id,source_id,principal_id,selection_id,root_identity,
       root_device,root_inode,root_path,access,bookmark,state,revision,created_at,updated_at

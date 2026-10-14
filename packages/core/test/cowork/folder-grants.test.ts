@@ -75,8 +75,8 @@ test("revocation scrubs bookmark/path, preserves tombstone and blocks old succes
 });
 test("receipt rollback leaves pending selection usable and no authority/source half-commit",()=>{
   const f=fixture(),p=f.prepare(),selected=f.selections.selection(principal,1,p.selectionId)!,pending=f.selections.prepareConsumption(principal,1,p.selectionId);
-  expect(()=>f.records.create({principalId:principal.id,requestId:"rollback",bindSources:s=>pending.bind(s[0]!),validateReceipt:()=>{throw new Error("refuse receipt");}},{ownership:"project",title:"Project",sources:[selected],ceiling:{toolClasses:[],hostServices:[],connectors:[],network:"none"}})).toThrow("refuse receipt");
-  expect(f.records.list()).toEqual([]);expect(f.db.db.query("SELECT count(*) AS n FROM cowork_folder_grants").get()).toEqual({n:0});expect(f.scopes()).toBe(1);
+  expect(()=>f.records.create({principalId:principal.id,requestId:"rollback",bindSources:s=>{expect(f.db.db.inTransaction).toBe(true);expect(["synchronous","fullfsync","checkpoint_fullfsync"].map(name=>f.db.db.query<Record<string,number>,[]>(`PRAGMA main.${name}`).get()![name])).toEqual([2,1,1]);pending.bind(s[0]!);},validateReceipt:()=>{throw new Error("refuse receipt");}},{ownership:"project",title:"Project",sources:[selected],ceiling:{toolClasses:[],hostServices:[],connectors:[],network:"none"}})).toThrow("refuse receipt");
+  expect(f.records.list()).toEqual([]);expect(f.db.db.query("SELECT count(*) AS n FROM cowork_folder_grants").get()).toEqual({n:0});expect(f.db.db.query("SELECT count(*) AS n FROM cowork_home_identity").get()).toEqual({n:0});expect(f.scopes()).toBe(1);
   expect(f.service.call(connection,"workspace.create",f.request(p.selectionId)).value.sources[0]!.state).toBe("preparing");expect(f.scopes()).toBe(0);
 });
 test("caller transaction refused before consumption cleanup; principal, disconnect and expiry deny pending grants",()=>{
