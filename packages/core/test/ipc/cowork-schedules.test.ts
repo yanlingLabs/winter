@@ -37,7 +37,7 @@ let daemon: RunningDaemon | undefined, home: string | undefined; const clients: 
 afterEach(async () => { clients.splice(0).forEach(client => client.close()); if (daemon) await daemon.stop(); daemon = undefined; if (home) rmSync(home, { recursive: true, force: true }); home = undefined; });
 test("isolated daemon accepts canonical metadata, restarts missed timers and never creates Code sessions", async () => {
   home = mkdtempSync(join(tmpdir(), "winter-schedule-rpc-")); let time = 0;
-  const host: CoworkHostPorts = { principal: connection => connection.role === "remote" ? { kind: "paired-user", id: "phone", workspaceIds: new Set(), repositoryAuthorities: new Set() } : { kind: "local-user", id: "fixture" }, grants: { folder: () => ({ rootIdentity: "fixture-root", writable: true, revoked: false }), repository: () => undefined }, selection: () => undefined, creationCeiling: () => caps, requireProvisioning: () => { throw new Error("native unavailable"); } };
+  const host: CoworkHostPorts = { principal: connection => connection.role === "remote" ? { kind: "paired-user", id: "phone", workspaceIds: new Set(), repositoryAuthorities: new Set<string>() } : { kind: "local-user", id: "fixture" }, grants: { folder: () => ({ rootIdentity: "fixture-root", writable: true, revoked: false }), repository: () => undefined }, selection: () => undefined, creationCeiling: () => caps, requireProvisioning: () => { throw new Error("native unavailable"); } };
   const boot = async () => { daemon = await startDaemon({ home: home!, secrets: new FileSecretStore(join(home!, "secrets")), agentProvider: null, coworkHost: host, coworkScheduleNow: () => time }); const client = await Client.connect(join(home!, "run/core.sock"), daemon.tokens.harness); clients.push(client); return client; };
   let local = await boot(); const records = new CoworkRepository(runtimeStateOnline(daemon!.runtimeState)!.db);
   const made = records.create({ principalId: "fixture", requestId: "workspace" }, { ownership: "project", title: "Fixture", ceiling: caps, sources: [{ kind: "folder", label: "Fixture", access: "read-write", detail: { grantRef: "fixture-grant", rootIdentity: "fixture-root" } }] });
@@ -66,5 +66,28 @@ test("all four remote allowlist mirrors exclude schedule metadata", () => {
     const root = join(import.meta.dir, "../../../..");
     const mirrors = ["apple/WinterKit/Sources/WinterKit/Gateway/Gateway.swift", "apple/WinterKit/Tests/WinterKitTests/GatewayGateTests.swift", "packages/core/test/ipc/remote-allowlist-parity.test.ts"];
     for (const path of mirrors) expect(readFileSync(join(root, path), "utf8").includes(`"${method}"`)).toBe(false);
+  }
+});
+test("actual daemon RPC returns safe durable quarantine and keeps healthy timers progressing", async () => {
+  home = mkdtempSync(join(tmpdir(), "winter-schedule-quarantine-rpc-")); let time = 0;
+  const host: CoworkHostPorts = { principal: () => ({ kind: "local-user", id: "fixture" }), grants: { folder: () => ({ rootIdentity: "fixture-root", writable: true, revoked: false }), repository: () => undefined }, selection: () => undefined, creationCeiling: () => caps, requireProvisioning: () => { throw new Error("execution unavailable"); } };
+  const boot = async () => { daemon = await startDaemon({ home: home!, secrets: new FileSecretStore(join(home!, "secrets")), agentProvider: null, coworkHost: host, coworkScheduleNow: () => time }); const client = await Client.connect(join(home!, "run/core.sock"), daemon.tokens.harness); clients.push(client); return client; };
+  let local = await boot(); let records = new CoworkRepository(runtimeStateOnline(daemon!.runtimeState)!.db);
+  const made = records.create({ principalId: "fixture", requestId: "workspace" }, { ownership: "project", title: "Fixture", ceiling: caps, sources: [{ kind: "folder", label: "Fixture", access: "read-write", detail: { grantRef: "fixture-grant", rootIdentity: "fixture-root" } }] });
+  const definition = { target: { kind: "project", projectId: made.value.workspace.ownerId }, sourceId: made.value.sources[0]!.sourceId, prompt: "fixture", timing: { kind: "recurring", spec: "every 1s" }, timezone: "UTC", savedCeiling: caps, policy: "auto", overlap: "one-active-one-pending" };
+  const healthy = (await local.request("workspace.schedule.create", { workspaceId: made.workspaceId, requestId: "healthy", definition })).result;
+  const poison = (await local.request("workspace.schedule.create", { workspaceId: made.workspaceId, requestId: "poison", definition })).result;
+  records.rs.db.run("UPDATE cowork_schedules SET definition_json='{poison-private-payload' WHERE schedule_id=?", [poison.scheduleId]);
+  clients.splice(0).forEach(client => client.close()); await daemon!.stop(); daemon = undefined; time = 2000; local = await boot(); records = new CoworkRepository(runtimeStateOnline(daemon!.runtimeState)!.db);
+  const bad = await local.request("workspace.schedule.status", { workspaceId: made.workspaceId, scheduleId: poison.scheduleId });
+  expect(bad.error).toBeUndefined(); expect(COWORK_RPC["workspace.schedule.status"].result.safeParse(bad.result).success).toBe(true);
+  expect(bad.result.schedule).toMatchObject({ state: "quarantined", reason: "invalid_schedule", cancelled: false }); expect(JSON.stringify(bad.result)).not.toContain("poison-private-payload");
+  expect((await local.request("workspace.schedule.status", { workspaceId: made.workspaceId, scheduleId: healthy.scheduleId })).result.occurrences[0].missedCount).toBe(1);
+  expect((await local.request("workspace.schedule.list", { workspaceId: made.workspaceId })).result.schedules).toHaveLength(2);
+  const cancelled = await local.request("workspace.schedule.cancel", { workspaceId: made.workspaceId, scheduleId: poison.scheduleId, expectedRevision: 1 });
+  expect(cancelled.error).toBeUndefined(); expect(cancelled.result).toMatchObject({ state: "quarantined", cancelled: true, revision: 2 });
+  for (const [role, principal] of [["remote", { kind: "local-user", id: "forged-local" }], ["harness", { kind: "paired-user", id: "paired", workspaceIds: new Set([made.workspaceId]), repositoryAuthorities: new Set<string>() }], ["remote", { kind: "paired-user", id: "paired", workspaceIds: new Set([made.workspaceId]), repositoryAuthorities: new Set<string>() }]] as const) {
+    const service = new CoworkWorkspaceService(records, { ...host, principal: () => principal });
+    expect(() => service.call({ role, connectionId: 999 }, "workspace.schedule.status", { workspaceId: made.workspaceId, scheduleId: healthy.scheduleId })).toThrow("authority_denied");
   }
 });

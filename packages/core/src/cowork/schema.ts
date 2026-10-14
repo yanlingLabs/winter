@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 /** Reverse dependency order also permits removing an unused additive schema on explicit rollback. */
-export const COWORK_TABLES = ["cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
+export const COWORK_TABLES = ["cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
 
 /** Host authority only. A guest manifest or rebuilt session index never populates these tables. */
 export function migrateCoworkSchema(db: Database): void {
@@ -184,5 +184,13 @@ export function migrateCoworkInstructionSchema(db: Database): void {
     expected_revision INTEGER NOT NULL CHECK(expected_revision>0),
     before_digest TEXT NOT NULL CHECK(length(before_digest)=64), after_digest TEXT NOT NULL CHECK(length(after_digest)=64),
     temporary_name TEXT NOT NULL, file_identity_json TEXT NOT NULL, after_bytes INTEGER NOT NULL CHECK(after_bytes>=0 AND after_bytes<=65536)
+  );`);
+}
+
+/** Schedule poison records are retained, never interpreted as runnable authority. */
+export function migrateCoworkScheduleQuarantineSchema(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS cowork_schedule_quarantines (
+    schedule_id TEXT PRIMARY KEY REFERENCES cowork_schedules(schedule_id),
+    reason TEXT NOT NULL CHECK(reason='invalid_schedule'), quarantined_at INTEGER NOT NULL
   );`);
 }

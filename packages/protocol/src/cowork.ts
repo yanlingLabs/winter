@@ -69,9 +69,13 @@ export const CoworkScheduleDefinition = z.object({
 }).strict();
 export const CoworkSchedule = z.object({ scheduleId: Id, workspaceId: Id, definition: CoworkScheduleDefinition,
   state: z.enum(["enabled", "cancelled", "handled"]), revision: Revision, nextDue: z.number().nullable(), createdAt: z.number() }).strict();
+export const CoworkQuarantinedSchedule = z.object({ scheduleId: Id, workspaceId: Id, state: z.literal("quarantined"),
+  revision: Revision, createdAt: z.number(), nextDue: z.null(), reason: z.literal("invalid_schedule"), cancelled: z.boolean() }).strict();
+export const CoworkScheduleView = z.union([CoworkSchedule, CoworkQuarantinedSchedule]);
+export type CoworkScheduleView = z.infer<typeof CoworkScheduleView>;
 export const CoworkScheduleOccurrence = z.object({ occurrenceId: Id, scheduleId: Id, dueAt: z.number(), latestDueAt: z.number(), missedCount: z.number().int().nonnegative(),
   state: z.enum(["pending", "claimed", "dispatching", "uncertain", "handled", "cancelled"]),
-  reason: z.enum(["execution_unavailable", "shutdown", "archived", "source_unavailable", "authority_denied", "branch_mismatch", "branch_state_unavailable", "recovery_required"]).nullable() }).strict();
+  reason: z.enum(["execution_unavailable", "shutdown", "archived", "source_unavailable", "authority_denied", "branch_mismatch", "branch_state_unavailable", "recovery_required", "invalid_schedule"]).nullable() }).strict();
 export type CoworkScheduleDefinition = z.infer<typeof CoworkScheduleDefinition>;
 export type CoworkSchedule = z.infer<typeof CoworkSchedule>;
 export type CoworkScheduleOccurrence = z.infer<typeof CoworkScheduleOccurrence>;
@@ -90,9 +94,9 @@ export const COWORK_RPC = {
   "workspace.instructions.provenance": { params: WorkspaceId, result: CoworkInstructionProvenance },
   "workspace.instructions.update": { params: CoworkInstructionUpdate, result: CoworkInstructionReceipt },
   "workspace.schedule.create": { params: WorkspaceId.extend({ requestId: Id, definition: CoworkScheduleDefinition }).strict(), result: CoworkSchedule },
-  "workspace.schedule.list": { params: WorkspaceId.extend({ cursor: Id.optional(), limit: z.number().int().min(1).max(100).default(100) }).strict(), result: z.object({ schedules: z.array(CoworkSchedule).max(100), nextCursor: Id.nullable() }).strict() },
-  "workspace.schedule.cancel": { params: WorkspaceId.extend({ scheduleId: Id, expectedRevision: Revision }).strict(), result: CoworkSchedule },
-  "workspace.schedule.status": { params: WorkspaceId.extend({ scheduleId: Id }).strict(), result: z.object({ schedule: CoworkSchedule, occurrences: z.array(CoworkScheduleOccurrence).max(100), execution: z.literal("unavailable") }).strict() },
+  "workspace.schedule.list": { params: WorkspaceId.extend({ cursor: Id.optional(), limit: z.number().int().min(1).max(100).default(100) }).strict(), result: z.object({ schedules: z.array(CoworkScheduleView).max(100), nextCursor: Id.nullable() }).strict() },
+  "workspace.schedule.cancel": { params: WorkspaceId.extend({ scheduleId: Id, expectedRevision: Revision }).strict(), result: CoworkScheduleView },
+  "workspace.schedule.status": { params: WorkspaceId.extend({ scheduleId: Id }).strict(), result: z.object({ schedule: CoworkScheduleView, occurrences: z.array(CoworkScheduleOccurrence).max(100), execution: z.literal("unavailable") }).strict() },
   "workspace.capabilities.get": { params: z.object({}).strict(), result: CoworkCapabilities },
   "workspace.selection.prepareFolder": { params: z.object({ requestId: Id, bookmarkBase64: z.string().min(4).max(87384).regex(/^[A-Za-z0-9+/]+={0,2}$/), label: Label, access: z.enum(["read-only", "read-write"]) }).strict(), result: CoworkPreparedFolder },
   "workspace.selection.revoke": { params: z.object({ selectionId: Id }).strict(), result: z.object({ revoked: z.literal(true) }).strict() },
