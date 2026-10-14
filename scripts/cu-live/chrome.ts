@@ -140,7 +140,7 @@ export function stepOutput(output: string, step: string): string {
 
 /** A key's answer says nothing visibly happened (the helper's honest note, any of its spellings). */
 export function saysNothingHappened(text: string): boolean {
-  return /may not have taken the key|did not move after|did not change after|selection did not change|had no visible effect|nothing changed that accessibility can see|had no effect accessibility can see/.test(text);
+  return /may not have taken the key|did not move after|did not change after|selection did not change|had no visible effect|nothing changed that accessibility can see|had no effect accessibility can see|nothing new appeared in the panel/.test(text);
 }
 
 /** Probe 1's verdict for one key: what the page saw against what the answer said. */
@@ -539,6 +539,111 @@ step("end");`,
     },
   },
 ];
+
+/** The open panel (2026-10-14): the file a native Open panel is driven to, written by the runner in the run's temp dir;
+ *  its path replaces this token in the rows' code. */
+export const PANEL_FILE_TOKEN = "__WINTER_PANEL_FILE__";
+export const PANEL_FILE_NAME = "winter-panel-probe.txt";
+export function withPanelFile(code: string, path: string): string { return code.split(PANEL_FILE_TOKEN).join(path); }
+
+/** What both open-panel rows share: the panel opened from the page's "Select file", its file list, and the end (Return,
+ *  Open if still there, Cancel if the panel stays). */
+const PANEL_STEPS = `
+const PATH = ${JSON.stringify(PANEL_FILE_TOKEN)};
+const w = await cft();
+await webReady(w, 8000);
+const hasSheet = async () => /\\bsheet\\b/.test(await w.state({ full: true, emit: false }));
+async function openPanel() {
+  const btn = await one(w, "Select file", ["button"]);
+  await attempt("click Select file", () => w.click(btn.ref));
+  await sleep(1500);
+  if (!(await hasSheet())) { await attempt("return into Select file", () => w.key("return", { into: btn.ref })); await sleep(1500); }
+  const open = await hasSheet();
+  report({ panelOpen: open });
+  return open;
+}
+async function fileList() {
+  const lists = await w.find({ role: "list" }, { emit: false });
+  const outlines = await w.find({ role: "outline" }, { emit: false });
+  return lists.find((e) => e.name === "icon view") || lists.find((e) => / view$/.test(e.name || ""))
+    || outlines.find((e) => / view$/.test(e.name || ""));
+}
+async function fields() {
+  const out = [];
+  for (const role of ["text field", "combo box"]) out.push(...(await w.find({ role }, { emit: false })));
+  return out;
+}
+async function finish() {
+  await attempt("return", () => w.key("return"));
+  await sleep(1500);
+  const openBtn = (await w.find({ role: "button", name: "Open" }, { emit: false })).find((e) => e.name === "Open" && !(e.states || []).includes("disabled"));
+  if (openBtn && (await hasSheet())) { await attempt("press Open", () => w.click(openBtn.ref)); await sleep(1500); }
+  const still = await hasSheet();
+  report({ panelStillOpen: still });
+  if (still) {
+    const cancel = (await w.find({ role: "button", name: "Cancel" }, { emit: false })).filter((e) => e.name === "Cancel").pop();
+    if (cancel) await attempt("press Cancel", () => w.click(cancel.ref));
+    else await attempt("escape", () => w.key("escape"));
+  }
+}
+`;
+
+const fileLanded = (ctx: VerifyContext): Check => {
+  const changes = page(ctx).filter((e) => e.ev === "file.change");
+  return check(`the page's file input holds ${PANEL_FILE_NAME} (input.files[0].name)`, changes.some((e) => e.name === PANEL_FILE_NAME), JSON.stringify(changes).slice(0, 300));
+};
+
+/** The open panel's two routes, measured: ⌘⇧G and the path (the keys now posted to the panel service's own process),
+ *  and the skill's §19 recipe (the path typed into the file list, then Return). */
+const PANEL_ROWS: Scenario[] = [
+  {
+    name: "chrome app: a native Open panel — ⌘⇧G and the path reach the panel, the file lands in the page's input", group: "chrome", chrome: MATERIAL,
+    timeoutMs: 90_000,
+    code: `${PANEL_STEPS}
+if (await openPanel()) {
+  const files = await fileList();
+  report({ fileList: files ? files.name : null });
+  const before = await fields();
+  await attempt("chord", () => w.key("cmd+shift+g", files ? { into: files.ref } : undefined));
+  await sleep(1200);
+  const after = await fields();
+  const goTo = after.find((e) => !before.some((b) => b.ref === e.ref));
+  report({ goToField: goTo ? (goTo.role + " " + (goTo.name || "")) : null });
+  await attempt("select all", () => w.key("cmd+a"));
+  let typed = false;
+  await attempt("type path", async () => { await w.type(PATH); typed = true; });
+  if (!typed && goTo) await attempt("type path into", () => w.type(PATH, { into: goTo.ref }));
+  await finish();
+}
+step("end");`,
+    verify: (ctx) => [
+      ok(ctx),
+      check("the Open panel opened (a sheet in the window's state)", ctx.facts.panelOpen === true, short(stepOutput(ctx.output, "click Select file"))),
+      check("⌘⇧G opened Go to folder (a new field in the tree), or its answer did not claim nothing appeared", ctx.facts.goToField !== null && ctx.facts.goToField !== undefined || !saysNothingHappened(stepOutput(ctx.output, "chord")), `field: ${String(ctx.facts.goToField)}; answer: ${short(stepOutput(ctx.output, "chord"))}`),
+      fileLanded(ctx),
+      check("the panel was closed (chosen, or cancelled)", ctx.facts.panelStillOpen !== true || fact(ctx, "press Cancel") === "ok" || fact(ctx, "escape") === "ok", `${fact(ctx, "press Open")} ${fact(ctx, "press Cancel")}`),
+    ],
+  },
+  {
+    name: "chrome app: a native Open panel — the skill's §19 recipe (the path typed into the file list, then Return)", group: "chrome", chrome: MATERIAL,
+    timeoutMs: 90_000,
+    code: `${PANEL_STEPS}
+if (await openPanel()) {
+  const files = await fileList();
+  report({ fileList: files ? files.name : null });
+  if (files) await attempt("type path", () => w.type(PATH, { into: files.ref }));
+  await finish();
+}
+step("end");`,
+    verify: (ctx) => [
+      ok(ctx),
+      check("the Open panel opened and its file list was found", ctx.facts.panelOpen === true && typeof ctx.facts.fileList === "string", `${String(ctx.facts.panelOpen)} ${String(ctx.facts.fileList)}`),
+      fileLanded(ctx),
+      check("the panel was closed (chosen, or cancelled)", ctx.facts.panelStillOpen !== true || fact(ctx, "press Cancel") === "ok" || fact(ctx, "escape") === "ok", `${fact(ctx, "press Open")} ${fact(ctx, "press Cancel")}`),
+    ],
+  },
+];
+SCENARIOS_.splice(SCENARIOS_.findIndex((x) => x.chrome?.key === "material-offspace"), 0, ...PANEL_ROWS);
 
 /** The app-leg probes (1, 2, 3) once more on the FULL-SCREEN instance — a desktop visit an act may need is allowed. */
 const PROBE_NAMES = ["bind Chrome for Testing", "mat-select", "Material check boxes", "Tab, Space and cmd+a", "\"Select file\""];

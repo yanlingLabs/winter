@@ -1168,8 +1168,15 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   `com.apple.appkit.xpc.openAndSavePanelService` (its own process, launchd its parent, started the second of the click),
   shown in Chrome's sheet window and bridged into Chrome's tree as a `sheet`. Keys are posted to Chrome's pid; ⌘⇧G with the
   panel's file list focused never opened Go to folder — in the background, after `requestForeground`, and after a live
-  screenshot — and once ran Chrome's own Find. Why AppKit's key-equivalent path does not reach the remote panel from a
-  posted event is unmeasured; delivery is unchanged.
+  screenshot — and once ran Chrome's own Find.
+- Keys and typed characters into a SHEET drawn by that service go to the service's own process (`target.act` `key`/`type`
+  only; `keyboardTarget`'s other uses unchanged): the instance the element's accessibility pid names when it is one, else the
+  one the app is responsible for (the youngest of several — an instance can outlive its panel), else the only instance
+  running when responsibility can't be read; never an instance serving another app, never outside a sheet. A path typed into
+  such a sheet that names a protected location (the save floor's list) is refused `save_path` — Open panels too. UNMEASURED:
+  whether the service's own process takes a posted ⌘⇧G and the typed path (the cu-live chrome rows "a native Open panel —
+  ⌘⇧G and the path …" and "… — the skill's §19 recipe …" measure both against `input.files[0].name`). Residual: a service
+  instance that outlived its panel, with another (in-process) sheet up on the app, would take that sheet's keys.
 - A key with the keyboard focus already in a sheet or panel (no `into`) is watched like one aimed there with `into`: no
   sheet or window opened, focus, value and selection unchanged → "nothing new appeared in the panel after …". A chord
   with ⌘, ⌃ or ⌥ adds that it went to the app itself, which may run its own command or drop it while a panel is up, and
@@ -1177,7 +1184,9 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   then Return.
 - A new window that is a sheet on the bound window (not in the app's accessibility windows; a sheet child of the bound
   window with that window id or the same frame) is said to be in the state already — never "useWindow(id)", which bound
-  it with no accessibility.
+  it with no accessibility. On a web browser bound as an app it adds the tab route: `browsers.tab({ url })` and
+  `upload(ref, paths)` on the page's file input, no dialog (a file from outside the working folder copied into $TMPDIR
+  first — `upload`'s own refusal now says so).
 - Typing into an element that is not a text field (no text role, not editable, no editable ancestor, not a page's hidden
   input) says "… is not a text field, so the characters went to it as keys and nothing can be read back" — never "<App>
   doesn't expose this editor's text".

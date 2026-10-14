@@ -694,6 +694,68 @@ final class LeftoversTests: XCTestCase {
         XCTAssertTrue(d.contains("received: unverifiable — [\(ref(files))] list \"icon view\" is not a text field, so the character went to it as keys and nothing can be read back (in a panel they may be its own keys: a file Open or Save panel opens Go to folder on \"/\" or \"~\")"), d)
     }
 
+    // MARK: keys into a sheet the Open/Save panel service draws
+
+    private func keyDownPids(since n: Int = 0) -> Set<pid_t> { Set(poster.entries.dropFirst(n).filter { $0.type == .keyDown }.map(\.pid)) }
+
+    func testKeysIntoAPanelSheetGoToThePanelServiceTheAppIsResponsibleFor() async throws {
+        world()
+        let (_, files) = openPanel()
+        sys.panelServices = [CUPanelService(pid: 93_606, responsible: pid, age: 3)]
+        try await act(.key(CUKeyAction(combo: "cmd+shift+g")))
+        XCTAssertEqual(keyDownPids(), [93_606], "the chord goes to the panel's own process")
+        XCTAssertEqual(poster.entries.first { $0.type == .keyDown }?.flags.contains(.maskCommand), true, "with its flags")
+        let n = poster.entries.count
+        try await act(.type(CUTypeAction(text: "/tmp/a.zip", into: ref(files))))
+        XCTAssertEqual(keyDownPids(since: n), [93_606], "typing too")
+    }
+
+    func testNoServiceOrAnotherAppsServiceKeepsTheAppsPid() async throws {
+        world()
+        _ = openPanel()
+        try await act(.key(CUKeyAction(combo: "cmd+shift+g")))
+        XCTAssertEqual(keyDownPids(), [pid], "no service running: the app")
+        let n = poster.entries.count
+        sys.panelServices = [CUPanelService(pid: 93_606, responsible: 777, age: 3)]
+        try await act(.key(CUKeyAction(combo: "cmd+shift+g")))
+        XCTAssertEqual(keyDownPids(since: n), [pid], "another app's panel service: never")
+    }
+
+    func testKeysOutsideASheetNeverGoToAPanelService() async throws {
+        world()
+        sys.panelServices = [CUPanelService(pid: 93_606, responsible: pid, age: 3)]
+        ax.focus(pid: pid, on: hiddenInput)
+        try await act(.type(CUTypeAction(text: "ab", into: ref(hiddenInput))))
+        XCTAssertFalse(keyDownPids().contains(93_606), "\(keyDownPids())")
+    }
+
+    func testAProtectedPathTypedIntoAPanelSheetIsRefused() async throws {
+        world()
+        let (_, files) = openPanel()
+        sys.panelServices = [CUPanelService(pid: 93_606, responsible: pid, age: 3)]
+        do {
+            try await act(.type(CUTypeAction(text: "~/.ssh/id_ed25519", into: ref(files))))
+            XCTFail("typed")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "refused")
+            XCTAssertTrue(e.message.contains("names a protected location"), e.message)
+        }
+        XCTAssertTrue(poster.entries.filter { $0.type == .keyDown }.isEmpty, "nothing was typed")
+    }
+
+    func testWhichPanelServiceServesTheApp() {
+        let host: pid_t = 100
+        let a = CUPanelService(pid: 1, responsible: host, age: 50), b = CUPanelService(pid: 2, responsible: host, age: 2)
+        let other = CUPanelService(pid: 3, responsible: 200, age: 1), unknown = CUPanelService(pid: 4, responsible: nil, age: 1)
+        XCTAssertEqual(CUCore.choosePanelService([a, b, other], hostPid: host, elementPid: nil), 2, "the youngest of the app's")
+        XCTAssertEqual(CUCore.choosePanelService([a, b], hostPid: host, elementPid: 1), 1, "the element's own process first")
+        XCTAssertNil(CUCore.choosePanelService([other], hostPid: host, elementPid: 3), "never another app's, even named by the element")
+        XCTAssertEqual(CUCore.choosePanelService([unknown], hostPid: host, elementPid: nil), 4, "the only one, responsibility unreadable")
+        XCTAssertNil(CUCore.choosePanelService([unknown, CUPanelService(pid: 5, responsible: nil, age: 9)], hostPid: host, elementPid: nil), "which one can't be told")
+        XCTAssertNil(CUCore.choosePanelService([unknown, other], hostPid: host, elementPid: nil))
+        XCTAssertNil(CUCore.choosePanelService([], hostPid: host, elementPid: host))
+    }
+
     func testNotATextFieldWords() {
         XCTAssertEqual(CUCore.notATextFieldWords("[4] table", chars: 3, inPanel: false),
                        "received: unverifiable — [4] table is not a text field, so the 3 characters went to it as keys and nothing can be read back (a list or table selects by typed letters; elsewhere they may be shortcuts) — check state() for what changed")

@@ -283,6 +283,14 @@ describe("upload paths", () => {
     expect(kinds(42)).toBe("TypeError");
     expect(kinds("missing.txt")).toBe("NotAllowed");
   });
+  test("a file outside the cwd and the temp dir is refused naming the way on: copy it into $TMPDIR first", () => {
+    const { r } = roots();
+    const elsewhere = mkdtempSync(join(tmpdir(), "winter-up-elsewhere-"));
+    writeFileSync(join(elsewhere, "pkg.zip"), "z");
+    let message = "";
+    try { checkUploadPaths(join(elsewhere, "pkg.zip"), r); } catch (e) { message = (e as Error).message; }
+    expect(message).toContain("is outside this session's working directory and temp directory — only files from those can be uploaded: copy it into $TMPDIR first (with your shell), then upload the copy");
+  });
 });
 
 describe("screenshots", () => {

@@ -1373,6 +1373,12 @@ extension CUCore {
             try guardUnnamedTarget(e, wf, text: text, t)
         }
         try CUFloorScan.checkTypedIntoSavePanel(e, text: text, pid: t.pid, ax: ax)
+        // Into a sheet macOS's Open/Save panel service draws (Open panels too — the keys reach the panel itself): a path
+        // naming a protected location is refused like the save panel's floor (the text test first; it is free).
+        if CUFloors.typedSavePathIsProtected(text), let e, panelServicePid(t, focused: e) != nil {
+            CULog.act.notice("type in \(t.appName, privacy: .public): a protected path into a file panel — refused")
+            throw Self.panelPathRefusal(t.appName)
+        }
         return (e, g)
     }
 
@@ -1441,7 +1447,7 @@ extension CUCore {
         let synth = self.synth(p)
         let chars = Array(text)
         var sent = 0
-        let keyPid = keyboardTarget(t, focused: e)
+        let keyPid = keyDeliveryPid(t, focused: e)
         let valueBefore = e.flatMap { ax.string($0, kAXValueAttribute) }
         // Watched for the focus leaving the field: only when it starts in it, and until a Tab (or a Return that
         // moves it) — those move the focus on purpose.
@@ -1800,6 +1806,62 @@ extension CUCore {
         guard AXUIElementGetPid(f, &pid) == .success, pid != t.pid, sys.isContentProcess(pid, of: t.pid) else { return t.pid }
         CULog.act.notice("keys in \(t.appName, privacy: .public): pid events → \(self.sys.processName(pid: pid) ?? "content process", privacy: .public) \(pid, privacy: .public)")
         return pid
+    }
+
+    /// Where keys and typed characters are POSTED: `keyboardTarget`, except for an element in a SHEET whose content
+    /// macOS's Open/Save panel service draws — then that service (the open panel, 2026-10-14: Chrome's Open panel ran in
+    /// `openAndSavePanelService`, keys posted to Chrome never reached it — ⌘⇧G opened no Go to folder and once ran
+    /// Chrome's own Find). Only `type` and `key` post here; every other use of `keyboardTarget` (web content, the
+    /// editing-shortcut emulation) is unchanged.
+    func keyDeliveryPid(_ t: CUTarget, focused: AXUIElement?) -> pid_t {
+        let base = keyboardTarget(t, focused: focused)
+        guard base == t.pid, let service = panelServicePid(t, focused: focused) else { return base }
+        CULog.act.notice("keys in \(t.appName, privacy: .public): the focus is in a sheet the Open/Save panel service draws — pid events → \(service, privacy: .public)")
+        return service
+    }
+
+    /// The panel service instance drawing the sheet `focused` (else the reported focus) lies in; nil when it is in no
+    /// sheet, no instance runs, or which one is this app's can't be told.
+    func panelServicePid(_ t: CUTarget, focused: AXUIElement?) -> pid_t? {
+        guard t.accessible, let e = focused ?? reportedFocus(t), inSheet(e) else { return nil }
+        let services = sys.openSavePanelServices()
+        guard !services.isEmpty else { return nil }
+        var owner: pid_t = 0
+        let elementPid: pid_t? = AXUIElementGetPid(e, &owner) == .success && owner > 0 ? owner : nil
+        return Self.choosePanelService(services, hostPid: t.pid, elementPid: elementPid)
+    }
+
+    /// `e` lies in an `AXSheet` (a few dozen levels up at most).
+    func inSheet(_ e: AXUIElement) -> Bool {
+        var cur: AXUIElement? = e
+        for _ in 0..<60 {
+            guard let c = cur else { return false }
+            let role = ax.string(c, kAXRoleAttribute)
+            if role == kAXSheetRole { return true }
+            if role == kAXWindowRole { return false }
+            cur = ax.element(c, kAXParentAttribute)
+        }
+        return false
+    }
+
+    /// Which panel service instance serves `hostPid`'s sheet. Pure. The element's own process when it is an instance
+    /// (accessibility names the remote view's owner) not known to serve another app; else the one instance the app is
+    /// responsible for (the youngest of several — an instance can outlive its panel); else, with responsibility
+    /// unreadable for all, the only instance running. Never an instance serving another app.
+    static func choosePanelService(_ services: [CUPanelService], hostPid: pid_t, elementPid: pid_t?) -> pid_t? {
+        if let ep = elementPid, ep != hostPid, let s = services.first(where: { $0.pid == ep }), s.responsible == nil || s.responsible == hostPid {
+            return ep
+        }
+        let mine = services.filter { $0.responsible == hostPid }
+        if !mine.isEmpty {
+            return mine.min { ($0.age ?? .infinity) < ($1.age ?? .infinity) }?.pid
+        }
+        guard services.count == 1, services[0].responsible == nil else { return nil }
+        return services[0].pid
+    }
+
+    static func panelPathRefusal(_ app: String) -> CUError {
+        CUError.refused(.savePath, "the path typed into \(app)'s file panel names a protected location (a shell startup file, ~/.ssh, LaunchAgents, or Winter's or Claude's settings) — nothing was typed; ask the user to choose it")
     }
 
     /// Whether the app's focused UI element is `e` now (its own, or its focused window's).
@@ -2444,7 +2506,7 @@ extension CUCore {
         // Resolve the route once (the menu lookup walks the menu bar), then press it `repeat` times.
         let plan = try chordPlan(chord, p, t, g)
         var out = ActOutcome(rung: .accessibility)
-        let keyPid = keyboardTarget(t, focused: e)
+        let keyPid = keyDeliveryPid(t, focused: e)
         let blips = CUKeyBlips(self, p, t, why: "keys")
         defer { blips.end() }
         // Return in a field of the window's toolbar (a browser's address field; not a find bar, where Return finds

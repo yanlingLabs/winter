@@ -192,6 +192,21 @@ final class LiveGateFinderTests: XCTestCase {
         XCTAssertEqual(core.newWindows(target).first?.hasPrefix("Finder's “Save” opened as a sheet on the bound window"), true)
     }
 
+    /// A sheet on a browser bound as an app (a page's file chooser, most often): the tab route is named.
+    func testASheetOnABrowserBoundAsAnAppNamesTheTabUpload() throws {
+        finder()
+        core.isWebBrowserOverride = { _ in true }
+        target.knownWindows = [77]
+        let sheet = fakeElement(99_710)
+        ax.put(window, [kAXChildrenAttribute: [group, trash, sheet]])
+        ax.add(sheet, role: kAXSheetRole, title: "open", frame: CGRect(x: 110, y: 128, width: 880, height: 448), extra: [kAXParentAttribute: window])
+        var open = FakeSystem.window(157_511, pid: pid, CGRect(x: 110, y: 128, width: 880, height: 448), owner: "Finder")
+        open.title = "Open"
+        sys.windows[157_511] = open
+        let note = try XCTUnwrap(core.newWindows(target).first)
+        XCTAssertTrue(note.hasSuffix("; if it is a web page's file chooser, a tab does it with no dialog: bind the page with browsers.tab({ url }) and call upload(ref, paths) on its file input (copy a file from outside the working folder into $TMPDIR first)"), note)
+    }
+
     func testAWindowIsAnnouncedOnceEverAndOnlyADocumentWindow() throws {
         finder()
         target.knownWindows = [77]

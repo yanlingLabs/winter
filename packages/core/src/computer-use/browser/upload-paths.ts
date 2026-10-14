@@ -64,7 +64,8 @@ export function checkUploadFiles(input: unknown, roots: UploadRoots): CheckedUpl
     const st = statSync(path);
     if (!st.isFile()) throw new AutomationFailure("NotAllowed", `${shown} is not a regular file`);
     if (!allowedRoots.some((r) => inside(path, r))) {
-      throw new AutomationFailure("NotAllowed", `${shown} is outside this session's working directory and temp directory — only files from those can be uploaded`);
+      // The way on is said (the open panel, 2026-10-14: a zip under the home folder sent the model to the native Open panel).
+      throw new AutomationFailure("NotAllowed", `${shown} is outside this session's working directory and temp directory — only files from those can be uploaded: copy it into $TMPDIR first (with your shell), then upload the copy`);
     }
     if (inside(path, home)) throw new AutomationFailure("NotAllowed", `${shown} is inside Winter's own home — it can't be uploaded`);
     if (denied.some((d) => inside(path, d))) throw new AutomationFailure("NotAllowed", `${shown} is on the sandbox's read-deny list — it can't be uploaded`);

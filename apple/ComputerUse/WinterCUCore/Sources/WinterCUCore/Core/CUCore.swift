@@ -1136,11 +1136,17 @@ public final class CUCore: @unchecked Sendable {
             guard !title.isEmpty, w.frame.width >= 200, w.frame.height >= 120 else { return nil }
             if let sub = axInfo[w.id]?.subrole, !documentKinds.contains(sub) { return nil }
             if axInfo[w.id] == nil, sheets.contains(where: { Self.isSheet($0, of: w, ax: ax) }) {
-                return "\(t.appName)'s \u{201C}\(title.prefix(80))\u{201D} opened as a sheet on the bound window — it is in this state (its sheet), so act on its refs here; useWindow(\(w.id)) would bind it with no accessibility"
+                let said = "\(t.appName)'s \u{201C}\(title.prefix(80))\u{201D} opened as a sheet on the bound window — it is in this state (its sheet), so act on its refs here; useWindow(\(w.id)) would bind it with no accessibility"
+                return isWebBrowser(t) ? said + "; " + Self.webFileInputHint : said
             }
             return "new \(t.appName) window \u{201C}\(title.prefix(80))\u{201D} (\(w.id)) — this state is still the bound window; useWindow(\(w.id)) to work in it"
         }.prefix(3).map { $0 }
     }
+
+    /// What a browser bound as an APP is told when a sheet opens on it (an Open panel from a page's file input, most
+    /// often): the tab route puts the file in with no dialog. (The helper does not know whether Winter reaches this
+    /// browser's tabs: said as a way to try.)
+    static let webFileInputHint = "if it is a web page's file chooser, a tab does it with no dialog: bind the page with browsers.tab({ url }) and call upload(ref, paths) on its file input (copy a file from outside the working folder into $TMPDIR first)"
 
     /// The sheet element `sheet` is the window-server window `w`: by its window id when accessibility gives that one, or
     /// by its frame (within a point or two — a sheet's window and its element cover the same rectangle; a sheet whose

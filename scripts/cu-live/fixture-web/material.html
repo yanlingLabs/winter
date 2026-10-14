@@ -220,7 +220,7 @@
     fileInput.click();
     log("file.requested", {});
   });
-  fileInput.addEventListener("change", () => { document.getElementById("file-name").textContent = fileInput.files.length + " file(s)"; log("file.change", { count: fileInput.files.length }); });
+  fileInput.addEventListener("change", () => { document.getElementById("file-name").textContent = fileInput.files.length + " file(s)"; log("file.change", { count: fileInput.files.length, name: fileInput.files.length > 0 ? fileInput.files[0].name : null }); });
   fileInput.addEventListener("cancel", () => log("file.cancel", {}));
   document.getElementById("plain").addEventListener("click", (e) => log("button", { id: "plain", trusted: e.isTrusted }));
   document.getElementById("paint").addEventListener("click", (e) => {

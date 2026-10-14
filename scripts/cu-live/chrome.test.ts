@@ -4,7 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   CFT_BUNDLE, CHROME_PRELUDE, CHROME_SCENARIOS, chromeLaunchArgs, chromePidFrom, describeChromePlan, keyVerdict, localStateFor, needsChrome, pageEventsSince,
-  parseDevToolsActivePort, runningChromeForTesting, saysNothingHappened, stepOutput, type ChromeObservation, type PageEvent,
+  PANEL_FILE_NAME, PANEL_FILE_TOKEN, parseDevToolsActivePort, runningChromeForTesting, saysNothingHappened, stepOutput, withPanelFile, type ChromeObservation, type PageEvent,
 } from "./chrome";
 import { markerFacts } from "./lib";
 import { scriptOf, type ImageStats, type VerifyContext } from "./scenarios";
@@ -32,7 +32,7 @@ function fakeApp(els: Array<{ ref: number; role: string; name: string; value?: s
     // (The page's web area is there: `webReady` returns at once.)
     state: async () => `[0] web area "Material Probe" · Select file\n` + els.map((e) => `[${e.ref}] ${e.role} "${e.name}"${e.value ? ` value="${e.value}"` : ""}`).join("\n"),
     find: async (q: string | { role?: string; name?: string }) => els.filter((e) => typeof q === "string" ? e.name.includes(q) : (q.role === undefined || e.role === q.role) && (q.name === undefined || e.name === q.name)),
-    click: act("click"), key: act("key"), setValue: act("setValue"), action: act("action"),
+    click: act("click"), key: act("key"), setValue: act("setValue"), action: act("action"), type: act("type"),
     windows: async () => [{ id: 1, title: "Material Probe", focused: true }],
     screenshot: async () => ({}),
   };
@@ -100,7 +100,7 @@ describe("the chrome group: launch and rig", () => {
 
 describe("the chrome group: scenarios", () => {
   test("every row needs a browser, carries the chrome prelude, compiles, and never binds the user's Chrome", () => {
-    expect(CHROME_SCENARIOS.length).toBe(15);
+    expect(CHROME_SCENARIOS.length).toBe(17);
     for (const s of CHROME_SCENARIOS) {
       expect(needsChrome(s)).toBe(true);
       expect(s.group).toBe("chrome");
@@ -260,5 +260,49 @@ describe("the chrome group: scenarios", () => {
     expect(failing(dialog.verify(ctxOf(dOut, [], { chrome: raised })))).toEqual([]);
     expect(failing(dialog.verify(ctxOf(dOut, [], { chrome: { ...raised, dialogRaised: false } })))).toEqual(["the runner raised the dialog (remote debugging on, a client connected)"]);
     expect(failing(dialog.verify(ctxOf(dOut, [{ t: 1, ev: "paint" }], { chrome: { ...raised, connectionAnswered: true } })))).toHaveLength(2);
+  });
+});
+
+describe("the chrome group: the open panel (2026-10-14)", () => {
+  const PATH = `/private/var/folders/x/T/winter-cu-live-1/panel/${PANEL_FILE_NAME}`;
+  const panel = () => [
+    { ref: 5, role: "button", name: "Select file" },
+    { ref: 20, role: "sheet", name: "open" },
+    { ref: 21, role: "list", name: "icon view" },
+    { ref: 30, role: "button", name: "Open" },
+    { ref: 31, role: "button", name: "Cancel" },
+  ];
+  const run = async (name: string, on: (what: string, ...a: unknown[]) => string | void) =>
+    runScript(withPanelFile(scriptOf(byName(name)), PATH), fakeApp(panel(), on));
+
+  test("the file's token is replaced by the run's path, everywhere", () => {
+    for (const s of CHROME_SCENARIOS.filter((x) => x.name.includes("native Open panel"))) {
+      expect(s.code).toContain(PANEL_FILE_TOKEN);
+      expect(withPanelFile(s.code, PATH)).not.toContain(PANEL_FILE_TOKEN);
+    }
+  });
+
+  test("⌘⇧G's row sends the chord into the file list, types the path, and passes only when the input holds the file", async () => {
+    const acts: unknown[][] = [];
+    const out = await run("⌘⇧G and the path", (what, ...a) => { acts.push([what, ...a]); return `${what} done`; });
+    expect(acts.some(([w, combo, o]) => w === "key" && combo === "cmd+shift+g" && (o as { into?: number })?.into === 21)).toBe(true);
+    expect(acts.some(([w, text]) => w === "type" && text === PATH)).toBe(true);
+    const row = byName("⌘⇧G and the path");
+    const landed = row.verify!(ctxOf(out, [{ t: 1, ev: "file.change", count: 1, name: PANEL_FILE_NAME }]));
+    expect(failing(landed)).toEqual([]);
+    const silent = row.verify!(ctxOf(out, []));
+    expect(failing(silent)).toEqual([`the page's file input holds ${PANEL_FILE_NAME} (input.files[0].name)`]);
+  });
+
+  test("the §19 recipe's row types the whole path into the file list, then Return", async () => {
+    const acts: unknown[][] = [];
+    const out = await run("§19 recipe", (what, ...a) => { acts.push([what, ...a]); return `${what} done`; });
+    expect(acts.some(([w, text, o]) => w === "type" && text === PATH && (o as { into?: number })?.into === 21)).toBe(true);
+    expect(acts.some(([w, combo]) => w === "key" && combo === "return")).toBe(true);
+    expect(failing(byName("§19 recipe").verify!(ctxOf(out, [{ t: 1, ev: "file.change", count: 1, name: PANEL_FILE_NAME }])))).toEqual([]);
+  });
+
+  test("a chord the helper says opened nothing in the panel is a no-op answer", () => {
+    expect(saysNothingHappened("nothing new appeared in the panel after cmd+shift+g (no sheet or window opened, its focus did not move)")).toBe(true);
   });
 });
