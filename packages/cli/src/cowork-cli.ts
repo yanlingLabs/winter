@@ -1,4 +1,6 @@
-import { COWORK_RPC, type CoworkMethod, type CoworkParams, type CoworkResult, type CoworkWorkspace, type CoworkWorkspacePolicy } from "@yanlinglabs/winter-protocol";
+import { COWORK_RPC, COWORK_INSTRUCTION_MAX_BYTES, type CoworkMethod, type CoworkParams, type CoworkResult, type CoworkWorkspace, type CoworkWorkspacePolicy } from "@yanlinglabs/winter-protocol";
+import { constants, openSync, closeSync, fstatSync, statSync, readSync } from "node:fs";
+import { resolve } from "node:path";
 import type { WinterClient } from "./client";
 
 export const COWORK_CLI_USAGE = `usage:
@@ -17,11 +19,13 @@ export const COWORK_CLI_USAGE = `usage:
   winter workspace schedule create <workspaceId> --definition-json JSON --request-id ID [--json]
   winter workspace schedule status|cancel <workspaceId> <scheduleId> [--revision N] [--json]
   winter workspace instructions get|provenance <workspaceId> [--json]
-  winter workspace instructions update <workspaceId> --instruction-revision N --digest SHA256 --content TEXT --request-id ID [--json]
+  winter workspace instructions update <workspaceId> --instruction-revision N --digest SHA256 (--content TEXT | --stdin | --content-file FILE) --request-id ID [--json]
   winter workspace operation get <workspaceId> <operationId> [--json]
 
 Creation is unavailable. Source provisioning is gated by the daemon; add commands
 accept an existing opaque host selection ID. This CLI does not issue selections.
+Guidance input accepts one content source, at most ${COWORK_INSTRUCTION_MAX_BYTES} UTF-8 bytes with no NUL.
+--stdin reads to EOF; --stdin and --content-file keep guidance text out of argv.
 POLICY: plan|dont-ask|ask|accept-edits|auto|bypass.`;
 
 export interface CoworkCliRoute { method: CoworkMethod; params: CoworkParams<CoworkMethod>; json: boolean }
@@ -29,9 +33,7 @@ export type CoworkCliResult = CoworkResult<CoworkMethod>;
 type Flags = Record<string, string | true>;
 const visible = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200e\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
 
-/** Strict pre-connection parsing: no paths/grants, silently ignored options or invented defaults. */
-export function parseCoworkArgs(surface: "workspace" | "project", args: string[]): CoworkCliRoute | { help: true } {
-  if (args.length === 1 && ["--help", "-h", "help"].includes(args[0]!)) return { help: true };
+function argumentsOf(args: string[]): { flags: Flags; positions: string[] } {
   const flags: Flags = {}, positions: string[] = [];
   for (let index = 0; index < args.length; index++) {
     const argument = args[index]!;
@@ -39,14 +41,21 @@ export function parseCoworkArgs(surface: "workspace" | "project", args: string[]
     const equals = argument.indexOf("="), word = equals < 0 ? argument : argument.slice(0, equals);
     const inline = equals < 0 ? undefined : argument.slice(equals + 1);
     if (Object.hasOwn(flags, word)) throw new Error(`Duplicate option ${word}`);
-    if (word === "--json") {
-      if (inline !== undefined) throw new Error("--json does not accept a value");
+    if (word === "--json" || word === "--stdin") {
+      if (inline !== undefined) throw new Error(`${word} does not accept a value`);
       flags[word] = true; continue;
     }
     const value = inline ?? args[++index];
     if (value === undefined || (inline === undefined && value.startsWith("--"))) throw new Error(`Missing value for ${word}`);
     flags[word] = value;
   }
+  return { flags, positions };
+}
+
+/** Strict pre-connection parsing: no grants, silently ignored options or invented defaults. */
+export function parseCoworkArgs(surface: "workspace" | "project", args: string[]): CoworkCliRoute | { help: true } {
+  if (args.length === 1 && ["--help", "-h", "help"].includes(args[0]!)) return { help: true };
+  const { flags, positions } = argumentsOf(args);
   const [verb = "list", sub, id, extra] = positions;
   let method: CoworkMethod, params: Record<string, unknown>, allowed: string[];
   const identity = (value?: string) => surface === "project" ? { projectId: value } : { workspaceId: value };
@@ -112,6 +121,72 @@ export function parseCoworkArgs(surface: "workspace" | "project", args: string[]
   const result = COWORK_RPC[method].params.safeParse(params);
   if (!result.success) throw new Error(`Invalid arguments: ${result.error.issues.map(issue => `${issue.path.join(".") || "request"}: ${issue.message}`).join("; ")}`);
   return { method, params: result.data, json: flags["--json"] === true };
+}
+
+function guidanceText(bytes: Uint8Array): string {
+  if (bytes.byteLength > COWORK_INSTRUCTION_MAX_BYTES) throw new Error(`Shared guidance input exceeds ${COWORK_INSTRUCTION_MAX_BYTES} bytes`);
+  let content: string;
+  try { content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
+  catch { throw new Error("Shared guidance input is not valid UTF-8"); }
+  if (content.includes("\0")) throw new Error("Shared guidance input contains NUL bytes");
+  return content;
+}
+function guidanceFile(path: string): Uint8Array {
+  if (!path || path.includes("\0") || path.endsWith("/")) throw new Error("--content-file must name a regular file");
+  let fd: number | undefined;
+  try {
+    const selected = resolve(path), initial = statSync(selected);
+    if (!initial.isFile()) throw new Error("--content-file must name a regular file");
+    if (initial.size > COWORK_INSTRUCTION_MAX_BYTES) throw new Error(`Shared guidance input exceeds ${COWORK_INSTRUCTION_MAX_BYTES} bytes`);
+    fd = openSync(selected, constants.O_RDONLY | constants.O_NONBLOCK);
+    const held = fstatSync(fd);
+    if (!held.isFile()) throw new Error("--content-file must name a regular file");
+    if (held.size > COWORK_INSTRUCTION_MAX_BYTES) throw new Error(`Shared guidance input exceeds ${COWORK_INSTRUCTION_MAX_BYTES} bytes`);
+    // Bound actual descriptor reads too: a file can grow after either stat.
+    const buffer = Buffer.alloc(COWORK_INSTRUCTION_MAX_BYTES + 1); let used = 0;
+    while (used < buffer.length) { const count = readSync(fd, buffer, used, buffer.length - used, null); if (count === 0) break; used += count; }
+    if (used > COWORK_INSTRUCTION_MAX_BYTES) throw new Error(`Shared guidance input exceeds ${COWORK_INSTRUCTION_MAX_BYTES} bytes`);
+    return buffer.subarray(0, used);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "--content-file must name a regular file" || message === `Shared guidance input exceeds ${COWORK_INSTRUCTION_MAX_BYTES} bytes`) throw error;
+    throw new Error("Could not read shared guidance content file");
+  } finally { if (fd !== undefined) closeSync(fd); }
+}
+async function guidanceStdin(stdin: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
+  const buffer = Buffer.alloc(COWORK_INSTRUCTION_MAX_BYTES); let used = 0;
+  try {
+    for await (const chunk of stdin) {
+      if (!(chunk instanceof Uint8Array)) throw new Error("Shared guidance stdin must supply raw bytes");
+      if (chunk.byteLength > COWORK_INSTRUCTION_MAX_BYTES - used) throw new Error(`Shared guidance input exceeds ${COWORK_INSTRUCTION_MAX_BYTES} bytes`);
+      buffer.set(chunk, used); used += chunk.byteLength;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "Shared guidance stdin must supply raw bytes" || message === `Shared guidance input exceeds ${COWORK_INSTRUCTION_MAX_BYTES} bytes`) throw error;
+    throw new Error("Could not read shared guidance from stdin");
+  }
+  return buffer.subarray(0, used);
+}
+
+/** Resolve optional private content inputs completely BEFORE connecting. The
+ * canonical RPC keeps its caller's revision/digest/replay ID. Never place resolved
+ * file/stdin content into argv, logs or a deferred route that can send empty data. */
+export async function resolveCoworkArgs(surface: "workspace" | "project", args: string[], input: { stdin?: AsyncIterable<Uint8Array> } = {}): Promise<CoworkCliRoute | { help: true }> {
+  if (args.length === 1 && ["--help", "-h", "help"].includes(args[0]!)) return parseCoworkArgs(surface, args);
+  const { flags, positions } = argumentsOf(args);
+  if (!Object.hasOwn(flags, "--stdin") && !Object.hasOwn(flags, "--content-file")) return parseCoworkArgs(surface, args);
+  if (surface !== "workspace" || positions[0] !== "instructions" || positions[1] !== "update") throw new Error("--stdin and --content-file are only supported for workspace instructions update");
+  if (["--content", "--stdin", "--content-file"].filter(flag => Object.hasOwn(flags, flag)).length !== 1) throw new Error("Choose exactly one of --content, --stdin or --content-file");
+  const metadata = [...positions, ...Object.entries(flags).filter(([name]) => name !== "--stdin" && name !== "--content-file")
+    .map(([name, value]) => value === true ? name : `${name}=${value}`), "--content="];
+  const route = parseCoworkArgs(surface, metadata);
+  if ("help" in route || route.method !== "workspace.instructions.update") throw new Error("Invalid shared guidance input command");
+  // Invalid revisions/digests/request IDs/extra flags have already refused here,
+  // before any stdin/file input or connection is touched.
+  const bytes = flags["--stdin"] === true ? await guidanceStdin(input.stdin ?? process.stdin) : guidanceFile(String(flags["--content-file"]));
+  const params = COWORK_RPC["workspace.instructions.update"].params.parse({ ...route.params, content: guidanceText(bytes) });
+  return { ...route, params };
 }
 
 export async function runCoworkRoute(client: Pick<WinterClient, "cowork">, route: CoworkCliRoute): Promise<CoworkCliResult> {

@@ -57,7 +57,7 @@ import { formatRoutineDetail } from "./routines-cli";
 import { runAgentsCommand } from "./agents-cli";
 import { mountAgents } from "./tui/agents-view";
 import { MEMORY_USAGE, formatDeleted, formatFactDetail, parseMemoryArgs, runMemoryRoute } from "./memory-cli";
-import { COWORK_CLI_USAGE, parseCoworkArgs, runCoworkRoute, formatCoworkResult, coworkErrorMessage } from "./cowork-cli";
+import { COWORK_CLI_USAGE, resolveCoworkArgs, runCoworkRoute, formatCoworkResult, coworkErrorMessage, type CoworkCliRoute } from "./cowork-cli";
 import { formatOptionLines, isOtherChoice, parseQuestionAnswer } from "./questions";
 import { parsePlanResponse } from "./plan-response";
 import { ShellCardQueue, approvalPromptLine, approvalResolvedHow } from "./shell-cards";
@@ -2381,11 +2381,11 @@ if (import.meta.main) {
   }
   case "workspace":
   case "project": {
-    let route: ReturnType<typeof parseCoworkArgs>;
-    try { route = parseCoworkArgs(cmdKey, process.argv.slice(3)); }
+    let route: CoworkCliRoute | { help: true };
+    try { route = await resolveCoworkArgs(cmdKey, process.argv.slice(3)); }
     catch (error) { console.error(coworkErrorMessage(error)); console.error(COWORK_CLI_USAGE); process.exit(1); }
     if ("help" in route) { console.log(COWORK_CLI_USAGE); break; }
-    // Use the existing local harness connection. Parsing/help never opens a socket, and no
+    // Use the existing local harness connection. Input resolution/help never opens a socket, and no
     // picker, grant resolution, provisioning or execution fallback is performed by the CLI.
     let client: WinterClient | undefined;
     try {
