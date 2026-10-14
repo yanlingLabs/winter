@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, renameSync, symlinkSync, linkSync, statfsSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, renameSync, symlinkSync, linkSync, statfsSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
-import { CoworkInstructionUpdate, CoworkInstructionRead, CoworkInstructionProvenance, COWORK_INSTRUCTION_MAX_BYTES } from "@yanlinglabs/winter-protocol";
+import { CoworkInstructionUpdate, CoworkInstructionRead, CoworkInstructionProvenance, CoworkInstructionMetadata, COWORK_INSTRUCTION_MAX_BYTES } from "@yanlinglabs/winter-protocol";
 import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, downgradeCoworkRuntimeStateToV7 } from "../../src/runtime-state/db";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { CoworkInstructions, type InstructionUpdate } from "../../src/cowork/instructions";
@@ -15,6 +15,8 @@ import { CoworkError, type CoworkErrorCode } from "../../src/cowork/types";
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const fn of cleanups.splice(0).reverse()) fn(); });
 const user = { kind: "local-user" as const, id: "user" };
+const supported = process.platform === "darwin" && process.arch === "arm64";
+const unavailable: CoworkErrorCode = supported ? "recovery_required" : "unsupported_topology";
 const grants = { folder: () => ({ rootIdentity: "root", writable: true, revoked: false }), repository: () => undefined };
 export function instructionFixture(checkpoint: (phase: string) => void = () => {}) {
   const home = mkdtempSync(join(tmpdir(), "winter-instructions-")); cleanups.push(() => rmSync(home, { recursive: true, force: true }));
@@ -22,12 +24,14 @@ export function instructionFixture(checkpoint: (phase: string) => void = () => {
   const records = new CoworkRepository(db), store = new SessionStore(home); cleanups.push(() => store.close());
   const hub = new SessionHub(store), broker = new ApprovalBroker();
   const made = records.create({ principalId: user.id, requestId: "create" }, { ownership: "project", title: "Fixture", sources: [{ kind: "folder", label: "Fixture", access: "read-write", detail: { grantRef: "grant", rootIdentity: "root" } }], ceiling: { toolClasses: ["read", "write"], hostServices: ["workspace.instructions.update"], connectors: [], network: "none" } });
-  const workspaceId = made.workspaceId, owner = new CoworkInstructions(records, home, grants, { broker, emit: (sessionId, event) => { hub.append(sessionId, event); } }, checkpoint);
+  const workspaceId = made.workspaceId;
+  let owned: CoworkInstructions | undefined;
+  const owner = () => owned ??= new CoworkInstructions(records, home, grants, { broker, emit: (sessionId, event) => { hub.append(sessionId, event); } }, checkpoint);
   const root = join(resolve(home), "cowork/workspaces", workspaceId, "shared/instructions"), path = join(root, "WINTER.md");
   const host: CoworkHostPorts = { principal: () => user, grants, selection: () => undefined, creationCeiling: () => undefined, requireProvisioning: () => { throw new CoworkError("unsupported_topology"); } };
   const service = new CoworkWorkspaceService(records, host, undefined, home);
-  return { home, db, records, store, hub, broker, owner, workspaceId, root, path, host, service,
-    input(content: string, requestId = "change"): InstructionUpdate { const value = owner.get(user, workspaceId); return { workspaceId, content, requestId, expectedInstructionRevision: value.instructionRevision, expectedDigest: value.digest }; },
+  return { home, db, records, store, hub, broker, get owner() { return owner(); }, workspaceId, root, path, host, service,
+    input(content: string, requestId = "change"): InstructionUpdate { const value = owner().get(user, workspaceId); return { workspaceId, content, requestId, expectedInstructionRevision: value.instructionRevision, expectedDigest: value.digest }; },
     bind() { const epoch = records.beginIncarnation(workspaceId, "fixture-incarnation", records.get(workspaceId).configRevision), sourceId = made.value.sources[0]!.sourceId; records.acknowledgeSource(epoch, sourceId, 1, "ready"); const sessionId = store.createSession("global", { mode: "code" }); records.bindConversation({ principalId: "user", requestId: "bind", expectedRevision: records.get(workspaceId).configRevision }, workspaceId, { sessionId, sourceId }); return { kind: "runtime" as const, id: "runtime", sessionId, workspaceId }; },
   };
 }
@@ -37,6 +41,7 @@ const native = process.platform === "darwin" && process.arch === "arm64" && proc
 test("strict content schema refuses client paths/approval flags and bounds UTF-8 before effects", () => {
  const valid = { workspaceId: "workspace", requestId: "request", expectedInstructionRevision: 1, expectedDigest: "a".repeat(64), content: "guidance" };
  expect(CoworkInstructionUpdate.safeParse(valid).success).toBe(true);
+ expect(CoworkInstructionMetadata.safeParse({ workspaceId: "workspace", instructionRevision: 1, digest: valid.expectedDigest, bytes: 0, refreshState: "unavailable" }).success).toBe(true);
  expect(CoworkInstructionUpdate.safeParse({ ...valid, content: "\ufeffvalid-bom" }).success).toBe(true);
  for (const field of ["path", "root", "approved", "approvalId", "expectedRevision"]) expect(CoworkInstructionUpdate.safeParse({ ...valid, [field]: "attacker" }).success).toBe(false);
  expect(CoworkInstructionUpdate.safeParse({ ...valid, content: "😀".repeat(COWORK_INSTRUCTION_MAX_BYTES / 4) }).success).toBe(true);
@@ -45,16 +50,26 @@ test("strict content schema refuses client paths/approval flags and bounds UTF-8
  expect(CoworkInstructionUpdate.safeParse({ ...valid, content: "\ud800" }).success).toBe(false);
 });
 test("schema13 retains authority and missing backing remains unavailable without seeding", () => {
- const f = fixture(); expect(f.db.schemaVersion()).toBe(13); expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(13);
- refusal(() => f.owner.get(user, f.workspaceId), "recovery_required"); expect(() => downgradeCoworkRuntimeStateToV7(f.home)).toThrow("Cowork authority"); expect(f.db.integrity().ok).toBe(true);
+ const f = fixture(); expect(f.db.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);
+ refusal(() => f.owner.get(user, f.workspaceId), unavailable); expect(() => downgradeCoworkRuntimeStateToV7(f.home)).toThrow("Cowork authority"); expect(f.db.integrity().ok).toBe(true);
  expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_directories").get()).toEqual({ n: 0 });
 });
 test("management service refuses runtime/paired guidance calls before backing access", () => {
- const f = fixture(); refusal(() => f.service.call({ role: "harness", connectionId: 1 }, "workspace.instructions.get", { workspaceId: f.workspaceId }), "recovery_required");
+ const f = fixture(); refusal(() => f.service.call({ role: "harness", connectionId: 1 }, "workspace.instructions.get", { workspaceId: f.workspaceId }), unavailable);
  f.host.principal = () => ({ kind: "paired-user", id: "phone", workspaceIds: new Set([f.workspaceId]), repositoryAuthorities: new Set() });
  refusal(() => f.service.call({ role: "remote", connectionId: 2 }, "workspace.instructions.get", { workspaceId: f.workspaceId }), "authority_denied");
  f.host.principal = () => ({ kind: "runtime", id: "guest", workspaceId: f.workspaceId, sessionId: "session" });
  refusal(() => f.service.call({ role: "harness", connectionId: 3 }, "workspace.instructions.update", {}), "authority_denied");
+});
+test("unsupported platform is typed before any filesystem admission and leaves service usable", () => {
+ const f = fixture(), descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+ try {
+  Object.defineProperty(process, "platform", { ...descriptor, value: "linux" });
+  refusal(() => new CoworkInstructions(f.records, f.home, grants), "unsupported_topology");
+  const service = new CoworkWorkspaceService(f.records, f.host, undefined, f.home);
+  expect(service.instructions).toBeUndefined(); refusal(() => service.call({ role: "harness", connectionId: 1 }, "workspace.instructions.get", { workspaceId: f.workspaceId }), "unsupported_topology");
+  expect(f.records.get(f.workspaceId).state).toBe("retained"); expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_directories").get()).toEqual({ n: 0 });
+ } finally { Object.defineProperty(process, "platform", descriptor); }
 });
 native("real files update and replay; normal external editor saves advance revisions and safe provenance", () => {
  const f = fixture(); f.owner.initialize(f.workspaceId, "shared:first"); const first = f.owner.get(user, f.workspaceId); expect(CoworkInstructionRead.parse(first).contentBase64).toBe(Buffer.from("shared:first").toString("base64"));
@@ -87,8 +102,13 @@ native("postreplacement crash reconciles only exact persisted vnode+digest and e
 });
 native("actual Broker approval binds copied content and rechecks revision/grants after waiting", async () => {
  const f = fixture(); f.owner.initialize(f.workspaceId, "old"); const runtime = f.bind(), input = f.input("approved-original"), controller = new AbortController();
+ const original = { ...input };
  const pending = f.owner.updateAgent(runtime, input, controller.signal); input.content = "mutated-caller-input";
- const approval = f.broker.list(runtime.sessionId)[0]!; expect(approval.summary).toContain("approved-original"); expect(approval.summary).not.toContain("mutated-caller-input"); f.broker.resolve(runtime.sessionId, approval.callId, true, "fixture-user"); await pending; expect(readFileSync(f.path, "utf8")).toBe("approved-original");
+ const approval = f.broker.list(runtime.sessionId)[0]!; expect(approval.summary).toContain(f.workspaceId); expect(approval.summary).toContain(original.expectedDigest); expect(approval.summary).toContain("approved-original"); expect(approval.summary).not.toContain("mutated-caller-input"); f.broker.resolve(runtime.sessionId, approval.callId, true, "fixture-user"); const receipt = await pending; expect(readFileSync(f.path, "utf8")).toBe("approved-original");
+ const count = f.store.read(runtime.sessionId).filter(event => event.type === "approval_requested").length;
+ expect(await f.owner.updateAgent(runtime, original, controller.signal)).toEqual(receipt); expect(f.broker.list(runtime.sessionId)).toHaveLength(0);
+ expect(f.store.read(runtime.sessionId).filter(event => event.type === "approval_requested")).toHaveLength(count);
+ await expect(f.owner.updateAgent(runtime, { ...original, content: "replay substitution" }, controller.signal)).rejects.toThrow("request_conflict"); expect(f.broker.list(runtime.sessionId)).toHaveLength(0);
  const stale = f.owner.updateAgent(runtime, f.input("must-not-apply", "stale"), controller.signal), oldApproval = f.broker.list(runtime.sessionId)[0]!;
  f.owner.update(user, f.input("user-change", "user-change")); f.broker.resolve(runtime.sessionId, oldApproval.callId, true, "fixture-user"); await expect(stale).rejects.toThrow("revision_conflict"); expect(readFileSync(f.path, "utf8")).toBe("user-change");
  const revoked = f.owner.updateAgent(runtime, f.input("revoked", "revoked"), controller.signal), revokeApproval = f.broker.list(runtime.sessionId)[0]!;
@@ -105,4 +125,50 @@ native("reviewed fullsync completes for owned file and held APFS directory on pi
   // does the same around descriptor-relative rename. No fallback is used.
   f.owner.initialize(f.workspaceId, "fullsync"); f.owner.update(user, f.input("fullsync-new"));
   console.info(JSON.stringify({ fixture: "instruction-fullsync", bun: Bun.version, bunRevision: Bun.revision, filesystemType: fsType, fileRequestCompleted: true, directoryRequestCompleted: true, hardwarePowerCutProof: false }));
+});
+
+native("journaled update before rename aborts debt without changing the saved file", () => {
+ let crash = true; const f = fixture(phase => { if (phase === "journal-durable" && crash) { crash = false; throw new Error("crash before rename"); } });
+ f.owner.initialize(f.workspaceId, "old"); const input = f.input("new"); refusal(() => f.owner.update(user, input), "recovery_required");
+ const debt = f.db.db.query<any, []>("SELECT * FROM cowork_instruction_mutations").get()!; expect(existsSync(join(f.root, debt.temporary_name))).toBe(true);
+ const reopened = openRuntimeStateDb(f.home); cleanups.push(() => reopened.close());
+ const restarted = new CoworkInstructions(new CoworkRepository(reopened), f.home, grants), value = restarted.get(user, f.workspaceId);
+ expect(Buffer.from(value.contentBase64, "base64").toString()).toBe("old"); expect(value.instructionRevision).toBe(1);
+ expect(f.db.db.query("SELECT status FROM cowork_operations WHERE operation_id=?").get(debt.operation_id)).toEqual({ status: "failed" });
+ expect(f.db.db.query("SELECT pending_operation FROM cowork_instructions").get()).toEqual({ pending_operation: null });
+ expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 0 }); expect(existsSync(join(f.root, debt.temporary_name))).toBe(false);
+ expect(f.db.db.query("SELECT count(*) AS n FROM cowork_outbox WHERE kind='workspace_instructions_changed'").get()).toEqual({ n: 0 });
+ expect(restarted.update(user, { ...input, requestId: "retry-new-request" }).value.instructionRevision).toBe(2);
+});
+native("SQLite restoration throw after journal COMMIT preserves debt-owned temporary file", () => {
+ const f = fixture(); f.owner.initialize(f.workspaceId, "old"); const input = f.input("new"), run = f.db.db.run.bind(f.db.db); let thrown = false;
+ f.db.db.run = ((...args: any[]) => { const result = (run as any)(...args); if (!thrown && args[0] === "PRAGMA main.synchronous = 1") { thrown = true; throw new Error("post-COMMIT restore failure"); } return result; }) as typeof f.db.db.run;
+ try { refusal(() => f.owner.update(user, input), "recovery_required"); } finally { f.db.db.run = run; }
+ expect(thrown).toBe(true); const debt = f.db.db.query<any, []>("SELECT * FROM cowork_instruction_mutations").get()!;
+ expect(debt).not.toBeNull(); expect(existsSync(join(f.root, debt.temporary_name))).toBe(true); expect(readFileSync(f.path, "utf8")).toBe("old");
+ const reopened = openRuntimeStateDb(f.home); cleanups.push(() => reopened.close());
+ const restarted = new CoworkInstructions(new CoworkRepository(reopened), f.home, grants); expect(restarted.get(user, f.workspaceId).instructionRevision).toBe(1);
+ expect(existsSync(join(f.root, debt.temporary_name))).toBe(false); expect(f.db.db.query("SELECT status FROM cowork_operations WHERE operation_id=?").get(debt.operation_id)).toEqual({ status: "failed" });
+});
+native("editor save after rename supersedes debt only when recorded temp is gone", () => {
+ for (const retainedTemp of [false, true]) {
+  let edited = false; const f = fixture(phase => { if (phase === "file-replaced" && !edited) { edited = true; const editor = join(f.root, "editor"); writeFileSync(editor, "editor wins", { mode: 0o600 }); renameSync(editor, f.path); if (retainedTemp) { const debt = f.db.db.query<any, []>("SELECT * FROM cowork_instruction_mutations").get()!; writeFileSync(join(f.root, debt.temporary_name), "ambiguous", { mode: 0o600 }); } } });
+  f.owner.initialize(f.workspaceId, "old"); refusal(() => f.owner.update(user, f.input("new")), "recovery_required");
+  const owner = new CoworkInstructions(f.records, f.home, grants);
+  if (retainedTemp) { refusal(() => owner.get(user, f.workspaceId), "recovery_required"); expect(f.db.db.query("SELECT status FROM cowork_operations WHERE method='workspace.instructions.update'").get()).toEqual({ status: "pending" }); }
+  else { const value = owner.get(user, f.workspaceId); expect(Buffer.from(value.contentBase64, "base64").toString()).toBe("editor wins"); expect(value.instructionRevision).toBe(2); expect(f.db.db.query("SELECT status FROM cowork_operations WHERE request_id='change'").get()).toEqual({ status: "superseded" }); expect(f.db.db.query("SELECT count(*) AS n FROM cowork_outbox WHERE kind='workspace_instructions_changed'").get()).toEqual({ n: 1 }); }
+  expect(readFileSync(f.path, "utf8")).toBe("editor wins");
+ }
+});
+native("immediate pre-rename reread refuses intervening editor save and retains ambiguous debt", () => {
+ let edited = false; const f = fixture(phase => { if (phase === "before-replace" && !edited) { edited = true; const editor = join(f.root, "editor"); writeFileSync(editor, "editor wins", { mode: 0o600 }); renameSync(editor, f.path); } });
+ f.owner.initialize(f.workspaceId, "old"); refusal(() => f.owner.update(user, f.input("new")), "revision_conflict");
+ expect(readFileSync(f.path, "utf8")).toBe("editor wins"); refusal(() => new CoworkInstructions(f.records, f.home, grants).get(user, f.workspaceId), "recovery_required");
+ expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 1 });
+});
+native("directory validation fault closes the just-opened descriptor", () => {
+ let fault = false; const f = fixture(phase => { if (phase === "directory-opened" && fault) throw new Error("identity fault"); }); f.owner.initialize(f.workspaceId, "old");
+ const before = readdirSync("/dev/fd").length; fault = true;
+ for (let i = 0; i < 10; i++) refusal(() => f.owner.get(user, f.workspaceId), "recovery_required");
+ expect(readdirSync("/dev/fd").length).toBe(before);
 });

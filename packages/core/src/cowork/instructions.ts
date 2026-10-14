@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, fstatSync, readSync, realpathSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { CoworkInstructionUpdate, COWORK_INSTRUCTION_MAX_BYTES } from "@yanlinglabs/winter-protocol";
-import { AT_FDCWD, createFileAt, mkdirAt, openDirAt, unlinkAt } from "../computer-use/browser/fd-fs";
+import { AT_FDCWD, FdError, createFileAt, mkdirAt, openDirAt, unlinkAt } from "../computer-use/browser/fd-fs";
 import { ApprovalBroker } from "../agent/approvals";
 import type { EventInput } from "../sessions/store";
 import { CoworkAuthority, type CoworkGrantResolver, type CoworkPrincipal } from "./authority";
@@ -38,6 +38,7 @@ export class CoworkInstructions {
     private readonly approval?: InstructionAgentApproval,
     /** Host-only fault/race injection, never settings/client input. */
     private readonly checkpoint: (phase: string) => void = () => {}) {
+    if (process.platform !== "darwin" || process.arch !== "arm64") throw new CoworkError("unsupported_topology");
     this.home = realpathSync(home);
     if (realpathSync(records.rs.path) !== join(this.home, "runtimes", "runtime-state.db")) fail("authority_denied");
     this.authority = new CoworkAuthority(records, grants);
@@ -52,22 +53,27 @@ export class CoworkInstructions {
   private owner(workspaceId: string): Row {
     this.scope(workspaceId);
     const row = this.one("SELECT * FROM cowork_instructions WHERE workspace_id=?", workspaceId);
-    if (!row || row.home_id !== this.records.homeIdentity()) fail();
+    if (!row || row.home_id !== this.one("SELECT home_id FROM cowork_home_identity WHERE singleton=1")?.home_id) fail();
     return row!;
   }
   private tree(workspaceId: string, create = false): Tree {
     this.scope(workspaceId);
     const entries: Tree["entries"] = [];
     const close = () => { for (const entry of entries.splice(0).reverse()) closeSync(entry.fd); };
+    const remember = (fd: number, name: string, relative: string): Identity => {
+      // Own the descriptor even if fstat/identity validation throws.
+      try { this.checkpoint("directory-opened"); const actual = identity(fd, true); entries.push({ fd, name, relative, identity: actual }); return actual; }
+      catch (error) { closeSync(fd); throw error; }
+    };
     try {
       // Walk EVERY absolute-home component from '/', never resolve an untrusted
       // ancestor through a path-based open. Root/system ancestor modes are observed;
       // the selected home and Cowork tree are private user-owned directories.
       let fd = openDirAt(AT_FDCWD, "/");
-      entries.push({ fd, name: "/", relative: "@root", identity: identity(fd, true) });
+      remember(fd, "/", "@root");
       const homeSegments = this.home.split("/").filter(Boolean);
       for (const name of homeSegments) {
-        fd = openDirAt(fd, name); entries.push({ fd, name, relative: "@ancestor", identity: identity(fd, true) });
+        fd = openDirAt(fd, name); remember(fd, name, "@ancestor");
       }
       const homeIdentity = identity(fd, true);
       if (homeIdentity.uid !== process.geteuid?.() || homeIdentity.mode !== 0o700) fail();
@@ -78,8 +84,7 @@ export class CoworkInstructions {
         relative = relative ? `${relative}/${name}` : name;
         const created = create ? mkdirAt(fd, name, 0o700) : false;
         fd = openDirAt(fd, name);
-        const actual = identity(fd, true);
-        entries.push({ fd, name, relative, identity: actual });
+        const actual = remember(fd, name, relative);
         if (actual.uid !== process.geteuid?.() || actual.mode !== 0o700) fail();
         this.checkDirectory(relative, actual, create, created);
       }
@@ -200,19 +205,59 @@ export class CoworkInstructions {
   private operation(operationId: string, principalId: string, workspaceId: string, requestId: string, requestDigest: string, status: string, receipt: unknown): void {
     this.run("INSERT INTO cowork_operations VALUES(?,?,?,?,?,?,?,?,?,?,?)", operationId, principalId, "workspace.instructions.update", workspaceId, requestId, requestDigest, workspaceId, status, JSON.stringify(receipt), this.now(), this.now());
   }
+  private temporaryGone(tree: Tree, name: string): boolean {
+    if (!/^instruction-[a-f0-9-]{36}\.tmp$/.test(name)) fail();
+    // Existing O_DIRECTORY|NOFOLLOW primitive cannot open a substituted device.
+    // Only ENOENT proves absence; regular files, links and all other failures are
+    // present/unknown. This is an observation, not an atomic absence guarantee.
+    try { const fd = openDirAt(tree.directory, name); closeSync(fd); return false; }
+    catch (error) { return error instanceof FdError && error.code === "ENOENT"; }
+  }
+  private discardTemporary(tree: Tree, name: string): void {
+    if (!/^instruction-[a-f0-9-]{36}\.tmp$/.test(name)) fail();
+    this.assertTree(tree);
+    try { unlinkAt(tree.directory, name); }
+    catch (error) { if (!(error instanceof FdError && error.code === "ENOENT")) throw error; }
+  }
   private recover(workspaceId: string, tree: Tree, operationId: string): void {
-    const mutation = this.one("SELECT * FROM cowork_instruction_mutations WHERE operation_id=? AND workspace_id=?", operationId, workspaceId);
-    if (!mutation) fail();
+    const mutation = this.one("SELECT * FROM cowork_instruction_mutations WHERE operation_id=? AND workspace_id=?", operationId, workspaceId) ?? fail();
+    if (!/^instruction-[a-f0-9-]{36}\.tmp$/.test(mutation.temporary_name)) fail();
+    const before = this.owner(workspaceId);
+    if (before.pending_operation !== operationId || before.digest !== mutation.before_digest || this.records.get(workspaceId).instructionRevision !== mutation.expected_revision) fail();
+    const matchesBefore = (value: Content) => value.digest === before.digest && same(value.identity, JSON.parse(before.file_identity_json));
+    const matchesAfter = (value: Content) => value.digest === mutation.after_digest && same(value.identity, JSON.parse(mutation.file_identity_json));
     const actual = this.read(tree);
-    // Only exact admitted vnode + bytes can close a file replacement debt. No
-    // temp replay, EOF, missing-file recovery or detached-directory adoption.
-    if (actual.digest !== mutation!.after_digest || !same(actual.identity, JSON.parse(mutation!.file_identity_json))) fail();
-    const fd = openInstructionAt(tree.directory);
-    try { if (!same(identity(fd, false), actual.identity)) fail(); fullSyncInstructionFd(fd); } finally { closeSync(fd); }
-    fullSyncInstructionFd(tree.directory);
-    const confirmed = this.read(tree);
-    if (confirmed.digest !== actual.digest || !same(confirmed.identity, actual.identity)) fail();
-    this.finish(workspaceId, tree, mutation!, confirmed);
+    if (matchesAfter(actual)) {
+      const fd = openInstructionAt(tree.directory);
+      try { if (!same(identity(fd, false), actual.identity)) fail(); fullSyncInstructionFd(fd); } finally { closeSync(fd); }
+      fullSyncInstructionFd(tree.directory);
+      const confirmed = this.read(tree);
+      if (!matchesAfter(confirmed)) fail();
+      this.finish(workspaceId, tree, mutation, confirmed); return;
+    }
+    const status = matchesBefore(actual) ? "failed" : this.temporaryGone(tree, mutation.temporary_name) ? "superseded" : undefined;
+    if (!status) fail();
+    try {
+      durableCoworkTransaction(this.records.rs, () => {
+        const current = this.owner(workspaceId), debt = this.one("SELECT * FROM cowork_instruction_mutations WHERE operation_id=?", operationId);
+        if (current.pending_operation !== operationId || current.digest !== before.digest || current.file_identity_json !== before.file_identity_json || this.records.get(workspaceId).instructionRevision !== mutation.expected_revision || JSON.stringify(debt) !== JSON.stringify(mutation)) fail();
+        const confirmed = this.read(tree);
+        if (confirmed.digest !== actual.digest || !same(confirmed.identity, actual.identity)) fail();
+        if (status === "failed" ? !matchesBefore(confirmed) : matchesBefore(confirmed) || matchesAfter(confirmed) || !this.temporaryGone(tree, mutation.temporary_name)) fail();
+        this.assertTree(tree);
+        this.run("UPDATE cowork_operations SET status=?,updated_at=? WHERE operation_id=? AND status='pending'", status, this.now(), operationId);
+        this.run("UPDATE cowork_instructions SET pending_operation=NULL WHERE workspace_id=?", workspaceId);
+        this.run("DELETE FROM cowork_instruction_mutations WHERE operation_id=?", operationId);
+        const changeId = `change-${randomUUID()}`;
+        this.run("INSERT INTO cowork_outbox(change_id,workspace_id,operation_id,revision,kind,payload_json,created_at) VALUES(?,?,?,?,?,?,?)", changeId, workspaceId, operationId, this.records.get(workspaceId).configRevision, "workspace_operation_changed", JSON.stringify({ status, terminal: true }), this.now());
+        this.run("INSERT INTO cowork_outbox_deliveries(change_id,session_id,state) SELECT ?,session_id,'pending' FROM cowork_conversations WHERE workspace_id=? AND state!='deleted'", changeId, workspaceId);
+      });
+    } finally {
+      // A pragma restoration error can happen AFTER COMMIT. Consult canonical
+      // ownership rather than inferring rollback from a thrown return.
+      if (status === "failed" && !this.one("SELECT 1 FROM cowork_instruction_mutations WHERE operation_id=?", operationId) && this.one("SELECT status FROM cowork_operations WHERE operation_id=?", operationId)?.status === "failed") this.discardTemporary(tree, mutation.temporary_name);
+    }
+    // observe() absorbs a superseding direct edit; never apply or replay the temp.
   }
   private finish(workspaceId: string, tree: Tree, mutation: Row, actual: Content) {
     return durableCoworkTransaction(this.records.rs, () => {
@@ -238,7 +283,7 @@ export class CoworkInstructions {
     if (this.records.rs.db.inTransaction) fail("authority_denied");
     this.owner(input.workspaceId);
     const requestDigest = digest(JSON.stringify(input)), tree = this.tree(input.workspaceId);
-    let temporaryName: string | undefined, journaled = false;
+    let temporaryName: string | undefined, pendingOperationId: string | undefined;
     try {
       const before = this.observe(input.workspaceId, tree);
       const previous = this.one("SELECT * FROM cowork_operations WHERE principal_id=? AND method='workspace.instructions.update' AND scope=? AND request_id=?", principalId, input.workspaceId, input.requestId);
@@ -257,6 +302,7 @@ export class CoworkInstructions {
       const current = this.read(tree);
       if (current.digest !== before.digest || !same(current.identity, before.identity)) throw new CoworkError("revision_conflict", revision);
       const mutation = { operation_id: operationId, expected_revision: revision, after_digest: after.digest, file_identity_json: JSON.stringify(after.identity) };
+      pendingOperationId = operationId;
       durableCoworkTransaction(this.records.rs, () => {
         const row = this.owner(input.workspaceId);
         if (row.pending_operation || this.records.get(input.workspaceId).instructionRevision !== revision || row.digest !== before.digest) fail();
@@ -265,8 +311,13 @@ export class CoworkInstructions {
         this.run("INSERT INTO cowork_instruction_mutations VALUES(?,?,?,?,?,?,?,?)", operationId, input.workspaceId, revision, before.digest, after.digest, temporaryName!, JSON.stringify(after.identity), bytes.length);
         this.run("UPDATE cowork_instructions SET pending_operation=? WHERE workspace_id=?", operationId, input.workspaceId);
       });
-      journaled = true;
       this.checkpoint("journal-durable"); this.assertTree(tree);
+      this.checkpoint("before-replace");
+      const immediatelyBefore = this.read(tree);
+      if (immediatelyBefore.digest !== before.digest || !same(immediatelyBefore.identity, before.identity)) throw new CoworkError("revision_conflict", revision);
+      this.assertTree(tree);
+      // This narrows the editor-save window; read and rename are not an atomic
+      // compare-and-swap. Same-user changes after this check remain a residual.
       // Replacement uses held directory descriptors; no pathname follows symlinks
       // or writes through the previously observed user file.
       replaceInstructionAt(tree.directory, temporaryName); temporaryName = undefined;
@@ -278,7 +329,12 @@ export class CoworkInstructions {
     finally {
       // Debt owns a temp after journal commit. It is not silently deleted/replayed
       // after a failure; recovery must see the recorded target inode+bytes.
-      if (temporaryName && !journaled) { try { unlinkAt(tree.directory, temporaryName); } catch { /* visible orphan requires host recovery; never follow a path */ } }
+      if (temporaryName) {
+        try {
+          const owned = pendingOperationId && this.one("SELECT 1 FROM cowork_instruction_mutations WHERE operation_id=? AND temporary_name=?", pendingOperationId, temporaryName);
+          if (!owned) this.discardTemporary(tree, temporaryName);
+        } catch { /* unknown DB/tree ownership retains the temp for host recovery */ }
+      }
       tree.close();
     }
   }
@@ -299,10 +355,13 @@ export class CoworkInstructions {
     principal = Object.freeze({ ...principal });
     const input = Object.freeze(CoworkInstructionUpdate.parse(raw));
     if (principal.kind !== "runtime" || principal.workspaceId !== input.workspaceId) fail("authority_denied");
-    const scope = this.agentScope(principal), contentDigest = digest(Buffer.from(input.content, "utf8")), callId = `instruction-${randomUUID()}`, issuedAt = Date.now(), timeoutMs = 60_000;
+    const scope = this.agentScope(principal);
+    const previous = this.one("SELECT 1 FROM cowork_operations WHERE principal_id=? AND method='workspace.instructions.update' AND scope=? AND request_id=?", principal.id, input.workspaceId, input.requestId);
+    if (previous) return this.perform(principal.id, input);
+    const contentDigest = digest(Buffer.from(input.content, "utf8")), callId = `instruction-${randomUUID()}`, issuedAt = Date.now(), timeoutMs = 60_000;
     const broker = approval.broker;
     const abort = () => { broker.resolve(principal.sessionId, callId, false, "aborted"); };
-    const summary = `Update shared workspace guidance at revision ${input.expectedInstructionRevision}; SHA-256 ${contentDigest}\nProposed content:\n${input.content}`;
+    const summary = `Update shared workspace guidance for ${input.workspaceId} at revision ${input.expectedInstructionRevision}; expected SHA-256 ${input.expectedDigest}; proposed SHA-256 ${contentDigest}\nProposed content:\n${input.content}`;
     const waiting = broker.wait(principal.sessionId, callId, timeoutMs, { toolName: "workspace.instructions.update", summary, issuedAt, expiresAt: issuedAt + timeoutMs });
     signal.addEventListener("abort", abort, { once: true });
     try {

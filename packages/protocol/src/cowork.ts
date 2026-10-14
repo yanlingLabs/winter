@@ -81,7 +81,7 @@ const Digest = z.string().regex(/^[a-f0-9]{64}$/);
 export const CoworkInstructionUpdate = WorkspaceId.extend({ requestId: Id, expectedInstructionRevision: Revision, expectedDigest: Digest,
   content: z.string().refine(value => !value.includes("\0") && new TextEncoder().encode(value).length <= COWORK_INSTRUCTION_MAX_BYTES && new TextDecoder("utf-8", { ignoreBOM: true }).decode(new TextEncoder().encode(value)) === value),
 }).strict();
-export const CoworkInstructionMetadata = z.object({ workspaceId: Id, instructionRevision: Revision, digest: Digest, bytes: z.number().int().min(0).max(COWORK_INSTRUCTION_MAX_BYTES), refreshState: z.literal("refresh-required") }).strict();
+export const CoworkInstructionMetadata = z.object({ workspaceId: Id, instructionRevision: Revision, digest: Digest, bytes: z.number().int().min(0).max(COWORK_INSTRUCTION_MAX_BYTES), refreshState: z.enum(["refresh-required", "unavailable"]) }).strict();
 export const CoworkInstructionRead = CoworkInstructionMetadata.extend({ contentBase64: z.string().max(87384), encoding: z.literal("utf-8") }).strict();
 export const CoworkInstructionProvenance = CoworkInstructionMetadata.extend({ entries: z.array(z.object({ kind: z.literal("workspace"), guestPath: z.literal("/workspace/.winter/WINTER.md"), digest: Digest }).strict()).length(1), sourceDiscovery: z.literal("unavailable") }).strict();
 export const CoworkInstructionReceipt = receipt(CoworkInstructionMetadata);

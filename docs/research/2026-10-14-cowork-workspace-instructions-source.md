@@ -21,8 +21,11 @@ changed here.
 ## Actual caller path
 
 `daemon.ts` constructs `CoworkWorkspaceService` with the daemon-selected home and
-its existing ApprovalBroker/SessionHub. Service constructs `CoworkInstructions`;
-initialization is a trusted host provisioning method with no RPC equivalent.
+its existing ApprovalBroker/SessionHub. Service attempts to construct
+`CoworkInstructions`; unsupported platforms or a
+noncanonical runtime-state DB disable that optional port without crashing daemon
+boot. Guidance RPCs then return `unsupported_topology`.
+Initialization is a trusted host provisioning method with no RPC equivalent.
 Default provisioning stays disabled and missing instructions stay
 `recovery_required`; daemon construction does not seed or enroll backing data.
 
@@ -67,24 +70,34 @@ write fallbacks or general rename APIs. Normal direct user edits, including atom
 editor saves, are observed under the unchanged canonical directory and advance
 instruction revision/outbox. Guidance is editable content, never host authority.
 
-Pending debt survives ordinary process restart in the DB. Only exact recorded
-replacement vnode and digest, unchanged admitted ancestry, repeated file/directory
-sync requests and current canonical instruction revision may finalize it. An
-old/missing/replaced target remains recovery_required; no pending file replacement
-is automatically replayed. Concurrent ancestor replacement fails and retains debt.
-The checked, still-owned original directory is distinct from a newly substituted
-canonical path, and is never silently adopted/reseeded. A debt that never reached
-rename currently needs explicit host recovery; this slice supplies no destructive
-repair/reset endpoint.
+Pending debt survives ordinary process restart in the DB. Exact recorded
+replacement vnode/digest, unchanged ancestry, repeated sync requests and the
+current revision finalize the write. When the target exactly matches the still
+recorded before vnode/digest and ancestry, one durable transaction marks the
+operation failed, clears pending ownership and deletes the mutation; only then is
+the recorded temp entry removed. A direct editor save matching neither image may
+supersede the operation only when a descriptor-relative O_DIRECTORY|NOFOLLOW
+probe reports ENOENT for the recorded temp. All other results are present/unknown
+and retain recovery_required. No temp is replayed and no replacement subtree is
+adopted. Cleanup consults canonical mutation ownership after a thrown transaction
+return, including SQLite pragma restoration errors after COMMIT.
+
+The update rereads the before vnode/digest immediately before rename and refuses
+an already visible editor save. Read and rename are separate requests, so an
+editor save after this check can still race replacement. This is a documented
+same-user residual, not a race-free compare-and-swap. A later editor save after
+rename and before finalization is reconciled as superseded only under the exact
+neither-image/temp-gone rule above.
 
 Agent edits have a separate internal owner method, not user RPC or generic file
 tool access. It freezes a copy of principal and exact proposed content/revision/
 digest, verifies canonical binding/source/capability/policy, creates an actual
-ApprovalBroker wait/card showing proposed content/hash, and rechecks after the
-answer. The method never accepts a reusable approval DTO. Aborts, denial, changed
+ApprovalBroker wait/card showing workspace ID, expected revision/digest and
+proposed content/hash, and rechecks after the answer. The method never accepts a reusable approval DTO. Aborts, denial, changed
 binding/grants/policy, revision or file content refuse the original write. The
-future authenticated guest-owner channel still must wire this method; its runtime
-principal shape is not itself native caller admission.
+exact committed request replay checks existing operation state before creating
+another prompt; substituted replay content refuses. The future authenticated
+guest-owner channel still must wire this method; its runtime principal shape is not itself native caller admission.
 
 ## Durability evidence and limits
 
@@ -136,8 +149,10 @@ SQLite, Unix RPC, SessionHub/JSONL, APFS file/directory fullsync, external edito
 saves, symlink/hardlink/ancestor replacement, visible pre-rename debt,
 post-replacement restart reconciliation, stable event deduplication, actual
 ApprovalBroker content substitution and post-approval revision/grant refusals.
-Default portable invocation skips the five Darwin file/approval cases plus the
-explicit fullsync case; it does not present skipped filesystem proof as passed.
+Default portable invocation skips the Darwin file/approval/fullsync cases and
+Darwin file RPC case; it does not present skipped filesystem proof as passed.
+Before corrections there were seven such cases. The correction focus adds five
+file cases; future Darwin arm64 CI must opt in and exercise all twelve.
 
 CLI `bun test test/cowork-cli.test.ts`: **15 passed,152 assertions**, including
 existing private-daemon management and strict new guidance parser/display controls.
@@ -156,6 +171,36 @@ Swift protocol/request source was updated but not compiled or executed here.
   runtime-shaped JSON object or guidance paragraph authorizes host writes.
 - Paired guidance reads/updates need their explicit four mirrors and per-record
   authority/transport handling. This source is Mac-local.
-- Explicit recovery for unchanged pre-rename debt, shared memory/output consumers,
+- Shared memory/output consumers,
   migration/export consistency, other filesystem validation and full guest E2E
   remain separate work. None is replaced by these source/file fixture passes.
+
+## Reviewer correction freeze
+
+Corrections from reviewer45 G1/W1/M3 and requested L2/L3/L6/L7/L10/L11 preserve the
+reviewed filesystem and fullsync leaf bytes and scoped SQLite helper unchanged.
+G1 tests exercise real journal-before-rename abort, post-COMMIT restoration throw,
+post-rename editor supersession and retained-temp refusal. W1 uses actual isolated
+daemon boot with symlinked runtime DB and valid Unix guidance RPC; L10 uses valid
+strict params and exact ERR.UNAUTHORIZED for every remote method. Descriptor
+fault tests observe stable /dev/fd counts; approval replay tests observe no new
+approval event/card. Canonical owner reads no longer call the repository's write
+wrapper, preserving composition with durable outbox transactions.
+
+Read/provenance can observe direct user edits and create a revision, operation and
+per-conversation outbox fanout; repeated unchanged reads are coalesced by exact
+vnode/digest equality. Repeated real edits still create unbounded operation rows;
+retention/cleanup is future integration work (L1). Remaining LOWs are initial
+file/DB failure orphan handling (L4), pre-journal process-crash temp sweep (L5),
+more distinct content/topology error codes (L8), stdin/file CLI input rather than
+argv content (L12), and populated schema downgrade corpus (L13). None is claimed
+fixed by these focused corrections. The pre-rename read/rename residual (M3) stays
+explicit. Swift source remains unexecuted; no native test host, GUI, VM or held
+lane was invoked.
+
+Correction freeze validation: **71 pass,899 assertions,0 skip/fail** across the six
+Core instruction/durable-transaction/RPC/repository/event/API files in the command
+above; CLI **15 pass,152 assertions,0 fail**. Default three-file portable focus:
+**9 pass,12 skip,61 assertions,0 fail**. Protocol/Core/CLI no-emit typechecks and
+diff check pass. Recovery tests reopen the actual SQLite file through a separate
+RuntimeStateDb connection. No pending temp is inferred absent from an exception.

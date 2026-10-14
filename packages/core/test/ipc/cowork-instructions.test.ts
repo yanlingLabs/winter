@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { COWORK_RPC, COWORK_REMOTE_METHODS, ConnWriter, LineDecoder, PROTOCOL_VERSION, encodeLine, type WritableSocket } from "@yanlinglabs/winter-protocol";
+import { COWORK_RPC, COWORK_REMOTE_METHODS, ERR, ConnWriter, LineDecoder, PROTOCOL_VERSION, encodeLine, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { CoworkWorkspaceService, type CoworkHostPorts } from "../../src/cowork/service";
 import { openRuntimeStateDb } from "../../src/runtime-state/db";
@@ -11,6 +11,7 @@ import { SessionHub } from "../../src/sessions/hub";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { startIpcServer } from "../../src/ipc/server";
+import { startDaemon } from "../../src/daemon";
 import { CoworkError } from "../../src/cowork/types";
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const fn of cleanup.splice(0).reverse()) fn(); });
@@ -33,8 +34,8 @@ async function fixture() {
  return { home, workspaceId, records, service, client, remote };
 }
 test("real Unix RPC keeps missing backing unavailable and all guidance methods Mac-local", async () => {
- const f = await fixture(); expect((await f.client.request("workspace.instructions.get", { workspaceId: f.workspaceId })).error.data.code).toBe("recovery_required");
- for (const method of ["workspace.instructions.get", "workspace.instructions.provenance", "workspace.instructions.update"] as const) { expect((COWORK_REMOTE_METHODS as readonly string[]).includes(method)).toBe(false); expect((await f.remote.request(method, { workspaceId: f.workspaceId })).error).toBeDefined(); }
+ const f = await fixture(); expect((await f.client.request("workspace.instructions.get", { workspaceId: f.workspaceId })).error.data.code).toBe(process.platform === "darwin" && process.arch === "arm64" ? "recovery_required" : "unsupported_topology");
+ for (const method of ["workspace.instructions.get", "workspace.instructions.provenance", "workspace.instructions.update"] as const) { expect((COWORK_REMOTE_METHODS as readonly string[]).includes(method)).toBe(false); const params = method === "workspace.instructions.update" ? { workspaceId: f.workspaceId, requestId: "remote-valid", expectedInstructionRevision: 1, expectedDigest: "a".repeat(64), content: "valid remote proposal" } : { workspaceId: f.workspaceId }; expect(COWORK_RPC[method].params.safeParse(params).success).toBe(true); expect((await f.remote.request(method, params)).error.code).toBe(ERR.UNAUTHORIZED); }
  expect((await f.client.request("workspace.instructions.get", { workspaceId: f.workspaceId, path: "/outside" })).error.data.code).toBe("invalid_request");
  const gateway = readFileSync(join(import.meta.dir, "../../../../apple/WinterKit/Sources/WinterKit/Gateway/Gateway.swift"), "utf8"); expect(gateway).not.toContain('"workspace.instructions.');
 });
@@ -49,3 +50,11 @@ native("real Unix RPC reads/updates content and enforces size/revision/digest/re
  expect((await f.client.request("workspace.instructions.update", { ...input, requestId: "bad", content: "x".repeat(65537) })).error.data.code).toBe("invalid_request");
  const provenance = (await f.client.request("workspace.instructions.provenance", { workspaceId: f.workspaceId })).result; expect(provenance.sourceDiscovery).toBe("unavailable"); expect(JSON.stringify(provenance)).not.toContain(f.home);
 });
+
+test("real daemon boots with unsupported symlinked runtime DB topology and gates guidance RPC", async () => {
+ const parent = mkdtempSync(join(tmpdir(), "winter-instruction-boot-")), home = join(parent, "home"), elsewhere = join(parent, "db-backing");
+ cleanup.push(() => rmSync(parent, { recursive: true, force: true })); mkdirSync(home, { mode: 0o700 }); mkdirSync(elsewhere, { mode: 0o700 }); symlinkSync(elsewhere, join(home, "runtimes"));
+ const daemon = await startDaemon({ home, secrets: new FileSecretStore(join(parent, "fixture-secrets.json")), agentProvider: null });
+ try { const client = await Client.open(daemon.socketPath, daemon.tokens.harness, "harness"); const reply = await client.request("workspace.instructions.get", { workspaceId: "workspace-valid" }); expect(reply.error.data.code).toBe("unsupported_topology"); expect("unavailable" in daemon.runtimeState).toBe(false); }
+ finally { await daemon.stop(); }
+}, 15000);

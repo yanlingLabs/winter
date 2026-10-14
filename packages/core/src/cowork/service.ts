@@ -62,7 +62,12 @@ export class CoworkWorkspaceService {
   constructor(readonly records: CoworkRepository, private readonly host: CoworkHostPorts = disabledCoworkHost, scheduleNow?: () => number, instructionHome?: string, instructionApproval?: InstructionAgentApproval) {
     this.authority = new CoworkAuthority(records, host.grants);
     this.schedules = new CoworkSchedules(records, host.grants, scheduleNow);
-    if (instructionHome) this.instructions = new CoworkInstructions(records, instructionHome, host.grants, instructionApproval);
+    if (instructionHome) {
+      // Optional Cowork backing admission must never make ordinary daemon boot
+      // fail. Unsupported platform/canonical DB topology leaves its RPC gated.
+      try { this.instructions = new CoworkInstructions(records, instructionHome, host.grants, instructionApproval); }
+      catch { this.instructions = undefined; }
+    }
   }
   beginShutdown(): void { this.schedules.beginShutdown(); }
   private snapshot(principal: CoworkPrincipal, workspaceId: string) {
