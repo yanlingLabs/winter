@@ -18,6 +18,7 @@ struct CoworkWorkspaceView: View {
     @State private var rename = ""
     @State private var sourceToRemove: CoworkSource?
     @State private var revoke = false
+    @State private var confirmingAbandon = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -131,38 +132,37 @@ struct CoworkWorkspaceView: View {
     private func guidanceEditor(_ state: CoworkWorkspaceModel.Guidance) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Shared WINTER.md").font(.headline)
+                Text("Shared WINTER.md").font(Typography.paneTitle)
                 Spacer()
                 Button("Refresh instructions", systemImage: "arrow.clockwise") { Task { await model.refreshInstructions(workspaceId: state.workspaceId) } }
                     .disabled(model.guidanceBusy)
             }
             Text("These instructions are shared by every conversation and subagent in this workspace. Host permissions are managed separately.")
-                .font(.callout).foregroundStyle(.secondary)
+                .font(Typography.label()).foregroundStyle(Theme.textMuted)
             if model.guidanceBusy { ProgressView("Updating shared instructions…") }
             if let current = state.current {
-                Text("Instruction revision \(current.instructionRevision) · \(current.bytes) bytes").font(.caption)
-                Label(state.available ? "Conversation refresh required" : "Shared instructions unavailable",
-                      systemImage: state.available ? "arrow.triangle.2.circlepath" : "exclamationmark.triangle")
-                    .font(.callout).foregroundStyle(.orange)
+                Text("Instruction revision \(current.instructionRevision) · \(current.bytes) bytes").font(Typography.caption())
+                guidanceStatus(state)
             } else {
                 Text("Shared instructions unavailable. Refresh to load the existing workspace file.")
-                    .foregroundStyle(.secondary)
+                    .font(Typography.label()).foregroundStyle(Theme.textMuted)
             }
-            if let message = state.message { Text(message).font(.callout).textSelection(.enabled) }
+            if let message = state.message { Text(message).font(Typography.label()).textSelection(.enabled) }
             if let receipt = state.receipt {
                 Text("Host save recorded at instruction revision \(receipt.value.instructionRevision).")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(Typography.caption()).foregroundStyle(Theme.textMuted)
             }
             if let draft = state.draft {
-                TextEditor(text: Binding(get: { model.guidance?.workspaceId == state.workspaceId ? (model.guidance?.draft ?? draft) : draft },
-                                         set: { model.editInstructions($0, workspaceId: state.workspaceId) }))
-                    .font(.system(.body, design: .monospaced)).frame(minHeight: 180)
+                GuidanceTextEditor(text: Binding(get: { model.guidance?.workspaceId == state.workspaceId ? (model.guidance?.draft ?? draft) : draft },
+                                                 set: { model.editInstructions($0, workspaceId: state.workspaceId) }))
+                    .frame(maxWidth: .infinity, minHeight: 180, idealHeight: 240, maxHeight: 360)
+                    .background(Theme.controlSurface, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Theme.hairlineElevated, lineWidth: 1))
                     .accessibilityLabel("Shared workspace instructions draft")
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
                 let valid = draft.utf8.count <= CoworkWorkspaceModel.instructionMaxBytes && !draft.contains("\0")
                 Text("\(draft.utf8.count) / \(CoworkWorkspaceModel.instructionMaxBytes) UTF-8 bytes\(state.hasUnsavedChanges ? " · unsaved draft" : "")")
-                    .font(.caption).foregroundStyle(valid ? Color.secondary : Color.red)
-                if !valid { Text("The draft exceeds the file limit or contains a NUL character.").font(.caption).foregroundStyle(.red) }
+                    .font(Typography.caption()).foregroundStyle(valid ? Theme.textMuted : Color.red)
+                if !valid { Text("The draft exceeds the file limit or contains a NUL character.").font(Typography.caption()).foregroundStyle(Color.red) }
                 HStack {
                     Button("Save instructions") {
                         Task { await model.saveInstructions(workspaceId: state.workspaceId, expectedDraft: draft,
@@ -171,15 +171,16 @@ struct CoworkWorkspaceView: View {
                         .disabled(model.guidanceBusy || !state.canSave || !valid)
                     if state.hasUnconfirmedSave {
                         Button("Retry pending save") { Task { await model.retryInstructionSave(workspaceId: state.workspaceId, requestId: state.pendingRequestId) } }.disabled(model.guidanceBusy)
+                        Button("Abandon unconfirmed save", role: .destructive) { confirmingAbandon = true }.disabled(model.guidanceBusy)
                     }
                 }
             }
             if state.conflict {
-                Text("The shared file changed. Compare the current content with your retained draft before saving.")
-                    .foregroundStyle(.orange)
+                Text("Compare the current shared content with your retained draft before saving.")
+                    .font(Typography.label())
                 if state.available, let current = state.currentContent {
                     DisclosureGroup("Current shared content") {
-                        ScrollView { Text(current).font(.system(.body, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                        ScrollView { Text(current).font(Typography.labelMono()).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
                             .frame(maxHeight: 180)
                     }
                     HStack {
@@ -190,7 +191,7 @@ struct CoworkWorkspaceView: View {
             }
             if let pending = state.pendingContent {
                 DisclosureGroup("Content of the unconfirmed save") {
-                    ScrollView { Text(pending).font(.system(.body, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                    ScrollView { Text(pending).font(Typography.labelMono()).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
                         .frame(maxHeight: 180)
                 }
             }
@@ -198,13 +199,39 @@ struct CoworkWorkspaceView: View {
                 DisclosureGroup("Instruction provenance") {
                     ForEach(Array(provenance.entries.enumerated()), id: \.offset) { _, entry in
                         Text(entry.guestPath).textSelection(.enabled)
-                        Text(entry.digest).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                        Text(entry.digest).font(Typography.captionMono()).textSelection(.enabled)
                     }
-                    Text("Repository instruction discovery is unavailable until Cowork execution is ready.").font(.caption).foregroundStyle(.secondary)
+                    Text("Repository instruction discovery is unavailable until Cowork execution is ready.").font(Typography.caption()).foregroundStyle(Theme.textMuted)
                 }
             }
         }.padding().frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+            .background(Theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
+            .confirmationDialog("Abandon the unconfirmed save?", isPresented: $confirmingAbandon) {
+                Button("Abandon unconfirmed save", role: .destructive) {
+                    Task { await model.abandonInstructionSave(workspaceId: state.workspaceId, requestId: state.pendingRequestId) }
+                }
+            } message: {
+                Text("Winter stops trying to confirm that save and keeps your current draft. If the host already applied it, the refresh shows it as the current shared content; either way you review it against your draft before saving again.")
+            }
+    }
+
+    /// The one status line under the revision. Only a real problem is drawn as one: a conflict (a
+    /// review is owed) or an unreadable file. The healthy steady state is a quiet note, not a warning,
+    /// and no state is drawn in a colour of its own: the glyph and the words carry it.
+    @ViewBuilder
+    private func guidanceStatus(_ state: CoworkWorkspaceModel.Guidance) -> some View {
+        if state.conflict {
+            Label(state.available ? "Review needed before saving" : "Review needed before saving · refresh to load the current content",
+                  systemImage: "exclamationmark.triangle")
+                .font(Typography.label())
+        } else if !state.available {
+            Label("Shared instructions unavailable", systemImage: "exclamationmark.triangle")
+                .font(Typography.label())
+        } else {
+            Label("Saved changes reach a conversation once it refreshes.", systemImage: "arrow.triangle.2.circlepath")
+                .font(Typography.caption()).foregroundStyle(Theme.textMuted)
+        }
     }
 
     private var creation: some View {
@@ -266,6 +293,80 @@ struct CoworkWorkspaceView: View {
                     }
                 }
             } catch { if selectionGeneration == context.generation { selectionError = error.localizedDescription } }
+        }
+    }
+}
+
+/// The guidance draft's editor. SwiftUI's `TextEditor` has no way to switch off the system's text
+/// substitutions on macOS, and this text is saved byte for byte (the host compares a SHA-256 of it),
+/// so smart quotes and dashes, autocorrection, text replacement, completion and link or data
+/// detection must never rewrite a character the person did not type. It follows `ComposerTextView`'s
+/// shape (an `NSScrollView` around a plain-text `NSTextView`, a `Coordinator` delegate writing the
+/// binding) and its `isAutomaticQuoteSubstitutionEnabled = false` precedent. That component itself
+/// cannot be reused here: Return submits in it and it claims first responder on every update.
+private struct GuidanceTextEditor: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
+        let font = Typography.monoNS(ofSize: Typography.labelSize)
+        let color = NSColor(named: "TextPrimary") ?? .labelColor
+        textView.delegate = context.coordinator
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticTextCompletionEnabled = false
+        textView.isAutomaticLinkDetectionEnabled = false
+        textView.isAutomaticDataDetectionEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.isGrammarCheckingEnabled = false
+        textView.smartInsertDeleteEnabled = false
+        textView.inlinePredictionType = .no
+        textView.mathExpressionCompletionType = .no
+        textView.font = font
+        textView.textColor = color
+        textView.typingAttributes = [.font: font, .foregroundColor: color]
+        textView.insertionPointColor = NSColor(named: "AccentColor") ?? .labelColor
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 6, height: 6)
+        textView.string = text
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        guard let textView = nsView.documentView as? NSTextView else { return }
+        context.coordinator.parent = self
+        // An AppKit view ignores the SwiftUI `.disabled(model.busy)` above it unless told.
+        textView.isEditable = context.environment.isEnabled
+        // Compare UTF-8 bytes, not Swift `==`: that treats canonically equivalent spellings as equal and
+        // would leave the view showing a different spelling from the one the model will save.
+        if !textView.string.utf8.elementsEqual(text.utf8) {
+            textView.string = text
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: GuidanceTextEditor
+
+        init(_ parent: GuidanceTextEditor) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
         }
     }
 }

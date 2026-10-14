@@ -28,10 +28,14 @@ import WinterProtocol
         public fileprivate(set) var draft: String?
         public fileprivate(set) var available = false
         public fileprivate(set) var conflict = false
-        public fileprivate(set) var message: String?
+        public fileprivate(set) var message: String? { didSet { messageIsAboutDraft = false } }
         public fileprivate(set) var receipt: CoworkReceipt<CoworkInstructionMetadata>?
         fileprivate var baseRevision: Int?, baseDigest: String?, baseContent: String?
         fileprivate var pending: InstructionSave?
+        /// True while `message` answers the draft exactly as it was sent (a size refusal, a definitive
+        /// host refusal). The next edit supersedes it. Any other assignment to `message` resets it.
+        fileprivate var messageIsAboutDraft = false
+        fileprivate mutating func note(_ text: String, aboutDraft: Bool) { message = text; messageIsAboutDraft = aboutDraft }
         public var hasUnconfirmedSave: Bool { pending != nil }
         public var pendingContent: String? { pending?.content }
         public var pendingRequestId: String? { pending?.requestId }
@@ -45,6 +49,9 @@ import WinterProtocol
     // One draft per durable workspace, shared by its conversations, retained through navigation
     // and transport reconnects. This is UI state only, not a memory store or a capability grant.
     private var guidanceByWorkspace: [String: Guidance] = [:]
+    /// A workspace selected while another guidance operation held `guidanceBusy`: its read could not
+    /// start then, and `finishGuidanceOperation` runs it (the last selection wins).
+    private var queuedGuidanceRead: String?
     private var selectedId: String?
     private let call: Call
     private var requestIds: [String: String] = [:]
@@ -87,7 +94,8 @@ import WinterProtocol
         // Publish only a complete source generation. A summary is never an empty source grant.
         selected = value; sources = items; policy = policyPage.policy
         guidance = guidanceByWorkspace[id] ?? Guidance(workspaceId: id)
-        if !guidanceBusy { await readGuidance(id) }
+        // Another workspace's save or refresh may hold the guidance lane; its end reads this one.
+        if guidanceBusy { queuedGuidanceRead = id } else { await readGuidance(id) }
     }
     public func refresh() async {
         guard !busy else { return }; busy = true; error = nil; defer { busy = false }
@@ -177,10 +185,17 @@ import WinterProtocol
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
     private static func validMetadata(workspaceId: String, revision: Int, digest: String, bytes: Int, refreshState: String, expectedWorkspace: String) -> Bool {
-        workspaceId == expectedWorkspace && revision > 0 && revision <= 9_007_199_254_740_991
-            && bytes >= 0 && bytes <= instructionMaxBytes
-            && digest.utf8.count == 64 && digest.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil
-            && ["refresh-required", "unavailable"].contains(refreshState)
+        // One guarded statement per rule: a single long `&&` chain over mixed Int/String/Optional
+        // operands is a type-checker timeout risk.
+        guard workspaceId == expectedWorkspace else { return false }
+        guard revision > 0 else { return false }
+        guard revision <= 9_007_199_254_740_991 else { return false }
+        guard bytes >= 0 else { return false }
+        guard bytes <= instructionMaxBytes else { return false }
+        guard digest.utf8.count == 64 else { return false }
+        guard digest.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else { return false }
+        let states: [String] = ["refresh-required", "unavailable"]
+        return states.contains(refreshState)
     }
     private static func decodeInstructions(_ read: CoworkInstructionRead, workspaceId: String) throws -> String {
         guard validMetadata(workspaceId: read.workspaceId, revision: read.instructionRevision, digest: read.digest, bytes: read.bytes, refreshState: read.refreshState, expectedWorkspace: workspaceId),
@@ -193,7 +208,9 @@ import WinterProtocol
         guard Data(text.utf8) == bytes, !text.contains("\0"), digest(bytes) == read.digest else { throw ModelError.invalidInstructions }
         return text
     }
-    private func readGuidance(_ id: String) async {
+    /// `keepingReceipt` is true only for the read that immediately follows a recorded save, so the
+    /// "save recorded" banner survives the refresh it triggered; every other read retires it.
+    private func readGuidance(_ id: String, keepingReceipt: Bool = false) async {
         do {
             let read = try await send(CoworkRequest<CoworkInstructionRead>.instructions(workspaceId: id))
             let content = try Self.decodeInstructions(read, workspaceId: id)
@@ -204,6 +221,16 @@ import WinterProtocol
                   provenance.entries.first?.kind == "workspace", provenance.entries.first?.guestPath == "/workspace/.winter/WINTER.md",
                   provenance.entries.first?.digest == read.digest else { throw ModelError.invalidInstructions }
             var state = guidanceByWorkspace[id] ?? Guidance(workspaceId: id)
+            // The host already holds exactly this unconfirmed save's bytes, one revision past the
+            // revision it was written against: it was applied and only its response was lost. Settle it
+            // as applied. No receipt is invented (its operation ID is unknown), and the draft keeps
+            // whatever has been typed since, now measured against the saved content as its base.
+            var resolved = false
+            if let pending = state.pending, read.instructionRevision == pending.expectedRevision + 1,
+               read.digest == Self.digest(Data(pending.content.utf8)) {
+                state.pending = nil; state.conflict = false; resolved = true
+                state.baseRevision = read.instructionRevision; state.baseDigest = read.digest; state.baseContent = content
+            }
             // Compare byte encodings: Swift String equality alone treats canonically equivalent
             // Unicode spellings as equal, but the host digest and optimistic write operate on bytes.
             let clean = state.draft.map { Data($0.utf8) } == state.baseContent.map { Data($0.utf8) }
@@ -215,24 +242,49 @@ import WinterProtocol
             }
             state.current = read; state.currentContent = content; state.provenance = provenance
             state.available = read.refreshState == "refresh-required"
-            state.message = state.pending != nil ? "The previous save is not confirmed. Retry that save before submitting another." : nil
+            if !keepingReceipt { state.receipt = nil }
+            if resolved {
+                state.message = "The earlier unconfirmed save was found applied by this refresh, at instruction revision \(read.instructionRevision)."
+            } else if state.pending != nil {
+                state.message = "The previous save is not confirmed. Retry it, or abandon it if retrying keeps failing."
+            } else {
+                state.message = nil
+            }
             publishGuidance(state)
         } catch {
             var state = guidanceByWorkspace[id] ?? Guidance(workspaceId: id)
             state.available = false
+            if !keepingReceipt { state.receipt = nil }
             state.message = "Shared instructions are unavailable. Refresh to try again; any draft and unconfirmed save are retained."
             publishGuidance(state)
         }
     }
+    /// Ends the guidance operation that holds `guidanceBusy`. A workspace selected while it ran could
+    /// not start its own read (`detail` queued it), so that read runs now instead of never.
+    private func finishGuidanceOperation() async {
+        guidanceBusy = false
+        while let id = queuedGuidanceRead {
+            queuedGuidanceRead = nil
+            guard selected?.workspaceId == id else { continue }
+            guidanceBusy = true
+            await readGuidance(id)
+            guidanceBusy = false
+        }
+    }
     public func refreshInstructions(workspaceId: String? = nil) async {
         guard !busy, !guidanceBusy, let id = selected?.workspaceId, workspaceId == nil || workspaceId == id else { return }
-        guidanceBusy = true; defer { guidanceBusy = false }
+        guidanceBusy = true
         await readGuidance(id)
+        await finishGuidanceOperation()
     }
     public func editInstructions(_ content: String, workspaceId: String? = nil) {
         guard let id = selected?.workspaceId, workspaceId == nil || workspaceId == id,
               var state = guidanceByWorkspace[id], state.draft != nil else { return }
-        state.draft = content; publishGuidance(state)
+        state.draft = content
+        // A save receipt, and a refusal of the previous draft, describe text that has since changed.
+        state.receipt = nil
+        if state.messageIsAboutDraft { state.message = nil }
+        publishGuidance(state)
     }
     /// Explicit conflict resolution after displaying the latest canonical content. Nothing is
     /// rebased automatically while a draft or unknown receipt could overwrite another user's edit.
@@ -253,12 +305,12 @@ import WinterProtocol
         if let expectedDraft, Data(expectedDraft.utf8) != Data(content.utf8) { return }
         guard expectedRevision == nil || expectedRevision == revision, expectedDigest == nil || expectedDigest == digest else { return }
         guard content.utf8.count <= Self.instructionMaxBytes, !content.contains("\0") else {
-            state.message = "Shared instructions must contain at most 65,536 UTF-8 bytes and no NUL characters."
+            state.note("Shared instructions must contain at most 65,536 UTF-8 bytes and no NUL characters.", aboutDraft: true)
             publishGuidance(state); return
         }
         // Capture every field before the first await. Later edits/refreshes cannot change a retry.
         let save = InstructionSave(workspaceId: id, requestId: UUID().uuidString, expectedDigest: digest, content: content, expectedRevision: revision)
-        state.pending = save; state.message = nil; publishGuidance(state)
+        state.pending = save; state.receipt = nil; state.message = nil; publishGuidance(state)
         await performInstructionSave(save)
     }
     public func retryInstructionSave(workspaceId: String? = nil, requestId: String? = nil) async {
@@ -266,8 +318,27 @@ import WinterProtocol
               let save = guidanceByWorkspace[id]?.pending, requestId == nil || requestId == save.requestId else { return }
         await performInstructionSave(save)
     }
+    /// Gives up on an unconfirmed save that cannot resolve, for example when the host answers
+    /// `recovery_required` forever to a failed journaled operation's request ID. The draft is kept.
+    /// The refresh comes first, so a save the host did apply is settled as applied rather than
+    /// dropped. A save still unresolved afterwards is forgotten and the draft's base is cleared:
+    /// the user must review the host's current content (`reviewInstructionConflict`) before any
+    /// new save, which then carries a fresh request ID.
+    public func abandonInstructionSave(workspaceId: String? = nil, requestId: String? = nil) async {
+        guard !busy, !guidanceBusy, let id = selected?.workspaceId, workspaceId == nil || workspaceId == id,
+              let save = guidanceByWorkspace[id]?.pending, requestId == nil || requestId == save.requestId else { return }
+        guidanceBusy = true
+        await readGuidance(id)
+        if var state = guidanceByWorkspace[id], state.pending?.requestId == save.requestId {
+            state.pending = nil; state.baseRevision = nil; state.baseDigest = nil; state.baseContent = nil
+            state.conflict = true
+            state.note("The unconfirmed save was abandoned. Compare the current shared content with your retained draft before saving.", aboutDraft: false)
+            publishGuidance(state)
+        }
+        await finishGuidanceOperation()
+    }
     private func performInstructionSave(_ save: InstructionSave) async {
-        guidanceBusy = true; defer { guidanceBusy = false }
+        guidanceBusy = true
         do {
             let receipt = try await send(CoworkRequest<CoworkReceipt<CoworkInstructionMetadata>>.updateInstructions(workspaceId: save.workspaceId, requestId: save.requestId,
                 expectedInstructionRevision: save.expectedRevision, expectedDigest: save.expectedDigest, content: save.content))
@@ -284,16 +355,57 @@ import WinterProtocol
             state.baseRevision = metadata.instructionRevision; state.baseDigest = metadata.digest; state.baseContent = save.content
             // Keep the latest draft, including edits typed while this exact save was in flight.
             state.message = "Save recorded. Refreshing canonical content…"; publishGuidance(state)
-            await readGuidance(save.workspaceId)
+            await readGuidance(save.workspaceId, keepingReceipt: true)
         } catch {
-            var state = guidanceByWorkspace[save.workspaceId]!
-            state.available = false
-            if let rpc = error as? RpcError, rpc.data?["code"]?.stringValue == "revision_conflict" {
-                state.pending = nil; state.conflict = true
-                state.message = "Shared instructions changed before this save. Refresh and review the current version; your draft is retained."
+            await settleFailedSave(error, save)
+        }
+        await finishGuidanceOperation()
+    }
+    /// What the host can say about a refused save, keyed by its `error.data.code`. All of these
+    /// mean the request was refused before any write: nothing was applied, and replaying the same
+    /// request ID can never succeed, so the pending save is dropped (the draft is kept).
+    private static let definitiveSaveRefusals: [String: String] = [
+        "authority_denied": "Changing shared instructions was not permitted. Nothing was saved; your draft is retained.",
+        "invalid_request": "The host refused this content as an invalid request. Nothing was saved; your draft is retained. Check the size limit and remove NUL characters.",
+        "not_found": "The host could not find this workspace's shared instructions. Nothing was saved; your draft is retained. Refresh to check their state.",
+        "unsupported_topology": "This host cannot edit shared instructions for this workspace. Nothing was saved; your draft is retained.",
+        "request_conflict": "The host refused this save because its request identity was already used for different content. Nothing was saved; your draft is retained. Save again to send it as a new request.",
+    ]
+    private func settleFailedSave(_ error: Error, _ save: InstructionSave) async {
+        var state = guidanceByWorkspace[save.workspaceId]!
+        let rpc = error as? RpcError
+        let code = rpc?.data?["code"]?.stringValue
+        if code == "revision_conflict" {
+            // Definitive: the host changed first. Fetch the version that won so the review compares
+            // against its current content, then hold the draft behind that explicit review.
+            state.pending = nil; state.conflict = true
+            publishGuidance(state)
+            await readGuidance(save.workspaceId)
+            var settled = guidanceByWorkspace[save.workspaceId] ?? state
+            settled.pending = nil; settled.conflict = true
+            if settled.available {
+                settled.note("Shared instructions changed before this save. Review the current version below; your draft is retained.", aboutDraft: false)
             } else {
-                state.message = "Save not confirmed. Your draft is retained. Retry the same save to resolve its receipt."
+                settled.note("Shared instructions changed before this save. Refresh to review the current version; your draft is retained.", aboutDraft: false)
             }
+            publishGuidance(settled)
+        } else if let code, let text = Self.definitiveSaveRefusals[code] {
+            state.pending = nil
+            state.note(text, aboutDraft: true)
+            publishGuidance(state)
+        } else if isMethodNotFoundError(error) {
+            // An older daemon without the method cannot have applied anything.
+            state.pending = nil
+            state.note("This version of the Winter service cannot edit shared instructions yet. Nothing was saved; your draft is retained.", aboutDraft: true)
+            publishGuidance(state)
+        } else if code == "recovery_required" {
+            // Unknown whether it was applied, and it may never resolve: the host keeps this request
+            // ID's failed operation forever. Keep the save and offer both ways forward.
+            state.note("The host could not confirm this save and has not finished recovering it. Your draft is retained. Retry the same save, or abandon it if retrying keeps failing.", aboutDraft: false)
+            publishGuidance(state)
+        } else {
+            // Transport loss or an invalid receipt: the write may have been applied.
+            state.note("Save not confirmed. Your draft is retained. Retry the same save to resolve its receipt, or abandon it.", aboutDraft: false)
             publishGuidance(state)
         }
     }
