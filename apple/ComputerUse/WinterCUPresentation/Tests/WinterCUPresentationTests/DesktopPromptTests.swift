@@ -200,7 +200,7 @@ import XCTest
 
     func testTheIslandSaysOneShortLineAndNamesTheAppAndItsBundleIdApart() {
         let m = model()
-        XCTAssertEqual(m.headline, "Winter needs your view for a sec")
+        XCTAssertEqual(m.headline, "Winter needs your view for a sec on Google Chrome")
         XCTAssertEqual(m.appName, "Google Chrome")
         XCTAssertEqual(m.bundleId, "com.google.Chrome")
         XCTAssertEqual(model(app: "", bundle: "").appName, "the app")
@@ -216,35 +216,48 @@ import XCTest
         XCTAssertEqual(m.fractionLeft(now: 500), 0, "never below empty")
     }
 
-    func testItGrowsOutOfTheCameraHousingWhenTheScreenHasOne() {
-        let g = DesktopIslandGeometry.make(housing: CGSize(width: 185, height: 32), menuBarHeight: 32, slot: 0)
-        XCTAssertTrue(g.attached)
-        XCTAssertEqual(g.closed, CGSize(width: 185, height: 32), "it springs out of the housing itself")
-        XCTAssertEqual(g.topInset, 32, "nothing is drawn behind the camera")
-        XCTAssertEqual(g.size, CGSize(width: 360, height: 82))
-        let wide = DesktopIslandGeometry.make(housing: CGSize(width: 260, height: 32), menuBarHeight: 32, slot: 0)
-        XCTAssertEqual(wide.size.width, 410, "always wider than the housing")
+    func testThePillRestsJustBelowTheHousingAndFitsItsLine() {
+        let width = DesktopIslandGeometry.pillWidth(for: model().headline)
+        XCTAssertTrue(DesktopIslandGeometry.widthRange.contains(width))
+        XCTAssertGreaterThan(DesktopIslandGeometry.pillWidth(for: model(app: "Safari").headline + " and much more text"),
+                             DesktopIslandGeometry.pillWidth(for: model(app: "Safari").headline))
+        XCTAssertEqual(DesktopIslandGeometry.pillWidth(for: String(repeating: "W", count: 400)),
+                       DesktopIslandGeometry.widthRange.upperBound, "a long name is capped; the line truncates")
+        let g = DesktopIslandGeometry.make(housing: CGSize(width: 185, height: 32), menuBarHeight: 32, pillWidth: 340, slot: 0)
+        XCTAssertTrue(g.sourceIsHousing)
+        XCTAssertFalse(g.floating)
+        XCTAssertEqual(g.source.size, CGSize(width: 185, height: 32))
+        XCTAssertEqual(g.source.minY, 0)
+        XCTAssertEqual(g.pill.minY, 42, "10 pt below the housing")
+        XCTAssertEqual(g.pill.midX, g.source.midX, "centred under the housing")
+        XCTAssertEqual(g.panelSize.height, g.pill.maxY + DesktopIslandGeometry.margin)
     }
 
-    func testWithoutAHousingItHangsUnderTheTopEdgeAndASecondPromptFloats() {
-        let g = DesktopIslandGeometry.make(housing: nil, menuBarHeight: 24, slot: 0)
-        XCTAssertTrue(g.attached)
-        XCTAssertEqual(g.closed.height, 24)
-        XCTAssertEqual(g.size.height, 74)
-        let second = DesktopIslandGeometry.make(housing: CGSize(width: 185, height: 32), menuBarHeight: 32, slot: 1)
-        XCTAssertFalse(second.attached)
-        XCTAssertEqual(second.topInset, 0)
-        XCTAssertEqual(second.size.height, 50)
+    func testTheBirthGrowsOutOfTheHousingThenTheNeckPartsAndThePillRests() {
+        let g = DesktopIslandGeometry.make(housing: CGSize(width: 185, height: 32), menuBarHeight: 32, pillWidth: 340, slot: 0)
+        func stem(_ t: Double) -> DesktopIslandGeometry.Blob? {
+            g.blobs(at: t).first { $0.rect.minY < 0 && $0.rect.width < g.source.width }
+        }
+        XCTAssertEqual(stem(0.42)?.rect.maxY ?? 0, g.pill.midY, accuracy: 0.5, "the mass reaches down to the pill")
+        XCTAssertLessThanOrEqual(stem(1)?.rect.maxY ?? 0, g.source.maxY - 10,
+                                 "the neck has parted and pulled back up inside the housing")
+        let resting = g.blobs(at: 1).last!
+        XCTAssertEqual(resting.rect, g.pill, "the pill rests where it is drawn crisp")
+        XCTAssertEqual(DesktopIslandGeometry.crispAlpha(1), 1)
+        XCTAssertEqual(DesktopIslandGeometry.contentAlpha(0.5), 0, "no words while it is still being born")
+        XCTAssertEqual(DesktopIslandGeometry.contentAlpha(1), 1)
     }
 
-    func testTheEarsCurveIntoTheTopEdgeAndTheFloatingIslandHasNone() {
-        let rect = CGRect(x: 0, y: 0, width: 380, height: 82)
-        let attached = IslandShape(bottomRadius: 22, ear: 10, floating: false).path(in: rect)
-        XCTAssertTrue(attached.contains(CGPoint(x: 1, y: 0.2)), "the ear meets the top edge at the panel's side")
-        XCTAssertFalse(attached.contains(CGPoint(x: 1, y: 8)), "below the edge the ear curves away (concave)")
-        XCTAssertTrue(attached.contains(CGPoint(x: 190, y: 81)))
-        XCTAssertFalse(attached.contains(CGPoint(x: 11, y: 81)), "round bottom corner")
-        let floating = IslandShape(bottomRadius: 22, ear: 0, floating: true).path(in: rect)
-        XCTAssertFalse(floating.contains(CGPoint(x: 1, y: 1)), "round top corner when it floats")
+    func testWithoutAHousingItIsBornFromTheTopEdgeAndASecondPromptFloats() {
+        let g = DesktopIslandGeometry.make(housing: nil, menuBarHeight: 24, pillWidth: 340, slot: 0)
+        XCTAssertFalse(g.sourceIsHousing)
+        XCTAssertEqual(g.source.height, 0)
+        XCTAssertEqual(g.pill.minY, 34, "below the menu bar")
+        XCTAssertEqual(g.blobs(at: 1).count, 1, "only the pill remains")
+        let second = DesktopIslandGeometry.make(housing: nil, menuBarHeight: 24, pillWidth: 340, slot: 1)
+        XCTAssertTrue(second.floating)
+        XCTAssertEqual(second.blobs(at: 1).map(\.rect), [second.pill])
+        XCTAssertEqual(DesktopIslandGeometry.panelTop(slot: 1, housing: nil, menuBarHeight: 24),
+                       24 + 10 + 44 + 10 - DesktopIslandGeometry.margin, "its pill sits 10 pt under the first one's")
     }
 }

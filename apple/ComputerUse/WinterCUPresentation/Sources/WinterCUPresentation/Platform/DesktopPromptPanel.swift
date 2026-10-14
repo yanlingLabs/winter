@@ -55,7 +55,7 @@ final class DesktopPromptPanel: NSPanel {
     init(_ model: CUDesktopPromptModel) {
         self.model = model
         state = DesktopIslandState(secondsLeft: model.secondsLeft(now: SystemClock().now))
-        panel = DesktopPromptPanel(contentRect: CGRect(x: 0, y: 0, width: DesktopIslandGeometry.width, height: 120))
+        panel = DesktopPromptPanel(contentRect: CGRect(x: 0, y: 0, width: 400, height: 120))
         super.init()
         // Its window name (the window list's), so a reader of the list can tell this panel from the helper's others.
         panel.title = model.title
@@ -72,39 +72,47 @@ final class DesktopPromptPanel: NSPanel {
             shown = true
             if NSApp.isHidden { NSApp.unhideWithoutActivation() }
             panel.orderFrontRegardless()
-            // Drawn closed first, then sprung open on the next turn of the run loop.
+            // Drawn as nothing first, then born on the next turn of the run loop.
             DispatchQueue.main.async { [state] in state.open = true }
         }
     }
 
-    /// Closed, not merely hidden: the window leaves the window list's on-screen set at once, and goes with this
-    /// object (the controller drops it).
+    /// Closed, not merely hidden: the window leaves the window list's on-screen set, and goes with this object (the
+    /// controller drops it). Answered on its own buttons, the pill first goes back into the housing; answered on the
+    /// card or cancelled, it goes at once.
     func close() {
         shown = false
-        panel.orderOut(nil)
-        panel.close()
+        let panel = panel
+        guard state.answeredHere, state.open, !reduceMotion else {
+            panel.orderOut(nil)
+            panel.close()
+            return
+        }
+        state.open = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + DesktopIslandView.duration) {
+            panel.orderOut(nil)
+            panel.close()
+        }
     }
 
-    /// Hangs from the top centre of the screen the pointer is on (where the user is), out of its camera housing
-    /// when it has one; a second prompt floats `slot` islands down.
+    /// Born from the camera housing at the top centre of the screen the pointer is on (where the user is), or from
+    /// the top edge without one; a second prompt floats below the first.
     private func place(slot: Int) {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main ?? NSScreen.screens.first
         let frame = screen?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
-        let geometry = DesktopIslandGeometry.make(housing: screen.flatMap(Self.housing),
-                                                  menuBarHeight: frame.maxY - (screen?.visibleFrame.maxY ?? frame.maxY),
-                                                  slot: slot)
+        let housing = screen.flatMap(Self.housing)
+        let menuBar = frame.maxY - (screen?.visibleFrame.maxY ?? frame.maxY)
+        let geometry = DesktopIslandGeometry.make(housing: housing, menuBarHeight: menuBar,
+                                                  pillWidth: DesktopIslandGeometry.pillWidth(for: model.headline), slot: slot)
         let view = DesktopIslandView(model: model, geometry: geometry, state: state, reduceMotion: reduceMotion)
         let host = FirstClickHostingView(rootView: view)
         host.sizingOptions = []
         panel.contentView = host
-        let m = DesktopIslandGeometry.margin
-        let width = geometry.size.width + 2 * m
-        let height = geometry.size.height + m + (geometry.attached ? 0 : m)
-        // Slot 0 hangs from the top edge; each later one floats below the island above it.
-        let top = slot == 0 ? frame.maxY
-            : frame.maxY - CGFloat(slot) * (geometry.size.height + DesktopIslandGeometry.gap) - m
-        panel.setFrame(CGRect(x: frame.midX - width / 2, y: top - height, width: width, height: height), display: true)
+        let size = geometry.panelSize
+        let top = frame.maxY - DesktopIslandGeometry.panelTop(slot: slot, housing: housing, menuBarHeight: menuBar)
+        panel.setFrame(CGRect(x: frame.midX - size.width / 2, y: top - size.height, width: size.width, height: size.height),
+                       display: true)
     }
 
     /// The camera housing's size on `screen`, nil when it has none.

@@ -57,8 +57,8 @@ public struct CUDesktopPromptModel: Sendable, Equatable {
     /// The model's reason, one sanitized line ("" when none).
     public let reason: String
     public let backLine = "Winter will bring you back right after."
-    /// The island's one short line (user ruling 2026-10-14: a black island at the top of the screen).
-    public let headline = "Winter needs your view for a sec"
+    /// The island's one short line (user ruling 2026-10-14): "Winter needs your view for a sec on Safari".
+    public let headline: String
     /// The app's name alone ("Safari"), and its bundle id ("com.apple.Safari", "" when none): the island shows both,
     /// so a look-alike app cannot borrow a trusted name.
     public let appName: String
@@ -81,6 +81,7 @@ public struct CUDesktopPromptModel: Sendable, Equatable {
         appLine = bundle.isEmpty ? name : "\(name) (\(bundle))"
         appName = name
         bundleId = bundle
+        headline = "Winter needs your view for a sec on \(name)"
         reason = Self.sanitize(r.reason, max: Self.reasonMax)
         let ms: Double
         if let expiresAt = r.expiresAt {
