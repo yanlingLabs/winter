@@ -20,13 +20,16 @@ import WinterProtocol
                 Button("Refresh schedules", systemImage: "arrow.clockwise") { Task { await model.refresh() } }
             }
             Label("Scheduled execution is unavailable", systemImage: "clock").foregroundStyle(.secondary)
+            if model.isUnsupported {
+                Text("Schedules are not available from this Winter daemon yet. Update Winter to see them.").foregroundStyle(.secondary)
+            }
             if model.busy { ProgressView("Reading schedule metadata…") }
             if let error = model.error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             if let receipt = model.lastCancellation {
                 Text("Cancellation recorded for \(receipt.scheduleId). Check occurrence status for any uncertain effects.")
                     .font(.caption).textSelection(.enabled)
             }
-            if model.schedules.isEmpty && !model.busy { Text("No schedules on this page.").foregroundStyle(.secondary) }
+            if model.schedules.isEmpty && !model.busy && !model.isUnsupported { Text("No schedules on this page.").foregroundStyle(.secondary) }
             ForEach(model.schedules, id: \.scheduleId) { value in
                 VStack(alignment: .leading, spacing: 6) {
                     switch value {
@@ -34,19 +37,21 @@ import WinterProtocol
                         Text(record.definition.prompt).lineLimit(2)
                         Text("\(record.state.rawValue) · revision \(record.revision)").font(.caption)
                         Text(timing(record.definition)).font(.caption).foregroundStyle(.secondary)
-                        Text(record.nextDue.map { "Next due: \(date($0))" } ?? "No future due time recorded").font(.caption).foregroundStyle(.secondary)
+                        Text(nextDue(record)).font(.caption).foregroundStyle(.secondary)
                         Text("Approvals: \(record.definition.policy.rawValue) · source: \(record.definition.sourceId)").font(.caption).textSelection(.enabled)
                     case let .quarantined(record):
-                        Text("Schedule quarantined").foregroundStyle(.orange)
+                        Text("Schedule quarantined").foregroundStyle(.red)
                         Text("invalid_schedule · revision \(record.revision)\(record.cancelled ? " · cancelled" : "")").font(.caption)
                     }
                     Text(value.scheduleId).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
                     HStack {
                         Button("Details") { Task { await model.inspect(scheduleId: value.scheduleId) } }
+                            .accessibilityLabel("Details for schedule \(value.scheduleId)")
                         Button("Cancel schedule", role: .destructive) { cancellation = value }.disabled(!value.canCancel)
+                            .accessibilityLabel("Cancel schedule \(value.scheduleId)")
                     }
                 }.padding().frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                    .background(Theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             HStack {
                 Button("Previous page") { Task { await model.previousPage() } }.disabled(!model.canGoBack)
@@ -91,20 +96,41 @@ import WinterProtocol
                     Text("\(occurrence.state.rawValue) · missed: \(occurrence.missedCount)")
                     Text("First due: \(date(occurrence.dueAt)); latest coalesced: \(date(occurrence.latestDueAt))").font(.caption)
                     if let reason = occurrence.reason { Text(reason.rawValue).font(.caption).foregroundStyle(.secondary) }
-                    if occurrence.state == .uncertain { Text("Recovery required. A completed effect is not confirmed.").font(.caption).foregroundStyle(.orange) }
+                    if occurrence.state == .uncertain { Text("Recovery required. A completed effect is not confirmed.").font(.caption).foregroundStyle(.red) }
                     Text(occurrence.occurrenceId).font(.caption2).textSelection(.enabled)
                 }
             }
         }.padding().frame(maxWidth: .infinity, alignment: .leading)
     }
     private func timing(_ value: CoworkScheduleDefinition) -> String {
-        switch value.timing { case let .once(at): "Once: \(date(at))"; case let .recurring(spec): "Recurring: \(spec) · \(value.timezone)" }
+        switch value.timing {
+        case let .once(at):
+            // An instant is meaningless without its zone: show it in the schedule's own zone, named.
+            guard let zone = TimeZone(identifier: value.timezone) else {
+                return "Once: \(date(at)) · schedule time zone \(value.timezone) is not recognized on this Mac"
+            }
+            return "Once: \(date(at, in: zone))"
+        case let .recurring(spec):
+            return "Recurring: \(spec) · \(value.timezone)"
+        }
+    }
+    private func nextDue(_ record: CoworkSchedule) -> String {
+        guard let due = record.nextDue else { return "No future due time recorded" }
+        return "Next due: \(date(due, in: TimeZone(identifier: record.definition.timezone) ?? .current))"
     }
     private func target(_ value: CoworkScheduleTarget) -> String {
-        switch value { case let .conversation(id): "Conversation \(id)"; case let .project(id): "Project \(id)" }
+        switch value {
+        case let .conversation(id): return "Conversation \(id)"
+        case let .project(id): return "Project \(id)"
+        }
     }
-    private func date(_ milliseconds: Double) -> String {
+    /// Every instant names its zone: a schedule's own zone for its once and next-due times, this Mac's
+    /// for the host's occurrence bookkeeping.
+    private func date(_ milliseconds: Double, in zone: TimeZone = .current) -> String {
         guard abs(milliseconds) <= 8_640_000_000_000_000 else { return String(milliseconds) }
-        return Date(timeIntervalSince1970: milliseconds / 1000).formatted(date: .abbreviated, time: .shortened)
+        let formatter = DateFormatter()
+        formatter.timeZone = zone
+        formatter.setLocalizedDateFormatFromTemplate("yMMMdjmm")
+        return "\(formatter.string(from: Date(timeIntervalSince1970: milliseconds / 1000))) \(zone.identifier)"
     }
 }

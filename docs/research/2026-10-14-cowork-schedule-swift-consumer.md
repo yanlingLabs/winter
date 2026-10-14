@@ -20,7 +20,7 @@ the existing local schedule authority. It does not admit scheduled execution.
   schedule and occurrence identities, rejects duplicate identities/cursor loops,
   and limits page history to 100 cursors. The 256 KiB Foundation re-encoding bound
   accommodates slash escaping over Core's existing 128 KiB list response budget.
-  At most 128 unconfirmed cancellation revisions are retained.
+  At most 128 unconfirmed cancellation revisions are retained (see "Review fixes").
 - Workspace binding UUIDs prevent late reads/receipts from entering a later
   selection, including returning to the same workspace ID. The parent model's
   `selected` observer invalidates schedules immediately during navigation or
@@ -40,12 +40,38 @@ internal to WinterProtocol so the dedicated factory extensions can use it.
 Source/policy paging and existing workspace publication/default/bypass behavior
 are unchanged. Capability counts never become saved capability authority.
 
+## Review fixes
+
+- **Stale cancellation pin.** A pinned cancel revision is the lost-reply replay token. It is
+  sent again only while the row still sits at that exact revision; at any other revision the
+  earlier attempt cannot have applied (revisions only advance), so the pin is dropped before
+  the unconfirmed-limit check and a list publish releases it. A definitive refusal
+  (`revision_conflict`, `not_found`, `authority_denied`, `invalid_request`, or a missing
+  method) releases it at once; ambiguous failures (transport loss, `recovery_required`,
+  `unsupported_topology`, unknown codes) keep it. A `revision_conflict` re-reads the page the
+  reader is on inside the same busy scope, so the next attempt carries the current revision.
+  Before this, a once-schedule that fired (revision 2, `handled`) after a refused attempt kept
+  re-sending revision 1 forever.
+- **Error text.** `RpcError` is not `LocalizedError`; its `localizedDescription` is a generic
+  Cocoa string and its `message` is daemon prose. `RpcError.data.code` (Core's `CoworkError`,
+  as relayed by `ipc/server.ts`) maps to one fixed sentence per code, an unknown code to a
+  generic sentence with only the numeric JSON-RPC code. A daemon that answers `-32601` for the
+  schedule methods is the neutral `isUnsupported` state (no red error, no empty-list claim).
+- **Wire parity.** Ceiling labels compare Unicode scalars, so `"\r\n"` is refused like Core's
+  `/[\0\r\n]/`. Response decoding keeps strict, closed key sets, matching Core's `.strict()`
+  schemas. `CoworkWorkspaceModel.validTitle` still compares `Character`s and accepts `"\r\n"`;
+  it belongs to the workspace lane and was deliberately not changed here.
+- **Presentation.** Once and next-due times name their time zone; the receipt banner clears on
+  a new listing or rebinding; row buttons carry per-schedule accessibility labels; the card
+  fill is `ElevatedSurface` and alerts use `.red` (docs/brand.md section 3.5).
+
 ## Source regressions and verification limits
 
-Nine protocol regression methods cover strict schema/nullable round trips,
-quarantine safety, all existing policies/reasons, UTF-16/trim bounds, target/timing,
-explicit creation identity and the exact cancellation wire shape.
-Twenty async fake-transport model regression methods cover canonical unavailable
+Twelve protocol regression methods cover strict schema/nullable round trips,
+quarantine safety, all existing policies/reasons, UTF-16/trim bounds (including
+the NUL/CR/LF scalars of Core's label check), target/timing, definition bounds,
+view accessors, explicit creation identity and the exact cancellation wire shape.
+Thirty-two async fake-transport model regression methods cover canonical unavailable
 status, coalescing/claims/recovery, cross-workspace and same-ID generation races,
 late reads/receipts, immediate parent selection invalidation, exact cancellation
 retry, serialization, invalid receipts, post-receipt read failure, pagination

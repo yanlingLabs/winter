@@ -21,7 +21,12 @@ private enum ScheduleWire {
     static func id(_ value: String) -> Bool { value.range(of: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$", options: .regularExpression) == (value.startIndex..<value.endIndex) }
     static func revision(_ value: Int) -> Bool { value > 0 && value <= 9_007_199_254_740_991 }
     static let trimCharacters = CharacterSet(charactersIn: "\u{0009}\u{000B}\u{000C}\u{0020}\u{00A0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}")
-    static func label(_ value: String) -> Bool { !value.trimmingCharacters(in: trimCharacters).isEmpty && value.utf16.count <= 200 && !value.contains(where: { $0 == "\0" || $0 == "\r" || $0 == "\n" }) }
+    /// Core tests `/[\0\r\n]/` against UTF-16 code units. A Swift `Character` is a grapheme cluster, so "\r\n" is ONE
+    /// Character equal to neither "\r" nor "\n"; compare scalars (NUL, CR, LF) so the pair is refused here too.
+    static func label(_ value: String) -> Bool {
+        guard !value.trimmingCharacters(in: trimCharacters).isEmpty, value.utf16.count <= 200 else { return false }
+        return !value.unicodeScalars.contains(where: { $0.value == 0x00 || $0.value == 0x0D || $0.value == 0x0A })
+    }
     static func ceiling(_ value: CoworkCapabilityCeiling) -> Bool {
         ["none", "internet"].contains(value.network) && [value.toolClasses, value.hostServices, value.connectors].allSatisfy { $0.count <= 256 && $0.allSatisfy(label) }
     }
@@ -89,7 +94,12 @@ public struct CoworkScheduleDefinition: Codable, Equatable, Sendable {
         savedCeiling = try CoworkCapabilityCeiling(from: ceilingDecoder); policy = try c.decode(CoworkApprovalPolicy.self, forKey: .policy); overlap = try c.decode(CoworkScheduleOverlap.self, forKey: .overlap)
         branchPrecondition = try c.decodeIfPresent(String.self, forKey: .branchPrecondition)
         if c.contains(.branchPrecondition), try c.decodeNil(forKey: .branchPrecondition) { throw ScheduleWire.invalid(decoder, "Branch precondition cannot be null") }
-        try ScheduleWire.require(ScheduleWire.id(sourceId) && !prompt.isEmpty && prompt.utf16.count <= 8192 && !prompt.contains("\0") && !timezone.isEmpty && timezone.utf16.count <= 100 && ScheduleWire.ceiling(savedCeiling) && (branchPrecondition.map { !$0.isEmpty && $0.utf16.count <= 200 } ?? true), decoder)
+        try ScheduleWire.require(ScheduleWire.id(sourceId), decoder)
+        try ScheduleWire.require(!prompt.isEmpty && prompt.utf16.count <= 8192, decoder)
+        try ScheduleWire.require(!prompt.contains("\0"), decoder)
+        try ScheduleWire.require(!timezone.isEmpty && timezone.utf16.count <= 100, decoder)
+        try ScheduleWire.require(ScheduleWire.ceiling(savedCeiling), decoder)
+        if let branch = branchPrecondition { try ScheduleWire.require(!branch.isEmpty && branch.utf16.count <= 200, decoder) }
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: Keys.self)
@@ -135,17 +145,47 @@ public struct CoworkQuarantinedSchedule: Codable, Equatable, Sendable {
 }
 public enum CoworkScheduleView: Codable, Equatable, Sendable {
     case schedule(CoworkSchedule), quarantined(CoworkQuarantinedSchedule)
-    public var scheduleId: String { switch self { case let .schedule(v): v.scheduleId; case let .quarantined(v): v.scheduleId } }
-    public var workspaceId: String { switch self { case let .schedule(v): v.workspaceId; case let .quarantined(v): v.workspaceId } }
-    public var revision: Int { switch self { case let .schedule(v): v.revision; case let .quarantined(v): v.revision } }
-    public var isCancelled: Bool { switch self { case let .schedule(v): v.state == .cancelled; case let .quarantined(v): v.cancelled } }
-    public var canCancel: Bool { switch self { case let .schedule(v): v.state != .cancelled; case let .quarantined(v): !v.cancelled } }
+    public var scheduleId: String {
+        switch self {
+        case let .schedule(v): return v.scheduleId
+        case let .quarantined(v): return v.scheduleId
+        }
+    }
+    public var workspaceId: String {
+        switch self {
+        case let .schedule(v): return v.workspaceId
+        case let .quarantined(v): return v.workspaceId
+        }
+    }
+    public var revision: Int {
+        switch self {
+        case let .schedule(v): return v.revision
+        case let .quarantined(v): return v.revision
+        }
+    }
+    public var isCancelled: Bool {
+        switch self {
+        case let .schedule(v): return v.state == .cancelled
+        case let .quarantined(v): return v.cancelled
+        }
+    }
+    public var canCancel: Bool {
+        switch self {
+        case let .schedule(v): return v.state != .cancelled
+        case let .quarantined(v): return !v.cancelled
+        }
+    }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: ScheduleWire.Key.self)
         if try c.decode(String.self, forKey: ScheduleWire.Key(stringValue: "state")!) == "quarantined" { self = .quarantined(try CoworkQuarantinedSchedule(from: decoder)) }
         else { self = .schedule(try CoworkSchedule(from: decoder)) }
     }
-    public func encode(to encoder: Encoder) throws { switch self { case let .schedule(v): try v.encode(to: encoder); case let .quarantined(v): try v.encode(to: encoder) } }
+    public func encode(to encoder: Encoder) throws {
+        switch self {
+        case let .schedule(v): try v.encode(to: encoder)
+        case let .quarantined(v): try v.encode(to: encoder)
+        }
+    }
 }
 public struct CoworkScheduleOccurrence: Codable, Equatable, Sendable {
     public let occurrenceId: String, scheduleId: String, dueAt: Double, latestDueAt: Double, missedCount: Int, state: CoworkScheduleOccurrenceState, reason: CoworkScheduleReason?

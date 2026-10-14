@@ -68,6 +68,45 @@ final class CoworkScheduleTests: XCTestCase {
         ceiling["savedCeiling"] = ["toolClasses": [String(repeating: "🙂", count: 101)], "hostServices": [], "connectors": [], "network": "none"]
         XCTAssertThrowsError(try decode(CoworkScheduleDefinition.self, ceiling))
     }
+    func testCeilingLabelsRefuseNulCarriageReturnAndLineFeedLikeCore() throws {
+        // Core's /[\0\r\n]/ sees "\r\n" as two code units. A Swift Character comparison sees ONE grapheme,
+        // equal to neither "\r" nor "\n", and used to let the pair through.
+        for bad in ["a\r\nb", "\r\n", "a\rb", "a\nb", "a\0b"] {
+            var ceiling = definition
+            ceiling["savedCeiling"] = ["toolClasses": [bad], "hostServices": [], "connectors": [], "network": "none"]
+            XCTAssertThrowsError(try decode(CoworkScheduleDefinition.self, ceiling), "\(bad.debugDescription) must be refused")
+            ceiling["savedCeiling"] = ["toolClasses": [], "hostServices": [bad], "connectors": [], "network": "none"]
+            XCTAssertThrowsError(try decode(CoworkScheduleDefinition.self, ceiling), "\(bad.debugDescription) must be refused in hostServices")
+            ceiling["savedCeiling"] = ["toolClasses": [], "hostServices": [], "connectors": [bad], "network": "none"]
+            XCTAssertThrowsError(try decode(CoworkScheduleDefinition.self, ceiling), "\(bad.debugDescription) must be refused in connectors")
+        }
+        var plain = definition
+        plain["savedCeiling"] = ["toolClasses": ["a b", "tab\tseparated"], "hostServices": [], "connectors": [], "network": "none"]
+        XCTAssertEqual(try decode(CoworkScheduleDefinition.self, plain).savedCeiling.toolClasses, ["a b", "tab\tseparated"])
+    }
+    func testDefinitionBoundsAreEnforcedIndependentlyAfterTheValidationSplit() throws {
+        var empty = definition; empty["prompt"] = ""; XCTAssertThrowsError(try decode(CoworkScheduleDefinition.self, empty))
+        var nul = definition; nul["prompt"] = "a\0b"; XCTAssertThrowsError(try decode(CoworkScheduleDefinition.self, nul))
+        var zone = definition; zone["timezone"] = ""; XCTAssertThrowsError(try decode(CoworkScheduleDefinition.self, zone))
+        var longZone = definition; longZone["timezone"] = String(repeating: "z", count: 101); XCTAssertThrowsError(try decode(CoworkScheduleDefinition.self, longZone))
+        var source = definition; source["sourceId"] = "../source"; XCTAssertThrowsError(try decode(CoworkScheduleDefinition.self, source))
+        var emptyBranch = definition; emptyBranch["branchPrecondition"] = ""; XCTAssertThrowsError(try decode(CoworkScheduleDefinition.self, emptyBranch))
+        var longBranch = definition; longBranch["branchPrecondition"] = String(repeating: "b", count: 201); XCTAssertThrowsError(try decode(CoworkScheduleDefinition.self, longBranch))
+        var branch = definition; branch["branchPrecondition"] = "main"; XCTAssertEqual(try decode(CoworkScheduleDefinition.self, branch).branchPrecondition, "main")
+    }
+    func testViewAccessorsAgreeForBothCases() throws {
+        let normal = try decode(CoworkScheduleView.self, record), quarantined = try decode(CoworkScheduleView.self, quarantine)
+        XCTAssertEqual(normal.scheduleId, "schedule"); XCTAssertEqual(normal.workspaceId, "workspace"); XCTAssertEqual(normal.revision, 1)
+        XCTAssertFalse(normal.isCancelled); XCTAssertTrue(normal.canCancel)
+        XCTAssertEqual(quarantined.revision, 2); XCTAssertFalse(quarantined.isCancelled); XCTAssertTrue(quarantined.canCancel)
+        var cancelledRecord = record; cancelledRecord["state"] = "cancelled"; cancelledRecord["nextDue"] = NSNull()
+        var cancelledQuarantine = quarantine; cancelledQuarantine["cancelled"] = true
+        let cancelledNormal = try decode(CoworkScheduleView.self, cancelledRecord), cancelledQuarantined = try decode(CoworkScheduleView.self, cancelledQuarantine)
+        for value in [cancelledNormal, cancelledQuarantined] {
+            XCTAssertTrue(value.isCancelled); XCTAssertFalse(value.canCancel)
+            XCTAssertEqual(try JSONDecoder().decode(CoworkScheduleView.self, from: JSONEncoder().encode(value)), value)
+        }
+    }
     func testFactoriesMirrorExistingLocalMethodsAndRequireExplicitRequestIdentity() throws {
         let value = try decode(CoworkScheduleDefinition.self, definition)
         let request = try CoworkRequest<CoworkSchedule>.createSchedule(workspaceId: "workspace", requestId: "stable-request", definition: value)

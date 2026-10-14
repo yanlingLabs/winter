@@ -20,6 +20,10 @@ import WinterProtocol
         static func occurrence(id: String = "occurrence", schedule: String = "schedule", state: String = "pending", reason: Any = "execution_unavailable") -> [String: Any] {
             ["occurrenceId": id, "scheduleId": schedule, "dueAt": 1000, "latestDueAt": 9000, "missedCount": 8, "state": state, "reason": reason]
         }
+        /// The wire shape of Core's `CoworkError` (`ipc/server.ts`): a generic message and the code in `data`.
+        static func refusal(_ code: String) -> RpcError {
+            RpcError(code: -32602, message: "Cowork request refused", data: .object(["code": .string(code)]))
+        }
         static func json(_ object: [String: Any]) throws -> SessionEvent.JSONValue {
             try JSONDecoder().decode(SessionEvent.JSONValue.self, from: JSONSerialization.data(withJSONObject: object))
         }
@@ -272,6 +276,195 @@ import WinterProtocol
             let model = CoworkSchedulesModel { try host.call($0, $1) }, binding = model.bind(workspaceId: "workspace")
             await model.refresh(); await model.cancel(scheduleId: "schedule", expectedRevision: 1, binding: binding)
             XCTAssertTrue(model.lastCancellation?.isCancelled == true); XCTAssertNil(model.error)
+        }
+    }
+
+    // MARK: - Stale cancellation pins, typed refusals and older daemons
+
+    func testFiredThenCancelRefreshesAndRetriesAtTheCurrentRevision() async throws {
+        let host = Host(); var revision = 1, state = "enabled"
+        host.handler = { method, params in
+            switch method {
+            case "workspace.schedule.list":
+                return ["schedules": [Host.record(revision: revision, state: state)], "nextCursor": NSNull()]
+            case "workspace.schedule.cancel":
+                guard params["expectedRevision"] as? Int == revision else {
+                    throw RpcError(code: -32602, message: "Cowork request refused", data: .object(["code": .string("revision_conflict"), "currentRevision": .number(Double(revision))]))
+                }
+                revision += 1; state = "cancelled"
+                return Host.record(revision: revision, state: state)
+            default:
+                return ["schedule": Host.record(revision: revision, state: state), "occurrences": [], "execution": "unavailable"]
+            }
+        }
+        let model = CoworkSchedulesModel { try host.call($0, $1) }, binding = model.bind(workspaceId: "workspace")
+        await model.refresh()
+        revision = 2; state = "handled" // a once-schedule fired after the list was read
+        await model.cancel(scheduleId: "schedule", expectedRevision: 1, binding: binding)
+        XCTAssertEqual(model.error, "Cancellation not confirmed: This schedule changed before the request completed. The list was refreshed; review it before trying again.")
+        XCTAssertNil(model.lastCancellation); XCTAssertEqual(model.unconfirmedCancellationCount, 0)
+        XCTAssertEqual(model.schedules.first?.revision, 2); XCTAssertFalse(model.busy)
+        await model.cancel(scheduleId: "schedule", expectedRevision: 2, binding: binding)
+        XCTAssertNil(model.error); XCTAssertEqual(model.lastCancellation?.revision, 3); XCTAssertEqual(model.unconfirmedCancellationCount, 0)
+        XCTAssertEqual(try host.params("workspace.schedule.cancel").map { $0["expectedRevision"] as? Int }, [1, 2])
+        XCTAssertEqual(try host.params("workspace.schedule.list").count, 2)
+    }
+    func testPinnedRevisionIsNotSentOnceTheRowHasMovedPastIt() async throws {
+        let host = Host(); var revision = 1, state = "enabled", lostRequests = 1
+        host.handler = { method, params in
+            switch method {
+            case "workspace.schedule.list":
+                return ["schedules": [Host.record(revision: revision, state: state)], "nextCursor": NSNull()]
+            case "workspace.schedule.cancel":
+                if lostRequests > 0 { lostRequests -= 1; throw NSError(domain: "request-never-arrived", code: 1) }
+                guard params["expectedRevision"] as? Int == revision else { throw Host.refusal("revision_conflict") }
+                revision += 1; state = "cancelled"
+                return Host.record(revision: revision, state: state)
+            default:
+                return ["schedule": Host.record(revision: revision, state: state), "occurrences": [], "execution": "unavailable"]
+            }
+        }
+        let model = CoworkSchedulesModel { try host.call($0, $1) }, binding = model.bind(workspaceId: "workspace")
+        await model.refresh(); await model.cancel(scheduleId: "schedule", expectedRevision: 1, binding: binding)
+        XCTAssertTrue(model.error?.hasPrefix("Cancellation not confirmed") == true); XCTAssertEqual(model.unconfirmedCancellationCount, 1)
+        revision = 2; state = "handled" // the request never arrived; the schedule fired instead
+        await model.inspect(scheduleId: "schedule") // moves the row to revision 2 without a list publish
+        XCTAssertEqual(model.schedules.first?.revision, 2); XCTAssertEqual(model.unconfirmedCancellationCount, 1)
+        await model.cancel(scheduleId: "schedule", expectedRevision: 2, binding: binding)
+        XCTAssertEqual(try host.params("workspace.schedule.cancel").map { $0["expectedRevision"] as? Int }, [1, 2])
+        XCTAssertNil(model.error); XCTAssertEqual(model.lastCancellation?.revision, 3); XCTAssertEqual(model.unconfirmedCancellationCount, 0)
+    }
+    func testPinIsReusedWhileTheRowIsUnchangedAndReleasedWhenARefreshShowsItApplied() async throws {
+        let host = Host(); host.loseCancelReplies = 1
+        let model = CoworkSchedulesModel { try host.call($0, $1) }, binding = model.bind(workspaceId: "workspace")
+        await model.refresh(); await model.cancel(scheduleId: "schedule", expectedRevision: 1, binding: binding)
+        XCTAssertEqual(model.unconfirmedCancellationCount, 1)
+        await model.cancel(scheduleId: "schedule", expectedRevision: 1, binding: binding)
+        XCTAssertEqual(try host.params("workspace.schedule.cancel").map { $0["expectedRevision"] as? Int }, [1, 1])
+        XCTAssertEqual(model.lastCancellation?.revision, 2); XCTAssertEqual(model.unconfirmedCancellationCount, 0)
+
+        let lost = Host(); lost.loseCancelReplies = 1
+        let other = CoworkSchedulesModel { try lost.call($0, $1) }, otherBinding = other.bind(workspaceId: "workspace")
+        await other.refresh(); await other.cancel(scheduleId: "schedule", expectedRevision: 1, binding: otherBinding)
+        XCTAssertEqual(other.unconfirmedCancellationCount, 1)
+        await other.refresh() // the list now shows the applied cancellation at revision 2
+        XCTAssertEqual(other.unconfirmedCancellationCount, 0); XCTAssertTrue(other.schedules.first?.isCancelled == true)
+        await other.cancel(scheduleId: "schedule", expectedRevision: 2, binding: otherBinding)
+        XCTAssertEqual(try lost.params("workspace.schedule.cancel").count, 1)
+    }
+    func testDefinitiveRefusalsReleaseThePinAndAmbiguousFailuresKeepIt() async throws {
+        let definitive: [Error] = [Host.refusal("revision_conflict"), Host.refusal("not_found"), Host.refusal("authority_denied"), Host.refusal("invalid_request"), RpcError(code: -32601, message: "Method not found")]
+        let ambiguous: [Error] = [Host.refusal("recovery_required"), Host.refusal("unsupported_topology"), Host.refusal("a_future_code"), NSError(domain: "lost-reply", code: 1)]
+        for (failures, pinned) in [(definitive, 0), (ambiguous, 1)] {
+            for failure in failures {
+                let host = Host(); host.handler = { method, _ in
+                    if method == "workspace.schedule.list" { return ["schedules": [Host.record()], "nextCursor": NSNull()] }
+                    throw failure
+                }
+                let model = CoworkSchedulesModel { try host.call($0, $1) }, binding = model.bind(workspaceId: "workspace")
+                await model.refresh(); await model.cancel(scheduleId: "schedule", expectedRevision: 1, binding: binding)
+                XCTAssertEqual(model.unconfirmedCancellationCount, pinned, "\(failure)"); XCTAssertNil(model.lastCancellation); XCTAssertFalse(model.busy)
+            }
+        }
+    }
+    func testCancelRefusalKeepsTheConfirmationPrefixAndFixedText() async {
+        let host = Host(); host.handler = { method, _ in
+            if method == "workspace.schedule.list" { return ["schedules": [Host.record()], "nextCursor": NSNull()] }
+            throw Host.refusal("authority_denied")
+        }
+        let model = CoworkSchedulesModel { try host.call($0, $1) }, binding = model.bind(workspaceId: "workspace")
+        await model.refresh(); await model.cancel(scheduleId: "schedule", expectedRevision: 1, binding: binding)
+        XCTAssertEqual(model.error, "Cancellation not confirmed: This schedule request is not permitted for this workspace.")
+    }
+    func testConflictReloadKeepsTheReadersPage() async throws {
+        let host = Host(); var secondRevision = 1
+        host.handler = { method, params in
+            if method != "workspace.schedule.list" { throw Host.refusal("revision_conflict") }
+            if params["cursor"] as? String == "next" { return ["schedules": [Host.record(id: "second", revision: secondRevision)], "nextCursor": NSNull()] }
+            return ["schedules": [Host.record(id: "first")], "nextCursor": "next"]
+        }
+        let model = CoworkSchedulesModel { try host.call($0, $1) }, binding = model.bind(workspaceId: "workspace")
+        await model.refresh(); await model.nextPage(); secondRevision = 2
+        await model.cancel(scheduleId: "second", expectedRevision: 1, binding: binding)
+        let lists = try host.params("workspace.schedule.list")
+        XCTAssertNil(lists[0]["cursor"]); XCTAssertEqual(lists[1]["cursor"] as? String, "next"); XCTAssertEqual(lists[2]["cursor"] as? String, "next")
+        XCTAssertEqual(model.schedules.map(\.scheduleId), ["second"]); XCTAssertEqual(model.schedules.first?.revision, 2); XCTAssertTrue(model.canGoBack)
+    }
+    func testFailedConflictReloadStillExplainsTheConflict() async {
+        var listed = 0
+        let host = Host(); host.handler = { method, _ in
+            if method == "workspace.schedule.list" {
+                listed += 1
+                if listed > 1 { throw NSError(domain: "reload-failed", code: 1) }
+                return ["schedules": [Host.record()], "nextCursor": NSNull()]
+            }
+            throw Host.refusal("revision_conflict")
+        }
+        let model = CoworkSchedulesModel { try host.call($0, $1) }, binding = model.bind(workspaceId: "workspace")
+        await model.refresh(); await model.cancel(scheduleId: "schedule", expectedRevision: 1, binding: binding)
+        XCTAssertEqual(model.error, "Cancellation not confirmed: This schedule changed before the request completed. Refresh the list to try again.")
+        XCTAssertEqual(model.schedules.first?.revision, 1); XCTAssertFalse(model.busy)
+    }
+    func testEveryRefusalCodeShowsItsFixedMessage() async {
+        let cases: [(String, String)] = [
+            ("revision_conflict", "This schedule changed before the request completed."),
+            ("not_found", "That workspace or schedule is no longer available."),
+            ("authority_denied", "This schedule request is not permitted for this workspace."),
+            ("unsupported_topology", "Schedules are not available in this Winter setup."),
+            ("invalid_request", "Winter sent a schedule request the daemon could not accept. Refresh and try again."),
+            ("recovery_required", "Winter could not complete this request and may need to recover its schedule records. Try again later."),
+            ("schedule_budget_exhausted", "Planning this schedule's next time exceeded its limit. Simplify the schedule or try again later."),
+        ]
+        for (code, text) in cases {
+            let host = Host(); host.handler = { _, _ in throw Host.refusal(code) }
+            let model = CoworkSchedulesModel { try host.call($0, $1) }; await model.open(workspaceId: "workspace")
+            XCTAssertEqual(model.error, text, code); XCTAssertFalse(model.isUnsupported, code); XCTAssertFalse(model.busy)
+        }
+    }
+    func testUnknownCodesAndPlainRpcErrorsShowOneGenericMessageWithoutDaemonProse() async {
+        for failure in [Host.refusal("a_future_code"), RpcError(code: -32603, message: "daemon prose that must not be shown")] {
+            let host = Host(); host.handler = { _, _ in throw failure }
+            let model = CoworkSchedulesModel { try host.call($0, $1) }; await model.open(workspaceId: "workspace")
+            XCTAssertEqual(model.error, "The Winter daemon could not complete this schedule request (error \(failure.code)).")
+        }
+        let host = Host(); host.handler = { _, _ in throw NSError(domain: "transport", code: 7) }
+        let model = CoworkSchedulesModel { try host.call($0, $1) }; await model.open(workspaceId: "workspace")
+        XCTAssertEqual(model.error, NSError(domain: "transport", code: 7).localizedDescription); XCTAssertFalse(model.isUnsupported)
+    }
+    func testOlderDaemonWithoutScheduleMethodsIsNeutralNotAnError() async {
+        var upgraded = false
+        let host = Host(); host.handler = { _, _ in
+            if !upgraded { throw RpcError(code: -32601, message: "Method not found") }
+            return ["schedules": [Host.record()], "nextCursor": NSNull()]
+        }
+        let model = CoworkSchedulesModel { try host.call($0, $1) }; await model.open(workspaceId: "workspace")
+        XCTAssertTrue(model.isUnsupported); XCTAssertNil(model.error); XCTAssertTrue(model.schedules.isEmpty)
+        XCTAssertNil(model.nextCursor); XCTAssertFalse(model.canGoBack); XCTAssertFalse(model.busy)
+        upgraded = true; await model.refresh()
+        XCTAssertFalse(model.isUnsupported); XCTAssertNil(model.error); XCTAssertEqual(model.schedules.count, 1)
+    }
+    func testMissingStatusAndCancelMethodsAreNeutralToo() async {
+        let host = Host(); host.handler = { method, _ in
+            if method == "workspace.schedule.list" { return ["schedules": [Host.record()], "nextCursor": NSNull()] }
+            throw RpcError(code: -32601, message: "Method not found")
+        }
+        let model = CoworkSchedulesModel { try host.call($0, $1) }, binding = model.bind(workspaceId: "workspace")
+        await model.refresh(); await model.inspect(scheduleId: "schedule")
+        XCTAssertTrue(model.isUnsupported); XCTAssertNil(model.error); XCTAssertTrue(model.schedules.isEmpty); XCTAssertNil(model.status)
+        await model.refresh(); XCTAssertFalse(model.isUnsupported); XCTAssertEqual(model.schedules.count, 1)
+        await model.cancel(scheduleId: "schedule", expectedRevision: 1, binding: binding)
+        XCTAssertTrue(model.isUnsupported); XCTAssertNil(model.error); XCTAssertNil(model.lastCancellation)
+        XCTAssertEqual(model.unconfirmedCancellationCount, 0)
+        model.bind(workspaceId: "workspace"); XCTAssertFalse(model.isUnsupported)
+    }
+    func testRefreshAndBindingChangeClearTheCancellationReceipt() async {
+        for rebind in [false, true] {
+            let host = Host()
+            let model = CoworkSchedulesModel { try host.call($0, $1) }, binding = model.bind(workspaceId: "workspace")
+            await model.refresh(); await model.cancel(scheduleId: "schedule", expectedRevision: 1, binding: binding)
+            XCTAssertEqual(model.lastCancellation?.revision, 2)
+            if rebind { model.bind(workspaceId: "workspace") } else { await model.refresh() }
+            XCTAssertNil(model.lastCancellation, rebind ? "binding change" : "refresh")
         }
     }
 }
