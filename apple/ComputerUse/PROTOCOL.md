@@ -1208,6 +1208,15 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   there): such a path is judged LEXICALLY. Residual: a symlink planted INSIDE one of those folders (e.g.
   `~/Downloads/x` → `~/.ssh`) is not followed, so a path through it is judged by its own names only. `upload` refuses a
   file with another hard link (`nlink > 1`), at the check and again at the private copy's open.
+- The fourth pass (over-refusal): every file-panel floor and the fail-closed arming apply to REAL file panels only — a
+  sheet or panel that names itself `NSOpenPanel`/`NSSavePanel` (`AXIdentifier`), is drawn by the panel service, has a
+  Save panel's name field, or hosts a file browser (an item with a file `AXURL`, or a search field, a folder pop-up and
+  an outline or browser); an alert ("Don't ask again" and OK), Print, or Return with any other sheet up act exactly as
+  before. The choice reads the SELECTION first, from the browsers themselves (the focus and its parents, the panel's
+  first three levels; `AXSelectedRows`/`AXSelectedChildren`): a readable selection or field is enough, whatever the
+  600-element walk reached; it fails closed only when neither can be read. A bare "Cookies" or "Keychains" is no
+  protected name (the Library rule is for paths under `~/Library` only). Edit ▸ Paste (or Paste and Match Style) through
+  `menu` into a file panel judges the clipboard as ⌘V does.
 - Still UNMEASURED on the remote view: which pid accessibility reports for the service-drawn panel's elements (the
   routing needs the service's), whether a Go to folder field it opens is in the app's tree at all (the floors' typed-text
   record covers one that isn't), whether the panel says its folder (`AXDocument`/`AXURL` — relative text is otherwise

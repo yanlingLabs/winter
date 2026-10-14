@@ -85,7 +85,8 @@ extension CUFloors {
     /// A relative path judged by its names alone, conservatively: any hidden name or protected name in it. Pure.
     static func namesOnlyProtected(_ path: String) -> Bool {
         let names = path.split(separator: "/").map { String($0).lowercased() }.filter { $0 != "." && $0 != ".." }
-        return names.contains { n in n.hasPrefix(".") || lowered(protectedFolderNames).contains(n) || lowered(secretLibraryFolders).contains(n) }
+        let library = zip(names, names.dropFirst()).contains { $0 == "library" && lowered(secretLibraryFolders).contains($1) }
+        return library || names.contains { n in n.hasPrefix(".") || lowered(protectedFolderNames).contains(n) }
             || names.last.map { lowered(shellStartupNames).contains($0) || lowered(protectedConfigNames).contains($0) } == true
     }
 
@@ -125,9 +126,10 @@ extension CUFloors {
         if let u = URL(string: s), u.isFileURL { s = u.path }
         if s.hasPrefix("/") || s.hasPrefix("~") || s.contains("/") { return isProtectedPanelPath(s, home: home) }
         // A bare name (an item's title, a pop-up's folder): "id_ed25519, 411 bytes" names "id_ed25519".
+        // (The Library rule only for a path under ~/Library — never a bare "Cookies" or "Keychains": the fourth pass.)
         let name = (s.components(separatedBy: ", ").first ?? s).lowercased()
         return name.hasPrefix(".") || lowered(shellStartupNames).contains(name) || lowered(protectedConfigNames).contains(name)
-            || lowered(protectedFolderNames).contains(name) || lowered(secretLibraryFolders).contains(name)
+            || lowered(protectedFolderNames).contains(name)
     }
 
     /// The parts of text a Return splits it into (\n, \r, \r\n).
@@ -146,9 +148,46 @@ struct CUPanelTyped {
 extension CUCore {
     static let panelPathWords = "a protected location (a shell startup file, ~/.ssh or another hidden folder of the home, LaunchAgents, a keychain, or Winter's or Claude's settings)"
 
-    /// The sheet or panel `e` lies in: its `AXSheet`, or a window of another kind than a standard one (a dialog, a
-    /// floating panel) or another than the bound one. Nil in the bound window's own content.
+    /// The FILE panel `e` lies in — an Open or Save panel, never another sheet or dialog (an alert, Print: those act
+    /// exactly as before; the fourth pass). Every floor here and the fail-closed arming go through it.
     func panelRoot(_ e: AXUIElement, _ t: CUTarget) -> AXUIElement? {
+        guard let root = anyPanelRoot(e, t), isFilePanel(root, e, t) else { return nil }
+        return root
+    }
+
+    /// The sheet or panel is a file Open or Save panel: it names itself so (an `NSOpenPanel`/`NSSavePanel` identifier), the
+    /// panel service draws it, it has a Save panel's name field, or it hosts a file browser — an item with a file URL, or
+    /// the shape every file panel has (a search field, a pop-up for the folder, an outline or browser). Bounded.
+    func isFilePanel(_ root: AXUIElement, _ e: AXUIElement?, _ t: CUTarget) -> Bool {
+        func named(_ c: AXUIElement) -> Bool {
+            guard let id = ax.string(c, kAXIdentifierAttribute)?.lowercased() else { return false }
+            return id.contains("openpanel") || id.contains("savepanel")
+        }
+        if named(root) { return true }
+        if let e, panelServicePid(t, focused: e) != nil { return true }
+        if CUFloorScan.filenameField(in: root, ax: ax) != nil { return true }
+        var search = false, popUp = false, files = false
+        var queue: [AXUIElement] = [root]
+        var seen = 0
+        while !queue.isEmpty, seen < 500 {
+            let c = queue.removeFirst()
+            seen += 1
+            if named(c) { return true }
+            let role = ax.string(c, kAXRoleAttribute) ?? ""
+            if role == "AXSearchField" || ax.string(c, kAXSubroleAttribute) == "AXSearchField" { search = true }
+            if role == kAXPopUpButtonRole { popUp = true }
+            if role == kAXOutlineRole || role == kAXBrowserRole { files = true }
+            if let u = ax.attribute(c, kAXURLAttribute), CFGetTypeID(u) == CFURLGetTypeID(), (u as! URL).isFileURL,
+               [kAXRowRole, kAXCellRole, kAXImageRole, kAXStaticTextRole, kAXGroupRole].contains(role) { return true }
+            if search && popUp && files { return true }
+            queue += ax.elements(c, kAXChildrenAttribute)
+        }
+        return false
+    }
+
+    /// The sheet or panel `e` lies in, whatever it holds: its `AXSheet`, or a window of another kind than a standard one
+    /// (a dialog, a floating panel) or another than the bound one. Nil in the bound window's own content.
+    func anyPanelRoot(_ e: AXUIElement, _ t: CUTarget) -> AXUIElement? {
         var cur: AXUIElement? = e
         for _ in 0..<60 {
             guard let c = cur else { return nil }
@@ -342,15 +381,16 @@ extension CUCore {
     /// A sheet open on the bound window (its first `AXSheet` child), when there is one.
     func openSheet(_ t: CUTarget) -> AXUIElement? {
         guard let w = try? windowElement(t) else { return nil }
-        return ax.elements(w, kAXChildrenAttribute).first { ax.string($0, kAXRoleAttribute) == kAXSheetRole }
+        return ax.elements(w, kAXChildrenAttribute).first { ax.string($0, kAXRoleAttribute) == kAXSheetRole && isFilePanel($0, nil, t) }
     }
 
     /// What the panel would choose, as read: the URLs, file names and titles of its selected items (and of `item`, a
     /// double-clicked one), its text fields' values (a file name, the Go to folder field), its pop-ups' values (the folder
     /// shown). `determined`: the whole panel was read and something besides its pop-ups was there to judge.
-    func panelChoices(_ root: AXUIElement, item: AXUIElement?) -> (values: [String], determined: Bool) {
+    func panelChoices(_ root: AXUIElement, item: AXUIElement?, _ t: CUTarget? = nil) -> (values: [String], determined: Bool) {
         var out: [String] = []
         var substantive = false
+        var selectionRead = false, fieldRead = false
         func describe(_ e: AXUIElement, depth: Int) {
             var queue: [(AXUIElement, Int)] = [(e, 0)]
             var n = 0
@@ -386,7 +426,32 @@ extension CUCore {
             }
             if !names.isEmpty { out.append(names.joined(separator: "/")); substantive = true }
         }
-        if let item { describe(item, depth: 3); rowPath(item) }
+        if let item { let n = out.count; describe(item, depth: 3); rowPath(item); if out.count > n { selectionRead = true } }
+        // The selection FIRST, from the browsers themselves — the focus and its parents, and the panel's own first levels —
+        // never only by the walk below, which a large folder can outrun (the fourth pass).
+        var browsers: [AXUIElement] = []
+        if let t, var cur = reportedFocus(t) {
+            for _ in 0..<12 {
+                browsers.append(cur)
+                if CFEqual(cur, root) { break }
+                guard let up = ax.element(cur, kAXParentAttribute) else { break }
+                cur = up
+            }
+        }
+        var level: [AXUIElement] = [root]
+        for _ in 0..<3 {
+            level = level.flatMap { ax.elements($0, kAXChildrenAttribute) }.prefix(200).map { $0 }
+            browsers += level.filter { [kAXOutlineRole, kAXListRole, kAXBrowserRole, kAXTableRole, "AXCollection", kAXScrollAreaRole].contains(ax.string($0, kAXRoleAttribute) ?? "") }
+        }
+        for b in browsers {
+            for name in [kAXSelectedRowsAttribute, kAXSelectedChildrenAttribute] {
+                for sel in ax.elements(b, name).prefix(20) {
+                    let n = out.count
+                    describe(sel, depth: 3); rowPath(sel)
+                    if out.count > n { selectionRead = true }
+                }
+            }
+        }
         var queue: [AXUIElement] = [root]
         var seen = 0
         while !queue.isEmpty, seen < Self.panelReadCap {
@@ -396,14 +461,15 @@ extension CUCore {
             if [kAXTextFieldRole, kAXComboBoxRole, kAXPopUpButtonRole].contains(role), ax.string(c, kAXSubroleAttribute) != "AXSearchField",
                let v = ax.string(c, kAXValueAttribute), !v.isEmpty {
                 out.append(v)
-                if role != kAXPopUpButtonRole { substantive = true }
+                if role != kAXPopUpButtonRole { substantive = true; fieldRead = true }
             }
             for name in [kAXSelectedRowsAttribute, kAXSelectedChildrenAttribute] {
                 for sel in ax.elements(c, name).prefix(20) { describe(sel, depth: 3); rowPath(sel) }
             }
             queue += ax.elements(c, kAXChildrenAttribute)
         }
-        return (out, substantive && queue.isEmpty)
+        // Readable enough: the selection, or a field, or the whole panel walked with something in it.
+        return (out, selectionRead || fieldRead || (substantive && queue.isEmpty))
     }
 
     /// The choice check on a panel: anything it would choose protected → refused; nothing readable after text was sent
@@ -411,7 +477,7 @@ extension CUCore {
     /// starts the panel's typed text afresh.
     func refuseProtectedChoiceIn(_ root: AXUIElement, item: AXUIElement?, _ t: CUTarget, extra: [String] = [], sending: Bool = false,
                                  unresolved: Bool = false) throws {
-        let (values, determined) = panelChoices(root, item: item)
+        let (values, determined) = panelChoices(root, item: item, t)
         let typed = typedInto(root, t)
         let base = panelFolder(root)
         let candidates = values + extra + (typed.map { [$0] } ?? [])

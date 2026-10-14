@@ -378,24 +378,7 @@ extension CUCore {
     /// The sheet or panel `root` (holding `e`) is a file Open or Save panel: a Save panel's name field, a sheet the panel
     /// service draws, or the shape every file panel has — a search field, a pop-up (the folder) and an outline or browser
     /// (the sidebar, the files).
-    func looksLikeFilePanel(_ root: AXUIElement, _ e: AXUIElement, _ t: CUTarget) -> Bool {
-        if CUFloorScan.savePanel(containing: e, ax: ax) != nil { return true }
-        if panelServicePid(t, focused: e) != nil { return true }
-        var search = false, popUp = false, files = false
-        var queue: [AXUIElement] = [root]
-        var seen = 0
-        while !queue.isEmpty, seen < 500 {
-            let c = queue.removeFirst()
-            seen += 1
-            let role = ax.string(c, kAXRoleAttribute) ?? ""
-            if role == "AXSearchField" || ax.string(c, kAXSubroleAttribute) == "AXSearchField" { search = true }
-            if role == kAXPopUpButtonRole { popUp = true }
-            if role == kAXOutlineRole || role == kAXBrowserRole { files = true }
-            if search && popUp && files { return true }
-            queue += ax.elements(c, kAXChildrenAttribute)
-        }
-        return false
-    }
+    func looksLikeFilePanel(_ root: AXUIElement, _ e: AXUIElement, _ t: CUTarget) -> Bool { isFilePanel(root, e, t) }
 
     /// The panel's windows and sheets, counted (a sheet it opened — Go to folder — shows here).
     func panelFingerprint(_ e: AXUIElement, app: AXUIElement) -> Int {

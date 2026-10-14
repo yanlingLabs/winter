@@ -430,7 +430,10 @@ extension CUCore {
         case .action(let a):
             try refuseProtectedChoice(p.action, t)
             return try axAction(a, p, t, token)
-        case .menu(let a): return try menu(a, p, t, token)
+        case .menu(let a):
+            // Edit ▸ Paste (or Paste and Match Style) with the focus in a file panel: the clipboard judged as for ⌘V.
+            if let last = a.path.last, CUPasteMenu.isPasteTitle(last) { try refuseProtectedClipboard(into: nil, t) }
+            return try menu(a, p, t, token)
         case .hover(let a): return try hover(a, p, t, token)
         }
     }

@@ -1079,6 +1079,104 @@ final class LeftoversTests: XCTestCase {
         XCTAssertTrue(CUFloors.isProtectedPanelPath("sub/.hidden/x", home: home, base: "/Users/u/Downloads"), "names-only with a folder known")
     }
 
+    // MARK: the fourth pass: only REAL file panels
+
+    /// An alert with a "Don't ask again" box and OK, a Print sheet, and Return with an unrelated sheet up: none is a file
+    /// panel, so every act goes as on main — no floor, no fail-closed choice.
+    private func alertSheet() -> (sheet: AXUIElement, box: AXUIElement, ok: AXUIElement) {
+        let sheet = fakeElement(98_200), box = fakeElement(98_201), ok = fakeElement(98_202), label = fakeElement(98_203)
+        ax.put(window, [kAXChildrenAttribute: [web, sheet]])
+        ax.add(sheet, role: kAXSheetRole, frame: CGRect(x: 100, y: 40, width: 400, height: 200), extra: [kAXParentAttribute: window])
+        ax.add(label, role: kAXStaticTextRole, frame: CGRect(x: 120, y: 60, width: 300, height: 20), extra: [kAXParentAttribute: sheet, kAXValueAttribute: "Keychains"])
+        ax.add(box, role: kAXCheckBoxRole, title: "Don't ask again", frame: CGRect(x: 120, y: 100, width: 200, height: 20), extra: [kAXParentAttribute: sheet, kAXValueAttribute: 0])
+        ax.setActions(box, [kAXPressAction])
+        ax.add(ok, role: kAXButtonRole, title: "OK", frame: CGRect(x: 400, y: 200, width: 60, height: 24), extra: [kAXParentAttribute: sheet])
+        ax.setActions(ok, [kAXPressAction])
+        ax.put(sheet, [kAXChildrenAttribute: [label, box, ok], kAXDefaultButtonAttribute: ok])
+        return (sheet, box, ok)
+    }
+
+    func testAnAlertsBoxAndOKActAsBefore() async throws {
+        world()
+        let (_, box, ok) = alertSheet()
+        let r1 = await refusal(.click(CUClickAction(ref: ref(box))))
+        XCTAssertNil(r1)
+        let r2 = await refusal(.click(CUClickAction(ref: ref(ok))))
+        XCTAssertNil(r2)
+        XCTAssertTrue(ax.performed.contains("\(token(ok)):AXPress"), "OK pressed")
+        XCTAssertNil(core.panelTyped[target.id], "nothing armed")
+    }
+
+    func testAPrintSheetActsAsBefore() async throws {
+        world()
+        let sheet = fakeElement(98_210), printer = fakeElement(98_211), presets = fakeElement(98_212), print = fakeElement(98_213)
+        ax.put(window, [kAXChildrenAttribute: [web, sheet]])
+        ax.add(sheet, role: kAXSheetRole, title: "Print", frame: CGRect(x: 100, y: 40, width: 500, height: 400), extra: [kAXParentAttribute: window])
+        ax.add(printer, role: kAXPopUpButtonRole, title: "Printer", frame: CGRect(x: 200, y: 60, width: 200, height: 20), extra: [kAXParentAttribute: sheet, kAXValueAttribute: "Office"])
+        ax.add(presets, role: kAXPopUpButtonRole, title: "Presets", frame: CGRect(x: 200, y: 90, width: 200, height: 20), extra: [kAXParentAttribute: sheet, kAXValueAttribute: ".Default"])
+        ax.add(print, role: kAXButtonRole, title: "Print", frame: CGRect(x: 500, y: 400, width: 60, height: 24), extra: [kAXParentAttribute: sheet])
+        ax.setActions(print, [kAXPressAction])
+        ax.put(sheet, [kAXChildrenAttribute: [printer, presets, print], kAXDefaultButtonAttribute: print])
+        let r3 = await refusal(.click(CUClickAction(ref: ref(print))))
+        XCTAssertNil(r3)
+        XCTAssertTrue(ax.performed.contains("\(token(print)):AXPress"))
+    }
+
+    func testReturnWithAnUnrelatedSheetUpGoesAsBefore() async throws {
+        world()
+        let (_, box, _) = alertSheet()
+        ax.focus(pid: pid, on: box)
+        let n = poster.entries.count
+        let r4 = await refusal(.key(CUKeyAction(combo: "return")))
+        XCTAssertNil(r4)
+        XCTAssertTrue(poster.entries.dropFirst(n).contains { $0.type == .keyDown }, "Return was sent")
+        ax.focus(pid: pid, on: select)  // the focus outside the sheet
+        let r5 = await refusal(.key(CUKeyAction(combo: "return")))
+        XCTAssertNil(r5, "no file panel open: no choice to judge")
+    }
+
+    /// A large folder: the selection, read from the browser itself, decides — the walk's cap never fails it closed.
+    func testALargeFoldersSelectedFileIsAcceptedFromTheSelectionAlone() async throws {
+        world()
+        let (sheet, files) = openPanel()
+        var rows: [AXUIElement] = []
+        for i in 0..<200 {
+            let row = fakeElement(99_000 + Int32(i) * 4)
+            var kids: [AXUIElement] = []
+            for k in 1...3 {
+                let c = fakeElement(99_000 + Int32(i) * 4 + Int32(k))
+                ax.add(c, role: kAXStaticTextRole, frame: CGRect(x: 130, y: 90, width: 10, height: 10), extra: [kAXParentAttribute: row, kAXValueAttribute: "f\(i)-\(k)"])
+                kids.append(c)
+            }
+            ax.add(row, role: kAXRowRole, frame: CGRect(x: 120, y: 80 + CGFloat(i), width: 560, height: 1),
+                   extra: [kAXParentAttribute: files, kAXChildrenAttribute: kids, kAXURLAttribute: URL(fileURLWithPath: "/Users/someone/Downloads/f\(i).zip") as CFURL])
+            rows.append(row)
+        }
+        ax.put(files, [kAXChildrenAttribute: rows, kAXSelectedRowsAttribute: [rows[199]]])
+        _ = await refusal(.click(CUClickAction(ref: ref(rows[3]))))  // the agent acted in the panel: fail-closed armed
+        let open = ax.element(sheet, kAXDefaultButtonAttribute)!
+        let r6 = await refusal(.click(CUClickAction(ref: ref(open))))
+        XCTAssertNil(r6)
+        XCTAssertTrue(ax.performed.contains("\(token(open)):AXPress"), "a normal file is chosen")
+    }
+
+    func testBareCookiesOrKeychainsIsNoProtectedName() {
+        XCTAssertFalse(CUFloors.panelChoiceIsProtected("Cookies"))
+        XCTAssertFalse(CUFloors.panelChoiceIsProtected("Keychains, 3 items"))
+        XCTAssertFalse(CUFloors.isProtectedPanelPath("Cookies/recipe.txt"))
+        XCTAssertTrue(CUFloors.isProtectedPanelPath("Library/Cookies/x"), "under Library it is")
+    }
+
+    func testEditPasteFromTheMenuJudgesTheClipboardLikeCmdV() async throws {
+        world()
+        _ = openPanel()
+        clip.items = [[NSPasteboard.PasteboardType.string.rawValue: Data((NSHomeDirectory() + "/.aws/credentials").utf8)]]
+        let said = await refusal(.menu(CUMenuAction(path: ["Edit", "Paste"])))
+        XCTAssertTrue(said?.contains("the text names a protected location") ?? false, said ?? "pasted")
+        let style = await refusal(.menu(CUMenuAction(path: ["Edit", "Paste and Match Style"])))
+        XCTAssertNotNil(style)
+    }
+
     func testProtectedPanelPaths() {
         let home = "/Users/u"
         XCTAssertTrue(CUFloors.isProtectedPanelPath("~/.aws/credentials", home: home))
