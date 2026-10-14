@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 /** Reverse dependency order also permits removing an unused additive schema on explicit rollback. */
-export const COWORK_TABLES = ["cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
+export const COWORK_TABLES = ["cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
 
 /** Host authority only. A guest manifest or rebuilt session index never populates these tables. */
 export function migrateCoworkSchema(db: Database): void {
@@ -145,4 +145,23 @@ export function migrateCoworkFolderGrantSchema(db: Database): void {
   );
   CREATE UNIQUE INDEX IF NOT EXISTS cowork_folder_grants_root ON cowork_folder_grants(workspace_id,root_device,root_inode) WHERE state='active';
   CREATE INDEX IF NOT EXISTS cowork_folder_grants_scope ON cowork_folder_grants(workspace_id,source_id);`);
+}
+
+/** Host-owned timer authority. Independent of VM power and guest SDK snapshots. */
+export function migrateCoworkScheduleSchema(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS cowork_schedules (
+    schedule_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES cowork_workspaces(workspace_id),
+    principal_id TEXT NOT NULL, request_id TEXT NOT NULL, request_digest TEXT NOT NULL,
+    definition_json TEXT NOT NULL, next_due INTEGER, state TEXT NOT NULL CHECK(state IN ('enabled','cancelled','handled')),
+    revision INTEGER NOT NULL CHECK(revision>0), created_at INTEGER NOT NULL,
+    UNIQUE(workspace_id,principal_id,request_id)
+  );
+  CREATE TABLE IF NOT EXISTS cowork_schedule_occurrences (
+    occurrence_id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL REFERENCES cowork_schedules(schedule_id),
+    due_at INTEGER NOT NULL, latest_due_at INTEGER NOT NULL, missed_count INTEGER NOT NULL DEFAULT 0 CHECK(missed_count>=0),
+    state TEXT NOT NULL CHECK(state IN ('pending','claimed','dispatching','uncertain','handled','cancelled')),
+    claim_token TEXT, reason TEXT, UNIQUE(schedule_id,due_at)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS cowork_schedule_pending ON cowork_schedule_occurrences(schedule_id) WHERE state='pending';
+  CREATE UNIQUE INDEX IF NOT EXISTS cowork_schedule_active ON cowork_schedule_occurrences(schedule_id) WHERE state IN ('claimed','dispatching','uncertain');`);
 }

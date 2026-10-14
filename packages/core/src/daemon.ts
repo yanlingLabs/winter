@@ -359,6 +359,8 @@ export function pluginToolNameParts(fullName: string): { pluginId: string; name:
 export async function startDaemon(opts: {
   /** Explicit host-only fixture/native authority ports; never read from settings or RPC. */
   coworkHost?: CoworkHostPorts;
+  /** Isolated clock for host schedule metadata tests. */
+  coworkScheduleNow?: () => number;
   home?: string;
   secrets?: SecretStore;
   server?: Partial<Pick<IpcServerOptions, "helloTimeoutMs" | "maxConnections" | "preAuthMaxLine">>;
@@ -2804,8 +2806,10 @@ export async function startDaemon(opts: {
   // P8b Task 17: a routine fires as a NEW code session through the driver table (fix wave F9: the
   // runner's engine branch is gone with the engine).
   const routineRunner = makeDaemonRoutineRunner({ store, hub, winter: winterDrivers });
+  let coworkService: CoworkWorkspaceService | undefined;
   const routineScheduler = makeRoutineScheduler({
     store: routineStore,
+    hostTick: () => coworkService?.schedules.tick(),
     runner: routineRunner,
     audit: (line) => routinesAudit.append(line),
     maxConcurrent: () => settings?.routines?.maxConcurrent,
@@ -2910,7 +2914,9 @@ export async function startDaemon(opts: {
     : undefined;
   const liveEffort = liveSelection ? () => liveSelection().reasoningEffort ?? "" : undefined;
 
-  const coworkService = runtime ? new CoworkWorkspaceService(new CoworkRepository(runtime.db), opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db)) : undefined;
+  coworkService = runtime ? new CoworkWorkspaceService(new CoworkRepository(runtime.db), opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db), opts.coworkScheduleNow) : undefined;
+  coworkService?.schedules.recover();
+  coworkService?.schedules.tick();
   const server: IpcServer = startIpcServer({
     socketPath: dirs.socketPath,
     serverVersion: CORE_VERSION,
@@ -3128,6 +3134,7 @@ export async function startDaemon(opts: {
       // after the children drained and before the store closes).
       // Before anything else: no session is created, resumed or (re)opened from here on, and an open
       // already under way refuses just before its spawn — no runtime child can outlive this daemon.
+      coworkService?.beginShutdown(); // close durable schedule claims before draining anything
       winterDrivers.beginShutdown?.();
       dispatchChildren?.beginShutdown();
       sessionMessaging?.beginShutdown(); // no SendMessage resumes a session into a daemon that is going away

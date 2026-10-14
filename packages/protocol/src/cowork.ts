@@ -60,7 +60,26 @@ export const CoworkPolicyValue = z.discriminatedUnion("detailState", [
 export const CoworkPolicyReceipt = receipt(CoworkPolicyValue);
 export const CoworkCapabilities = z.object({ folderPreparation: z.boolean(), repositoryPreparation: z.literal(false), provisioning: z.literal(false), execution: z.literal(false) }).strict();
 export const CoworkPreparedFolder = z.object({ selectionId: Id, kind: z.literal("folder"), label: Label, access: z.enum(["read-only", "read-write"]), state: z.literal("prepared"), expiresAt: z.string() }).strict();
+export const CoworkScheduleDefinition = z.object({
+  target: z.discriminatedUnion("kind", [z.object({ kind: z.literal("conversation"), sessionId: Id }).strict(), z.object({ kind: z.literal("project"), projectId: Id }).strict()]),
+  sourceId: Id, prompt: z.string().min(1).max(8192).refine(value => !value.includes("\0")),
+  timing: z.discriminatedUnion("kind", [z.object({ kind: z.literal("once"), at: z.number().int().nonnegative().max(8640000000000000) }).strict(), z.object({ kind: z.literal("recurring"), spec: z.string().min(1).max(200) }).strict()]),
+  timezone: z.string().min(1).max(100), savedCeiling: CoworkCapabilityCeiling,
+  policy: Policy, overlap: z.literal("one-active-one-pending"), branchPrecondition: z.string().min(1).max(200).optional(),
+}).strict();
+export const CoworkSchedule = z.object({ scheduleId: Id, workspaceId: Id, definition: CoworkScheduleDefinition,
+  state: z.enum(["enabled", "cancelled", "handled"]), revision: Revision, nextDue: z.number().nullable(), createdAt: z.number() }).strict();
+export const CoworkScheduleOccurrence = z.object({ occurrenceId: Id, scheduleId: Id, dueAt: z.number(), latestDueAt: z.number(), missedCount: z.number().int().nonnegative(),
+  state: z.enum(["pending", "claimed", "dispatching", "uncertain", "handled", "cancelled"]),
+  reason: z.enum(["execution_unavailable", "shutdown", "archived", "source_unavailable", "authority_denied", "branch_mismatch", "branch_state_unavailable", "recovery_required"]).nullable() }).strict();
+export type CoworkScheduleDefinition = z.infer<typeof CoworkScheduleDefinition>;
+export type CoworkSchedule = z.infer<typeof CoworkSchedule>;
+export type CoworkScheduleOccurrence = z.infer<typeof CoworkScheduleOccurrence>;
 export const COWORK_RPC = {
+  "workspace.schedule.create": { params: WorkspaceId.extend({ requestId: Id, definition: CoworkScheduleDefinition }).strict(), result: CoworkSchedule },
+  "workspace.schedule.list": { params: WorkspaceId.extend({ cursor: Id.optional(), limit: z.number().int().min(1).max(100).default(100) }).strict(), result: z.object({ schedules: z.array(CoworkSchedule).max(100), nextCursor: Id.nullable() }).strict() },
+  "workspace.schedule.cancel": { params: WorkspaceId.extend({ scheduleId: Id, expectedRevision: Revision }).strict(), result: CoworkSchedule },
+  "workspace.schedule.status": { params: WorkspaceId.extend({ scheduleId: Id }).strict(), result: z.object({ schedule: CoworkSchedule, occurrences: z.array(CoworkScheduleOccurrence).max(100), execution: z.literal("unavailable") }).strict() },
   "workspace.capabilities.get": { params: z.object({}).strict(), result: CoworkCapabilities },
   "workspace.selection.prepareFolder": { params: z.object({ requestId: Id, bookmarkBase64: z.string().min(4).max(87384).regex(/^[A-Za-z0-9+/]+={0,2}$/), label: Label, access: z.enum(["read-only", "read-write"]) }).strict(), result: CoworkPreparedFolder },
   "workspace.selection.revoke": { params: z.object({ selectionId: Id }).strict(), result: z.object({ revoked: z.literal(true) }).strict() },
@@ -93,6 +112,7 @@ export type CoworkWorkspace = z.infer<typeof CoworkWorkspace>;
 export type CoworkSource = z.infer<typeof CoworkSource>;
 export type CoworkWorkspacePolicy = z.infer<typeof CoworkWorkspacePolicy>;
 export const COWORK_METHODS = {
+  workspaceScheduleCreate: "workspace.schedule.create", workspaceScheduleList: "workspace.schedule.list", workspaceScheduleCancel: "workspace.schedule.cancel", workspaceScheduleStatus: "workspace.schedule.status",
   workspaceCapabilitiesGet: "workspace.capabilities.get", workspaceSelectionPrepareFolder: "workspace.selection.prepareFolder", workspaceSelectionRevoke: "workspace.selection.revoke",
   workspaceList: "workspace.list", workspaceGet: "workspace.get", workspaceCreate: "workspace.create", workspaceUpdate: "workspace.update",
   projectList: "project.list", projectGet: "project.get", projectCreate: "project.create", projectUpdate: "project.update",

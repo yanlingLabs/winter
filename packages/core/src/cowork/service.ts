@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { COWORK_RPC, CoworkSource as SourceDto, CoworkCompleteWorkspace as WorkspaceDto, CoworkSummaryWorkspace as SummaryDto, CoworkWorkspacePolicy as PolicyDto, CoworkPolicySummary as PolicySummaryDto, CoworkWorkspaceRecord as WorkspaceRecordDto, type CoworkMethod, type CoworkResult } from "@yanlinglabs/winter-protocol";
 import { CoworkAuthority, intersectCeilings, type CoworkGrantResolver, type CoworkPrincipal } from "./authority";
+import { CoworkSchedules } from "./schedules";
 import { CoworkRepository } from "./repository";
 import { CoworkError, type CapabilityCeiling, type MutationContext, type MutationReceipt, type SourceSelection, type WorkspaceSource, type WorkspacePolicy, type Workspace } from "./types";
 
@@ -55,7 +56,12 @@ export function assertRemoteMayUseWorkspace(records: CoworkRepository, authority
 }
 export class CoworkWorkspaceService {
   private readonly authority: CoworkAuthority;
-  constructor(readonly records: CoworkRepository, private readonly host: CoworkHostPorts = disabledCoworkHost) { this.authority = new CoworkAuthority(records, host.grants); }
+  readonly schedules: CoworkSchedules;
+  constructor(readonly records: CoworkRepository, private readonly host: CoworkHostPorts = disabledCoworkHost, scheduleNow?: () => number) {
+    this.authority = new CoworkAuthority(records, host.grants);
+    this.schedules = new CoworkSchedules(records, host.grants, scheduleNow);
+  }
+  beginShutdown(): void { this.schedules.beginShutdown(); }
   private snapshot(principal: CoworkPrincipal, workspaceId: string) {
     const value = assertRemoteMayUseWorkspace(this.records, this.authority, principal, workspaceId);
     // Explicit projection: never rely on a schema stripping a future sensitive field.
@@ -183,9 +189,31 @@ export class CoworkWorkspaceService {
     if (Buffer.byteLength(JSON.stringify(result), "utf8") > RESPONSE_BUDGET) throw new CoworkError("response_too_large");
   }
   closeConnection(connectionId: number): void { this.host.selections?.closeConnection(connectionId); }
-  close(): void { this.host.selections?.close(); }
+  close(): void { this.beginShutdown(); this.host.selections?.close(); }
   private execute(principal: CoworkPrincipal, method: CoworkMethod, raw: unknown, connection: CoworkConnection): unknown {
     switch (method) {
+      case "workspace.schedule.create": case "workspace.schedule.cancel": case "workspace.schedule.list": case "workspace.schedule.status": {
+        // Local metadata surface only until paired ownership and saved remote scope are admitted.
+        if (principal.kind !== "local-user" || connection.role === "remote") throw new CoworkError("authority_denied");
+        if (method === "workspace.schedule.create") {
+          const p = COWORK_RPC[method].params.parse(raw);
+          assertRemoteMayUseWorkspace(this.records, this.authority, principal, p.workspaceId, "member");
+          return this.schedules.create(principal.id, p.workspaceId, p.requestId, p.definition);
+        }
+        if (method === "workspace.schedule.cancel") {
+          const p = COWORK_RPC[method].params.parse(raw);
+          assertRemoteMayUseWorkspace(this.records, this.authority, principal, p.workspaceId, "member");
+          return this.schedules.cancel(p.workspaceId, p.scheduleId, p.expectedRevision);
+        }
+        if (method === "workspace.schedule.list") {
+          const p = COWORK_RPC[method].params.parse(raw);
+          assertRemoteMayUseWorkspace(this.records, this.authority, principal, p.workspaceId);
+          return this.schedules.list(p.workspaceId, p.cursor, p.limit);
+        }
+        const p = COWORK_RPC[method].params.parse(raw);
+        assertRemoteMayUseWorkspace(this.records, this.authority, principal, p.workspaceId);
+        return this.schedules.status(p.workspaceId, p.scheduleId);
+      }
       case "workspace.capabilities.get": {
         COWORK_RPC[method].params.parse(raw);
         if (principal.kind !== "local-user" || connection.role === "remote") throw new CoworkError("authority_denied");

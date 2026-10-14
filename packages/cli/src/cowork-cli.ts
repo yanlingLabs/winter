@@ -13,6 +13,9 @@ export const COWORK_CLI_USAGE = `usage:
   winter workspace|project policy set-default <id> --policy POLICY --revision N --request-id ID [--json]
   winter workspace policy set-publication <workspaceId> --publication manual|github-only-feature-branches --revision N --request-id ID [--json]
   winter workspace policy set-ceiling <workspaceId> --ceiling-json JSON --revision N --request-id ID [--json]
+  winter workspace schedule list <workspaceId> [--limit N] [--cursor TOKEN] [--json]
+  winter workspace schedule create <workspaceId> --definition-json JSON --request-id ID [--json]
+  winter workspace schedule status|cancel <workspaceId> <scheduleId> [--revision N] [--json]
   winter workspace operation get <workspaceId> <operationId> [--json]
 
 Creation is unavailable. Source provisioning is gated by the daemon; add commands
@@ -81,6 +84,15 @@ export function parseCoworkArgs(surface: "workspace" | "project", args: string[]
       try { ceiling = JSON.parse(String(flags["--ceiling-json"])); } catch { throw new Error("--ceiling-json must contain a complete capability ceiling JSON object"); }
       params = { workspaceId: id, ...mutation(), ceiling }; allowed.push("--ceiling-json");
     } else throw new Error("Unknown workspace/Project policy command; use workspace policy get with the workspace ID for details");
+  } else if (verb === "schedule" && surface === "workspace") {
+    if (sub === "list") { arity(3); method = "workspace.schedule.list"; params = { workspaceId: id, cursor: flags["--cursor"], limit: number("--limit") }; allowed = ["--cursor", "--limit"]; }
+    else if (sub === "create") {
+      arity(3); method = "workspace.schedule.create"; let definition: unknown;
+      try { definition = JSON.parse(String(flags["--definition-json"])); } catch { throw new Error("--definition-json must contain a complete schedule definition"); }
+      params = { workspaceId: id, requestId: flags["--request-id"], definition }; allowed = ["--definition-json", "--request-id"];
+    } else if (sub === "status") { arity(4); method = "workspace.schedule.status"; params = { workspaceId: id, scheduleId: extra }; allowed = []; }
+    else if (sub === "cancel") { arity(4); method = "workspace.schedule.cancel"; params = { workspaceId: id, scheduleId: extra, expectedRevision: number("--revision") }; allowed = ["--revision"]; }
+    else throw new Error("Unknown workspace schedule command");
   } else if (verb === "operation" && sub === "get" && surface === "workspace") {
     arity(4); method = "workspace.operation.get"; params = { workspaceId: id, operationId: extra }; allowed = [];
   } else if (verb === "create") throw new Error("Cowork creation is unavailable; production provisioning and host selection issuance remain gated");
@@ -110,6 +122,9 @@ function workspaceLines(value: CoworkWorkspace): string[] {
 
 export function formatCoworkResult(route: CoworkCliRoute, result: CoworkCliResult): string[] {
   if (route.json) return [JSON.stringify(result, null, 2)];
+  if ("schedules" in result) return [...result.schedules.map(value => `${value.scheduleId}: ${value.state}; revision ${value.revision}; next due ${value.nextDue ?? "none"}`), ...(result.nextCursor ? [`Next cursor: ${result.nextCursor}`] : [])];
+  if ("schedule" in result) return [`${result.schedule.scheduleId}: ${result.schedule.state}; guest execution ${result.execution}`, ...result.occurrences.map(value => `${value.occurrenceId}: ${value.state}; blocked ${value.reason ?? "none"}; missed ${value.missedCount}`)];
+  if ("scheduleId" in result) return [`Schedule ${result.scheduleId}: ${result.state}; revision ${result.revision}; metadata recorded; guest execution unavailable`];
   if ("workspaces" in result) return [...(result.workspaces.length ? result.workspaces.flatMap(workspaceLines) : ["(no workspaces)"]), ...(result.nextCursor ? [`Next cursor: ${result.nextCursor}`] : [])];
   if ("projects" in result) return [...(result.projects.length ? result.projects.flatMap(project => workspaceLines(project.workspace)) : ["(no Projects)"]), ...(result.nextCursor ? [`Next cursor: ${result.nextCursor}`] : [])];
   if ("workspace" in result) return workspaceLines(result.workspace);
