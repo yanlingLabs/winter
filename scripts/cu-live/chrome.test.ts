@@ -302,6 +302,30 @@ describe("the chrome group: the open panel (2026-10-14)", () => {
     expect(failing(byName("§19 recipe").verify!(ctxOf(out, [{ t: 1, ev: "file.change", count: 1, name: PANEL_FILE_NAME }])))).toEqual([]);
   });
 
+  test("the §19 row goes on in the Go to folder field when type stops there, and always closes the sheet", async () => {
+    const els = panel();
+    const acts: unknown[][] = [];
+    const out = await runScript(withPanelFile(scriptOf(byName("§19 recipe")), PATH), fakeApp(els, (what, ...a) => {
+      acts.push([what, ...a]);
+      if (what === "type" && (a[1] as { into?: number })?.into === 21) {
+        els.push({ ref: 40, role: "text field", name: "" });
+        return `throw Refused: typed 1 of ${PATH.length} characters; then the focus moved from [21] list "icon view" to [40] text field, so the rest was not sent — check state(), then type the rest with { into }`;
+      }
+      return `${what} done`;
+    }));
+    expect(acts.some(([w, text, o]) => w === "type" && text === PATH.slice(1) && (o as { into?: number })?.into === 40)).toBe(true);
+    expect(markerFacts(out).typedBeforeStop).toBe(1);
+    // A row that fails partway still closes the sheet (Cancel, or Escape) before the next one.
+    const acts2: unknown[][] = [];
+    const out2 = await runScript(withPanelFile(scriptOf(byName("⌘⇧G and the path")), PATH), fakeApp(panel(), (what, ...a) => {
+      acts2.push([what, ...a]);
+      if (what === "key" && a[0] === "return") throw new Error("the turn timed out");
+      return `${what} done`;
+    })).catch((e: Error) => e.message);
+    expect(String(out2)).toContain("timed out");
+    expect(acts2.some(([w, ref]) => w === "click" && ref === 31)).toBe(true);
+  });
+
   test("a chord the helper says opened nothing in the panel is a no-op answer", () => {
     expect(saysNothingHappened("nothing new appeared in the panel after cmd+shift+g (no sheet or window opened, its focus did not move)")).toBe(true);
   });

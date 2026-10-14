@@ -386,17 +386,35 @@ extension CUCore {
 
     func perform(_ p: TargetActParams, on t: CUTarget, token: CUCancellation.Token) throws -> ActOutcome {
         switch p.action {
-        case .click(let a): return pickerHinted(try click(a, p, t, token), a, t)
+        case .click(let a):
+            try refuseProtectedChoice(p.action, t)
+            return pickerHinted(try click(a, p, t, token), a, t)
         case .setValue(let a):
             if let o = try setValueOfWebSelect(a, p, t, token) { return o }
-            return try setValue(a, p, t, token)
-        case .type(let a): return try type(a, p, t, token)
-        case .paste(let a): return try paste(a, p, t, token)
-        case .key(let a): return try keyChecked(a, t) { try key(a, p, t, token) }
+            let o = try setValue(a, p, t, token)
+            try refuseProtectedPanelValue(try? element(a.ref, in: t), t)
+            return o
+        case .type(let a):
+            let o = try type(a, p, t, token)
+            try refuseProtectedPanelValue(a.into.flatMap { try? element($0, in: t) }, t)
+            return o
+        case .paste(let a):
+            let o = try paste(a, p, t, token)
+            try refuseProtectedPanelValue(a.into.flatMap { try? element($0, in: t) }, t)
+            return o
+        case .key(let a):
+            try refuseProtectedChoice(p.action, t)
+            let o = try keyChecked(a, t) { try key(a, p, t, token) }
+            if let chord = try? CUKeyChord.parse(a.combo), Self.producesText(chord) {
+                try refuseProtectedPanelValue(a.into.flatMap { try? element($0, in: t) }, t)
+            }
+            return o
         case .scroll(let a): return try scroll(a, p, t, token)
         case .drag(let a): return try drag(a, p, t, token)
         case .select(let a): return try select(a, p, t, token)
-        case .action(let a): return try axAction(a, p, t, token)
+        case .action(let a):
+            try refuseProtectedChoice(p.action, t)
+            return try axAction(a, p, t, token)
         case .menu(let a): return try menu(a, p, t, token)
         case .hover(let a): return try hover(a, p, t, token)
         }
@@ -1284,6 +1302,8 @@ extension CUCore {
         let info = ElementInfo(e, ax)
         if info.secure { throw secureRefusal() }
         try CUFloorScan.checkTypedIntoSavePanel(e, text: a.value, pid: t.pid, ax: ax)
+        // Any sheet or panel — an Open panel's Go to folder field too, not only a Save panel's (the review, MED-2).
+        try refuseProtectedPanelText(a.value, into: e, t)
         t.noteTargeted(e, at: clock.nowMs())
         announceTarget(t, info, pressing: false)
         cursor(t, "type", at: info.center)
@@ -1373,12 +1393,8 @@ extension CUCore {
             try guardUnnamedTarget(e, wf, text: text, t)
         }
         try CUFloorScan.checkTypedIntoSavePanel(e, text: text, pid: t.pid, ax: ax)
-        // Into a sheet macOS's Open/Save panel service draws (Open panels too — the keys reach the panel itself): a path
-        // naming a protected location is refused like the save panel's floor (the text test first; it is free).
-        if CUFloors.typedSavePathIsProtected(text), let e, panelServicePid(t, focused: e) != nil {
-            CULog.act.notice("type in \(t.appName, privacy: .public): a protected path into a file panel — refused")
-            throw Self.panelPathRefusal(t.appName)
-        }
+        // Into ANY sheet or panel (an Open panel too): a path naming a protected location is refused before it is sent.
+        try refuseProtectedPanelText(text, into: e, t)
         return (e, g)
     }
 
@@ -1821,14 +1837,25 @@ extension CUCore {
     }
 
     /// The panel service instance drawing the sheet `focused` (else the reported focus) lies in; nil when it is in no
-    /// sheet, no instance runs, or which one is this app's can't be told.
+    /// sheet, or no element from it up to its sheet is the service's own — an IN-PROCESS sheet (an alert, a Save sheet
+    /// the app draws itself) keeps its keys in the app, whatever service runs for another of its windows (the review of
+    /// the open panel, MED-1).
     func panelServicePid(_ t: CUTarget, focused: AXUIElement?) -> pid_t? {
         guard t.accessible, let e = focused ?? reportedFocus(t), inSheet(e) else { return nil }
         let services = sys.openSavePanelServices()
         guard !services.isEmpty else { return nil }
-        var owner: pid_t = 0
-        let elementPid: pid_t? = AXUIElementGetPid(e, &owner) == .success && owner > 0 ? owner : nil
-        return Self.choosePanelService(services, hostPid: t.pid, elementPid: elementPid)
+        // The element's own process and its ancestors' up to the sheet: the service's when accessibility names the remote
+        // view's owner.
+        var pids: [pid_t] = []
+        var cur: AXUIElement? = e
+        for _ in 0..<60 {
+            guard let c = cur else { break }
+            var owner: pid_t = 0
+            if AXUIElementGetPid(c, &owner) == .success, owner > 0, !pids.contains(owner) { pids.append(owner) }
+            if ax.string(c, kAXRoleAttribute) == kAXSheetRole { break }
+            cur = ax.element(c, kAXParentAttribute)
+        }
+        return Self.choosePanelService(services, hostPid: t.pid, elementPids: pids)
     }
 
     /// `e` lies in an `AXSheet` (a few dozen levels up at most).
@@ -1844,24 +1871,14 @@ extension CUCore {
         return false
     }
 
-    /// Which panel service instance serves `hostPid`'s sheet. Pure. The element's own process when it is an instance
-    /// (accessibility names the remote view's owner) not known to serve another app; else the one instance the app is
-    /// responsible for (the youngest of several — an instance can outlive its panel); else, with responsibility
-    /// unreadable for all, the only instance running. Never an instance serving another app.
-    static func choosePanelService(_ services: [CUPanelService], hostPid: pid_t, elementPid: pid_t?) -> pid_t? {
-        if let ep = elementPid, ep != hostPid, let s = services.first(where: { $0.pid == ep }), s.responsible == nil || s.responsible == hostPid {
-            return ep
+    /// Which panel service instance draws the sheet. Pure. Only one that accessibility names as the owner of the element
+    /// or of an ancestor up to its sheet — never by elimination (a running instance proves nothing about THIS sheet) — and
+    /// never one known to serve another app.
+    static func choosePanelService(_ services: [CUPanelService], hostPid: pid_t, elementPids: [pid_t]) -> pid_t? {
+        for ep in elementPids where ep != hostPid {
+            if let s = services.first(where: { $0.pid == ep }), s.responsible == nil || s.responsible == hostPid { return ep }
         }
-        let mine = services.filter { $0.responsible == hostPid }
-        if !mine.isEmpty {
-            return mine.min { ($0.age ?? .infinity) < ($1.age ?? .infinity) }?.pid
-        }
-        guard services.count == 1, services[0].responsible == nil else { return nil }
-        return services[0].pid
-    }
-
-    static func panelPathRefusal(_ app: String) -> CUError {
-        CUError.refused(.savePath, "the path typed into \(app)'s file panel names a protected location (a shell startup file, ~/.ssh, LaunchAgents, or Winter's or Claude's settings) — nothing was typed; ask the user to choose it")
+        return nil
     }
 
     /// Whether the app's focused UI element is `e` now (its own, or its focused window's).
@@ -3019,7 +3036,7 @@ extension CUCore {
     func sendChord(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token,
                    _ g: TypingFocus = TypingFocus()) throws -> ActOutcome {
         let focused = g.explicit ?? reportedFocus(t)
-        return try execute(try chordPlan(chord, p, t, g), p, t, token, keyPid: keyboardTarget(t, focused: focused))
+        return try execute(try chordPlan(chord, p, t, g), p, t, token, keyPid: keyDeliveryPid(t, focused: focused))
     }
 
     /// A menu-bar item whose key equivalent is `key` with `modifiers` (command implied). The walk is bounded

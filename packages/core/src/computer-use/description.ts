@@ -120,7 +120,7 @@ export function computerV2Description(input: ComputerV2DescriptionInput): string
     "  console(o?: Quiet & { levels?: string[]; filter?: string; limit?: number; clear?: boolean }): Promise<LogEntry[]>;",
     "  network(o?: Quiet & { filter?: string; types?: string[]; failed?: boolean; limit?: number; clear?: boolean }): Promise<Request[]>;",
     "  networkBody(id: string, o?: Quiet & { maxChars?: number }): Promise<string>;   // one response's text body; secret-looking values masked for display (best-effort, not a security boundary)",
-    "  upload(ref: Ref, paths: string | string[]): Promise<void>;  // files from this session's working directory or temp directory ($TMPDIR: copy a file from elsewhere there first) into a file input, no dialog",
+    "  upload(ref: Ref, paths: string | string[]): Promise<void>;  // files from this session's working directory or temp directory ($TMPDIR: copy a file from elsewhere there first — never a key, credential, dotfile or other protected file) into a file input, no dialog",
     "  viewport(size: { width: number; height: number; mobile?: boolean; scale?: number } | null): Promise<void>;   // emulate a screen size on a tab you opened; null: back to normal",
     "  mute(on?: boolean): Promise<void>;     // a tab you opened",
     "  download(t: Ref | { url: string }, o?: { to?: string; timeoutMs?: number }): Promise<{ path: string; name: string; bytes: number; mime: string }>;",

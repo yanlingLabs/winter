@@ -1146,7 +1146,7 @@ public final class CUCore: @unchecked Sendable {
     /// What a browser bound as an APP is told when a sheet opens on it (an Open panel from a page's file input, most
     /// often): the tab route puts the file in with no dialog. (The helper does not know whether Winter reaches this
     /// browser's tabs: said as a way to try.)
-    static let webFileInputHint = "if it is a web page's file chooser, a tab does it with no dialog: bind the page with browsers.tab({ url }) and call upload(ref, paths) on its file input (copy a file from outside the working folder into $TMPDIR first)"
+    static let webFileInputHint = "if it is a web page's file chooser, a tab does it with no dialog: bind the page with browsers.tab({ url }) and call upload(ref, paths) on its file input (copy a file from outside the working folder into $TMPDIR first — never a key, credential or dotfile)"
 
     /// The sheet element `sheet` is the window-server window `w`: by its window id when accessibility gives that one, or
     /// by its frame (within a point or two — a sheet's window and its element cover the same rectangle; a sheet whose

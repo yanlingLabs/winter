@@ -16,7 +16,7 @@ import { BrowserBackendRegistry } from "../../src/computer-use/browser/registry"
 import { fitsBudget, imageSize, scaleFor, toCss } from "../../src/computer-use/browser/scale";
 import { ruleAllowsSite, siteCardSummary, siteRow } from "../../src/computer-use/browser/site-policy";
 import { bodyLines, diffState, FULL_STATE_BYTE_CAP, FULL_STATE_LINE_CAP, fullState, makeSnapshot, nodeLine, printedState, type TabNode, siteToolsLine } from "../../src/computer-use/browser/state-format";
-import { checkUploadPaths, UPLOAD_MAX_FILES } from "../../src/computer-use/browser/upload-paths";
+import { checkUploadPaths, isSecretPath, UPLOAD_MAX_FILES } from "../../src/computer-use/browser/upload-paths";
 import { computerV2Description } from "../../src/computer-use/description";
 import { AutomationFailure } from "../../src/computer-use/errors";
 import { FakeCdpTransport, fakeJpeg } from "./browser-fake-transport";
@@ -290,6 +290,32 @@ describe("upload paths", () => {
     let message = "";
     try { checkUploadPaths(join(elsewhere, "pkg.zip"), r); } catch (e) { message = (e as Error).message; }
     expect(message).toContain("is outside this session's working directory and temp directory — only files from those can be uploaded: copy it into $TMPDIR first (with your shell), then upload the copy");
+  });
+  test("a protected file outside the roots is refused plainly — never told to copy it (deny list, Winter's home, a home dotfolder)", () => {
+    const { home, r } = roots();
+    const userHome = mkdtempSync(join(tmpdir(), "winter-up-user-"));
+    const denied = mkdtempSync(join(tmpdir(), "winter-up-denied-"));
+    mkdirSync(join(userHome, ".aws"));
+    writeFileSync(join(userHome, ".aws", "credentials"), "k");
+    writeFileSync(join(denied, "secret.txt"), "s");
+    writeFileSync(join(home, "settings.json"), "{}");
+    const said = (p: string, extra: Partial<typeof r> = {}): string => { try { checkUploadPaths(p, { ...r, userHome, ...extra }); return "ok"; } catch (e) { return (e as Error).message; } };
+    const deny = said(join(denied, "secret.txt"), { denyRead: [denied] });
+    expect(deny).toContain("is on the sandbox's read-deny list — it can't be uploaded");
+    expect(deny).not.toContain("copy");
+    const own = said(join(home, "settings.json"));
+    expect(own).toContain("inside Winter's own home");
+    expect(own).not.toContain("copy it");
+    const aws = said(join(userHome, ".aws", "credentials"));
+    expect(aws).toContain("is a protected file (in a hidden folder of the home, or a keychain) — it can't be uploaded, and must not be copied to be");
+    expect(aws).not.toContain("$TMPDIR");
+  });
+  test("secret paths: a home dot segment or a keychain; nothing outside the home", () => {
+    expect(isSecretPath("/Users/u/.ssh/id_ed25519", "/Users/u")).toBe(true);
+    expect(isSecretPath("/Users/u/work/.env", "/Users/u")).toBe(true);
+    expect(isSecretPath("/Users/u/Library/Keychains/login.keychain-db", "/Users/u")).toBe(true);
+    expect(isSecretPath("/Users/u/Downloads/pkg.zip", "/Users/u")).toBe(false);
+    expect(isSecretPath("/opt/.hidden/x", "/Users/u")).toBe(false);
   });
 });
 

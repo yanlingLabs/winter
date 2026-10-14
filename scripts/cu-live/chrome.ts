@@ -573,18 +573,21 @@ async function fields() {
   for (const role of ["text field", "combo box"]) out.push(...(await w.find({ role }, { emit: false })));
   return out;
 }
-async function finish() {
+async function choose() {
   await attempt("return", () => w.key("return"));
   await sleep(1500);
   const openBtn = (await w.find({ role: "button", name: "Open" }, { emit: false })).find((e) => e.name === "Open" && !(e.states || []).includes("disabled"));
   if (openBtn && (await hasSheet())) { await attempt("press Open", () => w.click(openBtn.ref)); await sleep(1500); }
-  const still = await hasSheet();
+}
+/** Always run (a finally): the sheet is closed before the next row, whatever happened. */
+async function cleanup() {
+  let still = true;
+  try { still = await hasSheet(); } catch (e) { still = true; }
   report({ panelStillOpen: still });
-  if (still) {
-    const cancel = (await w.find({ role: "button", name: "Cancel" }, { emit: false })).filter((e) => e.name === "Cancel").pop();
-    if (cancel) await attempt("press Cancel", () => w.click(cancel.ref));
-    else await attempt("escape", () => w.key("escape"));
-  }
+  if (!still) return;
+  const cancel = (await w.find({ role: "button", name: "Cancel" }, { emit: false }).catch(() => [])).filter((e) => e.name === "Cancel").pop();
+  if (cancel) await attempt("press Cancel", () => w.click(cancel.ref));
+  if (!cancel || (await hasSheet().catch(() => true))) await attempt("escape", () => w.key("escape"));
 }
 `;
 
@@ -600,20 +603,24 @@ const PANEL_ROWS: Scenario[] = [
     name: "chrome app: a native Open panel — ⌘⇧G and the path reach the panel, the file lands in the page's input", group: "chrome", chrome: MATERIAL,
     timeoutMs: 90_000,
     code: `${PANEL_STEPS}
-if (await openPanel()) {
-  const files = await fileList();
-  report({ fileList: files ? files.name : null });
-  const before = await fields();
-  await attempt("chord", () => w.key("cmd+shift+g", files ? { into: files.ref } : undefined));
-  await sleep(1200);
-  const after = await fields();
-  const goTo = after.find((e) => !before.some((b) => b.ref === e.ref));
-  report({ goToField: goTo ? (goTo.role + " " + (goTo.name || "")) : null });
-  await attempt("select all", () => w.key("cmd+a"));
-  let typed = false;
-  await attempt("type path", async () => { await w.type(PATH); typed = true; });
-  if (!typed && goTo) await attempt("type path into", () => w.type(PATH, { into: goTo.ref }));
-  await finish();
+try {
+  if (await openPanel()) {
+    const files = await fileList();
+    report({ fileList: files ? files.name : null });
+    const before = await fields();
+    await attempt("chord", () => w.key("cmd+shift+g", files ? { into: files.ref } : undefined));
+    await sleep(1200);
+    const after = await fields();
+    const goTo = after.find((e) => !before.some((b) => b.ref === e.ref));
+    report({ goToField: goTo ? (goTo.role + " " + (goTo.name || "")) : null });
+    await attempt("select all", () => w.key("cmd+a"));
+    let typed = false;
+    await attempt("type path", async () => { await w.type(PATH); typed = true; });
+    if (!typed && goTo) await attempt("type path into", () => w.type(PATH, { into: goTo.ref }));
+    await choose();
+  }
+} finally {
+  await cleanup();
 }
 step("end");`,
     verify: (ctx) => [
@@ -628,11 +635,28 @@ step("end");`,
     name: "chrome app: a native Open panel — the skill's §19 recipe (the path typed into the file list, then Return)", group: "chrome", chrome: MATERIAL,
     timeoutMs: 90_000,
     code: `${PANEL_STEPS}
-if (await openPanel()) {
-  const files = await fileList();
-  report({ fileList: files ? files.name : null });
-  if (files) await attempt("type path", () => w.type(PATH, { into: files.ref }));
-  await finish();
+try {
+  if (await openPanel()) {
+    const files = await fileList();
+    report({ fileList: files ? files.name : null });
+    if (files) {
+      const before = await fields();
+      step("type path");
+      try { await w.type(PATH, { into: files.ref }); report({ "type path": "ok" }); } catch (e) {
+        // The recipe: a type that stops because the focus moved to the Go to folder field goes on there with the rest.
+        const msg = (e && e.message) || String(e);
+        print(msg);
+        report({ "type path": msg.slice(0, 200) });
+        const m = /typed (\\d+) of (\\d+) characters/.exec(msg);
+        const goTo = (await fields()).find((f) => !before.some((b) => b.ref === f.ref));
+        report({ goToField: goTo ? (goTo.role + " " + (goTo.name || "")) : null, typedBeforeStop: m ? Number(m[1]) : null });
+        if (m && goTo) await attempt("type rest into Go to", () => w.type(PATH.slice(Number(m[1])), { into: goTo.ref }));
+      }
+    }
+    await choose();
+  }
+} finally {
+  await cleanup();
 }
 step("end");`,
     verify: (ctx) => [

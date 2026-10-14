@@ -1169,16 +1169,27 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   shown in Chrome's sheet window and bridged into Chrome's tree as a `sheet`. Keys are posted to Chrome's pid; ⌘⇧G with the
   panel's file list focused never opened Go to folder — in the background, after `requestForeground`, and after a live
   screenshot — and once ran Chrome's own Find.
-- Keys and typed characters into a SHEET drawn by that service go to the service's own process (`target.act` `key`/`type`
-  only; `keyboardTarget`'s other uses unchanged): the instance the element's accessibility pid names when it is one, else the
-  one the app is responsible for (the youngest of several — an instance can outlive its panel), else the only instance
-  running when responsibility can't be read; never an instance serving another app, never outside a sheet. A path typed into
-  such a sheet that names a protected location (the save floor's list) is refused `save_path` — Open panels too. UNMEASURED:
-  whether the service's own process takes a posted ⌘⇧G and the typed path (the cu-live chrome rows "a native Open panel —
-  ⌘⇧G and the path …" and "… — the skill's §19 recipe …" measure both against `input.files[0].name`). Residual: a service
-  instance that outlived its panel, with another (in-process) sheet up on the app, would take that sheet's keys.
+- Keys, typed characters and a paste's ⌘V into a SHEET drawn by that service go to the service's own process (`target.act`
+  `key`/`type`/`paste`, and `setValue`'s typing fallback; `keyboardTarget`'s other uses unchanged) — only when
+  accessibility names a running instance as the owner of the element or of an ancestor up to its sheet, never by
+  elimination and never one serving another app: an IN-PROCESS sheet (its elements the app's own) keeps its keys in the
+  app whatever service runs for another window (the review, MED-1). UNMEASURED: which pid accessibility reports for the
+  remote panel's elements, and whether the service takes a posted ⌘⇧G and the typed path — the cu-live chrome rows "a
+  native Open panel — ⌘⇧G and the path …" and "… — the skill's §19 recipe …" measure both against `input.files[0].name`
+  (the §19 row goes on in the Go to folder field when `type` stops there; both close the sheet in a `finally`).
+- File panels' floors (the review, MED-2; `Core/CUCore+FilePanel.swift`), each closing a way around the others — a
+  protected location being the save floor's list plus, for a panel, anything in a hidden folder of the home or a keychain
+  (`CUFloors.isProtectedPanelPath`): (1) text for ANY sheet or panel (`type`, `paste`, `setValue` — an Open panel's Go to
+  folder field too) naming one is refused `save_path` before it is sent; (2) after a `type`/`paste`/`setValue`/text `key`,
+  the VALUE of the named field and of the focus is judged whole (a path assembled over several calls), cleared when the
+  field takes a value, and refused; (3) a press that makes the panel CHOOSE — its default button (any but Cancel when it
+  names none), Return, Enter or ⌘O in it, a double-click or Open/Confirm on an item — first reads what it would choose (the
+  selected items' `AXURL`, `AXFilename`, title, description, value; its fields' and pop-ups' values) and a protected one
+  refuses the press.
 - A key with the keyboard focus already in a sheet or panel (no `into`) is watched like one aimed there with `into`: no
-  sheet or window opened, focus, value and selection unchanged → "nothing new appeared in the panel after …". A chord
+  sheet or window opened, focus, value, selection and caret range unchanged → "nothing new appeared in the panel after …".
+  Both only in a FILE panel (a Save panel's name field, a service-drawn sheet, or the shape: a search field, a pop-up and an
+  outline or browser), never for a caret move (arrows, ⌘-arrows), ⌘C, Space or ⌘⇧. (the review, LOW-1). A chord
   with ⌘, ⌃ or ⌥ adds that it went to the app itself, which may run its own command or drop it while a panel is up, and
   names the way into an Open or Save panel: the full path typed into its file list (Go to folder opens on "/" or "~"),
   then Return.
@@ -1186,7 +1197,9 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   window with that window id or the same frame) is said to be in the state already — never "useWindow(id)", which bound
   it with no accessibility. On a web browser bound as an app it adds the tab route: `browsers.tab({ url })` and
   `upload(ref, paths)` on the page's file input, no dialog (a file from outside the working folder copied into $TMPDIR
-  first — `upload`'s own refusal now says so).
+  first, never a key, credential or dotfile — `upload`'s own refusal says so, and only for a file no floor protects: a
+  file in Winter's home, on the read-deny list, or in a hidden folder of the home or a keychain is refused plainly —
+  the review, MED-3).
 - Typing into an element that is not a text field (no text role, not editable, no editable ancestor, not a page's hidden
   input) says "… is not a text field, so the characters went to it as keys and nothing can be read back" — never "<App>
   doesn't expose this editor's text".

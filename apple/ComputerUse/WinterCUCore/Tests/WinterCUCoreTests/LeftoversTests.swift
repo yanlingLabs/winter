@@ -610,7 +610,7 @@ final class LeftoversTests: XCTestCase {
         let sheet = fakeElement(98_030), files = fakeElement(98_031)
         ax.put(window, [kAXChildrenAttribute: [web, sheet]])
         ax.add(sheet, role: kAXSheetRole, frame: CGRect(x: 100, y: 40, width: 600, height: 400),
-               extra: [kAXParentAttribute: window, kAXChildrenAttribute: [files]])
+               extra: [kAXParentAttribute: window, kAXChildrenAttribute: [files] + filePanelShape(98_035, in: sheet)])
         ax.add(files, role: kAXListRole, frame: CGRect(x: 120, y: 80, width: 560, height: 300), extra: [kAXParentAttribute: sheet])
         ax.focus(pid: pid, on: files)
         ax.put(files, [kAXFocusedAttribute: true])
@@ -621,7 +621,7 @@ final class LeftoversTests: XCTestCase {
         poster.onPost = { [unowned self] e in
             guard e.type == .keyDown else { return }
             ax.add(goTo, role: kAXSheetRole, frame: CGRect(x: 150, y: 60, width: 400, height: 120), extra: [kAXParentAttribute: sheet])
-            ax.put(sheet, [kAXChildrenAttribute: [files, goTo]])
+            ax.put(sheet, [kAXChildrenAttribute: ax.elements(sheet, kAXChildrenAttribute) + [goTo]])
         }
         let again = try await act(.key(CUKeyAction(combo: "/", into: ref(files))))
         XCTAssertFalse(again.detail?.contains("nothing new appeared") ?? false, again.detail ?? "")
@@ -629,13 +629,30 @@ final class LeftoversTests: XCTestCase {
 
     /// The open panel (2026-10-14): Chrome's Open panel up, its file list focused, `key("cmd+shift+g")` with no `into`
     /// said only "pressed" while no Go to folder sheet opened.
+    /// What every file panel has besides its files: a sidebar outline, the folder's pop-up and a search field.
+    private func filePanelShape(_ base: Int32, in sheet: AXUIElement) -> [AXUIElement] {
+        let sidebar = fakeElement(base), whereTo = fakeElement(base + 1), search = fakeElement(base + 2)
+        ax.add(sidebar, role: kAXOutlineRole, title: "sidebar", frame: CGRect(x: 100, y: 80, width: 20, height: 300), extra: [kAXParentAttribute: sheet])
+        ax.add(whereTo, role: kAXPopUpButtonRole, title: "Where:", frame: CGRect(x: 300, y: 50, width: 120, height: 20),
+               extra: [kAXParentAttribute: sheet, kAXValueAttribute: "images"])
+        ax.add(search, role: kAXTextFieldRole, subrole: "AXSearchField", frame: CGRect(x: 500, y: 50, width: 120, height: 20), extra: [kAXParentAttribute: sheet])
+        return [sidebar, whereTo, search]
+    }
+
+    /// The open panel (2026-10-14): Chrome's Open panel up, its file list focused, `key("cmd+shift+g")` with no `into`
+    /// said only "pressed" while no Go to folder sheet opened. With an Open (default) and a Cancel button.
     private func openPanel() -> (sheet: AXUIElement, files: AXUIElement) {
-        let sheet = fakeElement(98_090), files = fakeElement(98_091)
+        let sheet = fakeElement(98_090), files = fakeElement(98_091), open = fakeElement(98_093), cancel = fakeElement(98_094)
         ax.put(window, [kAXChildrenAttribute: [web, sheet]])
-        ax.add(sheet, role: kAXSheetRole, title: "open", frame: CGRect(x: 100, y: 40, width: 600, height: 400),
-               extra: [kAXParentAttribute: window, kAXChildrenAttribute: [files]])
+        ax.add(sheet, role: kAXSheetRole, title: "open", frame: CGRect(x: 100, y: 40, width: 600, height: 400), extra: [kAXParentAttribute: window])
+        ax.put(sheet, [kAXChildrenAttribute: [files, open, cancel] + filePanelShape(98_095, in: sheet),
+                       kAXDefaultButtonAttribute: open, kAXCancelButtonAttribute: cancel])
         ax.add(files, role: kAXListRole, title: "icon view", frame: CGRect(x: 120, y: 80, width: 560, height: 300),
                extra: [kAXParentAttribute: sheet, kAXFocusedAttribute: true])
+        ax.add(open, role: kAXButtonRole, title: "Open", frame: CGRect(x: 600, y: 410, width: 60, height: 24), extra: [kAXParentAttribute: sheet])
+        ax.setActions(open, [kAXPressAction])
+        ax.add(cancel, role: kAXButtonRole, title: "Cancel", frame: CGRect(x: 520, y: 410, width: 60, height: 24), extra: [kAXParentAttribute: sheet])
+        ax.setActions(cancel, [kAXPressAction])
         ax.focus(pid: pid, on: files)
         return (sheet, files)
     }
@@ -698,25 +715,45 @@ final class LeftoversTests: XCTestCase {
 
     private func keyDownPids(since n: Int = 0) -> Set<pid_t> { Set(poster.entries.dropFirst(n).filter { $0.type == .keyDown }.map(\.pid)) }
 
-    func testKeysIntoAPanelSheetGoToThePanelServiceTheAppIsResponsibleFor() async throws {
-        world()
-        let (_, files) = openPanel()
-        sys.panelServices = [CUPanelService(pid: 93_606, responsible: pid, age: 3)]
-        try await act(.key(CUKeyAction(combo: "cmd+shift+g")))
-        XCTAssertEqual(keyDownPids(), [93_606], "the chord goes to the panel's own process")
-        XCTAssertEqual(poster.entries.first { $0.type == .keyDown }?.flags.contains(.maskCommand), true, "with its flags")
-        let n = poster.entries.count
-        try await act(.type(CUTypeAction(text: "/tmp/a.zip", into: ref(files))))
-        XCTAssertEqual(keyDownPids(since: n), [93_606], "typing too")
+    /// The file list's own process (its token in the fakes) is a running panel service instance: accessibility names the
+    /// remote view's owner.
+    private func serviceDrawn(_ files: AXUIElement, responsible: pid_t?) -> pid_t {
+        var owner: pid_t = 0
+        AXUIElementGetPid(files, &owner)
+        sys.panelServices = [CUPanelService(pid: owner, responsible: responsible, age: 3)]
+        return owner
     }
 
-    func testNoServiceOrAnotherAppsServiceKeepsTheAppsPid() async throws {
+    func testKeysTypingAndPasteIntoAServiceDrawnSheetGoToThatService() async throws {
         world()
-        _ = openPanel()
+        let (_, files) = openPanel()
+        let service = serviceDrawn(files, responsible: pid)
         try await act(.key(CUKeyAction(combo: "cmd+shift+g")))
-        XCTAssertEqual(keyDownPids(), [pid], "no service running: the app")
+        XCTAssertEqual(keyDownPids(), [service], "the chord goes to the panel's own process")
+        XCTAssertEqual(poster.entries.first { $0.type == .keyDown }?.flags.contains(.maskCommand), true, "with its flags")
+        var n = poster.entries.count
+        try await act(.type(CUTypeAction(text: "/tmp/a.zip", into: ref(files))))
+        XCTAssertEqual(keyDownPids(since: n), [service], "typing too")
+        n = poster.entries.count
+        _ = try? await act(.paste(CUPasteAction(text: "/tmp/b.zip", into: ref(files))))
+        XCTAssertEqual(keyDownPids(since: n), [service], "a paste's cmd+v too (LOW-3)")
+    }
+
+    /// MED-1: an IN-PROCESS sheet (an alert the app draws itself) keeps its keys in the app, though a panel service runs
+    /// for another of its windows; and an instance serving another app is never used.
+    func testAnInProcessSheetKeepsTheAppsPidWhateverServiceRuns() async throws {
+        world()
+        let alert = fakeElement(98_120), field = fakeElement(98_121)
+        ax.put(window, [kAXChildrenAttribute: [web, alert]])
+        ax.add(alert, role: kAXSheetRole, frame: CGRect(x: 100, y: 40, width: 400, height: 200), extra: [kAXParentAttribute: window, kAXChildrenAttribute: [field]])
+        ax.add(field, role: kAXTextFieldRole, frame: CGRect(x: 120, y: 80, width: 300, height: 24), extra: [kAXParentAttribute: alert, kAXValueAttribute: "", kAXFocusedAttribute: true])
+        ax.focus(pid: pid, on: field)
+        sys.panelServices = [CUPanelService(pid: 93_606, responsible: pid, age: 3)]  // the second window's Open panel
+        try await act(.key(CUKeyAction(combo: "cmd+shift+g")))
+        XCTAssertEqual(keyDownPids(), [pid])
         let n = poster.entries.count
-        sys.panelServices = [CUPanelService(pid: 93_606, responsible: 777, age: 3)]
+        let (_, files) = openPanel()
+        _ = serviceDrawn(files, responsible: 777)
         try await act(.key(CUKeyAction(combo: "cmd+shift+g")))
         XCTAssertEqual(keyDownPids(since: n), [pid], "another app's panel service: never")
     }
@@ -729,31 +766,158 @@ final class LeftoversTests: XCTestCase {
         XCTAssertFalse(keyDownPids().contains(93_606), "\(keyDownPids())")
     }
 
-    func testAProtectedPathTypedIntoAPanelSheetIsRefused() async throws {
+    func testWhichPanelServiceDrawsTheSheet() {
+        let host: pid_t = 100
+        let mine = CUPanelService(pid: 1, responsible: host, age: 50), other = CUPanelService(pid: 3, responsible: 200, age: 1)
+        let unknown = CUPanelService(pid: 4, responsible: nil, age: 1)
+        XCTAssertEqual(CUCore.choosePanelService([mine, other], hostPid: host, elementPids: [77, 1]), 1, "an instance accessibility names")
+        XCTAssertEqual(CUCore.choosePanelService([unknown], hostPid: host, elementPids: [4]), 4, "responsibility unreadable, named")
+        XCTAssertNil(CUCore.choosePanelService([mine], hostPid: host, elementPids: [host]), "the app's own element: an in-process sheet")
+        XCTAssertNil(CUCore.choosePanelService([mine, unknown], hostPid: host, elementPids: []), "never by elimination")
+        XCTAssertNil(CUCore.choosePanelService([other], hostPid: host, elementPids: [3]), "never another app's")
+    }
+
+    // MARK: the file panel's floors (MED-2)
+
+    private func goToField(_ sheet: AXUIElement, value: String = "") -> AXUIElement {
+        let f = fakeElement(98_130)
+        ax.add(f, role: kAXTextFieldRole, frame: CGRect(x: 150, y: 60, width: 300, height: 24), extra: [kAXParentAttribute: sheet, kAXValueAttribute: value])
+        ax.put(sheet, [kAXChildrenAttribute: ax.elements(sheet, kAXChildrenAttribute) + [f]])
+        return f
+    }
+
+    private func refusal(_ a: CUAction) async -> String? {
+        do { try await act(a); return nil } catch let e as CUError { return e.code == "refused" ? e.message : "\(e.code): \(e.message)" } catch { return "\(error)" }
+    }
+
+    func testAProtectedPathTypedIntoAnyPanelSheetIsRefusedBeforeSending() async throws {
         world()
         let (_, files) = openPanel()
-        sys.panelServices = [CUPanelService(pid: 93_606, responsible: pid, age: 3)]
-        do {
-            try await act(.type(CUTypeAction(text: "~/.ssh/id_ed25519", into: ref(files))))
-            XCTFail("typed")
-        } catch let e as CUError {
-            XCTAssertEqual(e.code, "refused")
-            XCTAssertTrue(e.message.contains("names a protected location"), e.message)
-        }
+        let said = await refusal(.type(CUTypeAction(text: "~/.ssh/id_ed25519", into: ref(files))))
+        XCTAssertTrue(said?.contains("the text names a protected location") ?? false, said ?? "typed")
         XCTAssertTrue(poster.entries.filter { $0.type == .keyDown }.isEmpty, "nothing was typed")
     }
 
-    func testWhichPanelServiceServesTheApp() {
-        let host: pid_t = 100
-        let a = CUPanelService(pid: 1, responsible: host, age: 50), b = CUPanelService(pid: 2, responsible: host, age: 2)
-        let other = CUPanelService(pid: 3, responsible: 200, age: 1), unknown = CUPanelService(pid: 4, responsible: nil, age: 1)
-        XCTAssertEqual(CUCore.choosePanelService([a, b, other], hostPid: host, elementPid: nil), 2, "the youngest of the app's")
-        XCTAssertEqual(CUCore.choosePanelService([a, b], hostPid: host, elementPid: 1), 1, "the element's own process first")
-        XCTAssertNil(CUCore.choosePanelService([other], hostPid: host, elementPid: 3), "never another app's, even named by the element")
-        XCTAssertEqual(CUCore.choosePanelService([unknown], hostPid: host, elementPid: nil), 4, "the only one, responsibility unreadable")
-        XCTAssertNil(CUCore.choosePanelService([unknown, CUPanelService(pid: 5, responsible: nil, age: 9)], hostPid: host, elementPid: nil), "which one can't be told")
-        XCTAssertNil(CUCore.choosePanelService([unknown, other], hostPid: host, elementPid: nil))
-        XCTAssertNil(CUCore.choosePanelService([], hostPid: host, elementPid: host))
+    func testSetValueOfAnOpenPanelsGoToFieldToAProtectedPathIsRefused() async throws {
+        world()
+        let (sheet, _) = openPanel()
+        let field = goToField(sheet)
+        ax.makeSettable(field, kAXValueAttribute)
+        let said = await refusal(.setValue(CUSetValueAction(ref: ref(field), value: "~/.ssh/id_ed25519")))
+        XCTAssertTrue(said?.contains("the text names a protected location") ?? false, said ?? "set")
+        XCTAssertFalse(ax.written.contains { $0.hasSuffix(":AXValue") }, "nothing written")
+        let aws = await refusal(.setValue(CUSetValueAction(ref: ref(field), value: NSHomeDirectory() + "/.aws/credentials")))
+        XCTAssertNotNil(aws, "a hidden folder of the home too")
+    }
+
+    func testAPathAssembledOverSeveralCallsIsJudgedByTheFieldsValueAndCleared() async throws {
+        world()
+        let (sheet, _) = openPanel()
+        let field = goToField(sheet, value: "~/.s")
+        ax.makeSettable(field, kAXValueAttribute)
+        ax.focus(pid: pid, on: field)
+        ax.put(field, [kAXFocusedAttribute: true])
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown, !e.unicode.isEmpty else { return }
+            ax.put(field, [kAXValueAttribute: (ax.string(field, kAXValueAttribute) ?? "") + e.unicode])
+        }
+        let said = await refusal(.type(CUTypeAction(text: "sh/id_ed25519", into: ref(field))))
+        XCTAssertTrue(said?.contains("panel field now names a protected location") ?? false, said ?? "typed")
+        XCTAssertTrue(said?.contains("it was cleared") ?? false, said ?? "")
+        XCTAssertEqual(ax.string(field, kAXValueAttribute), "")
+    }
+
+    private func selectItem(in files: AXUIElement, url: String) -> AXUIElement {
+        let item = fakeElement(98_140)
+        ax.add(item, role: kAXImageRole, title: "item", frame: CGRect(x: 130, y: 90, width: 60, height: 60),
+               extra: [kAXParentAttribute: files, kAXURLAttribute: URL(string: url)! as CFURL])
+        ax.setActions(item, ["AXOpen"])
+        ax.put(files, [kAXChildrenAttribute: [item], kAXSelectedChildrenAttribute: [item]])
+        return item
+    }
+
+    func testPressingOpenWithAProtectedFileSelectedIsRefusedBeforeThePress() async throws {
+        world()
+        let (sheet, files) = openPanel()
+        let item = selectItem(in: files, url: "file:///Users/someone/.ssh/id_ed25519")
+        let open = ax.element(sheet, kAXDefaultButtonAttribute)!
+        let viaClick = await refusal(.click(CUClickAction(ref: ref(open))))
+        XCTAssertTrue(viaClick?.contains("panel would choose a protected location") ?? false, viaClick ?? "pressed")
+        XCTAssertFalse(ax.performed.contains { $0.hasSuffix(":AXPress") }, "Open was not pressed")
+        let viaReturn = await refusal(.key(CUKeyAction(combo: "return")))
+        XCTAssertNotNil(viaReturn, "Return chooses too")
+        let viaDouble = await refusal(.click(CUClickAction(ref: ref(item), count: 2)))
+        XCTAssertNotNil(viaDouble, "a double-click on the item too")
+        let viaOpen = await refusal(.action(CUAXAction(ref: ref(item), name: "AXOpen")))
+        XCTAssertNotNil(viaOpen, "Open on the item too")
+        // Cancel is never held up; a harmless file is chosen as before.
+        let cancel = ax.element(sheet, kAXCancelButtonAttribute)!
+        _ = await refusal(.click(CUClickAction(ref: ref(cancel))))
+        XCTAssertTrue(ax.performed.contains("\(token(cancel)):AXPress"))
+        ax.put(item, [kAXURLAttribute: URL(string: "file:///Users/someone/Downloads/pkg.zip")! as CFURL])
+        _ = await refusal(.click(CUClickAction(ref: ref(open))))
+        XCTAssertTrue(ax.performed.contains("\(token(open)):AXPress"))
+    }
+
+    func testWithNothingSelectedReadableTheFieldsValueDecides() async throws {
+        world()
+        let (sheet, _) = openPanel()
+        _ = goToField(sheet, value: NSHomeDirectory() + "/.aws/credentials")
+        let open = ax.element(sheet, kAXDefaultButtonAttribute)!
+        let said = await refusal(.click(CUClickAction(ref: ref(open))))
+        XCTAssertTrue(said?.contains("panel would choose a protected location") ?? false, said ?? "pressed")
+    }
+
+    func testProtectedPanelPaths() {
+        let home = "/Users/u"
+        XCTAssertTrue(CUFloors.isProtectedPanelPath("~/.aws/credentials", home: home))
+        XCTAssertTrue(CUFloors.isProtectedPanelPath("/Users/u/Library/Keychains/login.keychain-db", home: home))
+        XCTAssertTrue(CUFloors.isProtectedPanelPath("/Volumes/x/.ssh/id_rsa", home: home), "the save floor's list anywhere")
+        XCTAssertFalse(CUFloors.isProtectedPanelPath("/Users/u/Downloads/pkg.zip", home: home))
+        XCTAssertTrue(CUFloors.panelChoiceIsProtected("file:///Users/u/.gnupg/secring.gpg", home: home))
+        XCTAssertTrue(CUFloors.panelChoiceIsProtected(".netrc", home: home), "a bare dotfile name")
+        XCTAssertTrue(CUFloors.panelChoiceIsProtected(".zshrc, 2 KB", home: home))
+        XCTAssertFalse(CUFloors.panelChoiceIsProtected("screenshot.png, 1 280 × 800", home: home))
+    }
+
+    // MARK: the watch, narrowed (LOW-1)
+
+    func testAKeyInASheetThatIsNoFilePanelIsNotWatched() async throws {
+        world()
+        let alert = fakeElement(98_150), list = fakeElement(98_151)
+        ax.put(window, [kAXChildrenAttribute: [web, alert]])
+        ax.add(alert, role: kAXSheetRole, frame: CGRect(x: 100, y: 40, width: 400, height: 200), extra: [kAXParentAttribute: window, kAXChildrenAttribute: [list]])
+        ax.add(list, role: kAXListRole, frame: CGRect(x: 120, y: 80, width: 300, height: 100), extra: [kAXParentAttribute: alert, kAXFocusedAttribute: true])
+        ax.focus(pid: pid, on: list)
+        let r = try await act(.key(CUKeyAction(combo: "cmd+shift+g")))
+        XCTAssertFalse(r.detail?.contains("nothing new appeared") ?? false, r.detail ?? "")
+    }
+
+    func testCaretMovesCopyQuickLookAndHiddenFilesAreNotJudged() async throws {
+        world()
+        _ = openPanel()
+        for combo in ["left", "cmd+down", "cmd+c", "space", "cmd+shift+."] {
+            let r = try await act(.key(CUKeyAction(combo: combo)))
+            XCTAssertFalse(r.detail?.contains("nothing new appeared") ?? false, "\(combo): \(r.detail ?? "")")
+        }
+        XCTAssertTrue(CUCore.panelWatchExempt(try CUKeyChord.parse("cmd+right")))
+        XCTAssertFalse(CUCore.panelWatchExempt(try CUKeyChord.parse("cmd+shift+g")))
+    }
+
+    func testACaretThatMovedInAPanelFieldIsAChange() async throws {
+        world()
+        let (sheet, _) = openPanel()
+        let field = goToField(sheet, value: "/tmp")
+        ax.focus(pid: pid, on: field)
+        var r0 = CFRange(location: 4, length: 0)
+        ax.put(field, [kAXFocusedAttribute: true, kAXSelectedTextRangeAttribute: AXValueCreate(.cfRange, &r0)!])
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            var r = CFRange(location: 0, length: 0)
+            ax.put(field, [kAXSelectedTextRangeAttribute: AXValueCreate(.cfRange, &r)!])
+        }
+        let r = try await act(.key(CUKeyAction(combo: "ctrl+a")))
+        XCTAssertFalse(r.detail?.contains("nothing new appeared") ?? false, r.detail ?? "")
     }
 
     func testNotATextFieldWords() {

@@ -385,7 +385,7 @@ Then reply: "Fill in the remaining fields and press Submit for review - I'll con
 
 ## 19. Put a file into an upload field
 
-On a web page, skip the Open panel: bind the page as a tab and hand the file to its file input with `upload`. No dialog opens. `upload` takes files from the working folder or `$TMPDIR` only, so first copy a file from anywhere else with your shell (`cp ~/Downloads/extension-1.2.0.zip "$TMPDIR/"`).
+On a web page, skip the Open panel: bind the page as a tab and hand the file to its file input with `upload`. No dialog opens. `upload` takes files from the working folder or `$TMPDIR` only, so first copy a file from anywhere else with your shell (`cp ~/Downloads/extension-1.2.0.zip "$TMPDIR/"`). Never copy a key, a credential, a dotfile or anything `upload` refuses as protected: that refusal is final.
 
 ```js
 const store = await browsers.tab({ url: 'https://dashboard.example.com/listing' });

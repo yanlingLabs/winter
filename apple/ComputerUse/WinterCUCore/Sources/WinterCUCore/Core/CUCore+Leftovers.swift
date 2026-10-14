@@ -330,9 +330,11 @@ extension CUCore {
         // A key aimed into a sheet or panel — named with `into`, or with the keyboard focus already there (the open
         // panel, 2026-10-14: `key("cmd+shift+g")` with Chrome's Open panel's file list focused said only "pressed", and
         // no Go to folder sheet opened).
-        let inPanel: AXUIElement? = a.into != nil
-            ? a.into.flatMap { try? element($0, in: t) }.flatMap { inSheetOrPanel($0, t) ? $0 : nil }
-            : reportedFocus(t).flatMap { inSheetOrPanel($0, t) ? $0 : nil }
+        // Only a FILE panel (an Open or Save panel), and never a key that changes nothing visible there by design: a caret
+        // move, ⌘C, Space (Quick Look), ⌘⇧. (hidden files) — the review of the open panel, LOW-1.
+        let inPanel: AXUIElement? = Self.panelWatchExempt(chord) ? nil : (a.into != nil
+            ? a.into.flatMap { try? element($0, in: t) }
+            : reportedFocus(t)).flatMap { el in panelRoot(el, t).map { looksLikeFilePanel($0, el, t) } == true ? el : nil }
         if let el = inPanel {
             let focusId = reportedFocus(t).map { AXIdentity(element: $0) }
             let app = ax.application(t.pid)
@@ -358,6 +360,41 @@ extension CUCore {
             return KeyWatch(kind: .selectAll(f, r, len), focus: focusId)
         }
         return nil
+    }
+
+    /// Keys a file panel's watch never judges: they move a caret, copy, preview or show hidden files, changing nothing the
+    /// watch reads. Pure.
+    static func panelWatchExempt(_ chord: CUKeyChord) -> Bool {
+        let m = chord.modifiers
+        if case .named(let k) = chord.key {
+            if [.left, .right, .up, .down].contains(k) { return true }
+            if k == .space, m.isEmpty { return true }
+        }
+        if m == [.command], chord.key == .character("c") { return true }
+        if m == [.command, .shift], chord.key == .character(".") { return true }
+        return false
+    }
+
+    /// The sheet or panel `root` (holding `e`) is a file Open or Save panel: a Save panel's name field, a sheet the panel
+    /// service draws, or the shape every file panel has — a search field, a pop-up (the folder) and an outline or browser
+    /// (the sidebar, the files).
+    func looksLikeFilePanel(_ root: AXUIElement, _ e: AXUIElement, _ t: CUTarget) -> Bool {
+        if CUFloorScan.savePanel(containing: e, ax: ax) != nil { return true }
+        if panelServicePid(t, focused: e) != nil { return true }
+        var search = false, popUp = false, files = false
+        var queue: [AXUIElement] = [root]
+        var seen = 0
+        while !queue.isEmpty, seen < 500 {
+            let c = queue.removeFirst()
+            seen += 1
+            let role = ax.string(c, kAXRoleAttribute) ?? ""
+            if role == "AXSearchField" || ax.string(c, kAXSubroleAttribute) == "AXSearchField" { search = true }
+            if role == kAXPopUpButtonRole { popUp = true }
+            if role == kAXOutlineRole || role == kAXBrowserRole { files = true }
+            if search && popUp && files { return true }
+            queue += ax.elements(c, kAXChildrenAttribute)
+        }
+        return false
     }
 
     /// The panel's windows and sheets, counted (a sheet it opened — Go to folder — shows here).
@@ -390,12 +427,14 @@ extension CUCore {
             if role == kAXSheetRole || role == kAXWindowRole { break }
             cur = ax.element(c, kAXParentAttribute)
         }
-        return PanelSelection(items: out, text: ax.string(e, kAXSelectedTextAttribute))
+        return PanelSelection(items: out, text: ax.string(e, kAXSelectedTextAttribute), caret: Self.selectionText(ax, e))
     }
 
     struct PanelSelection: Equatable {
         var items: [AXIdentity]
         var text: String?
+        /// The selected range ("12+0"): a caret that moved is a change.
+        var caret: String? = nil
     }
 
     func keyUnchanged(_ w: KeyWatch, _ a: CUKeyAction, _ t: CUTarget) -> String? {

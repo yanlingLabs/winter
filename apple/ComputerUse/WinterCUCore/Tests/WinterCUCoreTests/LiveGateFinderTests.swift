@@ -204,7 +204,7 @@ final class LiveGateFinderTests: XCTestCase {
         open.title = "Open"
         sys.windows[157_511] = open
         let note = try XCTUnwrap(core.newWindows(target).first)
-        XCTAssertTrue(note.hasSuffix("; if it is a web page's file chooser, a tab does it with no dialog: bind the page with browsers.tab({ url }) and call upload(ref, paths) on its file input (copy a file from outside the working folder into $TMPDIR first)"), note)
+        XCTAssertTrue(note.hasSuffix("; if it is a web page's file chooser, a tab does it with no dialog: bind the page with browsers.tab({ url }) and call upload(ref, paths) on its file input (copy a file from outside the working folder into $TMPDIR first — never a key, credential or dotfile)"), note)
     }
 
     func testAWindowIsAnnouncedOnceEverAndOnlyADocumentWindow() throws {

@@ -10,6 +10,7 @@
 // copies go when the session ends, and every leftover at the daemon's next start.
 import { randomBytes } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, rmSync, statSync, writeSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import { AutomationFailure } from "../errors";
 
@@ -25,6 +26,17 @@ export interface UploadRoots {
   home: string;
   /** The sandbox's read-deny list for the session (`sandboxConfigFor(home, cwd).filesystem.denyRead`). */
   denyRead: readonly string[];
+  /** The user's home folder (tests); `os.homedir()` otherwise. */
+  userHome?: string;
+}
+
+/** A file no upload advice may point at: under the user's home, in a folder or file whose name starts with "." (.ssh,
+ *  .aws, .gnupg, .config, .netrc, .env …) or in `Library/Keychains` / `Library/Cookies`. Pure. */
+export function isSecretPath(path: string, userHome: string): boolean {
+  if (!inside(path, userHome) || path === userHome) return false;
+  const rel = path.slice(userHome.length).split(sep).filter((s) => s.length > 0);
+  if (rel.some((seg) => seg.startsWith("."))) return true;
+  return rel[0] === "Library" && (rel[1] === "Keychains" || rel[1] === "Cookies");
 }
 
 const real = (p: string): string | undefined => { try { return realpathSync(p); } catch { return undefined; } };
@@ -63,12 +75,17 @@ export function checkUploadFiles(input: unknown, roots: UploadRoots): CheckedUpl
     if (path === undefined) throw new AutomationFailure("NotAllowed", `${shown}: no such file`);
     const st = statSync(path);
     if (!st.isFile()) throw new AutomationFailure("NotAllowed", `${shown} is not a regular file`);
-    if (!allowedRoots.some((r) => inside(path, r))) {
-      // The way on is said (the open panel, 2026-10-14: a zip under the home folder sent the model to the native Open panel).
-      throw new AutomationFailure("NotAllowed", `${shown} is outside this session's working directory and temp directory — only files from those can be uploaded: copy it into $TMPDIR first (with your shell), then upload the copy`);
-    }
+    // The floors first, wherever the file is: a protected file is refused plainly — never with the copy advice below,
+    // which would be a recipe for taking it out (the review of the open panel, MED-3).
     if (inside(path, home)) throw new AutomationFailure("NotAllowed", `${shown} is inside Winter's own home — it can't be uploaded`);
     if (denied.some((d) => inside(path, d))) throw new AutomationFailure("NotAllowed", `${shown} is on the sandbox's read-deny list — it can't be uploaded`);
+    const secret = isSecretPath(path, real(roots.userHome ?? homedir()) ?? (roots.userHome ?? homedir()));
+    if (!allowedRoots.some((r) => inside(path, r))) {
+      if (secret) throw new AutomationFailure("NotAllowed", `${shown} is a protected file (in a hidden folder of the home, or a keychain) — it can't be uploaded, and must not be copied to be`);
+      // The way on is said (the open panel, 2026-10-14: a zip under the home folder sent the model to the native Open
+      // panel) — only for a file no floor protects.
+      throw new AutomationFailure("NotAllowed", `${shown} is outside this session's working directory and temp directory — only files from those can be uploaded: copy it into $TMPDIR first (with your shell), then upload the copy`);
+    }
     total += st.size;
     if (total > UPLOAD_MAX_BYTES) throw new AutomationFailure("NotAllowed", `upload() takes at most ${UPLOAD_MAX_BYTES / (1024 * 1024)} MiB of files at once`);
     out.push({ path, dev: st.dev, ino: st.ino, size: st.size });
