@@ -476,16 +476,47 @@ final class LeftoversTests: XCTestCase {
         world()
         let combo = fakeElement(98_090), search = fakeElement(98_091)
         ax.put(form, [kAXChildrenAttribute: ax.elements(form, kAXChildrenAttribute) + [combo, search]])
+        // As Chrome for Testing 156 gives a `<div role="combobox">` select (measured 2026-10-14): the text attributes
+        // all there, its value settable, a list box pop-up — and no editable ancestor.
+        let range = AXValueCreate(.cfRange, [CFRange(location: 0, length: 0)])!
         ax.add(combo, role: kAXComboBoxRole, title: "Size", frame: CGRect(x: 60, y: 420, width: 200, height: 30),
-               extra: [kAXParentAttribute: form, kAXValueAttribute: "Medium"])
+               extra: [kAXParentAttribute: form, kAXValueAttribute: "Medium", kAXNumberOfCharactersAttribute: 0,
+                       kAXSelectedTextRangeAttribute: range, kAXInsertionPointLineNumberAttribute: Int.max,
+                       "AXHasPopup": true, "AXPopupValue": "listbox", kAXExpandedAttribute: false])
         ax.makeSettable(combo, kAXValueAttribute)
+        // An editable combo box (a search with suggestions): the same, plus its editable ancestor (itself).
         ax.add(search, role: kAXComboBoxRole, title: "Search", frame: CGRect(x: 300, y: 420, width: 200, height: 30),
                extra: [kAXParentAttribute: form, kAXValueAttribute: "", kAXNumberOfCharactersAttribute: 0,
-                       kAXSelectedTextRangeAttribute: AXValueCreate(.cfRange, [CFRange(location: 0, length: 0)])!])
+                       kAXSelectedTextRangeAttribute: range, kAXInsertionPointLineNumberAttribute: Int.max,
+                       "AXEditableAncestor": search, "AXHighestEditableAncestor": search])
         ax.makeSettable(search, kAXValueAttribute)
-        XCTAssertTrue(core.isWebSelect(combo), "no text entry's attributes: a select, settable or not")
+        XCTAssertTrue(core.isWebSelect(combo), "no editable ancestor: a select, whatever text attributes it carries")
         XCTAssertFalse(core.isWebSelect(search), "an editable combo box (a search with suggestions) is typed into")
         XCTAssertTrue(core.isWebSelect(select), "a pop-up button stays a select")
+    }
+
+    /// The measured trace (2026-10-14): `key("tab", { into: Title })` in a background Chrome — the app's focus on Title,
+    /// then on Subtitle ~120 ms after the key (the page fired no focus event: its window was not key). The focus moved:
+    /// no "did not move" note.
+    func testATabIntoAFieldWhoseFocusMovesAMomentLaterGetsNoNote() async throws {
+        world()
+        let title = fakeElement(98_093), subtitle = fakeElement(98_094)
+        ax.put(form, [kAXChildrenAttribute: ax.elements(form, kAXChildrenAttribute) + [title, subtitle]])
+        ax.add(title, role: kAXTextFieldRole, title: "Title", frame: CGRect(x: 60, y: 460, width: 300, height: 24),
+               extra: [kAXParentAttribute: form, kAXValueAttribute: "Hello Material probe", kAXFocusedAttribute: true, "AXEditableAncestor": title])
+        ax.add(subtitle, role: kAXTextFieldRole, title: "Subtitle", frame: CGRect(x: 60, y: 500, width: 300, height: 24),
+               extra: [kAXParentAttribute: form, kAXValueAttribute: "", "AXEditableAncestor": subtitle])
+        ax.focus(pid: pid, on: title)
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(120)) { [unowned self] in
+                ax.put(title, [kAXFocusedAttribute: false])
+                ax.put(subtitle, [kAXFocusedAttribute: true])
+                ax.focus(pid: pid, on: subtitle)
+            }
+        }
+        let r = try await act(.key(CUKeyAction(combo: "tab", into: ref(title))))
+        XCTAssertFalse(r.detail?.contains("did not move") ?? false, r.detail ?? "")
     }
 
     /// A key with `{ into }` is watched like one with the focus already there: Tab that left it where it was says so.

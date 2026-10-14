@@ -22,11 +22,14 @@ extension CUCore {
         return role == kAXPopUpButtonRole || !ax.isSettable(e, kAXValueAttribute) || !takesTypedText(e)
     }
 
-    /// The attributes only an element that takes typed text has (WebKit and Chromium give them to text fields, text
-    /// areas and editable combo boxes alone).
-    static let typedTextAttributes = [kAXNumberOfCharactersAttribute, kAXSelectedTextRangeAttribute, kAXInsertionPointLineNumberAttribute]
+    /// The attributes only an element that takes typed text has: its editable ancestor (itself, for a field). Not the
+    /// text attributes — Chrome gives `AXNumberOfCharacters`, `AXSelectedTextRange` and `AXInsertionPointLineNumber` to a
+    /// select-only `<div role="combobox">` too (measured on Chrome for Testing 156, 2026-10-14: the Size select had all
+    /// three, its value settable, and no editable ancestor; the Title field had `AXEditableAncestor` and
+    /// `AXHighestEditableAncestor`).
+    static let typedTextAttributes = ["AXEditableAncestor", "AXHighestEditableAncestor"]
 
-    /// Does `e` take typed text (a text entry's attributes)?
+    /// Does `e` take typed text (an editable ancestor — itself, for a field)?
     func takesTypedText(_ e: AXUIElement) -> Bool {
         Self.typedTextAttributes.contains { ax.attribute(e, $0) != nil }
     }

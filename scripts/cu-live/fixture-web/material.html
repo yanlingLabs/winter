@@ -104,6 +104,8 @@
 
 <div class="row">
   <button type="button" id="paint">Paint</button>
+  <label for="paint-word">Paint word</label>
+  <input type="text" id="paint-word" value="">
 </div>
 <div id="paint-area"></div>
 
@@ -205,7 +207,12 @@
   title.addEventListener("input", () => log("input", { id: "title", value: title.value }));
 
   document.addEventListener("focusin", (e) => log("focus", { id: e.target.id || e.target.tagName }));
-  document.addEventListener("keydown", (e) => log("key", { key: e.key, meta: e.metaKey, target: e.target.id || e.target.tagName, trusted: e.isTrusted }), true);
+  document.addEventListener("keydown", (e) => {
+    log("key", { key: e.key, meta: e.metaKey, target: e.target.id || e.target.tagName, trusted: e.isTrusted });
+    // Where the focus is a moment after a Tab: a window that is not key fires no focus event (measured 2026-10-14 —
+    // the focus moved to Subtitle while the page logged none), but document.activeElement says it.
+    if (e.key === "Tab") setTimeout(() => log("active", { id: (document.activeElement && document.activeElement.id) || "" }), 60);
+  }, true);
 
   const fileInput = document.getElementById("file-input");
   document.getElementById("select-file").addEventListener("click", (e) => {
@@ -219,6 +226,10 @@
   document.getElementById("paint").addEventListener("click", (e) => {
     document.getElementById("paint-area").classList.add("painted");
     log("paint", { trusted: e.isTrusted });
+  });
+  document.getElementById("paint-word").addEventListener("input", (e) => {
+    document.getElementById("paint-area").classList.add("painted");
+    log("paint", { via: "paint-word", trusted: e.isTrusted });
   });
   window.addEventListener("load", () => log("ready", { url: location.pathname, lang: navigator.language }));
 })();

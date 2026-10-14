@@ -1119,8 +1119,10 @@ export class ComputerV2Service {
     ctx.state.lastTargetShot.set(t.targetId, res.shotId);
     const handle = this.keepImage(ctx, res);
     // What the image is when it is not an ordinary capture ("captured …'s window on another desktop …") — said
-    // even for an `emit: false` read, since it bears on what the agent concludes from the image.
-    const detail = helperDetail(res.detail);
+    // even for an `emit: false` read, since it bears on what the agent concludes from the image. Whole: an off-desktop
+    // label with its after-act "may predate the last action" tail runs past 500 characters (the leftover probes,
+    // 2026-10-14: the 300 cap cut the tail and its screenshot({ live: true }) pointer).
+    const detail = helperDetail(res.detail, SCREENSHOT_DETAIL_CAP);
     if (detail !== undefined) ctx.builder.daemonLine(detail);
     if (args.emit !== false) {
       // The coordinate frame, so the model does not guess the scale: clicks take THIS image's pixels.
@@ -2046,7 +2048,7 @@ export function focusLine(res: ActResult): string | undefined {
  *  "typed" for keys nobody saw land — `pasted into …` for paste(), and so on, the helper's detail after it; the
  *  detail alone for any other act; nothing when there is nothing to say. */
 export function actLine(primitive: string, action: ActAction, res: ActResult): string | undefined {
-  const detail = helperDetail(res.detail, 700);
+  const detail = helperDetail(res.detail, ACT_DETAIL_CAP);
   const input = typeof res.input === "string" ? res.input.replace(/\s+/g, " ").trim().slice(0, 200) : undefined;
   const verb = action.kind === "type" ? `sent ${countCharacters(action.text)} to`
     : action.kind === "paste" ? "pasted into"
@@ -2068,6 +2070,11 @@ export function countCharacters(text: string): string {
   for (const _ of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)) n += 1;
   return `${n.toLocaleString("en-US")} character${n === 1 ? "" : "s"}`;
 }
+
+/** The helper's own words kept whole for a target screenshot (its freshness label + the after-act tail) and for an
+ *  act (its detail + the off-desktop caveat, which comes last). */
+export const SCREENSHOT_DETAIL_CAP = 800;
+export const ACT_DETAIL_CAP = 1_000;
 
 function helperDetail(detail: unknown, cap = 300): string | undefined {
   if (typeof detail !== "string") return undefined;

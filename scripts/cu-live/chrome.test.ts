@@ -100,7 +100,7 @@ describe("the chrome group: launch and rig", () => {
 
 describe("the chrome group: scenarios", () => {
   test("every row needs a browser, carries the chrome prelude, compiles, and never binds the user's Chrome", () => {
-    expect(CHROME_SCENARIOS.length).toBe(14);
+    expect(CHROME_SCENARIOS.length).toBe(15);
     for (const s of CHROME_SCENARIOS) {
       expect(needsChrome(s)).toBe(true);
       expect(s.group).toBe("chrome");
@@ -121,7 +121,11 @@ describe("the chrome group: scenarios", () => {
     expect(full).toHaveLength(5);
     for (const f of full) expect(f).toMatchObject({ chrome: { key: "material-fullscreen", fullScreen: true }, desktopSwitch: { answer: "allow" }, allowExcursionMs: 20_000 });
     expect(byName("off-desktop").chrome).toMatchObject({ fullScreen: true });
-    expect(byName("off-desktop").code).toContain('w.key("space", { into: paint.ref })');
+    expect(byName("off-desktop").code).toContain('w.setValue(word.ref, "paint")');
+    expect(byName("off-desktop").desktopSwitch).toEqual({ answer: "allow", afterMs: 1_500 });
+    expect(byName("the focus through Tab").chromeTrace).toBe(true);
+    // The off-desktop caveat makes a "nothing happened" answer honest about a key that worked.
+    expect(keyVerdict(true, "the selection did not change after cmd+a (the page may not have taken the key); Chrome's page is on another desktop, where it may not update its accessibility until it is seen — what it reads may predate the action, so this is unverified").ok).toBe(true);
     expect(chromeLaunchArgs({ key: "x", lang: "en", start: "material", extraArgs: ["--a"] }, "/p", "u")).toContain("--a");
     expect(byName("Autoriser").chrome).toEqual({ key: "fr-dialog", lang: "fr", start: "material", remoteDebugging: true });
   });
@@ -149,6 +153,9 @@ describe("the chrome group: scenarios", () => {
     const out = await runScript(scriptOf(s), works);
     const page: PageEvent[] = [{ t: 1, ev: "focus", id: "title" }, { t: 2, ev: "focus", id: "subtitle" }, { t: 3, ev: "check", id: "terms", checked: false }, { t: 4, ev: "selection", id: "title", start: 0, end: 20, length: 20 }];
     expect(failing(s.verify(ctxOf(out, page)))).toEqual([]);
+    // A background window fires no focus event: the activeElement after the Tab stands for it.
+    const background: PageEvent[] = [{ t: 2, ev: "active", id: "subtitle" }, ...page.slice(2)];
+    expect(failing(s.verify(ctxOf(out, background)))).toEqual([]);
     // Silent: "ok" and nothing in the page — every key row fails.
     expect(failing(s.verify(ctxOf(out, [])))).toHaveLength(3);
     // Honest: nothing in the page, and each answer says so.
