@@ -1,3 +1,4 @@
+import CoreGraphics
 import XCTest
 @testable import WinterCUCore
 
@@ -57,6 +58,11 @@ final class MatchingTests: XCTestCase {
 
     /// The Chrome Web Store dashboard (live, 2026-10-14), as Chrome's tree read it: the item's header with its status in
     /// five static texts, and the same web area while the "Success" dialog is up (only the dialog is in the tree).
+    /// A piece of the header's status line (y 370…390), from x `a` to x `b`.
+    private static func on(_ a: CGFloat, _ b: CGFloat, y: CGFloat = 370, h: CGFloat = 20) -> CGRect {
+        CGRect(x: a, y: y, width: b - a, height: h)
+    }
+
     private static func storeHeader(status: String = "Published") -> CUNode {
         CUNode(ref: 983, role: "AXGroup", name: "Winter for Chrome", children: [
             CUNode(ref: 984, role: "AXHeading", name: "Winter for Chrome", value: "1", children: [
@@ -64,13 +70,13 @@ final class MatchingTests: XCTestCase {
                     CUNode(ref: 986, role: "AXStaticText", name: "Winter for Chrome"),
                 ]),
             ]),
-            CUNode(ref: 987, role: "AXStaticText", name: "Status:"),
-            CUNode(ref: 988, role: "AXStaticText", value: " "),
-            CUNode(ref: 989, role: "AXStaticText", name: status),
-            CUNode(ref: 990, role: "AXStaticText", name: "-", value: " - "),
-            CUNode(ref: 991, role: "AXStaticText", name: "public"),
-            CUNode(ref: 992, role: "AXStaticText", name: "ID:", value: "ID: "),
-            CUNode(ref: 993, role: "AXStaticText", name: "flfkppajaamjgfmdljlklfdffkdcmicc"),
+            CUNode(ref: 987, role: "AXStaticText", name: "Status:", frame: Self.on(115, 162)),
+            CUNode(ref: 988, role: "AXStaticText", value: " ", frame: Self.on(162, 166)),
+            CUNode(ref: 989, role: "AXStaticText", name: status, frame: Self.on(166, 232)),
+            CUNode(ref: 990, role: "AXStaticText", name: "-", value: " - ", frame: Self.on(232, 246)),
+            CUNode(ref: 991, role: "AXStaticText", name: "public", frame: Self.on(246, 290)),
+            CUNode(ref: 992, role: "AXStaticText", name: "ID:", value: "ID: ", frame: Self.on(300, 325)),
+            CUNode(ref: 993, role: "AXStaticText", name: "flfkppajaamjgfmdljlklfdffkdcmicc", frame: Self.on(325, 560)),
             CUNode(ref: 995, role: "AXButton", name: "Save draft", states: .disabled),
             CUNode(ref: 997, role: "AXButton", name: "Publish", states: .disabled),
         ])
@@ -128,11 +134,62 @@ final class MatchingTests: XCTestCase {
         XCTAssertEqual(summary, CUElementSummary(ref: 987, role: "static text", name: "Status:"))
     }
 
+    /// Block elements the reader made siblings (paragraphs, log lines) never read as one line; a wrapped line does.
+    func testARunJoinsOnlyPiecesOnOneVisualLine() {
+        let paragraphs = CUNode(ref: 1, role: "AXGroup", children: [
+            CUNode(ref: 2, role: "AXStaticText", name: "Payment", frame: Self.on(20, 90, y: 100)),
+            CUNode(ref: 3, role: "AXStaticText", name: "Complete the form below", frame: Self.on(20, 220, y: 140)),
+            CUNode(ref: 4, role: "AXStaticText", name: "Log line one", frame: Self.on(20, 120, y: 180)),
+            CUNode(ref: 5, role: "AXStaticText", name: "complete", frame: Self.on(20, 90, y: 200)),
+        ])
+        let o = CUWaitEvaluator.Observation(roots: [paragraphs], windowTitle: "w", focusedRef: nil)
+        XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(text: "Payment complete"), o))
+        XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(text: "Log line one complete"), o), "touching lines are two lines")
+        XCTAssertTrue(CUFinder.find(.text("Payment complete"), in: [paragraphs]).isEmpty)
+        XCTAssertTrue(CUFinder.textRuns(paragraphs.flattened()).isEmpty)
+        // Unknown frames never join.
+        let unframed = CUNode(ref: 1, role: "AXGroup", children: [
+            CUNode(ref: 2, role: "AXStaticText", name: "Status:"), CUNode(ref: 3, role: "AXStaticText", name: "Published"),
+        ])
+        XCTAssertTrue(CUFinder.find(.text("Status: Published"), in: [unframed]).isEmpty)
+        // A wrapped piece (two lines tall) and the text continuing its bottom line join; so do two pieces side by side
+        // with no space of their own — a space between, never glued.
+        let wrapped = CUNode(ref: 1, role: "AXGroup", children: [
+            CUNode(ref: 2, role: "AXStaticText", name: "Your publish request was", frame: CGRect(x: 20, y: 100, width: 400, height: 40)),
+            CUNode(ref: 3, role: "AXStaticText", name: "submitted", frame: Self.on(20, 90, y: 120)),
+            CUNode(ref: 4, role: "AXStaticText", name: "today", frame: Self.on(90, 130, y: 120)),
+        ])
+        XCTAssertEqual(CUFinder.find(.text("request was submitted today"), in: [wrapped]).map(\.ref), [2])
+        XCTAssertEqual(CUFinder.find(.text("submitted today"), in: [wrapped]).map(\.ref), [3])
+        XCTAssertTrue(CUFinder.find(.text("submittedtoday"), in: [wrapped]).isEmpty, "words never glue")
+        XCTAssertEqual(CUFinder.textRuns(wrapped.flattened()).first?.line, "your publish request was submitted today")
+        XCTAssertEqual(CUFinder.textRuns(Self.storeHeader().flattened()).first?.line, "status: published - public id: flfkppajaamjgfmdljlklfdffkdcmicc")
+    }
+
+    /// The review: matchStart re-joined the prefix per piece (a 1,000-piece run took 8 s on the pid queue). One pass now.
+    func testALongRunIsMatchedInLinearTime() {
+        let n = 2_000
+        let line = CUNode(ref: 1, role: "AXGroup", children: (0..<n).map { i in
+            CUNode(ref: 10 + i, role: "AXStaticText", name: "w\(i)", frame: Self.on(CGFloat(i) * 10, CGFloat(i) * 10 + 8))
+        })
+        let t0 = Date()
+        let nodes = line.flattened()
+        let runs = CUFinder.textRuns(nodes)
+        XCTAssertEqual(runs.count, 1)
+        XCTAssertEqual(runs[0].matchStart("w1998 w1999"), 1998)
+        XCTAssertNil(runs[0].matchStart("w1999"), "inside one piece: that element's own match")
+        XCTAssertNil(runs[0].matchStart("w1999 w0"))
+        XCTAssertEqual(CUFinder.find(.text("w1500 w1501 w1502"), in: [line]).map(\.ref), [1510])
+        XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(text: "w1 w3"), CUWaitEvaluator.Observation(roots: [line], windowTitle: "w", focusedRef: nil)))
+        let ms = Date().timeIntervalSince(t0) * 1000
+        XCTAssertLessThan(ms, 50, "a 2,000-piece run: \(ms) ms")
+    }
+
     func testARunNeverReadsASecureField() {
         let row = CUNode(ref: 1, role: "AXGroup", children: [
-            CUNode(ref: 2, role: "AXStaticText", name: "Code:"),
-            CUNode(ref: 3, role: "AXStaticText", subrole: "AXSecureTextField", value: "4242"),
-            CUNode(ref: 4, role: "AXStaticText", name: "ok"),
+            CUNode(ref: 2, role: "AXStaticText", name: "Code:", frame: Self.on(0, 40)),
+            CUNode(ref: 3, role: "AXStaticText", subrole: "AXSecureTextField", value: "4242", frame: Self.on(44, 80)),
+            CUNode(ref: 4, role: "AXStaticText", name: "ok", frame: Self.on(84, 100)),
         ])
         let o = CUWaitEvaluator.Observation(roots: [row], windowTitle: "w", focusedRef: nil)
         XCTAssertFalse(CUWaitEvaluator.met(CUWaitCondition(text: "4242"), o))
@@ -164,6 +221,37 @@ final class MatchingTests: XCTestCase {
                      "a page whose only content is a named group with buttons is no dialog unless the focus is in it")
         XCTAssertNil(CUWaitEvaluator.dialogNote(page.roots, focusedRef: 230))
         XCTAssertEqual(CUWaitEvaluator.seen(page), "window \"Store Listing\" · 17 elements")
+    }
+
+    /// The review: the bound window itself a dialog is what is being read, never "a dialog is open".
+    func testTheBoundWindowIsNeverTheDialogInTheWay() {
+        for sub in ["AXDialog", "AXSystemDialog"] {
+            let w = CUNode(ref: 1, role: "AXWindow", subrole: sub, name: "Open", children: [
+                CUNode(ref: 2, role: "AXStaticText", name: "Choose a file"), CUNode(ref: 3, role: "AXButton", name: "Cancel"),
+            ])
+            XCTAssertNil(CUWaitEvaluator.dialogNote([w], focusedRef: 3), sub)
+            XCTAssertEqual(CUWaitEvaluator.seen(CUWaitEvaluator.Observation(roots: [w], windowTitle: "Open", focusedRef: 3)),
+                           "window \"Open\" · 3 elements · focused [3]")
+        }
+    }
+
+    /// The review: a login form wrapped in a named group (the page's only content, the focus in it) is no dialog; the
+    /// shape rule needs a small group with a button, the focus and nothing to type into — or a dialog-like name.
+    func testALoginFormInANamedGroupIsNoDialog() {
+        func form(_ name: String) -> CUNode {
+            CUNode(ref: 40, role: "AXGroup", name: name, children: [
+                CUNode(ref: 41, role: "AXTextField", name: "Email"),
+                CUNode(ref: 42, role: "AXTextField", subrole: "AXSecureTextField", name: "Password"),
+                CUNode(ref: 43, role: "AXButton", name: "Sign in"),
+            ])
+        }
+        XCTAssertNil(CUWaitEvaluator.dialogNote([Self.storeWindow([form("Sign in")])], focusedRef: 41))
+        XCTAssertTrue(CUWaitEvaluator.dialogNote([Self.storeWindow([form("Confirm sign-in dialog")])], focusedRef: nil)?
+            .hasPrefix("the page shows only group \"Confirm sign-in dialog\" [40]") ?? false, "a dialog-like name")
+        let big = CUNode(ref: 50, role: "AXGroup", name: "Results", children: (0..<12).map {
+            CUNode(ref: 51 + $0, role: "AXButton", name: "r\($0)")
+        })
+        XCTAssertNil(CUWaitEvaluator.dialogNote([Self.storeWindow([big])], focusedRef: 51), "12 elements or more: a page, not a dialog")
     }
 
     func testAPageWhoseOnlyContentIsALandmarkIsNoDialog() {

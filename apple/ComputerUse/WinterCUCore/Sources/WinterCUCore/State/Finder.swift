@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// `target.find` over an observed tree. Matching is case- and diacritic-insensitive:
@@ -52,48 +53,114 @@ public enum CUFinder {
         fold(s).split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
     }
 
-    /// A run of consecutive static-text siblings (two or more), read as one line.
+    /// A run of consecutive static-text siblings (two or more) on one visual line, read as one line.
     struct TextRun {
         var refs: [Int]
-        var pieces: [String]
+        /// The pieces folded and joined — a space added where neither side has one at the boundary, so words never
+        /// glue — with every run of whitespace one space and none at the ends. Built once, in one pass.
+        var line: String
+        /// Where each piece begins in `line`, in unicode scalars (non-decreasing; a piece that is only whitespace begins
+        /// where the space it folded into does).
+        var starts: [Int]
 
-        /// The line, joined as the pieces are and joined with spaces (both normalised).
-        func lines(_ r: ClosedRange<Int>) -> [String] {
-            let p = pieces[r]
-            return [CUFinder.norm(p.joined()), CUFinder.norm(p.joined(separator: " "))]
+        init(refs: [Int], pieces: [String]) {
+            self.refs = refs
+            var out = String.UnicodeScalarView()
+            var count = 0
+            var pendingSpace = false
+            var starts: [Int] = []
+            starts.reserveCapacity(pieces.count)
+            for (k, raw) in pieces.enumerated() {
+                let piece = raw.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil)
+                // Two pieces with no whitespace between them are two words: a space between, never glued.
+                if k > 0, let f = piece.unicodeScalars.first, !f.properties.isWhitespace,
+                   let l = pieces[k - 1].unicodeScalars.last, !l.properties.isWhitespace {
+                    pendingSpace = true
+                }
+                var began = false
+                for u in piece.unicodeScalars {
+                    if u.properties.isWhitespace { pendingSpace = true; continue }
+                    if pendingSpace, count > 0 { out.append(" "); count += 1 }
+                    pendingSpace = false
+                    if !began { starts.append(count); began = true }
+                    out.append(u)
+                    count += 1
+                }
+                if !began { starts.append(count) }
+            }
+            line = String(out)
+            self.starts = starts
         }
 
-        func contains(_ want: String) -> Bool { lines(0...(pieces.count - 1)).contains { $0.contains(want) } }
+        func contains(_ want: String) -> Bool { line.contains(want) }
 
-        /// The index of the piece where the FIRST occurrence of `want` that spans two or more pieces begins; nil when
-        /// none does (a phrase inside one piece is that element's own match). The first piece whose prefix of the run
-        /// holds it is where it ends; the last start from which it still holds up to there is where it begins.
+        /// The index of the piece where the FIRST occurrence of `want` (normalised: no space at its ends) begins, when
+        /// it spans two or more pieces; nil when there is none or it sits inside one piece (that element's own match).
+        /// Linear: one search of `line`, then a binary search of `starts` for each end of the match.
         func matchStart(_ want: String) -> Int? {
-            guard contains(want) else { return nil }
-            guard let end = pieces.indices.first(where: { j in lines(0...j).contains { $0.contains(want) } }) else { return nil }
-            guard let start = (0...end).last(where: { i in lines(i...end).contains { $0.contains(want) } }), start < end
-            else { return nil }
-            return start
+            guard !want.isEmpty, let r = line.range(of: want) else { return nil }
+            let scalars = line.unicodeScalars
+            let lo = scalars.distance(from: scalars.startIndex, to: r.lowerBound)
+            let hi = scalars.distance(from: scalars.startIndex, to: r.upperBound) - 1
+            // The last piece beginning at or before `offset`: the one whose text is there (both ends of a normalised
+            // match are text, never a space a whitespace-only piece stands for).
+            func piece(at offset: Int) -> Int {
+                var a = 0, b = starts.count - 1, found = 0
+                while a <= b {
+                    let m = (a + b) / 2
+                    if starts[m] <= offset { found = m; a = m + 1 } else { b = m - 1 }
+                }
+                return found
+            }
+            let first = piece(at: lo), last = piece(at: hi)
+            return first == last ? nil : first
         }
     }
 
-    /// Every run of consecutive static-text siblings: the text a page shows in pieces. Measured on the Chrome Web Store
-    /// dashboard (2026-10-14): its "Status: Published - public" is five static texts ("Status:", " ", "Published",
-    /// " - ", "public"), so "Status: Published" matched no single element. Only static text joins — a run never spans a
-    /// link, a button or a field, so unrelated controls side by side never read as one sentence — and a secure element
-    /// ends a run, never part of one. A piece is the element's value (its text as shown, spaces kept) or its name.
+    /// Two pieces read as one line: both frames known, overlapping vertically (or with near-equal middles), the next
+    /// beginning to the right of the previous one — or continuing the last line of a previous piece that wrapped (it is
+    /// taller than one line and the next sits on its bottom line). Block elements stacked one under the other never do.
+    static func sameLine(_ prev: CGRect?, _ next: CGRect?) -> Bool {
+        guard let p = prev, let n = next, p.height > 0, n.height > 0 else { return false }
+        let overlap = min(p.maxY, n.maxY) - max(p.minY, n.minY)
+        let lineHeight = min(p.height, n.height)
+        let tol: CGFloat = 2
+        let onOneLine = overlap >= lineHeight * 0.5 || abs(p.midY - n.midY) <= lineHeight * 0.25
+        if onOneLine, p.height <= n.height * 1.5 { return n.minX >= p.maxX - tol }
+        // A wrapped previous piece: the next one continues on its bottom line.
+        if p.height > n.height * 1.5 { return n.midY >= p.maxY - n.height && n.midY <= p.maxY + tol }
+        return false
+    }
+
+    /// Every run of consecutive static-text siblings on one visual line: the text a page shows in pieces. Measured on
+    /// the Chrome Web Store dashboard (2026-10-14): its "Status: Published - public" is five static texts ("Status:",
+    /// " ", "Published", " - ", "public"), so "Status: Published" matched no single element. Only static text joins — a
+    /// run never spans a link, a button or a field, so unrelated controls side by side never read as one sentence — a
+    /// secure element ends a run, never part of one, and pieces join only when their frames put them on one line (the
+    /// reader folds wrapper groups away, so block paragraphs and log lines are siblings too: they never join). A piece
+    /// with no frame joins nothing, except one that is only whitespace (Chrome's " " between two texts), which never
+    /// decides a join. A piece is the element's value (its text as shown, spaces kept) or its name.
     static func textRuns(_ nodes: [CUNode]) -> [TextRun] {
         var out: [TextRun] = []
         for parent in nodes where parent.children.count > 1 {
-            var run = TextRun(refs: [], pieces: [])
+            var refs: [Int] = []
+            var pieces: [String] = []
+            var lastFrame: CGRect?
+            var hasText = false
             func flush() {
-                if run.pieces.count > 1 { out.append(run) }
-                run = TextRun(refs: [], pieces: [])
+                if pieces.count > 1 { out.append(TextRun(refs: refs, pieces: pieces)) }
+                refs.removeAll(); pieces.removeAll(); lastFrame = nil; hasText = false
             }
             for c in parent.children {
                 guard c.role == "AXStaticText", !c.isSecure, let piece = c.value ?? c.name else { flush(); continue }
-                run.refs.append(c.ref)
-                run.pieces.append(piece)
+                let blank = piece.allSatisfy(\.isWhitespace)
+                if !blank {
+                    if hasText, !sameLine(lastFrame, c.frame) { flush() }
+                    hasText = true
+                    lastFrame = c.frame
+                }
+                refs.append(c.ref)
+                pieces.append(piece)
             }
             flush()
         }

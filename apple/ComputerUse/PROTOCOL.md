@@ -376,12 +376,17 @@ that says what working it there costs and names the ways out (a live screenshot,
 
 `cond` needs at least one field (else `invalid_params`); `gone` is a ref (number) or text that must
 disappear. A `text` (and a `gone` text) is met by an element's name or non-secure value containing it, or by a run
-of consecutive static-text siblings read as one line (joined as they are, and with spaces) — case, diacritics and
-whitespace runs folded; a run never spans a link, a button or a field. At the timeout `waitFor` fails `wait_timeout`
-with `data: {seen, waitedMs}`: `seen` is `window "<title>" · N elements · focused [ref]`, then — when a dialog is open
-(a dialog subrole, a sheet, or a web area whose only content is a named group holding a button and the focus) — the
-dialog by its words and that the page behind it may be out of the tree, and for a Chromium page on another desktop
-that the read may be out of date.
+of consecutive static-text siblings on one visual line, read as one line — case, diacritics and whitespace runs
+folded, a space put between two pieces with none at their boundary (words never glue). Pieces join only when their
+frames are on one line (overlapping vertically or with near-equal middles, the next to the right of the previous, or
+continuing the bottom line of a piece that wrapped): block elements — paragraphs, log lines — never join, nor do
+pieces with no frame (a whitespace-only piece never decides a join). A run never spans a link, a button or a field,
+and a secure element ends it. At the timeout `waitFor` fails `wait_timeout` with `data: {seen, waitedMs}`: `seen` is
+`window "<title>" · N elements · focused [ref]`, then — when a dialog is open below the window (a dialog subrole, a
+sheet, or a web area whose only content is a named group with a dialog-like name, or under 12 elements holding a
+button and the focus and no field to type into) — the dialog by its words and that the page behind it may be out of
+the tree, and for a Chromium page on another desktop that the read may be out of date. The bound window is never the
+dialog in the way, whatever its subrole.
 
 ### 4.7 AppleScript
 
@@ -1181,13 +1186,16 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   dialog (the page behind it out of the tree while it was up), and the status is five static texts ("Status:", " ",
   "Published", " - ", "public"), so no single element ever contained the phrase.
 - `waitFor`'s (and a watch's `appeared` / `gone` text) match now also reads each run of consecutive static-text siblings
-  as one line, joined as they are and with spaces, whitespace runs folded; a run never spans a link, a button or a field,
-  and never reads a secure element. `find` reads the same runs for a string query or a `text` without `name`, answering
+  ON ONE VISUAL LINE (by their frames: block elements the reader made siblings — paragraphs, log lines — never join, nor
+  pieces with no frame; a piece that wrapped joins the text on its bottom line) as one line, a space between pieces with
+  none at their boundary, whitespace runs folded; a run never spans a link, a button or a field, and never reads a
+  secure element; built in one pass and matched with one search (a 2,000-piece run well under 50 ms). `find` reads the same runs for a string query or a `text` without `name`, answering
   the element where the matched text begins (`find("Status: Published")` → the "Status:" element); a phrase inside one
   element stays that element's own match.
 - A `wait_timeout`'s `seen` names an open dialog — an element with the subrole `AXDialog`, `AXSystemDialog`,
   `AXApplicationDialog` or `AXApplicationAlertDialog`, a sheet, or (said as "it looks like a dialog") a web area whose
-  only content is one named, non-landmark group holding a button and the focus — with up to two of its texts and three
+  only content is one named, non-landmark group with a dialog-like name, or under 12 elements holding a button and the
+  focus and no field to type into (a login form is no dialog) — never the bound window itself — with up to two of its texts and three
   buttons, and that the page behind it is (or may be) out of the accessibility tree: answer or close it, then wait again.
 - A `wait_timeout` on a Chromium page on another desktop adds that its page may not update its accessibility until it
   is seen, so what the wait read may be out of date (finding D), naming `screenshot({ live: true, reason })`.
