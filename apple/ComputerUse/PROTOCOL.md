@@ -209,7 +209,11 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   of view; then the window's chrome outside a web page, then subtrees inside the page, then the focus's path, then
   the page itself (never folded wholesale while anything else can be). Only an outline row is ever `collapsed` (and
   keeps its sub-rows folded); WebKit's blanket `AXDisclosing = 0` is not read as collapsed.
-- `find`: `query` is a string or `{role?, name?, text?}`. A window with no accessibility answers `[]`. `page` is
+- `find`: `query` is a string or `{role?, name?, text?}`. A string, or a `text` with no `name`, also matches a run
+  of consecutive static-text siblings read as one line (as `target.waitFor` reads them, §4.6: no link, button or
+  field inside a run, never a secure element), answering the run's element where the matched text begins — the
+  piece that shows it, never the container, which may hold unrelated controls; a `role` must hold for that element.
+  A window with no accessibility answers `[]`. `page` is
   the window's page number (as the state header says it); `note` says when the page changed since the last
   whole-window `snapshot`, or the read was cut short.
 - A `snapshot`'s header ends with `page N` (the window's page, numbered: it goes up when the page's URL — an
@@ -371,7 +375,22 @@ that says what working it there costs and names the ways out (a live screenshot,
 | `target.waitFor` | `{targetId, cond: {text?, ref?, gone?, title?}, timeoutMs, callId?}` | `{met: true, waitedMs}` |
 
 `cond` needs at least one field (else `invalid_params`); `gone` is a ref (number) or text that must
-disappear. At the timeout `waitFor` fails `wait_timeout` with `data: {seen, waitedMs}`.
+disappear. A `text` (and a `gone` text) is met by an element's name or non-secure value containing it, or by a run
+of consecutive static-text siblings on one visual line, read as one line — case, diacritics and whitespace runs
+folded; at a boundary with no whitespace on either side the pieces are one word when their frames touch on one line
+(within 1.5 pt: "$" + "12.99", a highlighted "Pub" + "lished"), else a space goes between (separate words never glue).
+Pieces join only when their frames are on one line (overlapping vertically or with near-equal middles, the next to the
+right of the previous), or the text flows on: a previous piece that wrapped and the next on its bottom line, a next
+piece that wraps beginning on the previous one's line ("Note:" + a long value), or a line broken between them (the
+next at the container's left edge right under a previous that ended within three line heights of its right edge;
+left-to-right only). Block elements — paragraphs, log lines — never join, nor do pieces with no frame (a
+whitespace-only piece never decides a join). A run never spans a link, a button or a field,
+and a secure element ends it. At the timeout `waitFor` fails `wait_timeout` with `data: {seen, waitedMs}`: `seen` is
+`window "<title>" · N elements · focused [ref]`, then — when a dialog is open below the window (a dialog subrole, a
+sheet, or a web area whose only content is a named group with a dialog-like name and a button or the focus, or under 12 elements holding a
+button and the focus and no field to type into) — the dialog by its words and that the page behind it may be out of
+the tree, and for a Chromium page on another desktop that the read may be out of date. The bound window is never the
+dialog in the way, whatever its subrole.
 
 ### 4.7 AppleScript
 
@@ -829,7 +848,8 @@ acts: it only looks.
   the element, or the text, is no longer shown; `{kind: "changed", ref, settleMs?}` — the user changes the field's value,
   fired once it has stayed the same `settleMs` (default 1,500, at most 60,000); `{kind: "titled", title}` — the window's
   title comes to contain the text. A `ref` is a `target.snapshot` ref; a text or title is 1…500 characters, matched as
-  `target.waitFor` matches (names and non-secure values, case and diacritics folded, the first 1,500 elements read).
+  `target.waitFor` matches (names and non-secure values, and runs of static-text siblings read as one line; case,
+  diacritics and whitespace folded; the first 1,500 elements read).
   `submitted` and `navigated` are for browser tabs only: refused `invalid_params`.
 - **Arming** checks, in this order, and arms nothing when one fails: the params' shape — `watchId`, `targetId`, the
   condition (`invalid_params`); a `watchId` already armed (`invalid_params`); more than 64 watches in the helper
@@ -1162,3 +1182,27 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.19.1 | No wire change. The watch ring and pill stay while the watched window is its app's key window even when a window of the app's own sits above it — macOS attaches one above a window being captured (a session's view of it resuming), and a popover sits there too; before, the ring vanished the moment the view resumed capturing the watched window (§4.13). |
 | 1 | 1.20.0 | No wire change — the leftover probes on a real Chrome (2026-10-13). A Chromium BROWSER's page reaches the tree: `AXManualAccessibility` (Electron's and CEF's switch) is still set first, and when no web area appears within ~1 s, `AXEnhancedUserInterface` too (the one Chrome builds its web tree on, what VoiceOver sets) — once per process, browsers only, never an Electron or CEF app. Measured on Chrome for Testing 156 windowed behind the user's app: `AXManualAccessibility` answered `kAXErrorAttributeUnsupported` and no page appeared — before, in front, behind again — until `AXEnhancedUserInterface`, after which it was there within 3 s. A web combo box that takes no typed text (none of a text entry's attributes: `AXNumberOfCharacters`, `AXSelectedTextRange`, `AXInsertionPointLineNumber`) is a select even when its value reads settable: `setValue` opens it and presses the option. Chrome reads a `<div role="combobox">` select that way; the value write did nothing and the answer said "set the value". A key with `{ into }` is watched like one with the focus already there: a Tab that left the focus where it was, and a ⌘A that left the field not wholly selected, say so (the watch was armed only for keys with no `into`; `key("tab", { into })` said "pressed tab" with the focus unmoved). Floor F with no page URL to read (the page absent from the tree): the bound window's title, or its selected tab's, naming the inspect page refuses the act (a key went through with chrome://inspect shown). `AXEnhancedUserInterface`, its cost and its end (the controller's ruling, and the review's): it is what VoiceOver sets — per PROCESS, kept while the process runs until a client turns it off. It moves and resizes nothing itself, and Winter never moves a browser's windows; its known side effect is that window frame changes made through accessibility can animate or land in steps (window managers turn it off around their own moves). Chrome builds and keeps the accessibility tree of every tab of that process while it is on (CPU and memory); the user's browsing in it is otherwise unchanged. "A browser" here is Floor F's own test (a known bundle, or a Chromium app that declares http(s): Brave Beta, Opera GX, Comet — never Electron or CEF). Winter sets it only when the page did not appear otherwise, and it is WINTER'S only when the app answered the read just before with OFF (Chrome for Testing 156 answers it: false, then true once set — measured; an app that does not answer still gets it, never as Winter's). Winter's flag goes off again — re-read ON just before (unanswered or off: left as it is), and never while VoiceOver, Switch Control, Full Keyboard Access or Voice Control is on — when the last target in that process is released (a release, a session's end, a lost target) and when the helper ends (a quit, the idle quit, SIGTERM: `applicationWillTerminate`). The flags Winter set are recorded as `{pid, process start time}` in `<home>/run/computer-use-ax-flags.json` (0600); a helper that ended without clearing them (a crash, a kill) is followed by one that, at its start, clears each only in THAT process (same pid AND start time) still answering ON, then drops the record. Residual: another assistive tool macOS does not name (a keyboard-driven clicker reading the tree) that came to rely on a flag Winter set may lose it at Winter's release until it sets it again. The after-act picture window (1.17.0's ~1.5 s, and its label's) runs from when the act's RESULT returned, not from its input: an act whose answer came seconds later (Chrome activated itself and was put back) had its window spent before the next screenshot. A Chromium window on ANOTHER desktop may not update its accessibility (nor its picture) until it is seen: an act's "nothing changed" there (no visible effect, a key not taken, a box that did not change) gets "…'s page is on another desktop, where it may not update its accessibility until it is seen — what it reads may predate the action, so this is unverified; screenshot({ live: true, reason }) shows the window now", and `find()` within 10 s of an act there says the same in its note. Measured: Chrome full screen on its own Space — the page toggled while the answer said the press did nothing, and find() read the box unchecked. |
 | 1 | 1.20.1 | No wire change — the leftover fixes, from the measured evidence (2026-10-14). A web combo box is a select when it has no editable ancestor (`AXEditableAncestor` / `AXHighestEditableAncestor` — a field is its own), whatever text attributes it carries: Chrome for Testing 156 gives a select-only `<div role="combobox">` `AXNumberOfCharacters`, `AXSelectedTextRange` and `AXInsertionPointLineNumber` too (measured), so 1.20.0's rule left it a value write that did nothing. The element's attribute NAMES are read (twice: a failed read is unknown, never "none"); still unknown, the text-attribute rule decides, so a field never turns into a select on a read that failed. Safari's select-only combo box is unmeasured (WebKit's attributes for it not read on a real page yet). A picture's label names the app in at most 60 characters, so the label and its after-act tail always fit the daemon's 800 (the daemon now keeps a target screenshot's detail to 800 characters and an act's to 1,000: the 300 cut the "may predate the last action" tail). Measured, no change: `key("tab", { into })` into a background Chrome page moves the focus (the app's focus on the next field ~120 ms after the key) while the page fires no focus event (its window is not key) — the answer saying nothing of it was right. |
+
+
+**Pending** (waitFor behind a modal, 2026-10-14; no wire change — the controller folds it into the next helper version's row):
+- Measured live on the Chrome Web Store dashboard: after Publish, `waitFor({ text: "Status: Published" })` timed out with
+  `62 elements` and nothing said why. Two causes, each enough alone: Chrome's web area held ONLY the page's "Success" modal
+  dialog (the page behind it out of the tree while it was up), and the status is five static texts ("Status:", " ",
+  "Published", " - ", "public"), so no single element ever contained the phrase.
+- `waitFor`'s (and a watch's `appeared` / `gone` text) match now also reads each run of consecutive static-text siblings
+  ON ONE VISUAL LINE (by their frames: block elements the reader made siblings — paragraphs, log lines — never join, nor
+  pieces with no frame; text that flows on joins — a wrapped piece and the text on its bottom line, a wrapping next
+  piece, a line broken between two pieces at the container's edges) as one line — pieces touching on one line (within
+  1.5 pt) as one word, else a space where neither has one, whitespace runs folded; a run never spans a link, a button or a field, and never reads a
+  secure element; built in one pass and matched with one search (a 2,000-piece run well under 50 ms). `find` reads the same runs for a string query or a `text` without `name`, answering
+  the element where the matched text begins (`find("Status: Published")` → the "Status:" element); a phrase inside one
+  element stays that element's own match.
+- A `wait_timeout`'s `seen` names an open dialog — an element with the subrole `AXDialog`, `AXSystemDialog`,
+  `AXApplicationDialog` or `AXApplicationAlertDialog`, a sheet, or (said as "it looks like a dialog") a web area whose
+  only content is one named, non-landmark group with a dialog-like name and a button or the focus, or under 12 elements holding a button and the
+  focus and no field to type into (a login form is no dialog) — never the bound window itself — with up to two of its texts and three
+  buttons, and that the page behind it is (or may be) out of the accessibility tree: answer or close it, then wait again.
+- Not handled: right-to-left text broken across lines between two pieces stays two lines (no text direction is read;
+  the broken-line join is left-to-right only).
+- A `wait_timeout` on a Chromium page on another desktop adds that its page may not update its accessibility until it
+  is seen, so what the wait read may be out of date (finding D), naming `screenshot({ live: true, reason })`.

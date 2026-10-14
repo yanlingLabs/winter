@@ -310,12 +310,15 @@ enum CUWaitEvaluator {
 
     static func met(_ c: CUWaitCondition, _ o: Observation) -> Bool {
         let nodes = o.roots.flatMap { $0.flattened() }
+        var runs: [CUFinder.TextRun]?
         func hasText(_ t: String) -> Bool {
-            let want = CUFinder.fold(t)
+            let want = norm(t)
             guard !want.isEmpty else { return false }
-            return nodes.contains { n in
-                [n.name, n.isSecure ? nil : n.value].contains { $0.map { CUFinder.fold($0).contains(want) } ?? false }
-            }
+            if nodes.contains(where: { n in
+                [n.name, n.isSecure ? nil : n.value].contains { $0.map { norm($0).contains(want) } ?? false }
+            }) { return true }
+            if runs == nil { runs = CUFinder.textRuns(nodes) }
+            return runs!.contains { $0.contains(want) }
         }
         if let t = c.text, !hasText(t) { return false }
         if let r = c.ref, !nodes.contains(where: { $0.ref == r }) { return false }
@@ -329,11 +332,104 @@ enum CUWaitEvaluator {
         return c.text != nil || c.ref != nil || c.gone != nil || c.title != nil
     }
 
-    /// What `wait_timeout` reports as seen.
+    /// Folded, with every run of whitespace one space (`CUFinder.norm`).
+    static func norm(_ s: String) -> String { CUFinder.norm(s) }
+
+    /// What `wait_timeout` reports as seen: the window, its element count, the focus — and, when a dialog is open, the
+    /// dialog by its words and that the page behind it may be hidden from accessibility while it is open (measured on
+    /// the Chrome Web Store dashboard, 2026-10-14: with its "Success" dialog up, Chrome's web area held only the
+    /// dialog, so a wait for the status text behind it timed out with "62 elements" and nothing said why).
     static func seen(_ o: Observation) -> String {
         let count = o.roots.reduce(0) { $0 + $1.flattened().count }
         var parts = ["window \"\(o.windowTitle)\"", "\(count) elements"]
         if let f = o.focusedRef { parts.append("focused [\(f)]") }
-        return parts.joined(separator: " · ")
+        var s = parts.joined(separator: " · ")
+        if let d = dialogNote(o.roots, focusedRef: o.focusedRef) { s += " — " + d }
+        return s
+    }
+
+    /// Subroles of a dialog: AppKit's, and the one Chromium and WebKit give a page's `role="dialog"` / `alertdialog`.
+    static let dialogSubroles: Set<String> = ["AXDialog", "AXSystemDialog", "AXApplicationDialog", "AXApplicationAlertDialog"]
+
+    /// "a dialog "Success" is open ("Your publish request was submitted"; button "OK") — …" for the first dialog in the
+    /// tree below its roots: an element with a dialog subrole, a sheet — or, said as only looking like one, a web area whose
+    /// only content is one named group (not a landmark) with a dialog-like name and a button or the focus, or small (under 12 elements) holding a
+    /// button and the keyboard focus and no field to type into (how Chrome's tree read live while a page's modal dialog
+    /// was up: it printed as a group, the page left out). Nil when none. Pure.
+    static func dialogNote(_ roots: [CUNode], focusedRef: Int?) -> String? {
+        // Never a root: a bound window that is itself a dialog (or an open menu read beside it) is what is being read.
+        let nodes = roots.flatMap { $0.flattened().dropFirst() }
+        func plainGroup(_ n: CUNode) -> Bool {
+            guard n.role == "AXGroup", let name = n.name, !name.isEmpty,
+                  !(n.subrole.map { $0.hasPrefix("AXLandmark") || $0.hasPrefix("AXDocument") || $0 == "AXTabPanel" } ?? false)
+            else { return false }
+            let inside = n.flattened()
+            let button = inside.dropFirst().contains { $0.role == "AXButton" }
+            let focus = focusedRef.map { f in inside.contains { $0.ref == f } } == true
+            // A dialog-like name with something of a dialog's: a button or the focus (the name alone is a heading's).
+            if dialogLikeName(name) { return button || focus }
+            // A small group holding a button and the focus, and nothing to type into: a login or search form wrapped in
+            // a named group is no dialog (the review of this branch).
+            return inside.count < shapeMaxElements
+                && button && focus
+                && !inside.contains { entryRoles.contains($0.role) || $0.isSecure }
+        }
+        var dialog: CUNode?
+        var pageHidden = false
+        var byKind = true
+        if let d = nodes.first(where: { n in
+            (n.subrole.map(dialogSubroles.contains) ?? false) || n.role == "AXSheet"
+        }) {
+            dialog = d
+            pageHidden = nodes.contains { w in w.role == "AXWebArea" && soleContent(w)?.ref == d.ref }
+        } else if let w = nodes.first(where: { w in w.role == "AXWebArea" && soleContent(w).map(plainGroup) == true }) {
+            dialog = soleContent(w)
+            byKind = false
+        }
+        guard let d = dialog else { return nil }
+        func cut(_ s: String) -> String {
+            let t = s.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+            return t.count > 80 ? String(t.prefix(79)) + "…" : t
+        }
+        let inside = d.flattened().dropFirst()
+        let name = d.name.flatMap { $0.isEmpty ? nil : cut($0) }
+        var texts: [String] = []
+        for n in inside where n.role == "AXStaticText" && !n.isSecure {
+            guard let t = (n.name ?? n.value).map(cut), !t.isEmpty, t != name, !texts.contains(t) else { continue }
+            texts.append(t)
+            if texts.count == 2 { break }
+        }
+        let buttons = inside.filter { $0.role == "AXButton" }.compactMap { $0.name.flatMap { $0.isEmpty ? nil : cut($0) } }.prefix(3)
+        var what: [String] = []
+        if !texts.isEmpty { what.append(texts.map { "\"\($0)\"" }.joined(separator: ", ")) }
+        if !buttons.isEmpty { what.append((buttons.count == 1 ? "button " : "buttons ") + buttons.map { "\"\($0)\"" }.joined(separator: ", ")) }
+        let says = what.isEmpty ? "" : " (" + what.joined(separator: "; ") + ")"
+        let label = name.map { " \"\($0)\"" } ?? ""
+        if !byKind {
+            return "the page shows only \(d.roleWords)\(label) [\(d.ref)]\(says) — it looks like a dialog: while a page's dialog is open the browser leaves the page behind it out of the accessibility tree, so what you wait for may be behind it; answer or close it, then wait again"
+        }
+        let behind = pageHidden
+            ? "the page behind it is not in the accessibility tree while it is open"
+            : "what is behind it may be hidden from accessibility while it is open"
+        return "a dialog\(label) [\(d.ref)] is open\(says) — \(behind), so what you wait for may be behind it: answer or close the dialog, then wait again"
+    }
+
+    /// The shape rule's size bound: the measured "Success" dialog is 6 elements.
+    static let shapeMaxElements = 12
+    /// Roles a person types into: a group holding one is a form, not the shape rule's dialog.
+    static let entryRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
+
+    /// A name that says dialog: "… dialog", "Alert", "Confirm …", "… modal".
+    static func dialogLikeName(_ name: String) -> Bool {
+        let words = CUFinder.fold(name).split(whereSeparator: { !$0.isLetter }).map(String.init)
+        return words.contains { ["dialog", "alert", "modal", "confirm", "confirmation"].contains($0) }
+    }
+
+    /// A web area's only content: its one child that is not an empty, childless group. Nil with none or several.
+    static func soleContent(_ w: CUNode) -> CUNode? {
+        let content = w.children.filter { c in
+            !(c.role == "AXGroup" && (c.name ?? "").isEmpty && (c.value ?? "").isEmpty && c.children.isEmpty)
+        }
+        return content.count == 1 ? content[0] : nil
     }
 }
