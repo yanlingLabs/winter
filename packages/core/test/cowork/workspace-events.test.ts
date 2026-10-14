@@ -1,5 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { afterEach, expect, test as bunTest } from "bun:test";
+import { mkdtempSync, rmSync, statfsSync, renameSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HOST_WORKSPACE_EVENT_TYPES, SessionEvent, LineDecoder, ConnWriter, PROTOCOL_VERSION, encodeLine, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -18,6 +18,8 @@ import { startIpcServer } from "../../src/ipc/server";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { FileSecretStore } from "../../src/auth/secret-store";
 
+// Actual reviewed Darwin file+directory flushes. Unsupported hosts are not success fixtures.
+const test = process.platform === "darwin" && process.arch === "arm64" ? bunTest : bunTest.skip;
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const close of cleanups.splice(0).reverse()) close(); });
 const ceiling = { toolClasses: ["read", "write"], hostServices: [], connectors: [], network: "none" as const };
@@ -126,11 +128,15 @@ test("legacy payloads become safe refetch hints; hostile nested payload extras d
   expect(receipt.operationId).toBe(change.operationId);
 });
 
-test("missing logical session does not create a fake replacement or acknowledge pending notifications", () => {
+test("missing logical session is retired durably without deleting workspace data or growing new deliveries", () => {
   const f = fixture(); f.pump().drain(); f.update("missing");
   f.store.deleteSession(f.sessions[0]!);
-  expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 1 });
-  expect(f.records.pendingChanges(f.sessions[0]!)).toHaveLength(1);
+  expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 0 });
+  expect(f.records.pendingChanges(f.sessions[0]!)).toEqual([]);
+  expect(f.records.binding(f.sessions[0]!).state).toBe("deleted");
+  f.update("after-deletion"); expect(f.records.pendingChanges(f.sessions[0]!)).toEqual([]);
+  f.reopen(); expect(f.records.binding(f.sessions[0]!).state).toBe("deleted");
+  expect(f.records.get(f.workspaceId).state).toBe("retained"); expect(f.records.sources(f.workspaceId)).toHaveLength(1);
   expect(f.store.list()).toEqual([]);
 });
 
@@ -216,4 +222,74 @@ test("instruction change projection carries revision/digest/status without conte
   expect(JSON.stringify(event)).not.toMatch(/private guidance|Users/);
   expect(() => workspaceEventInput("s_one", { changeId: "change_one", workspaceId: "workspace_one", operationId: "operation_one", revision: 4,
     kind: "workspace_instructions_changed", payload: { instructionRevision: 2, digest: "/Users/private", refreshState: "current" } })).toThrow("recovery_required");
+});
+
+test("actual owned JSONL and held APFS-directory fullsync complete before delivery ACK", () => {
+  const f = fixture(); f.pump().drain();
+  expect(Bun.version).toBe("1.3.14"); expect(Bun.revision.startsWith("0d9b296a")).toBe(true);
+  const fsType = statfsSync(f.home).type; expect(fsType).toBe(0x1a);
+  f.update("fullsync-log"); const pending = f.records.pendingChanges(f.sessions[0]!)[0]!;
+  expect(f.pump().drain()).toEqual({ delivered: 1, blocked: 0 });
+  const acknowledged = f.db.db.query<{ event_seq: number }, [string, string]>("SELECT event_seq FROM cowork_outbox_deliveries WHERE session_id=? AND change_id=?").get(f.sessions[0]!, pending.changeId)!;
+  expect(acknowledged.event_seq).toBe(changes(f.store, f.sessions[0]!).at(-1)!.seq);
+  console.info(JSON.stringify({ fixture: "cowork-outbox-fullsync", bun: Bun.version, bunRevision: Bun.revision,
+    filesystemType: fsType, logFileRequestCompleted: true, directoryRequestCompleted: true,
+    exactAckSeq: acknowledged.event_seq, hardwarePowerCutProof: false }));
+});
+
+test("missing canonical JSONL refuses flush without recreation or acknowledgement", () => {
+  const f = fixture(); f.pump().drain(); f.update("missing-log");
+  const path = join(f.home, "sessions", "global", `${f.sessions[0]}.jsonl`);
+  renameSync(path, path + ".retained");
+  expect(() => f.store.flushLog(f.sessions[0]!)).toThrow();
+  expect(f.records.pendingChanges(f.sessions[0]!)).toHaveLength(1);
+});
+
+test("more than 100 pending changes stay ordered across bounded passes and prune delivered ledger/journal rows", () => {
+  const f = fixture(); f.pump().drain();
+  for (let i = 0; i < 125; i++) f.update(`change-${i}`);
+  const pending = f.records.pendingChanges(f.sessions[0]!);
+  const pump = f.pump(); expect(pump.drain()).toEqual({ delivered: 100, blocked: 0 });
+  expect(f.records.pendingChanges(f.sessions[0]!)).toHaveLength(25);
+  expect(pump.drain()).toEqual({ delivered: 25, blocked: 0 });
+  expect(changes(f.store, f.sessions[0]!).slice(-125).map(event => "workspaceChangeId" in event && event.workspaceChangeId)).toEqual(pending.map(change => change.changeId));
+  expect(f.db.db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM cowork_outbox_deliveries WHERE session_id=? AND state='delivered'").get(f.sessions[0]!)!.n).toBe(100);
+  expect(f.db.db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM cowork_outbox WHERE workspace_id=?").get(f.workspaceId)!.n).toBe(103); // unbound creation/source ACK/operation ACK + latest100 receipts
+  f.reopen(); expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 0 });
+});
+
+test("a failed live conversation backs off without appending duplicates or suppressing another conversation", () => {
+  const f = fixture(true); f.pump().drain(); f.update("backoff");
+  let attempts = 0;
+  const pump = new CoworkWorkspaceEvents(f.records, f.store, f.hub, (_phase, sessionId) => { if (sessionId === f.sessions[0]!) { attempts++; throw new Error("injected crash"); } });
+  expect(pump.drain()).toEqual({ delivered: 1, blocked: 1 });
+  expect(pump.drain()).toEqual({ delivered: 0, blocked: 0 });
+  expect(attempts).toBe(1);
+  expect(f.records.pendingChanges(f.sessions[0]!)).toHaveLength(1);
+  expect(f.records.pendingChanges(f.sessions[1]!)).toEqual([]);
+});
+
+test("structural restart reconciliation handles legacy optional fields and differently ordered JSONL keys", () => {
+  const f = fixture(); f.pump().drain();
+  f.records.updatePolicy(context("legacy-policy", f.records.get(f.workspaceId).configRevision), f.workspaceId, { defaultPolicy: "plan" });
+  const change = f.records.pendingChanges(f.sessions[0]!)[0]!;
+  f.db.db.run("UPDATE cowork_outbox SET payload_json='{}' WHERE change_id=?", [change.changeId]);
+  const pump = new CoworkWorkspaceEvents(f.records, f.store, f.hub, phase => { if (phase === "after-append") throw new Error("injected crash"); });
+  expect(pump.drain()).toEqual({ delivered: 0, blocked: 1 });
+  const path = f.store.transcriptPath(f.sessions[0]!);
+  const raw = readFileSync(path, "utf8").trimEnd().split("\n");
+  raw[raw.length - 1] = JSON.stringify(Object.fromEntries(Object.entries(JSON.parse(raw.at(-1)!)).reverse()));
+  writeFileSync(path, raw.join("\n") + "\n");
+  f.reopen(); expect(f.pump().drain()).toEqual({ delivered: 1, blocked: 0 });
+  expect(changes(f.store, f.sessions[0]!).filter(event => "workspaceChangeId" in event && event.workspaceChangeId === change.changeId)).toHaveLength(1);
+});
+
+test("actual outbox mutations and delivery ACK restore the preexisting shared connection durability settings", () => {
+  const f = fixture();
+  const settings = () => ["synchronous", "fullfsync", "checkpoint_fullfsync"].map(name => f.db.db.query<Record<string, number>, []>(`PRAGMA main.${name}`).get()![name]);
+  const prior = settings(); expect(prior[0]).toBe(1);
+  f.pump().drain(); expect(settings()).toEqual(prior);
+  f.update("scoped-fullsync"); expect(settings()).toEqual(prior);
+  expect(f.pump().drain()).toEqual({ delivered: 1, blocked: 0 }); expect(settings()).toEqual(prior);
+  f.records.abandonConversation(f.sessions[0]!); expect(settings()).toEqual(prior);
 });

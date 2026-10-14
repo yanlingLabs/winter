@@ -200,7 +200,7 @@ export class CoworkWorkspaceService {
   requireSessionRead(connection: CoworkConnection, sessionId: string, eventWorkspaceId?: string): void {
     const workspaceId = this.records.conversationWorkspace(sessionId);
     if (!workspaceId && !eventWorkspaceId) return;
-    if (!workspaceId || (eventWorkspaceId && workspaceId !== eventWorkspaceId)) throw new CoworkError("authority_denied");
+    if (!workspaceId || this.records.binding(sessionId).state === "deleted" || (eventWorkspaceId && workspaceId !== eventWorkspaceId)) throw new CoworkError("authority_denied");
     const principal = this.host.principal(connection);
     if (connection.role !== "remote" || principal?.kind !== "paired-user") throw new CoworkError("authority_denied");
     assertRemoteMayUseWorkspace(this.records, this.authority, principal, workspaceId);

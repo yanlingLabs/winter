@@ -2179,6 +2179,8 @@ export async function startDaemon(opts: {
     runtime?.onSessionDeleted(sessionId);
     // ComputerV2: the session's automation worker ends with it, and the helper releases its targets.
     computerUseRuntime.service.endSession(sessionId);
+    try { if (runtime) new CoworkRepository(runtime.db).abandonConversation(sessionId); }
+    catch { console.error("[cowork] conversation notification cleanup pending"); }
   };
   /** Task 17: what the engine used to answer, over the driver table + the child roster. */
   const grantDeniedPrefixes = [winterHome];

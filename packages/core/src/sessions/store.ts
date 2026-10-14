@@ -1,6 +1,7 @@
+import { fullSyncInstructionFd } from "../cowork/instruction-fullsync";
 import { Database } from "bun:sqlite";
-import { openSync, closeSync, fsyncSync, appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { openSync, closeSync, fstatSync, constants, appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { HOST_WORKSPACE_EVENT_TYPES, SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -663,12 +664,26 @@ export class SessionStore {
     return row.last_seq;
   }
 
-  /** Outbox ACK must follow durable log bytes, not just an index update or live delivery. */
+  /** Cowork-only ACK prerequisite. Reuses the reviewed Darwin owned-FD primitive;
+   * ordinary session append behavior is unchanged. Completed OS flush requests are
+   * not proof of storage hardware behavior after power loss. */
   flushLog(sessionId: string): void {
     const row = this.db.query("SELECT scope FROM sessions WHERE session_id=?").get(sessionId) as { scope: string } | null;
     if (!row) throw new Error("unknown session");
-    const fd = openSync(this.logPath(row.scope, sessionId), "r");
-    try { fsyncSync(fd); } finally { closeSync(fd); }
+    const path = this.logPath(row.scope, sessionId);
+    const directory = openSync(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    let file: number | undefined;
+    try {
+      file = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const directoryStat = fstatSync(directory), fileStat = fstatSync(file);
+      const uid = process.getuid?.();
+      if (!directoryStat.isDirectory() || !fileStat.isFile() || fileStat.nlink !== 1 ||
+          (uid !== undefined && (directoryStat.uid !== uid || fileStat.uid !== uid)) || directoryStat.dev !== fileStat.dev) {
+        throw new Error("workspace log flush refused");
+      }
+      fullSyncInstructionFd(file);
+      fullSyncInstructionFd(directory);
+    } finally { if (file !== undefined) closeSync(file); closeSync(directory); }
   }
 
   read(sessionId: string, fromSeq = 0): SessionEvent[] {
@@ -898,6 +913,11 @@ export class SessionStore {
       | { scope: string } | null;
     if (!row) throw new Error(`unknown session: ${sessionId}`);
     return this.logPath(row.scope, sessionId);
+  }
+
+  /** Index existence after constructor recovery; never inferred from a missing/unreadable log. */
+  hasSession(sessionId: string): boolean {
+    return this.db.query("SELECT 1 FROM sessions WHERE session_id=?").get(sessionId) !== null;
   }
 
   meta(sessionId: string): {

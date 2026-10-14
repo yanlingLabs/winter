@@ -17,18 +17,30 @@ in the workspace database for explicit snapshot/watch handling later.
 
 For each logical conversation, the consumer reads actual JSONL and reconciles
 `workspaceChangeId` before appending through SessionHub. It checks an existing
-event's safe payload against the immutable change, flushes the log with `fsync`,
-then ACKs that exact event sequence in the canonical delivery record. A crash
+event's safe payload structurally against the immutable change, requests the reviewed
+Darwin file and held-directory `F_FULLFSYNC` flushes,
+then ACKs that exact event sequence in the canonical delivery record. Canonical
+Cowork writes and ACK/cleanup transactions use the shared scoped FULL/fullfsync
+wrapper and restore previous connection settings before returning. Ordinary Code
+keeps the existing global SQLite defaults. Read-back and completed OS requests are
+configuration/ordering evidence, not hardware power-cut proof. A crash
 before append leaves the delivery pending. A crash after append but before ACK
 reuses that same event on the next drain/restart. No repeated live announcement
 is needed: attached/reconnecting clients replay the durable event with normal
 sequence deduplication. Session index rebuild recovers display events and never
 recreates canonical conversation bindings or broader workspace grants.
 
-Each conversation delivers at most 100 pending changes in a pass. A missing
-session, payload mismatch or append/flush/ACK failure keeps that conversation's
-first failed delivery pending and prevents later changes overtaking it. Other
-conversations can continue. Host errors are not copied into events. A read/index
+Each conversation delivers at most 100 pending changes in a pass. Host session
+deletion tombstones its canonical conversation binding and removes its delivery
+rows, preserving the workspace, sources, operation receipts and guest data. A
+post-recovery missing index row is terminally retired too; a missing or unreadable
+log with an existing row is a recovery failure, never grounds to recreate storage.
+Deleted conversations cannot accumulate new fanout. A live payload mismatch or
+append/flush/ACK failure keeps its first failed delivery pending, prevents later
+changes overtaking it, and backs off retries from one second to five minutes.
+Other conversations continue. Keep the latest 100 delivered receipts per logical
+conversation; prune older journal rows only after no conversation delivery still
+references them. Journal entries created without any conversation are retained. Host errors are not copied into events. A read/index
 sequence inconsistency requires session-store recovery before ACK; the consumer
 does not silently repair authority from an event stream.
 
@@ -65,7 +77,8 @@ serialized-event caps.
 
 ## Client and trust boundaries
 
-All five variants are durable history and remote-stream control metadata. They
+All five variants are ordinary durable SessionEvents admitted to history and
+remote streams. They are not members of the stream-control event-type set. They
 are excluded from model-greppable subagent transcripts and from SDK projection.
 `sync.push` and `SessionStore.appendSynced` reject both parsed and raw attempts to
 import these host-owned event variants. No RPC methods or remote mode eligibility
@@ -81,20 +94,34 @@ Swift enum mirrors, WinterClient sequence/session accessors and canonical
 fixtures are included. The Mac reducer records source/policy/operation/instruction
 metadata separately from agent execution state and marks details for refetch.
 Workspace UI/watch assembly and the separate iOS application's cache/rendering
-remain later integration work; old phone transports decode event envelopes
-opaquely and their existing unknown-event behavior remains unchanged.
+remain later integration work. Source inspection confirms the old `v-web-kit1`
+phone transport decodes opaque JSONValue envelopes, and current iOS transcript
+folds skip unknown types. Current iOS cacheableTypes does not cache these metadata
+variants: a history page consisting entirely of them can leave its older-page
+cache floor unchanged, causing repeated refetch rather than rendering metadata.
+This is a known version-skew limitation, not full old-client feature compatibility.
+
+Strict Swift SessionEvent decoding does throw on an unknown discriminator, but
+WinterKit's `parseServerLine` catches that per frame and returns `unknownEvent`;
+WinterClient emits unknown without closing the transport. Its transport loop
+continues routing subsequent lines. This is source evidence only; Swift tests
+remain deferred.
 
 ## Verification
 
 Pure headless validation uses disposable homes, real SQLite, file-backed session
 stores, SessionHub, actual host service mutations and an isolated Unix IPC socket.
-Crash injection is confined to the before-append/after-append windows. Coverage
+Crash injection is confined to the before-append/after-append windows. The reviewed
+file/directory helper succeeds on actual disposable APFS descriptors, not mocked
+flush outcomes; successful OS requests are not hardware power-cut proof. Coverage
 includes tied timestamps with reverse-sorting IDs, two Project conversations,
 restart and index rebuild, safe hostile-payload projection, source request/ACK
 separation, denied runtime/import authorship, and revoked remote scope.
 
 `pnpm protocol:generate` emits 89 fixtures. Core, protocol and CLI typechecks pass.
-The combined affected headless suite passes 404 tests across 15 files. Swift
+The frozen baseline passed 404 tests across 15 files; durability/review corrections
+pass 413 tests across 16 files, adding actual owned-FD flush, scoped SQLite setting
+restoration, deletion/backoff/pruning and structural replay coverage. Swift
 round-trip/reducer test sources are present but Swift builds, GUI/test-host runs,
 compiled-daemon verification, native/VM execution and release/activation were not
 performed under this source task's restrictions.

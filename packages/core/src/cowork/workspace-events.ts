@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { HOST_WORKSPACE_EVENT_TYPES, SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionHub } from "../sessions/hub";
 import type { EventInput, SessionStore } from "../sessions/store";
@@ -38,7 +39,8 @@ export function workspaceEventInput(sessionId: string, change: WorkspaceChange):
   }
   const parsed = SessionEvent.safeParse({ ...(input as object), seq: 1, ts: 0 });
   if (!parsed.success) throw new CoworkError("recovery_required");
-  const { seq, ts, ...event } = parsed.data;
+  // Match the persisted wire shape: optional undefined keys are absent in JSONL.
+  const { seq, ts, ...event } = JSON.parse(JSON.stringify(parsed.data)) as SessionEvent;
   return event;
 }
 
@@ -52,6 +54,7 @@ export interface WorkspaceEventCrashPoint {
  * bounded periodic drains recover database commits even when their originating caller vanished. */
 export class CoworkWorkspaceEvents {
   private draining = false;
+  private failures = new Map<string, { attempts: number; retryAt: number }>();
   private timer?: ReturnType<typeof setInterval>;
   constructor(private readonly records: CoworkRepository, private readonly store: SessionStore,
     private readonly hub: SessionHub, private readonly crashPoint?: WorkspaceEventCrashPoint) {}
@@ -62,8 +65,18 @@ export class CoworkWorkspaceEvents {
     this.draining = true;
     let delivered = 0, blocked = 0;
     try {
-      for (const sessionId of this.records.pendingChangeSessions()) {
+      const pendingSessions = this.records.pendingChangeSessions();
+      const pendingSet = new Set(pendingSessions);
+      for (const sessionId of this.failures.keys()) if (!pendingSet.has(sessionId)) this.failures.delete(sessionId);
+      for (const sessionId of pendingSessions) {
+        const failure = this.failures.get(sessionId);
+        if (failure && failure.retryAt > Date.now()) continue;
         try {
+          if (!this.store.hasSession(sessionId)) {
+            this.records.abandonConversation(sessionId);
+            this.failures.delete(sessionId);
+            continue;
+          }
           // Read real JSONL, not the disposable index. A committed append may outlive its DB ACK.
           const logged = new Map<string, SessionEvent>();
           for (const event of this.store.read(sessionId)) {
@@ -78,7 +91,7 @@ export class CoworkWorkspaceEvents {
             let event = logged.get(change.changeId);
             if (event) {
               const { seq, ts, ...prior } = event;
-              if (JSON.stringify(prior) !== JSON.stringify(input)) throw new CoworkError("recovery_required");
+              if (!isDeepStrictEqual(prior, input)) throw new CoworkError("recovery_required");
             } else {
               this.crashPoint?.("before-append", sessionId, change.changeId);
               event = this.hub.append(sessionId, input);
@@ -89,7 +102,13 @@ export class CoworkWorkspaceEvents {
             this.records.acknowledgeChange(sessionId, change.changeId, event.seq);
             delivered++;
           }
-        } catch { blocked++; } // Leave the exact delivery pending. No raw host errors enter events/logs.
+          this.records.pruneDeliveredChanges(sessionId);
+          this.failures.delete(sessionId);
+        } catch {
+          const attempts = Math.min((failure?.attempts ?? 0) + 1, 10);
+          this.failures.set(sessionId, { attempts, retryAt: Date.now() + Math.min(300_000, 1000 * 2 ** (attempts - 1)) });
+          blocked++;
+        } // Leave the exact delivery pending. No raw host errors enter events/logs.
       }
     } finally { this.draining = false; }
     return { delivered, blocked };
