@@ -108,6 +108,27 @@ The helper's clicks into a browser bound as an APP are trusted DOM events in its
 - A web page takes no hover from a synthetic pointer: the daemon says so once per session per app (`service.ts`'s `hoverNote`, from the helper's `webContent` flag); with `requestForeground` or rung 4 the real pointer moves.
 - A link pressed in a non-browser app: the helper hands it back (`target.act` `linkOpensViaDaemon`, helper ≥ 1.11.0; older helpers open it themselves) and the daemon opens it through its own door — an act in the opener under its access/card and the dangerous-domain floor. Files/URLs open via `apps.open` (NSWorkspace, `activates: false`). Nothing calls `SetFrontProcess`, sends ⌘N or opens a window to reach one (a running app with zero windows gets one background reopen).
 
+### The agent cursor's arrival gate (`Core/CUCore+CursorArrival.swift`)
+An act's input waits for the overlay's arrow. This covers the press, click, typing, key, scroll or drag, and the reticle
+before it. Otherwise the page would react before the arrow got there.
+- **How it works.** After the core emits its own `target`/`press`/`type`/`key`/`scroll`/`drag` event, it asks the
+  shell (`CUCoreEvents.cursorArrival` → `CUPresentation.cursorArrival`). The ask goes on the main queue, right behind
+  that event. The core then pauses the pid queue until the timeline's `actionAt`, so the press pulse plays with the
+  real click.
+- **The bound.** At most `cursorArrivalCapMs` = 400 ms per place: a reticle and its press share it, and the main-queue
+  answer counts toward it.
+- **No ask while not drawn.** No ask for an act's later events while the presentation reports the cursor not
+  drawn (`onCursorDrawn` → `CUCore.cursorDrawn`). The act's first gated event is always asked.
+- **Esc.** The wait ends on the act's cancel, and every gated site checks the token before its input, focus move,
+  rung-4 activation or background open.
+- **Input already landed.** It is shown with `arrive: false`, which skips the gate.
+- **When it is 0:**
+  - no overlay is drawn (off screen, another desktop, covered or faded);
+  - Reduce Motion is on;
+  - the cursor already rests there;
+  - in test cores (cap 0), or with no shell.
+- **Design.** `apple/ComputerUse/WinterCUPresentation/DESIGN-cursor.md` ("Arrival").
+
 ### The Focus Guardian (`Core/CUCore+Guardian.swift`, `Core/FocusGuardian.swift`)
 - Runs only with `privateEventPath` on, while a script runs (`script.active`) plus a 3 s tail (`guardianTail`) — never merely because targets are bound. NSWorkspace activation/Space observers plus a listen-only session tap (type-21 CPS notifications, left clicks, hardware-origin event times; never the window server's own source-less events). Secure Event Input polled at 4 Hz.
 - **Whose move a change is, is ONE rule**: `CUFocusGuardianCore.judge`, contract §4.12 of `PROTOCOL.md` (invariants I1–I6; I2′ is written down but NOT enforced). Every path asks it; every restore goes to the user's place as it is when it runs; theirs → `app_in_front`, nothing undone; the agent's → undone. Facts it owns: the user's place, causes per pid, `CUSwitchInput` (instants explaining one change only, after the agent's last cause on that app — never typing), claims, visits.

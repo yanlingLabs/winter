@@ -1206,3 +1206,13 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   the broken-line join is left-to-right only).
 - A `wait_timeout` on a Chromium page on another desktop adds that its page may not update its accessibility until it
   is seen, so what the wait read may be out of date (finding D), naming `screenshot({ live: true, reason })`.
+
+**Pending** (the cursor's arrival gate, 2026-10-14; no wire change — the controller folds it into the next helper version's row):
+- An act's input waits for the on-screen agent cursor. This covers the AX press, the posted click, typing, a key, a
+  scroll, a drag, and the focus placement after a reticle. Before, the page reacted before the arrow got there.
+- The wait is the glide still to go, plus the reticle's 0.12 s dwell. It is at most 400 ms per place: a reticle and
+  its press share that budget. It is 0 when no overlay cursor is drawn (the window off screen, on another desktop,
+  covered), under Reduce Motion, or when the cursor already rests there.
+- A `target.act` can take up to ~0.4 s longer per element it lands on. The press pulse now plays with the real click.
+- An Esc during the wait (the call's `cancel`) stops the act before its input, focus move, rung-4 activation or
+  background link open, and answers `cancelled`.

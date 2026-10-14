@@ -69,6 +69,50 @@ that.
 The core sends one for a consequential action: a press on an element named like Send, Delete, Save, Submit, Buy, Pay,
 Publish or Post, and any menu command. Captions on routine clicks would be noise that slows the user's eye.
 
+## Arrival: the action waits for the arrow
+
+The cursor glides to a place before the act lands there, so the real input waits for it. If it did not, the page would
+react before the arrow arrived. The waiting input is an AX press, a posted click, typing, a key, a scroll or a drag.
+
+- **The action moment.** `CursorTimeline.actionAt` is when the last place-bound event takes effect on screen:
+  - press, double click, right click, type, key, scroll: the glide's end, which is where the press pulse starts;
+  - drag: the button-down at the start point;
+  - target: the glide's end plus the reticle's 0.12 s dwell, so the reticle has settled.
+- **The answer.** `CUPresentation.cursorArrival(sessionId:target:)` returns the seconds from now to that moment, capped
+  at `CUCursorArrival.cap` (0.4 s). It is 0 when:
+  - no overlay is drawn (the window is off screen, minimized or on another desktop);
+  - the cursor is covered or faded out;
+  - Reduce Motion is on;
+  - the cursor already rests at the point;
+  - the presentation draws no cursor at all (the protocol's default).
+- **The wait.** Right after the core emits its own `target`, `press`, `type`, `key`, `scroll` or `drag` event, it asks
+  the shell (`CUCoreEvents.cursorArrival`). The question goes on the main queue behind that event (the queue is FIFO),
+  so the answer covers the event. The core then pauses the act's pid queue that long. The main actor is never blocked.
+- **The bound.** The wait is at most `CUCore.cursorArrivalCapMs` (400 ms) per place:
+  - the main queue's answer counts toward it;
+  - a reticle and the press on its element share one budget;
+  - the budget starts again at each act and each reticle.
+- **No ask while not drawn.** The presentation reports, through `onCursorDrawn`, whether each target's cursor is
+  drawn where the user can see it: shown, not covered, Reduce Motion off. While the engine knows it is not, it does
+  not ask about an act's later events, so a busy main thread costs nothing there.
+  - An act's first gated event is always asked, within the bound. That report may predate the act's own event, for
+    example an overlay just shown again whose ticker had stopped.
+  - A target the engine has no report on is asked.
+- **Esc.** The wait runs in 20 ms steps and ends on the act's cancel. Every gated site checks the cancel before
+  anything irreversible: input, a focus move, rung 4's activation, a background open of a link.
+- **Input that already landed.** A row selected in a panel, or an AX scroll, sends its event with `arrive: false`:
+  it only shows what was done, with no wait.
+- **Test cores.** The cap is 0 there, so there is no gate.
+- **Why 0.4 s.** Glides last 0.14–0.55 s. At 0.4 s, any reach up to about 300 pt has landed. A 1000 pt reach is
+  within about 3% of its point, and the press's own short wait after its reticle makes up the rest.
+- **What follows from it:**
+  - The press pulse plays at the moment of the real click: the core acts at `actionAt`, which is the ring's start.
+  - Waits do not stack. Each act waits only for its own glide, and the next glide starts from where the cursor
+    rests, so the visual queue no longer runs ahead of the work.
+  - The in-app mirror (`CUMirrorView` in Winter.app) runs the same timeline from the same events, so its pulse lands
+    with the click too, within the view stream's latency. When the overlay is hidden (window off screen), the gate is
+    0 and the mirror's cursor may trail the act by its glide.
+
 ## Accessibility
 
 - **Reduce Motion** (System Settings › Accessibility › Display, read on every event):
@@ -93,7 +137,8 @@ and every size is ×0.62. Captions are left out: the mirror's own caption strip 
 
 ## API
 
-`CUPresentation.cursor(sessionId:target:point:kind:)` is unchanged. `CUCursorKind` keeps the pinned
+`CUPresentation.cursor(sessionId:target:point:kind:)` is unchanged. `cursorArrival(sessionId:target:)` is additive:
+it has a default of 0 (see Arrival). `CUCursorKind` keeps the pinned
 `move, press, type, scroll, drag(to:)` and adds:
 
 ```swift

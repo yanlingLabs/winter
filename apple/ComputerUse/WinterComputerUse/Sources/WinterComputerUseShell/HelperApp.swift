@@ -61,6 +61,10 @@ import WinterCUPresentation
         // clearing them left there is cleared now (only for the very process that still runs with it on).
         CUCore.startAccessibilityFlagRecord(home: identity.home)
         let core = CUCore(events: coordinator)
+        // The arrival gate skips its main-queue ask while the cursor is known not to be drawn.
+        coordinator.cursorDrawn = { [weak core] sessionId, pid, windowID, drawn in
+            core?.cursorDrawn(sessionId: sessionId, pid: pid, windowID: windowID, drawn)
+        }
         // Esc closes the open desktop visit at once (the user returned), before the daemon hears it.
         coordinator.onEscape = { [weak core] in Task { await core?.closeAllVisits() } }
         // The wake triggers' watches: their events to the daemon, their count to the idle quit, their rings on screen.

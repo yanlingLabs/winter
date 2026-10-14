@@ -17,6 +17,11 @@ import Foundation
     /// `point` is in screen points, top-left origin; kinds that are not about a place carry the last point.
     func actionAt(sessionId: String, pid: pid_t, windowID: CGWindowID, point: CGPoint, kind: String, dragTo: CGPoint?,
                   frame: CGRect?, text: String?, count: Int?, button: String?)
+    /// The arrival gate: seconds from now until the on-screen agent cursor has arrived for the last place-bound
+    /// `actionAt` on this target (its glide and reticle settled, its press pulse starting); 0 when none is drawn there.
+    /// Asked right after that event, in order (the main queue is FIFO); the engine holds the act's input that long,
+    /// bounded by `CUCore.cursorArrivalCapMs`.
+    func cursorArrival(sessionId: String, pid: pid_t, windowID: CGWindowID) -> TimeInterval
     /// `reason`: "app_quit" | "window_closed".
     func targetLost(targetId: String, reason: String)
     func permissionsChanged(accessibility: Bool, screenRecording: Bool)
@@ -29,6 +34,8 @@ import Foundation
 
 extension CUCoreEvents {
     public func desktopVisited(_ visit: CUDesktopVisitEvent) {}
+    /// No cursor drawn, nothing to wait for.
+    public func cursorArrival(sessionId: String, pid: pid_t, windowID: CGWindowID) -> TimeInterval { 0 }
 }
 
 /// One closed desktop visit, as the daemon is told of it (`desktopVisited`).

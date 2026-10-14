@@ -118,6 +118,7 @@ public final class CUCore: @unchecked Sendable {
             visitFreshStableMs = 0
             visitNoProbeWaitMs = 0
             windowGoneSettleMs = 0  // one reading decides, as before: a test that wants the watch sets it
+            cursorArrivalCapMs = 0  // no wait for a cursor: a test that wants the gate sets it
         }
     }
 
@@ -711,6 +712,12 @@ public final class CUCore: @unchecked Sendable {
     var lateCheckSchedule: (Double, @escaping () -> Void) -> Void = { ms, work in
         DispatchQueue.global().asyncAfter(deadline: .now() + ms / 1000, execute: work)
     }
+    /// The arrival gate's bound (CUCore+CursorArrival): an act's input waits for the on-screen agent cursor at most this
+    /// long per place it lands on, a reticle and its press together (WinterCUPresentation's `CUCursorArrival.cap`).
+    /// 0 in test cores (no gate).
+    var cursorArrivalCapMs: Double = 400
+    /// Which targets' cursors the presentation says are NOT drawn where the user can see them (`cursorDrawn`).
+    let cursorBoard = CUCursorBoard()
     /// How long a press the app answered with an error is watched for its effect (a new window, a value, the
     /// focus). 0 in test cores (one read).
     var pressSettleMs: Double = 500
@@ -1544,6 +1551,7 @@ public final class CUCore: @unchecked Sendable {
     public func sessionEnded(_ p: SessionEndedParams) async throws -> SessionEndedResult {
         flushPendingRestore()
         await endSessionVisits(p.sessionId)
+        cursorBoard.forget(sessionId: p.sessionId)
         let ids: [String] = {
             lock.lock(); defer { lock.unlock() }
             return targets.values.filter { $0.sessionId == p.sessionId }.map(\.id)
@@ -1571,14 +1579,16 @@ public final class CUCore: @unchecked Sendable {
     /// One agent-cursor event (`CUCoreEvents.actionAt`). Without a `point` it goes to the last place the cursor
     /// was sent, else the window's centre; with neither it is dropped. `remember: false` keeps the resting
     /// point (the real pointer's position in the foreground is not where the agent's cursor rests).
+    /// `arrive: false` — the input already landed (the event only shows it): no arrival gate.
     func cursor(_ t: CUTarget, _ kind: String, at point: CGPoint? = nil, dragTo: CGPoint? = nil, frame: CGRect? = nil,
-                text: String? = nil, count: Int? = nil, button: String? = nil, remember: Bool = true) {
+                text: String? = nil, count: Int? = nil, button: String? = nil, remember: Bool = true, arrive: Bool = true) {
         guard let at = point ?? t.cursorPoint ?? sys.window(id: t.windowID).map({ CGPoint(x: $0.frame.midX, y: $0.frame.midY) })
         else { return }
         if point != nil, remember { t.cursorPoint = at }
         let (session, pid, wid) = (t.sessionId, t.pid, t.windowID)
         emit { $0.actionAt(sessionId: session, pid: pid, windowID: wid, point: at, kind: kind, dragTo: dragTo,
                            frame: frame, text: text, count: count, button: button) }
+        if arrive, Self.arrivalGated.contains(kind) { awaitCursorArrival(t, kind: kind) }
     }
 
     func logOnce(_ key: String, _ message: String) {
