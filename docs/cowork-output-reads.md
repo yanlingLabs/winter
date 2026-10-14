@@ -62,6 +62,13 @@ guidance-mutation pattern (journal commit, filesystem effect, finishing commit):
    `cowork_output_directory_intents` row only for those absent paths that have no
    `cowork_output_directories` record and no intent yet (`cowork` through
    `…/shared/outputs/<session-id>`). The home itself keeps its existing handling.
+   A path that has a `cowork_output_directories` record but is missing on disk (for
+   example `shared/outputs` removed after another conversation recorded it) can never
+   match its recorded identity again: the pre-walk refuses it, and the journal
+   transaction refuses any path that is both recorded and absent, before any intent
+   is written or any replacement directory is made. The intent insert is a plain
+   `INSERT` after the existence check, so a primary-key collision with a row of
+   another home identity fails loudly instead of being ignored.
 2. The walk is otherwise unchanged. A directory that already exists UNRECORDED is
    admitted only if all hold: an intent row for exactly that relative path and the
    current HomeIdentity was committed by an EARLIER call (an intent inserted by the
@@ -89,7 +96,14 @@ guidance-mutation pattern (journal commit, filesystem effect, finishing commit):
    process that later creates a 0700 same-device directory at exactly such an internal
    path would have it adopted by the next call. A same-user racer that wins before the
    mkdir of a live call is refused and its fresh intent forgotten. The journal records
-   intent, not the created inode, so this is documented, not eliminated.
+   intent, not the created inode, so this is documented, not eliminated. Two more
+   documented residuals: initialization assumes a single writer process (the
+   pre-walk, journal transaction and owner commit are not serialized against a second
+   process; the create walk's checks and the final rechecks, including the
+   location-conflict recheck, remain the authority), and a development store already
+   stamped schema version 15 before this table existed does not re-run migration 15,
+   so initialization fails closed with `file_unavailable` until the table is created
+   (rewind `user_version` to 14 so the idempotent migration re-runs).
 
 Nothing is ever deleted or renamed on disk. The reader never consults the journal.
 A non-empty journal makes the explicit schema downgrade refuse like any populated

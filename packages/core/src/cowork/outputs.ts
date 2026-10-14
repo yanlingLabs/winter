@@ -99,7 +99,12 @@ export class CoworkOutputs {
         const parent = fd, parentEntry = entries.at(-1)!; let created = false;
         if (absent) {
           try { fd = openDirAt(parent, name); }
-          catch (error) { if (error instanceof FdError && error.code === "ENOENT") { for (const later of chain.slice(index)) absent.add(later); break; } throw error; }
+          catch (error) {
+            if (!(error instanceof FdError) || error.code !== "ENOENT") throw error;
+            // A RECORDED directory that has vanished can never match its identity again: refuse before any journal or mkdir.
+            for (const later of chain.slice(index)) { if (this.one("SELECT 1 FROM cowork_output_directories WHERE relative_path=?", later)) fail(); absent.add(later); }
+            break;
+          }
         } else {
           created = create ? mkdirAt(parent, name, 0o700) : false;
           if (created) journal?.created.add(relative);
@@ -153,9 +158,9 @@ export class CoworkOutputs {
       if (sessions.hasCommittedSession(sessionId) !== true || this.records.recordedHomeIdentity() !== homeId || this.records.get(workspaceId).state !== "retained") fail("authority_denied");
       if (this.one("SELECT 1 FROM cowork_output_locations WHERE session_id=?", sessionId)) throw new CoworkError("request_conflict");
       for (const relative of chain) {
-        if (this.one("SELECT 1 FROM cowork_output_directories WHERE relative_path=?", relative)) continue;
+        if (this.one("SELECT 1 FROM cowork_output_directories WHERE relative_path=?", relative)) { if (absent.has(relative)) fail(); continue; } // recorded yet absent: never mkdir a replacement
         if (this.one("SELECT 1 FROM cowork_output_directory_intents WHERE relative_path=? AND home_id=?", relative, homeId)) prior.add(relative);
-        else if (absent.has(relative)) { this.run("INSERT OR IGNORE INTO cowork_output_directory_intents VALUES(?,?,?)", relative, homeId, new Date().toISOString()); fresh.add(relative); }
+        else if (absent.has(relative)) { this.run("INSERT INTO cowork_output_directory_intents VALUES(?,?,?)", relative, homeId, new Date().toISOString()); fresh.add(relative); }
       }
     });
     return { prior, fresh };
@@ -182,7 +187,7 @@ export class CoworkOutputs {
     if (!sessions || typeof sessions.hasCommittedSession !== "function" || sessions.hasCommittedSession(sessionId) !== true || this.records.get(workspaceId).state !== "retained") fail("authority_denied");
     if (this.one("SELECT 1 FROM cowork_output_locations WHERE session_id=?", sessionId)) throw new CoworkError("request_conflict");
     const homeId = this.records.recordedHomeIdentity(); let intents: { prior: Set<string>; fresh: Set<string> };
-    try { intents = this.journal(workspaceId, sessionId, sessions, homeId, this.absent(workspaceId, sessionId, homeId)); } catch (error) { if (error instanceof CoworkError) throw error; return fail(); }
+    try { const absent = this.absent(workspaceId, sessionId, homeId); this.checkpoint("pre-walk-done"); intents = this.journal(workspaceId, sessionId, sessions, homeId, absent); } catch (error) { if (error instanceof CoworkError) throw error; return fail(); }
     const created = new Set<string>(); let tree: (Tree & { newEntries: Entry[] }) | undefined;
     try {
       this.checkpoint("intents-recorded");
@@ -192,6 +197,7 @@ export class CoworkOutputs {
       durableCoworkTransaction(this.records.rs, () => {
         this.workspace(workspaceId); this.binding(workspaceId, sessionId, true);
         if (sessions.hasCommittedSession(sessionId) !== true || this.records.recordedHomeIdentity() !== homeId || this.records.get(workspaceId).state !== "retained") fail("authority_denied");
+        if (this.one("SELECT 1 FROM cowork_output_locations WHERE session_id=?", sessionId)) throw new CoworkError("request_conflict");
         this.assertTree(recorded, recorded.newEntries);
         for (const entry of recorded.newEntries) this.run("INSERT INTO cowork_output_directories VALUES(?,?,?)", entry.relative, homeId, JSON.stringify(entry.identity));
         this.run("INSERT INTO cowork_output_locations VALUES(?,?,?,?,?,1,?)", `output-${randomUUID()}`, homeId, workspaceId, sessionId, this.root(workspaceId, sessionId), new Date().toISOString());

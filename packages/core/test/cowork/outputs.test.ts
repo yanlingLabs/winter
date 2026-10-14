@@ -179,6 +179,34 @@ native("a foreign directory that appears after the pre-walk is refused and its f
  expect(intents(f)).toEqual([]); expect(count(f, "cowork_output_directories")).toBe(0); // the racer's directory is not blessed for a retry
  refusal(() => f.initialize(), "file_unavailable"); expect(intents(f)).toEqual([]);
 });
+native("a recorded ancestor that vanished is refused by the pre-walk before any journal or mkdir", () => {
+ const phases: string[] = []; const f = fixture(phase => phases.push(phase)); f.initialize(); const second = f.bind("bind-second");
+ const outputs = join(f.home, "cowork/workspaces", f.workspaceId, "shared/outputs"); rmSync(outputs, { recursive: true }); phases.length = 0;
+ refusal(() => f.outputs.initialize(f.workspaceId, second, f.store), "file_unavailable");
+ expect(existsSync(outputs)).toBe(false); expect(intents(f)).toEqual([]); expect(count(f, "cowork_output_locations")).toBe(1); expect(count(f, "cowork_output_directories")).toBe(RECORDED);
+ expect(phases).not.toContain("pre-walk-done"); // refused by the pre-walk itself, not only by the journal transaction
+});
+native("the journal refuses a path that became recorded after the pre-walk saw it absent, without making a replacement", () => {
+ let raced = false; const f = fixture(phase => { // a concurrent owner commit recording `cowork` between the pre-walk and the journal transaction
+  if (phase !== "pre-walk-done" || raced) return; raced = true;
+  f.db.db.run("INSERT INTO cowork_output_directories VALUES(?,?,?)", ["cowork", f.records.recordedHomeIdentity(), JSON.stringify({ device: "0", inode: "0", uid: process.geteuid!(), mode: 0o700 })]);
+ });
+ refusal(() => f.initialize(), "file_unavailable"); expect(existsSync(join(f.home, "cowork"))).toBe(false); expect(intents(f)).toEqual([]); expect(count(f, "cowork_output_locations")).toBe(0);
+});
+native("a location recorded between the journal and the owner commit is a request conflict, not a database error", () => {
+ let raced = false; const f = fixture(phase => { // another owner recorded this conversation's root first
+  if (phase !== "before-owner-commit" || raced) return; raced = true;
+  const relative = f.root.slice(f.root.indexOf("cowork/")), homeId = f.records.recordedHomeIdentity();
+  f.db.db.run("INSERT INTO cowork_output_directories VALUES(?,?,?)", [relative, homeId, JSON.stringify({ device: "0", inode: "0", uid: process.geteuid!(), mode: 0o700 })]);
+  f.db.db.run("INSERT INTO cowork_output_locations VALUES(?,?,?,?,?,1,?)", ["output-raced", homeId, f.workspaceId, f.sessionId, relative, new Date().toISOString()]);
+ });
+ refusal(() => f.initialize(), "request_conflict"); expect(count(f, "cowork_output_locations")).toBe(1); expect(count(f, "cowork_output_directories")).toBe(1);
+});
+native("an intent row under another home identity fails the journal loudly instead of being ignored", () => {
+ const f = fixture(); f.db.db.run("PRAGMA foreign_keys=OFF"); f.db.db.run("INSERT INTO cowork_output_directory_intents VALUES(?,?,?)", ["cowork", "home-other", new Date().toISOString()]); f.db.db.run("PRAGMA foreign_keys=ON");
+ refusal(() => f.initialize(), "file_unavailable"); expect(existsSync(join(f.home, "cowork"))).toBe(false); expect(intents(f)).toEqual(["cowork"]);
+ expect(count(f, "cowork_output_locations")).toBe(0);
+});
 native("the journal transaction rechecks the committed session and leaves neither intents nor directories when refused", () => {
  const f = fixture(); let calls = 0; const sessions = { hasCommittedSession: (id: string) => ++calls <= 1 && f.store.hasCommittedSession(id) }; // true for the preflight only
  refusal(() => f.outputs.initialize(f.workspaceId, f.sessionId, sessions as any), "authority_denied"); expect(calls).toBe(2);
