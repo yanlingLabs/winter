@@ -49,6 +49,8 @@ interface Instance {
   connectionAnswered?: boolean;
   note?: string;
   diag?: DiagStep[];
+  attrs?: Record<string, unknown>;
+  trace?: Array<Record<string, unknown>>;
   /** The step after which the browser's tree held the page (undefined: never). */
   readableAfter?: string;
 }
@@ -95,10 +97,10 @@ export class ChromeRig {
     const c = this.current;
     if (c === undefined) return undefined;
     return {
-      pid: c.pid, lang: c.need.lang, profile: c.profile, devToolsActivePort: existsSync(join(c.profile, "DevToolsActivePort")),
+      pid: c.pid, lang: c.need.lang, profile: c.profile, ...(c.need.fullScreen === true ? { fullScreen: true } : {}), devToolsActivePort: existsSync(join(c.profile, "DevToolsActivePort")),
       ...(c.dialogRaised === undefined ? {} : { dialogRaised: c.dialogRaised }), ...(c.dialogVia === undefined ? {} : { dialogVia: c.dialogVia }),
       ...(c.connectionAnswered === undefined ? {} : { connectionAnswered: c.connectionAnswered }), ...(c.note === undefined ? {} : { note: c.note }),
-      ...(c.diag === undefined ? {} : { diag: c.diag }), ...(c.readableAfter === undefined ? {} : { readableAfter: c.readableAfter }),
+      ...(c.diag === undefined ? {} : { diag: c.diag }), ...(c.attrs === undefined ? {} : { attrs: c.attrs }), ...(c.trace === undefined ? {} : { trace: c.trace }), ...(c.readableAfter === undefined ? {} : { readableAfter: c.readableAfter }),
     };
   }
 
@@ -181,6 +183,31 @@ export class ChromeRig {
     await sleep(800);
     await this.d.activateUser();
     await sleep(500);
+  }
+
+  /** The diagnostic row, before its action: the Size combo box's and the Title field's attributes (names, values,
+   *  settable), and a focus trace started for `ms` (every 50 ms) — `endTrace()` collects it. */
+  private tracing?: Promise<string>;
+  beginTrace(ms: number): void {
+    const c = this.current;
+    if (c === undefined) return;
+    c.attrs = {
+      size: this.axprobe(["attrs", String(c.pid), "AXComboBox", "Size"]),
+      title: this.axprobe(["attrs", String(c.pid), "AXTextField", "Title"]),
+    };
+    this.d.log(`trace row attributes: ${JSON.stringify(c.attrs)}`);
+    this.axprobe(["web", String(c.pid)]);   // (builds the reader once, before the trace starts)
+    const proc = Bun.spawn([this.axprobeBin!, "focus-trace", String(c.pid), String(ms), "50"], { stdout: "pipe", stderr: "pipe" });
+    this.d.own(proc.pid);
+    this.tracing = new Response(proc.stdout).text().finally(() => this.d.disown(proc.pid));
+  }
+  async endTrace(): Promise<void> {
+    const c = this.current;
+    if (c === undefined || this.tracing === undefined) return;
+    const text = await this.tracing;
+    this.tracing = undefined;
+    c.trace = text.split("\n").filter((l) => l.trim().length > 0).flatMap((l) => { try { return [JSON.parse(l) as Record<string, unknown>]; } catch { return []; } });
+    this.d.log(`trace row focus trace: ${JSON.stringify(c.trace)}`);
   }
 
   /** The independent reader (built once from `swift/AXProbe`, into the suite's out folder). */

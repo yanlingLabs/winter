@@ -476,16 +476,80 @@ final class LeftoversTests: XCTestCase {
         world()
         let combo = fakeElement(98_090), search = fakeElement(98_091)
         ax.put(form, [kAXChildrenAttribute: ax.elements(form, kAXChildrenAttribute) + [combo, search]])
+        // As Chrome for Testing 156 gives a `<div role="combobox">` select (measured 2026-10-14): the text attributes
+        // all there, its value settable, a list box pop-up — and no editable ancestor.
+        let range = AXValueCreate(.cfRange, [CFRange(location: 0, length: 0)])!
         ax.add(combo, role: kAXComboBoxRole, title: "Size", frame: CGRect(x: 60, y: 420, width: 200, height: 30),
-               extra: [kAXParentAttribute: form, kAXValueAttribute: "Medium"])
+               extra: [kAXParentAttribute: form, kAXValueAttribute: "Medium", kAXNumberOfCharactersAttribute: 0,
+                       kAXSelectedTextRangeAttribute: range, kAXInsertionPointLineNumberAttribute: Int.max,
+                       "AXHasPopup": true, "AXPopupValue": "listbox", kAXExpandedAttribute: false])
         ax.makeSettable(combo, kAXValueAttribute)
+        // An editable combo box (a search with suggestions): the same, plus its editable ancestor (itself).
         ax.add(search, role: kAXComboBoxRole, title: "Search", frame: CGRect(x: 300, y: 420, width: 200, height: 30),
                extra: [kAXParentAttribute: form, kAXValueAttribute: "", kAXNumberOfCharactersAttribute: 0,
-                       kAXSelectedTextRangeAttribute: AXValueCreate(.cfRange, [CFRange(location: 0, length: 0)])!])
+                       kAXSelectedTextRangeAttribute: range, kAXInsertionPointLineNumberAttribute: Int.max,
+                       "AXEditableAncestor": search, "AXHighestEditableAncestor": search])
         ax.makeSettable(search, kAXValueAttribute)
-        XCTAssertTrue(core.isWebSelect(combo), "no text entry's attributes: a select, settable or not")
+        XCTAssertTrue(core.isWebSelect(combo), "no editable ancestor: a select, whatever text attributes it carries")
         XCTAssertFalse(core.isWebSelect(search), "an editable combo box (a search with suggestions) is typed into")
         XCTAssertTrue(core.isWebSelect(select), "a pop-up button stays a select")
+    }
+
+    /// A failed read of the element's attribute names is unknown — retried once, and still unknown, the text-attribute
+    /// rule: a field never turns into a select on a read that failed.
+    func testAFailedAttributeReadNeverTurnsAFieldIntoASelect() {
+        world()
+        let search = fakeElement(98_095)
+        ax.put(form, [kAXChildrenAttribute: ax.elements(form, kAXChildrenAttribute) + [search]])
+        let range = AXValueCreate(.cfRange, [CFRange(location: 0, length: 0)])!
+        ax.add(search, role: kAXComboBoxRole, title: "Search", frame: CGRect(x: 300, y: 420, width: 200, height: 30),
+               extra: [kAXParentAttribute: form, kAXValueAttribute: "", kAXNumberOfCharactersAttribute: 0,
+                       kAXSelectedTextRangeAttribute: range, "AXEditableAncestor": search])
+        ax.makeSettable(search, kAXValueAttribute)
+        let token = { () -> Int32 in var p: pid_t = 0; AXUIElementGetPid(search, &p); return p }()
+        ax.namesFailures[token] = 1
+        XCTAssertFalse(core.isWebSelect(search), "one failed read: retried, and the names say it is editable")
+        ax.namesFailures[token] = 5
+        XCTAssertFalse(core.isWebSelect(search), "still unknown: the text attributes say it takes text")
+        XCTAssertEqual(ax.namesFailures[token], 3, "read twice, no more")
+    }
+
+    /// A long app name is capped in a picture's label, so the after-act tail and its pointer survive the daemon's cap.
+    func testALongAppNameKeepsThePictureLabelsTail() {
+        let long = String(repeating: "Very Long Browser Name ", count: 12)
+        let app = CUCore.labelAppName(long)
+        XCTAssertLessThanOrEqual(app.count, 60)
+        let label = CUCore.freshnessLabel(app: app, where_: "on another desktop (another Space or full screen)",
+                                          check: "to see what is really there, read it (state() or find() text, or something the app counts, such as a word count)",
+                                          previous: (7, 1000, 1000), digest: 7, now: 2500, actedMs: 2000, appActivityMs: 2100)
+        let full = CUCore.afterActFreshness(label, app: app, previous: (7, 1000, 1000), digest: 7, now: 2500, actedMs: 2000)
+        XCTAssertTrue(full.hasSuffix("screenshot({ live: true, reason }) takes one where the window is (the user is asked first)"), full)
+        XCTAssertLessThan(full.count, 800, "inside the daemon's SCREENSHOT_DETAIL_CAP")
+        XCTAssertEqual(CUCore.labelAppName("Google Chrome"), "Google Chrome")
+    }
+
+    /// The measured trace (2026-10-14): `key("tab", { into: Title })` in a background Chrome — the app's focus on Title,
+    /// then on Subtitle ~120 ms after the key (the page fired no focus event: its window was not key). The focus moved:
+    /// no "did not move" note.
+    func testATabIntoAFieldWhoseFocusMovesAMomentLaterGetsNoNote() async throws {
+        world()
+        let title = fakeElement(98_093), subtitle = fakeElement(98_094)
+        ax.put(form, [kAXChildrenAttribute: ax.elements(form, kAXChildrenAttribute) + [title, subtitle]])
+        ax.add(title, role: kAXTextFieldRole, title: "Title", frame: CGRect(x: 60, y: 460, width: 300, height: 24),
+               extra: [kAXParentAttribute: form, kAXValueAttribute: "Hello Material probe", kAXFocusedAttribute: true, "AXEditableAncestor": title])
+        ax.add(subtitle, role: kAXTextFieldRole, title: "Subtitle", frame: CGRect(x: 60, y: 500, width: 300, height: 24),
+               extra: [kAXParentAttribute: form, kAXValueAttribute: "", "AXEditableAncestor": subtitle])
+        ax.focus(pid: pid, on: title)
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(120)) { [unowned self] in
+                ax.put(title, [kAXFocusedAttribute: false])
+                ax.put(subtitle, [kAXFocusedAttribute: true])
+                ax.focus(pid: pid, on: subtitle)
+            }
+        }
+        let r = try await act(.key(CUKeyAction(combo: "tab", into: ref(title))))
+        XCTAssertFalse(r.detail?.contains("did not move") ?? false, r.detail ?? "")
     }
 
     /// A key with `{ into }` is watched like one with the focus already there: Tab that left it where it was says so.

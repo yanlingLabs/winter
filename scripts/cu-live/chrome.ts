@@ -75,8 +75,13 @@ export interface ChromeObservation {
   /** The helper's own Floor F lexicon line, when it logged one during the run. */
   lexiconLine?: string;
   note?: string;
+  /** The instance's window went full screen (another desktop): the off-desktop caveat may stand in for a verdict. */
+  fullScreen?: boolean;
   /** Finding A's diagnosis, step by step (the independent reader), and the step after which the page was there. */
   diag?: Array<{ step: string; webAreas?: number; webChildren?: number; manual?: unknown; enhanced?: unknown; trusted?: unknown; error?: string }>;
+  /** The diagnostic row: the attributes of the Size combo box and the Title field, and the focus trace (50 ms). */
+  attrs?: Record<string, unknown>;
+  trace?: Array<Record<string, unknown>>;
   readableAfter?: string;
 }
 
@@ -139,8 +144,11 @@ export function saysNothingHappened(text: string): boolean {
 }
 
 /** Probe 1's verdict for one key: what the page saw against what the answer said. */
-export function keyVerdict(effect: boolean, answer: string): { ok: boolean; verdict: string } {
+export function keyVerdict(effect: boolean, answer: string, offDesktop = false): { ok: boolean; verdict: string } {
   const honest = saysNothingHappened(answer);
+  // The off-desktop caveat (finding D): "nothing happened" stated as unverified is honest whatever the page did — in an
+  // off-desktop row only (a windowed row's answer never needs it, so there it changes nothing).
+  if (offDesktop && honest && /so this is unverified/.test(answer)) return { ok: true, verdict: effect ? "worked; the answer said it could not verify (off-desktop caveat)" : "did nothing; the answer said so, unverified (off-desktop caveat)" };
   if (effect && !honest) return { ok: true, verdict: "worked, and the answer did not say otherwise" };
   if (!effect && honest) return { ok: true, verdict: "did nothing in the page, and the answer SAID so" };
   if (effect && honest) return { ok: false, verdict: "worked in the page, but the answer said nothing happened" };
@@ -228,8 +236,28 @@ print(s.slice(0, 2500));`,
   },
 };
 
+/** The leftover fixes' evidence (2026-10-14): the Size combo box's and the Title field's attributes as Chrome gives
+ *  them, and the focus every 50 ms while `key("tab", { into: Title })` runs. */
+const TRACE_ROW: Scenario = {
+  name: "chrome app (diagnostic): the combo box's and Title's attributes, the focus through Tab into Title", group: "chrome", chrome: WINDOWED, chromeTrace: true,
+  code: `
+const w = await cft();
+await webReady(w, 8000);
+const title = await one(w, "Title", ["text field"]);
+await sleep(1200);
+report({ tabStart: Date.now() });
+await attempt("tab", () => w.key("tab", { into: title.ref }));
+report({ tabEnd: Date.now() });
+await sleep(800);
+const s = await w.state({ emit: false });
+report({ header: s.split("\\n")[0] });
+step("end");`,
+  verify: (ctx) => [ok(ctx), check("the attributes and the focus trace were taken", ctx.chrome?.attrs !== undefined && (ctx.chrome?.trace?.length ?? 0) > 0, JSON.stringify(ctx.chrome?.attrs ?? {}).slice(0, 300))],
+};
+
 const SCENARIOS_: Scenario[] = [
   FINDING_A_ROW,
+  TRACE_ROW,
   {
     name: "chrome app: bind Chrome for Testing on the Material page (reads its controls)", group: "chrome", chrome: MATERIAL,
     code: `
@@ -328,12 +356,15 @@ step("end");`,
     verify: (ctx) => {
       const ev = page(ctx);
       const focus = ev.filter((e) => e.ev === "focus").map((e) => String(e.id));
-      const tab = keyVerdict(focus.includes("subtitle"), stepOutput(ctx.output, "tab"));
-      const space = keyVerdict(ev.some((e) => e.ev === "check" && e.id === "terms"), stepOutput(ctx.output, "space"));
-      const all = keyVerdict(ev.some((e) => e.ev === "selection" && e.id === "title" && e.start === 0 && Number(e.length) > 0 && e.end === e.length), stepOutput(ctx.output, "cmd+a"));
+      // The focus after the Tab: a focus event, or (a background window fires none) the page's activeElement.
+      const active = ev.filter((e) => e.ev === "active").map((e) => String(e.id));
+      const off = ctx.chrome?.fullScreen === true;
+      const tab = keyVerdict(focus.includes("subtitle") || active.at(0) === "subtitle", stepOutput(ctx.output, "tab"), off);
+      const space = keyVerdict(ev.some((e) => e.ev === "check" && e.id === "terms"), stepOutput(ctx.output, "space"), off);
+      const all = keyVerdict(ev.some((e) => e.ev === "selection" && e.id === "title" && e.start === 0 && Number(e.length) > 0 && e.end === e.length), stepOutput(ctx.output, "cmd+a"), off);
       return [
         ok(ctx),
-        check(`Tab: ${tab.verdict}`, tab.ok && fact(ctx, "tab") === "ok", `${short(stepOutput(ctx.output, "tab"))} | page focus: ${focus.join(" → ")}`),
+        check(`Tab: ${tab.verdict}`, tab.ok && fact(ctx, "tab") === "ok", `${short(stepOutput(ctx.output, "tab"))} | page focus: ${focus.join(" → ")} | active after Tab: ${active.join(", ")}`),
         check(`Space: ${space.verdict}`, space.ok && fact(ctx, "space") === "ok", `${short(stepOutput(ctx.output, "space"))} | page: ${JSON.stringify(ev.filter((e) => e.ev === "check"))}`),
         check(`cmd+a: ${all.verdict}`, all.ok && fact(ctx, "cmd+a") === "ok", `${short(stepOutput(ctx.output, "cmd+a"))} | page: ${JSON.stringify(ev.filter((e) => e.ev === "selection").slice(-3))}`),
       ];
@@ -389,15 +420,17 @@ step("end");`,
     name: "chrome app (off-desktop): after an act in a Chrome window on another desktop, the next screenshot shows it — or says it may predate it", group: "chrome",
     chrome: { key: "material-offspace", lang: "en", start: "material", fullScreen: true },
     session: "fresh",
-    // The act is Space INTO the Paint button — one accessibility press, no desktop visit (the second run's click asked
-    // for a visit and the runner refused it). A plain click is tried LAST, for its own fact (a refused visit is held
-    // for the app in this session).
+    // The act is setValue into the "Paint word" field (an accessibility write — no desktop visit; the page paints on its
+    // input). A visit an act may still ask for is allowed (consented), so the act lands either way and the picture right
+    // after it is what is judged. A plain click is tried LAST, for its own fact.
+    desktopSwitch: { answer: "allow", afterMs: 1_500 }, allowExcursionMs: 20_000, maxExcursions: 12,
     code: `
 const w = await apps.open(${JSON.stringify(CFT_BUNDLE)});
+const word = (await w.find({ role: "text field" }, { emit: false })).find((e) => e.name === "Paint word");
 const paint = (await w.find({ role: "button", name: "Paint" }, { emit: false })).find((e) => e.name === "Paint");
 step("before");
 await w.screenshot();
-await attempt("act", () => w.key("space", { into: paint.ref }));
+await attempt("act", () => w.setValue(word.ref, "paint"));
 step("after");
 await w.screenshot();
 await sleep(3000);

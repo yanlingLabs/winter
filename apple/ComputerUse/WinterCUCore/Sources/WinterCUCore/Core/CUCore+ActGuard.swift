@@ -75,6 +75,7 @@ final class CUActGuardedAX: CUAXBackend {
     func application(_ pid: pid_t) -> AXUIElement { inner.application(pid) }
     func attribute(_ e: AXUIElement, _ name: String) -> CFTypeRef? { inner.attribute(e, name) }
     func copyMultiple(_ e: AXUIElement, _ names: [String]) -> [String: CFTypeRef]? { inner.copyMultiple(e, names) }
+    func attributeNames(_ e: AXUIElement) -> [String]? { inner.attributeNames(e) }
     func actions(_ e: AXUIElement) -> [String] { inner.actions(e) }
     func isSettable(_ e: AXUIElement, _ name: String) -> Bool { inner.isSettable(e, name) }
     func set(_ e: AXUIElement, _ name: String, _ value: CFTypeRef) throws {

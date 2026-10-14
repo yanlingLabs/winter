@@ -46,6 +46,60 @@ case "web":
         windows.append(["title": (attr(w, kAXTitleAttribute) as? String) ?? "", "nodes": nodes, "webAreas": webAreas, "webChildren": webChildren])
     }
     out(["trusted": AXIsProcessTrusted(), "manual": boolAttr(app, "AXManualAccessibility"), "enhanced": boolAttr(app, "AXEnhancedUserInterface"), "windows": windows])
+case "attrs":
+    // attrs <pid> <role> <name>: every attribute (name, value, settable) of the first element of that role named so.
+    guard args.count == 5 else { out(["usage": "attrs <pid> <role> <name>"]); exit(64) }
+    func named(_ e: AXUIElement) -> Bool {
+        [kAXTitleAttribute, kAXDescriptionAttribute].contains { (attr(e, $0) as? String) == args[4] }
+            || ((attr(e, kAXTitleUIElementAttribute)).flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? attr($0 as! AXUIElement, kAXValueAttribute) as? String : nil } == args[4])
+    }
+    var queue = ((attr(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []).map { ($0, 0) }
+    var next = 0
+    var found: AXUIElement?
+    while next < queue.count, next < 8000 {
+        let (e, d) = queue[next]; next += 1
+        if (attr(e, kAXRoleAttribute) as? String) == args[3], named(e) { found = e; break }
+        if d < 60 { queue.append(contentsOf: children(e).map { ($0, d + 1) }) }
+    }
+    guard let e = found else { out(["found": false]); exit(0) }
+    var names: CFArray?
+    AXUIElementCopyAttributeNames(e, &names)
+    var values: [String: String] = [:], settable: [String: Bool] = [:]
+    for n in (names as? [String]) ?? [] {
+        values[n] = attr(e, n).map { String(describing: $0).replacingOccurrences(of: "\n", with: " ").prefix(160).description } ?? "<no value>"
+        var s: DarwinBoolean = false
+        if AXUIElementIsAttributeSettable(e, n as CFString, &s) == .success { settable[n] = s.boolValue }
+    }
+    var params: CFArray?
+    AXUIElementCopyParameterizedAttributeNames(e, &params)
+    var actions: CFArray?
+    AXUIElementCopyActionNames(e, &actions)
+    out(["found": true, "names": (names as? [String]) ?? [], "values": values, "settable": settable,
+         "parameterized": (params as? [String]) ?? [], "actions": (actions as? [String]) ?? []])
+case "focus-trace":
+    // focus-trace <pid> <ms> <interval>: one line per sample — the app's focused element, the focused window's, and
+    // which text fields say AXFocused (by title).
+    guard args.count == 5, let ms = Double(args[3]), let every = UInt32(args[4]) else { out(["usage": "focus-trace <pid> <ms> <interval>"]); exit(64) }
+    func desc(_ v: CFTypeRef?) -> String {
+        guard let v, CFGetTypeID(v) == AXUIElementGetTypeID() else { return "nil" }
+        let e = v as! AXUIElement
+        let role = attr(e, kAXRoleAttribute) as? String ?? "?"
+        let title = attr(e, kAXTitleAttribute) as? String ?? attr(e, kAXDescriptionAttribute) as? String ?? ""
+        let label = attr(e, kAXTitleUIElementAttribute).flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? attr($0 as! AXUIElement, kAXValueAttribute) as? String : nil } ?? ""
+        return "\(role) \"\(title.isEmpty ? label : title)\""
+    }
+    let t0 = Date().timeIntervalSince1970 * 1000
+    var lastLine = ""
+    while Date().timeIntervalSince1970 * 1000 - t0 < ms {
+        let now = Date().timeIntervalSince1970 * 1000
+        let appF = desc(attr(app, kAXFocusedUIElementAttribute))
+        let win = attr(app, kAXFocusedWindowAttribute)
+        let winF = win.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? desc(attr($0 as! AXUIElement, kAXFocusedUIElementAttribute)) : nil } ?? "no window"
+        let line = "app=\(appF) win=\(winF)"
+        if line != lastLine { out(["t": Int(now), "app": appF, "window": winF]); lastLine = line }
+        usleep(every * 1000)
+    }
+    out(["t": Int(Date().timeIntervalSince1970 * 1000), "end": true])
 case "set":
     guard args.count == 5, ["AXManualAccessibility", "AXEnhancedUserInterface"].contains(args[3]) else { out(["usage": "set <pid> AXManualAccessibility|AXEnhancedUserInterface true|false"]); exit(64) }
     let err = AXUIElementSetAttributeValue(app, args[3] as CFString, (args[4] == "true" ? kCFBooleanTrue : kCFBooleanFalse)!)

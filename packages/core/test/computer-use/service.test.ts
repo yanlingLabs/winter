@@ -13,7 +13,7 @@ import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { HelperClient } from "../../src/computer-use/helper-client";
 import { ComputerPolicy, type SessionFacts } from "../../src/computer-use/policy";
 import { RecentApps } from "../../src/computer-use/recent-apps";
-import { ComputerV2Service, actLine, focusLine, pageLine, targetLostMessage, timeoutMessage, type ScriptResult } from "../../src/computer-use/service";
+import { ComputerV2Service, SCREENSHOT_DETAIL_CAP, actLine, focusLine, pageLine, targetLostMessage, timeoutMessage, type ScriptResult } from "../../src/computer-use/service";
 import { AutomationTelemetry } from "../../src/computer-use/telemetry";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
 import type { Settings } from "../../src/settings";
@@ -723,6 +723,18 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     expect(r.content.map((c) => (c.type === "text" ? c.text : "[image]"))).toContain("captured Notes's window on another desktop (another Space or full screen) — an app that stops drawing while hidden may show slightly older content\n");
     const r2 = await w.run("const quiet = await notes.screenshot({ emit: false })");
     expect(r2.content.map((c) => (c.type === "text" ? c.text : "[image]"))).toEqual(["captured Notes's window on another desktop (another Space or full screen) — an app that stops drawing while hidden may show slightly older content\n"]);
+  }, 30_000);
+
+  macOnly("an off-desktop screenshot's label keeps its after-act tail whole (the 300-character cap cut it)", async () => {
+    const w = world();
+    await w.run("const notes = await apps.open('Notes')");
+    // The helper's words as the live run printed them (2026-10-14), with the tail the cap cut.
+    const label = "stale since 1 s ago: captured Google Chrome for Testing's window on another desktop (another Space or full screen), unchanged although input was sent since — Google Chrome for Testing is not redrawing it there; to see what is really there, read it (state() or find() text, or something the app counts, such as a word count), or take a screenshot once the user shows the window — this picture may predate the last action: Google Chrome for Testing may not redraw a window on another desktop until it is seen; screenshot({ live: true, reason }) takes one where the window is (the user is asked first)";
+    w.fake.handlers["target.screenshot"] = () => ({ imageBase64: Buffer.from("jpeg-x").toString("base64"), mime: "image/jpeg", width: 10, height: 10, shotId: "shotY", detail: label });
+    const r = await w.run("await notes.screenshot({ emit: false })");
+    expect(text(r)).toContain("this picture may predate the last action");
+    expect(text(r)).toContain("screenshot({ live: true, reason }) takes one where the window is (the user is asked first)");
+    expect(label.length).toBeLessThan(SCREENSHOT_DETAIL_CAP);
   }, 30_000);
 
   macOnly("unsupported: the helper's sentence reaches the script; data.axError only the log", async () => {

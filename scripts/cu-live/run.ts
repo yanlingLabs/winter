@@ -1149,12 +1149,15 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         userLeaves?.catch(() => undefined);
         userLooks?.catch(() => undefined);
         const rig =s.desktopSwitch === undefined ? undefined : desktopSwitchRig(built.tool, s.desktopSwitch);
+        // The chrome group's diagnostic row: attributes before, a focus trace through the action.
+        if (s.chromeTrace === true) chromeRig?.beginTrace(Math.min(timeout, 9_000));
         const turn = await runTurn(where.client, where.sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer, rig);
         await userSwitch;
         await userWorks;
         await userLeaves;
         await userLooks;
         await rig?.done();
+        if (s.chromeTrace === true) await chromeRig?.endTrace();
         // A prompt during the action stops the run here, before this row is judged (its failure would be the prompt's).
         abortIfPrompt();
         const t1 = Date.now();

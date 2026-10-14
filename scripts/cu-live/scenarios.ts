@@ -147,6 +147,9 @@ export interface Scenario {
    * temp profile (a fresh one whenever the key changes), puts the user's app back in front, and adds `CHROME_PRELUDE`.
    */
   chrome?: ChromeNeed;
+  /** The chrome group's diagnostic row: the runner dumps the Size combo box's and the Title field's accessibility
+   *  attributes before the action and traces the app's focus every 50 ms through it (`ChromeObservation.attrs/trace`). */
+  chromeTrace?: boolean;
   verify(ctx: VerifyContext): Check[];
 }
 
