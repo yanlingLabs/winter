@@ -259,6 +259,24 @@ export class CoworkInstructions {
     }
     // observe() absorbs a superseding direct edit; never apply or replay the temp.
   }
+  /** This invocation knows renameat has NOT succeeded. Unlike restart recovery,
+   * it need not infer whether the temp was applied from the current user file. */
+  private abortUnreplaced(workspaceId: string, mutation: Row, before: Content, principalId: string, requestId: string, requestDigest: string): void {
+    durableCoworkTransaction(this.records.rs, () => {
+      const row = this.owner(workspaceId), debt = this.one("SELECT * FROM cowork_instruction_mutations WHERE operation_id=?", mutation.operation_id);
+      const operation = this.one("SELECT * FROM cowork_operations WHERE operation_id=?", mutation.operation_id);
+      if (row.pending_operation !== mutation.operation_id || row.digest !== before.digest || row.file_identity_json !== JSON.stringify(before.identity) || row.bytes !== before.bytes.length || this.records.get(workspaceId).instructionRevision !== mutation.expected_revision || !debt || Object.entries(mutation).some(([key, value]) => debt[key] !== value)) fail();
+      if (!operation || operation.status !== "pending" || operation.principal_id !== principalId || operation.method !== "workspace.instructions.update" || operation.scope !== workspaceId || operation.workspace_id !== workspaceId || operation.request_id !== requestId || operation.request_digest !== requestDigest) fail();
+      // A failed ancestry check cannot prevent this guarded metadata-only abort.
+      // No target read/write, detached-tree adoption or temp replay occurs here.
+      this.run("UPDATE cowork_operations SET status='failed',updated_at=? WHERE operation_id=?", this.now(), mutation.operation_id);
+      this.run("UPDATE cowork_instructions SET pending_operation=NULL WHERE workspace_id=?", workspaceId);
+      this.run("DELETE FROM cowork_instruction_mutations WHERE operation_id=?", mutation.operation_id);
+      const changeId = `change-${randomUUID()}`;
+      this.run("INSERT INTO cowork_outbox(change_id,workspace_id,operation_id,revision,kind,payload_json,created_at) VALUES(?,?,?,?,?,?,?)", changeId, workspaceId, mutation.operation_id, this.records.get(workspaceId).configRevision, "workspace_operation_changed", JSON.stringify({ status: "failed", terminal: true }), this.now());
+      this.run("INSERT INTO cowork_outbox_deliveries(change_id,session_id,state) SELECT ?,session_id,'pending' FROM cowork_conversations WHERE workspace_id=? AND state!='deleted'", changeId, workspaceId);
+    });
+  }
   private finish(workspaceId: string, tree: Tree, mutation: Row, actual: Content) {
     return durableCoworkTransaction(this.records.rs, () => {
       const row = this.owner(workspaceId), current = this.records.get(workspaceId);
@@ -283,7 +301,8 @@ export class CoworkInstructions {
     if (this.records.rs.db.inTransaction) fail("authority_denied");
     this.owner(input.workspaceId);
     const requestDigest = digest(JSON.stringify(input)), tree = this.tree(input.workspaceId);
-    let temporaryName: string | undefined, pendingOperationId: string | undefined;
+    let temporaryName: string | undefined, pendingOperationId: string | undefined, unreplaced: { mutation: Row; before: Content } | undefined;
+    let replacementSucceeded = false;
     try {
       const before = this.observe(input.workspaceId, tree);
       const previous = this.one("SELECT * FROM cowork_operations WHERE principal_id=? AND method='workspace.instructions.update' AND scope=? AND request_id=?", principalId, input.workspaceId, input.requestId);
@@ -303,6 +322,7 @@ export class CoworkInstructions {
       if (current.digest !== before.digest || !same(current.identity, before.identity)) throw new CoworkError("revision_conflict", revision);
       const mutation = { operation_id: operationId, expected_revision: revision, after_digest: after.digest, file_identity_json: JSON.stringify(after.identity) };
       pendingOperationId = operationId;
+      unreplaced = { before, mutation: { ...mutation, workspace_id: input.workspaceId, before_digest: before.digest, temporary_name: temporaryName, after_bytes: bytes.length } };
       durableCoworkTransaction(this.records.rs, () => {
         const row = this.owner(input.workspaceId);
         if (row.pending_operation || this.records.get(input.workspaceId).instructionRevision !== revision || row.digest !== before.digest) fail();
@@ -320,19 +340,27 @@ export class CoworkInstructions {
       // compare-and-swap. Same-user changes after this check remain a residual.
       // Replacement uses held directory descriptors; no pathname follows symlinks
       // or writes through the previously observed user file.
-      replaceInstructionAt(tree.directory, temporaryName); temporaryName = undefined;
+      replaceInstructionAt(tree.directory, temporaryName); replacementSucceeded = true; temporaryName = undefined;
       fullSyncInstructionFd(tree.directory); this.checkpoint("file-replaced"); this.assertTree(tree);
       const confirmed = this.read(tree);
       if (!same(confirmed.identity, after.identity) || confirmed.digest !== after.digest) fail();
       return this.finish(input.workspaceId, tree, mutation, confirmed);
-    } catch (error) { if (error instanceof CoworkError) throw error; return fail(); }
+    } catch (error) {
+      if (!replacementSucceeded && unreplaced) {
+        try { this.abortUnreplaced(input.workspaceId, unreplaced.mutation, unreplaced.before, principalId, input.requestId, requestDigest); }
+        catch { /* failed guards/abort retain canonical debt; preserve original error */ }
+      }
+      if (error instanceof CoworkError) throw error; return fail();
+    }
     finally {
       // Debt owns a temp after journal commit. It is not silently deleted/replayed
       // after a failure; recovery must see the recorded target inode+bytes.
       if (temporaryName) {
         try {
-          const owned = pendingOperationId && this.one("SELECT 1 FROM cowork_instruction_mutations WHERE operation_id=? AND temporary_name=?", pendingOperationId, temporaryName);
-          if (!owned) this.discardTemporary(tree, temporaryName);
+          const debt = pendingOperationId && this.one("SELECT 1 FROM cowork_instruction_mutations WHERE operation_id=? OR temporary_name=?", pendingOperationId, temporaryName);
+          const operation = pendingOperationId && this.one("SELECT status FROM cowork_operations WHERE operation_id=?", pendingOperationId);
+          const owner = this.one("SELECT pending_operation FROM cowork_instructions WHERE workspace_id=?", input.workspaceId);
+          if (!debt && (!operation || operation.status === "failed") && owner && owner.pending_operation !== pendingOperationId) this.discardTemporary(tree, temporaryName);
         } catch { /* unknown DB/tree ownership retains the temp for host recovery */ }
       }
       tree.close();

@@ -152,7 +152,8 @@ ApprovalBroker content substitution and post-approval revision/grant refusals.
 Default portable invocation skips the Darwin file/approval/fullsync cases and
 Darwin file RPC case; it does not present skipped filesystem proof as passed.
 Before corrections there were seven such cases. The correction focus adds five
-file cases; future Darwin arm64 CI must opt in and exercise all twelve.
+file cases; future Darwin arm64 CI must opt in. The R1 successor adds another native
+canonical-ownership guard case, bringing the explicit gated count to thirteen.
 
 CLI `bun test test/cowork-cli.test.ts`: **15 passed,152 assertions**, including
 existing private-daemon management and strict new guidance parser/display controls.
@@ -198,9 +199,45 @@ fixed by these focused corrections. The pre-rename read/rename residual (M3) sta
 explicit. Swift source remains unexecuted; no native test host, GUI, VM or held
 lane was invoked.
 
-Correction freeze validation: **71 pass,899 assertions,0 skip/fail** across the six
+Predecessor1764 correction validation: **71 pass,899 assertions,0 skip/fail** across the six
 Core instruction/durable-transaction/RPC/repository/event/API files in the command
 above; CLI **15 pass,152 assertions,0 fail**. Default three-file portable focus:
 **9 pass,12 skip,61 assertions,0 fail**. Protocol/Core/CLI no-emit typechecks and
 diff check pass. Recovery tests reopen the actual SQLite file through a separate
 RuntimeStateDb connection. No pending temp is inferred absent from an exception.
+
+## R1 known unapplied failure correction
+
+The owner separately records whether renameat returned success. Any error before
+that success, including journal restoration/checkpoint/ancestry errors and a real
+renameat failure, attempts a metadata-only durable abort guarded by the exact
+pending operation, owner before-record, mutation fields, request identity and
+unchanged instruction revision. It marks failed, clears pending ownership, deletes
+the mutation and enqueues one terminal outbox event. The original error survives
+an abort failure. Cleanup then consults canonical mutation/operation/owner state
+and removes only its unowned recorded temp through the admitted held tree.
+Unknown or changed canonical DB ownership retains the temp. Failed ancestry can
+still clear this known-unapplied operation, while admitted-tree cleanup refuses
+and leaves a visible orphan for host repair. It does not write the user target,
+adopt substituted backing or weaken restart recovery's mandatory ancestry proof.
+
+The pre-rename editor test now requires revision_conflict, failed operation,
+cleared pending/mutation, absent temp, and a next read that absorbs the exact
+editor save. Checkpoint and actual renameat ENOENT tests require the same abort.
+A post-COMMIT restoration error either safely aborts or, if abort SQL fails, retains
+debt-owned temp for exact-before-image restart reconciliation. Changed canonical
+mutation refuses the abort and preserves both the original conflict and temp.
+
+R2's proposed new temporary-file reader is deferred to a separately reviewed
+primitive. A process death before rename followed by a user editor save while the
+recorded temp remains still requires host repair; this source cannot establish the
+temp's exact recorded vnode/digest using a new unreviewed open binding. No new FFI
+primitive or native invocation was introduced. Completed OS sync requests remain
+separate from hardware power-loss proof.
+
+R1 freeze validation: **72 pass,956 assertions,0 skip/fail** across the six Core
+files above, including both journal-durable and before-replace ancestry failures
+with failed operation, cleared debt and retained refused orphan. Default focus:
+**9 pass,13 skip,61 assertions,0 fail**. Protocol/Core/CLI no-emit typechecks and
+diff check pass; CLI remains unchanged from its15-test152-assertion pass. Reviewed
+filesystem/fullsync/scoped-transaction leaf hashes remain byte-identical.

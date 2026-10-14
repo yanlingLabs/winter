@@ -89,10 +89,16 @@ native("size, symlink, hardlink, missing data and replaced ancestor refuse actua
  }
  const f = fixture(); mkdirSync(f.root, { recursive: true, mode: 0o700 }); refusal(() => f.owner.initialize(f.workspaceId, "not-a-seed"), "recovery_required");
 });
-native("rename after held walk cannot redirect replacement and leaves visible journal debt", () => {
- let attacked = false; const f = fixture(phase => { if (phase === "journal-durable" && !attacked) { attacked = true; renameSync(f.root, `${f.root}-held`); mkdirSync(f.root, { mode: 0o700 }); writeFileSync(f.path, "unauthorized replacement", { mode: 0o600 }); } });
- f.owner.initialize(f.workspaceId, "old"); refusal(() => f.owner.update(user, f.input("new")), "recovery_required");
- expect(readFileSync(f.path, "utf8")).toBe("unauthorized replacement"); expect(readFileSync(join(`${f.root}-held`, "WINTER.md"), "utf8")).toBe("old"); expect(f.db.db.query("SELECT status FROM cowork_operations WHERE method='workspace.instructions.update'").get()).toEqual({ status: "pending" }); refusal(() => f.owner.get(user, f.workspaceId), "recovery_required");
+native("journal and pre-replace ancestry failures abort known unapplied debt but retain refused orphan", () => {
+ for (const faultPhase of ["journal-durable", "before-replace"]) {
+  let attacked = false; const f = fixture(phase => { if (phase === faultPhase && !attacked) { attacked = true; renameSync(f.root, `${f.root}-held`); mkdirSync(f.root, { mode: 0o700 }); writeFileSync(f.path, "unauthorized replacement", { mode: 0o600 }); } });
+  f.owner.initialize(f.workspaceId, "old"); refusal(() => f.owner.update(user, f.input("new")), "recovery_required");
+  expect(readFileSync(f.path, "utf8")).toBe("unauthorized replacement"); expect(readFileSync(join(`${f.root}-held`, "WINTER.md"), "utf8")).toBe("old");
+  expect(f.db.db.query("SELECT status FROM cowork_operations WHERE method='workspace.instructions.update'").get()).toEqual({ status: "failed" }); expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 0 });
+  expect(f.db.db.query("SELECT pending_operation FROM cowork_instructions").get()).toEqual({ pending_operation: null });
+  expect(readdirSync(`${f.root}-held`).filter(name => name.startsWith("instruction-") && name.endsWith(".tmp"))).toHaveLength(1); expect(readdirSync(f.root)).toEqual(["WINTER.md"]);
+  refusal(() => f.owner.get(user, f.workspaceId), "recovery_required");
+ }
 });
 native("postreplacement crash reconciles only exact persisted vnode+digest and emits one instruction event", () => {
  let crash = true; const f = fixture(phase => { if (phase === "file-replaced" && crash) { crash = false; throw new Error("crash"); } }); f.owner.initialize(f.workspaceId, "old");
@@ -127,28 +133,28 @@ native("reviewed fullsync completes for owned file and held APFS directory on pi
   console.info(JSON.stringify({ fixture: "instruction-fullsync", bun: Bun.version, bunRevision: Bun.revision, filesystemType: fsType, fileRequestCompleted: true, directoryRequestCompleted: true, hardwarePowerCutProof: false }));
 });
 
-native("journaled update before rename aborts debt without changing the saved file", () => {
- let crash = true; const f = fixture(phase => { if (phase === "journal-durable" && crash) { crash = false; throw new Error("crash before rename"); } });
- f.owner.initialize(f.workspaceId, "old"); const input = f.input("new"); refusal(() => f.owner.update(user, input), "recovery_required");
- const debt = f.db.db.query<any, []>("SELECT * FROM cowork_instruction_mutations").get()!; expect(existsSync(join(f.root, debt.temporary_name))).toBe(true);
- const reopened = openRuntimeStateDb(f.home); cleanups.push(() => reopened.close());
- const restarted = new CoworkInstructions(new CoworkRepository(reopened), f.home, grants), value = restarted.get(user, f.workspaceId);
- expect(Buffer.from(value.contentBase64, "base64").toString()).toBe("old"); expect(value.instructionRevision).toBe(1);
- expect(f.db.db.query("SELECT status FROM cowork_operations WHERE operation_id=?").get(debt.operation_id)).toEqual({ status: "failed" });
- expect(f.db.db.query("SELECT pending_operation FROM cowork_instructions").get()).toEqual({ pending_operation: null });
- expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 0 }); expect(existsSync(join(f.root, debt.temporary_name))).toBe(false);
- expect(f.db.db.query("SELECT count(*) AS n FROM cowork_outbox WHERE kind='workspace_instructions_changed'").get()).toEqual({ n: 0 });
- expect(restarted.update(user, { ...input, requestId: "retry-new-request" }).value.instructionRevision).toBe(2);
+native("known no-rename checkpoint and real renameat errors abort debt without changing the saved file", () => {
+ for (const phase of ["journal-durable", "before-replace", "rename-error"] as const) {
+  let fault = true, temporary = ""; const f = fixture(current => { if (fault && current === (phase === "rename-error" ? "before-replace" : phase)) { fault = false; const debt = f.db.db.query<any, []>("SELECT * FROM cowork_instruction_mutations").get()!; temporary = debt.temporary_name; if (phase === "rename-error") rmSync(join(f.root, temporary)); else throw new Error("known no rename"); } });
+  f.owner.initialize(f.workspaceId, "old"); const input = f.input("new"); refusal(() => f.owner.update(user, input), "recovery_required");
+  expect(readFileSync(f.path, "utf8")).toBe("old"); expect(f.owner.get(user, f.workspaceId).instructionRevision).toBe(1);
+  expect(f.db.db.query("SELECT status FROM cowork_operations WHERE request_id='change'").get()).toEqual({ status: "failed" }); expect(f.db.db.query("SELECT pending_operation FROM cowork_instructions").get()).toEqual({ pending_operation: null });
+  expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 0 }); expect(existsSync(join(f.root, temporary))).toBe(false);
+  expect(f.db.db.query("SELECT payload_json FROM cowork_outbox WHERE kind='workspace_operation_changed'").get()).toEqual({ payload_json: JSON.stringify({ status: "failed", terminal: true }) });
+  expect(f.db.db.query("SELECT count(*) AS n FROM cowork_outbox WHERE kind='workspace_instructions_changed'").get()).toEqual({ n: 0 }); expect(f.owner.update(user, { ...input, requestId: "retry-new-request" }).value.instructionRevision).toBe(2);
+ }
 });
-native("SQLite restoration throw after journal COMMIT preserves debt-owned temporary file", () => {
- const f = fixture(); f.owner.initialize(f.workspaceId, "old"); const input = f.input("new"), run = f.db.db.run.bind(f.db.db); let thrown = false;
- f.db.db.run = ((...args: any[]) => { const result = (run as any)(...args); if (!thrown && args[0] === "PRAGMA main.synchronous = 1") { thrown = true; throw new Error("post-COMMIT restore failure"); } return result; }) as typeof f.db.db.run;
- try { refusal(() => f.owner.update(user, input), "recovery_required"); } finally { f.db.db.run = run; }
- expect(thrown).toBe(true); const debt = f.db.db.query<any, []>("SELECT * FROM cowork_instruction_mutations").get()!;
- expect(debt).not.toBeNull(); expect(existsSync(join(f.root, debt.temporary_name))).toBe(true); expect(readFileSync(f.path, "utf8")).toBe("old");
- const reopened = openRuntimeStateDb(f.home); cleanups.push(() => reopened.close());
- const restarted = new CoworkInstructions(new CoworkRepository(reopened), f.home, grants); expect(restarted.get(user, f.workspaceId).instructionRevision).toBe(1);
- expect(existsSync(join(f.root, debt.temporary_name))).toBe(false); expect(f.db.db.query("SELECT status FROM cowork_operations WHERE operation_id=?").get(debt.operation_id)).toEqual({ status: "failed" });
+native("SQLite restoration throw after journal COMMIT aborts safely or preserves temp if durable abort fails", () => {
+ for (const abortFails of [false, true]) {
+  const f = fixture(); f.owner.initialize(f.workspaceId, "old"); const input = f.input("new"), run = f.db.db.run.bind(f.db.db); let thrown = false, temporary = "";
+  f.db.db.run = ((...args: any[]) => { if (abortFails && String(args[0]).startsWith("UPDATE cowork_operations SET status='failed'")) throw new Error("abort SQL unavailable"); const result = (run as any)(...args); if (!thrown && args[0] === "PRAGMA main.synchronous = 1") { thrown = true; temporary = f.db.db.query<any, []>("SELECT * FROM cowork_instruction_mutations").get()!.temporary_name; throw new Error("post-COMMIT restore failure"); } return result; }) as typeof f.db.db.run;
+  try { refusal(() => f.owner.update(user, input), "recovery_required"); } finally { f.db.db.run = run; }
+  expect(thrown).toBe(true); expect(existsSync(join(f.root, temporary))).toBe(abortFails); expect(readFileSync(f.path, "utf8")).toBe("old");
+  expect(f.db.db.query("SELECT status FROM cowork_operations WHERE request_id='change'").get()).toEqual({ status: abortFails ? "pending" : "failed" });
+  const reopened = openRuntimeStateDb(f.home); cleanups.push(() => reopened.close());
+  const restarted = new CoworkInstructions(new CoworkRepository(reopened), f.home, grants); expect(restarted.get(user, f.workspaceId).instructionRevision).toBe(1);
+  expect(existsSync(join(f.root, temporary))).toBe(false); expect(f.db.db.query("SELECT status FROM cowork_operations WHERE request_id='change'").get()).toEqual({ status: "failed" }); expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 0 });
+ }
 });
 native("editor save after rename supersedes debt only when recorded temp is gone", () => {
  for (const retainedTemp of [false, true]) {
@@ -160,15 +166,24 @@ native("editor save after rename supersedes debt only when recorded temp is gone
   expect(readFileSync(f.path, "utf8")).toBe("editor wins");
  }
 });
-native("immediate pre-rename reread refuses intervening editor save and retains ambiguous debt", () => {
+native("immediate pre-rename editor conflict aborts known unapplied debt and next read absorbs the user save", () => {
  let edited = false; const f = fixture(phase => { if (phase === "before-replace" && !edited) { edited = true; const editor = join(f.root, "editor"); writeFileSync(editor, "editor wins", { mode: 0o600 }); renameSync(editor, f.path); } });
  f.owner.initialize(f.workspaceId, "old"); refusal(() => f.owner.update(user, f.input("new")), "revision_conflict");
- expect(readFileSync(f.path, "utf8")).toBe("editor wins"); refusal(() => new CoworkInstructions(f.records, f.home, grants).get(user, f.workspaceId), "recovery_required");
- expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 1 });
+ expect(readFileSync(f.path, "utf8")).toBe("editor wins");
+ expect(f.db.db.query("SELECT status FROM cowork_operations WHERE request_id='change'").get()).toEqual({ status: "failed" }); expect(f.db.db.query("SELECT pending_operation FROM cowork_instructions").get()).toEqual({ pending_operation: null });
+ expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 0 }); expect(readdirSync(f.root).filter(name => name.startsWith("instruction-") && name.endsWith(".tmp"))).toEqual([]);
+ const value = new CoworkInstructions(f.records, f.home, grants).get(user, f.workspaceId); expect(Buffer.from(value.contentBase64, "base64").toString()).toBe("editor wins"); expect(value.instructionRevision).toBe(2);
 });
 native("directory validation fault closes the just-opened descriptor", () => {
  let fault = false; const f = fixture(phase => { if (phase === "directory-opened" && fault) throw new Error("identity fault"); }); f.owner.initialize(f.workspaceId, "old");
  const before = readdirSync("/dev/fd").length; fault = true;
  for (let i = 0; i < 10; i++) refusal(() => f.owner.get(user, f.workspaceId), "recovery_required");
  expect(readdirSync("/dev/fd").length).toBe(before);
+});
+
+native("known no-rename abort refuses changed canonical mutation and preserves original conflict and temp", () => {
+ let edited = false; const f = fixture(phase => { if (phase === "before-replace" && !edited) { edited = true; const editor = join(f.root, "editor"); writeFileSync(editor, "editor wins", { mode: 0o600 }); renameSync(editor, f.path); f.db.db.run("UPDATE cowork_instruction_mutations SET temporary_name='instruction-00000000-0000-0000-0000-000000000000.tmp'"); } });
+ f.owner.initialize(f.workspaceId, "old"); refusal(() => f.owner.update(user, f.input("new")), "revision_conflict");
+ expect(f.db.db.query("SELECT status FROM cowork_operations WHERE request_id='change'").get()).toEqual({ status: "pending" }); expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 1 });
+ expect(readdirSync(f.root).filter(name => name.startsWith("instruction-") && name.endsWith(".tmp"))).toHaveLength(1); expect(readFileSync(f.path, "utf8")).toBe("editor wins");
 });
