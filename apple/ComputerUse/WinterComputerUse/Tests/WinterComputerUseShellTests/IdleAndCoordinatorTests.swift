@@ -192,6 +192,18 @@ final class CoordinatorTests: XCTestCase {
         ])
     }
 
+    /// The arrival gate: the engine's question reaches the presentation for the same target its cursor events drew on
+    /// (the bound app's name included, so it is the same overlay), and the answer goes back unchanged.
+    func testTheArrivalGateAsksThePresentationForTheBoundTargetsCursor() {
+        let rig = Rig()
+        rig.coordinator.targetBound(sessionId: "s_1", pid: 10, windowID: 20, appName: "Notes", mirror: false)
+        act(rig, "press", at: CGPoint(x: 5, y: 6))
+        rig.presentation.arrival = 0.25
+        XCTAssertEqual(rig.coordinator.cursorArrival(sessionId: "s_1", pid: 10, windowID: 20), 0.25)
+        XCTAssertEqual(rig.presentation.arrivalAsks.map(\.0), ["s_1"])
+        XCTAssertEqual(rig.presentation.arrivalAsks.map(\.1), [notes])
+    }
+
     func testEveryCursorStateTheEngineSendsReachesThePresentation() {
         let rig = Rig()
         rig.coordinator.targetBound(sessionId: "s_1", pid: 10, windowID: 20, appName: "Notes", mirror: false)

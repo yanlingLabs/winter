@@ -84,6 +84,9 @@ final class CUTarget: @unchecked Sendable {
         set { lock.lock(); _cursorPoint = newValue; lock.unlock() }
     }
     private var _cursorPoint: CGPoint?
+    /// How long the current act has waited for the agent cursor to arrive at its current place (CUCore+CursorArrival):
+    /// reset per act attempt and per reticle, bounded by `cursorArrivalCapMs`. Pid-queue only.
+    var arrivalWaitedMs: Double = 0
 
     /// The element the script last clicked by ref or aimed text at (`into`), and when — the focus fallback
     /// for apps that don't report their focused element (Electron). Pid-queue only.

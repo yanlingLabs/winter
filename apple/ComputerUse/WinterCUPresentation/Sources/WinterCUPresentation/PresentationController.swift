@@ -117,6 +117,19 @@ import Foundation
         refresh()
     }
 
+    /// The arrival gate: how long the helper holds the real action so it lands when the overlay's arrow does. Only a
+    /// cursor the user can see holds anything — an overlay that is shown (its window on screen, on this desktop), not
+    /// covered, not faded out — and never under Reduce Motion (nothing travels there). Read right after `cursor(...)`,
+    /// whose `refresh()` has brought the shown and covered states up to date.
+    func cursorArrival(sessionId: String, target: CUWindowRef) -> TimeInterval {
+        let key = TargetKey(sessionId: sessionId, target: target)
+        let now = clock.now
+        guard shownOverlays.contains(key), occluded[key] != true, !accessibility.reduceMotion,
+              let timeline = cursors[key], !timeline.options.reduceMotion, !timeline.isHidden(at: now),
+              let at = timeline.actionAt else { return 0 }
+        return min(max(0, at - now), CUCursorArrival.cap)
+    }
+
     func turnEnded(sessionId: String) {
         state.turnEnded(sessionId: sessionId)
         refresh()

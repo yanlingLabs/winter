@@ -254,6 +254,14 @@ public enum HelperNotification: Equatable, Sendable {
         presentation.cursor(sessionId: sessionId, target: CUWindowRef(pid: pid, windowID: windowID, appName: appName), point: point, kind: cursorKind)
     }
 
+    /// The arrival gate: how long the engine holds the act's input so it lands when the overlay's arrow does — the
+    /// presentation's answer for the cursor it draws over that target (0 when none is drawn). Winter.app's in-app
+    /// mirror runs the same timeline from the same events, so its pulse lands with the real click too.
+    public func cursorArrival(sessionId: String, pid: pid_t, windowID: CGWindowID) -> TimeInterval {
+        let appName = bound[BoundTarget(sessionId: sessionId, pid: pid, windowID: windowID)]?.appName ?? ""
+        return presentation.cursorArrival(sessionId: sessionId, target: CUWindowRef(pid: pid, windowID: windowID, appName: appName))
+    }
+
     /// The daemon hears the engine's observed reason — `app_quit`, `window_closed`, `helper_restart` or `unknown`
     /// (PROTOCOL.md §7.1); anything else goes out as `unknown`, so the wire carries only documented values.
     public func targetLost(targetId: String, reason: String) {

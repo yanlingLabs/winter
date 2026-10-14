@@ -171,6 +171,7 @@ extension CUCore {
         do {
             // A cancel that arrived while this act waited behind others stops it here.
             try token.check()
+            t.arrivalWaitedMs = 0  // the arrival gate's budget is per act
             try floorCheckPrivacy(t)
             try floorCheckRemoteDebugging(p, t)
             try saveFloorBeforeAct(p, t)

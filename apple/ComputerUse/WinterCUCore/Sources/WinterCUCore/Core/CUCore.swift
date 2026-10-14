@@ -118,6 +118,7 @@ public final class CUCore: @unchecked Sendable {
             visitFreshStableMs = 0
             visitNoProbeWaitMs = 0
             windowGoneSettleMs = 0  // one reading decides, as before: a test that wants the watch sets it
+            cursorArrivalCapMs = 0  // no wait for a cursor: a test that wants the gate sets it
         }
     }
 
@@ -711,6 +712,10 @@ public final class CUCore: @unchecked Sendable {
     var lateCheckSchedule: (Double, @escaping () -> Void) -> Void = { ms, work in
         DispatchQueue.global().asyncAfter(deadline: .now() + ms / 1000, execute: work)
     }
+    /// The arrival gate's bound (CUCore+CursorArrival): an act's input waits for the on-screen agent cursor at most this
+    /// long per place it lands on, a reticle and its press together (WinterCUPresentation's `CUCursorArrival.cap`).
+    /// 0 in test cores (no gate).
+    var cursorArrivalCapMs: Double = 400
     /// How long a press the app answered with an error is watched for its effect (a new window, a value, the
     /// focus). 0 in test cores (one read).
     var pressSettleMs: Double = 500
@@ -1572,6 +1577,7 @@ public final class CUCore: @unchecked Sendable {
         let (session, pid, wid) = (t.sessionId, t.pid, t.windowID)
         emit { $0.actionAt(sessionId: session, pid: pid, windowID: wid, point: at, kind: kind, dragTo: dragTo,
                            frame: frame, text: text, count: count, button: button) }
+        if Self.arrivalGated.contains(kind) { awaitCursorArrival(t, kind: kind) }
     }
 
     func logOnce(_ key: String, _ message: String) {
