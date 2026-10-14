@@ -160,3 +160,13 @@ SQLite connection's committed policy change. WAL snapshot isolation preserves on
 coherent old plan while its read transaction is open; the next plan sees the new
 revision. A separate actual external-connection commit across the protected-reader
 await is refused by final canonical revalidation. No nested-write guard was relaxed.
+
+Final recovery audit: an existing index row cannot cause the outbox consumer to
+recreate a missing/empty/uninitialized JSONL. Require the existing matching
+seq-1 session_created header before append. The actual missing-log consumer test
+checks blocked delivery, pending receipt, preserved active binding and no file
+recreation. Ordinary Code's append behavior is unchanged.
+
+The final recovery-guard composition reran the same 26-file set: 660 passed,
+2 skipped, 0 failed, 4862 assertions. Core typecheck passed after the guard;
+protocol/CLI typechecks passed on the preceding binding/maintenance freeze.

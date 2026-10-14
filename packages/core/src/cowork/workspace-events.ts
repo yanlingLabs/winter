@@ -89,8 +89,13 @@ export class CoworkWorkspaceEvents {
             continue;
           }
           // Read real JSONL, not the disposable index. A committed append may outlive its DB ACK.
+          const events = this.store.read(sessionId);
+          // Ordinary append can create a file; Cowork recovery must never replace a
+          // missing/empty/uninitialized transcript just because its index row survived.
+          const created = events[0];
+          if (!created || created.type !== "session_created" || created.sessionId !== sessionId || created.seq !== 1) throw new CoworkError("recovery_required");
           const logged = new Map<string, SessionEvent>();
-          for (const event of this.store.read(sessionId)) {
+          for (const event of events) {
             if (!HOST_WORKSPACE_EVENT_TYPES.has(event.type) || !("workspaceChangeId" in event)) continue;
             if (logged.has(event.workspaceChangeId)) throw new CoworkError("recovery_required");
             logged.set(event.workspaceChangeId, event);

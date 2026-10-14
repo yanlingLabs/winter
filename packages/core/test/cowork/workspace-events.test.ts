@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { reapEmptySessions } from "../../src/sessions/reaper";
 import { afterEach, expect, test as bunTest } from "bun:test";
-import { mkdtempSync, rmSync, statfsSync, renameSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statfsSync, renameSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HOST_WORKSPACE_EVENT_TYPES, SessionEvent, LineDecoder, ConnWriter, PROTOCOL_VERSION, encodeLine, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -244,7 +244,10 @@ test("missing canonical JSONL refuses flush without recreation or acknowledgemen
   const path = join(f.home, "sessions", "global", `${f.sessions[0]}.jsonl`);
   renameSync(path, path + ".retained");
   expect(() => f.store.flushLog(f.sessions[0]!)).toThrow();
+  expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 1, deferred: 0, pruneBlocked: 0 });
+  expect(existsSync(path)).toBe(false);
   expect(f.records.pendingChanges(f.sessions[0]!)).toHaveLength(1);
+  expect(f.records.binding(f.sessions[0]!).state).toBe("active");
 });
 
 test("more than 100 pending changes stay ordered across bounded passes and prune delivered ledger/journal rows", () => {
