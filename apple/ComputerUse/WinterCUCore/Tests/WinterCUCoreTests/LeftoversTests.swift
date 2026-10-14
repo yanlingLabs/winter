@@ -627,6 +627,78 @@ final class LeftoversTests: XCTestCase {
         XCTAssertFalse(again.detail?.contains("nothing new appeared") ?? false, again.detail ?? "")
     }
 
+    /// The open panel (2026-10-14): Chrome's Open panel up, its file list focused, `key("cmd+shift+g")` with no `into`
+    /// said only "pressed" while no Go to folder sheet opened.
+    private func openPanel() -> (sheet: AXUIElement, files: AXUIElement) {
+        let sheet = fakeElement(98_090), files = fakeElement(98_091)
+        ax.put(window, [kAXChildrenAttribute: [web, sheet]])
+        ax.add(sheet, role: kAXSheetRole, title: "open", frame: CGRect(x: 100, y: 40, width: 600, height: 400),
+               extra: [kAXParentAttribute: window, kAXChildrenAttribute: [files]])
+        ax.add(files, role: kAXListRole, title: "icon view", frame: CGRect(x: 120, y: 80, width: 560, height: 300),
+               extra: [kAXParentAttribute: sheet, kAXFocusedAttribute: true])
+        ax.focus(pid: pid, on: files)
+        return (sheet, files)
+    }
+
+    func testAShortcutWithThePanelFocusedThatOpenedNothingSaysSo() async throws {
+        world()
+        let (sheet, _) = openPanel()
+        let r = try await act(.key(CUKeyAction(combo: "cmd+shift+g")))
+        let d = r.detail ?? ""
+        XCTAssertTrue(d.contains("nothing new appeared in the panel after cmd+shift+g (no sheet or window opened, its focus did not move)"), d)
+        XCTAssertTrue(d.contains(CUCore.panelShortcutWords("Browser")), d)
+        XCTAssertTrue(poster.entries.contains { $0.type == .keyDown }, "the key was sent")
+        // A Go to folder sheet that opened is a change: nothing said.
+        let goTo = fakeElement(98_092)
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            ax.add(goTo, role: kAXSheetRole, frame: CGRect(x: 150, y: 60, width: 400, height: 120), extra: [kAXParentAttribute: sheet])
+            ax.put(sheet, [kAXChildrenAttribute: [ax.elements(sheet, kAXChildrenAttribute).first!, goTo]])
+        }
+        let again = try await act(.key(CUKeyAction(combo: "cmd+shift+g")))
+        XCTAssertFalse(again.detail?.contains("nothing new appeared") ?? false, again.detail ?? "")
+    }
+
+    func testAPlainKeyWithThePanelFocusedThatChangedNothingGetsNoShortcutWords() async throws {
+        world()
+        _ = openPanel()
+        let r = try await act(.key(CUKeyAction(combo: "/")))
+        let d = r.detail ?? ""
+        XCTAssertTrue(d.contains("nothing new appeared in the panel after /"), d)
+        XCTAssertFalse(d.contains("a shortcut with ⌘"), d)
+    }
+
+    func testAKeyOutsideAnyPanelIsNotWatchedAsOne() async throws {
+        world()
+        ax.focus(pid: pid, on: select)
+        let r = try await act(.key(CUKeyAction(combo: "cmd+shift+g")))
+        XCTAssertFalse(r.detail?.contains("nothing new appeared in the panel") ?? false, r.detail ?? "")
+    }
+
+    func testShortcutChords() throws {
+        XCTAssertTrue(CUCore.isShortcutChord(try CUKeyChord.parse("cmd+shift+g")))
+        XCTAssertTrue(CUCore.isShortcutChord(try CUKeyChord.parse("ctrl+a")))
+        XCTAssertTrue(CUCore.isShortcutChord(try CUKeyChord.parse("alt+left")))
+        XCTAssertFalse(CUCore.isShortcutChord(try CUKeyChord.parse("shift+tab")))
+        XCTAssertFalse(CUCore.isShortcutChord(try CUKeyChord.parse("/")))
+    }
+
+    /// The open panel: "/" typed into the panel's file list was answered "Google Chrome doesn't expose this editor's
+    /// text" — it is a list, not an editor.
+    func testTypingIntoAListIsNotCalledAnEditorThatHidesItsText() async throws {
+        world()
+        let (_, files) = openPanel()
+        let r = try await act(.type(CUTypeAction(text: "/", into: ref(files))))
+        let d = r.detail ?? ""
+        XCTAssertFalse(d.contains("editor's text"), d)
+        XCTAssertTrue(d.contains("received: unverifiable — [\(ref(files))] list \"icon view\" is not a text field, so the character went to it as keys and nothing can be read back (in a panel they may be its own keys: a file Open or Save panel opens Go to folder on \"/\" or \"~\")"), d)
+    }
+
+    func testNotATextFieldWords() {
+        XCTAssertEqual(CUCore.notATextFieldWords("[4] table", chars: 3, inPanel: false),
+                       "received: unverifiable — [4] table is not a text field, so the 3 characters went to it as keys and nothing can be read back (a list or table selects by typed letters; elsewhere they may be shortcuts) — check state() for what changed")
+    }
+
     // MARK: an off-desktop picture right after an act
 
     func testAPictureUnchangedSinceBeforeTheActIsTakenAgainUntilItChanges() throws {

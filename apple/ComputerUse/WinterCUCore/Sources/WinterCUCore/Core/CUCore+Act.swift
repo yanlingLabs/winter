@@ -1483,6 +1483,12 @@ extension CUCore {
         // window on another Space may not be redrawn, so a screenshot is no proof either): say so, with what the
         // input target's before/after does show — never leave the model to guess from a stale picture.
         if let e, !readsBack(e, t, value: valueBefore) {
+            // Not a text field at all (a list, a table, a button — the open panel, 2026-10-14: "/" into the Open panel's
+            // file list was called an editor that hides its text): said as that.
+            if t.accessible, !editableElement(e), hiddenInputWords(e, t) == nil {
+                CULog.act.notice("type in \(t.appName, privacy: .public): the keys went to an element that is not a text field")
+                return typed.noting(Self.notATextFieldWords(focusWords(e, t), chars: chars.count, inPanel: inSheetOrPanel(e, t)))
+            }
             let after = ax.string(e, kAXValueAttribute)
             let moved = after != nil && after != valueBefore
             CULog.act.notice("type in \(t.appName, privacy: .public): the editor hides its text — input target \(moved ? "changed" : "unchanged", privacy: .public)")
@@ -1495,6 +1501,15 @@ extension CUCore {
             return typed.noting("received: \(received.words)")
         }
         return typed.noting("received: unverifiable (no field to read it back from)")
+    }
+
+    /// What typing into an element that is not a text field received: nothing to read back, and what such keys do. Pure.
+    static func notATextFieldWords(_ label: String, chars: Int, inPanel: Bool) -> String {
+        let keys = chars == 1 ? "the character went" : "the \(chars) characters went"
+        let what = inPanel
+            ? "(in a panel they may be its own keys: a file Open or Save panel opens Go to folder on \"/\" or \"~\")"
+            : "(a list or table selects by typed letters; elsewhere they may be shortcuts)"
+        return "received: unverifiable — \(label) is not a text field, so \(keys) to it as keys and nothing can be read back \(what) — check state() for what changed"
     }
 
     /// "typed N of M characters; then the focus moved to [x] (after “…”)" — the counts in the sentence itself.

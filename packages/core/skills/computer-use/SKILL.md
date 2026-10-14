@@ -382,3 +382,17 @@ print('waiting for the user to submit - ' + wake.id);
 ```
 
 Then reply: "Fill in the remaining fields and press Submit for review - I'll continue as soon as you do." In the wake, your refs are stale: bind the target again if your handle is gone and call `state()`. `wakes.list()` shows what is armed, and `wake.cancel()` stops one you no longer need. `NotAllowed` says when a condition is already true (nothing to wait for) or when the app was allowed for one call only.
+
+## 19. Choose a file in an Open or Save panel
+
+A button like "Upload" or "Choose file" opens macOS's Open panel as a SHEET on the app's window. It is in that window's state (a `sheet` holding the folder's file list): stay bound to the window. Never call `useWindow()` with the panel's own window id: that binds it with no accessibility. The panel takes no ⌘ shortcut from here (⌘⇧G may run the app's own command instead). Typing a path that starts with "/" or "~" into its file list opens Go to folder with that path, and Return goes there, selecting the file.
+
+```js
+const chrome = await apps.open('Google Chrome');
+// [21] is the panel's file list in the state. Type the file's whole path.
+await chrome.type('/Users/me/Downloads/extension-1.2.0.zip', { into: 21 });
+await chrome.key('return');
+await chrome.state();
+```
+
+Then click the panel's Open button (or Choose, Upload, Save: its ref is in the state) if the panel is still there. If `type` stops because the focus moved to the Go to folder field, type the rest of the path into that field with `into`. If the panel shows no change, call `requestForeground(reason)` and do the same steps once more. If the user refuses, ask them to choose the file (`waitForUser`).

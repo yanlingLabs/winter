@@ -327,7 +327,13 @@ extension CUCore {
 
     func keyWatch(_ a: CUKeyAction, _ t: CUTarget) -> KeyWatch? {
         guard let chord = try? CUKeyChord.parse(a.combo), (a.repeat ?? 1) == 1 else { return nil }
-        if let into = a.into, let el = try? element(into, in: t), inSheetOrPanel(el, t) {
+        // A key aimed into a sheet or panel — named with `into`, or with the keyboard focus already there (the open
+        // panel, 2026-10-14: `key("cmd+shift+g")` with Chrome's Open panel's file list focused said only "pressed", and
+        // no Go to folder sheet opened).
+        let inPanel: AXUIElement? = a.into != nil
+            ? a.into.flatMap { try? element($0, in: t) }.flatMap { inSheetOrPanel($0, t) ? $0 : nil }
+            : reportedFocus(t).flatMap { inSheetOrPanel($0, t) ? $0 : nil }
+        if let el = inPanel {
             let focusId = reportedFocus(t).map { AXIdentity(element: $0) }
             let app = ax.application(t.pid)
             return KeyWatch(kind: .panel(el, panelFingerprint(el, app: app), focusId, ax.string(el, kAXValueAttribute), panelSelection(el)),
@@ -423,12 +429,26 @@ extension CUCore {
                 case .selectAll(_, _, let len):
                     return "the selection did not change after \(a.combo) (the field holds \(len) characters; the page may not have taken the key) — setValue(ref, text) replaces a field's text"
                 case .panel(_, _, _, _, _):
-                    return "nothing new appeared in the panel after \(a.combo) (no sheet or window opened, its focus did not move) — the panel may not take keys from here; set its fields with setValue (state({ within: <the panel> }) shows them — its search field, or the Go to folder field once open) or click a row"
+                    let said = "nothing new appeared in the panel after \(a.combo) (no sheet or window opened, its focus did not move) — the panel may not take keys from here; set its fields with setValue (state({ within: <the panel> }) shows them — its search field, or the Go to folder field once open) or click a row"
+                    guard let chord = try? CUKeyChord.parse(a.combo), Self.isShortcutChord(chord) else { return said }
+                    return said + "; " + Self.panelShortcutWords(t.appName)
                 }
             }
             clock.pause(ms: 50)
         }
         return nil
+    }
+
+    /// A chord with ⌘, ⌃ or ⌥: a shortcut, not a key that types or moves. Pure.
+    static func isShortcutChord(_ chord: CUKeyChord) -> Bool {
+        chord.modifiers.contains(.command) || chord.modifiers.contains(.control) || chord.modifiers.contains(.option)
+    }
+
+    /// What a shortcut that changed nothing in a panel is told (the open panel, 2026-10-14: ⌘⇧G with Chrome's Open
+    /// panel up opened no Go to folder sheet — the panel ran in macOS's own panel service, started at the click — and once
+    /// ran Chrome's own Find instead). Pure.
+    static func panelShortcutWords(_ app: String) -> String {
+        "a shortcut with ⌘, ⌃ or ⌥ goes to \(app) itself, which may run its own command or drop it while a panel is up (macOS draws a file Open or Save panel in a process of its own) — in an Open or Save panel, type(\"/full/path/to/the file\", { into: <its file list> }) opens Go to folder with the path, then key(\"return\")"
     }
 
     // MARK: a Chromium page on another desktop (finding D)
